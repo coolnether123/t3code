@@ -36,6 +36,10 @@ import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { buildCodexInitializeParams } from "./CodexProvider.ts";
+import {
+  codexAppServerCommandArgs,
+  type CodexAppServerTransport,
+} from "../CodexAppServerTransport.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import {
   CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS,
@@ -107,6 +111,7 @@ export interface CodexSessionRuntimeOptions {
   readonly serviceTier?: CodexServiceTier | undefined;
   readonly resumeCursor?: CodexResumeCursor;
   readonly appServerArgs?: ReadonlyArray<string>;
+  readonly appServerTransport?: CodexAppServerTransport;
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
@@ -719,11 +724,14 @@ export const makeCodexSessionRuntime = (
       ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
     };
     const extendEnv = options.environment === undefined;
-    const spawnCommand = yield* resolveSpawnCommand(
-      options.binaryPath,
-      ["app-server", ...(options.appServerArgs ?? [])],
-      { env, extendEnv },
+    const commandArgs = codexAppServerCommandArgs(
+      options.appServerTransport ?? "stdio",
+      options.appServerArgs,
     );
+    const spawnCommand = yield* resolveSpawnCommand(options.binaryPath, commandArgs, {
+      env,
+      extendEnv,
+    });
     const child = yield* spawner
       .spawn(
         ChildProcess.make(spawnCommand.command, spawnCommand.args, {
@@ -739,7 +747,7 @@ export const makeCodexSessionRuntime = (
         Effect.mapError(
           (cause) =>
             new CodexErrors.CodexAppServerSpawnError({
-              command: `${options.binaryPath} app-server`,
+              command: `${options.binaryPath} ${commandArgs.join(" ")}`,
               cause,
             }),
         ),

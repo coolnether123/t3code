@@ -191,13 +191,22 @@ export const CodexSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    useDesktopAppDaemon: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(false)),
+      Schema.annotateKey({
+        title: "Use Codex desktop bridge",
+        description:
+          "macOS only. Connect through the Codex app's managed local daemon so T3 shares its threads, plugins, Chrome, and Computer Use configuration.",
+        providerSettingsForm: { control: "switch", clearWhenEmpty: "omit" },
+      }),
+    ),
     customModels: Schema.Array(Schema.String).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
   },
   {
-    order: ["binaryPath", "homePath", "shadowHomePath"],
+    order: ["useDesktopAppDaemon", "binaryPath", "homePath", "shadowHomePath"],
   },
 );
 export type CodexSettings = typeof CodexSettings.Type;
@@ -469,6 +478,7 @@ const CodexSettingsPatch = Schema.Struct({
   binaryPath: Schema.optionalKey(TrimmedString),
   homePath: Schema.optionalKey(TrimmedString),
   shadowHomePath: Schema.optionalKey(TrimmedString),
+  useDesktopAppDaemon: Schema.optionalKey(Schema.Boolean),
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 

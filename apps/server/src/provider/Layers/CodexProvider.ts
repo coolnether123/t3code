@@ -32,6 +32,11 @@ import {
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
+import {
+  codexAppServerCommandArgs,
+  codexAppServerTransport,
+  type CodexAppServerTransport,
+} from "../CodexAppServerTransport.ts";
 import packageJson from "../../../package.json" with { type: "json" };
 const isCodexAppServerSpawnError = Schema.is(CodexErrors.CodexAppServerSpawnError);
 
@@ -292,6 +297,7 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
   readonly cwd: string;
   readonly customModels?: ReadonlyArray<string>;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly appServerTransport?: CodexAppServerTransport;
 }) {
   // `~` is not shell-expanded when env vars are set via `child_process.spawn`,
   // so `CODEX_HOME=~/.codex_work` would reach codex verbatim and trip
@@ -303,7 +309,8 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
     ...input.environment,
     ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
   };
-  const spawnCommand = yield* resolveSpawnCommand(input.binaryPath, ["app-server"], {
+  const commandArgs = codexAppServerCommandArgs(input.appServerTransport ?? "stdio");
+  const spawnCommand = yield* resolveSpawnCommand(input.binaryPath, commandArgs, {
     env: environment,
     extendEnv: true,
   });
@@ -321,7 +328,7 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
       Effect.mapError(
         (cause) =>
           new CodexErrors.CodexAppServerSpawnError({
-            command: `${input.binaryPath} app-server`,
+            command: `${input.binaryPath} ${commandArgs.join(" ")}`,
             cause,
           }),
       ),
@@ -468,6 +475,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     readonly cwd: string;
     readonly customModels: ReadonlyArray<string>;
     readonly environment?: NodeJS.ProcessEnv;
+    readonly appServerTransport?: CodexAppServerTransport;
   }) => Effect.Effect<
     CodexAppServerProviderSnapshot,
     CodexErrors.CodexAppServerError,
@@ -506,6 +514,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     cwd: process.cwd(),
     customModels: codexSettings.customModels,
     environment: resolvedEnvironment,
+    appServerTransport: codexAppServerTransport(codexSettings),
   }).pipe(
     Effect.scoped,
     Effect.timeoutOption(Duration.millis(AUTH_PROBE_TIMEOUT_MS)),
