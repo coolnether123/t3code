@@ -2,8 +2,12 @@ import { describe, expect, it } from "@effect/vitest";
 
 import {
   initialCodexScanState,
+  initialGeminiScanState,
+  parseAntigravityTokenCache,
   parseClaudeLine,
   parseCodexLine,
+  parseGeminiValue,
+  parseOpenCodeMessageValue,
   totalTokens,
 } from "./usageTranscripts.ts";
 
@@ -64,6 +68,102 @@ describe("parseClaudeLine", () => {
   it("ignores records that are not assistant messages", () => {
     expect(parseClaudeLine(JSON.stringify({ type: "user", message: {} }))).toBeNull();
     expect(parseClaudeLine("not json")).toBeNull();
+  });
+});
+
+describe("parseGeminiValue", () => {
+  it("splits cached prompt tokens and folds thoughts into billed output", () => {
+    const state = initialGeminiScanState();
+    parseGeminiValue({ sessionId: "gemini-session" }, state);
+    const record = parseGeminiValue(
+      {
+        id: "response-1",
+        timestamp: "2026-06-16T01:46:31.179Z",
+        type: "gemini",
+        model: "gemini-3-flash-preview",
+        tokens: { input: 54_134, output: 129, cached: 51_790, thoughts: 167, tool: 20 },
+      },
+      state,
+    );
+
+    expect(record?.provider).toBe("gemini");
+    expect(record?.sessionId).toBe("gemini-session");
+    expect(record?.totals).toEqual({
+      uncachedInputTokens: 2_364,
+      cachedInputTokens: 51_790,
+      cacheCreationTokens: 0,
+      outputTokens: 296,
+      reasoningTokens: 167,
+    });
+    expect(record?.dedupeKey).toBe("gemini:gemini-session:response-1");
+  });
+
+  it("reads an Antigravity conversation token cache", () => {
+    const record = parseAntigravityTokenCache(
+      { input: 986, output: 24_154, cached: 100, total: 25_140, cost: 0 },
+      { timestampMs: 123, sessionId: "trajectory" },
+    );
+
+    expect(record?.totals).toEqual({
+      uncachedInputTokens: 886,
+      cachedInputTokens: 100,
+      cacheCreationTokens: 0,
+      outputTokens: 24_154,
+      reasoningTokens: 0,
+    });
+    expect(record?.reportedCostUsd).toBeNull();
+  });
+});
+
+describe("parseOpenCodeMessageValue", () => {
+  it("uses OpenCode's disjoint cache and reasoning counters with reported cost", () => {
+    const record = parseOpenCodeMessageValue(
+      {
+        role: "assistant",
+        providerID: "google",
+        modelID: "gemini-3.1-flash-lite",
+        cost: 0.00251825,
+        tokens: {
+          input: 9_077,
+          output: 17,
+          reasoning: 149,
+          cache: { read: 8_112, write: 64 },
+        },
+      },
+      { id: "msg_1", sessionId: "ses_1", timestampMs: 123 },
+    );
+
+    expect(record?.provider).toBe("opencode");
+    expect(record?.model).toBe("google/gemini-3.1-flash-lite");
+    expect(record?.totals).toEqual({
+      uncachedInputTokens: 9_077,
+      cachedInputTokens: 8_112,
+      cacheCreationTokens: 64,
+      outputTokens: 166,
+      reasoningTokens: 149,
+    });
+    expect(record?.reportedCostUsd).toBe(0.00251825);
+    expect(record?.dedupeKey).toBe("opencode:msg_1");
+  });
+
+  it("preserves explicit zero cost for local and free models", () => {
+    const record = parseOpenCodeMessageValue(
+      {
+        role: "assistant",
+        providerID: "local-qwen",
+        modelID: "qwen35-128k-q4",
+        cost: 0,
+        tokens: {
+          input: 100,
+          output: 10,
+          reasoning: 0,
+          cache: { read: 1_000, write: 0 },
+        },
+      },
+      { id: "msg_local", sessionId: "ses_local", timestampMs: 456 },
+    );
+
+    expect(record?.reportedCostUsd).toBe(0);
   });
 });
 

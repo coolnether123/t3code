@@ -2,7 +2,9 @@
  * Usage reporting contract.
  *
  * Each environment scans the provider CLIs' own on-disk session transcripts
- * (`~/.claude/projects/**\/*.jsonl`, `~/.codex/sessions/**\/*.jsonl`) rather than
+ * (`~/.claude/projects/**\/*.jsonl`, `~/.codex/{sessions,archived_sessions}/**\/*.jsonl`,
+ * `~/.gemini/tmp/<project>/chats/session-*`, `~/.local/share/opencode/opencode.db`)
+ * rather than
  * relying on T3 Code's own orchestration projections, so usage stays complete
  * even for turns that were never driven through T3 Code. This mirrors the
  * approach `ccusage` takes.
@@ -21,9 +23,9 @@ import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
  * client renders partial coverage when an environment reports an older version
  * rather than failing the whole page.
  */
-export const USAGE_CONTRACT_VERSION = 4 as const;
+export const USAGE_CONTRACT_VERSION = 6 as const;
 
-export const UsageProviderKind = Schema.Literals(["claude", "codex"]);
+export const UsageProviderKind = Schema.Literals(["claude", "codex", "gemini", "opencode"]);
 export type UsageProviderKind = typeof UsageProviderKind.Type;
 
 /**
@@ -58,8 +60,9 @@ export type UsageCostSource = typeof UsageCostSource.Type;
  *
  * `cachedInputTokens` and `cacheCreationTokens` are disjoint from
  * `uncachedInputTokens`; summing all three gives total input. `reasoningTokens`
- * is a *subset* of `outputTokens` (Codex reports it that way, and Anthropic
- * folds thinking into output), so it must never be added on top.
+ * is a *subset* of `outputTokens` (Codex reports it that way, Gemini thoughts
+ * are folded into output, and Anthropic does not break thinking out), so it
+ * must never be added on top.
  */
 export const UsageTokenTotals = Schema.Struct({
   uncachedInputTokens: NonNegativeInt,
@@ -161,6 +164,12 @@ export const UsagePricing = Schema.Struct({
 export type UsagePricing = typeof UsagePricing.Type;
 
 export const UsageSummaryInput = Schema.Struct({
+  /**
+   * Highest response contract understood by the client. Omitted by clients
+   * older than usage contract v6, which only understand the original three
+   * providers.
+   */
+  clientContractVersion: Schema.optional(NonNegativeInt),
   /** Inclusive first day of the window, in `timeZone`. */
   sinceDay: UsageDay,
   /** Inclusive last day of the window, in `timeZone`. */

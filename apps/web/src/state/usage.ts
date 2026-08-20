@@ -15,7 +15,7 @@ import {
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 
 import { mergeUsage, type EnvironmentUsage, type MergedUsage } from "@t3tools/shared/usageMerge";
 import { appAtomRegistry } from "../rpc/atomRegistry";
@@ -75,6 +75,7 @@ export function useUsage(input: UsageSummaryInput): UsageView {
   const windowKey = useMemo(
     () =>
       JSON.stringify({
+        clientContractVersion: USAGE_CONTRACT_VERSION,
         sinceDay: input.sinceDay,
         untilDay: input.untilDay,
         timeZone: input.timeZone,
@@ -120,6 +121,21 @@ export function useUsage(input: UsageSummaryInput): UsageView {
     );
     return mergeUsage(answered, USAGE_CONTRACT_VERSION);
   }, [environments]);
+
+  const hasDeferredTranscripts = environments.some((environment) =>
+    environment.summary?.sources.some((source) => source.status === "partial"),
+  );
+
+  // A bounded server scan intentionally returns partial data while its cache is
+  // cold. Keep advancing that cache while the Usage page is mounted so totals
+  // converge without asking the user to click Refresh once per 128 MiB batch.
+  useEffect(() => {
+    if (!hasDeferredTranscripts || environments.some((environment) => environment.isPending)) {
+      return;
+    }
+    const timer = window.setTimeout(refresh, 750);
+    return () => window.clearTimeout(timer);
+  }, [environments, hasDeferredTranscripts, refresh]);
 
   const answeredCount = environments.filter((environment) => environment.summary !== null).length;
   const stillReporting = environments.filter(

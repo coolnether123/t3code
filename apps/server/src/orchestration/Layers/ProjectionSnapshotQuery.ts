@@ -73,6 +73,10 @@ const decodeThread = Schema.decodeUnknownEffect(OrchestrationThread);
 // activity window. Applying the limit in SQL avoids decoding an unbounded
 // payload_json set before the projector can enforce that invariant.
 const THREAD_DETAIL_ACTIVITY_LIMIT = 500;
+// Shell navigation must not wait indefinitely for Git discovery across a large
+// imported workspace catalog. Repository identity is optional presentation
+// metadata; projects and threads are still usable when enrichment times out.
+const SHELL_REPOSITORY_IDENTITY_RESOLUTION_TIMEOUT = "100 millis";
 const ProjectionProjectDbRowSchema = ProjectionProject.mapFields(
   Struct.assign({
     defaultModelSelection: Schema.NullOr(Schema.fromJsonString(ModelSelection)),
@@ -2009,7 +2013,12 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               updatedAt = maxIso(updatedAt, row.updatedAt);
             }
 
-            const repositoryIdentities = yield* resolveRepositoryIdentitiesForProjects(projectRows);
+            const repositoryIdentities = yield* resolveRepositoryIdentitiesForProjects(
+              projectRows,
+            ).pipe(
+              Effect.timeoutOption(SHELL_REPOSITORY_IDENTITY_RESOLUTION_TIMEOUT),
+              Effect.map(Option.getOrElse(() => new Map())),
+            );
             const latestTurnByThread = new Map(
               latestTurnRows.map((row) => [row.threadId, mapLatestTurn(row)] as const),
             );

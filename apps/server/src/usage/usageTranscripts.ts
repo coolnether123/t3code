@@ -1,7 +1,7 @@
 /**
  * Pure parsers for the provider CLIs' on-disk session transcripts.
  *
- * Both parsers are line-at-a-time reducers so callers can stream large files
+ * Provider parsers are line-at-a-time reducers where their formats allow it, so callers can stream large files
  * without materialising them. Neither touches the filesystem.
  *
  * @module usageTranscripts
@@ -68,7 +68,9 @@ export function totalTokens(totals: UsageTokenTotals): number {
  * an order of magnitude.
  */
 export function mightCarryUsage(line: string, provider: UsageProviderKind): boolean {
-  return provider === "claude" ? line.includes('"usage"') : line.includes('"token_count"');
+  if (provider === "claude") return line.includes('"usage"');
+  if (provider === "gemini") return line.includes('"tokens"');
+  return line.includes('"token_count"');
 }
 
 /* -------------------------------------------------------------------------- */
@@ -133,6 +135,178 @@ export function parseClaudeLine(line: string): UsageRecord | null {
     },
     reportedCostUsd: typeof cost === "number" && Number.isFinite(cost) ? cost : null,
     dedupeKey,
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Gemini CLI                                                                 */
+/* -------------------------------------------------------------------------- */
+
+export interface GeminiScanState {
+  sessionId: string;
+}
+
+export function initialGeminiScanState(): GeminiScanState {
+  return { sessionId: "" };
+}
+
+/**
+ * Parses Gemini CLI's session metadata and standalone message records.
+ *
+ * Newer sessions are JSONL streams, while older sessions store the same
+ * message shape in one JSON document. The caller feeds either representation
+ * through this function and keeps the last record for each message id.
+ */
+export function parseGeminiValue(parsed: unknown, state: GeminiScanState): UsageRecord | null {
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const record = parsed as Record<string, unknown>;
+
+  if (typeof record["sessionId"] === "string") state.sessionId = record["sessionId"];
+  if (record["type"] !== "gemini") return null;
+
+  const timestampMs = parseTimestampMs(record["timestamp"]);
+  const model = typeof record["model"] === "string" ? record["model"] : "";
+  const usage = record["tokens"];
+  if (timestampMs === null || model.length === 0 || typeof usage !== "object" || usage === null) {
+    return null;
+  }
+  const usageRecord = usage as Record<string, unknown>;
+  const inputTokens = int(usageRecord["input"]);
+  const cachedInputTokens = Math.min(inputTokens, int(usageRecord["cached"]));
+  const thoughtTokens = int(usageRecord["thoughts"]);
+  const candidateTokens = int(usageRecord["output"]);
+  const toolTokens = int(usageRecord["tool"]);
+  const totals: UsageTokenTotals = {
+    // Gemini reports cached content as a subset of prompt tokens. Tool-use
+    // prompt tokens are a separate input category and are billed as input.
+    uncachedInputTokens: Math.max(0, inputTokens - cachedInputTokens) + toolTokens,
+    cachedInputTokens,
+    cacheCreationTokens: 0,
+    // Thoughts are billed output and included in totalTokenCount separately
+    // from candidate output, so fold them into output while retaining the mix.
+    outputTokens: candidateTokens + thoughtTokens,
+    reasoningTokens: thoughtTokens,
+  };
+  if (totalTokens(totals) === 0) return null;
+
+  const messageId = typeof record["id"] === "string" ? record["id"] : null;
+  return {
+    provider: "gemini",
+    timestampMs,
+    model,
+    sessionId: state.sessionId,
+    totals,
+    reportedCostUsd: null,
+    dedupeKey:
+      messageId === null
+        ? null
+        : `gemini:${state.sessionId.length > 0 ? state.sessionId : "?"}:${messageId}`,
+  };
+}
+
+export function parseGeminiLine(line: string, state: GeminiScanState): UsageRecord | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  return parseGeminiValue(parsed, state);
+}
+
+/** One Antigravity conversation-level token cache. */
+export function parseAntigravityTokenCache(
+  parsed: unknown,
+  input: { readonly timestampMs: number; readonly sessionId: string },
+): UsageRecord | null {
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const usage = parsed as Record<string, unknown>;
+  const inputTokens = int(usage["input"]);
+  const cachedInputTokens = Math.min(inputTokens, int(usage["cached"]));
+  const outputTokens = int(usage["output"]);
+  const totals: UsageTokenTotals = {
+    uncachedInputTokens: Math.max(0, inputTokens - cachedInputTokens),
+    cachedInputTokens,
+    cacheCreationTokens: 0,
+    outputTokens,
+    reasoningTokens: 0,
+  };
+  if (totalTokens(totals) === 0) return null;
+  return {
+    provider: "gemini",
+    timestampMs: input.timestampMs,
+    model: "gemini-antigravity",
+    sessionId: input.sessionId,
+    totals,
+    // Antigravity's local cache reports subscription cost as zero. Usage uses
+    // API-equivalent pricing, so leave this null for the normal rate lookup.
+    reportedCostUsd: null,
+    dedupeKey: `gemini-antigravity:${input.sessionId}`,
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* OpenCode                                                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Parses one OpenCode assistant message from its SQLite session store.
+ *
+ * OpenCode 1.x stores fresh input, cache reads, cache writes, visible output,
+ * and reasoning as disjoint counters. Its own `opencode stats` command adds
+ * reasoning to output when computing the total, so we do the same while
+ * retaining reasoning as the output subset expected by the usage contract.
+ * The recorded cost is authoritative: it includes OpenCode's provider/model
+ * pricing configuration, including explicit zero-cost local and free models.
+ */
+export function parseOpenCodeMessageValue(
+  parsed: unknown,
+  input: {
+    readonly id: string;
+    readonly sessionId: string;
+    readonly timestampMs: number;
+  },
+): UsageRecord | null {
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const message = parsed as Record<string, unknown>;
+  if (message["role"] !== "assistant") return null;
+
+  const providerId = typeof message["providerID"] === "string" ? message["providerID"] : "";
+  const modelId = typeof message["modelID"] === "string" ? message["modelID"] : "";
+  const tokens = message["tokens"];
+  if (
+    providerId.length === 0 ||
+    modelId.length === 0 ||
+    typeof tokens !== "object" ||
+    tokens === null ||
+    !Number.isFinite(input.timestampMs)
+  ) {
+    return null;
+  }
+
+  const tokenRecord = tokens as Record<string, unknown>;
+  const cache = tokenRecord["cache"];
+  const cacheRecord =
+    typeof cache === "object" && cache !== null ? (cache as Record<string, unknown>) : {};
+  const reasoningTokens = int(tokenRecord["reasoning"]);
+  const totals: UsageTokenTotals = {
+    uncachedInputTokens: int(tokenRecord["input"]),
+    cachedInputTokens: int(cacheRecord["read"]),
+    cacheCreationTokens: int(cacheRecord["write"]),
+    outputTokens: int(tokenRecord["output"]) + reasoningTokens,
+    reasoningTokens,
+  };
+  if (totalTokens(totals) === 0) return null;
+
+  const cost = message["cost"];
+  return {
+    provider: "opencode",
+    timestampMs: input.timestampMs,
+    model: `${providerId}/${modelId}`,
+    sessionId: input.sessionId,
+    totals,
+    reportedCostUsd: typeof cost === "number" && Number.isFinite(cost) && cost >= 0 ? cost : null,
+    dedupeKey: input.id.length > 0 ? `opencode:${input.id}` : null,
   };
 }
 

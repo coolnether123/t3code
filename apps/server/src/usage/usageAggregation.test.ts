@@ -14,6 +14,21 @@ const rates: RateTable = new Map([
       cacheCreationCostPerToken: 1.25e-5,
     },
   ],
+  [
+    "gpt-long-context",
+    {
+      inputCostPerToken: 1e-6,
+      outputCostPerToken: 2e-6,
+      cacheReadCostPerToken: 0.1e-6,
+      cacheCreationCostPerToken: 1.25e-6,
+      above272kTokens: {
+        inputCostPerToken: 2e-6,
+        outputCostPerToken: 3e-6,
+        cacheReadCostPerToken: 0.2e-6,
+        cacheCreationCostPerToken: 2.5e-6,
+      },
+    },
+  ],
 ]);
 
 function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
@@ -154,6 +169,23 @@ describe("UsageAggregator", () => {
     // 100*1e-5 + 1000*1e-6 + 10*1.25e-5 + 50*5e-5
     expect(result.buckets[0]?.costUsd).toBeCloseTo(0.004625, 9);
     expect(result.buckets[0]?.costSource).toBe("modelPriced");
+  });
+
+  it("uses the long-context rates for a request above 272K input tokens", () => {
+    const result = aggregate([
+      record({
+        model: "gpt-long-context",
+        totals: {
+          uncachedInputTokens: 200_001,
+          cachedInputTokens: 72_000,
+          cacheCreationTokens: 0,
+          outputTokens: 1_000,
+          reasoningTokens: 500,
+        },
+      }),
+    ]);
+
+    expect(result.buckets[0]?.costUsd).toBeCloseTo(0.400_002 + 0.014_4 + 0.003, 9);
   });
 
   it("counts tokens but not cost for a model with no rate", () => {

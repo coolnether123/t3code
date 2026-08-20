@@ -31,6 +31,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
 import { ServerConfig } from "../config.ts";
@@ -43,6 +44,7 @@ import {
   listTranscriptFiles,
   readDirectoryVolumeId,
   readTranscriptRecords,
+  selectTranscriptFilesForScan,
 } from "./usageTranscriptReader.ts";
 import {
   decodeScanCache,
@@ -66,8 +68,11 @@ const RATES_TTL_MS = 24 * 60 * 60 * 1000;
 const MTIME_SLACK_MS = 36 * 60 * 60 * 1000;
 const MAX_HOURLY_WINDOW_MS = 24 * 60 * 60 * 1000;
 
-/** Longest window the UI offers, plus slack. Older entries are pruned. */
-const CACHE_RETENTION_DAYS = 90;
+/** Longest window the UI offers. Older entries are pruned. */
+const CACHE_RETENTION_DAYS = 365;
+
+/** Keeps a first-time usage read responsive even with very large transcripts. */
+const MAX_COLD_SCAN_BYTES_PER_SOURCE = 128 * 1024 * 1024;
 
 /** On-disk shape of the rate snapshot. */
 const RatesCacheFile = Schema.Struct({
@@ -123,6 +128,7 @@ export const make = Effect.gen(function* () {
   const config = yield* ServerConfig;
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const httpClient = yield* HttpClient.HttpClient;
+  const scanSemaphore = yield* Semaphore.make(1);
 
   const fileCache: ScanCache = new Map();
   let cacheDirty = false;
@@ -218,10 +224,17 @@ export const make = Effect.gen(function* () {
     const claudeHome = yield* resolveClaudeHomePath(settings.providers.claudeAgent);
     const claudeDir = yield* resolveClaudeTranscriptDir(claudeHome);
     const codexLayout = yield* resolveCodexHomeLayout(settings.providers.codex);
+    const codexHome = codexLayout.sharedHomePath;
+    const geminiHome = path.join(NodeOS.homedir(), ".gemini");
+    const openCodeHome = path.join(NodeOS.homedir(), ".local", "share", "opencode");
 
     return [
       { provider: "claude" as const, dir: claudeDir },
-      { provider: "codex" as const, dir: path.join(codexLayout.sharedHomePath, "sessions") },
+      { provider: "codex" as const, dir: path.join(codexHome, "sessions") },
+      { provider: "codex" as const, dir: path.join(codexHome, "archived_sessions") },
+      { provider: "gemini" as const, dir: path.join(geminiHome, "tmp") },
+      { provider: "gemini" as const, dir: path.join(geminiHome, "antigravity", "brain") },
+      { provider: "opencode" as const, dir: openCodeHome },
     ];
   });
 
@@ -290,7 +303,9 @@ export const make = Effect.gen(function* () {
       return records;
     });
 
-  const readSummary = Effect.fn("UsageService.readSummary")(function* (input: UsageSummaryInput) {
+  const readSummaryUnlocked = Effect.fn("UsageService.readSummaryUnlocked")(function* (
+    input: UsageSummaryInput,
+  ) {
     if (input.sinceDay > input.untilDay) {
       return yield* new UsageReadError({
         reason: "invalidWindow",
@@ -373,15 +388,28 @@ export const make = Effect.gen(function* () {
       }
 
       walkedRoots.push(dir);
-      const files = yield* Effect.promise(() => listTranscriptFiles(dir, windowStartMs));
+      const files = yield* Effect.promise(() => listTranscriptFiles(dir, windowStartMs, provider));
+      for (const file of files) livePaths.add(file.path);
+      const selection = selectTranscriptFilesForScan(
+        files,
+        (file) => {
+          const cached = fileCache.get(file.path);
+          return (
+            cached !== undefined &&
+            cached.size === file.size &&
+            cached.mtimeMs === file.mtimeMs &&
+            cached.provider === provider
+          );
+        },
+        MAX_COLD_SCAN_BYTES_PER_SOURCE,
+      );
       let scannedFiles = 0;
-      let skippedFiles = 0;
+      let skippedFiles = selection.deferredFiles;
       // Distinct per directory. Buckets carry per-cell session counts, but a
       // session spans days and models, so clients total this figure instead.
       const sessionIds = new Set<string>();
 
-      for (const file of files) {
-        livePaths.add(file.path);
+      for (const file of selection.files) {
         const records = yield* readFileRecords(file.path, file.size, file.mtimeMs, provider);
         if (records.length === 0) {
           skippedFiles += 1;
@@ -399,12 +427,15 @@ export const make = Effect.gen(function* () {
 
       sources.push({
         fingerprint: { hostId, provider, resolvedHomePath: dir, volumeId },
-        status: "ok",
+        status: selection.deferredFiles > 0 ? "partial" : "ok",
         scannedFiles,
         skippedFiles,
         malformedRecords: 0,
         distinctSessions: sessionIds.size,
-        message: null,
+        message:
+          selection.deferredFiles > 0
+            ? `Usage is partial while the transcript cache warms; ${selection.deferredFiles} older or oversized transcript files were deferred.`
+            : null,
       });
     }
 
@@ -420,15 +451,20 @@ export const make = Effect.gen(function* () {
     const aggregated = aggregator.finish();
     const readAt = yield* DateTime.now;
     const finishedAtMs = yield* Clock.currentTimeMillis;
+    const supportsOpenCode = (input.clientContractVersion ?? 5) >= 6;
 
     return {
-      contractVersion: USAGE_CONTRACT_VERSION,
+      contractVersion: supportsOpenCode ? USAGE_CONTRACT_VERSION : 5,
       readAt: DateTime.formatIso(readAt),
       timeZone: input.timeZone,
       sinceDay: input.sinceDay,
       untilDay: input.untilDay,
-      buckets: aggregated.buckets,
-      sources,
+      buckets: supportsOpenCode
+        ? aggregated.buckets
+        : aggregated.buckets.filter((bucket) => bucket.provider !== "opencode"),
+      sources: supportsOpenCode
+        ? sources
+        : sources.filter((source) => source.fingerprint.provider !== "opencode"),
       pricing: {
         status: ratesStatus,
         source: LITELLM_RATES_URL,
@@ -441,6 +477,12 @@ export const make = Effect.gen(function* () {
       scanDurationMs: Math.max(0, finishedAtMs - startedAtMs),
     } satisfies UsageSummary;
   });
+
+  // A cache miss is decided from mutable per-file state. Serializing summary
+  // scans makes that decision single-flight: a second window waits for the
+  // first scan to persist its newly warm files instead of parsing them again.
+  const readSummary: UsageService["Service"]["readSummary"] = (input) =>
+    scanSemaphore.withPermits(1)(readSummaryUnlocked(input));
 
   return { readSummary } as const;
 });
