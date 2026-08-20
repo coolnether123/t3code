@@ -36,7 +36,11 @@ import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { buildCodexInitializeParams } from "./CodexProvider.ts";
-import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
+import { codexLaunchArgv } from "./codexLaunchArgs.ts";
+import {
+  codexAppServerCommandArgs,
+  type CodexAppServerTransport,
+} from "../CodexAppServerTransport.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
@@ -107,6 +111,7 @@ export interface CodexSessionRuntimeOptions {
   readonly serviceTier?: CodexServiceTier | undefined;
   readonly resumeCursor?: CodexResumeCursor;
   readonly appServerArgs?: ReadonlyArray<string>;
+  readonly appServerTransport?: CodexAppServerTransport;
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
@@ -913,8 +918,11 @@ export const makeCodexSessionRuntime = (
       ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
     };
     const extendEnv = options.environment === undefined;
-    const appServerArgs = codexSessionAppServerArgs(options.appServerArgs, options.launchArgs);
-    const spawnCommand = yield* resolveSpawnCommand(options.binaryPath, appServerArgs, {
+    const commandArgs = codexAppServerCommandArgs(options.appServerTransport ?? "stdio", [
+      ...codexLaunchArgv(options.launchArgs),
+      ...(options.appServerArgs ?? []),
+    ]);
+    const spawnCommand = yield* resolveSpawnCommand(options.binaryPath, commandArgs, {
       env,
       extendEnv,
     });
@@ -933,7 +941,7 @@ export const makeCodexSessionRuntime = (
         Effect.mapError(
           (cause) =>
             new CodexErrors.CodexAppServerSpawnError({
-              command: `${options.binaryPath} app-server`,
+              command: `${options.binaryPath} ${commandArgs.join(" ")}`,
               cause,
             }),
         ),
