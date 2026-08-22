@@ -9,9 +9,16 @@
  * @module Preview
  */
 import { Schema } from "effect";
-import { ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { NonNegativeInt, PositiveInt, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
-const Url = TrimmedNonEmptyString.check(Schema.isMaxLength(2048));
+export const PREVIEW_URL_MAX_LENGTH = 2_048;
+export const CONFIGURED_LOCAL_SERVER_URLS_MAX_ITEMS = 32;
+
+const Url = TrimmedNonEmptyString.check(Schema.isMaxLength(PREVIEW_URL_MAX_LENGTH));
+
+export const ConfiguredLocalServerUrls = Schema.Array(Url).check(
+  Schema.isMaxLength(CONFIGURED_LOCAL_SERVER_URLS_MAX_ITEMS),
+);
 const Title = Schema.String.check(Schema.isMaxLength(512));
 
 export const PreviewTabId = TrimmedNonEmptyString.check(Schema.isMaxLength(128));
@@ -192,6 +199,10 @@ export type PreviewListInput = typeof PreviewListInput.Type;
 
 export const PreviewListResult = Schema.Struct({
   sessions: Schema.Array(PreviewSessionSnapshot),
+  /** Identifies the current server process so revision resets are safe. */
+  serverEpoch: TrimmedNonEmptyString,
+  /** Monotonic server state revision used to reject stale list responses. */
+  revision: NonNegativeInt,
 });
 export type PreviewListResult = typeof PreviewListResult.Type;
 
@@ -199,6 +210,10 @@ const PreviewEventBaseSchema = Schema.Struct({
   threadId: TrimmedNonEmptyString,
   tabId: PreviewTabId,
   createdAt: Schema.String,
+  /** Identifies the server process that emitted this event. */
+  serverEpoch: TrimmedNonEmptyString,
+  /** Monotonic server state revision shared with PreviewListResult. */
+  revision: PositiveInt,
 });
 
 const PreviewOpenedEvent = Schema.Struct({
@@ -264,6 +279,7 @@ export type DiscoveredLocalServer = typeof DiscoveredLocalServer.Type;
 export const DiscoveredLocalServerList = Schema.Struct({
   servers: Schema.Array(DiscoveredLocalServer),
   scannedAt: Schema.String,
+  configuredUrlProbing: Schema.optional(Schema.Literal(true)),
 });
 export type DiscoveredLocalServerList = typeof DiscoveredLocalServerList.Type;
 

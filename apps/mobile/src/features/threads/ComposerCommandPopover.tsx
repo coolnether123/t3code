@@ -1,14 +1,12 @@
-import { isLiquidGlassSupported, LiquidGlassView } from "@callstack/liquid-glass";
 import type { ComposerTriggerKind } from "@t3tools/shared/composerTrigger";
 import type { ServerProviderSkill, ServerProviderSlashCommand } from "@t3tools/contracts";
-import { SymbolView } from "expo-symbols";
+import { SymbolView } from "../../components/AppSymbol";
 import { memo } from "react";
 import { Pressable, ScrollView, useColorScheme, View, type ViewStyle } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
+import { GlassSurface } from "../../components/GlassSurface";
 import { PierreEntryIcon } from "../../components/PierreEntryIcon";
-import { MOBILE_TYPOGRAPHY } from "../../lib/typography";
-
 export type ComposerCommandItem =
   | {
       readonly id: string;
@@ -58,33 +56,14 @@ function PopoverSurface(props: {
     ...props.style,
   };
 
-  if (isLiquidGlassSupported) {
-    return (
-      <LiquidGlassView
-        effect="clear"
-        interactive={false}
-        tintColor={props.isDarkMode ? "rgba(30,30,32,0.95)" : "rgba(255,255,255,0.92)"}
-        colorScheme={props.isDarkMode ? "dark" : "light"}
-        style={baseStyle}
-      >
-        {props.children}
-      </LiquidGlassView>
-    );
-  }
-
   return (
-    <View
-      style={[
-        baseStyle,
-        {
-          backgroundColor: props.isDarkMode ? "rgba(44,44,46,0.96)" : "rgba(255,255,255,0.96)",
-          borderWidth: 1,
-          borderColor: props.isDarkMode ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.06)",
-        },
-      ]}
+    <GlassSurface
+      glassEffectStyle="clear"
+      tintColor={props.isDarkMode ? "rgba(30,30,32,0.95)" : "rgba(255,255,255,0.92)"}
+      style={baseStyle}
     >
       {props.children}
-    </View>
+    </GlassSurface>
   );
 }
 
@@ -156,23 +135,11 @@ const CommandRow = memo(function CommandRow(props: {
       ) : iconName ? (
         <SymbolView name={iconName} size={14} tintColor={iconColor} type="monochrome" />
       ) : null}
-      <Text
-        className="text-base font-t3-medium text-foreground"
-        numberOfLines={1}
-        style={{ flexShrink: 0 }}
-      >
+      <Text className="shrink-0 text-base font-t3-medium text-foreground" numberOfLines={1}>
         {props.item.label}
       </Text>
       {props.item.description ? (
-        <Text
-          numberOfLines={1}
-          style={{
-            flex: 1,
-            minWidth: 0,
-            fontSize: MOBILE_TYPOGRAPHY.label.fontSize,
-            color: "#a1a1aa",
-          }}
-        >
+        <Text className="min-w-0 flex-1 text-xs text-zinc-400" numberOfLines={1}>
           {props.item.description}
         </Text>
       ) : null}
@@ -189,18 +156,15 @@ export const ComposerCommandPopover = memo(function ComposerCommandPopover(
   return (
     <PopoverSurface isDarkMode={isDarkMode}>
       {label ? (
-        <View style={{ paddingHorizontal: 14, paddingTop: 10, paddingBottom: 4 }}>
-          <Text
-            className="text-3xs font-t3-bold text-foreground-muted"
-            style={{ letterSpacing: 0.8, textTransform: "uppercase" }}
-          >
+        <View className="px-3.5 pt-2.5 pb-1">
+          <Text className="text-3xs font-t3-bold tracking-[0.8px] uppercase text-foreground-muted">
             {label}
           </Text>
         </View>
       ) : null}
       {props.items.length > 0 ? (
         <ScrollView
-          style={{ maxHeight: 180 }}
+          className="max-h-[180px]"
           keyboardShouldPersistTaps="always"
           showsVerticalScrollIndicator={false}
         >
@@ -214,7 +178,7 @@ export const ComposerCommandPopover = memo(function ComposerCommandPopover(
           ))}
         </ScrollView>
       ) : (
-        <View style={{ paddingHorizontal: 14, paddingVertical: 10 }}>
+        <View className="px-3.5 py-2.5">
           <Text className="text-xs text-foreground-tertiary">
             {emptyText(props.triggerKind, props.isLoading)}
           </Text>

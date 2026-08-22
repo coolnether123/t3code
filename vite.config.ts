@@ -20,6 +20,10 @@ export default defineConfig({
     hookTimeout: 60_000,
     testTimeout: 60_000,
   },
+  staged: {
+    // Formatter only for now — no lint or typecheck on commit.
+    "*": "vp fmt",
+  },
   fmt: {
     ignorePatterns: [
       ".reference",
@@ -104,6 +108,12 @@ export default defineConfig({
               name: "@t3tools/client-runtime",
               message:
                 "Import from an explicit @t3tools/client-runtime/* subpath. The package has no root export.",
+            },
+            {
+              name: "@pierre/diffs/react",
+              importNames: ["CodeView"],
+              message:
+                "Use StyledDiffCodeView so web diff surfaces share styling and virtualized geometry.",
             },
           ],
         },

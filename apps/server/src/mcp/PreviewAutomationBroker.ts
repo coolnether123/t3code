@@ -13,22 +13,22 @@ import {
   PreviewAutomationTargetNotEditableError,
   PreviewAutomationTimeoutError,
   PreviewAutomationUnsupportedClientError,
+  PreviewTabId,
   type PreviewAutomationError,
   type PreviewAutomationOperation,
   type PreviewAutomationHost,
   type PreviewAutomationHostFocus,
   type PreviewAutomationResponse,
   type PreviewAutomationStreamEvent,
-  type PreviewTabId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
-import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 
@@ -74,11 +74,20 @@ interface PendingRequest {
   readonly context: PreviewAutomationRequestErrorContext;
 }
 
+/**
+ * A lease pinning one provider session to one desktop runtime. It lives exactly
+ * as long as the connection it names: `connectionId`/`queue` identity is what
+ * makes a lease valid, so a disconnected or replaced host is dropped on the next
+ * lookup. The lease deliberately has no clock of its own — it used to inherit
+ * the MCP credential's expiry, which coupled host stickiness to an unrelated
+ * auth deadline and could migrate a live session to another runtime mid-flow.
+ */
 interface HostAssignment {
   readonly clientId: ClientConnection["clientId"];
   readonly connectionId: ClientConnection["connectionId"];
   readonly queue: ClientConnection["queue"];
-  readonly expiresAt: number;
+  readonly tabId?: PreviewTabId;
+  readonly tabSequence?: number;
 }
 
 interface PreviewAutomationRequestErrorContext {
@@ -143,6 +152,14 @@ const selectorDiagnosticsFromInput = (
 
 const hostAssignmentKey = (scope: McpInvocationContext.McpInvocationScope): string =>
   `${scope.environmentId}\u0000${scope.providerSessionId}`;
+
+const isPreviewTabId = Schema.is(PreviewTabId);
+
+const readResultTabId = (result: unknown): PreviewTabId | null | undefined => {
+  if (typeof result !== "object" || result === null || !("tabId" in result)) return undefined;
+  const tabId = result.tabId;
+  return tabId === null || isPreviewTabId(tabId) ? tabId : undefined;
+};
 
 const supportsOperation = (
   connection: ClientConnection,
@@ -411,13 +428,11 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
   ): Effect.fn.Return<A, PreviewAutomationError> {
     const timeoutMs = input.timeoutMs ?? 15_000;
     const deferred = yield* Deferred.make<unknown, PreviewAutomationError>();
-    const now = yield* Clock.currentTimeMillis;
     const route = yield* SynchronizedRef.modify(state, (current) => {
       const assignments = new Map(
         Array.from(current.assignments).filter(([, assignment]) => {
           const connection = current.clients.get(assignment.clientId);
           return (
-            assignment.expiresAt > now &&
             connection?.connectionId === assignment.connectionId &&
             connection.queue === assignment.queue
           );
@@ -454,15 +469,23 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
         if (!hasLiveAssignment) assignments.delete(assignmentKey);
         return [undefined, { ...current, assignments }] as const;
       }
+      const canReuseAssignedTab =
+        assigned !== undefined &&
+        assigned.connectionId === connection.connectionId &&
+        assigned.queue === connection.queue;
       assignments.set(assignmentKey, {
         clientId: connection.clientId,
         connectionId: connection.connectionId,
         queue: connection.queue,
-        expiresAt: input.scope.expiresAt,
+        ...(canReuseAssignedTab && assigned.tabId !== undefined ? { tabId: assigned.tabId } : {}),
+        ...(canReuseAssignedTab && assigned.tabSequence !== undefined
+          ? { tabSequence: assigned.tabSequence }
+          : {}),
       });
 
-      const requestId = `preview-${current.requestSequence}`;
-      const tabId = input.tabId;
+      const requestSequence = current.requestSequence;
+      const requestId = `preview-${requestSequence}`;
+      const tabId = input.tabId ?? (canReuseAssignedTab ? assigned.tabId : undefined);
       const selectorDiagnostics = selectorDiagnosticsFromInput(input.input);
       const context: PreviewAutomationRequestErrorContext = {
         operation: input.operation,
@@ -480,7 +503,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       const pending = new Map(current.pending);
       pending.set(requestId, { queue: connection.queue, deferred, context });
       return [
-        { connection, requestId, requestContext: context },
+        { connection, requestId, requestContext: context, requestSequence },
         { ...current, assignments, pending, requestSequence: current.requestSequence + 1 },
       ] as const;
     });
@@ -493,7 +516,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
         providerInstanceId: input.scope.providerInstanceId,
       });
     }
-    const { connection, requestId, requestContext } = route;
+    const { connection, requestId, requestContext, requestSequence } = route;
     const removePending = SynchronizedRef.update(state, (next) => {
       if (!next.pending.has(requestId)) return next;
       const pending = new Map(next.pending);
@@ -508,6 +531,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
           requestId,
           threadId: input.scope.threadId,
           tabId: requestContext.tabId,
+          tabIdExplicit: input.tabId !== undefined,
           operation: input.operation,
           input: input.input,
           timeoutMs,
@@ -526,7 +550,35 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
         onSome: (value) => Effect.succeed(value as A),
       });
     });
-    return yield* awaitResponse().pipe(Effect.ensuring(removePending));
+    const result = yield* awaitResponse().pipe(Effect.ensuring(removePending));
+    const responseTabId = readResultTabId(result);
+    const resultTabId = responseTabId === undefined ? input.tabId : responseTabId;
+    if (resultTabId === undefined) return result;
+    const assignmentKey = hostAssignmentKey(input.scope);
+    yield* SynchronizedRef.update(state, (current) => {
+      const assignment = current.assignments.get(assignmentKey);
+      if (
+        !assignment ||
+        assignment.connectionId !== connection.connectionId ||
+        assignment.queue !== connection.queue ||
+        (assignment.tabSequence ?? -1) > requestSequence
+      ) {
+        return current;
+      }
+      const assignments = new Map(current.assignments);
+      if (resultTabId === null) {
+        const { tabId: _tabId, ...withoutTabId } = assignment;
+        assignments.set(assignmentKey, { ...withoutTabId, tabSequence: requestSequence });
+      } else {
+        assignments.set(assignmentKey, {
+          ...assignment,
+          ...(resultTabId === undefined ? {} : { tabId: resultTabId }),
+          tabSequence: requestSequence,
+        });
+      }
+      return { ...current, assignments };
+    });
+    return result;
   });
 
   return PreviewAutomationBroker.of({ connect, focusHost, respond, invoke });

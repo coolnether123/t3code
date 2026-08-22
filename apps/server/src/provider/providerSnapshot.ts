@@ -13,14 +13,16 @@ import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
-import { normalizeModelSlug } from "@t3tools/shared/model";
+import { normalizeCustomModelSlug } from "@t3tools/shared/model";
 import { isWindowsCommandNotFound } from "../processRunner.ts";
 import { createProviderVersionAdvisory } from "./providerMaintenance.ts";
 import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
 
 export const DEFAULT_TIMEOUT_MS = 4_000;
 // Auth status checks involve disk/network lookups and can be slow on first run (especially Windows)
-export const AUTH_PROBE_TIMEOUT_MS = 10_000;
+// Codex app-server startup can exceed 20 seconds when CODEX_HOME contains a
+// large migrated session corpus, especially on the first read after boot.
+export const AUTH_PROBE_TIMEOUT_MS = 60_000;
 
 export interface CommandResult {
   readonly stdout: string;
@@ -140,7 +142,6 @@ export function parseGenericCliVersion(output: string): string | null {
 
 export function providerModelsFromSettings(
   builtInModels: ReadonlyArray<ServerProviderModel>,
-  provider: ProviderDriverKind,
   customModels: ReadonlyArray<string>,
   customModelCapabilities: ModelCapabilities,
 ): ReadonlyArray<ServerProviderModel> {
@@ -149,7 +150,7 @@ export function providerModelsFromSettings(
   const customEntries: ServerProviderModel[] = [];
 
   for (const candidate of customModels) {
-    const normalized = normalizeModelSlug(candidate, provider);
+    const normalized = normalizeCustomModelSlug(candidate);
     if (!normalized || seen.has(normalized)) {
       continue;
     }
@@ -169,16 +170,22 @@ export function buildSelectOptionDescriptor(input: {
   readonly id: string;
   readonly label: string;
   readonly options:
-    | ReadonlyArray<{ value: string; label: string; isDefault?: boolean | undefined }>
+    | ReadonlyArray<{
+        value: string;
+        label: string;
+        description?: string | undefined;
+        isDefault?: boolean | undefined;
+      }>
     | undefined;
   readonly description?: string;
   readonly promptInjectedValues?: ReadonlyArray<string>;
 }) {
-  const options = (input.options ?? []).map((option) =>
-    option.isDefault
-      ? { id: option.value, label: option.label, isDefault: true }
-      : { id: option.value, label: option.label },
-  );
+  const options = (input.options ?? []).map((option) => ({
+    id: option.value,
+    label: option.label,
+    ...(option.description ? { description: option.description } : {}),
+    ...(option.isDefault ? { isDefault: true } : {}),
+  }));
   const currentValue = options.find((option) => option.isDefault)?.id;
   return {
     id: input.id,

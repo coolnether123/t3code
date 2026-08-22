@@ -1,21 +1,37 @@
 import * as Effect from "effect/Effect";
 import type {
   PreviewAutomationOperation,
+  PreviewAutomationOpenInput,
   PreviewAutomationRecordingArtifact,
   PreviewAutomationRecordingStatus,
   PreviewAutomationResizeResult,
+  PreviewAutomationSetColorSchemeResult,
   PreviewAutomationSnapshot,
   PreviewAutomationStatus,
+  PreviewTabId,
 } from "@t3tools/contracts";
 
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import { PreviewSnapshotToolkit, PreviewStandardToolkit, PreviewToolkit } from "./tools.ts";
 
+export function normalizePreviewOpenInput(
+  input: PreviewAutomationOpenInput,
+): PreviewAutomationOpenInput {
+  const open = input.open ?? input.show ?? true;
+  return {
+    ...input,
+    open,
+    show: open,
+    reuseExistingTab: input.reuseExistingTab ?? true,
+  };
+}
+
 const invoke = Effect.fn("PreviewToolkit.invoke")(function* <A>(
   operation: PreviewAutomationOperation,
   input: unknown,
   timeoutMs?: number,
+  tabId?: PreviewTabId,
 ): Effect.fn.Return<
   A,
   import("@t3tools/contracts").PreviewAutomationError,
@@ -28,31 +44,46 @@ const invoke = Effect.fn("PreviewToolkit.invoke")(function* <A>(
     operation,
     input,
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    ...(tabId === undefined ? {} : { tabId }),
   });
 });
 
+const invokeTargeted = <A>(
+  operation: PreviewAutomationOperation,
+  input: {
+    readonly tabId?: PreviewTabId | undefined;
+    readonly [key: string]: unknown;
+  },
+  timeoutMs?: number,
+) => {
+  const { tabId, ...operationInput } = input;
+  return invoke<A>(operation, operationInput, timeoutMs, tabId);
+};
+
 const handlers = {
-  preview_status: () => invoke<PreviewAutomationStatus>("status", {}),
+  preview_status: (input) => invokeTargeted<PreviewAutomationStatus>("status", input ?? {}),
   preview_open: (input) =>
-    invoke<PreviewAutomationStatus>("open", {
-      ...input,
-      show: input.show ?? true,
-      reuseExistingTab: input.reuseExistingTab ?? true,
-    }),
-  preview_navigate: (input) => invoke<PreviewAutomationStatus>("navigate", input, input.timeoutMs),
+    invokeTargeted<PreviewAutomationStatus>("open", normalizePreviewOpenInput(input)),
+  preview_navigate: (input) =>
+    invokeTargeted<PreviewAutomationStatus>("navigate", input, input.timeoutMs),
   preview_resize: (input) =>
-    invoke<PreviewAutomationResizeResult>("resize", input, input.timeoutMs),
-  preview_snapshot: () => invoke<PreviewAutomationSnapshot>("snapshot", {}),
-  preview_click: (input) => invoke<void>("click", input, input.timeoutMs).pipe(Effect.as(null)),
-  preview_type: (input) => invoke<void>("type", input, input.timeoutMs).pipe(Effect.as(null)),
-  preview_press: (input) => invoke<void>("press", input).pipe(Effect.as(null)),
-  preview_scroll: (input) => invoke<void>("scroll", input).pipe(Effect.as(null)),
+    invokeTargeted<PreviewAutomationResizeResult>("resize", input, input.timeoutMs),
+  preview_set_appearance: (input) =>
+    invokeTargeted<PreviewAutomationSetColorSchemeResult>("setColorScheme", input),
+  preview_snapshot: (input) => invokeTargeted<PreviewAutomationSnapshot>("snapshot", input ?? {}),
+  preview_click: (input) =>
+    invokeTargeted<void>("click", input, input.timeoutMs).pipe(Effect.as({})),
+  preview_type: (input) => invokeTargeted<void>("type", input, input.timeoutMs).pipe(Effect.as({})),
+  preview_press: (input) => invokeTargeted<void>("press", input).pipe(Effect.as({})),
+  preview_scroll: (input) => invokeTargeted<void>("scroll", input).pipe(Effect.as({})),
   preview_evaluate: (input) =>
-    invoke<unknown>("evaluate", input).pipe(Effect.map((result) => result ?? null)),
+    invokeTargeted<unknown>("evaluate", input).pipe(Effect.map((result) => result ?? null)),
   preview_wait_for: (input) =>
-    invoke<void>("waitFor", input, input.timeoutMs).pipe(Effect.as(null)),
-  preview_recording_start: () => invoke<PreviewAutomationRecordingStatus>("recordingStart", {}),
-  preview_recording_stop: () => invoke<PreviewAutomationRecordingArtifact>("recordingStop", {}),
+    invokeTargeted<void>("waitFor", input, input.timeoutMs).pipe(Effect.as({})),
+  preview_recording_start: (input) =>
+    invokeTargeted<PreviewAutomationRecordingStatus>("recordingStart", input ?? {}),
+  preview_recording_stop: (input) =>
+    invokeTargeted<PreviewAutomationRecordingArtifact>("recordingStop", input ?? {}),
 } satisfies Parameters<typeof PreviewToolkit.toLayer>[0];
 
 const { preview_snapshot, ...standardHandlers } = handlers;
