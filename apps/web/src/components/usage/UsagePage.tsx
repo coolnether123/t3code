@@ -140,8 +140,11 @@ export function UsagePage() {
                   ? `${formatDateTimeShort(window.sinceTime, window.timeZone)} to ${formatDateTimeShort(window.untilTime, window.timeZone)}`
                   : `${formatDayShort(window.sinceDay)} to ${formatDayShort(window.untilDay)}`}
               </p>
-              <div className="flex items-center gap-2">
-                <div className="flex rounded-md border border-border">
+              <div className="flex w-full min-w-0 items-center gap-2 sm:w-auto">
+                <div
+                  data-usage-window-options
+                  className="grid min-w-0 flex-1 grid-cols-3 rounded-md border border-border sm:flex sm:flex-none"
+                >
                   {WINDOW_OPTIONS.map((option) => (
                     <button
                       key={option.days}
@@ -149,7 +152,7 @@ export function UsagePage() {
                       aria-pressed={option.days === windowDays}
                       onClick={() => selectWindow(option.days)}
                       className={cn(
-                        "relative cursor-pointer px-3 py-1.5 text-xs outline-none first:rounded-s-[calc(var(--radius-md)-1px)] last:rounded-e-[calc(var(--radius-md)-1px)] focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
+                        "relative min-h-10 cursor-pointer whitespace-nowrap px-2 py-1.5 text-xs outline-none first:rounded-s-[calc(var(--radius-md)-1px)] last:rounded-e-[calc(var(--radius-md)-1px)] focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background sm:min-h-0 sm:px-3",
                         option.days === windowDays
                           ? "bg-muted text-foreground"
                           : "text-muted-foreground hover:text-foreground",
