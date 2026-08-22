@@ -164,6 +164,14 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const adapter = yield* makeCodexAdapter(effectiveConfig, {
         instanceId,
         environment: processEnv,
+        enableT3Workers: serverSettings.getSettings.pipe(
+          Effect.map((settings) => settings.enableT3Workers),
+          Effect.catch((cause) =>
+            Effect.logWarning("failed to read T3 Workers setting for Codex turn", {
+              cause,
+            }).pipe(Effect.as(false)),
+          ),
+        ),
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
       });
       const textGeneration = yield* makeCodexTextGeneration(effectiveConfig, processEnv);

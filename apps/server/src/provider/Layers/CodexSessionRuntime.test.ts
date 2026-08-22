@@ -181,6 +181,23 @@ describe("buildTurnStartParams", () => {
     });
   });
 
+  it("passes Worker mode into the turn developer instructions", () => {
+    const params = Effect.runSync(
+      buildTurnStartParams({
+        threadId: "provider-thread-1",
+        runtimeMode: "full-access",
+        prompt: "Implement it",
+        interactionMode: "default",
+        enableT3Workers: true,
+      }),
+    );
+
+    NodeAssert.match(
+      params.collaborationMode?.settings.developer_instructions ?? "",
+      /worker_approval_respond/,
+    );
+  });
+
   it("reports the same fallback model and effort in settings and instructions", () => {
     const params = Effect.runSync(
       buildTurnStartParams({
@@ -249,6 +266,52 @@ describe("buildTurnStartParams", () => {
 });
 
 describe("buildCodexDeveloperInstructions", () => {
+  it("leaves disabled Worker-mode instructions unchanged", () => {
+    const current = buildCodexDeveloperInstructions("default", {
+      model: "gpt-5.3-codex",
+      reasoningEffort: "high",
+    });
+    const disabled = buildCodexDeveloperInstructions("default", {
+      model: "gpt-5.3-codex",
+      reasoningEffort: "high",
+      enableT3Workers: false,
+    });
+
+    NodeAssert.equal(disabled, current);
+    NodeAssert.doesNotMatch(disabled, /worker_start/);
+  });
+
+  it("directs Worker-mode parents to all nine T3 tools instead of native collaboration", () => {
+    const instructions = buildCodexDeveloperInstructions("default", {
+      model: "gpt-5.3-codex",
+      reasoningEffort: "high",
+      enableT3Workers: true,
+    });
+
+    for (const tool of [
+      "worker_start",
+      "worker_list",
+      "worker_wait",
+      "worker_status",
+      "worker_observe",
+      "worker_send",
+      "worker_interrupt",
+      "worker_close",
+      "worker_approval_respond",
+    ]) {
+      NodeAssert.match(instructions, new RegExp(`\\b${tool}\\b`));
+    }
+    for (const nativeTool of [
+      "spawn_agent",
+      "send_input",
+      "resume_agent",
+      "wait_agent",
+      "close_agent",
+    ]) {
+      NodeAssert.match(instructions, new RegExp(`Do not call[^.]*${nativeTool}`));
+    }
+  });
+
   it("appends runtime info after the mode instructions", () => {
     const instructions = buildCodexDeveloperInstructions("default", {
       model: "gpt-5.3-codex",

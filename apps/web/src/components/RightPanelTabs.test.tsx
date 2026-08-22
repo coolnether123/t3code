@@ -91,6 +91,57 @@ function renderTabs(first: DesktopPreviewFavicon | null, second?: DesktopPreview
   );
 }
 
+const workerSurface = { id: "workers", kind: "workers" } as const;
+
+function renderWorkerSurface(workersAvailable: boolean) {
+  return renderToStaticMarkup(
+    <RightPanelTabs
+      mode="inline"
+      surfaces={[workerSurface]}
+      activeSurfaceId={workerSurface.id}
+      pendingSurfaceIds={new Set()}
+      previewSessions={{}}
+      desktopByTabId={{}}
+      terminalLabelsById={new Map()}
+      onActivate={() => undefined}
+      onCloseSurface={() => undefined}
+      onCloseOtherSurfaces={() => undefined}
+      onCloseSurfacesToRight={() => undefined}
+      onCloseAllSurfaces={() => undefined}
+      onCopyFilePath={() => undefined}
+      onAddBrowser={() => undefined}
+      onAddTerminal={() => undefined}
+      onAddPullRequest={() => undefined}
+      onAddDiff={() => undefined}
+      onAddFiles={() => undefined}
+      onAddAgents={() => undefined}
+      onAddWorkers={() => undefined}
+      liveAgentCount={0}
+      browserAvailable
+      terminalAvailable={false}
+      diffAvailable={false}
+      filesAvailable={false}
+      pullRequestAvailable={false}
+      agentsAvailable={false}
+      workersAvailable={workersAvailable}
+    >
+      <div>worker content</div>
+    </RightPanelTabs>,
+  );
+}
+
+describe("RightPanelTabs Worker availability", () => {
+  it("does not render a persisted Worker surface while the feature is disabled", () => {
+    const html = renderWorkerSurface(false);
+    expect(html).toContain("Enable T3 Workers in Settings.");
+    expect(html).not.toContain("worker content");
+  });
+
+  it("renders the Worker surface when enabled", () => {
+    expect(renderWorkerSurface(true)).toContain("worker content");
+  });
+});
+
 describe("RightPanelTabs preview favicon", () => {
   it("prefers a live capture and never asks Google about a private hostname", () => {
     const captured = renderTabs(favicon("data:image/png;base64,AAAA", "http://24x.xf.local/"));

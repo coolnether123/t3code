@@ -54,7 +54,23 @@ import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeInge
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import * as WorkerService from "../../worker/WorkerService.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+
+const testWorkerService = WorkerService.WorkerService.of({
+  start: () => Effect.die("Worker service is not used in this test"),
+  list: () => Effect.die("Worker service is not used in this test"),
+  get: () => Effect.die("Worker service is not used in this test"),
+  send: () => Effect.die("Worker service is not used in this test"),
+  wait: () => Effect.die("Worker service is not used in this test"),
+  observe: () => Effect.die("Worker service is not used in this test"),
+  interrupt: () => Effect.die("Worker service is not used in this test"),
+  close: () => Effect.die("Worker service is not used in this test"),
+  respondToApproval: () => Effect.die("Worker service is not used in this test"),
+  handleProviderEvent: () => Effect.void,
+  recover: Effect.void,
+  stream: Stream.empty,
+});
 
 function makeTestServerSettingsLayer(overrides: Partial<ServerSettings> = {}) {
   return ServerSettingsService.layerTest(overrides);
@@ -252,6 +268,7 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(Layer.succeed(WorkerService.WorkerService, testWorkerService)),
       Layer.provideMerge(NodeServices.layer),
     );
     runtime = ManagedRuntime.make(layer);

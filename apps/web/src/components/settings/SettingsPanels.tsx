@@ -2002,6 +2002,28 @@ export function GeneralSettingsPanel() {
         />
 
         <SettingsRow
+          {...searchableSetting("t3-workers")}
+          description="Enable the experimental T3-managed Worker inbox for persistent, resumable assignments."
+          resetAction={
+            settings.enableT3Workers !== DEFAULT_UNIFIED_SETTINGS.enableT3Workers ? (
+              <SettingResetButton
+                label="T3 Workers"
+                onClick={() =>
+                  updateSettings({ enableT3Workers: DEFAULT_UNIFIED_SETTINGS.enableT3Workers })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.enableT3Workers}
+              onCheckedChange={(checked) => updateSettings({ enableT3Workers: Boolean(checked) })}
+              aria-label="Enable T3 Workers"
+            />
+          }
+        />
+
+        <SettingsRow
           title={
             <span className="inline-flex items-center gap-1.5">
               Background activity

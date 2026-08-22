@@ -50,6 +50,15 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.serverReportClientActivity]: AuthOrchestrationReadScope,
   [WS_METHODS.serverReportHostPowerState]: AuthOrchestrationOperateScope,
   [WS_METHODS.serverGetBackgroundPolicy]: AuthOrchestrationReadScope,
+  [WS_METHODS.workersList]: AuthOrchestrationReadScope,
+  [WS_METHODS.workersGet]: AuthOrchestrationReadScope,
+  [WS_METHODS.workersStart]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workersSend]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workersWait]: AuthOrchestrationReadScope,
+  [WS_METHODS.workersObserve]: AuthOrchestrationReadScope,
+  [WS_METHODS.workersInterrupt]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workersClose]: AuthOrchestrationOperateScope,
+  [WS_METHODS.workersApprovalRespond]: AuthOrchestrationOperateScope,
   [WS_METHODS.cloudGetRelayClientStatus]: AuthRelayReadScope,
   [WS_METHODS.cloudInstallRelayClient]: AuthRelayWriteScope,
   [WS_METHODS.pullRequestsList]: AuthOrchestrationReadScope,
@@ -123,6 +132,7 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.subscribeServerLifecycle]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeAuthAccess]: AuthAccessReadScope,
   [WS_METHODS.subscribeBackgroundPolicy]: AuthOrchestrationReadScope,
+  [WS_METHODS.subscribeWorkers]: AuthOrchestrationReadScope,
 } as const satisfies Readonly<Record<WsRpcMethod, AuthEnvironmentScope>>;
 
 export function requiredScopeForRpcMethod(method: string): AuthEnvironmentScope {

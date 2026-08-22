@@ -180,6 +180,26 @@ import {
 import { UsageReadError, UsageSummary, UsageSummaryInput } from "./usage.ts";
 import { ServerSettings, ServerSettingsError, ServerSettingsPatch } from "./settings.ts";
 import {
+  WorkerApprovalResponseInput,
+  WorkerCloseInput,
+  WorkerDetail,
+  WorkerDisabledError,
+  WorkerEvent,
+  WorkerGetInput,
+  WorkerInterruptInput,
+  WorkerListInput,
+  WorkerListResult,
+  WorkerObserveInput,
+  WorkerObserverReport,
+  WorkerNotFoundError,
+  WorkerOperationError,
+  WorkerSendInput,
+  WorkerStartInput,
+  WorkerSubscribeInput,
+  WorkerWaitInput,
+  WorkerWaitResult,
+} from "./worker.ts";
+import {
   SourceControlCloneRepositoryInput,
   SourceControlCloneRepositoryResult,
   SourceControlDiscoveryResult,
@@ -272,6 +292,17 @@ export const WS_METHODS = {
   serverGetBackgroundPolicy: "server.getBackgroundPolicy",
   serverGetUsageSummary: "server.getUsageSummary",
 
+  // Persistent T3-managed Worker methods
+  workersList: "workers.list",
+  workersGet: "workers.get",
+  workersStart: "workers.start",
+  workersSend: "workers.send",
+  workersWait: "workers.wait",
+  workersObserve: "workers.observe",
+  workersInterrupt: "workers.interrupt",
+  workersClose: "workers.close",
+  workersApprovalRespond: "workers.approvalRespond",
+
   // Cloud environment methods
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
   cloudInstallRelayClient: "cloud.installRelayClient",
@@ -310,6 +341,7 @@ export const WS_METHODS = {
   subscribeAuthAccess: "subscribeAuthAccess",
   subscribeBackgroundPolicy: "subscribeBackgroundPolicy",
   subscribeResourceTelemetry: "subscribeResourceTelemetry",
+  subscribeWorkers: "subscribeWorkers",
 } as const;
 
 export const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding, {
@@ -465,6 +497,74 @@ export const WsServerGetBackgroundPolicyRpc = Rpc.make(WS_METHODS.serverGetBackg
   payload: Schema.Struct({}),
   success: BackgroundPolicySnapshot,
   error: EnvironmentAuthorizationError,
+});
+
+const WorkerRpcError = Schema.Union([
+  WorkerNotFoundError,
+  WorkerDisabledError,
+  WorkerOperationError,
+  EnvironmentAuthorizationError,
+]);
+
+export const WsWorkersListRpc = Rpc.make(WS_METHODS.workersList, {
+  payload: WorkerListInput,
+  success: WorkerListResult,
+  error: WorkerRpcError,
+});
+
+export const WsWorkersGetRpc = Rpc.make(WS_METHODS.workersGet, {
+  payload: WorkerGetInput,
+  success: WorkerDetail,
+  error: WorkerRpcError,
+});
+
+export const WsWorkersStartRpc = Rpc.make(WS_METHODS.workersStart, {
+  payload: WorkerStartInput,
+  success: WorkerDetail,
+  error: WorkerRpcError,
+});
+
+export const WsWorkersSendRpc = Rpc.make(WS_METHODS.workersSend, {
+  payload: WorkerSendInput,
+  success: WorkerDetail,
+  error: WorkerRpcError,
+});
+
+export const WsWorkersWaitRpc = Rpc.make(WS_METHODS.workersWait, {
+  payload: WorkerWaitInput,
+  success: WorkerWaitResult,
+  error: WorkerRpcError,
+});
+
+export const WsWorkersObserveRpc = Rpc.make(WS_METHODS.workersObserve, {
+  payload: WorkerObserveInput,
+  success: WorkerObserverReport,
+  error: WorkerRpcError,
+});
+
+export const WsWorkersInterruptRpc = Rpc.make(WS_METHODS.workersInterrupt, {
+  payload: WorkerInterruptInput,
+  success: WorkerDetail,
+  error: WorkerRpcError,
+});
+
+export const WsWorkersCloseRpc = Rpc.make(WS_METHODS.workersClose, {
+  payload: WorkerCloseInput,
+  success: WorkerDetail,
+  error: WorkerRpcError,
+});
+
+export const WsWorkersApprovalRespondRpc = Rpc.make(WS_METHODS.workersApprovalRespond, {
+  payload: WorkerApprovalResponseInput,
+  success: WorkerDetail,
+  error: WorkerRpcError,
+});
+
+export const WsWorkersSubscribeRpc = Rpc.make(WS_METHODS.subscribeWorkers, {
+  payload: WorkerSubscribeInput,
+  success: WorkerEvent,
+  error: WorkerRpcError,
+  stream: true,
 });
 
 const PullRequestRpcError = Schema.Union([
@@ -995,6 +1095,16 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerReportClientActivityRpc,
   WsServerReportHostPowerStateRpc,
   WsServerGetBackgroundPolicyRpc,
+  WsWorkersListRpc,
+  WsWorkersGetRpc,
+  WsWorkersStartRpc,
+  WsWorkersSendRpc,
+  WsWorkersWaitRpc,
+  WsWorkersObserveRpc,
+  WsWorkersInterruptRpc,
+  WsWorkersCloseRpc,
+  WsWorkersApprovalRespondRpc,
+  WsWorkersSubscribeRpc,
   WsCloudGetRelayClientStatusRpc,
   WsCloudInstallRelayClientRpc,
   WsPullRequestsListRpc,

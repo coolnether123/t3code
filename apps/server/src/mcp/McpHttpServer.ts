@@ -10,6 +10,7 @@ import { McpProtocol, McpSchema, McpServer, Tool } from "effect/unstable/ai";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 
 import packageJson from "../../package.json" with { type: "json" };
+import * as ServerSettings from "../serverSettings.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
@@ -22,6 +23,8 @@ import {
   PreviewSnapshotToolkit,
   PreviewStandardToolkit,
 } from "./toolkits/preview/tools.ts";
+import { WorkerToolkitHandlersLive } from "./toolkits/workers/handlers.ts";
+import { WorkerToolkit } from "./toolkits/workers/tools.ts";
 
 const unauthorized = HttpServerResponse.jsonUnsafe(
   {
@@ -216,6 +219,38 @@ export const PreviewToolkitRegistrationLive = Layer.mergeAll(
   PreviewSnapshotRegistrationLive,
 );
 
+export const WorkerToolkitRegistrationLive = McpServer.toolkit(WorkerToolkit).pipe(
+  Layer.provide(WorkerToolkitHandlersLive),
+);
+
+/**
+ * Effect MCP builds one tool catalog when this layer starts. Its conditional
+ * registration API sees MCP initialize metadata, not the authenticated bearer
+ * scope, so it cannot filter tools per provider session. The server setting
+ * controls startup registration. Worker handlers still enforce the credential
+ * capability and parent thread on every call. Changing the setting requires an
+ * MCP server restart before the advertised catalog changes.
+ */
+export const makeToolkitRegistrationLive = (enableT3Workers: boolean) =>
+  enableT3Workers
+    ? Layer.mergeAll(PreviewToolkitRegistrationLive, WorkerToolkitRegistrationLive)
+    : PreviewToolkitRegistrationLive;
+
+const ToolkitRegistrationLive = Layer.unwrap(
+  Effect.gen(function* () {
+    const serverSettings = yield* ServerSettings.ServerSettingsService;
+    const enableT3Workers = yield* serverSettings.getSettings.pipe(
+      Effect.map((settings) => settings.enableT3Workers),
+      Effect.catch((cause) =>
+        Effect.logWarning("failed to read T3 Workers setting while building MCP catalog", {
+          cause,
+        }).pipe(Effect.as(false)),
+      ),
+    );
+    return makeToolkitRegistrationLive(enableT3Workers);
+  }),
+);
+
 const McpTransportLive = McpServer.layerHttp({
   name: "T3 Code",
   version: packageJson.version,
@@ -223,4 +258,4 @@ const McpTransportLive = McpServer.layerHttp({
   protocols: [McpProtocol.v2025_06_18],
 }).pipe(Layer.provide(McpAuthMiddlewareLive));
 
-export const layer = PreviewToolkitRegistrationLive.pipe(Layer.provideMerge(McpTransportLive));
+export const layer = ToolkitRegistrationLive.pipe(Layer.provideMerge(McpTransportLive));

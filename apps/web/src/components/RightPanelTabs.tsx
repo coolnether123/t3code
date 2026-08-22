@@ -65,12 +65,14 @@ interface RightPanelTabsProps {
   onAddFiles: () => void;
   onAddPullRequest: () => void;
   onAddAgents: () => void;
+  onAddWorkers?: () => void;
   browserAvailable: boolean;
   terminalAvailable: boolean;
   diffAvailable: boolean;
   filesAvailable: boolean;
   pullRequestAvailable: boolean;
   agentsAvailable: boolean;
+  workersAvailable?: boolean;
   pullRequestStatuses?: Readonly<Record<string, PullRequestTabStatus>>;
   /** Running + waiting subagents; badges the Agents card in the empty state. */
   liveAgentCount: number;
@@ -92,6 +94,7 @@ const SURFACE_DISABLED_REASONS = {
   diff: "Diff is only available for server threads in Git repositories.",
   pullRequest: "This thread's branch has no pull request yet.",
   agents: "Agents are only available from a thread.",
+  workers: "Workers are an experimental T3 feature.",
 } as const;
 
 /** Overlays that must win over the launcher's letter shortcuts. */
@@ -114,6 +117,7 @@ const SURFACE_UNAVAILABLE_HINTS = {
   diff: "Available for Git repositories.",
   pullRequest: "No pull request on this branch yet.",
   agents: "Available from a thread.",
+  workers: "Enable T3 Workers in Settings.",
 } as const;
 
 type TabContextMenuAction = "copy-path" | "close" | "close-others" | "close-to-right" | "close-all";
@@ -160,12 +164,14 @@ function RightPanelEmptyState(props: {
   onAddFiles: () => void;
   onAddPullRequest: () => void;
   onAddAgents: () => void;
+  onAddWorkers: () => void;
   browserAvailable: boolean;
   terminalAvailable: boolean;
   diffAvailable: boolean;
   filesAvailable: boolean;
   pullRequestAvailable: boolean;
   agentsAvailable: boolean;
+  workersAvailable: boolean;
   liveAgentCount: number;
 }) {
   // -1 means no highlight: it only appears on hover or arrow use.
@@ -231,6 +237,16 @@ function RightPanelEmptyState(props: {
       disabledReason: SURFACE_UNAVAILABLE_HINTS.agents,
       onClick: props.onAddAgents,
       badgeCount: props.liveAgentCount,
+    },
+    {
+      label: "Workers",
+      description: "Manage persistent T3 workers.",
+      icon: Bot,
+      shortcut: "W",
+      available: props.workersAvailable,
+      disabledReason: SURFACE_UNAVAILABLE_HINTS.workers,
+      onClick: props.onAddWorkers,
+      badgeCount: 0,
     },
   ] as const;
 
@@ -426,6 +442,8 @@ function surfaceTitle(
       return `#${surface.number}`;
     case "agents":
       return "Agents";
+    case "workers":
+      return "Workers";
     case "preview": {
       const snapshot = surface.resourceId ? sessions[surface.resourceId] : null;
       if (!snapshot || snapshot.navStatus._tag === "Idle") return "Browser";
@@ -511,6 +529,8 @@ function SurfaceIcon({
     }
     case "agents":
       return <Bot className="size-3 shrink-0" />;
+    case "workers":
+      return <Bot className="size-3 shrink-0 text-info-foreground" />;
   }
 }
 
@@ -518,6 +538,16 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
   const ownsDesktopTitleBar = isElectron && props.mode === "inline";
   const { resolvedTheme } = useTheme();
   const tabListRef = useRef<HTMLDivElement>(null);
+  const workersAvailable = props.workersAvailable === true;
+  const onAddWorkers = props.onAddWorkers ?? (() => {});
+  const visibleSurfaces = props.surfaces.filter(
+    (surface) => surface.kind !== "workers" || workersAvailable,
+  );
+  const visibleActiveSurfaceId = visibleSurfaces.some(
+    (surface) => surface.id === props.activeSurfaceId,
+  )
+    ? props.activeSurfaceId
+    : null;
 
   const handleTabContextMenu = useCallback(
     async (event: ReactMouseEvent, surface: RightPanelSurface) => {
@@ -593,7 +623,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
   useEffect(() => {
     const activeTab = tabListRef.current?.querySelector<HTMLElement>("[data-active-tab='true']");
     activeTab?.scrollIntoView({ block: "nearest", inline: "nearest" });
-  }, [props.activeSurfaceId]);
+  }, [visibleActiveSurfaceId]);
 
   return (
     <PreviewPanelShell
@@ -622,8 +652,8 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
           data-right-panel-tab-list
         >
           <div className="flex h-full w-max min-w-full items-center gap-1">
-            {props.surfaces.map((surface) => {
-              const active = surface.id === props.activeSurfaceId;
+            {visibleSurfaces.map((surface) => {
+              const active = surface.id === visibleActiveSurfaceId;
               const pending = props.pendingSurfaceIds.has(surface.id);
               const title = surfaceTitle(surface, props.previewSessions, props.terminalLabelsById);
               return (
@@ -680,7 +710,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                 </div>
               );
             })}
-            {props.surfaces.length > 0 ? (
+            {visibleSurfaces.length > 0 ? (
               <Menu>
                 <MenuTrigger
                   render={
@@ -702,6 +732,14 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                   >
                     <Globe2 />
                     Browser
+                  </SurfaceMenuItem>
+                  <SurfaceMenuItem
+                    available={workersAvailable}
+                    disabledReason={SURFACE_DISABLED_REASONS.workers}
+                    onClick={onAddWorkers}
+                  >
+                    <Bot />
+                    Workers
                   </SurfaceMenuItem>
                   <SurfaceMenuItem
                     available={props.terminalAvailable}
@@ -751,7 +789,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
         {props.layoutControls}
       </div>
       <div className="flex min-h-0 flex-1 flex-col" data-right-panel-surface-content>
-        {props.activeSurfaceId === null ? (
+        {visibleActiveSurfaceId === null ? (
           <RightPanelEmptyState
             onAddBrowser={props.onAddBrowser}
             onAddTerminal={props.onAddTerminal}
@@ -759,12 +797,14 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             onAddFiles={props.onAddFiles}
             onAddPullRequest={props.onAddPullRequest}
             onAddAgents={props.onAddAgents}
+            onAddWorkers={onAddWorkers}
             browserAvailable={props.browserAvailable}
             terminalAvailable={props.terminalAvailable}
             diffAvailable={props.diffAvailable}
             filesAvailable={props.filesAvailable}
             pullRequestAvailable={props.pullRequestAvailable}
             agentsAvailable={props.agentsAvailable}
+            workersAvailable={workersAvailable}
             liveAgentCount={props.liveAgentCount}
           />
         ) : (

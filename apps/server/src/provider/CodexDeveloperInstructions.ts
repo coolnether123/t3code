@@ -11,6 +11,15 @@ For browser work, first call \`preview_status\`. If no automation-capable previe
 Do not switch to global browser skills, Chrome, Node REPL browser automation, standalone Playwright, or agent-browser merely because the preview is initially closed or a first call fails. Use an alternative browser system only when the T3 preview tools are absent, the user explicitly requests another browser, or \`preview_open\` returns an explicit unsupported/unavailable error. A failed T3 preview tool call should be inspected and retried with corrected arguments when the error is actionable.
 `;
 
+const T3_CODE_WORKER_PARENT_INSTRUCTIONS = `
+
+## T3 Workers
+
+T3 Workers are enabled for this parent thread. Use the T3-owned Worker tools for bounded background assignments: \`worker_start\`, \`worker_list\`, \`worker_wait\`, \`worker_status\`, \`worker_observe\`, \`worker_send\`, \`worker_interrupt\`, \`worker_close\`, and \`worker_approval_respond\`.
+
+Use these tools instead of Codex-native collaboration tools. Do not call \`spawn_agent\`, \`send_input\`, \`resume_agent\`, \`wait_agent\`, or \`close_agent\`. Pass explicit context because Workers do not inherit this conversation. Use \`worker_wait\` instead of polling. Use \`worker_status\` before interrupting, and use \`worker_observe\` when mechanical status does not answer the question. A completed Worker remains resumable until you explicitly close it.
+`;
+
 export const CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS = `<collaboration_mode># Plan Mode (Conversational)
 
 You work in 3 phases, and you should *chat your way* to a great plan before finalizing it. A great plan is very detailed-intent- and implementation-wise-so that it can be handed to another engineer or agent to be implemented right away. It must be **decision complete**, where the implementer does not need to make any decisions.
@@ -159,6 +168,7 @@ ${T3_CODE_BROWSER_TOOL_INSTRUCTIONS}
 export interface CodexRuntimeInfo {
   readonly model: string;
   readonly reasoningEffort: string;
+  readonly enableT3Workers?: boolean;
 }
 
 // Values come from trusted config, but keep the block single-line regardless.
@@ -174,7 +184,8 @@ export function buildCodexDeveloperInstructions(
     interactionMode === "plan"
       ? CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS
       : CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS;
-  return `${base}
+  const workerInstructions = runtime.enableT3Workers ? T3_CODE_WORKER_PARENT_INSTRUCTIONS : "";
+  return `${base}${workerInstructions}
 
 <runtime_info>In case you're asked: you are running in T3 Code through the Codex harness, as ${toSingleLine(runtime.model)} with ${toSingleLine(runtime.reasoningEffort)} reasoning effort. No need to mention this otherwise.</runtime_info>`;
 }

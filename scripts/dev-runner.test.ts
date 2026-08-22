@@ -485,7 +485,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
       Effect.gen(function* () {
         const env = yield* createDevRunnerEnv({
           mode: "dev",
-          baseEnv: { HOST: "0.0.0.0" },
+          baseEnv: { HOST: "0.0.0.0", T3CODE_WEB_BIND_HOST: "0.0.0.0" },
           serverOffset: 0,
           webOffset: 0,
           t3Home: undefined,
@@ -498,6 +498,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         });
 
         assert.equal(env.HOST, undefined);
+        assert.equal(env.T3CODE_WEB_BIND_HOST, undefined);
         assert.equal(env.T3CODE_HOST, "0.0.0.0");
       }),
     );
@@ -1083,6 +1084,14 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         }),
       );
 
+      it.effect("binds a shared Vite upstream to IPv4 loopback without pinning HMR", () =>
+        Effect.gen(function* () {
+          const env = yield* shareSpawnedEnv({ ambientBundledDev: undefined });
+          assert.equal(env?.T3CODE_WEB_BIND_HOST, "127.0.0.1");
+          assert.equal(env?.HOST, undefined);
+        }),
+      );
+
       it.effect("keeps an explicit T3CODE_BUNDLED_DEV=0 opt-out", () =>
         Effect.gen(function* () {
           const env = yield* shareSpawnedEnv({ ambientBundledDev: "0" });
@@ -1116,6 +1125,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
           );
 
           assert.equal(captured?.T3CODE_BUNDLED_DEV, undefined);
+          assert.equal(captured?.T3CODE_WEB_BIND_HOST, undefined);
         }),
       );
     });

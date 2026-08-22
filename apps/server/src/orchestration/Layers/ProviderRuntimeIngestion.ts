@@ -44,6 +44,7 @@ import {
 import { projectActivityPayload } from "../ActivityPayloadProjection.ts";
 import { forkParked } from "../../serverActivation.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { WorkerService } from "../../worker/WorkerService.ts";
 import { canReplaceThreadTitle } from "../threadTitles.ts";
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
@@ -115,6 +116,15 @@ type RuntimeIngestionInput =
       source: "domain";
       event: TurnStartRequestedDomainEvent;
     };
+
+export const runNormalProviderRuntimeEvent = <A, E, R, E2, R2>(
+  isLinkedProviderThread: (threadId: ThreadId) => Effect.Effect<boolean, E2, R2>,
+  event: ProviderRuntimeEvent,
+  process: (event: ProviderRuntimeEvent) => Effect.Effect<A, E, R>,
+): Effect.Effect<A | void, E | E2, R | R2> =>
+  isLinkedProviderThread(event.threadId).pipe(
+    Effect.flatMap((isLinked) => (isLinked ? Effect.void : process(event))),
+  );
 
 function toTurnId(value: TurnId | string | undefined): TurnId | undefined {
   return value === undefined ? undefined : TurnId.make(String(value));
@@ -329,6 +339,7 @@ function taskLinkageActivityFields(payload: Record<string, unknown>): Record<str
       agentId: typeof payload.agentId === "string" ? payload.agentId : undefined,
     }),
   };
+
   for (const key of [
     "taskType",
     "agentId",
@@ -884,6 +895,9 @@ const make = Effect.gen(function* () {
   const providerService = yield* ProviderService;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const serverSettingsService = yield* ServerSettingsService;
+  const workerService = yield* WorkerService;
+  const isLinkedProviderThread =
+    workerService.isLinkedProviderThread ?? (() => Effect.succeed(false));
   const providerCommandId = (event: ProviderRuntimeEvent, tag: string) =>
     crypto.randomUUIDv4.pipe(
       Effect.map((uuid) => CommandId.make(`provider:${event.eventId}:${tag}:${uuid}`)),
@@ -1481,7 +1495,7 @@ const make = Effect.gen(function* () {
     },
   );
 
-  const processRuntimeEvent = (event: ProviderRuntimeEvent) =>
+  const projectRuntimeEvent = (event: ProviderRuntimeEvent) =>
     Effect.gen(function* () {
       const thread = yield* resolveThreadShell(event.threadId);
       if (!thread) return;
@@ -2030,6 +2044,9 @@ const make = Effect.gen(function* () {
         ),
       ).pipe(Effect.asVoid);
     });
+
+  const processRuntimeEvent = (event: ProviderRuntimeEvent) =>
+    runNormalProviderRuntimeEvent(isLinkedProviderThread, event, projectRuntimeEvent);
 
   const processDomainEvent = (_event: TurnStartRequestedDomainEvent) => Effect.void;
 

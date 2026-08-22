@@ -2,9 +2,11 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import { HttpServer } from "effect/unstable/http";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 
 const environmentId = EnvironmentId.make("environment-1");
@@ -19,17 +21,46 @@ const fakeEnvironment = ServerEnvironment.ServerEnvironment.of({
   getDescriptor: Effect.die("unused"),
 });
 
-const makeRegistry = (now: () => number, httpServer = fakeHttpServer) =>
+const makeRegistry = (now: () => number, httpServer = fakeHttpServer, enableT3Workers = false) =>
   McpSessionRegistry.__testing
     .make({
       now,
       livenessWindowMs: 100,
     })
     .pipe(
-      Effect.provideService(HttpServer.HttpServer, httpServer),
-      Effect.provideService(ServerEnvironment.ServerEnvironment, fakeEnvironment),
-      Effect.provide(NodeServices.layer),
+      Effect.provide(
+        Layer.mergeAll(
+          Layer.succeed(HttpServer.HttpServer, httpServer),
+          Layer.succeed(ServerEnvironment.ServerEnvironment, fakeEnvironment),
+          ServerSettings.layerTest({ enableT3Workers }),
+          NodeServices.layer,
+        ),
+      ),
     );
+
+it.effect("issues Worker capability from the current provider-session setting", () =>
+  Effect.gen(function* () {
+    const disabledRegistry = yield* makeRegistry(() => 1_000);
+    const disabled = yield* disabledRegistry.issue({
+      threadId: ThreadId.make("thread-workers-disabled"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+    });
+    const disabledToken = disabled.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    const disabledScope = yield* disabledRegistry.resolve(disabledToken);
+    expect(disabledScope?.capabilities.has("preview")).toBe(true);
+    expect(disabledScope?.capabilities.has("workers")).toBe(false);
+
+    const enabledRegistry = yield* makeRegistry(() => 1_000, fakeHttpServer, true);
+    const enabled = yield* enabledRegistry.issue({
+      threadId: ThreadId.make("thread-workers-enabled"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+    });
+    const enabledToken = enabled.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    const enabledScope = yield* enabledRegistry.resolve(enabledToken);
+    expect(enabledScope?.capabilities.has("preview")).toBe(true);
+    expect(enabledScope?.capabilities.has("workers")).toBe(true);
+  }),
+);
 
 it.effect("stores only a token hash, resolves the bearer token, and revokes by thread", () =>
   Effect.gen(function* () {

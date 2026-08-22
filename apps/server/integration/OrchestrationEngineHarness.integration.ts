@@ -82,8 +82,24 @@ import { VcsStatusBroadcaster } from "../src/vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../src/git/GitWorkflowService.ts";
 import * as VcsProcess from "../src/vcs/VcsProcess.ts";
 import * as AgentAwarenessRelay from "../src/relay/AgentAwarenessRelay.ts";
+import * as WorkerService from "../src/worker/WorkerService.ts";
 
 const decodeCodexSettings = Schema.decodeEffect(CodexSettings);
+
+const testWorkerService = WorkerService.WorkerService.of({
+  start: () => Effect.die("Worker service is not used in this test"),
+  list: () => Effect.die("Worker service is not used in this test"),
+  get: () => Effect.die("Worker service is not used in this test"),
+  send: () => Effect.die("Worker service is not used in this test"),
+  wait: () => Effect.die("Worker service is not used in this test"),
+  observe: () => Effect.die("Worker service is not used in this test"),
+  interrupt: () => Effect.die("Worker service is not used in this test"),
+  close: () => Effect.die("Worker service is not used in this test"),
+  respondToApproval: () => Effect.die("Worker service is not used in this test"),
+  handleProviderEvent: () => Effect.void,
+  recover: Effect.void,
+  stream: Stream.empty,
+});
 
 function runGit(cwd: string, args: ReadonlyArray<string>) {
   return NodeChildProcess.execFileSync("git", args, {
@@ -306,6 +322,7 @@ export const makeOrchestrationIntegrationHarness = (
     const runtimeServicesLayer = Layer.mergeAll(
       projectionSnapshotQueryLayer,
       orchestrationLayer.pipe(Layer.provide(projectionSnapshotQueryLayer)),
+      Layer.succeed(WorkerService.WorkerService, testWorkerService),
       ProjectionCheckpointRepositoryLive,
       ProjectionPendingApprovalRepositoryLive,
       checkpointStoreLayer,

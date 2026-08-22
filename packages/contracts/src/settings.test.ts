@@ -16,6 +16,14 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 
+describe("ServerSettings T3 Workers", () => {
+  it("defaults the experimental Worker surface off and accepts opt-in", () => {
+    expect(decodeServerSettings({}).enableT3Workers).toBe(false);
+    expect(decodeServerSettings({ enableT3Workers: true }).enableT3Workers).toBe(true);
+    expect(decodeServerSettingsPatch({ enableT3Workers: true }).enableT3Workers).toBe(true);
+  });
+});
+
 describe("ClientSettings word wrap", () => {
   it("defaults word wrap on", () => {
     expect(decodeClientSettings({}).wordWrap).toBe(true);

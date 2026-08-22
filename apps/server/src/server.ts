@@ -4,6 +4,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schedule from "effect/Schedule";
+import * as Stream from "effect/Stream";
 import { FetchHttpClient, HttpRouter, HttpServer } from "effect/unstable/http";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
@@ -33,6 +34,7 @@ import * as ProviderSessionRuntime from "./persistence/ProviderSessionRuntime.ts
 import { ProviderAdapterRegistryLive } from "./provider/Layers/ProviderAdapterRegistry.ts";
 import * as ProviderEventLoggers from "./provider/Layers/ProviderEventLoggers.ts";
 import { ProviderServiceLive } from "./provider/Layers/ProviderService.ts";
+import * as ProviderService from "./provider/Services/ProviderService.ts";
 import { ProviderSessionReaperLive } from "./provider/Layers/ProviderSessionReaper.ts";
 import * as OpenCodeRuntime from "./provider/opencodeRuntime.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
@@ -118,6 +120,14 @@ import * as NetService from "@t3tools/shared/Net";
 import * as RelayClient from "@t3tools/shared/relayClient";
 import { disableTailscaleServe, ensureTailscaleServe } from "@t3tools/tailscale";
 import { forkParked, ServerActivation } from "./serverActivation.ts";
+import { WorkerStoreLive } from "./worker/WorkerStore.ts";
+import { CodexLinkedWorkerBackendLive } from "./worker/WorkerBackend.ts";
+import {
+  WorkerObserverLive,
+  WorkerObserverModelCatalogLive,
+  WorkerObserverRunnerLive,
+} from "./worker/WorkerObserver.ts";
+import { WorkerService, WorkerServiceLive } from "./worker/WorkerService.ts";
 
 // Effect's default preemptive shutdown waits 20s before finalizing request scopes.
 // T3's primary transport is long-lived WebSocket RPC, whose Effect scope finalizer
@@ -367,6 +377,34 @@ const ProviderRuntimeLayerLive = ProviderSessionReaperLive.pipe(
   Layer.provideMerge(OrchestrationLayerLive),
 );
 
+const WorkerObserverLayerLive = WorkerObserverLive.pipe(
+  Layer.provide(WorkerObserverModelCatalogLive),
+  Layer.provide(WorkerObserverRunnerLive),
+);
+
+const WorkerServiceLayerLive = WorkerServiceLive.pipe(
+  Layer.provide(WorkerStoreLive),
+  Layer.provide(CodexLinkedWorkerBackendLive),
+  Layer.provide(WorkerObserverLayerLive),
+  // The linked backend and the read-only observer runner both use the same
+  // ProviderService instance as the normal runtime. Providing it here keeps
+  // the Worker layer self-contained and prevents the requirement leaking into
+  // route/test layers that only consume the already-built Worker service.
+  Layer.provideMerge(ProviderLayerLive),
+);
+
+const WorkerRuntimeLayerLive = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const workers = yield* WorkerService;
+    const provider = yield* ProviderService.ProviderService;
+    yield* workers.recover;
+    yield* provider.streamEvents.pipe(
+      Stream.runForEach(workers.handleProviderEvent),
+      Effect.forkScoped,
+    );
+  }),
+).pipe(Layer.provideMerge(WorkerServiceLayerLive));
+
 const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // Core Services
   Layer.provideMerge(ServerSettingsLayerLive),
@@ -375,7 +413,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(GitLayerLive),
   Layer.provideMerge(VcsLayerLive),
   Layer.provideMerge(ProviderRuntimeLayerLive),
-  Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive)),
+  Layer.provideMerge(Layer.mergeAll(WorkerRuntimeLayerLive, TerminalLayerLive, PreviewLayerLive)),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(Keybindings.layer),
   Layer.provideMerge(ProviderRegistryLive),

@@ -1,5 +1,6 @@
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
+import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -50,6 +51,13 @@ import {
   AssetWorkspaceContextResolutionError,
   RpcClientId,
   EnvironmentAuthorizationError,
+  WorkerDisabledError,
+  WorkerOperationError,
+  ProviderDriverKind,
+  defaultInstanceIdForDriver,
+  type WorkerEvent,
+  type WorkerStartInput,
+  type WorkerSubscribeInput,
   ThreadId,
   type TerminalAttachStreamEvent,
   type TerminalError,
@@ -124,10 +132,63 @@ import * as PairingGrantStore from "./auth/PairingGrantStore.ts";
 import * as SessionStore from "./auth/SessionStore.ts";
 import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http.ts";
 import * as RelayClient from "@t3tools/shared/relayClient";
+import * as WorkerService from "./worker/WorkerService.ts";
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+const defaultCodexInstanceId = defaultInstanceIdForDriver(ProviderDriverKind.make("codex"));
 const EDITOR_DISCOVERY_TIMEOUT = Duration.seconds(5);
+
+const unavailableWorkerError = (operation: string) =>
+  new WorkerOperationError({
+    operation,
+    message: "T3 Workers are unavailable in this route layer.",
+  });
+
+/**
+ * Keep route-layer construction usable in isolated HTTP/RPC tests that do not
+ * boot the full runtime graph. The live server supplies WorkerService through
+ * the runtime context; this fallback is never reached there and still fails
+ * closed if a Worker RPC is called without that service.
+ */
+const unavailableWorkerService: WorkerService.WorkerServiceShape = {
+  start: () => Effect.fail(unavailableWorkerError("worker.start")),
+  list: () => Effect.fail(unavailableWorkerError("worker.list")),
+  get: () => Effect.fail(unavailableWorkerError("worker.get")),
+  send: () => Effect.fail(unavailableWorkerError("worker.send")),
+  wait: () => Effect.fail(unavailableWorkerError("worker.wait")),
+  observe: () => Effect.fail(unavailableWorkerError("worker.observe")),
+  interrupt: () => Effect.fail(unavailableWorkerError("worker.interrupt")),
+  close: () => Effect.fail(unavailableWorkerError("worker.close")),
+  respondToApproval: () => Effect.fail(unavailableWorkerError("worker.approvalRespond")),
+  handleProviderEvent: () => Effect.void,
+  recover: Effect.void,
+  stream: Stream.empty,
+};
+
+export const requireT3WorkersEnabled = (enabled: boolean) =>
+  enabled ? Effect.void : new WorkerDisabledError({});
+
+export const workerEventMatchesSubscription = (
+  event: WorkerEvent,
+  input: WorkerSubscribeInput,
+): boolean =>
+  (input.parentThreadId === undefined || event.summary.parentThreadId === input.parentThreadId) &&
+  (input.includeClosed === true || event.summary.status !== "closed");
+
+export const resolveWorkerStartRequest = (
+  input: WorkerStartInput,
+): Effect.Effect<WorkerService.WorkerStartRequest, WorkerOperationError> =>
+  input.parentThreadId === undefined
+    ? new WorkerOperationError({
+        operation: "worker.start",
+        message: "A parent thread is required to start a Worker over WebSocket",
+      })
+    : Effect.succeed({
+        parentThreadId: input.parentThreadId,
+        providerInstanceId: input.modelSelection?.instanceId ?? defaultCodexInstanceId,
+        input,
+      });
 
 export const resolveAvailableEditorsForConfig = <A, E, R>(
   discovery: Effect.Effect<ReadonlyArray<A>, E, R>,
@@ -376,6 +437,11 @@ const makeWsRpcLayer = (
       const config = yield* ServerConfig.ServerConfig;
       const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
+      const context = yield* Effect.context<never>();
+      const workers = Option.getOrElse(
+        Context.getOption(context, WorkerService.WorkerService),
+        () => unavailableWorkerService,
+      );
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
       const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
@@ -471,6 +537,21 @@ const makeWsRpcLayer = (
           method,
           authorizeEffect(requiredScopeForRpcMethod(method), effect),
           traceAttributes,
+        );
+      const withWorkersEnabled = <A, E, R>(
+        effect: Effect.Effect<A, E, R>,
+      ): Effect.Effect<A, E | WorkerDisabledError | WorkerOperationError, R> =>
+        serverSettings.getSettings.pipe(
+          Effect.mapError(
+            (cause) =>
+              new WorkerOperationError({
+                operation: "worker.settings",
+                message: "Worker settings could not be read",
+                cause,
+              }),
+          ),
+          Effect.flatMap((settings) => requireT3WorkersEnabled(settings.enableT3Workers)),
+          Effect.andThen(effect),
         );
       const toDispatchCommandError = (cause: unknown, fallbackMessage: string) =>
         isOrchestrationDispatchCommandError(cause)
@@ -1610,6 +1691,56 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.serverGetBackgroundPolicy, backgroundPolicy.snapshot, {
             "rpc.aggregate": "server",
           }),
+        [WS_METHODS.workersList]: (input) =>
+          observeRpcEffect(WS_METHODS.workersList, withWorkersEnabled(workers.list(input)), {
+            "rpc.aggregate": "workers",
+          }),
+        [WS_METHODS.workersGet]: (input) =>
+          observeRpcEffect(WS_METHODS.workersGet, withWorkersEnabled(workers.get(input.workerId)), {
+            "rpc.aggregate": "workers",
+            "worker.id": input.workerId,
+          }),
+        [WS_METHODS.workersStart]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.workersStart,
+            withWorkersEnabled(
+              resolveWorkerStartRequest(input).pipe(Effect.flatMap(workers.start)),
+            ),
+            { "rpc.aggregate": "workers" },
+          ),
+        [WS_METHODS.workersSend]: (input) =>
+          observeRpcEffect(WS_METHODS.workersSend, withWorkersEnabled(workers.send(input)), {
+            "rpc.aggregate": "workers",
+            "worker.id": input.workerId,
+          }),
+        [WS_METHODS.workersWait]: (input) =>
+          observeRpcEffect(WS_METHODS.workersWait, withWorkersEnabled(workers.wait(input)), {
+            "rpc.aggregate": "workers",
+            "worker.count": input.workerIds.length,
+          }),
+        [WS_METHODS.workersObserve]: (input) =>
+          observeRpcEffect(WS_METHODS.workersObserve, withWorkersEnabled(workers.observe(input)), {
+            "rpc.aggregate": "workers",
+            "worker.id": input.workerId,
+          }),
+        [WS_METHODS.workersInterrupt]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.workersInterrupt,
+            withWorkersEnabled(workers.interrupt(input)),
+            { "rpc.aggregate": "workers", "worker.id": input.workerId },
+          ),
+        [WS_METHODS.workersClose]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.workersClose,
+            withWorkersEnabled(workers.close(input.workerId)),
+            { "rpc.aggregate": "workers", "worker.id": input.workerId },
+          ),
+        [WS_METHODS.workersApprovalRespond]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.workersApprovalRespond,
+            withWorkersEnabled(workers.respondToApproval(input)),
+            { "rpc.aggregate": "workers", "worker.id": input.workerId },
+          ),
         [WS_METHODS.cloudGetRelayClientStatus]: (_input) =>
           observeRpcEffect(WS_METHODS.cloudGetRelayClientStatus, relayClient.resolve, {
             "rpc.aggregate": "cloud",
@@ -2285,6 +2416,18 @@ const makeWsRpcLayer = (
               ),
             ),
             { "rpc.aggregate": "server" },
+          ),
+        [WS_METHODS.subscribeWorkers]: (input) =>
+          observeRpcStreamEffect(
+            WS_METHODS.subscribeWorkers,
+            withWorkersEnabled(
+              Effect.succeed(
+                workers.stream.pipe(
+                  Stream.filter((event) => workerEventMatchesSubscription(event, input)),
+                ),
+              ),
+            ),
+            { "rpc.aggregate": "workers" },
           ),
       });
     }),
