@@ -63,7 +63,7 @@ it("keeps execution permission controls out of worker_start", () => {
     expect(properties).not.toHaveProperty(forbidden);
   }
   expect(WorkerToolkit.tools.worker_start.description).toContain(
-    "execution permissions always inherit the parent session",
+    "runtime access mode inherits the parent session",
   );
 });
 
