@@ -24,14 +24,19 @@ For browser work, first call \`preview_status\`. If no automation-capable previe
 Do not switch to global browser skills, Chrome, Node REPL browser automation, standalone Playwright, or agent-browser merely because the preview is initially closed or a first call fails. Use an alternative browser system only when the T3 preview tools are absent, the user explicitly requests another browser, or \`preview_open\` returns an explicit unsupported/unavailable error. A failed T3 preview tool call should be inspected and retried with corrected arguments when the error is actionable.
 `;
 
+const CHROME_TO_WINDOWS_CONTROL_FALLBACK_INSTRUCTIONS = `
+
+If the Chrome plugin reports that Chrome is unavailable, its extension is disconnected, or no browser session is discoverable, keep Chrome as the target and change only the control mechanism. When the \`computer-use:computer-use\` skill is listed, read it and use Windows Computer Use to operate the user's existing Chrome window. This is not permission to switch to another browser. Do not stop after extension diagnostics, ask to open a fresh Chrome window, or repeat connection retries when Windows control is available. Ask the user only when direct Chrome control and Windows Computer Use are both unavailable, or when the site or operating system requires user action.
+`;
+
 const FULL_CHROME_TOOL_INSTRUCTIONS = `
 
 ## Full Chrome control
 
 The user has selected Full Chrome for this thread and explicitly trusts the agent to browse, search, navigate, click, type, upload, download, and inspect pages in their Chrome session. Prefer the Chrome and Chrome DevTools tools over the T3 preview browser. Use screenshots, page structure, JavaScript evaluation, console output, and network inspection together when one view is incomplete.
 
-T3 adds no domain allowlist, action-word filter, read-only browser mode, or preview-only restriction in this mode. Do not stop merely because the first browser tool is unavailable or one approach fails. Inspect the error, retry when useful, then use another available Chrome, browser, desktop, command-line, or web tool that can complete the task. Keep the user informed when authentication, a browser permission, or a real operating-system boundary requires their action.
-`;
+T3 adds no domain allowlist, action-word filter, read-only browser mode, or preview-only restriction in this mode. Do not stop merely because the first browser tool is unavailable or one approach fails. Inspect the error, retry when useful, then use another available Chrome control mechanism, desktop tool, command-line tool, or web tool that can complete the task without changing the user's requested browser. Keep the user informed when authentication, a browser permission, or a real operating-system boundary requires their action.
+${CHROME_TO_WINDOWS_CONTROL_FALLBACK_INSTRUCTIONS}`;
 
 const FULL_DESKTOP_TOOL_INSTRUCTIONS = `
 
@@ -39,8 +44,8 @@ const FULL_DESKTOP_TOOL_INSTRUCTIONS = `
 
 The user has selected Full desktop for this thread and explicitly trusts the agent to use Chrome and Windows applications to finish the task. Browse, search, navigate, click, type, upload, download, run applications, inspect windows, and use screenshots or accessibility data as needed. Prefer direct browser tools for web pages, then use Windows computer control when browser APIs cannot reach a dialog, download, native application, or visual-only control.
 
-T3 adds no domain allowlist, action-word filter, read-only mode, or preview-only restriction in this mode. Do not wait indefinitely after a failed tool call. Inspect the failure, retry when useful, and switch among the available Chrome, browser, desktop, command-line, and web tools. Keep the user informed when authentication, a browser permission, or a real operating-system boundary requires their action.
-`;
+T3 adds no domain allowlist, action-word filter, read-only mode, or preview-only restriction in this mode. Do not wait indefinitely after a failed tool call. Inspect the failure, retry when useful, and switch among the available Chrome control mechanisms, desktop, command-line, and web tools while preserving the user's requested application. Keep the user informed when authentication, a browser permission, or a real operating-system boundary requires their action.
+${CHROME_TO_WINDOWS_CONTROL_FALLBACK_INSTRUCTIONS}`;
 
 function computerControlInstructions(
   mode: CodexComputerControlMode,

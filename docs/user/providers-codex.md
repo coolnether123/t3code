@@ -41,7 +41,7 @@ Open the model traits menu in a Codex thread and choose **Computer control**:
 - **Full desktop** is the default. Codex can use Chrome and Windows apps, including native dialogs,
   downloads, and controls that browser automation cannot reach.
 - **Full Chrome** prioritizes the existing Chrome session and its browser-development tools, then
-  falls back to other available browser or desktop tools when needed.
+  uses Windows Computer Use on that same Chrome window when the extension connection is unavailable.
 - **T3 Preview** uses the isolated collaborative preview browser and keeps its normal approval flow.
 
 Full Chrome and Full desktop do not add a T3 domain allowlist, an action-word filter, a read-only
@@ -51,8 +51,9 @@ Authentication challenges and operating-system permission prompts can still need
 
 Chrome, Browser, and Computer Use are Codex plugins. Enable the plugins in the same `CODEX_HOME`
 that the T3 provider uses. Full desktop can continue through Windows control when Chrome's extension
-connection is unavailable, but Chrome-specific page structure, console, and network inspection
-require a working Chrome plugin connection.
+connection is unavailable. It keeps the existing Chrome window as the target and changes the control
+mechanism instead of asking to launch a replacement window. Chrome-specific page structure, console,
+and network inspection require a working Chrome plugin connection.
 
 ## I Want Work And Personal Codex Accounts
 
