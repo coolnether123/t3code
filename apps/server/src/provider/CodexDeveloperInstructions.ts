@@ -1,5 +1,18 @@
 import type { ProviderInteractionMode } from "@t3tools/contracts";
 
+export const CODEX_COMPUTER_CONTROL_OPTION_ID = "computerControl";
+export const CODEX_COMPUTER_CONTROL_MODES = ["preview", "chrome", "desktop"] as const;
+export type CodexComputerControlMode = (typeof CODEX_COMPUTER_CONTROL_MODES)[number];
+export const DEFAULT_CODEX_COMPUTER_CONTROL_MODE: CodexComputerControlMode = "desktop";
+
+export function normalizeCodexComputerControlMode(
+  value: string | null | undefined,
+): CodexComputerControlMode {
+  return CODEX_COMPUTER_CONTROL_MODES.includes(value as CodexComputerControlMode)
+    ? (value as CodexComputerControlMode)
+    : DEFAULT_CODEX_COMPUTER_CONTROL_MODE;
+}
+
 const T3_CODE_BROWSER_TOOL_INSTRUCTIONS = `
 
 ## T3 Code collaborative browser
@@ -10,6 +23,38 @@ For browser work, first call \`preview_status\`. If no automation-capable previe
 
 Do not switch to global browser skills, Chrome, Node REPL browser automation, standalone Playwright, or agent-browser merely because the preview is initially closed or a first call fails. Use an alternative browser system only when the T3 preview tools are absent, the user explicitly requests another browser, or \`preview_open\` returns an explicit unsupported/unavailable error. A failed T3 preview tool call should be inspected and retried with corrected arguments when the error is actionable.
 `;
+
+const FULL_CHROME_TOOL_INSTRUCTIONS = `
+
+## Full Chrome control
+
+The user has selected Full Chrome for this thread and explicitly trusts the agent to browse, search, navigate, click, type, upload, download, and inspect pages in their Chrome session. Prefer the Chrome and Chrome DevTools tools over the T3 preview browser. Use screenshots, page structure, JavaScript evaluation, console output, and network inspection together when one view is incomplete.
+
+T3 adds no domain allowlist, action-word filter, read-only browser mode, or preview-only restriction in this mode. Do not stop merely because the first browser tool is unavailable or one approach fails. Inspect the error, retry when useful, then use another available Chrome, browser, desktop, command-line, or web tool that can complete the task. Keep the user informed when authentication, a browser permission, or a real operating-system boundary requires their action.
+`;
+
+const FULL_DESKTOP_TOOL_INSTRUCTIONS = `
+
+## Full Windows and Chrome control
+
+The user has selected Full desktop for this thread and explicitly trusts the agent to use Chrome and Windows applications to finish the task. Browse, search, navigate, click, type, upload, download, run applications, inspect windows, and use screenshots or accessibility data as needed. Prefer direct browser tools for web pages, then use Windows computer control when browser APIs cannot reach a dialog, download, native application, or visual-only control.
+
+T3 adds no domain allowlist, action-word filter, read-only mode, or preview-only restriction in this mode. Do not wait indefinitely after a failed tool call. Inspect the failure, retry when useful, and switch among the available Chrome, browser, desktop, command-line, and web tools. Keep the user informed when authentication, a browser permission, or a real operating-system boundary requires their action.
+`;
+
+function computerControlInstructions(
+  mode: CodexComputerControlMode,
+  browserToolsAvailable: boolean,
+): string {
+  switch (mode) {
+    case "preview":
+      return browserToolInstructions(browserToolsAvailable);
+    case "chrome":
+      return FULL_CHROME_TOOL_INSTRUCTIONS;
+    case "desktop":
+      return FULL_DESKTOP_TOOL_INSTRUCTIONS;
+  }
+}
 
 const T3_CODE_WORKER_PARENT_INSTRUCTIONS = `
 
@@ -31,7 +76,7 @@ const browserToolInstructions = (browserToolsAvailable: boolean): string =>
   browserToolsAvailable ? T3_CODE_BROWSER_TOOL_INSTRUCTIONS : "";
 
 export const codexPlanModeDeveloperInstructions = (
-  browserToolsAvailable: boolean,
+  _browserToolsAvailable: boolean,
 ): string => `<collaboration_mode># Plan Mode (Conversational)
 
 You work in 3 phases, and you should *chat your way* to a great plan before finalizing it. A great plan is very detailed-intent- and implementation-wise-so that it can be handed to another engineer or agent to be implemented right away. It must be **decision complete**, where the implementer does not need to make any decisions.
@@ -160,11 +205,10 @@ Do not ask "should I proceed?" in the final output. The user can easily switch o
 Only produce at most one \`<proposed_plan>\` block per turn, and only when you are presenting a complete spec.
 
 If the user stays in Plan mode and asks for revisions after a prior \`<proposed_plan>\`, any new \`<proposed_plan>\` must be a complete replacement. If the user indicates that the prior plan is not acceptable but does not provide enough information to produce a complete replacement, address the concern and continue planning without producing a \`<proposed_plan>\` block. If the follow-up neither requires changes nor calls the plan into question (e.g. clarifying question), answer it before the block, then reproduce the prior \`<proposed_plan>\` unchanged.
-${browserToolInstructions(browserToolsAvailable)}
 </collaboration_mode>`;
 
 export const codexDefaultModeDeveloperInstructions = (
-  browserToolsAvailable: boolean,
+  _browserToolsAvailable: boolean,
 ): string => `<collaboration_mode># Collaboration Mode: Default
 
 You are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.
@@ -176,7 +220,6 @@ Your active mode changes only when new developer instructions with a different \
 Use the \`request_user_input\` tool only when it is listed in the available tools for this turn.
 
 In Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.
-${browserToolInstructions(browserToolsAvailable)}
 </collaboration_mode>`;
 
 export const CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS = codexPlanModeDeveloperInstructions(true);
@@ -187,6 +230,7 @@ export interface CodexRuntimeInfo {
   readonly model: string;
   readonly reasoningEffort: string;
   readonly enableT3Workers?: boolean;
+  readonly computerControlMode?: CodexComputerControlMode;
 }
 
 // Values come from trusted config, but keep the block single-line regardless.
@@ -209,7 +253,11 @@ export function buildCodexDeveloperInstructions(
       ? codexPlanModeDeveloperInstructions(browserToolsAvailable)
       : codexDefaultModeDeveloperInstructions(browserToolsAvailable);
   const workerInstructions = runtime.enableT3Workers ? T3_CODE_WORKER_PARENT_INSTRUCTIONS : "";
-  return `${base}${workerInstructions}
+  const controlInstructions = computerControlInstructions(
+    runtime.computerControlMode ?? DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
+    browserToolsAvailable,
+  );
+  return `${base}${controlInstructions}${workerInstructions}
 
 <runtime_info>In case you're asked: you are running in T3 Code through the Codex harness, as ${toSingleLine(runtime.model)} with ${toSingleLine(runtime.reasoningEffort)} reasoning effort. No need to mention this otherwise.</runtime_info>`;
 }

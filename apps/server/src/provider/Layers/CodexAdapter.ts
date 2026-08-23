@@ -43,6 +43,11 @@ import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { codexAppServerTransport } from "../CodexAppServerTransport.ts";
+import {
+  CODEX_COMPUTER_CONTROL_OPTION_ID,
+  DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
+  normalizeCodexComputerControlMode,
+} from "../CodexDeveloperInstructions.ts";
 
 import {
   ProviderAdapterRequestError,
@@ -304,6 +309,8 @@ function toRequestTypeFromMethod(method: string): CanonicalRequestType {
       return "file_read_approval";
     case "item/fileChange/requestApproval":
       return "file_change_approval";
+    case "item/permissions/requestApproval":
+      return "permissions_approval";
     case "applyPatchApproval":
       return "apply_patch_approval";
     case "execCommandApproval":
@@ -327,6 +334,10 @@ function toRequestTypeFromKind(kind: ProviderRequestKind | undefined): Canonical
       return "file_read_approval";
     case "file-change":
       return "file_change_approval";
+    case "permissions":
+      return "permissions_approval";
+    case "tool":
+      return "tool_approval";
     default:
       return "unknown";
   }
@@ -818,6 +829,20 @@ function mapToRuntimeEvents(
           );
           return payload?.reason ?? undefined;
         }
+        case "item/permissions/requestApproval": {
+          const payload = readPayload(
+            EffectCodexSchema.ServerRequest__PermissionsRequestApprovalParams,
+            event.payload,
+          );
+          return payload?.reason ?? undefined;
+        }
+        case "mcpServer/elicitation/request": {
+          const payload = readPayload(
+            EffectCodexSchema.ServerRequest__McpServerElicitationRequestParams,
+            event.payload,
+          );
+          return payload?.message ?? undefined;
+        }
         case "applyPatchApproval": {
           const payload = readPayload(
             EffectCodexSchema.ServerRequest__ApplyPatchApprovalParams,
@@ -849,7 +874,9 @@ function mapToRuntimeEvents(
         ...runtimeEventBase(event, canonicalThreadId),
         type: "request.opened",
         payload: {
-          requestType: toRequestTypeFromMethod(event.method),
+          requestType: event.requestKind
+            ? toRequestTypeFromKind(event.requestKind)
+            : toRequestTypeFromMethod(event.method),
           ...(detail ? { detail } : {}),
           ...(event.payload !== undefined ? { args: event.payload } : {}),
         },
@@ -1662,6 +1689,15 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           input.modelSelection?.instanceId === boundInstanceId
             ? getCodexServiceTierOptionValue(input.modelSelection)
             : undefined;
+        const computerControlMode =
+          input.modelSelection?.instanceId === boundInstanceId
+            ? normalizeCodexComputerControlMode(
+                getModelSelectionStringOptionValue(
+                  input.modelSelection,
+                  CODEX_COMPUTER_CONTROL_OPTION_ID,
+                ),
+              )
+            : DEFAULT_CODEX_COMPUTER_CONTROL_MODE;
         const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
         const runtimeInput: CodexSessionRuntimeOptions = {
           threadId: input.threadId,
@@ -1680,6 +1716,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ? { model: input.modelSelection.model }
             : {}),
           ...(serviceTier ? { serviceTier } : {}),
+          computerControlMode,
           ...(mcpSession
             ? {
                 environment: {
@@ -1818,6 +1855,15 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       input.modelSelection?.instanceId === boundInstanceId
         ? getCodexServiceTierOptionValue(input.modelSelection)
         : undefined;
+    const computerControlMode =
+      input.modelSelection?.instanceId === boundInstanceId
+        ? normalizeCodexComputerControlMode(
+            getModelSelectionStringOptionValue(
+              input.modelSelection,
+              CODEX_COMPUTER_CONTROL_OPTION_ID,
+            ),
+          )
+        : DEFAULT_CODEX_COMPUTER_CONTROL_MODE;
     return yield* session.runtime
       .sendTurn({
         ...(input.input !== undefined ? { input: input.input } : {}),
@@ -1830,6 +1876,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             }
           : {}),
         ...(serviceTier ? { serviceTier } : {}),
+        computerControlMode,
         ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
         ...(enableT3Workers ? { enableT3Workers: true } : {}),
         ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
