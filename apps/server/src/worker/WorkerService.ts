@@ -638,9 +638,24 @@ const makeWorkerService = Effect.gen(function* () {
         status: "waiting",
         createdAt,
       });
+      const wakeReasonForStatus = (status: WorkerSummary["status"]): WorkerWakeEvent["reason"] =>
+        status === "completed"
+          ? "completed"
+          : status === "failed"
+            ? "failed"
+            : status === "interrupted"
+              ? "interrupted"
+              : status === "lost"
+                ? "lost"
+                : status === "closed"
+                  ? "closed"
+                  : status === "waitingApproval"
+                    ? "approvalRequested"
+                    : "statusChanged";
       const matches = (event: WorkerWakeEvent) =>
         input.workerIds.includes(event.workerId) &&
-        (input.until === undefined || input.until.includes(event.status));
+        (input.until === undefined || input.until.includes(event.status)) &&
+        (input.wakeReasons === undefined || input.wakeReasons.includes(event.reason));
       const readWorkers = () =>
         Effect.forEach(input.workerIds, (workerId) =>
           read(workerId).pipe(Effect.map((detail) => detail.summary)),
@@ -649,19 +664,15 @@ const makeWorkerService = Effect.gen(function* () {
       const alreadyMatched =
         input.until === undefined
           ? undefined
-          : initialWorkers.find((worker) => input.until!.includes(worker.status));
+          : initialWorkers.find(
+              (worker) =>
+                input.until!.includes(worker.status) &&
+                (input.wakeReasons === undefined ||
+                  input.wakeReasons.includes(wakeReasonForStatus(worker.status))),
+            );
       if (alreadyMatched !== undefined) {
         const completedAt = yield* nowIso;
-        const reason: WorkerWakeEvent["reason"] =
-          alreadyMatched.status === "completed"
-            ? "completed"
-            : alreadyMatched.status === "interrupted"
-              ? "interrupted"
-              : alreadyMatched.status === "lost"
-                ? "lost"
-                : alreadyMatched.status === "waitingApproval"
-                  ? "approvalRequested"
-                  : "failed";
+        const reason = wakeReasonForStatus(alreadyMatched.status);
         const event: WorkerWakeEvent = {
           workerId: alreadyMatched.id,
           ...(alreadyMatched.activeActivationId === undefined

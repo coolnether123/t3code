@@ -59,7 +59,7 @@ export const WorkerListTool = readonlyTool(
 
 export const WorkerWaitTool = Tool.make("worker_wait", {
   description:
-    "Wait for relevant events from selected Workers without polling or sending periodic messages. Results include T3-owned Worker identity, lifecycle, and usage; call worker_status after a wake when detailed tool activity is needed. An expired wait reports current state and does not mark a Worker failed or lost.",
+    "Wait once for a bounded interval and configured relevant events from selected Workers without polling or sending periodic messages. While this lease is active, do not call worker_status or worker_observe; if an interim event wakes the call and work continues, report useful progress and re-enter the same logical wait session. Results include T3-owned Worker identity, lifecycle, and usage; call worker_status only after a wake when detailed tool activity is needed. An expired wait reports current state and does not mark a Worker failed or lost.",
   parameters: WorkerMcpWaitInput,
   success: WorkerMcpWaitResult,
   failure: WorkerError,

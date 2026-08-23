@@ -122,10 +122,57 @@ export type WorkerTimelineEntry =
       readonly value: WorkerApprovalRequest;
     };
 
+function normalizedWorkerMessageBody(value: string): string {
+  return value.replace(/\r\n?/gu, "\n").trim();
+}
+
+function isCanonicalAssignmentBody(body: string, assignment: string): boolean {
+  const normalizedBody = normalizedWorkerMessageBody(body);
+  const normalizedAssignment = normalizedWorkerMessageBody(assignment);
+  if (!normalizedBody || !normalizedAssignment) return false;
+  if (normalizedBody === normalizedAssignment) return true;
+
+  const withoutAssignmentLabel = normalizedBody.replace(/^Assignment:\s*/iu, "");
+  if (withoutAssignmentLabel === normalizedAssignment) return true;
+  if (!withoutAssignmentLabel.startsWith(`${normalizedAssignment}\n`)) return false;
+
+  // Some older records persisted the provider prompt instead of the compact
+  // parent message. Only treat the known context-only suffixes as canonical;
+  // arbitrary extra prose remains visible as a meaningful parent message.
+  const suffix = withoutAssignmentLabel.slice(normalizedAssignment.length).trimStart();
+  return /^(?:Context(?: note)?|Explicit (?:context|references|snippets)|You are a T3 Worker)\b/iu.test(
+    suffix,
+  );
+}
+
+export function isCanonicalWorkerAssignmentMessage(
+  detail: Pick<WorkerDetail, "assignment" | "messages">,
+  message: WorkerMessage,
+): boolean {
+  if (message.author !== "parent" || message.kind !== "assignment") return false;
+  const firstAssignment = detail.messages
+    .map((candidate, index) => ({ candidate, index }))
+    .filter(({ candidate }) => candidate.author === "parent" && candidate.kind === "assignment")
+    .sort((left, right) => {
+      const leftTime = Date.parse(left.candidate.createdAt);
+      const rightTime = Date.parse(right.candidate.createdAt);
+      if (Number.isFinite(leftTime) && Number.isFinite(rightTime)) {
+        return leftTime - rightTime || left.index - right.index;
+      }
+      if (Number.isFinite(leftTime)) return -1;
+      if (Number.isFinite(rightTime)) return 1;
+      return left.index - right.index;
+    })[0]?.candidate;
+  return (
+    firstAssignment?.id === message.id && isCanonicalAssignmentBody(message.body, detail.assignment)
+  );
+}
+
 export function buildWorkerTimeline(detail: WorkerDetail): ReadonlyArray<WorkerTimelineEntry> {
   const entries: Array<WorkerTimelineEntry & { readonly order: number }> = [];
   let order = 0;
   for (const message of detail.messages) {
+    if (isCanonicalWorkerAssignmentMessage(detail, message)) continue;
     entries.push({
       type: "message",
       id: message.id,

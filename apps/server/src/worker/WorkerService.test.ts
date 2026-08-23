@@ -288,6 +288,70 @@ it.effect("settles a failed start durably and makes worker_wait return immediate
   }).pipe(Effect.provide(workerLayer(memory.store, backend)));
 });
 
+it.effect("wakes worker_wait only for configured wake reasons", () => {
+  const memory = makeMemoryWorkerStore();
+  let turnIndex = 0;
+  const backend = WorkerBackend.of({
+    start: (input) =>
+      Effect.succeed({
+        providerThreadId: input.providerThreadId,
+        providerTurnId: TurnId.make(`worker-start-${++turnIndex}`),
+      }),
+    send: (input) =>
+      Effect.succeed({
+        providerThreadId: input.providerThreadId,
+        providerTurnId: TurnId.make(`worker-follow-up-${++turnIndex}`),
+      }),
+    interrupt: () => Effect.void,
+    stop: () => Effect.void,
+    respondToApproval: () => Effect.void,
+    hasLiveSession: () => Effect.succeed(true),
+  });
+
+  return Effect.gen(function* () {
+    const service = yield* WorkerServiceTesting.make;
+    const started = yield* service.start({
+      parentThreadId,
+      providerInstanceId,
+      input: {
+        title: "Wake reason filter",
+        assignment: "Wait for a completion event.",
+        context: { references: [], snippets: [] },
+      },
+    });
+    const waitFiber = yield* Effect.forkChild(
+      service.wait({
+        workerIds: [started.summary.id],
+        timeoutMillis: 5_000,
+        wakeReasons: ["completed"],
+      }),
+      { startImmediately: true },
+    );
+    yield* Effect.yieldNow;
+
+    yield* service.interrupt({ workerId: started.summary.id, force: true });
+    const followUp = yield* service.send({
+      workerId: started.summary.id,
+      message: "Continue and finish the bounded assignment.",
+    });
+    const followUpActivation = followUp.activations.at(-1)!;
+    yield* service.handleProviderEvent({
+      eventId: EventId.make("wake-reason-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: followUpActivation.providerThreadId,
+      turnId: followUpActivation.providerTurnId,
+      createdAt: now,
+      type: "turn.completed",
+      payload: { state: "completed" },
+    });
+
+    expect(yield* Fiber.join(waitFiber)).toMatchObject({
+      status: "woken",
+      reason: "completed",
+    });
+  }).pipe(Effect.provide(workerLayer(memory.store, backend)));
+});
+
 it.effect(
   "keeps late events on their provider turn and publishes live tool and token updates",
   () => {

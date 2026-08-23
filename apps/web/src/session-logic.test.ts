@@ -928,6 +928,64 @@ describe("workEntryIndicatesToolFailure", () => {
 });
 
 describe("deriveWorkLogEntries", () => {
+  it("groups consecutive waits for one Worker into one logical session", () => {
+    const firstWait = makeActivity({
+      id: "worker-wait-first",
+      createdAt: "2026-02-23T00:00:10.000Z",
+      kind: "tool.completed",
+      summary: "Wait for Workers",
+      payload: {
+        status: "completed",
+        itemType: "mcp_tool_call",
+        data: {
+          toolCallId: "wait-1",
+          item: {
+            tool: "worker_wait",
+            status: "completed",
+            arguments: { workerIds: ["worker-1"], timeoutMillis: 900_000 },
+            result: {
+              status: "woken",
+              reason: "message",
+              workers: [{ id: "worker-1", displayName: "Luna Pine", status: "running" }],
+            },
+          },
+        },
+      },
+      turnId: "turn-worker",
+      sequence: 1,
+    });
+    const continuedWait = makeActivity({
+      id: "worker-wait-second",
+      createdAt: "2026-02-23T00:00:12.000Z",
+      kind: "tool.updated",
+      summary: "Wait for Workers",
+      payload: {
+        status: "inProgress",
+        itemType: "mcp_tool_call",
+        data: {
+          toolCallId: "wait-2",
+          item: {
+            tool: "worker_wait",
+            status: "inProgress",
+            arguments: { workerIds: ["worker-1"], timeoutMillis: 900_000 },
+          },
+        },
+      },
+      turnId: "turn-worker",
+      sequence: 2,
+    });
+
+    const entries = deriveWorkLogEntries([firstWait, continuedWait]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.workerToolCall).toMatchObject({
+      toolName: "worker_wait",
+      state: "inProgress",
+      workers: [{ name: "Luna Pine" }],
+      timeoutMillis: 900_000,
+    });
+    expect(entries[0]?.workerToolCall?.waitAttempts).toHaveLength(2);
+  });
+
   it("keeps edit-from-here failures as standalone domain events with technical detail", () => {
     const [entry] = deriveWorkLogEntries([
       makeActivity({

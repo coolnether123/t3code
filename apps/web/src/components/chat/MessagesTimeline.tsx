@@ -111,6 +111,9 @@ import { cn } from "~/lib/utils";
 import {
   workerToolDisplayName,
   workerToolElapsed,
+  workerWaitRowLabel,
+  workerWaitWakeReasonLabel,
+  formatWorkerTimeout,
   type ActiveWorkerWait,
   type WorkerToolCallPresentation,
 } from "../../workerToolPresentation";
@@ -1391,10 +1394,7 @@ function WorkerWaitDisclosure({ wait }: { wait: ActiveWorkerWait }) {
     .map((worker) => worker.status)
     .filter((value) => value !== undefined)
     .join(", ");
-  const timeout =
-    wait.timeoutMillis !== undefined
-      ? `${Math.round(wait.timeoutMillis / 1_000)}s`
-      : "not reported";
+  const timeout = formatWorkerTimeout(wait.timeoutMillis) ?? "not reported";
   return (
     <details className="ms-5 mt-1 max-w-full text-[.7rem] text-muted-foreground">
       <summary className="inline-flex min-h-11 cursor-pointer list-none items-center rounded-md px-1.5 underline decoration-border underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:min-h-7">
@@ -1427,6 +1427,12 @@ function WorkerWaitDisclosure({ wait }: { wait: ActiveWorkerWait }) {
         <dd>
           {wait.wakeReasons.length > 0 ? wait.wakeReasons.join(", ") : "relevant Worker event"}
         </dd>
+        <dt>Until statuses</dt>
+        <dd>
+          {wait.untilStatuses && wait.untilStatuses.length > 0
+            ? wait.untilStatuses.join(", ")
+            : "any status"}
+        </dd>
         <dt>Elapsed</dt>
         <dd>{workerToolElapsed(wait)}</dd>
         <dt>Lease / timeout</dt>
@@ -1436,7 +1442,7 @@ function WorkerWaitDisclosure({ wait }: { wait: ActiveWorkerWait }) {
             : `Active · ${timeout}`}
         </dd>
         <dt>Latest event</dt>
-        <dd>{wait.latestEvent ?? "Waiting for a Worker event"}</dd>
+        <dd>{wait.latestEvent ?? "No wake event yet"}</dd>
       </dl>
     </details>
   );
@@ -2797,19 +2803,48 @@ function workerCallStatusLabel(call: WorkerToolCallPresentation): string {
   return "Outcome unavailable";
 }
 
+function workerWaitFacts(call: WorkerToolCallPresentation): string[] {
+  if (call.toolName !== "worker_wait") return [];
+  const facts: string[] = [];
+  const timeout = formatWorkerTimeout(call.timeoutMillis);
+  const elapsed = workerToolElapsed(call);
+  if (timeout && call.state !== "inProgress") facts.push(`up to ${timeout}`);
+  if (call.state !== "inProgress") facts.push(`${elapsed} elapsed`);
+  const reason = workerWaitWakeReasonLabel(call.wakeReason);
+  if (reason && call.state !== "inProgress") facts.push(reason);
+  if (call.resultingStatus) facts.push(`status: ${call.resultingStatus}`);
+  if ((call.waitAttempts?.length ?? 0) > 1) {
+    facts.push(`${call.waitAttempts!.length} waits`);
+  }
+  return facts;
+}
+
+function workerToolAdvancedDetails(call: WorkerToolCallPresentation): string {
+  const value =
+    call.toolName === "worker_wait"
+      ? {
+          attempts: call.waitAttempts ?? [],
+          latest: call.rawData,
+        }
+      : call.rawData;
+  try {
+    return JSON.stringify(value, null, 2) ?? "No complete Worker tool payload was recorded.";
+  } catch {
+    return "Worker tool payload could not be formatted.";
+  }
+}
+
 export function FriendlyWorkerToolCallRow({ call }: { call: WorkerToolCallPresentation }) {
   const [expanded, setExpanded] = useState(false);
   const { copyToClipboard, isCopied } = useCopyToClipboard({ target: "Worker tool details" });
   const name = workerToolDisplayName(call);
-  let details = "No complete Worker tool payload was recorded.";
-  try {
-    details = JSON.stringify(call.rawData, null, 2) ?? details;
-  } catch {
-    details = "Worker tool payload could not be formatted.";
-  }
+  const details = workerToolAdvancedDetails(call);
   const status = workerCallStatusLabel(call);
-  const summary = call.resultSummary ?? call.assignment ?? status;
-  const label = `${call.action} ${name}`;
+  const isWait = call.toolName === "worker_wait";
+  const summary = isWait
+    ? workerWaitFacts(call).join(" · ") || "Waiting for a relevant Worker event"
+    : (call.resultSummary ?? call.assignment ?? status);
+  const label = isWait ? workerWaitRowLabel(call) : `${call.action} ${name}`;
   return (
     <div
       className="-mx-0.5 rounded-md border border-border/55 bg-card/35 px-2 py-1.5"
@@ -2818,25 +2853,29 @@ export function FriendlyWorkerToolCallRow({ call }: { call: WorkerToolCallPresen
       <div className="flex min-w-0 items-center gap-1.5 text-[12px] leading-5">
         <BotIcon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
         <span className="min-w-0 flex-1 truncate font-medium">{label}</span>
-        <span
-          className={cn(
-            "shrink-0 text-[.68rem]",
-            call.state === "failed"
-              ? "text-destructive"
-              : call.state === "completed"
-                ? "text-success-foreground"
-                : "text-muted-foreground",
-          )}
-        >
-          {status}
-        </span>
-        <span className="shrink-0 font-mono text-[.68rem] text-muted-foreground tabular-nums">
-          {workerToolElapsed(call)}
-        </span>
+        {!isWait ? (
+          <>
+            <span
+              className={cn(
+                "shrink-0 text-[.68rem]",
+                call.state === "failed"
+                  ? "text-destructive"
+                  : call.state === "completed"
+                    ? "text-success-foreground"
+                    : "text-muted-foreground",
+              )}
+            >
+              {status}
+            </span>
+            <span className="shrink-0 font-mono text-[.68rem] text-muted-foreground tabular-nums">
+              {workerToolElapsed(call)}
+            </span>
+          </>
+        ) : null}
       </div>
       <div className="ms-5 mt-0.5 flex min-w-0 items-center gap-2 text-[.7rem] text-muted-foreground">
         <span className="min-w-0 flex-1 truncate">{summary}</span>
-        {call.assignment && call.assignment !== summary ? (
+        {call.assignment && call.assignment !== summary && !isWait ? (
           <span className="hidden shrink-0 truncate sm:inline">Assignment: {call.assignment}</span>
         ) : null}
         <button

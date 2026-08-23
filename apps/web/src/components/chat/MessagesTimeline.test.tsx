@@ -354,6 +354,37 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain("do-not-show-by-default");
   });
 
+  it("renders a wait result with timing facts and keeps raw request/result data advanced", () => {
+    const markup = renderToStaticMarkup(
+      <FriendlyWorkerToolCallRow
+        call={{
+          toolName: "worker_wait",
+          action: "Waiting on",
+          state: "completed",
+          workerIds: ["worker-1"],
+          workers: [{ id: "worker-1", name: "Luna Pine", status: "running" }],
+          startedAt: MESSAGE_CREATED_AT,
+          endedAt: "2026-03-17T19:13:03.000Z",
+          durationMs: 35_000,
+          timeoutMillis: 15 * 60_000,
+          wakeReason: "message",
+          resultingStatus: "running",
+          wakeReasons: ["message"],
+          rawData: {
+            arguments: { timeoutMillis: 900_000 },
+            result: { secret: "do-not-show-by-default" },
+          },
+        }}
+      />,
+    );
+    expect(markup).toContain("Woke after 35s, progress event");
+    expect(markup).toContain("up to 15m");
+    expect(markup).toContain("status: running");
+    expect(markup).toContain("Advanced");
+    expect(markup).not.toContain("do-not-show-by-default");
+    expect(markup).not.toContain("{&quot;arguments");
+  });
+
   it("separates the active Worker name from the elapsed-time label", () => {
     const markup = renderToStaticMarkup(
       <MessagesTimeline
@@ -367,7 +398,10 @@ describe("MessagesTimeline", () => {
           workerIds: ["worker-1"],
           workers: [{ id: "worker-1", name: "Scout" }],
           startedAt: MESSAGE_CREATED_AT,
+          timeoutMillis: 15 * 60_000,
+          mode: "anyRelevantEvent",
           wakeReasons: [],
+          untilStatuses: ["completed"],
         }}
         timelineEntries={[]}
       />,
@@ -376,6 +410,10 @@ describe("MessagesTimeline", () => {
 
     expect(renderedText).toContain("Waiting on Scout for ");
     expect(renderedText).not.toContain("Waiting on Scoutfor ");
+    expect(markup).toContain("Wait details");
+    expect(markup).toContain("Until statuses");
+    expect(markup).toContain("completed");
+    expect(markup).toContain("min-h-11");
   });
 
   it("uses the larger leading inset only when the top fade is enabled", () => {

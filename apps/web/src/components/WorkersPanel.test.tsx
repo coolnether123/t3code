@@ -30,6 +30,7 @@ import {
 import workersPanelSource from "./WorkersPanel.tsx?raw";
 import {
   buildWorkerTimeline,
+  isCanonicalWorkerAssignmentMessage,
   liveWorkerTiming,
   partitionWorkers,
   reconcileWorkerPanelSelection,
@@ -300,6 +301,71 @@ describe("WorkersPanel timeline", () => {
       "message:message-worker",
     ]);
     expect(timeline.filter((entry) => entry.type === "approval")).toHaveLength(0);
+  });
+
+  it("suppresses only the canonical initial assignment payload", () => {
+    const detail = detailFixture();
+    const canonical: WorkerMessage = {
+      id: WorkerMessageId.make("message-canonical-assignment"),
+      workerId: running.id,
+      author: "parent",
+      kind: "assignment",
+      body: detail.assignment,
+      createdAt: "2026-08-22T20:00:01.000Z",
+    };
+    const firstResponse: WorkerMessage = {
+      id: WorkerMessageId.make("message-first-response"),
+      workerId: running.id,
+      author: "worker",
+      kind: "handoff",
+      body: "First response remains visible.",
+      createdAt: "2026-08-22T20:00:02.000Z",
+    };
+    const laterParent: WorkerMessage = {
+      id: WorkerMessageId.make("message-later-parent"),
+      workerId: running.id,
+      author: "parent",
+      kind: "followUp",
+      body: "Keep the result focused.",
+      createdAt: "2026-08-22T20:00:03.000Z",
+    };
+    const withCanonical = { ...detail, messages: [canonical, firstResponse, laterParent] };
+    expect(isCanonicalWorkerAssignmentMessage(withCanonical, canonical)).toBe(true);
+    expect(isCanonicalWorkerAssignmentMessage(withCanonical, firstResponse)).toBe(false);
+    expect(
+      buildWorkerTimeline(withCanonical)
+        .filter((entry) => entry.type === "message")
+        .map((entry) => entry.id),
+    ).toEqual([firstResponse.id, laterParent.id]);
+    expect(buildWorkerTimeline(withCanonical).some((entry) => entry.id === canonical.id)).toBe(
+      false,
+    );
+  });
+
+  it("handles the legacy assignment-plus-context wrapper without hiding later parent text", () => {
+    const detail = detailFixture();
+    const canonical: WorkerMessage = {
+      id: WorkerMessageId.make("message-legacy-assignment"),
+      workerId: running.id,
+      author: "parent",
+      kind: "assignment",
+      body: `Assignment:\n${detail.assignment}\nContext note:\n${detail.context.note}`,
+      createdAt: "2026-08-22T20:00:01.000Z",
+    };
+    const laterParent: WorkerMessage = {
+      id: WorkerMessageId.make("message-meaningful-parent"),
+      workerId: running.id,
+      author: "parent",
+      kind: "assignment",
+      body: "Same words, but a meaningful later parent message.",
+      createdAt: "2026-08-22T20:00:02.000Z",
+    };
+    const withLegacy = { ...detail, messages: [canonical, laterParent] };
+    expect(
+      buildWorkerTimeline(withLegacy)
+        .filter((entry) => entry.type === "message")
+        .map((entry) => entry.id),
+    ).toEqual([laterParent.id]);
   });
 
   it("keeps a newer pending approval when only an older request activity exists", () => {

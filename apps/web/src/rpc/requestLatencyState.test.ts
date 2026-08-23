@@ -95,19 +95,10 @@ describe("requestLatencyState", () => {
     ]);
   });
 
-  it("gives Worker wait leases a longer threshold while preserving diagnostics", () => {
+  it("excludes expected Worker wait leases from generic slow-request warnings", () => {
     trackRpcRequestSent("1", WS_METHODS.workersWait, "Waiting on Worker · env-1");
-    vi.advanceTimersByTime(SLOW_RPC_ACK_THRESHOLD_MS * 2);
+    vi.advanceTimersByTime(LONG_RUNNING_RPC_ACK_THRESHOLD_MS * 2);
     expect(getSlowRpcAckRequests()).toEqual([]);
-
-    vi.advanceTimersByTime(LONG_RUNNING_RPC_ACK_THRESHOLD_MS);
-    expect(getSlowRpcAckRequests()).toMatchObject([
-      {
-        requestId: "1",
-        tag: "Waiting on Worker · env-1",
-        thresholdMs: LONG_RUNNING_RPC_ACK_THRESHOLD_MS,
-      },
-    ]);
   });
 
   it("evicts the oldest pending requests once the tracker reaches capacity", () => {

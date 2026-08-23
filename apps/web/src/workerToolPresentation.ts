@@ -28,7 +28,28 @@ export interface WorkerToolCallPresentation {
   readonly endedAt?: string;
   readonly durationMs?: number;
   readonly callId?: string;
+  readonly timeoutMillis?: number;
+  readonly mode?: string;
+  readonly wakeReasons?: ReadonlyArray<string>;
+  readonly wakeReason?: string;
+  readonly resultingStatus?: WorkerStatus;
+  readonly waitAttempts?: ReadonlyArray<WorkerWaitAttemptPresentation>;
   /** Complete projected MCP data, shown only in Advanced/details UI. */
+  readonly rawData?: unknown;
+}
+
+export interface WorkerWaitAttemptPresentation {
+  readonly callId?: string;
+  readonly workerIds: ReadonlyArray<string>;
+  readonly state: WorkerToolCallState;
+  readonly startedAt: string;
+  readonly endedAt?: string;
+  readonly durationMs?: number;
+  readonly timeoutMillis?: number;
+  readonly mode?: string;
+  readonly wakeReasons: ReadonlyArray<string>;
+  readonly wakeReason?: string;
+  readonly resultingStatus?: WorkerStatus;
   readonly rawData?: unknown;
 }
 
@@ -37,20 +58,21 @@ export interface ActiveWorkerWait extends WorkerToolCallPresentation {
   readonly timeoutMillis?: number;
   readonly mode?: string;
   readonly wakeReasons: ReadonlyArray<string>;
+  readonly untilStatuses?: ReadonlyArray<WorkerStatus>;
   readonly deadlineAt?: string;
   readonly latestEvent?: string;
 }
 
 const ACTIONS: Record<T3WorkerToolName, string> = {
-  worker_start: "Started Worker",
-  worker_list: "Listed Workers",
-  worker_status: "Checked Worker status",
-  worker_observe: "Observed Worker",
-  worker_send: "Sent Worker follow-up",
-  worker_wait: "Waiting on Worker",
-  worker_interrupt: "Interrupted Worker",
-  worker_close: "Closed Worker",
-  worker_approval_respond: "Responded to Worker approval",
+  worker_start: "Started",
+  worker_list: "Listed",
+  worker_status: "Checked status for",
+  worker_observe: "Observed",
+  worker_send: "Sent follow-up to",
+  worker_wait: "Waiting on",
+  worker_interrupt: "Interrupted",
+  worker_close: "Closed",
+  worker_approval_respond: "Responded to approval for",
 };
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -103,7 +125,10 @@ function workerFromValue(value: unknown): WorkerToolIdentity | undefined {
   const id = text(entry.id) ?? text(entry.workerId);
   const name = workerName(entry);
   if (!id || !name) return undefined;
-  const assignment = text(entry.assignment);
+  // WorkerSummary records use `title` for the bounded assignment, while
+  // worker_start records may carry the full assignment field. Keep either
+  // shape available to the active-wait disclosure without guessing at prose.
+  const assignment = text(entry.assignment) ?? text(entry.title);
   const status = workerStatus(entry.status);
   const model = text(entry.model);
   return {
@@ -204,6 +229,189 @@ function resultSummary(
   return text(result?.message) ?? text(result?.summary);
 }
 
+const TERMINAL_WORKER_STATUSES: ReadonlySet<WorkerStatus> = new Set([
+  "completed",
+  "failed",
+  "interrupted",
+  "lost",
+  "closed",
+]);
+
+export function formatWorkerDuration(durationMs: number | undefined): string | undefined {
+  if (durationMs === undefined || !Number.isFinite(durationMs)) return undefined;
+  const seconds = Math.max(0, Math.floor(durationMs / 1_000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return seconds % 60 === 0
+      ? `${minutes}m`
+      : `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`;
+  }
+  return minutes % 60 === 0
+    ? `${Math.floor(minutes / 60)}h`
+    : `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`;
+}
+
+export function formatWorkerTimeout(timeoutMillis: number | undefined): string | undefined {
+  return formatWorkerDuration(timeoutMillis);
+}
+
+export function workerWaitWakeReasonLabel(reason: string | undefined): string | undefined {
+  switch (reason) {
+    case "message":
+      return "progress event";
+    case "statusChanged":
+      return "status change";
+    case "approvalRequested":
+      return "approval request";
+    case "completed":
+      return "completion";
+    case "failed":
+      return "failure";
+    case "interrupted":
+      return "interruption";
+    case "closed":
+      return "closed";
+    case "lost":
+      return "lost";
+    case "expired":
+      return "timeout";
+    case "userInput":
+      return "user input";
+    default:
+      return text(reason);
+  }
+}
+
+function isoElapsedMs(startedAt: string, endedAt: string | undefined): number | undefined {
+  if (!endedAt) return undefined;
+  const start = Date.parse(startedAt);
+  const end = Date.parse(endedAt);
+  return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : undefined;
+}
+
+function waitAttemptFromCall(
+  call: WorkerToolCallPresentation,
+): WorkerWaitAttemptPresentation | undefined {
+  if (call.toolName !== "worker_wait") return undefined;
+  return {
+    ...(call.callId ? { callId: call.callId } : {}),
+    workerIds: call.workerIds,
+    state: call.state,
+    startedAt: call.startedAt,
+    ...(call.endedAt ? { endedAt: call.endedAt } : {}),
+    ...(call.durationMs !== undefined ? { durationMs: call.durationMs } : {}),
+    ...(call.timeoutMillis !== undefined ? { timeoutMillis: call.timeoutMillis } : {}),
+    ...(call.mode ? { mode: call.mode } : {}),
+    wakeReasons: call.wakeReasons ?? [],
+    ...(call.wakeReason ? { wakeReason: call.wakeReason } : {}),
+    ...(call.resultingStatus ? { resultingStatus: call.resultingStatus } : {}),
+    ...(call.rawData !== undefined ? { rawData: call.rawData } : {}),
+  };
+}
+
+function mergeWaitAttempt(
+  previous: WorkerWaitAttemptPresentation,
+  next: WorkerWaitAttemptPresentation,
+): WorkerWaitAttemptPresentation {
+  const endedAt = next.endedAt ?? previous.endedAt;
+  const durationMs =
+    next.durationMs ?? previous.durationMs ?? isoElapsedMs(previous.startedAt, endedAt);
+  return {
+    ...previous,
+    ...next,
+    startedAt:
+      Date.parse(previous.startedAt) <= Date.parse(next.startedAt)
+        ? previous.startedAt
+        : next.startedAt,
+    ...(endedAt ? { endedAt } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
+    workerIds: next.workerIds.length > 0 ? next.workerIds : previous.workerIds,
+    wakeReasons: next.wakeReasons.length > 0 ? next.wakeReasons : previous.wakeReasons,
+  };
+}
+
+export function mergeWorkerToolCallPresentations(
+  previous: WorkerToolCallPresentation,
+  next: WorkerToolCallPresentation,
+): WorkerToolCallPresentation {
+  if (previous.toolName !== next.toolName) return next;
+  const startedAt =
+    Date.parse(previous.startedAt) <= Date.parse(next.startedAt)
+      ? previous.startedAt
+      : next.startedAt;
+  const endedAt = next.endedAt ?? previous.endedAt;
+  const durationMs = next.durationMs ?? previous.durationMs ?? isoElapsedMs(startedAt, endedAt);
+  const previousAttempts = previous.waitAttempts ?? [];
+  const nextAttempts = next.waitAttempts ?? [];
+  let waitAttempts: ReadonlyArray<WorkerWaitAttemptPresentation> | undefined;
+  if (next.toolName === "worker_wait") {
+    const incoming = nextAttempts.at(0) ?? waitAttemptFromCall(next);
+    const existing = previousAttempts.at(-1) ?? waitAttemptFromCall(previous);
+    if (existing && incoming) {
+      const sameAttempt =
+        (existing.callId !== undefined && existing.callId === incoming.callId) ||
+        (existing.callId === undefined &&
+          incoming.callId === undefined &&
+          existing.state === "inProgress" &&
+          incoming.endedAt !== undefined);
+      waitAttempts = sameAttempt
+        ? [...previousAttempts.slice(0, -1), mergeWaitAttempt(existing, incoming)]
+        : [...previousAttempts, incoming];
+    } else {
+      waitAttempts = [...previousAttempts, ...nextAttempts];
+    }
+  }
+  const previousWhileActive =
+    next.state === "inProgress"
+      ? (({
+          endedAt: _endedAt,
+          durationMs: _durationMs,
+          wakeReason: _wakeReason,
+          resultingStatus: _resultingStatus,
+          resultSummary: _resultSummary,
+          ...activePrevious
+        }) => activePrevious)(previous)
+      : previous;
+  return {
+    ...previousWhileActive,
+    ...next,
+    startedAt,
+    ...(next.state === "inProgress" ? {} : endedAt ? { endedAt } : {}),
+    ...(next.state === "inProgress" ? {} : durationMs !== undefined ? { durationMs } : {}),
+    workerIds: next.workerIds.length > 0 ? next.workerIds : previous.workerIds,
+    workers: next.workers.length > 0 ? next.workers : previous.workers,
+    ...(next.assignment
+      ? { assignment: next.assignment }
+      : previous.assignment
+        ? { assignment: previous.assignment }
+        : {}),
+    ...(next.rawData !== undefined
+      ? { rawData: next.rawData }
+      : previous.rawData !== undefined
+        ? { rawData: previous.rawData }
+        : {}),
+    ...(waitAttempts ? { waitAttempts } : {}),
+  };
+}
+
+export function workerWaitRowLabel(call: WorkerToolCallPresentation): string {
+  const name = workerToolDisplayName(call);
+  const elapsed = formatWorkerDuration(call.durationMs) ?? "—";
+  if (call.state === "inProgress") {
+    const timeout = formatWorkerTimeout(call.timeoutMillis);
+    return `Waiting on ${name}${timeout ? `, up to ${timeout}` : ""}`;
+  }
+  if (call.wakeReason === "expired" || call.resultSummary === "expired") {
+    return `Timed out after ${elapsed}`;
+  }
+  if (call.resultingStatus === "completed" || call.wakeReason === "completed") {
+    return `Worker finished after ${elapsed}`;
+  }
+  const reason = workerWaitWakeReasonLabel(call.wakeReason) ?? "an event";
+  return `Woke after ${elapsed}, ${reason}`;
+}
+
 export function parseWorkerToolActivity(
   activity: OrchestrationThreadActivity,
   knownWorkers: ReadonlyMap<string, WorkerToolIdentity> = new Map(),
@@ -229,10 +437,51 @@ export function parseWorkerToolActivity(
       : activity.createdAt;
   const durationMs = number(parsed.item?.durationMs) ?? number(parsed.data.durationMs);
   const summary = resultSummary(parsed.toolName, parsed.result, workers);
+  const state = lifecycleState(activity, parsed.payload, parsed.item);
+  const timeoutMillis =
+    parsed.toolName === "worker_wait" ? number(parsed.args?.timeoutMillis) : undefined;
+  const mode = parsed.toolName === "worker_wait" ? text(parsed.args?.mode) : undefined;
+  const wakeReason =
+    parsed.toolName === "worker_wait"
+      ? (text(parsed.result?.reason) ??
+        text(record(parsed.result?.lease)?.wakeReason) ??
+        (Array.isArray(parsed.result?.events)
+          ? text(record(parsed.result.events[0])?.reason)
+          : undefined))
+      : undefined;
+  const resultingStatus =
+    parsed.toolName === "worker_wait"
+      ? (workerStatus(
+          Array.isArray(parsed.result?.events)
+            ? record(parsed.result.events[0])?.status
+            : undefined,
+        ) ?? workers.find((worker) => worker.status !== undefined)?.status)
+      : undefined;
+  const wakeReasons =
+    parsed.toolName === "worker_wait" && Array.isArray(parsed.args?.wakeReasons)
+      ? parsed.args.wakeReasons.filter((reason): reason is string => typeof reason === "string")
+      : [];
+  const waitAttempt =
+    parsed.toolName === "worker_wait"
+      ? {
+          ...(parsed.callId ? { callId: parsed.callId } : {}),
+          workerIds: ids,
+          state,
+          startedAt: activity.createdAt,
+          ...(ended ? { endedAt: ended } : {}),
+          ...(durationMs !== undefined ? { durationMs } : {}),
+          ...(timeoutMillis !== undefined ? { timeoutMillis } : {}),
+          ...(mode ? { mode } : {}),
+          wakeReasons,
+          ...(wakeReason ? { wakeReason } : {}),
+          ...(resultingStatus ? { resultingStatus } : {}),
+          rawData: parsed.item ?? parsed.data,
+        }
+      : undefined;
   return {
     toolName: parsed.toolName,
     action: ACTIONS[parsed.toolName],
-    state: lifecycleState(activity, parsed.payload, parsed.item),
+    state,
     workerIds: ids.length > 0 ? ids : workers.map((worker) => worker.id),
     workers,
     ...(assignment ? { assignment } : {}),
@@ -241,6 +490,12 @@ export function parseWorkerToolActivity(
     ...(ended ? { endedAt: ended } : {}),
     ...(durationMs !== undefined ? { durationMs } : {}),
     ...(parsed.callId ? { callId: parsed.callId } : {}),
+    ...(timeoutMillis !== undefined ? { timeoutMillis } : {}),
+    ...(mode ? { mode } : {}),
+    ...(parsed.toolName === "worker_wait" ? { wakeReasons } : {}),
+    ...(wakeReason ? { wakeReason } : {}),
+    ...(resultingStatus ? { resultingStatus } : {}),
+    ...(waitAttempt ? { waitAttempts: [waitAttempt] } : {}),
     rawData: parsed.item ?? parsed.data,
   };
 }
@@ -256,7 +511,8 @@ export function deriveWorkerToolCallPresentations(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
 ): ReadonlyArray<WorkerToolCallPresentation> {
   const knownWorkers = new Map<string, WorkerToolIdentity>();
-  const calls = new Map<string, WorkerToolCallPresentation>();
+  const calls: WorkerToolCallPresentation[] = [];
+  const identifiedCallIndexes = new Map<string, number>();
   for (const activity of [...activities].toSorted(
     (a, b) => (a.sequence ?? 0) - (b.sequence ?? 0),
   )) {
@@ -264,13 +520,27 @@ export function deriveWorkerToolCallPresentations(
     if (!call) continue;
     for (const worker of call.workers) knownWorkers.set(worker.id, worker);
     const key = callKey(call);
-    if (call.state === "inProgress") {
-      calls.set(key, call);
-    } else {
-      calls.set(key, call);
+    const identifiedIndex = call.callId !== undefined ? identifiedCallIndexes.get(key) : undefined;
+    if (identifiedIndex !== undefined) {
+      calls[identifiedIndex] = mergeWorkerToolCallPresentations(calls[identifiedIndex]!, call);
+      continue;
     }
+    const previous = calls.at(-1);
+    const previousKey = previous ? callKey(previous) : undefined;
+    const canMergeLegacyLifecycle =
+      call.callId === undefined &&
+      previousKey === key &&
+      previous?.toolName === call.toolName &&
+      previous.state === "inProgress" &&
+      call.state !== "inProgress";
+    if (canMergeLegacyLifecycle && previous) {
+      calls[calls.length - 1] = mergeWorkerToolCallPresentations(previous, call);
+      continue;
+    }
+    calls.push(call);
+    if (call.callId !== undefined) identifiedCallIndexes.set(key, calls.length - 1);
   }
-  return [...calls.values()];
+  return calls;
 }
 
 export function deriveActiveWorkerWait(
@@ -295,6 +565,9 @@ export function deriveActiveWorkerWait(
     if (call.state === "inProgress") {
       const timeoutMillis = number(args?.timeoutMillis);
       const mode = text(args?.mode);
+      const untilStatuses = Array.isArray(args?.until)
+        ? args.until.filter((status): status is WorkerStatus => workerStatus(status) !== undefined)
+        : [];
       const startedAtMs = Date.parse(activity.createdAt);
       const deadlineMs =
         timeoutMillis !== undefined && Number.isFinite(startedAtMs)
@@ -316,8 +589,9 @@ export function deriveActiveWorkerWait(
         wakeReasons: Array.isArray(args?.wakeReasons)
           ? args.wakeReasons.filter((reason): reason is string => typeof reason === "string")
           : [],
+        untilStatuses,
         ...(deadlineAt ? { deadlineAt } : {}),
-        latestEvent: seconds > 0 ? `Waiting for ${seconds}s` : "Wait started",
+        latestEvent: seconds > 0 ? `No wake event yet · ${seconds}s elapsed` : "No wake event yet",
       });
     } else {
       active.delete(key);
@@ -330,7 +604,9 @@ export function workerToolDisplayName(call: WorkerToolCallPresentation): string 
   return (
     call.workers.map((worker) => worker.name).join(", ") ||
     (call.workerIds.length > 0
-      ? `${call.workerIds.length} Worker${call.workerIds.length === 1 ? "" : "s"}`
+      ? call.workerIds.length === 1
+        ? call.workerIds[0]!
+        : `${call.workerIds.length} Workers`
       : "Worker")
   );
 }
@@ -344,7 +620,5 @@ export function workerToolElapsed(call: WorkerToolCallPresentation, nowMs = Date
         ? Date.parse(call.endedAt)
         : nowMs;
   if (!Number.isFinite(start) || !Number.isFinite(end)) return "—";
-  const seconds = Math.max(0, Math.floor((end - start) / 1_000));
-  if (seconds < 60) return `${seconds}s`;
-  return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
+  return formatWorkerDuration(Math.max(0, end - start)) ?? "—";
 }

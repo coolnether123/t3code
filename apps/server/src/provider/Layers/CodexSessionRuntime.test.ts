@@ -473,7 +473,9 @@ describe("buildCodexDeveloperInstructions", () => {
       enableT3Workers: true,
     });
     const handoff = instructions.indexOf("After every successful `worker_start`");
-    const wait = instructions.indexOf("call `worker_wait` immediately after the report");
+    const wait = instructions.indexOf(
+      "call one long, bounded `worker_wait` immediately after the report",
+    );
     NodeAssert.ok(handoff >= 0);
     NodeAssert.ok(wait > handoff);
     NodeAssert.match(
@@ -484,6 +486,9 @@ describe("buildCodexDeveloperInstructions", () => {
       instructions,
       /if you tell the user that you are waiting, the next tool call must be `worker_wait`/,
     );
+    NodeAssert.match(instructions, /do not poll with `worker_status` or `worker_observe`/);
+    NodeAssert.match(instructions, /do not replace it with short repeated waits/);
+    NodeAssert.match(instructions, /re-enter the same logical long wait session/);
     NodeAssert.match(instructions, /never create nested Workers/);
   });
 

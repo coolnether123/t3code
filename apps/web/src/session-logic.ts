@@ -14,6 +14,7 @@ import {
   type TurnId,
 } from "@t3tools/contracts";
 import {
+  mergeWorkerToolCallPresentations,
   parseWorkerToolActivity,
   type WorkerToolCallPresentation,
   type WorkerToolIdentity,
@@ -1128,6 +1129,12 @@ function collapseDerivedWorkLogEntries(
       });
       continue;
     }
+    const previous = collapsed.at(-1);
+    if (previous && canContinueWorkerWait(previous, entry)) {
+      const previousIndex = collapsed.length - 1;
+      collapsed[previousIndex] = mergeDerivedWorkLogEntries(previous, entry);
+      continue;
+    }
     const lifecycleKey = toolLifecycleCollapseMapKey(entry);
     if (lifecycleKey !== undefined) {
       const matchingLifecycleIndex = toolLifecycleRowIndex.get(lifecycleKey);
@@ -1143,12 +1150,12 @@ function collapseDerivedWorkLogEntries(
       }
       toolLifecycleRowIndex.delete(lifecycleKey);
     }
-    const previous = collapsed.at(-1);
-    if (previous && shouldCollapseToolLifecycleEntries(previous, entry)) {
+    const adjacent = collapsed.at(-1);
+    if (adjacent && shouldCollapseToolLifecycleEntries(adjacent, entry)) {
       const previousIndex = collapsed.length - 1;
-      const previousKey = toolLifecycleCollapseMapKey(previous);
+      const previousKey = toolLifecycleCollapseMapKey(adjacent);
       if (previousKey !== undefined) toolLifecycleRowIndex.delete(previousKey);
-      const merged = mergeDerivedWorkLogEntries(previous, entry);
+      const merged = mergeDerivedWorkLogEntries(adjacent, entry);
       collapsed[previousIndex] = merged;
       const mergedKey = toolLifecycleCollapseMapKey(merged);
       if (mergedKey !== undefined) toolLifecycleRowIndex.set(mergedKey, previousIndex);
@@ -1160,6 +1167,33 @@ function collapseDerivedWorkLogEntries(
     }
   }
   return collapsed;
+}
+
+function canContinueWorkerWait(previous: DerivedWorkLogEntry, next: DerivedWorkLogEntry): boolean {
+  const previousCall = previous.workerToolCall;
+  const nextCall = next.workerToolCall;
+  if (
+    previousCall?.toolName !== "worker_wait" ||
+    nextCall?.toolName !== "worker_wait" ||
+    previousCall.state === "inProgress" ||
+    previousCall.state === "failed" ||
+    nextCall.workerIds.length === 0 ||
+    previousCall.workerIds.length !== nextCall.workerIds.length ||
+    !previousCall.workerIds.every((id) => nextCall.workerIds.includes(id))
+  ) {
+    return false;
+  }
+  if (
+    previousCall.wakeReason === "expired" ||
+    previousCall.resultingStatus === "completed" ||
+    previousCall.resultingStatus === "failed" ||
+    previousCall.resultingStatus === "interrupted" ||
+    previousCall.resultingStatus === "lost" ||
+    previousCall.resultingStatus === "closed"
+  ) {
+    return false;
+  }
+  return true;
 }
 
 function shouldCollapseToolLifecycleEntries(
@@ -1207,28 +1241,7 @@ function mergeDerivedWorkLogEntries(
   const toolData = next.toolData ?? previous.toolData;
   const workerToolCall = next.workerToolCall
     ? previous.workerToolCall
-      ? {
-          ...previous.workerToolCall,
-          ...next.workerToolCall,
-          workerIds:
-            next.workerToolCall.workerIds.length > 0
-              ? next.workerToolCall.workerIds
-              : previous.workerToolCall.workerIds,
-          workers:
-            next.workerToolCall.workers.length > 0
-              ? next.workerToolCall.workers
-              : previous.workerToolCall.workers,
-          ...(next.workerToolCall.assignment
-            ? { assignment: next.workerToolCall.assignment }
-            : previous.workerToolCall.assignment
-              ? { assignment: previous.workerToolCall.assignment }
-              : {}),
-          ...(next.workerToolCall.rawData !== undefined
-            ? { rawData: next.workerToolCall.rawData }
-            : previous.workerToolCall.rawData !== undefined
-              ? { rawData: previous.workerToolCall.rawData }
-              : {}),
-        }
+      ? mergeWorkerToolCallPresentations(previous.workerToolCall, next.workerToolCall)
       : next.workerToolCall
     : previous.workerToolCall;
   return {
