@@ -1,4 +1,5 @@
 import * as NodeCrypto from "node:crypto";
+import * as NodePath from "node:path";
 
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -693,6 +694,53 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
       }),
     );
 
+  const checkpointRefExists = (cwd: string, checkpointRef: string) =>
+    execute({
+      operation: "GitVcsDriver.checkpoints.checkpointRefExists",
+      cwd,
+      args: ["show-ref", "--verify", "--quiet", checkpointRef],
+      allowNonZeroExit: true,
+    }).pipe(Effect.map((result) => result.exitCode === 0));
+
+  const normalizedPath = (value: string, base: string) =>
+    NodePath.normalize(NodePath.resolve(base, value))
+      .replace(/[\\/]$/, "")
+      .toLowerCase();
+
+  const resolveBranch = (cwd: string) =>
+    execute({
+      operation: "GitVcsDriver.checkpoints.resolveBranch",
+      cwd,
+      args: ["symbolic-ref", "--short", "--quiet", "HEAD"],
+      allowNonZeroExit: true,
+    }).pipe(
+      Effect.map((result) => {
+        const branch = result.stdout.trim();
+        return result.exitCode === 0 && branch.length > 0 ? branch : null;
+      }),
+    );
+
+  const currentWorktreeDiffersFrom = (cwd: string, commitOid: string) =>
+    Effect.gen(function* () {
+      const tracked = yield* execute({
+        operation: "GitVcsDriver.checkpoints.compareCurrentWorktree",
+        cwd,
+        args: ["diff", "--quiet", "--no-ext-diff", commitOid, "--", "."],
+        allowNonZeroExit: true,
+      });
+      if (tracked.exitCode !== 0) {
+        return true;
+      }
+
+      const untracked = yield* execute({
+        operation: "GitVcsDriver.checkpoints.checkCurrentWorktreeStatus",
+        cwd,
+        args: ["status", "--porcelain=v1", "--untracked-files=all", "--", "."],
+        allowNonZeroExit: true,
+      });
+      return untracked.stdout.trim().length > 0;
+    });
+
   const resolveGitCommonDir = (cwd: string) =>
     Effect.gen(function* () {
       const result = yield* execute({
@@ -794,14 +842,80 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
     restoreCheckpoint: Effect.fn("GitVcsDriver.checkpoints.restoreCheckpoint")(function* (input) {
       const operation = "GitVcsDriver.checkpoints.restoreCheckpoint";
 
-      let commitOid = yield* resolveCheckpointCommit(input.cwd, input.checkpointRef);
-
-      if (!commitOid && input.fallbackToHead === true) {
-        commitOid = yield* resolveHeadCommit(input.cwd);
+      const repository = yield* detectRepository(input.cwd).pipe(
+        Effect.catchAll(() => Effect.succeed(null)),
+      );
+      if (!repository) {
+        return {
+          restored: false,
+          reason: "workspace-unavailable",
+          detail: "The configured workspace is not an available Git worktree.",
+        };
+      }
+      if (
+        input.expectedRepository &&
+        (normalizedPath(repository.rootPath, input.cwd) !==
+          normalizedPath(input.expectedRepository.rootPath, input.cwd) ||
+          (repository.metadataPath && input.expectedRepository.metadataPath
+            ? normalizedPath(repository.metadataPath, input.cwd) !==
+              normalizedPath(input.expectedRepository.metadataPath, input.cwd)
+            : false))
+      ) {
+        return {
+          restored: false,
+          reason: "repository-mismatch",
+          detail: "The configured workspace belongs to a different repository.",
+        };
       }
 
+      if (input.expectedBranch !== undefined && input.expectedBranch !== null) {
+        const branch = yield* resolveBranch(input.cwd);
+        if (branch !== input.expectedBranch) {
+          return {
+            restored: false,
+            reason: "branch-mismatch",
+            detail: `The workspace is on '${branch ?? "detached HEAD"}', not '${input.expectedBranch}'.`,
+          };
+        }
+      }
+
+      const targetRefExists = yield* checkpointRefExists(input.cwd, input.checkpointRef);
+      if (!targetRefExists) {
+        return {
+          restored: false,
+          reason: "checkpoint-missing",
+          detail: `Checkpoint ref '${input.checkpointRef}' is missing.`,
+        };
+      }
+      const commitOid = yield* resolveCheckpointCommit(input.cwd, input.checkpointRef);
       if (!commitOid) {
-        return false;
+        return {
+          restored: false,
+          reason: "checkpoint-invalid",
+          detail: `Checkpoint ref '${input.checkpointRef}' does not resolve to a commit.`,
+        };
+      }
+
+      if (input.expectedCurrentCheckpointRef) {
+        const currentCommitOid = yield* resolveCheckpointCommit(
+          input.cwd,
+          input.expectedCurrentCheckpointRef,
+        );
+        if (!currentCommitOid) {
+          return {
+            restored: false,
+            reason: "current-checkpoint-missing",
+            detail: `Current checkpoint ref '${input.expectedCurrentCheckpointRef}' is missing.`,
+          };
+        }
+        if (yield* currentWorktreeDiffersFrom(input.cwd, currentCommitOid)) {
+          return {
+            restored: false,
+            reason: "current-worktree-dirty",
+            detail:
+              "The workspace changed after the latest checkpoint; no user changes were overwritten.",
+          };
+        }
       }
 
       yield* execute({
@@ -809,22 +923,8 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         cwd: input.cwd,
         args: ["restore", "--source", commitOid, "--worktree", "--staged", "--", "."],
       });
-      yield* execute({
-        operation,
-        cwd: input.cwd,
-        args: ["clean", "-fd", "--", "."],
-      });
 
-      const headExists = yield* hasHeadCommit(input.cwd);
-      if (headExists) {
-        yield* execute({
-          operation,
-          cwd: input.cwd,
-          args: ["reset", "--quiet", "--", "."],
-        });
-      }
-
-      return true;
+      return { restored: true, commitOid };
     }),
 
     diffCheckpoints: Effect.fn("GitVcsDriver.checkpoints.diffCheckpoints")(function* (input) {

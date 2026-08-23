@@ -22,8 +22,31 @@ export interface VcsCaptureCheckpointInput {
 export interface VcsRestoreCheckpointInput {
   readonly cwd: string;
   readonly checkpointRef: CheckpointRef;
+  /** The repository recorded for the owning project, when available. */
+  readonly expectedRepository?: VcsRepositoryIdentity;
+  /** A recorded thread branch must still be checked out when provided. */
+  readonly expectedBranch?: string | null;
+  /** The latest checkpoint the current worktree must still match. */
+  readonly expectedCurrentCheckpointRef?: CheckpointRef;
   readonly fallbackToHead?: boolean;
 }
+
+export type VcsCheckpointRestoreFailureReason =
+  | "workspace-unavailable"
+  | "repository-mismatch"
+  | "branch-mismatch"
+  | "checkpoint-missing"
+  | "checkpoint-invalid"
+  | "current-checkpoint-missing"
+  | "current-worktree-dirty";
+
+export type VcsCheckpointRestoreResult =
+  | { readonly restored: true; readonly commitOid: string }
+  | {
+      readonly restored: false;
+      readonly reason: VcsCheckpointRestoreFailureReason;
+      readonly detail: string;
+    };
 
 export interface VcsDiffCheckpointsInput {
   readonly cwd: string;
@@ -45,7 +68,7 @@ export interface VcsCheckpointOps {
   ) => Effect.Effect<boolean, VcsError>;
   readonly restoreCheckpoint: (
     input: VcsRestoreCheckpointInput,
-  ) => Effect.Effect<boolean, VcsError>;
+  ) => Effect.Effect<VcsCheckpointRestoreResult, VcsError>;
   readonly diffCheckpoints: (input: VcsDiffCheckpointsInput) => Effect.Effect<string, VcsError>;
   readonly deleteCheckpointRefs: (
     input: VcsDeleteCheckpointRefsInput,
