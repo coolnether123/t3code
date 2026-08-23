@@ -57,7 +57,7 @@ describe("CheckpointDiffQuery.layer", () => {
         isGitRepository: () => Effect.succeed(true),
         captureCheckpoint: () => Effect.void,
         hasCheckpointRef: () => Effect.succeed(true),
-        restoreCheckpoint: () => Effect.succeed(true),
+        restoreCheckpoint: () => Effect.succeed({ restored: true, commitOid: "test-commit" }),
         diffCheckpoints: ({ fromCheckpointRef, toCheckpointRef, cwd, ignoreWhitespace }) =>
           Effect.sync(() => {
             diffCheckpointsCalls.push({
@@ -166,7 +166,7 @@ describe("CheckpointDiffQuery.layer", () => {
         isGitRepository: () => Effect.succeed(true),
         captureCheckpoint: () => Effect.void,
         hasCheckpointRef: () => Effect.succeed(true),
-        restoreCheckpoint: () => Effect.succeed(true),
+        restoreCheckpoint: () => Effect.succeed({ restored: true, commitOid: "test-commit" }),
         diffCheckpoints: ({ fromCheckpointRef, toCheckpointRef, cwd, ignoreWhitespace }) =>
           Effect.sync(() => {
             diffCheckpointsCalls.push({
@@ -255,7 +255,7 @@ describe("CheckpointDiffQuery.layer", () => {
         isGitRepository: () => Effect.succeed(true),
         captureCheckpoint: () => Effect.void,
         hasCheckpointRef: () => Effect.succeed(true),
-        restoreCheckpoint: () => Effect.succeed(true),
+        restoreCheckpoint: () => Effect.succeed({ restored: true, commitOid: "test-commit" }),
         diffCheckpoints: ({ ignoreWhitespace }) =>
           Effect.sync(() => {
             diffCheckpointsCalls.push({ ignoreWhitespace });
@@ -328,7 +328,7 @@ describe("CheckpointDiffQuery.layer", () => {
             hasCheckpointRefCallCount += 1;
             return true;
           }),
-        restoreCheckpoint: () => Effect.succeed(true),
+        restoreCheckpoint: () => Effect.succeed({ restored: true, commitOid: "test-commit" }),
         diffCheckpoints: () => Effect.succeed("diff patch"),
         deleteCheckpointRefs: () => Effect.void,
       };
@@ -382,7 +382,7 @@ describe("CheckpointDiffQuery.layer", () => {
         isGitRepository: () => Effect.succeed(true),
         captureCheckpoint: () => Effect.void,
         hasCheckpointRef: () => Effect.succeed(true),
-        restoreCheckpoint: () => Effect.succeed(true),
+        restoreCheckpoint: () => Effect.succeed({ restored: true, commitOid: "test-commit" }),
         diffCheckpoints: () => Effect.succeed(""),
         deleteCheckpointRefs: () => Effect.void,
       };

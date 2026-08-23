@@ -1422,6 +1422,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.cutoffCreatedAt !== undefined
             ? { cutoffCreatedAt: command.cutoffCreatedAt }
             : {}),
+          ...(command.editFromHereRequestId !== undefined
+            ? { editFromHereRequestId: command.editFromHereRequestId }
+            : {}),
         },
       };
     }

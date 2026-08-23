@@ -13,6 +13,7 @@ import {
   type ProviderRuntimeEvent,
   type VcsStatusLocalResult,
 } from "@t3tools/contracts";
+import * as Path from "effect/Path";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -42,6 +43,7 @@ import { isGitRepository } from "../../git/Utils.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as WorkspaceEntries from "../../workspace/WorkspaceEntries.ts";
 import { WorkerService } from "../../worker/WorkerService.ts";
+import type { VcsCheckpointRestoreFailureReason } from "../../vcs/VcsDriver.ts";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
@@ -136,11 +138,13 @@ const make = Effect.gen(function* () {
   const receiptBus = yield* RuntimeReceiptBus;
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
+  const path = yield* Path.Path;
 
   const appendRevertFailureActivity = (input: {
     readonly threadId: ThreadId;
     readonly turnCount: number;
     readonly detail: string;
+    readonly reason?: VcsCheckpointRestoreFailureReason;
     readonly createdAt: string;
   }) =>
     Effect.all({
@@ -160,6 +164,7 @@ const make = Effect.gen(function* () {
             payload: {
               turnCount: input.turnCount,
               detail: input.detail,
+              ...(input.reason !== undefined ? { reason: input.reason } : {}),
             },
             turnId: null,
             createdAt: input.createdAt,
@@ -773,10 +778,15 @@ const make = Effect.gen(function* () {
       yield* appendRevertFailureActivity({
         threadId: input.threadId,
         turnCount: input.turnCount,
+        reason: "workspace-unavailable",
         detail: "Thread was not found in read model.",
         createdAt: input.createdAt,
       }).pipe(Effect.catch(() => Effect.void));
-      return false;
+      return {
+        restored: false,
+        reason: "workspace-unavailable" as const,
+        detail: "The task is no longer present in the orchestration projection.",
+      };
     }
 
     const sessionRuntime = yield* resolveSessionRuntimeForThread(input.threadId);
@@ -784,19 +794,30 @@ const make = Effect.gen(function* () {
       yield* appendRevertFailureActivity({
         threadId: input.threadId,
         turnCount: input.turnCount,
+        reason: "workspace-unavailable",
         detail: "No active provider session with workspace cwd is bound to this thread.",
         createdAt: input.createdAt,
       }).pipe(Effect.catch(() => Effect.void));
-      return false;
+      return {
+        restored: false,
+        reason: "workspace-unavailable" as const,
+        detail: "No active provider session is bound to this task.",
+      };
     }
-    if (!isGitWorkspace(sessionRuntime.value.cwd)) {
-      yield* appendRevertFailureActivity({
-        threadId: input.threadId,
-        turnCount: input.turnCount,
-        detail: "Checkpoints are unavailable because this project is not a git repository.",
-        createdAt: input.createdAt,
-      }).pipe(Effect.catch(() => Effect.void));
-      return false;
+
+    const projects = yield* resolveThreadProjects(thread.projectId);
+    const project = projects[0];
+    const checkpointCwd = resolveThreadWorkspaceCwd({ thread, projects });
+    if (!checkpointCwd || !path.isAbsolute(checkpointCwd) || !isGitWorkspace(checkpointCwd)) {
+      const failure = {
+        restored: false as const,
+        reason: "workspace-unavailable" as const,
+        detail: "The task workspace is unavailable or is not a Git worktree.",
+      };
+      yield* appendRevertFailureActivity({ ...input, ...failure }).pipe(
+        Effect.catch(() => Effect.void),
+      );
+      return failure;
     }
 
     const currentTurnCount = thread.checkpoints.reduce(
@@ -808,10 +829,15 @@ const make = Effect.gen(function* () {
       yield* appendRevertFailureActivity({
         threadId: input.threadId,
         turnCount: input.turnCount,
+        reason: "checkpoint-missing",
         detail: `Checkpoint turn count ${input.turnCount} exceeds current turn count ${currentTurnCount}.`,
         createdAt: input.createdAt,
       }).pipe(Effect.catch(() => Effect.void));
-      return false;
+      return {
+        restored: false,
+        reason: "checkpoint-missing" as const,
+        detail: `Checkpoint turn count ${input.turnCount} is not available in this task.`,
+      };
     }
 
     const targetCheckpointRef =
@@ -825,30 +851,39 @@ const make = Effect.gen(function* () {
       yield* appendRevertFailureActivity({
         threadId: input.threadId,
         turnCount: input.turnCount,
+        reason: "checkpoint-missing",
         detail: `Checkpoint ref for turn ${input.turnCount} is unavailable in read model.`,
         createdAt: input.createdAt,
       }).pipe(Effect.catch(() => Effect.void));
-      return false;
+      return {
+        restored: false,
+        reason: "checkpoint-missing" as const,
+        detail: `Checkpoint ref for turn ${input.turnCount} is unavailable in the task record.`,
+      };
     }
 
     const restored = yield* checkpointStore.restoreCheckpoint({
-      cwd: sessionRuntime.value.cwd,
+      cwd: checkpointCwd,
       checkpointRef: targetCheckpointRef,
+      ...(project?.repositoryIdentity ? { expectedRepository: project.repositoryIdentity } : {}),
+      expectedBranch: thread.branch,
+      expectedCurrentCheckpointRef: checkpointRefForThreadTurn(input.threadId, currentTurnCount),
       fallbackToHead: input.turnCount === 0,
     });
-    if (!restored) {
+    if (!restored.restored) {
       yield* appendRevertFailureActivity({
         threadId: input.threadId,
         turnCount: input.turnCount,
-        detail: `Filesystem checkpoint is unavailable for turn ${input.turnCount}.`,
+        reason: restored.reason,
+        detail: restored.detail,
         createdAt: input.createdAt,
       }).pipe(Effect.catch(() => Effect.void));
-      return false;
+      return restored;
     }
 
     // Refresh the workspace entry index so the @-mention file picker
     // reflects the reverted filesystem state.
-    yield* workspaceEntries.refresh(sessionRuntime.value.cwd);
+    yield* workspaceEntries.refresh(checkpointCwd);
 
     const rolledBackTurns = Math.max(0, currentTurnCount - input.turnCount);
     if (rolledBackTurns > 0 && !input.skipProviderRollback) {
@@ -867,7 +902,7 @@ const make = Effect.gen(function* () {
 
     if (staleCheckpointRefs.length > 0) {
       yield* checkpointStore.deleteCheckpointRefs({
-        cwd: sessionRuntime.value.cwd,
+        cwd: checkpointCwd,
         checkpointRefs: staleCheckpointRefs,
       });
     }
@@ -881,6 +916,9 @@ const make = Effect.gen(function* () {
         turnCount: input.turnCount,
         ...(input.sourceMessageId !== undefined ? { sourceMessageId: input.sourceMessageId } : {}),
         ...(input.cutoffCreatedAt !== undefined ? { cutoffCreatedAt: input.cutoffCreatedAt } : {}),
+        ...(input.reconciliationRequestId !== undefined
+          ? { editFromHereRequestId: CommandId.make(input.reconciliationRequestId) }
+          : {}),
         createdAt: input.createdAt,
       })
       .pipe(
@@ -911,7 +949,13 @@ const make = Effect.gen(function* () {
         parentActivities: thread.activities,
       });
     }
-    return completed;
+    return completed
+      ? restored
+      : {
+          restored: false as const,
+          reason: "workspace-unavailable" as const,
+          detail: "The restore completed, but its orchestration receipt was rejected.",
+        };
   });
 
   const handleRevertRequested = Effect.fn("handleRevertRequested")(function* (
@@ -945,6 +989,8 @@ const make = Effect.gen(function* () {
     readonly threadId: ThreadId;
     readonly requestId: CommandId;
     readonly detail: string;
+    readonly reason?: VcsCheckpointRestoreFailureReason;
+    readonly technicalDetail?: string;
     readonly createdAt: string;
   }) =>
     orchestrationEngine.dispatch({
@@ -956,12 +1002,57 @@ const make = Effect.gen(function* () {
         tone: "error",
         kind: "thread.edit-from-here.failed",
         summary: "Edit from here failed",
-        payload: { detail: input.detail },
+        payload: {
+          detail: input.detail,
+          ...(input.reason !== undefined ? { reason: input.reason } : {}),
+          ...(input.technicalDetail !== undefined
+            ? { technicalDetail: input.technicalDetail }
+            : {}),
+        },
         turnId: null,
         createdAt: input.createdAt,
       },
       createdAt: input.createdAt,
     });
+
+  const editFromHereFailureMessage = (reason: VcsCheckpointRestoreFailureReason): string => {
+    switch (reason) {
+      case "current-worktree-dirty":
+        return "The workspace changed after the latest checkpoint, so your changes were left untouched.";
+      case "repository-mismatch":
+        return "This task is attached to a different repository than the selected checkpoint.";
+      case "branch-mismatch":
+        return "The task branch changed, so the selected checkpoint was not applied.";
+      case "checkpoint-missing":
+      case "checkpoint-invalid":
+      case "current-checkpoint-missing":
+        return "This checkpoint is no longer available. The task was not changed.";
+      case "workspace-unavailable":
+        return "The task workspace is unavailable. The task was not changed.";
+    }
+  };
+
+  const parseEditFromHereRestoreFailure = (detail: string) => {
+    const match = detail.match(/checkpoint-restore:([^:]+):([\s\S]*)/);
+    if (!match) return undefined;
+    const reason = match[1];
+    if (
+      reason !== "workspace-unavailable" &&
+      reason !== "repository-mismatch" &&
+      reason !== "branch-mismatch" &&
+      reason !== "checkpoint-missing" &&
+      reason !== "checkpoint-invalid" &&
+      reason !== "current-checkpoint-missing" &&
+      reason !== "current-worktree-dirty"
+    ) {
+      return undefined;
+    }
+    return {
+      reason,
+      userDetail: editFromHereFailureMessage(reason),
+      technicalDetail: detail,
+    } as const;
+  };
 
   const providerSessionStatus = (
     session: ProviderSession,
@@ -1111,8 +1202,10 @@ const make = Effect.gen(function* () {
             retainedTurnIds: boundary.retainedTurnIds,
             reconciliationRequestId: event.payload.requestId,
           });
-      if (!restored) {
-        return yield* Effect.die(new Error("The selected checkpoint could not be restored."));
+      if (!restored.restored) {
+        return yield* Effect.die(
+          new Error(`checkpoint-restore:${restored.reason}:${restored.detail}`),
+        );
       }
       yield* orchestrationEngine.dispatch({
         type: "thread.turn.start",
@@ -1260,11 +1353,21 @@ const make = Effect.gen(function* () {
         Effect.catchCause((cause) => {
           if (Cause.hasInterruptsOnly(cause)) return Effect.interrupt;
           const detail = Cause.pretty(cause) || "Edit from here failed.";
+          const restoreFailure = parseEditFromHereRestoreFailure(detail);
+          const userDetail =
+            restoreFailure?.userDetail ??
+            "The edit could not be applied. The task was not changed.";
           return Effect.gen(function* () {
             yield* appendEditFromHereFailure({
               threadId: event.payload.threadId,
               requestId: event.payload.requestId,
-              detail,
+              detail: userDetail,
+              ...(restoreFailure !== undefined
+                ? {
+                    reason: restoreFailure.reason,
+                    technicalDetail: restoreFailure.technicalDetail,
+                  }
+                : { technicalDetail: detail }),
               createdAt: event.payload.createdAt,
             }).pipe(Effect.catch(() => Effect.void));
             if (event.payload.mode === "branch" && event.payload.targetThreadId !== undefined) {
@@ -1282,7 +1385,7 @@ const make = Effect.gen(function* () {
               ...(event.payload.targetThreadId !== undefined
                 ? { targetThreadId: event.payload.targetThreadId }
                 : {}),
-              error: detail,
+              error: userDetail,
               createdAt: event.payload.createdAt,
             });
           });

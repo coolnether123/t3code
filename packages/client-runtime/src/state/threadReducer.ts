@@ -512,6 +512,12 @@ export function applyThreadDetailEvent(
 
     // ── Revert ──────────────────────────────────────────────────────
     case "thread.reverted": {
+      if (
+        event.payload.editFromHereRequestId !== undefined &&
+        thread.editFromHere?.requestId !== event.payload.editFromHereRequestId
+      ) {
+        return { kind: "unchanged" };
+      }
       const checkpoints = pipe(
         thread.checkpoints,
         Arr.filter(

@@ -965,6 +965,33 @@ describe("applyThreadDetailEvent", () => {
         ]);
       }
     });
+
+    it("ignores a late revert receipt from an older edit request", () => {
+      const pendingThread = {
+        ...baseThread,
+        editFromHere: {
+          requestId: CommandId.make("new-edit-request"),
+          mode: "rewind" as const,
+          sourceMessageId: MessageId.make("selected-message"),
+          startedAt: "2026-04-01T01:00:04.000Z",
+        },
+      };
+      const result = applyThreadDetailEvent(pendingThread, {
+        ...baseEventFields,
+        sequence: 16,
+        occurredAt: "2026-04-01T01:00:05.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.reverted",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          turnCount: 0,
+          editFromHereRequestId: CommandId.make("old-edit-request"),
+        },
+      });
+
+      expect(result.kind).toBe("unchanged");
+    });
   });
 
   describe("no-op events", () => {

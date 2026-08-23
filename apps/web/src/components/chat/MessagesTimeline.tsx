@@ -34,6 +34,7 @@ import { LegendList, type LegendListRef } from "@legendapp/list/react";
 import { FileDiff } from "@pierre/diffs/react";
 import {
   deriveTimelineEntries,
+  type EditFromHereFailureReason,
   workEntryDisplayIndicatesToolFailure,
   workLogEntryIsStandaloneDomainFailure,
   workLogEntryIsToolLike,
@@ -1664,6 +1665,24 @@ const EditFromHereFailureCard = memo(function EditFromHereFailureCard({
   const [dismissed, setDismissed] = useState(false);
   const { copyToClipboard, isCopied } = useCopyToClipboard({ target: "technical details" });
   const technicalDetails = workEntry.detail?.trim() || workEntry.command?.trim() || workEntry.label;
+  const failureMessage = (reason: EditFromHereFailureReason | undefined) => {
+    switch (reason) {
+      case "current-worktree-dirty":
+        return "The workspace changed after the latest checkpoint, so your changes were left untouched.";
+      case "repository-mismatch":
+        return "This task is attached to a different repository than the selected checkpoint.";
+      case "branch-mismatch":
+        return "The task branch changed, so the selected checkpoint was not applied.";
+      case "checkpoint-missing":
+      case "checkpoint-invalid":
+      case "current-checkpoint-missing":
+        return "This checkpoint is no longer available. The task was not changed.";
+      case "workspace-unavailable":
+        return "The task workspace is unavailable. The task was not changed.";
+      default:
+        return "The task was not changed. Review the details below before trying again.";
+    }
+  };
 
   if (dismissed) return null;
 
@@ -1682,7 +1701,7 @@ const EditFromHereFailureCard = memo(function EditFromHereFailureCard({
             Couldn't edit from here
           </h3>
           <p className="mt-1 text-secondary-label text-xs leading-5">
-            The task was not changed. Try again, or start a new task from that message.
+            {failureMessage(workEntry.editFromHereFailureReason)}
           </p>
         </div>
       </div>

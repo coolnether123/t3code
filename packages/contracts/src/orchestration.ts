@@ -1080,6 +1080,7 @@ const ThreadRevertCompleteCommand = Schema.Struct({
   turnCount: NonNegativeInt,
   sourceMessageId: Schema.optional(MessageId),
   cutoffCreatedAt: Schema.optional(IsoDateTime),
+  editFromHereRequestId: Schema.optional(CommandId),
   createdAt: IsoDateTime,
 });
 
@@ -1376,6 +1377,7 @@ export const ThreadRevertedPayload = Schema.Struct({
   turnCount: NonNegativeInt,
   sourceMessageId: Schema.optional(MessageId),
   cutoffCreatedAt: Schema.optional(IsoDateTime),
+  editFromHereRequestId: Schema.optional(CommandId),
 });
 
 export const ThreadSessionStopRequestedPayload = Schema.Struct({

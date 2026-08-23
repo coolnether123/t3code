@@ -1434,6 +1434,7 @@ function ChatViewContent(props: ChatViewProps) {
     readonly text: string;
   } | null>(null);
   const [isEditingFromHere, setIsEditingFromHere] = useState(false);
+  const [editFromHereMode, setEditFromHereMode] = useState<EditFromHereMode | null>(null);
   const [maximizedRightPanelThreadKey, setMaximizedRightPanelThreadKey] = useState<string | null>(
     null,
   );
@@ -2798,6 +2799,8 @@ function ChatViewContent(props: ChatViewProps) {
     ? activeProviderStatus
     : null;
   const hasTimelineTopBanner = Boolean(visibleThreadError) || visibleProviderStatus !== null;
+  const pendingEditFromHereMode =
+    activeServerThread?.editFromHere?.mode ?? (isEditingFromHere ? editFromHereMode : null);
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
   const activeThreadWorktreePath = activeThread?.worktreePath ?? null;
   const activeWorkspaceRoot = activeThreadWorktreePath ?? activeProjectCwd ?? undefined;
@@ -6413,6 +6416,7 @@ function ChatViewContent(props: ChatViewProps) {
       }
 
       const targetThreadId = mode === "branch" ? newThreadId() : null;
+      setEditFromHereMode(mode);
       setIsEditingFromHere(true);
       setThreadError(activeThread.id, null);
       const commonInput = {
@@ -6439,6 +6443,7 @@ function ChatViewContent(props: ChatViewProps) {
           );
         }
         setIsEditingFromHere(false);
+        setEditFromHereMode(null);
         return;
       }
 
@@ -6725,6 +6730,17 @@ function ChatViewContent(props: ChatViewProps) {
             </div>
             {/* Messages Wrapper */}
             <div className="relative flex min-h-0 flex-1 flex-col">
+              {pendingEditFromHereMode !== null && (
+                <div
+                  className="border-b border-border/60 px-4 py-1.5 text-secondary-label text-xs"
+                  role="status"
+                  aria-live="polite"
+                >
+                  {pendingEditFromHereMode === "rewind"
+                    ? "Rewinding to this message…"
+                    : "Starting a new task from this message…"}
+                </div>
+              )}
               {/* Messages — LegendList handles virtualization and scrolling internally */}
               <MessagesTimeline
                 agentPanelModel={agentPanelModel}

@@ -67,6 +67,15 @@ export type WorkLogToolLifecycleStatus =
   | "declined"
   | "stopped";
 
+export type EditFromHereFailureReason =
+  | "workspace-unavailable"
+  | "repository-mismatch"
+  | "branch-mismatch"
+  | "checkpoint-missing"
+  | "checkpoint-invalid"
+  | "current-checkpoint-missing"
+  | "current-worktree-dirty";
+
 export interface WorkLogEntry {
   id: string;
   createdAt: string;
@@ -75,6 +84,8 @@ export interface WorkLogEntry {
   toolCallId?: string;
   label: string;
   detail?: string;
+  /** Typed restore reason used for concise UI copy; raw diagnostics stay in detail. */
+  editFromHereFailureReason?: EditFromHereFailureReason;
   command?: string;
   rawCommand?: string;
   changedFiles?: ReadonlyArray<string>;
@@ -966,6 +977,20 @@ function toDerivedWorkLogEntry(
       ? stripTrailingExitCode(payload.detail).output
       : null
     : extractToolDetail(payload, title ?? activity.summary);
+  const editFromHereFailureReason =
+    activity.kind === "thread.edit-from-here.failed" &&
+    typeof payload?.reason === "string" &&
+    [
+      "workspace-unavailable",
+      "repository-mismatch",
+      "branch-mismatch",
+      "checkpoint-missing",
+      "checkpoint-invalid",
+      "current-checkpoint-missing",
+      "current-worktree-dirty",
+    ].includes(payload.reason)
+      ? (payload.reason as EditFromHereFailureReason)
+      : undefined;
   const toolCallId = isTaskActivity ? null : extractToolCallId(payload);
   const entry: DerivedWorkLogEntry = {
     id: activity.id,
@@ -984,6 +1009,11 @@ function toDerivedWorkLogEntry(
   const requestKind = extractWorkLogRequestKind(payload);
   if (detail) {
     entry.detail = detail;
+  }
+  if (editFromHereFailureReason) {
+    entry.editFromHereFailureReason = editFromHereFailureReason;
+    const technicalDetail = asTrimmedString(payload?.technicalDetail);
+    if (technicalDetail) entry.detail = technicalDetail;
   }
   if (commandPreview.command) {
     entry.command = commandPreview.command;

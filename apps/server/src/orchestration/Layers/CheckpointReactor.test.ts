@@ -1251,6 +1251,137 @@ describe("CheckpointReactor", () => {
     ).toBe(false);
   });
 
+  it("restores from the thread workspace when the provider session cwd is stale", async () => {
+    const nonRepositorySessionCwd = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "t3-checkpoint-stale-session-"),
+    );
+    tempDirs.push(nonRepositorySessionCwd);
+    const harness = await createHarness({ providerSessionCwd: nonRepositorySessionCwd });
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    await harness.dispatch({
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-stale-session-set"),
+      threadId: ThreadId.make("thread-1"),
+      session: {
+        threadId: ThreadId.make("thread-1"),
+        status: "ready",
+        providerName: "codex",
+        runtimeMode: "approval-required",
+        activeTurnId: null,
+        lastError: null,
+        updatedAt: createdAt,
+      },
+      createdAt,
+    });
+    await harness.dispatch({
+      type: "thread.turn.diff.complete",
+      commandId: CommandId.make("cmd-stale-session-diff-1"),
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-1"),
+      completedAt: createdAt,
+      checkpointRef: checkpointRefForThreadTurn(ThreadId.make("thread-1"), 1),
+      status: "ready",
+      files: [],
+      checkpointTurnCount: 1,
+      createdAt,
+    });
+    await harness.dispatch({
+      type: "thread.turn.diff.complete",
+      commandId: CommandId.make("cmd-stale-session-diff-2"),
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-2"),
+      completedAt: createdAt,
+      checkpointRef: checkpointRefForThreadTurn(ThreadId.make("thread-1"), 2),
+      status: "ready",
+      files: [],
+      checkpointTurnCount: 2,
+      createdAt,
+    });
+
+    await harness.dispatch({
+      type: "thread.checkpoint.revert",
+      commandId: CommandId.make("cmd-stale-session-revert"),
+      threadId: ThreadId.make("thread-1"),
+      turnCount: 1,
+      createdAt,
+    });
+    await waitForEvent(harness.engine, (event) => event.type === "thread.reverted");
+    expect(NodeFS.readFileSync(NodePath.join(harness.cwd, "README.md"), "utf8")).toBe("v2\n");
+  });
+
+  it("rejects a rewind when the worktree changed after its latest checkpoint", async () => {
+    const harness = await createHarness();
+    NodeFS.writeFileSync(NodePath.join(harness.cwd, "user-change.txt"), "keep me\n", "utf8");
+    await harness.dispatch({
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-dirty-session-set"),
+      threadId: ThreadId.make("thread-1"),
+      session: {
+        threadId: ThreadId.make("thread-1"),
+        status: "ready",
+        providerName: "codex",
+        runtimeMode: "approval-required",
+        activeTurnId: null,
+        lastError: null,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    await harness.dispatch({
+      type: "thread.turn.diff.complete",
+      commandId: CommandId.make("cmd-dirty-diff-1"),
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-1"),
+      completedAt: "2026-01-01T00:00:00.000Z",
+      checkpointRef: checkpointRefForThreadTurn(ThreadId.make("thread-1"), 1),
+      status: "ready",
+      files: [],
+      checkpointTurnCount: 1,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    await harness.dispatch({
+      type: "thread.turn.diff.complete",
+      commandId: CommandId.make("cmd-dirty-diff-2"),
+      threadId: ThreadId.make("thread-1"),
+      turnId: asTurnId("turn-2"),
+      completedAt: "2026-01-01T00:00:00.000Z",
+      checkpointRef: checkpointRefForThreadTurn(ThreadId.make("thread-1"), 2),
+      status: "ready",
+      files: [],
+      checkpointTurnCount: 2,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    await harness.dispatch({
+      type: "thread.checkpoint.revert",
+      commandId: CommandId.make("cmd-dirty-revert"),
+      threadId: ThreadId.make("thread-1"),
+      turnCount: 1,
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    const failureEvents = await waitForEvent(
+      harness.engine,
+      (event) =>
+        event.type === "thread.activity-appended" &&
+        (event as { readonly payload?: { readonly activity?: { readonly kind?: string } } }).payload
+          ?.activity?.kind === "checkpoint.revert.failed",
+    );
+    const failure = failureEvents.find(
+      (event) =>
+        event.type === "thread.activity-appended" &&
+        (event as { readonly payload?: { readonly activity?: { readonly kind?: string } } }).payload
+          ?.activity?.kind === "checkpoint.revert.failed",
+    ) as
+      | {
+          readonly type: "thread.activity-appended";
+          readonly payload: { readonly activity: { readonly payload: unknown } };
+        }
+      | undefined;
+    expect(failure).toBeDefined();
+    expect(failure?.payload.activity.payload).toMatchObject({ reason: "current-worktree-dirty" });
+    expect(NodeFS.existsSync(NodePath.join(harness.cwd, "user-change.txt"))).toBe(true);
+  });
+
   it("executes provider revert and emits thread.reverted for claude sessions", async () => {
     const harness = await createHarness({ providerName: ProviderDriverKind.make("claudeAgent") });
     const createdAt = "2026-01-01T00:00:00.000Z";
@@ -1611,7 +1742,8 @@ describe("CheckpointReactor", () => {
     ).toHaveLength(1);
     expect(restoreCheckpoint).toHaveBeenCalledWith(
       expect.objectContaining({
-        checkpointRef: expect.stringContaining(":0"),
+        checkpointRef: expect.stringContaining("/turn/0"),
+        expectedCurrentCheckpointRef: expect.stringContaining("/turn/0"),
         fallbackToHead: true,
       }),
     );

@@ -750,6 +750,12 @@ export function projectEvent(
           if (!thread) {
             return nextBase;
           }
+          if (
+            payload.editFromHereRequestId !== undefined &&
+            thread.editFromHere?.requestId !== payload.editFromHereRequestId
+          ) {
+            return nextBase;
+          }
 
           const checkpoints = thread.checkpoints
             .filter((entry) => entry.checkpointTurnCount <= payload.turnCount)

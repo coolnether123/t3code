@@ -1063,6 +1063,7 @@ describe("MessagesTimeline", () => {
               detail: technicalDetails,
               tone: "error",
               sourceActivityKind: "thread.edit-from-here.failed",
+              editFromHereFailureReason: "current-worktree-dirty",
             },
           },
         ]}
@@ -1071,7 +1072,7 @@ describe("MessagesTimeline", () => {
 
     expect(markup).toContain("Couldn&#x27;t edit from here");
     expect(markup).toContain(
-      "The task was not changed. Try again, or start a new task from that message.",
+      "The workspace changed after the latest checkpoint, so your changes were left untouched.",
     );
     expect(markup).toContain("<details");
     expect(markup).toContain("Technical details");
