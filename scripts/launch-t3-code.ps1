@@ -45,7 +45,9 @@ $excludedRelativeFiles = @(
     "infra\relay\.env",
     "infra\relay\.env.local",
     "apps\mobile\src\features\usage\usageProviders.ts",
-    "scripts\import-codex-history.mjs"
+    "scripts\import-codex-history.mjs",
+    "apps\desktop\tsconfig.tsbuildinfo",
+    "apps\web\tsconfig.tsbuildinfo"
 )
 
 $excludedDirectoryNames = @(
@@ -325,8 +327,8 @@ function Wait-Until {
 function Test-HttpEndpoint {
     param([Parameter(Mandatory)][string]$Uri)
     try {
-        $response = Invoke-WebRequest -Uri $Uri -UseBasicParsing -TimeoutSec 5
-        return [int]$response.StatusCode -ge 200 -and [int]$response.StatusCode -lt 400
+        & curl.exe --fail --silent --show-error --max-time 5 --output NUL $Uri 2>$null
+        return $LASTEXITCODE -eq 0
     }
     catch {
         return $false
@@ -336,11 +338,11 @@ function Test-HttpEndpoint {
 function Test-EnvironmentTransport {
     param([Parameter(Mandatory)][string]$BaseUri)
     try {
-        $response = Invoke-WebRequest -Uri "$($BaseUri.TrimEnd('/'))/api/auth/session" -UseBasicParsing -TimeoutSec 5
-        if ([int]$response.StatusCode -ne 200) {
+        $raw = & curl.exe --fail --silent --show-error --max-time 5 "$($BaseUri.TrimEnd('/'))/api/auth/session" 2>$null
+        if ($LASTEXITCODE -ne 0) {
             return $false
         }
-        $state = $response.Content | ConvertFrom-Json
+        $state = ($raw | Out-String) | ConvertFrom-Json
         $hasBearerSession = @($state.auth.sessionMethods) -contains "bearer-access-token"
         $hasDesktopBootstrap = @($state.auth.bootstrapMethods) -contains "desktop-bootstrap"
         return $null -ne $state.authenticated -and
@@ -396,17 +398,29 @@ function Invoke-ProjectCommand {
     param(
         [Parameter(Mandatory)][string]$Label,
         [Parameter(Mandatory)][string[]]$Arguments,
-        [Parameter(Mandatory)][string]$LogPath
+        [Parameter(Mandatory)][string]$LogPath,
+        [Parameter()][string]$WorkingDirectory
     )
     Write-Host "  RUN $Label"
     if ($planOnly) {
         Write-Host "       vp $($Arguments -join ' ')"
         return
     }
-    Push-Location $deployRoot
+    if ([string]::IsNullOrWhiteSpace($WorkingDirectory)) {
+        $WorkingDirectory = $deployRoot
+    }
+    Push-Location $WorkingDirectory
     $oldPath = $env:Path
+    $oldCodexEnvironment = @{}
     try {
         $env:Path = "$([System.IO.Path]::GetDirectoryName($nodePath));$oldPath"
+        # The desktop launcher is a project command boundary. These are
+        # agent-host markers, not T3 build settings; Vite+ treats them as an
+        # agent invocation and promotes ordinary build warnings to failures.
+        foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like "CODEX_*" })) {
+            $oldCodexEnvironment[$entry.Name] = $entry.Value
+            Remove-Item -LiteralPath "Env:$($entry.Name)" -ErrorAction SilentlyContinue
+        }
         & $vpPath @Arguments 1>> $LogPath 2>&1
         if ($LASTEXITCODE -ne 0) {
             throw "$Label failed with exit code $LASTEXITCODE. See $LogPath"
@@ -414,6 +428,12 @@ function Invoke-ProjectCommand {
     }
     finally {
         $env:Path = $oldPath
+        foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like "CODEX_*" })) {
+            Remove-Item -LiteralPath "Env:$($entry.Name)" -ErrorAction SilentlyContinue
+        }
+        foreach ($name in $oldCodexEnvironment.Keys) {
+            Set-Item -Path "Env:$name" -Value $oldCodexEnvironment[$name]
+        }
         Pop-Location
     }
 }
@@ -485,9 +505,42 @@ function Stop-ManagedDesktop {
     }
     if (-not $planOnly) {
         foreach ($root in @($roots + $webRoots + $electronRoots)) {
-            & taskkill.exe /PID ([string]$root.ProcessId) /T /F *> $null
-            if ($LASTEXITCODE -ne 0) {
-                throw "taskkill could not stop managed T3 root PID $($root.ProcessId)."
+            $taskKillExit = 0
+            try {
+                & taskkill.exe /PID ([string]$root.ProcessId) /T /F 1>$null 2>$null
+                $taskKillExit = $LASTEXITCODE
+            }
+            catch {
+                $taskKillExit = 1
+            }
+            if ($taskKillExit -ne 0) {
+                # taskkill can report races for descendants that exited while
+                # /T was walking the tree. The root PID is the ownership
+                # decision; the wait below still proves every managed child
+                # has drained before a replacement starts.
+                $rootStillRunning = $null -ne (Get-CimInstance Win32_Process -Filter "ProcessId = $($root.ProcessId)" -ErrorAction SilentlyContinue)
+                if ($rootStillRunning) {
+                    # Electron's GPU/resource-monitor children can make
+                    # taskkill /T return nonzero even though every process is
+                    # already in the verified owned tree. Reap that captured
+                    # tree by PID, then let the managed-root wait below prove
+                    # that no owned child remains.
+                    foreach ($ownedProcessId in @($ownedPid.Keys | Sort-Object -Descending)) {
+                        try {
+                            Stop-Process -Id ([int]$ownedProcessId) -Force -ErrorAction SilentlyContinue
+                        }
+                        catch {
+                            # The process may have exited between the snapshot
+                            # and this targeted fallback.
+                        }
+                    }
+                    Start-Sleep -Milliseconds 500
+                    $rootStillRunning = $null -ne (Get-CimInstance Win32_Process -Filter "ProcessId = $($root.ProcessId)" -ErrorAction SilentlyContinue)
+                    if ($rootStillRunning) {
+                        throw "taskkill could not stop managed T3 root PID $($root.ProcessId)."
+                    }
+                }
+                Write-Host "  managed T3 root PID $($root.ProcessId) exited while descendants were being reaped."
             }
         }
         Wait-Until -TimeoutSeconds 30 -Description "the managed T3 desktop process tree to stop" -Condition {
@@ -754,8 +807,9 @@ try {
         Invoke-ProjectCommand "server typecheck" @("run", "--filter", "t3", "typecheck") $commandLogPath
         Invoke-ProjectCommand "web typecheck" @("run", "--filter", "@t3tools/web", "typecheck") $commandLogPath
         Invoke-ProjectCommand "desktop typecheck" @("run", "--filter", "@t3tools/desktop", "typecheck") $commandLogPath
-        Invoke-ProjectCommand "web build" @("run", "--filter", "@t3tools/web", "build") $commandLogPath
-        Invoke-ProjectCommand "server bundle" @("run", "--filter", "t3", "build:bundle") $commandLogPath
+        Invoke-ProjectCommand "web build" @("build", "--logLevel", "error") $commandLogPath (Join-Path $deployRoot "apps\web")
+        Invoke-ProjectCommand "server bundle" @("pack", "--logLevel", "error") $commandLogPath (Join-Path $deployRoot "apps\server")
+        Invoke-ProjectCommand "server service-launcher bundle" @("pack", "src/service-launcher.ts", "--out-dir", "dist", "--no-clean", "--logLevel", "error") $commandLogPath (Join-Path $deployRoot "apps\server")
         Invoke-ProjectCommand "desktop Electron runtime" @("run", "--filter", "@t3tools/desktop", "ensure:electron") $commandLogPath
     }
 
