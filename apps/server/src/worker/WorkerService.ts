@@ -9,6 +9,8 @@ import {
   WorkerWaitLeaseId,
   WorkerOperationError,
   type ProviderRuntimeEvent,
+  type OrchestrationThreadActivity,
+  type TurnId,
   type WorkerActivation,
   type WorkerApprovalDecision,
   type WorkerDetail,
@@ -21,12 +23,12 @@ import {
   type WorkerObserverReport,
   type WorkerSendInput,
   type WorkerStartInput,
-  type WorkerStatus,
   type WorkerSummary,
   type WorkerTokenUsage,
   type WorkerWaitInput,
   type WorkerWaitResult,
   type WorkerWakeEvent,
+  workerDisplayNameFor,
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -43,11 +45,13 @@ import * as Stream from "effect/Stream";
 import {
   WORKER_PROVIDER_THREAD_PREFIX,
   WorkerBackend,
-  type WorkerBackendShape,
   runtimeModeFromPermission,
 } from "./WorkerBackend.ts";
 import { WorkerObserver } from "./WorkerObserver.ts";
 import { WorkerStore, type StoredWorker } from "./WorkerStore.ts";
+import { projectWorkerActivities } from "./WorkerActivityProjection.ts";
+import { buildWorkerEfficiencyOverview } from "./WorkerMetrics.ts";
+import { projectWorkerSummaryUsage, projectWorkerUsageSnapshot } from "./WorkerUsage.ts";
 
 const modelFallback = TrimmedNonEmptyString.make("gpt-5.6-luna");
 const zeroUsage = (): WorkerTokenUsage => ({
@@ -56,10 +60,50 @@ const zeroUsage = (): WorkerTokenUsage => ({
   reasoningTokens: 0,
   totalTokens: 0,
 });
+
+const projectWorkerTokenUsage = (usage: Record<string, unknown> | undefined): WorkerTokenUsage =>
+  projectWorkerUsageSnapshot(usage).cumulative;
 const isWorkerOperationError = Schema.is(WorkerOperationError);
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function workerStartLineage(
+  activity: OrchestrationThreadActivity,
+): { readonly workerId: string; readonly parentTurnId: TurnId } | undefined {
+  if (activity.kind !== "tool.completed" || activity.turnId === null) return undefined;
+  const payload = record(activity.payload);
+  if (payload?.itemType !== "mcp_tool_call") return undefined;
+  const data = record(payload.data);
+  const item = record(data?.item);
+  const rawTool = data?.toolName ?? item?.tool ?? data?.tool;
+  if (typeof rawTool !== "string" || (rawTool.split("__").at(-1) ?? rawTool) !== "worker_start") {
+    return undefined;
+  }
+  const result = record(item?.result ?? data?.result);
+  const content = Array.isArray(result?.content) ? result.content : [];
+  for (const entry of content) {
+    const text = record(entry)?.text;
+    if (typeof text !== "string") continue;
+    try {
+      const decoded = record(JSON.parse(text));
+      const summary = record(decoded?.summary);
+      if (typeof summary?.id === "string") {
+        return { workerId: summary.id, parentTurnId: activity.turnId };
+      }
+    } catch {
+      // Historical result text may not be JSON. It cannot prove lineage.
+    }
+  }
+  return undefined;
+}
 
 export interface WorkerStartRequest {
   readonly parentThreadId: ThreadId;
+  readonly parentTurnId?: TurnId | undefined;
   readonly providerInstanceId: ProviderInstanceId;
   readonly input: WorkerStartInput;
 }
@@ -85,6 +129,13 @@ export interface WorkerServiceShape {
     readonly requestId: import("@t3tools/contracts").ApprovalRequestId;
     readonly decision: WorkerApprovalDecision;
   }) => Effect.Effect<WorkerDetail, WorkerOperationError>;
+  readonly reconcileParentAfterRewind: (input: {
+    readonly parentThreadId: ThreadId;
+    readonly retainedTurnIds: ReadonlySet<TurnId>;
+    readonly requestId: string;
+    readonly discardUnattributed: boolean;
+    readonly parentActivities?: ReadonlyArray<OrchestrationThreadActivity> | undefined;
+  }) => Effect.Effect<ReadonlyArray<WorkerId>, WorkerOperationError>;
   readonly handleProviderEvent: (event: ProviderRuntimeEvent) => Effect.Effect<void, never>;
   readonly recover: Effect.Effect<void, never>;
   readonly stream: Stream.Stream<WorkerEvent>;
@@ -113,7 +164,11 @@ const makeWorkerService = Effect.gen(function* () {
     Ref.update(linkedProviderThreadIds, (current) => new Set(current ?? []).add(providerThreadId));
 
   const loadPersistedProviderThreads = Effect.gen(function* () {
-    const workers = yield* store.listWorkers({ includeClosed: true, limit: 100_000 });
+    const workers = yield* store.listWorkers({
+      includeClosed: true,
+      includeDiscarded: true,
+      limit: 100_000,
+    });
     const activations = yield* Effect.forEach(
       workers,
       (worker) => store.listActivations(worker.summary.id),
@@ -143,18 +198,20 @@ const makeWorkerService = Effect.gen(function* () {
 
   const read: WorkerServiceShape["get"] = (workerId) =>
     Effect.gen(function* () {
-      const stored = Option.getOrUndefined(yield* store.getWorker(workerId));
-      if (stored === undefined)
+      const storedRecord = Option.getOrUndefined(yield* store.getWorker(workerId));
+      if (storedRecord === undefined || storedRecord.discardedAt !== undefined)
         return yield* fail("worker.read", `Worker '${workerId}' was not found`);
-      const [activations, messages, approvals, reports] = yield* Effect.all([
+      const stored = yield* ensurePersistedDisplayName(storedRecord);
+      const [activations, messages, approvals, reports, providerEvents] = yield* Effect.all([
         store.listActivations(workerId),
         store.listMessages(workerId),
         store.getPendingApproval(workerId),
         store.listObserverReports(workerId),
+        store.listProviderEvents(workerId),
       ]);
       const pendingApproval = Option.getOrUndefined(approvals);
       return {
-        summary: stored.summary,
+        summary: projectWorkerSummaryUsage(stored.summary, providerEvents),
         assignment: stored.assignment,
         context: stored.context,
         ...(stored.instructions === undefined ? {} : { instructions: stored.instructions }),
@@ -162,6 +219,7 @@ const makeWorkerService = Effect.gen(function* () {
         activations,
         ...(pendingApproval === undefined ? {} : { pendingApproval }),
         observerReports: reports,
+        activities: projectWorkerActivities(providerEvents),
       } satisfies WorkerDetail;
     }).pipe(Effect.mapError(mapWorkerError("worker.read", "Worker read failed")));
 
@@ -194,6 +252,16 @@ const makeWorkerService = Effect.gen(function* () {
   const saveSummary = (stored: StoredWorker, summary: WorkerSummary) => {
     const next = { ...stored, summary };
     return store.saveWorker(next).pipe(Effect.as(next));
+  };
+
+  // Legacy Worker payloads predate displayName. Repair them on the first
+  // server read and write the repaired summary back so reconnects, projection
+  // rebuilds, and restarts keep the same identity label.
+  const ensurePersistedDisplayName = (stored: StoredWorker) => {
+    const displayName = workerDisplayNameFor(stored.summary.id, stored.summary.displayName);
+    if (stored.summary.displayName === displayName) return Effect.succeed(stored);
+    const migrated = { ...stored, summary: { ...stored.summary, displayName } };
+    return store.saveWorker(migrated).pipe(Effect.as(migrated));
   };
 
   const clearActiveActivation = (
@@ -242,6 +310,7 @@ const makeWorkerService = Effect.gen(function* () {
         input.runtimeMode ?? runtimeModeFromPermission(input.permissionMode) ?? "full-access";
       const summary: WorkerSummary = {
         id: workerId,
+        displayName: workerDisplayNameFor(workerId, input.displayName),
         title: input.title,
         status: "starting",
         backend: "codex",
@@ -262,6 +331,7 @@ const makeWorkerService = Effect.gen(function* () {
         summary,
         assignment: input.assignment,
         context: input.context,
+        ...(request.parentTurnId === undefined ? {} : { parentTurnId: request.parentTurnId }),
         ...(input.instructions === undefined ? {} : { instructions: input.instructions }),
       };
       const activation: WorkerActivation = {
@@ -270,10 +340,12 @@ const makeWorkerService = Effect.gen(function* () {
         status: "starting",
         providerInstanceId: request.providerInstanceId,
         providerThreadId,
+        runtimeMode,
         startedAt: now,
         lastActivityAt: now,
         usageBaseline: zeroUsage(),
         usageDelta: zeroUsage(),
+        ...(request.parentTurnId === undefined ? {} : { parentTurnId: request.parentTurnId }),
       };
       yield* store.saveWorker(stored);
       yield* store.saveActivation(activation);
@@ -326,6 +398,7 @@ const makeWorkerService = Effect.gen(function* () {
         limit: input.limit ?? 50,
       })
       .pipe(
+        Effect.flatMap((workers) => Effect.forEach(workers, ensurePersistedDisplayName)),
         Effect.flatMap((workers) =>
           Effect.forEach(workers, (worker) =>
             worker.summary.latestDirectMessage !== undefined
@@ -346,7 +419,34 @@ const makeWorkerService = Effect.gen(function* () {
                 ),
           ),
         ),
-        Effect.map((workers) => ({ workers })),
+        Effect.flatMap((workers) =>
+          Effect.gen(function* () {
+            const metricSources = yield* Effect.forEach(workers, (summary) =>
+              Effect.all({
+                summary: Effect.succeed(summary),
+                activations: store.listActivations(summary.id),
+                providerEvents: store.listProviderEvents(summary.id),
+              }),
+            );
+            const parentActivities =
+              input.parentThreadId === undefined || store.listParentActivities === undefined
+                ? undefined
+                : yield* store.listParentActivities(input.parentThreadId);
+            const computedAt = yield* nowIso;
+            const projectedMetricSources = metricSources.map((source) => ({
+              ...source,
+              summary: projectWorkerSummaryUsage(source.summary, source.providerEvents),
+            }));
+            return {
+              workers: projectedMetricSources.map((source) => source.summary),
+              overview: buildWorkerEfficiencyOverview({
+                workers: projectedMetricSources,
+                ...(parentActivities === undefined ? {} : { parentActivities }),
+                now: computedAt,
+              }),
+            };
+          }),
+        ),
         Effect.mapError((error) => fail("worker.list", "Worker list failed", error)),
       );
 
@@ -365,6 +465,7 @@ const makeWorkerService = Effect.gen(function* () {
         status: "starting",
         providerInstanceId: current.summary.providerInstanceId,
         providerThreadId: ThreadId.make(`${WORKER_PROVIDER_THREAD_PREFIX}${input.workerId}`),
+        runtimeMode: current.summary.runtimeMode,
         startedAt: now,
         lastActivityAt: now,
         usageBaseline: current.summary.usage,
@@ -598,6 +699,12 @@ const makeWorkerService = Effect.gen(function* () {
         decision: input.decision,
         resolvedAt,
       });
+      const resolvedApproval = {
+        ...approval,
+        status: "resolved",
+        resolvedAt,
+        decision: input.decision,
+      } as const;
       const message: WorkerMessage = {
         id: WorkerMessageId.make(yield* randomUuid),
         workerId: input.workerId,
@@ -608,7 +715,21 @@ const makeWorkerService = Effect.gen(function* () {
         createdAt: resolvedAt,
       };
       const current = Option.getOrUndefined(yield* store.getWorker(input.workerId));
-      if (current !== undefined) yield* addMessage(current, message);
+      if (current !== undefined) {
+        const runningActivation = updateActivation(activation, "running", resolvedAt);
+        yield* store.saveActivation(runningActivation);
+        const running = yield* saveSummary(current, {
+          ...current.summary,
+          status: "running",
+          updatedAt: resolvedAt,
+          lastActivityAt: resolvedAt,
+        });
+        const withDecision = yield* addMessage(running, message);
+        yield* publish(withDecision, {
+          type: "approvalResolved",
+          approval: resolvedApproval,
+        });
+      }
       yield* wake({
         workerId: input.workerId,
         activationId: activation.id,
@@ -619,10 +740,114 @@ const makeWorkerService = Effect.gen(function* () {
       return yield* read(input.workerId);
     }).pipe(Effect.mapError(mapWorkerError("worker.approvalRespond", "Approval response failed")));
 
+  const reconcileParentAfterRewind: WorkerServiceShape["reconcileParentAfterRewind"] = (input) =>
+    Effect.gen(function* () {
+      const [workers, parentActivities] = yield* Effect.all([
+        store.listWorkers({
+          parentThreadId: input.parentThreadId,
+          includeClosed: true,
+          includeDiscarded: false,
+          limit: 100_000,
+        }),
+        input.parentActivities !== undefined
+          ? Effect.succeed(input.parentActivities)
+          : store.listParentActivities
+            ? store.listParentActivities(input.parentThreadId)
+            : Effect.succeed([]),
+      ]);
+      const historicalLineage = new Map<string, TurnId>();
+      for (const activity of parentActivities) {
+        const lineage = workerStartLineage(activity);
+        if (lineage && !historicalLineage.has(lineage.workerId)) {
+          historicalLineage.set(lineage.workerId, lineage.parentTurnId);
+        }
+      }
+
+      return yield* Effect.forEach(
+        workers,
+        (stored) =>
+          Effect.gen(function* () {
+            const activations = yield* store.listActivations(stored.summary.id);
+            const parentTurnId =
+              stored.parentTurnId ??
+              activations.find((activation) => activation.parentTurnId !== undefined)
+                ?.parentTurnId ??
+              historicalLineage.get(stored.summary.id);
+            if (parentTurnId !== undefined && input.retainedTurnIds.has(parentTurnId)) {
+              return undefined;
+            }
+            if (parentTurnId === undefined && !input.discardUnattributed) {
+              return undefined;
+            }
+
+            const discardedAt = yield* nowIso;
+            const activeActivation =
+              stored.summary.activeActivationId === undefined
+                ? undefined
+                : activations.find(
+                    (activation) => activation.id === stored.summary.activeActivationId,
+                  );
+            if (stored.summary.activeActivationId !== undefined && activeActivation === undefined) {
+              return yield* fail(
+                "worker.reconcileAfterRewind",
+                `Active Worker '${stored.summary.id}' has no activation to stop`,
+              );
+            }
+            if (activeActivation !== undefined) {
+              yield* backend.stop(activeActivation.providerThreadId);
+              yield* store.saveActivation(
+                updateActivation(activeActivation, "interrupted", discardedAt, {
+                  finishedAt: discardedAt,
+                  error: "Parent task rewound before this Worker was created.",
+                }),
+              );
+            }
+            const summary =
+              activeActivation === undefined
+                ? stored.summary
+                : clearActiveActivation(stored.summary, {
+                    status: "interrupted",
+                    resumable: false,
+                    updatedAt: discardedAt,
+                    lastActivityAt: discardedAt,
+                  });
+            const discarded: StoredWorker = {
+              ...stored,
+              ...(parentTurnId === undefined ? {} : { parentTurnId }),
+              summary,
+              discardedAt,
+              discardedByRequestId: input.requestId,
+            };
+            yield* store.saveWorker(discarded);
+            yield* publish(discarded, { type: "deleted" });
+            if (activeActivation !== undefined) {
+              yield* wake({
+                workerId: stored.summary.id,
+                activationId: activeActivation.id,
+                reason: "interrupted",
+                status: "interrupted",
+                occurredAt: discardedAt,
+              });
+            }
+            return stored.summary.id;
+          }),
+        { concurrency: 1 },
+      ).pipe(Effect.map((workerIds) => workerIds.filter((id): id is WorkerId => id !== undefined)));
+    }).pipe(
+      Effect.mapError(
+        mapWorkerError(
+          "worker.reconcileAfterRewind",
+          "Worker lineage reconciliation after rewind failed",
+        ),
+      ),
+    );
+
   const handleProviderEvent: WorkerServiceShape["handleProviderEvent"] = (event) =>
     Effect.gen(function* () {
       const match = Option.getOrUndefined(yield* store.findProviderThread(event.threadId));
       if (match === undefined) return;
+      const current = Option.getOrUndefined(yield* store.getWorker(match.workerId));
+      if (current === undefined || current.discardedAt !== undefined) return;
       yield* store.appendProviderEvent({
         eventId: event.eventId,
         workerId: match.workerId,
@@ -630,9 +855,8 @@ const makeWorkerService = Effect.gen(function* () {
         eventType: event.type,
         payload: event,
       });
-      const current = Option.getOrUndefined(yield* store.getWorker(match.workerId));
       const activation = Option.getOrUndefined(yield* store.getActivation(match.activationId));
-      if (current === undefined || activation === undefined) return;
+      if (activation === undefined) return;
       const payload = event.payload as Record<string, unknown>;
       if (
         event.type === "content.delta" &&
@@ -648,9 +872,12 @@ const makeWorkerService = Effect.gen(function* () {
       }
       if (event.type === "turn.started") {
         yield* store.saveActivation(
-          updateActivation(activation, "running", event.createdAt, {
-            ...(event.turnId === undefined ? {} : { providerTurnId: event.turnId }),
-          }),
+          updateActivation(
+            activation,
+            "running",
+            event.createdAt,
+            event.turnId === undefined ? {} : { providerTurnId: event.turnId },
+          ),
         );
         const next = yield* saveSummary(current, {
           ...current.summary,
@@ -672,6 +899,7 @@ const makeWorkerService = Effect.gen(function* () {
             typeof payload.detail === "string" ? payload.detail : "Worker is waiting for input",
           ...(typeof payload.detail === "string" ? { detail: payload.detail } : {}),
           requestedAt: event.createdAt,
+          status: "pending",
         } satisfies import("@t3tools/contracts").WorkerApprovalRequest;
         yield* store.saveApproval(approval);
         yield* store.saveActivation(
@@ -694,22 +922,18 @@ const makeWorkerService = Effect.gen(function* () {
       }
       if (event.type === "thread.token-usage.updated") {
         const usage = payload.usage as Record<string, unknown> | undefined;
-        const total = typeof usage?.usedTokens === "number" ? usage.usedTokens : 0;
-        const delta: WorkerTokenUsage = {
-          inputTokens: typeof usage?.inputTokens === "number" ? usage.inputTokens : 0,
-          outputTokens: typeof usage?.outputTokens === "number" ? usage.outputTokens : 0,
-          reasoningTokens:
-            typeof usage?.reasoningOutputTokens === "number" ? usage.reasoningOutputTokens : 0,
-          totalTokens: total,
-        };
+        const projected = projectWorkerUsageSnapshot(usage, event.raw);
+        const lastModelCall = projected.lastModelCall ?? projected.cumulative;
         yield* store.saveActivation({
           ...activation,
           lastActivityAt: event.createdAt,
-          usageDelta: delta,
+          usageDelta: lastModelCall,
         });
         yield* saveSummary(current, {
           ...current.summary,
-          usage: delta,
+          usage: projected.cumulative,
+          usageCoverage: projected.coverage,
+          lastModelCallUsage: lastModelCall,
           updatedAt: event.createdAt,
         });
         return;
@@ -831,6 +1055,7 @@ const makeWorkerService = Effect.gen(function* () {
     interrupt,
     close,
     respondToApproval,
+    reconcileParentAfterRewind,
     handleProviderEvent,
     recover,
     stream: Stream.fromPubSub(changes),
@@ -842,3 +1067,9 @@ export class WorkerService extends Context.Service<WorkerService, WorkerServiceS
 ) {}
 
 export const WorkerServiceLive = Layer.effect(WorkerService, makeWorkerService);
+
+/** Test-only construction seam for state-transition behavior. */
+export const __testing = {
+  make: makeWorkerService,
+  projectWorkerTokenUsage,
+};

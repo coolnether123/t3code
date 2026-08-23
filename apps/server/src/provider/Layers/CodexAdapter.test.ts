@@ -37,10 +37,12 @@ import * as CodexErrors from "effect-codex-app-server/errors";
 
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { WORKER_PROVIDER_THREAD_PREFIX } from "../../worker/WorkerThreadBoundary.ts";
 import { ProviderAdapterValidationError } from "../Errors.ts";
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import {
+  buildCodexAppServerCommandArgs,
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeSendTurnInput,
   type CodexSessionRuntimeShape,
@@ -71,6 +73,12 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
       threadId: this.options.threadId,
       cwd: this.options.cwd,
       ...(this.options.model ? { model: this.options.model } : {}),
+      resumeCursor:
+        this.options.resumeCursor ??
+        ({ threadId: `provider-${String(this.options.threadId)}` } satisfies Record<
+          string,
+          unknown
+        >),
       createdAt: this.now,
       updatedAt: this.now,
     } satisfies ProviderSession),
@@ -171,6 +179,7 @@ function makeRuntimeFactory() {
 
   return {
     factory,
+    runtimes,
     get lastRuntime(): FakeCodexRuntime | undefined {
       return runtimes.at(-1);
     },
@@ -328,6 +337,41 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
     }),
   );
 
+  it.effect(
+    "keeps ordinary sends valid while rejecting explicit T3 control when Workers are off",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* CodexAdapter;
+        const threadId = asThreadId("sess-workers-disabled");
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+        const runtime = sessionRuntimeFactory.lastRuntime;
+        NodeAssert.ok(runtime);
+        runtime.sendTurnImpl.mockClear();
+
+        yield* adapter.sendTurn({ threadId, input: "ordinary", attachments: [] });
+        NodeAssert.deepStrictEqual(runtime.sendTurnImpl.mock.calls[0]?.[0], {
+          input: "ordinary",
+        });
+
+        const explicitControl = yield* adapter
+          .sendTurn({
+            threadId,
+            input: "linked control",
+            attachments: [],
+            subagentBackend: "native-v1-control",
+          })
+          .pipe(Effect.result);
+        NodeAssert.equal(explicitControl._tag, "Failure");
+        NodeAssert.equal(explicitControl.failure._tag, "ProviderAdapterValidationError");
+        NodeAssert.match(explicitControl.failure.message, /requires T3 Workers/);
+        NodeAssert.equal(runtime.sendTurnImpl.mock.calls.length, 1);
+      }),
+  );
+
   it.effect("maps codex model options before sending a turn", () =>
     Effect.gen(function* () {
       const adapter = yield* CodexAdapter;
@@ -478,6 +522,210 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       });
     }).pipe(Effect.provide(customLayer));
   });
+});
+
+function makeBackendAffinityLayer(runtimeFactory: ReturnType<typeof makeRuntimeFactory>) {
+  return Layer.effect(
+    CodexAdapter,
+    Effect.gen(function* () {
+      const codexConfig = decodeCodexSettings({});
+      return yield* makeCodexAdapter(codexConfig, {
+        enableT3Workers: Effect.succeed(true),
+        makeRuntime: runtimeFactory.factory,
+      });
+    }),
+  ).pipe(
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(ServerSettingsService.layerTest()),
+    Layer.provideMerge(providerSessionDirectoryTestLayer),
+    Layer.provideMerge(NodeServices.layer),
+  );
+}
+
+it.effect("enables T3 Worker tools for parents but not Worker-linked provider sessions", () => {
+  const runtimeFactory = makeRuntimeFactory();
+  const layer = makeBackendAffinityLayer(runtimeFactory);
+
+  return Effect.gen(function* () {
+    const adapter = yield* CodexAdapter;
+    yield* adapter.startSession({
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("parent-with-workers"),
+      runtimeMode: "full-access",
+      subagentBackend: "native-v1-control",
+    });
+    yield* adapter.startSession({
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId(`${WORKER_PROVIDER_THREAD_PREFIX}child-without-workers`),
+      runtimeMode: "full-access",
+    });
+
+    NodeAssert.equal(runtimeFactory.runtimes[0]?.options.enableT3Workers, true);
+    NodeAssert.notEqual(runtimeFactory.runtimes[1]?.options.enableT3Workers, true);
+    NodeAssert.equal(runtimeFactory.runtimes[1]?.options.workerSession, true);
+    NodeAssert.deepStrictEqual(
+      buildCodexAppServerCommandArgs(runtimeFactory.runtimes[1]!.options).slice(-6),
+      [
+        "-c",
+        "agents.enabled=false",
+        "-c",
+        "features.multi_agent=false",
+        "-c",
+        "features.multi_agent_v2=false",
+      ],
+    );
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("recreates a default or V1 runtime once for Native V1 control and then reuses it", () => {
+  const runtimeFactory = makeRuntimeFactory();
+  const layer = makeBackendAffinityLayer(runtimeFactory);
+
+  return Effect.gen(function* () {
+    const adapter = yield* CodexAdapter;
+    for (const initialBackend of [undefined, "v1"] as const) {
+      const initialRuntimeIndex = runtimeFactory.runtimes.length;
+      const threadId = asThreadId(`backend-${initialBackend ?? "default"}-to-native`);
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+        ...(initialBackend !== undefined ? { subagentBackend: initialBackend } : {}),
+      });
+      const original = runtimeFactory.runtimes[initialRuntimeIndex];
+      NodeAssert.ok(original);
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "first native turn",
+        attachments: [],
+        subagentBackend: "native-v1-control",
+      });
+      NodeAssert.equal(runtimeFactory.runtimes.length, initialRuntimeIndex + 2);
+      NodeAssert.equal(original.closeImpl.mock.calls.length, 1);
+      NodeAssert.equal(original.sendTurnImpl.mock.calls.length, 0);
+
+      const nativeRuntime = runtimeFactory.runtimes[initialRuntimeIndex + 1];
+      NodeAssert.ok(nativeRuntime);
+      NodeAssert.equal(nativeRuntime.options.subagentBackend, "native-v1-control");
+      NodeAssert.deepStrictEqual(nativeRuntime.options.resumeCursor, {
+        threadId: `provider-${String(threadId)}`,
+      });
+      NodeAssert.deepStrictEqual(buildCodexAppServerCommandArgs(nativeRuntime.options).slice(-6), [
+        "-c",
+        "agents.enabled=false",
+        "-c",
+        "features.multi_agent=false",
+        "-c",
+        "features.multi_agent_v2=false",
+      ]);
+      NodeAssert.equal(nativeRuntime.sendTurnImpl.mock.calls.length, 1);
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "second native turn",
+        attachments: [],
+        subagentBackend: "native-v1-control",
+      });
+      NodeAssert.equal(runtimeFactory.runtimes.length, initialRuntimeIndex + 2);
+      NodeAssert.equal(nativeRuntime.sendTurnImpl.mock.calls.length, 2);
+    }
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("recreates Native V1 control for exactly the requested V1 and V2 runtimes", () => {
+  const runtimeFactory = makeRuntimeFactory();
+  const layer = makeBackendAffinityLayer(runtimeFactory);
+
+  return Effect.gen(function* () {
+    const adapter = yield* CodexAdapter;
+    const threadId = asThreadId("backend-native-to-codex-native");
+    yield* adapter.startSession({
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      runtimeMode: "full-access",
+      subagentBackend: "native-v1-control",
+    });
+
+    for (const subagentBackend of ["v1", "v2"] as const) {
+      yield* adapter.sendTurn({
+        threadId,
+        input: `switch to ${subagentBackend}`,
+        attachments: [],
+        subagentBackend,
+      });
+    }
+
+    NodeAssert.deepStrictEqual(
+      runtimeFactory.runtimes.map((runtime) => runtime.options.subagentBackend),
+      ["native-v1-control", "v1", "v2"],
+    );
+    NodeAssert.equal(runtimeFactory.runtimes[0]?.sendTurnImpl.mock.calls.length, 0);
+    NodeAssert.equal(runtimeFactory.runtimes[1]?.sendTurnImpl.mock.calls.length, 1);
+    NodeAssert.equal(runtimeFactory.runtimes[2]?.sendTurnImpl.mock.calls.length, 1);
+    NodeAssert.equal(runtimeFactory.runtimes[0]?.closeImpl.mock.calls.length, 1);
+    NodeAssert.equal(runtimeFactory.runtimes[1]?.closeImpl.mock.calls.length, 1);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("does not send when backend-affinity recreation fails", () => {
+  const runtimes: Array<FakeCodexRuntime> = [];
+  const factory = vi.fn((runtimeOptions: CodexSessionRuntimeOptions) => {
+    if (factory.mock.calls.length === 2) {
+      return Effect.fail(
+        new CodexErrors.CodexAppServerSpawnError({
+          command: `${runtimeOptions.binaryPath} app-server`,
+          cause: new Error("replacement runtime failed"),
+        }),
+      );
+    }
+    const runtime = new FakeCodexRuntime(runtimeOptions);
+    runtimes.push(runtime);
+    return Effect.succeed(runtime);
+  });
+  const layer = Layer.effect(
+    CodexAdapter,
+    Effect.gen(function* () {
+      const codexConfig = decodeCodexSettings({});
+      return yield* makeCodexAdapter(codexConfig, {
+        enableT3Workers: Effect.succeed(true),
+        makeRuntime: factory,
+      });
+    }),
+  ).pipe(
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(ServerSettingsService.layerTest()),
+    Layer.provideMerge(providerSessionDirectoryTestLayer),
+    Layer.provideMerge(NodeServices.layer),
+  );
+
+  return Effect.gen(function* () {
+    const adapter = yield* CodexAdapter;
+    const threadId = asThreadId("backend-recreation-fails");
+    yield* adapter.startSession({
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      runtimeMode: "full-access",
+      subagentBackend: "v1",
+    });
+    const original = runtimes[0];
+    NodeAssert.ok(original);
+
+    const result = yield* adapter
+      .sendTurn({
+        threadId,
+        input: "must not send",
+        attachments: [],
+        subagentBackend: "native-v1-control",
+      })
+      .pipe(Effect.result);
+
+    NodeAssert.equal(result._tag, "Failure");
+    NodeAssert.equal(result.failure._tag, "ProviderAdapterProcessError");
+    NodeAssert.equal(factory.mock.calls.length, 2);
+    NodeAssert.equal(original.closeImpl.mock.calls.length, 1);
+    NodeAssert.equal(original.sendTurnImpl.mock.calls.length, 0);
+  }).pipe(Effect.provide(layer));
 });
 
 const lifecycleRuntimeFactory = makeRuntimeFactory();

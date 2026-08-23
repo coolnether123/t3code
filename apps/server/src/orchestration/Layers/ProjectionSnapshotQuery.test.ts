@@ -1,5 +1,6 @@
 import {
   CheckpointRef,
+  CommandId,
   EventId,
   MessageId,
   ProjectId,
@@ -21,6 +22,7 @@ import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { encodeThreadDetailPageCursor } from "../threadDetailCursor.ts";
+import { decideOrchestrationCommand } from "../decider.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
@@ -39,6 +41,167 @@ const projectionSnapshotLayer = it.layer(
 );
 
 projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
+  it.effect("rehydrates canonical user-message boundaries for branch and rewind commands", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("25d2f2a3-ac36-45d8-97f8-e0cf5b5d0064");
+      const canonicalMessageId = MessageId.make("ae3e6b3d-ded8-4590-8c53-70b8dd7242a2");
+
+      yield* sql`DELETE FROM projection_thread_messages`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_projects`;
+
+      yield* sql`
+          INSERT INTO projection_projects (
+            project_id,
+            title,
+            workspace_root,
+            default_model_selection_json,
+            scripts_json,
+            created_at,
+            updated_at,
+            deleted_at
+          )
+          VALUES (
+            'project-edit-boundary',
+            'Edit boundary project',
+            '/tmp/edit-boundary',
+            '{"provider":"codex","model":"gpt-5-codex"}',
+            '[]',
+            '2026-08-22T21:51:00.000Z',
+            '2026-08-22T21:51:00.000Z',
+            NULL
+          )
+        `;
+      yield* sql`
+          INSERT INTO projection_threads (
+            thread_id,
+            project_id,
+            title,
+            model_selection_json,
+            runtime_mode,
+            interaction_mode,
+            branch,
+            worktree_path,
+            latest_turn_id,
+            latest_user_message_at,
+            pending_approval_count,
+            pending_user_input_count,
+            has_actionable_proposed_plan,
+            created_at,
+            updated_at,
+            deleted_at
+          )
+          VALUES (
+            ${threadId},
+            'project-edit-boundary',
+            'Live projected shape',
+            '{"provider":"codex","model":"gpt-5-codex"}',
+            'full-access',
+            'default',
+            NULL,
+            NULL,
+            NULL,
+            '2026-08-22T21:51:10.406Z',
+            0,
+            0,
+            0,
+            '2026-08-22T21:51:00.000Z',
+            '2026-08-22T21:51:10.406Z',
+            NULL
+          )
+        `;
+      yield* sql`
+          INSERT INTO projection_thread_messages (
+            message_id,
+            thread_id,
+            turn_id,
+            role,
+            text,
+            is_streaming,
+            created_at,
+            updated_at
+          )
+          VALUES
+            (
+              ${canonicalMessageId},
+              ${threadId},
+              NULL,
+              'user',
+              'Root prompt',
+              0,
+              '2026-08-22T21:51:10.406Z',
+              '2026-08-22T21:51:10.406Z'
+            ),
+            (
+              'assistant:live-projected-message',
+              ${threadId},
+              '01a02b74-e034-7573-8b22-414b82d756e6',
+              'assistant',
+              'Projected reply',
+              0,
+              '2026-08-22T21:51:21.373Z',
+              '2026-08-22T21:51:21.373Z'
+            )
+        `;
+
+      const readModel = yield* snapshotQuery.getCommandReadModel();
+      const thread = readModel.threads.find((candidate) => candidate.id === threadId);
+      assert.deepEqual(thread?.messages, [
+        {
+          id: canonicalMessageId,
+          role: "user",
+          text: "",
+          turnId: null,
+          streaming: false,
+          createdAt: "2026-08-22T21:51:10.406Z",
+          updatedAt: "2026-08-22T21:51:10.406Z",
+        },
+      ]);
+
+      for (const mode of ["branch", "rewind"] as const) {
+        const commonCommand = {
+          type: "thread.edit-from-here" as const,
+          commandId: CommandId.make(`edit-from-here-${mode}`),
+          threadId,
+          sourceMessageId: canonicalMessageId,
+          replacementMessageId: MessageId.make(`replacement-${mode}`),
+          editedText: `Edited ${mode}`,
+          createdAt: "2026-08-22T22:00:00.000Z",
+        };
+        const command =
+          mode === "branch"
+            ? {
+                ...commonCommand,
+                mode: "branch" as const,
+                targetThreadId: ThreadId.make("branch-from-live-projected-message"),
+              }
+            : {
+                ...commonCommand,
+                mode: "rewind" as const,
+              };
+        const result = yield* decideOrchestrationCommand({
+          readModel,
+          command,
+        });
+        const event = Array.isArray(result) ? result[0] : result;
+        assert.equal(event?.type, "thread.edit-from-here-requested");
+        if (event?.type === "thread.edit-from-here-requested") {
+          assert.equal(event.payload.sourceMessageId, canonicalMessageId);
+          assert.equal(event.payload.mode, mode);
+        }
+      }
+
+      // The layer uses one in-memory database for this file. Leave the
+      // projection tables empty so the following hydration test observes
+      // only the rows it inserts itself.
+      yield* sql`DELETE FROM projection_thread_messages`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`DELETE FROM projection_projects`;
+    }),
+  );
+
   it.effect("hydrates read model from projection tables and computes snapshot sequence", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

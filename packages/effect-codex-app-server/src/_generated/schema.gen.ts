@@ -5374,6 +5374,13 @@ export const V2ModelListResponse__ModelServiceTier = Schema.Struct({
   name: Schema.String,
 });
 
+export type V2ModelListResponse__ModelMultiAgentVersion = string | null;
+export const V2ModelListResponse__ModelMultiAgentVersion = Schema.Union([
+  Schema.Literals(["disabled", "v1", "v2"]),
+  Schema.Null,
+  Schema.String,
+]);
+
 export type V2ModelListResponse__ModelUpgradeInfo = {
   readonly migrationMarkdown?: string | null;
   readonly model: string;
@@ -22220,6 +22227,7 @@ export type V2ModelListResponse__Model = {
   readonly inputModalities?: ReadonlyArray<V2ModelListResponse__InputModality>;
   readonly isDefault: boolean;
   readonly model: string;
+  readonly multiAgentVersion?: V2ModelListResponse__ModelMultiAgentVersion;
   readonly serviceTiers?: ReadonlyArray<V2ModelListResponse__ModelServiceTier>;
   readonly supportedReasoningEfforts: ReadonlyArray<V2ModelListResponse__ReasoningEffortOption>;
   readonly supportsPersonality?: boolean;
@@ -22254,6 +22262,7 @@ export const V2ModelListResponse__Model = Schema.Struct({
   ),
   isDefault: Schema.Boolean,
   model: Schema.String,
+  multiAgentVersion: Schema.optionalKey(V2ModelListResponse__ModelMultiAgentVersion),
   serviceTiers: Schema.optionalKey(
     Schema.Array(V2ModelListResponse__ModelServiceTier).annotate({ default: [] }),
   ),

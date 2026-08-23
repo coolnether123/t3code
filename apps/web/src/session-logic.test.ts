@@ -19,6 +19,8 @@ import {
   findLatestProposedPlan,
   hasActionableProposedPlan,
   isLatestTurnSettled,
+  workLogEntryIsStandaloneDomainFailure,
+  workLogEntryIsToolLike,
   workEntryIndicatesToolFailure,
   workEntryIndicatesToolNeutralStatus,
   workEntryIndicatesToolSuccess,
@@ -722,6 +724,30 @@ describe("workEntryIndicatesToolFailure", () => {
 });
 
 describe("deriveWorkLogEntries", () => {
+  it("keeps edit-from-here failures as standalone domain events with technical detail", () => {
+    const [entry] = deriveWorkLogEntries([
+      makeActivity({
+        id: "edit-from-here-failure",
+        createdAt: "2026-08-22T16:00:02.000Z",
+        kind: "thread.edit-from-here.failed",
+        summary: "Edit from here failed",
+        tone: "error",
+        payload: {
+          detail:
+            "Orchestration command invariant failed (thread.edit-from-here)\n    at A:\\Dev\\server.ts:12:3",
+        },
+      }),
+    ]);
+
+    expect(entry).toMatchObject({
+      id: "edit-from-here-failure",
+      sourceActivityKind: "thread.edit-from-here.failed",
+    });
+    expect(entry?.detail).toContain("Orchestration command invariant failed");
+    expect(entry && workLogEntryIsStandaloneDomainFailure(entry)).toBe(true);
+    expect(entry && workLogEntryIsToolLike(entry)).toBe(false);
+  });
+
   it("omits tool started entries and keeps completed entries", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

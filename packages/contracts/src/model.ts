@@ -124,8 +124,31 @@ function canonicalSelectionsToLegacyObject(
 
 export const ModelCapabilities = Schema.Struct({
   optionDescriptors: Schema.optional(Schema.Array(ProviderOptionDescriptor)),
+  subagentBackends: Schema.optional(
+    Schema.Struct({
+      v1: Schema.Struct({
+        supported: Schema.Boolean,
+        reason: Schema.optional(TrimmedNonEmptyString),
+      }),
+      v2: Schema.Struct({
+        supported: Schema.Boolean,
+        reason: Schema.optional(TrimmedNonEmptyString),
+      }),
+      "native-v1-control": Schema.Struct({
+        supported: Schema.Boolean,
+        reason: Schema.optional(TrimmedNonEmptyString),
+      }),
+    }),
+  ),
 });
 export type ModelCapabilities = typeof ModelCapabilities.Type;
+
+/**
+ * The user-selectable sub-agent control paths. These are runtime routes, not
+ * prompt hints: the server validates the selected route before a turn starts.
+ */
+export const SubagentBackend = Schema.Literals(["v1", "v2", "native-v1-control"]);
+export type SubagentBackend = typeof SubagentBackend.Type;
 
 const CODEX_DRIVER_KIND = ProviderDriverKind.make("codex");
 const CLAUDE_DRIVER_KIND = ProviderDriverKind.make("claudeAgent");

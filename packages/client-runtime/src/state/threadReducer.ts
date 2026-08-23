@@ -95,6 +95,7 @@ export function applyThreadDetailEvent(
           snoozedUntil: null,
           snoozedAt: null,
           deletedAt: null,
+          editFromHere: null,
           messages: [],
           proposedPlans: [],
           activities: [],
@@ -522,14 +523,26 @@ export function applyThreadDetailEvent(
       );
 
       const retainedTurnIds = new Set(Arr.map(checkpoints, (entry) => entry.turnId));
-      const messages = retainMessagesAfterRevert(thread.messages, retainedTurnIds);
+      const messages = retainMessagesAfterRevert(
+        thread.messages,
+        retainedTurnIds,
+        event.payload.sourceMessageId,
+      );
       const proposedPlans = pipe(
         thread.proposedPlans,
-        Arr.filter((plan) => plan.turnId === null || retainedTurnIds.has(plan.turnId)),
+        Arr.filter((plan) =>
+          event.payload.cutoffCreatedAt !== undefined
+            ? plan.createdAt < event.payload.cutoffCreatedAt
+            : plan.turnId === null || retainedTurnIds.has(plan.turnId),
+        ),
       );
       const activities = pipe(
         thread.activities,
-        Arr.filter((activity) => activity.turnId === null || retainedTurnIds.has(activity.turnId)),
+        Arr.filter((activity) =>
+          event.payload.cutoffCreatedAt !== undefined
+            ? activity.createdAt < event.payload.cutoffCreatedAt
+            : activity.turnId === null || retainedTurnIds.has(activity.turnId),
+        ),
       );
       const latestCheckpoint = checkpoints.at(-1) ?? null;
 
@@ -558,6 +571,36 @@ export function applyThreadDetailEvent(
         },
       };
     }
+
+    case "thread.edit-from-here-requested":
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          editFromHere: {
+            requestId: event.payload.requestId,
+            mode: event.payload.mode,
+            sourceMessageId: event.payload.sourceMessageId,
+            ...(event.payload.targetThreadId !== undefined
+              ? { targetThreadId: event.payload.targetThreadId }
+              : {}),
+            startedAt: event.payload.createdAt,
+          },
+          updatedAt: event.occurredAt,
+        },
+      };
+
+    case "thread.edit-from-here-finished":
+      return thread.editFromHere?.requestId !== event.payload.requestId
+        ? { kind: "unchanged" }
+        : {
+            kind: "updated",
+            thread: {
+              ...thread,
+              editFromHere: null,
+              updatedAt: event.payload.finishedAt,
+            },
+          };
 
     // ── Activities ──────────────────────────────────────────────────
     case "thread.activity-appended": {
@@ -654,7 +697,17 @@ function rebindCheckpointAssistantMessage(
 function retainMessagesAfterRevert(
   messages: ReadonlyArray<OrchestrationMessage>,
   retainedTurnIds: ReadonlySet<string>,
+  sourceMessageId?: MessageId,
 ): OrchestrationMessage[] {
+  if (sourceMessageId !== undefined) {
+    const sourceIndex = messages.findIndex((message) => message.id === sourceMessageId);
+    if (sourceIndex >= 0) {
+      return Arr.filter(
+        messages,
+        (message, index) => message.role === "system" || index < sourceIndex,
+      );
+    }
+  }
   // Keep messages that belong to a retained turn, plus system messages and
   // messages without a turn binding (pre-turn-0 user messages).
   return Arr.filter(messages, (message) => {

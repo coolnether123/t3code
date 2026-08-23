@@ -1,4 +1,9 @@
-import { ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import {
+  ProviderInstanceId,
+  ThreadId,
+  type ModelSelection,
+  type RuntimeMode,
+} from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -9,12 +14,16 @@ import { HttpServer } from "effect/unstable/http";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { isWorkerLinkedProviderThreadId } from "../worker/WorkerThreadBoundary.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpProviderSession from "./McpProviderSession.ts";
 
 export interface McpCredentialRequest {
   readonly threadId: ThreadId;
   readonly providerInstanceId: ProviderInstanceId;
+  readonly modelSelection?: ModelSelection | undefined;
+  readonly runtimeMode: RuntimeMode;
+  readonly workingDirectory?: string | undefined;
 }
 
 export interface McpIssuedCredential {
@@ -31,7 +40,11 @@ export interface McpSessionRegistryShape {
    * turns call this so that a session which is plainly alive keeps its
    * credential even when it goes a long time without touching an MCP tool.
    */
-  readonly touch: (threadId: ThreadId) => Effect.Effect<void>;
+  readonly touch: (
+    threadId: ThreadId,
+    modelSelection?: ModelSelection | undefined,
+    parentTurnId?: import("@t3tools/contracts").TurnId | undefined,
+  ) => Effect.Effect<void>;
   readonly revokeProviderSession: (providerSessionId: string) => Effect.Effect<void>;
   readonly revokeThread: (threadId: ThreadId) => Effect.Effect<void>;
   readonly revokeAll: Effect.Effect<void>;
@@ -138,9 +151,18 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         threadId: ThreadId.make(request.threadId),
         providerSessionId,
         providerInstanceId: ProviderInstanceId.make(request.providerInstanceId),
+        ...(request.modelSelection === undefined
+          ? {}
+          : { parentModelSelection: request.modelSelection }),
+        runtimeMode: request.runtimeMode,
+        ...(request.workingDirectory === undefined
+          ? {}
+          : { workingDirectory: request.workingDirectory }),
         capabilities: new Set<McpInvocationContext.McpCapability>([
           "preview",
-          ...(workersEnabled ? (["workers"] as const) : []),
+          ...(workersEnabled && !isWorkerLinkedProviderThreadId(request.threadId)
+            ? (["workers"] as const)
+            : []),
         ]),
         issuedAt,
       };
@@ -179,14 +201,22 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
   );
 
   const touch: McpSessionRegistryShape["touch"] = Effect.fn("McpSessionRegistry.touch")(
-    function* (threadId) {
+    function* (threadId, modelSelection, parentTurnId) {
       const timestamp = yield* currentTimeMillis;
       yield* SynchronizedRef.update(state, ({ records }) => {
         const current = pruneDead(records, timestamp);
         const next = new Map(current);
         for (const [tokenHash, record] of current) {
           if (record.scope.threadId === threadId) {
-            next.set(tokenHash, { ...record, lastAliveAt: timestamp });
+            next.set(tokenHash, {
+              ...record,
+              scope: {
+                ...record.scope,
+                ...(modelSelection === undefined ? {} : { parentModelSelection: modelSelection }),
+                ...(parentTurnId === undefined ? {} : { parentTurnId }),
+              },
+              lastAliveAt: timestamp,
+            });
           }
         }
         return { records: next };
@@ -248,8 +278,14 @@ export const issueActiveMcpCredential = (
  * Refreshes the liveness of a thread's MCP credential. Called on every provider
  * turn so an active session is never mistaken for an abandoned one.
  */
-export const touchActiveMcpThread = (threadId: ThreadId): Effect.Effect<void> =>
-  activeMcpSessionRegistry ? activeMcpSessionRegistry.touch(threadId) : Effect.void;
+export const touchActiveMcpThread = (
+  threadId: ThreadId,
+  modelSelection?: ModelSelection | undefined,
+  parentTurnId?: import("@t3tools/contracts").TurnId | undefined,
+): Effect.Effect<void> =>
+  activeMcpSessionRegistry
+    ? activeMcpSessionRegistry.touch(threadId, modelSelection, parentTurnId)
+    : Effect.void;
 
 export const revokeActiveMcpThread = (threadId: ThreadId): Effect.Effect<void> =>
   activeMcpSessionRegistry ? activeMcpSessionRegistry.revokeThread(threadId) : Effect.void;

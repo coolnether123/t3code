@@ -35,6 +35,7 @@ import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
+import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { ServerConfig } from "../../config.ts";
 
 const makeProjectionPipelinePrefixedTestLayer = (prefix: string) =>
@@ -52,7 +53,12 @@ const exists = (filePath: string) =>
     return fileInfo._tag === "Success";
   });
 
-const BaseTestLayer = makeProjectionPipelinePrefixedTestLayer("t3-projection-pipeline-test-");
+const BaseTestLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
+  Layer.provide(ThreadBackgroundLiveness.layer),
+  Layer.provide(ThreadPlanProgress.layer),
+  Layer.provideMerge(RepositoryIdentityResolver.layer),
+  Layer.provideMerge(makeProjectionPipelinePrefixedTestLayer("t3-projection-pipeline-test-")),
+);
 
 it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
   it.effect("bootstraps all projection states and writes projection rows", () =>
@@ -2469,6 +2475,168 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
           role: "assistant",
         },
       ]);
+    }),
+  );
+
+  it.effect("rehydrates only the replacement after a successful root edit rewind", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const threadId = ThreadId.make("1662a599-73a7-424f-981a-1366aee6d944");
+      const sourceMessageId = MessageId.make("ae26aa09-5a76-439e-bdbd-4390cf4dc141");
+      const replacementMessageId = MessageId.make("replacement-root-message");
+      const cutoffCreatedAt = "2026-08-22T16:00:00.000Z";
+      const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+        eventStore
+          .append(event)
+          .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+
+      const common = {
+        aggregateKind: "thread" as const,
+        aggregateId: threadId,
+        causationEventId: null,
+        metadata: {},
+      };
+
+      yield* appendAndProject({
+        type: "project.created",
+        eventId: EventId.make("evt-root-rehydrate-project"),
+        aggregateKind: "project",
+        aggregateId: ProjectId.make("project-root-rehydrate"),
+        occurredAt: cutoffCreatedAt,
+        commandId: CommandId.make("cmd-root-rehydrate-project"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-root-rehydrate-project"),
+        metadata: {},
+        payload: {
+          projectId: ProjectId.make("project-root-rehydrate"),
+          title: "Root rewind project",
+          workspaceRoot: "/tmp/root-rehydrate",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: cutoffCreatedAt,
+          updatedAt: cutoffCreatedAt,
+        },
+      });
+      yield* appendAndProject({
+        ...common,
+        type: "thread.created",
+        eventId: EventId.make("evt-root-rehydrate-thread"),
+        occurredAt: cutoffCreatedAt,
+        commandId: CommandId.make("cmd-root-rehydrate-thread"),
+        correlationId: CorrelationId.make("cmd-root-rehydrate-thread"),
+        payload: {
+          threadId,
+          projectId: ProjectId.make("project-root-rehydrate"),
+          title: "Root rewind task",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5.6-sol",
+          },
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt: cutoffCreatedAt,
+          updatedAt: cutoffCreatedAt,
+        },
+      });
+      yield* appendAndProject({
+        ...common,
+        type: "thread.message-sent",
+        eventId: EventId.make("evt-root-rehydrate-user"),
+        occurredAt: cutoffCreatedAt,
+        commandId: CommandId.make("cmd-root-rehydrate-user"),
+        correlationId: CorrelationId.make("cmd-root-rehydrate-user"),
+        payload: {
+          threadId,
+          messageId: sourceMessageId,
+          role: "user",
+          text: "Original root message",
+          turnId: null,
+          streaming: false,
+          createdAt: cutoffCreatedAt,
+          updatedAt: cutoffCreatedAt,
+        },
+      });
+      yield* appendAndProject({
+        ...common,
+        type: "thread.message-sent",
+        eventId: EventId.make("evt-root-rehydrate-assistant"),
+        occurredAt: "2026-08-22T16:00:01.000Z",
+        commandId: CommandId.make("cmd-root-rehydrate-assistant"),
+        correlationId: CorrelationId.make("cmd-root-rehydrate-assistant"),
+        payload: {
+          threadId,
+          messageId: MessageId.make("assistant-root-rehydrate"),
+          role: "assistant",
+          text: "BRANCH_OK",
+          turnId: TurnId.make("turn-root-rehydrate"),
+          streaming: false,
+          createdAt: "2026-08-22T16:00:01.000Z",
+          updatedAt: "2026-08-22T16:00:01.000Z",
+        },
+      });
+      yield* appendAndProject({
+        ...common,
+        type: "thread.activity-appended",
+        eventId: EventId.make("evt-root-rehydrate-failure"),
+        occurredAt: "2026-08-22T16:00:02.000Z",
+        commandId: CommandId.make("cmd-root-rehydrate-failure"),
+        correlationId: CorrelationId.make("cmd-root-rehydrate-failure"),
+        payload: {
+          threadId,
+          activity: {
+            id: EventId.make("activity-root-rehydrate-failure"),
+            tone: "error",
+            kind: "thread.edit-from-here.failed",
+            summary: "Edit from here failed",
+            payload: { detail: "Error: stale raw stack" },
+            turnId: null,
+            createdAt: "2026-08-22T16:00:02.000Z",
+          },
+        },
+      });
+      yield* appendAndProject({
+        ...common,
+        type: "thread.reverted",
+        eventId: EventId.make("evt-root-rehydrate-reverted"),
+        occurredAt: "2026-08-22T16:00:03.000Z",
+        commandId: CommandId.make("cmd-root-rehydrate-reverted"),
+        correlationId: CorrelationId.make("cmd-root-rehydrate-reverted"),
+        payload: {
+          threadId,
+          turnCount: 0,
+          sourceMessageId,
+          cutoffCreatedAt,
+        },
+      });
+      yield* appendAndProject({
+        ...common,
+        type: "thread.message-sent",
+        eventId: EventId.make("evt-root-rehydrate-replacement"),
+        occurredAt: "2026-08-22T16:00:04.000Z",
+        commandId: CommandId.make("cmd-root-rehydrate-replacement"),
+        correlationId: CorrelationId.make("cmd-root-rehydrate-replacement"),
+        payload: {
+          threadId,
+          messageId: replacementMessageId,
+          role: "user",
+          text: "Replacement root message",
+          turnId: null,
+          streaming: false,
+          createdAt: "2026-08-22T16:00:04.000Z",
+          updatedAt: "2026-08-22T16:00:04.000Z",
+        },
+      });
+
+      const rehydrated = yield* snapshotQuery.getSnapshot();
+      const thread = rehydrated.threads.find((entry) => entry.id === threadId);
+      assert.deepEqual(
+        thread?.messages.map((message) => [message.id, message.text]),
+        [[replacementMessageId, "Replacement root message"]],
+      );
+      assert.deepEqual(thread?.activities, []);
     }),
   );
 });

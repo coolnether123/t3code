@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
+import type { MessageId } from "@t3tools/contracts";
 import {
   computeStableMessagesTimelineRows,
   computeMessageDurationStart,
@@ -323,7 +324,7 @@ describe("deriveMessagesTimelineRows", () => {
       isWorking: false,
       activeTurnStartedAt: null,
       turnDiffSummaryByAssistantMessageId: new Map(),
-      revertTurnCountByUserMessageId: new Map(),
+      canonicalEditMessageIdByTimelineMessageId: new Map(),
     });
 
     const assistantRows = rows.filter(
@@ -377,7 +378,7 @@ describe("deriveMessagesTimelineRows", () => {
       isWorking: false,
       activeTurnStartedAt: null,
       turnDiffSummaryByAssistantMessageId: new Map(),
-      revertTurnCountByUserMessageId: new Map(),
+      canonicalEditMessageIdByTimelineMessageId: new Map(),
     });
 
     const assistantRows = rows.filter(
@@ -389,7 +390,7 @@ describe("deriveMessagesTimelineRows", () => {
     expect(assistantRows[1]?.assistantCopyStreaming).toBe(true);
   });
 
-  it("projects assistant diff summaries and user revert counts onto the affected rows", () => {
+  it("projects assistant diff summaries and persisted edit boundaries independently", () => {
     const assistantTurnDiffSummary = {
       turnId: "turn-1" as never,
       completedAt: "2026-01-01T00:00:30Z",
@@ -436,7 +437,9 @@ describe("deriveMessagesTimelineRows", () => {
       turnDiffSummaryByAssistantMessageId: new Map([
         ["assistant-1" as never, assistantTurnDiffSummary],
       ]),
-      revertTurnCountByUserMessageId: new Map([["user-1" as never, 1]]),
+      canonicalEditMessageIdByTimelineMessageId: new Map([
+        ["user-1" as never, "canonical-user-1" as never],
+      ]),
     });
 
     const userRow = rows.find(
@@ -448,7 +451,7 @@ describe("deriveMessagesTimelineRows", () => {
         row.kind === "message" && row.message.role === "assistant",
     );
 
-    expect(userRow?.revertTurnCount).toBe(1);
+    expect(userRow?.editFromHereMessageId).toBe("canonical-user-1");
     expect(assistantRow?.assistantTurnDiffSummary).toBe(assistantTurnDiffSummary);
   });
 
@@ -515,7 +518,7 @@ describe("deriveMessagesTimelineRows", () => {
       isWorking: false,
       activeTurnStartedAt: null,
       turnDiffSummaryByAssistantMessageId: new Map(),
-      revertTurnCountByUserMessageId: new Map(),
+      canonicalEditMessageIdByTimelineMessageId: new Map(),
     });
 
     const foldRow = collapsedRows.find(
@@ -538,7 +541,7 @@ describe("deriveMessagesTimelineRows", () => {
       isWorking: false,
       activeTurnStartedAt: null,
       turnDiffSummaryByAssistantMessageId: new Map(),
-      revertTurnCountByUserMessageId: new Map(),
+      canonicalEditMessageIdByTimelineMessageId: new Map(),
     });
 
     expect(expandedRows.map((row) => row.id)).toEqual([
@@ -638,7 +641,7 @@ describe("deriveMessagesTimelineRows", () => {
       isWorking: true,
       activeTurnStartedAt: "2026-01-01T00:00:14Z",
       turnDiffSummaryByAssistantMessageId: new Map(),
-      revertTurnCountByUserMessageId: new Map(),
+      canonicalEditMessageIdByTimelineMessageId: new Map(),
     });
 
     const foldRow = rows.find(
@@ -675,7 +678,7 @@ describe("deriveMessagesTimelineRows", () => {
       isWorking: false,
       activeTurnStartedAt: null,
       turnDiffSummaryByAssistantMessageId: new Map(),
-      revertTurnCountByUserMessageId: new Map(),
+      canonicalEditMessageIdByTimelineMessageId: new Map(),
     });
 
     expect(rows).toEqual([
@@ -743,7 +746,7 @@ describe("deriveMessagesTimelineRows", () => {
       isWorking: true,
       activeTurnStartedAt: "2026-01-01T00:01:00Z",
       turnDiffSummaryByAssistantMessageId: new Map(),
-      revertTurnCountByUserMessageId: new Map(),
+      canonicalEditMessageIdByTimelineMessageId: new Map(),
     });
 
     expect(rows.map((row) => row.id)).toEqual([
@@ -795,7 +798,7 @@ describe("deriveMessagesTimelineRows", () => {
       isWorking: true,
       activeTurnStartedAt: "2026-01-01T00:00:00Z",
       turnDiffSummaryByAssistantMessageId: new Map(),
-      revertTurnCountByUserMessageId: new Map(),
+      canonicalEditMessageIdByTimelineMessageId: new Map(),
     });
 
     expect(rows.some((row) => row.kind === "turn-fold")).toBe(false);
@@ -858,7 +861,7 @@ describe("deriveMessagesTimelineRows", () => {
       isWorking: true,
       activeTurnStartedAt: "2026-01-01T00:01:00Z",
       turnDiffSummaryByAssistantMessageId: new Map(),
-      revertTurnCountByUserMessageId: new Map(),
+      canonicalEditMessageIdByTimelineMessageId: new Map(),
     });
 
     expect(rows.filter((row) => row.kind === "turn-fold").map((row) => row.turnId)).toEqual([
@@ -903,7 +906,7 @@ describe("deriveMessagesTimelineRows", () => {
       isWorking: false,
       activeTurnStartedAt: null,
       turnDiffSummaryByAssistantMessageId: new Map(),
-      revertTurnCountByUserMessageId: new Map(),
+      canonicalEditMessageIdByTimelineMessageId: new Map(),
     });
 
     const assistantRows = rows.filter(
@@ -941,7 +944,7 @@ describe("deriveMessagesTimelineRows", () => {
       isWorking: true,
       activeTurnStartedAt: "2026-01-01T00:00:00Z",
       turnDiffSummaryByAssistantMessageId: new Map(),
-      revertTurnCountByUserMessageId: new Map(),
+      canonicalEditMessageIdByTimelineMessageId: new Map(),
     });
 
     const assistantRow = rows.find(
@@ -998,7 +1001,7 @@ describe("deriveMessagesTimelineRows", () => {
       isWorking: false,
       activeTurnStartedAt: null,
       turnDiffSummaryByAssistantMessageId: new Map(),
-      revertTurnCountByUserMessageId: new Map(),
+      canonicalEditMessageIdByTimelineMessageId: new Map<MessageId, MessageId>(),
     };
     const collapsedRows = deriveMessagesTimelineRows(baseInput);
     const expandedRows = deriveMessagesTimelineRows({
@@ -1021,6 +1024,59 @@ describe("deriveMessagesTimelineRows", () => {
     ]);
     expect(expandedRows.find((row) => row.kind === "work-toggle")).toMatchObject({
       expanded: true,
+    });
+  });
+
+  it("keeps edit-from-here failures out of tool-call overflow groups", () => {
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        {
+          id: "work-before",
+          kind: "work",
+          createdAt: "2026-08-22T16:00:01.000Z",
+          entry: {
+            id: "tool-before",
+            createdAt: "2026-08-22T16:00:01.000Z",
+            label: "Read file",
+            tone: "tool",
+          },
+        },
+        {
+          id: "edit-failure-entry",
+          kind: "work",
+          createdAt: "2026-08-22T16:00:02.000Z",
+          entry: {
+            id: "edit-failure",
+            createdAt: "2026-08-22T16:00:02.000Z",
+            label: "Edit from here failed",
+            detail: "Error: technical detail",
+            tone: "error",
+            sourceActivityKind: "thread.edit-from-here.failed",
+          },
+        },
+        {
+          id: "work-after",
+          kind: "work",
+          createdAt: "2026-08-22T16:00:03.000Z",
+          entry: {
+            id: "tool-after",
+            createdAt: "2026-08-22T16:00:03.000Z",
+            label: "Run command",
+            tone: "tool",
+          },
+        },
+      ],
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      canonicalEditMessageIdByTimelineMessageId: new Map<MessageId, MessageId>(),
+    });
+
+    expect(rows.map((row) => row.id)).toEqual(["work-before", "edit-failure-entry", "work-after"]);
+    expect(rows.some((row) => row.kind === "work-toggle")).toBe(false);
+    expect(rows[1]).toMatchObject({
+      kind: "work",
+      groupedEntries: [{ sourceActivityKind: "thread.edit-from-here.failed" }],
     });
   });
 });
@@ -1064,7 +1120,7 @@ describe("computeStableMessagesTimelineRows", () => {
       isWorking: false,
       activeTurnStartedAt: null,
       turnDiffSummaryByAssistantMessageId: new Map(),
-      revertTurnCountByUserMessageId: new Map(),
+      canonicalEditMessageIdByTimelineMessageId: new Map(),
     });
 
     const initial = computeStableMessagesTimelineRows(rows, {
@@ -1113,7 +1169,7 @@ describe("computeStableMessagesTimelineRows", () => {
         isWorking: false,
         activeTurnStartedAt: null,
         turnDiffSummaryByAssistantMessageId: new Map(),
-        revertTurnCountByUserMessageId: new Map(),
+        canonicalEditMessageIdByTimelineMessageId: new Map(),
       });
 
     const firstRows = createRows();
@@ -1169,7 +1225,7 @@ describe("computeStableMessagesTimelineRows", () => {
       isWorking: false,
       activeTurnStartedAt: null,
       turnDiffSummaryByAssistantMessageId: new Map(),
-      revertTurnCountByUserMessageId: new Map(),
+      canonicalEditMessageIdByTimelineMessageId: new Map(),
     });
 
     const initial = computeStableMessagesTimelineRows(firstRows, {

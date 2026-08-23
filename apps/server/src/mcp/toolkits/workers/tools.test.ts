@@ -44,3 +44,49 @@ it("marks mechanical reads as read-only and lifecycle controls as destructive", 
     expect(WorkerToolkit.tools[name].annotations).toBeDefined();
   }
 });
+
+it("keeps execution permission controls out of worker_start", () => {
+  const schema = Tool.getJsonSchema(WorkerToolkit.tools.worker_start) as {
+    readonly properties?: Readonly<Record<string, unknown>>;
+    readonly required?: ReadonlyArray<string>;
+  };
+  const properties = schema.properties ?? {};
+  expect(properties).toHaveProperty("displayName");
+  expect(schema.required ?? []).not.toContain("displayName");
+  for (const forbidden of [
+    "runtimeMode",
+    "permissionMode",
+    "approvalPolicy",
+    "sandboxMode",
+    "parentThreadId",
+  ]) {
+    expect(properties).not.toHaveProperty(forbidden);
+  }
+  expect(WorkerToolkit.tools.worker_start.description).toContain(
+    "execution permissions always inherit the parent session",
+  );
+});
+
+it("makes Worker provider identity optional and explains deterministic inheritance", () => {
+  const schema = Tool.getJsonSchema(WorkerToolkit.tools.worker_start) as {
+    readonly properties?: Readonly<
+      Record<
+        string,
+        {
+          readonly properties?: Readonly<Record<string, unknown>>;
+          readonly required?: ReadonlyArray<string>;
+        }
+      >
+    >;
+  };
+  const modelSelection = schema.properties?.modelSelection;
+  expect(modelSelection?.properties).toHaveProperty("instanceId");
+  expect(modelSelection?.required ?? []).not.toContain("model");
+  expect(modelSelection?.required ?? []).not.toContain("instanceId");
+  expect(WorkerToolkit.tools.worker_start.description).toContain(
+    "Omit modelSelection to inherit the parent's exact provider instance, model, and options",
+  );
+  expect(WorkerToolkit.tools.worker_start.description).toContain(
+    "send only modelSelection.options",
+  );
+});

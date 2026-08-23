@@ -7,6 +7,7 @@ import {
   type ErrorComponentProps,
   useLocation,
   useNavigate,
+  useRouter,
 } from "@tanstack/react-router";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 
@@ -39,9 +40,14 @@ import {
 import { useUiStateStore } from "../uiStateStore";
 import { syncBrowserChromeTheme } from "../hooks/useTheme";
 import { configureClientTracing } from "../observability/clientTracing";
-import { resolveInitialServerAuthGateState } from "../environments/primary";
+import {
+  refreshPrimarySessionState,
+  retryInitialServerAuthGateState,
+  resolveInitialServerAuthGateState,
+} from "../environments/primary";
 import { hasHostedPairingRequest, isHostedStaticApp } from "../hostedPairing";
 import { shellEnvironment } from "../state/shell";
+import { recoverRootRoute, runBoundedRootRouteRecovery } from "../rootRouteRecovery";
 import { useAtomValue } from "@effect/atom-react";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useEnvironments, usePrimaryEnvironment } from "../state/environments";
@@ -240,6 +246,36 @@ function HostedStaticEnvironmentBootstrap() {
 function RootRouteErrorView({ error, reset }: ErrorComponentProps) {
   const message = errorMessage(error);
   const details = errorDetails(error);
+  const router = useRouter();
+  const retryInFlight = useRef<Promise<void> | null>(null);
+  const [retrying, setRetrying] = useState(false);
+  const retry = useEffectEvent(() => {
+    if (retryInFlight.current) return retryInFlight.current;
+    setRetrying(true);
+    const operation = recoverRootRoute({
+      refreshSessionState: refreshPrimarySessionState,
+      retryAuthBootstrap: retryInitialServerAuthGateState,
+      invalidateRoute: () => router.invalidate(),
+      resetBoundary: reset,
+    }).finally(() => {
+      retryInFlight.current = null;
+      setRetrying(false);
+    });
+    retryInFlight.current = operation;
+    return operation;
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    void runBoundedRootRouteRecovery({
+      recover: retry,
+      wait: (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
+      isCancelled: () => cancelled,
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [error]);
 
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background px-4 py-10 text-foreground sm:px-6">
@@ -258,8 +294,8 @@ function RootRouteErrorView({ error, reset }: ErrorComponentProps) {
         <p className="mt-2 text-sm leading-relaxed text-muted-foreground">{message}</p>
 
         <div className="mt-5 flex flex-wrap gap-2">
-          <Button size="sm" onClick={() => reset()}>
-            Try again
+          <Button size="sm" disabled={retrying} onClick={() => void retry()}>
+            {retrying ? "Trying again…" : "Try again"}
           </Button>
           <Button size="sm" variant="outline" onClick={() => window.location.reload()}>
             Reload app

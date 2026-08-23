@@ -7,6 +7,7 @@ import type {
   ProviderInteractionMode,
   ResolvedKeybindingsConfig,
   RuntimeMode,
+  SubagentBackend,
   ScopedThreadRef,
   ServerProvider,
   ThreadId,
@@ -211,7 +212,7 @@ import {
   XIcon,
 } from "lucide-react";
 import { proposedPlanTitle } from "../../proposedPlan";
-import { getProviderInteractionModeToggle } from "../../providerModels";
+import { getProviderInteractionModeToggle, getSubagentBackendOptions } from "../../providerModels";
 import {
   applyProviderInstanceSettings,
   deriveProviderInstanceEntries,
@@ -391,6 +392,69 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
   );
 });
 
+const ComposerSubagentBackendControl = memo(function ComposerSubagentBackendControl(props: {
+  subagentBackend: SubagentBackend | null;
+  subagentBackendOptions: ReturnType<typeof getSubagentBackendOptions>;
+  onSubagentBackendChange: (backend: SubagentBackend) => void;
+}) {
+  const selectedOption = props.subagentBackendOptions.find(
+    (option) => option.value === props.subagentBackend,
+  );
+  return (
+    <>
+      <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
+      <Tooltip>
+        <Select
+          value={props.subagentBackend ?? ""}
+          onValueChange={(value) => {
+            const option = props.subagentBackendOptions.find(
+              (candidate) => candidate.value === value,
+            );
+            if (option?.supported) props.onSubagentBackendChange(option.value);
+          }}
+        >
+          <TooltipTrigger
+            render={
+              <ComposerSelectControl
+                className="shrink-0 font-medium"
+                aria-label="Sub-agent backend"
+                data-chat-subagent-backend="true"
+              />
+            }
+          >
+            <ComposerControlIcon icon={BotIcon} />
+            <SelectValue>{selectedOption?.label ?? "Sub-agents"}</SelectValue>
+          </TooltipTrigger>
+          <SelectPopup alignItemWithTrigger={false}>
+            {props.subagentBackendOptions.map((option) => (
+              <SelectItem
+                key={option.value}
+                value={option.value}
+                disabled={!option.supported}
+                hideIndicator
+                className="min-w-72 py-2"
+                title={option.supported ? undefined : option.reason}
+              >
+                <div className="grid min-w-0 gap-0.5">
+                  <span className="font-medium text-foreground">{option.label}</span>
+                  <span className="text-muted-foreground text-xs leading-4">
+                    {option.supported ? option.description : option.reason}
+                  </span>
+                </div>
+              </SelectItem>
+            ))}
+          </SelectPopup>
+        </Select>
+        <TooltipPopup side="top">
+          {selectedOption?.supported
+            ? "Select the callable sub-agent backend for the next turn."
+            : (selectedOption?.reason ?? "Select a supported sub-agent backend for the next turn.")}
+        </TooltipPopup>
+      </Tooltip>
+    </>
+  );
+});
+
 const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(props: {
   compact: boolean;
   activeContextWindow: ReturnType<typeof deriveLatestContextWindowSnapshot>;
@@ -491,6 +555,7 @@ export interface ChatComposerHandle {
     selectedProvider: ProviderDriverKind;
     selectedModel: string;
     selectedProviderModels: ReadonlyArray<ServerProvider["models"][number]>;
+    subagentBackend: SubagentBackend | null;
   };
   /** Validate the fully composed text immediately before a provider turn starts. */
   validateProviderInput: (providerInput: string) => boolean;
@@ -551,6 +616,7 @@ export interface ChatComposerProps {
   // Mode
   runtimeMode: RuntimeMode;
   interactionMode: ProviderInteractionMode;
+  subagentBackend: SubagentBackend | null;
 
   // Provider / model
   lockedProvider: ProviderDriverKind | null;
@@ -598,6 +664,7 @@ export interface ChatComposerProps {
   getModelDisabledReason: (instanceId: ProviderInstanceId, model: string) => string | null;
   toggleInteractionMode: () => void;
   handleRuntimeModeChange: (mode: RuntimeMode) => void;
+  handleSubagentBackendChange: (backend: SubagentBackend) => void;
   handleInteractionModeChange: (mode: ProviderInteractionMode) => void;
 
   focusComposer: () => void;
@@ -643,6 +710,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeProposedPlan,
     runtimeMode,
     interactionMode,
+    subagentBackend,
     lockedProvider,
     providerStatuses,
     activeProjectDefaultModelSelection,
@@ -670,6 +738,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     getModelDisabledReason,
     toggleInteractionMode,
     handleRuntimeModeChange,
+    handleSubagentBackendChange,
     handleInteractionModeChange,
     focusComposer,
     scheduleComposerFocus,
@@ -858,6 +927,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const selectedProviderModels = useMemo<ReadonlyArray<ServerProvider["models"][number]>>(
     () => selectedProviderEntry?.models ?? [],
     [selectedProviderEntry],
+  );
+  const subagentBackendOptions = useMemo(
+    () =>
+      getSubagentBackendOptions(selectedProviderModels, selectedModel, selectedProvider, {
+        workersEnabled: props.settings.enableT3Workers,
+      }),
+    [props.settings.enableT3Workers, selectedModel, selectedProvider, selectedProviderModels],
   );
 
   const composerPromptInjectionState = useMemo(
@@ -2632,6 +2708,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         selectedProvider,
         selectedModel,
         selectedProviderModels,
+        subagentBackend,
       }),
       validateProviderInput: (providerInput: string) => {
         const validationMessage = getComposerSubmissionValidationMessage({
@@ -2672,6 +2749,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       selectedPromptEffort,
       selectedProvider,
       selectedProviderModels,
+      subagentBackend,
     ],
   );
 
@@ -3179,10 +3257,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   <CompactComposerControlsMenu
                     interactionMode={interactionMode}
                     runtimeMode={runtimeMode}
+                    subagentBackend={subagentBackend}
+                    subagentBackendOptions={subagentBackendOptions}
                     showInteractionModeToggle={composerProviderControls.showInteractionModeToggle}
                     traitsMenuContent={providerTraitsMenuContent}
                     onToggleInteractionMode={toggleInteractionMode}
                     onRuntimeModeChange={handleRuntimeModeChange}
+                    onSubagentBackendChange={handleSubagentBackendChange}
                   />
                 ) : (
                   <>
@@ -3200,6 +3281,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       onRuntimeModeChange={handleRuntimeModeChange}
                     />
                   </>
+                )}
+                {isComposerFooterCompact ? null : (
+                  <ComposerSubagentBackendControl
+                    subagentBackend={subagentBackend}
+                    subagentBackendOptions={subagentBackendOptions}
+                    onSubagentBackendChange={handleSubagentBackendChange}
+                  />
                 )}
               </div>
 

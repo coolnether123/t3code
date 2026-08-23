@@ -1,8 +1,11 @@
 import {
   type EnvironmentId,
+  type ModelSelection,
   PreviewAutomationUnavailableError,
   type ProviderInstanceId,
+  type RuntimeMode,
   type ThreadId,
+  type TurnId,
   WorkerDisabledError,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -15,6 +18,12 @@ export interface McpInvocationScope {
   readonly threadId: ThreadId;
   readonly providerSessionId: string;
   readonly providerInstanceId: ProviderInstanceId;
+  /** Canonical selection used by the parent turn that owns this credential. */
+  readonly parentModelSelection?: ModelSelection | undefined;
+  /** Active canonical parent turn. Worker creation is bound to this lineage. */
+  readonly parentTurnId?: TurnId | undefined;
+  /** Always set by issued credentials. Missing legacy/test scopes fail closed. */
+  readonly runtimeMode?: RuntimeMode | undefined;
   readonly workingDirectory?: string | undefined;
   readonly capabilities: ReadonlySet<McpCapability>;
   readonly issuedAt: number;

@@ -1,4 +1,9 @@
-import type { OrchestrationEvent, OrchestrationReadModel, ThreadId } from "@t3tools/contracts";
+import type {
+  MessageId,
+  OrchestrationEvent,
+  OrchestrationReadModel,
+  ThreadId,
+} from "@t3tools/contracts";
 import {
   OrchestrationCheckpointSummary,
   OrchestrationMessage,
@@ -18,6 +23,8 @@ import {
   ThreadArchivedPayload,
   ThreadCreatedPayload,
   ThreadDeletedPayload,
+  ThreadEditFromHereFinishedPayload,
+  ThreadEditFromHereRequestedPayload,
   ThreadInteractionModeSetPayload,
   ThreadMetaUpdatedPayload,
   ThreadProposedPlanUpsertedPayload,
@@ -91,7 +98,15 @@ function retainThreadMessagesAfterRevert(
   messages: ReadonlyArray<OrchestrationMessage>,
   retainedTurnIds: ReadonlySet<string>,
   turnCount: number,
+  sourceMessageId?: MessageId,
 ): ReadonlyArray<OrchestrationMessage> {
+  if (sourceMessageId !== undefined) {
+    const sourceIndex = messages.findIndex((message) => message.id === sourceMessageId);
+    if (sourceIndex >= 0) {
+      return messages.filter((message, index) => message.role === "system" || index < sourceIndex);
+    }
+  }
+
   const retainedMessageIds = new Set<string>();
   for (const message of messages) {
     if (message.role === "system") {
@@ -153,7 +168,11 @@ function retainThreadMessagesAfterRevert(
 function retainThreadActivitiesAfterRevert(
   activities: ReadonlyArray<OrchestrationThread["activities"][number]>,
   retainedTurnIds: ReadonlySet<string>,
+  cutoffCreatedAt?: string,
 ): ReadonlyArray<OrchestrationThread["activities"][number]> {
+  if (cutoffCreatedAt !== undefined) {
+    return activities.filter((activity) => activity.createdAt < cutoffCreatedAt);
+  }
   return activities.filter(
     (activity) => activity.turnId === null || retainedTurnIds.has(activity.turnId),
   );
@@ -162,7 +181,11 @@ function retainThreadActivitiesAfterRevert(
 function retainThreadProposedPlansAfterRevert(
   proposedPlans: ReadonlyArray<OrchestrationThread["proposedPlans"][number]>,
   retainedTurnIds: ReadonlySet<string>,
+  cutoffCreatedAt?: string,
 ): ReadonlyArray<OrchestrationThread["proposedPlans"][number]> {
+  if (cutoffCreatedAt !== undefined) {
+    return proposedPlans.filter((proposedPlan) => proposedPlan.createdAt < cutoffCreatedAt);
+  }
   return proposedPlans.filter(
     (proposedPlan) => proposedPlan.turnId === null || retainedTurnIds.has(proposedPlan.turnId),
   );
@@ -220,6 +243,7 @@ export function projectEvent(
             createdAt: payload.createdAt,
             updatedAt: payload.updatedAt,
             deletedAt: null,
+            editFromHere: null,
           };
 
           return {
@@ -736,12 +760,18 @@ export function projectEvent(
             thread.messages,
             retainedTurnIds,
             payload.turnCount,
+            payload.sourceMessageId,
           ).slice(-MAX_THREAD_MESSAGES);
           const proposedPlans = retainThreadProposedPlansAfterRevert(
             thread.proposedPlans,
             retainedTurnIds,
+            payload.cutoffCreatedAt,
           ).slice(-200);
-          const activities = retainThreadActivitiesAfterRevert(thread.activities, retainedTurnIds);
+          const activities = retainThreadActivitiesAfterRevert(
+            thread.activities,
+            retainedTurnIds,
+            payload.cutoffCreatedAt,
+          );
 
           const latestCheckpoint = checkpoints.at(-1) ?? null;
           const latestTurn =
@@ -765,6 +795,50 @@ export function projectEvent(
               activities,
               latestTurn,
               updatedAt: event.occurredAt,
+            }),
+          };
+        }),
+      );
+
+    case "thread.edit-from-here-requested":
+      return decodeForEvent(
+        ThreadEditFromHereRequestedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            editFromHere: {
+              requestId: payload.requestId,
+              mode: payload.mode,
+              sourceMessageId: payload.sourceMessageId,
+              ...(payload.targetThreadId !== undefined
+                ? { targetThreadId: payload.targetThreadId }
+                : {}),
+              startedAt: payload.createdAt,
+            },
+            updatedAt: event.occurredAt,
+          }),
+        })),
+      );
+
+    case "thread.edit-from-here-finished":
+      return decodeForEvent(
+        ThreadEditFromHereFinishedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => {
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          if (!thread || thread.editFromHere?.requestId !== payload.requestId) return nextBase;
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              editFromHere: null,
+              updatedAt: payload.finishedAt,
             }),
           };
         }),

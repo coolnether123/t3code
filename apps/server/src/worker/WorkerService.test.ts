@@ -1,0 +1,537 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import {
+  ApprovalRequestId,
+  EventId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ThreadId,
+  TurnId,
+  WorkerActivationId,
+  WorkerId,
+  workerDisplayNameFor,
+  type WorkerActivation,
+  type WorkerApprovalRequest,
+  type WorkerMessage,
+  type WorkerSummary,
+  type ProviderRuntimeEvent,
+} from "@t3tools/contracts";
+import { expect, it } from "@effect/vitest";
+import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
+
+import { WorkerBackend, type WorkerBackendShape } from "./WorkerBackend.ts";
+import { WorkerObserver } from "./WorkerObserver.ts";
+import { __testing as WorkerServiceTesting } from "./WorkerService.ts";
+import { WorkerStore, type StoredWorker, type WorkerStoreShape } from "./WorkerStore.ts";
+
+const now = "2026-08-22T20:00:00.000Z";
+const workerId = WorkerId.make("worker-approval");
+const activationId = WorkerActivationId.make("activation-approval");
+const requestId = ApprovalRequestId.make("request-approval");
+const providerThreadId = ThreadId.make("t3-worker:worker-approval");
+const providerInstanceId = ProviderInstanceId.make("codex");
+const parentThreadId = ThreadId.make("parent-thread");
+
+it("preserves provider input, output, and cached-input usage dimensions", () => {
+  expect(
+    WorkerServiceTesting.projectWorkerTokenUsage({
+      usedTokens: 900,
+      totalProcessedTokens: 1_250,
+      inputTokens: 1_000,
+      cachedInputTokens: 640,
+      outputTokens: 250,
+      reasoningOutputTokens: 75,
+    }),
+  ).toEqual({
+    inputTokens: 1_000,
+    cachedInputTokens: 640,
+    outputTokens: 250,
+    reasoningTokens: 75,
+    totalTokens: 1_250,
+  });
+
+  expect(
+    WorkerServiceTesting.projectWorkerTokenUsage({
+      usedTokens: 12,
+      inputTokens: 10,
+      outputTokens: 2,
+    }),
+  ).toEqual({
+    inputTokens: 10,
+    outputTokens: 2,
+    reasoningTokens: 0,
+    totalTokens: 12,
+  });
+});
+
+it.effect("persists supplied names and migrates legacy Workers to a stable generated name", () => {
+  let stored: StoredWorker | undefined;
+  let activation: WorkerActivation | undefined;
+  const messages: Array<WorkerMessage> = [];
+  const providerThread = ThreadId.make("t3-worker-name-test");
+  const store = WorkerStore.of({
+    saveWorker: (worker) => Effect.sync(() => void (stored = worker)),
+    getWorker: () => Effect.succeed(Option.fromNullishOr(stored)),
+    listWorkers: () => Effect.succeed(stored === undefined ? [] : [stored]),
+    saveActivation: (next) => Effect.sync(() => void (activation = next)),
+    getActivation: () => Effect.succeed(Option.fromNullishOr(activation)),
+    listActivations: () => Effect.succeed(activation === undefined ? [] : [activation]),
+    findProviderThread: () => Effect.succeed(Option.none()),
+    saveMessage: (message) => Effect.sync(() => void messages.push(message)),
+    listMessages: () => Effect.succeed(messages),
+    saveApproval: () => Effect.void,
+    getPendingApproval: () => Effect.succeed(Option.none()),
+    resolveApproval: () => Effect.void,
+    saveObserverReport: () => Effect.void,
+    listObserverReports: () => Effect.succeed([]),
+    saveWaitLease: () => Effect.void,
+    finishWaitLease: () => Effect.void,
+    appendProviderEvent: () => Effect.void,
+    listProviderEvents: () => Effect.succeed([]),
+  } satisfies WorkerStoreShape);
+  const backend = WorkerBackend.of({
+    start: () =>
+      Effect.succeed({
+        providerThreadId: providerThread,
+        providerTurnId: TurnId.make("name-turn"),
+      }),
+    send: () => Effect.die("unused"),
+    interrupt: () => Effect.die("unused"),
+    stop: () => Effect.die("unused"),
+    respondToApproval: () => Effect.die("unused"),
+    hasLiveSession: () => Effect.succeed(true),
+  });
+
+  return Effect.gen(function* () {
+    const service = yield* WorkerServiceTesting.make;
+    const started = yield* service.start({
+      parentThreadId,
+      providerInstanceId,
+      input: {
+        displayName: "  Review Bot\n1  ",
+        title: "Historical assignment title",
+        assignment: "Inspect naming.",
+        context: { references: [], snippets: [] },
+      },
+    });
+    expect(started.summary.displayName).toBe("Review Bot 1");
+    expect(stored?.summary.displayName).toBe("Review Bot 1");
+
+    const { displayName: _displayName, ...legacySummary } = stored!.summary;
+    const legacy = { ...stored!, summary: legacySummary };
+    stored = legacy;
+    const migrated = yield* service.get(started.summary.id);
+    expect(migrated.summary.displayName).toBe(workerDisplayNameFor(started.summary.id));
+    expect(stored?.summary.displayName).toBe(migrated.summary.displayName);
+    const reloaded = yield* service.get(started.summary.id);
+    expect(reloaded.summary.displayName).toBe(migrated.summary.displayName);
+    expect(reloaded.summary.title).toBe("Historical assignment title");
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.succeed(WorkerStore, store),
+        Layer.succeed(WorkerBackend, backend),
+        Layer.succeed(WorkerObserver, WorkerObserver.of({ observe: () => Effect.die("unused") })),
+        NodeServices.layer,
+      ),
+    ),
+  );
+});
+
+it.effect("reconciles Worker lineage after rewind and stops discarded active work", () => {
+  const retainedTurnId = TurnId.make("turn-retained");
+  const discardedTurnId = TurnId.make("turn-discarded");
+  const makeStored = (
+    id: string,
+    status: WorkerSummary["status"],
+    parentTurnId: TurnId | undefined,
+  ): StoredWorker => {
+    const idValue = WorkerId.make(id);
+    const activeActivationId =
+      status === "running" ? WorkerActivationId.make(`${id}-activation`) : undefined;
+    return {
+      summary: {
+        id: idValue,
+        title: id,
+        status,
+        backend: "codex",
+        parentThreadId,
+        providerInstanceId,
+        model: "gpt-5.6-luna",
+        runtimeMode: "full-access",
+        createdAt: now,
+        updatedAt: now,
+        ...(activeActivationId === undefined ? {} : { activeActivationId }),
+        lastActivityAt: now,
+        unreadMessageCount: 0,
+        activationCount: 1,
+        resumable: true,
+        usage: { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, totalTokens: 0 },
+      },
+      assignment: id,
+      context: { references: [], snippets: [] },
+      ...(parentTurnId === undefined ? {} : { parentTurnId }),
+    };
+  };
+  const retained = makeStored("worker-retained", "completed", retainedTurnId);
+  const discardedCompleted = makeStored("worker-discarded-completed", "completed", undefined);
+  const discardedActive = makeStored("worker-discarded-active", "running", discardedTurnId);
+  const workers = new Map(
+    [retained, discardedCompleted, discardedActive].map((worker) => [worker.summary.id, worker]),
+  );
+  const activations = new Map<WorkerId, ReadonlyArray<WorkerActivation>>([
+    [
+      retained.summary.id,
+      [
+        {
+          id: WorkerActivationId.make("retained-activation"),
+          workerId: retained.summary.id,
+          status: "completed",
+          providerInstanceId,
+          providerThreadId: ThreadId.make("t3-worker-worker-retained"),
+          parentTurnId: retainedTurnId,
+          startedAt: now,
+          finishedAt: now,
+          lastActivityAt: now,
+          usageBaseline: { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, totalTokens: 0 },
+          usageDelta: { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, totalTokens: 0 },
+        },
+      ],
+    ],
+    [discardedCompleted.summary.id, []],
+    [
+      discardedActive.summary.id,
+      [
+        {
+          id: discardedActive.summary.activeActivationId!,
+          workerId: discardedActive.summary.id,
+          status: "running",
+          providerInstanceId,
+          providerThreadId: ThreadId.make("t3-worker-worker-discarded-active"),
+          parentTurnId: discardedTurnId,
+          startedAt: now,
+          lastActivityAt: now,
+          usageBaseline: { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, totalTokens: 0 },
+          usageDelta: { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, totalTokens: 0 },
+        },
+      ],
+    ],
+  ]);
+  const stopped: Array<ThreadId> = [];
+  let appendedProviderEvents = 0;
+  const historicalResult = JSON.stringify({ summary: { id: discardedCompleted.summary.id } });
+  const preRewindActivities = [
+    {
+      id: EventId.make("historical-worker-start"),
+      tone: "tool" as const,
+      kind: "tool.completed",
+      summary: "Start Worker",
+      payload: {
+        itemType: "mcp_tool_call",
+        data: {
+          item: {
+            tool: "mcp__t3_code__worker_start",
+            result: { content: [{ type: "text", text: historicalResult }] },
+          },
+        },
+      },
+      turnId: discardedTurnId,
+      createdAt: now,
+    },
+  ];
+  const store = WorkerStore.of({
+    saveWorker: (worker) => Effect.sync(() => void workers.set(worker.summary.id, worker)),
+    getWorker: (id) => Effect.succeed(Option.fromNullishOr(workers.get(id))),
+    listWorkers: (input) =>
+      Effect.succeed(
+        [...workers.values()].filter(
+          (worker) => input.includeDiscarded || worker.discardedAt === undefined,
+        ),
+      ),
+    saveActivation: (activation) =>
+      Effect.sync(() => {
+        const current = activations.get(activation.workerId) ?? [];
+        activations.set(
+          activation.workerId,
+          current.some((item) => item.id === activation.id)
+            ? current.map((item) => (item.id === activation.id ? activation : item))
+            : [...current, activation],
+        );
+      }),
+    getActivation: (id) =>
+      Effect.succeed(
+        Option.fromNullishOr([...activations.values()].flat().find((item) => item.id === id)),
+      ),
+    listActivations: (id) => Effect.succeed(activations.get(id) ?? []),
+    findProviderThread: () =>
+      Effect.succeed(
+        Option.some({
+          workerId: discardedActive.summary.id,
+          activationId: discardedActive.summary.activeActivationId!,
+        }),
+      ),
+    saveMessage: () => Effect.void,
+    listMessages: () => Effect.succeed([]),
+    saveApproval: () => Effect.void,
+    getPendingApproval: () => Effect.succeed(Option.none()),
+    resolveApproval: () => Effect.void,
+    saveObserverReport: () => Effect.void,
+    listObserverReports: () => Effect.succeed([]),
+    saveWaitLease: () => Effect.void,
+    finishWaitLease: () => Effect.void,
+    appendProviderEvent: () => Effect.sync(() => void (appendedProviderEvents += 1)),
+    listProviderEvents: () => Effect.succeed([]),
+    // The live projection has already truncated future activity by apply time.
+    listParentActivities: () => Effect.succeed([]),
+  } satisfies WorkerStoreShape);
+  const backend = WorkerBackend.of({
+    start: () => Effect.die("unused"),
+    send: () => Effect.die("unused"),
+    interrupt: () => Effect.die("unused"),
+    stop: (threadId) => Effect.sync(() => void stopped.push(threadId)),
+    respondToApproval: () => Effect.die("unused"),
+    hasLiveSession: () => Effect.succeed(true),
+  });
+
+  return Effect.gen(function* () {
+    const service = yield* WorkerServiceTesting.make;
+    const eventFiber = yield* Effect.forkChild(Stream.runHead(service.stream), {
+      startImmediately: true,
+    });
+    yield* Effect.yieldNow;
+    const discarded = yield* service.reconcileParentAfterRewind({
+      parentThreadId,
+      retainedTurnIds: new Set([retainedTurnId]),
+      requestId: "rewind-request",
+      discardUnattributed: false,
+      parentActivities: preRewindActivities,
+    });
+
+    expect(discarded).toEqual([discardedCompleted.summary.id, discardedActive.summary.id]);
+    expect(Option.getOrUndefined(yield* Fiber.join(eventFiber))).toMatchObject({
+      type: "deleted",
+      workerId: discardedCompleted.summary.id,
+    });
+    expect(stopped).toEqual([ThreadId.make("t3-worker-worker-discarded-active")]);
+    expect((yield* service.list({ parentThreadId, includeClosed: true })).workers).toEqual([
+      expect.objectContaining({ id: retained.summary.id }),
+    ]);
+    expect(yield* service.get(discardedActive.summary.id).pipe(Effect.flip)).toMatchObject({
+      operation: "worker.read",
+    });
+    yield* service.handleProviderEvent({
+      eventId: EventId.make("late-discarded-event"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: ThreadId.make("t3-worker-worker-discarded-active"),
+      createdAt: now,
+      type: "turn.completed",
+      payload: { state: "completed" },
+    });
+    expect(appendedProviderEvents).toBe(0);
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.succeed(WorkerStore, store),
+        Layer.succeed(WorkerBackend, backend),
+        Layer.succeed(WorkerObserver, WorkerObserver.of({ observe: () => Effect.die("unused") })),
+        NodeServices.layer,
+      ),
+    ),
+  );
+});
+
+it.effect("resumes persisted Worker status after an accepted provider approval", () => {
+  const operations: Array<string> = [];
+  let stored: StoredWorker = {
+    summary: {
+      id: workerId,
+      title: "Approval worker",
+      status: "waitingApproval",
+      backend: "codex",
+      parentThreadId,
+      providerInstanceId,
+      model: "gpt-5.6-sol",
+      runtimeMode: "approval-required",
+      createdAt: now,
+      updatedAt: now,
+      activeActivationId: activationId,
+      lastActivityAt: now,
+      unreadMessageCount: 0,
+      activationCount: 1,
+      resumable: true,
+      usage: { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, totalTokens: 0 },
+    } satisfies WorkerSummary,
+    assignment: "Inspect the repository.",
+    context: { references: [], snippets: [] },
+  };
+  let activation: WorkerActivation = {
+    id: activationId,
+    workerId,
+    status: "waitingApproval",
+    providerInstanceId,
+    providerThreadId,
+    runtimeMode: "approval-required",
+    startedAt: now,
+    lastActivityAt: now,
+    usageBaseline: { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, totalTokens: 0 },
+    usageDelta: { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, totalTokens: 0 },
+  };
+  let approval: WorkerApprovalRequest | undefined = {
+    requestId,
+    workerId,
+    activationId,
+    kind: "provider-request",
+    summary: "Approve command",
+    requestedAt: now,
+    status: "pending",
+  };
+  const messages: Array<WorkerMessage> = [];
+
+  const store = WorkerStore.of({
+    saveWorker: (next) =>
+      Effect.sync(() => {
+        stored = next;
+        operations.push(`worker:${next.summary.status}`);
+      }),
+    getWorker: () => Effect.succeed(Option.some(stored)),
+    listWorkers: () => Effect.succeed([stored]),
+    saveActivation: (next) =>
+      Effect.sync(() => {
+        activation = next;
+        operations.push(`activation:${next.status}`);
+      }),
+    getActivation: () => Effect.succeed(Option.some(activation)),
+    listActivations: () => Effect.succeed([activation]),
+    findProviderThread: () => Effect.succeed(Option.some({ workerId, activationId })),
+    saveMessage: (message) =>
+      Effect.sync(() => {
+        messages.push(message);
+        operations.push(`message:${message.kind}`);
+      }),
+    listMessages: () => Effect.succeed(messages),
+    saveApproval: (next) =>
+      Effect.sync(() => {
+        approval = next;
+      }),
+    getPendingApproval: () =>
+      Effect.succeed(approval === undefined ? Option.none() : Option.some(approval)),
+    resolveApproval: () =>
+      Effect.sync(() => {
+        approval = undefined;
+        operations.push("approval:resolved");
+      }),
+    saveObserverReport: () => Effect.void,
+    listObserverReports: () => Effect.succeed([]),
+    saveWaitLease: () => Effect.void,
+    finishWaitLease: () => Effect.void,
+    appendProviderEvent: () => Effect.void,
+    listProviderEvents: () =>
+      Effect.succeed([
+        {
+          eventId: EventId.make("worker-tool-started"),
+          provider: ProviderDriverKind.make("codex"),
+          threadId: providerThreadId,
+          createdAt: now,
+          itemId: "worker-tool-item",
+          type: "item.started",
+          payload: {
+            itemType: "command_execution",
+            status: "inProgress",
+            title: "Inspect status",
+            detail: "Command started",
+          },
+        } as ProviderRuntimeEvent,
+        {
+          eventId: EventId.make("worker-tool-completed"),
+          provider: ProviderDriverKind.make("codex"),
+          threadId: providerThreadId,
+          createdAt: now,
+          itemId: "worker-tool-item",
+          type: "item.completed",
+          payload: {
+            itemType: "command_execution",
+            title: "Inspect status",
+            detail: "Command completed",
+          },
+        } as ProviderRuntimeEvent,
+      ]),
+    listParentActivities: () =>
+      Effect.succeed([
+        {
+          id: EventId.make("parent-worker-start"),
+          tone: "tool",
+          kind: "tool.completed",
+          summary: "Start Worker",
+          payload: {
+            itemType: "mcp_tool_call",
+            data: { item: { tool: "worker_start", status: "completed" } },
+          },
+          turnId: null,
+          createdAt: now,
+        },
+      ]),
+  } satisfies WorkerStoreShape);
+
+  const backend = WorkerBackend.of({
+    start: () => Effect.die("unused"),
+    send: () => Effect.die("unused"),
+    interrupt: () => Effect.die("unused"),
+    stop: () => Effect.die("unused"),
+    respondToApproval: () =>
+      Effect.sync(() => {
+        operations.push("backend:accepted");
+      }),
+    hasLiveSession: () => Effect.succeed(true),
+  } satisfies WorkerBackendShape);
+
+  return Effect.gen(function* () {
+    const service = yield* WorkerServiceTesting.make;
+    const detail = yield* service.respondToApproval({ workerId, requestId, decision: "accept" });
+
+    expect(operations).toEqual([
+      "worker:waitingApproval",
+      "backend:accepted",
+      "approval:resolved",
+      "activation:running",
+      "worker:running",
+      "message:approvalDecision",
+      "worker:running",
+    ]);
+    expect(detail.summary.status).toBe("running");
+    expect(detail.activations[0]?.status).toBe("running");
+    expect(detail.pendingApproval).toBeUndefined();
+    expect(detail.activities).toEqual([
+      expect.objectContaining({
+        id: "worker-tool-started",
+        kind: "tool.completed",
+        title: "Inspect status",
+      }),
+    ]);
+    expect(detail.messages.at(-1)).toMatchObject({
+      author: "parent",
+      kind: "approvalDecision",
+      body: "Approval accept",
+    });
+    const list = yield* service.list({ parentThreadId, includeClosed: true });
+    expect(list.overview).toMatchObject({
+      workersCreated: 1,
+      workersActive: 1,
+      toolCalls: 1,
+      parentCoordinationCalls: 1,
+      parentCoordinationCoverage: { status: "complete" },
+      parentCoordinationTokenCoverage: { status: "unavailable" },
+    });
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        Layer.succeed(WorkerStore, store),
+        Layer.succeed(WorkerBackend, backend),
+        Layer.succeed(WorkerObserver, WorkerObserver.of({ observe: () => Effect.die("unused") })),
+        NodeServices.layer,
+      ),
+    ),
+  );
+});

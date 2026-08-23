@@ -25,6 +25,8 @@ import {
   ProviderApprovalDecision,
   ThreadId,
   ProviderSendTurnInput,
+  type ProviderSessionStartInput,
+  type SubagentBackend,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Crypto from "effect/Crypto";
@@ -55,8 +57,10 @@ import {
 import { type CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import { isWorkerLinkedProviderThreadId } from "../../worker/WorkerThreadBoundary.ts";
 import {
   CodexResumeCursorSchema,
+  type CodexResumeCursor,
   CodexSessionRuntimeThreadIdMissingError,
   makeCodexSessionRuntime,
   type CodexSessionRuntimeError,
@@ -94,6 +98,8 @@ interface CodexAdapterSessionContext {
   readonly scope: Scope.Closeable;
   readonly runtime: CodexSessionRuntimeShape;
   readonly eventFiber: Fiber.Fiber<void, never>;
+  readonly launchBackend?: SubagentBackend;
+  readonly startInput: ProviderSessionStartInput;
   stopped: boolean;
 }
 
@@ -1665,6 +1671,16 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           input.modelSelection?.instanceId === boundInstanceId
             ? getCodexServiceTierOptionValue(input.modelSelection)
             : undefined;
+        const workerSession = isWorkerLinkedProviderThreadId(input.threadId);
+        const t3WorkersSettingEnabled =
+          !workerSession && (yield* options?.enableT3Workers ?? Effect.succeed(false));
+        if (input.subagentBackend === "native-v1-control" && !t3WorkersSettingEnabled) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue: "Native V1 control requires T3 Workers to be enabled in settings.",
+          });
+        }
         const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
         const runtimeInput: CodexSessionRuntimeOptions = {
           threadId: input.threadId,
@@ -1679,10 +1695,15 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ? { resumeCursor: input.resumeCursor }
             : {}),
           runtimeMode: input.runtimeMode,
+          ...(workerSession ? { workerSession: true } : {}),
           ...(input.modelSelection?.instanceId === boundInstanceId
             ? { model: input.modelSelection.model }
             : {}),
           ...(serviceTier ? { serviceTier } : {}),
+          ...(input.subagentBackend !== undefined
+            ? { subagentBackend: input.subagentBackend }
+            : {}),
+          ...(t3WorkersSettingEnabled ? { enableT3Workers: true } : {}),
           ...(mcpSession
             ? {
                 environment: {
@@ -1764,6 +1785,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           scope: sessionScope,
           runtime,
           eventFiber,
+          ...(input.subagentBackend !== undefined ? { launchBackend: input.subagentBackend } : {}),
+          startInput: input,
           stopped: false,
         });
         sessionScopeTransferred = true;
@@ -1811,8 +1834,41 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       { concurrency: 1 },
     );
 
-    const session = yield* requireSession(input.threadId);
-    const enableT3Workers = yield* options?.enableT3Workers ?? Effect.succeed(false);
+    const t3WorkersSettingEnabled =
+      !isWorkerLinkedProviderThreadId(input.threadId) &&
+      (yield* options?.enableT3Workers ?? Effect.succeed(false));
+    if (input.subagentBackend === "native-v1-control" && !t3WorkersSettingEnabled) {
+      return yield* new ProviderAdapterValidationError({
+        provider: PROVIDER,
+        operation: "sendTurn",
+        issue: "Native V1 control requires T3 Workers to be enabled in settings.",
+      });
+    }
+    let session = yield* requireSession(input.threadId);
+    if (input.subagentBackend !== undefined && session.launchBackend !== input.subagentBackend) {
+      const currentProviderSession = yield* session.runtime.getSession.pipe(
+        Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "session/read", cause)),
+      );
+      if (!isCodexResumeCursorSchema(currentProviderSession.resumeCursor)) {
+        return yield* new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "sendTurn",
+          issue:
+            "Cannot switch the sub-agent backend because the active Codex session has no resumable thread cursor.",
+        });
+      }
+
+      yield* startSession({
+        ...session.startInput,
+        resumeCursor: currentProviderSession.resumeCursor,
+        subagentBackend: input.subagentBackend,
+        ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+      });
+      session = yield* requireSession(input.threadId);
+    }
+    const enableT3Workers =
+      t3WorkersSettingEnabled &&
+      (input.subagentBackend === undefined || input.subagentBackend === "native-v1-control");
     const reasoningEffort =
       input.modelSelection?.instanceId === boundInstanceId
         ? getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort")
@@ -1834,11 +1890,29 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           : {}),
         ...(serviceTier ? { serviceTier } : {}),
         ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
+        ...(input.subagentBackend !== undefined ? { subagentBackend: input.subagentBackend } : {}),
         ...(enableT3Workers ? { enableT3Workers: true } : {}),
         ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
       })
       .pipe(Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/start", cause)));
   });
+
+  const createForkResumeCursor: NonNullable<CodexAdapterShape["createForkResumeCursor"]> =
+    Effect.fn("createForkResumeCursor")(function* (sourceThreadId, lastTurnId) {
+      const source = yield* requireSession(sourceThreadId);
+      const sourceSession = yield* source.runtime.getSession;
+      if (!isCodexResumeCursorSchema(sourceSession.resumeCursor)) {
+        return yield* new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "createForkResumeCursor",
+          issue: `Source thread '${sourceThreadId}' has no resumable Codex thread cursor.`,
+        });
+      }
+      return {
+        threadId: sourceSession.resumeCursor.threadId,
+        forkLastTurnId: String(lastTurnId),
+      } satisfies CodexResumeCursor;
+    });
 
   const requireSession = Effect.fn("requireSession")(function* (threadId: ThreadId) {
     const session = sessions.get(threadId);
@@ -1983,6 +2057,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       sessionModelSwitch: "in-session",
     },
     startSession,
+    createForkResumeCursor,
     sendTurn,
     interruptTurn,
     readThread,

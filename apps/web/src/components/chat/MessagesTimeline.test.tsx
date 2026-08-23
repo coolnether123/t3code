@@ -185,8 +185,8 @@ function buildProps() {
     turnDiffSummaryByAssistantMessageId: new Map(),
     routeThreadKey: "environment-local:thread-1",
     onOpenTurnDiff: () => {},
-    revertTurnCountByUserMessageId: new Map(),
-    onRevertUserMessage: () => {},
+    canonicalEditMessageIdByTimelineMessageId: new Map<MessageId, MessageId>(),
+    onEditUserMessage: () => {},
     isRevertingCheckpoint: false,
     onImageExpand: () => {},
     activeThreadEnvironmentId: ACTIVE_THREAD_ENVIRONMENT_ID,
@@ -682,6 +682,57 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain('data-user-message-footer="true"');
   });
 
+  it("renders the edit-from-here action immediately beside copy for a root message", () => {
+    const rootMessage = buildUserTimelineEntry("Root prompt without a checkpoint.");
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[rootMessage]}
+        canonicalEditMessageIdByTimelineMessageId={
+          new Map([[rootMessage.message.id, rootMessage.message.id]])
+        }
+      />,
+    );
+
+    const editActionIndex = markup.indexOf('aria-label="Edit from here"');
+    const copyActionIndex = markup.indexOf('aria-label="Copy link"');
+    expect(editActionIndex).toBeGreaterThan(-1);
+    expect(copyActionIndex).toBeGreaterThan(editActionIndex);
+    expect(markup).toContain('title="Edit from here"');
+    expect(markup).toContain('data-message-action="edit-from-here"');
+    expect(markup).toContain("lucide-undo-2");
+  });
+
+  it("keeps the compact edit action visible and touchable on coarse pointers", () => {
+    const rootMessage = buildUserTimelineEntry("Mobile root prompt.");
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[rootMessage]}
+        canonicalEditMessageIdByTimelineMessageId={
+          new Map([[rootMessage.message.id, rootMessage.message.id]])
+        }
+      />,
+    );
+
+    expect(markup).toContain("pointer-coarse:opacity-100");
+    expect(markup).toContain("pointer-coarse:after:min-h-11");
+    expect(markup).toContain("pointer-coarse:after:min-w-11");
+    expect(markup).not.toContain("pointer-coarse:min-h-11");
+  });
+
+  it("does not offer edit-from-here for an optimistic message boundary", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[buildUserTimelineEntry("Still sending.")]}
+      />,
+    );
+
+    expect(markup).not.toContain('aria-label="Edit from here"');
+    expect(markup).toContain('aria-label="Copy link"');
+  });
+
   it("renders context compaction entries in the normal work log", () => {
     const markup = renderToStaticMarkup(
       <MessagesTimeline
@@ -704,6 +755,48 @@ describe("MessagesTimeline", () => {
 
     expect(markup).toContain("Context compacted");
     expect(markup).toContain("Work Log");
+  });
+
+  it("renders edit-from-here failures as an accessible mobile-safe disclosure card", () => {
+    const technicalDetails =
+      "Orchestration command invariant failed (thread.edit-from-here) at A:\\Dev\\server.ts:12:3";
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "edit-failure-entry",
+            kind: "work",
+            createdAt: "2026-08-22T16:00:02.000Z",
+            entry: {
+              id: "edit-failure",
+              createdAt: "2026-08-22T16:00:02.000Z",
+              label: "Edit from here failed",
+              detail: technicalDetails,
+              tone: "error",
+              sourceActivityKind: "thread.edit-from-here.failed",
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain("Couldn&#x27;t edit from here");
+    expect(markup).toContain(
+      "The task was not changed. Try again, or start a new task from that message.",
+    );
+    expect(markup).toContain("<details");
+    expect(markup).toContain("Technical details");
+    expect(markup).toContain(`<pre class="max-h-52`);
+    expect(markup).toContain(technicalDetails.replaceAll("&", "&amp;"));
+    expect(markup).toContain(">Copy details</button>");
+    expect(markup).toContain(">Dismiss</button>");
+    expect(markup).toContain("min-h-11");
+    expect(markup).toContain("sm:min-h-8");
+    expect(markup).not.toContain("previous tool call");
+    expect(markup.indexOf(technicalDetails.replaceAll("&", "&amp;"))).toBeGreaterThan(
+      markup.indexOf("Technical details"),
+    );
   });
 
   it("formats changed file paths from the workspace root", () => {

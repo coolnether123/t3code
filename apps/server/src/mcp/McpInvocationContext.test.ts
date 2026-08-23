@@ -16,6 +16,7 @@ it.effect("reports the scoped credential context when preview capability is unav
     threadId: ThreadId.make("thread-1"),
     providerSessionId: "provider-session-1",
     providerInstanceId: ProviderInstanceId.make("codex"),
+    runtimeMode: "full-access",
     capabilities: new Set(),
     issuedAt: 1,
   };
@@ -44,6 +45,7 @@ it.effect("rejects a credential without the workers capability", () => {
     threadId: ThreadId.make("thread-1"),
     providerSessionId: "provider-session-1",
     providerInstanceId: ProviderInstanceId.make("codex"),
+    runtimeMode: "approval-required",
     capabilities: new Set(["preview"]),
     issuedAt: 1,
   };

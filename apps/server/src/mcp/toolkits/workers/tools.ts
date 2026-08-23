@@ -38,7 +38,7 @@ const mutatingTool = <T extends Tool.Any>(tool: T): T =>
 export const WorkerStartTool = mutatingTool(
   Tool.make("worker_start", {
     description:
-      "Start one persistent T3 Worker for a bounded assignment. Send only explicit context, paths, snippets, and Worker instructions. The Worker does not inherit the parent conversation.",
+      "Start one persistent T3 Worker for a bounded assignment. Send only explicit context, paths, snippets, and Worker instructions. The Worker does not inherit the parent conversation. Its execution permissions always inherit the parent session and cannot be overridden in this call. Omit modelSelection to inherit the parent's exact provider instance, model, and options. To change supported options such as reasoningEffort, send only modelSelection.options; do not guess instanceId or model aliases.",
     parameters: WorkerMcpStartInput,
     success: WorkerMcpStartResult,
     failure: WorkerError,

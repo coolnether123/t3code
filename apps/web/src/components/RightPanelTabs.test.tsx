@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
 
 import { RightPanelTabs } from "./RightPanelTabs";
+import rightPanelTabsSource from "./RightPanelTabs.tsx?raw";
 
 const previewSurface = {
   id: "browser:tab-1" as const,
@@ -139,6 +140,8 @@ describe("RightPanelTabs Worker availability", () => {
 
   it("renders the Worker surface when enabled", () => {
     expect(renderWorkerSurface(true)).toContain("worker content");
+    expect(rightPanelTabsSource).toContain("Inspect parent-created T3 Worker activity.");
+    expect(rightPanelTabsSource).not.toContain("Manage persistent T3 workers.");
   });
 });
 

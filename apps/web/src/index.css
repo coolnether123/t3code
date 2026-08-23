@@ -994,6 +994,20 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   padding-right: max(env(safe-area-inset-right), 0px);
 }
 
+/* A Worker detail is an immersive read-only surface on narrow screens. The
+   panel tabbar and overview header are navigation chrome, not part of the
+   conversation, so remove them while the detail surface is active. The
+   detail itself owns the back affordance and safe-area inset. */
+@media (max-width: 619px) {
+  [data-right-panel-tabbar]:has(+ [data-right-panel-surface-content] [data-worker-detail-surface]) {
+    display: none;
+  }
+
+  [data-layout="drill-in"]:has([data-worker-detail-surface]) > [data-worker-panel-header] {
+    display: none;
+  }
+}
+
 /* Grain texture for chrome surfaces that float above the body (see the
    --surface-grain note). Layered over the element's background-color, so it
    composes with bg-* utilities. */

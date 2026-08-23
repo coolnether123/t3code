@@ -240,7 +240,7 @@ function RightPanelEmptyState(props: {
     },
     {
       label: "Workers",
-      description: "Manage persistent T3 workers.",
+      description: "Inspect parent-created T3 Worker activity.",
       icon: Bot,
       shortcut: "W",
       available: props.workersAvailable,

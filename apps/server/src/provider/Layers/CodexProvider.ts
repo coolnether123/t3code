@@ -148,6 +148,22 @@ export function mapCodexModelCapabilities(
     : null;
   const defaultServiceTier = catalogDefaultServiceTier ?? DEFAULT_SERVICE_TIER_ID;
   const optionDescriptors: ProviderOptionDescriptor[] = [];
+  const multiAgentVersion = model.multiAgentVersion;
+  const unavailableMultiAgentReason = (requested: "V1" | "V2"): string => {
+    if (multiAgentVersion === undefined) {
+      return "The live Codex model catalog did not advertise a multi-agent version for this model.";
+    }
+    if (multiAgentVersion === null) {
+      return "The live Codex model catalog reported no multi-agent runtime for this model.";
+    }
+    if (multiAgentVersion === "disabled") {
+      return "The live Codex model catalog reports multi-agent support as disabled for this model.";
+    }
+    if (multiAgentVersion !== "v1" && multiAgentVersion !== "v2") {
+      return `The live Codex model catalog advertised unrecognized multi-agent version '${multiAgentVersion}'.`;
+    }
+    return `The live Codex model catalog advertises '${multiAgentVersion}', not ${requested}.`;
+  };
 
   if (reasoningOptions.length > 0) {
     optionDescriptors.push({
@@ -182,6 +198,21 @@ export function mapCodexModelCapabilities(
 
   return createModelCapabilities({
     optionDescriptors,
+    subagentBackends: {
+      v1: {
+        supported: multiAgentVersion === "v1",
+        ...(multiAgentVersion === "v1" ? {} : { reason: unavailableMultiAgentReason("V1") }),
+      },
+      v2: {
+        supported: multiAgentVersion === "v2",
+        ...(multiAgentVersion === "v2" ? {} : { reason: unavailableMultiAgentReason("V2") }),
+      },
+      "native-v1-control": {
+        supported: true,
+        reason:
+          "Uses T3 Workers linked-provider control. This is separate from the Codex app-server V1 and V2 model runtimes.",
+      },
+    },
   });
 }
 
@@ -251,7 +282,15 @@ function appendCustomCodexModels(
       slug,
       name: slug,
       isCustom: true,
-      capabilities: fallbackCapabilities,
+      // Custom slugs have no live model capability record. Keep the known
+      // option descriptors useful, but deliberately do not inherit native
+      // sub-agent support from another model.
+      capabilities:
+        fallbackCapabilities === null
+          ? null
+          : {
+              optionDescriptors: fallbackCapabilities.optionDescriptors,
+            },
     });
   }
   return customEntries.length === 0 ? models : [...models, ...customEntries];

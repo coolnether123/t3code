@@ -89,6 +89,13 @@ const ProjectionThreadMessageDbRowSchema = ProjectionThreadMessage.mapFields(
     attachments: Schema.NullOr(Schema.fromJsonString(Schema.Array(ChatAttachment))),
   }),
 );
+const ProjectionThreadUserMessageIdentityDbRowSchema = Schema.Struct({
+  messageId: MessageId,
+  threadId: ThreadId,
+  turnId: Schema.NullOr(TurnId),
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
 const ProjectionThreadProposedPlanDbRowSchema = ProjectionThreadProposedPlan;
 const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
   Struct.assign({
@@ -540,6 +547,27 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           created_at AS "createdAt",
           updated_at AS "updatedAt"
         FROM projection_thread_messages
+        ORDER BY thread_id ASC, created_at ASC, message_id ASC
+      `,
+  });
+
+  // The command read model intentionally omits message bodies, but commands
+  // that target an existing user boundary still need persisted identities
+  // after a server restart. Keep this query narrow so command bootstrap does
+  // not hydrate transcript text or attachments.
+  const listThreadUserMessageIdentityRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: ProjectionThreadUserMessageIdentityDbRowSchema,
+    execute: () =>
+      sql`
+        SELECT
+          message_id AS "messageId",
+          thread_id AS "threadId",
+          turn_id AS "turnId",
+          created_at AS "createdAt",
+          updated_at AS "updatedAt"
+        FROM projection_thread_messages
+        WHERE role = 'user'
         ORDER BY thread_id ASC, created_at ASC, message_id ASC
       `,
   });
@@ -1759,6 +1787,14 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               ),
             ),
           ),
+          listThreadUserMessageIdentityRows(undefined).pipe(
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError(
+                "ProjectionSnapshotQuery.getCommandReadModel:listThreadUserMessageIdentities:query",
+                "ProjectionSnapshotQuery.getCommandReadModel:listThreadUserMessageIdentities:decodeRows",
+              ),
+            ),
+          ),
           listThreadProposedPlanRows(undefined).pipe(
             Effect.mapError(
               toPersistenceSqlOrDecodeError(
@@ -1795,11 +1831,20 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       )
       .pipe(
         Effect.flatMap(
-          ([projectRows, threadRows, proposedPlanRows, sessionRows, latestTurnRows, stateRows]) =>
+          ([
+            projectRows,
+            threadRows,
+            userMessageIdentityRows,
+            proposedPlanRows,
+            sessionRows,
+            latestTurnRows,
+            stateRows,
+          ]) =>
             Effect.sync(() => {
               let updatedAt: string | null = null;
               const projects: OrchestrationProject[] = [];
               const threads: OrchestrationThread[] = [];
+              const userMessageIdentitiesByThread = new Map<string, Array<OrchestrationMessage>>();
 
               for (let index = 0; index < projectRows.length; index += 1) {
                 const row = projectRows[index];
@@ -1826,6 +1871,24 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   continue;
                 }
                 updatedAt = maxIso(updatedAt, row.updatedAt);
+              }
+              for (let index = 0; index < userMessageIdentityRows.length; index += 1) {
+                const row = userMessageIdentityRows[index];
+                if (!row) {
+                  continue;
+                }
+                updatedAt = maxIso(updatedAt, row.updatedAt);
+                const messages = userMessageIdentitiesByThread.get(row.threadId) ?? [];
+                messages.push({
+                  id: row.messageId,
+                  role: "user",
+                  text: "",
+                  turnId: row.turnId,
+                  streaming: false,
+                  createdAt: row.createdAt,
+                  updatedAt: row.updatedAt,
+                });
+                userMessageIdentitiesByThread.set(row.threadId, messages);
               }
               for (let index = 0; index < proposedPlanRows.length; index += 1) {
                 const row = proposedPlanRows[index];
@@ -1917,7 +1980,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                   pinOrderKey: row.pinOrderKey ?? null,
                   titleRegeneration: mapTitleRegeneration(row),
                   deletedAt: row.deletedAt,
-                  messages: [],
+                  messages: userMessageIdentitiesByThread.get(row.threadId) ?? [],
                   proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
                   activities: [],
                   checkpoints: [],

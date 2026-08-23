@@ -39,7 +39,7 @@ export class PrimaryEnvironmentRequestError extends Schema.TaggedErrorClass<Prim
   "PrimaryEnvironmentRequestError",
   {
     operation: PrimaryEnvironmentRequestOperation,
-    status: Schema.Number,
+    status: Schema.NullOr(Schema.Number),
     pairingLinkId: Schema.optional(Schema.String),
     sessionId: Schema.optional(Schema.String),
     cause: Schema.Defect(),
@@ -51,7 +51,7 @@ export class PrimaryEnvironmentRequestError extends Schema.TaggedErrorClass<Prim
     readonly pairingLinkId?: string;
     readonly sessionId?: string;
   }): PrimaryEnvironmentRequestError {
-    const status = readHttpApiStatus(input.cause) ?? 500;
+    const status = readHttpApiStatus(input.cause);
     return new PrimaryEnvironmentRequestError({
       operation: input.operation,
       status,
@@ -62,7 +62,9 @@ export class PrimaryEnvironmentRequestError extends Schema.TaggedErrorClass<Prim
   }
 
   override get message(): string {
-    return `Primary environment request failed during ${this.operation} (HTTP ${this.status}).`;
+    return this.status === null
+      ? `Primary environment request failed during ${this.operation} because the environment transport was unavailable.`
+      : `Primary environment request failed during ${this.operation} (HTTP ${this.status}).`;
   }
 }
 
@@ -276,7 +278,12 @@ async function waitForAuthenticatedSessionAfterBootstrap(): Promise<AuthSessionS
   }
 }
 
-const TRANSIENT_BOOTSTRAP_STATUS_CODES = new Set([502, 503, 504]);
+// The environment HTTP client reports transport failures without an HTTP
+// response through PrimaryEnvironmentRequestError's conservative 500 fallback.
+// A local backend restart can therefore surface as 500 even though the server
+// never handled the GET. Bootstrap is the one safe place to retry that status:
+// it is a read-only session probe and remains bounded below.
+const TRANSIENT_BOOTSTRAP_STATUS_CODES = new Set([500, 502, 503, 504]);
 const BOOTSTRAP_RETRY_TIMEOUT_MS = 15_000;
 const BOOTSTRAP_RETRY_STEP_MS = 500;
 
@@ -307,7 +314,7 @@ function waitForBootstrapRetry(delayMs: number): Promise<void> {
 
 function isTransientBootstrapError(error: unknown): boolean {
   if (isPrimaryEnvironmentRequestError(error)) {
-    return TRANSIENT_BOOTSTRAP_STATUS_CODES.has(error.status);
+    return error.status === null || TRANSIENT_BOOTSTRAP_STATUS_CODES.has(error.status);
   }
 
   if (error instanceof TypeError) {
@@ -537,12 +544,21 @@ export async function resolveInitialServerAuthGateState(): Promise<ServerAuthGat
 // against the desktop bootstrap credential so the next WS reconnect doesn't
 // hit 401 and start a reauth loop in the renderer.
 export async function reauthenticatePrimaryEnvironment(): Promise<ServerAuthGateState> {
+  resetServerAuthBootstrap();
+  return resolveInitialServerAuthGateState();
+}
+
+/** Clears both successful and failed bootstrap state before a route retry. */
+export function resetServerAuthBootstrap(): void {
   resolvedAuthenticatedGateState = null;
   bootstrapPromise = null;
+}
+
+export function retryInitialServerAuthGateState(): Promise<ServerAuthGateState> {
+  resetServerAuthBootstrap();
   return resolveInitialServerAuthGateState();
 }
 
 export function __resetServerAuthBootstrapForTests() {
-  bootstrapPromise = null;
-  resolvedAuthenticatedGateState = null;
+  resetServerAuthBootstrap();
 }

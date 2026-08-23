@@ -1,9 +1,10 @@
 import type {
   EnvironmentId,
   ThreadId,
-  WorkerContextPackage,
-  WorkerContextReference,
+  WorkerActivity,
+  WorkerComparisonMetrics,
   WorkerDetail,
+  WorkerEfficiencyOverview,
   WorkerId,
   WorkerMessage,
   WorkerStatus,
@@ -12,100 +13,96 @@ import type {
 import { useAtomValue } from "@effect/atom-react";
 import {
   Activity,
-  CircleAlert,
+  AlertTriangle,
+  ArrowLeft,
+  ArrowRight,
+  BarChart3,
+  Bot,
+  Check,
+  ChevronDown,
+  CircleDot,
+  Clock3,
   Eye,
-  Hourglass,
+  Info,
+  ListTree,
   MessageSquare,
-  Pause,
-  Play,
-  Send,
-  UserRound,
+  Wrench,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 
 import { workerListInput } from "@t3tools/client-runtime/state/workers";
-import { useAtomCommand } from "../state/use-atom-command";
 import { useEnvironmentQuery } from "../state/query";
 import { workerEnvironment } from "../state/workers";
 import { cn } from "../lib/utils";
-import { Button } from "./ui/button";
+import {
+  ACTIVE_WORKER_STATUSES,
+  buildWorkerTimeline,
+  liveWorkerTiming,
+  partitionWorkers,
+  reconcileWorkerPanelSelection,
+  workerPanelLayout,
+  workerToolCallCount,
+  type WorkerSections,
+  type WorkerTimelineEntry,
+} from "./workersPanel.logic";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./ui/collapsible";
 import { ScrollArea } from "./ui/scroll-area";
-
-const ACTIVE_STATUSES: ReadonlySet<WorkerStatus> = new Set([
-  "starting",
-  "running",
-  "waitingApproval",
-]);
+import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
+import ChatMarkdown from "./ChatMarkdown";
 
 const EMPTY_WORKERS: ReadonlyArray<WorkerSummary> = [];
+const WORKER_ELAPSED_TICK_MS = 1_000;
+export const PARENT_INPUT_ATTRIBUTION_UNAVAILABLE_REASON =
+  "Provider usage combines parent-supplied content with system instructions, tool output, and later Worker input; it does not report a separate parent token count.";
 
-const WORKERS_PANEL_RESPONSIVE_CLASSES = {
-  root: "flex h-full min-h-0 min-w-0 flex-col overflow-x-hidden",
-  panes:
-    "grid min-h-0 min-w-0 flex-1 grid-cols-[minmax(10rem,.75fr)_minmax(0,1.25fr)] max-[680px]:grid-cols-1",
-  startControl:
-    "min-h-11 min-w-0 w-full rounded border border-border bg-background px-2 text-xs outline-none focus:border-ring",
-} as const;
+export function createWorkerElapsedClock(readNow: () => number = Date.now) {
+  let current = readNow();
+  let interval: ReturnType<typeof setInterval> | undefined;
+  const listeners = new Set<() => void>();
 
-export function resolveSelectedWorkerId(
-  current: WorkerId | null,
-  workers: ReadonlyArray<Pick<WorkerSummary, "id">>,
-): WorkerId | null {
-  if (current !== null && workers.some((worker) => worker.id === current)) return current;
-  return workers[0]?.id ?? null;
-}
-
-export function parseWorkerContextInputs(input: {
-  readonly note: string;
-  readonly references: string;
-  readonly snippets: string;
-}): WorkerContextPackage {
-  const references = input.references
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line, index) => {
-      const symbolSeparator = line.lastIndexOf("#");
-      const pathAndRange = (symbolSeparator < 0 ? line : line.slice(0, symbolSeparator)).trim();
-      const symbol = symbolSeparator < 0 ? "" : line.slice(symbolSeparator + 1).trim();
-      if (symbolSeparator >= 0 && !symbol) {
-        throw new Error(`Context reference ${index + 1} has an empty symbol`);
-      }
-
-      const rangeMatch = /:(\d+)(?:-(\d+))?$/.exec(pathAndRange);
-      const path = (rangeMatch ? pathAndRange.slice(0, rangeMatch.index) : pathAndRange).trim();
-      if (!path) {
-        throw new Error(`Context reference ${index + 1} requires a path`);
-      }
-
-      let lineStart: number | undefined;
-      let lineEnd: number | undefined;
-      if (rangeMatch) {
-        lineStart = Number(rangeMatch[1]);
-        lineEnd = Number(rangeMatch[2] ?? rangeMatch[1]);
-        if (lineStart < 1 || lineEnd < lineStart) {
-          throw new Error(`Context reference ${index + 1} has an invalid line range`);
-        }
-      }
-
-      return {
-        path,
-        ...(lineStart === undefined || lineEnd === undefined ? {} : { lineStart, lineEnd }),
-        ...(symbol ? { symbol } : {}),
-      } satisfies WorkerContextReference;
-    });
-
-  const snippets = input.snippets
-    .split(/\r?\n/)
-    .map((snippet) => snippet.trim())
-    .filter(Boolean);
+  const tick = () => {
+    current = readNow();
+    for (const listener of listeners) listener();
+  };
 
   return {
-    ...(input.note.trim() ? { note: input.note.trim() } : {}),
-    references,
-    snippets,
+    getSnapshot: () => current,
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      if (listeners.size === 1) {
+        current = readNow();
+        interval = setInterval(tick, WORKER_ELAPSED_TICK_MS);
+      }
+      return () => {
+        listeners.delete(listener);
+        if (listeners.size === 0 && interval !== undefined) {
+          clearInterval(interval);
+          interval = undefined;
+        }
+      };
+    },
   };
+}
+
+const workerElapsedClock = createWorkerElapsedClock();
+const noopClockSubscribe = () => () => {};
+const inactiveClockSnapshot = () => 0;
+
+function useWorkerElapsedNow(enabled: boolean): number {
+  return useSyncExternalStore(
+    enabled ? workerElapsedClock.subscribe : noopClockSubscribe,
+    enabled ? workerElapsedClock.getSnapshot : inactiveClockSnapshot,
+    enabled ? workerElapsedClock.getSnapshot : inactiveClockSnapshot,
+  );
 }
 
 const STATUS_LABELS: Record<WorkerStatus, string> = {
@@ -150,15 +147,27 @@ export function workerCardSummary(
   return directMessage || observerReport || "Awaiting worker report";
 }
 
+export function workerPrimaryName(worker: Pick<WorkerSummary, "displayName" | "title">): string {
+  return worker.displayName ?? worker.title;
+}
+
 function formatTokens(total: number): string {
   if (total < 1_000) return `${total}`;
   if (total < 1_000_000) return `${(total / 1_000).toFixed(total < 10_000 ? 1 : 0)}k`;
   return `${(total / 1_000_000).toFixed(1)}m`;
 }
 
-function elapsedLabel(startedAt: string, endedAt?: string): string {
+function formatDurationMs(durationMs: number): string {
+  const seconds = Math.max(0, Math.floor(durationMs / 1_000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`;
+  return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`;
+}
+
+function elapsedLabel(startedAt: string, endedAt: string | undefined, nowMs: number): string {
   const start = Date.parse(startedAt);
-  const end = endedAt ? Date.parse(endedAt) : Date.now();
+  const end = endedAt ? Date.parse(endedAt) : nowMs;
   if (!Number.isFinite(start) || !Number.isFinite(end)) return "—";
   const seconds = Math.max(0, Math.floor((end - start) / 1_000));
   if (seconds < 60) return `${seconds}s`;
@@ -167,12 +176,523 @@ function elapsedLabel(startedAt: string, endedAt?: string): string {
   return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`;
 }
 
+function dateTimeLabel(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
 function StatusPill({ status }: { status: WorkerStatus }) {
   return (
-    <span className="inline-flex items-center gap-1.5 text-[.7rem] text-muted-foreground">
+    <span
+      className="inline-flex items-center gap-1.5 text-[.7rem] text-muted-foreground"
+      title={`Worker status: ${workerStatusLabel(status)}`}
+    >
       <span aria-hidden className={cn("size-1.5 rounded-full", STATUS_DOTS[status])} />
       {workerStatusLabel(status)}
     </span>
+  );
+}
+
+export function WorkerCompletionSummary({
+  summary,
+  nowMs,
+}: {
+  summary: WorkerSummary;
+  nowMs: number;
+}) {
+  const active = ACTIVE_WORKER_STATUSES.has(summary.status);
+  const elapsed = elapsedLabel(summary.createdAt, active ? undefined : summary.updatedAt, nowMs);
+  const usage = summary.usage;
+  const cumulativeUsage = summary.usageCoverage?.status === "complete";
+  const lastModelCall = summary.lastModelCallUsage;
+
+  return (
+    <section
+      data-worker-completion-summary
+      aria-labelledby="worker-completion-summary-heading"
+      className="rounded-md border border-border/50 bg-card/20 px-3 py-2.5"
+    >
+      <h4
+        id="worker-completion-summary-heading"
+        className="text-[.65rem] font-semibold uppercase tracking-wider text-muted-foreground"
+      >
+        Worker summary
+      </h4>
+      <h5 className="mt-2 text-[.65rem] font-medium text-muted-foreground">
+        {cumulativeUsage ? "Cumulative Worker usage" : "Reported Worker usage (partial)"}
+      </h5>
+      <dl className="mt-1 flex flex-wrap gap-x-4 gap-y-2 text-xs">
+        <div className="min-w-24">
+          <dt className="text-[.65rem] text-muted-foreground">Total elapsed time</dt>
+          <dd className="mt-0.5 font-mono tabular-nums">{elapsed}</dd>
+        </div>
+        <div className="min-w-24">
+          <dt className="text-[.65rem] text-muted-foreground">
+            {cumulativeUsage ? "Cumulative total" : "Reported total"}
+          </dt>
+          <dd className="mt-0.5 font-mono tabular-nums">{formatTokens(usage.totalTokens)}</dd>
+        </div>
+        <div className="min-w-20">
+          <dt className="text-[.65rem] text-muted-foreground">
+            {cumulativeUsage ? "Cumulative input" : "Reported input"}
+          </dt>
+          <dd className="mt-0.5 font-mono tabular-nums">{formatTokens(usage.inputTokens)}</dd>
+        </div>
+        <div className="min-w-20">
+          <dt className="text-[.65rem] text-muted-foreground">
+            {cumulativeUsage ? "Cumulative output" : "Reported output"}
+          </dt>
+          <dd className="mt-0.5 font-mono tabular-nums">{formatTokens(usage.outputTokens)}</dd>
+        </div>
+        {usage.cachedInputTokens !== undefined ? (
+          <div className="min-w-24">
+            <dt className="text-[.65rem] text-muted-foreground">
+              {cumulativeUsage ? "Cumulative cached input" : "Reported cached input"}
+            </dt>
+            <dd className="mt-0.5 font-mono tabular-nums">
+              {formatTokens(usage.cachedInputTokens)}
+            </dd>
+          </div>
+        ) : null}
+      </dl>
+      {cumulativeUsage ? (
+        <dl className="mt-2 flex flex-wrap gap-x-4 gap-y-2 border-t border-border/40 pt-2 text-xs">
+          <div className="min-w-24">
+            <dt className="text-[.65rem] text-muted-foreground">Cumulative reasoning</dt>
+            <dd className="mt-0.5 font-mono tabular-nums">{formatTokens(usage.reasoningTokens)}</dd>
+          </div>
+        </dl>
+      ) : null}
+      {lastModelCall ? (
+        <div className="mt-2 border-t border-border/40 pt-2">
+          <h5 className="text-[.65rem] font-medium text-muted-foreground">Last model call</h5>
+          <dl className="mt-1 flex flex-wrap gap-x-4 gap-y-2 text-xs">
+            <div className="min-w-20">
+              <dt className="text-[.65rem] text-muted-foreground">Total</dt>
+              <dd className="mt-0.5 font-mono tabular-nums">
+                {formatTokens(lastModelCall.totalTokens)}
+              </dd>
+            </div>
+            <div className="min-w-20">
+              <dt className="text-[.65rem] text-muted-foreground">Input</dt>
+              <dd className="mt-0.5 font-mono tabular-nums">
+                {formatTokens(lastModelCall.inputTokens)}
+              </dd>
+            </div>
+            {lastModelCall.cachedInputTokens !== undefined ? (
+              <div className="min-w-24">
+                <dt className="text-[.65rem] text-muted-foreground">Cached input</dt>
+                <dd className="mt-0.5 font-mono tabular-nums">
+                  {formatTokens(lastModelCall.cachedInputTokens)}
+                </dd>
+              </div>
+            ) : null}
+            <div className="min-w-20">
+              <dt className="text-[.65rem] text-muted-foreground">Output</dt>
+              <dd className="mt-0.5 font-mono tabular-nums">
+                {formatTokens(lastModelCall.outputTokens)}
+              </dd>
+            </div>
+            <div className="min-w-20">
+              <dt className="text-[.65rem] text-muted-foreground">Reasoning</dt>
+              <dd className="mt-0.5 font-mono tabular-nums">
+                {formatTokens(lastModelCall.reasoningTokens)}
+              </dd>
+            </div>
+          </dl>
+        </div>
+      ) : null}
+      <div className="mt-2 flex min-w-0 items-center border-t border-border/40 pt-1.5 text-[.7rem] text-muted-foreground">
+        <span className="min-w-0">Parent input attribution unavailable</span>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <button
+                type="button"
+                aria-label="Why parent input attribution is unavailable"
+                className="-my-2 ml-1 inline-flex size-11 shrink-0 items-center justify-center rounded-md hover:bg-accent/30 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              />
+            }
+          >
+            <Info aria-hidden className="size-3.5" />
+          </TooltipTrigger>
+          <TooltipPopup>{PARENT_INPUT_ATTRIBUTION_UNAVAILABLE_REASON}</TooltipPopup>
+        </Tooltip>
+      </div>
+    </section>
+  );
+}
+
+function CoverageNote({
+  label,
+  coverage,
+}: {
+  label: string;
+  coverage: WorkerEfficiencyOverview["toolCoverage"];
+}) {
+  if (coverage.status === "complete") return null;
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <button
+            type="button"
+            aria-label={`${label}: ${coverage.status}`}
+            className="inline-flex size-11 items-center justify-center rounded-md text-muted-foreground hover:bg-accent/30 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          />
+        }
+      >
+        <Info aria-hidden className="size-3.5" />
+      </TooltipTrigger>
+      <TooltipPopup>{coverage.reason ?? `${label} is ${coverage.status}.`}</TooltipPopup>
+    </Tooltip>
+  );
+}
+
+function ToolBreakdown({
+  tools,
+  label,
+}: {
+  tools: WorkerEfficiencyOverview["tools"];
+  label: string;
+}) {
+  return (
+    <details className="group min-w-0">
+      <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 rounded-md px-2 text-xs text-muted-foreground hover:bg-accent/20 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
+        <ChevronDown
+          aria-hidden
+          className="size-3.5 shrink-0 -rotate-90 transition-transform group-open:rotate-0"
+        />
+        <span>{label}</span>
+        <span className="ml-auto font-mono text-[.65rem]">{tools.length}</span>
+      </summary>
+      <div className="space-y-1 border-s border-border/50 py-1 ps-3 text-[.7rem]">
+        {tools.length === 0 ? (
+          <p className="text-muted-foreground">No calls recorded.</p>
+        ) : (
+          tools.map((tool) => (
+            <div key={tool.name} className="flex min-w-0 items-center gap-2">
+              <span className="min-w-0 flex-1 truncate font-mono">{tool.name}</span>
+              <span className="shrink-0 text-muted-foreground">{tool.calls} calls</span>
+              {tool.completed > 0 ? (
+                <span className="shrink-0 text-muted-foreground">{tool.completed} completed</span>
+              ) : null}
+              {tool.failed > 0 ? (
+                <span className="shrink-0 text-destructive-foreground">{tool.failed} failed</span>
+              ) : null}
+              {tool.unknown > 0 ? (
+                <span className="shrink-0 text-warning-foreground">{tool.unknown} unknown</span>
+              ) : null}
+            </div>
+          ))
+        )}
+      </div>
+    </details>
+  );
+}
+
+export function WorkerComparisonRow({
+  worker,
+  nowMs,
+  computedAt,
+  onOpen,
+}: {
+  worker: WorkerComparisonMetrics;
+  nowMs: number;
+  computedAt: string;
+  onOpen: (workerId: WorkerId) => void;
+}) {
+  const computedAtMs = Date.parse(computedAt);
+  const liveElapsed =
+    worker.elapsedMs +
+    (worker.active && Number.isFinite(computedAtMs) ? Math.max(0, nowMs - computedAtMs) : 0);
+  return (
+    <article data-worker-comparison-card className="rounded-md border border-border/50 bg-card/15">
+      <button
+        type="button"
+        onClick={() => onOpen(worker.workerId)}
+        aria-label={`Open Worker ${worker.displayName ?? worker.title} detail`}
+        className="flex min-h-11 w-full min-w-0 cursor-pointer items-center gap-2 rounded-t-md px-2.5 text-left text-xs hover:bg-accent/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+      >
+        <span className="min-w-0 flex-1 truncate font-medium">
+          {worker.displayName ?? worker.title}
+        </span>
+        <StatusPill status={worker.status} />
+        <span className="shrink-0 font-mono text-[.65rem] text-muted-foreground">
+          {formatTokens(worker.usage.totalTokens)} cumulative tok
+        </span>
+        <ArrowRight aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
+      </button>
+      <div className="space-y-2 border-t border-border/45 px-3 py-2 text-[.7rem]">
+        <div className="flex flex-wrap gap-x-3 gap-y-1 text-muted-foreground">
+          {worker.displayName && worker.displayName !== worker.title ? (
+            <span className="text-foreground/80">Assignment: {worker.title}</span>
+          ) : null}
+          <span>{worker.model}</span>
+          <span>{worker.backend}</span>
+          <span>{formatDurationMs(liveElapsed)}</span>
+          <span>{worker.activations} activations</span>
+          <span>{worker.toolCalls} tool calls</span>
+          {worker.failedToolCalls > 0 ? <span>{worker.failedToolCalls} failed</span> : null}
+        </div>
+        <div className="flex flex-wrap gap-x-3 gap-y-1 font-mono text-[.65rem] text-muted-foreground">
+          <span>cumulative in {formatTokens(worker.usage.inputTokens)}</span>
+          <span>cumulative out {formatTokens(worker.usage.outputTokens)}</span>
+          {worker.usage.cachedInputTokens !== undefined ? (
+            <span>cumulative cached {formatTokens(worker.usage.cachedInputTokens)}</span>
+          ) : null}
+          <span>cumulative reasoning {formatTokens(worker.usage.reasoningTokens)}</span>
+        </div>
+        {worker.lastModelCallUsage ? (
+          <div className="flex flex-wrap gap-x-3 gap-y-1 font-mono text-[.65rem] text-muted-foreground">
+            <span className="font-sans font-medium">last model call</span>
+            <span>in {formatTokens(worker.lastModelCallUsage.inputTokens)}</span>
+            {worker.lastModelCallUsage.cachedInputTokens !== undefined ? (
+              <span>cached {formatTokens(worker.lastModelCallUsage.cachedInputTokens)}</span>
+            ) : null}
+            <span>out {formatTokens(worker.lastModelCallUsage.outputTokens)}</span>
+            <span>reasoning {formatTokens(worker.lastModelCallUsage.reasoningTokens)}</span>
+          </div>
+        ) : null}
+        {worker.parentTurnUsage ? (
+          <div className="flex flex-wrap gap-x-3 gap-y-1 font-mono text-[.65rem] text-muted-foreground">
+            <span className="font-sans font-medium">Parent turn usage</span>
+            <span>total {formatTokens(worker.parentTurnUsage.totalTokens)}</span>
+            <span>in {formatTokens(worker.parentTurnUsage.inputTokens)}</span>
+            {worker.parentTurnUsage.cachedInputTokens !== undefined ? (
+              <span>cached {formatTokens(worker.parentTurnUsage.cachedInputTokens)}</span>
+            ) : null}
+            <span>out {formatTokens(worker.parentTurnUsage.outputTokens)}</span>
+            <span>reasoning {formatTokens(worker.parentTurnUsage.reasoningTokens)}</span>
+          </div>
+        ) : null}
+        <ToolBreakdown tools={worker.tools} label="Tool breakdown" />
+      </div>
+    </article>
+  );
+}
+
+export function WorkerEfficiencyOverviewView({
+  overview,
+  nowMs,
+  onSelectWorker,
+  showWorkerList,
+}: {
+  overview: WorkerEfficiencyOverview;
+  nowMs: number;
+  onSelectWorker: (workerId: WorkerId) => void;
+  showWorkerList?: () => void;
+}) {
+  const timing = liveWorkerTiming(overview.timing, nowMs);
+  return (
+    <ScrollArea data-worker-overview-scroll-owner className="min-h-0 min-w-0 flex-1">
+      <div className="mx-auto w-full max-w-4xl space-y-4 px-3 py-4 pb-8 sm:px-5">
+        <header className="flex min-w-0 items-start gap-3">
+          <div className="min-w-0 flex-1">
+            <h3 className="text-sm font-semibold">Delegation overview</h3>
+            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+              What this task’s parent delegated to Workers, how long it ran, and what it cost.
+            </p>
+          </div>
+          {showWorkerList ? (
+            <button
+              type="button"
+              onClick={showWorkerList}
+              className="inline-flex min-h-11 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <ListTree aria-hidden className="size-3.5" /> Workers
+            </button>
+          ) : null}
+        </header>
+
+        <section aria-labelledby="worker-task-totals-heading">
+          <h4 id="worker-task-totals-heading" className="sr-only">
+            Task totals
+          </h4>
+          <dl className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">
+            {[
+              ["Created", overview.workersCreated],
+              ["Active", overview.workersActive],
+              ["Completed", overview.workersCompleted],
+              ["Failed", overview.workersFailed],
+              ["Interrupted", overview.workersInterrupted],
+              ["Tool calls", overview.toolCalls],
+            ].map(([label, value]) => (
+              <div
+                key={label}
+                className="rounded-md border border-border/50 bg-card/20 px-2.5 py-2"
+              >
+                <dt className="text-[.65rem] text-muted-foreground">{label}</dt>
+                <dd className="mt-0.5 font-mono text-sm tabular-nums">{value}</dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+
+        <section
+          className="rounded-md border border-border/50 bg-card/15 p-3"
+          aria-labelledby="worker-time-heading"
+        >
+          <div className="flex items-center gap-1">
+            <h4 id="worker-time-heading" className="text-xs font-medium">
+              Time and concurrency
+            </h4>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    type="button"
+                    aria-label="How Worker overlap and concurrency are calculated"
+                    className="inline-flex size-11 items-center justify-center rounded-md text-muted-foreground hover:bg-accent/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  />
+                }
+              >
+                <Info aria-hidden className="size-3.5" />
+              </TooltipTrigger>
+              <TooltipPopup>
+                Wall time sums every activation interval. Busy time is the union of those intervals.
+                Overlap is wall time minus busy time. Average concurrency is wall time divided by
+                busy time.
+              </TooltipPopup>
+            </Tooltip>
+          </div>
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs sm:grid-cols-3">
+            <div>
+              <dt className="text-[.65rem] text-muted-foreground">Worker wall time</dt>
+              <dd className="font-mono tabular-nums">{formatDurationMs(timing.totalWallTimeMs)}</dd>
+            </div>
+            <div>
+              <dt className="text-[.65rem] text-muted-foreground">Overall span</dt>
+              <dd className="font-mono tabular-nums">{formatDurationMs(timing.overallSpanMs)}</dd>
+            </div>
+            <div>
+              <dt className="text-[.65rem] text-muted-foreground">Parallel overlap</dt>
+              <dd className="font-mono tabular-nums">{formatDurationMs(timing.overlapTimeMs)}</dd>
+            </div>
+            <div>
+              <dt className="text-[.65rem] text-muted-foreground">Peak concurrency</dt>
+              <dd className="font-mono tabular-nums">{timing.peakConcurrency}</dd>
+            </div>
+            <div>
+              <dt className="text-[.65rem] text-muted-foreground">Average concurrency</dt>
+              <dd className="font-mono tabular-nums">{timing.averageConcurrency.toFixed(2)}×</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section className="grid gap-2 sm:grid-cols-2" aria-label="Worker cost and coordination">
+          <div className="rounded-md border border-border/50 bg-card/15 p-3">
+            <div className="flex items-center gap-1">
+              <h4 className="text-xs font-medium">
+                {overview.usageCoverage.status === "complete"
+                  ? "Cumulative Worker tokens"
+                  : "Reported Worker tokens (partial)"}
+              </h4>
+              <CoverageNote label="Worker token coverage" coverage={overview.usageCoverage} />
+            </div>
+            <p className="mt-1 font-mono text-lg tabular-nums">
+              {formatTokens(overview.usage.totalTokens)}
+            </p>
+            <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[.65rem] text-muted-foreground">
+              <span>
+                {overview.usageCoverage.status === "complete" ? "cumulative in" : "reported in"}{" "}
+                {formatTokens(overview.usage.inputTokens)}
+              </span>
+              <span>
+                {overview.usageCoverage.status === "complete" ? "cumulative out" : "reported out"}{" "}
+                {formatTokens(overview.usage.outputTokens)}
+              </span>
+              {overview.usage.cachedInputTokens !== undefined ? (
+                <span>
+                  {overview.usageCoverage.status === "complete"
+                    ? "cumulative cached"
+                    : "reported cached"}{" "}
+                  {formatTokens(overview.usage.cachedInputTokens)}
+                </span>
+              ) : null}
+              <span>
+                {overview.usageCoverage.status === "complete"
+                  ? "cumulative reasoning"
+                  : "reported reasoning"}{" "}
+                {formatTokens(overview.usage.reasoningTokens)}
+              </span>
+            </div>
+          </div>
+          <div className="rounded-md border border-border/50 bg-card/15 p-3">
+            <div className="flex items-center gap-1">
+              <h4 className="text-xs font-medium">Parent coordination</h4>
+              <CoverageNote
+                label="Parent coordination coverage"
+                coverage={overview.parentCoordinationCoverage}
+              />
+            </div>
+            <p className="mt-1 font-mono text-lg tabular-nums">
+              {overview.parentCoordinationCalls}
+            </p>
+            <p className="text-[.65rem] text-muted-foreground">
+              {overview.parentCoordinationCompleted} completed ·{" "}
+              {overview.parentCoordinationFailures} failed
+              {overview.parentCoordinationUnknown > 0
+                ? ` · ${overview.parentCoordinationUnknown} unknown`
+                : ""}
+            </p>
+            <div className="mt-1 flex items-center text-[.65rem] text-muted-foreground">
+              {overview.parentTurnUsageCoverage?.status === "complete"
+                ? "Parent turn usage is shown per Worker"
+                : "Parent turn usage unavailable"}
+              <CoverageNote
+                label="Parent turn usage"
+                coverage={
+                  overview.parentTurnUsageCoverage ?? overview.parentCoordinationTokenCoverage
+                }
+              />
+            </div>
+          </div>
+        </section>
+
+        <section
+          aria-labelledby="worker-tool-totals-heading"
+          className="rounded-md border border-border/50 bg-card/15 p-2"
+        >
+          <div className="flex items-center px-1">
+            <h4 id="worker-tool-totals-heading" className="text-xs font-medium">
+              Tool calls
+            </h4>
+            <span className="ml-auto text-[.65rem] text-muted-foreground">
+              {overview.completedToolCalls} completed · {overview.failedToolCalls} failed
+              {overview.unknownToolCalls > 0 ? ` · ${overview.unknownToolCalls} unknown` : ""}
+            </span>
+            <CoverageNote label="Worker tool coverage" coverage={overview.toolCoverage} />
+          </div>
+          <ToolBreakdown tools={overview.tools} label="Worker tool breakdown" />
+          <ToolBreakdown
+            tools={overview.parentCoordinationTools}
+            label="Parent coordination breakdown"
+          />
+        </section>
+
+        <section aria-labelledby="worker-comparison-heading" className="space-y-2">
+          <h4 id="worker-comparison-heading" className="text-xs font-medium">
+            Workers
+          </h4>
+          {overview.workers.length === 0 ? (
+            <p className="rounded-md border border-dashed border-border/60 p-4 text-center text-xs text-muted-foreground">
+              No Workers have been created for this task.
+            </p>
+          ) : (
+            overview.workers.map((worker) => (
+              <WorkerComparisonRow
+                key={worker.workerId}
+                worker={worker}
+                nowMs={nowMs}
+                computedAt={overview.computedAt}
+                onOpen={onSelectWorker}
+              />
+            ))
+          )}
+        </section>
+      </div>
+    </ScrollArea>
   );
 }
 
@@ -180,316 +700,568 @@ function WorkerRow({
   worker,
   selected,
   onSelect,
+  nowMs,
 }: {
   worker: WorkerSummary;
   selected: boolean;
   onSelect: () => void;
+  nowMs: number;
 }) {
+  const progress = worker.latestObserverReport?.progress?.trim();
+  const approvalNeeded = worker.status === "waitingApproval" || worker.hasPendingApproval === true;
   return (
     <button
       type="button"
       onClick={onSelect}
       aria-current={selected ? "true" : undefined}
+      aria-label={`Inspect Worker ${worker.displayName ?? worker.title}`}
       className={cn(
-        "w-full border-b border-border/50 px-3 py-2.5 text-left transition hover:bg-accent/50",
+        "group min-h-11 w-full border-b border-border/45 px-3 py-2.5 text-left transition-colors hover:bg-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
         selected && "bg-accent/70",
       )}
     >
-      <div className="flex items-center gap-2">
-        <span className="min-w-0 flex-1 truncate text-sm font-medium">{worker.title}</span>
-        <StatusPill status={worker.status} />
+      <div className="flex min-w-0 items-center gap-2">
+        <span className="min-w-0 flex-1 truncate text-sm font-medium">
+          {worker.displayName ?? worker.title}
+        </span>
+        {approvalNeeded ? (
+          <AlertTriangle
+            aria-label="Approval needed"
+            className="size-3.5 shrink-0 text-warning-foreground"
+          />
+        ) : null}
         {worker.unreadMessageCount > 0 ? (
-          <span className="rounded-full bg-info px-1.5 text-[.65rem] font-semibold text-white">
+          <span
+            aria-label={`${worker.unreadMessageCount} unread Worker messages`}
+            className="min-w-4 rounded-full bg-info px-1 text-center text-[.65rem] font-semibold text-white"
+          >
             {worker.unreadMessageCount}
           </span>
         ) : null}
       </div>
-      <div className="mt-1 flex items-center gap-2 truncate font-mono text-[.65rem] text-muted-foreground/80">
-        <span>{worker.model}</span>
+      <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[.65rem] text-muted-foreground">
+        <StatusPill status={worker.status} />
         <span aria-hidden>·</span>
-        <span>{worker.runtimeMode}</span>
-        <span aria-hidden>·</span>
-        <span>
+        <span className="min-w-0 truncate font-mono">{worker.model}</span>
+      </div>
+      <div className="mt-1 flex items-center gap-2 font-mono text-[.65rem] text-muted-foreground/80">
+        <span className="inline-flex items-center gap-1">
+          <Clock3 aria-hidden className="size-3" />
           {elapsedLabel(
             worker.createdAt,
-            worker.status === "closed" ? worker.updatedAt : undefined,
+            ACTIVE_WORKER_STATUSES.has(worker.status) ? undefined : worker.updatedAt,
+            nowMs,
           )}
         </span>
         <span aria-hidden>·</span>
         <span>{formatTokens(worker.usage.totalTokens)} tok</span>
       </div>
-      <p className="mt-1 truncate text-xs text-muted-foreground">{workerCardSummary(worker)}</p>
+      {progress ? (
+        <p className="mt-1 truncate text-xs text-info-foreground">{progress}</p>
+      ) : (
+        <p className="mt-1 truncate text-xs text-muted-foreground">{workerCardSummary(worker)}</p>
+      )}
     </button>
   );
 }
 
-function MessageBubble({ message }: { message: WorkerMessage }) {
-  const isParent = message.author === "parent";
-  const isObserver = message.author === "observer";
+export function WorkerRail({
+  sections,
+  selectedWorkerId,
+  recentOpen,
+  onRecentOpenChange,
+  onSelect,
+  nowMs,
+}: {
+  sections: WorkerSections;
+  selectedWorkerId: WorkerId | null;
+  recentOpen: boolean;
+  onRecentOpenChange: (open: boolean) => void;
+  onSelect: (workerId: WorkerId) => void;
+  nowMs: number;
+}) {
   return (
-    <div
-      className={cn(
-        "rounded-md border px-2.5 py-2",
-        isObserver ? "border-info/30 bg-info/5" : "border-border/60 bg-card/40",
-      )}
-    >
-      <div className="mb-1 flex items-center gap-1.5 text-[.65rem] font-medium uppercase tracking-wider text-muted-foreground">
-        {isParent ? (
-          <UserRound className="size-3" />
-        ) : isObserver ? (
-          <Eye className="size-3" />
+    <nav aria-label="Workers in this task" className="min-w-0">
+      <section aria-labelledby="active-workers-heading">
+        <div
+          id="active-workers-heading"
+          className="sticky top-0 z-10 border-b border-border/50 bg-background/95 px-3 py-2 text-[.65rem] font-semibold uppercase tracking-wider text-muted-foreground backdrop-blur"
+        >
+          Active <span className="ml-1 font-mono">{sections.active.length}</span>
+        </div>
+        {sections.active.length > 0 ? (
+          sections.active.map((worker) => (
+            <WorkerRow
+              key={worker.id}
+              worker={worker}
+              selected={worker.id === selectedWorkerId}
+              onSelect={() => onSelect(worker.id)}
+              nowMs={nowMs}
+            />
+          ))
         ) : (
-          <MessageSquare className="size-3" />
+          <p className="px-3 py-3 text-xs text-muted-foreground">No active Workers.</p>
         )}
-        {isParent ? "Parent" : isObserver ? "Observer" : message.author}
-        <span className="ml-auto font-normal normal-case">{message.kind}</span>
+      </section>
+
+      {sections.recent.length > 0 ? (
+        <Collapsible open={recentOpen} onOpenChange={onRecentOpenChange}>
+          <section aria-labelledby="recent-workers-heading">
+            <CollapsibleTrigger
+              id="recent-workers-heading"
+              className="sticky top-0 z-10 flex min-h-11 w-full items-center border-y border-border/50 bg-background/95 px-3 text-left text-[.65rem] font-semibold uppercase tracking-wider text-muted-foreground backdrop-blur hover:bg-accent/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+              aria-label={`${recentOpen ? "Collapse" : "Expand"} recent Workers`}
+            >
+              Recent <span className="ml-1 font-mono">{sections.recent.length}</span>
+              <ChevronDown
+                aria-hidden
+                className={cn("ml-auto size-3.5 transition-transform", recentOpen && "rotate-180")}
+              />
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              {sections.recent.map((worker) => (
+                <WorkerRow
+                  key={worker.id}
+                  worker={worker}
+                  selected={worker.id === selectedWorkerId}
+                  onSelect={() => onSelect(worker.id)}
+                  nowMs={nowMs}
+                />
+              ))}
+            </CollapsibleContent>
+          </section>
+        </Collapsible>
+      ) : null}
+    </nav>
+  );
+}
+
+function WorkerMessageFlow({ message, cwd }: { message: WorkerMessage; cwd?: string }) {
+  const isParent = message.author === "parent";
+  if (message.author === "observer" || message.author === "system") {
+    return (
+      <article className="mx-1 border-s border-info/40 ps-3 text-xs text-muted-foreground">
+        <div className="flex min-w-0 items-center gap-1.5 text-[.65rem] font-medium uppercase tracking-wider">
+          <Eye aria-hidden className="size-3" />
+          {message.author === "observer" ? "Observer" : "System"}
+          <time className="ml-auto shrink-0 font-normal normal-case" dateTime={message.createdAt}>
+            {dateTimeLabel(message.createdAt)}
+          </time>
+        </div>
+        <p className="mt-1 whitespace-pre-wrap break-words leading-relaxed">{message.body}</p>
+      </article>
+    );
+  }
+
+  return (
+    <article className={cn("group min-w-0", isParent && "flex flex-col items-end gap-1")}>
+      <div
+        className={cn(
+          "min-w-0",
+          isParent
+            ? "max-w-[85%] rounded-2xl bg-message p-3 text-message-foreground"
+            : "w-full px-1 py-0.5",
+        )}
+      >
+        <ChatMarkdown text={message.body} cwd={cwd} />
       </div>
-      <p className="whitespace-pre-wrap break-words text-xs leading-relaxed">{message.body}</p>
+      <div
+        className={cn(
+          "flex items-center gap-1.5 px-1 text-[.65rem] text-muted-foreground tabular-nums",
+          isParent ? "justify-end" : "justify-start",
+        )}
+      >
+        {isParent ? <span>Parent</span> : <Bot aria-hidden className="size-3" />}
+        {!isParent ? <span>Worker</span> : null}
+        <span aria-hidden>·</span>
+        <Tooltip>
+          <TooltipTrigger render={<time dateTime={message.createdAt} tabIndex={0} />}>
+            {dateTimeLabel(message.createdAt)}
+          </TooltipTrigger>
+          <TooltipPopup>Message timestamp</TooltipPopup>
+        </Tooltip>
+      </div>
+    </article>
+  );
+}
+
+export function workerToolCallExpandedBody(activity: WorkerActivity): string | null {
+  const blocks: string[] = [];
+  if (activity.detail?.trim()) blocks.push(`Command or input\n${activity.detail.trim()}`);
+  if (activity.result?.trim()) blocks.push(`Result\n${activity.result.trim()}`);
+  return blocks.length > 0 ? blocks.join("\n\n") : null;
+}
+
+export function WorkerToolCallRow({
+  activity,
+  defaultExpanded = false,
+}: {
+  activity: WorkerActivity;
+  defaultExpanded?: boolean;
+}) {
+  const [expanded, setExpanded] = useState(defaultExpanded);
+  const detailsId = useId();
+  const body = workerToolCallExpandedBody(activity);
+  const canExpand = body !== null;
+  const failed = activity.tone === "error" || activity.kind.includes("failed");
+  const completed = activity.kind === "tool.completed" || activity.kind === "tool.summary";
+  const controlLabel = `${expanded ? "Collapse" : "Expand"} tool call ${activity.title}`;
+
+  return (
+    <div className="min-w-0">
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <button
+              type="button"
+              disabled={!canExpand}
+              aria-expanded={canExpand ? expanded : undefined}
+              aria-controls={canExpand ? detailsId : undefined}
+              aria-label={canExpand ? controlLabel : activity.title}
+              title={canExpand ? controlLabel : activity.title}
+              onClick={() => setExpanded((current) => !current)}
+              className={cn(
+                "flex min-h-11 w-full min-w-0 items-center gap-1.5 rounded-md px-1 text-left text-xs transition-colors",
+                canExpand &&
+                  "hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
+              )}
+            />
+          }
+        >
+          <span className="flex size-5 shrink-0 items-center justify-center text-icon-muted">
+            <Wrench aria-hidden className="size-3.5" />
+          </span>
+          <span className="min-w-0 flex-1 truncate font-medium">{activity.title}</span>
+          <time
+            className="shrink-0 text-[.65rem] text-muted-foreground tabular-nums"
+            dateTime={activity.createdAt}
+          >
+            {dateTimeLabel(activity.createdAt)}
+          </time>
+          <span className="flex size-4 shrink-0 items-center justify-center text-icon-muted">
+            {failed ? (
+              <X aria-label="Tool call failed" className="size-3 text-destructive" />
+            ) : completed ? (
+              <Check aria-label="Tool call completed" className="size-3" />
+            ) : (
+              <Clock3 aria-label="Tool call in progress" className="size-3" />
+            )}
+          </span>
+          {canExpand ? (
+            <ChevronDown
+              aria-hidden
+              className={cn(
+                "size-3 shrink-0 text-icon-muted transition-transform",
+                expanded && "rotate-180",
+              )}
+            />
+          ) : null}
+        </TooltipTrigger>
+        <TooltipPopup>{canExpand ? controlLabel : "No additional tool details"}</TooltipPopup>
+      </Tooltip>
+      {expanded && body ? (
+        <div id={detailsId} className="ms-7 border-s border-border/45 ps-3 pt-1">
+          <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-secondary-label text-[length:var(--font-size-code,0.6875rem)] leading-relaxed select-text">
+            {body}
+          </pre>
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function WorkerDetailView({
+function ActivityNotice({ activity }: { activity: WorkerActivity }) {
+  return (
+    <article
+      className={cn(
+        "mx-1 border-s ps-3 text-xs",
+        activity.tone === "error"
+          ? "border-destructive/60 text-destructive-foreground"
+          : activity.tone === "approval"
+            ? "border-warning/60 text-warning-foreground"
+            : "border-info/40 text-muted-foreground",
+      )}
+    >
+      <div className="flex min-w-0 items-center gap-1.5">
+        <Activity aria-hidden className="size-3" />
+        <span className="min-w-0 flex-1 truncate font-medium">{activity.title}</span>
+        <time className="shrink-0 text-[.65rem] tabular-nums" dateTime={activity.createdAt}>
+          {dateTimeLabel(activity.createdAt)}
+        </time>
+      </div>
+      {activity.detail ? (
+        <p className="mt-1 whitespace-pre-wrap break-words leading-relaxed">{activity.detail}</p>
+      ) : null}
+    </article>
+  );
+}
+
+function TimelineEntry({ entry, cwd }: { entry: WorkerTimelineEntry; cwd?: string }) {
+  if (entry.type === "message") {
+    return <WorkerMessageFlow message={entry.value} {...(cwd ? { cwd } : {})} />;
+  }
+  if (entry.type === "activity") {
+    return entry.value.tone === "tool" ? (
+      <WorkerToolCallRow activity={entry.value} />
+    ) : (
+      <ActivityNotice activity={entry.value} />
+    );
+  }
+  if (entry.type === "observer") {
+    return (
+      <article className="mx-1 border-s border-info/45 ps-3 text-xs">
+        <div className="flex items-center gap-1.5 text-[.65rem] font-medium uppercase tracking-wider text-info-foreground">
+          <Eye aria-hidden className="size-3" /> Observer report
+          <time className="ml-auto font-normal normal-case" dateTime={entry.value.generatedAt}>
+            {dateTimeLabel(entry.value.generatedAt)}
+          </time>
+        </div>
+        <p className="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed">
+          {entry.value.report}
+        </p>
+        {entry.value.blockers.length > 0 ? (
+          <p className="mt-1 text-[.7rem] text-warning-foreground">
+            Blockers: {entry.value.blockers.join(" · ")}
+          </p>
+        ) : null}
+      </article>
+    );
+  }
+  return (
+    <article className="mx-1 border-s border-warning/60 ps-3 text-xs">
+      <div className="flex items-center gap-1.5 text-[.7rem] font-medium">
+        <AlertTriangle aria-hidden className="size-3.5" /> Approval requested
+      </div>
+      <p className="mt-1 text-xs">{entry.value.summary}</p>
+      <p className="mt-1 text-[.7rem] text-muted-foreground">
+        The parent agent must resolve this request.
+      </p>
+    </article>
+  );
+}
+
+export function WorkerDetailView({
   detail,
-  environmentId,
-  onRefresh,
+  showBack,
+  onBack,
+  nowMs = Date.now(),
 }: {
   detail: WorkerDetail;
-  environmentId: EnvironmentId;
-  onRefresh: () => void;
+  showBack: boolean;
+  onBack: () => void;
+  nowMs?: number;
 }) {
-  const [followUp, setFollowUp] = useState("");
-  const send = useAtomCommand(workerEnvironment.send, { reportFailure: false });
-  const wait = useAtomCommand(workerEnvironment.wait, { reportFailure: false });
-  const observe = useAtomCommand(workerEnvironment.observe, { reportFailure: false });
-  const interrupt = useAtomCommand(workerEnvironment.interrupt, { reportFailure: false });
-  const close = useAtomCommand(workerEnvironment.close, { reportFailure: false });
-  const respondToApproval = useAtomCommand(workerEnvironment.respondToApproval, {
-    reportFailure: false,
-  });
-  const [busy, setBusy] = useState<string | null>(null);
   const summary = detail.summary;
-  const latestObserverReport = detail.observerReports.at(-1) ?? summary.latestObserverReport;
-  const active = ACTIVE_STATUSES.has(summary.status);
-  const run = async (name: string, action: () => Promise<unknown>) => {
-    setBusy(name);
-    await action();
-    setBusy(null);
-    onRefresh();
-  };
+  const active = ACTIVE_WORKER_STATUSES.has(summary.status);
+  const timeline = buildWorkerTimeline(detail);
+  const toolCalls = workerToolCallCount(detail.activities);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="border-b border-border/60 px-3 py-3">
-        <div className="flex items-start gap-2">
+    <div
+      data-worker-detail-surface
+      className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden overscroll-contain"
+    >
+      <div
+        data-worker-identity-header
+        className="z-20 shrink-0 border-b border-border/60 bg-background/95 px-3 pb-2.5 pt-[max(env(safe-area-inset-top),0.625rem)] backdrop-blur"
+      >
+        <div className="flex min-w-0 items-start gap-2">
+          {showBack ? (
+            <button
+              type="button"
+              onClick={onBack}
+              aria-label="Back to Worker list"
+              title="Close Worker detail"
+              className="-ml-1 inline-flex size-11 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <ArrowLeft aria-hidden className="size-4" />
+            </button>
+          ) : null}
           <div className="min-w-0 flex-1">
-            <h3 className="truncate text-sm font-semibold">{summary.title}</h3>
+            <h3 className="truncate text-base font-semibold">{workerPrimaryName(summary)}</h3>
+            <p className="mt-0.5 truncate text-[.7rem] text-muted-foreground">
+              Assignment: {summary.title}
+            </p>
             <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
               <StatusPill status={summary.status} />
               <span className="font-mono text-[.65rem] text-muted-foreground">{summary.model}</span>
               <span className="font-mono text-[.65rem] text-muted-foreground">
                 {summary.runtimeMode}
               </span>
+              {summary.workingDirectory ? (
+                <span className="min-w-0 truncate font-mono text-[.65rem] text-muted-foreground">
+                  {summary.workingDirectory}
+                </span>
+              ) : summary.environmentId ? (
+                <span className="font-mono text-[.65rem] text-muted-foreground">
+                  {summary.environmentId}
+                </span>
+              ) : null}
             </div>
           </div>
-          <span className="font-mono text-[.65rem] text-muted-foreground">
+          <span className="shrink-0 font-mono text-[.65rem] text-muted-foreground">
             {formatTokens(summary.usage.totalTokens)} tok
           </span>
         </div>
-        <div className="mt-2 grid grid-cols-3 gap-1.5 text-[.65rem] text-muted-foreground">
-          <span className="rounded border border-border/50 px-1.5 py-1">
-            Elapsed {elapsedLabel(summary.createdAt, active ? undefined : summary.updatedAt)}
-          </span>
-          <span className="rounded border border-border/50 px-1.5 py-1">
-            Activations {summary.activationCount}
-          </span>
-          <span className="rounded border border-border/50 px-1.5 py-1">
-            Backend {summary.backend}
-          </span>
-        </div>
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {active ? (
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={busy !== null}
-              onClick={() =>
-                void run("wait", () =>
-                  wait({
-                    environmentId,
-                    input: { workerIds: [summary.id], timeoutMillis: 30_000 },
-                  }),
-                )
-              }
-            >
-              <Hourglass className="size-3" /> Wait
-            </Button>
-          ) : null}
-          {active ? (
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={busy !== null}
-              onClick={() =>
-                void run("observe", () =>
-                  observe({ environmentId, input: { workerId: summary.id } }),
-                )
-              }
-            >
-              <Eye className="size-3" /> Observe
-            </Button>
-          ) : null}
-          {active ? (
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={busy !== null}
-              onClick={() =>
-                void run("interrupt", () =>
-                  interrupt({
-                    environmentId,
-                    input: { workerId: summary.id, reason: "Interrupted from Worker inbox" },
-                  }),
-                )
-              }
-            >
-              <Pause className="size-3" /> Interrupt
-            </Button>
-          ) : null}
-          {summary.status !== "closed" ? (
-            <Button
-              size="xs"
-              variant="ghost"
-              disabled={busy !== null}
-              onClick={() =>
-                void run("close", () => close({ environmentId, input: { workerId: summary.id } }))
-              }
-            >
-              <X className="size-3" /> Close
-            </Button>
-          ) : null}
-        </div>
       </div>
 
-      <ScrollArea className="min-h-0 flex-1">
-        <div className="space-y-3 p-3">
-          <section className="rounded-md border border-border/60 bg-card/30 p-2.5">
-            <div className="mb-1 flex items-center gap-1.5 text-[.65rem] font-medium uppercase tracking-wider text-muted-foreground">
-              <Play className="size-3" /> Assignment
-            </div>
-            <p className="whitespace-pre-wrap text-xs leading-relaxed">{detail.assignment}</p>
-            <p className="mt-2 text-[.7rem] text-muted-foreground">
-              Context:{" "}
-              {detail.context.note?.trim() || "Explicit paths and notes were not supplied."}
-            </p>
-            {detail.context.references.length > 0 ? (
-              <p className="mt-1 font-mono text-[.65rem] text-muted-foreground/80">
-                {detail.context.references.map((reference) => reference.path).join(" · ")}
+      <ScrollArea data-worker-detail-scroll-owner className="min-h-0 min-w-0 flex-1 touch-pan-y">
+        <div className="mx-auto min-w-0 w-full max-w-3xl space-y-5 px-3 py-4 pb-[calc(env(safe-area-inset-bottom)+1.5rem)] sm:px-5">
+          <details open className="group rounded-md border border-border/50 bg-card/20">
+            <summary className="flex min-h-11 cursor-pointer items-center gap-2 px-3 text-xs font-medium text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
+              <ChevronDown
+                aria-hidden
+                className="size-3.5 transition-transform group-open:rotate-180"
+              />
+              Assignment and context
+            </summary>
+            <section
+              aria-labelledby="worker-overview-heading"
+              className="border-t border-border/45 p-3"
+            >
+              <h4 id="worker-overview-heading" className="sr-only">
+                Assignment and context
+              </h4>
+              <p className="whitespace-pre-wrap break-words text-xs leading-relaxed">
+                {detail.assignment}
               </p>
-            ) : null}
-          </section>
-
-          {detail.pendingApproval ? (
-            <section className="rounded-md border border-warning/40 bg-warning/5 p-2.5">
-              <div className="flex items-center gap-1.5 text-[.7rem] font-medium">
-                <CircleAlert className="size-3.5 text-warning-foreground" /> Approval requested
-              </div>
-              <p className="mt-1 text-xs">{detail.pendingApproval.summary}</p>
-              <div className="mt-2 flex gap-1.5">
-                {(["accept", "decline", "cancel"] as const).map((decision) => (
-                  <Button
-                    key={decision}
-                    size="xs"
-                    variant={decision === "accept" ? "default" : "outline"}
-                    disabled={busy !== null}
-                    onClick={() =>
-                      void run(`approval-${decision}`, () =>
-                        respondToApproval({
-                          environmentId,
-                          input: {
-                            workerId: summary.id,
-                            requestId: detail.pendingApproval!.requestId,
-                            decision,
-                          },
-                        }),
-                      )
-                    }
-                  >
-                    {decision[0]!.toUpperCase() + decision.slice(1)}
-                  </Button>
-                ))}
-              </div>
-            </section>
-          ) : null}
-
-          {latestObserverReport ? (
-            <section className="rounded-md border border-info/30 bg-info/5 p-2.5">
-              <div className="flex items-center gap-1.5 text-[.65rem] font-medium uppercase tracking-wider text-info-foreground">
-                <Eye className="size-3" /> Observer report
-              </div>
-              <p className="mt-1 whitespace-pre-wrap text-xs leading-relaxed">
-                {latestObserverReport.report}
-              </p>
-              {latestObserverReport.blockers.length > 0 ? (
-                <p className="mt-1 text-[.7rem] text-warning-foreground">
-                  Blockers: {latestObserverReport.blockers.join(" · ")}
+              {detail.instructions?.trim() ? (
+                <p className="mt-2 whitespace-pre-wrap border-t border-border/50 pt-2 text-xs leading-relaxed">
+                  {detail.instructions}
                 </p>
               ) : null}
+              {detail.context.note?.trim() ? (
+                <p className="mt-2 text-xs text-muted-foreground">{detail.context.note}</p>
+              ) : null}
+              {detail.context.references.length > 0 ? (
+                <ul className="mt-2 space-y-1 font-mono text-[.65rem] text-muted-foreground">
+                  {detail.context.references.map((reference) => (
+                    <li
+                      key={`${reference.path}:${reference.lineStart ?? ""}:${reference.lineEnd ?? ""}:${reference.symbol ?? ""}:${reference.excerpt ?? ""}`}
+                      className="break-all"
+                    >
+                      {reference.path}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
             </section>
-          ) : null}
+          </details>
 
-          <section className="space-y-2">
-            <div className="flex items-center gap-1.5 text-[.65rem] font-medium uppercase tracking-wider text-muted-foreground">
-              <MessageSquare className="size-3" /> Communication
+          <section aria-labelledby="worker-metrics-heading">
+            <h4 id="worker-metrics-heading" className="sr-only">
+              Worker status and usage
+            </h4>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-y border-border/45 py-2 text-[.7rem] text-muted-foreground">
+              <span>
+                Elapsed{" "}
+                {elapsedLabel(summary.createdAt, active ? undefined : summary.updatedAt, nowMs)}
+              </span>
+              <span>{summary.activationCount} activations</span>
+              <span>
+                {toolCalls} {toolCalls === 1 ? "tool" : "tools"}
+              </span>
+              <span>{summary.backend}</span>
             </div>
-            {detail.messages.length > 0 ? (
-              detail.messages.map((message) => <MessageBubble key={message.id} message={message} />)
+          </section>
+
+          <section aria-labelledby="worker-timeline-heading" className="space-y-3">
+            <div
+              data-worker-conversation-heading
+              className="sticky top-0 z-10 flex items-center gap-1.5 border-b border-border/45 bg-background/95 py-2 text-[.65rem] font-semibold uppercase tracking-wider text-muted-foreground backdrop-blur"
+            >
+              <MessageSquare aria-hidden className="size-3" />
+              <h4 id="worker-timeline-heading">Conversation</h4>
+            </div>
+            {timeline.length > 0 ? (
+              timeline.map((entry) => (
+                <TimelineEntry
+                  key={`${entry.type}:${entry.id}`}
+                  entry={entry}
+                  {...(summary.workingDirectory ? { cwd: summary.workingDirectory } : {})}
+                />
+              ))
             ) : (
-              <p className="text-xs text-muted-foreground">No direct messages yet.</p>
+              <p className="rounded-lg border border-dashed border-border/60 p-4 text-center text-xs text-muted-foreground">
+                No Worker activity yet.
+              </p>
             )}
           </section>
 
-          <section className="rounded-md border border-border/60 p-2">
-            <label
-              className="mb-1 block text-[.65rem] font-medium uppercase tracking-wider text-muted-foreground"
-              htmlFor="worker-follow-up"
+          <details className="group rounded-md border border-border/50">
+            <summary className="flex min-h-11 cursor-pointer items-center gap-2 px-3 text-xs text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring">
+              <CircleDot aria-hidden className="size-3" />
+              Activation history
+              <span className="font-mono text-[.65rem]">{detail.activations.length}</span>
+              <ChevronDown
+                aria-hidden
+                className="ml-auto size-3.5 transition-transform group-open:rotate-180"
+              />
+            </summary>
+            <section
+              aria-labelledby="worker-activations-heading"
+              className="space-y-2 border-t border-border/45 p-3"
             >
-              Follow-up assignment
-            </label>
-            <textarea
-              id="worker-follow-up"
-              value={followUp}
-              onChange={(event) => setFollowUp(event.target.value)}
-              placeholder={
-                summary.resumable
-                  ? "Give this worker its next bounded assignment…"
-                  : "Worker is not resumable"
-              }
-              disabled={!summary.resumable || busy !== null}
-              className="min-h-16 w-full resize-y rounded border border-border bg-background px-2 py-1.5 text-xs outline-none focus:border-ring"
-            />
-            <Button
-              className="mt-2"
-              size="xs"
-              disabled={!summary.resumable || !followUp.trim() || busy !== null}
-              onClick={() =>
-                void run("send", async () => {
-                  const result = await send({
-                    environmentId,
-                    input: { workerId: summary.id, message: followUp.trim() },
-                  });
-                  if (result._tag === "Success") setFollowUp("");
-                  return result;
-                })
-              }
-            >
-              <Send className="size-3" /> Send follow-up
-            </Button>
-          </section>
+              <h4 id="worker-activations-heading" className="sr-only">
+                Activation history
+              </h4>
+              {detail.activations.map((activation) => (
+                <article
+                  key={activation.id}
+                  className="rounded-md border border-border/50 p-2 text-[.7rem]"
+                >
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <StatusPill status={activation.status} />
+                    <span className="text-muted-foreground">
+                      {dateTimeLabel(activation.startedAt)} ·{" "}
+                      {elapsedLabel(
+                        activation.startedAt,
+                        activation.finishedAt ?? (active ? undefined : summary.updatedAt),
+                        nowMs,
+                      )}
+                    </span>
+                  </div>
+                  <p className="mt-1 break-all font-mono text-[.65rem] text-muted-foreground">
+                    Parent turn {activation.parentTurnId ?? "—"} · Worker thread{" "}
+                    {activation.providerThreadId}
+                  </p>
+                  {activation.handoff?.trim() ? (
+                    <p className="mt-1 whitespace-pre-wrap break-words">{activation.handoff}</p>
+                  ) : null}
+                  {activation.error?.trim() ? (
+                    <p className="mt-1 whitespace-pre-wrap break-words text-destructive-foreground">
+                      {activation.error}
+                    </p>
+                  ) : null}
+                </article>
+              ))}
+            </section>
+          </details>
+
+          <p className="text-center text-[.7rem] text-muted-foreground">
+            Read-only view. The parent agent owns Worker creation and control.
+          </p>
+          <WorkerCompletionSummary summary={summary} nowMs={nowMs} />
         </div>
       </ScrollArea>
     </div>
   );
+}
+
+function useWorkerPanelLayout() {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [layout, setLayout] = useState<"master-detail" | "drill-in">("drill-in");
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    const measure = () => setLayout(workerPanelLayout(root.clientWidth));
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(root);
+    return () => observer.disconnect();
+  }, []);
+  return { rootRef, layout };
 }
 
 export function WorkersPanel({
@@ -502,12 +1274,10 @@ export function WorkersPanel({
   enabled?: boolean;
 }) {
   const [selectedWorkerId, setSelectedWorkerId] = useState<WorkerId | null>(null);
-  const [title, setTitle] = useState("");
-  const [assignment, setAssignment] = useState("");
-  const [contextNote, setContextNote] = useState("");
-  const [contextReferences, setContextReferences] = useState("");
-  const [contextSnippets, setContextSnippets] = useState("");
-  const [startError, setStartError] = useState<string | null>(null);
+  const [selectedSurface, setSelectedSurface] = useState<"overview" | "worker">("overview");
+  const [recentOpen, setRecentOpen] = useState(true);
+  const [narrowPage, setNarrowPage] = useState<"overview" | "list" | "detail">("overview");
+  const { rootRef, layout } = useWorkerPanelLayout();
   const listQuery = useEnvironmentQuery(
     enabled
       ? workerEnvironment.list({ environmentId, input: workerListInput(parentThreadId) })
@@ -521,18 +1291,32 @@ export function WorkersPanel({
   const liveEvents = useAtomValue(
     workerEnvironment.events({ environmentId, input: { parentThreadId, includeClosed: true } }),
   );
-  const start = useAtomCommand(workerEnvironment.start, { reportFailure: false });
   const workers = listQuery.data?.workers ?? EMPTY_WORKERS;
+  const sections = useMemo(() => partitionWorkers(workers), [workers]);
+  const elapsedNow = useWorkerElapsedNow(sections.active.length > 0);
+  const orderedWorkers = useMemo(() => [...sections.active, ...sections.recent], [sections]);
   const eventConnected = liveEvents._tag === "Success" || liveEvents.waiting;
-  const selected = workers.find((worker) => worker.id === selectedWorkerId) ?? workers[0] ?? null;
+  const selected = orderedWorkers.find((worker) => worker.id === selectedWorkerId) ?? null;
+  const isMasterDetail = layout === "master-detail";
+  const overview = listQuery.data?.overview;
+  const displayNow =
+    elapsedNow ||
+    (overview && Number.isFinite(Date.parse(overview.computedAt))
+      ? Date.parse(overview.computedAt)
+      : Date.now());
 
   useEffect(() => {
-    setSelectedWorkerId((current) => resolveSelectedWorkerId(current, workers));
-  }, [workers]);
+    if (selectedWorkerId === null) return;
+    const reconciled = reconcileWorkerPanelSelection(
+      { selectedWorkerId, selectedSurface, narrowPage },
+      sections,
+    );
+    if (reconciled.selectedWorkerId === selectedWorkerId) return;
+    setSelectedWorkerId(reconciled.selectedWorkerId);
+    setSelectedSurface(reconciled.selectedSurface);
+    setNarrowPage(reconciled.narrowPage);
+  }, [narrowPage, sections, selectedSurface, selectedWorkerId]);
 
-  // Keep the detail pane aligned with the first available Worker after the
-  // initial list load, and recover gracefully when a closed/removed Worker
-  // disappears during a refresh.
   useEffect(() => {
     if (liveEvents._tag !== "Success") return;
     listQuery.refresh();
@@ -541,171 +1325,150 @@ export function WorkersPanel({
 
   const aggregate = useMemo(
     () => ({
-      active: workers.filter((worker) => ACTIVE_STATUSES.has(worker.status)).length,
+      active: sections.active.length,
       tokens: workers.reduce((total, worker) => total + worker.usage.totalTokens, 0),
     }),
-    [workers],
+    [sections.active.length, workers],
   );
 
   if (!enabled) return null;
 
-  const submitStart = async () => {
-    if (!title.trim() || !assignment.trim()) return;
-    setStartError(null);
-    let context: WorkerContextPackage;
-    try {
-      context = parseWorkerContextInputs({
-        note: contextNote,
-        references: contextReferences,
-        snippets: contextSnippets,
-      });
-    } catch (error) {
-      setStartError(error instanceof Error ? error.message : "Explicit context is invalid.");
-      return;
-    }
-    const result = await start({
-      environmentId,
-      input: {
-        title: title.trim(),
-        assignment: assignment.trim(),
-        context,
-        parentThreadId,
-      },
-    });
-    if (result._tag === "Success") {
-      setSelectedWorkerId(result.value.summary.id);
-      setTitle("");
-      setAssignment("");
-      setContextNote("");
-      setContextReferences("");
-      setContextSnippets("");
-    } else {
-      setStartError("Could not start Worker. Check the server status and try again.");
-    }
+  const selectWorker = (workerId: WorkerId) => {
+    setSelectedWorkerId(workerId);
+    setSelectedSurface("worker");
+    setNarrowPage("detail");
   };
 
-  return (
-    <div className={WORKERS_PANEL_RESPONSIVE_CLASSES.root}>
-      <div className="border-b border-border/60 px-3 py-2.5">
-        <div className="flex items-center gap-2">
-          <Activity className="size-3.5 text-info-foreground" />
-          <span className="text-sm font-semibold">Workers</span>
-          <span className="ml-auto font-mono text-[.65rem] text-muted-foreground">
-            {aggregate.active} active · {formatTokens(aggregate.tokens)} tok
-          </span>
-          <span
-            className={cn(
-              "size-1.5 rounded-full",
-              eventConnected ? "bg-success" : "bg-muted-foreground/40",
-            )}
-            title={eventConnected ? "Live Worker updates" : "Waiting for Worker updates"}
-          />
-        </div>
-        <div className="mt-2 grid gap-1.5">
-          <input
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            placeholder="Worker title"
-            aria-label="Worker title"
-            className={WORKERS_PANEL_RESPONSIVE_CLASSES.startControl}
-          />
-          <textarea
-            value={assignment}
-            onChange={(event) => setAssignment(event.target.value)}
-            placeholder="Bounded assignment"
-            aria-label="Bounded assignment"
-            className={cn(WORKERS_PANEL_RESPONSIVE_CLASSES.startControl, "min-h-16 resize-y py-2")}
-          />
-          <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] gap-1.5 max-[480px]:grid-cols-1">
-            <input
-              value={contextNote}
-              onChange={(event) => setContextNote(event.target.value)}
-              placeholder="Explicit context note (optional)"
-              aria-label="Explicit context note"
-              className={WORKERS_PANEL_RESPONSIVE_CLASSES.startControl}
-            />
-            <Button
-              className="min-h-11 max-[480px]:w-full"
-              disabled={!title.trim() || !assignment.trim()}
-              onClick={() => void submitStart()}
-            >
-              <Play className="size-3" /> Start
-            </Button>
-          </div>
-          <details className="min-w-0 rounded border border-border/60 bg-card/20">
-            <summary className="flex min-h-11 cursor-pointer items-center px-2 text-xs text-muted-foreground">
-              Explicit paths and snippets
-            </summary>
-            <div className="grid min-w-0 gap-2 border-t border-border/60 p-2">
-              <label className="grid min-w-0 gap-1 text-[.7rem] text-muted-foreground">
-                References — one per line: path:10-20#symbol
-                <textarea
-                  value={contextReferences}
-                  onChange={(event) => setContextReferences(event.target.value)}
-                  placeholder="apps/server/src/worker/WorkerStore.ts:10-40#WorkerStore"
-                  className={cn(
-                    WORKERS_PANEL_RESPONSIVE_CLASSES.startControl,
-                    "min-h-16 resize-y py-2 font-mono",
-                  )}
-                />
-              </label>
-              <label className="grid min-w-0 gap-1 text-[.7rem] text-muted-foreground">
-                Snippets — one explicit snippet per line
-                <textarea
-                  value={contextSnippets}
-                  onChange={(event) => setContextSnippets(event.target.value)}
-                  placeholder="Paste only the text this Worker needs."
-                  className={cn(
-                    WORKERS_PANEL_RESPONSIVE_CLASSES.startControl,
-                    "min-h-16 resize-y py-2 font-mono",
-                  )}
-                />
-              </label>
-            </div>
-          </details>
-          {startError ? (
-            <p className="text-[.7rem] text-destructive-foreground">{startError}</p>
-          ) : null}
-        </div>
-      </div>
+  const selectOverview = () => {
+    setSelectedSurface("overview");
+    setNarrowPage("overview");
+  };
 
-      <div className={WORKERS_PANEL_RESPONSIVE_CLASSES.panes}>
-        <ScrollArea className="min-h-0 border-r border-border/60 max-[680px]:max-h-52 max-[680px]:border-r-0 max-[680px]:border-b">
-          {listQuery.isPending && workers.length === 0 ? (
-            <p className="p-3 text-xs text-muted-foreground">Loading Workers…</p>
-          ) : null}
-          {listQuery.error ? (
-            <p className="p-3 text-xs text-destructive-foreground">{listQuery.error}</p>
-          ) : null}
-          {!listQuery.isPending && !listQuery.error && workers.length === 0 ? (
-            <p className="p-4 text-center text-xs text-muted-foreground">
-              No Workers for this thread yet.
-            </p>
-          ) : null}
-          {workers.map((worker) => (
-            <WorkerRow
-              key={worker.id}
-              worker={worker}
-              selected={worker.id === selected?.id}
-              onSelect={() => setSelectedWorkerId(worker.id)}
+  const detailContent =
+    detailQuery.data && detailQuery.data.summary.id === selected?.id ? (
+      <WorkerDetailView
+        detail={detailQuery.data}
+        showBack={!isMasterDetail}
+        onBack={() => setNarrowPage("list")}
+        nowMs={displayNow}
+      />
+    ) : (
+      <div className="flex h-full min-h-52 items-center justify-center p-6 text-center text-xs text-muted-foreground">
+        {selected
+          ? detailQuery.isPending
+            ? "Loading Worker detail…"
+            : (detailQuery.error ?? "Select a Worker to inspect its timeline.")
+          : "Select a Worker to inspect its assignment, messages, activity, status, and results."}
+      </div>
+    );
+
+  const overviewContent = overview ? (
+    <WorkerEfficiencyOverviewView
+      overview={overview}
+      nowMs={displayNow}
+      onSelectWorker={selectWorker}
+      {...(!isMasterDetail ? { showWorkerList: () => setNarrowPage("list") } : {})}
+    />
+  ) : (
+    <div className="flex h-full min-h-52 items-center justify-center p-6 text-center text-xs text-muted-foreground">
+      {listQuery.isPending
+        ? "Loading Worker overview…"
+        : (listQuery.error ?? "Worker metrics are unavailable for this task.")}
+    </div>
+  );
+
+  const listContent = (
+    <ScrollArea
+      className={cn(
+        "h-full min-h-0 min-w-0 overflow-x-hidden",
+        isMasterDetail ? "w-60 shrink-0 border-r border-border/60" : "w-full",
+      )}
+    >
+      {!isMasterDetail ? (
+        <button
+          type="button"
+          onClick={selectOverview}
+          className="sticky top-0 z-10 flex min-h-11 w-full items-center gap-2 border-b border-border/60 bg-background/95 px-3 text-xs text-muted-foreground backdrop-blur hover:bg-accent/30 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        >
+          <ArrowLeft aria-hidden className="size-4" /> Overview
+        </button>
+      ) : (
+        <button
+          type="button"
+          aria-current={selectedSurface === "overview" ? "page" : undefined}
+          onClick={selectOverview}
+          className={cn(
+            "flex min-h-11 w-full items-center gap-2 border-b border-border/45 px-3 text-left text-xs hover:bg-accent/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+            selectedSurface === "overview" && "bg-accent/45 text-foreground",
+          )}
+        >
+          <BarChart3 aria-hidden className="size-3.5" />
+          <span className="font-medium">Overview</span>
+        </button>
+      )}
+      {listQuery.isPending && workers.length === 0 ? (
+        <p className="p-3 text-xs text-muted-foreground">Loading Workers…</p>
+      ) : null}
+      {listQuery.error ? (
+        <p className="p-3 text-xs text-destructive-foreground">{listQuery.error}</p>
+      ) : null}
+      {!listQuery.isPending && !listQuery.error && workers.length === 0 ? (
+        <p className="p-5 text-center text-xs text-muted-foreground">
+          No Workers for this task yet.
+        </p>
+      ) : null}
+      <WorkerRail
+        sections={sections}
+        selectedWorkerId={selectedSurface === "worker" ? selectedWorkerId : null}
+        recentOpen={recentOpen}
+        onRecentOpenChange={setRecentOpen}
+        onSelect={selectWorker}
+        nowMs={displayNow}
+      />
+    </ScrollArea>
+  );
+
+  return (
+    <div
+      ref={rootRef}
+      data-layout={layout}
+      className="flex h-full min-h-0 min-w-0 flex-col overflow-x-hidden"
+    >
+      {isMasterDetail || narrowPage !== "detail" ? (
+        <header data-worker-panel-header className="shrink-0 border-b border-border/60 px-3 py-2.5">
+          <div className="flex min-w-0 items-center gap-2">
+            <Activity aria-hidden className="size-3.5 text-info-foreground" />
+            <span className="text-sm font-semibold">Workers</span>
+            <span className="ml-auto shrink-0 font-mono text-[.65rem] text-muted-foreground">
+              {aggregate.active} active · {formatTokens(aggregate.tokens)} tok
+            </span>
+            <span
+              aria-label={eventConnected ? "Live Worker updates" : "Waiting for Worker updates"}
+              className={cn(
+                "size-1.5 shrink-0 rounded-full",
+                eventConnected ? "bg-success" : "bg-muted-foreground/40",
+              )}
             />
-          ))}
-        </ScrollArea>
-        {detailQuery.data && detailQuery.data.summary.id === selected?.id ? (
-          <WorkerDetailView
-            environmentId={environmentId}
-            detail={detailQuery.data}
-            onRefresh={detailQuery.refresh}
-          />
-        ) : (
-          <div className="flex items-center justify-center p-6 text-center text-xs text-muted-foreground">
-            {selected
-              ? detailQuery.isPending
-                ? "Loading Worker detail…"
-                : (detailQuery.error ?? "Select a Worker to inspect its communication.")
-              : "Start or select a Worker to inspect its communication."}
           </div>
-        )}
+          <p className="mt-1.5 text-[.7rem] text-muted-foreground">
+            Read-only activity from Workers created by this task’s parent agent.
+          </p>
+        </header>
+      ) : null}
+
+      <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+        {isMasterDetail ? listContent : null}
+        <div className="h-full min-h-0 min-w-0 flex-1">
+          {isMasterDetail
+            ? selectedSurface === "overview"
+              ? overviewContent
+              : detailContent
+            : narrowPage === "overview"
+              ? overviewContent
+              : narrowPage === "list"
+                ? listContent
+                : detailContent}
+        </div>
       </div>
     </div>
   );

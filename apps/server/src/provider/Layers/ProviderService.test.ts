@@ -46,7 +46,7 @@ import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
 import * as ProviderSessionDirectory from "../Services/ProviderSessionDirectory.ts";
-import { makeProviderServiceLive } from "./ProviderService.ts";
+import { makeProviderServiceLive, providerSessionUsesT3Mcp } from "./ProviderService.ts";
 import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import { ProviderSessionDirectoryLive } from "./ProviderSessionDirectory.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -59,6 +59,7 @@ import * as ServerConfig from "../../config.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import { makeAdapterRegistryMock } from "../testUtils/providerAdapterRegistryMock.ts";
+import { WORKER_PROVIDER_THREAD_PREFIX } from "../../worker/WorkerThreadBoundary.ts";
 
 const defaultServerSettingsLayer = ServerSettings.ServerSettingsService.layerTest();
 const serverConfigTestLayer = ServerConfig.layerTest(process.cwd(), process.cwd()).pipe(
@@ -74,6 +75,14 @@ const claudeAgentInstanceId = ProviderInstanceId.make("claudeAgent");
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const CLAUDE_AGENT_DRIVER = ProviderDriverKind.make("claudeAgent");
 const CURSOR_DRIVER = ProviderDriverKind.make("cursor");
+
+it("attaches the T3 MCP toolkit to parent sessions but not Worker sessions", () => {
+  assert.equal(providerSessionUsesT3Mcp(asThreadId("parent-thread")), true);
+  assert.equal(
+    providerSessionUsesT3Mcp(asThreadId(`${WORKER_PROVIDER_THREAD_PREFIX}worker-1`)),
+    false,
+  );
+});
 
 type LegacyProviderRuntimeEvent = {
   readonly type: string;
@@ -1078,6 +1087,39 @@ routing.layer("ProviderServiceLive routing", (it) => {
         assert.equal(startPayload.threadId, initial.threadId);
       }
       assert.equal(routing.codex.sendTurn.mock.calls.length, 1);
+    }),
+  );
+
+  it.effect("starts a fresh conversation when resumeCursor is explicitly null", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-fresh-conversation");
+      const initial = yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project-fresh-conversation",
+        runtimeMode: "full-access",
+      });
+      assert.notEqual(initial.resumeCursor, undefined);
+
+      routing.codex.startSession.mockClear();
+      yield* provider.startSession(threadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId,
+        cwd: "/tmp/project-fresh-conversation",
+        resumeCursor: null,
+        runtimeMode: "full-access",
+      });
+
+      assert.equal(routing.codex.startSession.mock.calls.length, 1);
+      const freshStartInput = routing.codex.startSession.mock.calls[0]?.[0];
+      assert.equal(freshStartInput?.resumeCursor, undefined);
+      assert.equal(
+        freshStartInput !== undefined && Object.hasOwn(freshStartInput, "resumeCursor"),
+        false,
+      );
     }),
   );
 
