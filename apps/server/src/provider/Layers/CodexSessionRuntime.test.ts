@@ -11,18 +11,23 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import {
   buildCodexDeveloperInstructions,
-  CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS,
-  CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS,
+  codexDefaultModeDeveloperInstructions,
+  codexPlanModeDeveloperInstructions,
 } from "../CodexDeveloperInstructions.ts";
 import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import {
+  buildMcpApprovalResponse,
+  buildPermissionsApprovalResponse,
   buildCodexAppServerCommandArgs,
   buildTurnStartParams,
   codexSubagentBackendAppServerArgs,
   assertCodexSubagentIsolationConfig,
   hasConfiguredMcpServer,
+  isComputerUseMcpApproval,
+  isMcpToolApproval,
   isRecoverableThreadResumeError,
   makeMemoryConsolidationNotificationFilter,
+  mcpApprovalRequestKind,
   openCodexThread,
 } from "./CodexSessionRuntime.ts";
 import { isWorkerLifecycleToolName } from "../../worker/WorkerThreadBoundary.ts";
@@ -42,6 +47,116 @@ describe("CodexSessionRuntimeIdentifierGenerationError", () => {
       error.message,
       "Failed to generate Codex App Server identifier for provider-event.",
     );
+  });
+});
+
+describe("buildPermissionsApprovalResponse", () => {
+  const permissions = {
+    network: { enabled: true },
+    fileSystem: {
+      entries: [{ access: "write" as const, path: { type: "path" as const, path: "/tmp" } }],
+    },
+  };
+
+  it("grants the requested execution context for this turn", () => {
+    NodeAssert.deepStrictEqual(buildPermissionsApprovalResponse(permissions, "accept"), {
+      permissions,
+      scope: "turn",
+    });
+  });
+
+  it("persists an accepted execution context only for acceptForSession", () => {
+    NodeAssert.deepStrictEqual(buildPermissionsApprovalResponse(permissions, "acceptForSession"), {
+      permissions,
+      scope: "session",
+    });
+  });
+
+  it("denies every requested capability on decline or cancellation", () => {
+    for (const decision of ["decline", "cancel"] as const) {
+      NodeAssert.deepStrictEqual(buildPermissionsApprovalResponse(permissions, decision), {
+        permissions: {},
+        scope: "turn",
+      });
+    }
+  });
+});
+
+describe("MCP tool approval", () => {
+  const request = {
+    _meta: {
+      codex_approval_kind: "mcp_tool_call",
+      connector_id: "computer-use",
+      persist: ["session", "always"],
+    },
+    message: "Allow Computer Use to control this desktop?",
+    mode: "form" as const,
+    requestedSchema: { type: "object" as const, properties: {} },
+    serverName: "computer-use",
+    threadId: "provider-thread-1",
+    turnId: "turn-1",
+  };
+
+  it("recognizes only the Computer Use connector approval", () => {
+    NodeAssert.equal(isComputerUseMcpApproval(request), true);
+    NodeAssert.equal(
+      isComputerUseMcpApproval({
+        ...request,
+        _meta: { ...request._meta, connector_id: "calendar" },
+      }),
+      false,
+    );
+  });
+
+  it("recognizes generic MCP tool guardian approvals without a connector id", () => {
+    const genericRequest = {
+      ...request,
+      _meta: { codex_approval_kind: "mcp_tool_call" as const },
+      message: "Allow node_repl to run this tool call?",
+      serverName: "node_repl",
+    };
+
+    NodeAssert.equal(isMcpToolApproval(genericRequest), true);
+    NodeAssert.equal(isComputerUseMcpApproval(genericRequest), false);
+    NodeAssert.equal(mcpApprovalRequestKind(genericRequest), "tool");
+    NodeAssert.equal(mcpApprovalRequestKind(request), "permissions");
+  });
+
+  it("does not recognize URL or unrelated form elicitations as MCP tool approvals", () => {
+    NodeAssert.equal(
+      isMcpToolApproval({
+        ...request,
+        mode: "url",
+        url: "https://example.com/approve",
+        elicitationId: "elicitation-1",
+      }),
+      false,
+    );
+    const unrelatedRequest = {
+      ...request,
+      _meta: { connector_id: "computer-use" },
+    };
+    NodeAssert.equal(isMcpToolApproval(unrelatedRequest), false);
+    NodeAssert.equal(mcpApprovalRequestKind(unrelatedRequest), undefined);
+    NodeAssert.equal(
+      mcpApprovalRequestKind({
+        ...request,
+        mode: "url",
+        url: "https://example.com/approve",
+        elicitationId: "elicitation-1",
+      }),
+      undefined,
+    );
+  });
+
+  it("maps approval decisions to MCP actions and session persistence", () => {
+    NodeAssert.deepStrictEqual(buildMcpApprovalResponse("accept"), { action: "accept" });
+    NodeAssert.deepStrictEqual(buildMcpApprovalResponse("acceptForSession"), {
+      action: "accept",
+      _meta: { persist: "session" },
+    });
+    NodeAssert.deepStrictEqual(buildMcpApprovalResponse("decline"), { action: "decline" });
+    NodeAssert.deepStrictEqual(buildMcpApprovalResponse("cancel"), { action: "cancel" });
   });
 });
 
@@ -348,6 +463,7 @@ describe("buildCodexDeveloperInstructions", () => {
     ]) {
       NodeAssert.match(instructions, new RegExp(`Do not call[^.]*${nativeTool}`));
     }
+    NodeAssert.match(instructions, /follow the Worker tools' assignment and telemetry guidance/);
   });
 
   it("requires a visible start handoff before a meaningful Worker wait", () => {
@@ -377,7 +493,7 @@ describe("buildCodexDeveloperInstructions", () => {
       reasoningEffort: "high",
     });
 
-    NodeAssert.ok(instructions.startsWith(CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS));
+    NodeAssert.ok(instructions.startsWith(codexDefaultModeDeveloperInstructions(true)));
     NodeAssert.match(instructions, /T3 Code/);
     NodeAssert.match(instructions, /Codex harness/);
     NodeAssert.match(instructions, /as gpt-5\.3-codex with high reasoning effort/);
@@ -389,7 +505,7 @@ describe("buildCodexDeveloperInstructions", () => {
       reasoningEffort: "medium",
     });
 
-    NodeAssert.ok(instructions.startsWith(CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS));
+    NodeAssert.ok(instructions.startsWith(codexPlanModeDeveloperInstructions(true)));
     NodeAssert.match(instructions, /as gpt-5\.3-codex with medium reasoning effort/);
   });
 
@@ -418,16 +534,70 @@ describe("buildCodexDeveloperInstructions", () => {
 });
 
 describe("T3 browser developer instructions", () => {
-  it("prefers the product-native preview tools in both collaboration modes", () => {
+  it("defaults to trusted full desktop control", () => {
+    const instructions = buildCodexDeveloperInstructions("default", {
+      model: "gpt-5.6-sol",
+      reasoningEffort: "high",
+    });
+
+    NodeAssert.match(instructions, /Full Windows and Chrome control/);
+    NodeAssert.match(instructions, /upload, download/);
+    NodeAssert.match(instructions, /no domain allowlist/);
+    NodeAssert.doesNotMatch(instructions, /Do not switch to global browser skills/);
+  });
+
+  it("keeps preview, full Chrome, and full desktop as explicit per-turn options", () => {
+    const common = { model: "gpt-5.6-sol", reasoningEffort: "high" } as const;
+    const preview = buildCodexDeveloperInstructions("default", {
+      ...common,
+      computerControlMode: "preview",
+    });
+    const chrome = buildCodexDeveloperInstructions("default", {
+      ...common,
+      computerControlMode: "chrome",
+    });
+    const desktop = buildCodexDeveloperInstructions("plan", {
+      ...common,
+      computerControlMode: "desktop",
+    });
+
+    NodeAssert.match(preview, /preview_status/);
+    NodeAssert.match(preview, /Do not switch to global browser skills/);
+    NodeAssert.match(chrome, /Full Chrome control/);
+    NodeAssert.match(chrome, /Chrome DevTools/);
+    NodeAssert.match(desktop, /Full Windows and Chrome control/);
+  });
+
+  it("keeps the base collaboration modes independent from browser availability", () => {
     for (const instructions of [
-      CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS,
-      CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS,
+      codexDefaultModeDeveloperInstructions(true),
+      codexPlanModeDeveloperInstructions(true),
+      codexDefaultModeDeveloperInstructions(false),
+      codexPlanModeDeveloperInstructions(false),
     ]) {
-      NodeAssert.match(instructions, /t3-code/);
-      NodeAssert.match(instructions, /preview_status/);
-      NodeAssert.match(instructions, /preview_open/);
-      NodeAssert.match(instructions, /Do not switch to global browser skills/);
+      NodeAssert.doesNotMatch(instructions, /preview_status/);
+      NodeAssert.doesNotMatch(instructions, /preview_open/);
+      NodeAssert.doesNotMatch(instructions, /T3 Code collaborative browser/);
+      // Steering away from other browser automation must go with the tools;
+      // keeping it would leave the model talked out of its only option.
+      NodeAssert.doesNotMatch(instructions, /Do not switch to global browser skills/);
+      // The rest of the collaboration mode is untouched.
+      NodeAssert.match(instructions, /<collaboration_mode>/);
+      NodeAssert.match(instructions, /<\/collaboration_mode>/);
     }
+  });
+
+  it("only describes preview tools when preview mode has an attached MCP server", () => {
+    const runtime = {
+      model: "gpt-5.3-codex",
+      reasoningEffort: "high",
+      computerControlMode: "preview" as const,
+    };
+    NodeAssert.match(buildCodexDeveloperInstructions("default", runtime, true), /preview_open/);
+    NodeAssert.doesNotMatch(
+      buildCodexDeveloperInstructions("default", runtime, false),
+      /preview_open/,
+    );
   });
 });
 

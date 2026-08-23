@@ -33,7 +33,14 @@ const fakeEnvironment = ServerEnvironment.ServerEnvironment.of({
   getDescriptor: Effect.die("unused"),
 });
 
-const makeRegistry = (now: () => number, httpServer = fakeHttpServer, enableT3Workers = false) =>
+const makeRegistry = (
+  now: () => number,
+  httpServer = fakeHttpServer,
+  settings: {
+    readonly enableAgentBrowserAccess?: boolean;
+    readonly enableT3Workers?: boolean;
+  } = {},
+) =>
   McpSessionRegistry.__testing
     .make({
       now,
@@ -44,7 +51,7 @@ const makeRegistry = (now: () => number, httpServer = fakeHttpServer, enableT3Wo
         Layer.mergeAll(
           Layer.succeed(HttpServer.HttpServer, httpServer),
           Layer.succeed(ServerEnvironment.ServerEnvironment, fakeEnvironment),
-          ServerSettings.layerTest({ enableT3Workers }),
+          ServerSettings.layerTest(settings),
           NodeServices.layer,
         ),
       ),
@@ -52,7 +59,9 @@ const makeRegistry = (now: () => number, httpServer = fakeHttpServer, enableT3Wo
 
 it.effect("grants Worker capability to parent sessions but never Worker sessions", () =>
   Effect.gen(function* () {
-    const disabledRegistry = yield* makeRegistry(() => 1_000);
+    const disabledRegistry = yield* makeRegistry(() => 1_000, fakeHttpServer, {
+      enableAgentBrowserAccess: true,
+    });
     const disabled = yield* disabledRegistry.issue({
       threadId: ThreadId.make("thread-workers-disabled"),
       providerInstanceId: ProviderInstanceId.make("codex"),
@@ -63,7 +72,10 @@ it.effect("grants Worker capability to parent sessions but never Worker sessions
     expect(disabledScope?.capabilities.has("preview")).toBe(true);
     expect(disabledScope?.capabilities.has("workers")).toBe(false);
 
-    const enabledRegistry = yield* makeRegistry(() => 1_000, fakeHttpServer, true);
+    const enabledRegistry = yield* makeRegistry(() => 1_000, fakeHttpServer, {
+      enableAgentBrowserAccess: true,
+      enableT3Workers: true,
+    });
     const enabled = yield* enabledRegistry.issue({
       threadId: ThreadId.make("thread-workers-enabled"),
       providerInstanceId: ProviderInstanceId.make("codex"),
@@ -90,6 +102,36 @@ it.effect("grants Worker capability to parent sessions but never Worker sessions
     expect(workerScope?.capabilities.has("workers")).toBe(false);
   }),
 );
+
+it("derives preview and Worker capabilities independently", () => {
+  const parent = ThreadId.make("thread-capability-matrix");
+  const worker = ThreadId.make(`${WORKER_PROVIDER_THREAD_PREFIX}capability-matrix`);
+
+  expect(
+    Array.from(
+      McpSessionRegistry.resolveMcpCapabilities(
+        { enableAgentBrowserAccess: false, enableT3Workers: true },
+        parent,
+      ),
+    ),
+  ).toEqual(["workers"]);
+  expect(
+    Array.from(
+      McpSessionRegistry.resolveMcpCapabilities(
+        { enableAgentBrowserAccess: true, enableT3Workers: false },
+        parent,
+      ),
+    ),
+  ).toEqual(["preview"]);
+  expect(
+    Array.from(
+      McpSessionRegistry.resolveMcpCapabilities(
+        { enableAgentBrowserAccess: true, enableT3Workers: true },
+        worker,
+      ),
+    ),
+  ).toEqual(["preview"]);
+});
 
 it.effect("stores only a token hash, resolves the bearer token, and revokes by thread", () =>
   Effect.gen(function* () {
@@ -197,7 +239,9 @@ it.effect("binds a live MCP credential to the active parent turn", () =>
 
 it.effect("refreshes the parent model selection before a turn uses the MCP credential", () =>
   Effect.gen(function* () {
-    const registry = yield* makeRegistry(() => 1_000, fakeHttpServer, true);
+    const registry = yield* makeRegistry(() => 1_000, fakeHttpServer, {
+      enableT3Workers: true,
+    });
     const threadId = ThreadId.make("thread-model-refresh");
     const issued = yield* registry.issue({
       threadId,

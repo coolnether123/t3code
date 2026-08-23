@@ -8,11 +8,13 @@ import {
   TurnId,
   WorkerActivationId,
   WorkerId,
+  WorkerOperationError,
   workerDisplayNameFor,
   type WorkerActivation,
   type WorkerApprovalRequest,
   type WorkerMessage,
   type WorkerSummary,
+  type ModelSelection,
   type ProviderRuntimeEvent,
 } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
@@ -34,6 +36,72 @@ const requestId = ApprovalRequestId.make("request-approval");
 const providerThreadId = ThreadId.make("t3-worker:worker-approval");
 const providerInstanceId = ProviderInstanceId.make("codex");
 const parentThreadId = ThreadId.make("parent-thread");
+
+function makeMemoryWorkerStore() {
+  const workers = new Map<WorkerId, StoredWorker>();
+  const activations = new Map<WorkerActivationId, WorkerActivation>();
+  const messages = new Map<WorkerId, Array<WorkerMessage>>();
+  const providerEvents = new Map<WorkerId, Array<ProviderRuntimeEvent>>();
+  const store = WorkerStore.of({
+    saveWorker: (worker) => Effect.sync(() => void workers.set(worker.summary.id, worker)),
+    getWorker: (id) => Effect.succeed(Option.fromNullishOr(workers.get(id))),
+    listWorkers: () => Effect.succeed([...workers.values()]),
+    saveActivation: (activation) =>
+      Effect.sync(() => void activations.set(activation.id, activation)),
+    getActivation: (id) => Effect.succeed(Option.fromNullishOr(activations.get(id))),
+    listActivations: (id) =>
+      Effect.succeed([...activations.values()].filter((activation) => activation.workerId === id)),
+    findProviderActivation: (input) => {
+      const candidates = [...activations.values()]
+        .filter((activation) => activation.providerThreadId === input.providerThreadId)
+        .sort((left, right) => right.startedAt.localeCompare(left.startedAt));
+      const exact =
+        input.providerTurnId === undefined
+          ? undefined
+          : candidates.find((activation) => activation.providerTurnId === input.providerTurnId);
+      const fallback = candidates.find(
+        (activation) => activation.status === "starting" && activation.providerTurnId === undefined,
+      );
+      const matched =
+        exact ?? fallback ?? (input.providerTurnId === undefined ? candidates[0] : undefined);
+      return Effect.succeed(
+        matched === undefined
+          ? Option.none()
+          : Option.some({ workerId: matched.workerId, activationId: matched.id }),
+      );
+    },
+    saveMessage: (message) =>
+      Effect.sync(() => {
+        messages.set(message.workerId, [...(messages.get(message.workerId) ?? []), message]);
+      }),
+    listMessages: (id) => Effect.succeed(messages.get(id) ?? []),
+    saveApproval: () => Effect.void,
+    getPendingApproval: () => Effect.succeed(Option.none()),
+    resolveApproval: () => Effect.void,
+    saveObserverReport: () => Effect.void,
+    listObserverReports: () => Effect.succeed([]),
+    saveWaitLease: () => Effect.void,
+    finishWaitLease: () => Effect.void,
+    appendProviderEvent: (input) =>
+      Effect.sync(() => {
+        const event = input.payload as ProviderRuntimeEvent;
+        const existing = providerEvents.get(input.workerId) ?? [];
+        if (!existing.some((candidate) => candidate.eventId === event.eventId)) {
+          providerEvents.set(input.workerId, [...existing, event]);
+        }
+      }),
+    listProviderEvents: (id) => Effect.succeed(providerEvents.get(id) ?? []),
+  } satisfies WorkerStoreShape);
+  return { store, workers, activations, messages, providerEvents };
+}
+
+const workerLayer = (store: WorkerStoreShape, backend: WorkerBackendShape) =>
+  Layer.mergeAll(
+    Layer.succeed(WorkerStore, store),
+    Layer.succeed(WorkerBackend, backend),
+    Layer.succeed(WorkerObserver, WorkerObserver.of({ observe: () => Effect.die("unused") })),
+    NodeServices.layer,
+  );
 
 it("preserves provider input, output, and cached-input usage dimensions", () => {
   expect(
@@ -67,9 +135,10 @@ it("preserves provider input, output, and cached-input usage dimensions", () => 
   });
 });
 
-it.effect("persists supplied names and migrates legacy Workers to a stable generated name", () => {
+it.effect("persists Worker identity and exact model options across follow-up activations", () => {
   let stored: StoredWorker | undefined;
   let activation: WorkerActivation | undefined;
+  const followUpModelSelections: Array<ModelSelection | undefined> = [];
   const messages: Array<WorkerMessage> = [];
   const providerThread = ThreadId.make("t3-worker-name-test");
   const store = WorkerStore.of({
@@ -79,7 +148,7 @@ it.effect("persists supplied names and migrates legacy Workers to a stable gener
     saveActivation: (next) => Effect.sync(() => void (activation = next)),
     getActivation: () => Effect.succeed(Option.fromNullishOr(activation)),
     listActivations: () => Effect.succeed(activation === undefined ? [] : [activation]),
-    findProviderThread: () => Effect.succeed(Option.none()),
+    findProviderActivation: () => Effect.succeed(Option.none()),
     saveMessage: (message) => Effect.sync(() => void messages.push(message)),
     listMessages: () => Effect.succeed(messages),
     saveApproval: () => Effect.void,
@@ -98,7 +167,14 @@ it.effect("persists supplied names and migrates legacy Workers to a stable gener
         providerThreadId: providerThread,
         providerTurnId: TurnId.make("name-turn"),
       }),
-    send: () => Effect.die("unused"),
+    send: (input) =>
+      Effect.sync(() => {
+        followUpModelSelections.push(input.modelSelection);
+        return {
+          providerThreadId: providerThread,
+          providerTurnId: TurnId.make("follow-up-turn"),
+        };
+      }),
     interrupt: () => Effect.die("unused"),
     stop: () => Effect.die("unused"),
     respondToApproval: () => Effect.die("unused"),
@@ -115,10 +191,37 @@ it.effect("persists supplied names and migrates legacy Workers to a stable gener
         title: "Historical assignment title",
         assignment: "Inspect naming.",
         context: { references: [], snippets: [] },
+        modelSelection: {
+          instanceId: providerInstanceId,
+          model: "gpt-5.6-sol",
+          options: [{ id: "computerControl", value: "chrome" }],
+        },
       },
     });
     expect(started.summary.displayName).toBe("Review Bot 1");
     expect(stored?.summary.displayName).toBe("Review Bot 1");
+    const reloadedService = yield* WorkerServiceTesting.make;
+    yield* reloadedService.send({
+      workerId: started.summary.id,
+      message: "Continue in Chrome.",
+    });
+    expect(followUpModelSelections[0]).toEqual({
+      instanceId: providerInstanceId,
+      model: "gpt-5.6-sol",
+      options: [{ id: "computerControl", value: "chrome" }],
+    });
+
+    const { modelSelection: _modelSelection, ...legacyWithoutModelSelection } = stored!;
+    stored = legacyWithoutModelSelection;
+    const legacyService = yield* WorkerServiceTesting.make;
+    yield* legacyService.send({
+      workerId: started.summary.id,
+      message: "Continue with the legacy record.",
+    });
+    expect(followUpModelSelections[1]).toEqual({
+      instanceId: providerInstanceId,
+      model: "gpt-5.6-sol",
+    });
 
     const { displayName: _displayName, ...legacySummary } = stored!.summary;
     const legacy = { ...stored!, summary: legacySummary };
@@ -139,6 +242,290 @@ it.effect("persists supplied names and migrates legacy Workers to a stable gener
       ),
     ),
   );
+});
+
+it.effect("settles a failed start durably and makes worker_wait return immediately", () => {
+  const memory = makeMemoryWorkerStore();
+  const backend = WorkerBackend.of({
+    start: () =>
+      Effect.fail(
+        new WorkerOperationError({ operation: "worker.start", message: "provider refused start" }),
+      ),
+    send: () => Effect.die("unused"),
+    interrupt: () => Effect.die("unused"),
+    stop: () => Effect.die("unused"),
+    respondToApproval: () => Effect.die("unused"),
+    hasLiveSession: () => Effect.succeed(false),
+  });
+
+  return Effect.gen(function* () {
+    const service = yield* WorkerServiceTesting.make;
+    yield* service
+      .start({
+        parentThreadId,
+        providerInstanceId,
+        input: {
+          title: "Failure test",
+          assignment: "Fail cleanly.",
+          context: { references: [], snippets: [] },
+        },
+      })
+      .pipe(Effect.flip);
+
+    const failed = [...memory.workers.values()][0]!;
+    expect(failed.summary.status).toBe("failed");
+    expect(failed.summary.activeActivationId).toBeUndefined();
+    expect([...memory.activations.values()][0]).toMatchObject({
+      status: "failed",
+      error: "provider refused start",
+    });
+    const waited = yield* service.wait({
+      workerIds: [failed.summary.id],
+      timeoutMillis: 1_000,
+      until: ["failed"],
+    });
+    expect(waited).toMatchObject({ status: "woken", reason: "failed" });
+  }).pipe(Effect.provide(workerLayer(memory.store, backend)));
+});
+
+it.effect(
+  "keeps late events on their provider turn and publishes live tool and token updates",
+  () => {
+    const memory = makeMemoryWorkerStore();
+    let turnIndex = 0;
+    const backend = WorkerBackend.of({
+      start: (input) =>
+        Effect.succeed({
+          providerThreadId: input.providerThreadId,
+          providerTurnId: TurnId.make(`worker-turn-${++turnIndex}`),
+        }),
+      send: (input) =>
+        Effect.succeed({
+          providerThreadId: input.providerThreadId,
+          providerTurnId: TurnId.make(`worker-turn-${++turnIndex}`),
+        }),
+      interrupt: () => Effect.die("unused"),
+      stop: () => Effect.die("unused"),
+      respondToApproval: () => Effect.die("unused"),
+      hasLiveSession: () => Effect.succeed(true),
+    });
+
+    return Effect.gen(function* () {
+      const service = yield* WorkerServiceTesting.make;
+      const started = yield* service.start({
+        parentThreadId,
+        providerInstanceId,
+        input: {
+          title: "Browser acceptance",
+          assignment: "Open Wikipedia.",
+          context: { references: [], snippets: [] },
+        },
+      });
+      const first = started.activations[0]!;
+      const eventFiber = yield* Effect.forkChild(Stream.runHead(service.stream), {
+        startImmediately: true,
+      });
+      yield* Effect.yieldNow;
+      yield* service.handleProviderEvent({
+        eventId: EventId.make("tool-completed-live"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId: first.providerThreadId,
+        turnId: first.providerTurnId,
+        createdAt: now,
+        type: "item.completed",
+        payload: {
+          itemType: "mcp_tool_call",
+          status: "completed",
+          title: "chrome.navigate",
+        },
+      });
+      expect(Option.getOrUndefined(yield* Fiber.join(eventFiber))).toMatchObject({
+        workerId: started.summary.id,
+        type: "updated",
+      });
+
+      const tokenFiber = yield* Effect.forkChild(Stream.runHead(service.stream), {
+        startImmediately: true,
+      });
+      yield* Effect.yieldNow;
+      yield* service.handleProviderEvent({
+        eventId: EventId.make("token-live"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId: first.providerThreadId,
+        turnId: first.providerTurnId,
+        createdAt: now,
+        type: "thread.token-usage.updated",
+        payload: {
+          usage: { usedTokens: 30, inputTokens: 20, outputTokens: 10 },
+        },
+      });
+      expect(Option.getOrUndefined(yield* Fiber.join(tokenFiber))?.summary.usage).toMatchObject({
+        inputTokens: 20,
+        outputTokens: 10,
+        totalTokens: 30,
+      });
+
+      yield* service.handleProviderEvent({
+        eventId: EventId.make("assistant-final-no-delta"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId: first.providerThreadId,
+        turnId: first.providerTurnId,
+        createdAt: now,
+        type: "item.completed",
+        payload: {
+          itemType: "assistant_message",
+          status: "completed",
+          detail: "Wikipedia opened and the Wi-Fi page was downloaded.",
+        },
+      });
+      yield* service.handleProviderEvent({
+        eventId: EventId.make("first-turn-completed"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId: first.providerThreadId,
+        turnId: first.providerTurnId,
+        createdAt: now,
+        type: "turn.completed",
+        payload: { state: "completed" },
+      });
+      expect((yield* service.get(started.summary.id)).messages.at(-1)?.body).toBe(
+        "Wikipedia opened and the Wi-Fi page was downloaded.",
+      );
+
+      const followedUp = yield* service.send({
+        workerId: started.summary.id,
+        message: "Verify the saved file.",
+      });
+      const second = followedUp.activations.at(-1)!;
+      yield* service.handleProviderEvent({
+        eventId: EventId.make("second-turn-token"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId: second.providerThreadId,
+        turnId: second.providerTurnId,
+        createdAt: now,
+        type: "thread.token-usage.updated",
+        payload: {
+          usage: { usedTokens: 100, inputTokens: 70, outputTokens: 30 },
+        },
+      });
+      yield* service.handleProviderEvent({
+        eventId: EventId.make("late-first-token"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId: first.providerThreadId,
+        turnId: first.providerTurnId,
+        createdAt: now,
+        type: "thread.token-usage.updated",
+        payload: {
+          usage: { usedTokens: 40, inputTokens: 25, outputTokens: 15 },
+        },
+      });
+      const afterLateEvent = yield* service.get(started.summary.id);
+      expect(
+        afterLateEvent.activations.find((item) => item.id === first.id)?.usageDelta,
+      ).toMatchObject({
+        totalTokens: 40,
+      });
+      expect(afterLateEvent.activations.find((item) => item.id === second.id)?.status).toBe(
+        "running",
+      );
+      expect(afterLateEvent.summary.activeActivationId).toBe(second.id);
+      expect(afterLateEvent.summary.usage.totalTokens).toBe(100);
+    }).pipe(Effect.provide(workerLayer(memory.store, backend)));
+  },
+);
+
+it.effect("does not overwrite a fast provider completion back to running", () => {
+  const memory = makeMemoryWorkerStore();
+  let handleEvent: ((event: ProviderRuntimeEvent) => Effect.Effect<void>) | undefined;
+  const backend = WorkerBackend.of({
+    start: (input) =>
+      Effect.gen(function* () {
+        const providerTurnId = TurnId.make("fast-complete-turn");
+        yield* handleEvent!({
+          eventId: EventId.make("fast-complete"),
+          provider: ProviderDriverKind.make("codex"),
+          threadId: input.providerThreadId,
+          turnId: providerTurnId,
+          createdAt: now,
+          type: "turn.completed",
+          payload: { state: "completed" },
+        });
+        return { providerThreadId: input.providerThreadId, providerTurnId };
+      }),
+    send: () => Effect.die("unused"),
+    interrupt: () => Effect.die("unused"),
+    stop: () => Effect.die("unused"),
+    respondToApproval: () => Effect.die("unused"),
+    hasLiveSession: () => Effect.succeed(true),
+  });
+
+  return Effect.gen(function* () {
+    const service = yield* WorkerServiceTesting.make;
+    handleEvent = service.handleProviderEvent;
+    const detail = yield* service.start({
+      parentThreadId,
+      providerInstanceId,
+      input: {
+        title: "Fast completion",
+        assignment: "Finish before start returns.",
+        context: { references: [], snippets: [] },
+      },
+    });
+    expect(detail.summary.status).toBe("completed");
+    expect(detail.summary.activeActivationId).toBeUndefined();
+    expect(detail.activations[0]?.status).toBe("completed");
+  }).pipe(Effect.provide(workerLayer(memory.store, backend)));
+});
+
+it.effect("records a failed follow-up activation without corrupting the completed Worker", () => {
+  const memory = makeMemoryWorkerStore();
+  const backend = WorkerBackend.of({
+    start: (input) =>
+      Effect.succeed({
+        providerThreadId: input.providerThreadId,
+        providerTurnId: TurnId.make("completed-before-follow-up"),
+      }),
+    send: () =>
+      Effect.fail(
+        new WorkerOperationError({ operation: "worker.send", message: "follow-up rejected" }),
+      ),
+    interrupt: () => Effect.die("unused"),
+    stop: () => Effect.die("unused"),
+    respondToApproval: () => Effect.die("unused"),
+    hasLiveSession: () => Effect.succeed(true),
+  });
+
+  return Effect.gen(function* () {
+    const service = yield* WorkerServiceTesting.make;
+    const started = yield* service.start({
+      parentThreadId,
+      providerInstanceId,
+      input: {
+        title: "Follow-up failure",
+        assignment: "Complete once.",
+        context: { references: [], snippets: [] },
+      },
+    });
+    yield* service.handleProviderEvent({
+      eventId: EventId.make("complete-before-failed-follow-up"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: started.activations[0]!.providerThreadId,
+      turnId: started.activations[0]!.providerTurnId,
+      createdAt: now,
+      type: "turn.completed",
+      payload: { state: "completed" },
+    });
+    yield* service
+      .send({ workerId: started.summary.id, message: "This follow-up should fail." })
+      .pipe(Effect.flip);
+
+    const detail = yield* service.get(started.summary.id);
+    expect(detail.summary.status).toBe("completed");
+    expect(detail.summary.activeActivationId).toBeUndefined();
+    expect(detail.activations.at(-1)).toMatchObject({
+      status: "failed",
+      error: "follow-up rejected",
+    });
+  }).pipe(Effect.provide(workerLayer(memory.store, backend)));
 });
 
 it.effect("reconciles Worker lineage after rewind and stops discarded active work", () => {
@@ -266,7 +653,7 @@ it.effect("reconciles Worker lineage after rewind and stops discarded active wor
         Option.fromNullishOr([...activations.values()].flat().find((item) => item.id === id)),
       ),
     listActivations: (id) => Effect.succeed(activations.get(id) ?? []),
-    findProviderThread: () =>
+    findProviderActivation: () =>
       Effect.succeed(
         Option.some({
           workerId: discardedActive.summary.id,
@@ -405,7 +792,7 @@ it.effect("resumes persisted Worker status after an accepted provider approval",
       }),
     getActivation: () => Effect.succeed(Option.some(activation)),
     listActivations: () => Effect.succeed([activation]),
-    findProviderThread: () => Effect.succeed(Option.some({ workerId, activationId })),
+    findProviderActivation: () => Effect.succeed(Option.some({ workerId, activationId })),
     saveMessage: (message) =>
       Effect.sync(() => {
         messages.push(message);

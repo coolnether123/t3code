@@ -112,6 +112,10 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
       }),
   );
 
+  public readonly uploadFeedbackImpl = vi.fn((_reason?: string) =>
+    Promise.resolve({ threadId: "provider-thread-1" }),
+  );
+
   public readonly respondToRequestImpl = vi.fn(
     (_requestId: ApprovalRequestId, _decision: ProviderApprovalDecision): Promise<void> =>
       Promise.resolve(undefined),
@@ -148,6 +152,10 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
 
   rollbackThread(numTurns: number) {
     return Effect.promise(() => this.rollbackThreadImpl(numTurns));
+  }
+
+  uploadFeedback(reason?: string) {
+    return Effect.promise(() => this.uploadFeedbackImpl(reason));
   }
 
   respondToRequest(requestId: ApprovalRequestId, decision: ProviderApprovalDecision) {
@@ -282,6 +290,7 @@ validationLayer("CodexAdapterLive validation", (it) => {
         threadId: asThreadId("thread-1"),
         modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.3-codex", [
           { id: "serviceTier", value: "priority" },
+          { id: "computerControl", value: "chrome" },
         ]),
         runtimeMode: "full-access",
       });
@@ -293,6 +302,7 @@ validationLayer("CodexAdapterLive validation", (it) => {
         model: "gpt-5.3-codex",
         providerInstanceId: ProviderInstanceId.make("codex"),
         serviceTier: "priority",
+        computerControlMode: "chrome",
         threadId: asThreadId("thread-1"),
         runtimeMode: "full-access",
       });
@@ -337,6 +347,42 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
     }),
   );
 
+  it.effect("uploads feedback for the active Codex thread", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("thread-feedback");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+
+      const result = yield* adapter.uploadFeedback({
+        threadId,
+        reason: "The agent stopped early.",
+      });
+
+      NodeAssert.deepStrictEqual(result, { feedbackId: "provider-thread-1" });
+      NodeAssert.deepStrictEqual(runtime.uploadFeedbackImpl.mock.calls, [
+        ["The agent stopped early."],
+      ]);
+    }),
+  );
+
+  it.effect("rejects feedback for an unknown Codex thread", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const result = yield* adapter
+        .uploadFeedback({ threadId: asThreadId("thread-feedback-missing") })
+        .pipe(Effect.result);
+
+      NodeAssert.equal(result._tag, "Failure");
+      NodeAssert.equal(result.failure._tag, "ProviderAdapterSessionNotFoundError");
+    }),
+  );
+
   it.effect(
     "keeps ordinary sends valid while rejecting explicit T3 control when Workers are off",
     () =>
@@ -355,6 +401,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         yield* adapter.sendTurn({ threadId, input: "ordinary", attachments: [] });
         NodeAssert.deepStrictEqual(runtime.sendTurnImpl.mock.calls[0]?.[0], {
           input: "ordinary",
+          computerControlMode: "desktop",
         });
 
         const explicitControl = yield* adapter
@@ -391,6 +438,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
           modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.3-codex", [
             { id: "reasoningEffort", value: "high" },
             { id: "serviceTier", value: "priority" },
+            { id: "computerControl", value: "preview" },
           ]),
           attachments: [],
         }),
@@ -401,6 +449,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         model: "gpt-5.3-codex",
         effort: "high",
         serviceTier: "priority",
+        computerControlMode: "preview",
       });
     }),
   );
@@ -508,6 +557,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
             [
               { id: "reasoningEffort", value: "high" },
               { id: "serviceTier", value: "flex" },
+              { id: "computerControl", value: "chrome" },
             ],
           ),
           attachments: [],
@@ -519,6 +569,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         model: "gpt-5.3-codex",
         effort: "high",
         serviceTier: "flex",
+        computerControlMode: "chrome",
       });
     }).pipe(Effect.provide(customLayer));
   });
@@ -761,6 +812,67 @@ function startLifecycleRuntime() {
 }
 
 lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
+  it.effect("does not reactivate an idle child after a parent interaction", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 3)).pipe(
+        Effect.forkChild,
+      );
+
+      const childEvent = (id: string, method: string, payload: Record<string, unknown>) => ({
+        id: asEventId(id),
+        kind: "notification" as const,
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method,
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        payload,
+      });
+
+      yield* runtime.emit(
+        childEvent("evt-child-running", "collabAgent/turnStarted", {
+          agentThreadId: "child-1",
+          agentPath: "/root/audit",
+        }),
+      );
+      yield* runtime.emit(
+        childEvent("evt-child-idle", "collabAgent/turnCompleted", {
+          agentThreadId: "child-1",
+          agentPath: "/root/audit",
+          turn: { status: "completed" },
+        }),
+      );
+      yield* runtime.emit(
+        childEvent("evt-child-interacted", "collabAgent/activity", {
+          agentThreadId: "child-1",
+          agentPath: "/root/audit",
+          activityKind: "interacted",
+        }),
+      );
+      yield* runtime.emit(
+        childEvent("evt-other-child-running", "collabAgent/turnStarted", {
+          agentThreadId: "child-2",
+          agentPath: "/root/other",
+        }),
+      );
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      NodeAssert.deepStrictEqual(
+        events.map((event) =>
+          event.type === "task.updated"
+            ? { taskId: event.payload.taskId, status: event.payload.status }
+            : { type: event.type },
+        ),
+        [
+          { taskId: "child-1", status: "running" },
+          { taskId: "child-1", status: "idle" },
+          { taskId: "child-2", status: "running" },
+        ],
+      );
+    }),
+  );
+
   it.effect("maps completed agent message items to canonical item.completed events", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
@@ -859,6 +971,66 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
           status: "completed",
         },
       });
+    }),
+  );
+
+  it.effect("preserves failed and declined outcomes on completed tool items", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const items = [
+        {
+          type: "commandExecution",
+          id: "failed-command",
+          command: "vp test run",
+          commandActions: [],
+          cwd: "/tmp",
+          exitCode: 1,
+          status: "failed",
+        },
+        {
+          type: "mcpToolCall",
+          id: "failed-mcp",
+          server: "simulator",
+          tool: "build",
+          arguments: {},
+          error: { message: "Build failed" },
+          status: "failed",
+        },
+        {
+          type: "fileChange",
+          id: "declined-change",
+          changes: [],
+          status: "declined",
+        },
+      ] as const;
+
+      for (const item of items) {
+        const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+        yield* runtime.emit({
+          id: asEventId(`evt-${item.id}`),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "item/completed",
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          itemId: asItemId(item.id),
+          payload: {
+            completedAtMs: 1_778_000_000_000,
+            threadId: "thread-1",
+            turnId: "turn-1",
+            item,
+          },
+        });
+
+        const firstEvent = yield* Fiber.join(firstEventFiber);
+        NodeAssert.equal(firstEvent._tag, "Some");
+        if (firstEvent._tag !== "Some" || firstEvent.value.type !== "item.completed") {
+          return;
+        }
+        NodeAssert.equal(firstEvent.value.payload.status, item.status);
+      }
     }),
   );
 
@@ -1262,6 +1434,44 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       if (secondEvent?.type === "runtime.warning") {
         NodeAssert.equal(secondEvent.payload.message, "Sandbox setup failed");
       }
+    }),
+  );
+
+  it.effect("maps Computer Use MCP requests to canonical permission approvals", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-computer-use-approval"),
+        kind: "request",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "mcpServer/elicitation/request",
+        requestId: ApprovalRequestId.make("req-computer-use-1"),
+        requestKind: "permissions",
+        payload: {
+          _meta: {
+            codex_approval_kind: "mcp_tool_call",
+            connector_id: "computer-use",
+          },
+          message: "Allow Computer Use to control this desktop?",
+          mode: "form",
+          requestedSchema: { type: "object", properties: {} },
+          serverName: "computer-use",
+          threadId: "thread-1",
+          turnId: "turn-1",
+        },
+      } satisfies ProviderEvent);
+
+      const event = yield* Fiber.join(eventFiber);
+      NodeAssert.equal(event._tag, "Some");
+      if (event._tag !== "Some") return;
+      NodeAssert.equal(event.value.type, "request.opened");
+      if (event.value.type !== "request.opened") return;
+      NodeAssert.equal(event.value.payload.requestType, "permissions_approval");
+      NodeAssert.equal(event.value.payload.detail, "Allow Computer Use to control this desktop?");
     }),
   );
 

@@ -1,5 +1,6 @@
 import type {
   ApprovalRequestId,
+  ModelSelection,
   ProviderRuntimeEvent,
   WorkerActivation,
   WorkerApprovalRequest,
@@ -26,6 +27,8 @@ export interface StoredWorker {
   readonly summary: WorkerSummary;
   readonly assignment: string;
   readonly context: WorkerDetail["context"];
+  /** Exact inherited provider selection, including control mode and reasoning options. */
+  readonly modelSelection?: ModelSelection | undefined;
   readonly instructions?: string | undefined;
   readonly parentTurnId?: TurnId | undefined;
   readonly discardedAt?: string | undefined;
@@ -68,9 +71,10 @@ export interface WorkerStoreShape {
   readonly listActivations: (
     workerId: StoredWorker["summary"]["id"],
   ) => Effect.Effect<ReadonlyArray<WorkerActivation>, PersistenceSqlError>;
-  readonly findProviderThread: (
-    providerThreadId: string,
-  ) => Effect.Effect<Option.Option<WorkerProviderThreadMatch>, PersistenceSqlError>;
+  readonly findProviderActivation: (input: {
+    readonly providerThreadId: string;
+    readonly providerTurnId?: string | undefined;
+  }) => Effect.Effect<Option.Option<WorkerProviderThreadMatch>, PersistenceSqlError>;
   readonly saveMessage: (message: WorkerMessage) => Effect.Effect<void, PersistenceSqlError>;
   readonly listMessages: (
     workerId: StoredWorker["summary"]["id"],
@@ -214,15 +218,30 @@ const makeWorkerStore = Effect.gen(function* () {
       ),
     );
 
-  const findProviderThread: WorkerStoreShape["findProviderThread"] = (providerThreadId) =>
+  const findProviderActivation: WorkerStoreShape["findProviderActivation"] = (input) =>
     query(
-      "WorkerStore.findProviderThread",
+      "WorkerStore.findProviderActivation",
       sql<{ readonly worker_id: string; readonly activation_id: string }>`
         SELECT worker_id, activation_id
         FROM t3_worker_activations
-        WHERE provider_thread_id = ${providerThreadId}
-          AND status NOT IN ('completed', 'failed', 'interrupted', 'lost')
-        ORDER BY activation_id DESC
+        WHERE provider_thread_id = ${input.providerThreadId}
+          AND (
+            ${input.providerTurnId ?? null} IS NULL
+            OR json_extract(payload_json, '$.providerTurnId') = ${input.providerTurnId ?? null}
+            OR (
+              json_extract(payload_json, '$.providerTurnId') IS NULL
+              AND status = 'starting'
+            )
+          )
+        ORDER BY
+          CASE
+            WHEN json_extract(payload_json, '$.providerTurnId') = ${input.providerTurnId ?? null}
+              THEN 0
+            WHEN status NOT IN ('completed', 'failed', 'interrupted', 'lost') THEN 1
+            ELSE 2
+          END,
+          json_extract(payload_json, '$.startedAt') DESC,
+          activation_id DESC
         LIMIT 1
       `.pipe(
         Effect.map((rows) =>
@@ -420,7 +439,7 @@ const makeWorkerStore = Effect.gen(function* () {
     saveActivation,
     getActivation,
     listActivations,
-    findProviderThread,
+    findProviderActivation,
     saveMessage,
     listMessages,
     saveApproval,

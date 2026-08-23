@@ -1,7 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
-export default Effect.gen(function* () {
+export const ensureWorkerSchema = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
 
   yield* sql`
@@ -110,3 +110,5 @@ export default Effect.gen(function* () {
     ON t3_worker_provider_events (worker_id, created_at, event_id)
   `;
 });
+
+export default ensureWorkerSchema;

@@ -1,4 +1,6 @@
 import { expect, it } from "@effect/vitest";
+import { WorkerMcpGetResult, WorkerMcpWaitResult } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { Tool } from "effect/unstable/ai";
 
 import { WorkerToolkit } from "./tools.ts";
@@ -63,7 +65,13 @@ it("keeps execution permission controls out of worker_start", () => {
     expect(properties).not.toHaveProperty(forbidden);
   }
   expect(WorkerToolkit.tools.worker_start.description).toContain(
-    "execution permissions always inherit the parent session",
+    "runtime access mode inherits the parent session",
+  );
+  expect(WorkerToolkit.tools.worker_start.description).toContain(
+    "Do not ask it to report Worker IDs, token usage, or tool counts",
+  );
+  expect(WorkerToolkit.tools.worker_start.description).toContain(
+    "State the task once in assignment",
   );
 });
 
@@ -89,4 +97,27 @@ it("makes Worker provider identity optional and explains deterministic inheritan
   expect(WorkerToolkit.tools.worker_start.description).toContain(
     "send only modelSelection.options",
   );
+  expect(WorkerToolkit.tools.worker_wait.description).toContain("identity, lifecycle, and usage");
+  expect(WorkerToolkit.tools.worker_wait.description).toContain(
+    "call worker_status after a wake when detailed tool activity is needed",
+  );
+  expect(WorkerToolkit.tools.worker_status.description).toContain("detailed tool activity");
+});
+
+it("keeps summary telemetry in worker_wait and detailed activity in worker_status", () => {
+  const waitSchema = JSON.stringify(
+    Schema.toStandardJSONSchemaV1(WorkerMcpWaitResult)["~standard"].jsonSchema.output({
+      target: "draft-2020-12",
+    }),
+  );
+  const statusSchema = JSON.stringify(
+    Schema.toStandardJSONSchemaV1(WorkerMcpGetResult)["~standard"].jsonSchema.output({
+      target: "draft-2020-12",
+    }),
+  );
+
+  expect(waitSchema).toContain('"workers"');
+  expect(waitSchema).toContain('"usage"');
+  expect(waitSchema).not.toContain('"activities"');
+  expect(statusSchema).toContain('"activities"');
 });

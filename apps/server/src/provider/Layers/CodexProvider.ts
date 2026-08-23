@@ -28,6 +28,10 @@ import { createModelCapabilities } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { codexLaunchArgv, resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
 import {
+  CODEX_COMPUTER_CONTROL_OPTION_ID,
+  DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
+} from "../CodexDeveloperInstructions.ts";
+import {
   AUTH_PROBE_TIMEOUT_MS,
   buildServerProvider,
   type ServerProviderDraft,
@@ -67,7 +71,13 @@ const REASONING_EFFORT_LABELS: Readonly<Record<string, string>> = {
 };
 
 const DEFAULT_SERVICE_TIER_ID = "default";
-const CURRENT_CODEX_MODELS = new Set(["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"]);
+const CURRENT_CODEX_MODELS = new Set([
+  "gpt-5.6-luna",
+  "gpt-5.6-terra",
+  "gpt-5.6-sol",
+  "gpt-daybreak-blue-latest",
+  "gpt-daybreak-red-latest",
+]);
 
 export function isLegacyCodexModel(model: string): boolean {
   return !CURRENT_CODEX_MODELS.has(model);
@@ -195,6 +205,31 @@ export function mapCodexModelCapabilities(
       currentValue: defaultServiceTier,
     });
   }
+  optionDescriptors.push({
+    id: CODEX_COMPUTER_CONTROL_OPTION_ID,
+    label: "Computer control",
+    type: "select",
+    options: [
+      {
+        id: "desktop",
+        label: "Full desktop",
+        description: "Use unrestricted Chrome and Windows computer-control tools with fallbacks.",
+        isDefault: true,
+      },
+      {
+        id: "chrome",
+        label: "Full Chrome",
+        description:
+          "Use the existing Chrome session, DevTools, downloads, uploads, and web tools.",
+      },
+      {
+        id: "preview",
+        label: "T3 Preview",
+        description: "Prefer T3's isolated collaborative preview browser.",
+      },
+    ],
+    currentValue: DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
+  });
 
   return createModelCapabilities({
     optionDescriptors,
@@ -359,6 +394,7 @@ export function buildCodexInitializeParams(): CodexSchema.V1InitializeParams {
     },
     capabilities: {
       experimentalApi: true,
+      mcpServerOpenaiFormElicitation: true,
     },
   };
 }
@@ -617,7 +653,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
         auth: { status: "unknown" },
         message: installed
           ? `Codex app-server provider probe failed: ${error.message}.`
-          : "Codex CLI (`codex`) is not installed or not on PATH.",
+          : "Codex CLI (`codex`) was not found on PATH.",
       },
     });
   }
@@ -648,6 +684,13 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     checkedAt,
     models: snapshot.models,
     skills: snapshot.skills,
+    slashCommands: [
+      {
+        name: "feedback",
+        description: "Send this thread and Codex logs to OpenAI",
+        input: { hint: "Describe the issue (optional)" },
+      },
+    ],
     probe: {
       installed: true,
       version: snapshot.version ?? null,

@@ -70,6 +70,23 @@ export interface McpSessionRegistryOptions {
   readonly now?: () => number;
 }
 
+export interface McpCapabilitySettings {
+  readonly enableAgentBrowserAccess: boolean;
+  readonly enableT3Workers: boolean;
+}
+
+/** Single source of truth for which T3 MCP toolkits a provider session receives. */
+export const resolveMcpCapabilities = (
+  settings: McpCapabilitySettings,
+  threadId: ThreadId,
+): ReadonlySet<McpInvocationContext.McpCapability> =>
+  new Set([
+    ...(settings.enableAgentBrowserAccess ? (["preview"] as const) : []),
+    ...(settings.enableT3Workers && !isWorkerLinkedProviderThreadId(threadId)
+      ? (["workers"] as const)
+      : []),
+  ]);
+
 /**
  * How long a credential outlives the last sign of life from its provider
  * session.
@@ -82,7 +99,7 @@ export interface McpSessionRegistryOptions {
  *
  * The bound matters because `/mcp` is mounted outside the environment auth
  * stack and is reachable on whatever host the server binds to, so this token is
- * the only thing guarding the preview toolkit on a remote-reachable server.
+ * the only thing guarding T3 MCP toolkits on a remote-reachable server.
  */
 const DEFAULT_LIVENESS_WINDOW_MS = 24 * 60 * 60 * 1_000;
 
@@ -135,12 +152,15 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
   const issue: McpSessionRegistryShape["issue"] = Effect.fn("McpSessionRegistry.issue")(
     function* (request) {
       const issuedAt = yield* currentTimeMillis;
-      const workersEnabled = yield* serverSettings.getSettings.pipe(
-        Effect.map((settings) => settings.enableT3Workers),
+      const capabilitySettings = yield* serverSettings.getSettings.pipe(
+        Effect.map((settings) => ({
+          enableAgentBrowserAccess: settings.enableAgentBrowserAccess,
+          enableT3Workers: settings.enableT3Workers,
+        })),
         Effect.catch((cause) =>
-          Effect.logWarning("failed to read T3 Workers setting while issuing MCP credential", {
+          Effect.logWarning("failed to read MCP capability settings while issuing credential", {
             cause,
-          }).pipe(Effect.as(false)),
+          }).pipe(Effect.as({ enableAgentBrowserAccess: false, enableT3Workers: false })),
         ),
       );
       const providerSessionId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
@@ -158,12 +178,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         ...(request.workingDirectory === undefined
           ? {}
           : { workingDirectory: request.workingDirectory }),
-        capabilities: new Set<McpInvocationContext.McpCapability>([
-          "preview",
-          ...(workersEnabled && !isWorkerLinkedProviderThreadId(request.threadId)
-            ? (["workers"] as const)
-            : []),
-        ]),
+        capabilities: resolveMcpCapabilities(capabilitySettings, request.threadId),
         issuedAt,
       };
       yield* SynchronizedRef.update(state, ({ records }) => {

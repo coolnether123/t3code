@@ -19,9 +19,10 @@ describe("ChatComposer sub-agent backend selector", () => {
     expect(compactControlsSource).toContain('value={props.subagentBackend ?? ""}');
   });
 
-  it("persists the resolved Codex default into the task draft", () => {
+  it("derives the Codex default from the current Worker setting without persisting it", () => {
     expect(chatViewSource).toContain("resolveComposerSubagentBackend(");
-    expect(chatViewSource).toContain(
+    expect(chatViewSource).toContain("workersEnabled: settings.enableT3Workers");
+    expect(chatViewSource).not.toContain(
       "setComposerDraftSubagentBackend(composerDraftTarget, subagentBackend)",
     );
   });

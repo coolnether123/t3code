@@ -45,6 +45,11 @@ import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { codexAppServerTransport } from "../CodexAppServerTransport.ts";
+import {
+  CODEX_COMPUTER_CONTROL_OPTION_ID,
+  DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
+  normalizeCodexComputerControlMode,
+} from "../CodexDeveloperInstructions.ts";
 
 import {
   ProviderAdapterRequestError,
@@ -310,6 +315,8 @@ function toRequestTypeFromMethod(method: string): CanonicalRequestType {
       return "file_read_approval";
     case "item/fileChange/requestApproval":
       return "file_change_approval";
+    case "item/permissions/requestApproval":
+      return "permissions_approval";
     case "applyPatchApproval":
       return "apply_patch_approval";
     case "execCommandApproval":
@@ -333,6 +340,10 @@ function toRequestTypeFromKind(kind: ProviderRequestKind | undefined): Canonical
       return "file_read_approval";
     case "file-change":
       return "file_change_approval";
+    case "permissions":
+      return "permissions_approval";
+    case "tool":
+      return "tool_approval";
     default:
       return "unknown";
   }
@@ -488,7 +499,9 @@ function mapItemLifecycle(
     lifecycle === "item.started"
       ? "inProgress"
       : lifecycle === "item.completed"
-        ? "completed"
+        ? "status" in item && (item.status === "failed" || item.status === "declined")
+          ? item.status
+          : "completed"
         : undefined;
 
   return {
@@ -596,14 +609,9 @@ function mapCollabAgentEvent(
           },
         ];
       }
-      // interacted → the child is (again) actively driven.
-      return [
-        {
-          ...base,
-          type: "task.updated",
-          payload: { taskId, status: "running", ...statusLinkage },
-        },
-      ];
+      // Reading a child's result also emits "interacted" after its turn is idle.
+      // Only the child's turn or thread lifecycle can prove it resumed work.
+      return [];
     }
     case "collabAgent/turnStarted":
       return [
@@ -827,6 +835,20 @@ function mapToRuntimeEvents(
           );
           return payload?.reason ?? undefined;
         }
+        case "item/permissions/requestApproval": {
+          const payload = readPayload(
+            EffectCodexSchema.ServerRequest__PermissionsRequestApprovalParams,
+            event.payload,
+          );
+          return payload?.reason ?? undefined;
+        }
+        case "mcpServer/elicitation/request": {
+          const payload = readPayload(
+            EffectCodexSchema.ServerRequest__McpServerElicitationRequestParams,
+            event.payload,
+          );
+          return payload?.message ?? undefined;
+        }
         case "applyPatchApproval": {
           const payload = readPayload(
             EffectCodexSchema.ServerRequest__ApplyPatchApprovalParams,
@@ -858,7 +880,9 @@ function mapToRuntimeEvents(
         ...runtimeEventBase(event, canonicalThreadId),
         type: "request.opened",
         payload: {
-          requestType: toRequestTypeFromMethod(event.method),
+          requestType: event.requestKind
+            ? toRequestTypeFromKind(event.requestKind)
+            : toRequestTypeFromMethod(event.method),
           ...(detail ? { detail } : {}),
           ...(event.payload !== undefined ? { args: event.payload } : {}),
         },
@@ -1671,6 +1695,15 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           input.modelSelection?.instanceId === boundInstanceId
             ? getCodexServiceTierOptionValue(input.modelSelection)
             : undefined;
+        const computerControlMode =
+          input.modelSelection?.instanceId === boundInstanceId
+            ? normalizeCodexComputerControlMode(
+                getModelSelectionStringOptionValue(
+                  input.modelSelection,
+                  CODEX_COMPUTER_CONTROL_OPTION_ID,
+                ),
+              )
+            : DEFAULT_CODEX_COMPUTER_CONTROL_MODE;
         const workerSession = isWorkerLinkedProviderThreadId(input.threadId);
         const t3WorkersSettingEnabled =
           !workerSession && (yield* options?.enableT3Workers ?? Effect.succeed(false));
@@ -1700,6 +1733,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ? { model: input.modelSelection.model }
             : {}),
           ...(serviceTier ? { serviceTier } : {}),
+          computerControlMode,
           ...(input.subagentBackend !== undefined
             ? { subagentBackend: input.subagentBackend }
             : {}),
@@ -1877,6 +1911,15 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       input.modelSelection?.instanceId === boundInstanceId
         ? getCodexServiceTierOptionValue(input.modelSelection)
         : undefined;
+    const computerControlMode =
+      input.modelSelection?.instanceId === boundInstanceId
+        ? normalizeCodexComputerControlMode(
+            getModelSelectionStringOptionValue(
+              input.modelSelection,
+              CODEX_COMPUTER_CONTROL_OPTION_ID,
+            ),
+          )
+        : DEFAULT_CODEX_COMPUTER_CONTROL_MODE;
     return yield* session.runtime
       .sendTurn({
         ...(input.input !== undefined ? { input: input.input } : {}),
@@ -1889,6 +1932,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             }
           : {}),
         ...(serviceTier ? { serviceTier } : {}),
+        computerControlMode,
         ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
         ...(input.subagentBackend !== undefined ? { subagentBackend: input.subagentBackend } : {}),
         ...(enableT3Workers ? { enableT3Workers: true } : {}),
@@ -1973,6 +2017,17 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       })),
     );
   };
+
+  const uploadFeedback: CodexAdapterShape["uploadFeedback"] = (input) =>
+    requireSession(input.threadId).pipe(
+      Effect.flatMap((session) => session.runtime.uploadFeedback(input.reason)),
+      Effect.map(({ threadId }) => ({ feedbackId: threadId })),
+      Effect.mapError((cause) =>
+        cause._tag === "ProviderAdapterSessionNotFoundError"
+          ? cause
+          : mapCodexRuntimeError(input.threadId, "feedback/upload", cause),
+      ),
+    );
 
   const respondToRequest: CodexAdapterShape["respondToRequest"] = (threadId, requestId, decision) =>
     requireSession(threadId).pipe(
@@ -2062,6 +2117,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     interruptTurn,
     readThread,
     rollbackThread,
+    uploadFeedback,
     respondToRequest,
     respondToUserInput,
     stopSession,

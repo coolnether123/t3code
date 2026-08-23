@@ -17,7 +17,7 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
 import * as ProviderService from "../provider/Services/ProviderService.ts";
-import { buildWorkerAssignmentPrompt } from "./WorkerContext.ts";
+import { buildWorkerAssignmentPrompt, buildWorkerFollowUpPrompt } from "./WorkerContext.ts";
 export {
   WORKER_PROVIDER_THREAD_PREFIX,
   isWorkerLinkedProviderThreadId,
@@ -154,14 +154,7 @@ export const makeCodexLinkedWorkerBackend = Effect.fn("makeCodexLinkedWorkerBack
       yield* ensureCodex(input.providerInstanceId);
       const turn = yield* provider.sendTurn({
         threadId: input.providerThreadId,
-        input: [
-          input.message.trim(),
-          input.context === undefined
-            ? ""
-            : buildWorkerAssignmentPrompt({ assignment: input.message, context: input.context }),
-        ]
-          .filter(Boolean)
-          .join("\n\n"),
+        input: buildWorkerFollowUpPrompt(input),
         ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
       });
       return {

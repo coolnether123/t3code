@@ -461,7 +461,7 @@ describe("WorkersPanel timeline", () => {
     expect(markup).toContain("Cumulative input");
     expect(markup).toContain("Last model call");
     expect(markup).toContain("36k");
-    expect(markup).not.toContain("Last model call" + " cumulative");
+    expect(markup).not.toContain("Last model call cumulative");
   });
 
   it("keeps sanitized tool details collapsed until the accessible row is expanded", () => {
@@ -473,7 +473,7 @@ describe("WorkersPanel timeline", () => {
 
     expect(collapsed).toContain('aria-expanded="false"');
     expect(collapsed).toContain('aria-label="Expand tool call Read configuration"');
-    expect(collapsed).toContain('title="Expand tool call Read configuration"');
+    expect(collapsed).not.toContain('title="Expand tool call Read configuration"');
     expect(collapsed).toContain("min-h-11");
     expect(collapsed).not.toContain("Inspected runtime flags.");
     expect(collapsed).not.toContain("multi_agent=false");

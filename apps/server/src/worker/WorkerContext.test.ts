@@ -1,6 +1,10 @@
 import { describe, expect, it } from "@effect/vitest";
 
-import { buildWorkerAssignmentPrompt, buildWorkerContextPrompt } from "./WorkerContext.ts";
+import {
+  buildWorkerAssignmentPrompt,
+  buildWorkerContextPrompt,
+  buildWorkerFollowUpPrompt,
+} from "./WorkerContext.ts";
 
 describe("Worker context package", () => {
   it("contains only explicitly selected context", () => {
@@ -38,5 +42,22 @@ describe("Worker context package", () => {
         maxCharacters: 20,
       }),
     ).toContain("[context truncated]");
+  });
+
+  it("renders a contextual follow-up once without first-turn boilerplate", () => {
+    const message = "Open the Wi-Fi article and download the page.";
+    const prompt = buildWorkerFollowUpPrompt({
+      message,
+      context: {
+        note: "Use Chrome.",
+        references: [],
+        snippets: [],
+        maxCharacters: 14,
+      },
+    });
+
+    expect(prompt.split(message)).toHaveLength(2);
+    expect(prompt).toContain("[context truncated]");
+    expect(prompt).not.toContain("You are a T3 Worker");
   });
 });

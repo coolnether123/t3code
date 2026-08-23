@@ -20,6 +20,7 @@ import {
   ProviderSendTurnInput,
   ProviderSessionStartInput,
   ProviderStopSessionInput,
+  ProviderUploadFeedbackInput,
   type ProviderInstanceId,
   type ProviderDriverKind,
   type ProviderRuntimeEvent,
@@ -58,7 +59,9 @@ import { type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import * as McpInvocationContext from "../../mcp/McpInvocationContext.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
+import * as ServerSettings from "../../serverSettings.ts";
 import { isWorkerLinkedProviderThreadId } from "../../worker/WorkerThreadBoundary.ts";
 const isModelSelection = Schema.is(ModelSelection);
 
@@ -69,6 +72,14 @@ const isModelSelection = Schema.is(ModelSelection);
  */
 export interface ProviderServiceLiveOptions {
   readonly canonicalEventLogger?: EventNdjsonLogger;
+  /**
+   * Overrides MCP credential issuance. The real issuer reads a module-global
+   * registry that only a running MCP server installs, which makes capability
+   * gating unobservable from a unit test. This seam exposes credential requests.
+   */
+  readonly issueMcpCredential?: typeof McpSessionRegistry.issueActiveMcpCredential;
+  /** Same seam as `issueMcpCredential`, for observing the deny path's revoke. */
+  readonly revokeMcpCredential?: typeof McpSessionRegistry.revokeActiveMcpThread;
 }
 
 type ProviderServiceMethod<Name extends keyof ProviderService.ProviderService["Service"]> =
@@ -228,10 +239,26 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
   const registry = yield* ProviderAdapterRegistry.ProviderAdapterRegistry;
   const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+  const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const issueMcpCredential =
+    options?.issueMcpCredential ?? McpSessionRegistry.issueActiveMcpCredential;
+  const revokeMcpCredential =
+    options?.revokeMcpCredential ?? McpSessionRegistry.revokeActiveMcpThread;
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+  const mcpCapabilitiesFor = (threadId: ThreadId) =>
+    serverSettings.getSettings.pipe(
+      Effect.map((settings) => McpSessionRegistry.resolveMcpCapabilities(settings, threadId)),
+      Effect.catch((cause) =>
+        Effect.logWarning(
+          "Could not read server settings; withholding T3 MCP capabilities for this session.",
+          { cause },
+        ).pipe(Effect.as(new Set<McpInvocationContext.McpCapability>())),
+      ),
+    );
+
   const clearMcpSession = (threadId: ThreadId) =>
-    McpSessionRegistry.revokeActiveMcpThread(threadId).pipe(
+    revokeMcpCredential(threadId).pipe(
       Effect.tap(() => Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
     );
   const prepareMcpSession = (
@@ -241,21 +268,24 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     workingDirectory?: string,
     modelSelection?: ModelSelection,
   ) =>
-    !providerSessionUsesT3Mcp(threadId)
-      ? clearMcpSession(threadId)
-      : McpSessionRegistry.issueActiveMcpCredential({
-          threadId,
-          providerInstanceId,
-          ...(modelSelection === undefined ? {} : { modelSelection }),
-          runtimeMode,
-          ...(workingDirectory === undefined ? {} : { workingDirectory }),
-        }).pipe(
-          Effect.tap((credential) =>
-            credential
-              ? Effect.sync(() => McpProviderSession.setMcpProviderSession(credential.config))
-              : Effect.void,
-          ),
-        );
+    Effect.gen(function* () {
+      const capabilities = yield* mcpCapabilitiesFor(threadId);
+      if (!providerSessionUsesT3Mcp(threadId) || capabilities.size === 0) {
+        yield* clearMcpSession(threadId);
+        return undefined;
+      }
+      const credential = yield* issueMcpCredential({
+        threadId,
+        providerInstanceId,
+        ...(modelSelection === undefined ? {} : { modelSelection }),
+        runtimeMode,
+        ...(workingDirectory === undefined ? {} : { workingDirectory }),
+      });
+      if (credential) {
+        yield* Effect.sync(() => McpProviderSession.setMcpProviderSession(credential.config));
+      }
+      return credential;
+    });
 
   const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
     Effect.succeed(event).pipe(
@@ -1119,6 +1149,47 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     );
   });
 
+  const uploadFeedback: ProviderServiceMethod<"uploadFeedback"> = Effect.fn("uploadFeedback")(
+    function* (rawInput) {
+      const input = yield* decodeInputOrValidationError({
+        operation: "ProviderService.uploadFeedback",
+        schema: ProviderUploadFeedbackInput,
+        payload: rawInput,
+      });
+      let routed = yield* resolveRoutableSession({
+        threadId: input.threadId,
+        operation: "ProviderService.uploadFeedback",
+        allowRecovery: false,
+      });
+      if (routed.adapter.uploadFeedback === undefined) {
+        return yield* toValidationError(
+          "ProviderService.uploadFeedback",
+          `Provider '${routed.adapter.provider}' does not support feedback uploads.`,
+        );
+      }
+      if (!routed.isActive) {
+        routed = yield* resolveRoutableSession({
+          threadId: input.threadId,
+          operation: "ProviderService.uploadFeedback",
+          allowRecovery: true,
+        });
+      }
+      const uploadFeedback = routed.adapter.uploadFeedback;
+      if (uploadFeedback === undefined) {
+        return yield* toValidationError(
+          "ProviderService.uploadFeedback",
+          `Provider '${routed.adapter.provider}' does not support feedback uploads.`,
+        );
+      }
+      yield* Effect.annotateCurrentSpan({
+        "provider.operation": "upload-feedback",
+        "provider.kind": routed.adapter.provider,
+        "provider.thread_id": input.threadId,
+      });
+      return yield* uploadFeedback(input);
+    },
+  );
+
   const forkConversation: ProviderServiceMethod<"forkConversation"> = Effect.fn("forkConversation")(
     function* (rawInput) {
       const input = yield* decodeInputOrValidationError({
@@ -1226,6 +1297,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     getCapabilities,
     getInstanceInfo,
     rollbackConversation,
+    uploadFeedback,
     forkConversation,
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (ProviderRuntimeIngestion, CheckpointReactor, etc.) each

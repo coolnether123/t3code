@@ -39,18 +39,15 @@ export const SUBAGENT_BACKEND_OPTIONS: ReadonlyArray<{
   },
 ];
 
-/**
- * Resolve the task-scoped composer selection without silently changing an
- * explicit backend. A missing Codex selection is Native V1 control even when
- * that route is unavailable, so the normal capability check can fail closed
- * with its concrete reason instead of falling back to a native Codex backend.
- */
 export function resolveComposerSubagentBackend(
   savedBackend: SubagentBackend | null | undefined,
   provider: ProviderDriverKind,
+  options?: { readonly workersEnabled?: boolean },
 ): SubagentBackend | null {
+  if (provider !== DEFAULT_DRIVER_KIND) return null;
+  if (savedBackend === "native-v1-control" && options?.workersEnabled === false) return null;
   if (savedBackend !== null && savedBackend !== undefined) return savedBackend;
-  return provider === DEFAULT_DRIVER_KIND ? DEFAULT_CODEX_SUBAGENT_BACKEND : null;
+  return options?.workersEnabled === true ? DEFAULT_CODEX_SUBAGENT_BACKEND : null;
 }
 
 export function formatProviderDriverKindLabel(provider: ProviderDriverKind): string {
@@ -119,9 +116,40 @@ export function getProviderModelCapabilities(
   models: ReadonlyArray<ServerProviderModel>,
   model: string | null | undefined,
   provider: ProviderDriverKind,
+  planModeEnabled = true,
 ): ModelCapabilities {
   const slug = normalizeModelSlug(model, provider);
-  return models.find((candidate) => candidate.slug === slug)?.capabilities ?? EMPTY_CAPABILITIES;
+  const caps =
+    models.find((candidate) => candidate.slug === slug)?.capabilities ?? EMPTY_CAPABILITIES;
+  if (planModeEnabled) {
+    return caps;
+  }
+  return withoutPlanAgentOption(caps);
+}
+
+// The opencode "plan" agent is only reachable while legacy plan mode is on.
+// With it off, drop the option so it cannot be selected or dispatched, and
+// drop the descriptor entirely when nothing remains selectable. currentValue
+// is re-resolved against the surviving options so a stale or defaulted "plan"
+// value cannot leak back into dispatch.
+function withoutPlanAgentOption(caps: ModelCapabilities): ModelCapabilities {
+  return {
+    ...caps,
+    optionDescriptors: (caps.optionDescriptors ?? []).flatMap((descriptor) => {
+      if (descriptor.type !== "select" || descriptor.id !== "agent") {
+        return [descriptor];
+      }
+      const options = descriptor.options.filter((option) => option.id !== "plan");
+      if (options.length === 0) {
+        return [];
+      }
+      const currentValue =
+        descriptor.currentValue && options.some((option) => option.id === descriptor.currentValue)
+          ? descriptor.currentValue
+          : (options.find((option) => option.isDefault)?.id ?? options[0]?.id);
+      return [{ ...descriptor, options, ...(currentValue ? { currentValue } : {}) }];
+    }),
+  };
 }
 
 export function getSubagentBackendOptions(

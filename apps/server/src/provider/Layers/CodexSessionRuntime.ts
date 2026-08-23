@@ -43,7 +43,11 @@ import {
   type CodexAppServerTransport,
 } from "../CodexAppServerTransport.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
-import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
+import {
+  buildCodexDeveloperInstructions,
+  DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
+  type CodexComputerControlMode,
+} from "../CodexDeveloperInstructions.ts";
 import { isWorkerLifecycleToolName } from "../../worker/WorkerThreadBoundary.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
 
@@ -196,6 +200,15 @@ const CodexUserInputAnswerObject = Schema.Struct({
 });
 const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
 const isCodexUserInputAnswerObject = Schema.is(CodexUserInputAnswerObject);
+const ComputerUseMcpApprovalMeta = Schema.Struct({
+  codex_approval_kind: Schema.Literal("mcp_tool_call"),
+  connector_id: Schema.Literal("computer-use"),
+});
+const McpToolApprovalMeta = Schema.Struct({
+  codex_approval_kind: Schema.Literal("mcp_tool_call"),
+});
+const isComputerUseApprovalMeta = Schema.is(ComputerUseMcpApprovalMeta);
+const isMcpToolApprovalMeta = Schema.is(McpToolApprovalMeta);
 
 // TODO: Verify `packages/effect-codex-app-server/scripts/generate.ts` so the generated
 // `V2TurnStartParams` schema includes `collaborationMode` directly.
@@ -228,6 +241,7 @@ export interface CodexSessionRuntimeOptions {
   readonly runtimeMode: RuntimeMode;
   readonly model?: string;
   readonly serviceTier?: CodexServiceTier | undefined;
+  readonly computerControlMode?: CodexComputerControlMode;
   readonly resumeCursor?: CodexResumeCursor;
   readonly appServerArgs?: ReadonlyArray<string>;
   readonly subagentBackend?: SubagentBackend;
@@ -245,6 +259,7 @@ export interface CodexSessionRuntimeSendTurnInput {
   readonly model?: string;
   readonly serviceTier?: CodexServiceTier | undefined;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort | undefined;
+  readonly computerControlMode?: CodexComputerControlMode;
   readonly interactionMode?: ProviderInteractionMode;
   readonly subagentBackend?: SubagentBackend;
   readonly enableT3Workers?: boolean;
@@ -271,6 +286,9 @@ export interface CodexSessionRuntimeShape {
   readonly rollbackThread: (
     numTurns: number,
   ) => Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
+  readonly uploadFeedback: (
+    reason?: string,
+  ) => Effect.Effect<EffectCodexSchema.V2FeedbackUploadResponse, CodexSessionRuntimeError>;
   readonly respondToRequest: (
     requestId: ApprovalRequestId,
     decision: ProviderApprovalDecision,
@@ -281,6 +299,50 @@ export interface CodexSessionRuntimeShape {
   ) => Effect.Effect<void, CodexSessionRuntimeError>;
   readonly events: Stream.Stream<ProviderEvent, never>;
   readonly close: Effect.Effect<void>;
+}
+
+export function buildPermissionsApprovalResponse(
+  permissions: EffectCodexSchema.PermissionsRequestApprovalParams["permissions"],
+  decision: ProviderApprovalDecision,
+): EffectCodexSchema.PermissionsRequestApprovalResponse {
+  return {
+    permissions: decision === "accept" || decision === "acceptForSession" ? permissions : {},
+    scope: decision === "acceptForSession" ? "session" : "turn",
+  };
+}
+
+export function isComputerUseMcpApproval(
+  payload: EffectCodexSchema.McpServerElicitationRequestParams,
+): boolean {
+  return payload.mode !== "url" && isComputerUseApprovalMeta(payload._meta);
+}
+
+export function isMcpToolApproval(
+  payload: EffectCodexSchema.McpServerElicitationRequestParams,
+): boolean {
+  return payload.mode !== "url" && isMcpToolApprovalMeta(payload._meta);
+}
+
+export function mcpApprovalRequestKind(
+  payload: EffectCodexSchema.McpServerElicitationRequestParams,
+): ProviderRequestKind | undefined {
+  if (!isMcpToolApproval(payload)) return undefined;
+  return isComputerUseMcpApproval(payload) ? "permissions" : "tool";
+}
+
+export function buildMcpApprovalResponse(
+  decision: ProviderApprovalDecision,
+): EffectCodexSchema.McpServerElicitationRequestResponse {
+  switch (decision) {
+    case "accept":
+      return { action: "accept" };
+    case "acceptForSession":
+      return { action: "accept", _meta: { persist: "session" } };
+    case "decline":
+      return { action: "decline" };
+    case "cancel":
+      return { action: "cancel" };
+  }
 }
 
 export type CodexSessionRuntimeError =
@@ -470,6 +532,8 @@ function buildCodexCollaborationMode(input: {
   readonly model?: string;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort;
   readonly enableT3Workers?: boolean;
+  readonly browserToolsAvailable?: boolean;
+  readonly computerControlMode?: CodexComputerControlMode;
   readonly subagentBackend?: SubagentBackend;
 }): EffectCodexSchema.V2TurnStartParams__CollaborationMode | undefined {
   if (input.interactionMode === undefined) {
@@ -485,12 +549,17 @@ function buildCodexCollaborationMode(input: {
     settings: {
       model,
       reasoning_effort: reasoningEffort,
-      developer_instructions: buildCodexDeveloperInstructions(input.interactionMode, {
-        model,
-        reasoningEffort,
-        ...(input.subagentBackend ? { subagentBackend: input.subagentBackend } : {}),
-        ...(enableT3Workers ? { enableT3Workers: true } : {}),
-      }),
+      developer_instructions: buildCodexDeveloperInstructions(
+        input.interactionMode,
+        {
+          model,
+          reasoningEffort,
+          ...(input.subagentBackend ? { subagentBackend: input.subagentBackend } : {}),
+          ...(enableT3Workers ? { enableT3Workers: true } : {}),
+          computerControlMode: input.computerControlMode ?? DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
+        },
+        input.browserToolsAvailable ?? true,
+      ),
     },
   };
 }
@@ -509,6 +578,9 @@ export function buildTurnStartParams(input: {
   readonly interactionMode?: ProviderInteractionMode;
   readonly subagentBackend?: SubagentBackend;
   readonly enableT3Workers?: boolean;
+  /** Defaults to true so callers that predate the agent-access gate are unchanged. */
+  readonly browserToolsAvailable?: boolean;
+  readonly computerControlMode?: CodexComputerControlMode;
 }): Effect.Effect<
   CodexTurnStartParamsWithCollaborationMode,
   CodexErrors.CodexAppServerProtocolParseError
@@ -528,9 +600,11 @@ export function buildTurnStartParams(input: {
   const collaborationMode = buildCodexCollaborationMode({
     ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
     ...(input.enableT3Workers ? { enableT3Workers: true } : {}),
+    ...(input.computerControlMode ? { computerControlMode: input.computerControlMode } : {}),
     ...(input.subagentBackend ? { subagentBackend: input.subagentBackend } : {}),
     ...(input.model ? { model: input.model } : {}),
     ...(input.effort ? { effort: input.effort } : {}),
+    browserToolsAvailable: input.browserToolsAvailable ?? true,
   });
 
   return decodeCodexTurnStartParamsWithCollaborationMode({
@@ -1054,6 +1128,9 @@ export const makeCodexSessionRuntime = (
     const pendingApprovalsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingApproval>());
     const approvalCorrelationsRef = yield* Ref.make(new Map<string, ApprovalCorrelation>());
     const pendingUserInputsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingUserInput>());
+    const computerControlModeRef = yield* Ref.make(
+      options.computerControlMode ?? DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
+    );
     const collabReceiverTurnsRef = yield* Ref.make(new Map<string, TurnId>());
     const collabChildAgentsRef = yield* Ref.make(new Map<string, CollabChildAgentState>());
     /** Child provider-thread id → its currently running provider turn id. */
@@ -1756,6 +1833,118 @@ export const makeCodexSessionRuntime = (
       }),
     );
 
+    yield* client.handleServerRequest("item/permissions/requestApproval", (payload) =>
+      Effect.gen(function* () {
+        if ((yield* Ref.get(computerControlModeRef)) !== "preview") {
+          return buildPermissionsApprovalResponse(payload.permissions, "acceptForSession");
+        }
+
+        const requestId = ApprovalRequestId.make(
+          yield* randomUUIDv4("permissions-approval-request"),
+        );
+        const turnId = TurnId.make(payload.turnId);
+        const itemId = ProviderItemId.make(payload.itemId);
+        const decision = yield* Deferred.make<ProviderApprovalDecision>();
+
+        yield* Ref.update(pendingApprovalsRef, (current) => {
+          const next = new Map(current);
+          next.set(requestId, {
+            requestId,
+            jsonRpcId: payload.itemId,
+            requestKind: "permissions",
+            turnId,
+            itemId,
+            decision,
+          });
+          return next;
+        });
+        yield* Ref.update(approvalCorrelationsRef, (current) => {
+          const next = new Map(current);
+          next.set(payload.itemId, {
+            requestId,
+            requestKind: "permissions",
+            turnId,
+            itemId,
+          });
+          return next;
+        });
+
+        yield* emitEvent({
+          kind: "request",
+          threadId: options.threadId,
+          method: "item/permissions/requestApproval",
+          requestId,
+          requestKind: "permissions",
+          turnId,
+          itemId,
+          payload,
+        });
+
+        const resolved = yield* Deferred.await(decision).pipe(
+          Effect.ensuring(
+            Ref.update(pendingApprovalsRef, (current) => {
+              const next = new Map(current);
+              next.delete(requestId);
+              return next;
+            }),
+          ),
+        );
+        return buildPermissionsApprovalResponse(payload.permissions, resolved);
+      }),
+    );
+
+    yield* client.handleServerRequest("mcpServer/elicitation/request", (payload) =>
+      Effect.gen(function* () {
+        const requestKind = mcpApprovalRequestKind(payload);
+        if (!requestKind) {
+          return yield* CodexErrors.CodexAppServerRequestError.methodNotFound(
+            "mcpServer/elicitation/request",
+          );
+        }
+        if ((yield* Ref.get(computerControlModeRef)) !== "preview") {
+          return buildMcpApprovalResponse("acceptForSession");
+        }
+
+        const requestId = ApprovalRequestId.make(yield* randomUUIDv4("mcp-approval-request"));
+        const turnId = payload.turnId ? TurnId.make(payload.turnId) : undefined;
+        const decision = yield* Deferred.make<ProviderApprovalDecision>();
+
+        yield* Ref.update(pendingApprovalsRef, (current) => {
+          const next = new Map(current);
+          next.set(requestId, {
+            requestId,
+            jsonRpcId: payload.serverName,
+            requestKind,
+            turnId,
+            itemId: undefined,
+            decision,
+          });
+          return next;
+        });
+
+        yield* emitEvent({
+          kind: "request",
+          threadId: options.threadId,
+          method: "mcpServer/elicitation/request",
+          requestId,
+          requestKind,
+          ...(turnId ? { turnId } : {}),
+          payload,
+        });
+
+        const resolved = yield* Deferred.await(decision).pipe(
+          Effect.ensuring(
+            Ref.update(pendingApprovalsRef, (current) => {
+              const next = new Map(current);
+              next.delete(requestId);
+              return next;
+            }),
+          ),
+        );
+        return buildMcpApprovalResponse(resolved);
+      }),
+    );
+
     yield* client.handleServerRequest("item/tool/requestUserInput", (payload) =>
       Effect.gen(function* () {
         const requestId = ApprovalRequestId.make(yield* randomUUIDv4("user-input-request"));
@@ -1987,6 +2176,11 @@ export const makeCodexSessionRuntime = (
       sendTurn: (input) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;
+          const computerControlMode =
+            input.computerControlMode ??
+            options.computerControlMode ??
+            DEFAULT_CODEX_COMPUTER_CONTROL_MODE;
+          yield* Ref.set(computerControlModeRef, computerControlMode);
           if (hasConfiguredMcpServer(options.appServerArgs)) {
             yield* client.request("config/mcpServer/reload", undefined).pipe(
               Effect.catch((cause) =>
@@ -2010,6 +2204,11 @@ export const makeCodexSessionRuntime = (
             ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
             ...(input.subagentBackend ? { subagentBackend: input.subagentBackend } : {}),
             ...(input.enableT3Workers ? { enableT3Workers: true } : {}),
+            // Derived from the session's own MCP configuration rather than the
+            // setting, so the prompt describes the tools this turn actually
+            // has even if the setting changed after the session started.
+            browserToolsAvailable: hasConfiguredMcpServer(options.appServerArgs),
+            computerControlMode,
           });
           const rawResponse = yield* client.raw.request("turn/start", params);
           const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
@@ -2092,6 +2291,16 @@ export const makeCodexSessionRuntime = (
             activeTurnId: undefined,
           });
           return parseThreadSnapshot(response);
+        }),
+      uploadFeedback: (reason) =>
+        Effect.gen(function* () {
+          const providerThreadId = yield* readProviderThreadId;
+          return yield* client.request("feedback/upload", {
+            classification: "bug",
+            includeLogs: true,
+            ...(reason ? { reason } : {}),
+            threadId: providerThreadId,
+          });
         }),
       respondToRequest: (requestId, decision) =>
         Effect.gen(function* () {

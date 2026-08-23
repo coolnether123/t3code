@@ -186,10 +186,7 @@ function dateTimeLabel(value: string): string {
 
 function StatusPill({ status }: { status: WorkerStatus }) {
   return (
-    <span
-      className="inline-flex items-center gap-1.5 text-[.7rem] text-muted-foreground"
-      title={`Worker status: ${workerStatusLabel(status)}`}
-    >
+    <span className="inline-flex items-center gap-1.5 text-[.7rem] text-muted-foreground">
       <span aria-hidden className={cn("size-1.5 rounded-full", STATUS_DOTS[status])} />
       {workerStatusLabel(status)}
     </span>
@@ -937,7 +934,6 @@ export function WorkerToolCallRow({
               aria-expanded={canExpand ? expanded : undefined}
               aria-controls={canExpand ? detailsId : undefined}
               aria-label={canExpand ? controlLabel : activity.title}
-              title={canExpand ? controlLabel : activity.title}
               onClick={() => setExpanded((current) => !current)}
               className={cn(
                 "flex min-h-11 w-full min-w-0 items-center gap-1.5 rounded-md px-1 text-left text-xs transition-colors",
@@ -1090,7 +1086,6 @@ export function WorkerDetailView({
               type="button"
               onClick={onBack}
               aria-label="Back to Worker list"
-              title="Close Worker detail"
               className="-ml-1 inline-flex size-11 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               <ArrowLeft aria-hidden className="size-4" />

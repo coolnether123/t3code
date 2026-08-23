@@ -105,14 +105,20 @@ it("decodes an unknown future multi-agent version and fails closed with an expli
 
 it("keeps only the GPT-5.6 Codex family out of legacy models", () => {
   assert.deepStrictEqual(
-    ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.4"].map((model) => [
-      model,
-      isLegacyCodexModel(model),
-    ]),
+    [
+      "gpt-5.6-luna",
+      "gpt-5.6-terra",
+      "gpt-5.6-sol",
+      "gpt-daybreak-blue-latest",
+      "gpt-daybreak-red-latest",
+      "gpt-5.4",
+    ].map((model) => [model, isLegacyCodexModel(model)]),
     [
       ["gpt-5.6-luna", false],
       ["gpt-5.6-terra", false],
       ["gpt-5.6-sol", false],
+      ["gpt-daybreak-blue-latest", false],
+      ["gpt-daybreak-red-latest", false],
       ["gpt-5.4", true],
     ],
   );
@@ -176,6 +182,31 @@ it("maps current Codex model capability fields", () => {
         },
       ],
       currentValue: "flex",
+    },
+    {
+      id: "computerControl",
+      label: "Computer control",
+      type: "select",
+      options: [
+        {
+          id: "desktop",
+          label: "Full desktop",
+          description: "Use unrestricted Chrome and Windows computer-control tools with fallbacks.",
+          isDefault: true,
+        },
+        {
+          id: "chrome",
+          label: "Full Chrome",
+          description:
+            "Use the existing Chrome session, DevTools, downloads, uploads, and web tools.",
+        },
+        {
+          id: "preview",
+          label: "T3 Preview",
+          description: "Prefer T3's isolated collaborative preview browser.",
+        },
+      ],
+      currentValue: "desktop",
     },
   ]);
 });
@@ -289,6 +320,31 @@ it("uses standard routing when the catalog has no default service tier", () => {
         },
       ],
       currentValue: "default",
+    },
+    {
+      id: "computerControl",
+      label: "Computer control",
+      type: "select",
+      options: [
+        {
+          id: "desktop",
+          label: "Full desktop",
+          description: "Use unrestricted Chrome and Windows computer-control tools with fallbacks.",
+          isDefault: true,
+        },
+        {
+          id: "chrome",
+          label: "Full Chrome",
+          description:
+            "Use the existing Chrome session, DevTools, downloads, uploads, and web tools.",
+        },
+        {
+          id: "preview",
+          label: "T3 Preview",
+          description: "Prefer T3's isolated collaborative preview browser.",
+        },
+      ],
+      currentValue: "desktop",
     },
   ]);
 });
