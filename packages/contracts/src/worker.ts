@@ -31,6 +31,20 @@ import {
 import { ProviderOptionSelections } from "./model.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
+/** Canonical T3-owned Worker tool names shared by server and web consumers. */
+export const T3_WORKER_TOOL_NAMES = [
+  "worker_start",
+  "worker_list",
+  "worker_status",
+  "worker_observe",
+  "worker_send",
+  "worker_wait",
+  "worker_interrupt",
+  "worker_close",
+  "worker_approval_respond",
+] as const;
+export type T3WorkerToolName = (typeof T3_WORKER_TOOL_NAMES)[number];
+
 const WorkerEntityId = <Brand extends string>(brand: Brand) =>
   TrimmedNonEmptyString.pipe(Schema.brand(brand));
 

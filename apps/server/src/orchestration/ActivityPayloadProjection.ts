@@ -1,7 +1,9 @@
-import type {
-  OrchestrationEvent,
-  OrchestrationThreadActivity,
-  OrchestrationThreadDetailSnapshot,
+import {
+  T3_WORKER_TOOL_NAMES,
+  type OrchestrationEvent,
+  type OrchestrationThreadActivity,
+  type OrchestrationThreadDetailSnapshot,
+  type T3WorkerToolName,
 } from "@t3tools/contracts";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -217,26 +219,227 @@ function summarizeMcpResult(result: unknown): Record<string, unknown> | undefine
   return summary ? { content: summary } : undefined;
 }
 
-const T3_WORKER_TOOL_NAMES = new Set([
-  "worker_start",
-  "worker_list",
-  "worker_status",
-  "worker_observe",
-  "worker_send",
-  "worker_wait",
-  "worker_interrupt",
-  "worker_close",
-  "worker_approval_respond",
-]);
-
-function isT3WorkerTool(value: unknown): boolean {
+function t3WorkerToolName(value: unknown): T3WorkerToolName | null {
   const name = asTrimmedString(value);
+  if (name === null) return null;
   return (
-    name !== null &&
-    [...T3_WORKER_TOOL_NAMES].some(
+    T3_WORKER_TOOL_NAMES.find(
       (workerTool) => name === workerTool || name.endsWith(`_${workerTool}`),
-    )
+    ) ?? null
   );
+}
+
+function projectPrimitiveFields(
+  value: unknown,
+  fields: ReadonlyArray<string>,
+): Record<string, unknown> | undefined {
+  const source = asRecord(value);
+  if (!source) return undefined;
+  const projected: Record<string, unknown> = {};
+  for (const field of fields) {
+    const entry = source[field];
+    if (
+      typeof entry === "string" ||
+      typeof entry === "number" ||
+      typeof entry === "boolean" ||
+      entry === null
+    ) {
+      projected[field] = entry;
+    }
+  }
+  return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+function projectWorkerUsage(value: unknown): Record<string, unknown> | undefined {
+  return projectPrimitiveFields(value, [
+    "inputTokens",
+    "cachedInputTokens",
+    "outputTokens",
+    "reasoningTokens",
+    "reasoningOutputTokens",
+    "totalTokens",
+    "toolUses",
+    "durationMillis",
+    "model",
+    "reasoningEffort",
+    "provider",
+  ]);
+}
+
+function projectWorkerObserverReport(value: unknown): Record<string, unknown> | undefined {
+  const source = asRecord(value);
+  if (!source) return undefined;
+  const projected =
+    projectPrimitiveFields(source, [
+      "id",
+      "workerId",
+      "activationId",
+      "model",
+      "appearsBlocked",
+      "safeToLeaveRunning",
+      "parentDecision",
+      "observedStatus",
+      "readOnly",
+      "generatedAt",
+    ]) ?? {};
+  const summary = asTrimmedString(source.report);
+  if (summary) projected.summary = summarizeToolTextOutput(summary);
+  const progress = asTrimmedString(source.progress);
+  if (progress) projected.progress = summarizeToolTextOutput(progress);
+  const nextAction = asTrimmedString(source.nextAction);
+  if (nextAction) projected.nextAction = summarizeToolTextOutput(nextAction);
+  for (const field of ["blockers", "files", "verification"] as const) {
+    const entries = Array.isArray(source[field])
+      ? source[field]
+          .map(asTrimmedString)
+          .filter((entry): entry is string => entry !== null)
+          .slice(0, 12)
+      : [];
+    if (entries.length > 0) projected[field] = entries;
+  }
+  return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+function projectWorkerSummary(value: unknown): Record<string, unknown> | undefined {
+  const source = asRecord(value);
+  if (!source) return undefined;
+  const projected =
+    projectPrimitiveFields(source, [
+      "id",
+      "displayName",
+      "title",
+      "status",
+      "backend",
+      "parentThreadId",
+      "projectId",
+      "environmentId",
+      "providerInstanceId",
+      "providerThreadId",
+      "model",
+      "runtimeMode",
+      "workingDirectory",
+      "permissionMode",
+      "reasoningEffort",
+      "createdAt",
+      "updatedAt",
+      "closedAt",
+      "activeActivationId",
+      "lastActivityAt",
+      "lastDirectMessageAt",
+      "unreadMessageCount",
+      "activationCount",
+      "resumable",
+      "elapsedMs",
+      "hasPendingApproval",
+      "hasUnreadEvents",
+    ]) ?? {};
+  const usage = projectWorkerUsage(source.usage);
+  if (usage) projected.usage = usage;
+  const lastModelCallUsage = projectWorkerUsage(source.lastModelCallUsage);
+  if (lastModelCallUsage) projected.lastModelCallUsage = lastModelCallUsage;
+  const usageCoverage = projectPrimitiveFields(source.usageCoverage, ["status", "reason"]);
+  if (usageCoverage) projected.usageCoverage = usageCoverage;
+  const observer = projectWorkerObserverReport(source.latestObserverReport);
+  if (observer) projected.latestObserverReport = observer;
+  return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+function projectWorkerApproval(value: unknown): Record<string, unknown> | undefined {
+  const source = asRecord(value);
+  if (!source) return undefined;
+  const projected =
+    projectPrimitiveFields(source, [
+      "requestId",
+      "workerId",
+      "activationId",
+      "kind",
+      "requestedAt",
+      "status",
+      "resolvedAt",
+      "decision",
+    ]) ?? {};
+  for (const field of ["summary", "detail"] as const) {
+    const value = asTrimmedString(source[field]);
+    if (value) projected[field] = summarizeToolTextOutput(value);
+  }
+  return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+function projectWorkerDetail(value: unknown): Record<string, unknown> | undefined {
+  const source = asRecord(value);
+  if (!source) return undefined;
+  const projected: Record<string, unknown> = {};
+  const summary = projectWorkerSummary(source.summary);
+  if (summary) projected.summary = summary;
+  const assignment = asTrimmedString(source.assignment);
+  if (assignment) projected.assignment = summarizeToolTextOutput(assignment);
+  const pendingApproval = projectWorkerApproval(source.pendingApproval);
+  if (pendingApproval) projected.pendingApproval = pendingApproval;
+  return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+function projectWorkerWaitResult(value: unknown): Record<string, unknown> | undefined {
+  const source = asRecord(value);
+  if (!source) return undefined;
+  const projected =
+    projectPrimitiveFields(source, ["leaseId", "status", "reason", "completedAt"]) ?? {};
+  const workers = Array.isArray(source.workers)
+    ? source.workers
+        .map(projectWorkerSummary)
+        .filter((worker): worker is Record<string, unknown> => worker !== undefined)
+    : [];
+  if (workers.length > 0) projected.workers = workers;
+  const events = Array.isArray(source.events)
+    ? source.events
+        .map((event) =>
+          projectPrimitiveFields(event, [
+            "workerId",
+            "activationId",
+            "reason",
+            "status",
+            "occurredAt",
+            "messageId",
+          ]),
+        )
+        .filter((event): event is Record<string, unknown> => event !== undefined)
+    : [];
+  if (events.length > 0) projected.events = events;
+  const lease = projectPrimitiveFields(source.lease, [
+    "leaseId",
+    "parentThreadId",
+    "deadlineAt",
+    "status",
+    "wakeReason",
+    "createdAt",
+    "completedAt",
+  ]);
+  const leaseSource = asRecord(source.lease);
+  if (lease && Array.isArray(leaseSource?.workerIds)) {
+    lease.workerIds = leaseSource.workerIds.filter((id) => typeof id === "string").slice(0, 64);
+  }
+  if (lease) projected.lease = lease;
+  return Object.keys(projected).length > 0 ? projected : undefined;
+}
+
+function projectT3WorkerResult(
+  toolName: T3WorkerToolName,
+  value: unknown,
+): Record<string, unknown> | undefined {
+  const source = asRecord(value);
+  if (!source) return undefined;
+  if (toolName === "worker_wait") return projectWorkerWaitResult(source);
+  if (toolName === "worker_observe") return projectWorkerObserverReport(source);
+  if (toolName === "worker_list") {
+    const projected = projectPrimitiveFields(source, ["nextCursor"]) ?? {};
+    const workers = Array.isArray(source.workers)
+      ? source.workers
+          .map(projectWorkerSummary)
+          .filter((worker): worker is Record<string, unknown> => worker !== undefined)
+      : [];
+    if (workers.length > 0) projected.workers = workers;
+    return Object.keys(projected).length > 0 ? projected : undefined;
+  }
+  return projectWorkerDetail(source);
 }
 
 /**
@@ -256,16 +459,12 @@ function projectMcpToolCallData(data: Record<string, unknown>): Record<string, u
         projectedItem[key] = item[key];
       }
     }
-    const result = summarizeMcpResult(item.result);
+    const workerToolName = t3WorkerToolName(item.tool);
+    const result = workerToolName
+      ? (projectT3WorkerResult(workerToolName, item.result) ?? summarizeMcpResult(item.result))
+      : summarizeMcpResult(item.result);
     if (result) {
       projectedItem.result = result;
-    }
-    // Worker orchestration results carry the persisted name, assignment,
-    // lease, and wake event that the parent UI needs for an honest summary.
-    // Keep them intact for the Advanced/details disclosure. Ordinary MCP
-    // results remain summarized to protect the thread snapshot size.
-    if (isT3WorkerTool(item.tool) && item.result !== undefined) {
-      projectedItem.result = item.result;
     }
     projectedData.item = projectedItem;
   }
@@ -277,12 +476,12 @@ function projectMcpToolCallData(data: Record<string, unknown>): Record<string, u
     projectedData.input = data.input;
   }
   if (!item) {
-    const result = summarizeMcpResult(data.result);
+    const workerToolName = t3WorkerToolName(data.toolName);
+    const result = workerToolName
+      ? (projectT3WorkerResult(workerToolName, data.result) ?? summarizeMcpResult(data.result))
+      : summarizeMcpResult(data.result);
     if (result) {
       projectedData.result = result;
-    }
-    if (isT3WorkerTool(data.toolName) && data.result !== undefined) {
-      projectedData.result = data.result;
     }
   }
 

@@ -190,7 +190,7 @@ describe("projectActivityPayload", () => {
     expect(JSON.stringify(projected.payload).length).toBeLessThan(500);
   });
 
-  it("keeps complete T3 Worker results for the parent Advanced disclosure", () => {
+  it("keeps compact T3 Worker wait fields for the parent disclosure", () => {
     const result = {
       leaseId: "lease-1",
       status: "woken",
@@ -213,6 +213,222 @@ describe("projectActivityPayload", () => {
     );
     const data = (projected.payload as Record<string, unknown>).data as Record<string, unknown>;
     expect((data.item as Record<string, unknown>).result).toEqual(result);
+  });
+
+  it("projects Worker detail results without histories or delegated context", () => {
+    const secret = "private-context-that-must-not-reach-the-parent-snapshot";
+    const projected = projectActivityPayload(
+      activity({
+        itemType: "mcp_tool_call",
+        data: {
+          item: {
+            tool: "worker_status",
+            arguments: { workerId: "worker-1" },
+            status: "completed",
+            result: {
+              summary: {
+                id: "worker-1",
+                displayName: "Scout",
+                title: "Inspect the provider boundary",
+                status: "running",
+                model: "gpt-5.6-sol",
+                usage: {
+                  inputTokens: 120,
+                  cachedInputTokens: 100,
+                  outputTokens: 20,
+                  reasoningTokens: 5,
+                  totalTokens: 145,
+                },
+                latestDirectMessage: { body: secret },
+                latestObserverReport: {
+                  id: "report-1",
+                  workerId: "worker-1",
+                  model: "gpt-5.6-sol",
+                  report: `No blocker found.\n${secret.repeat(200)}`,
+                  blockers: [],
+                  observedStatus: "running",
+                  readOnly: true,
+                  generatedAt: "2026-08-01T10:00:00.000Z",
+                },
+              },
+              assignment: `Inspect the provider boundary.\n${"detail ".repeat(500)}`,
+              context: { note: secret, snippets: [secret.repeat(200)] },
+              instructions: secret,
+              messages: Array.from({ length: 100 }, () => ({ body: secret })),
+              activations: Array.from({ length: 100 }, () => ({ context: { note: secret } })),
+              observerReports: Array.from({ length: 100 }, () => ({ report: secret })),
+              activities: Array.from({ length: 100 }, () => ({ detail: secret })),
+              pendingApproval: {
+                requestId: "approval-1",
+                workerId: "worker-1",
+                activationId: "activation-1",
+                kind: "command",
+                summary: "Run verification",
+                detail: `${"long ".repeat(100)}detail`,
+                requestedAt: "2026-08-01T10:00:00.000Z",
+                status: "pending",
+              },
+            },
+          },
+        },
+      }),
+    );
+    const data = (projected.payload as Record<string, unknown>).data as Record<string, unknown>;
+    const result = (data.item as Record<string, unknown>).result as Record<string, unknown>;
+    const summary = result.summary as Record<string, unknown>;
+
+    expect(summary).toMatchObject({
+      id: "worker-1",
+      displayName: "Scout",
+      title: "Inspect the provider boundary",
+      status: "running",
+      model: "gpt-5.6-sol",
+      usage: { totalTokens: 145, cachedInputTokens: 100 },
+      latestObserverReport: { summary: "No blocker found." },
+    });
+    expect(result).toMatchObject({
+      assignment: "Inspect the provider boundary.",
+      pendingApproval: { requestId: "approval-1", status: "pending" },
+    });
+    for (const omitted of [
+      "context",
+      "instructions",
+      "messages",
+      "activations",
+      "observerReports",
+      "activities",
+    ]) {
+      expect(result[omitted]).toBeUndefined();
+    }
+    expect(summary.latestDirectMessage).toBeUndefined();
+    expect(JSON.stringify(projected.payload)).not.toContain(secret);
+    expect(JSON.stringify(projected.payload).length).toBeLessThan(2_500);
+  });
+
+  it("projects legacy Worker detail data through the same compact boundary", () => {
+    const projected = projectActivityPayload(
+      activity({
+        itemType: "mcp_tool_call",
+        data: {
+          toolName: "mcp__t3_code__worker_status",
+          input: { workerId: "worker-legacy" },
+          result: {
+            summary: {
+              id: "worker-legacy",
+              displayName: "Legacy Scout",
+              title: "Inspect legacy adapter",
+              status: "running",
+              model: "gpt-5.6-sol",
+            },
+            assignment: "Inspect legacy adapter",
+            context: { snippets: ["large delegated context".repeat(500)] },
+            messages: [{ body: "private Worker message" }],
+            activities: [{ detail: "private Worker activity" }],
+          },
+        },
+      }),
+    );
+    const data = (projected.payload as Record<string, unknown>).data as Record<string, unknown>;
+    expect(data.result).toMatchObject({
+      summary: { id: "worker-legacy", displayName: "Legacy Scout", status: "running" },
+      assignment: "Inspect legacy adapter",
+    });
+    expect(JSON.stringify(data.result)).not.toContain("private Worker");
+    expect(JSON.stringify(data.result)).not.toContain("large delegated context");
+  });
+
+  it("keeps compact list and observe presentation fields", () => {
+    const secret = "observer-private-history";
+    const list = projectActivityPayload(
+      activity({
+        itemType: "mcp_tool_call",
+        data: {
+          item: {
+            tool: "worker_list",
+            status: "completed",
+            result: {
+              workers: [
+                {
+                  id: "worker-1",
+                  displayName: "Scout",
+                  title: "Scan files",
+                  status: "running",
+                  model: "gpt-5.6-sol",
+                  usage: { inputTokens: 10, outputTokens: 5, reasoningTokens: 0, totalTokens: 15 },
+                  latestDirectMessage: { body: secret },
+                },
+              ],
+              nextCursor: "page-2",
+              overview: { workers: Array.from({ length: 100 }, () => secret) },
+            },
+          },
+        },
+      }),
+    );
+    const observe = projectActivityPayload(
+      activity({
+        itemType: "mcp_tool_call",
+        data: {
+          item: {
+            tool: "worker_observe",
+            status: "completed",
+            result: {
+              id: "report-1",
+              workerId: "worker-1",
+              model: "gpt-5.6-sol",
+              report: `Making progress.\n${secret.repeat(500)}`,
+              progress: "Reviewing tests",
+              blockers: ["None"],
+              observedStatus: "running",
+              readOnly: true,
+              generatedAt: "2026-08-01T10:00:00.000Z",
+            },
+          },
+        },
+      }),
+    );
+    const listResult = (
+      ((list.payload as Record<string, unknown>).data as Record<string, unknown>).item as Record<
+        string,
+        unknown
+      >
+    ).result as Record<string, unknown>;
+    const observeResult = (
+      ((observe.payload as Record<string, unknown>).data as Record<string, unknown>).item as Record<
+        string,
+        unknown
+      >
+    ).result as Record<string, unknown>;
+
+    expect(listResult).toMatchObject({
+      nextCursor: "page-2",
+      workers: [{ id: "worker-1", displayName: "Scout", usage: { totalTokens: 15 } }],
+    });
+    expect(listResult.overview).toBeUndefined();
+    expect(observeResult).toMatchObject({
+      workerId: "worker-1",
+      summary: "Making progress.",
+      progress: "Reviewing tests",
+      observedStatus: "running",
+    });
+    expect(JSON.stringify({ listResult, observeResult })).not.toContain(secret);
+  });
+
+  it("falls back to a bounded Worker error summary for non-detail results", () => {
+    const projected = projectActivityPayload(
+      activity({
+        itemType: "mcp_tool_call",
+        data: {
+          item: {
+            tool: "worker_send",
+            status: "failed",
+            result: { content: `Permission denied\n${"diagnostic ".repeat(1_000)}` },
+          },
+        },
+      }),
+    );
+    const data = (projected.payload as Record<string, unknown>).data as Record<string, unknown>;
+    expect((data.item as Record<string, unknown>).result).toEqual({ content: "Permission denied" });
   });
 
   it("passes task lifecycle payloads (no data field) through untouched", () => {

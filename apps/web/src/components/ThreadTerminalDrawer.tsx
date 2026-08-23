@@ -1765,7 +1765,7 @@ export default function ThreadTerminalDrawer({
       </div>
       {compactTerminal ? (
         <div
-          role="toolbar"
+          role="group"
           className="flex min-h-11 shrink-0 items-center gap-1 overflow-x-auto border-t border-border/70 bg-background px-1 pb-[env(safe-area-inset-bottom)]"
           aria-label="Terminal keyboard shortcuts"
         >

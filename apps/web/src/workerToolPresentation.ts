@@ -1,18 +1,11 @@
-import type { OrchestrationThreadActivity, WorkerStatus } from "@t3tools/contracts";
+import {
+  T3_WORKER_TOOL_NAMES,
+  type OrchestrationThreadActivity,
+  type T3WorkerToolName,
+  type WorkerStatus,
+} from "@t3tools/contracts";
 
-export const T3_WORKER_TOOL_NAMES = [
-  "worker_start",
-  "worker_list",
-  "worker_status",
-  "worker_observe",
-  "worker_send",
-  "worker_wait",
-  "worker_interrupt",
-  "worker_close",
-  "worker_approval_respond",
-] as const;
-
-export type T3WorkerToolName = (typeof T3_WORKER_TOOL_NAMES)[number];
+export { T3_WORKER_TOOL_NAMES, type T3WorkerToolName } from "@t3tools/contracts";
 export type WorkerToolCallState = "inProgress" | "completed" | "failed" | "unknown";
 
 export interface WorkerToolIdentity {
@@ -188,10 +181,13 @@ function resultWorkers(result: Record<string, unknown> | undefined): WorkerToolI
 }
 
 function idsFromArgs(args: Record<string, unknown> | undefined): string[] {
-  if (!args || !Array.isArray(args.workerIds)) return [];
-  return args.workerIds.filter(
-    (id): id is string => typeof id === "string" && id.trim().length > 0,
-  );
+  if (!args) return [];
+  const ids = Array.isArray(args.workerIds)
+    ? args.workerIds.map((id) => text(id)).filter((id): id is string => id !== undefined)
+    : [];
+  const workerId = text(args.workerId);
+  if (workerId) ids.push(workerId);
+  return ids.filter((id, index) => ids.indexOf(id) === index);
 }
 
 function resultSummary(
@@ -299,12 +295,18 @@ export function deriveActiveWorkerWait(
     if (call.state === "inProgress") {
       const timeoutMillis = number(args?.timeoutMillis);
       const mode = text(args?.mode);
-      const deadlineAt =
-        timeoutMillis !== undefined
-          ? new Date(Date.parse(activity.createdAt) + timeoutMillis).toISOString()
+      const startedAtMs = Date.parse(activity.createdAt);
+      const deadlineMs =
+        timeoutMillis !== undefined && Number.isFinite(startedAtMs)
+          ? startedAtMs + timeoutMillis
           : undefined;
-      const seconds = Number.isFinite(Date.parse(activity.createdAt))
-        ? Math.max(0, Math.floor((nowMs - Date.parse(activity.createdAt)) / 1_000))
+      if (deadlineMs !== undefined && nowMs >= deadlineMs) {
+        active.delete(key);
+        continue;
+      }
+      const deadlineAt = deadlineMs !== undefined ? new Date(deadlineMs).toISOString() : undefined;
+      const seconds = Number.isFinite(startedAtMs)
+        ? Math.max(0, Math.floor((nowMs - startedAtMs) / 1_000))
         : 0;
       active.set(key, {
         ...call,

@@ -354,6 +354,30 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain("do-not-show-by-default");
   });
 
+  it("separates the active Worker name from the elapsed-time label", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        isWorking
+        activeTurnStartedAt={MESSAGE_CREATED_AT}
+        activeWorkerWait={{
+          toolName: "worker_wait",
+          action: "Waiting on Worker",
+          state: "inProgress",
+          workerIds: ["worker-1"],
+          workers: [{ id: "worker-1", name: "Scout" }],
+          startedAt: MESSAGE_CREATED_AT,
+          wakeReasons: [],
+        }}
+        timelineEntries={[]}
+      />,
+    );
+    const renderedText = markup.replace(/<[^>]+>/gu, "");
+
+    expect(renderedText).toContain("Waiting on Scout for ");
+    expect(renderedText).not.toContain("Waiting on Scoutfor ");
+  });
+
   it("uses the larger leading inset only when the top fade is enabled", () => {
     const timelineEntries = [buildUserTimelineEntry("Hello")];
 

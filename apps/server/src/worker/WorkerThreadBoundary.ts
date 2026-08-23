@@ -1,3 +1,5 @@
+import { T3_WORKER_TOOL_NAMES } from "@t3tools/contracts";
+
 /**
  * T3-owned provider sessions use a reserved, persisted thread-id namespace.
  * Keeping this boundary separate lets the normal provider-ingestion fan-out
@@ -19,15 +21,7 @@ const WORKER_LIFECYCLE_TOOL_ALIASES = new Set([
   "wait_agent",
   "resume_agent",
   "close_agent",
-  "worker_start",
-  "worker_list",
-  "worker_wait",
-  "worker_status",
-  "worker_observe",
-  "worker_send",
-  "worker_interrupt",
-  "worker_close",
-  "worker_approval_respond",
+  ...T3_WORKER_TOOL_NAMES,
 ]);
 
 /**
