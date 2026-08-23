@@ -880,6 +880,91 @@ describe("applyThreadDetailEvent", () => {
         expect(result.thread.latestTurn?.turnId).toBe("turn-1");
       }
     });
+
+    it("removes the selected root message and stale edit failure before one replacement", () => {
+      const selectedMessageId = MessageId.make("ae26aa09-5a76-439e-bdbd-4390cf4dc141");
+      const replacementMessageId = MessageId.make("replacement-root-message");
+      const threadWithLiveRootRows: OrchestrationThread = {
+        ...baseThread,
+        messages: [
+          {
+            id: selectedMessageId,
+            role: "user",
+            text: "Original root message",
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-04-01T01:00:00.000Z",
+            updatedAt: "2026-04-01T01:00:00.000Z",
+          },
+          {
+            id: MessageId.make("assistant-live-root"),
+            role: "assistant",
+            text: "BRANCH_OK",
+            turnId: TurnId.make("turn-live-root"),
+            streaming: false,
+            createdAt: "2026-04-01T01:00:01.000Z",
+            updatedAt: "2026-04-01T01:00:01.000Z",
+          },
+        ],
+        activities: [
+          {
+            id: EventId.make("stale-edit-failure"),
+            tone: "error",
+            kind: "thread.edit-from-here.failed",
+            summary: "Edit from here failed",
+            payload: { detail: "Error: old raw stack\n    at C:\\repo\\server.ts:10:2" },
+            turnId: null,
+            createdAt: "2026-04-01T01:00:02.000Z",
+          },
+        ],
+      };
+
+      const reverted = applyThreadDetailEvent(threadWithLiveRootRows, {
+        ...baseEventFields,
+        sequence: 14,
+        occurredAt: "2026-04-01T01:00:03.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.reverted",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          turnCount: 0,
+          sourceMessageId: selectedMessageId,
+          cutoffCreatedAt: "2026-04-01T01:00:00.000Z",
+        },
+      });
+
+      expect(reverted.kind).toBe("updated");
+      if (reverted.kind !== "updated") return;
+      expect(reverted.thread.messages).toEqual([]);
+      expect(reverted.thread.activities).toEqual([]);
+
+      const replaced = applyThreadDetailEvent(reverted.thread, {
+        ...baseEventFields,
+        sequence: 15,
+        occurredAt: "2026-04-01T01:00:04.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.message-sent",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          messageId: replacementMessageId,
+          role: "user",
+          text: "Replacement root message",
+          turnId: null,
+          streaming: false,
+          createdAt: "2026-04-01T01:00:04.000Z",
+          updatedAt: "2026-04-01T01:00:04.000Z",
+        },
+      });
+
+      expect(replaced.kind).toBe("updated");
+      if (replaced.kind === "updated") {
+        expect(replaced.thread.messages.map((message) => [message.id, message.text])).toEqual([
+          [replacementMessageId, "Replacement root message"],
+        ]);
+      }
+    });
   });
 
   describe("no-op events", () => {

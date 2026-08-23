@@ -24,6 +24,7 @@ import type {
   ProviderUploadFeedbackInput,
   ProviderUploadFeedbackResult,
   ThreadId,
+  TurnId,
   ProviderTurnStartResult,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -106,6 +107,14 @@ export interface ProviderServiceShape {
     readonly threadId: ThreadId;
     readonly numTurns: number;
   }) => Effect.Effect<void, ProviderServiceError>;
+
+  /** Start a target session from an inclusive provider turn boundary. */
+  readonly forkConversation: (input: {
+    readonly sourceThreadId: ThreadId;
+    readonly targetThreadId: ThreadId;
+    readonly lastTurnId: TurnId;
+    readonly startSession: ProviderSessionStartInput;
+  }) => Effect.Effect<ProviderSession, ProviderServiceError>;
 
   /**
    * Upload a thread and return the provider's shareable feedback identifier.

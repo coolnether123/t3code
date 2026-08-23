@@ -316,6 +316,11 @@ export const ThreadTokenUsageSnapshot = Schema.Struct({
   cachedInputTokens: Schema.optional(NonNegativeInt),
   outputTokens: Schema.optional(NonNegativeInt),
   reasoningOutputTokens: Schema.optional(NonNegativeInt),
+  /** Cumulative dimensions when the provider exposes a separate total snapshot. */
+  cumulativeInputTokens: Schema.optional(NonNegativeInt),
+  cumulativeCachedInputTokens: Schema.optional(NonNegativeInt),
+  cumulativeOutputTokens: Schema.optional(NonNegativeInt),
+  cumulativeReasoningOutputTokens: Schema.optional(NonNegativeInt),
   lastUsedTokens: Schema.optional(NonNegativeInt),
   lastInputTokens: Schema.optional(NonNegativeInt),
   lastCachedInputTokens: Schema.optional(NonNegativeInt),

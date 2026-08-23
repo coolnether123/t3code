@@ -11,7 +11,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import type { ChangeRequestSettleSource } from "@t3tools/client-runtime/state/thread-settled";
-import { ChevronDownIcon } from "lucide-react";
+import { CheckIcon, ChevronDownIcon, CopyIcon, MoreHorizontalIcon, PlusIcon } from "lucide-react";
 import {
   memo,
   useCallback,
@@ -21,6 +21,7 @@ import {
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
+  type ReactNode,
 } from "react";
 import GitActionsControl from "../GitActionsControl";
 import { isTrailingDoubleClick } from "../Sidebar.logic";
@@ -45,6 +46,9 @@ import {
   WorkspaceBreadcrumbSeparator,
 } from "../WorkspaceBreadcrumb";
 import { cn } from "~/lib/utils";
+import { Button } from "../ui/button";
+import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
+import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 
 interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
@@ -65,6 +69,7 @@ interface ChatHeaderProps {
   availableEditors: ReadonlyArray<EditorId>;
   rightPanelOpen: boolean;
   gitCwd: string | null;
+  transcript: string;
   readonly onOpenPullRequest?: ((number: number) => void) | undefined;
   onNewThreadInProject: () => void;
   onRunProjectScript: (script: ProjectScript) => void;
@@ -74,6 +79,55 @@ interface ChatHeaderProps {
     input: NewProjectScriptInput,
   ) => Promise<ProjectScriptActionResult>;
   onDeleteProjectScript: (scriptId: string) => Promise<ProjectScriptActionResult>;
+}
+
+export function CompactTaskActions({
+  open,
+  onOpenChange,
+  reservePanelControls,
+  children,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  reservePanelControls: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      data-mobile-chat-header-actions
+      className={cn(
+        "no-drag relative flex shrink-0 @xl/header-actions:hidden",
+        // PanelLayoutControls is an absolute two-button cluster at the same
+        // right inset. Reserve its full compact hit area while it is shown;
+        // otherwise its z-50 target sits over this button on touch screens.
+        reservePanelControls ? "mr-[4.5rem]" : "mr-0",
+      )}
+    >
+      <Popover open={open} onOpenChange={onOpenChange}>
+        <PopoverTrigger
+          aria-label="Task actions"
+          render={
+            <Button
+              size="icon-xl"
+              variant="ghost"
+              className="size-11"
+              title="Task actions"
+              data-mobile-header-overflow
+            />
+          }
+        >
+          <MoreHorizontalIcon aria-hidden className="size-5" strokeWidth={2.25} />
+        </PopoverTrigger>
+        <PopoverPopup
+          align="end"
+          className="w-[min(19rem,calc(100vw-env(safe-area-inset-left)-env(safe-area-inset-right)-1rem))]"
+          viewportClassName="p-2"
+        >
+          {children}
+        </PopoverPopup>
+      </Popover>
+    </div>
+  );
 }
 
 /**
@@ -134,6 +188,7 @@ export const ChatHeader = memo(function ChatHeader({
   availableEditors,
   rightPanelOpen,
   gitCwd,
+  transcript,
   onOpenPullRequest,
   onNewThreadInProject,
   onRunProjectScript,
@@ -142,6 +197,12 @@ export const ChatHeader = memo(function ChatHeader({
   onDeleteProjectScript,
 }: ChatHeaderProps) {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const { copyToClipboard, isCopied } = useCopyToClipboard({
+    target: "task transcript",
+    onCopy: () => toastManager.add({ type: "success", title: "Chat copied" }),
+    onError: (error) =>
+      toastManager.add({ type: "error", title: "Could not copy chat", description: error.message }),
+  });
   const fileScripts = useT3ProjectFileScripts(
     activeThreadEnvironmentId,
     activeProjectScripts ? activeProjectCwd : null,
@@ -258,6 +319,7 @@ export const ChatHeader = memo(function ChatHeader({
     },
     [cancelPendingTitleMenu, closeMenu, startRename],
   );
+  const [mobileActionsOpen, setMobileActionsOpen] = useState(false);
   const handleHeaderContextMenu = useCallback(
     (event: ReactMouseEvent) => {
       if (!isServerThread || renamingTitle !== null) return;
@@ -285,10 +347,68 @@ export const ChatHeader = memo(function ChatHeader({
   );
   return (
     <div
-      className="@container/header-actions flex min-w-0 flex-1 items-center gap-2 sm:gap-3"
+      className="@container/header-actions flex min-w-0 flex-1 items-center gap-1 @xl/header-actions:gap-3"
       onContextMenu={handleHeaderContextMenu}
     >
-      <WorkspaceBreadcrumb ariaLabel="Thread breadcrumb" className="flex-1">
+      <div
+        data-mobile-chat-header-context
+        className="flex min-w-0 flex-1 items-center @xl/header-actions:hidden"
+      >
+        {isServerThread ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <button
+                  type="button"
+                  aria-label={`Thread actions for ${activeThreadTitle}`}
+                  aria-haspopup="menu"
+                  onClick={openMenuFromTitle}
+                  className="no-drag flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-md px-1 text-left focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                />
+              }
+            >
+              {activeProjectName ? (
+                <ProjectFavicon
+                  environmentId={activeThreadEnvironmentId}
+                  cwd={activeProjectCwd ?? ""}
+                  faviconPath={activeProjectFaviconPath}
+                  className="size-4 shrink-0"
+                />
+              ) : null}
+              <span className="min-w-0 flex-1 truncate text-sm font-medium">
+                {activeProjectName ? `${activeProjectName} / ` : ""}
+                {activeThreadTitle}
+              </span>
+            </TooltipTrigger>
+            <TooltipPopup side="bottom">
+              {activeProjectName ? `${activeProjectName} / ` : ""}
+              {activeThreadTitle}
+            </TooltipPopup>
+          </Tooltip>
+        ) : (
+          <div
+            aria-label={activeThreadTitle}
+            className="flex min-h-11 min-w-0 flex-1 items-center gap-2 px-1"
+          >
+            {activeProjectName ? (
+              <ProjectFavicon
+                environmentId={activeThreadEnvironmentId}
+                cwd={activeProjectCwd ?? ""}
+                faviconPath={activeProjectFaviconPath}
+                className="size-4 shrink-0"
+              />
+            ) : null}
+            <span className="min-w-0 flex-1 truncate text-sm font-medium">
+              {activeProjectName ? `${activeProjectName} / ` : ""}
+              {activeThreadTitle}
+            </span>
+          </div>
+        )}
+      </div>
+      <WorkspaceBreadcrumb
+        ariaLabel="Thread breadcrumb"
+        className="hidden flex-1 @xl/header-actions:block"
+      >
         {/* The project always leads the header: knowing which project a
             thread lives in is priority zero, and the thread title alone
             doesn't answer it. */}
@@ -339,7 +459,6 @@ export const ChatHeader = memo(function ChatHeader({
               <TooltipTrigger
                 render={
                   <button
-                    ref={titleButtonRef}
                     type="button"
                     aria-label={`Thread actions for ${activeThreadTitle}`}
                     aria-haspopup="menu"
@@ -373,13 +492,126 @@ export const ChatHeader = memo(function ChatHeader({
           )}
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
+      <CompactTaskActions
+        open={mobileActionsOpen}
+        onOpenChange={setMobileActionsOpen}
+        reservePanelControls={!rightPanelOpen}
+      >
+        <div aria-label="Task actions" className="flex min-w-0 flex-col gap-1" role="group">
+          <Button
+            type="button"
+            variant="ghost"
+            className="min-h-11 w-full justify-start border-0 px-3"
+            aria-label={isCopied ? "Chat copied" : "Copy chat"}
+            onClick={() => {
+              copyToClipboard(transcript, undefined);
+              setMobileActionsOpen(false);
+            }}
+          >
+            {isCopied ? (
+              <CheckIcon aria-hidden className="size-4" />
+            ) : (
+              <CopyIcon aria-hidden className="size-4" />
+            )}
+            {isCopied ? "Chat copied" : "Copy chat"}
+          </Button>
+          {activeProjectName ? (
+            <Button
+              type="button"
+              variant="ghost"
+              className="min-h-11 w-full justify-start border-0 px-3"
+              onClick={() => {
+                setMobileActionsOpen(false);
+                onNewThreadInProject();
+              }}
+            >
+              <PlusIcon aria-hidden className="size-4" />
+              New task in {activeProjectName}
+            </Button>
+          ) : null}
+          {(activeProjectScripts || showOpenInPicker || activeProjectName) && (
+            <div className="my-1 h-px bg-border" aria-hidden />
+          )}
+          <div className="grid min-w-0 gap-2 px-1 pb-1 [&_[data-slot=button]]:min-h-11 [&_[data-slot=button]]:min-w-11">
+            {activeProjectScripts ? (
+              <div className="flex min-h-11 min-w-0 items-center justify-between gap-3 px-2">
+                <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
+                  Project actions
+                </span>
+                <ProjectScriptsControl
+                  scripts={activeProjectScripts}
+                  fileScripts={fileScripts}
+                  keybindings={keybindings}
+                  preferredScriptId={preferredScriptId}
+                  onRunScript={onRunProjectScript}
+                  onAddScript={onAddProjectScript}
+                  onUpdateScript={onUpdateProjectScript}
+                  onDeleteScript={onDeleteProjectScript}
+                />
+              </div>
+            ) : null}
+            {showOpenInPicker ? (
+              <div className="flex min-h-11 min-w-0 items-center justify-between gap-3 px-2">
+                <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
+                  Open in editor
+                </span>
+                <OpenInPicker
+                  environmentId={activeThreadEnvironmentId}
+                  keybindings={keybindings}
+                  availableEditors={availableEditors}
+                  openInCwd={openInCwd}
+                  compact
+                  enableShortcut={false}
+                />
+              </div>
+            ) : null}
+            {activeProjectName ? (
+              <div className="flex min-h-11 min-w-0 items-center justify-between gap-3 px-2">
+                <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
+                  Git actions
+                </span>
+                <GitActionsControl
+                  gitCwd={gitCwd}
+                  activeThreadRef={scopeThreadRef(activeThreadEnvironmentId, activeThreadId)}
+                  onOpenPullRequest={onOpenPullRequest}
+                  {...(draftId ? { draftId } : {})}
+                />
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </CompactTaskActions>
       <div
         data-chat-header-actions
         className={cn(
-          "flex shrink-0 items-center justify-end gap-2 @3xl/header-actions:gap-3",
-          rightPanelOpen ? "pr-0" : "pr-16",
+          "hidden shrink-0 items-center justify-end gap-2 @xl/header-actions:flex @3xl/header-actions:gap-3",
+          rightPanelOpen ? "pr-0" : "@xl/header-actions:pr-16",
         )}
       >
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="no-drag min-h-9 shrink-0 gap-1.5 px-2.5"
+                aria-label={isCopied ? "Chat copied" : "Copy chat"}
+                onClick={() => copyToClipboard(transcript, undefined)}
+              />
+            }
+          >
+            {isCopied ? (
+              <CheckIcon aria-hidden className="size-3.5" />
+            ) : (
+              <CopyIcon aria-hidden className="size-3.5" />
+            )}
+            <span>Copy chat</span>
+          </TooltipTrigger>
+          <TooltipPopup side="bottom">
+            {isCopied ? "Copied full chat" : "Copy full chat"}
+          </TooltipPopup>
+        </Tooltip>
         {activeProjectScripts && (
           <ProjectScriptsControl
             scripts={activeProjectScripts}

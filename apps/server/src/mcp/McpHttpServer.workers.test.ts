@@ -19,6 +19,7 @@ const workerService = WorkerService.WorkerService.of({
   interrupt: () => Effect.die("unused interrupt"),
   close: () => Effect.die("unused close"),
   respondToApproval: () => Effect.die("unused approval"),
+  reconcileParentAfterRewind: () => Effect.die("unused reconciliation"),
   handleProviderEvent: () => Effect.void,
   recover: Effect.void,
   stream: Stream.empty,

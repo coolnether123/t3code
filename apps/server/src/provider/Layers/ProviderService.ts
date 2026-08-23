@@ -13,6 +13,7 @@ import {
   ModelSelection,
   NonNegativeInt,
   ThreadId,
+  TurnId,
   ProviderInterruptTurnInput,
   ProviderRespondToRequestInput,
   ProviderRespondToUserInputInput,
@@ -24,6 +25,7 @@ import {
   type ProviderDriverKind,
   type ProviderRuntimeEvent,
   type ProviderSession,
+  type RuntimeMode,
 } from "@t3tools/contracts";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import * as DateTime from "effect/DateTime";
@@ -59,6 +61,7 @@ import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
+import { isWorkerLinkedProviderThreadId } from "../../worker/WorkerThreadBoundary.ts";
 const isModelSelection = Schema.is(ModelSelection);
 
 /**
@@ -86,6 +89,16 @@ const ProviderRollbackConversationInput = Schema.Struct({
   threadId: ThreadId,
   numTurns: NonNegativeInt,
 });
+
+const ProviderForkConversationInput = Schema.Struct({
+  sourceThreadId: ThreadId,
+  targetThreadId: ThreadId,
+  lastTurnId: TurnId,
+  startSession: ProviderSessionStartInput,
+});
+
+export const providerSessionUsesT3Mcp = (threadId: ThreadId): boolean =>
+  !isWorkerLinkedProviderThreadId(threadId);
 
 function toValidationError(
   operation: string,
@@ -259,29 +272,34 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     ),
   );
 
-  const prepareMcpSession = (threadId: ThreadId, providerInstanceId: ProviderInstanceId) =>
+  const clearMcpSession = (threadId: ThreadId) =>
+    revokeMcpCredential(threadId).pipe(
+      Effect.tap(() => Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
+    );
+  const prepareMcpSession = (
+    threadId: ThreadId,
+    providerInstanceId: ProviderInstanceId,
+    runtimeMode: RuntimeMode,
+    workingDirectory?: string,
+    modelSelection?: ModelSelection,
+  ) =>
     Effect.gen(function* () {
-      if (!(yield* agentBrowserAccessEnabled)) {
-        // Revoke as well as clear. Every other prepare path reaches
-        // `issueActiveMcpCredential`, which revokes the thread first, so
-        // skipping it here would leave a previously issued bearer token valid
-        // against `/mcp` for the rest of its liveness window — and later turns
-        // would keep refreshing it. A session restart (runtime mode, cwd,
-        // model) re-prepares without stopping, so it relies on this.
-        yield* revokeMcpCredential(threadId);
-        yield* Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId));
+      if (!providerSessionUsesT3Mcp(threadId) || !(yield* agentBrowserAccessEnabled)) {
+        yield* clearMcpSession(threadId);
         return undefined;
       }
-      const credential = yield* issueMcpCredential({ threadId, providerInstanceId });
+      const credential = yield* issueMcpCredential({
+        threadId,
+        providerInstanceId,
+        ...(modelSelection === undefined ? {} : { modelSelection }),
+        runtimeMode,
+        ...(workingDirectory === undefined ? {} : { workingDirectory }),
+      });
       if (credential) {
         yield* Effect.sync(() => McpProviderSession.setMcpProviderSession(credential.config));
       }
       return credential;
     });
-  const clearMcpSession = (threadId: ThreadId) =>
-    McpSessionRegistry.revokeActiveMcpThread(threadId).pipe(
-      Effect.tap(() => Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
-    );
 
   const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
     Effect.succeed(event).pipe(
@@ -453,7 +471,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const persistedCwd = readPersistedCwd(input.binding.runtimePayload);
       const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
 
-      yield* prepareMcpSession(input.binding.threadId, bindingInstanceId);
+      yield* prepareMcpSession(
+        input.binding.threadId,
+        bindingInstanceId,
+        input.binding.runtimeMode ?? "full-access",
+        persistedCwd,
+        persistedModelSelection,
+      );
       const resumed = yield* adapter
         .startSession({
           threadId: input.binding.threadId,
@@ -508,6 +532,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     }
     const instanceId = yield* requireBindingInstanceId(input.operation, binding);
     const adapter = yield* registry.getByInstance(instanceId);
+    const modelSelection = readPersistedModelSelection(binding.runtimePayload);
 
     const hasRequestedSession = yield* adapter.hasSession(input.threadId);
     if (hasRequestedSession) {
@@ -516,6 +541,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         instanceId,
         threadId: input.threadId,
         runtimeMode: binding.runtimeMode,
+        modelSelection,
         isActive: true,
       } as const;
     }
@@ -526,6 +552,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         instanceId,
         threadId: input.threadId,
         runtimeMode: binding.runtimeMode,
+        modelSelection,
         isActive: false,
       } as const;
     }
@@ -539,6 +566,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       instanceId,
       threadId: input.threadId,
       runtimeMode: recovered.session.runtimeMode,
+      modelSelection,
       isActive: true,
     } as const;
   });
@@ -619,11 +647,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           );
         }
         const persistedBinding = Option.getOrUndefined(yield* directory.getBinding(threadId));
+        // An explicit null is the server-authoritative "start a fresh
+        // conversation" sentinel. Undefined continues to mean "resume the
+        // persisted provider conversation when one exists".
         const effectiveResumeCursor =
-          input.resumeCursor ??
-          (persistedBinding?.providerInstanceId === resolvedInstanceId
-            ? persistedBinding.resumeCursor
-            : undefined);
+          input.resumeCursor !== undefined
+            ? (input.resumeCursor ?? undefined)
+            : persistedBinding?.providerInstanceId === resolvedInstanceId
+              ? persistedBinding.resumeCursor
+              : undefined;
         const effectiveCwd =
           input.cwd ??
           (persistedBinding?.providerInstanceId === resolvedInstanceId
@@ -649,10 +681,17 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "provider.cwd.effective": effectiveCwd ?? "",
         });
         const adapter = yield* registry.getByInstance(resolvedInstanceId);
-        yield* prepareMcpSession(threadId, resolvedInstanceId);
+        yield* prepareMcpSession(
+          threadId,
+          resolvedInstanceId,
+          input.runtimeMode,
+          effectiveCwd,
+          input.modelSelection,
+        );
+        const { resumeCursor: _requestedResumeCursor, ...sessionInput } = input;
         const session = yield* adapter
           .startSession({
-            ...input,
+            ...sessionInput,
             providerInstanceId: resolvedInstanceId,
             ...(effectiveCwd !== undefined ? { cwd: effectiveCwd } : {}),
             ...(effectiveResumeCursor !== undefined ? { resumeCursor: effectiveResumeCursor } : {}),
@@ -774,18 +813,24 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         allowRecovery: true,
       });
       metricProvider = routed.adapter.provider;
-      metricModel = input.modelSelection?.model;
+      const activeModelSelection = input.modelSelection ?? routed.modelSelection;
+      metricModel = activeModelSelection?.model;
       yield* Effect.annotateCurrentSpan({
         "provider.kind": routed.adapter.provider,
-        ...(input.modelSelection?.model ? { "provider.model": input.modelSelection.model } : {}),
+        ...(activeModelSelection?.model ? { "provider.model": activeModelSelection.model } : {}),
       });
       // A turn is the clearest sign a session is still alive. The MCP
       // credential is minted once at session start and cannot be rotated into
       // an already-spawned agent process, so we keep the existing token valid
       // rather than issuing a new one: sessions that go a long time between
       // browser tool calls used to lose the toolkit outright.
-      yield* McpSessionRegistry.touchActiveMcpThread(input.threadId);
+      yield* McpSessionRegistry.touchActiveMcpThread(input.threadId, activeModelSelection);
       const turn = yield* routed.adapter.sendTurn(input);
+      yield* McpSessionRegistry.touchActiveMcpThread(
+        input.threadId,
+        activeModelSelection,
+        turn.turnId,
+      );
       yield* directory.upsert({
         threadId: input.threadId,
         provider: routed.adapter.provider,
@@ -793,7 +838,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         status: "running",
         ...(turn.resumeCursor !== undefined ? { resumeCursor: turn.resumeCursor } : {}),
         runtimePayload: {
-          ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+          ...(activeModelSelection !== undefined ? { modelSelection: activeModelSelection } : {}),
           activeTurnId: turn.turnId,
           lastRuntimeEvent: "provider.sendTurn",
           lastRuntimeEventAt: yield* nowIso,
@@ -801,7 +846,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       });
       yield* analytics.record("provider.turn.sent", {
         provider: routed.adapter.provider,
-        model: input.modelSelection?.model,
+        model: activeModelSelection?.model,
         interactionMode: input.interactionMode,
         // Session-start events alone skew runtime mode toward users who toggle
         // often, since every toggle restarts the session. Recording it per turn
@@ -1159,6 +1204,42 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     },
   );
 
+  const forkConversation: ProviderServiceMethod<"forkConversation"> = Effect.fn("forkConversation")(
+    function* (rawInput) {
+      const input = yield* decodeInputOrValidationError({
+        operation: "ProviderService.forkConversation",
+        schema: ProviderForkConversationInput,
+        payload: rawInput,
+      });
+      const source = yield* resolveRoutableSession({
+        threadId: input.sourceThreadId,
+        operation: "ProviderService.forkConversation",
+        allowRecovery: true,
+      });
+      if (!source.adapter.createForkResumeCursor) {
+        return yield* toValidationError(
+          "ProviderService.forkConversation",
+          `Provider '${source.adapter.provider}' does not support conversation forks.`,
+        );
+      }
+      if (input.startSession.modelSelection?.instanceId !== source.instanceId) {
+        return yield* toValidationError(
+          "ProviderService.forkConversation",
+          "A fork must use the same provider instance as its source task.",
+        );
+      }
+      const resumeCursor = yield* source.adapter.createForkResumeCursor(
+        input.sourceThreadId,
+        input.lastTurnId,
+      );
+      return yield* startSession(input.targetThreadId, {
+        ...input.startSession,
+        threadId: input.targetThreadId,
+        resumeCursor,
+      });
+    },
+  );
+
   const runStopAll = Effect.fn("runStopAll")(function* () {
     const threadIds = yield* directory.listThreadIds();
     const currentAdapters = yield* getAdapterEntries;
@@ -1231,6 +1312,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     getInstanceInfo,
     rollbackConversation,
     uploadFeedback,
+    forkConversation,
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (ProviderRuntimeIngestion, CheckpointReactor, etc.) each
     // independently receive all runtime events.

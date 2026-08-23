@@ -59,6 +59,15 @@ export interface ProviderAdapterShape<TError> {
   ) => Effect.Effect<ProviderSession, TError>;
 
   /**
+   * Build a provider-native cursor that forks source history through the
+   * inclusive turn boundary. Omitted means the provider cannot fork.
+   */
+  readonly createForkResumeCursor?: (
+    sourceThreadId: ThreadId,
+    lastTurnId: TurnId,
+  ) => Effect.Effect<unknown, TError>;
+
+  /**
    * Send a turn to an active provider session.
    */
   readonly sendTurn: (

@@ -10,7 +10,6 @@ import {
   type RuntimeMode,
   type WorkerContextPackage,
   type WorkerPermissionMode,
-  type WorkerStartInput,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";

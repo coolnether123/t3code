@@ -11,6 +11,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  SubagentBackend,
   ThreadId,
   type ModelSelection,
   type ProviderOptionSelection,
@@ -254,6 +255,18 @@ describe("composerDraftStore addImages", () => {
     const draft = draftFor(threadId, TEST_ENVIRONMENT_ID);
     expect(draft?.images.map((image) => image.id)).toEqual(["img-shared"]);
     expect(revokeSpy).not.toHaveBeenCalledWith("blob:shared");
+  });
+});
+
+describe("composerDraftStore sub-agent backend", () => {
+  it("persists the parent turn backend on the thread draft", () => {
+    resetComposerDraftStore();
+    const threadId = ThreadId.make("thread-subagent-backend");
+    const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+
+    useComposerDraftStore.getState().setSubagentBackend(threadRef, "v2" satisfies SubagentBackend);
+
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.subagentBackend).toBe("v2");
   });
 });
 

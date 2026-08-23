@@ -18,7 +18,10 @@ import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import {
   buildMcpApprovalResponse,
   buildPermissionsApprovalResponse,
+  buildCodexAppServerCommandArgs,
   buildTurnStartParams,
+  codexSubagentBackendAppServerArgs,
+  assertCodexSubagentIsolationConfig,
   hasConfiguredMcpServer,
   isComputerUseMcpApproval,
   isMcpToolApproval,
@@ -27,6 +30,7 @@ import {
   mcpApprovalRequestKind,
   openCodexThread,
 } from "./CodexSessionRuntime.ts";
+import { isWorkerLifecycleToolName } from "../../worker/WorkerThreadBoundary.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 
 describe("CodexSessionRuntimeIdentifierGenerationError", () => {
@@ -313,21 +317,53 @@ describe("buildTurnStartParams", () => {
     );
   });
 
-  it("reports the same fallback model and effort in settings and instructions", () => {
-    const params = Effect.runSync(
-      buildTurnStartParams({
+  it.effect("routes Native V1 control through T3 Workers and leaves Codex V1/V2 native", () =>
+    Effect.gen(function* () {
+      const nativeControl = yield* buildTurnStartParams({
+        threadId: "provider-thread-native-control",
+        runtimeMode: "full-access",
+        prompt: "Implement it",
+        interactionMode: "default",
+        subagentBackend: "native-v1-control",
+        enableT3Workers: true,
+      });
+      NodeAssert.match(
+        nativeControl.collaborationMode?.settings.developer_instructions ?? "",
+        /worker_start/,
+      );
+
+      for (const subagentBackend of ["v1", "v2"] as const) {
+        const codexNative = yield* buildTurnStartParams({
+          threadId: `provider-thread-${subagentBackend}`,
+          runtimeMode: "full-access",
+          prompt: "Implement it",
+          interactionMode: "default",
+          subagentBackend,
+          enableT3Workers: true,
+        });
+        NodeAssert.doesNotMatch(
+          codexNative.collaborationMode?.settings.developer_instructions ?? "",
+          /worker_start/,
+        );
+      }
+    }),
+  );
+
+  it.effect("reports the same fallback model and effort in settings and instructions", () =>
+    Effect.gen(function* () {
+      const params = yield* buildTurnStartParams({
         threadId: "provider-thread-1",
         runtimeMode: "full-access",
         prompt: "Go",
         interactionMode: "default",
-      }),
-    );
+      });
 
-    const settings = params.collaborationMode?.settings;
-    NodeAssert.equal(settings?.model, DEFAULT_MODEL);
-    NodeAssert.equal(settings?.reasoning_effort, "medium");
-    NodeAssert.ok(settings?.developer_instructions?.includes(`as ${DEFAULT_MODEL} with medium`));
-  });
+      const settings = params.collaborationMode?.settings;
+      NodeAssert.equal(settings?.model, DEFAULT_MODEL);
+      NodeAssert.equal(settings?.reasoning_effort, "medium");
+      NodeAssert.ok(settings?.developer_instructions?.includes(`as ${DEFAULT_MODEL} with medium`));
+    }),
+  );
 
   it.effect("routes approvals to the auto reviewer in auto mode", () =>
     Effect.gen(function* () {
@@ -418,10 +454,12 @@ describe("buildCodexDeveloperInstructions", () => {
     }
     for (const nativeTool of [
       "spawn_agent",
-      "send_input",
-      "resume_agent",
+      "send_message",
+      "followup_task",
+      "interrupt_agent",
+      "list_agents",
       "wait_agent",
-      "close_agent",
+      "multi_agent_v1",
     ]) {
       NodeAssert.match(instructions, new RegExp(`Do not call[^.]*${nativeTool}`));
     }
@@ -549,6 +587,136 @@ describe("hasConfiguredMcpServer", () => {
       hasConfiguredMcpServer(["-c", 'mcp_servers.t3-code.url="http://127.0.0.1/mcp"']),
       true,
     );
+  });
+});
+
+describe("Codex sub-agent tool catalog routing", () => {
+  it.effect("fails closed unless app-server reports every isolation gate as disabled", () =>
+    Effect.gen(function* () {
+      yield* assertCodexSubagentIsolationConfig({
+        agents: { enabled: false },
+        features: { multi_agent: false, multi_agent_v2: false },
+      } as unknown as EffectCodexSchema.V2ConfigReadResponse["config"]);
+
+      for (const config of [
+        { features: { multi_agent: false, multi_agent_v2: false } },
+        { agents: { enabled: true }, features: { multi_agent: false, multi_agent_v2: false } },
+        { agents: { enabled: false }, features: { multi_agent: true, multi_agent_v2: false } },
+        { agents: { enabled: false }, features: { multi_agent: false, multi_agent_v2: true } },
+      ]) {
+        const result = yield* assertCodexSubagentIsolationConfig(
+          config as unknown as EffectCodexSchema.V2ConfigReadResponse["config"],
+        ).pipe(Effect.result);
+        NodeAssert.equal(result._tag, "Failure");
+        NodeAssert.match(result.failure.message, /did not apply.*isolation/i);
+      }
+    }),
+  );
+
+  it("removes native V1/V2 tools at process launch for T3 Workers while preserving unrelated tools", () => {
+    const commandArgs = buildCodexAppServerCommandArgs({
+      launchArgs: "--strict-config -c features.multi_agent=true",
+      appServerArgs: [
+        "-c",
+        "mcp_servers.t3-code.url=http://127.0.0.1/mcp",
+        "-c",
+        "tools.web_search=true",
+      ],
+      subagentBackend: "native-v1-control",
+      enableT3Workers: true,
+    });
+
+    NodeAssert.deepStrictEqual(commandArgs, [
+      "app-server",
+      "--strict-config",
+      "-c",
+      "features.multi_agent=true",
+      "-c",
+      "mcp_servers.t3-code.url=http://127.0.0.1/mcp",
+      "-c",
+      "tools.web_search=true",
+      "-c",
+      "agents.enabled=false",
+      "-c",
+      "features.multi_agent=false",
+      "-c",
+      "features.multi_agent_v2=false",
+    ]);
+    NodeAssert.equal(commandArgs.at(-3), "features.multi_agent=false");
+    NodeAssert.equal(commandArgs.at(-1), "features.multi_agent_v2=false");
+    NodeAssert.ok(commandArgs.includes("agents.enabled=false"));
+    NodeAssert.ok(commandArgs.includes("tools.web_search=true"));
+    NodeAssert.ok(commandArgs.some((argument) => argument.startsWith("mcp_servers.t3-code.")));
+  });
+
+  it("selects exactly one Codex-native multi-agent runtime for V1 or V2", () => {
+    NodeAssert.deepStrictEqual(
+      codexSubagentBackendAppServerArgs({ subagentBackend: "v1", enableT3Workers: true }),
+      [
+        "-c",
+        "agents.enabled=true",
+        "-c",
+        "features.multi_agent=true",
+        "-c",
+        "features.multi_agent_v2=false",
+      ],
+    );
+    NodeAssert.deepStrictEqual(
+      codexSubagentBackendAppServerArgs({ subagentBackend: "v2", enableT3Workers: true }),
+      [
+        "-c",
+        "agents.enabled=true",
+        "-c",
+        "features.multi_agent=false",
+        "-c",
+        "features.multi_agent_v2=true",
+      ],
+    );
+  });
+
+  it("preserves ordinary provider defaults when no backend is selected and Workers are disabled", () => {
+    NodeAssert.deepStrictEqual(codexSubagentBackendAppServerArgs({ enableT3Workers: false }), []);
+  });
+
+  it("hard-disables every native catalog for Worker sessions regardless of model metadata", () => {
+    const commandArgs = buildCodexAppServerCommandArgs({
+      launchArgs: "-c agents.enabled=true -c features.multi_agent_v2=true",
+      appServerArgs: ["-c", "tools.web_search=true"],
+      enableT3Workers: false,
+      workerSession: true,
+    });
+
+    NodeAssert.deepStrictEqual(commandArgs.slice(-6), [
+      "-c",
+      "agents.enabled=false",
+      "-c",
+      "features.multi_agent=false",
+      "-c",
+      "features.multi_agent_v2=false",
+    ]);
+    NodeAssert.ok(commandArgs.includes("tools.web_search=true"));
+  });
+
+  it("recognizes native, legacy, collaboration, and T3 Worker lifecycle aliases", () => {
+    for (const name of [
+      "collaboration.spawn_agent",
+      "multi_agent_v1__send_input",
+      "mcp__t3_code__worker_start",
+      "spawn_agent",
+      "followup_task",
+      "send_message",
+      "interrupt_agent",
+      "list_agents",
+      "wait_agent",
+      "resume_agent",
+      "close_agent",
+    ]) {
+      NodeAssert.equal(isWorkerLifecycleToolName(name), true, name);
+    }
+    NodeAssert.equal(isWorkerLifecycleToolName("spawn_agent", "collaboration"), true);
+    NodeAssert.equal(isWorkerLifecycleToolName("exec_command"), false);
+    NodeAssert.equal(isWorkerLifecycleToolName("read_file"), false);
+    NodeAssert.equal(isWorkerLifecycleToolName("skill_search"), false);
   });
 });
 
@@ -779,10 +947,13 @@ describe("isRecoverableThreadResumeError", () => {
 describe("openCodexThread", () => {
   it.effect("falls back to thread/start when resume fails recoverably", () =>
     Effect.gen(function* () {
-      const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
+      const calls: Array<{
+        method: "thread/start" | "thread/resume" | "thread/fork";
+        payload: unknown;
+      }> = [];
       const started = makeThreadOpenResponse("fresh-thread");
       const client = {
-        request: <M extends "thread/start" | "thread/resume">(
+        request: <M extends "thread/start" | "thread/resume" | "thread/fork">(
           method: M,
           payload: CodexRpc.ClientRequestParamsByMethod[M],
         ) => {
@@ -820,7 +991,7 @@ describe("openCodexThread", () => {
   it.effect("propagates non-recoverable resume failures", () =>
     Effect.gen(function* () {
       const client = {
-        request: <M extends "thread/start" | "thread/resume">(
+        request: <M extends "thread/start" | "thread/resume" | "thread/fork">(
           method: M,
           _payload: CodexRpc.ClientRequestParamsByMethod[M],
         ) => {

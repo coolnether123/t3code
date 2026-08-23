@@ -1,12 +1,14 @@
 import type {
   ApprovalRequestId,
+  ProviderRuntimeEvent,
   WorkerActivation,
   WorkerApprovalRequest,
   WorkerDetail,
   WorkerMessage,
   WorkerObserverReport,
-  WorkerStatus,
   WorkerSummary,
+  OrchestrationThreadActivity,
+  TurnId,
   WorkerWaitLeaseId,
   WorkerWaitLeaseStatus,
   WorkerWakeReason,
@@ -25,6 +27,9 @@ export interface StoredWorker {
   readonly assignment: string;
   readonly context: WorkerDetail["context"];
   readonly instructions?: string | undefined;
+  readonly parentTurnId?: TurnId | undefined;
+  readonly discardedAt?: string | undefined;
+  readonly discardedByRequestId?: string | undefined;
 }
 
 export interface StoredWaitLease {
@@ -51,6 +56,7 @@ export interface WorkerStoreShape {
   readonly listWorkers: (input: {
     readonly parentThreadId?: string | undefined;
     readonly includeClosed: boolean;
+    readonly includeDiscarded?: boolean | undefined;
     readonly limit: number;
   }) => Effect.Effect<ReadonlyArray<StoredWorker>, PersistenceSqlError>;
   readonly saveActivation: (
@@ -100,6 +106,13 @@ export interface WorkerStoreShape {
     readonly eventType: string;
     readonly payload: unknown;
   }) => Effect.Effect<void, PersistenceSqlError>;
+  readonly listProviderEvents: (
+    workerId: StoredWorker["summary"]["id"],
+  ) => Effect.Effect<ReadonlyArray<ProviderRuntimeEvent>, PersistenceSqlError>;
+  /** Optional for isolated test stores; the live store reads the canonical parent projection. */
+  readonly listParentActivities?: (
+    parentThreadId: string,
+  ) => Effect.Effect<ReadonlyArray<OrchestrationThreadActivity>, PersistenceSqlError>;
 }
 
 export class WorkerStore extends Context.Service<WorkerStore, WorkerStoreShape>()(
@@ -149,9 +162,16 @@ const makeWorkerStore = Effect.gen(function* () {
         FROM t3_workers
         WHERE (${input.parentThreadId ?? null} IS NULL OR parent_thread_id = ${input.parentThreadId ?? null})
           AND (${input.includeClosed ? 1 : 0} = 1 OR status <> 'closed')
+          AND (${input.includeDiscarded ? 1 : 0} = 1 OR json_extract(payload_json, '$.discardedAt') IS NULL)
         ORDER BY updated_at DESC, worker_id DESC
         LIMIT ${input.limit}
-      `.pipe(Effect.map((rows) => rows.map((row) => parseJson<StoredWorker>(row.payload_json)))),
+      `.pipe(
+        Effect.map((rows) =>
+          rows
+            .map((row) => parseJson<StoredWorker>(row.payload_json))
+            .filter((worker) => input.includeDiscarded || worker.discardedAt === undefined),
+        ),
+      ),
     );
 
   const saveActivation: WorkerStoreShape["saveActivation"] = (activation) =>
@@ -273,7 +293,7 @@ const makeWorkerStore = Effect.gen(function* () {
       sql`
         UPDATE t3_worker_approvals
         SET resolved_at = ${input.resolvedAt},
-            payload_json = json_set(payload_json, '$.resolvedAt', ${input.resolvedAt}, '$.decision', ${input.decision ?? null})
+            payload_json = json_set(payload_json, '$.status', 'resolved', '$.resolvedAt', ${input.resolvedAt}, '$.decision', ${input.decision ?? null})
         WHERE request_id = ${input.requestId}
       `.pipe(Effect.asVoid),
     );
@@ -333,6 +353,66 @@ const makeWorkerStore = Effect.gen(function* () {
       `.pipe(Effect.asVoid),
     );
 
+  const listProviderEvents: WorkerStoreShape["listProviderEvents"] = (workerId) =>
+    query(
+      "WorkerStore.listProviderEvents",
+      sql<{ readonly payload_json: string }>`
+        SELECT payload_json
+        FROM t3_worker_provider_events
+        WHERE worker_id = ${workerId}
+          AND event_type <> 'content.delta'
+        ORDER BY created_at ASC, event_id ASC
+      `.pipe(
+        Effect.map((rows) => rows.map((row) => parseJson<ProviderRuntimeEvent>(row.payload_json))),
+      ),
+    );
+
+  const listParentActivities: NonNullable<WorkerStoreShape["listParentActivities"]> = (
+    parentThreadId,
+  ) =>
+    query(
+      "WorkerStore.listParentActivities",
+      sql<{
+        activityId: string;
+        tone: OrchestrationThreadActivity["tone"];
+        kind: string;
+        summary: string;
+        payloadJson: string;
+        turnId: string | null;
+        sequence: number | null;
+        createdAt: string;
+      }>`
+          SELECT
+            activity_id AS "activityId",
+            tone,
+            kind,
+            summary,
+            payload_json AS "payloadJson",
+            turn_id AS "turnId",
+            sequence,
+            created_at AS "createdAt"
+          FROM projection_thread_activities
+          WHERE thread_id = ${parentThreadId}
+          ORDER BY sequence ASC, created_at ASC, activity_id ASC
+        `.pipe(
+        Effect.map((rows) =>
+          rows.map(
+            (row) =>
+              ({
+                id: row.activityId,
+                tone: row.tone,
+                kind: row.kind,
+                summary: row.summary,
+                payload: parseJson<unknown>(row.payloadJson),
+                turnId: row.turnId,
+                ...(row.sequence === null ? {} : { sequence: row.sequence }),
+                createdAt: row.createdAt,
+              }) as OrchestrationThreadActivity,
+          ),
+        ),
+      ),
+    );
+
   return {
     saveWorker,
     getWorker,
@@ -351,6 +431,8 @@ const makeWorkerStore = Effect.gen(function* () {
     saveWaitLease,
     finishWaitLease,
     appendProviderEvent,
+    listProviderEvents,
+    listParentActivities,
   } satisfies WorkerStoreShape;
 });
 

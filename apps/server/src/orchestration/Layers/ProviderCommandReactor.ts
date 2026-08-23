@@ -10,9 +10,11 @@ import {
   ThreadId,
   type ProviderSession,
   type RuntimeMode,
+  type SubagentBackend,
   type TurnId,
 } from "@t3tools/contracts";
 import { isTemporaryWorktreeBranch, WORKTREE_BRANCH_PREFIX } from "@t3tools/shared/git";
+import { normalizeModelSlug } from "@t3tools/shared/model";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
@@ -325,6 +327,7 @@ const make = Effect.gen(function* () {
     );
 
   const threadModelSelections = new Map<string, ModelSelection>();
+  const threadSubagentBackends = new Map<string, SubagentBackend>();
 
   const appendProviderFailureActivity = (input: {
     readonly threadId: ThreadId;
@@ -471,6 +474,7 @@ const make = Effect.gen(function* () {
     createdAt: string,
     options?: {
       readonly modelSelection?: ModelSelection;
+      readonly subagentBackend?: SubagentBackend;
       readonly pendingTurnStart?: boolean;
     },
   ) {
@@ -616,6 +620,9 @@ const make = Effect.gen(function* () {
         ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
         ...(thread.title ? { title: thread.title } : {}),
         modelSelection: desiredModelSelection,
+        ...(options?.subagentBackend !== undefined
+          ? { subagentBackend: options.subagentBackend }
+          : {}),
         ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
         runtimeMode: desiredRuntimeMode,
       });
@@ -668,13 +675,18 @@ const make = Effect.gen(function* () {
         preferredProvider === "claudeAgent" &&
         requestedModelSelection !== undefined &&
         !Equal.equals(previousModelSelection, requestedModelSelection);
+      const previousSubagentBackend = threadSubagentBackends.get(threadId);
+      const shouldRestartForSubagentBackendChange =
+        options?.subagentBackend !== undefined &&
+        previousSubagentBackend !== options.subagentBackend;
 
       if (
         !runtimeModeChanged &&
         !cwdChanged &&
         !instanceChanged &&
         !shouldRestartForModelChange &&
-        !shouldRestartForModelSelectionChange
+        !shouldRestartForModelSelectionChange &&
+        !shouldRestartForSubagentBackendChange
       ) {
         return existingSessionThreadId;
       }
@@ -699,6 +711,7 @@ const make = Effect.gen(function* () {
         instanceChanged,
         shouldRestartForModelChange,
         shouldRestartForModelSelectionChange,
+        shouldRestartForSubagentBackendChange,
         hasResumeCursor: resumeCursor !== undefined,
       });
       const restartedSession = yield* startProviderSession(
@@ -713,11 +726,17 @@ const make = Effect.gen(function* () {
         cwd: restartedSession.cwd,
       });
       yield* bindSessionToThread(restartedSession);
+      if (options?.subagentBackend !== undefined) {
+        threadSubagentBackends.set(threadId, options.subagentBackend);
+      }
       return restartedSession.threadId;
     }
 
     const startedSession = yield* startProviderSession(undefined);
     yield* bindSessionToThread(startedSession);
+    if (options?.subagentBackend !== undefined) {
+      threadSubagentBackends.set(threadId, options.subagentBackend);
+    }
     return startedSession.threadId;
   });
 
@@ -727,6 +746,7 @@ const make = Effect.gen(function* () {
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
     readonly interactionMode?: "default" | "plan";
+    readonly subagentBackend?: SubagentBackend;
     readonly createdAt: string;
   }) {
     const thread = yield* resolveThread(input.threadId);
@@ -737,6 +757,7 @@ const make = Effect.gen(function* () {
     }
     yield* ensureSessionForThread(input.threadId, input.createdAt, {
       ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+      ...(input.subagentBackend !== undefined ? { subagentBackend: input.subagentBackend } : {}),
       pendingTurnStart: true,
     });
     if (input.modelSelection !== undefined) {
@@ -771,6 +792,38 @@ const make = Effect.gen(function* () {
             }
           : requestedModelSelection
         : input.modelSelection;
+    if (input.subagentBackend !== undefined) {
+      const providerSnapshots = yield* providerRegistry.getProviders;
+      const selectedProviderInstanceId =
+        modelForTurn?.instanceId ??
+        activeSession?.providerInstanceId ??
+        thread.modelSelection.instanceId;
+      const activeProvider = providerSnapshots.find(
+        (provider) => provider.instanceId === selectedProviderInstanceId,
+      );
+      const selectedModelSlug =
+        modelForTurn?.model ?? activeSession?.model ?? thread.modelSelection.model;
+      const normalizedSelectedModel = activeProvider
+        ? normalizeModelSlug(selectedModelSlug, activeProvider.driver)
+        : null;
+      const selectedModel = activeProvider?.models.find(
+        (model) =>
+          model.slug === selectedModelSlug ||
+          normalizeModelSlug(model.slug, activeProvider.driver) === normalizedSelectedModel,
+      );
+      const backendCapability =
+        selectedModel?.capabilities?.subagentBackends?.[input.subagentBackend];
+      if (backendCapability?.supported !== true) {
+        const reason =
+          backendCapability?.reason ??
+          "The active provider/model did not advertise this sub-agent backend.";
+        return yield* new ProviderAdapterRequestError({
+          provider: providerErrorLabel(activeProvider?.driver ?? activeSession?.provider),
+          method: "thread.turn.start",
+          detail: `Sub-agent backend '${input.subagentBackend}' is unavailable for model '${selectedModelSlug}': ${reason}`,
+        });
+      }
+    }
 
     return {
       threadId: input.threadId,
@@ -778,6 +831,7 @@ const make = Effect.gen(function* () {
       ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
       ...(modelForTurn !== undefined ? { modelSelection: modelForTurn } : {}),
       ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
+      ...(input.subagentBackend !== undefined ? { subagentBackend: input.subagentBackend } : {}),
     };
   });
 
@@ -1158,6 +1212,9 @@ const make = Effect.gen(function* () {
         ? { modelSelection: event.payload.modelSelection }
         : {}),
       interactionMode: event.payload.interactionMode,
+      ...(event.payload.subagentBackend !== undefined
+        ? { subagentBackend: event.payload.subagentBackend }
+        : {}),
       createdAt: event.payload.createdAt,
     }).pipe(
       Effect.map(Option.some),

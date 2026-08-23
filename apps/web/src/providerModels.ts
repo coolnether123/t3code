@@ -2,6 +2,7 @@ import {
   DEFAULT_MODEL,
   DEFAULT_MODEL_BY_PROVIDER,
   defaultInstanceIdForDriver,
+  type SubagentBackend,
   ProviderDriverKind,
   type ModelCapabilities,
   type ProviderInstanceId,
@@ -14,6 +15,43 @@ const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],
 });
 const DEFAULT_DRIVER_KIND = ProviderDriverKind.make("codex");
+export const DEFAULT_CODEX_SUBAGENT_BACKEND: SubagentBackend = "native-v1-control";
+
+export const SUBAGENT_BACKEND_OPTIONS: ReadonlyArray<{
+  readonly value: SubagentBackend;
+  readonly label: string;
+  readonly description: string;
+}> = [
+  {
+    value: "v1",
+    label: "V1",
+    description: "Codex app-server V1 with namespaced multi_agent_v1 tools.",
+  },
+  {
+    value: "v2",
+    label: "V2",
+    description: "Codex app-server V2 with plain sub-agent control tools.",
+  },
+  {
+    value: "native-v1-control",
+    label: "Native V1 control",
+    description: "T3 Workers linked-provider control, separate from Codex V1 and V2.",
+  },
+];
+
+/**
+ * Resolve the task-scoped composer selection without silently changing an
+ * explicit backend. A missing Codex selection is Native V1 control even when
+ * that route is unavailable, so the normal capability check can fail closed
+ * with its concrete reason instead of falling back to a native Codex backend.
+ */
+export function resolveComposerSubagentBackend(
+  savedBackend: SubagentBackend | null | undefined,
+  provider: ProviderDriverKind,
+): SubagentBackend | null {
+  if (savedBackend !== null && savedBackend !== undefined) return savedBackend;
+  return provider === DEFAULT_DRIVER_KIND ? DEFAULT_CODEX_SUBAGENT_BACKEND : null;
+}
 
 export function formatProviderDriverKindLabel(provider: ProviderDriverKind): string {
   return provider
@@ -115,6 +153,52 @@ function withoutPlanAgentOption(caps: ModelCapabilities): ModelCapabilities {
       return [{ ...descriptor, options, ...(currentValue ? { currentValue } : {}) }];
     }),
   };
+}
+
+export function getSubagentBackendOptions(
+  models: ReadonlyArray<ServerProviderModel>,
+  model: string | null | undefined,
+  provider: ProviderDriverKind,
+  options?: { readonly workersEnabled?: boolean },
+): ReadonlyArray<{
+  readonly value: SubagentBackend;
+  readonly label: string;
+  readonly description: string;
+  readonly supported: boolean;
+  readonly reason: string;
+}> {
+  const capabilities = getProviderModelCapabilities(models, model, provider);
+  return SUBAGENT_BACKEND_OPTIONS.map((option) => {
+    const capability = capabilities.subagentBackends?.[option.value];
+    const workersDisabled =
+      option.value === "native-v1-control" && options?.workersEnabled === false;
+    return {
+      ...option,
+      supported: capability?.supported === true && !workersDisabled,
+      reason:
+        (workersDisabled
+          ? "T3 Workers are disabled in settings; enable them before selecting Native V1 control."
+          : capability?.reason) ??
+        "This provider/model has not advertised support for this sub-agent backend.",
+    };
+  });
+}
+
+export function getSubagentBackendUnavailableReason(
+  backend: SubagentBackend | null | undefined,
+  models: ReadonlyArray<ServerProviderModel>,
+  model: string | null | undefined,
+  provider: ProviderDriverKind,
+  options?: { readonly workersEnabled?: boolean },
+): string | null {
+  if (backend === null || backend === undefined) return null;
+  const selected = getSubagentBackendOptions(models, model, provider, options).find(
+    (option) => option.value === backend,
+  );
+  return selected?.supported
+    ? null
+    : (selected?.reason ??
+        "The selected model has not advertised support for this sub-agent backend.");
 }
 
 export function getDefaultServerModel(

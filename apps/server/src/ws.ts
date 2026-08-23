@@ -56,10 +56,7 @@ import {
   EnvironmentAuthorizationError,
   WorkerDisabledError,
   WorkerOperationError,
-  ProviderDriverKind,
-  defaultInstanceIdForDriver,
   type WorkerEvent,
-  type WorkerStartInput,
   type WorkerSubscribeInput,
   ThreadId,
   type TerminalAttachStreamEvent,
@@ -141,7 +138,6 @@ import * as WorkerService from "./worker/WorkerService.ts";
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
-const defaultCodexInstanceId = defaultInstanceIdForDriver(ProviderDriverKind.make("codex"));
 const EDITOR_DISCOVERY_TIMEOUT = Duration.seconds(5);
 
 const unavailableWorkerError = (operation: string) =>
@@ -166,6 +162,8 @@ const unavailableWorkerService: WorkerService.WorkerServiceShape = {
   interrupt: () => Effect.fail(unavailableWorkerError("worker.interrupt")),
   close: () => Effect.fail(unavailableWorkerError("worker.close")),
   respondToApproval: () => Effect.fail(unavailableWorkerError("worker.approvalRespond")),
+  reconcileParentAfterRewind: () =>
+    Effect.fail(unavailableWorkerError("worker.reconcileAfterRewind")),
   handleProviderEvent: () => Effect.void,
   recover: Effect.void,
   stream: Stream.empty,
@@ -181,19 +179,13 @@ export const workerEventMatchesSubscription = (
   (input.parentThreadId === undefined || event.summary.parentThreadId === input.parentThreadId) &&
   (input.includeClosed === true || event.summary.status !== "closed");
 
-export const resolveWorkerStartRequest = (
-  input: WorkerStartInput,
-): Effect.Effect<WorkerService.WorkerStartRequest, WorkerOperationError> =>
-  input.parentThreadId === undefined
-    ? new WorkerOperationError({
-        operation: "worker.start",
-        message: "A parent thread is required to start a Worker over WebSocket",
-      })
-    : Effect.succeed({
-        parentThreadId: input.parentThreadId,
-        providerInstanceId: input.modelSelection?.instanceId ?? defaultCodexInstanceId,
-        input,
-      });
+export const rejectWorkerLifecycleWebSocketControl = (operation: string) =>
+  Effect.fail(
+    new WorkerOperationError({
+      operation,
+      message: "Worker lifecycle control is available only to parent agents through MCP.",
+    }),
+  );
 
 export const resolveAvailableEditorsForConfig = <A, E, R>(
   discovery: Effect.Effect<ReadonlyArray<A>, E, R>,
@@ -1797,19 +1789,21 @@ const makeWsRpcLayer = (
             "rpc.aggregate": "workers",
             "worker.id": input.workerId,
           }),
-        [WS_METHODS.workersStart]: (input) =>
+        [WS_METHODS.workersStart]: (_input) =>
           observeRpcEffect(
             WS_METHODS.workersStart,
-            withWorkersEnabled(
-              resolveWorkerStartRequest(input).pipe(Effect.flatMap(workers.start)),
-            ),
+            withWorkersEnabled(rejectWorkerLifecycleWebSocketControl("worker.start")),
             { "rpc.aggregate": "workers" },
           ),
         [WS_METHODS.workersSend]: (input) =>
-          observeRpcEffect(WS_METHODS.workersSend, withWorkersEnabled(workers.send(input)), {
-            "rpc.aggregate": "workers",
-            "worker.id": input.workerId,
-          }),
+          observeRpcEffect(
+            WS_METHODS.workersSend,
+            withWorkersEnabled(rejectWorkerLifecycleWebSocketControl("worker.send")),
+            {
+              "rpc.aggregate": "workers",
+              "worker.id": input.workerId,
+            },
+          ),
         [WS_METHODS.workersWait]: (input) =>
           observeRpcEffect(WS_METHODS.workersWait, withWorkersEnabled(workers.wait(input)), {
             "rpc.aggregate": "workers",
@@ -1823,19 +1817,19 @@ const makeWsRpcLayer = (
         [WS_METHODS.workersInterrupt]: (input) =>
           observeRpcEffect(
             WS_METHODS.workersInterrupt,
-            withWorkersEnabled(workers.interrupt(input)),
+            withWorkersEnabled(rejectWorkerLifecycleWebSocketControl("worker.interrupt")),
             { "rpc.aggregate": "workers", "worker.id": input.workerId },
           ),
         [WS_METHODS.workersClose]: (input) =>
           observeRpcEffect(
             WS_METHODS.workersClose,
-            withWorkersEnabled(workers.close(input.workerId)),
+            withWorkersEnabled(rejectWorkerLifecycleWebSocketControl("worker.close")),
             { "rpc.aggregate": "workers", "worker.id": input.workerId },
           ),
         [WS_METHODS.workersApprovalRespond]: (input) =>
           observeRpcEffect(
             WS_METHODS.workersApprovalRespond,
-            withWorkersEnabled(workers.respondToApproval(input)),
+            withWorkersEnabled(rejectWorkerLifecycleWebSocketControl("worker.approvalRespond")),
             { "rpc.aggregate": "workers", "worker.id": input.workerId },
           ),
         [WS_METHODS.cloudGetRelayClientStatus]: (_input) =>

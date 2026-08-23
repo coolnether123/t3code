@@ -20,6 +20,7 @@ import {
   ProviderInteractionMode,
   ProviderDriverKind,
   RuntimeMode,
+  type SubagentBackend,
   TerminalOpenInput,
 } from "@t3tools/contracts";
 import {
@@ -84,7 +85,6 @@ import {
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { isElectron } from "../env";
-import { readLocalApi } from "../localApi";
 import { useDiffPanelStore } from "../diffPanelStore";
 import {
   collapseExpandedComposerCursor,
@@ -196,7 +196,12 @@ import {
 import { newDraftId, newMessageId, newThreadId } from "~/lib/utils";
 import { useBrowserHistoryStore } from "~/browserHistoryStore";
 import { registerFaviconProjectForThread } from "~/browserFaviconStore";
-import { getProviderModelCapabilities, resolveSelectableProvider } from "../providerModels";
+import {
+  getProviderModelCapabilities,
+  getSubagentBackendUnavailableReason,
+  resolveComposerSubagentBackend,
+  resolveSelectableProvider,
+} from "../providerModels";
 import { NO_PROVIDER_MODEL_SELECTION } from "../providerInstances";
 import {
   useClientSettings,
@@ -273,10 +278,12 @@ import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
+import { EditFromHereDialog, type EditFromHereMode } from "./chat/EditFromHereDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
 import { resolveTimelineIsAtEnd } from "./chat/MessagesTimeline.logic";
 import { ChatHeader } from "./chat/ChatHeader";
+import { serializeTaskTranscript } from "../chatTranscript";
 import { PanelLayoutControls, RightPanelMaximizeControl } from "./chat/PanelLayoutControls";
 import { type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
 import { NoActiveThreadState } from "./NoActiveThreadState";
@@ -1289,7 +1296,7 @@ function ChatViewContent(props: ChatViewProps) {
   const respondToThreadUserInput = useAtomCommand(threadEnvironment.respondToUserInput, {
     reportFailure: false,
   });
-  const revertThreadCheckpoint = useAtomCommand(threadEnvironment.revertCheckpoint, {
+  const editThreadFromHere = useAtomCommand(threadEnvironment.editFromHere, {
     reportFailure: false,
   });
   const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: false });
@@ -1357,6 +1364,9 @@ function ChatViewContent(props: ChatViewProps) {
   const composerInteractionMode = useComposerDraftStore(
     (store) => store.getComposerDraft(composerDraftTarget)?.interactionMode ?? null,
   );
+  const composerSubagentBackend = useComposerDraftStore(
+    (store) => store.getComposerDraft(composerDraftTarget)?.subagentBackend ?? null,
+  );
   const composerActiveProvider = useComposerDraftStore(
     (store) => store.getComposerDraft(composerDraftTarget)?.activeProvider ?? null,
   );
@@ -1376,6 +1386,9 @@ function ChatViewContent(props: ChatViewProps) {
   const setComposerDraftRuntimeMode = useComposerDraftStore((store) => store.setRuntimeMode);
   const setComposerDraftInteractionMode = useComposerDraftStore(
     (store) => store.setInteractionMode,
+  );
+  const setComposerDraftSubagentBackend = useComposerDraftStore(
+    (store) => store.setSubagentBackend,
   );
   const clearComposerDraftContent = useComposerDraftStore((store) => store.clearComposerContent);
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
@@ -1415,7 +1428,11 @@ function ChatViewContent(props: ChatViewProps) {
     Record<string, LocalThreadErrorEntry>
   >({});
   const [isConnecting, _setIsConnecting] = useState(false);
-  const [isRevertingCheckpoint, setIsRevertingCheckpoint] = useState(false);
+  const [editFromHereDialog, setEditFromHereDialog] = useState<{
+    readonly messageId: MessageId;
+    readonly text: string;
+  } | null>(null);
+  const [isEditingFromHere, setIsEditingFromHere] = useState(false);
   const [maximizedRightPanelThreadKey, setMaximizedRightPanelThreadKey] = useState<string | null>(
     null,
   );
@@ -1586,6 +1603,18 @@ function ChatViewContent(props: ChatViewProps) {
   // depend on which route is mounted.
   const isServerThread = activeServerThread !== null;
   const activeThread = activeServerThread ?? localDraftThread;
+  const activeTaskTranscript = useMemo(
+    () =>
+      activeThread
+        ? serializeTaskTranscript({
+            title: activeThread.title,
+            threadId: activeThread.id,
+            messages: activeThread.messages,
+            activities: activeThread.activities,
+          })
+        : "",
+    [activeThread],
+  );
   const threadError = isServerThread
     ? (localServerError ?? activeServerThread?.session?.lastError ?? null)
     : localDraftError;
@@ -2286,6 +2315,16 @@ function ChatViewContent(props: ChatViewProps) {
     selectedProviderByThreadId ?? threadProvider,
   );
   const selectedProvider: ProviderDriverKind = lockedProvider ?? unlockedSelectedProvider;
+  const subagentBackend = resolveComposerSubagentBackend(composerSubagentBackend, selectedProvider);
+  useEffect(() => {
+    if (composerSubagentBackend !== null || subagentBackend === null) return;
+    setComposerDraftSubagentBackend(composerDraftTarget, subagentBackend);
+  }, [
+    composerDraftTarget,
+    composerSubagentBackend,
+    setComposerDraftSubagentBackend,
+    subagentBackend,
+  ]);
   const phase = derivePhase(activeThread?.session ?? null);
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
   const workLogEntries = useMemo(() => deriveWorkLogEntries(threadActivities), [threadActivities]);
@@ -2393,7 +2432,12 @@ function ChatViewContent(props: ChatViewProps) {
     activePendingUserInput: activePendingUserInput?.requestId ?? null,
     threadError,
   });
-  const isWorking = phase === "running" || isSendBusy || isConnecting || isRevertingCheckpoint;
+  const isWorking =
+    phase === "running" ||
+    isSendBusy ||
+    isConnecting ||
+    isEditingFromHere ||
+    activeServerThread?.editFromHere != null;
   const activeWorkStartedAt = deriveActiveWorkStartedAt(
     activeLatestTurn,
     activeThread?.session ?? null,
@@ -2678,8 +2722,7 @@ function ChatViewContent(props: ChatViewProps) {
     attachDraftHeroComposerAnchorRef,
     captureDraftHeroComposerRect,
   ] = useDraftHeroLayoutTransition(isDraftHeroState);
-  const { turnDiffSummaries, inferredCheckpointTurnCountByTurnId } =
-    useTurnDiffSummaries(activeThread);
+  const { turnDiffSummaries } = useTurnDiffSummaries(activeThread);
   const turnDiffSummaryByAssistantMessageId = useMemo(() => {
     const byMessageId = new Map<MessageId, TurnDiffSummary>();
     for (const summary of turnDiffSummaries) {
@@ -2688,38 +2731,15 @@ function ChatViewContent(props: ChatViewProps) {
     }
     return byMessageId;
   }, [turnDiffSummaries]);
-  const revertTurnCountByUserMessageId = useMemo(() => {
-    const byUserMessageId = new Map<MessageId, number>();
-    for (let index = 0; index < timelineEntries.length; index += 1) {
-      const entry = timelineEntries[index];
-      if (!entry || entry.kind !== "message" || entry.message.role !== "user") {
-        continue;
-      }
-
-      for (let nextIndex = index + 1; nextIndex < timelineEntries.length; nextIndex += 1) {
-        const nextEntry = timelineEntries[nextIndex];
-        if (!nextEntry || nextEntry.kind !== "message") {
-          continue;
-        }
-        if (nextEntry.message.role === "user") {
-          break;
-        }
-        const summary = turnDiffSummaryByAssistantMessageId.get(nextEntry.message.id);
-        if (!summary) {
-          continue;
-        }
-        const turnCount =
-          summary.checkpointTurnCount ?? inferredCheckpointTurnCountByTurnId[summary.turnId];
-        if (typeof turnCount !== "number") {
-          break;
-        }
-        byUserMessageId.set(entry.message.id, Math.max(0, turnCount - 1));
-        break;
-      }
-    }
-
-    return byUserMessageId;
-  }, [inferredCheckpointTurnCountByTurnId, timelineEntries, turnDiffSummaryByAssistantMessageId]);
+  const canonicalEditMessageIdByTimelineMessageId = useMemo(
+    () =>
+      new Map(
+        displayServerMessages.flatMap((message) =>
+          message.role === "user" ? [[message.id, message.id] as const] : [],
+        ),
+      ),
+    [displayServerMessages],
+  );
 
   const gitCwd = activeProject
     ? projectScriptCwd({
@@ -3376,6 +3396,14 @@ function ChatViewContent(props: ChatViewProps) {
   const toggleInteractionMode = useCallback(() => {
     handleInteractionModeChange(interactionMode === "plan" ? "default" : "plan");
   }, [handleInteractionModeChange, interactionMode]);
+  const handleSubagentBackendChange = useCallback(
+    (backend: SubagentBackend) => {
+      if (backend === subagentBackend) return;
+      setComposerDraftSubagentBackend(composerDraftTarget, backend);
+      scheduleComposerFocus();
+    },
+    [composerDraftTarget, scheduleComposerFocus, setComposerDraftSubagentBackend, subagentBackend],
+  );
   const createBrowserSurface = useCallback(() => {
     if (!activeThreadRef) return;
     void addBrowserSurface({ threadRef: activeThreadRef, openPreview });
@@ -4189,7 +4217,8 @@ function ChatViewContent(props: ChatViewProps) {
   }, [activeThread?.id]);
 
   useEffect(() => {
-    setIsRevertingCheckpoint(false);
+    setEditFromHereDialog(null);
+    setIsEditingFromHere(false);
   }, [activeThread?.id]);
 
   useEffect(() => {
@@ -5045,66 +5074,6 @@ function ChatViewContent(props: ChatViewProps) {
     composerRef,
   ]);
 
-  const onRevertToTurnCount = useCallback(
-    async (turnCount: number) => {
-      const localApi = readLocalApi();
-      if (!localApi || !activeThread || isRevertingCheckpoint) return;
-
-      if (activeEnvironmentUnavailable && activeEnvironmentUnavailableLabel) {
-        setThreadError(
-          activeThread.id,
-          `Reconnect ${activeEnvironmentUnavailableLabel} before reverting checkpoints.`,
-        );
-        return;
-      }
-      if (phase === "running" || isSendBusy || isConnecting) {
-        setThreadError(activeThread.id, "Interrupt the current turn before reverting checkpoints.");
-        return;
-      }
-      const confirmed = await localApi.dialogs.confirm(
-        [
-          `Revert this thread to checkpoint ${turnCount}?`,
-          "This will discard newer messages and turn diffs in this thread.",
-          "This action cannot be undone.",
-        ].join("\n"),
-        { variant: "destructive" },
-      );
-      if (!confirmed) {
-        return;
-      }
-
-      setIsRevertingCheckpoint(true);
-      setThreadError(activeThread.id, null);
-      const result = await revertThreadCheckpoint({
-        environmentId,
-        input: {
-          threadId: activeThread.id,
-          turnCount,
-        },
-      });
-      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
-        setThreadError(
-          activeThread.id,
-          error instanceof Error ? error.message : "Failed to revert thread state.",
-        );
-      }
-      setIsRevertingCheckpoint(false);
-    },
-    [
-      activeThread,
-      activeEnvironmentUnavailable,
-      activeEnvironmentUnavailableLabel,
-      environmentId,
-      isConnecting,
-      isRevertingCheckpoint,
-      isSendBusy,
-      phase,
-      revertThreadCheckpoint,
-      setThreadError,
-    ],
-  );
-
   const onSend = async (
     e?: { preventDefault: () => void },
     submissionIntent: ComposerSubmissionIntent = "foreground",
@@ -5169,7 +5138,25 @@ function ChatViewContent(props: ChatViewProps) {
       selectedProviderModels: ctxSelectedProviderModels,
       selectedPromptEffort: ctxSelectedPromptEffort,
       selectedModelSelection: ctxSelectedModelSelection,
+      subagentBackend: ctxSubagentBackend,
     } = sendCtx;
+    const subagentBackendUnavailableReason = getSubagentBackendUnavailableReason(
+      ctxSubagentBackend,
+      ctxSelectedProviderModels,
+      ctxSelectedModel,
+      ctxSelectedProvider,
+      { workersEnabled: settings.enableT3Workers },
+    );
+    if (subagentBackendUnavailableReason !== null) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: "Sub-agent backend unavailable",
+          description: subagentBackendUnavailableReason,
+        }),
+      );
+      return;
+    }
     const composerImages =
       directAnnotation?.image &&
       !sendContextImages.some((image) => image.id === directAnnotation.image?.id)
@@ -5627,6 +5614,7 @@ function ChatViewContent(props: ChatViewProps) {
           titleSeed: title,
           runtimeMode,
           interactionMode,
+          ...(ctxSubagentBackend !== null ? { subagentBackend: ctxSubagentBackend } : {}),
           ...(bootstrap ? { bootstrap } : {}),
           createdAt: messageCreatedAt,
         },
@@ -5966,6 +5954,7 @@ function ChatViewContent(props: ChatViewProps) {
         selectedProviderModels: ctxSelectedProviderModels,
         selectedPromptEffort: ctxSelectedPromptEffort,
         selectedModelSelection: ctxSelectedModelSelection,
+        subagentBackend: ctxSubagentBackend,
       } = sendCtx;
 
       const threadIdForSend = activeThread.id;
@@ -6033,6 +6022,7 @@ function ChatViewContent(props: ChatViewProps) {
             titleSeed: activeThread.title,
             runtimeMode,
             interactionMode: nextInteractionMode,
+            ...(ctxSubagentBackend !== null ? { subagentBackend: ctxSubagentBackend } : {}),
             ...(nextInteractionMode === "default" && activeProposedPlan
               ? {
                   sourceProposedPlan: {
@@ -6111,6 +6101,7 @@ function ChatViewContent(props: ChatViewProps) {
       selectedProviderModels: ctxSelectedProviderModels,
       selectedPromptEffort: ctxSelectedPromptEffort,
       selectedModelSelection: ctxSelectedModelSelection,
+      subagentBackend: ctxSubagentBackend,
     } = sendCtx;
 
     const createdAt = new Date().toISOString();
@@ -6169,6 +6160,7 @@ function ChatViewContent(props: ChatViewProps) {
           titleSeed: nextThreadTitle,
           runtimeMode,
           interactionMode: "default",
+          ...(ctxSubagentBackend !== null ? { subagentBackend: ctxSubagentBackend } : {}),
           sourceProposedPlan: {
             threadId: activeThread.id,
             planId: activeProposedPlan.id,
@@ -6399,19 +6391,81 @@ function ChatViewContent(props: ChatViewProps) {
     },
     [activeThreadRef, isServerThread, onDiffPanelOpen],
   );
-  // Both the Map and the revert handler are read from refs at call-time so
-  // the callback reference is fully stable and never busts context identity.
-  const revertTurnCountRef = useRef(revertTurnCountByUserMessageId);
-  revertTurnCountRef.current = revertTurnCountByUserMessageId;
-  const onRevertToTurnCountRef = useRef(onRevertToTurnCount);
-  onRevertToTurnCountRef.current = onRevertToTurnCount;
-  const onRevertUserMessage = useCallback((messageId: MessageId) => {
-    const targetTurnCount = revertTurnCountRef.current.get(messageId);
-    if (typeof targetTurnCount !== "number") {
-      return;
-    }
-    void onRevertToTurnCountRef.current(targetTurnCount);
+  const onEditUserMessage = useCallback((messageId: MessageId, text: string) => {
+    setEditFromHereDialog({ messageId, text });
   }, []);
+
+  const submitEditFromHere = useCallback(
+    async (mode: EditFromHereMode, editedText: string) => {
+      if (!activeThread || !editFromHereDialog || isEditingFromHere) return;
+      if (activeEnvironmentUnavailable && activeEnvironmentUnavailableLabel) {
+        setThreadError(
+          activeThread.id,
+          `Reconnect ${activeEnvironmentUnavailableLabel} before editing this task.`,
+        );
+        return;
+      }
+      if (phase === "running" || isSendBusy || isConnecting) {
+        setThreadError(activeThread.id, "Interrupt the current turn before editing from here.");
+        return;
+      }
+
+      const targetThreadId = mode === "branch" ? newThreadId() : null;
+      setIsEditingFromHere(true);
+      setThreadError(activeThread.id, null);
+      const commonInput = {
+        threadId: activeThread.id,
+        sourceMessageId: editFromHereDialog.messageId,
+        replacementMessageId: newMessageId(),
+        editedText,
+        ...(subagentBackend !== null ? { subagentBackend } : {}),
+      };
+      const result = await editThreadFromHere({
+        environmentId,
+        input:
+          mode === "branch"
+            ? { ...commonInput, mode, targetThreadId: targetThreadId! }
+            : { ...commonInput, mode },
+      });
+
+      if (result._tag === "Failure") {
+        if (!isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          setThreadError(
+            activeThread.id,
+            error instanceof Error ? error.message : "Failed to edit from this message.",
+          );
+        }
+        setIsEditingFromHere(false);
+        return;
+      }
+
+      setEditFromHereDialog(null);
+      if (targetThreadId !== null) {
+        await waitForStartedServerThread(scopeThreadRef(environmentId, targetThreadId), 3_000);
+        await navigate({
+          to: "/$environmentId/$threadId",
+          params: { environmentId, threadId: targetThreadId },
+        });
+      }
+      setIsEditingFromHere(false);
+    },
+    [
+      activeEnvironmentUnavailable,
+      activeEnvironmentUnavailableLabel,
+      activeThread,
+      editFromHereDialog,
+      editThreadFromHere,
+      environmentId,
+      isConnecting,
+      isEditingFromHere,
+      isSendBusy,
+      navigate,
+      phase,
+      subagentBackend,
+      setThreadError,
+    ],
+  );
 
   // Empty state: no active thread
   if (!activeThread) {
@@ -6618,6 +6672,7 @@ function ChatViewContent(props: ChatViewProps) {
             availableEditors={availableEditors}
             rightPanelOpen={rightPanelOpen}
             gitCwd={gitCwd}
+            transcript={activeTaskTranscript}
             onNewThreadInProject={handleNewThreadInActiveProject}
             onRunProjectScript={runProjectScript}
             onAddProjectScript={saveProjectScript}
@@ -6684,9 +6739,13 @@ function ChatViewContent(props: ChatViewProps) {
                 activeThreadEnvironmentId={activeThread.environmentId}
                 routeThreadKey={routeThreadKey}
                 onOpenTurnDiff={onOpenTurnDiff}
-                revertTurnCountByUserMessageId={revertTurnCountByUserMessageId}
-                onRevertUserMessage={onRevertUserMessage}
-                isRevertingCheckpoint={isRevertingCheckpoint}
+                canonicalEditMessageIdByTimelineMessageId={
+                  canonicalEditMessageIdByTimelineMessageId
+                }
+                onEditUserMessage={onEditUserMessage}
+                isRevertingCheckpoint={
+                  isEditingFromHere || activeServerThread?.editFromHere != null
+                }
                 onImageExpand={onExpandTimelineImage}
                 markdownCwd={gitCwd ?? undefined}
                 resolvedTheme={resolvedTheme}
@@ -6702,6 +6761,15 @@ function ChatViewContent(props: ChatViewProps) {
                 hideEmptyPlaceholder={isDraftHeroState || threadDetailLoading}
                 topFadeEnabled={!hasTimelineTopBanner}
                 loadEarlier={loadEarlierTurns}
+              />
+              <EditFromHereDialog
+                open={editFromHereDialog !== null}
+                initialText={editFromHereDialog?.text ?? ""}
+                submitting={isEditingFromHere}
+                onOpenChange={(open) => {
+                  if (!open) setEditFromHereDialog(null);
+                }}
+                onSubmit={(mode, editedText) => void submitEditFromHere(mode, editedText)}
               />
 
               {/* scroll to end pill — shown when user has scrolled away from the live edge */}
@@ -6823,6 +6891,7 @@ function ChatViewContent(props: ChatViewProps) {
                             activeTaskSteps={activeComposerTaskSteps}
                             runtimeMode={runtimeMode}
                             interactionMode={interactionMode}
+                            subagentBackend={subagentBackend}
                             lockedProvider={lockedProvider}
                             providerStatuses={providerStatuses as ServerProvider[]}
                             activeProjectDefaultModelSelection={
@@ -6857,6 +6926,7 @@ function ChatViewContent(props: ChatViewProps) {
                             getModelDisabledReason={getModelDisabledReason}
                             toggleInteractionMode={toggleInteractionMode}
                             handleRuntimeModeChange={handleRuntimeModeChange}
+                            handleSubagentBackendChange={handleSubagentBackendChange}
                             handleInteractionModeChange={handleInteractionModeChange}
                             focusComposer={focusComposer}
                             scheduleComposerFocus={scheduleComposerFocus}

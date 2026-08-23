@@ -13,6 +13,7 @@ import * as Schema from "effect/Schema";
 import {
   ApprovalRequestId,
   EnvironmentId,
+  EventId,
   IsoDateTime,
   NonNegativeInt,
   PositiveInt,
@@ -27,6 +28,7 @@ import {
   ProviderSandboxMode,
   RuntimeMode,
 } from "./orchestration.ts";
+import { ProviderOptionSelections } from "./model.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
 const WorkerEntityId = <Brand extends string>(brand: Brand) =>
@@ -34,6 +36,60 @@ const WorkerEntityId = <Brand extends string>(brand: Brand) =>
 
 export const WorkerId = WorkerEntityId("WorkerId");
 export type WorkerId = typeof WorkerId.Type;
+
+/** Display names are identity labels, not assignment titles. */
+export const WORKER_DISPLAY_NAME_MAX_LENGTH = 64;
+
+const WORKER_NAME_ADJECTIVES = [
+  "Amber",
+  "Brisk",
+  "Cobalt",
+  "Copper",
+  "Jade",
+  "Keen",
+  "Quiet",
+  "Silver",
+  "Solar",
+  "Swift",
+] as const;
+const WORKER_NAME_NOUNS = [
+  "Badger",
+  "Cedar",
+  "Comet",
+  "Falcon",
+  "Finch",
+  "Harbor",
+  "Maple",
+  "Orbit",
+  "Pine",
+  "Raven",
+] as const;
+
+/**
+ * Normalizes a parent-supplied label at the contract boundary. Blank labels
+ * intentionally return undefined so the server can assign an identity name.
+ */
+export function sanitizeWorkerDisplayName(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, WORKER_DISPLAY_NAME_MAX_LENGTH)
+    .trim();
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+/** Stable fallback/generation from the already-random Worker id. */
+export function workerDisplayNameFor(workerId: string, suppliedName?: string): string {
+  const supplied = sanitizeWorkerDisplayName(suppliedName);
+  if (supplied !== undefined) return supplied;
+  let hash = 0;
+  for (const character of workerId) hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
+  const adjective = WORKER_NAME_ADJECTIVES[hash % WORKER_NAME_ADJECTIVES.length];
+  const noun = WORKER_NAME_NOUNS[(hash >>> 8) % WORKER_NAME_NOUNS.length];
+  return `${adjective} ${noun}`;
+}
 
 export const WorkerActivationId = WorkerEntityId("WorkerActivationId");
 export type WorkerActivationId = typeof WorkerActivationId.Type;
@@ -46,6 +102,24 @@ export type WorkerWaitLeaseId = typeof WorkerWaitLeaseId.Type;
 
 export const WorkerObserverReportId = WorkerEntityId("WorkerObserverReportId");
 export type WorkerObserverReportId = typeof WorkerObserverReportId.Type;
+
+export const WorkerActivityTone = Schema.Literals(["info", "tool", "approval", "error"]);
+export type WorkerActivityTone = typeof WorkerActivityTone.Type;
+
+/**
+ * A deliberately small, client-safe projection of a Worker provider event.
+ * Raw provider payloads and streamed model content never cross this boundary.
+ */
+export const WorkerActivity = Schema.Struct({
+  id: EventId,
+  tone: WorkerActivityTone,
+  kind: TrimmedNonEmptyString,
+  title: TrimmedNonEmptyString,
+  detail: Schema.optionalKey(Schema.String),
+  result: Schema.optionalKey(Schema.String),
+  createdAt: IsoDateTime,
+});
+export type WorkerActivity = typeof WorkerActivity.Type;
 
 /** The backend identifier is open so the contract does not encode one provider. */
 export const WorkerBackendKind = TrimmedNonEmptyString;
@@ -228,6 +302,8 @@ export type WorkerObserverReport = typeof WorkerObserverReport.Type;
 
 export const WorkerSummary = Schema.Struct({
   id: WorkerId,
+  /** Optional on the wire for legacy records; the server persists a fallback. */
+  displayName: Schema.optionalKey(TrimmedNonEmptyString),
   title: TrimmedNonEmptyString,
   status: WorkerStatus,
   backend: WorkerBackendKind,
@@ -251,6 +327,15 @@ export const WorkerSummary = Schema.Struct({
   activationCount: NonNegativeInt,
   resumable: Schema.Boolean,
   usage: WorkerTokenUsage,
+  /** Exact cumulative dimensions are available for newly projected provider data. */
+  usageCoverage: Schema.optionalKey(
+    Schema.Struct({
+      status: Schema.Literals(["complete", "partial", "unavailable"]),
+      reason: Schema.optionalKey(Schema.String),
+    }),
+  ),
+  /** The most recent provider-reported model call, kept separate from cumulative usage. */
+  lastModelCallUsage: Schema.optionalKey(WorkerTokenUsage),
   elapsedMs: Schema.optionalKey(NonNegativeInt),
   latestDirectMessage: Schema.optionalKey(WorkerMessage),
   hasPendingApproval: Schema.optionalKey(Schema.Boolean),
@@ -268,10 +353,13 @@ export const WorkerDetail = Schema.Struct({
   activations: Schema.Array(WorkerActivation),
   pendingApproval: Schema.optionalKey(WorkerApprovalRequest),
   observerReports: Schema.Array(WorkerObserverReport),
+  activities: Schema.Array(WorkerActivity).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
 });
 export type WorkerDetail = typeof WorkerDetail.Type;
 
 export const WorkerStartInput = Schema.Struct({
+  /** Optional identity label; blank or omitted values receive a server name. */
+  displayName: Schema.optionalKey(Schema.String),
   title: TrimmedNonEmptyString,
   assignment: Schema.String,
   context: WorkerContextPackage,
@@ -302,9 +390,99 @@ export const WorkerListInput = Schema.Struct({
 });
 export type WorkerListInput = typeof WorkerListInput.Type;
 
+export const WorkerMetricCoverage = Schema.Struct({
+  status: Schema.Literals(["complete", "partial", "unavailable"]),
+  reason: Schema.optionalKey(Schema.String),
+});
+export type WorkerMetricCoverage = typeof WorkerMetricCoverage.Type;
+
+export const WorkerToolMetric = Schema.Struct({
+  name: TrimmedNonEmptyString,
+  calls: NonNegativeInt,
+  completed: NonNegativeInt,
+  failed: NonNegativeInt,
+  unknown: NonNegativeInt,
+});
+export type WorkerToolMetric = typeof WorkerToolMetric.Type;
+
+export const WorkerTimingMetrics = Schema.Struct({
+  computedAt: IsoDateTime,
+  totalWallTimeMs: NonNegativeInt,
+  overallSpanMs: NonNegativeInt,
+  busyTimeMs: NonNegativeInt,
+  overlapTimeMs: NonNegativeInt,
+  averageConcurrency: Schema.Number,
+  peakConcurrency: NonNegativeInt,
+  activeActivationCount: NonNegativeInt,
+});
+export type WorkerTimingMetrics = typeof WorkerTimingMetrics.Type;
+
+export const WorkerComparisonMetrics = Schema.Struct({
+  workerId: WorkerId,
+  displayName: Schema.optionalKey(TrimmedNonEmptyString),
+  title: TrimmedNonEmptyString,
+  status: WorkerStatus,
+  model: TrimmedNonEmptyString,
+  backend: WorkerBackendKind,
+  elapsedMs: NonNegativeInt,
+  active: Schema.Boolean,
+  activations: NonNegativeInt,
+  usage: WorkerTokenUsage,
+  usageCoverage: Schema.optionalKey(
+    Schema.Struct({
+      status: Schema.Literals(["complete", "partial", "unavailable"]),
+      reason: Schema.optionalKey(Schema.String),
+    }),
+  ),
+  lastModelCallUsage: Schema.optionalKey(WorkerTokenUsage),
+  parentTurnUsage: Schema.optionalKey(WorkerTokenUsage),
+  parentTurnUsageCoverage: Schema.optionalKey(
+    Schema.Struct({
+      status: Schema.Literals(["complete", "partial", "unavailable"]),
+      reason: Schema.optionalKey(Schema.String),
+    }),
+  ),
+  toolCalls: NonNegativeInt,
+  completedToolCalls: NonNegativeInt,
+  failedToolCalls: NonNegativeInt,
+  unknownToolCalls: NonNegativeInt,
+  tools: Schema.Array(WorkerToolMetric),
+  toolCoverage: WorkerMetricCoverage,
+});
+export type WorkerComparisonMetrics = typeof WorkerComparisonMetrics.Type;
+
+export const WorkerEfficiencyOverview = Schema.Struct({
+  computedAt: IsoDateTime,
+  workersCreated: NonNegativeInt,
+  workersActive: NonNegativeInt,
+  workersCompleted: NonNegativeInt,
+  workersFailed: NonNegativeInt,
+  workersInterrupted: NonNegativeInt,
+  timing: WorkerTimingMetrics,
+  usage: WorkerTokenUsage,
+  usageCoverage: WorkerMetricCoverage,
+  toolCalls: NonNegativeInt,
+  completedToolCalls: NonNegativeInt,
+  failedToolCalls: NonNegativeInt,
+  unknownToolCalls: NonNegativeInt,
+  tools: Schema.Array(WorkerToolMetric),
+  toolCoverage: WorkerMetricCoverage,
+  parentCoordinationCalls: NonNegativeInt,
+  parentCoordinationCompleted: NonNegativeInt,
+  parentCoordinationFailures: NonNegativeInt,
+  parentCoordinationUnknown: NonNegativeInt,
+  parentCoordinationTools: Schema.Array(WorkerToolMetric),
+  parentCoordinationCoverage: WorkerMetricCoverage,
+  parentCoordinationTokenCoverage: WorkerMetricCoverage,
+  parentTurnUsageCoverage: Schema.optionalKey(WorkerMetricCoverage),
+  workers: Schema.Array(WorkerComparisonMetrics),
+});
+export type WorkerEfficiencyOverview = typeof WorkerEfficiencyOverview.Type;
+
 export const WorkerListResult = Schema.Struct({
   workers: Schema.Array(WorkerSummary),
   nextCursor: Schema.optionalKey(TrimmedNonEmptyString),
+  overview: Schema.optionalKey(WorkerEfficiencyOverview),
 });
 export type WorkerListResult = typeof WorkerListResult.Type;
 
@@ -408,8 +586,38 @@ export type WorkerEvent = typeof WorkerEvent.Type;
 /** MCP uses the same validated payloads as WebSocket callers. These named
  * aliases make the tool surface discoverable without creating a second wire
  * model that could drift from the server API. */
-export const WorkerMcpStartInput = WorkerStartInput;
-export type WorkerMcpStartInput = WorkerStartInput;
+/**
+ * Parent-agent Worker creation input. Execution permissions are deliberately
+ * absent: the MCP server binds them to the calling parent session instead of
+ * trusting model-authored arguments.
+ */
+/**
+ * Model selection accepted by `worker_start`.
+ *
+ * The parent invocation scope is the routing authority, so callers normally
+ * omit `instanceId`. An explicit value is accepted for diagnostics and is
+ * validated against the calling parent before the canonical `ModelSelection`
+ * reaches Worker storage or the provider runtime.
+ */
+export const WorkerMcpModelSelection = Schema.Struct({
+  instanceId: Schema.optionalKey(ProviderInstanceId),
+  model: Schema.optionalKey(TrimmedNonEmptyString),
+  options: Schema.optionalKey(ProviderOptionSelections),
+});
+export type WorkerMcpModelSelection = typeof WorkerMcpModelSelection.Type;
+
+export const WorkerMcpStartInput = Schema.Struct({
+  /** Optional identity label; blank or omitted values receive a server name. */
+  displayName: Schema.optionalKey(Schema.String),
+  title: TrimmedNonEmptyString,
+  assignment: Schema.String,
+  context: WorkerContextPackage,
+  instructions: Schema.optionalKey(Schema.String),
+  modelSelection: Schema.optionalKey(WorkerMcpModelSelection),
+  backendPreference: Schema.optionalKey(WorkerBackendKind),
+  cwd: Schema.optionalKey(TrimmedNonEmptyString),
+});
+export type WorkerMcpStartInput = typeof WorkerMcpStartInput.Type;
 export const WorkerMcpListInput = WorkerListInput;
 export type WorkerMcpListInput = WorkerListInput;
 export const WorkerMcpGetInput = WorkerGetInput;

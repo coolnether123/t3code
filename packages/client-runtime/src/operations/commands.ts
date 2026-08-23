@@ -17,16 +17,22 @@ import {
 
 type CommandType = ClientOrchestrationCommand["type"];
 type CommandOf<T extends CommandType> = Extract<ClientOrchestrationCommand, { readonly type: T }>;
-type CommandInput<T extends CommandType> = Omit<
-  CommandOf<T>,
+type CommandInputVariant<C extends ClientOrchestrationCommand> = Omit<
+  C,
   "type" | "commandId" | "createdAt"
 > & {
   readonly commandId?: CommandId;
-} & ("createdAt" extends keyof CommandOf<T>
+} & ("createdAt" extends keyof C
     ? {
-        readonly createdAt?: CommandOf<T>["createdAt"];
+        readonly createdAt?: C["createdAt"];
       }
     : {});
+type CommandInput<T extends CommandType> =
+  CommandOf<T> extends infer C
+    ? C extends ClientOrchestrationCommand
+      ? CommandInputVariant<C>
+      : never
+    : never;
 
 export type CreateProjectInput = CommandInput<"project.create">;
 export type UpdateProjectInput = CommandInput<"project.meta.update">;
@@ -50,6 +56,7 @@ export type InterruptThreadTurnInput = CommandInput<"thread.turn.interrupt">;
 export type RespondToThreadApprovalInput = CommandInput<"thread.approval.respond">;
 export type RespondToThreadUserInputInput = CommandInput<"thread.user-input.respond">;
 export type RevertThreadCheckpointInput = CommandInput<"thread.checkpoint.revert">;
+export type EditThreadFromHereInput = CommandInput<"thread.edit-from-here">;
 export type StopThreadSessionInput = CommandInput<"thread.session.stop">;
 
 type DispatchTag = typeof ORCHESTRATION_WS_METHODS.dispatchCommand;
@@ -319,6 +326,26 @@ export const revertThreadCheckpoint: (input: RevertThreadCheckpointInput) => Com
       createdAt: metadata.createdAt,
     });
   });
+
+export const editThreadFromHere: (input: EditThreadFromHereInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.editThreadFromHere",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  if (input.mode === "branch") {
+    return yield* dispatch({
+      ...input,
+      type: "thread.edit-from-here",
+      commandId: metadata.commandId,
+      createdAt: metadata.createdAt,
+    });
+  }
+  return yield* dispatch({
+    ...input,
+    type: "thread.edit-from-here",
+    commandId: metadata.commandId,
+    createdAt: metadata.createdAt,
+  });
+});
 
 export const stopThreadSession: (input: StopThreadSessionInput) => CommandEffect = Effect.fn(
   "EnvironmentCommands.stopThreadSession",

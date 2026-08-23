@@ -67,6 +67,7 @@ const testWorkerService = WorkerService.WorkerService.of({
   interrupt: () => Effect.die("Worker service is not used in this test"),
   close: () => Effect.die("Worker service is not used in this test"),
   respondToApproval: () => Effect.die("Worker service is not used in this test"),
+  reconcileParentAfterRewind: () => Effect.die("Worker service is not used in this test"),
   handleProviderEvent: () => Effect.void,
   recover: Effect.void,
   stream: Stream.empty,
@@ -142,6 +143,7 @@ function createProviderServiceHarness() {
     },
     rollbackConversation: () => unsupported(),
     uploadFeedback: () => unsupported(),
+    forkConversation: () => unsupported(),
     get streamEvents() {
       return Stream.fromPubSub(runtimeEventPubSub);
     },
@@ -3102,6 +3104,69 @@ describe("ProviderRuntimeIngestion", () => {
       reasoningOutputTokens: 25,
       lastUsedTokens: 1075,
       compactsAutomatically: true,
+    });
+  });
+
+  it("retains a raw provider turn id and cumulative dimensions for token usage", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    const parentTurnId = TurnId.make("parent-turn");
+
+    harness.emit({
+      type: "thread.token-usage.updated",
+      eventId: asEventId("evt-thread-token-usage-raw-turn"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      payload: {
+        usage: {
+          usedTokens: 100,
+          totalProcessedTokens: 1_000,
+          inputTokens: 90,
+          cachedInputTokens: 80,
+          outputTokens: 10,
+          reasoningOutputTokens: 2,
+          lastUsedTokens: 100,
+          lastInputTokens: 90,
+          lastCachedInputTokens: 80,
+          lastOutputTokens: 10,
+          lastReasoningOutputTokens: 2,
+        },
+      },
+      raw: {
+        source: "codex.app-server.notification",
+        method: "thread/tokenUsage/updated",
+        payload: {
+          turnId: parentTurnId,
+          tokenUsage: {
+            total: {
+              inputTokens: 900,
+              cachedInputTokens: 700,
+              outputTokens: 100,
+              reasoningOutputTokens: 20,
+              totalTokens: 1_000,
+            },
+          },
+        },
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) => activity.kind === "context-window.updated",
+      ),
+    );
+    const usageActivity = thread.activities.find(
+      (activity: ProviderRuntimeTestActivity) => activity.kind === "context-window.updated",
+    );
+    expect(usageActivity).toMatchObject({
+      turnId: parentTurnId,
+      payload: {
+        cumulativeInputTokens: 900,
+        cumulativeCachedInputTokens: 700,
+        cumulativeOutputTokens: 100,
+        cumulativeReasoningOutputTokens: 20,
+      },
     });
   });
 

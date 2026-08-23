@@ -96,6 +96,7 @@ const testWorkerService = WorkerService.WorkerService.of({
   interrupt: () => Effect.die("Worker service is not used in this test"),
   close: () => Effect.die("Worker service is not used in this test"),
   respondToApproval: () => Effect.die("Worker service is not used in this test"),
+  reconcileParentAfterRewind: () => Effect.die("Worker service is not used in this test"),
   handleProviderEvent: () => Effect.void,
   recover: Effect.void,
   stream: Stream.empty,

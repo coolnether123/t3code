@@ -207,7 +207,15 @@ function retainProjectionMessagesAfterRevert(
   messages: ReadonlyArray<ProjectionThreadMessage>,
   turns: ReadonlyArray<ProjectionTurn>,
   turnCount: number,
+  sourceMessageId?: string,
 ): ReadonlyArray<ProjectionThreadMessage> {
+  if (sourceMessageId !== undefined) {
+    const sourceIndex = messages.findIndex((message) => message.messageId === sourceMessageId);
+    if (sourceIndex >= 0) {
+      return messages.filter((message, index) => message.role === "system" || index < sourceIndex);
+    }
+  }
+
   const retainedMessageIds = new Set<string>();
   const retainedTurnIds = new Set<string>();
   const keptTurns = turns.filter(
@@ -291,7 +299,11 @@ function retainProjectionActivitiesAfterRevert(
   activities: ReadonlyArray<ProjectionThreadActivity>,
   turns: ReadonlyArray<ProjectionTurn>,
   turnCount: number,
+  cutoffCreatedAt?: string,
 ): ReadonlyArray<ProjectionThreadActivity> {
+  if (cutoffCreatedAt !== undefined) {
+    return activities.filter((activity) => activity.createdAt < cutoffCreatedAt);
+  }
   const retainedTurnIds = new Set<string>(
     turns
       .filter(
@@ -311,7 +323,11 @@ function retainProjectionProposedPlansAfterRevert(
   proposedPlans: ReadonlyArray<ProjectionThreadProposedPlan>,
   turns: ReadonlyArray<ProjectionTurn>,
   turnCount: number,
+  cutoffCreatedAt?: string,
 ): ReadonlyArray<ProjectionThreadProposedPlan> {
+  if (cutoffCreatedAt !== undefined) {
+    return proposedPlans.filter((proposedPlan) => proposedPlan.createdAt < cutoffCreatedAt);
+  }
   const retainedTurnIds = new Set<string>(
     turns
       .filter(
@@ -1001,6 +1017,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             existingRows,
             existingTurns,
             event.payload.turnCount,
+            event.payload.sourceMessageId,
           );
           if (keptRows.length === existingRows.length) {
             return;
@@ -1056,6 +1073,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             existingRows,
             existingTurns,
             event.payload.turnCount,
+            event.payload.cutoffCreatedAt,
           );
           if (keptRows.length === existingRows.length) {
             return;
@@ -1109,6 +1127,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             existingRows,
             existingTurns,
             event.payload.turnCount,
+            event.payload.cutoffCreatedAt,
           );
           if (keptRows.length === existingRows.length) {
             return;

@@ -98,6 +98,10 @@ export interface WorkLogEntry {
   };
 }
 
+export function workLogEntryIsStandaloneDomainFailure(entry: WorkLogEntry): boolean {
+  return entry.sourceActivityKind === "thread.edit-from-here.failed";
+}
+
 interface DerivedWorkLogEntry extends WorkLogEntry {
   activityKind: OrchestrationThreadActivity["kind"];
   collapseKey?: string;
@@ -168,6 +172,9 @@ export type TimelineEntry =
     };
 
 export function workLogEntryIsToolLike(entry: WorkLogEntry): boolean {
+  if (workLogEntryIsStandaloneDomainFailure(entry)) {
+    return false;
+  }
   if (entry.tone === "tool" || entry.tone === "thinking" || entry.tone === "error") {
     return true;
   }

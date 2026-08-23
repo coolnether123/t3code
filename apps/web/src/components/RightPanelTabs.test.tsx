@@ -8,6 +8,7 @@ import {
   surfaceShortcutTargetsTypingContext,
   tabMuteMenuItem,
 } from "./RightPanelTabs";
+import rightPanelTabsSource from "./RightPanelTabs.tsx?raw";
 
 function shortcutEvent(
   key: string,
@@ -170,6 +171,8 @@ describe("RightPanelTabs Worker availability", () => {
 
   it("renders the Worker surface when enabled", () => {
     expect(renderWorkerSurface(true)).toContain("worker content");
+    expect(rightPanelTabsSource).toContain("Inspect parent-created T3 Worker activity.");
+    expect(rightPanelTabsSource).not.toContain("Manage persistent T3 workers.");
   });
 });
 

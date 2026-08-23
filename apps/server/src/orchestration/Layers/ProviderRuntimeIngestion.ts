@@ -263,7 +263,44 @@ function buildContextWindowActivityPayload(
   if (event.type !== "thread.token-usage.updated" || event.payload.usage.usedTokens <= 0) {
     return undefined;
   }
-  return event.payload.usage;
+  const raw = event.raw?.payload;
+  const rawPayload =
+    raw !== null && typeof raw === "object" && !Array.isArray(raw)
+      ? (raw as Record<string, unknown>)
+      : undefined;
+  const tokenUsage =
+    rawPayload?.tokenUsage !== null &&
+    typeof rawPayload?.tokenUsage === "object" &&
+    !Array.isArray(rawPayload.tokenUsage)
+      ? (rawPayload.tokenUsage as Record<string, unknown>)
+      : undefined;
+  const total =
+    tokenUsage?.total !== null &&
+    typeof tokenUsage?.total === "object" &&
+    !Array.isArray(tokenUsage.total)
+      ? (tokenUsage.total as Record<string, unknown>)
+      : undefined;
+  return {
+    ...event.payload.usage,
+    ...(typeof total?.inputTokens === "number" ? { cumulativeInputTokens: total.inputTokens } : {}),
+    ...(typeof total?.cachedInputTokens === "number"
+      ? { cumulativeCachedInputTokens: total.cachedInputTokens }
+      : {}),
+    ...(typeof total?.outputTokens === "number"
+      ? { cumulativeOutputTokens: total.outputTokens }
+      : {}),
+    ...(typeof total?.reasoningOutputTokens === "number"
+      ? { cumulativeReasoningOutputTokens: total.reasoningOutputTokens }
+      : {}),
+  };
+}
+
+function normalizedProviderTurnId(event: ProviderRuntimeEvent): TurnId | undefined {
+  if (event.turnId !== undefined) return toTurnId(event.turnId);
+  const raw = event.raw?.payload;
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const rawTurnId = (raw as Record<string, unknown>).turnId;
+  return typeof rawTurnId === "string" ? toTurnId(rawTurnId) : undefined;
 }
 
 function normalizeRuntimeTurnState(
@@ -796,7 +833,7 @@ export function runtimeEventToActivities(
           kind: "context-window.updated",
           summary: "Context window updated",
           payload,
-          turnId: toTurnId(event.turnId) ?? null,
+          turnId: normalizedProviderTurnId(event) ?? null,
           ...maybeSequence,
         },
       ];

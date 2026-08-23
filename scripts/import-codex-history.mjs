@@ -1,8 +1,8 @@
-import { createHash } from "node:crypto";
-import { createReadStream, existsSync, readdirSync, readFileSync } from "node:fs";
-import { basename, join } from "node:path";
-import { createInterface } from "node:readline";
-import { DatabaseSync } from "node:sqlite";
+import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+import * as NodeReadline from "node:readline";
+import * as NodeSqlite from "node:sqlite";
 
 const PROJECTORS = [
   "projection.projects",
@@ -28,7 +28,10 @@ function readArguments(argv) {
 }
 
 function stableId(namespace, value) {
-  const hex = createHash("sha256").update(`${namespace}\0${value}`).digest("hex").slice(0, 32);
+  const hex = NodeCrypto.createHash("sha256")
+    .update(`${namespace}\0${value}`)
+    .digest("hex")
+    .slice(0, 32);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20)}`;
 }
 
@@ -40,15 +43,15 @@ function iso(value, fallback) {
 function listSessionFiles(codexHome) {
   const byId = new Map();
   for (const directoryName of ["sessions", "archived_sessions"]) {
-    const root = join(codexHome, directoryName);
-    if (!existsSync(root)) continue;
-    for (const entry of readdirSync(root, { recursive: true, withFileTypes: true })) {
+    const root = NodePath.join(codexHome, directoryName);
+    if (!NodeFS.existsSync(root)) continue;
+    for (const entry of NodeFS.readdirSync(root, { recursive: true, withFileTypes: true })) {
       if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
       const match = entry.name.match(
         /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i,
       );
       if (!match) continue;
-      byId.set(match[1].toLowerCase(), join(entry.parentPath, entry.name));
+      byId.set(match[1].toLowerCase(), NodePath.join(entry.parentPath, entry.name));
     }
   }
   return byId;
@@ -57,7 +60,7 @@ function listSessionFiles(codexHome) {
 function readIndex(codexHome) {
   const rows = [];
   const seen = new Set();
-  const text = readFileSync(join(codexHome, "session_index.jsonl"), "utf8");
+  const text = NodeFS.readFileSync(NodePath.join(codexHome, "session_index.jsonl"), "utf8");
   for (const line of text.split(/\r?\n/)) {
     if (!line.trim()) continue;
     const row = JSON.parse(line);
@@ -82,7 +85,10 @@ async function readSession(file, indexRow) {
   let lastModel = null;
   const messages = [];
   const turns = new Map();
-  const input = createInterface({ input: createReadStream(file), crlfDelay: Infinity });
+  const input = NodeReadline.createInterface({
+    input: NodeFS.createReadStream(file),
+    crlfDelay: Infinity,
+  });
   let lineNumber = 0;
 
   for await (const line of input) {
@@ -248,7 +254,7 @@ const limit = args.limit ? Number.parseInt(args.limit, 10) : Number.POSITIVE_INF
 const fallbackModel = args.model || "gpt-5.6-luna";
 const sessionFiles = listSessionFiles(args["codex-home"]);
 const indexRows = readIndex(args["codex-home"]).slice(0, limit);
-const db = new DatabaseSync(args.db);
+const db = new NodeSqlite.DatabaseSync(args.db);
 db.exec(
   "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=30000;",
 );
@@ -268,7 +274,7 @@ for (const [position, indexRow] of indexRows.entries()) {
   const workspaceRoot = session.cwd;
   const projectKey = workspaceRoot.toLowerCase();
   const projectId = stableId("codex-project", projectKey);
-  const projectTitle = basename(workspaceRoot.replace(/[\\/]+$/, "")) || workspaceRoot;
+  const projectTitle = NodePath.basename(workspaceRoot.replace(/[\\/]+$/, "")) || workspaceRoot;
   const modelSelection = { instanceId: "codex", model: session.model ?? fallbackModel };
   const latestTurnId = session.turns.at(-1)?.turnId ?? null;
   const latestUserMessageAt =

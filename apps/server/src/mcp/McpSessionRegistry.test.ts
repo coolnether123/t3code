@@ -1,15 +1,27 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProviderInstanceId,
+  ThreadId,
+  TurnId,
+  type ModelSelection,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { HttpServer } from "effect/unstable/http";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { WORKER_PROVIDER_THREAD_PREFIX } from "../worker/WorkerThreadBoundary.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 
 const environmentId = EnvironmentId.make("environment-1");
+const lunaSelection: ModelSelection = {
+  instanceId: ProviderInstanceId.make("codex"),
+  model: "gpt-5.6-luna",
+  options: [{ id: "reasoningEffort", value: "medium" }],
+};
 const makeFakeHttpServer = (hostname: string, port = 43123) =>
   HttpServer.HttpServer.of({
     address: { _tag: "TcpAddress", hostname, port },
@@ -38,12 +50,13 @@ const makeRegistry = (now: () => number, httpServer = fakeHttpServer, enableT3Wo
       ),
     );
 
-it.effect("issues Worker capability from the current provider-session setting", () =>
+it.effect("grants Worker capability to parent sessions but never Worker sessions", () =>
   Effect.gen(function* () {
     const disabledRegistry = yield* makeRegistry(() => 1_000);
     const disabled = yield* disabledRegistry.issue({
       threadId: ThreadId.make("thread-workers-disabled"),
       providerInstanceId: ProviderInstanceId.make("codex"),
+      runtimeMode: "approval-required",
     });
     const disabledToken = disabled.config.authorizationHeader.replace(/^Bearer\s+/, "");
     const disabledScope = yield* disabledRegistry.resolve(disabledToken);
@@ -54,11 +67,27 @@ it.effect("issues Worker capability from the current provider-session setting", 
     const enabled = yield* enabledRegistry.issue({
       threadId: ThreadId.make("thread-workers-enabled"),
       providerInstanceId: ProviderInstanceId.make("codex"),
+      modelSelection: lunaSelection,
+      runtimeMode: "full-access",
+      workingDirectory: "A:/Dev/Worktrees/project",
     });
     const enabledToken = enabled.config.authorizationHeader.replace(/^Bearer\s+/, "");
     const enabledScope = yield* enabledRegistry.resolve(enabledToken);
     expect(enabledScope?.capabilities.has("preview")).toBe(true);
     expect(enabledScope?.capabilities.has("workers")).toBe(true);
+    expect(enabledScope?.runtimeMode).toBe("full-access");
+    expect(enabledScope?.workingDirectory).toBe("A:/Dev/Worktrees/project");
+    expect(enabledScope?.parentModelSelection).toEqual(lunaSelection);
+
+    const worker = yield* enabledRegistry.issue({
+      threadId: ThreadId.make(`${WORKER_PROVIDER_THREAD_PREFIX}nested-denied`),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      runtimeMode: "full-access",
+    });
+    const workerToken = worker.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    const workerScope = yield* enabledRegistry.resolve(workerToken);
+    expect(workerScope?.capabilities.has("preview")).toBe(true);
+    expect(workerScope?.capabilities.has("workers")).toBe(false);
   }),
 );
 
@@ -70,6 +99,7 @@ it.effect("stores only a token hash, resolves the bearer token, and revokes by t
     const issued = yield* registry.issue({
       threadId,
       providerInstanceId: ProviderInstanceId.make("codex"),
+      runtimeMode: "full-access",
     });
     expect(issued.config.endpoint).toBe("http://127.0.0.1:43123/mcp");
     const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
@@ -99,6 +129,7 @@ it.effect("builds MCP endpoints from the bound server host", () =>
       const issued = yield* registry.issue({
         threadId: ThreadId.make(`thread-${hostname}`),
         providerInstanceId: ProviderInstanceId.make("codex"),
+        runtimeMode: "full-access",
       });
       expect(issued.config.endpoint).toBe(expectedEndpoint);
     }
@@ -112,6 +143,7 @@ it.effect("expires credentials once their session stops showing signs of life", 
     const issued = yield* registry.issue({
       threadId: ThreadId.make("thread-2"),
       providerInstanceId: ProviderInstanceId.make("claude"),
+      runtimeMode: "approval-required",
     });
     const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
     timestamp += 101;
@@ -127,6 +159,7 @@ it.effect("keeps a credential alive across turns that never touch an MCP tool", 
     const issued = yield* registry.issue({
       threadId,
       providerInstanceId: ProviderInstanceId.make("claude"),
+      runtimeMode: "auto-accept-edits",
     });
     const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
 
@@ -141,6 +174,49 @@ it.effect("keeps a credential alive across turns that never touch an MCP tool", 
   }),
 );
 
+it.effect("binds a live MCP credential to the active parent turn", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const threadId = ThreadId.make("thread-parent-lineage");
+    const issued = yield* registry.issue({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      runtimeMode: "full-access",
+    });
+    const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    const parentTurnId = TurnId.make("turn-parent-lineage");
+
+    yield* registry.touch(threadId, lunaSelection, parentTurnId);
+
+    expect(yield* registry.resolve(token)).toMatchObject({
+      parentModelSelection: lunaSelection,
+      parentTurnId,
+    });
+  }),
+);
+
+it.effect("refreshes the parent model selection before a turn uses the MCP credential", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000, fakeHttpServer, true);
+    const threadId = ThreadId.make("thread-model-refresh");
+    const issued = yield* registry.issue({
+      threadId,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      modelSelection: lunaSelection,
+      runtimeMode: "full-access",
+    });
+    const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    const highReasoning: ModelSelection = {
+      ...lunaSelection,
+      options: [{ id: "reasoningEffort", value: "high" }],
+    };
+
+    yield* registry.touch(threadId, highReasoning);
+
+    expect((yield* registry.resolve(token))?.parentModelSelection).toEqual(highReasoning);
+  }),
+);
+
 it.effect("does not keep credentials of other threads alive", () =>
   Effect.gen(function* () {
     let timestamp = 1_000;
@@ -148,6 +224,7 @@ it.effect("does not keep credentials of other threads alive", () =>
     const issued = yield* registry.issue({
       threadId: ThreadId.make("thread-4"),
       providerInstanceId: ProviderInstanceId.make("codex"),
+      runtimeMode: "full-access",
     });
     const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
 

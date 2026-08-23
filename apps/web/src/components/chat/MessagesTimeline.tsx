@@ -35,6 +35,7 @@ import { FileDiff } from "@pierre/diffs/react";
 import {
   deriveTimelineEntries,
   workEntryDisplayIndicatesToolFailure,
+  workLogEntryIsStandaloneDomainFailure,
   workLogEntryIsToolLike,
 } from "../../session-logic";
 import { type TurnDiffSummary } from "../../types";
@@ -65,6 +66,7 @@ import {
   ZapIcon,
 } from "lucide-react";
 import { Button } from "../ui/button";
+import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { buildExpandedImagePreview, ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ProposedPlanCard } from "./ProposedPlanCard";
 import { ChangedFilesCard } from "./ChangedFilesTree";
@@ -140,7 +142,7 @@ interface TimelineRowSharedState {
   workspaceRoot: string | undefined;
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   activeThreadEnvironmentId: EnvironmentId;
-  onRevertUserMessage: (messageId: MessageId) => void;
+  onEditUserMessage: (messageId: MessageId, text: string) => void;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   onToggleTurnFold: (turnId: TurnId) => void;
@@ -216,8 +218,8 @@ interface MessagesTimelineProps {
   turnDiffSummaryByAssistantMessageId: Map<MessageId, TurnDiffSummary>;
   routeThreadKey: string;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
-  revertTurnCountByUserMessageId: Map<MessageId, number>;
-  onRevertUserMessage: (messageId: MessageId) => void;
+  canonicalEditMessageIdByTimelineMessageId: ReadonlyMap<MessageId, MessageId>;
+  onEditUserMessage: (messageId: MessageId, text: string) => void;
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   activeThreadEnvironmentId: EnvironmentId;
@@ -261,8 +263,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   turnDiffSummaryByAssistantMessageId,
   routeThreadKey,
   onOpenTurnDiff,
-  revertTurnCountByUserMessageId,
-  onRevertUserMessage,
+  canonicalEditMessageIdByTimelineMessageId,
+  onEditUserMessage,
   isRevertingCheckpoint,
   onImageExpand,
   activeThreadEnvironmentId,
@@ -415,7 +417,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         isWorking,
         activeTurnStartedAt,
         turnDiffSummaryByAssistantMessageId,
-        revertTurnCountByUserMessageId,
+        canonicalEditMessageIdByTimelineMessageId,
       }),
     [
       timelineEntries,
@@ -426,7 +428,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       isWorking,
       activeTurnStartedAt,
       turnDiffSummaryByAssistantMessageId,
-      revertTurnCountByUserMessageId,
+      canonicalEditMessageIdByTimelineMessageId,
     ],
   );
   const rows = useStableRows(rawRows);
@@ -521,7 +523,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       workspaceRoot,
       skills,
       activeThreadEnvironmentId,
-      onRevertUserMessage,
+      onEditUserMessage,
       onImageExpand,
       onOpenTurnDiff,
       onToggleTurnFold,
@@ -537,7 +539,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       workspaceRoot,
       skills,
       activeThreadEnvironmentId,
-      onRevertUserMessage,
+      onEditUserMessage,
       onImageExpand,
       onOpenTurnDiff,
       onToggleTurnFold,
@@ -1005,7 +1007,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
   ];
   const previewImages = userImages.filter((image) => image.name.startsWith("preview-annotation-"));
   const regularImages = userImages.filter((image) => !image.name.startsWith("preview-annotation-"));
-  const canRevertAgentWork = typeof row.revertTurnCount === "number";
+  const editFromHereMessageId = row.editFromHereMessageId;
 
   return (
     <div className="group flex flex-col items-end gap-1">
@@ -1067,7 +1069,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
           markdownCwd={ctx.markdownCwd}
         />
       </div>
-      <div className="flex w-full max-w-[80%] items-center justify-end pe-1 text-xs tabular-nums opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover:opacity-100">
+      <div className="flex w-full max-w-[80%] items-center justify-end pe-1 text-xs tabular-nums opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover:opacity-100 pointer-coarse:opacity-100">
         <div className="flex shrink-0 items-center gap-2">
           <Tooltip>
             <TooltipTrigger render={<p className="text-muted-foreground text-xs tabular-nums" />}>
@@ -1078,7 +1080,9 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
             </TooltipPopup>
           </Tooltip>
           <div className="flex items-center gap-0.5">
-            {canRevertAgentWork && <RevertUserMessageButton messageId={row.message.id} />}
+            {editFromHereMessageId !== null && (
+              <EditUserMessageButton messageId={editFromHereMessageId} text={row.message.text} />
+            )}
             {displayedUserMessage.copyText && (
               <MessageCopyButton text={displayedUserMessage.copyText} variant="ghost" />
             )}
@@ -1089,7 +1093,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
   );
 }
 
-function RevertUserMessageButton({ messageId }: { messageId: MessageId }) {
+function EditUserMessageButton({ messageId, text }: { messageId: MessageId; text: string }) {
   const ctx = use(TimelineRowCtx);
   const activity = use(TimelineRowActivityCtx);
 
@@ -1102,14 +1106,16 @@ function RevertUserMessageButton({ messageId }: { messageId: MessageId }) {
             size="xs"
             variant="ghost"
             disabled={activity.isRevertingCheckpoint || activity.isWorking}
-            onClick={() => ctx.onRevertUserMessage(messageId)}
-            aria-label="Revert to this message"
+            onClick={() => ctx.onEditUserMessage(messageId, text)}
+            aria-label="Edit from here"
+            title="Edit from here"
+            data-message-action="edit-from-here"
           />
         }
       >
         <Undo2Icon className="size-3" />
       </TooltipTrigger>
-      <TooltipPopup side="top">Revert to this message</TooltipPopup>
+      <TooltipPopup side="top">Edit from here</TooltipPopup>
     </Tooltip>
   );
 }
@@ -1386,6 +1392,8 @@ const WorkGroupSection = memo(function WorkGroupSection({
     [groupedEntries, isExpandedToolGroupEntry],
   );
   const onlyToolEntries = nonEmptyEntries.every((entry) => workLogEntryIsToolLike(entry));
+  const standaloneFailure =
+    nonEmptyEntries.length === 1 && workLogEntryIsStandaloneDomainFailure(nonEmptyEntries[0]!);
   const groupLabel = onlyToolEntries
     ? nonEmptyEntries.length === 1
       ? "1 tool call"
@@ -1394,6 +1402,9 @@ const WorkGroupSection = memo(function WorkGroupSection({
   const GroupContainer = isExpandedToolGroupEntry ? "div" : "section";
 
   if (nonEmptyEntries.length === 0) return null;
+  if (standaloneFailure) {
+    return <EditFromHereFailureCard workEntry={nonEmptyEntries[0]!} />;
+  }
 
   return (
     <GroupContainer
@@ -1540,6 +1551,70 @@ function toolGroupSummaryIconName(
       return "hammer";
   }
 }
+
+const EditFromHereFailureCard = memo(function EditFromHereFailureCard({
+  workEntry,
+}: {
+  workEntry: TimelineWorkEntry;
+}) {
+  const [dismissed, setDismissed] = useState(false);
+  const { copyToClipboard, isCopied } = useCopyToClipboard({ target: "technical details" });
+  const technicalDetails = workEntry.detail?.trim() || workEntry.command?.trim() || workEntry.label;
+
+  if (dismissed) return null;
+
+  return (
+    <section
+      className="my-1 rounded-lg border border-destructive/25 bg-destructive/5 px-3 py-3"
+      aria-labelledby={`edit-from-here-failure-${workEntry.id}`}
+    >
+      <div className="flex items-start gap-2.5">
+        <CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden />
+        <div className="min-w-0 flex-1">
+          <h3
+            id={`edit-from-here-failure-${workEntry.id}`}
+            className="font-medium text-destructive text-sm"
+          >
+            Couldn't edit from here
+          </h3>
+          <p className="mt-1 text-secondary-label text-xs leading-5">
+            The task was not changed. Try again, or start a new task from that message.
+          </p>
+        </div>
+      </div>
+      <div className="mt-2.5 flex flex-wrap items-center gap-1.5 ps-6">
+        <details className="group/details min-w-0">
+          <summary className="inline-flex min-h-11 cursor-pointer list-none items-center rounded-md px-2 text-secondary-label text-xs hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/70 sm:min-h-8">
+            Technical details
+          </summary>
+          <div className="mt-1.5 max-w-full rounded-md border border-border/60 bg-background/70 p-2.5">
+            <pre className="max-h-52 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] text-secondary-label leading-relaxed select-text">
+              {technicalDetails}
+            </pre>
+          </div>
+        </details>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="min-h-11 px-2 text-xs sm:min-h-8"
+          onClick={() => copyToClipboard(technicalDetails)}
+        >
+          {isCopied ? "Copied" : "Copy details"}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          className="min-h-11 px-2 text-xs sm:min-h-8"
+          onClick={() => setDismissed(true)}
+        >
+          Dismiss
+        </Button>
+      </div>
+    </section>
+  );
+});
 
 function WorkGroupToggleTimelineRow({
   row,

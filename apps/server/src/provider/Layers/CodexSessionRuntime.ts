@@ -12,6 +12,7 @@ import {
   type ProviderSession,
   type ProviderTurnStartResult,
   type ProviderUserInputAnswers,
+  type SubagentBackend,
   RuntimeMode,
   ThreadId,
   TurnId,
@@ -47,6 +48,7 @@ import {
   DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
   type CodexComputerControlMode,
 } from "../CodexDeveloperInstructions.ts";
+import { isWorkerLifecycleToolName } from "../../worker/WorkerThreadBoundary.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
 
 const PROVIDER = ProviderDriverKind.make("codex");
@@ -73,8 +75,125 @@ export function hasConfiguredMcpServer(appServerArgs: ReadonlyArray<string> | un
   return appServerArgs?.some((argument) => argument.includes("mcp_servers.")) === true;
 }
 
+/**
+ * Codex app-server chooses its native collaboration tool catalog when the
+ * process starts. Keep these overrides at the provider boundary so a T3
+ * Workers parent never receives native agent tools (including through
+ * ALL_TOOLS metadata), while explicit Codex V1/V2 selections get exactly one
+ * native runtime.
+ */
+export function codexSubagentBackendAppServerArgs(input: {
+  readonly subagentBackend?: SubagentBackend;
+  readonly enableT3Workers: boolean;
+  readonly workerSession?: boolean;
+}): ReadonlyArray<string> {
+  if (
+    input.workerSession === true ||
+    input.subagentBackend === "native-v1-control" ||
+    (input.subagentBackend === undefined && input.enableT3Workers)
+  ) {
+    return [
+      "-c",
+      "agents.enabled=false",
+      "-c",
+      "features.multi_agent=false",
+      "-c",
+      "features.multi_agent_v2=false",
+    ];
+  }
+  if (input.subagentBackend === "v1") {
+    return [
+      "-c",
+      "agents.enabled=true",
+      "-c",
+      "features.multi_agent=true",
+      "-c",
+      "features.multi_agent_v2=false",
+    ];
+  }
+  if (input.subagentBackend === "v2") {
+    return [
+      "-c",
+      "agents.enabled=true",
+      "-c",
+      "features.multi_agent=false",
+      "-c",
+      "features.multi_agent_v2=true",
+    ];
+  }
+  return [];
+}
+
+type CodexEffectiveConfig = EffectCodexSchema.V2ConfigReadResponse["config"];
+
+function readRecordProperty(value: unknown, property: string): Record<string, unknown> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const candidate = (value as Record<string, unknown>)[property];
+  return typeof candidate === "object" && candidate !== null && !Array.isArray(candidate)
+    ? (candidate as Record<string, unknown>)
+    : undefined;
+}
+
+/**
+ * Attest the effective process-scoped Codex configuration before opening an
+ * isolated thread. Codex constructs and dispatches native collaboration tools
+ * inside app-server, so a T3 dynamic-tool filter cannot secure this boundary.
+ */
+export function assertCodexSubagentIsolationConfig(
+  config: CodexEffectiveConfig,
+): Effect.Effect<void, CodexErrors.CodexAppServerRequestError> {
+  const agents = readRecordProperty(config, "agents");
+  const features = readRecordProperty(config, "features");
+  if (
+    agents?.["enabled"] === false &&
+    features?.["multi_agent"] === false &&
+    features?.["multi_agent_v2"] === false
+  ) {
+    return Effect.void;
+  }
+
+  return Effect.fail(
+    CodexErrors.CodexAppServerRequestError.internalError(
+      "Codex app-server did not apply the required sub-agent isolation configuration.",
+      {
+        agentsEnabled: agents?.["enabled"] ?? null,
+        multiAgent: features?.["multi_agent"] ?? null,
+        multiAgentV2: features?.["multi_agent_v2"] ?? null,
+      },
+      { method: "config/read", operation: "receive-response" },
+    ),
+  );
+}
+
+export function buildCodexAppServerCommandArgs(
+  options: Pick<
+    CodexSessionRuntimeOptions,
+    | "appServerArgs"
+    | "appServerTransport"
+    | "enableT3Workers"
+    | "launchArgs"
+    | "subagentBackend"
+    | "workerSession"
+  >,
+): ReadonlyArray<string> {
+  return codexAppServerCommandArgs(options.appServerTransport ?? "stdio", [
+    ...codexLaunchArgv(options.launchArgs),
+    ...(options.appServerArgs ?? []),
+    ...codexSubagentBackendAppServerArgs({
+      ...(options.subagentBackend !== undefined
+        ? { subagentBackend: options.subagentBackend }
+        : {}),
+      enableT3Workers: options.enableT3Workers === true,
+      ...(options.workerSession === true ? { workerSession: true } : {}),
+    }),
+  ]);
+}
+
 export const CodexResumeCursorSchema = Schema.Struct({
   threadId: Schema.String,
+  forkLastTurnId: Schema.optional(Schema.String),
 });
 const CodexUserInputAnswerObject = Schema.Struct({
   answers: Schema.Array(Schema.String),
@@ -125,6 +244,9 @@ export interface CodexSessionRuntimeOptions {
   readonly computerControlMode?: CodexComputerControlMode;
   readonly resumeCursor?: CodexResumeCursor;
   readonly appServerArgs?: ReadonlyArray<string>;
+  readonly subagentBackend?: SubagentBackend;
+  readonly enableT3Workers?: boolean;
+  readonly workerSession?: boolean;
   readonly appServerTransport?: CodexAppServerTransport;
 }
 
@@ -139,6 +261,7 @@ export interface CodexSessionRuntimeSendTurnInput {
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort | undefined;
   readonly computerControlMode?: CodexComputerControlMode;
   readonly interactionMode?: ProviderInteractionMode;
+  readonly subagentBackend?: SubagentBackend;
   readonly enableT3Workers?: boolean;
 }
 
@@ -411,12 +534,16 @@ function buildCodexCollaborationMode(input: {
   readonly enableT3Workers?: boolean;
   readonly browserToolsAvailable?: boolean;
   readonly computerControlMode?: CodexComputerControlMode;
+  readonly subagentBackend?: SubagentBackend;
 }): EffectCodexSchema.V2TurnStartParams__CollaborationMode | undefined {
   if (input.interactionMode === undefined) {
     return undefined;
   }
   const model = normalizeCodexModelSlug(input.model) ?? DEFAULT_MODEL;
   const reasoningEffort = input.effort ?? "medium";
+  const enableT3Workers =
+    input.enableT3Workers === true &&
+    (input.subagentBackend === undefined || input.subagentBackend === "native-v1-control");
   return {
     mode: input.interactionMode,
     settings: {
@@ -427,7 +554,8 @@ function buildCodexCollaborationMode(input: {
         {
           model,
           reasoningEffort,
-          ...(input.enableT3Workers ? { enableT3Workers: true } : {}),
+          ...(input.subagentBackend ? { subagentBackend: input.subagentBackend } : {}),
+          ...(enableT3Workers ? { enableT3Workers: true } : {}),
           computerControlMode: input.computerControlMode ?? DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
         },
         input.browserToolsAvailable ?? true,
@@ -448,6 +576,7 @@ export function buildTurnStartParams(input: {
   readonly serviceTier?: CodexServiceTier;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort;
   readonly interactionMode?: ProviderInteractionMode;
+  readonly subagentBackend?: SubagentBackend;
   readonly enableT3Workers?: boolean;
   /** Defaults to true so callers that predate the agent-access gate are unchanged. */
   readonly browserToolsAvailable?: boolean;
@@ -472,6 +601,7 @@ export function buildTurnStartParams(input: {
     ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
     ...(input.enableT3Workers ? { enableT3Workers: true } : {}),
     ...(input.computerControlMode ? { computerControlMode: input.computerControlMode } : {}),
+    ...(input.subagentBackend ? { subagentBackend: input.subagentBackend } : {}),
     ...(input.model ? { model: input.model } : {}),
     ...(input.effort ? { effort: input.effort } : {}),
     browserToolsAvailable: input.browserToolsAvailable ?? true,
@@ -528,9 +658,10 @@ export function isRecoverableThreadResumeError(error: unknown): boolean {
 
 type CodexThreadOpenResponse =
   | CodexRpc.ClientRequestResponsesByMethod["thread/start"]
-  | CodexRpc.ClientRequestResponsesByMethod["thread/resume"];
+  | CodexRpc.ClientRequestResponsesByMethod["thread/resume"]
+  | CodexRpc.ClientRequestResponsesByMethod["thread/fork"];
 
-type CodexThreadOpenMethod = "thread/start" | "thread/resume";
+type CodexThreadOpenMethod = "thread/start" | "thread/resume" | "thread/fork";
 
 interface CodexThreadOpenClient {
   readonly request: <M extends CodexThreadOpenMethod>(
@@ -547,6 +678,7 @@ export const openCodexThread = (input: {
   readonly requestedModel: string | undefined;
   readonly serviceTier: CodexServiceTier | undefined;
   readonly resumeThreadId: string | undefined;
+  readonly forkLastTurnId?: string;
 }): Effect.Effect<CodexThreadOpenResponse, CodexErrors.CodexAppServerError> => {
   const resumeThreadId = input.resumeThreadId;
   const startParams = buildThreadStartParams({
@@ -558,6 +690,21 @@ export const openCodexThread = (input: {
 
   if (resumeThreadId === undefined) {
     return input.client.request("thread/start", startParams);
+  }
+
+  if (input.forkLastTurnId !== undefined) {
+    const forkRuntime = runtimeModeToThreadConfig(input.runtimeMode);
+    const forkParams: EffectCodexSchema.V2ThreadForkParams = {
+      threadId: resumeThreadId,
+      lastTurnId: input.forkLastTurnId,
+      cwd: input.cwd,
+      approvalPolicy: forkRuntime.approvalPolicy,
+      approvalsReviewer: forkRuntime.approvalsReviewer,
+      sandbox: forkRuntime.sandbox,
+      ...(input.requestedModel ? { model: input.requestedModel } : {}),
+      ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
+    };
+    return input.client.request("thread/fork", forkParams);
   }
 
   return input.client
@@ -1000,10 +1147,7 @@ export const makeCodexSessionRuntime = (
       ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
     };
     const extendEnv = options.environment === undefined;
-    const commandArgs = codexAppServerCommandArgs(options.appServerTransport ?? "stdio", [
-      ...codexLaunchArgv(options.launchArgs),
-      ...(options.appServerArgs ?? []),
-    ]);
+    const commandArgs = buildCodexAppServerCommandArgs(options);
     const spawnCommand = yield* resolveSpawnCommand(options.binaryPath, commandArgs, {
       env,
       extendEnv,
@@ -1851,6 +1995,20 @@ export const makeCodexSessionRuntime = (
       }),
     );
 
+    if (options.workerSession === true) {
+      yield* client.handleServerRequest("item/tool/call", (payload) => {
+        const toolName = payload.namespace ? `${payload.namespace}.${payload.tool}` : payload.tool;
+        return isWorkerLifecycleToolName(payload.tool, payload.namespace)
+          ? Effect.fail(
+              CodexErrors.CodexAppServerRequestError.invalidParams(
+                `Worker sessions cannot invoke agent lifecycle tool '${toolName}'.`,
+                { tool: toolName },
+              ),
+            )
+          : Effect.fail(CodexErrors.CodexAppServerRequestError.methodNotFound("item/tool/call"));
+      });
+    }
+
     yield* client.handleUnknownServerRequest((method) =>
       Effect.fail(CodexErrors.CodexAppServerRequestError.methodNotFound(method)),
     );
@@ -1940,6 +2098,18 @@ export const makeCodexSessionRuntime = (
       yield* client.request("initialize", buildCodexInitializeParams());
       yield* client.notify("initialized", undefined);
 
+      const requiresSubagentIsolation =
+        options.workerSession === true ||
+        options.subagentBackend === "native-v1-control" ||
+        (options.subagentBackend === undefined && options.enableT3Workers === true);
+      if (requiresSubagentIsolation) {
+        const effectiveConfig = yield* client.request("config/read", {
+          includeLayers: false,
+          cwd: options.cwd,
+        });
+        yield* assertCodexSubagentIsolationConfig(effectiveConfig.config);
+      }
+
       const requestedModel = normalizeCodexModelSlug(options.model);
 
       const opened = yield* openCodexThread({
@@ -1950,6 +2120,9 @@ export const makeCodexSessionRuntime = (
         requestedModel,
         serviceTier: options.serviceTier,
         resumeThreadId: readResumeCursorThreadId(options.resumeCursor),
+        ...(options.resumeCursor?.forkLastTurnId !== undefined
+          ? { forkLastTurnId: options.resumeCursor.forkLastTurnId }
+          : {}),
       });
 
       const providerThreadId = opened.thread.id;
@@ -2029,6 +2202,7 @@ export const makeCodexSessionRuntime = (
             ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
             ...(input.effort ? { effort: input.effort } : {}),
             ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
+            ...(input.subagentBackend ? { subagentBackend: input.subagentBackend } : {}),
             ...(input.enableT3Workers ? { enableT3Workers: true } : {}),
             // Derived from the session's own MCP configuration rather than the
             // setting, so the prompt describes the tools this turn actually
