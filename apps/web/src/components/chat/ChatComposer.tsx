@@ -100,6 +100,7 @@ import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommand
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
+import { ComposerImagePicker } from "./ComposerImagePicker";
 import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
 import { ComposerPlanFollowUpBanner } from "./ComposerPlanFollowUpBanner";
@@ -1067,6 +1068,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const [composerMenuAnchor, setComposerMenuAnchor] = useState<HTMLDivElement | null>(null);
   const [isStashMenuOpen, setIsStashMenuOpen] = useState(false);
   const [isTasksDrawerOpen, setIsTasksDrawerOpen] = useState(false);
+  const [pendingImageCompressionCounts, setPendingImageCompressionCounts] = useState<
+    ReadonlyMap<ThreadId, number>
+  >(() => new Map());
   const [dismissedTasksTurnId, setDismissedTasksTurnId] = useState<TurnId | null>(null);
   const [stashPulse, setStashPulse] = useState<{ key: number; active: boolean }>({
     key: 0,
@@ -1378,6 +1382,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const collapsedComposerPrimaryActionLabel = "Send message";
   const showMobilePendingAnswerActions =
     isMobileViewport && !isComposerCollapsedMobile && pendingPrimaryAction !== null;
+  const imagePickerBusy =
+    activeThreadId !== null && (pendingImageCompressionCounts.get(activeThreadId) ?? 0) > 0;
+  const imagePickerDisabled =
+    activeThreadId === null ||
+    isComposerApprovalState ||
+    pendingUserInputs.length > 0 ||
+    projectSelectionRequired;
 
   // ------------------------------------------------------------------
   // Prompt helpers
@@ -2581,6 +2592,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     if (acceptedFiles.length === 0) return;
 
     pendingImageCompressionsRef.current.set(threadId, pendingCount + acceptedFiles.length);
+    setPendingImageCompressionCounts((current) => {
+      const next = new Map(current);
+      next.set(threadId, pendingCount + acceptedFiles.length);
+      return next;
+    });
     try {
       const nextImages: ComposerImageAttachment[] = [];
       let compressionError: string | null = null;
@@ -2627,6 +2643,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       } else {
         pendingImageCompressionsRef.current.delete(threadId);
       }
+      setPendingImageCompressionCounts((current) => {
+        const next = new Map(current);
+        if (remaining > 0) {
+          next.set(threadId, remaining);
+        } else {
+          next.delete(threadId);
+        }
+        return next;
+      });
     }
   };
 
@@ -3379,6 +3404,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 )}
               >
                 <div className="-m-1 -ms-3.5 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto p-1 ps-3.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                  <ComposerImagePicker
+                    busy={imagePickerBusy}
+                    disabled={imagePickerDisabled}
+                    onFiles={(files) => void addComposerImages(files)}
+                  />
                   {noProviderAvailable ? (
                     <Button
                       type="button"
