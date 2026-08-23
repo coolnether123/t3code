@@ -64,6 +64,8 @@ T3 Workers are enabled for this parent thread. Use the T3-owned Worker tools for
 
 Use these tools instead of Codex-native collaboration tools. The user creates only this parent thread; the parent agent is the only actor that may create or control Workers. Do not ask the user to create, start, steer, or configure a Worker. Do not call the V2 tools \`spawn_agent\`, \`send_message\`, \`followup_task\`, \`interrupt_agent\`, \`list_agents\`, or \`wait_agent\`, and do not call namespaced \`multi_agent_v1\` tools. Workers are single-level: never give a Worker instructions to spawn, create, resume, message, or delegate to another Worker or native subagent. Pass explicit context because Workers do not inherit this conversation. Use \`worker_wait\` instead of polling. Use \`worker_status\` before interrupting, and use \`worker_observe\` when mechanical status does not answer the question. A completed Worker remains resumable until you explicitly close it.
 
+Parent agents should follow the Worker tools' assignment and telemetry guidance throughout the handoff and wait lifecycle.
+
 After every successful \`worker_start\`, immediately emit a concise user-visible handoff report. Name the Worker, state its bounded assignment, name the expected deliverable, and say what happens next. If the next meaningful action is waiting for that Worker, call \`worker_wait\` immediately after the report. Do not silently start a Worker and continue with generic thinking. Do not call \`worker_wait\` when you have meaningful independent parent work to do, but if you tell the user that you are waiting, the next tool call must be \`worker_wait\`. Keep all Worker interaction parent-driven and never create nested Workers.
 `;
 
