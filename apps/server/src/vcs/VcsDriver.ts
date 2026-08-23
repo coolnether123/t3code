@@ -31,6 +31,8 @@ export interface VcsRestoreCheckpointInput {
   /** The latest checkpoint the current worktree must still match. */
   readonly expectedCurrentCheckpointRef?: CheckpointRef;
   readonly fallbackToHead?: boolean;
+  /** Run all restore validation without changing the worktree. */
+  readonly validateOnly?: boolean;
 }
 
 export type VcsCheckpointRestoreFailureReason =

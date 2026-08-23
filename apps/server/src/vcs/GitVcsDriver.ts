@@ -884,9 +884,18 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
           detail: "The configured workspace is not an available Git worktree.",
         };
       }
+      const expectedRootRepository = input.expectedRepositoryRoot
+        ? yield* detectRepository(input.expectedRepositoryRoot).pipe(
+            Effect.catch(() => Effect.succeed(null)),
+          )
+        : null;
       const repositoryMatchesExpectedRoot = input.expectedRepositoryRoot
-        ? normalizedPath(repository.rootPath, input.cwd) ===
-          normalizedPath(input.expectedRepositoryRoot, input.cwd)
+        ? expectedRootRepository !== null &&
+          (repository.metadataPath && expectedRootRepository.metadataPath
+            ? normalizedPath(repository.metadataPath, input.cwd) ===
+              normalizedPath(expectedRootRepository.metadataPath, input.expectedRepositoryRoot)
+            : normalizedPath(repository.rootPath, input.cwd) ===
+              normalizedPath(expectedRootRepository.rootPath, input.expectedRepositoryRoot))
         : true;
       const repositoryMatchesExpectedIdentity = input.expectedRepository
         ? repository.metadataPath && input.expectedRepository.metadataPath
@@ -958,6 +967,10 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
               "The workspace changed after the latest checkpoint; no user changes were overwritten.",
           };
         }
+      }
+
+      if (input.validateOnly === true) {
+        return { restored: true, commitOid };
       }
 
       yield* execute({

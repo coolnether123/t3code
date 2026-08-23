@@ -772,6 +772,7 @@ const make = Effect.gen(function* () {
     readonly retainedTurnIds?: ReadonlySet<TurnId>;
     readonly reconciliationRequestId?: string;
     readonly skipProviderRollback?: boolean;
+    readonly validateOnly?: boolean;
   }) {
     const thread = yield* resolveThreadDetail(input.threadId);
     if (!thread) {
@@ -871,6 +872,7 @@ const make = Effect.gen(function* () {
       expectedBranch: thread.branch,
       expectedCurrentCheckpointRef: checkpointRefForThreadTurn(input.threadId, currentTurnCount),
       fallbackToHead: input.turnCount === 0,
+      ...(input.validateOnly ? { validateOnly: true } : {}),
     });
     if (!restored.restored) {
       yield* appendRevertFailureActivity({
@@ -882,6 +884,8 @@ const make = Effect.gen(function* () {
       }).pipe(Effect.catch(() => Effect.void));
       return restored;
     }
+
+    if (input.validateOnly) return restored;
 
     // Refresh the workspace entry index so the @-mention file picker
     // reflects the reverted filesystem state.
@@ -1137,19 +1141,36 @@ const make = Effect.gen(function* () {
       );
     }
 
+    const latestSequence = yield* orchestrationEngine.latestSequence;
+    const laterEvents =
+      latestSequence > event.sequence
+        ? yield* Stream.runCollect(
+            orchestrationEngine.readEvents(event.sequence, latestSequence - event.sequence),
+          )
+        : [];
+    const requestWasSuperseded = Array.from(laterEvents).some(
+      (laterEvent) =>
+        ((laterEvent.type === "thread.edit-from-here-requested" &&
+          laterEvent.payload.requestId !== event.payload.requestId) ||
+          (laterEvent.type === "thread.edit-from-here-finished" &&
+            laterEvent.payload.requestId === event.payload.requestId)) &&
+        laterEvent.payload.threadId === event.payload.threadId,
+    );
+    if (requestWasSuperseded) {
+      return;
+    }
+
     if (
       sourceThread.messages.some((message) => message.id === event.payload.replacementMessageId)
     ) {
-      if (sourceThread.editFromHere?.requestId === event.payload.requestId) {
-        yield* finishEditFromHere({
-          threadId: sourceThread.id,
-          requestId: event.payload.requestId,
-          ...(event.payload.targetThreadId !== undefined
-            ? { targetThreadId: event.payload.targetThreadId }
-            : {}),
-          createdAt: event.payload.createdAt,
-        });
-      }
+      yield* finishEditFromHere({
+        threadId: sourceThread.id,
+        requestId: event.payload.requestId,
+        ...(event.payload.targetThreadId !== undefined
+          ? { targetThreadId: event.payload.targetThreadId }
+          : {}),
+        createdAt: event.payload.createdAt,
+      });
       return;
     }
 
@@ -1164,6 +1185,19 @@ const make = Effect.gen(function* () {
       const isRootBoundary = boundary.turnCount === 0 && boundary.lastTurnId === null;
       const restored = isRootBoundary
         ? yield* Effect.gen(function* () {
+            const preflight = yield* restoreThreadToTurnCount({
+              threadId: sourceThread.id,
+              turnCount: 0,
+              createdAt: event.payload.createdAt,
+              sourceMessageId: event.payload.sourceMessageId,
+              cutoffCreatedAt: boundary.sourceMessage.createdAt,
+              retainedTurnIds: boundary.retainedTurnIds,
+              reconciliationRequestId: event.payload.requestId,
+              skipProviderRollback: true,
+              validateOnly: true,
+            });
+            if (!preflight.restored) return preflight;
+
             const startSession = yield* resolveEditSessionStart({
               sourceThread,
               targetThreadId: sourceThread.id,

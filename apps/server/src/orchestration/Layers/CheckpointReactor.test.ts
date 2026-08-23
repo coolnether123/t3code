@@ -324,9 +324,25 @@ describe("CheckpointReactor", () => {
     readonly providerSessionCwd?: string;
     readonly providerName?: ProviderDriverKind;
     readonly gitStatusRefreshCalls?: Array<string>;
+    readonly useLinkedWorktree?: boolean;
   }) {
-    const cwd = createGitRepository();
-    tempDirs.push(cwd);
+    const repositoryRoot = createGitRepository();
+    tempDirs.push(repositoryRoot);
+    let cwd = repositoryRoot;
+    let projectWorkspaceRoot = options?.projectWorkspaceRoot ?? repositoryRoot;
+    let threadWorktreePath = options?.threadWorktreePath ?? repositoryRoot;
+    let threadBranch = options?.threadBranch ?? null;
+    if (options?.useLinkedWorktree === true) {
+      const worktreeParent = NodeFS.mkdtempSync(
+        NodePath.join(NodeOS.tmpdir(), "t3-checkpoint-linked-parent-"),
+      );
+      tempDirs.push(worktreeParent);
+      cwd = NodePath.join(worktreeParent, "linked");
+      threadWorktreePath = cwd;
+      threadBranch = "checkpoint-reactor-linked";
+      runGit(repositoryRoot, ["worktree", "add", "-b", threadBranch, cwd]);
+      projectWorkspaceRoot = repositoryRoot;
+    }
     const provider = createProviderServiceHarness(
       cwd,
       options?.hasSession ?? true,
@@ -435,7 +451,7 @@ describe("CheckpointReactor", () => {
         commandId: CommandId.make("cmd-project-create"),
         projectId: asProjectId("project-1"),
         title: "Test Project",
-        workspaceRoot: options?.projectWorkspaceRoot ?? cwd,
+        workspaceRoot: projectWorkspaceRoot,
         defaultModelSelection: {
           instanceId: ProviderInstanceId.make("codex"),
           model: "gpt-5-codex",
@@ -457,8 +473,8 @@ describe("CheckpointReactor", () => {
           },
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           runtimeMode: "approval-required",
-          branch: options?.threadBranch ?? null,
-          worktreePath: options?.threadWorktreePath ?? cwd,
+          branch: threadBranch,
+          worktreePath: threadWorktreePath,
           createdAt,
         })
         .pipe(
@@ -477,7 +493,7 @@ describe("CheckpointReactor", () => {
                   interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
                   runtimeMode: "approval-required",
                   branch: null,
-                  worktreePath: options?.threadWorktreePath ?? cwd,
+                  worktreePath: threadWorktreePath,
                   createdAt,
                 }),
               )
@@ -1312,6 +1328,54 @@ describe("CheckpointReactor", () => {
     ).toBe("v2\n");
   });
 
+  it("restores a linked worktree owned by the project repository", async () => {
+    const harness = await createHarness({ useLinkedWorktree: true });
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    await harness.dispatch({
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-linked-session-set"),
+      threadId: ThreadId.make("thread-1"),
+      session: {
+        threadId: ThreadId.make("thread-1"),
+        status: "ready",
+        providerName: "codex",
+        runtimeMode: "approval-required",
+        activeTurnId: null,
+        lastError: null,
+        updatedAt: createdAt,
+      },
+      createdAt,
+    });
+    for (const turnCount of [1, 2] as const) {
+      await harness.dispatch({
+        type: "thread.turn.diff.complete",
+        commandId: CommandId.make(`cmd-linked-diff-${turnCount}`),
+        threadId: ThreadId.make("thread-1"),
+        turnId: asTurnId(`turn-${turnCount}`),
+        completedAt: createdAt,
+        checkpointRef: checkpointRefForThreadTurn(ThreadId.make("thread-1"), turnCount),
+        status: "ready",
+        files: [],
+        checkpointTurnCount: turnCount,
+        createdAt,
+      });
+    }
+
+    await harness.dispatch({
+      type: "thread.checkpoint.revert",
+      commandId: CommandId.make("cmd-linked-revert"),
+      threadId: ThreadId.make("thread-1"),
+      turnCount: 1,
+      createdAt,
+    });
+    await waitForEvent(harness.engine, (event) => event.type === "thread.reverted");
+
+    expect(
+      NodeFS.readFileSync(NodePath.join(harness.cwd, "README.md"), "utf8").replaceAll("\r\n", "\n"),
+    ).toBe("v2\n");
+    expect(harness.provider.rollbackConversation).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects a rewind when the worktree changed after its latest checkpoint", async () => {
     const harness = await createHarness();
     NodeFS.writeFileSync(NodePath.join(harness.cwd, "user-change.txt"), "keep me\n", "utf8");
@@ -1614,7 +1678,10 @@ describe("CheckpointReactor", () => {
     const source = (await harness.readModel()).threads.find(
       (thread) => thread.id === seeded.threadId,
     );
-    expect(source?.messages.map((message) => [message.id, message.text])).toEqual([
+    expect(
+      source?.messages.map((message) => [message.id, message.text]),
+      JSON.stringify(source?.activities),
+    ).toEqual([
       [seeded.user1, "Original first message"],
       [seeded.assistant1, "First answer"],
       [replacementMessageId, "Rewritten second message"],
@@ -1638,6 +1705,129 @@ describe("CheckpointReactor", () => {
       threadId: seeded.threadId,
       numTurns: 1,
     });
+  });
+
+  it("ignores an older queued edit after a newer request becomes active", async () => {
+    const harness = await createHarness();
+    const seeded = await seedEditFromHereConversation(harness);
+    const restoreCheckpointLive = harness.checkpointStore.restoreCheckpoint.bind(
+      harness.checkpointStore,
+    );
+    const restoreCheckpoint = vi.spyOn(harness.checkpointStore, "restoreCheckpoint");
+    const deleteCheckpointRefs = vi.spyOn(harness.checkpointStore, "deleteCheckpointRefs");
+    const oldRequestId = CommandId.make("edit-stale-old-request");
+    const newRequestId = CommandId.make("edit-stale-new-request");
+    let releaseBlockingRestore!: () => void;
+    let markBlockingRestoreStarted!: () => void;
+    const blockingRestore = new Promise<void>((resolve) => {
+      releaseBlockingRestore = resolve;
+    });
+    const blockingRestoreStarted = new Promise<void>((resolve) => {
+      markBlockingRestoreStarted = resolve;
+    });
+    restoreCheckpoint.mockImplementationOnce((input) => {
+      markBlockingRestoreStarted();
+      return Effect.promise(() => blockingRestore).pipe(
+        Effect.andThen(restoreCheckpointLive(input)),
+      );
+    });
+
+    await harness.dispatch({
+      type: "thread.checkpoint.revert",
+      commandId: CommandId.make("edit-stale-blocking-revert"),
+      threadId: seeded.threadId,
+      turnCount: 2,
+      createdAt: seeded.createdAt,
+    });
+    await blockingRestoreStarted;
+    await harness.dispatch({
+      type: "thread.edit-from-here",
+      commandId: oldRequestId,
+      threadId: seeded.threadId,
+      sourceMessageId: seeded.user2,
+      replacementMessageId: MessageId.make("edit-stale-old-replacement"),
+      editedText: "Stale replacement",
+      mode: "rewind",
+      createdAt: seeded.createdAt,
+    });
+    await harness.dispatch({
+      type: "thread.edit-from-here.finish",
+      commandId: CommandId.make("edit-stale-old-finish"),
+      threadId: seeded.threadId,
+      requestId: oldRequestId,
+      error: "Superseded for test",
+      createdAt: seeded.createdAt,
+    });
+    await harness.dispatch({
+      type: "thread.edit-from-here",
+      commandId: newRequestId,
+      threadId: seeded.threadId,
+      sourceMessageId: seeded.user2,
+      replacementMessageId: MessageId.make("edit-stale-new-replacement"),
+      editedText: "Current replacement",
+      mode: "rewind",
+      createdAt: seeded.createdAt,
+    });
+    releaseBlockingRestore();
+    await waitForEvent(
+      harness.engine,
+      (event) =>
+        event.type === "thread.edit-from-here-finished" &&
+        (event as { payload?: { requestId?: string } }).payload?.requestId === newRequestId,
+    );
+    await harness.drain();
+
+    expect(restoreCheckpoint).toHaveBeenCalledTimes(2);
+    expect(deleteCheckpointRefs).toHaveBeenCalledTimes(1);
+    expect(harness.provider.rollbackConversation).toHaveBeenCalledTimes(1);
+    const source = (await harness.readModel()).threads.find(
+      (thread) => thread.id === seeded.threadId,
+    );
+    expect(source?.messages.some((message) => message.text === "Stale replacement")).toBe(false);
+    expect(source?.messages.some((message) => message.text === "Current replacement")).toBe(true);
+  });
+
+  it("keeps the existing provider binding when a dirty root rewind is rejected", async () => {
+    const harness = await createHarness();
+    const seeded = await seedEditFromHereConversation(harness);
+    await harness.drain();
+    const before = (await harness.readModel()).threads.find(
+      (thread) => thread.id === seeded.threadId,
+    );
+    harness.provider.startSession.mockClear();
+    NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "keep root change\n", "utf8");
+
+    await harness.dispatch({
+      type: "thread.edit-from-here",
+      commandId: CommandId.make("edit-dirty-root-request"),
+      threadId: seeded.threadId,
+      sourceMessageId: seeded.user1,
+      replacementMessageId: MessageId.make("edit-dirty-root-replacement"),
+      editedText: "Rejected root replacement",
+      mode: "rewind",
+      createdAt: seeded.createdAt,
+    });
+    await waitForEvent(
+      harness.engine,
+      (event) =>
+        event.type === "thread.edit-from-here-finished" &&
+        (event as { payload?: { requestId?: string } }).payload?.requestId ===
+          "edit-dirty-root-request",
+    );
+    await harness.drain();
+
+    const after = (await harness.readModel()).threads.find(
+      (thread) => thread.id === seeded.threadId,
+    );
+    expect(harness.provider.startSession).not.toHaveBeenCalled();
+    expect(after?.session).toEqual(before?.session);
+    expect(NodeFS.readFileSync(NodePath.join(harness.cwd, "README.md"), "utf8")).toContain(
+      "keep root change",
+    );
+    expect(after?.messages.some((message) => message.id === seeded.user1)).toBe(true);
+    expect(after?.messages.some((message) => message.id === "edit-dirty-root-replacement")).toBe(
+      false,
+    );
   });
 
   it("rewinds the first message of a rehydrated branch task by resetting its provider binding", async () => {

@@ -232,8 +232,6 @@ it.layer(GitContractLayer)("Git checkpoint restore safeguards", (it) => {
       const linkedCwd = `${worktreeParent}/linked`;
       yield* runGit(repositoryRoot, ["worktree", "add", "-b", "checkpoint-linked", linkedCwd]);
 
-      const expectedRepository = yield* driver.detectRepository(repositoryRoot);
-      assert.ok(expectedRepository);
       const targetRef = CheckpointRef.make("refs/t3/tests/linked-target");
       const currentRef = CheckpointRef.make("refs/t3/tests/linked-current");
       yield* fileSystem.writeFileString(`${linkedCwd}/README.md`, "linked target\n");
@@ -244,7 +242,7 @@ it.layer(GitContractLayer)("Git checkpoint restore safeguards", (it) => {
       const result = yield* checkpoints.restoreCheckpoint({
         cwd: linkedCwd,
         checkpointRef: targetRef,
-        expectedRepository,
+        expectedRepositoryRoot: repositoryRoot,
         expectedBranch: "checkpoint-linked",
         expectedCurrentCheckpointRef: currentRef,
       });
