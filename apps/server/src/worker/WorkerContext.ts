@@ -63,3 +63,12 @@ export function buildWorkerAssignmentPrompt(input: {
   if (input.instructions?.trim()) parts.push(`Worker instructions:\n${input.instructions.trim()}`);
   return parts.filter((part) => part.trim().length > 0).join("\n\n");
 }
+
+/** Compact follow-up prompt. The Worker already received its role and boundary instructions. */
+export function buildWorkerFollowUpPrompt(input: {
+  readonly message: string;
+  readonly context?: WorkerContextPackage | undefined;
+}): string {
+  const context = input.context === undefined ? "" : buildWorkerContextPrompt(input.context);
+  return [input.message.trim(), context].filter((part) => part.length > 0).join("\n\n");
+}

@@ -11,17 +11,27 @@ import {
 const CODEX = ProviderDriverKind.make("codex");
 
 describe("getSubagentBackendOptions", () => {
-  it("defaults a fresh Codex task to Native V1 control before its first turn", () => {
-    expect(resolveComposerSubagentBackend(null, CODEX)).toBe("native-v1-control");
+  it("leaves a fresh Codex task on no sub-agent backend while Workers are disabled", () => {
+    expect(resolveComposerSubagentBackend(null, CODEX, { workersEnabled: false })).toBeNull();
   });
 
-  it("migrates a legacy missing Codex draft selection to Native V1 control", () => {
-    expect(resolveComposerSubagentBackend(undefined, CODEX)).toBe("native-v1-control");
+  it("defaults a fresh Codex task to Native V1 control when Workers are enabled", () => {
+    expect(resolveComposerSubagentBackend(undefined, CODEX, { workersEnabled: true })).toBe(
+      "native-v1-control",
+    );
   });
 
   it("preserves explicit V1 and V2 task selections", () => {
-    expect(resolveComposerSubagentBackend("v1", CODEX)).toBe("v1");
-    expect(resolveComposerSubagentBackend("v2", CODEX)).toBe("v2");
+    expect(resolveComposerSubagentBackend("v1", CODEX, { workersEnabled: false })).toBe("v1");
+    expect(resolveComposerSubagentBackend("v2", CODEX, { workersEnabled: false })).toBe("v2");
+  });
+
+  it("does not carry a Codex backend into another provider", () => {
+    expect(
+      resolveComposerSubagentBackend("native-v1-control", ProviderDriverKind.make("claude"), {
+        workersEnabled: true,
+      }),
+    ).toBeNull();
   });
 
   it("fails closed when the selected model does not advertise a backend", () => {
@@ -68,7 +78,7 @@ describe("getSubagentBackendOptions", () => {
     expect(options[0]?.reason).toBe("V1 unavailable");
   });
 
-  it("keeps the Native default selected and unavailable when Workers are disabled", () => {
+  it("clears a saved Native selection when Workers are disabled", () => {
     const models = [
       {
         slug: "gpt-test",
@@ -85,17 +95,17 @@ describe("getSubagentBackendOptions", () => {
       },
     ];
 
-    const defaultBackend = resolveComposerSubagentBackend(null, CODEX);
-    expect(defaultBackend).toBe("native-v1-control");
+    const defaultBackend = resolveComposerSubagentBackend("native-v1-control", CODEX, {
+      workersEnabled: false,
+    });
+    expect(defaultBackend).toBeNull();
     expect(
       getSubagentBackendOptions(models, "gpt-test", CODEX, { workersEnabled: false }).map(
         (option) => option.supported,
       ),
     ).toEqual([true, false, false]);
     expect(
-      getSubagentBackendUnavailableReason(defaultBackend, models, "gpt-test", CODEX, {
-        workersEnabled: false,
-      }),
-    ).toContain("T3 Workers are disabled");
+      getSubagentBackendUnavailableReason(defaultBackend, models, "gpt-test", CODEX),
+    ).toBeNull();
   });
 });

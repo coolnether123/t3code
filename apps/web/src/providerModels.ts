@@ -39,18 +39,15 @@ export const SUBAGENT_BACKEND_OPTIONS: ReadonlyArray<{
   },
 ];
 
-/**
- * Resolve the task-scoped composer selection without silently changing an
- * explicit backend. A missing Codex selection is Native V1 control even when
- * that route is unavailable, so the normal capability check can fail closed
- * with its concrete reason instead of falling back to a native Codex backend.
- */
 export function resolveComposerSubagentBackend(
   savedBackend: SubagentBackend | null | undefined,
   provider: ProviderDriverKind,
+  options?: { readonly workersEnabled?: boolean },
 ): SubagentBackend | null {
+  if (provider !== DEFAULT_DRIVER_KIND) return null;
+  if (savedBackend === "native-v1-control" && options?.workersEnabled === false) return null;
   if (savedBackend !== null && savedBackend !== undefined) return savedBackend;
-  return provider === DEFAULT_DRIVER_KIND ? DEFAULT_CODEX_SUBAGENT_BACKEND : null;
+  return options?.workersEnabled === true ? DEFAULT_CODEX_SUBAGENT_BACKEND : null;
 }
 
 export function formatProviderDriverKindLabel(provider: ProviderDriverKind): string {

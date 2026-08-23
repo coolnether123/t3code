@@ -132,11 +132,17 @@ export function projectWorkerSummaryUsage(
   summary: WorkerSummary,
   providerEvents: ReadonlyArray<ProviderRuntimeEvent>,
 ): WorkerSummary {
-  const latestEvent = providerEvents.findLast(
-    (event) => event.type === "thread.token-usage.updated",
-  );
-  if (latestEvent === undefined) return summary;
-  const projected = projectWorkerProviderEventUsage(latestEvent);
+  // Worker-linked Codex sessions report cumulative usage. Late events from an
+  // earlier activation can arrive after a follow-up, so arrival order is not a
+  // safe source of truth. Select the greatest cumulative snapshot instead.
+  const projected = providerEvents.reduce<ProjectedWorkerUsage | undefined>((greatest, event) => {
+    const candidate = projectWorkerProviderEventUsage(event);
+    if (candidate === undefined) return greatest;
+    return greatest === undefined ||
+      candidate.cumulative.totalTokens >= greatest.cumulative.totalTokens
+      ? candidate
+      : greatest;
+  }, undefined);
   if (projected === undefined) return summary;
   return {
     ...summary,

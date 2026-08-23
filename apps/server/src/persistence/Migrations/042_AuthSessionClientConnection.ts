@@ -1,10 +1,16 @@
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
+import { ensureWorkerSchema } from "./041_Workers.ts";
+
 // Client-declared surface (web/desktop/mobile) and app version, refreshed on
 // every WebSocket connect so the row tracks the client's current build instead
 // of freezing at session issuance. Nullable: old clients never report them.
 export default Effect.gen(function* () {
+  // Migration 41 existed independently as Workers and auth client metadata in
+  // two histories. Reconcile both schemas here because the migrator skips a
+  // different migration that reused an already-recorded numeric ID.
+  yield* ensureWorkerSchema;
   const sql = yield* SqlClient.SqlClient;
   const columns = yield* sql<{ readonly name: string }>`
     PRAGMA table_info(auth_sessions)

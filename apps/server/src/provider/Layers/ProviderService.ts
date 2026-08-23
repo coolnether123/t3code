@@ -59,6 +59,7 @@ import { type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
+import * as McpInvocationContext from "../../mcp/McpInvocationContext.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import { isWorkerLinkedProviderThreadId } from "../../worker/WorkerThreadBoundary.ts";
@@ -73,9 +74,8 @@ export interface ProviderServiceLiveOptions {
   readonly canonicalEventLogger?: EventNdjsonLogger;
   /**
    * Overrides MCP credential issuance. The real issuer reads a module-global
-   * registry that only a running MCP server installs, which makes the
-   * agent-browser-access gate unobservable from a unit test; this seam lets a
-   * test see whether a credential was requested at all.
+   * registry that only a running MCP server installs, which makes capability
+   * gating unobservable from a unit test. This seam exposes credential requests.
    */
   readonly issueMcpCredential?: typeof McpSessionRegistry.issueActiveMcpCredential;
   /** Same seam as `issueMcpCredential`, for observing the deny path's revoke. */
@@ -246,31 +246,16 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     options?.revokeMcpCredential ?? McpSessionRegistry.revokeActiveMcpThread;
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
-  /**
-   * Attach the `t3-code` MCP server to the session that is about to start.
-   *
-   * This is the only place a credential is minted, so withholding one here is
-   * what disables agent browser access everywhere: every adapter already
-   * treats a missing session as "no MCP server", and the `/mcp` endpoint
-   * accepts nothing but tokens issued from this path.
-   */
-  /**
-   * Deny on an unreadable settings file rather than letting the read failure
-   * escape: adding `ServerSettingsError` to `ProviderServiceError` would widen
-   * a union every caller handles, for a branch that only decides whether one
-   * optional toolset is attached. Denying is the safe direction — an explicit
-   * "off" silently becoming "on" would violate the user's stated choice,
-   * whereas the reverse costs an agent one toolset and is visible immediately.
-   */
-  const agentBrowserAccessEnabled = serverSettings.getSettings.pipe(
-    Effect.map((settings) => settings.enableAgentBrowserAccess),
-    Effect.catch((cause) =>
-      Effect.logWarning(
-        "Could not read server settings; withholding agent browser access for this session.",
-        { cause },
-      ).pipe(Effect.as(false)),
-    ),
-  );
+  const mcpCapabilitiesFor = (threadId: ThreadId) =>
+    serverSettings.getSettings.pipe(
+      Effect.map((settings) => McpSessionRegistry.resolveMcpCapabilities(settings, threadId)),
+      Effect.catch((cause) =>
+        Effect.logWarning(
+          "Could not read server settings; withholding T3 MCP capabilities for this session.",
+          { cause },
+        ).pipe(Effect.as(new Set<McpInvocationContext.McpCapability>())),
+      ),
+    );
 
   const clearMcpSession = (threadId: ThreadId) =>
     revokeMcpCredential(threadId).pipe(
@@ -284,7 +269,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     modelSelection?: ModelSelection,
   ) =>
     Effect.gen(function* () {
-      if (!providerSessionUsesT3Mcp(threadId) || !(yield* agentBrowserAccessEnabled)) {
+      const capabilities = yield* mcpCapabilitiesFor(threadId);
+      if (!providerSessionUsesT3Mcp(threadId) || capabilities.size === 0) {
         yield* clearMcpSession(threadId);
         return undefined;
       }

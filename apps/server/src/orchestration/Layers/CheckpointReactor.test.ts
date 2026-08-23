@@ -1609,7 +1609,12 @@ describe("CheckpointReactor", () => {
     expect(
       branchAfter?.messages.filter((message) => message.id === rewindRequest.replacementMessageId),
     ).toHaveLength(1);
-    expect(restoreCheckpoint).not.toHaveBeenCalled();
+    expect(restoreCheckpoint).toHaveBeenCalledWith(
+      expect.objectContaining({
+        checkpointRef: expect.stringContaining(":0"),
+        fallbackToHead: true,
+      }),
+    );
     expect(harness.provider.rollbackConversation).not.toHaveBeenCalled();
     expect(harness.provider.forkConversation).not.toHaveBeenCalled();
     expect(harness.reconcileParentAfterRewind).toHaveBeenCalledWith(

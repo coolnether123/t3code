@@ -766,6 +766,7 @@ const make = Effect.gen(function* () {
     readonly cutoffCreatedAt?: string;
     readonly retainedTurnIds?: ReadonlySet<TurnId>;
     readonly reconciliationRequestId?: string;
+    readonly skipProviderRollback?: boolean;
   }) {
     const thread = yield* resolveThreadDetail(input.threadId);
     if (!thread) {
@@ -850,7 +851,7 @@ const make = Effect.gen(function* () {
     yield* workspaceEntries.refresh(sessionRuntime.value.cwd);
 
     const rolledBackTurns = Math.max(0, currentTurnCount - input.turnCount);
-    if (rolledBackTurns > 0) {
+    if (rolledBackTurns > 0 && !input.skipProviderRollback) {
       yield* providerService.rollbackConversation({
         threadId: sessionRuntime.value.threadId,
         numTurns: rolledBackTurns,
@@ -1088,25 +1089,17 @@ const make = Effect.gen(function* () {
               runtimeMode: sourceThread.runtimeMode,
               createdAt: event.payload.createdAt,
             });
-            yield* orchestrationEngine
-              .dispatch({
-                type: "thread.revert.complete",
-                commandId: editCommandId(event.payload.requestId, "revert-complete"),
-                threadId: sourceThread.id,
-                turnCount: 0,
-                sourceMessageId: event.payload.sourceMessageId,
-                cutoffCreatedAt: boundary.sourceMessage.createdAt,
-                createdAt: event.payload.createdAt,
-              })
-              .pipe(Effect.asVoid);
-            yield* workerService.reconcileParentAfterRewind({
-              parentThreadId: sourceThread.id,
+            return yield* restoreThreadToTurnCount({
+              threadId: sourceThread.id,
+              turnCount: 0,
+              createdAt: event.payload.createdAt,
+              completionCommandId: editCommandId(event.payload.requestId, "revert-complete"),
+              sourceMessageId: event.payload.sourceMessageId,
+              cutoffCreatedAt: boundary.sourceMessage.createdAt,
               retainedTurnIds: boundary.retainedTurnIds,
-              requestId: event.payload.requestId,
-              discardUnattributed: true,
-              parentActivities: sourceThread.activities,
+              reconciliationRequestId: event.payload.requestId,
+              skipProviderRollback: true,
             });
-            return true;
           })
         : yield* restoreThreadToTurnCount({
             threadId: sourceThread.id,

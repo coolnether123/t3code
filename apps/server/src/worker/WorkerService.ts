@@ -2,15 +2,16 @@ import {
   ApprovalRequestId,
   ProviderInstanceId,
   ThreadId,
+  TurnId,
   TrimmedNonEmptyString,
   WorkerActivationId,
   WorkerId,
   WorkerMessageId,
   WorkerWaitLeaseId,
   WorkerOperationError,
+  isToolLifecycleItemType,
   type ProviderRuntimeEvent,
   type OrchestrationThreadActivity,
-  type TurnId,
   type WorkerActivation,
   type WorkerApprovalDecision,
   type WorkerDetail,
@@ -31,6 +32,7 @@ import {
   workerDisplayNameFor,
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Context from "effect/Context";
@@ -40,6 +42,7 @@ import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import {
@@ -64,11 +67,29 @@ const zeroUsage = (): WorkerTokenUsage => ({
 const projectWorkerTokenUsage = (usage: Record<string, unknown> | undefined): WorkerTokenUsage =>
   projectWorkerUsageSnapshot(usage).cumulative;
 const isWorkerOperationError = Schema.is(WorkerOperationError);
+const terminalActivationStatuses: ReadonlySet<WorkerActivation["status"]> = new Set([
+  "completed",
+  "failed",
+  "interrupted",
+  "lost",
+]);
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+function providerTurnIdForEvent(event: ProviderRuntimeEvent): string | undefined {
+  return event.turnId ?? event.providerRefs?.providerTurnId;
+}
+
+function completedAssistantText(event: ProviderRuntimeEvent): string | undefined {
+  if (event.type !== "item.completed" || event.payload.itemType !== "assistant_message") {
+    return undefined;
+  }
+  const detail = event.payload.detail?.trim();
+  return detail && detail.length > 0 ? detail : undefined;
 }
 
 function workerStartLineage(
@@ -151,6 +172,7 @@ const makeWorkerService = Effect.gen(function* () {
   const sequence = yield* Ref.make(0);
   const contentBuffers = yield* Ref.make(new Map<string, string>());
   const linkedProviderThreadIds = yield* Ref.make<ReadonlySet<string> | undefined>(undefined);
+  const transitions = yield* Semaphore.make(1);
 
   const fail = (operation: string, message: string, cause?: unknown) =>
     new WorkerOperationError({ operation, message, ...(cause === undefined ? {} : { cause }) });
@@ -299,6 +321,52 @@ const makeWorkerService = Effect.gen(function* () {
     extra?: Partial<WorkerActivation>,
   ) => ({ ...activation, status, lastActivityAt, ...extra }) satisfies WorkerActivation;
 
+  const failPendingActivation = (input: {
+    readonly stored: StoredWorker;
+    readonly activation: WorkerActivation;
+    readonly error: unknown;
+    readonly failWorkerSummary: boolean;
+  }) =>
+    transitions.withPermits(1)(
+      Effect.gen(function* () {
+        const latestActivation = Option.getOrUndefined(
+          yield* store.getActivation(input.activation.id),
+        );
+        if (latestActivation === undefined || latestActivation.status !== "starting") return;
+
+        const failedAt = yield* nowIso;
+        const errorMessage =
+          input.error instanceof Error ? input.error.message : "Provider activation failed";
+        yield* store.saveActivation(
+          updateActivation(latestActivation, "failed", failedAt, {
+            finishedAt: failedAt,
+            error: errorMessage,
+          }),
+        );
+
+        const latestStored =
+          Option.getOrUndefined(yield* store.getWorker(input.stored.summary.id)) ?? input.stored;
+        const next = input.failWorkerSummary
+          ? yield* saveSummary(
+              latestStored,
+              clearActiveActivation(latestStored.summary, {
+                status: "failed",
+                updatedAt: failedAt,
+                lastActivityAt: failedAt,
+              }),
+            )
+          : latestStored;
+        yield* publish(next, { type: "updated" });
+        yield* wake({
+          workerId: input.activation.workerId,
+          activationId: input.activation.id,
+          reason: "failed",
+          status: "failed",
+          occurredAt: failedAt,
+        });
+      }),
+    );
+
   const start: WorkerServiceShape["start"] = (request) =>
     Effect.gen(function* () {
       const input = request.input;
@@ -331,6 +399,7 @@ const makeWorkerService = Effect.gen(function* () {
         summary,
         assignment: input.assignment,
         context: input.context,
+        ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
         ...(request.parentTurnId === undefined ? {} : { parentTurnId: request.parentTurnId }),
         ...(input.instructions === undefined ? {} : { instructions: input.instructions }),
       };
@@ -374,20 +443,41 @@ const makeWorkerService = Effect.gen(function* () {
           ...(input.approvalPolicy === undefined ? {} : { approvalPolicy: input.approvalPolicy }),
           ...(input.sandboxMode === undefined ? {} : { sandboxMode: input.sandboxMode }),
         })
-        .pipe(Effect.mapError((error) => error));
-      const runningAt = yield* nowIso;
-      const runningActivation = updateActivation(activation, "running", runningAt, {
-        providerTurnId: started.providerTurnId,
-      });
-      yield* store.saveActivation(runningActivation);
-      const running = yield* saveSummary(stored, {
-        ...summary,
-        status: "running",
-        updatedAt: runningAt,
-        lastActivityAt: runningAt,
-      });
-      yield* publish(running, { type: "created", message: assignmentMessage });
-      return yield* read(workerId);
+        .pipe(
+          Effect.catch((error) =>
+            failPendingActivation({
+              stored,
+              activation,
+              error,
+              failWorkerSummary: true,
+            }).pipe(Effect.andThen(Effect.fail(error))),
+          ),
+        );
+      return yield* transitions.withPermits(1)(
+        Effect.gen(function* () {
+          const latestActivation = Option.getOrUndefined(yield* store.getActivation(activationId));
+          if (latestActivation === undefined || latestActivation.status !== "starting") {
+            return yield* read(workerId);
+          }
+          const runningAt = yield* nowIso;
+          const runningActivation = updateActivation(latestActivation, "running", runningAt, {
+            providerTurnId: started.providerTurnId,
+          });
+          yield* store.saveActivation(runningActivation);
+          const latestStored = Option.getOrUndefined(yield* store.getWorker(workerId)) ?? stored;
+          if (latestStored.summary.activeActivationId !== activationId) {
+            return yield* read(workerId);
+          }
+          const running = yield* saveSummary(latestStored, {
+            ...latestStored.summary,
+            status: "running",
+            updatedAt: runningAt,
+            lastActivityAt: runningAt,
+          });
+          yield* publish(running, { type: "created", message: assignmentMessage });
+          return yield* read(workerId);
+        }),
+      );
     }).pipe(Effect.mapError(mapWorkerError("worker.start", "Worker start failed")));
 
   const list: WorkerServiceShape["list"] = (input) =>
@@ -483,33 +573,54 @@ const makeWorkerService = Effect.gen(function* () {
         createdAt: now,
       };
       const withMessage = yield* addMessage(current, message);
-      const sent = yield* backend.send({
-        providerThreadId: activation.providerThreadId,
-        providerInstanceId: current.summary.providerInstanceId,
-        title: current.summary.title,
-        message: input.message,
-        ...(input.context === undefined ? {} : { context: input.context }),
-        modelSelection: {
-          instanceId: current.summary.providerInstanceId,
-          model: current.summary.model,
-        },
-        runtimeMode: current.summary.runtimeMode,
-      });
-      const runningAt = yield* nowIso;
-      yield* store.saveActivation(
-        updateActivation(activation, "running", runningAt, {
-          providerTurnId: sent.providerTurnId,
+      const sent = yield* backend
+        .send({
+          providerThreadId: activation.providerThreadId,
+          providerInstanceId: current.summary.providerInstanceId,
+          title: current.summary.title,
+          message: input.message,
+          ...(input.context === undefined ? {} : { context: input.context }),
+          modelSelection: current.modelSelection ?? {
+            instanceId: current.summary.providerInstanceId,
+            model: current.summary.model,
+          },
+          runtimeMode: current.summary.runtimeMode,
+        })
+        .pipe(
+          Effect.catch((error) =>
+            failPendingActivation({
+              stored: withMessage,
+              activation,
+              error,
+              failWorkerSummary: false,
+            }).pipe(Effect.andThen(Effect.fail(error))),
+          ),
+        );
+      return yield* transitions.withPermits(1)(
+        Effect.gen(function* () {
+          const latestActivation = Option.getOrUndefined(yield* store.getActivation(activationId));
+          if (latestActivation === undefined || latestActivation.status !== "starting") {
+            return yield* read(input.workerId);
+          }
+          const runningAt = yield* nowIso;
+          yield* store.saveActivation(
+            updateActivation(latestActivation, "running", runningAt, {
+              providerTurnId: sent.providerTurnId,
+            }),
+          );
+          const latestStored = Option.getOrUndefined(yield* store.getWorker(input.workerId));
+          if (latestStored === undefined) return yield* read(input.workerId);
+          yield* saveSummary(latestStored, {
+            ...latestStored.summary,
+            status: "running",
+            activeActivationId: activationId,
+            activationCount: latestStored.summary.activationCount + 1,
+            updatedAt: runningAt,
+            lastActivityAt: runningAt,
+          });
+          return yield* read(input.workerId);
         }),
       );
-      yield* saveSummary(withMessage, {
-        ...withMessage.summary,
-        status: "running",
-        activeActivationId: activationId,
-        activationCount: withMessage.summary.activationCount + 1,
-        updatedAt: runningAt,
-        lastActivityAt: runningAt,
-      });
-      return yield* read(input.workerId);
     }).pipe(Effect.mapError(mapWorkerError("worker.send", "Worker send failed")));
 
   const wait: WorkerServiceShape["wait"] = (input) =>
@@ -534,6 +645,47 @@ const makeWorkerService = Effect.gen(function* () {
         Effect.forEach(input.workerIds, (workerId) =>
           read(workerId).pipe(Effect.map((detail) => detail.summary)),
         );
+      const initialWorkers = yield* readWorkers();
+      const alreadyMatched =
+        input.until === undefined
+          ? undefined
+          : initialWorkers.find((worker) => input.until!.includes(worker.status));
+      if (alreadyMatched !== undefined) {
+        const completedAt = yield* nowIso;
+        const reason: WorkerWakeEvent["reason"] =
+          alreadyMatched.status === "completed"
+            ? "completed"
+            : alreadyMatched.status === "interrupted"
+              ? "interrupted"
+              : alreadyMatched.status === "lost"
+                ? "lost"
+                : alreadyMatched.status === "waitingApproval"
+                  ? "approvalRequested"
+                  : "failed";
+        const event: WorkerWakeEvent = {
+          workerId: alreadyMatched.id,
+          ...(alreadyMatched.activeActivationId === undefined
+            ? {}
+            : { activationId: alreadyMatched.activeActivationId }),
+          reason,
+          status: alreadyMatched.status,
+          occurredAt: completedAt,
+        };
+        yield* store.finishWaitLease({
+          leaseId,
+          status: "woken",
+          reason,
+          completedAt,
+        });
+        return {
+          leaseId,
+          status: "woken",
+          reason,
+          events: [event],
+          workers: initialWorkers,
+          completedAt,
+        } satisfies WorkerWaitResult;
+      }
       const result = yield* Effect.scoped(
         PubSub.subscribe(wakes).pipe(
           Effect.flatMap((subscription) =>
@@ -842,9 +994,17 @@ const makeWorkerService = Effect.gen(function* () {
       ),
     );
 
-  const handleProviderEvent: WorkerServiceShape["handleProviderEvent"] = (event) =>
+  const matchProviderEvent = (event: ProviderRuntimeEvent) =>
+    store.findProviderActivation({
+      providerThreadId: event.threadId,
+      ...(providerTurnIdForEvent(event) === undefined
+        ? {}
+        : { providerTurnId: providerTurnIdForEvent(event) }),
+    });
+
+  const processProviderEvent = (event: ProviderRuntimeEvent) =>
     Effect.gen(function* () {
-      const match = Option.getOrUndefined(yield* store.findProviderThread(event.threadId));
+      const match = Option.getOrUndefined(yield* matchProviderEvent(event));
       if (match === undefined) return;
       const current = Option.getOrUndefined(yield* store.getWorker(match.workerId));
       if (current === undefined || current.discardedAt !== undefined) return;
@@ -858,6 +1018,10 @@ const makeWorkerService = Effect.gen(function* () {
       const activation = Option.getOrUndefined(yield* store.getActivation(match.activationId));
       if (activation === undefined) return;
       const payload = event.payload as Record<string, unknown>;
+      const ownsSummary =
+        current.summary.activeActivationId === activation.id ||
+        (current.summary.activeActivationId === undefined && activation.status === "starting");
+
       if (
         event.type === "content.delta" &&
         payload.streamKind === "assistant_text" &&
@@ -869,35 +1033,59 @@ const makeWorkerService = Effect.gen(function* () {
             `${buffers.get(match.activationId) ?? ""}${payload.delta as string}`,
           ),
         );
+        return;
       }
+
+      const finalAssistantText = completedAssistantText(event);
+      if (finalAssistantText !== undefined) {
+        yield* Ref.update(contentBuffers, (buffers) =>
+          buffers.get(match.activationId)?.trim()
+            ? buffers
+            : new Map(buffers).set(match.activationId, finalAssistantText),
+        );
+      }
+
       if (event.type === "turn.started") {
+        if (terminalActivationStatuses.has(activation.status)) return;
+        const providerTurnId = providerTurnIdForEvent(event);
         yield* store.saveActivation(
           updateActivation(
             activation,
             "running",
             event.createdAt,
-            event.turnId === undefined ? {} : { providerTurnId: event.turnId },
+            providerTurnId === undefined
+              ? undefined
+              : { providerTurnId: TurnId.make(providerTurnId) },
           ),
         );
         const next = yield* saveSummary(current, {
           ...current.summary,
           status: "running",
+          activeActivationId: activation.id,
+          activationCount:
+            current.summary.activeActivationId === activation.id
+              ? current.summary.activationCount
+              : current.summary.activationCount + 1,
           updatedAt: event.createdAt,
+          lastActivityAt: event.createdAt,
         });
         yield* publish(next, { type: "updated" });
         return;
       }
+
       if (event.type === "request.opened" || event.type === "user-input.requested") {
+        if (!ownsSummary || terminalActivationStatuses.has(activation.status)) return;
         const requestId = event.requestId;
         if (requestId === undefined) return;
+        const detail =
+          event.type === "request.opened" ? event.payload.detail : "Worker is waiting for input";
         const approval = {
           requestId: ApprovalRequestId.make(requestId),
           workerId: match.workerId,
           activationId: match.activationId,
           kind: event.type === "request.opened" ? "provider-request" : "user-input",
-          summary:
-            typeof payload.detail === "string" ? payload.detail : "Worker is waiting for input",
-          ...(typeof payload.detail === "string" ? { detail: payload.detail } : {}),
+          summary: detail ?? "Worker is waiting for input",
+          ...(detail === undefined ? {} : { detail }),
           requestedAt: event.createdAt,
           status: "pending",
         } satisfies import("@t3tools/contracts").WorkerApprovalRequest;
@@ -908,7 +1096,9 @@ const makeWorkerService = Effect.gen(function* () {
         const next = yield* saveSummary(current, {
           ...current.summary,
           status: "waitingApproval",
+          activeActivationId: activation.id,
           updatedAt: event.createdAt,
+          lastActivityAt: event.createdAt,
         });
         yield* publish(next, { type: "approvalRequested", approval });
         yield* wake({
@@ -920,6 +1110,7 @@ const makeWorkerService = Effect.gen(function* () {
         });
         return;
       }
+
       if (event.type === "thread.token-usage.updated") {
         const usage = payload.usage as Record<string, unknown> | undefined;
         const projected = projectWorkerUsageSnapshot(usage, event.raw);
@@ -929,81 +1120,199 @@ const makeWorkerService = Effect.gen(function* () {
           lastActivityAt: event.createdAt,
           usageDelta: lastModelCall,
         });
-        yield* saveSummary(current, {
+        const advancesCumulativeUsage =
+          projected.cumulative.totalTokens >= current.summary.usage.totalTokens;
+        const next = yield* saveSummary(current, {
           ...current.summary,
-          usage: projected.cumulative,
-          usageCoverage: projected.coverage,
-          lastModelCallUsage: lastModelCall,
+          ...(advancesCumulativeUsage
+            ? {
+                usage: projected.cumulative,
+                usageCoverage: projected.coverage,
+                lastModelCallUsage: lastModelCall,
+              }
+            : {}),
           updatedAt: event.createdAt,
+          lastActivityAt: event.createdAt,
         });
+        yield* publish(next, { type: "updated" });
         return;
       }
+
+      if (event.type === "item.completed" && isToolLifecycleItemType(event.payload.itemType)) {
+        yield* publish(current, { type: "updated" });
+        return;
+      }
+
       if (
-        event.type === "turn.completed" ||
-        event.type === "turn.aborted" ||
-        event.type === "runtime.error"
+        event.type !== "turn.completed" &&
+        event.type !== "turn.aborted" &&
+        event.type !== "runtime.error"
       ) {
-        const state =
-          event.type === "turn.completed"
-            ? payload.state
-            : event.type === "turn.aborted"
-              ? "interrupted"
-              : "failed";
-        const status: WorkerActivation["status"] =
-          state === "completed"
-            ? "completed"
-            : state === "interrupted" || state === "cancelled"
-              ? "interrupted"
-              : "failed";
-        const handoff =
-          status === "completed"
-            ? (yield* Ref.get(contentBuffers)).get(match.activationId)?.trim() ||
-              "Worker completed without a handoff."
-            : undefined;
-        yield* Ref.update(contentBuffers, (buffers) => {
-          const next = new Map(buffers);
-          next.delete(match.activationId);
-          return next;
-        });
-        const finished = updateActivation(activation, status, event.createdAt, {
-          finishedAt: event.createdAt,
-          ...(handoff === undefined ? {} : { handoff }),
-          ...(typeof payload.errorMessage === "string" ? { error: payload.errorMessage } : {}),
-        });
-        yield* store.saveActivation(finished);
-        const next = yield* saveSummary(
-          current,
-          clearActiveActivation(current.summary, { status, updatedAt: event.createdAt }),
+        return;
+      }
+      if (terminalActivationStatuses.has(activation.status)) return;
+
+      const state =
+        event.type === "turn.completed"
+          ? payload.state
+          : event.type === "turn.aborted"
+            ? "interrupted"
+            : "failed";
+      const status: WorkerActivation["status"] =
+        state === "completed"
+          ? "completed"
+          : state === "interrupted" || state === "cancelled"
+            ? "interrupted"
+            : "failed";
+      let handoff: string | undefined;
+      if (status === "completed") {
+        const buffered = (yield* Ref.get(contentBuffers)).get(match.activationId)?.trim();
+        const providerEvents = buffered ? [] : yield* store.listProviderEvents(match.workerId);
+        const turnId = activation.providerTurnId ?? event.turnId;
+        const persisted = providerEvents.findLast(
+          (candidate) =>
+            completedAssistantText(candidate) !== undefined &&
+            (turnId === undefined || providerTurnIdForEvent(candidate) === turnId),
         );
-        if (handoff !== undefined) {
-          const message: WorkerMessage = {
-            id: WorkerMessageId.make(yield* randomUuid),
-            workerId: match.workerId,
-            activationId: match.activationId,
-            author: "worker",
-            kind: "handoff",
-            body: handoff,
-            createdAt: event.createdAt,
-          };
-          yield* addMessage(next, message);
-        } else {
-          yield* publish(next, { type: "updated" });
-        }
-        const reason: WorkerWakeEvent["reason"] =
-          status === "completed"
-            ? "completed"
-            : status === "interrupted"
-              ? "interrupted"
-              : "failed";
-        yield* wake({
+        handoff =
+          buffered ||
+          (persisted === undefined ? undefined : completedAssistantText(persisted)) ||
+          "Worker completed without a handoff.";
+      }
+      yield* Ref.update(contentBuffers, (buffers) => {
+        const next = new Map(buffers);
+        next.delete(match.activationId);
+        return next;
+      });
+      const errorMessage =
+        event.type === "runtime.error"
+          ? event.payload.message
+          : event.type === "turn.completed"
+            ? event.payload.errorMessage
+            : event.payload.reason;
+      const finished = updateActivation(activation, status, event.createdAt, {
+        finishedAt: event.createdAt,
+        ...(handoff === undefined ? {} : { handoff }),
+        ...(errorMessage === undefined ? {} : { error: errorMessage }),
+      });
+      yield* store.saveActivation(finished);
+      const next = ownsSummary
+        ? yield* saveSummary(
+            current,
+            clearActiveActivation(current.summary, {
+              status,
+              activationCount:
+                current.summary.activeActivationId === activation.id
+                  ? current.summary.activationCount
+                  : current.summary.activationCount + 1,
+              updatedAt: event.createdAt,
+              lastActivityAt: event.createdAt,
+            }),
+          )
+        : current;
+      if (handoff !== undefined) {
+        const message: WorkerMessage = {
+          id: WorkerMessageId.make(yield* randomUuid),
           workerId: match.workerId,
           activationId: match.activationId,
-          reason,
-          status,
-          occurredAt: event.createdAt,
-        });
+          author: "worker",
+          kind: "handoff",
+          body: handoff,
+          createdAt: event.createdAt,
+        };
+        yield* addMessage(next, message);
+      } else {
+        yield* publish(next, { type: "updated" });
       }
-    }).pipe(Effect.catch(() => Effect.void));
+      const reason: WorkerWakeEvent["reason"] =
+        status === "completed" ? "completed" : status === "interrupted" ? "interrupted" : "failed";
+      yield* wake({
+        workerId: match.workerId,
+        activationId: match.activationId,
+        reason,
+        status,
+        occurredAt: event.createdAt,
+      });
+    });
+
+  const handleProviderEvent: WorkerServiceShape["handleProviderEvent"] = (event) =>
+    transitions
+      .withPermits(1)(processProviderEvent(event))
+      .pipe(
+        Effect.catchCause((cause) =>
+          Effect.gen(function* () {
+            yield* Effect.logError("Worker provider event projection failed", {
+              eventId: event.eventId,
+              eventType: event.type,
+              providerThreadId: event.threadId,
+              providerTurnId: providerTurnIdForEvent(event),
+              cause: Cause.pretty(cause),
+            });
+            if (
+              event.type !== "turn.completed" &&
+              event.type !== "turn.aborted" &&
+              event.type !== "runtime.error"
+            ) {
+              return;
+            }
+            yield* transitions
+              .withPermits(1)(
+                Effect.gen(function* () {
+                  const match = Option.getOrUndefined(yield* matchProviderEvent(event));
+                  if (match === undefined) return;
+                  const [storedOption, activationOption] = yield* Effect.all([
+                    store.getWorker(match.workerId),
+                    store.getActivation(match.activationId),
+                  ]);
+                  const stored = Option.getOrUndefined(storedOption);
+                  const activation = Option.getOrUndefined(activationOption);
+                  if (
+                    stored === undefined ||
+                    activation === undefined ||
+                    terminalActivationStatuses.has(activation.status)
+                  ) {
+                    return;
+                  }
+                  const failedAt = event.createdAt;
+                  yield* store.saveActivation(
+                    updateActivation(activation, "failed", failedAt, {
+                      finishedAt: failedAt,
+                      error: `Provider event projection failed: ${event.type}`,
+                    }),
+                  );
+                  const next =
+                    stored.summary.activeActivationId === activation.id
+                      ? yield* saveSummary(
+                          stored,
+                          clearActiveActivation(stored.summary, {
+                            status: "failed",
+                            updatedAt: failedAt,
+                            lastActivityAt: failedAt,
+                          }),
+                        )
+                      : stored;
+                  yield* publish(next, { type: "updated" });
+                  yield* wake({
+                    workerId: match.workerId,
+                    activationId: match.activationId,
+                    reason: "failed",
+                    status: "failed",
+                    occurredAt: failedAt,
+                  });
+                }),
+              )
+              .pipe(
+                Effect.catchCause((recoveryCause) =>
+                  Effect.logError("Worker projection failure recovery failed", {
+                    eventId: event.eventId,
+                    eventType: event.type,
+                    cause: Cause.pretty(recoveryCause),
+                  }),
+                ),
+              );
+          }),
+        ),
+      );
 
   const recover = Effect.gen(function* () {
     const workers = yield* store.listWorkers({ includeClosed: false, limit: 500 });

@@ -587,9 +587,9 @@ export type WorkerEvent = typeof WorkerEvent.Type;
  * aliases make the tool surface discoverable without creating a second wire
  * model that could drift from the server API. */
 /**
- * Parent-agent Worker creation input. Execution permissions are deliberately
- * absent: the MCP server binds them to the calling parent session instead of
- * trusting model-authored arguments.
+ * Parent-agent Worker creation input. Runtime access is deliberately absent:
+ * the MCP server binds it to the calling parent session instead of trusting
+ * model-authored arguments.
  */
 /**
  * Model selection accepted by `worker_start`.

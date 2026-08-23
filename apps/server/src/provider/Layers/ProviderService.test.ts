@@ -2163,7 +2163,10 @@ validation.layer("ProviderServiceLive validation", (it) => {
 describe("agent browser access", () => {
   const revokedThreads: Array<ThreadId> = [];
 
-  const startSessionWith = (enableAgentBrowserAccess: boolean, threadId: ThreadId) =>
+  const startSessionWith = (
+    settings: { readonly enableAgentBrowserAccess: boolean; readonly enableT3Workers?: boolean },
+    threadId: ThreadId,
+  ) =>
     Effect.gen(function* () {
       const issued: Array<ThreadId> = [];
       const codex = makeFakeCodexAdapter();
@@ -2187,7 +2190,7 @@ describe("agent browser access", () => {
       }).pipe(
         Layer.provide(providerAdapterLayer),
         Layer.provide(directoryLayer),
-        Layer.provide(ServerSettings.ServerSettingsService.layerTest({ enableAgentBrowserAccess })),
+        Layer.provide(ServerSettings.ServerSettingsService.layerTest(settings)),
         Layer.provide(serverConfigTestLayer),
         Layer.provide(AnalyticsService.layerTest),
         Layer.provide(
@@ -2216,7 +2219,10 @@ describe("agent browser access", () => {
   // what actually denies every provider and external MCP client.
   it.effect("requests no MCP credential when agent browser access is off", () =>
     Effect.gen(function* () {
-      const issued = yield* startSessionWith(false, asThreadId("thread-browser-off"));
+      const issued = yield* startSessionWith(
+        { enableAgentBrowserAccess: false },
+        asThreadId("thread-browser-off"),
+      );
 
       assert.deepEqual(issued, []);
     }).pipe(Effect.provide(NodeServices.layer)),
@@ -2227,7 +2233,7 @@ describe("agent browser access", () => {
       const threadId = asThreadId("thread-browser-revoke");
       revokedThreads.length = 0;
 
-      yield* startSessionWith(false, threadId);
+      yield* startSessionWith({ enableAgentBrowserAccess: false }, threadId);
 
       // Clearing the in-memory map is not enough: a token issued before the
       // toggle flipped stays valid against `/mcp` for its whole liveness
@@ -2240,7 +2246,20 @@ describe("agent browser access", () => {
     Effect.gen(function* () {
       const threadId = asThreadId("thread-browser-on");
 
-      const issued = yield* startSessionWith(true, threadId);
+      const issued = yield* startSessionWith({ enableAgentBrowserAccess: true }, threadId);
+
+      assert.deepEqual(issued, [threadId]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("requests an MCP credential for Workers when browser preview is off", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-workers-only");
+
+      const issued = yield* startSessionWith(
+        { enableAgentBrowserAccess: false, enableT3Workers: true },
+        threadId,
+      );
 
       assert.deepEqual(issued, [threadId]);
     }).pipe(Effect.provide(NodeServices.layer)),

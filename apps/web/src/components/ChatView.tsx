@@ -2315,16 +2315,13 @@ function ChatViewContent(props: ChatViewProps) {
     selectedProviderByThreadId ?? threadProvider,
   );
   const selectedProvider: ProviderDriverKind = lockedProvider ?? unlockedSelectedProvider;
-  const subagentBackend = resolveComposerSubagentBackend(composerSubagentBackend, selectedProvider);
-  useEffect(() => {
-    if (composerSubagentBackend !== null || subagentBackend === null) return;
-    setComposerDraftSubagentBackend(composerDraftTarget, subagentBackend);
-  }, [
-    composerDraftTarget,
+  const subagentBackend = resolveComposerSubagentBackend(
     composerSubagentBackend,
-    setComposerDraftSubagentBackend,
-    subagentBackend,
-  ]);
+    selectedProvider,
+    {
+      workersEnabled: settings.enableT3Workers,
+    },
+  );
   const phase = derivePhase(activeThread?.session ?? null);
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
   const workLogEntries = useMemo(() => deriveWorkLogEntries(threadActivities), [threadActivities]);
