@@ -16,10 +16,15 @@ import {
 } from "../CodexDeveloperInstructions.ts";
 import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import {
+  buildMcpApprovalResponse,
+  buildPermissionsApprovalResponse,
   buildTurnStartParams,
   hasConfiguredMcpServer,
+  isComputerUseMcpApproval,
+  isMcpToolApproval,
   isRecoverableThreadResumeError,
   makeMemoryConsolidationNotificationFilter,
+  mcpApprovalRequestKind,
   openCodexThread,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
@@ -38,6 +43,116 @@ describe("CodexSessionRuntimeIdentifierGenerationError", () => {
       error.message,
       "Failed to generate Codex App Server identifier for provider-event.",
     );
+  });
+});
+
+describe("buildPermissionsApprovalResponse", () => {
+  const permissions = {
+    network: { enabled: true },
+    fileSystem: {
+      entries: [{ access: "write" as const, path: { type: "path" as const, path: "/tmp" } }],
+    },
+  };
+
+  it("grants the requested execution context for this turn", () => {
+    NodeAssert.deepStrictEqual(buildPermissionsApprovalResponse(permissions, "accept"), {
+      permissions,
+      scope: "turn",
+    });
+  });
+
+  it("persists an accepted execution context only for acceptForSession", () => {
+    NodeAssert.deepStrictEqual(buildPermissionsApprovalResponse(permissions, "acceptForSession"), {
+      permissions,
+      scope: "session",
+    });
+  });
+
+  it("denies every requested capability on decline or cancellation", () => {
+    for (const decision of ["decline", "cancel"] as const) {
+      NodeAssert.deepStrictEqual(buildPermissionsApprovalResponse(permissions, decision), {
+        permissions: {},
+        scope: "turn",
+      });
+    }
+  });
+});
+
+describe("MCP tool approval", () => {
+  const request = {
+    _meta: {
+      codex_approval_kind: "mcp_tool_call",
+      connector_id: "computer-use",
+      persist: ["session", "always"],
+    },
+    message: "Allow Computer Use to control this desktop?",
+    mode: "form" as const,
+    requestedSchema: { type: "object" as const, properties: {} },
+    serverName: "computer-use",
+    threadId: "provider-thread-1",
+    turnId: "turn-1",
+  };
+
+  it("recognizes only the Computer Use connector approval", () => {
+    NodeAssert.equal(isComputerUseMcpApproval(request), true);
+    NodeAssert.equal(
+      isComputerUseMcpApproval({
+        ...request,
+        _meta: { ...request._meta, connector_id: "calendar" },
+      }),
+      false,
+    );
+  });
+
+  it("recognizes generic MCP tool guardian approvals without a connector id", () => {
+    const genericRequest = {
+      ...request,
+      _meta: { codex_approval_kind: "mcp_tool_call" as const },
+      message: "Allow node_repl to run this tool call?",
+      serverName: "node_repl",
+    };
+
+    NodeAssert.equal(isMcpToolApproval(genericRequest), true);
+    NodeAssert.equal(isComputerUseMcpApproval(genericRequest), false);
+    NodeAssert.equal(mcpApprovalRequestKind(genericRequest), "tool");
+    NodeAssert.equal(mcpApprovalRequestKind(request), "permissions");
+  });
+
+  it("does not recognize URL or unrelated form elicitations as MCP tool approvals", () => {
+    NodeAssert.equal(
+      isMcpToolApproval({
+        ...request,
+        mode: "url",
+        url: "https://example.com/approve",
+        elicitationId: "elicitation-1",
+      }),
+      false,
+    );
+    const unrelatedRequest = {
+      ...request,
+      _meta: { connector_id: "computer-use" },
+    };
+    NodeAssert.equal(isMcpToolApproval(unrelatedRequest), false);
+    NodeAssert.equal(mcpApprovalRequestKind(unrelatedRequest), undefined);
+    NodeAssert.equal(
+      mcpApprovalRequestKind({
+        ...request,
+        mode: "url",
+        url: "https://example.com/approve",
+        elicitationId: "elicitation-1",
+      }),
+      undefined,
+    );
+  });
+
+  it("maps approval decisions to MCP actions and session persistence", () => {
+    NodeAssert.deepStrictEqual(buildMcpApprovalResponse("accept"), { action: "accept" });
+    NodeAssert.deepStrictEqual(buildMcpApprovalResponse("acceptForSession"), {
+      action: "accept",
+      _meta: { persist: "session" },
+    });
+    NodeAssert.deepStrictEqual(buildMcpApprovalResponse("decline"), { action: "decline" });
+    NodeAssert.deepStrictEqual(buildMcpApprovalResponse("cancel"), { action: "cancel" });
   });
 });
 
@@ -239,30 +354,30 @@ describe("buildTurnStartParams", () => {
     }),
   );
 
-  it("omits collaboration mode when interaction mode is absent", () => {
-    const params = Effect.runSync(
-      buildTurnStartParams({
+  it.effect("omits collaboration mode when interaction mode is absent", () =>
+    Effect.gen(function* () {
+      const params = yield* buildTurnStartParams({
         threadId: "provider-thread-1",
         runtimeMode: "approval-required",
         prompt: "Review",
-      }),
-    );
+      });
 
-    NodeAssert.deepStrictEqual(params, {
-      threadId: "provider-thread-1",
-      approvalPolicy: "untrusted",
-      approvalsReviewer: "user",
-      sandboxPolicy: {
-        type: "readOnly",
-      },
-      input: [
-        {
-          type: "text",
-          text: "Review",
+      NodeAssert.deepStrictEqual(params, {
+        threadId: "provider-thread-1",
+        approvalPolicy: "untrusted",
+        approvalsReviewer: "user",
+        sandboxPolicy: {
+          type: "readOnly",
         },
-      ],
-    });
-  });
+        input: [
+          {
+            type: "text",
+            text: "Review",
+          },
+        ],
+      });
+    }),
+  );
 });
 
 describe("buildCodexDeveloperInstructions", () => {
@@ -359,16 +474,38 @@ describe("buildCodexDeveloperInstructions", () => {
 });
 
 describe("T3 browser developer instructions", () => {
-  it("prefers the product-native preview tools in both collaboration modes", () => {
-    for (const instructions of [
-      CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS,
-      CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS,
-    ]) {
-      NodeAssert.match(instructions, /t3-code/);
-      NodeAssert.match(instructions, /preview_status/);
-      NodeAssert.match(instructions, /preview_open/);
-      NodeAssert.match(instructions, /Do not switch to global browser skills/);
-    }
+  it("defaults to trusted full desktop control", () => {
+    const instructions = buildCodexDeveloperInstructions("default", {
+      model: "gpt-5.6-sol",
+      reasoningEffort: "high",
+    });
+
+    NodeAssert.match(instructions, /Full Windows and Chrome control/);
+    NodeAssert.match(instructions, /upload, download/);
+    NodeAssert.match(instructions, /no domain allowlist/);
+    NodeAssert.doesNotMatch(instructions, /Do not switch to global browser skills/);
+  });
+
+  it("keeps preview, full Chrome, and full desktop as explicit per-turn options", () => {
+    const common = { model: "gpt-5.6-sol", reasoningEffort: "high" } as const;
+    const preview = buildCodexDeveloperInstructions("default", {
+      ...common,
+      computerControlMode: "preview",
+    });
+    const chrome = buildCodexDeveloperInstructions("default", {
+      ...common,
+      computerControlMode: "chrome",
+    });
+    const desktop = buildCodexDeveloperInstructions("plan", {
+      ...common,
+      computerControlMode: "desktop",
+    });
+
+    NodeAssert.match(preview, /preview_status/);
+    NodeAssert.match(preview, /Do not switch to global browser skills/);
+    NodeAssert.match(chrome, /Full Chrome control/);
+    NodeAssert.match(chrome, /Chrome DevTools/);
+    NodeAssert.match(desktop, /Full Windows and Chrome control/);
   });
 });
 

@@ -28,6 +28,10 @@ import { createModelCapabilities } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { codexLaunchArgv, resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
 import {
+  CODEX_COMPUTER_CONTROL_OPTION_ID,
+  DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
+} from "../CodexDeveloperInstructions.ts";
+import {
   AUTH_PROBE_TIMEOUT_MS,
   buildServerProvider,
   type ServerProviderDraft,
@@ -179,6 +183,31 @@ export function mapCodexModelCapabilities(
       currentValue: defaultServiceTier,
     });
   }
+  optionDescriptors.push({
+    id: CODEX_COMPUTER_CONTROL_OPTION_ID,
+    label: "Computer control",
+    type: "select",
+    options: [
+      {
+        id: "desktop",
+        label: "Full desktop",
+        description: "Use unrestricted Chrome and Windows computer-control tools with fallbacks.",
+        isDefault: true,
+      },
+      {
+        id: "chrome",
+        label: "Full Chrome",
+        description:
+          "Use the existing Chrome session, DevTools, downloads, uploads, and web tools.",
+      },
+      {
+        id: "preview",
+        label: "T3 Preview",
+        description: "Prefer T3's isolated collaborative preview browser.",
+      },
+    ],
+    currentValue: DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
+  });
 
   return createModelCapabilities({
     optionDescriptors,
@@ -320,6 +349,7 @@ export function buildCodexInitializeParams(): CodexSchema.V1InitializeParams {
     },
     capabilities: {
       experimentalApi: true,
+      mcpServerOpenaiFormElicitation: true,
     },
   };
 }

@@ -130,6 +130,50 @@ describe("derivePendingApprovals", () => {
     ]);
   });
 
+  it("maps MCP tool and permission requests into their own approval kinds", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "approval-open-tool",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "approval.requested",
+        summary: "Tool approval requested",
+        tone: "approval",
+        payload: {
+          requestId: "req-tool",
+          requestType: "tool_approval",
+          detail: "Use Chrome",
+        },
+      }),
+      makeActivity({
+        id: "approval-open-permissions",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "approval.requested",
+        summary: "Permission requested",
+        tone: "approval",
+        payload: {
+          requestId: "req-permissions",
+          requestType: "permissions_approval",
+          detail: "Control Windows",
+        },
+      }),
+    ];
+
+    expect(derivePendingApprovals(activities)).toEqual([
+      {
+        requestId: "req-tool",
+        requestKind: "tool",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        detail: "Use Chrome",
+      },
+      {
+        requestId: "req-permissions",
+        requestKind: "permissions",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        detail: "Control Windows",
+      },
+    ]);
+  });
+
   it("derives dynamic tool requests as actionable generic approvals", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

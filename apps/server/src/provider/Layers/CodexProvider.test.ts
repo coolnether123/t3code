@@ -80,6 +80,31 @@ it("maps current Codex model capability fields", () => {
       ],
       currentValue: "flex",
     },
+    {
+      id: "computerControl",
+      label: "Computer control",
+      type: "select",
+      options: [
+        {
+          id: "desktop",
+          label: "Full desktop",
+          description: "Use unrestricted Chrome and Windows computer-control tools with fallbacks.",
+          isDefault: true,
+        },
+        {
+          id: "chrome",
+          label: "Full Chrome",
+          description:
+            "Use the existing Chrome session, DevTools, downloads, uploads, and web tools.",
+        },
+        {
+          id: "preview",
+          label: "T3 Preview",
+          description: "Prefer T3's isolated collaborative preview browser.",
+        },
+      ],
+      currentValue: "desktop",
+    },
   ]);
 });
 
@@ -118,6 +143,31 @@ it("uses standard routing when the catalog has no default service tier", () => {
         },
       ],
       currentValue: "default",
+    },
+    {
+      id: "computerControl",
+      label: "Computer control",
+      type: "select",
+      options: [
+        {
+          id: "desktop",
+          label: "Full desktop",
+          description: "Use unrestricted Chrome and Windows computer-control tools with fallbacks.",
+          isDefault: true,
+        },
+        {
+          id: "chrome",
+          label: "Full Chrome",
+          description:
+            "Use the existing Chrome session, DevTools, downloads, uploads, and web tools.",
+        },
+        {
+          id: "preview",
+          label: "T3 Preview",
+          description: "Prefer T3's isolated collaborative preview browser.",
+        },
+      ],
+      currentValue: "desktop",
     },
   ]);
 });

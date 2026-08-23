@@ -273,6 +273,7 @@ validationLayer("CodexAdapterLive validation", (it) => {
         threadId: asThreadId("thread-1"),
         modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.3-codex", [
           { id: "serviceTier", value: "priority" },
+          { id: "computerControl", value: "chrome" },
         ]),
         runtimeMode: "full-access",
       });
@@ -284,6 +285,7 @@ validationLayer("CodexAdapterLive validation", (it) => {
         model: "gpt-5.3-codex",
         providerInstanceId: ProviderInstanceId.make("codex"),
         serviceTier: "priority",
+        computerControlMode: "chrome",
         threadId: asThreadId("thread-1"),
         runtimeMode: "full-access",
       });
@@ -347,6 +349,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
           modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.3-codex", [
             { id: "reasoningEffort", value: "high" },
             { id: "serviceTier", value: "priority" },
+            { id: "computerControl", value: "preview" },
           ]),
           attachments: [],
         }),
@@ -357,6 +360,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         model: "gpt-5.3-codex",
         effort: "high",
         serviceTier: "priority",
+        computerControlMode: "preview",
       });
     }),
   );
@@ -464,6 +468,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
             [
               { id: "reasoningEffort", value: "high" },
               { id: "serviceTier", value: "flex" },
+              { id: "computerControl", value: "chrome" },
             ],
           ),
           attachments: [],
@@ -475,6 +480,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         model: "gpt-5.3-codex",
         effort: "high",
         serviceTier: "flex",
+        computerControlMode: "chrome",
       });
     }).pipe(Effect.provide(customLayer));
   });
@@ -1014,6 +1020,44 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       if (secondEvent?.type === "runtime.warning") {
         NodeAssert.equal(secondEvent.payload.message, "Sandbox setup failed");
       }
+    }),
+  );
+
+  it.effect("maps Computer Use MCP requests to canonical permission approvals", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-computer-use-approval"),
+        kind: "request",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "mcpServer/elicitation/request",
+        requestId: ApprovalRequestId.make("req-computer-use-1"),
+        requestKind: "permissions",
+        payload: {
+          _meta: {
+            codex_approval_kind: "mcp_tool_call",
+            connector_id: "computer-use",
+          },
+          message: "Allow Computer Use to control this desktop?",
+          mode: "form",
+          requestedSchema: { type: "object", properties: {} },
+          serverName: "computer-use",
+          threadId: "thread-1",
+          turnId: "turn-1",
+        },
+      } satisfies ProviderEvent);
+
+      const event = yield* Fiber.join(eventFiber);
+      NodeAssert.equal(event._tag, "Some");
+      if (event._tag !== "Some") return;
+      NodeAssert.equal(event.value.type, "request.opened");
+      if (event.value.type !== "request.opened") return;
+      NodeAssert.equal(event.value.payload.requestType, "permissions_approval");
+      NodeAssert.equal(event.value.payload.detail, "Allow Computer Use to control this desktop?");
     }),
   );
 
