@@ -236,15 +236,35 @@ function Test-ManagedDesktopCommand {
     # held outside this exact T3 process tree.
     $isDesktopMode = $command -match '(?i)scripts[\\/]dev-runner\.ts\s+dev:desktop(?:\s|$)'
     $hasExpectedDesktopUrl = $command -match "(?i)--dev-url\s+[^\s]*$webPort"
-    return $command -match '(?i)scripts[\\/]dev-runner\.ts\s+dev(?::desktop)?(?:\s|$)' -and
+    $runnerRoot = $command -match '(?i)scripts[\\/]dev-runner\.ts\s+dev(?::desktop)?(?:\s|$)' -and
         $command -match "(?i)--home-dir\s+.*$homePattern" -and
         $command -match "(?i)--port\s+$serverPort(\s|$)" -and
         (-not $isDesktopMode -or $hasExpectedDesktopUrl)
+    $directServerRoot = $command -match '(?i)(?:^|\s|[\\/])apps[\\/]server[\\/]src[\\/]bin\.ts\s+--host\s+127\.0\.0\.1(?:\s|$)'
+    return $runnerRoot -or $directServerRoot
 }
 
 function Get-ManagedDesktopRoots {
     param([Parameter(Mandatory)][string]$HomePath)
     return @(Get-CimInstance Win32_Process | Where-Object { Test-ManagedDesktopCommand $_ $HomePath })
+}
+
+function Get-ManagedElectronRoots {
+    return @(Get-CimInstance Win32_Process | Where-Object {
+        $_.Name -match '^node(\.exe)?$' -and
+        $null -ne $_.ExecutablePath -and
+        (Test-SamePath $_.ExecutablePath $nodePath) -and
+        (Get-ProcessCommandLine $_) -match '(?i)apps[\\/]desktop[\\/]scripts[\\/]start-electron\.mjs(?:\s|$)'
+    })
+}
+
+function Get-ManagedWebRoots {
+    return @(Get-CimInstance Win32_Process | Where-Object {
+        $_.Name -match '^node(\.exe)?$' -and
+        $null -ne $_.ExecutablePath -and
+        (Test-SamePath $_.ExecutablePath $nodePath) -and
+        (Get-ProcessCommandLine $_) -match '(?i)node_modules[\\/]vite-plus[\\/]bin[\\/]vp\s+dev\s+--host\s+127\.0\.0\.1(?:\s+--port\s+6803)?(?:\s|$)'
+    })
 }
 
 function Get-ListeningProcesses {
@@ -357,15 +377,26 @@ function Invoke-ProjectCommand {
 function Stop-ManagedDesktop {
     param([Parameter(Mandatory)][string]$HomePath)
     $roots = @(Get-ManagedDesktopRoots $HomePath)
+    $electronRoots = @(Get-ManagedElectronRoots)
+    $webRoots = @(Get-ManagedWebRoots)
+    Write-Host "  managed candidates server=$($roots.Count) web=$($webRoots.Count) electron=$($electronRoots.Count)"
     if ($roots.Count -gt 1) {
         throw "Found $($roots.Count) managed T3 desktop roots for this home. Refusing to choose one."
+    }
+    if ($electronRoots.Count -gt 1) {
+        throw "Found $($electronRoots.Count) managed T3 Electron roots. Refusing to choose one."
+    }
+    if ($webRoots.Count -gt 1) {
+        throw "Found $($webRoots.Count) managed T3 web roots. Refusing to choose one."
     }
     $listeners = @()
     $listeners += @(Get-ListeningProcesses $serverPort)
     $listeners += @(Get-ListeningProcesses $webPort)
     $ownedPid = @{}
-    if ($roots.Count -eq 1) {
-        $ownedPid[[int]$roots[0].ProcessId] = $true
+    if ($roots.Count -eq 1 -or $webRoots.Count -eq 1 -or $electronRoots.Count -eq 1) {
+        foreach ($root in @($roots + $webRoots + $electronRoots)) {
+            $ownedPid[[int]$root.ProcessId] = $true
+        }
         $all = @(Get-CimInstance Win32_Process)
         $changed = $true
         while ($changed) {
@@ -387,17 +418,28 @@ function Stop-ManagedDesktop {
         if ($listeners.Count -gt 0) {
             throw "A required T3 port is occupied but no managed desktop root owns it."
         }
-        Write-Plan "No existing managed desktop instance found."
-        return
+        Write-Plan "No existing managed server/web root found."
     }
-    Write-Plan "Stopping managed desktop root PID $($roots[0].ProcessId) and its process tree."
+    if ($webRoots.Count -eq 1) {
+        Write-Plan "Stopping managed Vite root PID $($webRoots[0].ProcessId) and its process tree."
+    }
+    if ($roots.Count -eq 1) {
+        Write-Plan "Stopping managed server/web root PID $($roots[0].ProcessId) and its process tree."
+    }
+    if ($electronRoots.Count -eq 1) {
+        Write-Plan "Stopping managed Electron root PID $($electronRoots[0].ProcessId) and its process tree."
+    }
     if (-not $planOnly) {
-        & taskkill.exe /PID ([string]$roots[0].ProcessId) /T /F *> $null
-        if ($LASTEXITCODE -ne 0) {
-            throw "taskkill could not stop managed desktop root PID $($roots[0].ProcessId)."
+        foreach ($root in @($roots + $webRoots + $electronRoots)) {
+            & taskkill.exe /PID ([string]$root.ProcessId) /T /F *> $null
+            if ($LASTEXITCODE -ne 0) {
+                throw "taskkill could not stop managed T3 root PID $($root.ProcessId)."
+            }
         }
         Wait-Until -TimeoutSeconds 30 -Description "the managed T3 desktop process tree to stop" -Condition {
-            @(Get-ManagedDesktopRoots $HomePath).Count -eq 0
+            @(Get-ManagedDesktopRoots $HomePath).Count -eq 0 -and
+            @(Get-ManagedWebRoots).Count -eq 0 -and
+            @(Get-ManagedElectronRoots).Count -eq 0
         }
     }
 }
@@ -408,19 +450,12 @@ function Start-ManagedDesktop {
         [Parameter(Mandatory)][string]$StdOutPath,
         [Parameter(Mandatory)][string]$StdErrPath
     )
-    $arguments = @(
-        "scripts/dev-runner.ts",
-        "dev:desktop",
-        "--home-dir",
-        $HomePath,
-        "--port",
-        [string]$serverPort,
-        "--dev-url",
-        $expectedDevUrl
-    )
-    Write-Plan "Starting one hidden desktop dev root with Node $nodePath."
+    $serverArguments = @("apps/server/src/bin.ts", "--host", "127.0.0.1")
+    $webArguments = @("$deployRoot/node_modules/vite-plus/bin/vp", "dev", "--host", "127.0.0.1", "--port", [string]$webPort)
+    Write-Plan "Starting one hidden T3 server and one hot-reload Vite root with Node $nodePath."
     if ($planOnly) {
-        Write-Host "       node $($arguments -join ' ')"
+        Write-Host "       node $($serverArguments -join ' ')"
+        Write-Host "       node $($webArguments -join ' ')"
         return $null
     }
     $oldPath = $env:Path
@@ -428,7 +463,13 @@ function Start-ManagedDesktop {
     try {
         $env:Path = "$([System.IO.Path]::GetDirectoryName($nodePath));$oldPath"
         $env:T3CODE_PORT_OFFSET = [string]$webPortOffset
-        return Start-Process -FilePath $nodePath -ArgumentList $arguments -WorkingDirectory $deployRoot -WindowStyle Hidden -RedirectStandardOutput $StdOutPath -RedirectStandardError $StdErrPath -PassThru
+        $env:T3CODE_HOME = $HomePath
+        $env:T3CODE_PORT = [string]$serverPort
+        $server = Start-Process -FilePath $nodePath -ArgumentList $serverArguments -WorkingDirectory $deployRoot -WindowStyle Hidden -RedirectStandardOutput $StdOutPath -RedirectStandardError $StdErrPath -PassThru
+        $env:PORT = [string]$webPort
+        $env:T3CODE_SINGLE_ORIGIN_DEV = "1"
+        $web = Start-Process -FilePath $nodePath -ArgumentList $webArguments -WorkingDirectory (Join-Path $deployRoot "apps\web") -WindowStyle Hidden -RedirectStandardOutput ($StdOutPath + ".vite") -RedirectStandardError ($StdErrPath + ".vite") -PassThru
+        return $server
     }
     finally {
         $env:Path = $oldPath
@@ -438,6 +479,33 @@ function Start-ManagedDesktop {
         else {
             $env:T3CODE_PORT_OFFSET = $oldOffset
         }
+    }
+}
+
+function Start-ManagedElectron {
+    param(
+        [Parameter(Mandatory)][string]$StdOutPath,
+        [Parameter(Mandatory)][string]$StdErrPath
+    )
+    $arguments = @("apps/desktop/scripts/start-electron.mjs")
+    Write-Plan "Starting one hidden Electron dev root with Node $nodePath."
+    if ($planOnly) {
+        Write-Host "       node $($arguments -join ' ')"
+        return $null
+    }
+    $oldPath = $env:Path
+    $oldDevUrl = $env:VITE_DEV_SERVER_URL
+    try {
+        $env:Path = "$([System.IO.Path]::GetDirectoryName($nodePath));$oldPath"
+        $env:VITE_DEV_SERVER_URL = $expectedDevUrl
+        $env:T3CODE_HOME = $t3Home
+        $env:T3CODE_PORT = [string]$serverPort
+        return Start-Process -FilePath $nodePath -ArgumentList $arguments -WorkingDirectory $deployRoot -WindowStyle Hidden -RedirectStandardOutput $StdOutPath -RedirectStandardError $StdErrPath -PassThru
+    }
+    finally {
+        $env:Path = $oldPath
+        if ($null -eq $oldDevUrl) { Remove-Item Env:VITE_DEV_SERVER_URL -ErrorAction SilentlyContinue }
+        else { $env:VITE_DEV_SERVER_URL = $oldDevUrl }
     }
 }
 
@@ -503,9 +571,9 @@ try {
     if ($nodeVersion -ne "v24.19.0") {
         throw "Official Node path reports '$nodeVersion', expected v24.19.0."
     }
-    $vpPath = Join-Path $deployRoot "node_modules\.bin\vp.cmd"
+    $vpPath = Join-Path $deployRoot "node_modules\.bin\vp.ps1"
     if (-not (Test-Path -LiteralPath $vpPath -PathType Leaf)) {
-        throw "Deploy-local vp command is missing: $vpPath"
+        throw "Deploy-local vp shim is missing: $vpPath"
     }
     $oldPathForVersion = $env:Path
     try {
@@ -581,6 +649,8 @@ try {
     $commandLogPath = Join-Path $verificationDir "launch-t3-code-$stamp.commands.log"
     $desktopStdOutPath = Join-Path $verificationDir "launch-t3-code-$stamp.desktop.stdout.log"
     $desktopStdErrPath = Join-Path $verificationDir "launch-t3-code-$stamp.desktop.stderr.log"
+    $electronStdOutPath = Join-Path $verificationDir "launch-t3-code-$stamp.electron.stdout.log"
+    $electronStdErrPath = Join-Path $verificationDir "launch-t3-code-$stamp.electron.stderr.log"
     Write-Host "  transcript $transcriptPath"
     if (-not $planOnly) {
         New-Item -ItemType Directory -Path $verificationDir -Force | Out-Null
@@ -663,6 +733,14 @@ try {
         Wait-Until -TimeoutSeconds $WaitSeconds -Description "T3 web app on 127.0.0.1:$webPort" -Condition {
             Test-HttpEndpoint "http://127.0.0.1:$webPort/"
         }
+        $electronProcess = Start-ManagedElectron $electronStdOutPath $electronStdErrPath
+        Wait-Until -TimeoutSeconds 30 -Description "exactly one managed Electron root" -Condition {
+            $electronRoots = @(Get-ManagedElectronRoots)
+            if ($electronRoots.Count -gt 1) {
+                throw "More than one managed Electron root appeared after launch."
+            }
+            return $electronRoots.Count -eq 1
+        }
         if ($null -eq $existingProxy) {
             throw "Tailscale mapping was not available after the planned no-write dry path."
         }
@@ -676,6 +754,12 @@ try {
         $finalRootCommand = Get-ProcessCommandLine $finalRoots[0]
         Write-Host "  root PID $($finalRoots[0].ProcessId) validated"
         Write-Host "  root command $finalRootCommand"
+        $finalElectronRoots = @(Get-ManagedElectronRoots)
+        if ($finalElectronRoots.Count -ne 1) {
+            throw "Final managed Electron root count is $($finalElectronRoots.Count), expected exactly one."
+        }
+        Write-Host "  Electron PID $($finalElectronRoots[0].ProcessId) validated"
+        Write-Host "  Electron command $(Get-ProcessCommandLine $finalElectronRoots[0])"
     }
 
     $finalSourceFiles = @(Get-IncludedFiles $sourceRoot)
