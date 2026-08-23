@@ -1,0 +1,733 @@
+[CmdletBinding()]
+param(
+    [switch]$DryRun,
+    [switch]$Fast,
+    [switch]$Full,
+    [switch]$SkipBuild,
+    [ValidateRange(15, 600)]
+    [int]$WaitSeconds = 120
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+if ($Fast -and $Full) {
+    throw "-Fast and -Full cannot be used together."
+}
+
+if ($Full -and $SkipBuild) {
+    throw "-Full and -SkipBuild cannot be used together."
+}
+
+$sourceRoot = "A:\Dev\Worktrees\t3code-workers-prototype"
+$deployRoot = "A:\Dev\Worktrees\t3code-deploy"
+$t3Home = "D:\MovedAppData\T3CodeServer"
+$nodePath = "A:\Dev\Tooling\t3-node-v24.19.0\node.exe"
+$expectedBranch = "feat/t3-workers-prototype"
+$serverPort = 3774
+$webPort = 6803
+$tailnetServePort = 9445
+$webPortOffset = $webPort - 5733
+$expectedDevUrl = "http://127.0.0.1:$webPort/"
+$expectedTailnetProxy = "http://127.0.0.1:$serverPort"
+$planOnly = $DryRun -or [bool]$WhatIfPreference
+$transcriptStarted = $false
+$transcriptPath = $null
+$needsTailscaleServe = $false
+
+# These paths are owned by the deploy checkout or by the D-backed runtime.
+# The synchronizer never removes them and never copies over them.
+$excludedRelativeFiles = @(
+    ".git",
+    ".env",
+    ".env.local",
+    "infra\relay\.env",
+    "infra\relay\.env.local",
+    "apps\mobile\src\features\usage\usageProviders.ts",
+    "scripts\import-codex-history.mjs"
+)
+
+$excludedDirectoryNames = @(
+    ".git",
+    ".t3",
+    ".vite-plus",
+    "node_modules",
+    "caches",
+    "dist",
+    "dist-electron",
+    "target",
+    "userdata",
+    "work",
+    "worktrees",
+    "release"
+)
+
+function Write-Phase {
+    param([Parameter(Mandatory)][string]$Name)
+    Write-Host "[$Name]"
+}
+
+function Write-Plan {
+    param([Parameter(Mandatory)][string]$Message)
+    if ($planOnly) {
+        Write-Host "  PLAN $Message"
+    }
+    else {
+        Write-Host "  $Message"
+    }
+}
+
+function Normalize-AbsolutePath {
+    param([Parameter(Mandatory)][string]$Path)
+    $full = [System.IO.Path]::GetFullPath($Path)
+    return $full.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+}
+
+function Test-SamePath {
+    param(
+        [Parameter(Mandatory)][string]$Left,
+        [Parameter(Mandatory)][string]$Right
+    )
+    return (Normalize-AbsolutePath $Left).Equals((Normalize-AbsolutePath $Right), [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Assert-SafeRoot {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Label
+    )
+    if ($Path -notmatch '^[A-Za-z]:[\\/]') {
+        throw "$Label must be an absolute path: $Path"
+    }
+    $resolved = Normalize-AbsolutePath $Path
+    if ($resolved.Length -lt 4 -or $resolved -match '^[A-Za-z]:$') {
+        throw "$Label resolves to an unsafe broad path: $resolved"
+    }
+    if (-not (Test-Path -LiteralPath $resolved -PathType Container)) {
+        throw "$Label does not exist as a directory: $resolved"
+    }
+    $item = Get-Item -LiteralPath $resolved -Force
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "$Label is a reparse point. Refusing to operate through it: $resolved"
+    }
+    return $resolved
+}
+
+function Assert-ContainedPath {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Candidate,
+        [Parameter(Mandatory)][string]$Label
+    )
+    $rootFull = (Normalize-AbsolutePath $Root) + [System.IO.Path]::DirectorySeparatorChar
+    $candidateFull = Normalize-AbsolutePath $Candidate
+    if (-not $candidateFull.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "$Label is outside its approved root: $candidateFull"
+    }
+    return $candidateFull
+}
+
+function Invoke-GitText {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string[]]$Arguments
+    )
+    $result = & git -C $Root @Arguments 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "git $($Arguments -join ' ') failed in $Root with exit code $LASTEXITCODE"
+    }
+    return (($result | Out-String).Trim())
+}
+
+function Test-ExcludedRelativePath {
+    param([Parameter(Mandatory)][string]$RelativePath)
+    $normalized = $RelativePath.Replace('/', '\').TrimStart('\')
+    $comparison = $normalized.ToLowerInvariant()
+    foreach ($excluded in $excludedRelativeFiles) {
+        if ($comparison -eq $excluded.ToLowerInvariant()) {
+            return $true
+        }
+    }
+    foreach ($part in ($normalized -split '\\')) {
+        if ($excludedDirectoryNames -contains $part.ToLowerInvariant()) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Get-IncludedFiles {
+    param([Parameter(Mandatory)][string]$Root)
+    $pending = New-Object 'System.Collections.Generic.Stack[string]'
+    $pending.Push($Root)
+    $files = New-Object 'System.Collections.Generic.List[object]'
+
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Pop()
+        foreach ($item in @(Get-ChildItem -LiteralPath $directory -Force)) {
+            $relative = $item.FullName.Substring($Root.Length).TrimStart('\', '/')
+            if (Test-ExcludedRelativePath $relative) {
+                continue
+            }
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Refusing to traverse or copy a reparse point in the owned source projection: $($item.FullName)"
+            }
+            if ($item.PSIsContainer) {
+                $pending.Push($item.FullName)
+            }
+            elseif ($item -is [System.IO.FileInfo]) {
+                [void]$files.Add([pscustomobject]@{ Relative = $relative; FullName = $item.FullName })
+            }
+        }
+    }
+    return @($files.ToArray())
+}
+
+function Get-FileSha256 {
+    param([Parameter(Mandatory)][string]$Path)
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+}
+
+function Get-FingerprintMap {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][object[]]$Files
+    )
+    $map = @{}
+    foreach ($file in $Files) {
+        $map[$file.Relative.ToLowerInvariant()] = Get-FileSha256 $file.FullName
+    }
+    return $map
+}
+
+function Get-DependencyRelativePaths {
+    param([Parameter(Mandatory)][object[]]$Files)
+    return @($Files | Where-Object {
+        $name = [System.IO.Path]::GetFileName($_.Relative)
+        $name -eq "package.json" -or $name -eq "pnpm-lock.yaml" -or $name -eq "pnpm-workspace.yaml"
+    } | ForEach-Object { $_.Relative.ToLowerInvariant() })
+}
+
+function Get-ProcessCommandLine {
+    param([Parameter(Mandatory)][object]$Process)
+    if ($null -eq $Process.CommandLine) {
+        return ""
+    }
+    return (($Process.CommandLine -replace '\r|\n', ' ') -replace '\s+', ' ').Trim()
+}
+
+function Test-ManagedDesktopCommand {
+    param(
+        [Parameter(Mandatory)][object]$Process,
+        [Parameter(Mandatory)][string]$HomePath
+    )
+    if ($Process.Name -notmatch '^node(\.exe)?$') {
+        return $false
+    }
+    if ($null -ne $Process.ExecutablePath -and -not (Test-SamePath $Process.ExecutablePath $nodePath)) {
+        return $false
+    }
+    $command = Get-ProcessCommandLine $Process
+    $homePattern = [regex]::Escape($HomePath)
+    # `dev` is the existing hot-reload browser stack used by the deploy
+    # checkout, while `dev:desktop` adds the Electron renderer. Both are valid
+    # launcher-owned roots when they carry the approved home, server port, and
+    # web origin. Descendant listener ownership below still rejects any port
+    # held outside this exact T3 process tree.
+    $isDesktopMode = $command -match '(?i)scripts[\\/]dev-runner\.ts\s+dev:desktop(?:\s|$)'
+    $hasExpectedDesktopUrl = $command -match "(?i)--dev-url\s+[^\s]*$webPort"
+    return $command -match '(?i)scripts[\\/]dev-runner\.ts\s+dev(?::desktop)?(?:\s|$)' -and
+        $command -match "(?i)--home-dir\s+.*$homePattern" -and
+        $command -match "(?i)--port\s+$serverPort(\s|$)" -and
+        (-not $isDesktopMode -or $hasExpectedDesktopUrl)
+}
+
+function Get-ManagedDesktopRoots {
+    param([Parameter(Mandatory)][string]$HomePath)
+    return @(Get-CimInstance Win32_Process | Where-Object { Test-ManagedDesktopCommand $_ $HomePath })
+}
+
+function Get-ListeningProcesses {
+    param([Parameter(Mandatory)][int]$Port)
+    if (-not (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue)) {
+        throw "Get-NetTCPConnection is required to validate port ownership."
+    }
+    $connections = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue)
+    $processes = @{}
+    foreach ($connection in $connections) {
+        $processId = [int]$connection.OwningProcess
+        if (-not $processes.ContainsKey($processId)) {
+            $processes[$processId] = Get-CimInstance Win32_Process -Filter "ProcessId=$processId" -ErrorAction SilentlyContinue
+        }
+    }
+    return @($processes.Values | Where-Object { $null -ne $_ })
+}
+
+function Wait-Until {
+    param(
+        [Parameter(Mandatory)][scriptblock]$Condition,
+        [Parameter(Mandatory)][int]$TimeoutSeconds,
+        [Parameter(Mandatory)][string]$Description
+    )
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        if (& $Condition) {
+            return
+        }
+        Start-Sleep -Seconds 2
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Timed out after $TimeoutSeconds seconds waiting for $Description."
+}
+
+function Test-HttpEndpoint {
+    param([Parameter(Mandatory)][string]$Uri)
+    try {
+        $response = Invoke-WebRequest -Uri $Uri -UseBasicParsing -TimeoutSec 5
+        return [int]$response.StatusCode -ge 200 -and [int]$response.StatusCode -lt 400
+    }
+    catch {
+        return $false
+    }
+}
+
+function Read-TailscaleJson {
+    param([Parameter(Mandatory)][string[]]$Arguments)
+    $raw = & $tailscalePath @Arguments 2>$null | Out-String
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($raw)) {
+        throw "tailscale $($Arguments -join ' ') failed. No CLI output was retained."
+    }
+    try {
+        return $raw | ConvertFrom-Json
+    }
+    catch {
+        throw "tailscale $($Arguments -join ' ') returned invalid JSON."
+    }
+}
+
+function Get-TailscaleProxy {
+    param(
+        [Parameter(Mandatory)][object]$ServeStatus,
+        [Parameter(Mandatory)][int]$ServePort
+    )
+    if ($null -eq $ServeStatus.Web) {
+        return $null
+    }
+    foreach ($entry in @($ServeStatus.Web.PSObject.Properties)) {
+        if ($entry.Name -notmatch ":$ServePort$") {
+            continue
+        }
+        if ($null -eq $entry.Value.Handlers) {
+            continue
+        }
+        foreach ($handler in @($entry.Value.Handlers.PSObject.Properties)) {
+            if ($handler.Name -eq "/" -and $null -ne $handler.Value.Proxy) {
+                return ([string]$handler.Value.Proxy).TrimEnd('/')
+            }
+        }
+    }
+    return $null
+}
+
+function Invoke-ProjectCommand {
+    param(
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [Parameter(Mandatory)][string]$LogPath
+    )
+    Write-Host "  RUN $Label"
+    if ($planOnly) {
+        Write-Host "       vp $($Arguments -join ' ')"
+        return
+    }
+    Push-Location $deployRoot
+    try {
+        & $vpPath @Arguments 1>> $LogPath 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "$Label failed with exit code $LASTEXITCODE. See $LogPath"
+        }
+    }
+    finally {
+        Pop-Location
+    }
+}
+
+function Stop-ManagedDesktop {
+    param([Parameter(Mandatory)][string]$HomePath)
+    $roots = @(Get-ManagedDesktopRoots $HomePath)
+    if ($roots.Count -gt 1) {
+        throw "Found $($roots.Count) managed T3 desktop roots for this home. Refusing to choose one."
+    }
+    $listeners = @()
+    $listeners += @(Get-ListeningProcesses $serverPort)
+    $listeners += @(Get-ListeningProcesses $webPort)
+    $ownedPid = @{}
+    if ($roots.Count -eq 1) {
+        $ownedPid[[int]$roots[0].ProcessId] = $true
+        $all = @(Get-CimInstance Win32_Process)
+        $changed = $true
+        while ($changed) {
+            $changed = $false
+            foreach ($process in $all) {
+                if ($ownedPid.ContainsKey([int]$process.ParentProcessId) -and -not $ownedPid.ContainsKey([int]$process.ProcessId)) {
+                    $ownedPid[[int]$process.ProcessId] = $true
+                    $changed = $true
+                }
+            }
+        }
+    }
+    foreach ($listener in $listeners) {
+        if (-not $ownedPid.ContainsKey([int]$listener.ProcessId)) {
+            throw "Port $serverPort or $webPort is held by an unrelated process. Refusing to stop it."
+        }
+    }
+    if ($roots.Count -eq 0) {
+        if ($listeners.Count -gt 0) {
+            throw "A required T3 port is occupied but no managed desktop root owns it."
+        }
+        Write-Plan "No existing managed desktop instance found."
+        return
+    }
+    Write-Plan "Stopping managed desktop root PID $($roots[0].ProcessId) and its process tree."
+    if (-not $planOnly) {
+        & taskkill.exe /PID ([string]$roots[0].ProcessId) /T /F *> $null
+        if ($LASTEXITCODE -ne 0) {
+            throw "taskkill could not stop managed desktop root PID $($roots[0].ProcessId)."
+        }
+        Wait-Until -TimeoutSeconds 30 -Description "the managed T3 desktop process tree to stop" -Condition {
+            @(Get-ManagedDesktopRoots $HomePath).Count -eq 0
+        }
+    }
+}
+
+function Start-ManagedDesktop {
+    param(
+        [Parameter(Mandatory)][string]$HomePath,
+        [Parameter(Mandatory)][string]$StdOutPath,
+        [Parameter(Mandatory)][string]$StdErrPath
+    )
+    $arguments = @(
+        "scripts/dev-runner.ts",
+        "dev:desktop",
+        "--home-dir",
+        $HomePath,
+        "--port",
+        [string]$serverPort,
+        "--dev-url",
+        $expectedDevUrl
+    )
+    Write-Plan "Starting one hidden desktop dev root with Node $nodePath."
+    if ($planOnly) {
+        Write-Host "       node $($arguments -join ' ')"
+        return $null
+    }
+    $oldPath = $env:Path
+    $oldOffset = $env:T3CODE_PORT_OFFSET
+    try {
+        $env:Path = "$([System.IO.Path]::GetDirectoryName($nodePath));$oldPath"
+        $env:T3CODE_PORT_OFFSET = [string]$webPortOffset
+        return Start-Process -FilePath $nodePath -ArgumentList $arguments -WorkingDirectory $deployRoot -WindowStyle Hidden -RedirectStandardOutput $StdOutPath -RedirectStandardError $StdErrPath -PassThru
+    }
+    finally {
+        $env:Path = $oldPath
+        if ($null -eq $oldOffset) {
+            Remove-Item Env:T3CODE_PORT_OFFSET -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:T3CODE_PORT_OFFSET = $oldOffset
+        }
+    }
+}
+
+try {
+    Write-Phase "validate"
+    $sourceRoot = Assert-SafeRoot $sourceRoot "canonical source"
+    $deployRoot = Assert-SafeRoot $deployRoot "deploy mirror"
+    $t3Home = Assert-SafeRoot $t3Home "D-backed T3 home"
+    if (Test-SamePath $sourceRoot $deployRoot) {
+        throw "Canonical source and deploy mirror resolve to the same path."
+    }
+    if (-not (Test-SamePath $sourceRoot "A:\Dev\Worktrees\t3code-workers-prototype") -or
+        -not (Test-SamePath $deployRoot "A:\Dev\Worktrees\t3code-deploy")) {
+        throw "Resolved repository paths do not match the approved T3 Code owners."
+    }
+
+    $requiredPaths = @(
+        (Join-Path $sourceRoot "package.json"),
+        (Join-Path $sourceRoot "pnpm-lock.yaml"),
+        (Join-Path $sourceRoot "pnpm-workspace.yaml"),
+        (Join-Path $sourceRoot "scripts\dev-runner.ts"),
+        (Join-Path $sourceRoot "apps\desktop\package.json"),
+        (Join-Path $sourceRoot "apps\desktop\scripts\start-electron.mjs"),
+        (Join-Path $deployRoot "package.json"),
+        (Join-Path $deployRoot "pnpm-lock.yaml"),
+        (Join-Path $deployRoot "scripts\dev-runner.ts"),
+        (Join-Path $t3Home "userdata")
+    )
+    foreach ($required in $requiredPaths) {
+        if (-not (Test-Path -LiteralPath $required)) {
+            throw "Required project/runtime path is missing: $required"
+        }
+    }
+
+    $sourceTop = Normalize-AbsolutePath (Invoke-GitText $sourceRoot @("rev-parse", "--show-toplevel"))
+    $deployTop = Normalize-AbsolutePath (Invoke-GitText $deployRoot @("rev-parse", "--show-toplevel"))
+    if (-not (Test-SamePath $sourceTop $sourceRoot) -or -not (Test-SamePath $deployTop $deployRoot)) {
+        throw "Git ownership does not match the approved source/deploy roots."
+    }
+    $sourceBranch = Invoke-GitText $sourceRoot @("branch", "--show-current")
+    if ($sourceBranch -ne $expectedBranch) {
+        throw "Source branch is '$sourceBranch', expected '$expectedBranch'."
+    }
+    $deployBranch = & git -C $deployRoot symbolic-ref --quiet --short HEAD 2>$null
+    if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace(($deployBranch | Out-String))) {
+        throw "Deploy mirror is attached to a branch. It must remain detached."
+    }
+    $sourceCommit = Invoke-GitText $sourceRoot @("rev-parse", "HEAD")
+    $deployCommitBefore = Invoke-GitText $deployRoot @("rev-parse", "HEAD")
+    Write-Host "  source $sourceBranch $sourceCommit"
+    Write-Host "  deploy detached $deployCommitBefore"
+
+    $sourcePackage = Get-Content -LiteralPath (Join-Path $sourceRoot "package.json") -Raw | ConvertFrom-Json
+    $desktopCommand = [string]$sourcePackage.scripts.'dev:desktop'
+    if ($desktopCommand -ne "node scripts/dev-runner.ts dev:desktop") {
+        throw "The documented dev:desktop launcher changed unexpectedly: $desktopCommand"
+    }
+
+    if (-not (Test-Path -LiteralPath $nodePath -PathType Leaf)) {
+        throw "Official isolated Node 24.19.0 is missing: $nodePath"
+    }
+    $nodeVersion = (& $nodePath --version 2>$null | Select-Object -First 1).Trim()
+    if ($nodeVersion -ne "v24.19.0") {
+        throw "Official Node path reports '$nodeVersion', expected v24.19.0."
+    }
+    $vpCommands = @(Get-Command vp.cmd -All -ErrorAction SilentlyContinue)
+    if ($vpCommands.Count -ne 1) {
+        throw "Expected exactly one vp.cmd command, found $($vpCommands.Count)."
+    }
+    $vpPath = $vpCommands[0].Source
+    if (-not (Test-Path -LiteralPath $vpPath -PathType Leaf)) {
+        throw "Resolved vp command is not a file: $vpPath"
+    }
+    $oldPathForVersion = $env:Path
+    try {
+        $env:Path = "$([System.IO.Path]::GetDirectoryName($nodePath));$oldPathForVersion"
+        $vpVersion = (& $vpPath --version 2>$null | Select-Object -First 1).Trim()
+    }
+    finally {
+        $env:Path = $oldPathForVersion
+    }
+    if ($vpVersion -notmatch '^vp v\d+\.\d+\.\d+') {
+        throw "Resolved vp did not report a recognized version: $vpVersion"
+    }
+    Write-Host "  toolchain Node $nodeVersion, $vpVersion"
+
+    Write-Phase "inspect"
+    $sourceFiles = @(Get-IncludedFiles $sourceRoot)
+    $deployFiles = @(Get-IncludedFiles $deployRoot)
+    $sourceMap = Get-FingerprintMap $sourceRoot $sourceFiles
+    $deployMap = Get-FingerprintMap $deployRoot $deployFiles
+    $sourceRelatives = @{}
+    foreach ($file in $sourceFiles) {
+        $sourceRelatives[$file.Relative.ToLowerInvariant()] = $file
+    }
+    $deployOnlyFiles = @($deployFiles | Where-Object {
+        -not $sourceRelatives.ContainsKey($_.Relative.ToLowerInvariant())
+    })
+    if ($deployOnlyFiles.Count -gt 0) {
+        Write-Host "  preserving $($deployOnlyFiles.Count) deploy-only files absent from source"
+    }
+    $mismatches = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($file in $sourceFiles) {
+        $key = $file.Relative.ToLowerInvariant()
+        if (-not $deployMap.ContainsKey($key) -or $deployMap[$key] -ne $sourceMap[$key]) {
+            [void]$mismatches.Add($file)
+        }
+    }
+    $dependencyRelatives = @(Get-DependencyRelativePaths $sourceFiles)
+    $dependencyNeedsInstall = -not (Test-Path -LiteralPath (Join-Path $deployRoot "node_modules\.modules.yaml"))
+    foreach ($relative in $dependencyRelatives) {
+        if (-not $deployMap.ContainsKey($relative) -or $deployMap[$relative] -ne $sourceMap[$relative]) {
+            $dependencyNeedsInstall = $true
+        }
+    }
+    Write-Host "  source projection files $($sourceFiles.Count), deploy mismatches $($mismatches.Count)"
+    Write-Host "  dependency state $(if ($dependencyNeedsInstall) { 'requires vp i' } else { 'matches lock/manifests' })"
+
+    Write-Phase "sync"
+    if ($mismatches.Count -eq 0) {
+        Write-Plan "Deploy projection already matches source."
+    }
+    elseif ($planOnly) {
+        Write-Plan "Would copy $($mismatches.Count) source files into deploy without deleting anything."
+    }
+    else {
+        foreach ($file in $mismatches) {
+            $destination = Assert-ContainedPath $deployRoot (Join-Path $deployRoot $file.Relative) "sync destination"
+            $parent = Split-Path -LiteralPath $destination -Parent
+            if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+                New-Item -ItemType Directory -Path $parent -Force | Out-Null
+            }
+            $parentItem = Get-Item -LiteralPath $parent -Force
+            if (($parentItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Sync destination parent is a reparse point: $parent"
+            }
+            Copy-Item -LiteralPath $file.FullName -Destination $destination -Force
+        }
+        Write-Host "  copied $($mismatches.Count) files. No deploy files were deleted."
+    }
+
+    $verificationDir = Join-Path $t3Home "userdata\verification"
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $transcriptPath = Join-Path $verificationDir "launch-t3-code-$stamp.transcript.log"
+    $commandLogPath = Join-Path $verificationDir "launch-t3-code-$stamp.commands.log"
+    $desktopStdOutPath = Join-Path $verificationDir "launch-t3-code-$stamp.desktop.stdout.log"
+    $desktopStdErrPath = Join-Path $verificationDir "launch-t3-code-$stamp.desktop.stderr.log"
+    Write-Host "  transcript $transcriptPath"
+    if (-not $planOnly) {
+        New-Item -ItemType Directory -Path $verificationDir -Force | Out-Null
+        Start-Transcript -LiteralPath $transcriptPath -Force | Out-Null
+        $transcriptStarted = $true
+    }
+
+    Write-Phase "dependencies"
+    if ($dependencyNeedsInstall) {
+        Invoke-ProjectCommand "vp i" @("i") $commandLogPath
+    }
+    else {
+        Write-Plan "Dependency state is current. Skipping vp i."
+    }
+
+    Write-Phase "checks and builds"
+    if ($Fast -or $SkipBuild) {
+        Write-Plan "Fast readiness mode selected. Skipping full contract/server/web/desktop checks and builds."
+    }
+    else {
+        Invoke-ProjectCommand "contracts typecheck" @("run", "--filter", "@t3tools/contracts", "typecheck") $commandLogPath
+        Invoke-ProjectCommand "server typecheck" @("run", "--filter", "t3", "typecheck") $commandLogPath
+        Invoke-ProjectCommand "web typecheck" @("run", "--filter", "@t3tools/web", "typecheck") $commandLogPath
+        Invoke-ProjectCommand "desktop typecheck" @("run", "--filter", "@t3tools/desktop", "typecheck") $commandLogPath
+        Invoke-ProjectCommand "web build" @("run", "--filter", "@t3tools/web", "build") $commandLogPath
+        Invoke-ProjectCommand "server bundle" @("run", "--filter", "t3", "build:bundle") $commandLogPath
+        Invoke-ProjectCommand "desktop Electron runtime" @("run", "--filter", "@t3tools/desktop", "ensure:electron") $commandLogPath
+    }
+
+    Write-Phase "tailscale"
+    $tailscaleCommands = @(Get-Command tailscale.exe -All -ErrorAction SilentlyContinue)
+    if ($tailscaleCommands.Count -ne 1) {
+        throw "Expected exactly one tailscale.exe command, found $($tailscaleCommands.Count)."
+    }
+    $tailscalePath = $tailscaleCommands[0].Source
+    $tailscaleStatus = Read-TailscaleJson @("status", "--json")
+    $dnsName = ([string]$tailscaleStatus.Self.DNSName).Trim().TrimEnd('.')
+    if ([string]::IsNullOrWhiteSpace($dnsName)) {
+        throw "Tailscale is running without a MagicDNS identity."
+    }
+    $serveStatus = Read-TailscaleJson @("serve", "status", "--json")
+    $existingProxy = Get-TailscaleProxy $serveStatus $tailnetServePort
+    if ($null -eq $existingProxy) {
+        Write-Plan "Tailscale HTTPS $tailnetServePort has no mapping."
+        $needsTailscaleServe = $true
+    }
+    if ($null -ne $existingProxy -and $existingProxy -ne $expectedTailnetProxy) {
+        throw "Tailscale HTTPS $tailnetServePort points to '$existingProxy', not $expectedTailnetProxy. Refusing to replace unrelated Serve config."
+    }
+    $tailnetUrl = "https://$dnsName`:$tailnetServePort/"
+    Write-Host "  MagicDNS $dnsName"
+    Write-Host "  HTTPS $tailnetUrl -> $expectedTailnetProxy"
+
+    Write-Phase "desktop"
+    Stop-ManagedDesktop $t3Home
+    $desktopProcess = Start-ManagedDesktop $t3Home $desktopStdOutPath $desktopStdErrPath
+
+    if (-not $planOnly) {
+        if ($needsTailscaleServe) {
+            & $tailscalePath serve --bg "--https=$tailnetServePort" $expectedTailnetProxy *> $null
+            if ($LASTEXITCODE -ne 0) {
+                throw "Could not create the missing Tailscale HTTPS mapping on port $tailnetServePort."
+            }
+            $serveStatus = Read-TailscaleJson @("serve", "status", "--json")
+            $existingProxy = Get-TailscaleProxy $serveStatus $tailnetServePort
+            if ($existingProxy -ne $expectedTailnetProxy) {
+                throw "Tailscale HTTPS $tailnetServePort did not resolve to $expectedTailnetProxy after setup."
+            }
+        }
+        Wait-Until -TimeoutSeconds 20 -Description "exactly one managed desktop root" -Condition {
+            $roots = @(Get-ManagedDesktopRoots $t3Home)
+            if ($roots.Count -gt 1) {
+                throw "More than one managed desktop root appeared after launch."
+            }
+            return $roots.Count -eq 1
+        }
+        Wait-Until -TimeoutSeconds $WaitSeconds -Description "T3 server on 127.0.0.1:$serverPort" -Condition {
+            Test-HttpEndpoint "http://127.0.0.1:$serverPort/.well-known/t3/environment"
+        }
+        Wait-Until -TimeoutSeconds $WaitSeconds -Description "T3 web app on 127.0.0.1:$webPort" -Condition {
+            Test-HttpEndpoint "http://127.0.0.1:$webPort/"
+        }
+        if ($null -eq $existingProxy) {
+            throw "Tailscale mapping was not available after the planned no-write dry path."
+        }
+        Wait-Until -TimeoutSeconds $WaitSeconds -Description "Tailscale HTTPS health at $tailnetUrl" -Condition {
+            Test-HttpEndpoint "${tailnetUrl}.well-known/t3/environment"
+        }
+        $finalRoots = @(Get-ManagedDesktopRoots $t3Home)
+        if ($finalRoots.Count -ne 1) {
+            throw "Final managed desktop root count is $($finalRoots.Count), expected exactly one."
+        }
+        $finalRootCommand = Get-ProcessCommandLine $finalRoots[0]
+        Write-Host "  root PID $($finalRoots[0].ProcessId) validated"
+        Write-Host "  root command $finalRootCommand"
+    }
+
+    $finalSourceFiles = @(Get-IncludedFiles $sourceRoot)
+    $finalDeployFiles = @(Get-IncludedFiles $deployRoot)
+    $finalSourceMap = Get-FingerprintMap $sourceRoot $finalSourceFiles
+    $finalDeployMap = Get-FingerprintMap $deployRoot $finalDeployFiles
+    $finalParity = 0
+    foreach ($file in $finalSourceFiles) {
+        $key = $file.Relative.ToLowerInvariant()
+        if (-not $finalDeployMap.ContainsKey($key) -or $finalDeployMap[$key] -ne $finalSourceMap[$key]) {
+            $finalParity++
+        }
+    }
+    if ($planOnly) {
+        Write-Phase "dry run summary"
+        Write-Host "  no files, processes, dependencies, builds, or Tailscale settings changed"
+        Write-Host "  source commit $sourceCommit"
+        Write-Host "  deploy detached commit $deployCommitBefore"
+        Write-Host "  planned projection mismatches $($mismatches.Count)"
+        Write-Host "  planned endpoints http://127.0.0.1:$serverPort, http://127.0.0.1:$webPort, $tailnetUrl"
+        Write-Host "  readiness not probed because this was a no-write run"
+    }
+    else {
+        $deployCommitAfter = Invoke-GitText $deployRoot @("rev-parse", "HEAD")
+        if ($deployCommitAfter -ne $deployCommitBefore) {
+            throw "Deploy detached commit changed unexpectedly from $deployCommitBefore to $deployCommitAfter."
+        }
+        if ($finalParity -ne 0) {
+            throw "Source/deploy parity check found $finalParity mismatched files after sync."
+        }
+        Write-Phase "ready"
+        Write-Host "  source commit $sourceCommit"
+        Write-Host "  deploy detached commit $deployCommitAfter"
+        Write-Host "  projection parity exact, excluded state preserved"
+        Write-Host "  process exactly one managed desktop root"
+        Write-Host "  endpoints http://127.0.0.1:$serverPort, http://127.0.0.1:$webPort, $tailnetUrl"
+        Write-Host "  server/web/Tailscale readiness passed"
+        Write-Host "  logs $transcriptPath"
+        Write-Host "  command output $commandLogPath"
+    }
+}
+catch {
+    $failure = $_
+    Write-Error ("launch-t3-code.ps1 FAILED: " + $failure.Exception.Message)
+    if ($transcriptStarted) {
+        try { Stop-Transcript | Out-Null } catch { }
+    }
+    exit 1
+}
+finally {
+    if ($transcriptStarted) {
+        try { Stop-Transcript | Out-Null } catch { }
+    }
+}
