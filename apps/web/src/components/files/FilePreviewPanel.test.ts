@@ -6,6 +6,48 @@ import {
   remapFileCommentAnnotations,
 } from "./fileCommentAnnotations";
 import { isMarkdownPreviewFile, setMarkdownTaskChecked } from "./filePreviewMode";
+import { resolveFilePreviewPaneVisibility } from "./FilePreviewPanel";
+
+describe("resolveFilePreviewPaneVisibility", () => {
+  it("uses one pane at a time on compact screens", () => {
+    expect(
+      resolveFilePreviewPaneVisibility({
+        compact: true,
+        compactExplorerOpen: false,
+        explorerOpen: true,
+        relativePath: "src/index.ts",
+      }),
+    ).toEqual({ showExplorer: false, showFile: true });
+
+    expect(
+      resolveFilePreviewPaneVisibility({
+        compact: true,
+        compactExplorerOpen: true,
+        explorerOpen: false,
+        relativePath: "src/index.ts",
+      }),
+    ).toEqual({ showExplorer: true, showFile: false });
+  });
+
+  it("keeps the desktop split view preference and always shows an empty explorer", () => {
+    expect(
+      resolveFilePreviewPaneVisibility({
+        compact: false,
+        compactExplorerOpen: false,
+        explorerOpen: true,
+        relativePath: "src/index.ts",
+      }),
+    ).toEqual({ showExplorer: true, showFile: true });
+    expect(
+      resolveFilePreviewPaneVisibility({
+        compact: true,
+        compactExplorerOpen: false,
+        explorerOpen: false,
+        relativePath: null,
+      }),
+    ).toEqual({ showExplorer: true, showFile: false });
+  });
+});
 
 describe("file comment annotations", () => {
   it("normalizes and formats selected line ranges", () => {

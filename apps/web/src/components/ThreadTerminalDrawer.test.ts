@@ -1,12 +1,30 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  TERMINAL_ACCESSORY_KEYS,
   resolveTerminalSelectionActionPosition,
   shouldHandleTerminalExit,
   shouldHandleTerminalSelectionMouseUp,
   terminalSelectionActionDelayForClickCount,
   terminalSelectionLineRange,
 } from "./ThreadTerminalDrawer";
+
+describe("TERMINAL_ACCESSORY_KEYS", () => {
+  it("sends terminal control sequences for phone-only keys", () => {
+    expect(Object.fromEntries(TERMINAL_ACCESSORY_KEYS.map((key) => [key.label, key.data]))).toEqual(
+      {
+        Esc: "\u001b",
+        Tab: "\t",
+        "↑": "\u001b[A",
+        "↓": "\u001b[B",
+        "←": "\u001b[D",
+        "→": "\u001b[C",
+        "Ctrl-C": "\u0003",
+        "Ctrl-D": "\u0004",
+      },
+    );
+  });
+});
 
 describe("resolveTerminalSelectionActionPosition", () => {
   it("prefers the selection rect over the last pointer position", () => {
