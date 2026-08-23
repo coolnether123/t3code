@@ -60,6 +60,7 @@ import {
   type ThreadTerminalGroup,
 } from "../types";
 import { readLocalApi } from "~/localApi";
+import { confirmTerminalClose } from "~/lib/terminalCloseConfirm";
 import { useClientSettings } from "../hooks/useSettings";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useAttachedTerminalSession } from "../state/terminalSessions";
@@ -89,6 +90,17 @@ export const TERMINAL_ACCESSORY_KEYS = [
   { label: "Ctrl-C", data: "\u0003" },
   { label: "Ctrl-D", data: "\u0004" },
 ] as const;
+
+export async function closeTerminalAfterConfirmation(input: {
+  readonly terminalId: string;
+  readonly terminalLabel: string;
+  readonly confirm: (labels: readonly [string, ...string[]]) => Promise<boolean>;
+  readonly onClose: (terminalId: string) => void;
+}): Promise<void> {
+  if (await input.confirm([input.terminalLabel])) {
+    input.onClose(input.terminalId);
+  }
+}
 
 function maxDrawerHeight(): number {
   if (typeof window === "undefined") return DEFAULT_THREAD_TERMINAL_HEIGHT;
@@ -1290,6 +1302,18 @@ export default function ThreadTerminalDrawer({
   const onNewTerminalAction = useCallback(() => {
     onNewTerminal();
   }, [onNewTerminal]);
+  const confirmCloseTerminal = useCallback(
+    (terminalId: string) => {
+      const label = terminalLabelById.get(terminalId) ?? getTerminalLabel(terminalId);
+      void closeTerminalAfterConfirmation({
+        terminalId,
+        terminalLabel: label,
+        confirm: confirmTerminalClose,
+        onClose: onCloseTerminal,
+      });
+    },
+    [onCloseTerminal, terminalLabelById],
+  );
   const sendAccessoryInput = useCallback(
     (data: string) => {
       if (!resolvedActiveTerminalId) return;
@@ -1504,7 +1528,7 @@ export default function ThreadTerminalDrawer({
                 "text-foreground/90 transition-colors hover:bg-accent",
                 compactTerminal ? "inline-flex size-11 items-center justify-center" : "p-1",
               )}
-              onClick={() => onCloseTerminal(resolvedActiveTerminalId)}
+              onClick={() => confirmCloseTerminal(resolvedActiveTerminalId)}
               label={closeTerminalActionLabel}
             >
               <Trash2 className="size-3.25" />
@@ -1639,7 +1663,7 @@ export default function ThreadTerminalDrawer({
                   </TerminalActionButton>
                   <TerminalActionButton
                     className="inline-flex h-full items-center border-l border-border/70 px-1 text-foreground/90 transition-colors hover:bg-accent/70"
-                    onClick={() => onCloseTerminal(resolvedActiveTerminalId)}
+                    onClick={() => confirmCloseTerminal(resolvedActiveTerminalId)}
                     label={closeTerminalActionLabel}
                   >
                     <Trash2 className="size-3.25" />
@@ -1709,7 +1733,7 @@ export default function ThreadTerminalDrawer({
                                       <button
                                         type="button"
                                         className="inline-flex size-3.5 items-center justify-center rounded text-xs font-medium leading-none text-muted-foreground opacity-0 transition hover:bg-accent hover:text-foreground group-hover:opacity-100"
-                                        onClick={() => onCloseTerminal(terminalId)}
+                                        onClick={() => confirmCloseTerminal(terminalId)}
                                         aria-label={closeTerminalLabel}
                                       />
                                     }

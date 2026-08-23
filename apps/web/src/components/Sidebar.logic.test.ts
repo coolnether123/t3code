@@ -19,6 +19,7 @@ import {
   orderItemsByPreferredIds,
   resolveProjectStatusIndicator,
   resolveSidebarStageBadgeLabel,
+  resolveSidebarThreadSection,
   resolveThreadRowClassName,
   resolveSidebarThreadStatus,
   resolveThreadStatusPill,
@@ -936,6 +937,55 @@ describe("sortPinnedThreadsForSidebar", () => {
     ]);
 
     expect(sorted.map((thread) => thread.id)).toEqual(["a", "b"]);
+  });
+});
+
+describe("resolveSidebarThreadSection", () => {
+  const lifecycleThread = (overrides: Record<string, unknown> = {}) =>
+    ({
+      ...makeThread(),
+      latestUserMessageAt: "2026-03-09T10:00:00.000Z",
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      pinnedAt: "2026-03-09T10:01:00.000Z",
+      pinOrderKey: "m",
+      snoozedAt: null,
+      snoozedUntil: null,
+      ...overrides,
+    }) as never;
+
+  const options = {
+    supportsSettlement: true,
+    supportsSnooze: true,
+    now: "2026-03-10T10:00:00.000Z",
+    preciseNow: "2026-03-10T10:00:00.000Z",
+    autoSettleAfterDays: null,
+    autoSettleOnMerge: true,
+    changeRequest: null,
+  } as const;
+
+  it("settles a pinned thread when its change request merges", () => {
+    expect(
+      resolveSidebarThreadSection(lifecycleThread(), {
+        ...options,
+        changeRequest: {
+          state: "merged",
+          updatedAt: "2026-03-10T09:00:00.000Z",
+        },
+      }),
+    ).toBe("settled");
+  });
+
+  it("keeps a persisted pin beneath a current snooze", () => {
+    expect(
+      resolveSidebarThreadSection(
+        lifecycleThread({
+          snoozedAt: "2026-03-10T09:00:00.000Z",
+          snoozedUntil: "2026-03-11T09:00:00.000Z",
+        }),
+        options,
+      ),
+    ).toBe("snoozed");
   });
 });
 
