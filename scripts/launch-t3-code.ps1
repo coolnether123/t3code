@@ -660,7 +660,7 @@ try {
 
     Write-Phase "dependencies"
     if ($dependencyNeedsInstall) {
-        Invoke-ProjectCommand "vp i" @("i") $commandLogPath
+        Invoke-ProjectCommand "vp i --frozen-lockfile" @("i", "--frozen-lockfile") $commandLogPath
     }
     else {
         Write-Plan "Dependency state is current. Skipping vp i."
