@@ -51,8 +51,9 @@ Authentication challenges and operating-system permission prompts can still need
 
 Chrome, Browser, and Computer Use are Codex plugins. Enable the plugins in the same `CODEX_HOME`
 that the T3 provider uses. Full desktop can continue through Windows control when Chrome's extension
-connection is unavailable, but Chrome-specific page structure, console, and network inspection
-require a working Chrome plugin connection.
+connection is unavailable. It keeps the existing Chrome window as the target and changes the control
+mechanism instead of asking to launch a replacement window. Chrome-specific page structure, console,
+and network inspection require a working Chrome plugin connection.
 
 ## I Want Work And Personal Codex Accounts
 

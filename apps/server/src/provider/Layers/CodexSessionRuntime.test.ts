@@ -568,6 +568,32 @@ describe("T3 browser developer instructions", () => {
     NodeAssert.match(desktop, /Full Windows and Chrome control/);
   });
 
+  it("keeps Chrome as the target while routing extension failures to Windows control", () => {
+    for (const computerControlMode of ["chrome", "desktop"] as const) {
+      const instructions = buildCodexDeveloperInstructions("default", {
+        model: "gpt-5.6-sol",
+        reasoningEffort: "high",
+        computerControlMode,
+      });
+
+      NodeAssert.match(
+        instructions,
+        /keep Chrome as the target and change only the control mechanism/,
+      );
+      NodeAssert.match(instructions, /computer-use:computer-use/);
+      NodeAssert.match(
+        instructions,
+        /use Windows Computer Use to operate the user's existing Chrome window/,
+      );
+      NodeAssert.match(instructions, /Do not stop after extension diagnostics/);
+      NodeAssert.match(instructions, /ask to open a fresh Chrome window/);
+      NodeAssert.match(
+        instructions,
+        /direct Chrome control and Windows Computer Use are both unavailable/,
+      );
+    }
+  });
+
   it("keeps the base collaboration modes independent from browser availability", () => {
     for (const instructions of [
       codexDefaultModeDeveloperInstructions(true),
