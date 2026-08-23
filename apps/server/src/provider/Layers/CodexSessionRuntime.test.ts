@@ -463,6 +463,7 @@ describe("buildCodexDeveloperInstructions", () => {
     ]) {
       NodeAssert.match(instructions, new RegExp(`Do not call[^.]*${nativeTool}`));
     }
+    NodeAssert.match(instructions, /follow the Worker tools' assignment and telemetry guidance/);
   });
 
   it("appends runtime info after the mode instructions", () => {

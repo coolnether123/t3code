@@ -38,7 +38,7 @@ const mutatingTool = <T extends Tool.Any>(tool: T): T =>
 export const WorkerStartTool = mutatingTool(
   Tool.make("worker_start", {
     description:
-      "Start one persistent T3 Worker for a bounded assignment. Send only explicit context, paths, snippets, and Worker instructions. The Worker does not inherit the parent conversation. Its runtime access mode inherits the parent session and cannot be overridden in this call. Omit modelSelection to inherit the parent's exact provider instance, model, and options. To change supported options such as reasoningEffort, send only modelSelection.options; do not guess instanceId or model aliases.",
+      "Start one persistent T3 Worker for a bounded assignment. The Worker does not inherit the parent conversation. State the task once in assignment; title is a label, and context and instructions should contain only non-duplicative supporting material. Do not ask it to report Worker IDs, token usage, or tool counts; T3 reports that server-owned telemetry through Worker tool results. Its runtime access mode inherits the parent session and cannot be overridden in this call. Omit modelSelection to inherit the parent's exact provider instance, model, and options. To change supported options such as reasoningEffort, send only modelSelection.options; do not guess instanceId or model aliases.",
     parameters: WorkerMcpStartInput,
     success: WorkerMcpStartResult,
     failure: WorkerError,
@@ -59,7 +59,7 @@ export const WorkerListTool = readonlyTool(
 
 export const WorkerWaitTool = Tool.make("worker_wait", {
   description:
-    "Wait for relevant events from selected Workers without polling or sending periodic messages. An expired wait reports current state and does not mark a Worker failed or lost.",
+    "Wait for relevant events from selected Workers without polling or sending periodic messages. Results include T3-owned Worker identity, lifecycle, and usage; call worker_status after a wake when detailed tool activity is needed. An expired wait reports current state and does not mark a Worker failed or lost.",
   parameters: WorkerMcpWaitInput,
   success: WorkerMcpWaitResult,
   failure: WorkerError,
@@ -72,7 +72,7 @@ export const WorkerWaitTool = Tool.make("worker_wait", {
 export const WorkerStatusTool = readonlyTool(
   Tool.make("worker_status", {
     description:
-      "Read objective persisted status for one Worker owned by this parent. This does not message the Worker, invoke an observer model, or change Worker state.",
+      "Read persisted detail for one Worker owned by this parent, including lifecycle, usage, activations, messages, and detailed tool activity. This does not message the Worker, invoke an observer model, or change Worker state.",
     parameters: WorkerMcpGetInput,
     success: WorkerMcpGetResult,
     failure: WorkerError,
