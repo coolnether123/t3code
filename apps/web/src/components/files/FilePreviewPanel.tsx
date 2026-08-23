@@ -21,6 +21,7 @@ import { useAssetUrlState } from "~/assets/assetUrls";
 import ChatMarkdown from "~/components/ChatMarkdown";
 import { OpenInPicker } from "~/components/chat/OpenInPicker";
 import { useRemoteOpenState } from "~/remoteOpen";
+import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { useClientSettings } from "~/hooks/useSettings";
 import { useTheme } from "~/hooks/useTheme";
 import { getLocalStorageItem, setLocalStorageItem, useLocalStorage } from "~/hooks/useLocalStorage";
@@ -755,6 +756,24 @@ function initialExplorerOpen(): boolean {
   }
 }
 
+export function resolveFilePreviewPaneVisibility(input: {
+  compact: boolean;
+  compactExplorerOpen: boolean;
+  explorerOpen: boolean;
+  relativePath: string | null;
+}): { showExplorer: boolean; showFile: boolean } {
+  if (input.relativePath === null) {
+    return { showExplorer: true, showFile: false };
+  }
+  if (input.compact) {
+    return {
+      showExplorer: input.compactExplorerOpen,
+      showFile: !input.compactExplorerOpen,
+    };
+  }
+  return { showExplorer: input.explorerOpen, showFile: true };
+}
+
 export default function FilePreviewPanel({
   environmentId,
   cwd,
@@ -782,7 +801,9 @@ export default function FilePreviewPanel({
   });
   const isImage = relativePath !== null && isWorkspaceImagePreviewPath(relativePath);
   const file = useProjectFileQuery(environmentId, cwd, relativePath, !isImage);
+  const compact = useMediaQuery("max-sm");
   const [explorerOpen, setExplorerOpen] = useState(initialExplorerOpen);
+  const [compactExplorerOpen, setCompactExplorerOpen] = useState(relativePath === null);
   // Reading markdown rendered is a preference, not a property of one file. Keeping
   // it on the panel meant a thread switch dropped it and forced source back.
   const [renderMarkdownPreferred, setRenderMarkdownPreferred] = useLocalStorage(
@@ -820,7 +841,24 @@ export default function FilePreviewPanel({
     currentCrumb?.scrollIntoView({ block: "nearest", inline: "end" });
   }, [relativePath]);
 
+  useEffect(() => {
+    if (relativePath !== null) {
+      setCompactExplorerOpen(false);
+    }
+  }, [relativePath]);
+
+  const panes = resolveFilePreviewPaneVisibility({
+    compact,
+    compactExplorerOpen,
+    explorerOpen,
+    relativePath,
+  });
+
   const toggleExplorer = () => {
+    if (compact) {
+      setCompactExplorerOpen((current) => !current);
+      return;
+    }
     setExplorerOpen((current) => {
       const next = !current;
       try {
@@ -831,6 +869,14 @@ export default function FilePreviewPanel({
       return next;
     });
   };
+
+  const handleOpenFile = useCallback(
+    (nextRelativePath: string) => {
+      setCompactExplorerOpen(false);
+      onOpenFile(nextRelativePath);
+    },
+    [onOpenFile],
+  );
 
   const handleOpenInBrowser = useCallback(() => {
     if (!absolutePath || !environmentHttpBaseUrl) return;
@@ -858,7 +904,7 @@ export default function FilePreviewPanel({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-background">
-      {relativePath ? (
+      {relativePath && panes.showFile ? (
         <div
           className="flex h-10 min-h-10 shrink-0 items-center gap-2 border-b border-border/60 bg-background px-3 in-data-[preview-panel-mode=inline]:mb-3 in-data-[preview-panel-mode=inline]:h-7 in-data-[preview-panel-mode=inline]:min-h-7 in-data-[preview-panel-mode=inline]:border-b-transparent"
           data-surface-subheader
@@ -966,9 +1012,9 @@ export default function FilePreviewPanel({
               render={
                 <Toggle
                   className="shrink-0"
-                  pressed={explorerOpen}
+                  pressed={panes.showExplorer}
                   onPressedChange={toggleExplorer}
-                  aria-label={explorerOpen ? "Hide file explorer" : "Show file explorer"}
+                  aria-label={panes.showExplorer ? "Hide file explorer" : "Show file explorer"}
                   variant="ghost"
                   size="sm"
                 >
@@ -977,7 +1023,7 @@ export default function FilePreviewPanel({
               }
             />
             <TooltipPopup>
-              {explorerOpen ? "Hide file explorer" : "Show file explorer"}
+              {panes.showExplorer ? "Hide file explorer" : "Show file explorer"}
             </TooltipPopup>
           </Tooltip>
         </div>
@@ -991,7 +1037,7 @@ export default function FilePreviewPanel({
         <div
           className={cn(
             "min-w-0 flex-1 flex-col overflow-hidden",
-            relativePath ? "flex" : "hidden",
+            panes.showFile ? "flex" : "hidden",
           )}
         >
           {relativePath && isImage && absolutePath ? (
@@ -1063,11 +1109,11 @@ export default function FilePreviewPanel({
             )
           ) : null}
         </div>
-        {explorerOpen || relativePath === null ? (
+        {panes.showExplorer ? (
           <aside
             className={cn(
               "flex min-h-0 shrink-0 bg-background",
-              relativePath
+              relativePath && !compact
                 ? "w-[min(22rem,46%)] min-w-64 border-l border-border/60"
                 : "min-w-0 flex-1",
             )}
@@ -1079,7 +1125,7 @@ export default function FilePreviewPanel({
               projectName={projectName}
               selectedPath={relativePath}
               selectedPathRevealId={revealRequestId}
-              onOpenFile={onOpenFile}
+              onOpenFile={handleOpenFile}
               {...(relativePath && !isImage ? { onRefreshSelectedFile: file.refresh } : {})}
             />
           </aside>

@@ -34,6 +34,7 @@ import {
 import { Popover, PopoverPopup, PopoverTrigger } from "~/components/ui/popover";
 import { Button } from "~/components/ui/button";
 import { readTextFromClipboard, writeTextToClipboard } from "~/hooks/useCopyToClipboard";
+import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { cn } from "~/lib/utils";
 import { type TerminalContextSelection } from "~/lib/terminalContext";
 import {
@@ -59,7 +60,6 @@ import {
   type ThreadTerminalGroup,
 } from "../types";
 import { readLocalApi } from "~/localApi";
-import { confirmTerminalClose } from "~/lib/terminalCloseConfirm";
 import { useClientSettings } from "../hooks/useSettings";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useAttachedTerminalSession } from "../state/terminalSessions";
@@ -78,6 +78,17 @@ import {
 const MIN_DRAWER_HEIGHT = 180;
 const MAX_DRAWER_HEIGHT_RATIO = 0.75;
 const MULTI_CLICK_SELECTION_ACTION_DELAY_MS = 260;
+
+export const TERMINAL_ACCESSORY_KEYS = [
+  { label: "Esc", data: "\u001b" },
+  { label: "Tab", data: "\t" },
+  { label: "↑", data: "\u001b[A" },
+  { label: "↓", data: "\u001b[B" },
+  { label: "←", data: "\u001b[D" },
+  { label: "→", data: "\u001b[C" },
+  { label: "Ctrl-C", data: "\u0003" },
+  { label: "Ctrl-D", data: "\u0004" },
+] as const;
 
 function maxDrawerHeight(): number {
   if (typeof window === "undefined") return DEFAULT_THREAD_TERMINAL_HEIGHT;
@@ -978,7 +989,7 @@ export function TerminalViewport({
   return (
     <div
       ref={containerRef}
-      className="relative h-full w-full overflow-hidden bg-[var(--terminal-background)]"
+      className="relative h-full w-full overflow-hidden rounded-[4px] bg-background"
     />
   );
 }
@@ -1074,6 +1085,10 @@ export default function ThreadTerminalDrawer({
   terminalLaunchLocationsById,
 }: ThreadTerminalDrawerProps) {
   const isPanel = mode === "panel";
+  const compactTerminal = useMediaQuery("(max-width: 640px), (pointer: coarse)");
+  const writeTerminalInput = useAtomCommand(terminalEnvironment.write, {
+    reportFailure: false,
+  });
   const [advancedTypography] = useLocalStorage(
     TYPOGRAPHY_ADVANCED_STORAGE_KEY,
     false,
@@ -1217,13 +1232,14 @@ export default function ThreadTerminalDrawer({
     return indexByTerminal >= 0 ? indexByTerminal : 0;
   }, [activeTerminalGroupId, resolvedActiveTerminalId, resolvedTerminalGroups]);
 
-  const visibleTerminalIds =
+  const activeGroupTerminalIds =
     resolvedTerminalGroups[resolvedActiveGroupIndex]?.terminalIds ??
     (normalizedTerminalIds.length > 0 ? [resolvedActiveTerminalId] : []);
+  const visibleTerminalIds = compactTerminal ? [resolvedActiveTerminalId] : activeGroupTerminalIds;
   const splitDirection =
     resolvedTerminalGroups[resolvedActiveGroupIndex]?.splitDirection ?? "horizontal";
-  const hasTerminalSidebar = normalizedTerminalIds.length > 1;
-  const isSplitView = visibleTerminalIds.length > 1;
+  const hasTerminalSidebar = !compactTerminal && normalizedTerminalIds.length > 1;
+  const isSplitView = !compactTerminal && visibleTerminalIds.length > 1;
   const showGroupHeaders =
     resolvedTerminalGroups.length > 1 ||
     resolvedTerminalGroups.some((terminalGroup) => terminalGroup.terminalIds.length > 1);
@@ -1274,14 +1290,19 @@ export default function ThreadTerminalDrawer({
   const onNewTerminalAction = useCallback(() => {
     onNewTerminal();
   }, [onNewTerminal]);
-  const confirmCloseTerminal = useCallback(
-    (terminalId: string) => {
-      const label = terminalLabelById.get(terminalId) ?? getTerminalLabel(terminalId);
-      void confirmTerminalClose([label]).then((confirmed) => {
-        if (confirmed) onCloseTerminal(terminalId);
+  const sendAccessoryInput = useCallback(
+    (data: string) => {
+      if (!resolvedActiveTerminalId) return;
+      void writeTerminalInput({
+        environmentId: threadRef.environmentId,
+        input: {
+          threadId,
+          terminalId: resolvedActiveTerminalId,
+          data,
+        },
       });
     },
-    [onCloseTerminal, terminalLabelById],
+    [resolvedActiveTerminalId, threadId, threadRef.environmentId, writeTerminalInput],
   );
 
   useEffect(() => {
@@ -1439,32 +1460,39 @@ export default function ThreadTerminalDrawer({
       {!hasTerminalSidebar && (
         <div className="pointer-events-none absolute right-2 top-2 z-20">
           <div className="pointer-events-auto inline-flex items-center overflow-hidden rounded-md border border-border/80 bg-background shadow-xs">
+            {!compactTerminal ? (
+              <>
+                <TerminalActionButton
+                  className={`p-1 text-foreground/90 transition-colors ${
+                    hasReachedSplitLimit
+                      ? "cursor-not-allowed opacity-45 hover:bg-transparent"
+                      : "hover:bg-accent"
+                  }`}
+                  onClick={onSplitTerminalAction}
+                  label={splitTerminalActionLabel}
+                >
+                  <SquareSplitHorizontal className="size-3.25" />
+                </TerminalActionButton>
+                <div className="h-4 w-px bg-border/80" />
+                <TerminalActionButton
+                  className={`p-1 text-foreground/90 transition-colors ${
+                    hasReachedSplitLimit
+                      ? "cursor-not-allowed opacity-45 hover:bg-transparent"
+                      : "hover:bg-accent"
+                  }`}
+                  onClick={onSplitTerminalVerticalAction}
+                  label={splitTerminalVerticalActionLabel}
+                >
+                  <SquareSplitVertical className="size-3.25" />
+                </TerminalActionButton>
+                <div className="h-4 w-px bg-border/80" />
+              </>
+            ) : null}
             <TerminalActionButton
-              className={`p-1 text-foreground/90 transition-colors ${
-                hasReachedSplitLimit
-                  ? "cursor-not-allowed opacity-45 hover:bg-transparent"
-                  : "hover:bg-accent"
-              }`}
-              onClick={onSplitTerminalAction}
-              label={splitTerminalActionLabel}
-            >
-              <SquareSplitHorizontal className="size-3.25" />
-            </TerminalActionButton>
-            <div className="h-4 w-px bg-border/80" />
-            <TerminalActionButton
-              className={`p-1 text-foreground/90 transition-colors ${
-                hasReachedSplitLimit
-                  ? "cursor-not-allowed opacity-45 hover:bg-transparent"
-                  : "hover:bg-accent"
-              }`}
-              onClick={onSplitTerminalVerticalAction}
-              label={splitTerminalVerticalActionLabel}
-            >
-              <SquareSplitVertical className="size-3.25" />
-            </TerminalActionButton>
-            <div className="h-4 w-px bg-border/80" />
-            <TerminalActionButton
-              className="p-1 text-foreground/90 transition-colors hover:bg-accent"
+              className={cn(
+                "text-foreground/90 transition-colors hover:bg-accent",
+                compactTerminal ? "inline-flex size-11 items-center justify-center" : "p-1",
+              )}
               onClick={onNewTerminalAction}
               label={newTerminalActionLabel}
             >
@@ -1472,8 +1500,11 @@ export default function ThreadTerminalDrawer({
             </TerminalActionButton>
             <div className="h-4 w-px bg-border/80" />
             <TerminalActionButton
-              className="p-1 text-foreground/90 transition-colors hover:bg-accent"
-              onClick={() => confirmCloseTerminal(resolvedActiveTerminalId)}
+              className={cn(
+                "text-foreground/90 transition-colors hover:bg-accent",
+                compactTerminal ? "inline-flex size-11 items-center justify-center" : "p-1",
+              )}
+              onClick={() => onCloseTerminal(resolvedActiveTerminalId)}
               label={closeTerminalActionLabel}
             >
               <Trash2 className="size-3.25" />
@@ -1483,12 +1514,7 @@ export default function ThreadTerminalDrawer({
       )}
 
       <div className="min-h-0 w-full flex-1">
-        <div
-          className={cn(
-            "flex h-full min-h-0 bg-[var(--terminal-background)]",
-            hasTerminalSidebar && "gap-1.5",
-          )}
-        >
+        <div className={`flex h-full min-h-0 ${hasTerminalSidebar ? "gap-1.5" : ""}`}>
           <div className="min-w-0 flex-1">
             {isSplitView ? (
               <div
@@ -1523,7 +1549,7 @@ export default function ThreadTerminalDrawer({
                         }
                       }}
                     >
-                      <div className="h-full">
+                      <div className="h-full p-1">
                         <TerminalViewport
                           advancedTypography={advancedTypography}
                           threadRef={threadRef}
@@ -1551,7 +1577,7 @@ export default function ThreadTerminalDrawer({
                 })}
               </div>
             ) : (
-              <div className="h-full">
+              <div className="h-full p-1">
                 <TerminalViewport
                   advancedTypography={advancedTypography}
                   key={resolvedActiveTerminalId}
@@ -1613,7 +1639,7 @@ export default function ThreadTerminalDrawer({
                   </TerminalActionButton>
                   <TerminalActionButton
                     className="inline-flex h-full items-center border-l border-border/70 px-1 text-foreground/90 transition-colors hover:bg-accent/70"
-                    onClick={() => confirmCloseTerminal(resolvedActiveTerminalId)}
+                    onClick={() => onCloseTerminal(resolvedActiveTerminalId)}
                     label={closeTerminalActionLabel}
                   >
                     <Trash2 className="size-3.25" />
@@ -1683,7 +1709,7 @@ export default function ThreadTerminalDrawer({
                                       <button
                                         type="button"
                                         className="inline-flex size-3.5 items-center justify-center rounded text-xs font-medium leading-none text-muted-foreground opacity-0 transition hover:bg-accent hover:text-foreground group-hover:opacity-100"
-                                        onClick={() => confirmCloseTerminal(terminalId)}
+                                        onClick={() => onCloseTerminal(terminalId)}
                                         aria-label={closeTerminalLabel}
                                       />
                                     }
@@ -1713,6 +1739,44 @@ export default function ThreadTerminalDrawer({
           )}
         </div>
       </div>
+      {compactTerminal ? (
+        <div
+          className="flex min-h-11 shrink-0 items-center gap-1 overflow-x-auto border-t border-border/70 bg-background px-1 pb-[env(safe-area-inset-bottom)]"
+          aria-label="Terminal keyboard shortcuts"
+        >
+          {normalizedTerminalIds.length > 1
+            ? normalizedTerminalIds.map((terminalId) => (
+                <button
+                  key={terminalId}
+                  type="button"
+                  className={cn(
+                    "h-11 max-w-36 shrink-0 truncate rounded-md px-3 text-xs font-medium",
+                    terminalId === resolvedActiveTerminalId
+                      ? "bg-accent text-foreground"
+                      : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+                  )}
+                  aria-pressed={terminalId === resolvedActiveTerminalId}
+                  onClick={() => onActiveTerminalChange(terminalId)}
+                >
+                  {terminalLabelById.get(terminalId) ?? "Terminal"}
+                </button>
+              ))
+            : null}
+          {normalizedTerminalIds.length > 1 ? (
+            <div className="h-6 w-px shrink-0 bg-border/80" aria-hidden />
+          ) : null}
+          {TERMINAL_ACCESSORY_KEYS.map((key) => (
+            <button
+              key={key.label}
+              type="button"
+              className="h-11 min-w-11 shrink-0 rounded-md px-3 text-xs font-medium text-foreground hover:bg-accent active:bg-accent/80"
+              onClick={() => sendAccessoryInput(key.data)}
+            >
+              {key.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
     </aside>
   );
 }
