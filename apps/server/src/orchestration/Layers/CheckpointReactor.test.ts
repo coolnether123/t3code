@@ -1307,7 +1307,9 @@ describe("CheckpointReactor", () => {
       createdAt,
     });
     await waitForEvent(harness.engine, (event) => event.type === "thread.reverted");
-    expect(NodeFS.readFileSync(NodePath.join(harness.cwd, "README.md"), "utf8")).toBe("v2\n");
+    expect(
+      NodeFS.readFileSync(NodePath.join(harness.cwd, "README.md"), "utf8").replaceAll("\r\n", "\n"),
+    ).toBe("v2\n");
   });
 
   it("rejects a rewind when the worktree changed after its latest checkpoint", async () => {

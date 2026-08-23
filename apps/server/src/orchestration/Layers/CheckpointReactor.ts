@@ -865,7 +865,9 @@ const make = Effect.gen(function* () {
     const restored = yield* checkpointStore.restoreCheckpoint({
       cwd: checkpointCwd,
       checkpointRef: targetCheckpointRef,
-      ...(project?.repositoryIdentity ? { expectedRepository: project.repositoryIdentity } : {}),
+      ...(project?.repositoryIdentity?.rootPath
+        ? { expectedRepositoryRoot: project.repositoryIdentity.rootPath }
+        : {}),
       expectedBranch: thread.branch,
       expectedCurrentCheckpointRef: checkpointRefForThreadTurn(input.threadId, currentTurnCount),
       fallbackToHead: input.turnCount === 0,

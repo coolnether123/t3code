@@ -249,7 +249,7 @@ it.layer(GitContractLayer)("Git checkpoint restore safeguards", (it) => {
         expectedCurrentCheckpointRef: currentRef,
       });
 
-      assert.strictEqual(result.restored, true, JSON.stringify(result));
+      assert.strictEqual(result.restored, true, result.restored ? "" : result.detail);
       assert.strictEqual(
         (yield* fileSystem.readFileString(`${linkedCwd}/README.md`)).replaceAll("\r\n", "\n"),
         "linked target\n",

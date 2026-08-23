@@ -28,14 +28,7 @@ export interface CaptureCheckpointInput {
   readonly checkpointRef: CheckpointRef;
 }
 
-export interface RestoreCheckpointInput {
-  readonly cwd: string;
-  readonly checkpointRef: CheckpointRef;
-  readonly expectedRepository?: VcsRestoreCheckpointInput["expectedRepository"];
-  readonly expectedBranch?: string | null;
-  readonly expectedCurrentCheckpointRef?: CheckpointRef;
-  readonly fallbackToHead?: boolean;
-}
+export type RestoreCheckpointInput = VcsRestoreCheckpointInput;
 
 export interface DiffCheckpointsInput {
   readonly cwd: string;
@@ -68,7 +61,7 @@ export class CheckpointStore extends Context.Service<
 
     /** Check whether a checkpoint ref exists. */
     readonly hasCheckpointRef: (
-      input: Omit<RestoreCheckpointInput, "fallbackToHead">,
+      input: Pick<RestoreCheckpointInput, "cwd" | "checkpointRef">,
     ) => Effect.Effect<boolean, CheckpointStoreError>;
 
     /**

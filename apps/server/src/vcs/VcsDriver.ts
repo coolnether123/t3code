@@ -24,6 +24,8 @@ export interface VcsRestoreCheckpointInput {
   readonly checkpointRef: CheckpointRef;
   /** The repository recorded for the owning project, when available. */
   readonly expectedRepository?: VcsRepositoryIdentity;
+  /** The canonical project repository root, when project metadata provides it. */
+  readonly expectedRepositoryRoot?: string;
   /** A recorded thread branch must still be checked out when provided. */
   readonly expectedBranch?: string | null;
   /** The latest checkpoint the current worktree must still match. */
@@ -64,7 +66,7 @@ export interface VcsDeleteCheckpointRefsInput {
 export interface VcsCheckpointOps {
   readonly captureCheckpoint: (input: VcsCaptureCheckpointInput) => Effect.Effect<void, VcsError>;
   readonly hasCheckpointRef: (
-    input: Omit<VcsRestoreCheckpointInput, "fallbackToHead">,
+    input: Pick<VcsRestoreCheckpointInput, "cwd" | "checkpointRef">,
   ) => Effect.Effect<boolean, VcsError>;
   readonly restoreCheckpoint: (
     input: VcsRestoreCheckpointInput,

@@ -884,13 +884,19 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
           detail: "The configured workspace is not an available Git worktree.",
         };
       }
-      const repositoryMatchesExpected = input.expectedRepository
+      const repositoryMatchesExpectedRoot = input.expectedRepositoryRoot
+        ? normalizedPath(repository.rootPath, input.cwd) ===
+          normalizedPath(input.expectedRepositoryRoot, input.cwd)
+        : true;
+      const repositoryMatchesExpectedIdentity = input.expectedRepository
         ? repository.metadataPath && input.expectedRepository.metadataPath
           ? normalizedPath(repository.metadataPath, input.cwd) ===
             normalizedPath(input.expectedRepository.metadataPath, input.cwd)
           : normalizedPath(repository.rootPath, input.cwd) ===
             normalizedPath(input.expectedRepository.rootPath, input.cwd)
         : true;
+      const repositoryMatchesExpected =
+        repositoryMatchesExpectedRoot && repositoryMatchesExpectedIdentity;
       if (!repositoryMatchesExpected) {
         return {
           restored: false,
