@@ -563,7 +563,7 @@ try {
     else {
         foreach ($file in $mismatches) {
             $destination = Assert-ContainedPath $deployRoot (Join-Path $deployRoot $file.Relative) "sync destination"
-            $parent = Split-Path -LiteralPath $destination -Parent
+            $parent = [System.IO.Path]::GetDirectoryName($destination)
             if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
                 New-Item -ItemType Directory -Path $parent -Force | Out-Null
             }
@@ -720,7 +720,9 @@ try {
 }
 catch {
     $failure = $_
-    Write-Error ("launch-t3-code.ps1 FAILED: " + $failure.Exception.Message)
+    Write-Host ("  failure at " + $failure.InvocationInfo.PositionMessage)
+    Write-Host ("  stack " + $failure.ScriptStackTrace)
+    Write-Error ("launch-t3-code.ps1 FAILED: " + $failure.Exception.Message) -ErrorAction Continue
     if ($transcriptStarted) {
         try { Stop-Transcript | Out-Null } catch { }
     }
