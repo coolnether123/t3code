@@ -177,6 +177,7 @@ import { Input } from "./ui/input";
 import { Menu, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuTrigger } from "./ui/menu";
 import { SidebarContent, SidebarGroup, SidebarMenuButton, useSidebar } from "./ui/sidebar";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
+import { SidebarThreadOverflowButton } from "./SidebarThreadOverflowButton";
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import {
@@ -1212,6 +1213,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       />
     )
   ) : null;
+  const coarsePointerOverflowAction = (
+    <SidebarThreadOverflowButton
+      threadTitle={thread.title}
+      onOpen={(position) => onContextMenu(threadRef, position)}
+    />
+  );
 
   if (variant === "slim") {
     return (
@@ -1227,7 +1234,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 tabIndex={0}
                 data-testid="sidebar-row-slim"
                 aria-busy={isRegeneratingTitle || undefined}
-                className={cn(rowSurfaceClassName, "flex h-9 items-center gap-2.5 px-2.5")}
+                className={cn(
+                  rowSurfaceClassName,
+                  "flex h-11 items-center gap-2.5 px-2.5 pointer-fine:h-9 pointer-coarse:pr-12",
+                )}
                 onClick={handleClick}
                 onDoubleClick={handleDoubleClick}
                 onKeyDown={handleKeyDown}
@@ -1352,6 +1362,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               )}
             </span>
             {props.jumpLabel ? <JumpHintBadge label={props.jumpLabel} /> : null}
+            {coarsePointerOverflowAction}
           </TooltipTrigger>
           {detailsTooltip}
         </Tooltip>
@@ -1396,7 +1407,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             />
           }
         >
-          <div className="relative z-10 h-[4.875rem] px-[var(--sidebar-row-content-inset)] py-[var(--sidebar-content-inset)]">
+          <div className="relative z-10 h-[4.875rem] px-[var(--sidebar-row-content-inset)] py-[var(--sidebar-content-inset)] pointer-coarse:pr-12">
             <div className="flex h-5 min-w-0 items-center gap-1.5">
               <ProjectFavicon
                 environmentId={thread.environmentId}
@@ -1582,6 +1593,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             </div>
           </div>
           {props.jumpLabel ? <JumpHintBadge label={props.jumpLabel} /> : null}
+          {coarsePointerOverflowAction}
         </TooltipTrigger>
         {detailsTooltip}
       </Tooltip>
