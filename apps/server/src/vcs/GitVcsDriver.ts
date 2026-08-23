@@ -506,10 +506,16 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
       ["rev-parse", "--git-common-dir"],
     ).pipe(Effect.orElseSucceed(() => null));
 
+    const metadataPath = gitCommonDir?.stdout.trim() || null;
     return {
       kind: "git" as const,
       rootPath: root.stdout.trim(),
-      metadataPath: gitCommonDir?.stdout.trim() || null,
+      metadataPath:
+        metadataPath === null
+          ? null
+          : path.isAbsolute(metadataPath)
+            ? metadataPath
+            : path.resolve(cwd, metadataPath),
       freshness: yield* nowFreshness(),
     };
   });
