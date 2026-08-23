@@ -34,6 +34,7 @@ $planOnly = $DryRun -or [bool]$WhatIfPreference
 $transcriptStarted = $false
 $transcriptPath = $null
 $needsTailscaleServe = $false
+$startedRootPids = @()
 
 # These paths are owned by the deploy checkout or by the D-backed runtime.
 # The synchronizer never removes them and never copies over them.
@@ -221,13 +222,30 @@ function Test-ManagedDesktopCommand {
         [Parameter(Mandatory)][object]$Process,
         [Parameter(Mandatory)][string]$HomePath
     )
+    $command = Get-ProcessCommandLine $Process
+    $embeddedDesktopServer = $command -match '(?i)apps[\\/]server[\\/]dist[\\/]bin\.mjs\s+--bootstrap-fd\s+3(?:\s|$)'
+    if ($embeddedDesktopServer) {
+        return $Process.Name -match '^electron(\.exe)?$' -and
+            $command -match '(?i)apps[\\/]server[\\/]dist[\\/]bin\.mjs'
+    }
+    # A previous supported launcher used the packaged server entrypoint as a
+    # standalone process. Recognize that exact deploy/home/port shape so a
+    # transition run can replace it, but never broaden ownership to an
+    # arbitrary Node process or another server on the same port.
+    $deployPattern = [regex]::Escape((Normalize-AbsolutePath $deployRoot))
+    $homePattern = [regex]::Escape((Normalize-AbsolutePath $HomePath))
+    $quotePattern = [regex]::Escape([string][char]34)
+    $legacyServerPattern = "(?i)$deployPattern[\\/]apps[\\/]server[\\/]dist[\\/]bin\.mjs(?:$quotePattern)?\s+serve\s+--host\s+127\.0\.0\.1\s+--port\s+$serverPort\s+--base-dir\s+(?:$quotePattern)?$homePattern(?:$quotePattern)?\s+--no-browser(?:\s|$)"
+    $legacyServerRoot = $command -match $legacyServerPattern
+    if ($legacyServerRoot) {
+        return $Process.Name -match '^node(\.exe)?$'
+    }
     if ($Process.Name -notmatch '^node(\.exe)?$') {
         return $false
     }
     if ($null -ne $Process.ExecutablePath -and -not (Test-SamePath $Process.ExecutablePath $nodePath)) {
         return $false
     }
-    $command = Get-ProcessCommandLine $Process
     $homePattern = [regex]::Escape($HomePath)
     # `dev` is the existing hot-reload browser stack used by the deploy
     # checkout, while `dev:desktop` adds the Electron renderer. Both are valid
@@ -241,7 +259,12 @@ function Test-ManagedDesktopCommand {
         $command -match "(?i)--port\s+$serverPort(\s|$)" -and
         (-not $isDesktopMode -or $hasExpectedDesktopUrl)
     $directServerRoot = $command -match '(?i)(?:^|\s|[\\/])apps[\\/]server[\\/]src[\\/]bin\.ts\s+--host\s+127\.0\.0\.1(?:\s|$)'
-    return $runnerRoot -or $directServerRoot
+    # In desktop development the authenticated server is spawned by Electron
+    # with the bootstrap envelope on fd 3. It must stay in the same process
+    # tree as Electron so the desktop-issued bearer token matches the server
+    # that owns port 3774. Keep recognizing the old direct-server form while
+    # existing managed instances drain, but never launch that form here.
+    return $runnerRoot -or $directServerRoot -or $embeddedDesktopServer
 }
 
 function Get-ManagedDesktopRoots {
@@ -304,6 +327,27 @@ function Test-HttpEndpoint {
     try {
         $response = Invoke-WebRequest -Uri $Uri -UseBasicParsing -TimeoutSec 5
         return [int]$response.StatusCode -ge 200 -and [int]$response.StatusCode -lt 400
+    }
+    catch {
+        return $false
+    }
+}
+
+function Test-EnvironmentTransport {
+    param([Parameter(Mandatory)][string]$BaseUri)
+    try {
+        $response = Invoke-WebRequest -Uri "$($BaseUri.TrimEnd('/'))/api/auth/session" -UseBasicParsing -TimeoutSec 5
+        if ([int]$response.StatusCode -ne 200) {
+            return $false
+        }
+        $state = $response.Content | ConvertFrom-Json
+        $hasBearerSession = @($state.auth.sessionMethods) -contains "bearer-access-token"
+        $hasDesktopBootstrap = @($state.auth.bootstrapMethods) -contains "desktop-bootstrap"
+        return $null -ne $state.authenticated -and
+            $null -ne $state.auth -and
+            $state.auth.policy -eq "desktop-managed-local" -and
+            $hasDesktopBootstrap -and
+            $hasBearerSession
     }
     catch {
         return $false
@@ -380,7 +424,17 @@ function Stop-ManagedDesktop {
     $electronRoots = @(Get-ManagedElectronRoots)
     $webRoots = @(Get-ManagedWebRoots)
     Write-Host "  managed candidates server=$($roots.Count) web=$($webRoots.Count) electron=$($electronRoots.Count)"
-    if ($roots.Count -gt 1) {
+    $embeddedRoots = @($roots | Where-Object {
+        (Get-ProcessCommandLine $_) -match '(?i)apps[\\/]server[\\/]dist[\\/]bin\.mjs\s+--bootstrap-fd\s+3(?:\s|$)'
+    })
+    $directRoots = @($roots | Where-Object {
+        (Get-ProcessCommandLine $_) -match '(?i)apps[\\/]server[\\/]src[\\/]bin\.ts\s+--host\s+127\.0\.0\.1(?:\s|$)'
+    })
+    # A failed previous launch can leave the old standalone server beside the
+    # Electron-owned server. Both are launcher-owned and are stopped together;
+    # any second root of the same kind remains a fail-closed condition.
+    $isKnownTransitionPair = $roots.Count -eq 2 -and $embeddedRoots.Count -eq 1 -and $directRoots.Count -eq 1 -and $electronRoots.Count -eq 1
+    if ($roots.Count -gt 1 -and -not $isKnownTransitionPair) {
         throw "Found $($roots.Count) managed T3 desktop roots for this home. Refusing to choose one."
     }
     if ($electronRoots.Count -gt 1) {
@@ -414,7 +468,7 @@ function Stop-ManagedDesktop {
             throw "Port $serverPort or $webPort is held by an unrelated process. Refusing to stop it."
         }
     }
-    if ($roots.Count -eq 0) {
+    if ($roots.Count -eq 0 -and $webRoots.Count -eq 0 -and $electronRoots.Count -eq 0) {
         if ($listeners.Count -gt 0) {
             throw "A required T3 port is occupied but no managed desktop root owns it."
         }
@@ -450,11 +504,9 @@ function Start-ManagedDesktop {
         [Parameter(Mandatory)][string]$StdOutPath,
         [Parameter(Mandatory)][string]$StdErrPath
     )
-    $serverArguments = @("apps/server/src/bin.ts", "--host", "127.0.0.1")
     $webArguments = @("$deployRoot/node_modules/vite-plus/bin/vp", "dev", "--host", "127.0.0.1", "--port", [string]$webPort)
-    Write-Plan "Starting one hidden T3 server and one hot-reload Vite root with Node $nodePath."
+    Write-Plan "Starting one hot-reload Vite root with Node $nodePath; Electron owns the authenticated T3 server."
     if ($planOnly) {
-        Write-Host "       node $($serverArguments -join ' ')"
         Write-Host "       node $($webArguments -join ' ')"
         return $null
     }
@@ -465,11 +517,10 @@ function Start-ManagedDesktop {
         $env:T3CODE_PORT_OFFSET = [string]$webPortOffset
         $env:T3CODE_HOME = $HomePath
         $env:T3CODE_PORT = [string]$serverPort
-        $server = Start-Process -FilePath $nodePath -ArgumentList $serverArguments -WorkingDirectory $deployRoot -WindowStyle Hidden -RedirectStandardOutput $StdOutPath -RedirectStandardError $StdErrPath -PassThru
         $env:PORT = [string]$webPort
         $env:T3CODE_SINGLE_ORIGIN_DEV = "1"
         $web = Start-Process -FilePath $nodePath -ArgumentList $webArguments -WorkingDirectory (Join-Path $deployRoot "apps\web") -WindowStyle Hidden -RedirectStandardOutput ($StdOutPath + ".vite") -RedirectStandardError ($StdErrPath + ".vite") -PassThru
-        return $server
+        return $web
     }
     finally {
         $env:Path = $oldPath
@@ -611,13 +662,26 @@ try {
         }
     }
     $dependencyRelatives = @(Get-DependencyRelativePaths $sourceFiles)
-    $dependencyNeedsInstall = -not (Test-Path -LiteralPath (Join-Path $deployRoot "node_modules\.modules.yaml"))
+    $dependencyProbePaths = @(
+        "apps\web\node_modules\@vitejs\plugin-react\package.json",
+        "apps\web\node_modules\@rolldown\plugin-babel\package.json",
+        "apps\web\node_modules\@tanstack\router-plugin\package.json",
+        "apps\web\node_modules\compression\package.json",
+        "node_modules\vite-plus\package.json"
+    ) | ForEach-Object { Join-Path $deployRoot $_ }
+    $missingDependencyProbes = @($dependencyProbePaths | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
+    $dependencyNeedsInstall =
+        -not (Test-Path -LiteralPath (Join-Path $deployRoot "node_modules\.modules.yaml")) -or
+        $missingDependencyProbes.Count -gt 0
     foreach ($relative in $dependencyRelatives) {
         if (-not $deployMap.ContainsKey($relative) -or $deployMap[$relative] -ne $sourceMap[$relative]) {
             $dependencyNeedsInstall = $true
         }
     }
     Write-Host "  source projection files $($sourceFiles.Count), deploy mismatches $($mismatches.Count)"
+    if ($missingDependencyProbes.Count -gt 0) {
+        Write-Host "  missing dependency links $($missingDependencyProbes.Count)"
+    }
     Write-Host "  dependency state $(if ($dependencyNeedsInstall) { 'requires vp i' } else { 'matches lock/manifests' })"
 
     Write-Phase "sync"
@@ -660,7 +724,22 @@ try {
 
     Write-Phase "dependencies"
     if ($dependencyNeedsInstall) {
-        Invoke-ProjectCommand "vp i --frozen-lockfile" @("i", "--frozen-lockfile") $commandLogPath
+        # The source lockfile is authoritative for the deploy projection. vp i
+        # may otherwise rewrite it while repairing a stale node_modules tree,
+        # making every safe repeat appear to need another install.
+        $oldNpmConfigLockfile = $env:npm_config_lockfile
+        try {
+            $env:npm_config_lockfile = "false"
+            Invoke-ProjectCommand "vp i" @("i") $commandLogPath
+        }
+        finally {
+            if ($null -eq $oldNpmConfigLockfile) {
+                Remove-Item Env:npm_config_lockfile -ErrorAction SilentlyContinue
+            }
+            else {
+                $env:npm_config_lockfile = $oldNpmConfigLockfile
+            }
+        }
     }
     else {
         Write-Plan "Dependency state is current. Skipping vp i."
@@ -707,6 +786,9 @@ try {
     Write-Phase "desktop"
     Stop-ManagedDesktop $t3Home
     $desktopProcess = Start-ManagedDesktop $t3Home $desktopStdOutPath $desktopStdErrPath
+    if ($null -ne $desktopProcess) {
+        $startedRootPids += [int]$desktopProcess.Id
+    }
 
     if (-not $planOnly) {
         if ($needsTailscaleServe) {
@@ -720,20 +802,13 @@ try {
                 throw "Tailscale HTTPS $tailnetServePort did not resolve to $expectedTailnetProxy after setup."
             }
         }
-        Wait-Until -TimeoutSeconds 20 -Description "exactly one managed desktop root" -Condition {
-            $roots = @(Get-ManagedDesktopRoots $t3Home)
-            if ($roots.Count -gt 1) {
-                throw "More than one managed desktop root appeared after launch."
-            }
-            return $roots.Count -eq 1
-        }
-        Wait-Until -TimeoutSeconds $WaitSeconds -Description "T3 server on 127.0.0.1:$serverPort" -Condition {
-            Test-HttpEndpoint "http://127.0.0.1:$serverPort/.well-known/t3/environment"
-        }
         Wait-Until -TimeoutSeconds $WaitSeconds -Description "T3 web app on 127.0.0.1:$webPort" -Condition {
             Test-HttpEndpoint "http://127.0.0.1:$webPort/"
         }
         $electronProcess = Start-ManagedElectron $electronStdOutPath $electronStdErrPath
+        if ($null -ne $electronProcess) {
+            $startedRootPids += [int]$electronProcess.Id
+        }
         Wait-Until -TimeoutSeconds 30 -Description "exactly one managed Electron root" -Condition {
             $electronRoots = @(Get-ManagedElectronRoots)
             if ($electronRoots.Count -gt 1) {
@@ -741,6 +816,20 @@ try {
             }
             return $electronRoots.Count -eq 1
         }
+        Wait-Until -TimeoutSeconds $WaitSeconds -Description "the Electron-owned authenticated T3 server root" -Condition {
+            $roots = @(Get-ManagedDesktopRoots $t3Home)
+            if ($roots.Count -gt 1) {
+                throw "More than one managed desktop server root appeared after Electron launch."
+            }
+            return $roots.Count -eq 1
+        }
+        Wait-Until -TimeoutSeconds $WaitSeconds -Description "T3 server on 127.0.0.1:$serverPort" -Condition {
+            Test-HttpEndpoint "http://127.0.0.1:$serverPort/.well-known/t3/environment"
+        }
+        Wait-Until -TimeoutSeconds $WaitSeconds -Description "the authenticated environment session transport" -Condition {
+            Test-EnvironmentTransport "http://127.0.0.1:$serverPort"
+        }
+        Write-Host "  environment transport/auth session probe passed"
         if ($null -eq $existingProxy) {
             throw "Tailscale mapping was not available after the planned no-write dry path."
         }
@@ -806,6 +895,16 @@ catch {
     Write-Host ("  failure at " + $failure.InvocationInfo.PositionMessage)
     Write-Host ("  stack " + $failure.ScriptStackTrace)
     Write-Error ("launch-t3-code.ps1 FAILED: " + $failure.Exception.Message) -ErrorAction Continue
+    if (-not $planOnly) {
+        foreach ($startedRootPid in $startedRootPids) {
+            try {
+                & taskkill.exe /PID ([string]$startedRootPid) /T /F *> $null
+            }
+            catch {
+                Write-Host "  cleanup could not stop captured root PID $startedRootPid"
+            }
+        }
+    }
     if ($transcriptStarted) {
         try { Stop-Transcript | Out-Null } catch { }
     }
