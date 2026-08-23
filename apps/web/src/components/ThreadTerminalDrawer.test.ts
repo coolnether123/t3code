@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   TERMINAL_ACCESSORY_KEYS,
+  closeTerminalAfterConfirmation,
   resolveTerminalSelectionActionPosition,
   shouldHandleTerminalExit,
   shouldHandleTerminalSelectionMouseUp,
@@ -23,6 +24,42 @@ describe("TERMINAL_ACCESSORY_KEYS", () => {
         "Ctrl-D": "\u0004",
       },
     );
+  });
+});
+
+describe("closeTerminalAfterConfirmation", () => {
+  it("waits for an affirmative user confirmation before closing", async () => {
+    let resolveConfirmation: ((confirmed: boolean) => void) | undefined;
+    const confirm = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveConfirmation = resolve;
+        }),
+    );
+    const onClose = vi.fn();
+    const closing = closeTerminalAfterConfirmation({
+      terminalId: "terminal-1",
+      terminalLabel: "Development server",
+      confirm,
+      onClose,
+    });
+
+    expect(confirm).toHaveBeenCalledWith(["Development server"]);
+    expect(onClose).not.toHaveBeenCalled();
+    resolveConfirmation?.(true);
+    await closing;
+    expect(onClose).toHaveBeenCalledWith("terminal-1");
+  });
+
+  it("leaves the terminal running when confirmation is declined", async () => {
+    const onClose = vi.fn();
+    await closeTerminalAfterConfirmation({
+      terminalId: "terminal-1",
+      terminalLabel: "Development server",
+      confirm: async () => false,
+      onClose,
+    });
+    expect(onClose).not.toHaveBeenCalled();
   });
 });
 

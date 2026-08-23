@@ -1,4 +1,5 @@
 import {
+  T3_WORKER_TOOL_NAMES,
   isToolLifecycleItemType,
   type OrchestrationThreadActivity,
   type ProviderRuntimeEvent,
@@ -17,17 +18,7 @@ import {
 } from "./WorkerUsage.ts";
 
 const ACTIVE_STATUSES = new Set(["starting", "running", "waitingApproval"]);
-const COORDINATION_TOOLS = new Set([
-  "worker_start",
-  "worker_list",
-  "worker_status",
-  "worker_observe",
-  "worker_send",
-  "worker_wait",
-  "worker_interrupt",
-  "worker_close",
-  "worker_approval_respond",
-]);
+const COORDINATION_TOOLS = new Set<string>(T3_WORKER_TOOL_NAMES);
 
 type WorkerMetricSource = {
   readonly summary: WorkerSummary;

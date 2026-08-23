@@ -1,6 +1,11 @@
 import * as React from "react";
 import { defaultAnimateLayoutChanges, type AnimateLayoutChanges } from "@dnd-kit/sortable";
-import type { ContextMenuItem } from "@t3tools/contracts";
+import type { ContextMenuItem, OrchestrationThreadShell } from "@t3tools/contracts";
+import {
+  effectiveSettled,
+  effectiveSnoozed,
+  type ChangeRequestSettleSource,
+} from "@t3tools/client-runtime/state/thread-settled";
 import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "@t3tools/contracts/settings";
 import {
   getThreadSortTimestamp,
@@ -23,6 +28,42 @@ export const THREAD_JUMP_HINT_SHOW_DELAY_MS = 100;
 // so this limit is a direct renderer-heap and server-load multiplier — keep
 // it small; cold opens still render instantly from the cached snapshot.
 export const SIDEBAR_THREAD_PREWARM_LIMIT = 3;
+
+export type SidebarThreadSection = "snoozed" | "settled" | "pinned" | "active";
+
+/**
+ * Canonical sidebar lifecycle precedence. Snooze temporarily hides every
+ * other state; settlement then reflects explicit or derived completion; a
+ * surviving pin keeps only otherwise-active work at the top.
+ */
+export function resolveSidebarThreadSection(
+  thread: OrchestrationThreadShell,
+  input: {
+    readonly supportsSettlement: boolean;
+    readonly supportsSnooze: boolean;
+    readonly now: string;
+    readonly preciseNow: string;
+    readonly autoSettleAfterDays: number | null;
+    readonly autoSettleOnMerge: boolean;
+    readonly changeRequest: ChangeRequestSettleSource | null;
+  },
+): SidebarThreadSection {
+  if (input.supportsSnooze && effectiveSnoozed(thread, { now: input.preciseNow })) {
+    return "snoozed";
+  }
+  if (
+    input.supportsSettlement &&
+    effectiveSettled(thread, {
+      now: input.now,
+      autoSettleAfterDays: input.autoSettleAfterDays,
+      autoSettleOnMerge: input.autoSettleOnMerge,
+      changeRequest: input.changeRequest,
+    })
+  ) {
+    return "settled";
+  }
+  return thread.pinnedAt != null ? "pinned" : "active";
+}
 
 // The list already reaches its destination through sortable transforms while
 // the pointer is down. dnd-kit's default also animates the committed DOM order

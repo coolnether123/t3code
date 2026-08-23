@@ -466,6 +466,21 @@ describe("thread navigation helpers", () => {
       }),
     );
   });
+
+  it("follows contextual shortcut ownership for terminal and model-picker surfaces", () => {
+    assert.isTrue(
+      shouldShowThreadJumpHints(event({ metaKey: true }), DEFAULT_BINDINGS, {
+        platform: "MacIntel",
+        context: { terminalOpen: true, terminalFocus: false },
+      }),
+    );
+    assert.isFalse(
+      shouldShowThreadJumpHints(event({ metaKey: true }), DEFAULT_BINDINGS, {
+        platform: "MacIntel",
+        context: { modelPickerOpen: true },
+      }),
+    );
+  });
 });
 
 describe("model picker navigation helpers", () => {

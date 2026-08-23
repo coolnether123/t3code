@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   deriveActiveWorkerWait,
+  deriveWorkerToolCallPresentations,
   parseWorkerToolActivity,
   workerToolDisplayName,
 } from "./workerToolPresentation";
@@ -101,6 +102,45 @@ describe("T3 Worker tool presentation", () => {
     });
   });
 
+  it("resolves singular worker_observe arguments through prior Worker identity", () => {
+    const started = activity(
+      {
+        itemType: "mcp_tool_call",
+        data: {
+          item: {
+            tool: "worker_start",
+            status: "completed",
+            result: { summary: { id: "worker-1", displayName: "Scout", title: "Scan files" } },
+          },
+        },
+      },
+      { kind: "tool.completed", sequence: 1 },
+    );
+    const observed = activity(
+      {
+        itemType: "mcp_tool_call",
+        data: {
+          item: {
+            tool: "worker_observe",
+            status: "completed",
+            arguments: { workerId: "worker-1" },
+            result: { workerId: "worker-1", summary: "Still working" },
+          },
+        },
+      },
+      { kind: "tool.completed", sequence: 2 },
+    );
+
+    const call = deriveWorkerToolCallPresentations([started, observed]).find(
+      (candidate) => candidate.toolName === "worker_observe",
+    );
+    expect(call).toMatchObject({
+      workerIds: ["worker-1"],
+      workers: [{ id: "worker-1", name: "Scout" }],
+    });
+    expect(workerToolDisplayName(call!)).toBe("Scout");
+  });
+
   it("shows an active wait only while the real tool lifecycle is in progress", () => {
     const waitStarted = activity(
       {
@@ -157,5 +197,46 @@ describe("T3 Worker tool presentation", () => {
       { kind: "tool.completed", sequence: 3, createdAt: "2026-08-23T01:00:05.000Z" },
     );
     expect(deriveActiveWorkerWait([started, waitStarted, finished])).toBeNull();
+  });
+
+  it("does not throw on a malformed wait timestamp", () => {
+    const waitStarted = activity(
+      {
+        itemType: "mcp_tool_call",
+        status: "inProgress",
+        data: {
+          toolCallId: "wait-malformed",
+          item: {
+            tool: "worker_wait",
+            status: "inProgress",
+            arguments: { workerIds: ["worker-1"], timeoutMillis: 60_000 },
+          },
+        },
+      },
+      { createdAt: "not-a-date" },
+    );
+
+    expect(() => deriveActiveWorkerWait([waitStarted])).not.toThrow();
+    const activeWait = deriveActiveWorkerWait([waitStarted]);
+    expect(activeWait).toMatchObject({ latestEvent: "Wait started" });
+    expect(activeWait).not.toHaveProperty("deadlineAt");
+  });
+
+  it("expires an orphaned in-progress wait at its own deadline", () => {
+    const waitStarted = activity({
+      itemType: "mcp_tool_call",
+      status: "inProgress",
+      data: {
+        toolCallId: "wait-orphaned",
+        item: {
+          tool: "worker_wait",
+          status: "inProgress",
+          arguments: { workerIds: ["worker-1"], timeoutMillis: 1_000 },
+        },
+      },
+    });
+
+    expect(deriveActiveWorkerWait([waitStarted], Date.parse(startedAt) + 999)).not.toBeNull();
+    expect(deriveActiveWorkerWait([waitStarted], Date.parse(startedAt) + 1_000)).toBeNull();
   });
 });

@@ -2,6 +2,12 @@ import type {
   EnvironmentProject,
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
+import {
+  scopedProjectKey,
+  scopedThreadKey,
+  scopeProjectRef,
+  scopeThreadRef,
+} from "@t3tools/client-runtime/environment";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import {
   projectThreadAwareness,
@@ -22,7 +28,7 @@ export function browserThreadKey(input: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
 }): string {
-  return `${input.environmentId}:${input.threadId}`;
+  return scopedThreadKey(scopeThreadRef(input.environmentId, input.threadId));
 }
 
 export function buildWebThreadRoute(input: {
@@ -37,11 +43,16 @@ export function buildBrowserAwarenessSnapshot(
   threads: ReadonlyArray<EnvironmentThreadShell>,
 ): ReadonlyMap<string, AgentAwarenessState> {
   const projectsByKey = new Map(
-    projects.map((project) => [`${project.environmentId}:${project.id}`, project] as const),
+    projects.map(
+      (project) =>
+        [scopedProjectKey(scopeProjectRef(project.environmentId, project.id)), project] as const,
+    ),
   );
   const states = new Map<string, AgentAwarenessState>();
   for (const thread of threads) {
-    const project = projectsByKey.get(`${thread.environmentId}:${thread.projectId}`);
+    const project = projectsByKey.get(
+      scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId)),
+    );
     if (!project) continue;
     const state = projectThreadAwareness({
       environmentId: thread.environmentId,
