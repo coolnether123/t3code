@@ -340,13 +340,16 @@ function Invoke-ProjectCommand {
         return
     }
     Push-Location $deployRoot
+    $oldPath = $env:Path
     try {
+        $env:Path = "$([System.IO.Path]::GetDirectoryName($nodePath));$oldPath"
         & $vpPath @Arguments 1>> $LogPath 2>&1
         if ($LASTEXITCODE -ne 0) {
             throw "$Label failed with exit code $LASTEXITCODE. See $LogPath"
         }
     }
     finally {
+        $env:Path = $oldPath
         Pop-Location
     }
 }
@@ -500,13 +503,9 @@ try {
     if ($nodeVersion -ne "v24.19.0") {
         throw "Official Node path reports '$nodeVersion', expected v24.19.0."
     }
-    $vpCommands = @(Get-Command vp.cmd -All -ErrorAction SilentlyContinue)
-    if ($vpCommands.Count -ne 1) {
-        throw "Expected exactly one vp.cmd command, found $($vpCommands.Count)."
-    }
-    $vpPath = $vpCommands[0].Source
+    $vpPath = Join-Path $deployRoot "node_modules\.bin\vp.cmd"
     if (-not (Test-Path -LiteralPath $vpPath -PathType Leaf)) {
-        throw "Resolved vp command is not a file: $vpPath"
+        throw "Deploy-local vp command is missing: $vpPath"
     }
     $oldPathForVersion = $env:Path
     try {
