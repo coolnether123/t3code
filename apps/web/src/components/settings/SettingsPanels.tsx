@@ -146,6 +146,7 @@ import {
 } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
 import { ProjectFavicon } from "../ProjectFavicon";
+import { BrowserNotificationSettingsSection } from "../../notifications/BrowserNotificationSettingsSection";
 
 const ENVIRONMENT_IDENTIFICATION_LABELS: Record<EnvironmentIdentificationMode, string> = {
   artwork: "Artwork",
@@ -2462,6 +2463,8 @@ export function GeneralSettingsPanel() {
           }
         />
       </SettingsSection>
+
+      <BrowserNotificationSettingsSection />
 
       <SettingsSection title="About">
         {isElectron || HOSTED_APP_CHANNEL ? (

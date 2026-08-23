@@ -17,11 +17,14 @@ import {
 } from "./lib/windowControlsOverlay";
 import { AppRoot } from "./AppRoot";
 import { clerkAppearance } from "./components/clerk/clerkAppearance";
+import { registerPwaServiceWorker } from "./pwa/registerPwaServiceWorker";
 
 // Electron loads the app from a file-backed shell, so hash history avoids path resolution issues.
 const history = isElectron ? createHashHistory() : createBrowserHistory();
 
 const router = getRouter(history);
+
+void registerPwaServiceWorker();
 
 if (isElectron) {
   syncDocumentElectronPlatformClasses(navigator.platform);
