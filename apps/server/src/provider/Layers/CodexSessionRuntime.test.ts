@@ -473,9 +473,7 @@ describe("buildCodexDeveloperInstructions", () => {
       enableT3Workers: true,
     });
     const handoff = instructions.indexOf("After every successful `worker_start`");
-    const wait = instructions.indexOf(
-      "call one long, bounded `worker_wait` immediately after the report",
-    );
+    const wait = instructions.indexOf("the next tool call must be one long, bounded `worker_wait`");
     NodeAssert.ok(handoff >= 0);
     NodeAssert.ok(wait > handoff);
     NodeAssert.match(
@@ -484,7 +482,7 @@ describe("buildCodexDeveloperInstructions", () => {
     );
     NodeAssert.match(
       instructions,
-      /if you tell the user that you are waiting, the next tool call must be `worker_wait`/,
+      /If you say that you are waiting now, the next tool call must be one long, bounded `worker_wait`/,
     );
     NodeAssert.match(instructions, /do not poll with `worker_status` or `worker_observe`/);
     NodeAssert.match(instructions, /do not replace it with short repeated waits/);
@@ -586,6 +584,7 @@ describe("T3 browser developer instructions", () => {
         /keep Chrome as the target and change only the control mechanism/,
       );
       NodeAssert.match(instructions, /computer-use:computer-use/);
+      NodeAssert.match(instructions, /computer_open_url/);
       NodeAssert.match(
         instructions,
         /use Windows Computer Use to operate the user's existing Chrome window/,
@@ -594,7 +593,7 @@ describe("T3 browser developer instructions", () => {
       NodeAssert.match(instructions, /ask to open a fresh Chrome window/);
       NodeAssert.match(
         instructions,
-        /direct Chrome control and Windows Computer Use are both unavailable/,
+        /direct Chrome control, `computer_open_url`, and Windows Computer Use are all unavailable/,
       );
     }
   });

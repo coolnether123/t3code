@@ -62,7 +62,6 @@ import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as McpInvocationContext from "../../mcp/McpInvocationContext.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
-import { isWorkerLinkedProviderThreadId } from "../../worker/WorkerThreadBoundary.ts";
 const isModelSelection = Schema.is(ModelSelection);
 
 /**
@@ -96,9 +95,6 @@ const ProviderForkConversationInput = Schema.Struct({
   lastTurnId: TurnId,
   startSession: ProviderSessionStartInput,
 });
-
-export const providerSessionUsesT3Mcp = (threadId: ThreadId): boolean =>
-  !isWorkerLinkedProviderThreadId(threadId);
 
 function toValidationError(
   operation: string,
@@ -246,9 +242,22 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     options?.revokeMcpCredential ?? McpSessionRegistry.revokeActiveMcpThread;
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
-  const mcpCapabilitiesFor = (threadId: ThreadId) =>
+  const mcpCapabilitiesFor = (
+    threadId: ThreadId,
+    providerInstanceId: ProviderInstanceId,
+    providerDriverKind: ProviderDriverKind,
+    modelSelection?: ModelSelection,
+  ) =>
     serverSettings.getSettings.pipe(
-      Effect.map((settings) => McpSessionRegistry.resolveMcpCapabilities(settings, threadId)),
+      Effect.map((settings) =>
+        McpSessionRegistry.resolveMcpCapabilities(
+          settings,
+          threadId,
+          modelSelection,
+          providerDriverKind,
+          providerInstanceId,
+        ),
+      ),
       Effect.catch((cause) =>
         Effect.logWarning(
           "Could not read server settings; withholding T3 MCP capabilities for this session.",
@@ -264,19 +273,26 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const prepareMcpSession = (
     threadId: ThreadId,
     providerInstanceId: ProviderInstanceId,
+    providerDriverKind: ProviderDriverKind,
     runtimeMode: RuntimeMode,
     workingDirectory?: string,
     modelSelection?: ModelSelection,
   ) =>
     Effect.gen(function* () {
-      const capabilities = yield* mcpCapabilitiesFor(threadId);
-      if (!providerSessionUsesT3Mcp(threadId) || capabilities.size === 0) {
+      const capabilities = yield* mcpCapabilitiesFor(
+        threadId,
+        providerInstanceId,
+        providerDriverKind,
+        modelSelection,
+      );
+      if (capabilities.size === 0) {
         yield* clearMcpSession(threadId);
         return undefined;
       }
       const credential = yield* issueMcpCredential({
         threadId,
         providerInstanceId,
+        providerDriverKind,
         ...(modelSelection === undefined ? {} : { modelSelection }),
         runtimeMode,
         ...(workingDirectory === undefined ? {} : { workingDirectory }),
@@ -460,6 +476,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       yield* prepareMcpSession(
         input.binding.threadId,
         bindingInstanceId,
+        input.binding.provider,
         input.binding.runtimeMode ?? "full-access",
         persistedCwd,
         persistedModelSelection,
@@ -670,6 +687,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         yield* prepareMcpSession(
           threadId,
           resolvedInstanceId,
+          resolvedProvider,
           input.runtimeMode,
           effectiveCwd,
           input.modelSelection,

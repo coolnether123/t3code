@@ -6,6 +6,7 @@ import * as Stream from "effect/Stream";
 import { McpServer } from "effect/unstable/ai";
 
 import * as WorkerService from "../worker/WorkerService.ts";
+import * as ExternalLauncher from "../process/externalLauncher.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 
@@ -29,6 +30,16 @@ const makeCatalogLayer = (enableT3Workers: boolean) =>
   McpHttpServer.makeToolkitRegistrationLive(enableT3Workers).pipe(
     Layer.provideMerge(McpServer.McpServer.layer),
     Layer.provide(PreviewAutomationBroker.layer.pipe(Layer.provide(NodeServices.layer))),
+    Layer.provide(
+      Layer.succeed(
+        ExternalLauncher.ExternalLauncher,
+        ExternalLauncher.ExternalLauncher.of({
+          resolveAvailableEditors: () => Effect.succeed([]),
+          launchBrowser: () => Effect.void,
+          launchEditor: () => Effect.void,
+        }),
+      ),
+    ),
     Layer.provide(Layer.succeed(WorkerService.WorkerService, workerService)),
   );
 
@@ -50,6 +61,7 @@ it.effect("omits Worker tools when startup registration is disabled", () =>
     const names = server.tools.map(({ tool }) => tool.name);
     expect(names.some((name) => name.startsWith("worker_"))).toBe(false);
     expect(names).toContain("preview_status");
+    expect(names).toContain("computer_open_url");
   }).pipe(Effect.provide(makeCatalogLayer(false))),
 );
 
@@ -61,5 +73,6 @@ it.effect("advertises exactly nine Worker tools when startup registration is ena
       .filter((name) => name.startsWith("worker_"));
     expect(names).toEqual(workerToolNames);
     expect(server.tools.map(({ tool }) => tool.name)).toContain("preview_status");
+    expect(server.tools.map(({ tool }) => tool.name)).toContain("computer_open_url");
   }).pipe(Effect.provide(makeCatalogLayer(true))),
 );

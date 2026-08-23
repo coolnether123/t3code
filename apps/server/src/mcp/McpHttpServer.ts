@@ -14,6 +14,8 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import { ComputerToolkitHandlersLive } from "./toolkits/computer/handlers.ts";
+import { ComputerToolkit } from "./toolkits/computer/tools.ts";
 import {
   PreviewSnapshotToolkitHandlersLive,
   PreviewStandardToolkitHandlersLive,
@@ -223,6 +225,10 @@ export const WorkerToolkitRegistrationLive = McpServer.toolkit(WorkerToolkit).pi
   Layer.provide(WorkerToolkitHandlersLive),
 );
 
+export const ComputerToolkitRegistrationLive = McpServer.toolkit(ComputerToolkit).pipe(
+  Layer.provide(ComputerToolkitHandlersLive),
+);
+
 /**
  * Effect MCP builds one tool catalog when this layer starts. Its conditional
  * registration API sees MCP initialize metadata, not the authenticated bearer
@@ -233,8 +239,12 @@ export const WorkerToolkitRegistrationLive = McpServer.toolkit(WorkerToolkit).pi
  */
 export const makeToolkitRegistrationLive = (enableT3Workers: boolean) =>
   enableT3Workers
-    ? Layer.mergeAll(PreviewToolkitRegistrationLive, WorkerToolkitRegistrationLive)
-    : PreviewToolkitRegistrationLive;
+    ? Layer.mergeAll(
+        PreviewToolkitRegistrationLive,
+        ComputerToolkitRegistrationLive,
+        WorkerToolkitRegistrationLive,
+      )
+    : Layer.mergeAll(PreviewToolkitRegistrationLive, ComputerToolkitRegistrationLive);
 
 const ToolkitRegistrationLive = Layer.unwrap(
   Effect.gen(function* () {

@@ -1,17 +1,17 @@
 import type { ProviderInteractionMode, SubagentBackend } from "@t3tools/contracts";
 
-export const CODEX_COMPUTER_CONTROL_OPTION_ID = "computerControl";
-export const CODEX_COMPUTER_CONTROL_MODES = ["preview", "chrome", "desktop"] as const;
-export type CodexComputerControlMode = (typeof CODEX_COMPUTER_CONTROL_MODES)[number];
-export const DEFAULT_CODEX_COMPUTER_CONTROL_MODE: CodexComputerControlMode = "desktop";
+import {
+  type CodexComputerControlMode,
+  DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
+} from "./CodexComputerControl.ts";
 
-export function normalizeCodexComputerControlMode(
-  value: string | null | undefined,
-): CodexComputerControlMode {
-  return CODEX_COMPUTER_CONTROL_MODES.includes(value as CodexComputerControlMode)
-    ? (value as CodexComputerControlMode)
-    : DEFAULT_CODEX_COMPUTER_CONTROL_MODE;
-}
+export {
+  CODEX_COMPUTER_CONTROL_MODES,
+  CODEX_COMPUTER_CONTROL_OPTION_ID,
+  DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
+  normalizeCodexComputerControlMode,
+  type CodexComputerControlMode,
+} from "./CodexComputerControl.ts";
 
 const T3_CODE_BROWSER_TOOL_INSTRUCTIONS = `
 
@@ -26,7 +26,7 @@ Do not switch to global browser skills, Chrome, Node REPL browser automation, st
 
 const CHROME_TO_WINDOWS_CONTROL_FALLBACK_INSTRUCTIONS = `
 
-If the Chrome plugin reports that Chrome is unavailable, its extension is disconnected, or no browser session is discoverable, keep Chrome as the target and change only the control mechanism. When the \`computer-use:computer-use\` skill is listed, read it and use Windows Computer Use to operate the user's existing Chrome window. This is not permission to switch to another browser. Do not stop after extension diagnostics, ask to open a fresh Chrome window, or repeat connection retries when Windows control is available. Ask the user only when direct Chrome control and Windows Computer Use are both unavailable, or when the site or operating system requires user action.
+If the Chrome plugin reports that Chrome is unavailable, its extension is disconnected, or no browser session is discoverable, keep Chrome as the target and change only the control mechanism. When \`computer_open_url\` is available, use it to open an exact user-requested HTTP or HTTPS URL in Chrome instead of asking the user to navigate manually. When the \`computer-use:computer-use\` skill is listed, read it and use Windows Computer Use to operate the user's existing Chrome window before and after navigation. This is not permission to switch to another browser. Do not stop after extension diagnostics, ask to open a fresh Chrome window, or repeat connection retries when T3 URL opening or Windows control is available. Ask the user only when direct Chrome control, \`computer_open_url\`, and Windows Computer Use are all unavailable, or when the site or operating system requires user action.
 `;
 
 const FULL_CHROME_TOOL_INSTRUCTIONS = `
@@ -71,7 +71,7 @@ Use these tools instead of Codex-native collaboration tools. The user creates on
 
 Parent agents should follow the Worker tools' assignment and telemetry guidance throughout the handoff and wait lifecycle.
 
-After every successful \`worker_start\`, immediately emit a concise user-visible handoff report. Name the Worker, state its bounded assignment, name the expected deliverable, and say that the parent will wait. If the next meaningful action is waiting for that Worker, call one long, bounded \`worker_wait\` immediately after the report, using the configured relevant wake reasons or timeout. Do not silently start a Worker and continue with generic thinking. While that lease is active, do not poll with \`worker_status\` or \`worker_observe\`, and do not replace it with short repeated waits. A wait wakes only for its configured relevant event or timeout; if an interim relevant event wakes it and the Worker continues, report only useful progress and re-enter the same logical long wait session. Clear the wait state when the call wakes, fails, times out, or the Worker finishes. Do not block useful independent parent work when it exists. Keep all Worker interaction parent-driven and never create nested Workers.
+After every successful \`worker_start\`, immediately emit a concise user-visible handoff report. Name the Worker, state its bounded assignment, name the expected deliverable, and state what the parent will do next. If useful independent parent work remains, say that you will do it before waiting. If you say that you are waiting now, the next tool call must be one long, bounded \`worker_wait\`, using the configured relevant wake reasons or timeout. Do not silently start a Worker and continue with generic thinking. While that lease is active, do not poll with \`worker_status\` or \`worker_observe\`, and do not replace it with short repeated waits. A wait wakes only for its configured relevant event or timeout; if an interim relevant event wakes it and the Worker continues, report only useful progress and re-enter the same logical long wait session. Clear the wait state when the call wakes, fails, times out, or the Worker finishes. Keep all Worker interaction parent-driven and never create nested Workers.
 `;
 
 const CODEX_NATIVE_SUBAGENT_PARENT_INSTRUCTIONS = `

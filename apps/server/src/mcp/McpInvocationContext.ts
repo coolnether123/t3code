@@ -1,8 +1,10 @@
 import {
   type EnvironmentId,
+  ComputerControlUnavailableError,
   type ModelSelection,
   PreviewAutomationUnavailableError,
   type ProviderInstanceId,
+  type ProviderDriverKind,
   type RuntimeMode,
   type ThreadId,
   type TurnId,
@@ -11,13 +13,14 @@ import {
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 
-export type McpCapability = "preview" | "workers";
+export type McpCapability = "computer" | "preview" | "workers";
 
 export interface McpInvocationScope {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly providerSessionId: string;
   readonly providerInstanceId: ProviderInstanceId;
+  readonly providerDriverKind?: ProviderDriverKind | undefined;
   /** Canonical selection used by the parent turn that owns this credential. */
   readonly parentModelSelection?: ModelSelection | undefined;
   /** Active canonical parent turn. Worker creation is bound to this lineage. */
@@ -40,11 +43,20 @@ export function requireMcpCapability(
 export function requireMcpCapability(
   capability: "workers",
 ): Effect.Effect<McpInvocationScope, WorkerDisabledError, McpInvocationContext>;
+export function requireMcpCapability(
+  capability: "computer",
+): Effect.Effect<McpInvocationScope, ComputerControlUnavailableError, McpInvocationContext>;
 export function requireMcpCapability(capability: McpCapability) {
   return Effect.gen(function* () {
     const invocation = yield* McpInvocationContext;
     if (invocation.capabilities.has(capability)) return invocation;
     if (capability === "workers") return yield* new WorkerDisabledError({});
+    if (capability === "computer") {
+      return yield* new ComputerControlUnavailableError({
+        message:
+          "Full Chrome or Full desktop control is not active for this provider turn. Select one of those computer-control modes and start a new turn.",
+      });
+    }
     return yield* new PreviewAutomationUnavailableError({
       capability,
       environmentId: invocation.environmentId,

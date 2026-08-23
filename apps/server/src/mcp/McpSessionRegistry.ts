@@ -1,5 +1,6 @@
 import {
   ProviderInstanceId,
+  type ProviderDriverKind,
   ThreadId,
   type ModelSelection,
   type RuntimeMode,
@@ -14,6 +15,7 @@ import { HttpServer } from "effect/unstable/http";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { modelSelectionAllowsFullComputerControl } from "../provider/CodexComputerControl.ts";
 import { isWorkerLinkedProviderThreadId } from "../worker/WorkerThreadBoundary.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpProviderSession from "./McpProviderSession.ts";
@@ -21,6 +23,7 @@ import * as McpProviderSession from "./McpProviderSession.ts";
 export interface McpCredentialRequest {
   readonly threadId: ThreadId;
   readonly providerInstanceId: ProviderInstanceId;
+  readonly providerDriverKind?: ProviderDriverKind | undefined;
   readonly modelSelection?: ModelSelection | undefined;
   readonly runtimeMode: RuntimeMode;
   readonly workingDirectory?: string | undefined;
@@ -79,8 +82,18 @@ export interface McpCapabilitySettings {
 export const resolveMcpCapabilities = (
   settings: McpCapabilitySettings,
   threadId: ThreadId,
+  modelSelection?: ModelSelection,
+  providerDriverKind?: ProviderDriverKind,
+  providerInstanceId?: ProviderInstanceId,
 ): ReadonlySet<McpInvocationContext.McpCapability> =>
   new Set([
+    ...(modelSelectionAllowsFullComputerControl(
+      modelSelection,
+      providerDriverKind,
+      providerInstanceId,
+    )
+      ? (["computer"] as const)
+      : []),
     ...(settings.enableAgentBrowserAccess ? (["preview"] as const) : []),
     ...(settings.enableT3Workers && !isWorkerLinkedProviderThreadId(threadId)
       ? (["workers"] as const)
@@ -171,6 +184,9 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         threadId: ThreadId.make(request.threadId),
         providerSessionId,
         providerInstanceId: ProviderInstanceId.make(request.providerInstanceId),
+        ...(request.providerDriverKind === undefined
+          ? {}
+          : { providerDriverKind: request.providerDriverKind }),
         ...(request.modelSelection === undefined
           ? {}
           : { parentModelSelection: request.modelSelection }),
@@ -178,7 +194,13 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         ...(request.workingDirectory === undefined
           ? {}
           : { workingDirectory: request.workingDirectory }),
-        capabilities: resolveMcpCapabilities(capabilitySettings, request.threadId),
+        capabilities: resolveMcpCapabilities(
+          capabilitySettings,
+          request.threadId,
+          request.modelSelection,
+          request.providerDriverKind,
+          request.providerInstanceId,
+        ),
         issuedAt,
       };
       yield* SynchronizedRef.update(state, ({ records }) => {
@@ -218,6 +240,26 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
   const touch: McpSessionRegistryShape["touch"] = Effect.fn("McpSessionRegistry.touch")(
     function* (threadId, modelSelection, parentTurnId) {
       const timestamp = yield* currentTimeMillis;
+      const capabilitySettings =
+        modelSelection === undefined
+          ? undefined
+          : yield* serverSettings.getSettings.pipe(
+              Effect.map((settings) => ({
+                enableAgentBrowserAccess: settings.enableAgentBrowserAccess,
+                enableT3Workers: settings.enableT3Workers,
+              })),
+              Effect.catch((cause) =>
+                Effect.logWarning(
+                  "failed to refresh MCP capability settings while touching credential",
+                  { cause },
+                ).pipe(
+                  Effect.as({
+                    enableAgentBrowserAccess: false,
+                    enableT3Workers: false,
+                  }),
+                ),
+              ),
+            );
       yield* SynchronizedRef.update(state, ({ records }) => {
         const current = pruneDead(records, timestamp);
         const next = new Map(current);
@@ -229,6 +271,17 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
                 ...record.scope,
                 ...(modelSelection === undefined ? {} : { parentModelSelection: modelSelection }),
                 ...(parentTurnId === undefined ? {} : { parentTurnId }),
+                ...(capabilitySettings === undefined
+                  ? {}
+                  : {
+                      capabilities: resolveMcpCapabilities(
+                        capabilitySettings,
+                        record.scope.threadId,
+                        modelSelection,
+                        record.scope.providerDriverKind,
+                        record.scope.providerInstanceId,
+                      ),
+                    }),
               },
               lastAliveAt: timestamp,
             });

@@ -3,6 +3,7 @@ import { expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
   ProviderInstanceId,
+  ProviderDriverKind,
   ThreadId,
   TurnId,
   type ModelSelection,
@@ -17,11 +18,26 @@ import { WORKER_PROVIDER_THREAD_PREFIX } from "../worker/WorkerThreadBoundary.ts
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 
 const environmentId = EnvironmentId.make("environment-1");
+const codexInstanceId = ProviderInstanceId.make("codex");
 const lunaSelection: ModelSelection = {
-  instanceId: ProviderInstanceId.make("codex"),
+  instanceId: codexInstanceId,
   model: "gpt-5.6-luna",
   options: [{ id: "reasoningEffort", value: "medium" }],
 };
+const desktopSelection: ModelSelection = {
+  ...lunaSelection,
+  options: [...(lunaSelection.options ?? []), { id: "computerControl", value: "desktop" }],
+};
+const chromeSelection: ModelSelection = {
+  ...lunaSelection,
+  options: [{ id: "computerControl", value: "chrome" }],
+};
+const previewSelection: ModelSelection = {
+  ...lunaSelection,
+  options: [{ id: "computerControl", value: "preview" }],
+};
+const codexDriver = ProviderDriverKind.make("codex");
+const claudeDriver = ProviderDriverKind.make("claudeAgent");
 const makeFakeHttpServer = (hostname: string, port = 43123) =>
   HttpServer.HttpServer.of({
     address: { _tag: "TcpAddress", hostname, port },
@@ -94,11 +110,14 @@ it.effect("grants Worker capability to parent sessions but never Worker sessions
     const worker = yield* enabledRegistry.issue({
       threadId: ThreadId.make(`${WORKER_PROVIDER_THREAD_PREFIX}nested-denied`),
       providerInstanceId: ProviderInstanceId.make("codex"),
+      providerDriverKind: codexDriver,
+      modelSelection: desktopSelection,
       runtimeMode: "full-access",
     });
     const workerToken = worker.config.authorizationHeader.replace(/^Bearer\s+/, "");
     const workerScope = yield* enabledRegistry.resolve(workerToken);
     expect(workerScope?.capabilities.has("preview")).toBe(true);
+    expect(workerScope?.capabilities.has("computer")).toBe(true);
     expect(workerScope?.capabilities.has("workers")).toBe(false);
   }),
 );
@@ -131,6 +150,77 @@ it("derives preview and Worker capabilities independently", () => {
       ),
     ),
   ).toEqual(["preview"]);
+});
+
+it("derives computer capability from the canonical Codex mode", () => {
+  const threadId = ThreadId.make("thread-computer-capability");
+  const settings = { enableAgentBrowserAccess: false, enableT3Workers: false };
+
+  for (const selection of [lunaSelection, desktopSelection, chromeSelection]) {
+    expect(
+      McpSessionRegistry.resolveMcpCapabilities(
+        settings,
+        threadId,
+        selection,
+        codexDriver,
+        codexInstanceId,
+      ).has("computer"),
+    ).toBe(true);
+  }
+  expect(
+    McpSessionRegistry.resolveMcpCapabilities(
+      settings,
+      threadId,
+      previewSelection,
+      codexDriver,
+      codexInstanceId,
+    ).has("computer"),
+  ).toBe(false);
+  expect(
+    McpSessionRegistry.resolveMcpCapabilities(
+      settings,
+      threadId,
+      desktopSelection,
+      claudeDriver,
+      codexInstanceId,
+    ).has("computer"),
+  ).toBe(false);
+  expect(
+    McpSessionRegistry.resolveMcpCapabilities(
+      settings,
+      threadId,
+      {
+        ...previewSelection,
+        instanceId: ProviderInstanceId.make("different-codex-instance"),
+      },
+      codexDriver,
+      codexInstanceId,
+    ).has("computer"),
+  ).toBe(true);
+});
+
+it("grants Worker computer control without nested Worker authority", () => {
+  const worker = ThreadId.make(`${WORKER_PROVIDER_THREAD_PREFIX}computer-control`);
+  const settings = { enableAgentBrowserAccess: true, enableT3Workers: true };
+  const desktopCapabilities = McpSessionRegistry.resolveMcpCapabilities(
+    settings,
+    worker,
+    desktopSelection,
+    codexDriver,
+    codexInstanceId,
+  );
+  const previewCapabilities = McpSessionRegistry.resolveMcpCapabilities(
+    settings,
+    worker,
+    previewSelection,
+    codexDriver,
+    codexInstanceId,
+  );
+
+  expect(desktopCapabilities.has("computer")).toBe(true);
+  expect(desktopCapabilities.has("workers")).toBe(false);
+  expect(previewCapabilities.has("computer")).toBe(false);
+  expect(previewCapabilities.has("preview")).toBe(true);
 });
 
 it.effect("stores only a token hash, resolves the bearer token, and revokes by thread", () =>
@@ -237,7 +327,7 @@ it.effect("binds a live MCP credential to the active parent turn", () =>
   }),
 );
 
-it.effect("refreshes the parent model selection before a turn uses the MCP credential", () =>
+it.effect("refreshes computer authority with the parent model selection", () =>
   Effect.gen(function* () {
     const registry = yield* makeRegistry(() => 1_000, fakeHttpServer, {
       enableT3Workers: true,
@@ -246,18 +336,22 @@ it.effect("refreshes the parent model selection before a turn uses the MCP crede
     const issued = yield* registry.issue({
       threadId,
       providerInstanceId: ProviderInstanceId.make("codex"),
-      modelSelection: lunaSelection,
+      providerDriverKind: codexDriver,
+      modelSelection: desktopSelection,
       runtimeMode: "full-access",
     });
     const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
-    const highReasoning: ModelSelection = {
-      ...lunaSelection,
-      options: [{ id: "reasoningEffort", value: "high" }],
-    };
+    expect((yield* registry.resolve(token))?.capabilities.has("computer")).toBe(true);
 
-    yield* registry.touch(threadId, highReasoning);
+    yield* registry.touch(threadId, previewSelection);
+    const previewScope = yield* registry.resolve(token);
+    expect(previewScope?.parentModelSelection).toEqual(previewSelection);
+    expect(previewScope?.capabilities.has("computer")).toBe(false);
 
-    expect((yield* registry.resolve(token))?.parentModelSelection).toEqual(highReasoning);
+    yield* registry.touch(threadId, chromeSelection);
+    const chromeScope = yield* registry.resolve(token);
+    expect(chromeScope?.parentModelSelection).toEqual(chromeSelection);
+    expect(chromeScope?.capabilities.has("computer")).toBe(true);
   }),
 );
 

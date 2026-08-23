@@ -48,7 +48,7 @@ import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
 import * as ProviderSessionDirectory from "../Services/ProviderSessionDirectory.ts";
-import { makeProviderServiceLive, providerSessionUsesT3Mcp } from "./ProviderService.ts";
+import { makeProviderServiceLive } from "./ProviderService.ts";
 import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import { ProviderSessionDirectoryLive } from "./ProviderSessionDirectory.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -61,7 +61,6 @@ import * as ServerConfig from "../../config.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import { makeAdapterRegistryMock } from "../testUtils/providerAdapterRegistryMock.ts";
-import { WORKER_PROVIDER_THREAD_PREFIX } from "../../worker/WorkerThreadBoundary.ts";
 
 const defaultServerSettingsLayer = ServerSettings.ServerSettingsService.layerTest();
 const serverConfigTestLayer = ServerConfig.layerTest(process.cwd(), process.cwd()).pipe(
@@ -77,14 +76,6 @@ const claudeAgentInstanceId = ProviderInstanceId.make("claudeAgent");
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const CLAUDE_AGENT_DRIVER = ProviderDriverKind.make("claudeAgent");
 const CURSOR_DRIVER = ProviderDriverKind.make("cursor");
-
-it("attaches the T3 MCP toolkit to parent sessions but not Worker sessions", () => {
-  assert.equal(providerSessionUsesT3Mcp(asThreadId("parent-thread")), true);
-  assert.equal(
-    providerSessionUsesT3Mcp(asThreadId(`${WORKER_PROVIDER_THREAD_PREFIX}worker-1`)),
-    false,
-  );
-});
 
 type LegacyProviderRuntimeEvent = {
   readonly type: string;
@@ -2166,6 +2157,7 @@ describe("agent browser access", () => {
   const startSessionWith = (
     settings: { readonly enableAgentBrowserAccess: boolean; readonly enableT3Workers?: boolean },
     threadId: ThreadId,
+    computerControlMode?: "chrome" | "desktop" | "preview",
   ) =>
     Effect.gen(function* () {
       const issued: Array<ThreadId> = [];
@@ -2207,6 +2199,13 @@ describe("agent browser access", () => {
           provider: CODEX_DRIVER,
           providerInstanceId: codexInstanceId,
           threadId,
+          ...(computerControlMode === undefined
+            ? {}
+            : {
+                modelSelection: createModelSelection(codexInstanceId, "gpt-5.6-sol", [
+                  { id: "computerControl", value: computerControlMode },
+                ]),
+              }),
           runtimeMode: "full-access",
         });
       }).pipe(Effect.provide(providerLayer));
@@ -2217,14 +2216,14 @@ describe("agent browser access", () => {
   // Credential issuance is the observable that matters: it is the only place a
   // credential is minted, and `/mcp` accepts nothing else, so withholding it is
   // what actually denies every provider and external MCP client.
-  it.effect("requests no MCP credential when agent browser access is off", () =>
+  it.effect("requests an MCP credential for Codex's default desktop mode", () =>
     Effect.gen(function* () {
       const issued = yield* startSessionWith(
         { enableAgentBrowserAccess: false },
         asThreadId("thread-browser-off"),
       );
 
-      assert.deepEqual(issued, []);
+      assert.deepEqual(issued, [asThreadId("thread-browser-off")]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -2233,12 +2232,24 @@ describe("agent browser access", () => {
       const threadId = asThreadId("thread-browser-revoke");
       revokedThreads.length = 0;
 
-      yield* startSessionWith({ enableAgentBrowserAccess: false }, threadId);
+      yield* startSessionWith({ enableAgentBrowserAccess: false }, threadId, "preview");
 
       // Clearing the in-memory map is not enough: a token issued before the
       // toggle flipped stays valid against `/mcp` for its whole liveness
       // window, and later turns refresh it.
       assert.deepEqual(revokedThreads, [threadId]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("withholds the MCP credential in preview mode when browser access is off", () =>
+    Effect.gen(function* () {
+      const issued = yield* startSessionWith(
+        { enableAgentBrowserAccess: false },
+        asThreadId("thread-preview-off"),
+        "preview",
+      );
+
+      assert.deepEqual(issued, []);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
