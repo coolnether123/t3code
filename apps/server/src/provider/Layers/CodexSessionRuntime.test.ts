@@ -350,6 +350,27 @@ describe("buildCodexDeveloperInstructions", () => {
     }
   });
 
+  it("requires a visible start handoff before a meaningful Worker wait", () => {
+    const instructions = buildCodexDeveloperInstructions("default", {
+      model: "gpt-5.3-codex",
+      reasoningEffort: "high",
+      enableT3Workers: true,
+    });
+    const handoff = instructions.indexOf("After every successful `worker_start`");
+    const wait = instructions.indexOf("call `worker_wait` immediately after the report");
+    NodeAssert.ok(handoff >= 0);
+    NodeAssert.ok(wait > handoff);
+    NodeAssert.match(
+      instructions,
+      /Name the Worker, state its bounded assignment, name the expected deliverable/,
+    );
+    NodeAssert.match(
+      instructions,
+      /if you tell the user that you are waiting, the next tool call must be `worker_wait`/,
+    );
+    NodeAssert.match(instructions, /never create nested Workers/);
+  });
+
   it("appends runtime info after the mode instructions", () => {
     const instructions = buildCodexDeveloperInstructions("default", {
       model: "gpt-5.3-codex",

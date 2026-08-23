@@ -92,6 +92,7 @@ import {
   hasActionableProposedPlan,
   isLatestTurnSettled,
 } from "../session-logic";
+import { deriveActiveWorkerWait } from "../workerToolPresentation";
 import { type LegendListRef } from "@legendapp/list/react";
 import { getAnchoredTurnMetrics, type TimelineScrollMode } from "./chat/timelineScrollAnchoring";
 import {
@@ -2257,6 +2258,10 @@ function ChatViewContent(props: ChatViewProps) {
   const phase = derivePhase(activeThread?.session ?? null);
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
   const workLogEntries = useMemo(() => deriveWorkLogEntries(threadActivities), [threadActivities]);
+  const activeWorkerWait = useMemo(
+    () => deriveActiveWorkerWait(threadActivities),
+    [threadActivities],
+  );
   const turnPlans = useMemo(() => deriveTurnPlans(threadActivities), [threadActivities]);
   // Native subagent fold: memoized by activity-list identity, shared by the
   // Agents surface, live strip, and workflow cards. v2Projection is null
@@ -6372,6 +6377,7 @@ function ChatViewContent(props: ChatViewProps) {
                 key={activeThread.id}
                 isWorking={isWorking}
                 workingStepLabel={workingStepLabel}
+                activeWorkerWait={activeWorkerWait}
                 activeTurnInProgress={isWorking || !latestTurnSettled}
                 activeTurnStartedAt={activeWorkStartedAt}
                 listRef={legendListRef}

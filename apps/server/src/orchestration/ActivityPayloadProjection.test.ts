@@ -151,6 +151,31 @@ describe("projectActivityPayload agent-field survival", () => {
     expect(JSON.stringify(projected.payload).length).toBeLessThan(500);
   });
 
+  it("keeps complete T3 Worker results for the parent Advanced disclosure", () => {
+    const result = {
+      leaseId: "lease-1",
+      status: "woken",
+      reason: "completed",
+      events: [{ workerId: "worker-1", reason: "completed", status: "completed" }],
+      workers: [{ id: "worker-1", displayName: "Scout", title: "Scan files", status: "completed" }],
+    };
+    const projected = projectActivityPayload(
+      activity({
+        itemType: "mcp_tool_call",
+        data: {
+          item: {
+            tool: "worker_wait",
+            arguments: { workerIds: ["worker-1"], timeoutMillis: 60_000 },
+            status: "completed",
+            result,
+          },
+        },
+      }),
+    );
+    const data = (projected.payload as Record<string, unknown>).data as Record<string, unknown>;
+    expect((data.item as Record<string, unknown>).result).toEqual(result);
+  });
+
   it("passes task lifecycle payloads (no data field) through untouched", () => {
     const source = activity({
       taskId: "task-9",

@@ -199,6 +199,28 @@ function summarizeMcpResult(result: unknown): Record<string, unknown> | undefine
   return summary ? { content: summary } : undefined;
 }
 
+const T3_WORKER_TOOL_NAMES = new Set([
+  "worker_start",
+  "worker_list",
+  "worker_status",
+  "worker_observe",
+  "worker_send",
+  "worker_wait",
+  "worker_interrupt",
+  "worker_close",
+  "worker_approval_respond",
+]);
+
+function isT3WorkerTool(value: unknown): boolean {
+  const name = asTrimmedString(value);
+  return (
+    name !== null &&
+    [...T3_WORKER_TOOL_NAMES].some(
+      (workerTool) => name === workerTool || name.endsWith(`_${workerTool}`),
+    )
+  );
+}
+
 /**
  * MCP tool calls carry full tool results (`data.item.result` on Codex,
  * `data.result` on Claude/OpenCode) that used to bypass slimming entirely to
@@ -220,6 +242,13 @@ function projectMcpToolCallData(data: Record<string, unknown>): Record<string, u
     if (result) {
       projectedItem.result = result;
     }
+    // Worker orchestration results carry the persisted name, assignment,
+    // lease, and wake event that the parent UI needs for an honest summary.
+    // Keep them intact for the Advanced/details disclosure. Ordinary MCP
+    // results remain summarized to protect the thread snapshot size.
+    if (isT3WorkerTool(item.tool) && item.result !== undefined) {
+      projectedItem.result = item.result;
+    }
     projectedData.item = projectedItem;
   }
 
@@ -233,6 +262,9 @@ function projectMcpToolCallData(data: Record<string, unknown>): Record<string, u
     const result = summarizeMcpResult(data.result);
     if (result) {
       projectedData.result = result;
+    }
+    if (isT3WorkerTool(data.toolName) && data.result !== undefined) {
+      projectedData.result = data.result;
     }
   }
 

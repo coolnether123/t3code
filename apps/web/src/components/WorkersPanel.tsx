@@ -10,6 +10,7 @@ import type {
   WorkerStatus,
   WorkerSummary,
 } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { useAtomValue } from "@effect/atom-react";
 import {
   Activity,
@@ -43,6 +44,7 @@ import { workerListInput } from "@t3tools/client-runtime/state/workers";
 import { useEnvironmentQuery } from "../state/query";
 import { workerEnvironment } from "../state/workers";
 import { cn } from "../lib/utils";
+import { useLocalStorage } from "../hooks/useLocalStorage";
 import {
   ACTIVE_WORKER_STATUSES,
   buildWorkerTimeline,
@@ -61,6 +63,7 @@ import ChatMarkdown from "./ChatMarkdown";
 
 const EMPTY_WORKERS: ReadonlyArray<WorkerSummary> = [];
 const WORKER_ELAPSED_TICK_MS = 1_000;
+export const WORKERS_ADVANCED_STORAGE_KEY = "t3code:workers:advanced";
 export const PARENT_INPUT_ATTRIBUTION_UNAVAILABLE_REASON =
   "Provider usage combines parent-supplied content with system instructions, tool output, and later Worker input; it does not report a separate parent token count.";
 
@@ -189,6 +192,24 @@ function StatusPill({ status }: { status: WorkerStatus }) {
     >
       <span aria-hidden className={cn("size-1.5 rounded-full", STATUS_DOTS[status])} />
       {workerStatusLabel(status)}
+    </span>
+  );
+}
+
+function WorkerAvatar({ worker }: { worker: Pick<WorkerSummary, "id" | "displayName" | "title"> }) {
+  const label = workerPrimaryName(worker);
+  let hash = 0;
+  for (const character of `${worker.id}:${label}`) hash = (hash * 31 + character.charCodeAt(0)) | 0;
+  const hue = Math.abs(hash) % 360;
+  return (
+    <span
+      aria-hidden
+      className="flex size-8 shrink-0 items-center justify-center rounded-full border border-border/60 text-[.65rem] font-semibold text-white shadow-inner"
+      style={{
+        background: `linear-gradient(145deg, hsl(${hue} 55% 52%), hsl(${(hue + 42) % 360} 48% 32%))`,
+      }}
+    >
+      {label.slice(0, 1).toUpperCase()}
     </span>
   );
 }
@@ -707,7 +728,6 @@ function WorkerRow({
   onSelect: () => void;
   nowMs: number;
 }) {
-  const progress = worker.latestObserverReport?.progress?.trim();
   const approvalNeeded = worker.status === "waitingApproval" || worker.hasPendingApproval === true;
   return (
     <button
@@ -716,14 +736,35 @@ function WorkerRow({
       aria-current={selected ? "true" : undefined}
       aria-label={`Inspect Worker ${worker.displayName ?? worker.title}`}
       className={cn(
-        "group min-h-11 w-full border-b border-border/45 px-3 py-2.5 text-left transition-colors hover:bg-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+        "group flex min-h-14 w-full items-center gap-2.5 border-b border-border/45 px-3 py-2 text-left transition-colors hover:bg-accent/45 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
         selected && "bg-accent/70",
       )}
     >
-      <div className="flex min-w-0 items-center gap-2">
-        <span className="min-w-0 flex-1 truncate text-sm font-medium">
-          {worker.displayName ?? worker.title}
-        </span>
+      <WorkerAvatar worker={worker} />
+      <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className="min-w-0 flex-1 truncate text-sm font-medium">
+            {workerPrimaryName(worker)}
+          </span>
+          <span className="shrink-0 font-mono text-[.68rem] text-muted-foreground tabular-nums">
+            {elapsedLabel(
+              worker.createdAt,
+              ACTIVE_WORKER_STATUSES.has(worker.status) ? undefined : worker.updatedAt,
+              nowMs,
+            )}
+          </span>
+        </div>
+        <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[.68rem] text-muted-foreground">
+          <StatusPill status={worker.status} />
+          <span aria-hidden>·</span>
+          <span className="min-w-0 truncate">
+            {worker.latestObserverReport?.progress?.trim() ||
+              worker.title ||
+              workerCardSummary(worker)}
+          </span>
+        </div>
+      </div>
+      <div className="flex shrink-0 items-center gap-1.5">
         {approvalNeeded ? (
           <AlertTriangle
             aria-label="Approval needed"
@@ -739,28 +780,6 @@ function WorkerRow({
           </span>
         ) : null}
       </div>
-      <div className="mt-1 flex min-w-0 items-center gap-1.5 text-[.65rem] text-muted-foreground">
-        <StatusPill status={worker.status} />
-        <span aria-hidden>·</span>
-        <span className="min-w-0 truncate font-mono">{worker.model}</span>
-      </div>
-      <div className="mt-1 flex items-center gap-2 font-mono text-[.65rem] text-muted-foreground/80">
-        <span className="inline-flex items-center gap-1">
-          <Clock3 aria-hidden className="size-3" />
-          {elapsedLabel(
-            worker.createdAt,
-            ACTIVE_WORKER_STATUSES.has(worker.status) ? undefined : worker.updatedAt,
-            nowMs,
-          )}
-        </span>
-        <span aria-hidden>·</span>
-        <span>{formatTokens(worker.usage.totalTokens)} tok</span>
-      </div>
-      {progress ? (
-        <p className="mt-1 truncate text-xs text-info-foreground">{progress}</p>
-      ) : (
-        <p className="mt-1 truncate text-xs text-muted-foreground">{workerCardSummary(worker)}</p>
-      )}
     </button>
   );
 }
@@ -1277,6 +1296,11 @@ export function WorkersPanel({
   const [selectedSurface, setSelectedSurface] = useState<"overview" | "worker">("overview");
   const [recentOpen, setRecentOpen] = useState(true);
   const [narrowPage, setNarrowPage] = useState<"overview" | "list" | "detail">("overview");
+  const [showAdvanced, setShowAdvanced] = useLocalStorage(
+    WORKERS_ADVANCED_STORAGE_KEY,
+    false,
+    Schema.Boolean,
+  );
   const { rootRef, layout } = useWorkerPanelLayout();
   const listQuery = useEnvironmentQuery(
     enabled
@@ -1326,9 +1350,8 @@ export function WorkersPanel({
   const aggregate = useMemo(
     () => ({
       active: sections.active.length,
-      tokens: workers.reduce((total, worker) => total + worker.usage.totalTokens, 0),
     }),
-    [sections.active.length, workers],
+    [sections.active.length],
   );
 
   if (!enabled) return null;
@@ -1362,20 +1385,38 @@ export function WorkersPanel({
       </div>
     );
 
-  const overviewContent = overview ? (
-    <WorkerEfficiencyOverviewView
-      overview={overview}
-      nowMs={displayNow}
-      onSelectWorker={selectWorker}
-      {...(!isMasterDetail ? { showWorkerList: () => setNarrowPage("list") } : {})}
-    />
-  ) : (
-    <div className="flex h-full min-h-52 items-center justify-center p-6 text-center text-xs text-muted-foreground">
-      {listQuery.isPending
-        ? "Loading Worker overview…"
-        : (listQuery.error ?? "Worker metrics are unavailable for this task.")}
-    </div>
+  const compactContent = (
+    <ScrollArea data-worker-compact-scroll-owner className="min-h-0 min-w-0 flex-1">
+      <div className="mx-auto w-full max-w-2xl py-1">
+        <WorkerRail
+          sections={sections}
+          selectedWorkerId={selectedSurface === "worker" ? selectedWorkerId : null}
+          recentOpen={recentOpen}
+          onRecentOpenChange={setRecentOpen}
+          onSelect={selectWorker}
+          nowMs={displayNow}
+        />
+      </div>
+    </ScrollArea>
   );
+
+  const overviewContent =
+    showAdvanced && overview ? (
+      <WorkerEfficiencyOverviewView
+        overview={overview}
+        nowMs={displayNow}
+        onSelectWorker={selectWorker}
+        {...(!isMasterDetail ? { showWorkerList: () => setNarrowPage("list") } : {})}
+      />
+    ) : showAdvanced ? (
+      <div className="flex h-full min-h-52 items-center justify-center p-6 text-center text-xs text-muted-foreground">
+        {listQuery.isPending
+          ? "Loading Worker overview…"
+          : (listQuery.error ?? "Worker metrics are unavailable for this task.")}
+      </div>
+    ) : (
+      compactContent
+    );
 
   const listContent = (
     <ScrollArea
@@ -1439,9 +1480,17 @@ export function WorkersPanel({
           <div className="flex min-w-0 items-center gap-2">
             <Activity aria-hidden className="size-3.5 text-info-foreground" />
             <span className="text-sm font-semibold">Workers</span>
-            <span className="ml-auto shrink-0 font-mono text-[.65rem] text-muted-foreground">
-              {aggregate.active} active · {formatTokens(aggregate.tokens)} tok
+            <span className="shrink-0 text-[.68rem] text-muted-foreground">
+              {aggregate.active} active
             </span>
+            <button
+              type="button"
+              aria-pressed={showAdvanced}
+              onClick={() => setShowAdvanced((value) => !value)}
+              className="ml-auto inline-flex min-h-11 items-center rounded-md border border-border/60 px-2.5 text-[.7rem] font-medium text-muted-foreground hover:bg-accent/35 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:min-h-8"
+            >
+              {showAdvanced ? "Compact" : "Advanced"}
+            </button>
             <span
               aria-label={eventConnected ? "Live Worker updates" : "Waiting for Worker updates"}
               className={cn(
@@ -1451,13 +1500,15 @@ export function WorkersPanel({
             />
           </div>
           <p className="mt-1.5 text-[.7rem] text-muted-foreground">
-            Read-only activity from Workers created by this task’s parent agent.
+            {showAdvanced
+              ? "Usage, tools, models, lifecycle events, and parent coordination."
+              : "Read-only activity from Workers created by this task’s parent agent."}
           </p>
         </header>
       ) : null}
 
       <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
-        {isMasterDetail ? listContent : null}
+        {isMasterDetail && selectedSurface === "worker" ? listContent : null}
         <div className="h-full min-h-0 min-w-0 flex-1">
           {isMasterDetail
             ? selectedSurface === "overview"

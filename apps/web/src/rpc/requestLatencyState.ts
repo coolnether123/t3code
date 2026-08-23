@@ -33,6 +33,9 @@ const longRunningRpcAckMethods = new Set<string>([
   WS_METHODS.serverUpdateProvider,
   WS_METHODS.serverRefreshProviders,
   WS_METHODS.serverUpdateServer,
+  // A Worker wait is a lease-backed long poll by design. Its completion is
+  // the wake event, not an acknowledgement that should trigger the 15s toast.
+  WS_METHODS.workersWait,
 ]);
 
 const slowRpcAckRequestsAtom = Atom.make<ReadonlyArray<SlowRpcAckRequest>>([]).pipe(

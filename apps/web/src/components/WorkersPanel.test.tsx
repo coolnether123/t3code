@@ -23,6 +23,7 @@ import {
   WorkerEfficiencyOverviewView,
   WorkerRail,
   WorkerToolCallRow,
+  WORKERS_ADVANCED_STORAGE_KEY,
   workerCardSummary,
   workerToolCallExpandedBody,
 } from "./WorkersPanel";
@@ -610,6 +611,11 @@ describe("WorkersPanel responsive read-only boundary", () => {
     expect(workersPanelSource).toContain("data-worker-detail-surface");
     expect(workersPanelSource).toContain("safe-area-inset-top");
     expect(workersPanelSource).toContain('narrowPage !== "detail"');
+    expect(workersPanelSource).toContain("data-worker-compact-scroll-owner");
+    expect(workersPanelSource).toContain("showAdvanced");
+    expect(workersPanelSource).toContain("aria-pressed={showAdvanced}");
+    expect(workersPanelSource).toContain("useLocalStorage");
+    expect(WORKERS_ADVANCED_STORAGE_KEY).toBe("t3code:workers:advanced");
   });
 
   it("shows the persisted Worker handoff when no observer report exists", () => {

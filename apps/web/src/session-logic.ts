@@ -13,6 +13,11 @@ import {
   type ThreadId,
   type TurnId,
 } from "@t3tools/contracts";
+import {
+  parseWorkerToolActivity,
+  type WorkerToolCallPresentation,
+  type WorkerToolIdentity,
+} from "./workerToolPresentation";
 
 import type {
   ChatMessage,
@@ -73,6 +78,8 @@ export interface WorkLogEntry {
   tone: "thinking" | "tool" | "info" | "error";
   toolTitle?: string;
   toolData?: unknown;
+  /** Parsed T3 Worker MCP call. Raw data stays behind the row's details disclosure. */
+  workerToolCall?: WorkerToolCallPresentation;
   itemType?: ToolLifecycleItemType;
   requestKind?: PendingApproval["requestKind"];
   /** From runtime item / task payload `status` when present (e.g. tool.updated). */
@@ -753,6 +760,14 @@ export function deriveWorkLogEntries(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
 ): WorkLogEntry[] {
   const ordered = [...activities].toSorted(compareActivitiesByOrder);
+  const knownWorkers = new Map<string, WorkerToolIdentity>();
+  for (const activity of ordered) {
+    const workerToolCall = parseWorkerToolActivity(activity, knownWorkers);
+    if (!workerToolCall) continue;
+    for (const worker of workerToolCall.workers) {
+      knownWorkers.set(worker.id, worker);
+    }
+  }
   const entries: DerivedWorkLogEntry[] = [];
   for (const activity of ordered) {
     if (activity.kind === "tool.started") continue;
@@ -767,7 +782,7 @@ export function deriveWorkLogEntries(
     if (activity.summary === "Checkpoint captured") continue;
     if (isPlanBoundaryToolActivity(activity)) continue;
     if (isAgentInternalActivity(activity)) continue;
-    entries.push(toDerivedWorkLogEntry(activity));
+    entries.push(toDerivedWorkLogEntry(activity, knownWorkers));
   }
   return collapseDerivedWorkLogEntries(entries).map((entry) => {
     const { activityKind, collapseKey: _collapseKey, ...rest } = entry;
@@ -806,7 +821,10 @@ function extractWorkLogToolLifecycleStatus(
   return undefined;
 }
 
-function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWorkLogEntry {
+function toDerivedWorkLogEntry(
+  activity: OrchestrationThreadActivity,
+  knownWorkers: ReadonlyMap<string, WorkerToolIdentity> = new Map(),
+): DerivedWorkLogEntry {
   const payload =
     activity.payload && typeof activity.payload === "object"
       ? (activity.payload as Record<string, unknown>)
@@ -874,6 +892,10 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     if (data?.item !== undefined) {
       entry.toolData = data.item;
     }
+  }
+  const workerToolCall = parseWorkerToolActivity(activity, knownWorkers);
+  if (workerToolCall) {
+    entry.workerToolCall = workerToolCall;
   }
   if (itemType) {
     entry.itemType = itemType;
@@ -1050,6 +1072,32 @@ function mergeDerivedWorkLogEntries(
   const toolCallId = next.toolCallId ?? previous.toolCallId;
   const toolLifecycleStatus = next.toolLifecycleStatus ?? previous.toolLifecycleStatus;
   const toolData = next.toolData ?? previous.toolData;
+  const workerToolCall = next.workerToolCall
+    ? previous.workerToolCall
+      ? {
+          ...previous.workerToolCall,
+          ...next.workerToolCall,
+          workerIds:
+            next.workerToolCall.workerIds.length > 0
+              ? next.workerToolCall.workerIds
+              : previous.workerToolCall.workerIds,
+          workers:
+            next.workerToolCall.workers.length > 0
+              ? next.workerToolCall.workers
+              : previous.workerToolCall.workers,
+          ...(next.workerToolCall.assignment
+            ? { assignment: next.workerToolCall.assignment }
+            : previous.workerToolCall.assignment
+              ? { assignment: previous.workerToolCall.assignment }
+              : {}),
+          ...(next.workerToolCall.rawData !== undefined
+            ? { rawData: next.workerToolCall.rawData }
+            : previous.workerToolCall.rawData !== undefined
+              ? { rawData: previous.workerToolCall.rawData }
+              : {}),
+        }
+      : next.workerToolCall
+    : previous.workerToolCall;
   return {
     ...previous,
     ...next,
@@ -1064,6 +1112,7 @@ function mergeDerivedWorkLogEntries(
     ...(toolCallId ? { toolCallId } : {}),
     ...(toolLifecycleStatus !== undefined ? { toolLifecycleStatus } : {}),
     ...(toolData !== undefined ? { toolData } : {}),
+    ...(workerToolCall !== undefined ? { workerToolCall } : {}),
   };
 }
 

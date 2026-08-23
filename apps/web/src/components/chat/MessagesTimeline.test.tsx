@@ -243,6 +243,43 @@ describe("MessagesTimeline", () => {
     expect(toolCallExpandedBodyClassName).not.toContain("text-[11px]");
   });
 
+  it("renders Worker MCP calls as a friendly collapsed card and hides raw payloads", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "worker-start-entry",
+            kind: "work",
+            createdAt: MESSAGE_CREATED_AT,
+            entry: {
+              id: "worker-start",
+              createdAt: MESSAGE_CREATED_AT,
+              label: "worker_start",
+              tone: "tool",
+              workerToolCall: {
+                toolName: "worker_start",
+                action: "Started Worker",
+                state: "completed",
+                workerIds: ["worker-1"],
+                workers: [{ id: "worker-1", name: "Scout", status: "running" }],
+                assignment: "Scan the provider boundary",
+                resultSummary: "running",
+                startedAt: MESSAGE_CREATED_AT,
+                endedAt: MESSAGE_CREATED_AT,
+                rawData: { arguments: { secretCommand: "do-not-show-by-default" } },
+              },
+            },
+          },
+        ]}
+      />,
+    );
+    expect(markup).toContain("Started Worker Scout");
+    expect(markup).toContain("Scan the provider boundary");
+    expect(markup).toContain("Advanced");
+    expect(markup).not.toContain("do-not-show-by-default");
+  });
+
   it("uses the larger leading inset only when the top fade is enabled", () => {
     const timelineEntries = [buildUserTimelineEntry("Hello")];
 

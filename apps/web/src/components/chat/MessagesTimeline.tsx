@@ -106,6 +106,12 @@ import {
   type ParsedPreviewAnnotation,
 } from "~/lib/previewAnnotation";
 import { cn } from "~/lib/utils";
+import {
+  workerToolDisplayName,
+  workerToolElapsed,
+  type ActiveWorkerWait,
+  type WorkerToolCallPresentation,
+} from "../../workerToolPresentation";
 import { useUiStateStore } from "~/uiStateStore";
 import { type TimestampFormat } from "@t3tools/contracts/settings";
 import { formatChatTimestampTooltip, formatDayAwareTimestamp } from "../../timestampFormat";
@@ -156,6 +162,7 @@ interface TimelineRowActivityState {
   latestTurnId: TurnId | null;
   /** Current plan step label for the working row, when the turn has a plan. */
   workingStepLabel: string | null;
+  activeWorkerWait: ActiveWorkerWait | null;
 }
 
 const TimelineRowCtx = createContext<TimelineRowSharedState>(null!);
@@ -209,6 +216,7 @@ interface MessagesTimelineProps {
   onOpenAgents?: () => void;
   isWorking: boolean;
   workingStepLabel?: string | null;
+  activeWorkerWait?: ActiveWorkerWait | null;
   activeTurnInProgress: boolean;
   activeTurnStartedAt: string | null;
   listRef: React.RefObject<LegendListRef | null>;
@@ -253,6 +261,7 @@ interface MessagesTimelineProps {
 export const MessagesTimeline = memo(function MessagesTimeline({
   isWorking,
   workingStepLabel = null,
+  activeWorkerWait = null,
   activeTurnInProgress,
   activeTurnStartedAt,
   agentPanelModel = EMPTY_AGENT_PANEL_MODEL,
@@ -545,8 +554,16 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       activeTurnInProgress,
       latestTurnId: latestTurn?.turnId ?? null,
       workingStepLabel,
+      activeWorkerWait,
     }),
-    [activeTurnInProgress, isRevertingCheckpoint, isWorking, latestTurn?.turnId, workingStepLabel],
+    [
+      activeTurnInProgress,
+      activeWorkerWait,
+      isRevertingCheckpoint,
+      isWorking,
+      latestTurn?.turnId,
+      workingStepLabel,
+    ],
   );
 
   // Stable renderItem — no closure deps. Row components read shared state
@@ -1286,7 +1303,8 @@ const TurnPlanTimelineRow = memo(function TurnPlanTimelineRow({
 });
 
 function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "working" }> }) {
-  const { workingStepLabel } = use(TimelineRowActivityCtx);
+  const { activeWorkerWait, workingStepLabel } = use(TimelineRowActivityCtx);
+  const waitName = activeWorkerWait ? workerToolDisplayName(activeWorkerWait) : null;
   return (
     <div className="py-0.5 pl-1.5">
       <div className="flex min-w-0 items-center gap-2 pt-1 text-secondary-label text-[11px] tabular-nums">
@@ -1296,7 +1314,14 @@ function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "workin
           <span className="h-1 w-1 rounded-full bg-muted-foreground/30 animate-status-pulse [animation-delay:400ms]" />
         </span>
         <span className="shrink-0">
-          {row.createdAt ? (
+          {activeWorkerWait ? (
+            <>
+              <span className="font-medium text-info-foreground">Waiting on {waitName}</span>
+              <span>
+                for <WorkingTimer createdAt={activeWorkerWait.startedAt} />
+              </span>
+            </>
+          ) : row.createdAt ? (
             <>
               Working for <WorkingTimer createdAt={row.createdAt} />
             </>
@@ -1308,7 +1333,72 @@ function WorkingTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "workin
           <span className="min-w-0 truncate text-muted-foreground/55">· {workingStepLabel}</span>
         ) : null}
       </div>
+      {activeWorkerWait ? <WorkerWaitDisclosure wait={activeWorkerWait} /> : null}
     </div>
+  );
+}
+
+function WorkerWaitDisclosure({ wait }: { wait: ActiveWorkerWait }) {
+  const assignment = wait.workers
+    .map((worker) => worker.assignment)
+    .filter((value): value is string => value !== undefined)
+    .join(", ");
+  const models = wait.workers
+    .map((worker) => worker.model)
+    .filter((value): value is string => value !== undefined)
+    .join(", ");
+  const statuses = wait.workers
+    .map((worker) => worker.status)
+    .filter((value) => value !== undefined)
+    .join(", ");
+  const timeout =
+    wait.timeoutMillis !== undefined
+      ? `${Math.round(wait.timeoutMillis / 1_000)}s`
+      : "not reported";
+  return (
+    <details className="ms-5 mt-1 max-w-full text-[.7rem] text-muted-foreground">
+      <summary className="inline-flex min-h-11 cursor-pointer list-none items-center rounded-md px-1.5 underline decoration-border underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:min-h-7">
+        Wait details
+      </summary>
+      <dl className="mt-1 grid max-w-xl grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 rounded-md border border-border/45 bg-card/30 p-2 text-[.68rem]">
+        <dt>Worker</dt>
+        <dd className="truncate text-foreground">{workerToolDisplayName(wait)}</dd>
+        {assignment ? (
+          <>
+            <dt>Assignment</dt>
+            <dd className="truncate text-foreground">{assignment}</dd>
+          </>
+        ) : null}
+        {models ? (
+          <>
+            <dt>Model</dt>
+            <dd className="truncate text-foreground">{models}</dd>
+          </>
+        ) : null}
+        {statuses ? (
+          <>
+            <dt>Status</dt>
+            <dd className="truncate text-foreground">{statuses}</dd>
+          </>
+        ) : null}
+        <dt>Wait mode</dt>
+        <dd>{wait.mode ?? "any relevant event"}</dd>
+        <dt>Wake conditions</dt>
+        <dd>
+          {wait.wakeReasons.length > 0 ? wait.wakeReasons.join(", ") : "relevant Worker event"}
+        </dd>
+        <dt>Elapsed</dt>
+        <dd>{workerToolElapsed(wait)}</dd>
+        <dt>Lease / timeout</dt>
+        <dd>
+          {wait.deadlineAt
+            ? `Active until ${new Date(wait.deadlineAt).toLocaleTimeString()}`
+            : `Active · ${timeout}`}
+        </dd>
+        <dt>Latest event</dt>
+        <dd>{wait.latestEvent ?? "Waiting for a Worker event"}</dd>
+      </dl>
+    </details>
   );
 }
 
@@ -2298,8 +2388,86 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   if (workEntry.agentSpawn) {
     return <AgentSpawnCtaRow workEntry={workEntry} />;
   }
+  if (workEntry.workerToolCall) {
+    return <FriendlyWorkerToolCallRow call={workEntry.workerToolCall} />;
+  }
   return <PlainWorkEntryRow workEntry={workEntry} workspaceRoot={workspaceRoot} />;
 });
+
+function workerCallStatusLabel(call: WorkerToolCallPresentation): string {
+  if (call.state === "inProgress") return "In progress";
+  if (call.state === "completed") return "Completed";
+  if (call.state === "failed") return "Failed";
+  return "Outcome unavailable";
+}
+
+function FriendlyWorkerToolCallRow({ call }: { call: WorkerToolCallPresentation }) {
+  const [expanded, setExpanded] = useState(false);
+  const { copyToClipboard, isCopied } = useCopyToClipboard({ target: "Worker tool details" });
+  const name = workerToolDisplayName(call);
+  let details = "No complete Worker tool payload was recorded.";
+  try {
+    details = JSON.stringify(call.rawData, null, 2) ?? details;
+  } catch {
+    details = "Worker tool payload could not be formatted.";
+  }
+  const status = workerCallStatusLabel(call);
+  const summary = call.resultSummary ?? call.assignment ?? status;
+  const label = `${call.action} ${name}`;
+  return (
+    <div
+      className="-mx-0.5 rounded-md border border-border/55 bg-card/35 px-2 py-1.5"
+      data-worker-tool-call={call.toolName}
+    >
+      <div className="flex min-w-0 items-center gap-1.5 text-[12px] leading-5">
+        <BotIcon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+        <span className="min-w-0 flex-1 truncate font-medium">{label}</span>
+        <span
+          className={cn(
+            "shrink-0 text-[.68rem]",
+            call.state === "failed"
+              ? "text-destructive"
+              : call.state === "completed"
+                ? "text-success-foreground"
+                : "text-muted-foreground",
+          )}
+        >
+          {status}
+        </span>
+        <span className="shrink-0 font-mono text-[.68rem] text-muted-foreground tabular-nums">
+          {workerToolElapsed(call)}
+        </span>
+      </div>
+      <div className="ms-5 mt-0.5 flex min-w-0 items-center gap-2 text-[.7rem] text-muted-foreground">
+        <span className="min-w-0 flex-1 truncate">{summary}</span>
+        {call.assignment && call.assignment !== summary ? (
+          <span className="hidden shrink-0 truncate sm:inline">Assignment: {call.assignment}</span>
+        ) : null}
+        <button
+          type="button"
+          aria-expanded={expanded}
+          aria-label={`${expanded ? "Hide" : "Show"} advanced details for ${call.toolName}`}
+          onClick={() => setExpanded((value) => !value)}
+          className="min-h-11 shrink-0 rounded px-1.5 text-[.68rem] text-muted-foreground underline decoration-border underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:min-h-7"
+        >
+          {expanded ? "Hide details" : "Advanced"}
+        </button>
+      </div>
+      {expanded ? (
+        <div className="ms-5 mt-1 border-s border-border/45 ps-3">
+          <pre className={toolCallExpandedBodyClassName}>{details}</pre>
+          <button
+            type="button"
+            onClick={() => copyToClipboard(details)}
+            className="mt-1 min-h-11 rounded px-1.5 text-[.68rem] text-muted-foreground underline underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:min-h-7"
+          >
+            {isCopied ? "Copied" : "Copy details"}
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
   workEntry: TimelineWorkEntry;
