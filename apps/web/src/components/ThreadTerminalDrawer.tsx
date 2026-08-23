@@ -60,7 +60,6 @@ import {
   type ThreadTerminalGroup,
 } from "../types";
 import { readLocalApi } from "~/localApi";
-import { confirmTerminalClose } from "~/lib/terminalCloseConfirm";
 import { useClientSettings } from "../hooks/useSettings";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useAttachedTerminalSession } from "../state/terminalSessions";
@@ -990,7 +989,7 @@ export function TerminalViewport({
   return (
     <div
       ref={containerRef}
-      className="relative h-full w-full overflow-hidden bg-[var(--terminal-background)]"
+      className="relative h-full w-full overflow-hidden rounded-[4px] bg-background"
     />
   );
 }
@@ -1291,15 +1290,6 @@ export default function ThreadTerminalDrawer({
   const onNewTerminalAction = useCallback(() => {
     onNewTerminal();
   }, [onNewTerminal]);
-  const confirmCloseTerminal = useCallback(
-    (terminalId: string) => {
-      const label = terminalLabelById.get(terminalId) ?? getTerminalLabel(terminalId);
-      void confirmTerminalClose([label]).then((confirmed) => {
-        if (confirmed) onCloseTerminal(terminalId);
-      });
-    },
-    [onCloseTerminal, terminalLabelById],
-  );
   const sendAccessoryInput = useCallback(
     (data: string) => {
       if (!resolvedActiveTerminalId) return;
@@ -1514,7 +1504,7 @@ export default function ThreadTerminalDrawer({
                 "text-foreground/90 transition-colors hover:bg-accent",
                 compactTerminal ? "inline-flex size-11 items-center justify-center" : "p-1",
               )}
-              onClick={() => confirmCloseTerminal(resolvedActiveTerminalId)}
+              onClick={() => onCloseTerminal(resolvedActiveTerminalId)}
               label={closeTerminalActionLabel}
             >
               <Trash2 className="size-3.25" />
@@ -1524,12 +1514,7 @@ export default function ThreadTerminalDrawer({
       )}
 
       <div className="min-h-0 w-full flex-1">
-        <div
-          className={cn(
-            "flex h-full min-h-0 bg-[var(--terminal-background)]",
-            hasTerminalSidebar && "gap-1.5",
-          )}
-        >
+        <div className={`flex h-full min-h-0 ${hasTerminalSidebar ? "gap-1.5" : ""}`}>
           <div className="min-w-0 flex-1">
             {isSplitView ? (
               <div
@@ -1564,7 +1549,7 @@ export default function ThreadTerminalDrawer({
                         }
                       }}
                     >
-                      <div className="h-full">
+                      <div className="h-full p-1">
                         <TerminalViewport
                           advancedTypography={advancedTypography}
                           threadRef={threadRef}
@@ -1592,7 +1577,7 @@ export default function ThreadTerminalDrawer({
                 })}
               </div>
             ) : (
-              <div className="h-full">
+              <div className="h-full p-1">
                 <TerminalViewport
                   advancedTypography={advancedTypography}
                   key={resolvedActiveTerminalId}
@@ -1654,7 +1639,7 @@ export default function ThreadTerminalDrawer({
                   </TerminalActionButton>
                   <TerminalActionButton
                     className="inline-flex h-full items-center border-l border-border/70 px-1 text-foreground/90 transition-colors hover:bg-accent/70"
-                    onClick={() => confirmCloseTerminal(resolvedActiveTerminalId)}
+                    onClick={() => onCloseTerminal(resolvedActiveTerminalId)}
                     label={closeTerminalActionLabel}
                   >
                     <Trash2 className="size-3.25" />
@@ -1724,7 +1709,7 @@ export default function ThreadTerminalDrawer({
                                       <button
                                         type="button"
                                         className="inline-flex size-3.5 items-center justify-center rounded text-xs font-medium leading-none text-muted-foreground opacity-0 transition hover:bg-accent hover:text-foreground group-hover:opacity-100"
-                                        onClick={() => confirmCloseTerminal(terminalId)}
+                                        onClick={() => onCloseTerminal(terminalId)}
                                         aria-label={closeTerminalLabel}
                                       />
                                     }
