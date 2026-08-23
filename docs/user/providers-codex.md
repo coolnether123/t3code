@@ -34,6 +34,26 @@ In an existing Codex thread, send `/feedback` or `/feedback` followed by a descr
 issue. T3 Code uploads the thread and Codex logs to OpenAI and shows a thread ID that you can copy
 and share with OpenAI employees.
 
+## Choose browser and computer control
+
+Open the model traits menu in a Codex thread and choose **Computer control**:
+
+- **Full desktop** is the default. Codex can use Chrome and Windows apps, including native dialogs,
+  downloads, and controls that browser automation cannot reach.
+- **Full Chrome** prioritizes the existing Chrome session and its browser-development tools, then
+  falls back to other available browser or desktop tools when needed.
+- **T3 Preview** uses the isolated collaborative preview browser and keeps its normal approval flow.
+
+Full Chrome and Full desktop do not add a T3 domain allowlist, an action-word filter, a read-only
+browser mode, or a preview-only requirement. T3 accepts typed tool and computer-use permission
+requests for the current Codex session. An unattended turn does not wait for a hidden approval.
+Authentication challenges and operating-system permission prompts can still need your input.
+
+Chrome, Browser, and Computer Use are Codex plugins. Enable the plugins in the same `CODEX_HOME`
+that the T3 provider uses. Full desktop can continue through Windows control when Chrome's extension
+connection is unavailable, but Chrome-specific page structure, console, and network inspection
+require a working Chrome plugin connection.
+
 ## I Want Work And Personal Codex Accounts
 
 Use one real Codex home and one shadow home.
