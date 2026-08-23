@@ -2783,7 +2783,7 @@ function workerCallStatusLabel(call: WorkerToolCallPresentation): string {
   return "Outcome unavailable";
 }
 
-function FriendlyWorkerToolCallRow({ call }: { call: WorkerToolCallPresentation }) {
+export function FriendlyWorkerToolCallRow({ call }: { call: WorkerToolCallPresentation }) {
   const [expanded, setExpanded] = useState(false);
   const { copyToClipboard, isCopied } = useCopyToClipboard({ target: "Worker tool details" });
   const name = workerToolDisplayName(call);

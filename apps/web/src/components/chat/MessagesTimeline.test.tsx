@@ -135,6 +135,7 @@ function matchMedia() {
 }
 
 let MessagesTimeline: typeof import("./MessagesTimeline").MessagesTimeline;
+let FriendlyWorkerToolCallRow: typeof import("./MessagesTimeline").FriendlyWorkerToolCallRow;
 
 beforeAll(async () => {
   const classList = {
@@ -168,7 +169,7 @@ beforeAll(async () => {
     },
   });
 
-  ({ MessagesTimeline } = await import("./MessagesTimeline"));
+  ({ MessagesTimeline, FriendlyWorkerToolCallRow } = await import("./MessagesTimeline"));
 }, 30_000);
 
 const ACTIVE_THREAD_ENVIRONMENT_ID = EnvironmentId.make("environment-local");
@@ -332,33 +333,19 @@ describe("MessagesTimeline", () => {
 
   it("renders Worker MCP calls as a friendly collapsed card and hides raw payloads", () => {
     const markup = renderToStaticMarkup(
-      <MessagesTimeline
-        {...buildProps()}
-        timelineEntries={[
-          {
-            id: "worker-start-entry",
-            kind: "work",
-            createdAt: MESSAGE_CREATED_AT,
-            entry: {
-              id: "worker-start",
-              createdAt: MESSAGE_CREATED_AT,
-              label: "worker_start",
-              tone: "tool",
-              workerToolCall: {
-                toolName: "worker_start",
-                action: "Started Worker",
-                state: "completed",
-                workerIds: ["worker-1"],
-                workers: [{ id: "worker-1", name: "Scout", status: "running" }],
-                assignment: "Scan the provider boundary",
-                resultSummary: "running",
-                startedAt: MESSAGE_CREATED_AT,
-                endedAt: MESSAGE_CREATED_AT,
-                rawData: { arguments: { secretCommand: "do-not-show-by-default" } },
-              },
-            },
-          },
-        ]}
+      <FriendlyWorkerToolCallRow
+        call={{
+          toolName: "worker_start",
+          action: "Started Worker",
+          state: "completed",
+          workerIds: ["worker-1"],
+          workers: [{ id: "worker-1", name: "Scout", status: "running" }],
+          assignment: "Scan the provider boundary",
+          resultSummary: "running",
+          startedAt: MESSAGE_CREATED_AT,
+          endedAt: MESSAGE_CREATED_AT,
+          rawData: { arguments: { secretCommand: "do-not-show-by-default" } },
+        }}
       />,
     );
     expect(markup).toContain("Started Worker Scout");
