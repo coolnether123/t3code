@@ -2016,6 +2016,40 @@ describe("CheckpointReactor", () => {
     });
   });
 
+  it("starts a fresh root session when the provider binding was rehydrated away", async () => {
+    const harness = await createHarness({ hasSession: false, seedFilesystemCheckpoints: false });
+    const seeded = await seedEditFromHereConversation(harness);
+    const requestId = CommandId.make("edit-root-rewind-rehydrated-session");
+    const replacementMessageId = MessageId.make("edit-root-rewind-rehydrated-replacement");
+
+    await harness.dispatch({
+      type: "thread.edit-from-here",
+      commandId: requestId,
+      threadId: seeded.threadId,
+      sourceMessageId: seeded.user1,
+      replacementMessageId,
+      editedText: "Rewritten after provider rehydration",
+      mode: "rewind",
+      createdAt: seeded.createdAt,
+    });
+    await waitForEvent(
+      harness.engine,
+      (event) =>
+        event.type === "thread.edit-from-here-finished" &&
+        (event as { payload?: { requestId?: string } }).payload?.requestId === requestId,
+    );
+    await harness.drain();
+
+    const thread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === seeded.threadId,
+    );
+    expect(thread?.messages.map((message) => message.id)).toContain(replacementMessageId);
+    expect(harness.provider.startSession).toHaveBeenCalledWith(
+      seeded.threadId,
+      expect.objectContaining({ cwd: harness.cwd, resumeCursor: null }),
+    );
+  });
+
   it("appends an error activity when revert is requested without an active session", async () => {
     const harness = await createHarness({ hasSession: false });
     const createdAt = "2026-01-01T00:00:00.000Z";

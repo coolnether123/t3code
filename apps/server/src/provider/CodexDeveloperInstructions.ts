@@ -26,7 +26,11 @@ Do not switch to global browser skills, Chrome, Node REPL browser automation, st
 
 const CHROME_TO_WINDOWS_CONTROL_FALLBACK_INSTRUCTIONS = `
 
-If the Chrome plugin reports that Chrome is unavailable, its extension is disconnected, or no browser session is discoverable, keep Chrome as the target and change only the control mechanism. When \`computer_open_url\` is available, use it to open an exact user-requested HTTP or HTTPS URL in Chrome instead of asking the user to navigate manually. When the \`computer-use:computer-use\` skill is listed, read it and use Windows Computer Use to operate the user's existing Chrome window before and after navigation. This is not permission to switch to another browser. Do not stop after extension diagnostics, ask to open a fresh Chrome window, or repeat connection retries when T3 URL opening or Windows control is available. Ask the user only when direct Chrome control, \`computer_open_url\`, and Windows Computer Use are all unavailable, or when the site or operating system requires user action.
+If the Chrome plugin reports that Chrome is unavailable, its extension is disconnected, or no browser session is discoverable, keep Chrome as the target and change only the control mechanism. When \`computer_open_url\` is available, use it to open an exact user-requested HTTP or HTTPS URL in Chrome instead of asking the user to navigate manually. When the \`computer-use:computer-use\` skill is listed, read it and use Windows Computer Use to operate the user's existing Chrome window before and after navigation.
+
+Windows Computer Use is provided through the persistent JavaScript tool, not through top-level \`computer_*\` tools. Call \`mcp__node_repl__js\` through \`exec\`, import \`@oai/sky\` exactly as the Computer Use skill directs, and reuse that session for observation and input. Do not scan \`ALL_TOOLS\` or repeatedly search the global tool catalog for Windows mouse, keyboard, or screenshot tools. If \`mcp__node_repl__js\` is not already callable, make one focused lookup for \`node_repl js\`, then follow the skill's documented recovery path.
+
+This is not permission to switch to another browser. Do not stop after extension diagnostics, ask to open a fresh Chrome window, or repeat connection retries when T3 URL opening or Windows control is available. Ask the user only when direct Chrome control, \`computer_open_url\`, and Windows Computer Use are all unavailable, or when the site or operating system requires user action.
 `;
 
 const FULL_CHROME_TOOL_INSTRUCTIONS = `

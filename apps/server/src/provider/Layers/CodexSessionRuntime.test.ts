@@ -585,6 +585,9 @@ describe("T3 browser developer instructions", () => {
       );
       NodeAssert.match(instructions, /computer-use:computer-use/);
       NodeAssert.match(instructions, /computer_open_url/);
+      NodeAssert.match(instructions, /mcp__node_repl__js/);
+      NodeAssert.match(instructions, /import `@oai\/sky`/);
+      NodeAssert.match(instructions, /Do not scan `ALL_TOOLS`/);
       NodeAssert.match(
         instructions,
         /use Windows Computer Use to operate the user's existing Chrome window/,

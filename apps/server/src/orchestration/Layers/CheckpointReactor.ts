@@ -791,7 +791,7 @@ const make = Effect.gen(function* () {
     }
 
     const sessionRuntime = yield* resolveSessionRuntimeForThread(input.threadId);
-    if (Option.isNone(sessionRuntime)) {
+    if (Option.isNone(sessionRuntime) && input.skipProviderRollback !== true) {
       yield* appendRevertFailureActivity({
         threadId: input.threadId,
         turnCount: input.turnCount,
@@ -894,7 +894,7 @@ const make = Effect.gen(function* () {
     const rolledBackTurns = Math.max(0, currentTurnCount - input.turnCount);
     if (rolledBackTurns > 0 && !input.skipProviderRollback) {
       yield* providerService.rollbackConversation({
-        threadId: sessionRuntime.value.threadId,
+        threadId: input.threadId,
         numTurns: rolledBackTurns,
       });
     }
