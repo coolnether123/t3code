@@ -187,34 +187,16 @@ function ipv4IsBlocked(hostname: string): boolean {
   );
 }
 
-function ipv6IsBlocked(hostname: string): boolean {
-  const normalized = normalizedIp(hostname);
-  const halves = normalized.split("::");
-  if (halves.length > 2) return true;
-  const left = halves[0] === "" ? [] : halves[0]!.split(":");
-  const right = halves.length > 1 && halves[1] !== "" ? halves[1]!.split(":") : [];
-  const omittedGroups = halves.length === 1 ? 0 : 8 - left.length - right.length;
-  const groups = [...left, ...Array.from({ length: omittedGroups }, () => "0"), ...right];
-  if (groups.length !== 8 || groups.some((group) => !/^[0-9a-f]{1,4}$/u.test(group))) return true;
-  const values = groups.map((group) => Number.parseInt(group, 16));
-  const first = values[0] ?? -1;
-  const second = values[1] ?? -1;
-
-  const isPublicNat64 =
-    first === 0x64 && second === 0xff9b && values.slice(2, 6).every((group) => group === 0);
-  if (isPublicNat64) return false;
-
-  if (first < 0x2000 || first > 0x3fff) return true;
-  if (first === 0x2001 && second >= 0 && second <= 0x01ff) return true;
-  if (first === 0x2001 && second === 0x0db8) return true;
-  if (first === 0x2002) return true;
-  return first === 0x3fff && second >= 0 && second <= 0x0fff;
+function ipv6IsBlocked(): boolean {
+  // Inherited HTTP MCP preflight intentionally rejects all IPv6 targets. The exact local
+  // t3-code endpoint is handled separately; an IPv6 result is accepted only when it is ::1.
+  return true;
 }
 
 function isBlockedAddress(address: string): boolean {
   const normalized = normalizedIp(address);
   const family = NodeNet.isIP(normalized);
-  return family === 4 ? ipv4IsBlocked(normalized) : family === 6 ? ipv6IsBlocked(normalized) : true;
+  return family === 4 ? ipv4IsBlocked(normalized) : family === 6 ? ipv6IsBlocked() : true;
 }
 
 function isLoopbackAddress(address: string): boolean {

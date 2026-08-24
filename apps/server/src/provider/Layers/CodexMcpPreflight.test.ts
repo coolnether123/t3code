@@ -175,6 +175,7 @@ url = "https://rebound.example.test/mcp"
     );
     NodeAssert.equal(validateCodexMcpEndpoint("other", "http://127.0.0.1:3774/mcp").allowed, false);
     NodeAssert.equal(validateCodexMcpEndpoint("other", "http://[::1]:3774/mcp").allowed, false);
+    NodeAssert.equal(validateCodexMcpEndpoint("t3-code", "http://[::1]:3774/mcp").allowed, true);
     NodeAssert.equal(
       validateCodexMcpEndpoint("t3-code", "http://127.0.0.1:3774/admin").allowed,
       false,
@@ -278,22 +279,46 @@ url = "https://rebound.example.test/mcp"
     NodeAssert.equal(lookupAddress, "93.184.216.34");
   });
 
-  it("rejects IPv6 multicast endpoints and multicast DNS answers", async () => {
-    NodeAssert.equal(validateCodexMcpEndpoint("other", "http://[ff02::1]/mcp").allowed, false);
+  it("conservatively rejects every inherited IPv6 literal and DNS result", async () => {
+    const addresses = [
+      ["reserved-3ff0", "3ff0::1"],
+      ["reserved-3ffe", "3ffe::1"],
+      ["unallocated-2fff", "2fff::1"],
+      ["global", "2606:4700:4700::1111"],
+      ["multicast", "ff02::1"],
+      ["ula", "fd00::1"],
+      ["link-local", "fe80::1"],
+    ] as const;
+    for (const [, address] of addresses) {
+      NodeAssert.equal(validateCodexMcpEndpoint("other", `http://[${address}]/mcp`).allowed, false);
+    }
+
+    const resolvedAddresses = new Map(
+      addresses.map(([name, address]) => [`${name}.example.test`, address]),
+    );
     const result = await preflightCodexMcpServers({
       configTexts: [
         {
           source: "config.toml",
-          text: '[mcp_servers.multicast]\nurl = "https://multicast.example.test/mcp"',
+          text: addresses
+            .map(([name]) => `[mcp_servers.${name}]\nurl = "https://${name}.example.test/mcp"`)
+            .join("\n\n"),
         },
       ],
-      resolveHost: async () => [{ address: "ff02::1", family: 6 }],
+      resolveHost: async (hostname) => {
+        const address = resolvedAddresses.get(hostname);
+        NodeAssert.ok(address !== undefined);
+        return [{ address, family: 6 }];
+      },
       probe: async () => {
-        NodeAssert.fail("a multicast endpoint must not be probed");
+        NodeAssert.fail("an inherited IPv6 endpoint must not be probed");
       },
     });
 
-    NodeAssert.equal(result.unavailable[0]?.reason, "blocked");
+    NodeAssert.deepStrictEqual(
+      result.unavailable.map(({ serverName, reason }) => ({ serverName, reason })),
+      addresses.map(([serverName]) => ({ serverName, reason: "blocked" })),
+    );
   });
 
   it("preserves the original Host and TLS SNI while pinning the connection address", () => {
