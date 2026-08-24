@@ -7,8 +7,21 @@ const CONTROL_CHARACTER_REGEX = new RegExp(
 
 export const CODEX_APP_SERVER_STDERR_MAX_CHARS = 8_192;
 
+const AUTHORIZATION_KEY_PATTERN = String.raw`(?:["'])?\b(?:proxy[-_ ]?authorization|authorization)\b(?:["'])?`;
+
 const SECRET_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
-  [/((?:authorization|proxy-authorization)\s*[:=]\s*bearer\s+)[^\s,;]+/giu, "$1[REDACTED]"],
+  [
+    new RegExp(`(${AUTHORIZATION_KEY_PATTERN}\\s*[:=]\\s*)"(?:\\\\.|[^"\\\\\\r\\n])*"`, "giu"),
+    '$1"[REDACTED]"',
+  ],
+  [
+    new RegExp(`(${AUTHORIZATION_KEY_PATTERN}\\s*[:=]\\s*)'(?:\\\\.|[^'\\\\\\r\\n])*'`, "giu"),
+    "$1'[REDACTED]'",
+  ],
+  [
+    new RegExp(`(${AUTHORIZATION_KEY_PATTERN}\\s*[:=]\\s*)([^"'\\r\\n][^\\r\\n]*)`, "giu"),
+    "$1[REDACTED]",
+  ],
   [
     /((?:["'])?\b(?:[a-z0-9]+[-_])*(?:api[-_]?key|access[-_]?token|refresh[-_]?token|id[-_]?token|client[-_]?secret|token|cookie|set[-_]?cookie|password|passwd|secret|credential)\b(?:["'])?\s*[:=]\s*)"[^"]*"/giu,
     '$1"[REDACTED]"',

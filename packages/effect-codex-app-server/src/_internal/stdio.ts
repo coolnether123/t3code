@@ -10,7 +10,11 @@ import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import * as CodexError from "../errors.ts";
-import { appendBoundedCodexDiagnostic, sanitizeCodexDiagnosticText } from "./diagnostics.ts";
+import {
+  appendBoundedCodexDiagnostic,
+  CODEX_APP_SERVER_STDERR_MAX_CHARS,
+  sanitizeCodexDiagnosticText,
+} from "./diagnostics.ts";
 
 const encoder = new TextEncoder();
 
@@ -64,6 +68,52 @@ export interface CodexAppServerStderrCapture {
 }
 
 const CODEX_APP_SERVER_STDERR_DRAIN_TIMEOUT = "500 millis" as const;
+const OMITTED_STDERR_LINE = "[stderr line omitted: exceeds diagnostic limit]";
+
+interface ForwardedStderrState {
+  readonly remainder: string;
+  readonly omitted: boolean;
+}
+
+function takeSanitizedStderrLines(
+  state: ForwardedStderrState,
+  chunk: string,
+): { readonly state: ForwardedStderrState; readonly chunks: ReadonlyArray<string> } {
+  let remainder = state.remainder;
+  let omitted = state.omitted;
+  const chunks: Array<string> = [];
+  const segments = chunk.split("\n");
+
+  for (const [index, segment] of segments.entries()) {
+    const complete = index < segments.length - 1;
+    if (!complete) {
+      if (!omitted) {
+        const next = remainder + segment;
+        if (next.length > CODEX_APP_SERVER_STDERR_MAX_CHARS) {
+          remainder = "";
+          omitted = true;
+        } else {
+          remainder = next;
+        }
+      }
+      continue;
+    }
+
+    const line = remainder + segment;
+    chunks.push(
+      `${omitted || line.length > CODEX_APP_SERVER_STDERR_MAX_CHARS ? OMITTED_STDERR_LINE : sanitizeCodexDiagnosticText(line)}\n`,
+    );
+    remainder = "";
+    omitted = false;
+  }
+
+  return { state: { remainder, omitted }, chunks };
+}
+
+function flushSanitizedStderrLine(state: ForwardedStderrState): string | undefined {
+  if (state.omitted) return OMITTED_STDERR_LINE;
+  return state.remainder.length > 0 ? sanitizeCodexDiagnosticText(state.remainder) : undefined;
+}
 
 export const captureChildStderr = (
   stderr: Stream.Stream<Uint8Array, unknown>,
@@ -75,6 +125,25 @@ export const captureChildStderr = (
       stderrTruncated: false,
     });
     const completed = yield* Deferred.make<void>();
+    const forwardedState = yield* Ref.make<ForwardedStderrState>({
+      remainder: "",
+      omitted: false,
+    });
+    const forwardChunk = (chunk: string) =>
+      onChunk
+        ? Ref.modify(forwardedState, (state) => {
+            const next = takeSanitizedStderrLines(state, chunk);
+            return [next.chunks, next.state] as const;
+          }).pipe(Effect.flatMap((chunks) => Effect.forEach(chunks, onChunk, { discard: true })))
+        : Effect.void;
+    const finishForwarding = onChunk
+      ? Ref.get(forwardedState).pipe(
+          Effect.flatMap((state) => {
+            const finalChunk = flushSanitizedStderrLine(state);
+            return finalChunk === undefined ? Effect.void : onChunk(finalChunk);
+          }),
+        )
+      : Effect.void;
     yield* stderr.pipe(
       Stream.decodeText(),
       Stream.runForEach((chunk) =>
@@ -84,12 +153,15 @@ export const captureChildStderr = (
             stderr: next.value,
             stderrTruncated: current.stderrTruncated || next.truncated,
           };
-        }).pipe(
-          Effect.andThen(onChunk ? onChunk(sanitizeCodexDiagnosticText(chunk)) : Effect.void),
-        ),
+        }).pipe(Effect.andThen(forwardChunk(chunk))),
       ),
       Effect.ignore,
-      Effect.ensuring(Deferred.succeed(completed, undefined).pipe(Effect.asVoid)),
+      Effect.ensuring(
+        finishForwarding.pipe(
+          Effect.andThen(Deferred.succeed(completed, undefined)),
+          Effect.asVoid,
+        ),
+      ),
       Effect.forkScoped,
     );
     return {

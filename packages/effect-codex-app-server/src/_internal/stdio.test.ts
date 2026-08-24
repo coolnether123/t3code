@@ -4,11 +4,12 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as PlatformError from "effect/PlatformError";
 import * as Ref from "effect/Ref";
+import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import * as CodexError from "../errors.ts";
-import { makeTerminationError, readFinalChildStderr } from "./stdio.ts";
+import { captureChildStderr, makeTerminationError, readFinalChildStderr } from "./stdio.ts";
 
 describe("Codex App Server child process termination", () => {
   it.effect("retains the process identifier with the exit code", () =>
@@ -103,5 +104,28 @@ describe("Codex App Server child process termination", () => {
       const result = yield* Fiber.join(resultFiber);
       assert.deepEqual(result, { stderr: "available", stderrTruncated: false });
     }),
+  );
+
+  it.effect("redacts authorization split across stderr chunks before forwarding", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const forwarded = yield* Ref.make("");
+        const encoder = new TextEncoder();
+        const capture = yield* captureChildStderr(
+          Stream.fromIterable([
+            encoder.encode("Authorization: Bearer "),
+            encoder.encode("split-secret\nnext line"),
+          ]),
+          (chunk) => Ref.update(forwarded, (current) => current + chunk),
+        );
+
+        const diagnostics = yield* readFinalChildStderr(capture);
+        const forwardedValue = yield* Ref.get(forwarded);
+
+        assert.notInclude(diagnostics.stderr, "split-secret");
+        assert.notInclude(forwardedValue, "split-secret");
+        assert.equal(forwardedValue, "Authorization: [REDACTED]\nnext line");
+      }),
+    ),
   );
 });

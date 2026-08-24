@@ -4,6 +4,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import { assert, describe, it } from "@effect/vitest";
 import * as CodexErrors from "effect-codex-app-server/errors";
 
@@ -88,6 +89,34 @@ describe("Codex Windows sandbox state recovery", () => {
           for (const collision of collisions) {
             assert.equal(Fs.readFileSync(collision, "utf8"), "preserve-me");
           }
+        }),
+      (home) => Effect.sync(() => Fs.rmSync(home, { recursive: true, force: true })),
+    ),
+  );
+
+  it.effect("does not overwrite a destination created after recovery starts", () =>
+    Effect.acquireUseRelease(
+      Effect.sync(makeHome),
+      (home) =>
+        Effect.gen(function* () {
+          const path = writeState(home, new Uint8Array(22));
+          const contestedPath = codexDenyReadAclQuarantinePath(path, 0);
+          const recoveryFiber = yield* recoverCodexDenyReadAclState({
+            homeDirectory: home,
+            platform: "win32",
+          }).pipe(Effect.forkChild({ startImmediately: true }));
+
+          Fs.writeFileSync(contestedPath, "concurrent-owner", { flag: "wx" });
+          const recovery = yield* Fiber.join(recoveryFiber);
+
+          assert.exists(recovery);
+          assert.equal(recovery.status, "quarantined");
+          assert.notEqual(recovery.quarantinedPath, contestedPath);
+          assert.equal(Fs.readFileSync(contestedPath, "utf8"), "concurrent-owner");
+          assert.deepEqual(
+            [...Fs.readFileSync(recovery.quarantinedPath!)],
+            [...new Uint8Array(22)],
+          );
         }),
       (home) => Effect.sync(() => Fs.rmSync(home, { recursive: true, force: true })),
     ),

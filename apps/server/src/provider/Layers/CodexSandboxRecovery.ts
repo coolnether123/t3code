@@ -80,16 +80,15 @@ function isMissingPathError(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === "ENOENT";
 }
 
-function isCollisionError(error: unknown): boolean {
-  const code = (error as NodeJS.ErrnoException).code;
-  return code === "EEXIST" || code === "EACCES" || code === "EPERM";
-}
-
 function isSafeExistingQuarantine(path: string, statePath: string): boolean {
   if (!isSafeQuarantinePath(path, statePath)) return false;
   try {
     const stat = Fs.lstatSync(path);
-    return stat.isFile() && !stat.isSymbolicLink();
+    return (
+      stat.isFile() &&
+      !stat.isSymbolicLink() &&
+      isCorruptDenyReadAclStateBytes(Fs.readFileSync(path))
+    );
   } catch {
     return false;
   }
@@ -108,6 +107,32 @@ function findExistingQuarantine(statePath: string): string | undefined {
     return undefined;
   }
   return undefined;
+}
+
+function hasSameFileIdentity(left: NodeFS.Stats, right: NodeFS.Stats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function pathHasFileIdentity(path: string, identity: NodeFS.Stats): boolean {
+  try {
+    const pathStat = Fs.lstatSync(path);
+    return (
+      pathStat.isFile() &&
+      !pathStat.isSymbolicLink() &&
+      hasSameFileIdentity(Fs.statSync(path), identity)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function closeFileDescriptor(fileDescriptor: number | undefined): void {
+  if (fileDescriptor === undefined) return;
+  try {
+    Fs.closeSync(fileDescriptor);
+  } catch {
+    // Best-effort cleanup after the recovery decision.
+  }
 }
 
 export function isCorruptDenyReadAclStateBytes(bytes: Uint8Array): boolean {
@@ -170,8 +195,6 @@ function recoverCodexSandboxStateSync(
     const quarantinedPath = codexDenyReadAclQuarantinePath(inspection.path, attempt);
     if (!isSafeQuarantinePath(quarantinedPath, inspection.path)) return undefined;
 
-    if (isSafeExistingQuarantine(quarantinedPath, inspection.path)) continue;
-
     inspection = inspectCodexDenyReadAclState(homeDirectory, platform);
     if (inspection.status === "valid") {
       return { path: inspection.path, status: "already-recovered" };
@@ -184,14 +207,88 @@ function recoverCodexSandboxStateSync(
     }
     if (inspection.status !== "corrupt") return undefined;
 
+    let sourceDescriptor: number | undefined;
+    let quarantineDescriptor: number | undefined;
     try {
-      Fs.renameSync(inspection.path, quarantinedPath);
-      return {
-        path: inspection.path,
-        quarantinedPath,
-        status: "quarantined",
-      };
-    } catch (error) {
+      sourceDescriptor = Fs.openSync(inspection.path, Fs.constants.O_RDONLY);
+      const sourceStat = Fs.fstatSync(sourceDescriptor);
+      const sourceBytes = Fs.readFileSync(sourceDescriptor);
+      if (
+        !sourceStat.isFile() ||
+        !isCorruptDenyReadAclStateBytes(sourceBytes) ||
+        !hasSafeDirectoryParents(inspection.path, homeDirectory) ||
+        !pathHasFileIdentity(inspection.path, sourceStat)
+      ) {
+        const current = inspectCodexDenyReadAclState(homeDirectory, platform);
+        return current.status === "valid"
+          ? { path: current.path, status: "already-recovered" }
+          : undefined;
+      }
+
+      try {
+        Fs.linkSync(inspection.path, quarantinedPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
+        const current = inspectCodexDenyReadAclState(homeDirectory, platform);
+        if (current.status === "valid") {
+          return { path: current.path, status: "already-recovered" };
+        }
+        if (current.status === "missing") {
+          const existing = findExistingQuarantine(current.path);
+          return existing
+            ? { path: current.path, quarantinedPath: existing, status: "already-recovered" }
+            : undefined;
+        }
+        return undefined;
+      }
+
+      quarantineDescriptor = Fs.openSync(quarantinedPath, Fs.constants.O_RDONLY);
+      const quarantineStat = Fs.fstatSync(quarantineDescriptor);
+      const quarantineBytes = Fs.readFileSync(quarantineDescriptor);
+      const preserved =
+        quarantineStat.isFile() &&
+        hasSameFileIdentity(sourceStat, quarantineStat) &&
+        quarantineBytes.length === sourceBytes.length &&
+        isCorruptDenyReadAclStateBytes(quarantineBytes) &&
+        hasSafeDirectoryParents(inspection.path, homeDirectory) &&
+        isSafeQuarantinePath(quarantinedPath, inspection.path) &&
+        pathHasFileIdentity(quarantinedPath, quarantineStat);
+      if (!preserved) {
+        const current = inspectCodexDenyReadAclState(homeDirectory, platform);
+        return current.status === "valid"
+          ? { path: current.path, status: "already-recovered" }
+          : undefined;
+      }
+
+      if (
+        !hasSafeDirectoryParents(inspection.path, homeDirectory) ||
+        !pathHasFileIdentity(inspection.path, sourceStat)
+      ) {
+        const current = inspectCodexDenyReadAclState(homeDirectory, platform);
+        if (current.status === "valid") {
+          return { path: current.path, status: "already-recovered" };
+        }
+        return current.status === "missing"
+          ? { path: current.path, quarantinedPath, status: "already-recovered" }
+          : undefined;
+      }
+
+      // Node does not expose handle-relative link or unlink operations on Windows. Rechecking
+      // the parent chain and both file identities narrows the remaining race to the interval
+      // between this final identity check and unlinkSync.
+      Fs.unlinkSync(inspection.path);
+      if (
+        !hasSafeDirectoryParents(inspection.path, homeDirectory) ||
+        !pathHasFileIdentity(quarantinedPath, quarantineStat)
+      ) {
+        return undefined;
+      }
+
+      const current = inspectCodexDenyReadAclState(homeDirectory, platform);
+      return current.status === "missing" || current.status === "valid"
+        ? { path: current.path, quarantinedPath, status: "quarantined" }
+        : undefined;
+    } catch {
       const current = inspectCodexDenyReadAclState(homeDirectory, platform);
       if (current.status === "valid") {
         return { path: current.path, status: "already-recovered" };
@@ -202,9 +299,10 @@ function recoverCodexSandboxStateSync(
           ? { path: current.path, quarantinedPath: existing, status: "already-recovered" }
           : undefined;
       }
-      if (!isCollisionError(error) || !isSafeExistingQuarantine(quarantinedPath, inspection.path)) {
-        return undefined;
-      }
+      return undefined;
+    } finally {
+      closeFileDescriptor(quarantineDescriptor);
+      closeFileDescriptor(sourceDescriptor);
     }
   }
 
