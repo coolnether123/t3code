@@ -205,6 +205,7 @@ const make = Effect.gen(function* () {
             payload: {
               turnCount: input.turnCount,
               filesRestored: false,
+              ...(input.outcome.conversationOnly === true ? { conversationOnly: true } : {}),
               ...(input.outcome.reason !== undefined ? { reason: input.outcome.reason } : {}),
               ...(input.outcome.detail !== undefined ? { detail: input.outcome.detail } : {}),
             },
@@ -896,7 +897,7 @@ const make = Effect.gen(function* () {
     if (!hasFilesystemCheckpointSummary) {
       workspaceRestore = {
         filesRestored: false,
-        reason: "conversation-only",
+        conversationOnly: true,
         detail:
           "No filesystem checkpoint summary is recorded for this task; the conversation was rewound without changing files.",
       };
@@ -1099,6 +1100,7 @@ const make = Effect.gen(function* () {
         kind: "thread.edit-from-here.failed",
         summary: "Edit from here failed",
         payload: {
+          requestId: input.requestId,
           detail: input.detail,
           ...(input.reason !== undefined ? { reason: input.reason } : {}),
           ...(input.technicalDetail !== undefined

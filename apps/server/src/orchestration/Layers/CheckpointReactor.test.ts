@@ -1443,7 +1443,7 @@ describe("CheckpointReactor", () => {
     const finishedEvent = finished.find((event) => event.type === "thread.edit-from-here-finished");
     expect(finishedEvent).toMatchObject({
       payload: {
-        workspaceRestore: { filesRestored: false, reason: "conversation-only" },
+        workspaceRestore: { filesRestored: false, conversationOnly: true },
       },
     });
     expect(thread?.messages.map((message) => message.id)).toContain(replacementMessageId);
@@ -1451,7 +1451,7 @@ describe("CheckpointReactor", () => {
       expect.arrayContaining([
         expect.objectContaining({
           kind: "thread.edit-from-here.files-not-restored",
-          payload: expect.objectContaining({ filesRestored: false, reason: "conversation-only" }),
+          payload: expect.objectContaining({ filesRestored: false, conversationOnly: true }),
         }),
       ]),
     );
@@ -2010,6 +2010,7 @@ describe("CheckpointReactor", () => {
       (activity) => activity.kind === "thread.edit-from-here.failed",
     );
     expect(failure?.payload).toMatchObject({
+      requestId,
       reason: "checkpoint-invalid",
       technicalDetail: expect.stringContaining(
         `checkpoint-restore:checkpoint-invalid:${technicalDetail}`,

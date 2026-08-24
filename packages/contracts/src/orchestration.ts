@@ -1084,9 +1084,12 @@ export const ThreadWorkspaceRestoreOutcome = Schema.Struct({
       "checkpoint-invalid",
       "current-checkpoint-missing",
       "current-worktree-dirty",
-      "conversation-only",
     ]),
   ),
+  // Additive marker for conversation-only rewinds. Older clients ignore this
+  // unknown optional field while newer clients can explain that files stayed
+  // untouched without widening the existing reason enum.
+  conversationOnly: Schema.optional(Schema.Boolean),
   detail: Schema.optional(TrimmedNonEmptyString),
 });
 export type ThreadWorkspaceRestoreOutcome = typeof ThreadWorkspaceRestoreOutcome.Type;
