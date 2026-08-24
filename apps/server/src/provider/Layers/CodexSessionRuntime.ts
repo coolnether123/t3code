@@ -75,6 +75,17 @@ export function hasConfiguredMcpServer(appServerArgs: ReadonlyArray<string> | un
   return appServerArgs?.some((argument) => argument.includes("mcp_servers.")) === true;
 }
 
+export function isCodexRemoteControlAvailable(status: {
+  readonly status: EffectCodexSchema.V2RemoteControlStatusChangedNotification["status"];
+  readonly environmentId?: string | null | undefined;
+}): boolean {
+  return (
+    status.status === "connected" &&
+    typeof status.environmentId === "string" &&
+    status.environmentId.trim().length > 0
+  );
+}
+
 /**
  * Codex app-server chooses its native collaboration tool catalog when the
  * process starts. Keep these overrides at the provider boundary so a T3
@@ -534,6 +545,7 @@ function buildCodexCollaborationMode(input: {
   readonly enableT3Workers?: boolean;
   readonly browserToolsAvailable?: boolean;
   readonly computerControlMode?: CodexComputerControlMode;
+  readonly computerControlAvailable?: boolean;
   readonly subagentBackend?: SubagentBackend;
 }): EffectCodexSchema.V2TurnStartParams__CollaborationMode | undefined {
   if (input.interactionMode === undefined) {
@@ -557,6 +569,7 @@ function buildCodexCollaborationMode(input: {
           ...(input.subagentBackend ? { subagentBackend: input.subagentBackend } : {}),
           ...(enableT3Workers ? { enableT3Workers: true } : {}),
           computerControlMode: input.computerControlMode ?? DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
+          computerControlAvailable: input.computerControlAvailable ?? true,
         },
         input.browserToolsAvailable ?? true,
       ),
@@ -581,6 +594,8 @@ export function buildTurnStartParams(input: {
   /** Defaults to true so callers that predate the agent-access gate are unchanged. */
   readonly browserToolsAvailable?: boolean;
   readonly computerControlMode?: CodexComputerControlMode;
+  /** Defaults to true for pure callers; live sessions pass app-server status. */
+  readonly computerControlAvailable?: boolean;
 }): Effect.Effect<
   CodexTurnStartParamsWithCollaborationMode,
   CodexErrors.CodexAppServerProtocolParseError
@@ -604,6 +619,9 @@ export function buildTurnStartParams(input: {
     ...(input.subagentBackend ? { subagentBackend: input.subagentBackend } : {}),
     ...(input.model ? { model: input.model } : {}),
     ...(input.effort ? { effort: input.effort } : {}),
+    ...(input.computerControlAvailable !== undefined
+      ? { computerControlAvailable: input.computerControlAvailable }
+      : {}),
     browserToolsAvailable: input.browserToolsAvailable ?? true,
   });
 
@@ -1131,6 +1149,7 @@ export const makeCodexSessionRuntime = (
     const computerControlModeRef = yield* Ref.make(
       options.computerControlMode ?? DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
     );
+    const computerControlAvailableRef = yield* Ref.make(false);
     const collabReceiverTurnsRef = yield* Ref.make(new Map<string, TurnId>());
     const collabChildAgentsRef = yield* Ref.make(new Map<string, CollabChildAgentState>());
     /** Child provider-thread id → its currently running provider turn id. */
@@ -1669,6 +1688,10 @@ export const makeCodexSessionRuntime = (
       ),
     );
 
+    yield* client.handleServerNotification("remoteControl/status/changed", (payload) =>
+      Ref.set(computerControlAvailableRef, isCodexRemoteControlAvailable(payload)),
+    );
+
     yield* client.handleServerNotification("turn/started", (payload) =>
       currentSessionProviderThreadId.pipe(
         Effect.flatMap((providerThreadId) => {
@@ -2180,6 +2203,7 @@ export const makeCodexSessionRuntime = (
             input.computerControlMode ??
             options.computerControlMode ??
             DEFAULT_CODEX_COMPUTER_CONTROL_MODE;
+          const computerControlAvailable = yield* Ref.get(computerControlAvailableRef);
           yield* Ref.set(computerControlModeRef, computerControlMode);
           if (hasConfiguredMcpServer(options.appServerArgs)) {
             yield* client.request("config/mcpServer/reload", undefined).pipe(
@@ -2209,6 +2233,7 @@ export const makeCodexSessionRuntime = (
             // has even if the setting changed after the session started.
             browserToolsAvailable: hasConfiguredMcpServer(options.appServerArgs),
             computerControlMode,
+            computerControlAvailable,
           });
           const rawResponse = yield* client.raw.request("turn/start", params);
           const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(

@@ -54,7 +54,11 @@ ${CHROME_TO_WINDOWS_CONTROL_FALLBACK_INSTRUCTIONS}`;
 function computerControlInstructions(
   mode: CodexComputerControlMode,
   browserToolsAvailable: boolean,
+  computerControlAvailable: boolean,
 ): string {
+  if (!computerControlAvailable && mode !== "preview") {
+    return browserToolInstructions(browserToolsAvailable);
+  }
   switch (mode) {
     case "preview":
       return browserToolInstructions(browserToolsAvailable);
@@ -251,6 +255,8 @@ export interface CodexRuntimeInfo {
   readonly reasoningEffort: string;
   readonly enableT3Workers?: boolean;
   readonly computerControlMode?: CodexComputerControlMode;
+  /** Full Chrome/desktop control requires an active app-server environment. */
+  readonly computerControlAvailable?: boolean;
   readonly subagentBackend?: SubagentBackend;
 }
 
@@ -277,6 +283,7 @@ export function buildCodexDeveloperInstructions(
   const controlInstructions = computerControlInstructions(
     runtime.computerControlMode ?? DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
     browserToolsAvailable,
+    runtime.computerControlAvailable ?? true,
   );
   const nativeSubagentInstructions =
     runtime.subagentBackend === "v1" || runtime.subagentBackend === "v2"

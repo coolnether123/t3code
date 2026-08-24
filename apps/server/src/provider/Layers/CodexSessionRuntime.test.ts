@@ -23,6 +23,7 @@ import {
   codexSubagentBackendAppServerArgs,
   assertCodexSubagentIsolationConfig,
   hasConfiguredMcpServer,
+  isCodexRemoteControlAvailable,
   isComputerUseMcpApproval,
   isMcpToolApproval,
   isRecoverableThreadResumeError,
@@ -184,6 +185,26 @@ function makeThreadOpenResponse(
 }
 
 describe("buildTurnStartParams", () => {
+  it.effect("does not advertise full control without an app-server environment", () =>
+    Effect.gen(function* () {
+      for (const computerControlMode of ["chrome", "desktop"] as const) {
+        const params = yield* buildTurnStartParams({
+          threadId: `provider-thread-no-remote-control-${computerControlMode}`,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          computerControlMode,
+          computerControlAvailable: false,
+          browserToolsAvailable: true,
+        });
+        const instructions = params.collaborationMode?.settings.developer_instructions ?? "";
+
+        NodeAssert.doesNotMatch(instructions, /Full Windows and Chrome control/);
+        NodeAssert.doesNotMatch(instructions, /Full Chrome control/);
+        NodeAssert.match(instructions, /preview_status/);
+      }
+    }),
+  );
+
   it("keeps invalid turn values only in the schema cause", () => {
     const secret = "codex-turn-input-secret-sentinel";
     const error = Effect.runSync(
@@ -640,6 +661,24 @@ describe("hasConfiguredMcpServer", () => {
     NodeAssert.equal(hasConfiguredMcpServer(["--model", "gpt-5.4"]), false);
     NodeAssert.equal(
       hasConfiguredMcpServer(["-c", 'mcp_servers.t3-code.url="http://127.0.0.1/mcp"']),
+      true,
+    );
+  });
+});
+
+describe("isCodexRemoteControlAvailable", () => {
+  it("requires a connected status and a nonblank environment id", () => {
+    for (const status of ["disabled", "connecting", "errored"] as const) {
+      NodeAssert.equal(isCodexRemoteControlAvailable({ status, environmentId: "env-1" }), false);
+    }
+    for (const environmentId of [undefined, null, "", "   "]) {
+      NodeAssert.equal(
+        isCodexRemoteControlAvailable({ status: "connected", environmentId }),
+        false,
+      );
+    }
+    NodeAssert.equal(
+      isCodexRemoteControlAvailable({ status: "connected", environmentId: "env-1" }),
       true,
     );
   });
