@@ -1397,7 +1397,7 @@ describe("CheckpointReactor", () => {
     expect(NodeFS.existsSync(NodePath.join(harness.cwd, "apps", "server", ".keep"))).toBe(true);
   });
 
-  it("rewinds a legacy task with an unavailable workspace without claiming file restoration", async () => {
+  it("marks a legacy rewind as conversation-only and continues the replacement turn", async () => {
     const unavailableWorkspace = NodeFS.mkdtempSync(
       NodePath.join(NodeOS.tmpdir(), "t3-checkpoint-unavailable-workspace-"),
     );
@@ -1443,7 +1443,7 @@ describe("CheckpointReactor", () => {
     const finishedEvent = finished.find((event) => event.type === "thread.edit-from-here-finished");
     expect(finishedEvent).toMatchObject({
       payload: {
-        workspaceRestore: { filesRestored: false, reason: "workspace-unavailable" },
+        workspaceRestore: { filesRestored: false, reason: "conversation-only" },
       },
     });
     expect(thread?.messages.map((message) => message.id)).toContain(replacementMessageId);
@@ -1451,7 +1451,7 @@ describe("CheckpointReactor", () => {
       expect.arrayContaining([
         expect.objectContaining({
           kind: "thread.edit-from-here.files-not-restored",
-          payload: expect.objectContaining({ filesRestored: false }),
+          payload: expect.objectContaining({ filesRestored: false, reason: "conversation-only" }),
         }),
       ]),
     );

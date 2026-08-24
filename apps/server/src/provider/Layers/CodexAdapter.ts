@@ -73,7 +73,12 @@ import {
   type CodexSessionRuntimeShape,
 } from "./CodexSessionRuntime.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
-import { resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
+import { codexLaunchArgv, resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
+import {
+  codexMcpDisableOverride,
+  type CodexMcpPreflightInput,
+  type CodexMcpPreflightResult,
+} from "./CodexMcpPreflight.ts";
 const isCodexAppServerProcessExitedError = Schema.is(CodexErrors.CodexAppServerProcessExitedError);
 const isCodexAppServerTransportError = Schema.is(CodexErrors.CodexAppServerTransportError);
 const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
@@ -96,6 +101,9 @@ export interface CodexAdapterLiveOptions {
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
   readonly enableT3Workers?: Effect.Effect<boolean>;
+  readonly preflightMcpServers?: (
+    input: CodexMcpPreflightInput,
+  ) => Effect.Effect<CodexMcpPreflightResult>;
 }
 
 interface CodexAdapterSessionContext {
@@ -1714,7 +1722,29 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             issue: "Native V1 control requires T3 Workers to be enabled in settings.",
           });
         }
+        const mcpPreflight = options?.preflightMcpServers
+          ? yield* options.preflightMcpServers({
+              homePath: codexConfig.homePath,
+              cwd: input.cwd ?? process.cwd(),
+              ...(options.environment !== undefined ? { environment: options.environment } : {}),
+              appServerArgs: codexLaunchArgv(
+                resolveCodexLaunchArgs(codexConfig.launchArgs, options.environment),
+              ),
+            })
+          : ({ disabledServerNames: [], unavailable: [] } satisfies CodexMcpPreflightResult);
+        for (const diagnostic of mcpPreflight.unavailable) {
+          yield* Effect.logWarning("codex.mcp.unavailable", diagnostic);
+        }
         const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
+        const inheritedMcpOverrides = mcpPreflight.disabledServerNames.map(codexMcpDisableOverride);
+        const t3McpArgs = mcpSession
+          ? [
+              "-c",
+              `mcp_servers.t3-code.url=${mcpSession.endpoint}`,
+              "-c",
+              'mcp_servers.t3-code.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
+            ]
+          : [];
         const runtimeInput: CodexSessionRuntimeOptions = {
           threadId: input.threadId,
           providerInstanceId: boundInstanceId,
@@ -1744,11 +1774,13 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
                   ...(options?.environment ?? process.env),
                   T3_MCP_BEARER_TOKEN: mcpSession.authorizationHeader.replace(/^Bearer\s+/, ""),
                 },
+              }
+            : {}),
+          ...(inheritedMcpOverrides.length > 0 || t3McpArgs.length > 0
+            ? {
                 appServerArgs: [
-                  "-c",
-                  `mcp_servers.t3-code.url=${mcpSession.endpoint}`,
-                  "-c",
-                  'mcp_servers.t3-code.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
+                  ...inheritedMcpOverrides.flatMap((override) => ["-c", override]),
+                  ...t3McpArgs,
                 ],
               }
             : {}),

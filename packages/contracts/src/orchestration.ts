@@ -1084,6 +1084,7 @@ export const ThreadWorkspaceRestoreOutcome = Schema.Struct({
       "checkpoint-invalid",
       "current-checkpoint-missing",
       "current-worktree-dirty",
+      "conversation-only",
     ]),
   ),
   detail: Schema.optional(TrimmedNonEmptyString),

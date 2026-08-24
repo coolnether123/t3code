@@ -896,7 +896,7 @@ const make = Effect.gen(function* () {
     if (!hasFilesystemCheckpointSummary) {
       workspaceRestore = {
         filesRestored: false,
-        reason: "workspace-unavailable",
+        reason: "conversation-only",
         detail:
           "No filesystem checkpoint summary is recorded for this task; the conversation was rewound without changing files.",
       };

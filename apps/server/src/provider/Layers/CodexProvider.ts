@@ -43,6 +43,7 @@ import {
   type CodexAppServerTransport,
 } from "../CodexAppServerTransport.ts";
 import { withCodexSandboxStartupRecovery } from "./CodexSandboxRecovery.ts";
+import { codexMcpDisableOverride, preflightCodexMcpServers } from "./CodexMcpPreflight.ts";
 import packageJson from "../../../package.json" with { type: "json" };
 const isCodexAppServerSpawnError = Schema.is(CodexErrors.CodexAppServerSpawnError);
 
@@ -420,10 +421,22 @@ const probeCodexAppServerProviderOnce = Effect.fn("probeCodexAppServerProviderOn
       ...input.environment,
       ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
     };
-    const commandArgs = codexAppServerCommandArgs(
-      input.appServerTransport ?? "stdio",
-      codexLaunchArgv(input.launchArgs),
+    const launchArgs = codexLaunchArgv(input.launchArgs);
+    const mcpPreflight = yield* Effect.promise(() =>
+      preflightCodexMcpServers({
+        ...(resolvedHomePath ? { homePath: resolvedHomePath } : {}),
+        cwd: input.cwd,
+        environment,
+        appServerArgs: launchArgs,
+      }),
     );
+    for (const diagnostic of mcpPreflight.unavailable) {
+      yield* Effect.logWarning("codex.mcp.unavailable", diagnostic);
+    }
+    const commandArgs = codexAppServerCommandArgs(input.appServerTransport ?? "stdio", [
+      ...launchArgs,
+      ...mcpPreflight.disabledServerNames.flatMap((name) => ["-c", codexMcpDisableOverride(name)]),
+    ]);
     const spawnCommand = yield* resolveSpawnCommand(input.binaryPath, commandArgs, {
       env: environment,
       extendEnv: true,

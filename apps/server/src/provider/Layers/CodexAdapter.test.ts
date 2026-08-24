@@ -517,6 +517,51 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
     }).pipe(Effect.provide(layer));
   });
 
+  it.effect("adds only session-scoped overrides for unavailable inherited MCPs", () => {
+    const runtimeFactory = makeRuntimeFactory();
+    const layer = Layer.effect(
+      CodexAdapter,
+      Effect.gen(function* () {
+        const codexConfig = decodeCodexSettings({});
+        return yield* makeCodexAdapter(codexConfig, {
+          makeRuntime: runtimeFactory.factory,
+          preflightMcpServers: () =>
+            Effect.succeed({
+              disabledServerNames: ["dead"],
+              unavailable: [
+                {
+                  kind: "codex.mcp.unavailable" as const,
+                  serverName: "dead",
+                  endpoint: "http://127.0.0.1:31002/mcp",
+                  reason: "connection-failed" as const,
+                  timeoutMs: 750,
+                },
+              ],
+            }),
+        });
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("sess-mcp-preflight"),
+        runtimeMode: "full-access",
+      });
+
+      NodeAssert.deepStrictEqual(runtimeFactory.lastRuntime?.options.appServerArgs, [
+        "-c",
+        "mcp_servers.dead.enabled=false",
+      ]);
+    }).pipe(Effect.provide(layer));
+  });
+
   it.effect("maps codex model options for the adapter's bound custom instance id", () => {
     const customInstanceId = ProviderInstanceId.make("codex_personal");
     const customRuntimeFactory = makeRuntimeFactory();

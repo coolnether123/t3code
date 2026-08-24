@@ -43,6 +43,7 @@ import type { ProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import { resolveCodexBinaryPath } from "../CodexAppServerTransport.ts";
+import { preflightCodexMcpServers } from "../Layers/CodexMcpPreflight.ts";
 import {
   enrichProviderSnapshotWithVersionAdvisory,
   makePackageManagedProviderMaintenanceResolver,
@@ -172,6 +173,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
             }).pipe(Effect.as(false)),
           ),
         ),
+        preflightMcpServers: (input) => Effect.promise(() => preflightCodexMcpServers(input)),
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
       });
       const textGeneration = yield* makeCodexTextGeneration(effectiveConfig, processEnv);
