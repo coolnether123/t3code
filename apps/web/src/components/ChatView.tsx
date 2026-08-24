@@ -2441,6 +2441,18 @@ function ChatViewContent(props: ChatViewProps) {
     isConnecting ||
     isEditingFromHere ||
     activeServerThread?.editFromHere != null;
+  useEffect(() => {
+    if (
+      !isEditingFromHere ||
+      editFromHereMode !== "rewind" ||
+      activeServerThread?.editFromHere == null
+    ) {
+      return;
+    }
+    setEditFromHereDialog(null);
+    setIsEditingFromHere(false);
+    setEditFromHereMode(null);
+  }, [activeServerThread?.editFromHere, editFromHereMode, isEditingFromHere]);
   const activeWorkStartedAt = deriveActiveWorkStartedAt(
     activeLatestTurn,
     activeThread?.session ?? null,
@@ -6442,6 +6454,7 @@ function ChatViewContent(props: ChatViewProps) {
             error instanceof Error ? error.message : "Failed to edit from this message.",
           );
         }
+        setEditFromHereDialog(null);
         setIsEditingFromHere(false);
         setEditFromHereMode(null);
         return;
@@ -6454,8 +6467,10 @@ function ChatViewContent(props: ChatViewProps) {
           to: "/$environmentId/$threadId",
           params: { environmentId, threadId: targetThreadId },
         });
+        setEditFromHereDialog(null);
+        setIsEditingFromHere(false);
+        setEditFromHereMode(null);
       }
-      setIsEditingFromHere(false);
     },
     [
       activeEnvironmentUnavailable,
