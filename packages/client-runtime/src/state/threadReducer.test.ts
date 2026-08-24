@@ -995,7 +995,7 @@ describe("applyThreadDetailEvent", () => {
   });
 
   describe("rewind terminal events", () => {
-    it("clears pending rewind state when the failure activity arrives", () => {
+    it("clears pending rewind state when a matching failure activity arrives", () => {
       const requestId = CommandId.make("edit-request-failed");
       const thread = {
         ...baseThread,
@@ -1020,7 +1020,7 @@ describe("applyThreadDetailEvent", () => {
             tone: "error",
             kind: "thread.edit-from-here.failed",
             summary: "Edit from here failed",
-            payload: { detail: "The checkpoint could not be restored." },
+            payload: { requestId, detail: "The checkpoint could not be restored." },
             turnId: null,
             createdAt: "2026-04-01T01:00:01.000Z",
           },
@@ -1031,6 +1031,85 @@ describe("applyThreadDetailEvent", () => {
       if (result.kind === "updated") {
         expect(result.thread.editFromHere).toBeNull();
         expect(result.thread.activities).toHaveLength(1);
+      }
+    });
+
+    it("keeps a newer rewind pending when an older failure arrives late", () => {
+      const newerRequestId = CommandId.make("new-edit-request");
+      const thread = {
+        ...baseThread,
+        editFromHere: {
+          requestId: newerRequestId,
+          mode: "rewind" as const,
+          sourceMessageId: MessageId.make("new-source-message"),
+          startedAt: "2026-04-01T01:00:02.000Z",
+        },
+      };
+      const result = applyThreadDetailEvent(thread, {
+        ...baseEventFields,
+        sequence: 22,
+        occurredAt: "2026-04-01T01:00:03.000Z",
+        aggregateKind: "thread",
+        aggregateId: thread.id,
+        type: "thread.activity-appended",
+        payload: {
+          threadId: thread.id,
+          activity: {
+            id: EventId.make("old-edit-failure-activity"),
+            tone: "error",
+            kind: "thread.edit-from-here.failed",
+            summary: "Edit from here failed",
+            payload: {
+              requestId: CommandId.make("old-edit-request"),
+              detail: "The older checkpoint could not be restored.",
+            },
+            turnId: null,
+            createdAt: "2026-04-01T01:00:03.000Z",
+          },
+        },
+      });
+
+      expect(result.kind).toBe("updated");
+      if (result.kind === "updated") {
+        expect(result.thread.editFromHere?.requestId).toBe(newerRequestId);
+      }
+    });
+
+    it("does not let a legacy failure without a request id cancel a newer rewind", () => {
+      const newerRequestId = CommandId.make("new-edit-request-with-legacy-failure");
+      const thread = {
+        ...baseThread,
+        editFromHere: {
+          requestId: newerRequestId,
+          mode: "rewind" as const,
+          sourceMessageId: MessageId.make("new-source-message"),
+          startedAt: "2026-04-01T01:00:02.000Z",
+        },
+      };
+      const result = applyThreadDetailEvent(thread, {
+        ...baseEventFields,
+        sequence: 23,
+        occurredAt: "2026-04-01T01:00:04.000Z",
+        aggregateKind: "thread",
+        aggregateId: thread.id,
+        type: "thread.activity-appended",
+        payload: {
+          threadId: thread.id,
+          activity: {
+            id: EventId.make("legacy-edit-failure-activity"),
+            tone: "error",
+            kind: "thread.edit-from-here.failed",
+            summary: "Edit from here failed",
+            payload: { detail: "The older client did not include a request id." },
+            turnId: null,
+            createdAt: "2026-04-01T01:00:04.000Z",
+          },
+        },
+      });
+
+      expect(result.kind).toBe("updated");
+      if (result.kind === "updated") {
+        expect(result.thread.editFromHere?.requestId).toBe(newerRequestId);
       }
     });
   });

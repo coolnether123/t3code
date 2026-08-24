@@ -625,8 +625,19 @@ export function applyThreadDetailEvent(
       // thread.reverted that discards turns can still resolve a value from
       // the turns that survive.
       const supersedesContextWindow = isResolvableContextWindowActivity(activity);
+      const activityPayload =
+        activity.payload && typeof activity.payload === "object"
+          ? (activity.payload as Record<string, unknown>)
+          : null;
+      const failureRequestId =
+        activity.kind === "thread.edit-from-here.failed" &&
+        typeof activityPayload?.requestId === "string"
+          ? activityPayload.requestId
+          : null;
       const editFromHere =
-        activity.kind === "thread.edit-from-here.failed" ? null : thread.editFromHere;
+        failureRequestId !== null && failureRequestId === thread.editFromHere?.requestId
+          ? null
+          : thread.editFromHere;
       const activities = pipe(
         thread.activities,
         Arr.filter(

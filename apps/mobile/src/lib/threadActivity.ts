@@ -398,8 +398,9 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   const diagnostic =
     activity.kind === "runtime.warning" || activity.kind === "runtime.error"
       ? normalizeDiagnosticDetail(payload?.detail)
-      : activity.kind === "thread.edit-from-here.files-not-restored" ||
-          activity.kind === "checkpoint.revert.files-not-restored"
+      : (activity.kind === "thread.edit-from-here.files-not-restored" ||
+            activity.kind === "checkpoint.revert.files-not-restored") &&
+          isConversationOnlyRestorePayload(payload)
         ? {
             preview: "Only conversation history was rewound. Files were not changed.",
             technicalDetail: asTrimmedString(payload?.detail),
@@ -767,6 +768,17 @@ function workEntryHeading(workEntry: WorkLogEntry): string {
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+}
+
+function isConversationOnlyRestorePayload(payload: Record<string, unknown> | null): boolean {
+  if (payload?.conversationOnly === true) {
+    return true;
+  }
+
+  // Older servers emitted filesRestored=false without the additive marker.
+  // Keep those receipts readable, but do not treat a positive restore as
+  // conversation-only.
+  return payload?.filesRestored === false && payload.reason !== "workspace-unavailable";
 }
 
 function asTrimmedString(value: unknown): string | null {
@@ -1607,7 +1619,7 @@ export function buildThreadFeed(
           const detail = workEntryPreview(entry);
           const getFullDetail = memoizeValue(() => buildWorkEntryExpandedBody(entry));
           const getCopyText = memoizeValue(() =>
-            [summary, detail, getFullDetail()]
+            [summary, detail]
               .filter((value, index, values): value is string => {
                 return Boolean(value) && values.indexOf(value) === index;
               })

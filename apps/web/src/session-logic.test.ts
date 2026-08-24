@@ -1050,7 +1050,11 @@ describe("deriveWorkLogEntries", () => {
         kind: "thread.edit-from-here.files-not-restored",
         summary: "Conversation rewound; files not restored",
         tone: "info",
-        payload: { detail: "The task has no Git-backed workspace." },
+        payload: {
+          filesRestored: false,
+          conversationOnly: true,
+          detail: "The task has no Git-backed workspace.",
+        },
       }),
     ]);
 
@@ -1058,6 +1062,21 @@ describe("deriveWorkLogEntries", () => {
       detail: "Only conversation history was rewound. Files were not changed.",
       technicalDetail: "The task has no Git-backed workspace.",
     });
+  });
+
+  it("keeps older conversation-only restore activities readable", () => {
+    const [entry] = deriveWorkLogEntries([
+      makeActivity({
+        id: "legacy-conversation-only-rewind",
+        kind: "checkpoint.revert.files-not-restored",
+        summary: "Conversation rewound; files not restored",
+        tone: "info",
+        payload: { filesRestored: false, detail: "Legacy server receipt." },
+      }),
+    ]);
+
+    expect(entry?.detail).toBe("Only conversation history was rewound. Files were not changed.");
+    expect(entry?.technicalDetail).toBe("Legacy server receipt.");
   });
 
   it("omits tool started entries and keeps completed entries", () => {

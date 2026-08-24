@@ -264,6 +264,18 @@ export function ThreadWorkLog(props: {
                       {fullDetail}
                     </Text>
                   </ScrollView>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={
+                      props.copiedRowId === row.id ? "Details copied" : "Copy details"
+                    }
+                    className="mt-1 self-start rounded-md px-1 py-1"
+                    onPress={() => props.onCopyRow(row.id, fullDetail)}
+                  >
+                    <Text className="font-t3-medium text-2xs text-foreground-muted underline">
+                      {props.copiedRowId === row.id ? "Copied" : "Copy details"}
+                    </Text>
+                  </Pressable>
                 </View>
               ) : null}
             </Animated.View>

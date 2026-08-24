@@ -217,6 +217,46 @@ describe("buildThreadFeed", () => {
     expect(group.activities[0]?.getFullDetail()).toContain('"fields"');
   });
 
+  it("uses the additive conversation-only marker and accepts older restore payloads", () => {
+    const entries = buildThreadFeed(
+      makeThread({
+        id: ThreadId.make("thread-conversation-only"),
+        projectId: ProjectId.make("project-1"),
+        title: "Conversation rewind",
+        activities: [
+          makeActivity({
+            id: EventId.make("conversation-only-current"),
+            kind: "thread.edit-from-here.files-not-restored",
+            summary: "Conversation rewound; files not restored",
+            createdAt: "2026-08-24T18:17:45.000Z",
+            payload: {
+              filesRestored: false,
+              conversationOnly: true,
+              detail: "The task has no Git-backed workspace.",
+            },
+          }),
+          makeActivity({
+            id: EventId.make("conversation-only-legacy"),
+            kind: "checkpoint.revert.files-not-restored",
+            summary: "Conversation rewound; files not restored",
+            createdAt: "2026-08-24T18:17:46.000Z",
+            payload: {
+              filesRestored: false,
+              detail: "Legacy server receipt.",
+            },
+          }),
+        ],
+      }),
+    ).find((entry) => entry.type === "activity-group");
+
+    expect(entries?.type).toBe("activity-group");
+    if (entries?.type !== "activity-group") return;
+    expect(entries.activities.map((activity) => activity.detail)).toEqual([
+      "Only conversation history was rewound. Files were not changed.",
+      "Only conversation history was rewound. Files were not changed.",
+    ]);
+  });
+
   it("keeps older local feedback before newer messages returned by the server", () => {
     const submission = {
       id: MessageId.make("feedback-command-ordering"),
@@ -373,9 +413,7 @@ describe("buildThreadFeed", () => {
       status: "success",
     });
     expect(group.activities[0]?.getFullDetail()).toBe("/bin/zsh -lc 'bun run test'");
-    expect(group.activities[0]?.getCopyText()).toBe(
-      "Run tests\nbun run test\n/bin/zsh -lc 'bun run test'",
-    );
+    expect(group.activities[0]?.getCopyText()).toBe("Run tests\nbun run test");
   });
 
   it("keeps MCP inputs available to expanded mobile work rows", () => {
@@ -428,7 +466,7 @@ describe("buildThreadFeed", () => {
     expect(group.activities[0]?.getFullDetail()).toContain("repository.search");
   });
 
-  it("defers large tool output expansion until a work row is opened or copied", () => {
+  it("defers large tool output expansion until a work row is opened", () => {
     let serializedToolOutputs = 0;
     const activities = Array.from({ length: 5_000 }, (_, index) =>
       makeActivity({
@@ -471,7 +509,7 @@ describe("buildThreadFeed", () => {
     expect(group.activities).toHaveLength(5_000);
     expect(group.activities[0]?.getFullDetail()).toContain('"output"');
     expect(serializedToolOutputs).toBe(1);
-    expect(group.activities[0]?.getCopyText()).toContain('"output"');
+    expect(group.activities[0]?.getCopyText()).toBe("Tool 0");
     expect(serializedToolOutputs).toBe(1);
   });
 
