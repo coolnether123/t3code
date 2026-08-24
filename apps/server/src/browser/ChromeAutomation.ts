@@ -60,7 +60,8 @@ export interface ChromeAutomationPageSnapshot {
 export type ChromeAutomationTarget = { readonly ref: string } | { readonly selector: string };
 
 export interface ChromeAutomationLaunchOptions {
-  readonly executablePath: string;
+  readonly executablePath: string | undefined;
+  readonly channel: "chrome" | undefined;
   readonly userDataDir: string;
   readonly headless: false;
   readonly args: ReadonlyArray<string>;
@@ -155,6 +156,12 @@ export interface ChromeAutomationOptions {
   readonly executablePath?: string;
 }
 
+export interface ChromeAutomationLaunchTarget {
+  readonly executablePath: string | undefined;
+  /** Playwright resolves this channel to an installed Google Chrome executable. */
+  readonly channel: "chrome" | undefined;
+}
+
 interface ManagedTab {
   readonly id: string;
   readonly page: ChromeAutomationPageAdapter;
@@ -223,65 +230,145 @@ const targetSelector = (
   return selector;
 };
 
-const profileArguments = (profileDir: string): ReadonlyArray<string> => [
+export const profileArguments = (): ReadonlyArray<string> => [
   "--no-first-run",
   "--no-default-browser-check",
-  `--user-data-dir=${profileDir}`,
 ];
 
-const chromePathCandidates = (
+const trimPathCandidate = (candidate: string): string => {
+  const trimmed = candidate.trim();
+  if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+};
+
+const appendUniquePathCandidate = (
+  candidates: Array<string>,
+  seen: Set<string>,
+  platform: NodeJS.Platform,
+  candidate: string | undefined,
+): void => {
+  if (candidate === undefined) return;
+  const trimmed = trimPathCandidate(candidate);
+  if (trimmed.length === 0) return;
+  const key = platform === "win32" ? trimmed.toLowerCase() : trimmed;
+  if (seen.has(key)) return;
+  seen.add(key);
+  candidates.push(trimmed);
+};
+
+const joinWindowsPath = (root: string, relativePath: string): string =>
+  `${trimPathCandidate(root).replace(/[\\/]+$/, "")}\\${relativePath}`;
+
+export const chromePathCandidates = (
   platform: NodeJS.Platform,
   env: NodeJS.ProcessEnv,
 ): ReadonlyArray<string> => {
-  const candidates = [env.CHROME_PATH, env.CHROMIUM_PATH].filter(
-    (candidate): candidate is string => candidate !== undefined && candidate.trim().length > 0,
-  );
+  const candidates: Array<string> = [];
+  const seen = new Set<string>();
+  appendUniquePathCandidate(candidates, seen, platform, env.CHROME_PATH);
+  appendUniquePathCandidate(candidates, seen, platform, env.CHROMIUM_PATH);
 
   if (platform === "win32") {
-    const roots = [env.ProgramFilesX86, env.ProgramFiles, env.LOCALAPPDATA].filter(
-      (root): root is string => root !== undefined && root.trim().length > 0,
-    );
+    const systemDrive =
+      trimPathCandidate(env.SystemDrive ?? "") ||
+      trimPathCandidate(env.SystemRoot ?? "").slice(0, 2) ||
+      "C:";
+    const roots = [
+      // Windows names this variable `ProgramFiles(x86)`. Keep the old
+      // spelling as a compatibility fallback for embedders that normalize
+      // environment keys before constructing the server environment.
+      env["ProgramFiles(x86)"],
+      env.ProgramFilesX86,
+      env.ProgramFiles,
+      env.ProgramW6432,
+      `${systemDrive}\\Program Files (x86)`,
+      `${systemDrive}\\Program Files`,
+      env.LOCALAPPDATA,
+      env.USERPROFILE === undefined ? undefined : `${env.USERPROFILE}\\AppData\\Local`,
+    ];
+    const relativePaths = [
+      "Google\\Chrome\\Application\\chrome.exe",
+      "Google\\Chrome Beta\\Application\\chrome.exe",
+      "Google\\Chrome Dev\\Application\\chrome.exe",
+      "Google\\Chrome SxS\\Application\\chrome.exe",
+      "Google\\Chrome for Testing\\Application\\chrome.exe",
+      "Chromium\\Application\\chrome.exe",
+    ];
     for (const root of roots) {
-      candidates.push(`${root}\\Google\\Chrome\\Application\\chrome.exe`);
-      candidates.push(`${root}\\Chromium\\Application\\chrome.exe`);
+      if (root === undefined || trimPathCandidate(root).length === 0) continue;
+      for (const relativePath of relativePaths) {
+        appendUniquePathCandidate(candidates, seen, platform, joinWindowsPath(root, relativePath));
+      }
+    }
+    // A portable or administrator-managed installation may be exposed only
+    // through PATH. These are checked after explicit standard locations.
+    for (const command of ["chrome.exe", "chrome", "chromium.exe", "chromium"]) {
+      appendUniquePathCandidate(candidates, seen, platform, command);
     }
     return candidates;
   }
 
   if (platform === "darwin") {
-    return [
-      ...candidates,
+    for (const candidate of [
       "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
       "/Applications/Chromium.app/Contents/MacOS/Chromium",
-      `${env.HOME ?? ""}/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`,
-      `${env.HOME ?? ""}/Applications/Chromium.app/Contents/MacOS/Chromium`,
-    ];
+      env.HOME === undefined
+        ? undefined
+        : `${env.HOME}/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`,
+      env.HOME === undefined
+        ? undefined
+        : `${env.HOME}/Applications/Chromium.app/Contents/MacOS/Chromium`,
+    ]) {
+      appendUniquePathCandidate(candidates, seen, platform, candidate);
+    }
+    return candidates;
   }
 
-  return [...candidates, "google-chrome", "google-chrome-stable", "chromium", "chromium-browser"];
+  for (const command of ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]) {
+    appendUniquePathCandidate(candidates, seen, platform, command);
+  }
+  return candidates;
 };
 
-const resolveInstalledChrome = Effect.fn("ChromeAutomation.resolveInstalledChrome")(function* () {
-  const platform = yield* HostProcessPlatform;
-  const env = yield* HostProcessEnvironment;
-  const fileSystem = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
+export const resolveInstalledChrome = Effect.fn("ChromeAutomation.resolveInstalledChrome")(
+  function* () {
+    const platform = yield* HostProcessPlatform;
+    const env = yield* HostProcessEnvironment;
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
 
-  for (const candidate of chromePathCandidates(platform, env)) {
-    if (!path.isAbsolute(candidate)) {
-      const resolved = yield* resolveCommandPath(candidate, { env }).pipe(Effect.option);
-      if (resolved._tag === "Some") return resolved.value;
-      continue;
+    const candidates = chromePathCandidates(platform, env);
+    for (const candidate of candidates) {
+      if (!path.isAbsolute(candidate)) {
+        const resolved = yield* resolveCommandPath(candidate, { env }).pipe(Effect.option);
+        if (resolved._tag === "Some") {
+          return {
+            executablePath: resolved.value,
+            channel: undefined,
+          } satisfies ChromeAutomationLaunchTarget;
+        }
+        continue;
+      }
+      if (yield* fileSystem.exists(candidate).pipe(Effect.orElseSucceed(() => false))) {
+        return {
+          executablePath: candidate,
+          channel: undefined,
+        } satisfies ChromeAutomationLaunchTarget;
+      }
     }
-    if (yield* fileSystem.exists(candidate).pipe(Effect.orElseSucceed(() => false))) {
-      return candidate;
-    }
-  }
 
-  return yield* Effect.fail(
-    new ChromeAutomationError("start", "No installed Chrome or Chromium executable was found."),
-  );
-});
+    yield* Effect.logInfo(
+      "managed Chrome path discovery found no explicit executable; trying Playwright channel",
+      { platform, candidates },
+    );
+    return {
+      executablePath: undefined,
+      channel: "chrome",
+    } satisfies ChromeAutomationLaunchTarget;
+  },
+);
 
 const makePlaywrightPageAdapter = (page: Page): ChromeAutomationPageAdapter => ({
   url: () => page.url(),
@@ -353,7 +440,8 @@ const makePlaywrightPageAdapter = (page: Page): ChromeAutomationPageAdapter => (
 const makePlaywrightAdapter = (): ChromeAutomationBrowserAdapter => ({
   launchPersistentContext: async (options) => {
     const context = await chromium.launchPersistentContext(options.userDataDir, {
-      executablePath: options.executablePath,
+      ...(options.executablePath === undefined ? {} : { executablePath: options.executablePath }),
+      ...(options.channel === undefined ? {} : { channel: options.channel }),
       headless: options.headless,
       args: [...options.args],
     });
@@ -387,6 +475,7 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
     options.adapter === undefined && options.executablePath === undefined;
   let executablePath =
     options.executablePath ?? (shouldDiscoverExecutable ? undefined : "injected");
+  let launchChannel: ChromeAutomationLaunchTarget["channel"] = undefined;
 
   let browser: ChromeAutomationBrowser | undefined;
   let selectedTabId: string | undefined;
@@ -453,6 +542,13 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
 
   const failStart = (cause: unknown) =>
     Effect.gen(function* () {
+      yield* Effect.logError("managed Chrome failed to start", {
+        profileDir,
+        executablePath: status.executablePath,
+        channel: launchChannel,
+        detail: errorDetail(cause),
+        cause,
+      });
       const currentBrowser = browser;
       expectedDisconnect = true;
       if (currentBrowser !== undefined) {
@@ -545,20 +641,26 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
     if (status.lifecycle === "connected" && browser !== undefined) return status;
     status = { ...status, lifecycle: "starting", error: undefined };
     expectedDisconnect = false;
+    launchChannel = undefined;
     const connection = ++connectionSequence;
-    const launchExecutablePath = shouldDiscoverExecutable
+    const launchTarget = shouldDiscoverExecutable
       ? yield* provideExecutableDiscoveryServices(resolveInstalledChrome())
-      : executablePath!;
-    executablePath = launchExecutablePath;
-    status = { ...status, executablePath: launchExecutablePath };
+      : ({
+          executablePath: executablePath!,
+          channel: undefined,
+        } satisfies ChromeAutomationLaunchTarget);
+    executablePath = launchTarget.executablePath;
+    launchChannel = launchTarget.channel;
+    status = { ...status, executablePath: launchTarget.executablePath };
     activeConnection = connection;
     const launched = yield* Effect.tryPromise({
       try: () =>
         adapter.launchPersistentContext({
-          executablePath: launchExecutablePath,
+          executablePath: launchTarget.executablePath,
+          channel: launchTarget.channel,
           userDataDir: profileDir,
           headless: false,
-          args: profileArguments(profileDir),
+          args: profileArguments(),
           onDisconnected: () => onDisconnected(connection),
         }),
       catch: (cause) => failure("start", cause),

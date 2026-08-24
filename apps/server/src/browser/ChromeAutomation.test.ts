@@ -141,6 +141,19 @@ const provideTestServices = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
     ),
   );
 
+it("selects Google Chrome from the Windows ProgramFiles(x86) installation root", () => {
+  const programFilesX86Chrome = "D:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe";
+  const candidates = ChromeAutomationModule.chromePathCandidates("win32", {
+    "ProgramFiles(x86)": "D:\\Program Files (x86)",
+    ProgramFiles: "C:\\Program Files",
+    ProgramW6432: "C:\\Program Files",
+    LOCALAPPDATA: "C:\\Users\\tester\\AppData\\Local",
+  });
+
+  assert.equal(candidates[0], programFilesX86Chrome);
+  assert.equal(candidates.indexOf(programFilesX86Chrome), 0);
+});
+
 it.effect("manages lifecycle and keeps the persistent profile under server state", () =>
   provideTestServices(
     Effect.gen(function* () {
@@ -160,7 +173,7 @@ it.effect("manages lifecycle and keeps the persistent profile under server state
       assert.ok(fake.launchOptions);
       const expectedProfile = path.join(config.stateDir, "browser", "chrome-profile");
       assert.equal(fake.launchOptions.userDataDir, expectedProfile);
-      assert.ok(fake.launchOptions.args.includes(`--user-data-dir=${expectedProfile}`));
+      assert.ok(!fake.launchOptions.args.some((arg) => arg.startsWith("--user-data-dir=")));
 
       const stopped = yield* automation.stop();
       assert.equal(stopped.lifecycle, "stopped");
