@@ -1,4 +1,5 @@
 import {
+  ComputerChromeAutomationError,
   ComputerControlUnavailableError,
   EnvironmentId,
   ProviderInstanceId,
@@ -7,6 +8,7 @@ import {
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 
+import * as ChromeAutomation from "../../../browser/ChromeAutomation.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as ExternalLauncher from "../../../process/externalLauncher.ts";
 import { computerHandlers } from "./handlers.ts";
@@ -33,6 +35,49 @@ const launcher = (
     resolveAvailableEditors: () => Effect.succeed([]),
     launchBrowser,
     launchEditor: () => Effect.die("unused launchEditor"),
+  });
+
+const chromeStatus: ChromeAutomation.ChromeAutomationStatus = {
+  lifecycle: "connected",
+  profileDir: "A:/t3/browser/chrome-profile",
+  executablePath: "chrome.exe",
+  selectedTabId: "tab-1",
+  error: undefined,
+};
+
+const chromeTab: ChromeAutomation.ChromeAutomationTab = {
+  id: "tab-1",
+  url: "https://example.test",
+  title: "Example",
+  selected: true,
+};
+
+const chromeSnapshot: ChromeAutomation.ChromeAutomationPageSnapshot & { readonly tabId: string } = {
+  tabId: "tab-1",
+  accessibilityTree: "- document",
+  dom: "<body>Example</body>",
+  refs: [],
+};
+
+const chromeService = (calls: Array<string>) =>
+  ChromeAutomation.ChromeAutomation.of({
+    start: () => Effect.sync(() => (calls.push("start"), chromeStatus)),
+    stop: () => Effect.sync(() => (calls.push("stop"), { ...chromeStatus, lifecycle: "stopped" })),
+    status: () => Effect.succeed(chromeStatus),
+    listTabs: () => Effect.sync(() => (calls.push("tabs"), [chromeTab])),
+    selectTab: (tabId) => Effect.sync(() => (calls.push(`select:${tabId}`), chromeTab)),
+    navigate: (url) => Effect.sync(() => (calls.push(`navigate:${url}`), chromeTab)),
+    snapshot: () => Effect.sync(() => (calls.push("snapshot"), chromeSnapshot)),
+    click: (target) =>
+      Effect.sync(() => calls.push(`click:${"ref" in target ? target.ref : target.selector}`)),
+    fill: (target, value) =>
+      Effect.sync(() =>
+        calls.push(`fill:${"ref" in target ? target.ref : target.selector}:${value}`),
+      ),
+    type: (target, value) =>
+      Effect.sync(() =>
+        calls.push(`type:${"ref" in target ? target.ref : target.selector}:${value}`),
+      ),
   });
 
 it.effect(
@@ -75,5 +120,94 @@ it.effect("fails closed before launching when the provider turn lacks computer a
 
     expect(error).toBeInstanceOf(ComputerControlUnavailableError);
     expect(launched).toBe(false);
+  }),
+);
+
+it.effect("routes managed Chrome operations through the authenticated service", () =>
+  Effect.gen(function* () {
+    const calls: Array<string> = [];
+    const service = chromeService(calls);
+    const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+      effect.pipe(
+        Effect.provideService(
+          McpInvocationContext.McpInvocationContext,
+          invocation(new Set(["computer"])),
+        ),
+        Effect.provideService(ChromeAutomation.ChromeAutomation, service),
+      );
+
+    expect(yield* provide(computerHandlers.computer_start())).toMatchObject({
+      lifecycle: "connected",
+      profileDir: "A:/t3/browser/chrome-profile",
+    });
+    expect(yield* provide(computerHandlers.computer_status())).toMatchObject({
+      selectedTabId: "tab-1",
+    });
+    expect(yield* provide(computerHandlers.computer_tabs())).toEqual([chromeTab]);
+    expect(yield* provide(computerHandlers.computer_select_tab({ tabId: "tab-1" }))).toEqual(
+      chromeTab,
+    );
+    expect(
+      yield* provide(
+        computerHandlers.computer_navigate({
+          url: "https://example.test/next",
+          waitUntil: "domcontentloaded",
+          timeoutMs: 100,
+        }),
+      ),
+    ).toEqual(chromeTab);
+    expect(yield* provide(computerHandlers.computer_snapshot())).toEqual(chromeSnapshot);
+    expect(yield* provide(computerHandlers.computer_click({ target: { ref: "ref-1" } }))).toEqual({
+      completed: true,
+    });
+    expect(
+      yield* provide(
+        computerHandlers.computer_fill({ target: { selector: "#email" }, value: "a@example.test" }),
+      ),
+    ).toEqual({ completed: true });
+    expect(
+      yield* provide(
+        computerHandlers.computer_type({ target: { selector: "#note" }, value: "hello" }),
+      ),
+    ).toEqual({ completed: true });
+    expect(yield* provide(computerHandlers.computer_close())).toMatchObject({
+      lifecycle: "stopped",
+    });
+    expect(calls).toEqual([
+      "start",
+      "tabs",
+      "select:tab-1",
+      "navigate:https://example.test/next",
+      "snapshot",
+      "click:ref-1",
+      "fill:#email:a@example.test",
+      "type:#note:hello",
+      "stop",
+    ]);
+  }),
+);
+
+it.effect("maps managed Chrome failures without exposing service causes", () =>
+  Effect.gen(function* () {
+    const service = chromeService([]);
+    const error = yield* computerHandlers.computer_tabs().pipe(
+      Effect.provideService(
+        McpInvocationContext.McpInvocationContext,
+        invocation(new Set(["computer"])),
+      ),
+      Effect.provideService(
+        ChromeAutomation.ChromeAutomation,
+        ChromeAutomation.ChromeAutomation.of({
+          ...service,
+          listTabs: () =>
+            Effect.fail(new ChromeAutomation.ChromeAutomationError("tabs", "secret cause")),
+        }),
+      ),
+      Effect.flip,
+    );
+
+    expect(error).toEqual(
+      new ComputerChromeAutomationError({ operation: "tabs", message: "secret cause" }),
+    );
   }),
 );

@@ -592,7 +592,7 @@ describe("T3 browser developer instructions", () => {
     NodeAssert.match(desktop, /Full Windows and Chrome control/);
   });
 
-  it("keeps Chrome as the target while routing extension failures to Windows control", () => {
+  it("prefers authenticated T3 Chrome tools when they are attached", () => {
     for (const computerControlMode of ["chrome", "desktop"] as const) {
       const instructions = buildCodexDeveloperInstructions("default", {
         model: "gpt-5.6-sol",
@@ -602,24 +602,29 @@ describe("T3 browser developer instructions", () => {
 
       NodeAssert.match(
         instructions,
-        /keep Chrome as the target and change only the control mechanism/,
+        /computer_start.*computer_status.*computer_tabs.*computer_select_tab/s,
       );
-      NodeAssert.match(instructions, /computer-use:computer-use/);
-      NodeAssert.match(instructions, /computer_open_url/);
-      NodeAssert.match(instructions, /mcp__node_repl__js/);
-      NodeAssert.match(instructions, /import `@oai\/sky`/);
-      NodeAssert.match(instructions, /Do not scan `ALL_TOOLS`/);
-      NodeAssert.match(
-        instructions,
-        /use Windows Computer Use to operate the user's existing Chrome window/,
-      );
-      NodeAssert.match(instructions, /Do not stop after extension diagnostics/);
-      NodeAssert.match(instructions, /ask to open a fresh Chrome window/);
-      NodeAssert.match(
-        instructions,
-        /direct Chrome control, `computer_open_url`, and Windows Computer Use are all unavailable/,
-      );
+      NodeAssert.match(instructions, /computer_navigate.*computer_snapshot.*computer_click/s);
+      NodeAssert.match(instructions, /computer_fill.*computer_type.*computer_close/s);
+      NodeAssert.match(instructions, /persistent Chrome profile/);
+      NodeAssert.doesNotMatch(instructions, /node_repl|Chrome-extension diagnostics/);
     }
+  });
+
+  it("uses the private Windows fallback only when T3 browser tools are absent", () => {
+    const instructions = buildCodexDeveloperInstructions(
+      "default",
+      {
+        model: "gpt-5.6-sol",
+        reasoningEffort: "high",
+        computerControlMode: "desktop",
+      },
+      false,
+    );
+
+    NodeAssert.match(instructions, /mcp__node_repl__js/);
+    NodeAssert.match(instructions, /Chrome plugin reports/);
+    NodeAssert.doesNotMatch(instructions, /computer_start/);
   });
 
   it("keeps the base collaboration modes independent from browser availability", () => {

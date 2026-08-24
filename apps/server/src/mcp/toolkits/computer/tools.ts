@@ -1,4 +1,14 @@
 import {
+  ComputerChromeActionResult,
+  ComputerChromeAutomationError,
+  ComputerChromeEmptyInput,
+  ComputerChromeNavigateInput,
+  ComputerChromeSelectTabInput,
+  ComputerChromeSnapshot,
+  ComputerChromeStatus,
+  ComputerChromeTab,
+  ComputerChromeTargetInput,
+  ComputerChromeValueInput,
   ComputerControlUnavailableError,
   ComputerOpenUrlInput,
   ComputerOpenUrlFailedError,
@@ -7,8 +17,147 @@ import {
 import { Schema } from "effect";
 import { Tool, Toolkit } from "effect/unstable/ai";
 
+import * as ChromeAutomation from "../../../browser/ChromeAutomation.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as ExternalLauncher from "../../../process/externalLauncher.ts";
+
+const chromeDependencies = [
+  McpInvocationContext.McpInvocationContext,
+  ChromeAutomation.ChromeAutomation,
+];
+
+const chromeFailure = Schema.Union([
+  ComputerControlUnavailableError,
+  ComputerChromeAutomationError,
+]);
+
+const readOnlyChromeTool = <T extends Tool.Any>(tool: T): T =>
+  tool
+    .annotate(Tool.Readonly, true)
+    .annotate(Tool.Destructive, false)
+    .annotate(Tool.Idempotent, true) as T;
+
+const mutatingChromeTool = <T extends Tool.Any>(tool: T): T =>
+  tool.annotate(Tool.Readonly, false).annotate(Tool.Destructive, true) as T;
+
+const safeChromeTool = <T extends Tool.Any>(tool: T): T =>
+  tool.annotate(Tool.Readonly, false).annotate(Tool.Destructive, false) as T;
+
+const idempotentChromeTool = <T extends Tool.Any>(tool: T): T =>
+  safeChromeTool(tool).annotate(Tool.Idempotent, true) as T;
+
+export const ComputerStartTool = idempotentChromeTool(
+  Tool.make("computer_start", {
+    description:
+      "Start T3's persistent, user-visible Chrome session and select its first tab. This is idempotent and does not create a new profile.",
+    parameters: ComputerChromeEmptyInput,
+    success: ComputerChromeStatus,
+    failure: chromeFailure,
+    dependencies: chromeDependencies,
+  }).annotate(Tool.Title, "Start T3 Chrome"),
+);
+
+export const ComputerStatusTool = readOnlyChromeTool(
+  Tool.make("computer_status", {
+    description: "Report the lifecycle and selected-tab state of T3's managed Chrome session.",
+    parameters: ComputerChromeEmptyInput,
+    success: ComputerChromeStatus,
+    failure: chromeFailure,
+    dependencies: chromeDependencies,
+  }).annotate(Tool.Title, "Get T3 Chrome status"),
+);
+
+export const ComputerTabsTool = readOnlyChromeTool(
+  Tool.make("computer_tabs", {
+    description: "List the readable IDs, URLs, titles, and selection state of managed Chrome tabs.",
+    parameters: ComputerChromeEmptyInput,
+    success: Schema.Array(ComputerChromeTab),
+    failure: chromeFailure,
+    dependencies: chromeDependencies,
+  }).annotate(Tool.Title, "List T3 Chrome tabs"),
+);
+
+export const ComputerSelectTabTool = idempotentChromeTool(
+  Tool.make("computer_select_tab", {
+    description: "Select one managed Chrome tab by its ID for subsequent navigation and actions.",
+    parameters: ComputerChromeSelectTabInput,
+    success: ComputerChromeTab,
+    failure: chromeFailure,
+    dependencies: chromeDependencies,
+  }).annotate(Tool.Title, "Select T3 Chrome tab"),
+);
+
+export const ComputerNavigateTool = safeChromeTool(
+  Tool.make("computer_navigate", {
+    description: "Navigate the selected managed Chrome tab to an exact absolute HTTP or HTTPS URL.",
+    parameters: ComputerChromeNavigateInput,
+    success: ComputerChromeTab,
+    failure: chromeFailure,
+    dependencies: chromeDependencies,
+  })
+    .annotate(Tool.Title, "Navigate T3 Chrome")
+    .annotate(Tool.OpenWorld, true),
+);
+
+export const ComputerSnapshotTool = readOnlyChromeTool(
+  Tool.make("computer_snapshot", {
+    description:
+      "Inspect the selected managed Chrome tab and return its accessibility tree, DOM, and fresh interaction refs.",
+    parameters: ComputerChromeEmptyInput,
+    success: ComputerChromeSnapshot,
+    failure: chromeFailure,
+    dependencies: chromeDependencies,
+  })
+    .annotate(Tool.Title, "Snapshot T3 Chrome")
+    .annotate(Tool.OpenWorld, true),
+);
+
+export const ComputerClickTool = mutatingChromeTool(
+  Tool.make("computer_click", {
+    description: "Click one ref from the latest snapshot or one explicit CSS selector.",
+    parameters: ComputerChromeTargetInput,
+    success: ComputerChromeActionResult,
+    failure: chromeFailure,
+    dependencies: chromeDependencies,
+  })
+    .annotate(Tool.Title, "Click T3 Chrome")
+    .annotate(Tool.OpenWorld, true),
+);
+
+export const ComputerFillTool = mutatingChromeTool(
+  Tool.make("computer_fill", {
+    description:
+      "Replace the value of one snapshot ref or explicit CSS selector with literal text.",
+    parameters: ComputerChromeValueInput,
+    success: ComputerChromeActionResult,
+    failure: chromeFailure,
+    dependencies: chromeDependencies,
+  })
+    .annotate(Tool.Title, "Fill T3 Chrome field")
+    .annotate(Tool.OpenWorld, true),
+);
+
+export const ComputerTypeTool = mutatingChromeTool(
+  Tool.make("computer_type", {
+    description: "Type literal text into one snapshot ref or explicit CSS selector.",
+    parameters: ComputerChromeValueInput,
+    success: ComputerChromeActionResult,
+    failure: chromeFailure,
+    dependencies: chromeDependencies,
+  })
+    .annotate(Tool.Title, "Type in T3 Chrome")
+    .annotate(Tool.OpenWorld, true),
+);
+
+export const ComputerCloseTool = mutatingChromeTool(
+  Tool.make("computer_close", {
+    description: "Close T3's managed Chrome session and release its browser process.",
+    parameters: ComputerChromeEmptyInput,
+    success: ComputerChromeStatus,
+    failure: chromeFailure,
+    dependencies: chromeDependencies,
+  }).annotate(Tool.Title, "Close T3 Chrome"),
+);
 
 export const ComputerOpenUrlTool = Tool.make("computer_open_url", {
   description:
@@ -24,4 +173,16 @@ export const ComputerOpenUrlTool = Tool.make("computer_open_url", {
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, false);
 
-export const ComputerToolkit = Toolkit.make(ComputerOpenUrlTool);
+export const ComputerToolkit = Toolkit.make(
+  ComputerStartTool,
+  ComputerStatusTool,
+  ComputerTabsTool,
+  ComputerSelectTabTool,
+  ComputerNavigateTool,
+  ComputerSnapshotTool,
+  ComputerClickTool,
+  ComputerFillTool,
+  ComputerTypeTool,
+  ComputerCloseTool,
+  ComputerOpenUrlTool,
+);

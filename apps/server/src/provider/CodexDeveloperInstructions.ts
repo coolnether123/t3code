@@ -33,23 +33,30 @@ Windows Computer Use is provided through the persistent JavaScript tool, not thr
 This is not permission to switch to another browser. Do not stop after extension diagnostics, ask to open a fresh Chrome window, or repeat connection retries when T3 URL opening or Windows control is available. Ask the user only when direct Chrome control, \`computer_open_url\`, and Windows Computer Use are all unavailable, or when the site or operating system requires user action.
 `;
 
-const FULL_CHROME_TOOL_INSTRUCTIONS = `
+const T3_CODE_CHROME_TOOL_INSTRUCTIONS = `
+
+When the \`t3-code\` MCP server exposes the managed Chrome tools, use them first for browser work: call \`computer_start\` or \`computer_status\`, use \`computer_tabs\` and \`computer_select_tab\` when choosing a tab, then \`computer_navigate\`, \`computer_snapshot\`, \`computer_click\`, \`computer_fill\`, and \`computer_type\`. Use refs from the latest \`computer_snapshot\` for interaction, and call \`computer_close\` when the browser session is no longer needed. These tools operate T3's user-visible persistent Chrome profile.
+
+While these T3 browser tools are available, do not use private diagnostics, standalone Playwright, or another browser-control path. Do not ask the user to navigate manually just because a browser extension is unavailable; inspect the managed Chrome tool result and continue within T3's Chrome session.
+`;
+
+const FULL_CHROME_TOOL_INSTRUCTIONS = (browserToolsAvailable: boolean) => `
 
 ## Full Chrome control
 
-The user has selected Full Chrome for this thread and explicitly trusts the agent to browse, search, navigate, click, type, upload, download, and inspect pages in their Chrome session. Prefer the Chrome and Chrome DevTools tools over the T3 preview browser. Use screenshots, page structure, JavaScript evaluation, console output, and network inspection together when one view is incomplete.
+The user has selected Full Chrome for this thread and explicitly trusts the agent to browse, search, navigate, click, type, upload, download, and inspect pages in their Chrome session. Prefer T3's managed Chrome tools over the T3 preview browser when they are attached. Use screenshots, page structure, JavaScript evaluation, console output, and network inspection together when the attached Chrome or Chrome DevTools surface exposes them and one view is incomplete.
 
 T3 adds no domain allowlist, action-word filter, read-only browser mode, or preview-only restriction in this mode. Do not stop merely because the first browser tool is unavailable or one approach fails. Inspect the error, retry when useful, then use another available Chrome control mechanism, desktop tool, command-line tool, or web tool that can complete the task without changing the user's requested browser. Keep the user informed when authentication, a browser permission, or a real operating-system boundary requires their action.
-${CHROME_TO_WINDOWS_CONTROL_FALLBACK_INSTRUCTIONS}`;
+${browserToolsAvailable ? T3_CODE_CHROME_TOOL_INSTRUCTIONS : CHROME_TO_WINDOWS_CONTROL_FALLBACK_INSTRUCTIONS}`;
 
-const FULL_DESKTOP_TOOL_INSTRUCTIONS = `
+const FULL_DESKTOP_TOOL_INSTRUCTIONS = (browserToolsAvailable: boolean) => `
 
 ## Full Windows and Chrome control
 
 The user has selected Full desktop for this thread and explicitly trusts the agent to use Chrome and Windows applications to finish the task. Browse, search, navigate, click, type, upload, download, run applications, inspect windows, and use screenshots or accessibility data as needed. Prefer direct browser tools for web pages, then use Windows computer control when browser APIs cannot reach a dialog, download, native application, or visual-only control.
 
 T3 adds no domain allowlist, action-word filter, read-only mode, or preview-only restriction in this mode. Do not wait indefinitely after a failed tool call. Inspect the failure, retry when useful, and switch among the available Chrome control mechanisms, desktop, command-line, and web tools while preserving the user's requested application. Keep the user informed when authentication, a browser permission, or a real operating-system boundary requires their action.
-${CHROME_TO_WINDOWS_CONTROL_FALLBACK_INSTRUCTIONS}`;
+${browserToolsAvailable ? T3_CODE_CHROME_TOOL_INSTRUCTIONS : CHROME_TO_WINDOWS_CONTROL_FALLBACK_INSTRUCTIONS}`;
 
 function computerControlInstructions(
   mode: CodexComputerControlMode,
@@ -63,9 +70,9 @@ function computerControlInstructions(
     case "preview":
       return browserToolInstructions(browserToolsAvailable);
     case "chrome":
-      return FULL_CHROME_TOOL_INSTRUCTIONS;
+      return FULL_CHROME_TOOL_INSTRUCTIONS(browserToolsAvailable);
     case "desktop":
-      return FULL_DESKTOP_TOOL_INSTRUCTIONS;
+      return FULL_DESKTOP_TOOL_INSTRUCTIONS(browserToolsAvailable);
   }
 }
 

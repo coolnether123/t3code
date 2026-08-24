@@ -6,6 +6,7 @@ import * as Stream from "effect/Stream";
 import { McpServer } from "effect/unstable/ai";
 
 import * as WorkerService from "../worker/WorkerService.ts";
+import * as ChromeAutomation from "../browser/ChromeAutomation.ts";
 import * as ExternalLauncher from "../process/externalLauncher.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
@@ -40,6 +41,23 @@ const makeCatalogLayer = (enableT3Workers: boolean) =>
         }),
       ),
     ),
+    Layer.provide(
+      Layer.succeed(
+        ChromeAutomation.ChromeAutomation,
+        ChromeAutomation.ChromeAutomation.of({
+          start: () => Effect.die("unused start"),
+          stop: () => Effect.die("unused stop"),
+          status: () => Effect.die("unused status"),
+          listTabs: () => Effect.die("unused tabs"),
+          selectTab: () => Effect.die("unused select"),
+          navigate: () => Effect.die("unused navigate"),
+          snapshot: () => Effect.die("unused snapshot"),
+          click: () => Effect.die("unused click"),
+          fill: () => Effect.die("unused fill"),
+          type: () => Effect.die("unused type"),
+        }),
+      ),
+    ),
     Layer.provide(Layer.succeed(WorkerService.WorkerService, workerService)),
   );
 
@@ -61,6 +79,20 @@ it.effect("omits Worker tools when startup registration is disabled", () =>
     const names = server.tools.map(({ tool }) => tool.name);
     expect(names.some((name) => name.startsWith("worker_"))).toBe(false);
     expect(names).toContain("preview_status");
+    expect(names).toEqual(
+      expect.arrayContaining([
+        "computer_start",
+        "computer_status",
+        "computer_tabs",
+        "computer_select_tab",
+        "computer_navigate",
+        "computer_snapshot",
+        "computer_click",
+        "computer_fill",
+        "computer_type",
+        "computer_close",
+      ]),
+    );
     expect(names).toContain("computer_open_url");
   }).pipe(Effect.provide(makeCatalogLayer(false))),
 );
@@ -73,6 +105,9 @@ it.effect("advertises exactly nine Worker tools when startup registration is ena
       .filter((name) => name.startsWith("worker_"));
     expect(names).toEqual(workerToolNames);
     expect(server.tools.map(({ tool }) => tool.name)).toContain("preview_status");
+    expect(server.tools.map(({ tool }) => tool.name)).toEqual(
+      expect.arrayContaining(["computer_start", "computer_snapshot", "computer_close"]),
+    );
     expect(server.tools.map(({ tool }) => tool.name)).toContain("computer_open_url");
   }).pipe(Effect.provide(makeCatalogLayer(true))),
 );
