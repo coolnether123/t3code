@@ -2,9 +2,10 @@ import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
-import { ComputerOpenUrlInput } from "./computerControl.ts";
+import { ComputerChromeNavigateInput, ComputerOpenUrlInput } from "./computerControl.ts";
 
 const decode = Schema.decodeUnknownEffect(ComputerOpenUrlInput);
+const decodeNavigate = Schema.decodeUnknownEffect(ComputerChromeNavigateInput);
 
 it.effect("accepts long authentication URLs without restricting their domain", () =>
   Effect.gen(function* () {
@@ -17,5 +18,20 @@ it.effect("rejects non-web protocols", () =>
   Effect.gen(function* () {
     const error = yield* decode({ url: "file:///C:/Users/secret.txt" }).pipe(Effect.flip);
     expect(String(error)).toContain("http or https");
+  }),
+);
+
+it.effect("allows managed Chrome to reset a tab to about:blank", () =>
+  Effect.gen(function* () {
+    expect(yield* decodeNavigate({ url: "about:blank" })).toEqual({ url: "about:blank" });
+  }),
+);
+
+it.effect("rejects unsafe and unintended navigation schemes", () =>
+  Effect.gen(function* () {
+    for (const url of ["about:srcdoc", "file:///C:/Users/secret.txt", "javascript:alert(1)"]) {
+      const error = yield* decodeNavigate({ url }).pipe(Effect.flip);
+      expect(String(error)).toContain("http or https");
+    }
   }),
 );

@@ -22,6 +22,30 @@ const HttpUrl = Schema.String.check(Schema.isTrimmed())
       "Exact absolute HTTP or HTTPS URL to open. Domains are not restricted; long authentication and relay URLs are supported.",
   });
 
+const ChromeNavigateUrl = Schema.String.check(Schema.isTrimmed())
+  .check(Schema.isNonEmpty())
+  .check(Schema.isMaxLength(8_192))
+  .check(
+    Schema.makeFilter((value) => {
+      if (value === "about:blank") return true;
+
+      try {
+        const parsed = new URL(value);
+        return (
+          parsed.protocol === "http:" ||
+          parsed.protocol === "https:" ||
+          "URL must use the http or https protocol, or be exactly about:blank."
+        );
+      } catch {
+        return "URL must be an absolute http or https URL, or exactly about:blank.";
+      }
+    }),
+  )
+  .annotate({
+    description:
+      "Exact absolute HTTP or HTTPS URL to open, or exactly about:blank to reset the selected tab.",
+  });
+
 const NonEmptyString = Schema.String.check(Schema.isTrimmed()).check(Schema.isNonEmpty());
 
 export const ComputerChromeLifecycle = Schema.Literals([
@@ -82,7 +106,7 @@ const ComputerChromeTarget = Schema.Union([
 ]);
 
 export const ComputerChromeNavigateInput = Schema.Struct({
-  url: HttpUrl,
+  url: ChromeNavigateUrl,
   waitUntil: Schema.optionalKey(Schema.Literals(["load", "domcontentloaded", "commit"])),
   timeoutMs: Schema.optionalKey(Schema.Number),
 });

@@ -89,7 +89,8 @@ export const ComputerSelectTabTool = idempotentChromeTool(
 
 export const ComputerNavigateTool = safeChromeTool(
   Tool.make("computer_navigate", {
-    description: "Navigate the selected managed Chrome tab to an exact absolute HTTP or HTTPS URL.",
+    description:
+      "Navigate the selected managed Chrome tab to an exact absolute HTTP or HTTPS URL, or reset it with exactly about:blank.",
     parameters: ComputerChromeNavigateInput,
     success: ComputerChromeTab,
     failure: chromeFailure,
