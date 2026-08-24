@@ -52,6 +52,7 @@ import Animated, {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { ControlPill } from "../../components/ControlPill";
+import { AppText as Text } from "../../components/AppText";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import type { ComposerEditorHandle } from "../../components/ComposerEditor";
 import type { StatusTone } from "../../components/StatusPill";
@@ -78,6 +79,8 @@ import {
   ThreadComposer,
 } from "./ThreadComposer";
 import { ThreadFeed } from "./ThreadFeed";
+import { EditFromHereDialog } from "./EditFromHereDialog";
+import type { EditFromHereMode } from "./editFromHere";
 import type { ThreadContentPresentation } from "./threadContentPresentation";
 import { resolveThreadFeedSubmissionAnchor } from "./thread-feed-live-follow";
 
@@ -89,6 +92,14 @@ export interface ThreadDetailScreenProps {
   readonly environmentLabel: string | null;
   readonly selectedThreadFeed: ReadonlyArray<ThreadFeedEntry>;
   readonly activeWorkStartedAt: string | null;
+  readonly isWorking: boolean;
+  readonly isEditFromHerePending: boolean;
+  readonly editFromHereMode: EditFromHereMode | null;
+  readonly onSubmitEditFromHere: (input: {
+    readonly mode: EditFromHereMode;
+    readonly sourceMessageId: MessageId;
+    readonly editedText: string;
+  }) => Promise<boolean>;
   readonly activePendingApproval: PendingApproval | null;
   readonly respondingApprovalId: ApprovalRequestId | null;
   readonly activePendingUserInput: PendingUserInput | null;
@@ -263,6 +274,26 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
   const [anchorMessageId, setAnchorMessageId] = useState<MessageId | null>(null);
   const [submittedMessageId, setSubmittedMessageId] = useState<MessageId | null>(null);
   const [endFollowEnabled, setEndFollowEnabled] = useState(true);
+  const [editFromHereDialog, setEditFromHereDialog] = useState<{
+    readonly messageId: MessageId;
+    readonly text: string;
+  } | null>(null);
+  const submitEditFromHere = useCallback(
+    async (mode: EditFromHereMode, editedText: string) => {
+      if (!editFromHereDialog) {
+        return;
+      }
+      const accepted = await props.onSubmitEditFromHere({
+        mode,
+        sourceMessageId: editFromHereDialog.messageId,
+        editedText,
+      });
+      if (accepted) {
+        setEditFromHereDialog(null);
+      }
+    },
+    [editFromHereDialog, props.onSubmitEditFromHere],
+  );
   // Android keys the safe-area padding on keyboard visibility (#5988): the
   // back gesture closes the keyboard while the editor stays focused, and a
   // focus-keyed inset would leave the toolbar under the gesture bar. iOS must
@@ -606,6 +637,15 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
           onTouchEnd={handleFeedTouchEnd}
           onTouchCancel={handleFeedTouchCancel}
         >
+          {props.editFromHereMode !== null ? (
+            <View accessibilityLiveRegion="polite" className="border-b border-border/60 px-4 py-2">
+              <Text className="text-xs text-foreground-muted">
+                {props.editFromHereMode === "rewind"
+                  ? "Rewinding to this message…"
+                  : "Starting a new task from this message…"}
+              </Text>
+            </View>
+          ) : null}
           <ThreadFeed
             key={props.selectedThread.id}
             environmentId={props.environmentId}
@@ -616,6 +656,9 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
             agentLabel={agentLabel}
             latestTurn={props.selectedThread.latestTurn}
             activeWorkStartedAt={props.activeWorkStartedAt}
+            isWorking={props.isWorking}
+            isEditFromHerePending={props.isEditFromHerePending}
+            onEditUserMessage={(messageId, text) => setEditFromHereDialog({ messageId, text })}
             listRef={listRef}
             freeze={freeze}
             anchorMessageId={anchorMessageId}
@@ -635,6 +678,18 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
       ) : (
         <View className="flex-1" />
       )}
+
+      <EditFromHereDialog
+        open={editFromHereDialog !== null}
+        initialText={editFromHereDialog?.text ?? ""}
+        submitting={props.isEditFromHerePending}
+        onOpenChange={(open) => {
+          if (!open) {
+            setEditFromHereDialog(null);
+          }
+        }}
+        onSubmit={(mode, editedText) => void submitEditFromHere(mode, editedText)}
+      />
 
       {/* Floating composer — sticks to keyboard via KeyboardStickyView */}
       {showContent ? (

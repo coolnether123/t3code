@@ -165,6 +165,9 @@ export interface ThreadFeedProps {
   readonly onHeaderMaterialVisibilityChange?: (visible: boolean) => void;
   readonly onEndFollowEnabledChange?: (enabled: boolean) => void;
   readonly skills?: ReadonlyArray<SelectableMarkdownSkill>;
+  readonly isWorking?: boolean;
+  readonly isEditFromHerePending?: boolean;
+  readonly onEditUserMessage?: (messageId: MessageId, text: string) => void;
   /** Non-null when older turns exist beyond the loaded window. */
   readonly loadEarlier?: {
     readonly loading: boolean;
@@ -988,6 +991,9 @@ function renderFeedEntry(
     readonly reviewCommentColors: ReviewCommentColors;
     readonly reviewCommentBubbleWidth: number;
     readonly userBubbleMaxWidth: number;
+    readonly isWorking: boolean;
+    readonly isEditFromHerePending: boolean;
+    readonly onEditUserMessage?: (messageId: MessageId, text: string) => void;
   },
 ) {
   const entry = info.item;
@@ -1099,6 +1105,35 @@ function renderFeedEntry(
             <Text className="font-t3-medium text-xs tabular-nums text-neutral-600 dark:text-neutral-400">
               {timestampLabel}
             </Text>
+            {props.onEditUserMessage ? (
+              <Pressable
+                accessibilityHint="Edit this message and choose whether to rewind this task or start a new task."
+                accessibilityLabel="Edit from here"
+                accessibilityRole="button"
+                accessibilityState={{
+                  disabled: props.isWorking || props.isEditFromHerePending,
+                }}
+                disabled={props.isWorking || props.isEditFromHerePending}
+                hitSlop={8}
+                onPress={() => props.onEditUserMessage?.(message.id, message.text)}
+                style={({ pressed }) => ({
+                  alignItems: "center",
+                  borderRadius: 9,
+                  height: 28,
+                  justifyContent: "center",
+                  opacity:
+                    props.isWorking || props.isEditFromHerePending ? 0.45 : pressed ? 0.55 : 1,
+                  width: 28,
+                })}
+              >
+                <SymbolView
+                  name={{ ios: "square.and.pencil", android: "edit" }}
+                  size={13}
+                  tintColor={iconSubtleColor}
+                  type="monochrome"
+                />
+              </Pressable>
+            ) : null}
             {message.text.trim().length > 0 ? (
               <CopyTextButton
                 accessibilityLabel="Copy message"
@@ -1626,6 +1661,8 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   );
   const markdownStyles = useMarkdownStyles(onMarkdownLinkPress, renderMarkdownImage);
   const reviewCommentColors = useReviewCommentColors();
+  const isWorking = props.isWorking ?? false;
+  const isEditFromHerePending = props.isEditFromHerePending ?? false;
   // LegendList does not invalidate visible rows when only the renderItem closure changes.
   // Keep row-local interaction props in extraData so disclosures and copy feedback repaint.
   const listAppearanceData = useMemo(
@@ -1636,6 +1673,8 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       markdownStyles,
       reviewCommentColors,
       userBubbleColor,
+      isWorking,
+      isEditFromHerePending,
       viewportWidth,
     }),
     [
@@ -1645,6 +1684,8 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       markdownStyles,
       reviewCommentColors,
       userBubbleColor,
+      isWorking,
+      isEditFromHerePending,
       viewportWidth,
     ],
   );
@@ -2023,6 +2064,9 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         reviewCommentBubbleWidth,
         userBubbleMaxWidth,
         skills: props.skills,
+        isWorking,
+        isEditFromHerePending,
+        onEditUserMessage: props.onEditUserMessage,
       }),
     [
       copiedRowId,
@@ -2035,6 +2079,11 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       reviewCommentColors,
       reviewCommentBubbleWidth,
       userBubbleMaxWidth,
+      props.isEditFromHerePending,
+      props.isWorking,
+      props.onEditUserMessage,
+      isEditFromHerePending,
+      isWorking,
       onCopyWorkRow,
       onMarkdownLinkPress,
       onPressImage,

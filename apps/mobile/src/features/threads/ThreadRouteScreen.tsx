@@ -1,4 +1,5 @@
 import { NativeStackScreenOptions } from "../../native/StackHeader";
+import * as Cause from "effect/Cause";
 import {
   StackActions,
   useFocusEffect,
@@ -7,13 +8,14 @@ import {
 } from "@react-navigation/native";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import * as Option from "effect/Option";
-import { EnvironmentId, ThreadId, type ProjectScript } from "@t3tools/contracts";
+import { EnvironmentId, MessageId, ThreadId, type ProjectScript } from "@t3tools/contracts";
+import { isAtomCommandInterrupted } from "@t3tools/client-runtime/state/runtime";
 import {
   requestOlderThreadTurns,
   threadHasOlderTurns,
 } from "@t3tools/client-runtime/state/threads";
 import { projectScriptCwd, projectScriptRuntimeEnv } from "@t3tools/shared/projectScripts";
-import { Platform, ScrollView, View } from "react-native";
+import { Alert, Platform, ScrollView, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useWorkspaceState } from "../../state/workspace";
 import { useEnvironmentQuery } from "../../state/query";
@@ -50,6 +52,13 @@ import {
 } from "../terminal/terminalLaunchContext";
 import { terminalDebugLog } from "../terminal/terminalDebugLog";
 import { ThreadDetailScreen } from "./ThreadDetailScreen";
+import {
+  buildEditFromHereInput,
+  isEditFromHereBlocked,
+  resolveEditFromHereNavigation,
+  type EditFromHereMode,
+} from "./editFromHere";
+import { uuidv4 } from "../../lib/uuid";
 import {
   ThreadGitControls,
   useThreadGitCenterHeaderItems,
@@ -214,6 +223,10 @@ function ThreadRouteContent(
   const gitActions = useSelectedThreadGitActions();
   const requests = useSelectedThreadRequests();
   const interruptThreadTurn = useAtomCommand(threadEnvironment.interruptTurn, "thread interrupt");
+  const editThreadFromHere = useAtomCommand(threadEnvironment.editFromHere, {
+    label: "edit from here",
+    reportFailure: false,
+  });
   const navigation = useNavigation();
   const params = props.route.params;
   const environmentIdRaw = firstRouteParam(params.environmentId);
@@ -224,6 +237,8 @@ function ThreadRouteContent(
   const [inspectorSelection, setInspectorSelection] = useState<ThreadInspectorSelection | null>(
     () => (props.renderInspector ? { routeThreadIdentity, mode: "route" } : null),
   );
+  const [isEditingFromHere, setIsEditingFromHere] = useState(false);
+  const [editFromHereMode, setEditFromHereMode] = useState<EditFromHereMode | null>(null);
   const inspectorMode = (() => {
     if (inspectorSelection?.routeThreadIdentity === routeThreadIdentity) {
       if (inspectorSelection.mode === "files" && selectedThreadCwd === null) {
@@ -496,6 +511,94 @@ function ThreadRouteContent(
       },
     });
   }, [interruptThreadTurn, selectedThread]);
+
+  const serverEditFromHerePending = selectedThreadDetail?.editFromHere != null;
+  const isEditFromHerePending = isEditingFromHere || serverEditFromHerePending;
+  const pendingEditFromHereMode =
+    selectedThreadDetail?.editFromHere?.mode ?? (isEditingFromHere ? editFromHereMode : null);
+  useEffect(() => {
+    if (!isEditingFromHere || editFromHereMode !== "rewind" || !serverEditFromHerePending) {
+      return;
+    }
+    setIsEditingFromHere(false);
+    setEditFromHereMode(null);
+  }, [editFromHereMode, isEditingFromHere, serverEditFromHerePending]);
+  const isThreadWorking = isEditFromHereBlocked({
+    sessionStatus: selectedThread?.session?.status,
+    activeWorkStartedAt: composer.activeWorkStartedAt,
+    editPending: isEditFromHerePending,
+  });
+
+  const submitEditFromHere = useCallback(
+    async (input: {
+      readonly mode: EditFromHereMode;
+      readonly sourceMessageId: MessageId;
+      readonly editedText: string;
+    }): Promise<boolean> => {
+      if (!selectedThread || isEditFromHerePending) {
+        return false;
+      }
+      if (routeConnectionState !== "available" && routeConnectionState !== "connected") {
+        Alert.alert("Environment unavailable", "Reconnect before editing this task.");
+        return false;
+      }
+      if (isThreadWorking) {
+        Alert.alert("Task is working", "Interrupt the current turn before editing from here.");
+        return false;
+      }
+
+      const targetThreadId = input.mode === "branch" ? ThreadId.make(uuidv4()) : undefined;
+      setEditFromHereMode(input.mode);
+      setIsEditingFromHere(true);
+      const result = await editThreadFromHere({
+        environmentId: selectedThread.environmentId,
+        input: buildEditFromHereInput({
+          threadId: selectedThread.id,
+          sourceMessageId: input.sourceMessageId,
+          replacementMessageId: MessageId.make(uuidv4()),
+          editedText: input.editedText,
+          mode: input.mode,
+          ...(targetThreadId ? { targetThreadId } : {}),
+        }),
+      });
+
+      if (result._tag === "Failure") {
+        setIsEditingFromHere(false);
+        setEditFromHereMode(null);
+        if (!isAtomCommandInterrupted(result)) {
+          const error = Cause.squash(result.cause);
+          Alert.alert(
+            "Edit from here failed",
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        return false;
+      }
+
+      if (targetThreadId) {
+        setIsEditingFromHere(false);
+        setEditFromHereMode(null);
+        navigation.navigate(
+          "Thread",
+          resolveEditFromHereNavigation({
+            environmentId: selectedThread.environmentId,
+            currentThreadId: selectedThread.id,
+            mode: input.mode,
+            targetThreadId,
+          }),
+        );
+      }
+      return true;
+    },
+    [
+      editThreadFromHere,
+      isEditFromHerePending,
+      isThreadWorking,
+      navigation,
+      routeConnectionState,
+      selectedThread,
+    ],
+  );
 
   const handleOpenTerminal = useCallback(
     (nextTerminalId?: string | null) => {
@@ -774,6 +877,10 @@ function ThreadRouteContent(
           environmentLabel={selectedEnvironmentConnection?.environmentLabel ?? null}
           selectedThreadFeed={composer.selectedThreadFeed}
           activeWorkStartedAt={composer.activeWorkStartedAt}
+          isWorking={isThreadWorking}
+          isEditFromHerePending={isEditFromHerePending}
+          editFromHereMode={pendingEditFromHereMode}
+          onSubmitEditFromHere={submitEditFromHere}
           activePendingApproval={requests.activePendingApproval}
           respondingApprovalId={requests.respondingApprovalId}
           activePendingUserInput={requests.activePendingUserInput}
