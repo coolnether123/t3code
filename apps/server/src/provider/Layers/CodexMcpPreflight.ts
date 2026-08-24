@@ -1,12 +1,15 @@
 // @effect-diagnostics nodeBuiltinImport:off globalFetch:off globalTimers:off - This is the provider boundary where Codex config and HTTP reachability are inspected.
 import * as NodeFSP from "node:fs/promises";
 import * as NodeDnsPromises from "node:dns/promises";
+import * as NodeHttp from "node:http";
+import * as NodeHttps from "node:https";
 import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 export const CODEX_MCP_PREFLIGHT_TIMEOUT_MS = 750;
 const CODEX_MCP_PREFLIGHT_MAX_BODY_BYTES = 4_096;
+const CODEX_MCP_PREFLIGHT_MAX_HEADER_BYTES = 16_384;
 const T3_MCP_SERVER_NAME = "t3-code";
 const LOOPBACK_HOSTNAMES = new Set(["localhost", "localhost.localdomain"]);
 const METADATA_HOSTNAMES = new Set([
@@ -52,8 +55,18 @@ type EndpointValidation =
   | { readonly allowed: true; readonly url: URL }
   | { readonly allowed: false; readonly detail: string };
 
-type ResolveHost = (hostname: string) => Promise<ReadonlyArray<string>>;
-type FetchImpl = (input: string | URL, init?: RequestInit) => Promise<Response>;
+export type ResolvedAddress = {
+  readonly address: string;
+  readonly family: 4 | 6;
+};
+
+type ProbeContext = {
+  readonly signal: AbortSignal;
+  readonly pinnedAddress: ResolvedAddress;
+};
+
+type ResolveHost = (hostname: string) => Promise<ReadonlyArray<ResolvedAddress>>;
+type Probe = (url: string, timeoutMs: number, context: ProbeContext) => Promise<ProbeResult>;
 
 export type CodexMcpPreflightInput = {
   readonly homePath?: string;
@@ -61,9 +74,9 @@ export type CodexMcpPreflightInput = {
   readonly environment?: NodeJS.ProcessEnv;
   readonly appServerArgs?: ReadonlyArray<string>;
   readonly configTexts?: ReadonlyArray<ConfigText>;
-  readonly probe?: (url: string, timeoutMs: number) => Promise<ProbeResult>;
+  readonly probe?: Probe;
   readonly resolveHost?: ResolveHost;
-  readonly fetchImpl?: FetchImpl;
+  readonly timeoutMs?: number;
 };
 
 const emptyResult = (): CodexMcpPreflightResult => ({
@@ -165,7 +178,8 @@ function ipv4IsBlocked(hostname: string): boolean {
     (a === 100 && b >= 64 && b <= 127) ||
     (a === 169 && b === 254) ||
     (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && ((b === 0 && (c === 0 || c === 2)) || b === 168)) ||
+    (a === 192 && ((b === 0 && c === 0) || (b === 0 && c === 2) || b === 168)) ||
+    (a === 192 && b === 88 && c === 99) ||
     (a === 198 && b >= 18 && b <= 19) ||
     (a === 198 && b === 51 && c === 100) ||
     (a === 203 && b === 0 && c === 113) ||
@@ -175,48 +189,37 @@ function ipv4IsBlocked(hostname: string): boolean {
 
 function ipv6IsBlocked(hostname: string): boolean {
   const normalized = normalizedIp(hostname);
-  if (
-    normalized === "::" ||
-    normalized === "::1" ||
-    normalized.startsWith("fc") ||
-    normalized.startsWith("fd")
-  ) {
-    return true;
-  }
-  if (/^fe[89a-f][0-9a-f]:/u.test(normalized) || normalized.startsWith("2001:db8:")) {
-    return true;
-  }
-  const mapped = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/u)?.[1];
-  if (mapped !== undefined) return ipv4IsBlocked(mapped);
-
   const halves = normalized.split("::");
+  if (halves.length > 2) return true;
   const left = halves[0] === "" ? [] : halves[0]!.split(":");
   const right = halves.length > 1 && halves[1] !== "" ? halves[1]!.split(":") : [];
-  const groups = [
-    ...left,
-    ...Array.from({ length: 8 - left.length - right.length }, () => "0"),
-    ...right,
-  ];
-  if (
-    groups.length !== 8 ||
-    groups.slice(0, 5).some((group) => Number.parseInt(group, 16) !== 0) ||
-    Number.parseInt(groups[5] ?? "0", 16) !== 0xffff
-  ) {
-    return false;
-  }
-  const high = Number.parseInt(groups[6] ?? "0", 16);
-  const low = Number.parseInt(groups[7] ?? "0", 16);
-  return ipv4IsBlocked(`${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`);
+  const omittedGroups = halves.length === 1 ? 0 : 8 - left.length - right.length;
+  const groups = [...left, ...Array.from({ length: omittedGroups }, () => "0"), ...right];
+  if (groups.length !== 8 || groups.some((group) => !/^[0-9a-f]{1,4}$/u.test(group))) return true;
+  const values = groups.map((group) => Number.parseInt(group, 16));
+  const first = values[0] ?? -1;
+  const second = values[1] ?? -1;
+
+  const isPublicNat64 =
+    first === 0x64 && second === 0xff9b && values.slice(2, 6).every((group) => group === 0);
+  if (isPublicNat64) return false;
+
+  if (first < 0x2000 || first > 0x3fff) return true;
+  if (first === 0x2001 && second >= 0 && second <= 0x01ff) return true;
+  if (first === 0x2001 && second === 0x0db8) return true;
+  if (first === 0x2002) return true;
+  return first === 0x3fff && second >= 0 && second <= 0x0fff;
 }
 
 function isBlockedAddress(address: string): boolean {
   const normalized = normalizedIp(address);
   const family = NodeNet.isIP(normalized);
-  return family === 4
-    ? ipv4IsBlocked(normalized)
-    : family === 6
-      ? ipv6IsBlocked(normalized)
-      : false;
+  return family === 4 ? ipv4IsBlocked(normalized) : family === 6 ? ipv6IsBlocked(normalized) : true;
+}
+
+function isLoopbackAddress(address: string): boolean {
+  const normalized = normalizedIp(address);
+  return normalized === "::1" || (NodeNet.isIP(normalized) === 4 && normalized.startsWith("127."));
 }
 
 function isTrustedLocalT3Endpoint(serverName: string, url: URL): boolean {
@@ -326,47 +329,139 @@ async function readConfigTexts(input: CodexMcpPreflightInput): Promise<ReadonlyA
   ).then((texts) => texts.flatMap((text) => (text === undefined ? [] : [text])));
 }
 
-async function resolveHostAddresses(hostname: string): Promise<ReadonlyArray<string>> {
-  if (NodeNet.isIP(normalizedIp(hostname)) !== 0) return [normalizedIp(hostname)];
+async function resolveHostAddresses(hostname: string): Promise<ReadonlyArray<ResolvedAddress>> {
+  const normalized = normalizedIp(hostname);
+  const literalFamily = NodeNet.isIP(normalized);
+  if (literalFamily !== 0) {
+    return [{ address: normalized, family: literalFamily === 4 ? 4 : 6 }];
+  }
   const addresses = await NodeDnsPromises.lookup(hostname, { all: true, verbatim: true });
-  return addresses.map(({ address }) => address);
+  return addresses.flatMap(({ address, family }) =>
+    family === 4 || family === 6 ? [{ address, family }] : [],
+  );
 }
 
-async function consumeBoundedBody(response: Response, maxBytes: number): Promise<void> {
-  if (response.body === null) return;
-  const reader = response.body.getReader();
-  let bytesRead = 0;
-  try {
-    while (bytesRead < maxBytes) {
-      const next = await reader.read();
-      if (next.done) return;
-      bytesRead += next.value.byteLength;
+function abortError(): Error {
+  const error = new Error("The MCP preflight deadline expired.");
+  error.name = "AbortError";
+  return error;
+}
+
+function withAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortError());
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(abortError());
+    signal.addEventListener("abort", onAbort, { once: true });
+    operation.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+export function createPinnedMcpRequestOptions(
+  endpoint: URL,
+  pinnedAddress: ResolvedAddress,
+  signal: AbortSignal,
+): NodeHttps.RequestOptions {
+  const originalHostname = normalizedIp(endpoint.hostname);
+  const lookup: NodeNet.LookupFunction = (_hostname, options, callback) => {
+    if (options.all) {
+      callback(null, [pinnedAddress]);
+      return;
     }
-  } finally {
-    await reader.cancel().catch(() => undefined);
-  }
+    callback(null, pinnedAddress.address, pinnedAddress.family);
+  };
+  return {
+    protocol: endpoint.protocol,
+    hostname: originalHostname,
+    ...(endpoint.port === "" ? {} : { port: endpoint.port }),
+    path: `${endpoint.pathname}${endpoint.search}`,
+    method: "GET",
+    headers: {
+      Accept: "application/json, text/event-stream",
+      Connection: "close",
+      Host: endpoint.host,
+    },
+    lookup,
+    family: pinnedAddress.family,
+    agent: false,
+    signal,
+    maxHeaderSize: CODEX_MCP_PREFLIGHT_MAX_HEADER_BYTES,
+    ...(endpoint.protocol === "https:" && NodeNet.isIP(originalHostname) === 0
+      ? { servername: originalHostname }
+      : {}),
+  };
 }
 
 export async function probeCodexHttpMcp(
-  url: string,
+  rawUrl: string,
   timeoutMs: number,
-  options: { readonly fetchImpl?: FetchImpl } = {},
+  options: {
+    readonly pinnedAddress: ResolvedAddress;
+    readonly signal?: AbortSignal;
+  },
 ): Promise<ProbeResult> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const ownedController = options.signal === undefined ? new AbortController() : undefined;
+  const signal = options.signal ?? ownedController!.signal;
+  const timeout =
+    ownedController === undefined
+      ? undefined
+      : setTimeout(() => ownedController.abort(), timeoutMs);
   try {
-    const response = await (options.fetchImpl ?? fetch)(url, {
-      method: "GET",
-      headers: { Accept: "application/json, text/event-stream" },
-      redirect: "manual",
-      signal: controller.signal,
+    const endpoint = new URL(rawUrl);
+    const request = endpoint.protocol === "https:" ? NodeHttps.request : NodeHttp.request;
+    return await new Promise<ProbeResult>((resolve) => {
+      let settled = false;
+      const finish = (result: ProbeResult): void => {
+        if (settled) return;
+        settled = true;
+        resolve(result);
+      };
+      const clientRequest = request(
+        createPinnedMcpRequestOptions(endpoint, options.pinnedAddress, signal),
+        (response) => {
+          const status = response.statusCode ?? 0;
+          if (status >= 300 && status < 400) {
+            finish({
+              reachable: false,
+              reason: "redirected",
+              detail: "Redirects are not followed.",
+            });
+            response.destroy();
+            return;
+          }
+          let bytesRead = 0;
+          response.on("data", (chunk: Buffer | string) => {
+            bytesRead += Buffer.byteLength(chunk);
+            if (bytesRead >= CODEX_MCP_PREFLIGHT_MAX_BODY_BYTES) {
+              finish({ reachable: true });
+              response.destroy();
+            }
+          });
+          response.once("end", () => finish({ reachable: true }));
+          response.once("error", (error) => {
+            finish({
+              reachable: false,
+              reason: error.name === "AbortError" ? "timeout" : "connection-failed",
+            });
+          });
+        },
+      );
+      clientRequest.once("error", (error) => {
+        finish({
+          reachable: false,
+          reason: error.name === "AbortError" ? "timeout" : "connection-failed",
+        });
+      });
+      clientRequest.end();
     });
-    if (response.status >= 300 && response.status < 400) {
-      if (response.body !== null) await response.body.cancel().catch(() => undefined);
-      return { reachable: false, reason: "redirected", detail: "Redirects are not followed." };
-    }
-    await consumeBoundedBody(response, CODEX_MCP_PREFLIGHT_MAX_BODY_BYTES);
-    return { reachable: true };
   } catch (error) {
     return {
       reachable: false,
@@ -374,7 +469,7 @@ export async function probeCodexHttpMcp(
         error instanceof Error && error.name === "AbortError" ? "timeout" : "connection-failed",
     };
   } finally {
-    clearTimeout(timeout);
+    if (timeout !== undefined) clearTimeout(timeout);
   }
 }
 
@@ -387,7 +482,8 @@ export async function preflightCodexMcpServers(
   });
   if (servers.length === 0) return emptyResult();
 
-  const probe = input.probe ?? ((url, timeoutMs) => probeCodexHttpMcp(url, timeoutMs, input));
+  const probe = input.probe ?? probeCodexHttpMcp;
+  const timeoutMs = input.timeoutMs ?? CODEX_MCP_PREFLIGHT_TIMEOUT_MS;
   const results = await Promise.all(
     servers.map(async (server) => ({
       server,
@@ -395,27 +491,64 @@ export async function preflightCodexMcpServers(
         const endpoint = validateCodexMcpEndpoint(server.name, server.url);
         if (!endpoint.allowed)
           return { reachable: false, reason: "blocked", detail: endpoint.detail };
-        if (!isTrustedLocalT3Endpoint(server.name, endpoint.url)) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          const resolveHost = input.resolveHost ?? resolveHostAddresses;
+          let addresses: ReadonlyArray<ResolvedAddress>;
           try {
-            const resolveHost = input.resolveHost ?? resolveHostAddresses;
-            const addresses = await resolveHost(normalizedIp(endpoint.url.hostname));
-            if (addresses.length === 0 || addresses.some(isBlockedAddress)) {
-              return {
-                reachable: false,
-                reason: "blocked",
-                detail:
-                  "The endpoint resolved to a private, loopback, link-local, or reserved address.",
-              };
+            addresses = await withAbort(
+              resolveHost(normalizedIp(endpoint.url.hostname)),
+              controller.signal,
+            );
+          } catch (error) {
+            if (error instanceof Error && error.name === "AbortError") {
+              return { reachable: false, reason: "timeout" };
             }
-          } catch {
             return {
               reachable: false,
               reason: "connection-failed",
               detail: "DNS resolution failed.",
             };
           }
+          const trustedLocal = isTrustedLocalT3Endpoint(server.name, endpoint.url);
+          if (
+            addresses.length === 0 ||
+            addresses.some(({ address }) =>
+              trustedLocal ? !isLoopbackAddress(address) : isBlockedAddress(address),
+            )
+          ) {
+            return {
+              reachable: false,
+              reason: "blocked",
+              detail: trustedLocal
+                ? "The trusted local T3 endpoint did not resolve to a local address."
+                : "The endpoint resolved to a private, loopback, link-local, or reserved address.",
+            };
+          }
+          const pinnedAddress = addresses[0];
+          if (pinnedAddress === undefined) {
+            return {
+              reachable: false,
+              reason: "connection-failed",
+              detail: "DNS returned no addresses.",
+            };
+          }
+          return await withAbort(
+            probe(server.url, timeoutMs, { signal: controller.signal, pinnedAddress }),
+            controller.signal,
+          ).catch(
+            (error: unknown): ProbeResult => ({
+              reachable: false,
+              reason:
+                error instanceof Error && error.name === "AbortError"
+                  ? "timeout"
+                  : "connection-failed",
+            }),
+          );
+        } finally {
+          clearTimeout(timeout);
         }
-        return probe(server.url, CODEX_MCP_PREFLIGHT_TIMEOUT_MS);
       })(),
     })),
   );
@@ -428,7 +561,7 @@ export async function preflightCodexMcpServers(
             serverName: server.name,
             endpoint: sanitizeCodexMcpEndpoint(server.url),
             reason: result.reason,
-            timeoutMs: CODEX_MCP_PREFLIGHT_TIMEOUT_MS,
+            timeoutMs,
             ...(result.detail !== undefined ? { detail: result.detail } : {}),
           },
         ],

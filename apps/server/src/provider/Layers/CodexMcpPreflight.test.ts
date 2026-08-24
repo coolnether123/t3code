@@ -1,4 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off - The connector tests use a loopback HTTP server to verify address pinning without external traffic.
 import * as NodeAssert from "node:assert/strict";
+import * as NodeHttp from "node:http";
 
 import { describe, it } from "vite-plus/test";
 
@@ -6,6 +8,7 @@ import {
   CODEX_MCP_PREFLIGHT_TIMEOUT_MS,
   codexMcpDisableOverride,
   collectCodexHttpMcpServers,
+  createPinnedMcpRequestOptions,
   probeCodexHttpMcp,
   preflightCodexMcpServers,
   sanitizeCodexMcpEndpoint,
@@ -31,7 +34,7 @@ args = ["server.py"]
 url = "http://127.0.0.1:3774/mcp"
 `;
 
-  const publicAddresses = async () => ["93.184.216.34"];
+  const publicAddresses = async () => [{ address: "93.184.216.34", family: 4 as const }];
 
   it("probes HTTP MCPs, excludes dead endpoints, and preserves healthy/T3/stdio servers", async () => {
     const configBefore = inheritedConfig;
@@ -149,7 +152,9 @@ url = "https://rebound.example.test/mcp"
         return { reachable: true };
       },
       resolveHost: async (hostname) =>
-        hostname === "rebound.example.test" ? ["10.0.0.8"] : ["93.184.216.34"],
+        hostname === "rebound.example.test"
+          ? [{ address: "10.0.0.8", family: 4 }]
+          : [{ address: "93.184.216.34", family: 4 }],
     });
 
     NodeAssert.deepStrictEqual(probed, []);
@@ -202,40 +207,156 @@ url = "https://rebound.example.test/mcp"
     );
   });
 
-  it("does not follow redirects and consumes only a bounded response body", async () => {
-    let receivedInit: RequestInit | undefined;
-    const result = await probeCodexHttpMcp("https://example.test/mcp", 100, {
-      fetchImpl: async (_input, init) => {
-        receivedInit = init;
-        return new Response("x".repeat(8_192), {
-          status: 302,
-          headers: { Location: "http://127.0.0.1/" },
-        });
+  it("applies one deadline to delayed DNS resolution and skips the HTTP probe", async () => {
+    let probed = false;
+    const result = await preflightCodexMcpServers({
+      configTexts: [
+        {
+          source: "config.toml",
+          text: '[mcp_servers.slow_dns]\nurl = "https://slow-dns.example.test/mcp"',
+        },
+      ],
+      timeoutMs: 20,
+      resolveHost: () => new Promise(() => undefined),
+      probe: async () => {
+        probed = true;
+        return { reachable: true };
       },
     });
 
-    NodeAssert.deepStrictEqual(result, {
-      reachable: false,
-      reason: "redirected",
-      detail: "Redirects are not followed.",
-    });
-    NodeAssert.equal(receivedInit?.redirect, "manual");
+    NodeAssert.equal(probed, false);
+    NodeAssert.deepStrictEqual(result.unavailable, [
+      {
+        kind: "codex.mcp.unavailable",
+        serverName: "slow_dns",
+        endpoint: "https://slow-dns.example.test/mcp",
+        reason: "timeout",
+        timeoutMs: 20,
+      },
+    ]);
+  });
 
-    let canceled = false;
-    const body = new ReadableStream<Uint8Array>({
-      pull(controller) {
-        controller.enqueue(new Uint8Array(4_096));
+  it("pins the validated address so a second DNS answer cannot rebind the request", async () => {
+    let resolutions = 0;
+    let pinnedAddress: string | undefined;
+    let lookupAddress: string | undefined;
+    const result = await preflightCodexMcpServers({
+      configTexts: [
+        {
+          source: "config.toml",
+          text: '[mcp_servers.rebinding]\nurl = "https://rebinding.example.test/mcp"',
+        },
+      ],
+      resolveHost: async () => {
+        resolutions += 1;
+        return resolutions === 1
+          ? [{ address: "93.184.216.34", family: 4 }]
+          : [{ address: "10.0.0.8", family: 4 }];
       },
-      cancel() {
-        canceled = true;
+      probe: async (rawUrl, _timeoutMs, context) => {
+        pinnedAddress = context.pinnedAddress.address;
+        const requestOptions = createPinnedMcpRequestOptions(
+          new URL(rawUrl),
+          context.pinnedAddress,
+          context.signal,
+        );
+        requestOptions.lookup?.(
+          "rebinding.example.test",
+          { family: 4, all: false },
+          (error, address) => {
+            NodeAssert.ifError(error);
+            lookupAddress = typeof address === "string" ? address : address[0]?.address;
+          },
+        );
+        return { reachable: true };
       },
     });
-    NodeAssert.deepStrictEqual(
-      await probeCodexHttpMcp("https://example.test/mcp", 100, {
-        fetchImpl: async () => new Response(body, { status: 200 }),
-      }),
-      { reachable: true },
+
+    NodeAssert.deepStrictEqual(result, { disabledServerNames: [], unavailable: [] });
+    NodeAssert.equal(resolutions, 1);
+    NodeAssert.equal(pinnedAddress, "93.184.216.34");
+    NodeAssert.equal(lookupAddress, "93.184.216.34");
+  });
+
+  it("rejects IPv6 multicast endpoints and multicast DNS answers", async () => {
+    NodeAssert.equal(validateCodexMcpEndpoint("other", "http://[ff02::1]/mcp").allowed, false);
+    const result = await preflightCodexMcpServers({
+      configTexts: [
+        {
+          source: "config.toml",
+          text: '[mcp_servers.multicast]\nurl = "https://multicast.example.test/mcp"',
+        },
+      ],
+      resolveHost: async () => [{ address: "ff02::1", family: 6 }],
+      probe: async () => {
+        NodeAssert.fail("a multicast endpoint must not be probed");
+      },
+    });
+
+    NodeAssert.equal(result.unavailable[0]?.reason, "blocked");
+  });
+
+  it("preserves the original Host and TLS SNI while pinning the connection address", () => {
+    const controller = new AbortController();
+    const options = createPinnedMcpRequestOptions(
+      new URL("https://mcp.example.test:8443/mcp"),
+      { address: "93.184.216.34", family: 4 },
+      controller.signal,
     );
-    NodeAssert.equal(canceled, true);
+
+    NodeAssert.equal(options.hostname, "mcp.example.test");
+    NodeAssert.equal(options.servername, "mcp.example.test");
+    NodeAssert.equal(
+      (options.headers as NodeHttp.OutgoingHttpHeaders).Host,
+      "mcp.example.test:8443",
+    );
+  });
+
+  it("reaches a healthy endpoint through the pinned address and never follows redirects", async () => {
+    const receivedPaths: string[] = [];
+    const receivedHosts: Array<string | undefined> = [];
+    const server = NodeHttp.createServer((request, response) => {
+      receivedPaths.push(request.url ?? "");
+      receivedHosts.push(request.headers.host);
+      if (request.url === "/redirect") {
+        response.writeHead(302, { Location: "http://127.0.0.1/private" });
+        response.end();
+        return;
+      }
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end("x".repeat(8_192));
+    });
+    server.listen(0, "127.0.0.1");
+    await new Promise<void>((resolve, reject) => {
+      server.once("listening", resolve);
+      server.once("error", reject);
+    });
+    const address = server.address();
+    NodeAssert.ok(address !== null && typeof address !== "string");
+
+    try {
+      const pinnedAddress = { address: "127.0.0.1", family: 4 as const };
+      NodeAssert.deepStrictEqual(
+        await probeCodexHttpMcp(`http://healthy.example.test:${address.port}/mcp`, 500, {
+          pinnedAddress,
+        }),
+        { reachable: true },
+      );
+      NodeAssert.deepStrictEqual(
+        await probeCodexHttpMcp(`http://healthy.example.test:${address.port}/redirect`, 500, {
+          pinnedAddress,
+        }),
+        { reachable: false, reason: "redirected", detail: "Redirects are not followed." },
+      );
+      NodeAssert.deepStrictEqual(receivedPaths, ["/mcp", "/redirect"]);
+      NodeAssert.deepStrictEqual(receivedHosts, [
+        `healthy.example.test:${address.port}`,
+        `healthy.example.test:${address.port}`,
+      ]);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error === undefined ? resolve() : reject(error)));
+      });
+    }
   });
 });

@@ -2122,19 +2122,13 @@ describe("CheckpointReactor", () => {
     expect(branchAfter?.activities).toEqual([
       expect.objectContaining({
         kind: "thread.edit-from-here.files-not-restored",
-        payload: expect.objectContaining({ filesRestored: false }),
+        payload: expect.objectContaining({ filesRestored: false, conversationOnly: true }),
       }),
     ]);
     expect(
       branchAfter?.messages.filter((message) => message.id === rewindRequest.replacementMessageId),
     ).toHaveLength(1);
-    expect(restoreCheckpoint).toHaveBeenCalledWith(
-      expect.objectContaining({
-        checkpointRef: expect.stringContaining("/turn/0"),
-        expectedCurrentCheckpointRef: expect.stringContaining("/turn/0"),
-        fallbackToHead: true,
-      }),
-    );
+    expect(restoreCheckpoint).not.toHaveBeenCalled();
     expect(harness.provider.rollbackConversation).not.toHaveBeenCalled();
     expect(harness.provider.forkConversation).not.toHaveBeenCalled();
     expect(harness.reconcileParentAfterRewind).toHaveBeenCalledWith(
@@ -2161,6 +2155,7 @@ describe("CheckpointReactor", () => {
       turnCount: 0,
       sourceMessageId: originalMessageId,
       cutoffCreatedAt: seeded.createdAt,
+      workspaceRestore: { filesRestored: false, conversationOnly: true },
     });
   });
 
