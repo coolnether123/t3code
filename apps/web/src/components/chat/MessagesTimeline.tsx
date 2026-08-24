@@ -1664,7 +1664,11 @@ const EditFromHereFailureCard = memo(function EditFromHereFailureCard({
 }) {
   const [dismissed, setDismissed] = useState(false);
   const { copyToClipboard, isCopied } = useCopyToClipboard({ target: "technical details" });
-  const technicalDetails = workEntry.detail?.trim() || workEntry.command?.trim() || workEntry.label;
+  const technicalDetails =
+    workEntry.technicalDetail?.trim() ||
+    workEntry.detail?.trim() ||
+    workEntry.command?.trim() ||
+    workEntry.label;
   const failureMessage = (reason: EditFromHereFailureReason | undefined) => {
     switch (reason) {
       case "current-worktree-dirty":
@@ -2416,11 +2420,15 @@ function workToneIcon(tone: TimelineWorkEntry["tone"]): {
 }
 
 function workEntryPreview(
-  workEntry: Pick<TimelineWorkEntry, "detail" | "command" | "changedFiles">,
+  workEntry: Pick<TimelineWorkEntry, "detail" | "command" | "changedFiles" | "diagnosticCount">,
   workspaceRoot: string | undefined,
 ) {
   if (workEntry.command) return workEntry.command;
-  if (workEntry.detail) return workEntry.detail;
+  if (workEntry.detail) {
+    return workEntry.diagnosticCount && workEntry.diagnosticCount > 1
+      ? `${workEntry.detail} (${workEntry.diagnosticCount} occurrences)`
+      : workEntry.detail;
+  }
   if ((workEntry.changedFiles?.length ?? 0) === 0) return null;
   const [firstPath] = workEntry.changedFiles ?? [];
   if (!firstPath) return null;
@@ -2642,6 +2650,12 @@ function buildToolCallExpandedBody(
   }
   if (workEntry.detail?.trim()) {
     blocks.push(workEntry.detail.trim());
+  }
+  if (
+    workEntry.technicalDetail?.trim() &&
+    workEntry.technicalDetail.trim() !== workEntry.detail?.trim()
+  ) {
+    blocks.push(workEntry.technicalDetail.trim());
   }
   const changedFiles = workEntry.changedFiles ?? [];
   if (changedFiles.length > 0) {

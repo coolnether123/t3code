@@ -1,4 +1,5 @@
 import { ApprovalRequestId, isToolLifecycleItemType } from "@t3tools/contracts";
+import { normalizeDiagnosticDetail } from "@t3tools/client-runtime/diagnostics";
 import type {
   OrchestrationLatestTurn,
   OrchestrationThread,
@@ -66,6 +67,9 @@ interface WorkLogEntry {
   turnId: TurnId | null;
   label: string;
   detail?: string;
+  technicalDetail?: string;
+  diagnosticKey?: string;
+  diagnosticCount?: number;
   command?: string;
   rawCommand?: string;
   changedFiles?: ReadonlyArray<string>;
@@ -391,6 +395,17 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   };
   const itemType = extractWorkLogItemType(payload);
   const requestKind = extractWorkLogRequestKind(payload);
+  const diagnostic =
+    activity.kind === "runtime.warning" || activity.kind === "runtime.error"
+      ? normalizeDiagnosticDetail(payload?.detail)
+      : activity.kind === "thread.edit-from-here.files-not-restored" ||
+          activity.kind === "checkpoint.revert.files-not-restored"
+        ? {
+            preview: "Only conversation history was rewound. Files were not changed.",
+            technicalDetail: asTrimmedString(payload?.detail),
+            key: "conversation-only-rewind",
+          }
+        : null;
   if (
     !taskDetailAsLabel &&
     payload &&
@@ -398,7 +413,11 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     payload.detail.length > 0
   ) {
     const detail = stripTrailingExitCode(payload.detail).output;
-    if (detail) {
+    if (diagnostic) {
+      entry.detail = diagnostic.preview;
+      entry.diagnosticKey = diagnostic.key;
+      if (diagnostic.technicalDetail) entry.technicalDetail = diagnostic.technicalDetail;
+    } else if (detail) {
       entry.detail = detail;
     }
   }
@@ -464,6 +483,10 @@ function collapseDerivedWorkLogEntries(
       continue;
     }
     const previous = collapsed.at(-1);
+    if (previous && shouldCollapseDiagnosticEntries(previous, entry)) {
+      collapsed[collapsed.length - 1] = mergeDerivedWorkLogEntries(previous, entry);
+      continue;
+    }
     if (previous && shouldCollapseToolLifecycleEntries(previous, entry)) {
       collapsed[collapsed.length - 1] = mergeDerivedWorkLogEntries(previous, entry);
       continue;
@@ -471,6 +494,18 @@ function collapseDerivedWorkLogEntries(
     collapsed.push(entry);
   }
   return collapsed;
+}
+
+function shouldCollapseDiagnosticEntries(
+  previous: DerivedWorkLogEntry,
+  next: DerivedWorkLogEntry,
+): boolean {
+  return (
+    previous.activityKind === "runtime.warning" &&
+    next.activityKind === "runtime.warning" &&
+    previous.diagnosticKey !== undefined &&
+    previous.diagnosticKey === next.diagnosticKey
+  );
 }
 
 function shouldCollapseToolLifecycleEntries(
@@ -495,6 +530,12 @@ function mergeDerivedWorkLogEntries(
 ): DerivedWorkLogEntry {
   const changedFiles = mergeChangedFiles(previous.changedFiles, next.changedFiles);
   const detail = next.detail ?? previous.detail;
+  const technicalDetail = next.technicalDetail ?? previous.technicalDetail;
+  const diagnosticKey = next.diagnosticKey ?? previous.diagnosticKey;
+  const diagnosticCount =
+    diagnosticKey !== undefined && previous.diagnosticKey === diagnosticKey
+      ? (previous.diagnosticCount ?? 1) + (next.diagnosticCount ?? 1)
+      : (next.diagnosticCount ?? previous.diagnosticCount);
   const command = next.command ?? previous.command;
   const rawCommand = next.rawCommand ?? previous.rawCommand;
   const toolTitle = next.toolTitle ?? previous.toolTitle;
@@ -507,6 +548,9 @@ function mergeDerivedWorkLogEntries(
     ...previous,
     ...next,
     ...(detail ? { detail } : {}),
+    ...(technicalDetail ? { technicalDetail } : {}),
+    ...(diagnosticKey ? { diagnosticKey } : {}),
+    ...(diagnosticCount !== undefined ? { diagnosticCount } : {}),
     ...(command ? { command } : {}),
     ...(rawCommand ? { rawCommand } : {}),
     ...(changedFiles.length > 0 ? { changedFiles } : {}),
@@ -660,6 +704,7 @@ function buildWorkEntryExpandedBody(entry: WorkLogEntry): string | null {
   }
   appendUniqueBlock(entry.rawCommand ?? entry.command);
   appendUniqueBlock(entry.detail);
+  appendUniqueBlock(entry.technicalDetail);
   if ((entry.changedFiles?.length ?? 0) > 0) {
     appendUniqueBlock(entry.changedFiles!.join("\n"));
   }
@@ -689,10 +734,14 @@ function memoizeValue<T>(build: () => T): () => T {
 }
 
 function workEntryPreview(
-  workEntry: Pick<WorkLogEntry, "detail" | "command" | "changedFiles">,
+  workEntry: Pick<WorkLogEntry, "detail" | "command" | "changedFiles" | "diagnosticCount">,
 ): string | null {
   if (workEntry.command) return workEntry.command;
-  if (workEntry.detail) return workEntry.detail;
+  if (workEntry.detail) {
+    return workEntry.diagnosticCount && workEntry.diagnosticCount > 1
+      ? `${workEntry.detail} (${workEntry.diagnosticCount} occurrences)`
+      : workEntry.detail;
+  }
   if ((workEntry.changedFiles?.length ?? 0) === 0) return null;
   const [firstPath] = workEntry.changedFiles ?? [];
   if (!firstPath) return null;

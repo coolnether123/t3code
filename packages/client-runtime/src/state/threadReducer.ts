@@ -556,6 +556,11 @@ export function applyThreadDetailEvent(
         kind: "updated",
         thread: {
           ...thread,
+          editFromHere:
+            event.payload.editFromHereRequestId !== undefined &&
+            thread.editFromHere?.requestId === event.payload.editFromHereRequestId
+              ? null
+              : thread.editFromHere,
           checkpoints,
           messages,
           proposedPlans,
@@ -620,6 +625,8 @@ export function applyThreadDetailEvent(
       // thread.reverted that discards turns can still resolve a value from
       // the turns that survive.
       const supersedesContextWindow = isResolvableContextWindowActivity(activity);
+      const editFromHere =
+        activity.kind === "thread.edit-from-here.failed" ? null : thread.editFromHere;
       const activities = pipe(
         thread.activities,
         Arr.filter(
@@ -637,7 +644,7 @@ export function applyThreadDetailEvent(
 
       return {
         kind: "updated",
-        thread: { ...thread, activities, updatedAt: event.occurredAt },
+        thread: { ...thread, activities, editFromHere, updatedAt: event.occurredAt },
       };
     }
 

@@ -588,6 +588,8 @@ function ThreadRouteContent(
           }),
         );
       }
+      setIsEditingFromHere(false);
+      setEditFromHereMode(null);
       return true;
     },
     [

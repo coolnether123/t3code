@@ -1,5 +1,6 @@
 import * as Option from "effect/Option";
 import * as Arr from "effect/Array";
+import { normalizeDiagnosticDetail } from "@t3tools/client-runtime/diagnostics";
 import { isBackgroundTaskActivity } from "@t3tools/client-runtime/state/subagentRuntime";
 import {
   ApprovalRequestId,
@@ -85,6 +86,11 @@ export interface WorkLogEntry {
   toolCallId?: string;
   label: string;
   detail?: string;
+  /** Full diagnostic payload, shown only in the existing expanded details. */
+  technicalDetail?: string;
+  /** Stable key used to collapse adjacent repeated provider diagnostics. */
+  diagnosticKey?: string;
+  diagnosticCount?: number;
   /** Typed restore reason used for concise UI copy; raw diagnostics stay in detail. */
   editFromHereFailureReason?: EditFromHereFailureReason;
   command?: string;
@@ -978,6 +984,17 @@ function toDerivedWorkLogEntry(
       ? stripTrailingExitCode(payload.detail).output
       : null
     : extractToolDetail(payload, title ?? activity.summary);
+  const diagnostic =
+    activity.kind === "runtime.warning" || activity.kind === "runtime.error"
+      ? normalizeDiagnosticDetail(payload?.detail)
+      : activity.kind === "thread.edit-from-here.files-not-restored" ||
+          activity.kind === "checkpoint.revert.files-not-restored"
+        ? {
+            preview: "Only conversation history was rewound. Files were not changed.",
+            technicalDetail: asTrimmedString(payload?.detail),
+            key: "conversation-only-rewind",
+          }
+        : null;
   const editFromHereFailureReason =
     activity.kind === "thread.edit-from-here.failed" &&
     typeof payload?.reason === "string" &&
@@ -1009,13 +1026,17 @@ function toDerivedWorkLogEntry(
   };
   const itemType = extractWorkLogItemType(payload);
   const requestKind = extractWorkLogRequestKind(payload);
-  if (detail) {
+  if (diagnostic) {
+    entry.detail = diagnostic.preview;
+    entry.diagnosticKey = diagnostic.key;
+    if (diagnostic.technicalDetail) entry.technicalDetail = diagnostic.technicalDetail;
+  } else if (detail) {
     entry.detail = detail;
   }
   if (editFromHereFailureReason) {
     entry.editFromHereFailureReason = editFromHereFailureReason;
     const technicalDetail = asTrimmedString(payload?.technicalDetail);
-    if (technicalDetail) entry.detail = technicalDetail;
+    if (technicalDetail) entry.technicalDetail = technicalDetail;
   }
   if (commandPreview.command) {
     entry.command = commandPreview.command;
@@ -1184,6 +1205,11 @@ function collapseDerivedWorkLogEntries(
       collapsed[previousIndex] = mergeDerivedWorkLogEntries(previous, entry);
       continue;
     }
+    if (previous && shouldCollapseDiagnosticEntries(previous, entry)) {
+      const previousIndex = collapsed.length - 1;
+      collapsed[previousIndex] = mergeDerivedWorkLogEntries(previous, entry);
+      continue;
+    }
     const lifecycleKey = toolLifecycleCollapseMapKey(entry);
     if (lifecycleKey !== undefined) {
       const matchingLifecycleIndex = toolLifecycleRowIndex.get(lifecycleKey);
@@ -1216,6 +1242,18 @@ function collapseDerivedWorkLogEntries(
     }
   }
   return collapsed;
+}
+
+function shouldCollapseDiagnosticEntries(
+  previous: DerivedWorkLogEntry,
+  next: DerivedWorkLogEntry,
+): boolean {
+  return (
+    previous.sourceActivityKind === "runtime.warning" &&
+    next.sourceActivityKind === "runtime.warning" &&
+    previous.diagnosticKey !== undefined &&
+    previous.diagnosticKey === next.diagnosticKey
+  );
 }
 
 function canContinueWorkerWait(previous: DerivedWorkLogEntry, next: DerivedWorkLogEntry): boolean {
@@ -1285,6 +1323,12 @@ function mergeDerivedWorkLogEntries(
 ): DerivedWorkLogEntry {
   const changedFiles = mergeChangedFiles(previous.changedFiles, next.changedFiles);
   const detail = next.detail ?? previous.detail;
+  const technicalDetail = next.technicalDetail ?? previous.technicalDetail;
+  const diagnosticKey = next.diagnosticKey ?? previous.diagnosticKey;
+  const diagnosticCount =
+    diagnosticKey !== undefined && previous.diagnosticKey === diagnosticKey
+      ? (previous.diagnosticCount ?? 1) + (next.diagnosticCount ?? 1)
+      : (next.diagnosticCount ?? previous.diagnosticCount);
   const command = next.command ?? previous.command;
   const rawCommand = next.rawCommand ?? previous.rawCommand;
   const toolTitle = next.toolTitle ?? previous.toolTitle;
@@ -1303,6 +1347,9 @@ function mergeDerivedWorkLogEntries(
     ...previous,
     ...next,
     ...(detail ? { detail } : {}),
+    ...(technicalDetail ? { technicalDetail } : {}),
+    ...(diagnosticKey ? { diagnosticKey } : {}),
+    ...(diagnosticCount !== undefined ? { diagnosticCount } : {}),
     ...(command ? { command } : {}),
     ...(rawCommand ? { rawCommand } : {}),
     ...(changedFiles.length > 0 ? { changedFiles } : {}),

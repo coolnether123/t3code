@@ -994,6 +994,47 @@ describe("applyThreadDetailEvent", () => {
     });
   });
 
+  describe("rewind terminal events", () => {
+    it("clears pending rewind state when the failure activity arrives", () => {
+      const requestId = CommandId.make("edit-request-failed");
+      const thread = {
+        ...baseThread,
+        editFromHere: {
+          requestId,
+          mode: "rewind" as const,
+          sourceMessageId: MessageId.make("source-message"),
+          startedAt: "2026-04-01T01:00:00.000Z",
+        },
+      };
+      const result = applyThreadDetailEvent(thread, {
+        ...baseEventFields,
+        sequence: 21,
+        occurredAt: "2026-04-01T01:00:01.000Z",
+        aggregateKind: "thread",
+        aggregateId: thread.id,
+        type: "thread.activity-appended",
+        payload: {
+          threadId: thread.id,
+          activity: {
+            id: EventId.make("edit-failure-activity"),
+            tone: "error",
+            kind: "thread.edit-from-here.failed",
+            summary: "Edit from here failed",
+            payload: { detail: "The checkpoint could not be restored." },
+            turnId: null,
+            createdAt: "2026-04-01T01:00:01.000Z",
+          },
+        },
+      });
+
+      expect(result.kind).toBe("updated");
+      if (result.kind === "updated") {
+        expect(result.thread.editFromHere).toBeNull();
+        expect(result.thread.activities).toHaveLength(1);
+      }
+    });
+  });
+
   describe("no-op events", () => {
     it("returns unchanged for approval-response-requested", () => {
       const result = applyThreadDetailEvent(baseThread, {

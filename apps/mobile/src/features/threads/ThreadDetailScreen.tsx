@@ -641,7 +641,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
             <View accessibilityLiveRegion="polite" className="border-b border-border/60 px-4 py-2">
               <Text className="text-xs text-foreground-muted">
                 {props.editFromHereMode === "rewind"
-                  ? "Rewinding to this message…"
+                  ? "Rewinding. Showing the current conversation until the server confirms the restore."
                   : "Starting a new task from this message…"}
               </Text>
             </View>

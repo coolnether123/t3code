@@ -1010,6 +1010,56 @@ describe("deriveWorkLogEntries", () => {
     expect(entry && workLogEntryIsToolLike(entry)).toBe(false);
   });
 
+  it("normalizes and groups adjacent provider diagnostics without losing technical detail", () => {
+    const entries = deriveWorkLogEntries([
+      makeActivity({
+        id: "provider-warning-1",
+        kind: "runtime.warning",
+        summary: "Work log",
+        tone: "error",
+        payload: {
+          detail:
+            '{"fields":{"message":"ai-game-developer -> http://localhost:27985 request send failed"}}',
+        },
+      }),
+      makeActivity({
+        id: "provider-warning-2",
+        kind: "runtime.warning",
+        summary: "Work log",
+        tone: "error",
+        payload: {
+          detail:
+            '{"fields":{"message":"ai-game-developer -> http://localhost:27985 request send failed"}}',
+        },
+      }),
+    ]);
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      detail: "ai-game-developer unavailable",
+      diagnosticKey: "mcp-unavailable:ai-game-developer",
+      diagnosticCount: 2,
+    });
+    expect(entries[0]?.technicalDetail).toContain('"fields"');
+  });
+
+  it("explains conversation-only rewinds without implying that files changed", () => {
+    const [entry] = deriveWorkLogEntries([
+      makeActivity({
+        id: "conversation-only-rewind",
+        kind: "thread.edit-from-here.files-not-restored",
+        summary: "Conversation rewound; files not restored",
+        tone: "info",
+        payload: { detail: "The task has no Git-backed workspace." },
+      }),
+    ]);
+
+    expect(entry).toMatchObject({
+      detail: "Only conversation history was rewound. Files were not changed.",
+      technicalDetail: "The task has no Git-backed workspace.",
+    });
+  });
+
   it("omits tool started entries and keeps completed entries", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

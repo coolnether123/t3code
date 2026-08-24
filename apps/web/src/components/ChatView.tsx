@@ -6461,6 +6461,11 @@ function ChatViewContent(props: ChatViewProps) {
       }
 
       setEditFromHereDialog(null);
+      // The command was accepted. From this point the server receipt owns the
+      // pending state, so the local submission flag cannot leave the chat
+      // stuck if the receipt arrives after this render.
+      setIsEditingFromHere(false);
+      setEditFromHereMode(null);
       if (targetThreadId !== null) {
         await waitForStartedServerThread(scopeThreadRef(environmentId, targetThreadId), 3_000);
         await navigate({
@@ -6752,7 +6757,7 @@ function ChatViewContent(props: ChatViewProps) {
                   aria-live="polite"
                 >
                   {pendingEditFromHereMode === "rewind"
-                    ? "Rewinding to this message…"
+                    ? "Rewinding. Showing the current conversation until the server confirms the restore."
                     : "Starting a new task from this message…"}
                 </div>
               )}

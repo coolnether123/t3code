@@ -180,6 +180,43 @@ function makeThread(
 }
 
 describe("buildThreadFeed", () => {
+  it("keeps diagnostics compact while exposing raw payload only in expanded details", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-diagnostics"),
+      projectId: ProjectId.make("project-diagnostics"),
+      title: "Diagnostics",
+      activities: [
+        makeActivity({
+          id: EventId.make("warning-1"),
+          kind: "runtime.warning",
+          summary: "Work log",
+          createdAt: "2026-08-24T18:17:43.000Z",
+          payload: {
+            detail:
+              '{"fields":{"message":"ai-game-developer -> http://localhost:27985 request send failed"}}',
+          },
+        }),
+        makeActivity({
+          id: EventId.make("warning-2"),
+          kind: "runtime.warning",
+          summary: "Work log",
+          createdAt: "2026-08-24T18:17:44.000Z",
+          payload: {
+            detail:
+              '{"fields":{"message":"ai-game-developer -> http://localhost:27985 request send failed"}}',
+          },
+        }),
+      ],
+    });
+
+    const group = buildThreadFeed(thread).find((entry) => entry.type === "activity-group");
+    expect(group?.type).toBe("activity-group");
+    if (group?.type !== "activity-group") return;
+    expect(group.activities).toHaveLength(1);
+    expect(group.activities[0]?.detail).toBe("ai-game-developer unavailable (2 occurrences)");
+    expect(group.activities[0]?.getFullDetail()).toContain('"fields"');
+  });
+
   it("keeps older local feedback before newer messages returned by the server", () => {
     const submission = {
       id: MessageId.make("feedback-command-ordering"),
