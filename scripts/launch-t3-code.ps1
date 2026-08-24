@@ -211,6 +211,44 @@ function Get-DependencyRelativePaths {
     } | ForEach-Object { $_.Relative.ToLowerInvariant() })
 }
 
+function Sync-TrackedSourceFiles {
+    param(
+        [Parameter(Mandatory)][string]$SourceRoot,
+        [Parameter(Mandatory)][string]$DeployRoot,
+        [switch]$PlanOnly
+    )
+    $sourceFiles = @(Get-IncludedFiles $SourceRoot)
+    $deployFiles = @(Get-IncludedFiles $DeployRoot)
+    $sourceMap = Get-FingerprintMap $SourceRoot $sourceFiles
+    $deployMap = Get-FingerprintMap $DeployRoot $deployFiles
+    $mismatches = @($sourceFiles | Where-Object {
+        $key = $_.Relative.ToLowerInvariant()
+        -not $deployMap.ContainsKey($key) -or $deployMap[$key] -ne $sourceMap[$key]
+    })
+    if ($mismatches.Count -eq 0) {
+        Write-Plan "Deploy projection already matches source."
+        return 0
+    }
+    if ($PlanOnly) {
+        Write-Plan "Would copy $($mismatches.Count) source files into deploy without deleting anything."
+        return $mismatches.Count
+    }
+    foreach ($file in $mismatches) {
+        $destination = Assert-ContainedPath $DeployRoot (Join-Path $DeployRoot $file.Relative) "sync destination"
+        $parent = [System.IO.Path]::GetDirectoryName($destination)
+        if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+            New-Item -ItemType Directory -Path $parent -Force | Out-Null
+        }
+        $parentItem = Get-Item -LiteralPath $parent -Force
+        if (($parentItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Sync destination parent is a reparse point: $parent"
+        }
+        Copy-Item -LiteralPath $file.FullName -Destination $destination -Force
+    }
+    Write-Host "  copied $($mismatches.Count) files. No deploy files were deleted."
+    return $mismatches.Count
+}
+
 function Get-ProcessCommandLine {
     param([Parameter(Mandatory)][object]$Process)
     if ($null -eq $Process.CommandLine) {
@@ -738,27 +776,7 @@ try {
     Write-Host "  dependency state $(if ($dependencyNeedsInstall) { 'requires vp i' } else { 'matches lock/manifests' })"
 
     Write-Phase "sync"
-    if ($mismatches.Count -eq 0) {
-        Write-Plan "Deploy projection already matches source."
-    }
-    elseif ($planOnly) {
-        Write-Plan "Would copy $($mismatches.Count) source files into deploy without deleting anything."
-    }
-    else {
-        foreach ($file in $mismatches) {
-            $destination = Assert-ContainedPath $deployRoot (Join-Path $deployRoot $file.Relative) "sync destination"
-            $parent = [System.IO.Path]::GetDirectoryName($destination)
-            if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
-                New-Item -ItemType Directory -Path $parent -Force | Out-Null
-            }
-            $parentItem = Get-Item -LiteralPath $parent -Force
-            if (($parentItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-                throw "Sync destination parent is a reparse point: $parent"
-            }
-            Copy-Item -LiteralPath $file.FullName -Destination $destination -Force
-        }
-        Write-Host "  copied $($mismatches.Count) files. No deploy files were deleted."
-    }
+    [void](Sync-TrackedSourceFiles $sourceRoot $deployRoot -PlanOnly:$planOnly)
 
     $verificationDir = Join-Path $t3Home "userdata\verification"
     $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -797,6 +815,9 @@ try {
     else {
         Write-Plan "Dependency state is current. Skipping vp i."
     }
+
+    Write-Phase "final sync"
+    [void](Sync-TrackedSourceFiles $sourceRoot $deployRoot -PlanOnly:$planOnly)
 
     Write-Phase "checks and builds"
     if ($Fast -or $SkipBuild) {
