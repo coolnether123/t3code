@@ -848,6 +848,30 @@ describe("EnvironmentSupervisor", () => {
     }).pipe(Effect.provide(TestClock.layer())),
   );
 
+  it.effect("reboots a connection after an initial bootstrap wakeup", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        prepare: (attempt) => (attempt === 1 ? Effect.never : Effect.succeed(PREPARED_CONNECTION)),
+      });
+      const supervisor = yield* EnvironmentSupervisor.make(TARGET_ENTRY, {
+        initiallyDesired: true,
+      }).pipe(Effect.provide(harness.dependencies));
+
+      yield* awaitState(supervisor.state, (state) => state.phase === "connecting");
+      yield* harness.wake("application-bootstrap-retry");
+      yield* awaitState(
+        supervisor.state,
+        (state) => state.phase === "connected" && state.generation === 1 && state.attempt === 1,
+      );
+
+      expect(yield* Ref.get(harness.prepareCount)).toBe(2);
+      yield* harness.wake("application-bootstrap-retry");
+      yield* harness.wake("application-bootstrap-retry");
+      yield* Effect.yieldNow;
+      expect(yield* Ref.get(harness.prepareCount)).toBe(2);
+    }),
+  );
+
   it.effect("probes the active session without reconnecting on application activation", () =>
     Effect.gen(function* () {
       const probeCount = yield* Ref.make(0);

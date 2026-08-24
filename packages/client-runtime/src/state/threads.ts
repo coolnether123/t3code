@@ -548,7 +548,10 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   const foregroundResubscriptions = Option.match(wakeups, {
     onNone: () => Stream.never,
     onSome: (service) =>
-      service.changes.pipe(Stream.filter(ConnectionWakeups.shouldResubscribeAfterWakeup)),
+      service.changes.pipe(
+        Stream.changes,
+        Stream.filter(ConnectionWakeups.shouldResubscribeAfterWakeup),
+      ),
   });
 
   yield* setSynchronizing;
