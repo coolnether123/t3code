@@ -1,6 +1,8 @@
 import {
+  CommandId,
   EnvironmentId,
   EventId,
+  MessageId,
   ORCHESTRATION_WS_METHODS,
   ProjectId,
   ProviderInstanceId,
@@ -271,6 +273,14 @@ const snapshot = (thread: OrchestrationThread): OrchestrationThreadStreamItem =>
   },
 });
 
+const snapshotAt = (
+  thread: OrchestrationThread,
+  snapshotSequence: number,
+): OrchestrationThreadStreamItem => ({
+  kind: "snapshot",
+  snapshot: { snapshotSequence, thread },
+});
+
 const synchronized = (): OrchestrationThreadStreamItem => ({ kind: "synchronized" });
 
 const titleUpdated = (title: string, sequence = 2): OrchestrationThreadStreamItem => ({
@@ -290,6 +300,79 @@ const titleUpdated = (title: string, sequence = 2): OrchestrationThreadStreamIte
       threadId: THREAD_ID,
       title,
       updatedAt: "2026-04-01T01:00:00.000Z",
+    },
+  },
+});
+
+const rewindRequestId = CommandId.make("edit-request");
+const selectedMessageId = MessageId.make("selected-message");
+
+const reverted = (sequence: number): OrchestrationThreadStreamItem => ({
+  kind: "event",
+  event: {
+    eventId: EventId.make(`event-reverted-${sequence}`),
+    sequence,
+    occurredAt: "2026-04-01T02:00:00.000Z",
+    commandId: null,
+    causationEventId: null,
+    correlationId: null,
+    metadata: {},
+    aggregateKind: "thread",
+    aggregateId: THREAD_ID,
+    type: "thread.reverted",
+    payload: {
+      threadId: THREAD_ID,
+      turnCount: 0,
+      sourceMessageId: selectedMessageId,
+      cutoffCreatedAt: "2026-04-01T01:00:00.000Z",
+      editFromHereRequestId: rewindRequestId,
+    },
+  },
+});
+
+const replacementMessage = (sequence: number): OrchestrationThreadStreamItem => ({
+  kind: "event",
+  event: {
+    eventId: EventId.make(`event-replacement-${sequence}`),
+    sequence,
+    occurredAt: "2026-04-01T02:00:01.000Z",
+    commandId: null,
+    causationEventId: null,
+    correlationId: null,
+    metadata: {},
+    aggregateKind: "thread",
+    aggregateId: THREAD_ID,
+    type: "thread.message-sent",
+    payload: {
+      threadId: THREAD_ID,
+      messageId: MessageId.make("replacement-message"),
+      role: "user",
+      text: "Replacement",
+      turnId: null,
+      streaming: false,
+      createdAt: "2026-04-01T02:00:01.000Z",
+      updatedAt: "2026-04-01T02:00:01.000Z",
+    },
+  },
+});
+
+const rewindFinished = (sequence: number): OrchestrationThreadStreamItem => ({
+  kind: "event",
+  event: {
+    eventId: EventId.make(`event-finished-${sequence}`),
+    sequence,
+    occurredAt: "2026-04-01T02:00:02.000Z",
+    commandId: null,
+    causationEventId: null,
+    correlationId: null,
+    metadata: {},
+    aggregateKind: "thread",
+    aggregateId: THREAD_ID,
+    type: "thread.edit-from-here-finished",
+    payload: {
+      threadId: THREAD_ID,
+      requestId: rewindRequestId,
+      finishedAt: "2026-04-01T02:00:02.000Z",
     },
   },
 });
@@ -436,6 +519,65 @@ describe("EnvironmentThreads", () => {
       );
 
       expect(Option.getOrThrow(state.data).title).toBe("Live title");
+    }),
+  );
+
+  it.effect("ignores late snapshots after a rewind but accepts newer snapshots", () =>
+    Effect.gen(function* () {
+      const originalThread: OrchestrationThread = {
+        ...BASE_THREAD,
+        messages: [
+          {
+            id: selectedMessageId,
+            role: "user",
+            text: "Original",
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-04-01T01:00:00.000Z",
+            updatedAt: "2026-04-01T01:00:00.000Z",
+          },
+        ],
+        editFromHere: {
+          requestId: rewindRequestId,
+          mode: "rewind",
+          sourceMessageId: selectedMessageId,
+          startedAt: "2026-04-01T01:00:00.000Z",
+        },
+      };
+      const harness = yield* makeHarness({ cached: originalThread });
+      yield* Queue.offer(harness.inputs, snapshotAt(originalThread, 10));
+      yield* Queue.offer(harness.inputs, reverted(11));
+      yield* Queue.offer(harness.inputs, replacementMessage(12));
+      yield* Queue.offer(harness.inputs, rewindFinished(13));
+
+      const rewound = yield* awaitThreadState(
+        harness.observed,
+        (value) =>
+          Option.isSome(value.data) &&
+          value.data.value.messages.some((message) => message.text === "Replacement") &&
+          value.data.value.editFromHere === null,
+      );
+      expect(Option.getOrThrow(rewound.data).messages.map((message) => message.text)).toEqual([
+        "Replacement",
+      ]);
+
+      yield* Queue.offer(harness.inputs, snapshotAt(originalThread, 10));
+      for (let index = 0; index < 10; index += 1) {
+        yield* Effect.yieldNow;
+      }
+      const afterLateSnapshot = yield* Ref.get(harness.latest);
+      expect(
+        Option.getOrThrow(afterLateSnapshot.data).messages.map((message) => message.text),
+      ).toEqual(["Replacement"]);
+      expect(Option.getOrThrow(afterLateSnapshot.data).editFromHere).toBeNull();
+
+      const newerThread = { ...originalThread, title: "Newer snapshot" };
+      yield* Queue.offer(harness.inputs, snapshotAt(newerThread, 14));
+      const afterNewerSnapshot = yield* awaitThreadState(
+        harness.observed,
+        (value) => Option.isSome(value.data) && value.data.value.title === "Newer snapshot",
+      );
+      expect(Option.getOrThrow(afterNewerSnapshot.data).title).toBe("Newer snapshot");
     }),
   );
 

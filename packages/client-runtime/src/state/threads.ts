@@ -328,6 +328,10 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     }
 
     if (item.kind === "snapshot") {
+      const currentSequence = yield* SubscriptionRef.get(lastSequence);
+      if (item.snapshot.snapshotSequence < currentSequence) {
+        return;
+      }
       // A fresh snapshot replaces all loaded history, including older
       // pages: a turn reverted while disconnected would otherwise survive
       // in the preserved history with no event left to remove it. The
