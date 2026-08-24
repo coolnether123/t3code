@@ -1,15 +1,18 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { EnvironmentId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
-import { McpServer } from "effect/unstable/ai";
+import { McpSchema, McpServer } from "effect/unstable/ai";
 
 import * as WorkerService from "../worker/WorkerService.ts";
 import * as ChromeAutomation from "../browser/ChromeAutomation.ts";
 import * as ExternalLauncher from "../process/externalLauncher.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import * as McpInvocationContext from "./McpInvocationContext.ts";
 
 const workerService = WorkerService.WorkerService.of({
   start: () => Effect.die("unused start"),
@@ -73,28 +76,79 @@ const workerToolNames = [
   "worker_approval_respond",
 ] as const;
 
+const computerToolNames = new Set([
+  "computer_start",
+  "computer_status",
+  "computer_tabs",
+  "computer_select_tab",
+  "computer_navigate",
+  "computer_snapshot",
+  "computer_click",
+  "computer_fill",
+  "computer_type",
+  "computer_close",
+  "computer_open_url",
+]);
+
+const makeInvocation = (capabilities: ReadonlySet<"computer" | "preview" | "workers">) => ({
+  environmentId: EnvironmentId.make("environment-mcp-catalog-test"),
+  threadId: ThreadId.make("thread-mcp-catalog-test"),
+  providerSessionId: "provider-session-mcp-catalog-test",
+  providerInstanceId: ProviderInstanceId.make("codex"),
+  capabilities,
+  issuedAt: 1,
+});
+
+const visibleToolNames = (server: {
+  readonly tools: ReadonlyArray<{
+    readonly annotations: Context.Context<never>;
+    readonly tool: { readonly name: string };
+  }>;
+}) =>
+  server.tools
+    .filter(({ annotations }) => {
+      const enabledWhen = Context.getOption(annotations, McpSchema.EnabledWhen);
+      return (
+        enabledWhen._tag === "None" ||
+        enabledWhen.value({
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "mcp-catalog-test", version: "1.0.0" },
+        })
+      );
+    })
+    .map(({ tool }) => tool.name);
+
 it.effect("omits Worker tools when startup registration is disabled", () =>
   Effect.gen(function* () {
     const server = yield* McpServer.McpServer;
-    const names = server.tools.map(({ tool }) => tool.name);
+    const names = visibleToolNames(server);
     expect(names.some((name) => name.startsWith("worker_"))).toBe(false);
     expect(names).toContain("preview_status");
-    expect(names).toEqual(
-      expect.arrayContaining([
-        "computer_start",
-        "computer_status",
-        "computer_tabs",
-        "computer_select_tab",
-        "computer_navigate",
-        "computer_snapshot",
-        "computer_click",
-        "computer_fill",
-        "computer_type",
-        "computer_close",
-      ]),
-    );
-    expect(names).toContain("computer_open_url");
+    expect(names.some((name) => computerToolNames.has(name))).toBe(false);
   }).pipe(Effect.provide(makeCatalogLayer(false))),
+);
+
+it.effect("advertises computer tools only to an authorized invocation", () =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const unauthorizedNames = yield* Effect.sync(() => visibleToolNames(server));
+    const authorizedNames = yield* Effect.sync(() => visibleToolNames(server)).pipe(
+      Effect.provideService(
+        McpInvocationContext.McpInvocationContext,
+        makeInvocation(new Set(["computer"])),
+      ),
+    );
+
+    expect(unauthorizedNames.some((name) => computerToolNames.has(name))).toBe(false);
+    expect(authorizedNames).toEqual(expect.arrayContaining([...computerToolNames]));
+  }).pipe(
+    Effect.provide(makeCatalogLayer(false)),
+    Effect.provideService(
+      McpInvocationContext.McpInvocationContext,
+      makeInvocation(new Set(["preview"])),
+    ),
+  ),
 );
 
 it.effect("advertises exactly nine Worker tools when startup registration is enabled", () =>
@@ -105,9 +159,5 @@ it.effect("advertises exactly nine Worker tools when startup registration is ena
       .filter((name) => name.startsWith("worker_"));
     expect(names).toEqual(workerToolNames);
     expect(server.tools.map(({ tool }) => tool.name)).toContain("preview_status");
-    expect(server.tools.map(({ tool }) => tool.name)).toEqual(
-      expect.arrayContaining(["computer_start", "computer_snapshot", "computer_close"]),
-    );
-    expect(server.tools.map(({ tool }) => tool.name)).toContain("computer_open_url");
   }).pipe(Effect.provide(makeCatalogLayer(true))),
 );

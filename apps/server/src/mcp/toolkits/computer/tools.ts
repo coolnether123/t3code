@@ -14,8 +14,10 @@ import {
   ComputerOpenUrlFailedError,
   ComputerOpenUrlResult,
 } from "@t3tools/contracts";
+import * as Context from "effect/Context";
+import * as Fiber from "effect/Fiber";
 import { Schema } from "effect";
-import { Tool, Toolkit } from "effect/unstable/ai";
+import { McpSchema, Tool, Toolkit } from "effect/unstable/ai";
 
 import * as ChromeAutomation from "../../../browser/ChromeAutomation.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -46,133 +48,171 @@ const safeChromeTool = <T extends Tool.Any>(tool: T): T =>
 const idempotentChromeTool = <T extends Tool.Any>(tool: T): T =>
   safeChromeTool(tool).annotate(Tool.Idempotent, true) as T;
 
-export const ComputerStartTool = idempotentChromeTool(
-  Tool.make("computer_start", {
+/**
+ * MCP's tool-list filter runs inside the authenticated request fiber. Keep
+ * computer control out of catalogs unless that fiber carries the same
+ * capability used by the execution-time guard.
+ */
+export const hasCurrentComputerCapability = (): boolean => {
+  const fiber = Fiber.getCurrent();
+  if (!fiber) return false;
+  const invocation = Context.getOption(fiber.context, McpInvocationContext.McpInvocationContext);
+  return invocation._tag === "Some" && invocation.value.capabilities.has("computer");
+};
+
+const computerTool = <T extends Tool.Any>(tool: T): T =>
+  tool.annotate(McpSchema.EnabledWhen, hasCurrentComputerCapability) as T;
+
+export const ComputerStartTool = computerTool(
+  idempotentChromeTool(
+    Tool.make("computer_start", {
+      description:
+        "Start T3's persistent, user-visible Chrome session and select its first tab. This is idempotent and does not create a new profile.",
+      parameters: ComputerChromeEmptyInput,
+      success: ComputerChromeStatus,
+      failure: chromeFailure,
+      dependencies: chromeDependencies,
+    }).annotate(Tool.Title, "Start T3 Chrome"),
+  ),
+);
+
+export const ComputerStatusTool = computerTool(
+  readOnlyChromeTool(
+    Tool.make("computer_status", {
+      description: "Report the lifecycle and selected-tab state of T3's managed Chrome session.",
+      parameters: ComputerChromeEmptyInput,
+      success: ComputerChromeStatus,
+      failure: chromeFailure,
+      dependencies: chromeDependencies,
+    }).annotate(Tool.Title, "Get T3 Chrome status"),
+  ),
+);
+
+export const ComputerTabsTool = computerTool(
+  readOnlyChromeTool(
+    Tool.make("computer_tabs", {
+      description:
+        "List the readable IDs, URLs, titles, and selection state of managed Chrome tabs.",
+      parameters: ComputerChromeEmptyInput,
+      success: Schema.Array(ComputerChromeTab),
+      failure: chromeFailure,
+      dependencies: chromeDependencies,
+    }).annotate(Tool.Title, "List T3 Chrome tabs"),
+  ),
+);
+
+export const ComputerSelectTabTool = computerTool(
+  idempotentChromeTool(
+    Tool.make("computer_select_tab", {
+      description: "Select one managed Chrome tab by its ID for subsequent navigation and actions.",
+      parameters: ComputerChromeSelectTabInput,
+      success: ComputerChromeTab,
+      failure: chromeFailure,
+      dependencies: chromeDependencies,
+    }).annotate(Tool.Title, "Select T3 Chrome tab"),
+  ),
+);
+
+export const ComputerNavigateTool = computerTool(
+  safeChromeTool(
+    Tool.make("computer_navigate", {
+      description:
+        "Navigate the selected managed Chrome tab to an exact absolute HTTP or HTTPS URL, or reset it with exactly about:blank.",
+      parameters: ComputerChromeNavigateInput,
+      success: ComputerChromeTab,
+      failure: chromeFailure,
+      dependencies: chromeDependencies,
+    })
+      .annotate(Tool.Title, "Navigate T3 Chrome")
+      .annotate(Tool.OpenWorld, true),
+  ),
+);
+
+export const ComputerSnapshotTool = computerTool(
+  readOnlyChromeTool(
+    Tool.make("computer_snapshot", {
+      description:
+        "Inspect the selected managed Chrome tab and return its accessibility tree, DOM, and fresh interaction refs.",
+      parameters: ComputerChromeEmptyInput,
+      success: ComputerChromeSnapshot,
+      failure: chromeFailure,
+      dependencies: chromeDependencies,
+    })
+      .annotate(Tool.Title, "Snapshot T3 Chrome")
+      .annotate(Tool.OpenWorld, true),
+  ),
+);
+
+export const ComputerClickTool = computerTool(
+  mutatingChromeTool(
+    Tool.make("computer_click", {
+      description: "Click one ref from the latest snapshot or one explicit CSS selector.",
+      parameters: ComputerChromeTargetInput,
+      success: ComputerChromeActionResult,
+      failure: chromeFailure,
+      dependencies: chromeDependencies,
+    })
+      .annotate(Tool.Title, "Click T3 Chrome")
+      .annotate(Tool.OpenWorld, true),
+  ),
+);
+
+export const ComputerFillTool = computerTool(
+  mutatingChromeTool(
+    Tool.make("computer_fill", {
+      description:
+        "Replace the value of one snapshot ref or explicit CSS selector with literal text.",
+      parameters: ComputerChromeValueInput,
+      success: ComputerChromeActionResult,
+      failure: chromeFailure,
+      dependencies: chromeDependencies,
+    })
+      .annotate(Tool.Title, "Fill T3 Chrome field")
+      .annotate(Tool.OpenWorld, true),
+  ),
+);
+
+export const ComputerTypeTool = computerTool(
+  mutatingChromeTool(
+    Tool.make("computer_type", {
+      description: "Type literal text into one snapshot ref or explicit CSS selector.",
+      parameters: ComputerChromeValueInput,
+      success: ComputerChromeActionResult,
+      failure: chromeFailure,
+      dependencies: chromeDependencies,
+    })
+      .annotate(Tool.Title, "Type in T3 Chrome")
+      .annotate(Tool.OpenWorld, true),
+  ),
+);
+
+export const ComputerCloseTool = computerTool(
+  mutatingChromeTool(
+    Tool.make("computer_close", {
+      description: "Close T3's managed Chrome session and release its browser process.",
+      parameters: ComputerChromeEmptyInput,
+      success: ComputerChromeStatus,
+      failure: chromeFailure,
+      dependencies: chromeDependencies,
+    }).annotate(Tool.Title, "Close T3 Chrome"),
+  ),
+);
+
+export const ComputerOpenUrlTool = computerTool(
+  Tool.make("computer_open_url", {
     description:
-      "Start T3's persistent, user-visible Chrome session and select its first tab. This is idempotent and does not create a new profile.",
-    parameters: ComputerChromeEmptyInput,
-    success: ComputerChromeStatus,
-    failure: chromeFailure,
-    dependencies: chromeDependencies,
-  }).annotate(Tool.Title, "Start T3 Chrome"),
-);
-
-export const ComputerStatusTool = readOnlyChromeTool(
-  Tool.make("computer_status", {
-    description: "Report the lifecycle and selected-tab state of T3's managed Chrome session.",
-    parameters: ComputerChromeEmptyInput,
-    success: ComputerChromeStatus,
-    failure: chromeFailure,
-    dependencies: chromeDependencies,
-  }).annotate(Tool.Title, "Get T3 Chrome status"),
-);
-
-export const ComputerTabsTool = readOnlyChromeTool(
-  Tool.make("computer_tabs", {
-    description: "List the readable IDs, URLs, titles, and selection state of managed Chrome tabs.",
-    parameters: ComputerChromeEmptyInput,
-    success: Schema.Array(ComputerChromeTab),
-    failure: chromeFailure,
-    dependencies: chromeDependencies,
-  }).annotate(Tool.Title, "List T3 Chrome tabs"),
-);
-
-export const ComputerSelectTabTool = idempotentChromeTool(
-  Tool.make("computer_select_tab", {
-    description: "Select one managed Chrome tab by its ID for subsequent navigation and actions.",
-    parameters: ComputerChromeSelectTabInput,
-    success: ComputerChromeTab,
-    failure: chromeFailure,
-    dependencies: chromeDependencies,
-  }).annotate(Tool.Title, "Select T3 Chrome tab"),
-);
-
-export const ComputerNavigateTool = safeChromeTool(
-  Tool.make("computer_navigate", {
-    description:
-      "Navigate the selected managed Chrome tab to an exact absolute HTTP or HTTPS URL, or reset it with exactly about:blank.",
-    parameters: ComputerChromeNavigateInput,
-    success: ComputerChromeTab,
-    failure: chromeFailure,
-    dependencies: chromeDependencies,
+      "Open an exact absolute HTTP or HTTPS URL in the user's Google Chrome session. Use this when the Chrome extension is unavailable or Windows Computer Use cannot reliably focus the address bar. This tool has no domain allowlist and supports long authentication or relay URLs. It only navigates; continue with Chrome or Windows Computer Use to inspect and interact with the page.",
+    parameters: ComputerOpenUrlInput,
+    success: ComputerOpenUrlResult,
+    failure: Schema.Union([ComputerControlUnavailableError, ComputerOpenUrlFailedError]),
+    dependencies: [McpInvocationContext.McpInvocationContext, ExternalLauncher.ExternalLauncher],
   })
-    .annotate(Tool.Title, "Navigate T3 Chrome")
-    .annotate(Tool.OpenWorld, true),
+    .annotate(Tool.Title, "Open URL in Google Chrome")
+    .annotate(Tool.OpenWorld, true)
+    .annotate(Tool.Readonly, false)
+    .annotate(Tool.Destructive, false)
+    .annotate(Tool.Idempotent, false),
 );
-
-export const ComputerSnapshotTool = readOnlyChromeTool(
-  Tool.make("computer_snapshot", {
-    description:
-      "Inspect the selected managed Chrome tab and return its accessibility tree, DOM, and fresh interaction refs.",
-    parameters: ComputerChromeEmptyInput,
-    success: ComputerChromeSnapshot,
-    failure: chromeFailure,
-    dependencies: chromeDependencies,
-  })
-    .annotate(Tool.Title, "Snapshot T3 Chrome")
-    .annotate(Tool.OpenWorld, true),
-);
-
-export const ComputerClickTool = mutatingChromeTool(
-  Tool.make("computer_click", {
-    description: "Click one ref from the latest snapshot or one explicit CSS selector.",
-    parameters: ComputerChromeTargetInput,
-    success: ComputerChromeActionResult,
-    failure: chromeFailure,
-    dependencies: chromeDependencies,
-  })
-    .annotate(Tool.Title, "Click T3 Chrome")
-    .annotate(Tool.OpenWorld, true),
-);
-
-export const ComputerFillTool = mutatingChromeTool(
-  Tool.make("computer_fill", {
-    description:
-      "Replace the value of one snapshot ref or explicit CSS selector with literal text.",
-    parameters: ComputerChromeValueInput,
-    success: ComputerChromeActionResult,
-    failure: chromeFailure,
-    dependencies: chromeDependencies,
-  })
-    .annotate(Tool.Title, "Fill T3 Chrome field")
-    .annotate(Tool.OpenWorld, true),
-);
-
-export const ComputerTypeTool = mutatingChromeTool(
-  Tool.make("computer_type", {
-    description: "Type literal text into one snapshot ref or explicit CSS selector.",
-    parameters: ComputerChromeValueInput,
-    success: ComputerChromeActionResult,
-    failure: chromeFailure,
-    dependencies: chromeDependencies,
-  })
-    .annotate(Tool.Title, "Type in T3 Chrome")
-    .annotate(Tool.OpenWorld, true),
-);
-
-export const ComputerCloseTool = mutatingChromeTool(
-  Tool.make("computer_close", {
-    description: "Close T3's managed Chrome session and release its browser process.",
-    parameters: ComputerChromeEmptyInput,
-    success: ComputerChromeStatus,
-    failure: chromeFailure,
-    dependencies: chromeDependencies,
-  }).annotate(Tool.Title, "Close T3 Chrome"),
-);
-
-export const ComputerOpenUrlTool = Tool.make("computer_open_url", {
-  description:
-    "Open an exact absolute HTTP or HTTPS URL in the user's Google Chrome session. Use this when the Chrome extension is unavailable or Windows Computer Use cannot reliably focus the address bar. This tool has no domain allowlist and supports long authentication or relay URLs. It only navigates; continue with Chrome or Windows Computer Use to inspect and interact with the page.",
-  parameters: ComputerOpenUrlInput,
-  success: ComputerOpenUrlResult,
-  failure: Schema.Union([ComputerControlUnavailableError, ComputerOpenUrlFailedError]),
-  dependencies: [McpInvocationContext.McpInvocationContext, ExternalLauncher.ExternalLauncher],
-})
-  .annotate(Tool.Title, "Open URL in Google Chrome")
-  .annotate(Tool.OpenWorld, true)
-  .annotate(Tool.Readonly, false)
-  .annotate(Tool.Destructive, false)
-  .annotate(Tool.Idempotent, false);
 
 export const ComputerToolkit = Toolkit.make(
   ComputerStartTool,

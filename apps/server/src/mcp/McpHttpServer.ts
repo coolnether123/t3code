@@ -230,12 +230,13 @@ export const ComputerToolkitRegistrationLive = McpServer.toolkit(ComputerToolkit
 );
 
 /**
- * Effect MCP builds one tool catalog when this layer starts. Its conditional
- * registration API sees MCP initialize metadata, not the authenticated bearer
- * scope, so it cannot filter tools per provider session. The server setting
- * controls startup registration. Worker handlers still enforce the credential
- * capability and parent thread on every call. Changing the setting requires an
- * MCP server restart before the advertised catalog changes.
+ * Effect MCP builds one registry when this layer starts, then evaluates each
+ * tool's `EnabledWhen` predicate while serving `tools/list`. Computer tools
+ * use the authenticated invocation fiber for that predicate, so the registry
+ * can stay shared without advertising computer control to other sessions.
+ * Handlers still enforce the credential capability and parent thread on every
+ * call. The server setting controls startup registration for the Worker
+ * toolkit; changing it requires an MCP server restart.
  */
 export const makeToolkitRegistrationLive = (enableT3Workers: boolean) =>
   enableT3Workers
