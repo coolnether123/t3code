@@ -397,7 +397,7 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   const requestKind = extractWorkLogRequestKind(payload);
   const diagnostic =
     activity.kind === "runtime.warning" || activity.kind === "runtime.error"
-      ? normalizeDiagnosticDetail(payload?.detail)
+      ? normalizeDiagnosticDetail(payload?.detail ?? payload?.message)
       : (activity.kind === "thread.edit-from-here.files-not-restored" ||
             activity.kind === "checkpoint.revert.files-not-restored") &&
           isConversationOnlyRestorePayload(payload)
@@ -407,18 +407,18 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
             key: "conversation-only-rewind",
           }
         : null;
-  if (
+  if (!taskDetailAsLabel && diagnostic) {
+    entry.detail = diagnostic.preview;
+    entry.diagnosticKey = diagnostic.key;
+    if (diagnostic.technicalDetail) entry.technicalDetail = diagnostic.technicalDetail;
+  } else if (
     !taskDetailAsLabel &&
     payload &&
     typeof payload.detail === "string" &&
     payload.detail.length > 0
   ) {
     const detail = stripTrailingExitCode(payload.detail).output;
-    if (diagnostic) {
-      entry.detail = diagnostic.preview;
-      entry.diagnosticKey = diagnostic.key;
-      if (diagnostic.technicalDetail) entry.technicalDetail = diagnostic.technicalDetail;
-    } else if (detail) {
+    if (detail) {
       entry.detail = detail;
     }
   }

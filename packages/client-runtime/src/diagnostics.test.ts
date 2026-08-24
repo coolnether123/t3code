@@ -28,6 +28,23 @@ describe("normalizeDiagnosticDetail", () => {
       preview: "Worker stopped unexpectedly",
       key: "worker-stopped",
     });
+    expect(
+      normalizeDiagnosticDetail(
+        '{"timestamp":"2026-08-24T18:17:40.502456Z","level":"WARN","fields":{"message":"streamable HTTP post_message failed","endpoint_host":"localhost"}',
+      ),
+    ).toMatchObject({ preview: "MCP server unavailable", key: "mcp-unavailable" });
+  });
+
+  it("extracts the message from a truncated JSON-like diagnostic", () => {
+    const result = normalizeDiagnosticDetail(
+      '{"timestamp":"2026-08-24T18:17:46.473044Z","level":"ERROR","fields":{"message":"worker quit with fatal: Transport channel closed',
+    );
+
+    expect(result).toMatchObject({
+      preview: "Worker stopped unexpectedly",
+      key: "worker-stopped",
+    });
+    expect(result?.technicalDetail).toContain('"timestamp":"2026-08-24T18:17:46.473044Z"');
   });
 
   it("collapses whitespace and truncates the compact preview", () => {

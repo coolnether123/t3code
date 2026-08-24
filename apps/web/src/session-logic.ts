@@ -986,7 +986,7 @@ function toDerivedWorkLogEntry(
     : extractToolDetail(payload, title ?? activity.summary);
   const diagnostic =
     activity.kind === "runtime.warning" || activity.kind === "runtime.error"
-      ? normalizeDiagnosticDetail(payload?.detail)
+      ? normalizeDiagnosticDetail(payload?.detail ?? payload?.message)
       : (activity.kind === "thread.edit-from-here.files-not-restored" ||
             activity.kind === "checkpoint.revert.files-not-restored") &&
           isConversationOnlyRestorePayload(payload)

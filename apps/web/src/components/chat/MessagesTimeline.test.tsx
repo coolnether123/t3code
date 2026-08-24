@@ -1045,6 +1045,36 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("Work Log");
   });
 
+  it("keeps historical serialized diagnostics out of the collapsed row", () => {
+    const rawMessage = String.raw`{"timestamp":"2026-08-24T18:17:46.473044Z","level":"ERROR","fields":{"message":"worker quit with fatal: Transport channel closed"},"target":"rmcp::transport::worker"}`;
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "historical-runtime-warning",
+            kind: "work",
+            createdAt: "2026-08-24T18:17:46.473044Z",
+            entry: {
+              id: "historical-runtime-warning",
+              createdAt: "2026-08-24T18:17:46.473044Z",
+              label: "Work log",
+              detail: "Worker stopped unexpectedly",
+              technicalDetail: rawMessage,
+              tone: "error",
+              sourceActivityKind: "runtime.warning",
+              diagnosticKey: "worker-stopped",
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain("Worker stopped unexpectedly");
+    expect(markup).toContain('aria-expanded="false"');
+    expect(markup).not.toContain('{"timestamp"');
+  });
+
   it("renders edit-from-here failures as an accessible mobile-safe disclosure card", () => {
     const technicalDetails =
       "Orchestration command invariant failed (thread.edit-from-here) at A:\\Dev\\server.ts:12:3";

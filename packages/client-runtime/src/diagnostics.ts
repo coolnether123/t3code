@@ -29,6 +29,28 @@ function compact(value: string, limit: number): string {
   return `${normalized.slice(0, Math.max(1, limit - 1)).trimEnd()}…`;
 }
 
+function decodePartialJsonString(value: string): string {
+  try {
+    return JSON.parse(`"${value}"`) as string;
+  } catch {
+    return value.replace(/\\([\\"\\/bfnrt])/g, (_match, escaped: string) => {
+      const decoded: Record<string, string> = {
+        b: "\b",
+        f: "\f",
+        n: "\n",
+        r: "\r",
+        t: "\t",
+      };
+      return escaped === "\\" ? "\\" : (decoded[escaped] ?? escaped);
+    });
+  }
+}
+
+function extractPartialMessage(raw: string): string | null {
+  const match = /["']message["']\s*:\s*["']((?:\\.|[^"'\\])*)/.exec(raw);
+  return match?.[1] ? decodePartialJsonString(match[1]) : null;
+}
+
 function parseDiagnosticValue(raw: string): { message: string; technicalDetail: string } {
   const trimmed = raw.trim();
   if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
@@ -45,11 +67,16 @@ function parseDiagnosticValue(raw: string): { message: string; technicalDetail: 
       return { message, technicalDetail: trimmed };
     }
   } catch {
-    // Some providers prefix JSON with a timestamp or emit partial JSON. Keep
-    // the original text in Advanced details and use its compact form inline.
+    const partialMessage = extractPartialMessage(trimmed);
+    if (partialMessage) {
+      return { message: partialMessage, technicalDetail: trimmed };
+    }
   }
 
-  return { message: trimmed, technicalDetail: trimmed };
+  return {
+    message: extractPartialMessage(trimmed) ?? trimmed,
+    technicalDetail: trimmed,
+  };
 }
 
 function endpointName(value: string): string | null {
@@ -74,6 +101,16 @@ function namedMessage(message: string): { preview: string; key: string } | null 
     /(failed|unavailable|not listening|connection refused|request send failed|could not)/.test(
       normalized,
     )
+  ) {
+    return {
+      preview: name ? `${name} unavailable` : "MCP server unavailable",
+      key: name ? `mcp-unavailable:${name.toLowerCase()}` : "mcp-unavailable",
+    };
+  }
+
+  if (
+    /(streamable http|post_message|mcp initialize|handshaking with mcp)/.test(normalized) &&
+    /(failed|error|refused|unavailable|retrying)/.test(normalized)
   ) {
     return {
       preview: name ? `${name} unavailable` : "MCP server unavailable",

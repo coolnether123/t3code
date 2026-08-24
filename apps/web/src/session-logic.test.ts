@@ -1043,6 +1043,26 @@ describe("deriveWorkLogEntries", () => {
     expect(entries[0]?.technicalDetail).toContain('"fields"');
   });
 
+  it("normalizes historical runtime warning messages stored in payload.message", () => {
+    const rawMessage = String.raw`{"timestamp":"2026-08-24T18:17:46.473044Z","level":"ERROR","fields":{"message":"worker quit with fatal: Transport channel closed, when Client(HttpRequest(HttpRequest(\"http/request failed: error sending request for url (http://localhost:27985/)\")))"},"target":"rmcp::transport::worker"}`;
+    const [entry] = deriveWorkLogEntries([
+      makeActivity({
+        id: "historical-runtime-warning",
+        kind: "runtime.warning",
+        summary: "Work log",
+        tone: "error",
+        payload: { message: rawMessage },
+      }),
+    ]);
+
+    expect(entry).toMatchObject({
+      detail: "Worker stopped unexpectedly",
+      diagnosticKey: "worker-stopped",
+      technicalDetail: rawMessage,
+    });
+    expect(entry?.detail).not.toContain('{"timestamp"');
+  });
+
   it("explains conversation-only rewinds without implying that files changed", () => {
     const [entry] = deriveWorkLogEntries([
       makeActivity({

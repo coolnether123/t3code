@@ -217,6 +217,34 @@ describe("buildThreadFeed", () => {
     expect(group.activities[0]?.getFullDetail()).toContain('"fields"');
   });
 
+  it("normalizes historical payload.message diagnostics for rows and copy", () => {
+    const rawMessage = String.raw`{"timestamp":"2026-08-24T18:17:46.473044Z","level":"ERROR","fields":{"message":"worker quit with fatal: Transport channel closed"},"target":"rmcp::transport::worker"}`;
+    const group = buildThreadFeed(
+      makeThread({
+        id: ThreadId.make("thread-historical-runtime-warning"),
+        projectId: ProjectId.make("project-diagnostics"),
+        title: "Historical diagnostics",
+        activities: [
+          makeActivity({
+            id: EventId.make("historical-runtime-warning"),
+            kind: "runtime.warning",
+            summary: "Work log",
+            createdAt: "2026-08-24T18:17:46.473044Z",
+            payload: { message: rawMessage },
+          }),
+        ],
+      }),
+    ).find((entry) => entry.type === "activity-group");
+
+    expect(group?.type).toBe("activity-group");
+    if (group?.type !== "activity-group") return;
+    const [activity] = group.activities;
+    expect(activity?.detail).toBe("Worker stopped unexpectedly");
+    expect(activity?.detail).not.toContain('{"timestamp"');
+    expect(activity?.getCopyText()).not.toContain('{"timestamp"');
+    expect(activity?.getFullDetail()).toContain('{"timestamp"');
+  });
+
   it("uses the additive conversation-only marker and accepts older restore payloads", () => {
     const entries = buildThreadFeed(
       makeThread({
