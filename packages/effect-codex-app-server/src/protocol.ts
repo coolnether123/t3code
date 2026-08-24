@@ -33,7 +33,9 @@ export interface CodexAppServerIncomingRequest {
 
 export interface CodexAppServerPatchedProtocolOptions {
   readonly stdio: Stdio.Stdio;
-  readonly terminationError?: Effect.Effect<CodexError.CodexAppServerError>;
+  readonly terminationError?: (
+    context: CodexAppServerTerminationContext,
+  ) => Effect.Effect<CodexError.CodexAppServerError>;
   readonly logIncoming?: boolean;
   readonly logOutgoing?: boolean;
   readonly logger?: (event: CodexAppServerProtocolLogEvent) => Effect.Effect<void, never>;
@@ -44,6 +46,11 @@ export interface CodexAppServerPatchedProtocolOptions {
     request: CodexAppServerIncomingRequest,
   ) => Effect.Effect<unknown, CodexError.CodexAppServerError>;
   readonly onTermination?: (error: CodexError.CodexAppServerError) => Effect.Effect<void, never>;
+}
+
+export interface CodexAppServerTerminationContext {
+  readonly method?: string;
+  readonly requestId?: string;
 }
 
 export interface CodexAppServerPatchedProtocol {
@@ -181,6 +188,15 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
           }),
         ),
         Effect.andThen(Ref.set(pending, new Map())),
+      );
+
+    const activeRequestContext = (): Effect.Effect<CodexAppServerTerminationContext> =>
+      Ref.get(pending).pipe(
+        Effect.map((current) => {
+          const last = [...current.entries()].at(-1);
+          if (!last) return {};
+          return { method: last[1].method, requestId: last[0] };
+        }),
       );
 
     const handleTermination = (classify: () => Effect.Effect<CodexError.CodexAppServerError>) =>
@@ -372,10 +388,10 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
             Effect.matchEffect({
               onFailure: (error) => handleTermination(() => Effect.succeed(error)),
               onSuccess: () =>
-                handleTermination(
-                  () =>
-                    options.terminationError ??
-                    Effect.succeed(new CodexError.CodexAppServerInputStreamEndedError({})),
+                handleTermination(() =>
+                  options.terminationError
+                    ? Effect.flatMap(activeRequestContext(), options.terminationError)
+                    : Effect.succeed(new CodexError.CodexAppServerInputStreamEndedError({})),
                 ),
             }),
           ),

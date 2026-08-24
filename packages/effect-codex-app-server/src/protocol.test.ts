@@ -370,7 +370,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
       const { stdio, input } = yield* makeInMemoryStdio();
       const events: Array<CodexProtocol.CodexAppServerProtocolLogEvent> = [];
       const termination = yield* Deferred.make<CodexError.CodexAppServerError>();
-      yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+      const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
         stdio,
         logIncoming: true,
         logger: (event) =>
@@ -402,7 +402,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
       const secret = "codex-unroutable-secret-sentinel";
       const { stdio, input } = yield* makeInMemoryStdio();
       const termination = yield* Deferred.make<CodexError.CodexAppServerError>();
-      yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+      const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
         stdio,
         onTermination: (error) => Deferred.succeed(termination, error).pipe(Effect.asVoid),
       });
@@ -431,7 +431,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
     Effect.gen(function* () {
       const { stdio, input } = yield* makeInMemoryStdio();
       const termination = yield* Deferred.make<CodexError.CodexAppServerError>();
-      yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+      const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
         stdio,
         onTermination: (error) => Deferred.succeed(termination, error).pipe(Effect.asVoid),
       });
@@ -442,6 +442,41 @@ it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
       assert.instanceOf(error, CodexError.CodexAppServerInputStreamEndedError);
       assert.equal(error.message, "Codex App Server input stream ended.");
       assert.equal("cause" in error, false);
+    }),
+  );
+
+  it.effect("reports the active RPC method and request id when the process ends", () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const termination = yield* Deferred.make<CodexError.CodexAppServerError>();
+      const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio,
+        terminationError: (context) =>
+          Effect.sync(
+            () =>
+              new CodexError.CodexAppServerProcessExitedError({
+                code: 1,
+                ...context,
+              }),
+          ),
+        onTermination: (error) => Deferred.succeed(termination, error).pipe(Effect.asVoid),
+      });
+
+      yield* transport.request("config/read", { includeLayers: false }).pipe(Effect.forkScoped);
+      const outbound = yield* Schema.decodeEffect(Schema.fromJsonString(Schema.Unknown))(
+        yield* Queue.take(output),
+      );
+      assert.deepEqual(outbound, {
+        id: 1,
+        method: "config/read",
+        params: { includeLayers: false },
+      });
+      yield* Queue.end(input);
+
+      const error = yield* Deferred.await(termination);
+      assert.instanceOf(error, CodexError.CodexAppServerProcessExitedError);
+      assert.equal(error.method, "config/read");
+      assert.equal(error.requestId, "1");
     }),
   );
 });

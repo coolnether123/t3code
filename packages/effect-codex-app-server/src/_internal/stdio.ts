@@ -1,12 +1,15 @@
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
+import * as Ref from "effect/Ref";
 import * as Sink from "effect/Sink";
+import * as Scope from "effect/Scope";
 import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import * as CodexError from "../errors.ts";
+import { appendBoundedCodexDiagnostic, sanitizeCodexDiagnosticText } from "./diagnostics.ts";
 
 const encoder = new TextEncoder();
 
@@ -49,8 +52,47 @@ type ChildProcessTerminationHandle = Pick<
   "exitCode" | "pid"
 >;
 
+export interface CodexAppServerStderrDiagnostics {
+  readonly stderr: string;
+  readonly stderrTruncated: boolean;
+}
+
+export interface CodexAppServerStderrCapture {
+  readonly snapshot: Effect.Effect<CodexAppServerStderrDiagnostics>;
+}
+
+export const captureChildStderr = (
+  stderr: Stream.Stream<Uint8Array, unknown>,
+  onChunk?: (chunk: string) => Effect.Effect<void, never>,
+): Effect.Effect<CodexAppServerStderrCapture, never, Scope.Scope> =>
+  Effect.gen(function* () {
+    const state = yield* Ref.make<CodexAppServerStderrDiagnostics>({
+      stderr: "",
+      stderrTruncated: false,
+    });
+    yield* stderr.pipe(
+      Stream.decodeText(),
+      Stream.runForEach((chunk) =>
+        Ref.update(state, (current) => {
+          const next = appendBoundedCodexDiagnostic(current.stderr, chunk);
+          return {
+            stderr: next.value,
+            stderrTruncated: current.stderrTruncated || next.truncated,
+          };
+        }).pipe(
+          Effect.andThen(onChunk ? onChunk(sanitizeCodexDiagnosticText(chunk)) : Effect.void),
+        ),
+      ),
+      Effect.ignore,
+      Effect.forkScoped,
+    );
+    return { snapshot: Ref.get(state) } satisfies CodexAppServerStderrCapture;
+  });
+
 export const makeTerminationError = (
   handle: ChildProcessTerminationHandle,
+  context: { readonly method?: string; readonly requestId?: string } = {},
+  diagnostics: CodexAppServerStderrDiagnostics = { stderr: "", stderrTruncated: false },
 ): Effect.Effect<CodexError.CodexAppServerError> =>
   Effect.match(handle.exitCode, {
     onFailure: (cause) =>
@@ -59,5 +101,12 @@ export const makeTerminationError = (
         pid: handle.pid,
         cause,
       }),
-    onSuccess: (code) => new CodexError.CodexAppServerProcessExitedError({ code, pid: handle.pid }),
+    onSuccess: (code) =>
+      new CodexError.CodexAppServerProcessExitedError({
+        code,
+        pid: handle.pid,
+        ...(diagnostics.stderr.length > 0 ? diagnostics : {}),
+        ...(context.method === undefined ? {} : { method: context.method }),
+        ...(context.requestId === undefined ? {} : { requestId: context.requestId }),
+      }),
   });

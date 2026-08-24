@@ -4,7 +4,6 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stdio from "effect/Stdio";
-import * as Stream from "effect/Stream";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
 import * as CodexRpc from "./_generated/meta.gen.ts";
@@ -16,7 +15,7 @@ import {
   encodeOptionalPayload,
   runHandler,
 } from "./_internal/shared.ts";
-import { makeChildStdio, makeTerminationError } from "./_internal/stdio.ts";
+import { captureChildStderr, makeChildStdio, makeTerminationError } from "./_internal/stdio.ts";
 
 export interface CodexAppServerClientOptions {
   readonly logIncoming?: boolean;
@@ -24,6 +23,7 @@ export interface CodexAppServerClientOptions {
   readonly logger?: (
     event: CodexProtocol.CodexAppServerProtocolLogEvent,
   ) => Effect.Effect<void, never>;
+  readonly onStderr?: (chunk: string) => Effect.Effect<void, never>;
 }
 
 interface CodexAppServerClientRaw {
@@ -87,7 +87,9 @@ type ServerNotificationHandler = (
 export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make")(function* (
   stdio: Stdio.Stdio,
   options: CodexAppServerClientOptions = {},
-  terminationError?: Effect.Effect<CodexError.CodexAppServerError>,
+  terminationError?: (
+    context: CodexProtocol.CodexAppServerTerminationContext,
+  ) => Effect.Effect<CodexError.CodexAppServerError>,
 ): Effect.fn.Return<CodexAppServerClient["Service"], never, Scope.Scope> {
   const requestHandlers = new Map<string, ServerRequestHandler>();
   const notificationHandlers = new Map<string, Array<ServerNotificationHandler>>();
@@ -264,6 +266,10 @@ export const layerChildProcess = (
 const makeChildProcessClient = Effect.fn(
   "effect-codex-app-server/CodexAppServerClient.makeChildProcessClient",
 )(function* (handle: ChildProcessSpawner.ChildProcessHandle, options: CodexAppServerClientOptions) {
-  yield* Stream.runDrain(handle.stderr).pipe(Effect.ignore, Effect.forkScoped);
-  return yield* make(makeChildStdio(handle), options, makeTerminationError(handle));
+  const stderr = yield* captureChildStderr(handle.stderr, options.onStderr);
+  return yield* make(makeChildStdio(handle), options, (context) =>
+    stderr.snapshot.pipe(
+      Effect.flatMap((diagnostics) => makeTerminationError(handle, context, diagnostics)),
+    ),
+  );
 });

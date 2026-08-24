@@ -149,13 +149,29 @@ export class CodexAppServerProcessExitedError extends Schema.TaggedErrorClass<Co
   {
     code: Schema.optional(Schema.Number),
     pid: Schema.optionalKey(Schema.Int),
+    stderr: Schema.optionalKey(Schema.String),
+    stderrTruncated: Schema.optionalKey(Schema.Boolean),
+    method: Schema.optionalKey(Schema.String),
+    requestId: Schema.optionalKey(Schema.String),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
   override get message() {
-    return this.code === undefined
-      ? "Codex App Server process exited"
-      : `Codex App Server process exited with code ${this.code}`;
+    const exitMessage =
+      this.code === undefined
+        ? "Codex App Server process exited"
+        : `Codex App Server process exited with code ${this.code}`;
+    const requestContext =
+      this.method === undefined
+        ? ""
+        : ` while handling method '${this.method}'${
+            this.requestId === undefined ? "" : ` (request ${this.requestId})`
+          }`;
+    const stderr = this.stderr === undefined ? "" : ` Stderr: ${this.stderr}`;
+    const truncation = this.stderrTruncated === true ? " [stderr truncated]" : "";
+    const separator = requestContext.length > 0 && stderr.length > 0 ? "." : "";
+    const stderrPrefix = requestContext.length === 0 && stderr.length > 0 ? "." : "";
+    return `${exitMessage}${requestContext}${separator}${stderrPrefix}${stderr}${truncation}`;
   }
 }
 

@@ -49,6 +49,7 @@ import {
   type CodexComputerControlMode,
 } from "../CodexDeveloperInstructions.ts";
 import { isWorkerLifecycleToolName } from "../../worker/WorkerThreadBoundary.ts";
+import { quarantineCorruptCodexDenyReadAclState } from "./CodexSandboxRecovery.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
 
 const PROVIDER = ProviderDriverKind.make("codex");
@@ -1139,10 +1140,15 @@ export const makeCodexSessionRuntime = (
   ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | Scope.Scope
 > =>
   Effect.gen(function* () {
+    // Codex's Windows sandbox reads this user-level state before the app-server
+    // handshake. Quarantine the one known all-NUL corruption before spawning so
+    // a thread start does not inherit a process that is guaranteed to exit.
+    yield* quarantineCorruptCodexDenyReadAclState();
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const runtimeScope = yield* Scope.Scope;
     const crypto = yield* Crypto.Crypto;
     const events = yield* Queue.unbounded<ProviderEvent>();
+    const stderrChunks = yield* Queue.unbounded<string>();
     const pendingApprovalsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingApproval>());
     const approvalCorrelationsRef = yield* Ref.make(new Map<string, ApprovalCorrelation>());
     const pendingUserInputsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingUserInput>());
@@ -1192,10 +1198,9 @@ export const makeCodexSessionRuntime = (
         ),
       );
 
-    const clientContext = yield* CodexClient.layerChildProcess(child).pipe(
-      Layer.build,
-      Effect.provideService(Scope.Scope, runtimeScope),
-    );
+    const clientContext = yield* CodexClient.layerChildProcess(child, {
+      onStderr: (chunk) => Queue.offer(stderrChunks, chunk).pipe(Effect.asVoid),
+    }).pipe(Layer.build, Effect.provideService(Scope.Scope, runtimeScope));
     const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
       Effect.provide(clientContext),
     );
@@ -2057,8 +2062,7 @@ export const makeCodexSessionRuntime = (
     );
 
     const stderrRemainderRef = yield* Ref.make("");
-    yield* child.stderr.pipe(
-      Stream.decodeText(),
+    yield* Stream.fromQueue(stderrChunks).pipe(
       Stream.runForEach((chunk) =>
         Ref.modify(stderrRemainderRef, (current) => {
           const combined = current + chunk;
