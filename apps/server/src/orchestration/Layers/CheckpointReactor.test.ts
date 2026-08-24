@@ -252,6 +252,8 @@ function createGitRepository() {
   runGit(cwd, ["config", "user.email", "test@example.com"]);
   runGit(cwd, ["config", "user.name", "Test User"]);
   NodeFS.writeFileSync(NodePath.join(cwd, "README.md"), "v1\n", "utf8");
+  NodeFS.mkdirSync(NodePath.join(cwd, "apps", "server"), { recursive: true });
+  NodeFS.writeFileSync(NodePath.join(cwd, "apps", "server", ".keep"), "tracked\n", "utf8");
   runGit(cwd, ["add", "."]);
   runGit(cwd, ["commit", "-m", "Initial"]);
   return cwd;
@@ -325,6 +327,7 @@ describe("CheckpointReactor", () => {
     readonly providerName?: ProviderDriverKind;
     readonly gitStatusRefreshCalls?: Array<string>;
     readonly useLinkedWorktree?: boolean;
+    readonly useNestedThreadCwd?: boolean;
   }) {
     const repositoryRoot = createGitRepository();
     tempDirs.push(repositoryRoot);
@@ -342,6 +345,9 @@ describe("CheckpointReactor", () => {
       threadBranch = "checkpoint-reactor-linked";
       runGit(repositoryRoot, ["worktree", "add", "-b", threadBranch, cwd]);
       projectWorkspaceRoot = repositoryRoot;
+    }
+    if (options?.useNestedThreadCwd === true) {
+      threadWorktreePath = NodePath.join(repositoryRoot, "apps", "server");
     }
     const provider = createProviderServiceHarness(
       cwd,
@@ -1328,6 +1334,129 @@ describe("CheckpointReactor", () => {
     ).toBe("v2\n");
   });
 
+  it("resolves a nested recorded workspace through the Git repository", async () => {
+    const harness = await createHarness({ useNestedThreadCwd: true });
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    await harness.dispatch({
+      type: "thread.session.set",
+      commandId: CommandId.make("cmd-nested-session-set"),
+      threadId: ThreadId.make("thread-1"),
+      session: {
+        threadId: ThreadId.make("thread-1"),
+        status: "ready",
+        providerName: "codex",
+        runtimeMode: "approval-required",
+        activeTurnId: null,
+        lastError: null,
+        updatedAt: createdAt,
+      },
+      createdAt,
+    });
+    for (const turnCount of [1, 2] as const) {
+      await harness.dispatch({
+        type: "thread.turn.diff.complete",
+        commandId: CommandId.make(`cmd-nested-diff-${turnCount}`),
+        threadId: ThreadId.make("thread-1"),
+        turnId: asTurnId(`nested-turn-${turnCount}`),
+        completedAt: createdAt,
+        checkpointRef: checkpointRefForThreadTurn(ThreadId.make("thread-1"), turnCount),
+        status: "ready",
+        files: [],
+        checkpointTurnCount: turnCount,
+        createdAt,
+      });
+    }
+
+    await harness.dispatch({
+      type: "thread.checkpoint.revert",
+      commandId: CommandId.make("cmd-nested-revert"),
+      threadId: ThreadId.make("thread-1"),
+      turnCount: 1,
+      createdAt,
+    });
+    const revertEvents = await waitForEvent(
+      harness.engine,
+      (event) => event.type === "thread.reverted" || event.type === "thread.activity-appended",
+    );
+    const reverted = revertEvents.find((event) => event.type === "thread.reverted");
+    const revertFailure = revertEvents.find(
+      (event) =>
+        event.type === "thread.activity-appended" &&
+        (event as { payload?: { activity?: { kind?: string } } }).payload?.activity?.kind ===
+          "checkpoint.revert.failed",
+    );
+    if (!reverted) {
+      throw new Error(`Nested restore failed: ${JSON.stringify(revertFailure)}`);
+    }
+
+    expect(reverted).toMatchObject({
+      type: "thread.reverted",
+      payload: { workspaceRestore: { filesRestored: true } },
+    });
+    expect(NodeFS.existsSync(NodePath.join(harness.cwd, "apps", "server", ".keep"))).toBe(true);
+  });
+
+  it("rewinds a legacy task with an unavailable workspace without claiming file restoration", async () => {
+    const unavailableWorkspace = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "t3-checkpoint-unavailable-workspace-"),
+    );
+    tempDirs.push(unavailableWorkspace);
+    const harness = await createHarness({
+      hasSession: false,
+      seedFilesystemCheckpoints: false,
+      projectWorkspaceRoot: unavailableWorkspace,
+      threadWorktreePath: unavailableWorkspace,
+    });
+    const sourceMessageId = MessageId.make("legacy-root-source");
+    const replacementMessageId = MessageId.make("legacy-root-replacement");
+    const createdAt = "2026-01-01T00:00:00.000Z";
+
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("legacy-root-turn"),
+      threadId: ThreadId.make("thread-1"),
+      message: { messageId: sourceMessageId, role: "user", text: "Old prompt", attachments: [] },
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+      runtimeMode: "approval-required",
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      createdAt,
+    });
+    await harness.drain();
+    await harness.dispatch({
+      type: "thread.edit-from-here",
+      commandId: CommandId.make("legacy-root-rewind"),
+      threadId: ThreadId.make("thread-1"),
+      sourceMessageId,
+      replacementMessageId,
+      editedText: "New prompt",
+      mode: "rewind",
+      createdAt,
+    });
+    const finished = await waitForEvent(
+      harness.engine,
+      (event) => event.type === "thread.edit-from-here-finished",
+    );
+    await harness.drain();
+
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === "thread-1");
+    const finishedEvent = finished.find((event) => event.type === "thread.edit-from-here-finished");
+    expect(finishedEvent).toMatchObject({
+      payload: {
+        workspaceRestore: { filesRestored: false, reason: "workspace-unavailable" },
+      },
+    });
+    expect(thread?.messages.map((message) => message.id)).toContain(replacementMessageId);
+    expect(thread?.activities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "thread.edit-from-here.files-not-restored",
+          payload: expect.objectContaining({ filesRestored: false }),
+        }),
+      ]),
+    );
+  });
+
   it("restores a linked worktree owned by the project repository", async () => {
     const harness = await createHarness({ useLinkedWorktree: true });
     const createdAt = "2026-01-01T00:00:00.000Z";
@@ -1928,7 +2057,12 @@ describe("CheckpointReactor", () => {
     ]);
     expect(branchAfter?.messages.some((message) => message.id === originalMessageId)).toBe(false);
     expect(branchAfter?.messages.some((message) => message.id === originalAssistantId)).toBe(false);
-    expect(branchAfter?.activities).toEqual([]);
+    expect(branchAfter?.activities).toEqual([
+      expect.objectContaining({
+        kind: "thread.edit-from-here.files-not-restored",
+        payload: expect.objectContaining({ filesRestored: false }),
+      }),
+    ]);
     expect(
       branchAfter?.messages.filter((message) => message.id === rewindRequest.replacementMessageId),
     ).toHaveLength(1);

@@ -1073,6 +1073,23 @@ const ThreadActivityAppendCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+export const ThreadWorkspaceRestoreOutcome = Schema.Struct({
+  filesRestored: Schema.Boolean,
+  reason: Schema.optional(
+    Schema.Literals([
+      "workspace-unavailable",
+      "repository-mismatch",
+      "branch-mismatch",
+      "checkpoint-missing",
+      "checkpoint-invalid",
+      "current-checkpoint-missing",
+      "current-worktree-dirty",
+    ]),
+  ),
+  detail: Schema.optional(TrimmedNonEmptyString),
+});
+export type ThreadWorkspaceRestoreOutcome = typeof ThreadWorkspaceRestoreOutcome.Type;
+
 const ThreadRevertCompleteCommand = Schema.Struct({
   type: Schema.Literal("thread.revert.complete"),
   commandId: CommandId,
@@ -1081,6 +1098,7 @@ const ThreadRevertCompleteCommand = Schema.Struct({
   sourceMessageId: Schema.optional(MessageId),
   cutoffCreatedAt: Schema.optional(IsoDateTime),
   editFromHereRequestId: Schema.optional(CommandId),
+  workspaceRestore: Schema.optional(ThreadWorkspaceRestoreOutcome),
   createdAt: IsoDateTime,
 });
 
@@ -1091,6 +1109,7 @@ export const ThreadEditFromHereFinishCommand = Schema.Struct({
   requestId: CommandId,
   targetThreadId: Schema.optional(ThreadId),
   error: Schema.optional(TrimmedNonEmptyString),
+  workspaceRestore: Schema.optional(ThreadWorkspaceRestoreOutcome),
   createdAt: IsoDateTime,
 });
 
@@ -1369,6 +1388,7 @@ export const ThreadEditFromHereFinishedPayload = Schema.Struct({
   requestId: CommandId,
   targetThreadId: Schema.optional(ThreadId),
   error: Schema.optional(TrimmedNonEmptyString),
+  workspaceRestore: Schema.optional(ThreadWorkspaceRestoreOutcome),
   finishedAt: IsoDateTime,
 });
 
@@ -1378,6 +1398,7 @@ export const ThreadRevertedPayload = Schema.Struct({
   sourceMessageId: Schema.optional(MessageId),
   cutoffCreatedAt: Schema.optional(IsoDateTime),
   editFromHereRequestId: Schema.optional(CommandId),
+  workspaceRestore: Schema.optional(ThreadWorkspaceRestoreOutcome),
 });
 
 export const ThreadSessionStopRequestedPayload = Schema.Struct({

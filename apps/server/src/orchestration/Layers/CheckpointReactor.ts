@@ -4,6 +4,7 @@ import {
   EventId,
   MessageId,
   type OrchestrationThread,
+  type ThreadWorkspaceRestoreOutcome,
   type ProjectId,
   type ProviderSession,
   type SubagentBackend,
@@ -39,11 +40,15 @@ import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts"
 import { RuntimeReceiptBus } from "../Services/RuntimeReceiptBus.ts";
 import type { CheckpointStoreError } from "../../checkpointing/Errors.ts";
 import type { OrchestrationDispatchError } from "../Errors.ts";
-import { isGitRepository } from "../../git/Utils.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as WorkspaceEntries from "../../workspace/WorkspaceEntries.ts";
 import { WorkerService } from "../../worker/WorkerService.ts";
-import type { VcsCheckpointRestoreFailureReason } from "../../vcs/VcsDriver.ts";
+import type {
+  VcsCheckpointRestoreFailureReason,
+  VcsCheckpointRestoreResult,
+} from "../../vcs/VcsDriver.ts";
+
+type RewindFailureReason = VcsCheckpointRestoreFailureReason | "orchestration-receipt-rejected";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
@@ -144,7 +149,7 @@ const make = Effect.gen(function* () {
     readonly threadId: ThreadId;
     readonly turnCount: number;
     readonly detail: string;
-    readonly reason?: VcsCheckpointRestoreFailureReason;
+    readonly reason?: RewindFailureReason;
     readonly createdAt: string;
   }) =>
     Effect.all({
@@ -165,6 +170,43 @@ const make = Effect.gen(function* () {
               turnCount: input.turnCount,
               detail: input.detail,
               ...(input.reason !== undefined ? { reason: input.reason } : {}),
+            },
+            turnId: null,
+            createdAt: input.createdAt,
+          },
+          createdAt: input.createdAt,
+        }),
+      ),
+    );
+
+  const appendWorkspaceRestoreOutcomeActivity = (input: {
+    readonly threadId: ThreadId;
+    readonly turnCount: number;
+    readonly outcome: ThreadWorkspaceRestoreOutcome;
+    readonly editFromHere: boolean;
+    readonly createdAt: string;
+  }) =>
+    Effect.all({
+      commandId: serverCommandId("checkpoint-files-not-restored"),
+      activityId: serverEventId,
+    }).pipe(
+      Effect.flatMap(({ commandId, activityId }) =>
+        orchestrationEngine.dispatch({
+          type: "thread.activity.append",
+          commandId,
+          threadId: input.threadId,
+          activity: {
+            id: activityId,
+            tone: "info",
+            kind: input.editFromHere
+              ? "thread.edit-from-here.files-not-restored"
+              : "checkpoint.revert.files-not-restored",
+            summary: "Conversation rewound; files not restored",
+            payload: {
+              turnCount: input.turnCount,
+              filesRestored: false,
+              ...(input.outcome.reason !== undefined ? { reason: input.outcome.reason } : {}),
+              ...(input.outcome.detail !== undefined ? { detail: input.outcome.detail } : {}),
             },
             turnId: null,
             createdAt: input.createdAt,
@@ -252,8 +294,6 @@ const make = Effect.gen(function* () {
     return project ? [project] : [];
   });
 
-  const isGitWorkspace = (cwd: string) => isGitRepository(cwd);
-
   // Resolves the workspace CWD for checkpoint operations, preferring the
   // active provider session CWD and falling back to the thread/project config.
   // Returns undefined when no CWD can be determined or the workspace is not
@@ -270,24 +310,20 @@ const make = Effect.gen(function* () {
       projects: input.projects,
     });
 
-    const cwd = input.preferSessionRuntime
-      ? (Option.match(fromSession, {
-          onNone: () => undefined,
-          onSome: (runtime) => runtime.cwd,
-        }) ?? fromThread)
-      : (fromThread ??
-        Option.match(fromSession, {
-          onNone: () => undefined,
-          onSome: (runtime) => runtime.cwd,
-        }));
-
-    if (!cwd) {
-      return undefined;
+    const sessionCwd = Option.isSome(fromSession) ? fromSession.value.cwd : undefined;
+    const candidates = input.preferSessionRuntime
+      ? [sessionCwd, fromThread]
+      : [fromThread, sessionCwd];
+    for (const candidate of candidates) {
+      if (
+        candidate !== undefined &&
+        path.isAbsolute(candidate) &&
+        (yield* checkpointStore.isGitRepository(candidate).pipe(Effect.orElseSucceed(() => false)))
+      ) {
+        return candidate;
+      }
     }
-    if (!isGitWorkspace(cwd)) {
-      return undefined;
-    }
-    return cwd;
+    return undefined;
   });
 
   // Shared tail for both capture paths: creates the git checkpoint ref, diffs
@@ -784,41 +820,32 @@ const make = Effect.gen(function* () {
         createdAt: input.createdAt,
       }).pipe(Effect.catch(() => Effect.void));
       return {
-        restored: false,
+        restored: false as const,
         reason: "workspace-unavailable" as const,
         detail: "The task is no longer present in the orchestration projection.",
       };
     }
 
-    const sessionRuntime = yield* resolveSessionRuntimeForThread(input.threadId);
-    if (Option.isNone(sessionRuntime) && input.skipProviderRollback !== true) {
-      yield* appendRevertFailureActivity({
-        threadId: input.threadId,
-        turnCount: input.turnCount,
-        reason: "workspace-unavailable",
-        detail: "No active provider session with workspace cwd is bound to this thread.",
-        createdAt: input.createdAt,
-      }).pipe(Effect.catch(() => Effect.void));
-      return {
-        restored: false,
-        reason: "workspace-unavailable" as const,
-        detail: "No active provider session is bound to this task.",
-      };
-    }
-
     const projects = yield* resolveThreadProjects(thread.projectId);
     const project = projects[0];
-    const checkpointCwd = resolveThreadWorkspaceCwd({ thread, projects });
-    if (!checkpointCwd || !path.isAbsolute(checkpointCwd) || !isGitWorkspace(checkpointCwd)) {
-      const failure = {
-        restored: false as const,
-        reason: "workspace-unavailable" as const,
-        detail: "The task workspace is unavailable or is not a Git worktree.",
-      };
-      yield* appendRevertFailureActivity({ ...input, ...failure }).pipe(
-        Effect.catch(() => Effect.void),
-      );
-      return failure;
+    const configuredCwd = resolveThreadWorkspaceCwd({ thread, projects });
+    const sessionRuntime = yield* resolveSessionRuntimeForThread(input.threadId);
+    const sessionCwd = Option.isSome(sessionRuntime) ? sessionRuntime.value.cwd : undefined;
+    const candidateCwds = [
+      ...new Set(
+        [configuredCwd, sessionCwd].flatMap((candidate) =>
+          candidate === undefined ? [] : [candidate],
+        ),
+      ),
+    ].filter((candidate) => path.isAbsolute(candidate));
+    let checkpointCwd: string | undefined;
+    for (const candidate of candidateCwds) {
+      if (
+        yield* checkpointStore.isGitRepository(candidate).pipe(Effect.orElseSucceed(() => false))
+      ) {
+        checkpointCwd = candidate;
+        break;
+      }
     }
 
     const currentTurnCount = thread.checkpoints.reduce(
@@ -835,7 +862,7 @@ const make = Effect.gen(function* () {
         createdAt: input.createdAt,
       }).pipe(Effect.catch(() => Effect.void));
       return {
-        restored: false,
+        restored: false as const,
         reason: "checkpoint-missing" as const,
         detail: `Checkpoint turn count ${input.turnCount} is not available in this task.`,
       };
@@ -848,48 +875,94 @@ const make = Effect.gen(function* () {
             (checkpoint) => checkpoint.checkpointTurnCount === input.turnCount,
           )?.checkpointRef;
 
-    if (!targetCheckpointRef) {
+    const hasFilesystemCheckpointSummary = thread.checkpoints.length > 0;
+    if (
+      hasFilesystemCheckpointSummary &&
+      Option.isNone(sessionRuntime) &&
+      input.skipProviderRollback !== true
+    ) {
+      const detail = "No active provider session is bound to this checkpoint-backed task.";
       yield* appendRevertFailureActivity({
         threadId: input.threadId,
         turnCount: input.turnCount,
-        reason: "checkpoint-missing",
-        detail: `Checkpoint ref for turn ${input.turnCount} is unavailable in read model.`,
+        reason: "workspace-unavailable",
+        detail,
         createdAt: input.createdAt,
       }).pipe(Effect.catch(() => Effect.void));
-      return {
-        restored: false,
-        reason: "checkpoint-missing" as const,
-        detail: `Checkpoint ref for turn ${input.turnCount} is unavailable in the task record.`,
+      return { restored: false as const, reason: "workspace-unavailable" as const, detail };
+    }
+    let restored: Extract<VcsCheckpointRestoreResult, { restored: true }> | undefined;
+    let workspaceRestore: ThreadWorkspaceRestoreOutcome;
+    if (!hasFilesystemCheckpointSummary) {
+      workspaceRestore = {
+        filesRestored: false,
+        reason: "workspace-unavailable",
+        detail:
+          "No filesystem checkpoint summary is recorded for this task; the conversation was rewound without changing files.",
       };
-    }
-
-    const restored = yield* checkpointStore.restoreCheckpoint({
-      cwd: checkpointCwd,
-      checkpointRef: targetCheckpointRef,
-      ...(project?.repositoryIdentity?.rootPath
-        ? { expectedRepositoryRoot: project.repositoryIdentity.rootPath }
-        : {}),
-      expectedBranch: thread.branch,
-      expectedCurrentCheckpointRef: checkpointRefForThreadTurn(input.threadId, currentTurnCount),
-      fallbackToHead: input.turnCount === 0,
-      ...(input.validateOnly ? { validateOnly: true } : {}),
-    });
-    if (!restored.restored) {
+    } else if (checkpointCwd === undefined || targetCheckpointRef === undefined) {
+      const reason =
+        targetCheckpointRef === undefined
+          ? ("checkpoint-missing" as const)
+          : ("workspace-unavailable" as const);
+      const detail =
+        targetCheckpointRef === undefined
+          ? `Checkpoint ref for turn ${input.turnCount} is unavailable in the task record.`
+          : "The task workspace is unavailable or is not a Git worktree.";
       yield* appendRevertFailureActivity({
         threadId: input.threadId,
         turnCount: input.turnCount,
-        reason: restored.reason,
-        detail: restored.detail,
+        reason,
+        detail,
         createdAt: input.createdAt,
       }).pipe(Effect.catch(() => Effect.void));
-      return restored;
+      return { restored: false as const, reason, detail };
+    } else {
+      const vcsRestore = yield* checkpointStore.restoreCheckpoint({
+        cwd: checkpointCwd,
+        checkpointRef: targetCheckpointRef,
+        ...(project?.repositoryIdentity?.rootPath
+          ? { expectedRepositoryRoot: project.repositoryIdentity.rootPath }
+          : {}),
+        expectedBranch: thread.branch,
+        expectedCurrentCheckpointRef: checkpointRefForThreadTurn(input.threadId, currentTurnCount),
+        fallbackToHead: input.turnCount === 0,
+        ...(input.validateOnly ? { validateOnly: true } : {}),
+      });
+      if (!vcsRestore.restored) {
+        yield* appendRevertFailureActivity({
+          threadId: input.threadId,
+          turnCount: input.turnCount,
+          reason: vcsRestore.reason,
+          detail: vcsRestore.detail,
+          createdAt: input.createdAt,
+        }).pipe(Effect.catch(() => Effect.void));
+        return vcsRestore;
+      }
+      restored = vcsRestore;
+      workspaceRestore = { filesRestored: true };
     }
 
-    if (input.validateOnly) return restored;
+    const restoreOutcome = !workspaceRestore.filesRestored
+      ? {
+          restored: true as const,
+          filesRestored: false as const,
+          workspaceRestore,
+        }
+      : {
+          restored: true as const,
+          filesRestored: true as const,
+          commitOid: restored!.commitOid,
+          workspaceRestore,
+        };
+
+    if (input.validateOnly) return restoreOutcome;
 
     // Refresh the workspace entry index so the @-mention file picker
     // reflects the reverted filesystem state.
-    yield* workspaceEntries.refresh(checkpointCwd);
+    if (checkpointCwd !== undefined && restoreOutcome.filesRestored) {
+      yield* workspaceEntries.refresh(checkpointCwd);
+    }
 
     const rolledBackTurns = Math.max(0, currentTurnCount - input.turnCount);
     if (rolledBackTurns > 0 && !input.skipProviderRollback) {
@@ -906,7 +979,11 @@ const make = Effect.gen(function* () {
       }
     }
 
-    if (staleCheckpointRefs.length > 0) {
+    if (
+      staleCheckpointRefs.length > 0 &&
+      checkpointCwd !== undefined &&
+      restoreOutcome.filesRestored
+    ) {
       yield* checkpointStore.deleteCheckpointRefs({
         cwd: checkpointCwd,
         checkpointRefs: staleCheckpointRefs,
@@ -925,6 +1002,7 @@ const make = Effect.gen(function* () {
         ...(input.reconciliationRequestId !== undefined
           ? { editFromHereRequestId: CommandId.make(input.reconciliationRequestId) }
           : {}),
+        workspaceRestore,
         createdAt: input.createdAt,
       })
       .pipe(
@@ -954,13 +1032,23 @@ const make = Effect.gen(function* () {
         discardUnattributed: input.turnCount === 0,
         parentActivities: thread.activities,
       });
+      if (!restoreOutcome.filesRestored) {
+        yield* appendWorkspaceRestoreOutcomeActivity({
+          threadId: input.threadId,
+          turnCount: input.turnCount,
+          outcome: workspaceRestore,
+          editFromHere: input.reconciliationRequestId !== undefined,
+          createdAt: input.createdAt,
+        }).pipe(Effect.catch(() => Effect.void));
+      }
     }
     return completed
-      ? restored
+      ? restoreOutcome
       : {
           restored: false as const,
-          reason: "workspace-unavailable" as const,
-          detail: "The restore completed, but its orchestration receipt was rejected.",
+          reason: "orchestration-receipt-rejected" as const,
+          detail:
+            "The workspace restore was applied, but the conversation receipt was rejected. Files remain at the selected checkpoint; the conversation was not changed.",
         };
   });
 
@@ -979,6 +1067,7 @@ const make = Effect.gen(function* () {
     readonly requestId: CommandId;
     readonly targetThreadId?: ThreadId;
     readonly error?: string;
+    readonly workspaceRestore?: ThreadWorkspaceRestoreOutcome;
     readonly createdAt: string;
   }) =>
     orchestrationEngine.dispatch({
@@ -988,6 +1077,7 @@ const make = Effect.gen(function* () {
       requestId: input.requestId,
       ...(input.targetThreadId !== undefined ? { targetThreadId: input.targetThreadId } : {}),
       ...(input.error !== undefined ? { error: input.error } : {}),
+      ...(input.workspaceRestore !== undefined ? { workspaceRestore: input.workspaceRestore } : {}),
       createdAt: input.createdAt,
     });
 
@@ -995,7 +1085,7 @@ const make = Effect.gen(function* () {
     readonly threadId: ThreadId;
     readonly requestId: CommandId;
     readonly detail: string;
-    readonly reason?: VcsCheckpointRestoreFailureReason;
+    readonly reason?: RewindFailureReason;
     readonly technicalDetail?: string;
     readonly createdAt: string;
   }) =>
@@ -1021,7 +1111,7 @@ const make = Effect.gen(function* () {
       createdAt: input.createdAt,
     });
 
-  const editFromHereFailureMessage = (reason: VcsCheckpointRestoreFailureReason): string => {
+  const editFromHereFailureMessage = (reason: RewindFailureReason): string => {
     switch (reason) {
       case "current-worktree-dirty":
         return "The workspace changed after the latest checkpoint, so your changes were left untouched.";
@@ -1035,6 +1125,8 @@ const make = Effect.gen(function* () {
         return "This checkpoint is no longer available. The task was not changed.";
       case "workspace-unavailable":
         return "The task workspace is unavailable. The task was not changed.";
+      case "orchestration-receipt-rejected":
+        return "The files were restored, but the conversation receipt was rejected. The conversation was not changed.";
     }
   };
 
@@ -1049,7 +1141,8 @@ const make = Effect.gen(function* () {
       reason !== "checkpoint-missing" &&
       reason !== "checkpoint-invalid" &&
       reason !== "current-checkpoint-missing" &&
-      reason !== "current-worktree-dirty"
+      reason !== "current-worktree-dirty" &&
+      reason !== "orchestration-receipt-rejected"
     ) {
       return undefined;
     }
@@ -1265,6 +1358,7 @@ const make = Effect.gen(function* () {
       yield* finishEditFromHere({
         threadId: sourceThread.id,
         requestId: event.payload.requestId,
+        workspaceRestore: restored.workspaceRestore,
         createdAt: event.payload.createdAt,
       });
       return;

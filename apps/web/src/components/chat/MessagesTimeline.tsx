@@ -1679,6 +1679,8 @@ const EditFromHereFailureCard = memo(function EditFromHereFailureCard({
         return "This checkpoint is no longer available. The task was not changed.";
       case "workspace-unavailable":
         return "The task workspace is unavailable. The task was not changed.";
+      case "orchestration-receipt-rejected":
+        return "The files were restored, but the conversation receipt was rejected. The conversation was not changed.";
       default:
         return "The task was not changed. Review the details below before trying again.";
     }

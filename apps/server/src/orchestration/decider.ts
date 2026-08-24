@@ -1425,6 +1425,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.editFromHereRequestId !== undefined
             ? { editFromHereRequestId: command.editFromHereRequestId }
             : {}),
+          ...(command.workspaceRestore !== undefined
+            ? { workspaceRestore: command.workspaceRestore }
+            : {}),
         },
       };
     }
@@ -1456,6 +1459,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             ? { targetThreadId: command.targetThreadId }
             : {}),
           ...(command.error !== undefined ? { error: command.error } : {}),
+          ...(command.workspaceRestore !== undefined
+            ? { workspaceRestore: command.workspaceRestore }
+            : {}),
           finishedAt: command.createdAt,
         },
       };

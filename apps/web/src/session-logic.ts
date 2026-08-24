@@ -74,7 +74,8 @@ export type EditFromHereFailureReason =
   | "checkpoint-missing"
   | "checkpoint-invalid"
   | "current-checkpoint-missing"
-  | "current-worktree-dirty";
+  | "current-worktree-dirty"
+  | "orchestration-receipt-rejected";
 
 export interface WorkLogEntry {
   id: string;
@@ -988,6 +989,7 @@ function toDerivedWorkLogEntry(
       "checkpoint-invalid",
       "current-checkpoint-missing",
       "current-worktree-dirty",
+      "orchestration-receipt-rejected",
     ].includes(payload.reason)
       ? (payload.reason as EditFromHereFailureReason)
       : undefined;
