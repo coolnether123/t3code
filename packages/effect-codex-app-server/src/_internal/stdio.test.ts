@@ -1,10 +1,14 @@
 import { assert, describe, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as PlatformError from "effect/PlatformError";
+import * as Ref from "effect/Ref";
+import { TestClock } from "effect/testing";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import * as CodexError from "../errors.ts";
-import { makeTerminationError } from "./stdio.ts";
+import { makeTerminationError, readFinalChildStderr } from "./stdio.ts";
 
 describe("Codex App Server child process termination", () => {
   it.effect("retains the process identifier with the exit code", () =>
@@ -68,6 +72,36 @@ describe("Codex App Server child process termination", () => {
         "Codex App Server transport operation 'read-process-exit-status' failed.",
       );
       assert.notInclude(error.message, rootCause.message);
+    }),
+  );
+
+  it.effect("waits for stderr completion before taking the final snapshot", () =>
+    Effect.gen(function* () {
+      const completed = yield* Deferred.make<void>();
+      const snapshot = yield* Ref.make({ stderr: "partial", stderrTruncated: false });
+      const resultFiber = yield* readFinalChildStderr({
+        completion: Deferred.await(completed),
+        snapshot: Ref.get(snapshot),
+      }).pipe(Effect.forkScoped);
+
+      yield* Ref.set(snapshot, { stderr: "complete", stderrTruncated: true });
+      yield* Deferred.succeed(completed, undefined);
+      const result = yield* Fiber.join(resultFiber);
+
+      assert.deepEqual(result, { stderr: "complete", stderrTruncated: true });
+    }),
+  );
+
+  it.effect("bounds the stderr completion wait", () =>
+    Effect.gen(function* () {
+      const resultFiber = yield* readFinalChildStderr({
+        completion: Effect.never,
+        snapshot: Effect.succeed({ stderr: "available", stderrTruncated: false }),
+      }).pipe(Effect.forkScoped);
+
+      yield* TestClock.adjust("500 millis");
+      const result = yield* Fiber.join(resultFiber);
+      assert.deepEqual(result, { stderr: "available", stderrTruncated: false });
     }),
   );
 });

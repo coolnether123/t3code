@@ -1,4 +1,5 @@
 import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
@@ -59,7 +60,10 @@ export interface CodexAppServerStderrDiagnostics {
 
 export interface CodexAppServerStderrCapture {
   readonly snapshot: Effect.Effect<CodexAppServerStderrDiagnostics>;
+  readonly completion: Effect.Effect<void>;
 }
+
+const CODEX_APP_SERVER_STDERR_DRAIN_TIMEOUT = "500 millis" as const;
 
 export const captureChildStderr = (
   stderr: Stream.Stream<Uint8Array, unknown>,
@@ -70,6 +74,7 @@ export const captureChildStderr = (
       stderr: "",
       stderrTruncated: false,
     });
+    const completed = yield* Deferred.make<void>();
     yield* stderr.pipe(
       Stream.decodeText(),
       Stream.runForEach((chunk) =>
@@ -84,29 +89,51 @@ export const captureChildStderr = (
         ),
       ),
       Effect.ignore,
+      Effect.ensuring(Deferred.succeed(completed, undefined).pipe(Effect.asVoid)),
       Effect.forkScoped,
     );
-    return { snapshot: Ref.get(state) } satisfies CodexAppServerStderrCapture;
+    return {
+      snapshot: Ref.get(state),
+      completion: Deferred.await(completed),
+    } satisfies CodexAppServerStderrCapture;
   });
+
+export const readFinalChildStderr = (
+  capture: CodexAppServerStderrCapture,
+): Effect.Effect<CodexAppServerStderrDiagnostics> =>
+  capture.completion.pipe(
+    Effect.timeoutOption(CODEX_APP_SERVER_STDERR_DRAIN_TIMEOUT),
+    Effect.andThen(capture.snapshot),
+  );
 
 export const makeTerminationError = (
   handle: ChildProcessTerminationHandle,
   context: { readonly method?: string; readonly requestId?: string } = {},
-  diagnostics: CodexAppServerStderrDiagnostics = { stderr: "", stderrTruncated: false },
+  diagnostics: CodexAppServerStderrDiagnostics | Effect.Effect<CodexAppServerStderrDiagnostics> = {
+    stderr: "",
+    stderrTruncated: false,
+  },
 ): Effect.Effect<CodexError.CodexAppServerError> =>
-  Effect.match(handle.exitCode, {
+  Effect.matchEffect(handle.exitCode, {
     onFailure: (cause) =>
-      new CodexError.CodexAppServerTransportError({
-        operation: "read-process-exit-status",
-        pid: handle.pid,
-        cause,
-      }),
+      Effect.succeed(
+        new CodexError.CodexAppServerTransportError({
+          operation: "read-process-exit-status",
+          pid: handle.pid,
+          cause,
+        }),
+      ),
     onSuccess: (code) =>
-      new CodexError.CodexAppServerProcessExitedError({
-        code,
-        pid: handle.pid,
-        ...(diagnostics.stderr.length > 0 ? diagnostics : {}),
-        ...(context.method === undefined ? {} : { method: context.method }),
-        ...(context.requestId === undefined ? {} : { requestId: context.requestId }),
-      }),
+      (Effect.isEffect(diagnostics) ? diagnostics : Effect.succeed(diagnostics)).pipe(
+        Effect.map(
+          (snapshot) =>
+            new CodexError.CodexAppServerProcessExitedError({
+              code,
+              pid: handle.pid,
+              ...(snapshot.stderr.length > 0 ? snapshot : {}),
+              ...(context.method === undefined ? {} : { method: context.method }),
+              ...(context.requestId === undefined ? {} : { requestId: context.requestId }),
+            }),
+        ),
+      ),
   });

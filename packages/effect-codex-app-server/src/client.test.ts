@@ -12,6 +12,7 @@ import { assert, it } from "@effect/vitest";
 
 import * as CodexClient from "./client.ts";
 import * as CodexErrors from "./errors.ts";
+import { CODEX_APP_SERVER_STDERR_MAX_CHARS } from "./_internal/diagnostics.ts";
 
 const mockPeerPath = Effect.map(Effect.service(Path.Path), (path) =>
   path.join(import.meta.dirname, "../test/fixtures/codex-app-server-mock-peer.ts"),
@@ -191,6 +192,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
       assert.equal(processError.method, "initialize");
       assert.equal(processError.requestId, "1");
       assert.equal(processError.stderrTruncated, true);
+      assert.equal(processError.stderr?.length, CODEX_APP_SERVER_STDERR_MAX_CHARS);
       assert.notInclude(processError.message, secret);
       assert.include(processError.message, "api_key=[REDACTED]");
     }),

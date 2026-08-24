@@ -15,7 +15,12 @@ import {
   encodeOptionalPayload,
   runHandler,
 } from "./_internal/shared.ts";
-import { captureChildStderr, makeChildStdio, makeTerminationError } from "./_internal/stdio.ts";
+import {
+  captureChildStderr,
+  makeChildStdio,
+  makeTerminationError,
+  readFinalChildStderr,
+} from "./_internal/stdio.ts";
 
 export interface CodexAppServerClientOptions {
   readonly logIncoming?: boolean;
@@ -268,8 +273,6 @@ const makeChildProcessClient = Effect.fn(
 )(function* (handle: ChildProcessSpawner.ChildProcessHandle, options: CodexAppServerClientOptions) {
   const stderr = yield* captureChildStderr(handle.stderr, options.onStderr);
   return yield* make(makeChildStdio(handle), options, (context) =>
-    stderr.snapshot.pipe(
-      Effect.flatMap((diagnostics) => makeTerminationError(handle, context, diagnostics)),
-    ),
+    makeTerminationError(handle, context, readFinalChildStderr(stderr)),
   );
 });

@@ -1,18 +1,25 @@
 // @effect-diagnostics nodeBuiltinImport:off - Tests use an isolated temporary filesystem fixture.
-import * as Fs from "node:fs";
-import * as Os from "node:os";
-import * as Path from "node:path";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 
 import * as Effect from "effect/Effect";
 import { assert, describe, it } from "@effect/vitest";
 import * as CodexErrors from "effect-codex-app-server/errors";
 
+const Fs = NodeFS;
+const Os = NodeOS;
+const Path = NodePath;
+
 import {
+  CODEX_SANDBOX_QUARANTINE_COLLISION_LIMIT,
+  codexDenyReadAclQuarantinePath,
   codexDenyReadAclStatePath,
   inspectCodexDenyReadAclState,
   isCorruptDenyReadAclStateBytes,
   isConfirmedCorruptCodexSandboxExit,
   quarantineCorruptCodexDenyReadAclState,
+  recoverCodexDenyReadAclState,
   shouldRecoverCodexSandboxExit,
   withCodexSandboxStartupRecovery,
 } from "./CodexSandboxRecovery.ts";
@@ -59,6 +66,63 @@ describe("Codex Windows sandbox state recovery", () => {
     ),
   );
 
+  it.effect("bounds quarantine collisions without overwriting existing files", () =>
+    Effect.acquireUseRelease(
+      Effect.sync(makeHome),
+      (home) =>
+        Effect.gen(function* () {
+          const path = writeState(home, new Uint8Array(22));
+          const collisions = Array.from(
+            { length: CODEX_SANDBOX_QUARANTINE_COLLISION_LIMIT },
+            (_, attempt) => codexDenyReadAclQuarantinePath(path, attempt),
+          );
+          for (const collision of collisions) Fs.writeFileSync(collision, "preserve-me");
+
+          const recovery = yield* recoverCodexDenyReadAclState({
+            homeDirectory: home,
+            platform: "win32",
+          });
+
+          assert.equal(recovery, undefined);
+          assert.equal(inspectCodexDenyReadAclState(home, "win32").status, "corrupt");
+          for (const collision of collisions) {
+            assert.equal(Fs.readFileSync(collision, "utf8"), "preserve-me");
+          }
+        }),
+      (home) => Effect.sync(() => Fs.rmSync(home, { recursive: true, force: true })),
+    ),
+  );
+
+  it.effect("coalesces simultaneous recovery and recognizes the quarantined result", () =>
+    Effect.acquireUseRelease(
+      Effect.sync(makeHome),
+      (home) =>
+        Effect.gen(function* () {
+          const path = writeState(home, new Uint8Array(22));
+          const [first, second] = yield* Effect.all(
+            [
+              recoverCodexDenyReadAclState({ homeDirectory: home, platform: "win32" }),
+              recoverCodexDenyReadAclState({ homeDirectory: home, platform: "win32" }),
+            ],
+            { concurrency: "unbounded" },
+          );
+
+          assert.exists(first);
+          assert.deepEqual(second, first);
+          assert.equal(first.status, "quarantined");
+          assert.equal(Fs.existsSync(path), false);
+
+          const afterFlight = yield* recoverCodexDenyReadAclState({
+            homeDirectory: home,
+            platform: "win32",
+          });
+          assert.equal(afterFlight?.status, "already-recovered");
+          assert.equal(afterFlight?.quarantinedPath, first.quarantinedPath);
+        }),
+      (home) => Effect.sync(() => Fs.rmSync(home, { recursive: true, force: true })),
+    ),
+  );
+
   it("rejects unsafe and unrelated exits", () => {
     const exit = new CodexErrors.CodexAppServerProcessExitedError({
       code: 1,
@@ -68,6 +132,26 @@ describe("Codex Windows sandbox state recovery", () => {
     assert.equal(shouldRecoverCodexSandboxExit(exit, Os.homedir()), false);
     assert.equal(inspectCodexDenyReadAclState(Os.homedir(), "linux").status, "unsafe");
   });
+
+  it.effect("refuses a sandbox directory junction", () =>
+    Effect.acquireUseRelease(
+      Effect.sync(makeHome),
+      (home) =>
+        Effect.sync(() => {
+          const codexDirectory = Path.join(home, ".codex");
+          const redirectedSandbox = Path.join(home, "redirected-sandbox");
+          Fs.mkdirSync(codexDirectory, { recursive: true });
+          Fs.mkdirSync(redirectedSandbox, { recursive: true });
+          const redirectedState = Path.join(redirectedSandbox, "deny_read_acl_state.json");
+          Fs.writeFileSync(redirectedState, new Uint8Array(22));
+          Fs.symlinkSync(redirectedSandbox, Path.join(codexDirectory, ".sandbox"), "junction");
+
+          assert.equal(inspectCodexDenyReadAclState(home, "win32").status, "unsafe");
+          assert.equal(Fs.existsSync(redirectedState), true);
+        }),
+      (home) => Effect.sync(() => Fs.rmSync(home, { recursive: true, force: true })),
+    ),
+  );
 
   it("recognizes the confirmed stderr marker before allowing recovery", () => {
     const exit = new CodexErrors.CodexAppServerProcessExitedError({
@@ -117,6 +201,71 @@ describe("Codex Windows sandbox state recovery", () => {
           }).pipe(Effect.flip);
           assert.strictEqual(unrelated, unrelatedExit);
           assert.equal(unrelatedAttempts, 1);
+        }),
+      (home) => Effect.sync(() => Fs.rmSync(home, { recursive: true, force: true })),
+    ),
+  );
+
+  it.effect("lets simultaneous startup callers recover and retry once each", () =>
+    Effect.acquireUseRelease(
+      Effect.sync(makeHome),
+      (home) =>
+        Effect.gen(function* () {
+          writeState(home, new Uint8Array(22));
+          const confirmedExit = new CodexErrors.CodexAppServerProcessExitedError({
+            code: 1,
+            stderr:
+              "parse deny-read ACL state deny_read_acl_state.json: expected value at line 1 column 1",
+          });
+          const attempts = [0, 0];
+          const startup = (index: number) =>
+            withCodexSandboxStartupRecovery({
+              homeDirectory: home,
+              run: () => {
+                attempts[index] = (attempts[index] ?? 0) + 1;
+                return attempts[index] === 1
+                  ? Effect.fail(confirmedExit)
+                  : Effect.succeed(`ready-${index}`);
+              },
+            });
+
+          const results = yield* Effect.all([startup(0), startup(1)], {
+            concurrency: "unbounded",
+          });
+          assert.deepEqual(results, ["ready-0", "ready-1"]);
+          assert.deepEqual(attempts, [2, 2]);
+        }),
+      (home) => Effect.sync(() => Fs.rmSync(home, { recursive: true, force: true })),
+    ),
+  );
+
+  it.effect("retries when another startup has already regenerated valid state", () =>
+    Effect.acquireUseRelease(
+      Effect.sync(makeHome),
+      (home) =>
+        Effect.gen(function* () {
+          const path = writeState(home, new Uint8Array(22));
+          const confirmedExit = new CodexErrors.CodexAppServerProcessExitedError({
+            code: 1,
+            stderr:
+              "parse deny-read ACL state deny_read_acl_state.json: expected value at line 1 column 1",
+          });
+          let attempts = 0;
+          const result = yield* withCodexSandboxStartupRecovery({
+            homeDirectory: home,
+            run: () => {
+              attempts += 1;
+              if (attempts === 1) {
+                Fs.writeFileSync(path, "{}");
+                return Effect.fail(confirmedExit);
+              }
+              return Effect.succeed("ready");
+            },
+          });
+
+          assert.equal(result, "ready");
+          assert.equal(attempts, 2);
+          assert.equal(inspectCodexDenyReadAclState(home, "win32").status, "valid");
         }),
       (home) => Effect.sync(() => Fs.rmSync(home, { recursive: true, force: true })),
     ),

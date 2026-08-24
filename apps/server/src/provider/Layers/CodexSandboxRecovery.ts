@@ -1,13 +1,18 @@
 // @effect-diagnostics nodeBuiltinImport:off - This is a small synchronous boundary for the Windows sandbox state file.
-import * as Fs from "node:fs";
-import * as Os from "node:os";
-import * as Path from "node:path";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as CodexErrors from "effect-codex-app-server/errors";
 
+const Fs = NodeFS;
+const Os = NodeOS;
+const Path = NodePath;
+
 const DENY_READ_ACL_STATE_FILE = "deny_read_acl_state.json";
 const QUARANTINE_SUFFIX = ".corrupt";
+export const CODEX_SANDBOX_QUARANTINE_COLLISION_LIMIT = 16;
 
 export interface CodexSandboxStateInspection {
   readonly path: string;
@@ -19,8 +24,24 @@ export interface CodexSandboxStateQuarantine {
   readonly quarantinedPath: string;
 }
 
+export interface CodexSandboxStateRecovery {
+  readonly path: string;
+  readonly status: "quarantined" | "already-recovered";
+  readonly quarantinedPath?: string;
+}
+
+const startupRecoveryFlights = new Map<string, Promise<CodexSandboxStateRecovery | undefined>>();
+
 export function codexDenyReadAclStatePath(homeDirectory = Os.homedir()): string {
   return Path.join(Path.resolve(homeDirectory), ".codex", ".sandbox", DENY_READ_ACL_STATE_FILE);
+}
+
+export function codexDenyReadAclQuarantinePath(
+  statePath: string,
+  attempt: number,
+  processId = process.pid,
+): string {
+  return `${statePath}${QUARANTINE_SUFFIX}-${processId}-${attempt}`;
 }
 
 function isSafeStatePath(path: string, homeDirectory: string): boolean {
@@ -42,25 +63,75 @@ function hasSafeDirectoryParents(path: string, homeDirectory: string): boolean {
   });
 }
 
+function isSafeQuarantinePath(path: string, statePath: string): boolean {
+  const parent = Path.dirname(statePath);
+  const relative = Path.relative(parent, path);
+  return (
+    Path.dirname(path) === parent &&
+    relative.length > 0 &&
+    !relative.startsWith("..") &&
+    !Path.isAbsolute(relative) &&
+    !relative.includes(Path.sep) &&
+    Path.basename(path).startsWith(`${DENY_READ_ACL_STATE_FILE}${QUARANTINE_SUFFIX}-`)
+  );
+}
+
+function isMissingPathError(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException).code === "ENOENT";
+}
+
+function isCollisionError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "EEXIST" || code === "EACCES" || code === "EPERM";
+}
+
+function isSafeExistingQuarantine(path: string, statePath: string): boolean {
+  if (!isSafeQuarantinePath(path, statePath)) return false;
+  try {
+    const stat = Fs.lstatSync(path);
+    return stat.isFile() && !stat.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+function findExistingQuarantine(statePath: string): string | undefined {
+  const parent = Path.dirname(statePath);
+  const prefix = `${Path.basename(statePath)}${QUARANTINE_SUFFIX}-`;
+  try {
+    for (const entry of Fs.readdirSync(parent, { withFileTypes: true })) {
+      if (!entry.name.startsWith(prefix) || !entry.isFile() || entry.isSymbolicLink()) continue;
+      const candidate = Path.join(parent, entry.name);
+      if (isSafeExistingQuarantine(candidate, statePath)) return candidate;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
 export function isCorruptDenyReadAclStateBytes(bytes: Uint8Array): boolean {
   return bytes.length > 0 && bytes.every((byte) => byte === 0);
 }
 
 export function inspectCodexDenyReadAclState(
   homeDirectory = Os.homedir(),
-  platform: string = process.platform,
+  platform: string = Os.platform(),
 ): CodexSandboxStateInspection {
   const path = codexDenyReadAclStatePath(homeDirectory);
   if (platform !== "win32" || !isSafeStatePath(path, homeDirectory)) {
     return { path, status: "unsafe" };
   }
 
-  let stat: Fs.Stats;
+  let stat: NodeFS.Stats;
   try {
     stat = Fs.lstatSync(path);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return { path, status: "missing" };
+    if (isMissingPathError(error)) {
+      return {
+        path,
+        status: hasSafeDirectoryParents(path, homeDirectory) ? "missing" : "unsafe",
+      };
     }
     return { path, status: "unsafe" };
   }
@@ -79,34 +150,113 @@ export function inspectCodexDenyReadAclState(
   }
 }
 
+function recoverCodexSandboxStateSync(
+  homeDirectory: string,
+  platform: string,
+): CodexSandboxStateRecovery | undefined {
+  let inspection = inspectCodexDenyReadAclState(homeDirectory, platform);
+  if (inspection.status === "unsafe") return undefined;
+  if (inspection.status === "valid") {
+    return { path: inspection.path, status: "already-recovered" };
+  }
+  if (inspection.status === "missing") {
+    const quarantinedPath = findExistingQuarantine(inspection.path);
+    return quarantinedPath
+      ? { path: inspection.path, quarantinedPath, status: "already-recovered" }
+      : undefined;
+  }
+
+  for (let attempt = 0; attempt < CODEX_SANDBOX_QUARANTINE_COLLISION_LIMIT; attempt += 1) {
+    const quarantinedPath = codexDenyReadAclQuarantinePath(inspection.path, attempt);
+    if (!isSafeQuarantinePath(quarantinedPath, inspection.path)) return undefined;
+
+    if (isSafeExistingQuarantine(quarantinedPath, inspection.path)) continue;
+
+    inspection = inspectCodexDenyReadAclState(homeDirectory, platform);
+    if (inspection.status === "valid") {
+      return { path: inspection.path, status: "already-recovered" };
+    }
+    if (inspection.status === "missing") {
+      const existing = findExistingQuarantine(inspection.path);
+      return existing
+        ? { path: inspection.path, quarantinedPath: existing, status: "already-recovered" }
+        : undefined;
+    }
+    if (inspection.status !== "corrupt") return undefined;
+
+    try {
+      Fs.renameSync(inspection.path, quarantinedPath);
+      return {
+        path: inspection.path,
+        quarantinedPath,
+        status: "quarantined",
+      };
+    } catch (error) {
+      const current = inspectCodexDenyReadAclState(homeDirectory, platform);
+      if (current.status === "valid") {
+        return { path: current.path, status: "already-recovered" };
+      }
+      if (current.status === "missing") {
+        const existing = findExistingQuarantine(current.path);
+        return existing
+          ? { path: current.path, quarantinedPath: existing, status: "already-recovered" }
+          : undefined;
+      }
+      if (!isCollisionError(error) || !isSafeExistingQuarantine(quarantinedPath, inspection.path)) {
+        return undefined;
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function recoveryKey(homeDirectory: string): string {
+  return codexDenyReadAclStatePath(homeDirectory).toLocaleLowerCase("en-US");
+}
+
+export function recoverCodexDenyReadAclState(
+  input: {
+    readonly homeDirectory?: string;
+    readonly platform?: string;
+  } = {},
+): Effect.Effect<CodexSandboxStateRecovery | undefined> {
+  const homeDirectory = input.homeDirectory ?? Os.homedir();
+  const platform = input.platform ?? Os.platform();
+  return Effect.promise(() => {
+    const key = recoveryKey(homeDirectory);
+    const active = startupRecoveryFlights.get(key);
+    if (active) return active;
+
+    const flight = Promise.resolve()
+      .then(() => {
+        try {
+          return recoverCodexSandboxStateSync(homeDirectory, platform);
+        } catch {
+          return undefined;
+        }
+      })
+      .finally(() => {
+        if (startupRecoveryFlights.get(key) === flight) startupRecoveryFlights.delete(key);
+      });
+    startupRecoveryFlights.set(key, flight);
+    return flight;
+  });
+}
+
 export function quarantineCorruptCodexDenyReadAclState(
   input: {
     readonly homeDirectory?: string;
     readonly platform?: string;
   } = {},
 ): Effect.Effect<CodexSandboxStateQuarantine | undefined> {
-  const homeDirectory = input.homeDirectory ?? Os.homedir();
-  const platform = input.platform ?? process.platform;
-  return Effect.try({
-    try: () => {
-      const inspection = inspectCodexDenyReadAclState(homeDirectory, platform);
-      if (inspection.status !== "corrupt") return undefined;
-
-      const parent = Path.dirname(inspection.path);
-      const quarantineBase = `${inspection.path}${QUARANTINE_SUFFIX}-${process.pid}`;
-      let quarantinedPath = quarantineBase;
-      let attempt = 0;
-      while (Fs.existsSync(quarantinedPath)) {
-        attempt += 1;
-        quarantinedPath = `${quarantineBase}-${attempt}`;
-      }
-
-      if (Path.dirname(quarantinedPath) !== parent) return undefined;
-      Fs.renameSync(inspection.path, quarantinedPath);
-      return { path: inspection.path, quarantinedPath } satisfies CodexSandboxStateQuarantine;
-    },
-    catch: () => undefined,
-  }).pipe(Effect.orElseSucceed(() => undefined));
+  return recoverCodexDenyReadAclState(input).pipe(
+    Effect.map((recovery) =>
+      recovery?.status === "quarantined" && recovery.quarantinedPath
+        ? { path: recovery.path, quarantinedPath: recovery.quarantinedPath }
+        : undefined,
+    ),
+  );
 }
 
 const isCodexProcessExit = Schema.is(CodexErrors.CodexAppServerProcessExitedError);
@@ -138,14 +288,14 @@ export function withCodexSandboxStartupRecovery<A, E, R>(input: {
   return Effect.gen(function* () {
     const first = yield* Effect.result(input.run());
     if (first._tag === "Success") return first.success;
-    if (!shouldRecoverCodexSandboxExit(first.failure, input.homeDirectory)) {
+    if (!isConfirmedCorruptCodexSandboxExit(first.failure)) {
       return yield* Effect.fail(first.failure);
     }
 
-    const quarantine = yield* quarantineCorruptCodexDenyReadAclState({
-      ...(input.homeDirectory === undefined ? {} : { homeDirectory: input.homeDirectory }),
-    });
-    if (!quarantine) return yield* Effect.fail(first.failure);
+    const recovery = yield* recoverCodexDenyReadAclState(
+      input.homeDirectory === undefined ? {} : { homeDirectory: input.homeDirectory },
+    );
+    if (!recovery) return yield* Effect.fail(first.failure);
     return yield* input.run();
   });
 }

@@ -49,7 +49,7 @@ import {
   type CodexComputerControlMode,
 } from "../CodexDeveloperInstructions.ts";
 import { isWorkerLifecycleToolName } from "../../worker/WorkerThreadBoundary.ts";
-import { quarantineCorruptCodexDenyReadAclState } from "./CodexSandboxRecovery.ts";
+import { recoverCodexDenyReadAclState } from "./CodexSandboxRecovery.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
 
 const PROVIDER = ProviderDriverKind.make("codex");
@@ -1143,7 +1143,7 @@ export const makeCodexSessionRuntime = (
     // Codex's Windows sandbox reads this user-level state before the app-server
     // handshake. Quarantine the one known all-NUL corruption before spawning so
     // a thread start does not inherit a process that is guaranteed to exit.
-    yield* quarantineCorruptCodexDenyReadAclState();
+    yield* recoverCodexDenyReadAclState();
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const runtimeScope = yield* Scope.Scope;
     const crypto = yield* Crypto.Crypto;
