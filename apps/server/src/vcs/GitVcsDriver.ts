@@ -418,6 +418,46 @@ function parseGitRemoteVerboseOutput(
   return remotes;
 }
 
+const sanitizeCheckpointOutput = (value: string, truncated: boolean): string => {
+  const redacted = value
+    .replace(/(authorization\s*:\s*bearer\s+)[^\s]+/gi, "$1[REDACTED]")
+    .replace(/(bearer\s+)[^\s]+/gi, "$1[REDACTED]")
+    .replace(/(token|password|passwd|secret|api[_-]?key)\s*[=:]\s*[^\s,;]+/gi, "$1=[REDACTED]")
+    .replace(/gh[pousr]_[A-Za-z0-9_]+/g, "[REDACTED]")
+    .replace(/github_pat_[A-Za-z0-9_]+/g, "[REDACTED]");
+  const bounded =
+    redacted.length > 4_096 ? `${redacted.slice(0, 4_096)}\n[output capped]` : redacted;
+  return truncated && !bounded.includes("[output capped]")
+    ? `${bounded}\n[output truncated]`
+    : bounded;
+};
+
+const checkpointRestoreFailureDetail = (input: {
+  readonly operation: string;
+  readonly cwd: string;
+  readonly checkpointRef: string;
+  readonly commitOid: string;
+  readonly error: VcsProcessExitError;
+}): string => {
+  const stdout = sanitizeCheckpointOutput(
+    input.error.stdout ?? "",
+    input.error.stdoutTruncated ?? false,
+  );
+  const stderr = sanitizeCheckpointOutput(
+    input.error.stderr ?? "",
+    input.error.stderrTruncated ?? false,
+  );
+  return JSON.stringify({
+    operation: input.operation,
+    cwd: input.cwd,
+    checkpointRef: input.checkpointRef,
+    commitOid: input.commitOid,
+    exitCode: input.error.exitCode,
+    stdout,
+    stderr,
+  });
+};
+
 const gitCommand = (
   process: VcsProcess.VcsProcess["Service"],
   operation: string,
@@ -973,11 +1013,29 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         return { restored: true, commitOid };
       }
 
-      yield* execute({
+      const restoreResult = yield* execute({
         operation,
         cwd: input.cwd,
         args: ["restore", "--source", commitOid, "--worktree", "--staged", "--", "."],
-      });
+      }).pipe(
+        Effect.catchTag("VcsProcessExitError", (error) =>
+          Effect.succeed({
+            restored: false as const,
+            reason: "checkpoint-invalid" as const,
+            detail: checkpointRestoreFailureDetail({
+              operation,
+              cwd: input.cwd,
+              checkpointRef: input.checkpointRef,
+              commitOid,
+              error,
+            }),
+          }),
+        ),
+      );
+
+      if ("restored" in restoreResult) {
+        return restoreResult;
+      }
 
       return { restored: true, commitOid };
     }),

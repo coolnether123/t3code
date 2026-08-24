@@ -1959,6 +1959,67 @@ describe("CheckpointReactor", () => {
     );
   });
 
+  it("keeps bounded Git restore diagnostics on the failed edit activity without rewinding", async () => {
+    const harness = await createHarness();
+    const seeded = await seedEditFromHereConversation(harness);
+    await harness.drain();
+    const before = (await harness.readModel()).threads.find(
+      (thread) => thread.id === seeded.threadId,
+    );
+    const fileBefore = NodeFS.readFileSync(NodePath.join(harness.cwd, "README.md"), "utf8");
+    const technicalDetail = JSON.stringify({
+      operation: "GitVcsDriver.checkpoints.restoreCheckpoint",
+      cwd: "C:\\repo\\apps\\server",
+      checkpointRef: "refs/t3/threads/restore-failure",
+      commitOid: "0123456789abcdef0123456789abcdef01234567",
+      exitCode: 128,
+      stdout: "diagnostic stdout",
+      stderr: "fatal: token=[REDACTED]",
+    });
+    vi.spyOn(harness.checkpointStore, "restoreCheckpoint").mockImplementationOnce(() =>
+      Effect.succeed({
+        restored: false,
+        reason: "checkpoint-invalid",
+        detail: technicalDetail,
+      }),
+    );
+
+    const requestId = CommandId.make("edit-restore-diagnostics");
+    await harness.dispatch({
+      type: "thread.edit-from-here",
+      commandId: requestId,
+      threadId: seeded.threadId,
+      sourceMessageId: seeded.user2,
+      replacementMessageId: MessageId.make("edit-restore-diagnostics-replacement"),
+      editedText: "This replacement must not be projected",
+      mode: "rewind",
+      createdAt: seeded.createdAt,
+    });
+    await waitForEvent(
+      harness.engine,
+      (event) =>
+        event.type === "thread.edit-from-here-finished" &&
+        (event as { payload?: { requestId?: string } }).payload?.requestId === requestId,
+    );
+    await harness.drain();
+
+    const after = (await harness.readModel()).threads.find(
+      (thread) => thread.id === seeded.threadId,
+    );
+    const failure = after?.activities.find(
+      (activity) => activity.kind === "thread.edit-from-here.failed",
+    );
+    expect(failure?.payload).toMatchObject({
+      reason: "checkpoint-invalid",
+      technicalDetail: expect.stringContaining(
+        `checkpoint-restore:checkpoint-invalid:${technicalDetail}`,
+      ),
+    });
+    expect(after?.messages).toEqual(before?.messages);
+    expect(harness.provider.rollbackConversation).not.toHaveBeenCalled();
+    expect(NodeFS.readFileSync(NodePath.join(harness.cwd, "README.md"), "utf8")).toBe(fileBefore);
+  });
+
   it("rewinds the first message of a rehydrated branch task by resetting its provider binding", async () => {
     const harness = await createHarness({ seedFilesystemCheckpoints: false });
     const seeded = await seedEditFromHereConversation(harness);
