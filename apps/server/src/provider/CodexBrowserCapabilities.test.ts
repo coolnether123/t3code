@@ -1,0 +1,53 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  hasT3ManagedChromeTools,
+  resolveCodexBrowserCapabilities,
+  T3_MANAGED_CHROME_TOOLS,
+} from "./CodexBrowserCapabilities.ts";
+
+const managedTools = Object.fromEntries(T3_MANAGED_CHROME_TOOLS.map((name) => [name, {}]));
+
+describe("Codex browser capabilities", () => {
+  it("requires the complete tool catalog on the T3 MCP server", () => {
+    expect(hasT3ManagedChromeTools([])).toBe(false);
+    expect(hasT3ManagedChromeTools([{ name: "other", tools: managedTools }])).toBe(false);
+    expect(
+      hasT3ManagedChromeTools([{ name: "t3-code", tools: { computer_open_url: {} } }]),
+    ).toBe(false);
+    for (const missing of T3_MANAGED_CHROME_TOOLS) {
+      const tools = { ...managedTools };
+      delete tools[missing];
+      expect(hasT3ManagedChromeTools([{ name: "t3-code", tools }])).toBe(false);
+    }
+    expect(hasT3ManagedChromeTools([{ name: "t3-code", tools: managedTools }])).toBe(true);
+  });
+
+  it("does not infer desktop integration from a JavaScript tool or plugin names", () => {
+    const providers = resolveCodexBrowserCapabilities([
+      { name: "node_repl", tools: { js: {} } },
+      { name: "chrome", tools: managedTools },
+      { name: "browser", tools: managedTools },
+      { name: "computer-use", tools: managedTools },
+    ]);
+    expect(providers.every((provider) => !provider.available)).toBe(true);
+  });
+
+  it("keeps the separate browser profiles and Windows input owner explicit", () => {
+    const providers = resolveCodexBrowserCapabilities([{ name: "t3-code", tools: managedTools }]);
+    expect(providers.map(({ id, available, profile }) => ({ id, available, profile }))).toEqual([
+      { id: "t3-managed-chrome", available: true, profile: "t3-managed" },
+      { id: "codex-chrome", available: false, profile: "user-browser" },
+      { id: "codex-browser", available: false, profile: "codex-browser" },
+      { id: "codex-computer-use", available: false, profile: "desktop" },
+    ]);
+    expect(providers.every((provider) => provider.reason.length > 0)).toBe(true);
+  });
+
+  it("does not retain availability after the advertised tools disappear", () => {
+    expect(resolveCodexBrowserCapabilities([{ name: "t3-code", tools: managedTools }])[0]?.available)
+      .toBe(true);
+    expect(resolveCodexBrowserCapabilities([{ name: "t3-code", tools: {} }])[0]?.available)
+      .toBe(false);
+  });
+});
