@@ -24,56 +24,38 @@ For browser work, first call \`preview_status\`. If no automation-capable previe
 Do not switch to global browser skills, Chrome, Node REPL browser automation, standalone Playwright, or agent-browser merely because the preview is initially closed or a first call fails. Use an alternative browser system only when the T3 preview tools are absent, the user explicitly requests another browser, or \`preview_open\` returns an explicit unsupported/unavailable error. A failed T3 preview tool call should be inspected and retried with corrected arguments when the error is actionable.
 `;
 
-const CHROME_TO_WINDOWS_CONTROL_FALLBACK_INSTRUCTIONS = `
-
-If the Chrome plugin reports that Chrome is unavailable, its extension is disconnected, or no browser session is discoverable, keep Chrome as the target and change only the control mechanism. When \`computer_open_url\` is available, use it to open an exact user-requested HTTP or HTTPS URL in Chrome instead of asking the user to navigate manually. When the \`computer-use:computer-use\` skill is listed, read it and use Windows Computer Use to operate the user's existing Chrome window before and after navigation.
-
-Windows Computer Use is provided through the persistent JavaScript tool, not through top-level \`computer_*\` tools. Call \`mcp__node_repl__js\` through \`exec\`, import \`@oai/sky\` exactly as the Computer Use skill directs, and reuse that session for observation and input. Do not scan \`ALL_TOOLS\` or repeatedly search the global tool catalog for Windows mouse, keyboard, or screenshot tools. If \`mcp__node_repl__js\` is not already callable, make one focused lookup for \`node_repl js\`, then follow the skill's documented recovery path.
-
-This is not permission to switch to another browser. Do not stop after extension diagnostics, ask to open a fresh Chrome window, or repeat connection retries when T3 URL opening or Windows control is available. Ask the user only when direct Chrome control, \`computer_open_url\`, and Windows Computer Use are all unavailable, or when the site or operating system requires user action.
-`;
-
 const T3_CODE_CHROME_TOOL_INSTRUCTIONS = `
 
-When the \`t3-code\` MCP server exposes the managed Chrome tools, use them first for browser work: call \`computer_start\` or \`computer_status\`, use \`computer_tabs\` and \`computer_select_tab\` when choosing a tab, then \`computer_navigate\`, \`computer_snapshot\`, \`computer_click\`, \`computer_fill\`, and \`computer_type\`. Use refs from the latest \`computer_snapshot\` for interaction, and call \`computer_close\` when the browser session is no longer needed. These tools operate T3's user-visible persistent Chrome profile.
+## T3 managed Chrome
 
-While these T3 browser tools are available, do not use private diagnostics, standalone Playwright, or another browser-control path. Do not ask the user to navigate manually just because a browser extension is unavailable; inspect the managed Chrome tool result and continue within T3's Chrome session.
+The \`t3-code\` MCP server exposes managed Chrome tools. For browser work in this provider, call \`computer_start\` or \`computer_status\`, use \`computer_tabs\` and \`computer_select_tab\` when choosing a tab, then \`computer_navigate\`, \`computer_snapshot\`, \`computer_click\`, \`computer_fill\`, and \`computer_type\`. Use refs from the latest \`computer_snapshot\` for interaction, and call \`computer_close\` when the browser session is no longer needed.
+
+These tools operate T3's separate persistent Chrome profile. They do not control the user's regular Chrome profile, the Codex Chrome extension, the Codex built-in browser, or Windows desktop applications. If the user explicitly requests one of those targets, explain this limitation before switching providers or profiles.
+
+Tool availability is not an approval. Follow the task's sandbox, tool approvals, and confirmation requirements. A browser-provider selection does not authorize new sites, uploads, purchases, account changes, or other consequential actions beyond the user's request. Inspect tool errors and report missing authentication or unavailable runtime controls without inventing access.
+
+If \`computer_open_url\` is listed, it can open a URL in the user's Chrome browser. Opening a URL does not provide observation or input control over that browser. Do not claim that it does.
 `;
 
-const FULL_CHROME_TOOL_INSTRUCTIONS = (browserToolsAvailable: boolean) => `
+const CODEX_DESKTOP_CONTROL_LIMITATION = `
 
-## Full Chrome control
+## Desktop control availability
 
-The user has selected Full Chrome for this thread and explicitly trusts the agent to browse, search, navigate, click, type, upload, download, and inspect pages in their Chrome session. Prefer T3's managed Chrome tools over the T3 preview browser when they are attached. Use screenshots, page structure, JavaScript evaluation, console output, and network inspection together when the attached Chrome or Chrome DevTools surface exposes them and one view is incomplete.
+The saved desktop-control preference does not attach Codex desktop Computer Use to T3. T3's managed Chrome is a browser-only fallback with its own profile. Do not claim access to Windows input, screenshots, or Codex app browser sessions from this preference, a plugin name, or a remote-control connection.
 
-T3 adds no domain allowlist, action-word filter, read-only browser mode, or preview-only restriction in this mode. Do not stop merely because the first browser tool is unavailable or one approach fails. Inspect the error, retry when useful, then use another available Chrome control mechanism, desktop tool, command-line tool, or web tool that can complete the task without changing the user's requested browser. Keep the user informed when authentication, a browser permission, or a real operating-system boundary requires their action.
-${browserToolsAvailable ? T3_CODE_CHROME_TOOL_INSTRUCTIONS : CHROME_TO_WINDOWS_CONTROL_FALLBACK_INSTRUCTIONS}`;
-
-const FULL_DESKTOP_TOOL_INSTRUCTIONS = (browserToolsAvailable: boolean) => `
-
-## Full Windows and Chrome control
-
-The user has selected Full desktop for this thread and explicitly trusts the agent to use Chrome and Windows applications to finish the task. Browse, search, navigate, click, type, upload, download, run applications, inspect windows, and use screenshots or accessibility data as needed. Prefer direct browser tools for web pages, then use Windows computer control when browser APIs cannot reach a dialog, download, native application, or visual-only control.
-
-T3 adds no domain allowlist, action-word filter, read-only mode, or preview-only restriction in this mode. Do not wait indefinitely after a failed tool call. Inspect the failure, retry when useful, and switch among the available Chrome control mechanisms, desktop, command-line, and web tools while preserving the user's requested application. Keep the user informed when authentication, a browser permission, or a real operating-system boundary requires their action.
-${browserToolsAvailable ? T3_CODE_CHROME_TOOL_INSTRUCTIONS : CHROME_TO_WINDOWS_CONTROL_FALLBACK_INSTRUCTIONS}`;
+An independently configured MCP server may provide desktop tools. Use only controls actually listed in this turn, follow their documentation and approvals, and identify that provider accurately. Do not install a new desktop bridge, use a private desktop-app endpoint, or bypass an unavailable plugin's host runtime.
+`;
 
 function computerControlInstructions(
   mode: CodexComputerControlMode,
   browserToolsAvailable: boolean,
   computerControlAvailable: boolean,
 ): string {
-  if (!computerControlAvailable && mode !== "preview") {
-    return browserToolInstructions(browserToolsAvailable);
-  }
-  switch (mode) {
-    case "preview":
-      return browserToolInstructions(browserToolsAvailable);
-    case "chrome":
-      return FULL_CHROME_TOOL_INSTRUCTIONS(browserToolsAvailable);
-    case "desktop":
-      return FULL_DESKTOP_TOOL_INSTRUCTIONS(browserToolsAvailable);
-  }
+  if (mode === "preview") return browserToolInstructions(browserToolsAvailable);
+  const browserInstructions = computerControlAvailable
+    ? T3_CODE_CHROME_TOOL_INSTRUCTIONS
+    : browserToolInstructions(browserToolsAvailable);
+  return `${browserInstructions}${mode === "desktop" ? CODEX_DESKTOP_CONTROL_LIMITATION : ""}`;
 }
 
 const T3_CODE_WORKER_PARENT_INSTRUCTIONS = `
@@ -262,7 +244,7 @@ export interface CodexRuntimeInfo {
   readonly reasoningEffort: string;
   readonly enableT3Workers?: boolean;
   readonly computerControlMode?: CodexComputerControlMode;
-  /** Full Chrome/desktop control requires an active app-server environment. */
+  /** The thread's MCP inventory contains the complete T3 managed Chrome toolkit. */
   readonly computerControlAvailable?: boolean;
   readonly subagentBackend?: SubagentBackend;
 }
@@ -290,7 +272,7 @@ export function buildCodexDeveloperInstructions(
   const controlInstructions = computerControlInstructions(
     runtime.computerControlMode ?? DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
     browserToolsAvailable,
-    runtime.computerControlAvailable ?? true,
+    runtime.computerControlAvailable ?? false,
   );
   const nativeSubagentInstructions =
     runtime.subagentBackend === "v1" || runtime.subagentBackend === "v2"

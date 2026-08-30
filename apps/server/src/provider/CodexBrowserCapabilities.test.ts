@@ -2,13 +2,26 @@ import { describe, expect, it } from "vitest";
 
 import {
   hasT3ManagedChromeTools,
+  hasT3PreviewBrowserTools,
   resolveCodexBrowserCapabilities,
   T3_MANAGED_CHROME_TOOLS,
+  T3_PREVIEW_BROWSER_TOOLS,
 } from "./CodexBrowserCapabilities.ts";
 
 const managedTools = Object.fromEntries(T3_MANAGED_CHROME_TOOLS.map((name) => [name, {}]));
 
 describe("Codex browser capabilities", () => {
+  it("discovers preview separately from managed Chrome", () => {
+    const servers = [{
+      name: "t3-code",
+      tools: Object.fromEntries(T3_PREVIEW_BROWSER_TOOLS.map((name) => [name, {}])),
+    }];
+    expect(hasT3PreviewBrowserTools(servers)).toBe(true);
+    expect(hasT3ManagedChromeTools(servers)).toBe(false);
+    expect(hasT3PreviewBrowserTools([{ name: "t3-code", tools: managedTools }])).toBe(false);
+    expect(hasT3PreviewBrowserTools([])).toBe(false);
+  });
+
   it("requires the complete tool catalog on the T3 MCP server", () => {
     expect(hasT3ManagedChromeTools([])).toBe(false);
     expect(hasT3ManagedChromeTools([{ name: "other", tools: managedTools }])).toBe(false);

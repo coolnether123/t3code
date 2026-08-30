@@ -17,17 +17,35 @@ export const T3_MANAGED_CHROME_TOOLS = [
   "computer_close",
 ] as const;
 
-/** Tool availability does not imply that Chrome has started or that an action is approved. */
-export const hasT3ManagedChromeTools = (
+export const T3_PREVIEW_BROWSER_TOOLS = [
+  "preview_status",
+  "preview_open",
+  "preview_navigate",
+  "preview_snapshot",
+  "preview_click",
+  "preview_type",
+] as const;
+
+const hasT3Tools = (
   servers: ReadonlyArray<CodexMcpToolInventory>,
+  requiredTools: ReadonlyArray<string>,
 ): boolean =>
   servers.some(
     (server) =>
       server.name === "t3-code" &&
-      T3_MANAGED_CHROME_TOOLS.every((name) =>
+      requiredTools.every((name) =>
         Object.prototype.hasOwnProperty.call(server.tools, name),
       ),
   );
+
+/** Tool availability does not imply that Chrome has started or that an action is approved. */
+export const hasT3ManagedChromeTools = (
+  servers: ReadonlyArray<CodexMcpToolInventory>,
+): boolean => hasT3Tools(servers, T3_MANAGED_CHROME_TOOLS);
+
+export const hasT3PreviewBrowserTools = (
+  servers: ReadonlyArray<CodexMcpToolInventory>,
+): boolean => hasT3Tools(servers, T3_PREVIEW_BROWSER_TOOLS);
 
 export interface CodexBrowserCapability {
   readonly id:
