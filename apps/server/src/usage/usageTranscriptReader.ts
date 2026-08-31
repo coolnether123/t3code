@@ -28,6 +28,7 @@ import {
   parseGeminiLine,
   parseGeminiValue,
   parseOpenCodeMessageValue,
+  type CodexScanState,
   type UsageRecord,
 } from "./usageTranscripts.ts";
 
@@ -37,8 +38,8 @@ export interface TranscriptFile {
   readonly mtimeMs: number;
 }
 
-export interface TranscriptScanSelection {
-  readonly files: readonly TranscriptFile[];
+export interface TranscriptScanSelection<File extends TranscriptFile = TranscriptFile> {
+  readonly files: readonly File[];
   readonly deferredFiles: number;
   readonly deferredBytes: number;
   readonly coldBytes: number;
@@ -46,15 +47,16 @@ export interface TranscriptScanSelection {
 
 /**
  * Chooses newest transcripts first while bounding uncached I/O for one request.
- * Warm files do not consume the budget, allowing repeated reads to progressively
+ * Warm files cost zero and validated append reads cost only their new bytes.
+ * This allows repeated reads to progressively
  * fill the cache without making the usage page wait on an unbounded cold scan.
  */
-export function selectTranscriptFilesForScan(
-  files: readonly TranscriptFile[],
-  isWarm: (file: TranscriptFile) => boolean,
+export function selectTranscriptFilesForScan<File extends TranscriptFile>(
+  files: readonly File[],
+  bytesToRead: (file: File) => number,
   maxColdBytes: number,
-): TranscriptScanSelection {
-  const selected: TranscriptFile[] = [];
+): TranscriptScanSelection<File> {
+  const selected: File[] = [];
   let deferredFiles = 0;
   let deferredBytes = 0;
   let coldBytes = 0;
@@ -64,18 +66,19 @@ export function selectTranscriptFilesForScan(
     (left, right) => right.mtimeMs - left.mtimeMs || left.path.localeCompare(right.path),
   );
   for (const file of newestFirst) {
-    if (isWarm(file)) {
+    const readBytes = bytesToRead(file);
+    if (readBytes === 0) {
       selected.push(file);
       continue;
     }
-    if (file.size <= maxColdBytes - coldBytes || !selectedColdFile) {
+    if (readBytes <= maxColdBytes - coldBytes || !selectedColdFile) {
       selected.push(file);
-      coldBytes += file.size;
+      coldBytes += readBytes;
       selectedColdFile = true;
       continue;
     }
     deferredFiles += 1;
-    deferredBytes += file.size;
+    deferredBytes += readBytes;
   }
 
   return { files: selected, deferredFiles, deferredBytes, coldBytes };
@@ -104,6 +107,7 @@ export async function listTranscriptFiles(
     } catch {
       return;
     }
+    const transcripts: string[] = [];
     for (const entry of entries) {
       const child = NodePath.join(dir, entry.name);
       if (entry.isDirectory()) {
@@ -117,13 +121,24 @@ export async function listTranscriptFiles(
             entry.name === "tokens_cache.json"
           : entry.name.endsWith(".jsonl");
       if (!isTranscript) continue;
-      try {
-        const stats = await NodeFSP.stat(child);
-        if (stats.mtimeMs >= sinceMs) {
-          found.push({ path: child, size: stats.size, mtimeMs: stats.mtimeMs });
-        }
-      } catch {
-        // Vanished between readdir and stat.
+      transcripts.push(child);
+    }
+    // Bound concurrent metadata reads, including on slower network-backed homes.
+    for (let offset = 0; offset < transcripts.length; offset += 32) {
+      const batch = await Promise.all(
+        transcripts.slice(offset, offset + 32).map(async (child) => {
+          try {
+            const stats = await NodeFSP.stat(child);
+            return stats.mtimeMs >= sinceMs
+              ? { path: child, size: stats.size, mtimeMs: stats.mtimeMs }
+              : null;
+          } catch {
+            return null;
+          }
+        }),
+      );
+      for (const file of batch) {
+        if (file !== null) found.push(file);
       }
     }
   };
@@ -189,19 +204,65 @@ export async function readDirectoryVolumeId(path: string): Promise<string> {
  * their own, so those still have to pass through the reducer to keep model
  * attribution correct.
  */
+export interface TranscriptReadOptions {
+  readonly startByte?: number;
+  readonly endByte?: number;
+  readonly codexState?: CodexScanState;
+}
+
+export interface TranscriptReadResult {
+  readonly records: readonly UsageRecord[];
+  readonly codexState?: CodexScanState;
+}
+
+/** Whether an append cursor follows a complete JSONL record. */
+export async function transcriptCursorIsLineBoundary(
+  filePath: string,
+  offset: number,
+): Promise<boolean> {
+  if (offset === 0) return true;
+  let file: NodeFSP.FileHandle | null = null;
+  try {
+    file = await NodeFSP.open(filePath, "r");
+    const byte = Buffer.allocUnsafe(1);
+    const read = await file.read(byte, 0, 1, offset - 1);
+    return read.bytesRead === 1 && byte[0] === 0x0a;
+  } catch {
+    return false;
+  } finally {
+    await file?.close();
+  }
+}
+
 export async function readTranscriptRecords(
   filePath: string,
   provider: UsageProviderKind,
-): Promise<readonly UsageRecord[] | null> {
-  if (provider === "gemini") return readGeminiTranscriptRecords(filePath);
-  if (provider === "opencode") return readOpenCodeDatabaseRecords(filePath);
+  options: TranscriptReadOptions = {},
+): Promise<TranscriptReadResult | null> {
+  if (provider === "gemini") {
+    const records = await readGeminiTranscriptRecords(filePath);
+    return records === null ? null : { records };
+  }
+  if (provider === "opencode") {
+    const records = await readOpenCodeDatabaseRecords(filePath);
+    return records === null ? null : { records };
+  }
 
   const records: UsageRecord[] = [];
-  const codexState = initialCodexScanState();
+  const codexState = options.codexState ? { ...options.codexState } : initialCodexScanState();
 
   try {
+    const start = options.startByte ?? 0;
+    const end = options.endByte;
+    if (end !== undefined && end < start) {
+      return provider === "codex" ? { records, codexState } : { records };
+    }
     const lines = NodeReadline.createInterface({
-      input: NodeFS.createReadStream(filePath, { encoding: "utf8" }),
+      input: NodeFS.createReadStream(filePath, {
+        encoding: "utf8",
+        ...(start === 0 ? {} : { start }),
+        ...(end === undefined ? {} : { end }),
+      }),
       crlfDelay: Infinity,
     });
 
@@ -227,7 +288,7 @@ export async function readTranscriptRecords(
     return null;
   }
 
-  return records;
+  return provider === "codex" ? { records, codexState } : { records };
 }
 
 interface OpenCodeMessageRow {

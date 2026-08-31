@@ -3,6 +3,18 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./usageRefresh": {
+      "types": "./src/usageRefresh.ts",
+      "default": "./src/usageRefresh.ts"
+    },
+    "./resetCheckPresentation": {
+      "types": "./src/resetCheckPresentation.ts",
+      "default": "./src/resetCheckPresentation.ts"
+    },
+    "./resetAnnouncements": {
+      "types": "./src/resetAnnouncements.ts",
+      "default": "./src/resetAnnouncements.ts"
+    },
     "./connection": {
       "types": "./src/connection/index.ts",
       "default": "./src/connection/index.ts"

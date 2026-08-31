@@ -163,6 +163,40 @@ export const UsagePricing = Schema.Struct({
 });
 export type UsagePricing = typeof UsagePricing.Type;
 
+/** Sanitized observations imported from an external quota tracker. */
+export const UsageQuotaSample = Schema.Struct({
+  observedAt: Schema.String,
+  remainingPercent: Schema.Number,
+  resetsAt: Schema.String,
+});
+export type UsageQuotaSample = typeof UsageQuotaSample.Type;
+
+export const UsageQuotaHistory = Schema.Struct({
+  status: Schema.Literals(["ready", "missing", "invalid"]),
+  source: Schema.String,
+  samples: Schema.Array(UsageQuotaSample),
+  message: Schema.NullOr(Schema.String),
+});
+export type UsageQuotaHistory = typeof UsageQuotaHistory.Type;
+
+/** Cost is measured after the first observation and through the last one. */
+export const UsageQuotaInterval = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  sinceTime: TrimmedNonEmptyString,
+  untilTime: TrimmedNonEmptyString,
+});
+export type UsageQuotaInterval = typeof UsageQuotaInterval.Type;
+
+export const UsageQuotaCost = Schema.Struct({
+  intervalId: Schema.String,
+  fingerprint: UsageSourceFingerprint,
+  costUsd: Schema.Number,
+  records: NonNegativeInt,
+  unpricedRecords: NonNegativeInt,
+  complete: Schema.Boolean,
+});
+export type UsageQuotaCost = typeof UsageQuotaCost.Type;
+
 export const UsageSummaryInput = Schema.Struct({
   /**
    * Highest response contract understood by the client. Omitted by clients
@@ -170,6 +204,8 @@ export const UsageSummaryInput = Schema.Struct({
    * providers.
    */
   clientContractVersion: Schema.optional(NonNegativeInt),
+  /** Revalidate recent files while retaining parsed, unchanged transcripts. */
+  refresh: Schema.optional(Schema.Boolean),
   /** Inclusive first day of the window, in `timeZone`. */
   sinceDay: UsageDay,
   /** Inclusive last day of the window, in `timeZone`. */
@@ -185,6 +221,10 @@ export const UsageSummaryInput = Schema.Struct({
   sinceTime: Schema.optional(TrimmedNonEmptyString),
   /** Exclusive UTC instant for an hourly rolling window. */
   untilTime: Schema.optional(TrimmedNonEmptyString),
+  includeQuotaHistory: Schema.optional(Schema.Boolean),
+  /** Read saved observations without scanning transcripts or fetching prices. */
+  quotaHistoryOnly: Schema.optional(Schema.Boolean),
+  quotaIntervals: Schema.optional(Schema.Array(UsageQuotaInterval).check(Schema.isMaxLength(64))),
 });
 export type UsageSummaryInput = typeof UsageSummaryInput.Type;
 
@@ -199,6 +239,8 @@ export const UsageSummary = Schema.Struct({
   pricing: UsagePricing,
   /** Wall-clock cost of the scan, surfaced in diagnostics. */
   scanDurationMs: NonNegativeInt,
+  quotaHistory: Schema.optional(UsageQuotaHistory),
+  quotaCosts: Schema.optional(Schema.Array(UsageQuotaCost)),
 });
 export type UsageSummary = typeof UsageSummary.Type;
 

@@ -31,5 +31,7 @@ export * from "./previewAutomation.ts";
 export * from "./computerControl.ts";
 export * from "./resourceTelemetry.ts";
 export * from "./usage.ts";
+export * from "./resetCheck.ts";
+export * from "./communityCheck.ts";
 export * from "./worker.ts";
 export * from "./rpc.ts";

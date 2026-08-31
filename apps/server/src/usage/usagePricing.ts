@@ -12,22 +12,16 @@ import type { UsageCostSource, UsageTokenTotals } from "@t3tools/contracts";
 /**
  * The subset of a LiteLLM entry we price against. All values are USD per token.
  *
- * LiteLLM also publishes tiered variants (`*_above_272k_tokens`, `*_flex`,
- * `*_priority`, `*_batches`). We deliberately price at the base tier: the
- * transcripts don't record which tier served a request, so anything else would
- * be a guess dressed up as precision.
+ * Context-length tiers use each request's input count. Service tiers default to
+ * standard rates; transcript token totals don't identify fast/flex/batch billing.
  */
 export interface ModelRate {
   readonly inputCostPerToken: number;
   readonly outputCostPerToken: number;
-  readonly cacheReadCostPerToken: number;
-  readonly cacheCreationCostPerToken: number;
-  readonly above272kTokens?: {
-    readonly inputCostPerToken: number;
-    readonly outputCostPerToken: number;
-    readonly cacheReadCostPerToken: number;
-    readonly cacheCreationCostPerToken: number;
-  };
+  readonly cacheReadCostPerToken: number | null;
+  readonly cacheCreationCostPerToken: number | null;
+  readonly above200kTokens?: ModelRate;
+  readonly above272kTokens?: ModelRate;
 }
 
 export type RateTable = ReadonlyMap<string, ModelRate>;
@@ -38,6 +32,11 @@ interface LiteLlmEntry {
   readonly output_cost_per_token?: unknown;
   readonly cache_read_input_token_cost?: unknown;
   readonly cache_creation_input_token_cost?: unknown;
+  readonly input_cost_per_token_cache_hit?: unknown;
+  readonly input_cost_per_token_above_200k_tokens?: unknown;
+  readonly output_cost_per_token_above_200k_tokens?: unknown;
+  readonly cache_read_input_token_cost_above_200k_tokens?: unknown;
+  readonly cache_creation_input_token_cost_above_200k_tokens?: unknown;
   readonly input_cost_per_token_above_272k_tokens?: unknown;
   readonly output_cost_per_token_above_272k_tokens?: unknown;
   readonly cache_read_input_token_cost_above_272k_tokens?: unknown;
@@ -45,7 +44,7 @@ interface LiteLlmEntry {
 }
 
 function finiteNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 /**
@@ -68,23 +67,40 @@ export function parseRateTable(document: unknown): RateTable {
 
     const aboveInput = finiteNumber(entry.input_cost_per_token_above_272k_tokens);
     const aboveOutput = finiteNumber(entry.output_cost_per_token_above_272k_tokens);
+    const above200Input = finiteNumber(entry.input_cost_per_token_above_200k_tokens);
+    const above200Output = finiteNumber(entry.output_cost_per_token_above_200k_tokens);
     table.set(normalizeModelName(name), {
       inputCostPerToken: input,
       outputCostPerToken: output,
-      // Anthropic bills cache reads at a discount and cache writes at a
-      // premium. When a model omits them, cached input is priced as plain
-      // input rather than as free.
-      cacheReadCostPerToken: finiteNumber(entry.cache_read_input_token_cost) ?? input,
-      cacheCreationCostPerToken: finiteNumber(entry.cache_creation_input_token_cost) ?? input,
+      cacheReadCostPerToken:
+        finiteNumber(entry.cache_read_input_token_cost) ??
+        finiteNumber(entry.input_cost_per_token_cache_hit),
+      cacheCreationCostPerToken: finiteNumber(entry.cache_creation_input_token_cost),
+      ...(above200Input !== null && above200Output !== null
+        ? {
+            above200kTokens: {
+              inputCostPerToken: above200Input,
+              outputCostPerToken: above200Output,
+              cacheReadCostPerToken: finiteNumber(
+                entry.cache_read_input_token_cost_above_200k_tokens,
+              ),
+              cacheCreationCostPerToken: finiteNumber(
+                entry.cache_creation_input_token_cost_above_200k_tokens,
+              ),
+            },
+          }
+        : {}),
       ...(aboveInput !== null && aboveOutput !== null
         ? {
             above272kTokens: {
               inputCostPerToken: aboveInput,
               outputCostPerToken: aboveOutput,
-              cacheReadCostPerToken:
-                finiteNumber(entry.cache_read_input_token_cost_above_272k_tokens) ?? aboveInput,
-              cacheCreationCostPerToken:
-                finiteNumber(entry.cache_creation_input_token_cost_above_272k_tokens) ?? aboveInput,
+              cacheReadCostPerToken: finiteNumber(
+                entry.cache_read_input_token_cost_above_272k_tokens,
+              ),
+              cacheCreationCostPerToken: finiteNumber(
+                entry.cache_creation_input_token_cost_above_272k_tokens,
+              ),
             },
           }
         : {}),
@@ -96,14 +112,11 @@ export function parseRateTable(document: unknown): RateTable {
 /**
  * Canonicalises a model name for lookup.
  *
- * Strips a `provider/` prefix (LiteLLM publishes both `claude-opus-5` and
- * `anthropic/claude-opus-5`) and lowercases, since transcripts are inconsistent
- * about casing.
+ * Retains the provider namespace: resellers can charge different rates for the
+ * same underlying model. Only casing and surrounding whitespace are normalized.
  */
 export function normalizeModelName(model: string): string {
-  const trimmed = model.trim().toLowerCase();
-  const slash = trimmed.lastIndexOf("/");
-  return slash === -1 ? trimmed : trimmed.slice(slash + 1);
+  return model.trim().toLowerCase();
 }
 
 /**
@@ -125,7 +138,19 @@ const UNPRICEABLE_MODELS = new Set([
 export function lookupRate(table: RateTable, model: string): ModelRate | null {
   const normalized = normalizeModelName(model);
   if (normalized.length === 0 || UNPRICEABLE_MODELS.has(normalized)) return null;
-  return table.get(normalized) ?? null;
+  const exact = table.get(normalized);
+  if (exact !== undefined) return exact;
+  // First-party transcript spellings may differ from the catalogue's namespace.
+  // Never strip arbitrary reseller or local-router prefixes.
+  if (/^(openai\/gpt-|anthropic\/claude-)/.test(normalized)) {
+    return table.get(normalized.slice(normalized.indexOf("/") + 1)) ?? null;
+  }
+  if (normalized.startsWith("google/gemini-")) {
+    const name = normalized.slice("google/".length);
+    return table.get(`gemini/${name}`) ?? table.get(name) ?? null;
+  }
+  if (normalized.startsWith("gemini-")) return table.get(`gemini/${normalized}`) ?? null;
+  return null;
 }
 
 export interface PricedUsage {
@@ -136,7 +161,9 @@ export interface PricedUsage {
 function rateForTotals(rate: ModelRate, totals: UsageTokenTotals): ModelRate {
   const inputTokens =
     totals.uncachedInputTokens + totals.cachedInputTokens + totals.cacheCreationTokens;
-  return inputTokens > 272_000 && rate.above272kTokens !== undefined ? rate.above272kTokens : rate;
+  if (inputTokens > 272_000 && rate.above272kTokens !== undefined) return rate.above272kTokens;
+  if (inputTokens > 200_000 && rate.above200kTokens !== undefined) return rate.above200kTokens;
+  return rate;
 }
 
 /**
@@ -151,18 +178,23 @@ export function priceUsage(
   totals: UsageTokenTotals,
   reportedCostUsd: number | null,
 ): PricedUsage {
-  if (reportedCostUsd !== null && Number.isFinite(reportedCostUsd)) {
+  if (reportedCostUsd !== null && finiteNumber(reportedCostUsd) !== null) {
     return { costUsd: reportedCostUsd, costSource: "providerReported" };
   }
 
   const baseRate = lookupRate(table, model);
   if (baseRate === null) return { costUsd: 0, costSource: "unpriced" };
   const rate = rateForTotals(baseRate, totals);
+  if (
+    (totals.cachedInputTokens > 0 && rate.cacheReadCostPerToken === null) ||
+    (totals.cacheCreationTokens > 0 && rate.cacheCreationCostPerToken === null)
+  )
+    return { costUsd: 0, costSource: "unpriced" };
 
   const costUsd =
     totals.uncachedInputTokens * rate.inputCostPerToken +
-    totals.cachedInputTokens * rate.cacheReadCostPerToken +
-    totals.cacheCreationTokens * rate.cacheCreationCostPerToken +
+    totals.cachedInputTokens * (rate.cacheReadCostPerToken ?? 0) +
+    totals.cacheCreationTokens * (rate.cacheCreationCostPerToken ?? 0) +
     totals.outputTokens * rate.outputCostPerToken;
 
   return { costUsd, costSource: "modelPriced" };
@@ -176,5 +208,6 @@ export function cacheSavingsUsd(table: RateTable, model: string, totals: UsageTo
   const baseRate = lookupRate(table, model);
   if (baseRate === null) return 0;
   const rate = rateForTotals(baseRate, totals);
+  if (rate.cacheReadCostPerToken === null) return 0;
   return totals.cachedInputTokens * (rate.inputCostPerToken - rate.cacheReadCostPerToken);
 }

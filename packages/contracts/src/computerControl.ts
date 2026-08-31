@@ -89,10 +89,15 @@ export type ComputerChromeRef = typeof ComputerChromeRef.Type;
 export const ComputerChromeSnapshot = Schema.Struct({
   tabId: NonEmptyString,
   accessibilityTree: Schema.String,
-  dom: Schema.String,
+  dom: Schema.optionalKey(Schema.String),
   refs: Schema.Array(ComputerChromeRef),
 });
 export type ComputerChromeSnapshot = typeof ComputerChromeSnapshot.Type;
+
+export const ComputerChromeSnapshotInput = Schema.Struct({
+  includeDom: Schema.optionalKey(Schema.Boolean),
+});
+export type ComputerChromeSnapshotInput = typeof ComputerChromeSnapshotInput.Type;
 
 export const ComputerChromeEmptyInput = Schema.Struct({});
 export type ComputerChromeEmptyInput = typeof ComputerChromeEmptyInput.Type;

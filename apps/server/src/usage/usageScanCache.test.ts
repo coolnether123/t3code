@@ -1,9 +1,11 @@
 import { describe, expect, it } from "@effect/vitest";
 
 import {
+  decodeScanCoverage,
   decodeScanCache,
   dedupeWithinFile,
   encodeScanCache,
+  planTranscriptScan,
   pruneScanCache,
   type ScanCache,
 } from "./usageScanCache.ts";
@@ -59,6 +61,64 @@ describe("scan cache round trip", () => {
     expect(encoded.sessions).toEqual(["session-a"]);
   });
 
+  it("restores provider-root scan coverage", () => {
+    const coverage = [
+      {
+        provider: "codex" as const,
+        rootPath: "/home/me/.codex/sessions",
+        sinceMs: 100,
+        scannedAtMs: 200,
+      },
+    ];
+
+    const encoded = encodeScanCache(new Map(), coverage);
+
+    expect(decodeScanCoverage(JSON.parse(JSON.stringify(encoded)))).toEqual(coverage);
+  });
+
+  it("restores the Codex append parser state", () => {
+    const original = cacheWith([["/codex.jsonl", 100, [record({ provider: "codex" })]]]);
+    const cached = original.get("/codex.jsonl")!;
+    original.set("/codex.jsonl", {
+      ...cached,
+      codexState: {
+        model: "gpt-5.6-sol",
+        sessionId: "session-codex",
+        lastUsageSignature: '{"input_tokens":10}',
+        sawSessionMeta: true,
+        suppressingForkCopies: false,
+        forkCopyAnchorMs: 123,
+      },
+    });
+
+    const restored = decodeScanCache(JSON.parse(JSON.stringify(encodeScanCache(original))));
+
+    expect(restored.get("/codex.jsonl")?.codexState).toEqual(
+      original.get("/codex.jsonl")?.codexState,
+    );
+  });
+
+  it("keeps v2 file entries but treats them as uncovered", () => {
+    const encoded = encodeScanCache(cacheWith([["/a.jsonl", 100, [record()]]]));
+    const v2 = { ...encoded, version: 2, coverage: undefined };
+
+    expect(decodeScanCache(JSON.parse(JSON.stringify(v2))).size).toBe(1);
+    expect(decodeScanCoverage(JSON.parse(JSON.stringify(v2)))).toEqual([]);
+  });
+
+  it("keeps v3 coverage while requiring a fresh parser state", () => {
+    const coverage = [
+      { provider: "codex" as const, rootPath: "/sessions", sinceMs: 100, scannedAtMs: 200 },
+    ];
+    const encoded = encodeScanCache(cacheWith([["/a.jsonl", 100, [record()]]]), coverage);
+    const v3 = { ...encoded, version: 3 };
+
+    expect(decodeScanCache(JSON.parse(JSON.stringify(v3))).get("/a.jsonl")?.codexState).toBe(
+      undefined,
+    );
+    expect(decodeScanCoverage(JSON.parse(JSON.stringify(v3)))).toEqual(coverage);
+  });
+
   it("treats a corrupt or foreign document as an empty cache", () => {
     // A bad cache should cost one cold scan, never a broken page.
     expect(decodeScanCache(null).size).toBe(0);
@@ -105,6 +165,92 @@ describe("scan cache round trip", () => {
 
     const restored = decodeScanCache(JSON.parse(JSON.stringify(poisoned)));
     expect(restored.has("/a.jsonl")).toBe(false);
+  });
+});
+
+describe("planTranscriptScan", () => {
+  const nowMs = 1_000_000;
+  const common = {
+    windowStartMs: 100_000,
+    nowMs,
+    lastRecentScanAtMs: 0,
+    incrementalScanTtlMs: 15_000,
+    recentTranscriptWindowMs: 200_000,
+    fullScanIntervalMs: 300_000,
+  };
+
+  it("starts with a complete requested-window scan", () => {
+    expect(planTranscriptScan({ ...common, coverage: undefined })).toEqual({
+      hasCurrentCoverage: false,
+      shouldRefresh: true,
+      scanStartMs: common.windowStartMs,
+    });
+  });
+
+  it("refreshes only recent history when a wider persisted scan is fresh", () => {
+    expect(
+      planTranscriptScan({
+        ...common,
+        coverage: {
+          provider: "codex",
+          rootPath: "/sessions",
+          sinceMs: 50_000,
+          scannedAtMs: nowMs - 10_000,
+        },
+      }),
+    ).toEqual({
+      hasCurrentCoverage: true,
+      shouldRefresh: true,
+      scanStartMs: nowMs - common.recentTranscriptWindowMs,
+    });
+  });
+
+  it("reuses the last inventory during rapid range switches", () => {
+    expect(
+      planTranscriptScan({
+        ...common,
+        lastRecentScanAtMs: nowMs - 1000,
+        coverage: {
+          provider: "codex",
+          rootPath: "/sessions",
+          sinceMs: 50_000,
+          scannedAtMs: nowMs - 10_000,
+        },
+      }).shouldRefresh,
+    ).toBe(false);
+  });
+
+  it("audits the full covered range after coverage expires", () => {
+    expect(
+      planTranscriptScan({
+        ...common,
+        coverage: {
+          provider: "codex",
+          rootPath: "/sessions",
+          sinceMs: 50_000,
+          scannedAtMs: nowMs - common.fullScanIntervalMs,
+        },
+      }),
+    ).toEqual({
+      hasCurrentCoverage: false,
+      shouldRefresh: true,
+      scanStartMs: 50_000,
+    });
+  });
+
+  it("widens from the requested start when coverage is too narrow", () => {
+    expect(
+      planTranscriptScan({
+        ...common,
+        windowStartMs: 25_000,
+        coverage: {
+          provider: "codex",
+          rootPath: "/sessions",
+          sinceMs: 50_000,
+          scannedAtMs: nowMs - 10_000,
+        },
+      }).scanStartMs,
+    ).toBe(25_000);
   });
 });
 

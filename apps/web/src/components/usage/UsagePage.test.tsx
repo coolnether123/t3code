@@ -33,6 +33,7 @@ vi.mock("react", async (importOriginal) => {
 });
 
 vi.mock("../../env", () => ({ isElectron: false }));
+vi.mock("@tanstack/react-router", () => ({ Link: "a", useNavigate: () => vi.fn() }));
 vi.mock("../../state/usage", () => ({ useUsage: testState.useUsage }));
 vi.mock("../ui/button", () => ({ Button: "button" }));
 vi.mock("../ui/scroll-area", () => ({ ScrollArea: "div" }));
@@ -58,6 +59,12 @@ vi.mock("./usageProviders", async (importOriginal) => {
   return {
     ...actual,
     PROVIDER_PRESENTATION: {
+      ...Object.fromEntries(
+        Object.entries(actual.PROVIDER_PRESENTATION).map(([id, presentation]) => [
+          id,
+          { ...presentation, mark: "span" },
+        ]),
+      ),
       codex: { color: "white", label: "Codex", mark: "span" },
       claude: { color: "orange", label: "Claude Code", mark: "span" },
     },
@@ -102,6 +109,46 @@ beforeEach(() => {
 });
 
 describe("UsagePage hourly breakdown", () => {
+  it("makes only Codex's provider row open its usage and reset details", () => {
+    const view = testState.useUsage();
+    testState.useUsage.mockReturnValue({
+      ...view,
+      merged: {
+        ...view.merged,
+        providers: ["codex", "claude"].map((provider) => ({
+          provider,
+          costUsd: 10,
+          totalTokens: 1000,
+          records: 1,
+          sessions: 1,
+          costShare: 0.5,
+          tokenShare: 0.5,
+        })),
+      },
+    });
+    const markup = renderToStaticMarkup(<UsagePage />);
+    expect(markup.match(/aria-label="Open Codex usage and resets"/g)).toHaveLength(1);
+    expect(markup).toContain("Usage &amp; resets");
+    expect(markup).toContain("Claude Code");
+    expect(markup).not.toContain('aria-label="Open Claude');
+  });
+  it("keeps Codex reset history reachable while usage is loading", () => {
+    testState.useUsage.mockReturnValue({ ...testState.useUsage(), isPending: true });
+    const markup = renderToStaticMarkup(<UsagePage />);
+    expect(markup).toContain('to="/usage-resets"');
+    expect(markup).toContain("Codex usage &amp; resets");
+  });
+
+  it("warns that missing prices are not free usage", () => {
+    const view = testState.useUsage();
+    testState.useUsage.mockReturnValue({
+      ...view,
+      merged: { ...view.merged, costQuality: { ...view.merged.costQuality, unpricedShare: 0.01 } },
+    });
+    const markup = renderToStaticMarkup(<UsagePage />);
+    expect(markup).toContain("Some usage is unpriced and excluded from dollar totals");
+    expect(markup).toContain("not mean that usage was free");
+  });
   it("keeps recent activity visible first without empty hourly rows", () => {
     const markup = renderToStaticMarkup(<UsagePage />);
     const body = markup.match(/<tbody>(.*?)<\/tbody>/)?.[1] ?? "";

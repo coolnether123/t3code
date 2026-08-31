@@ -16,6 +16,7 @@ import * as NodeOS from "node:os";
 import {
   USAGE_CONTRACT_VERSION,
   type UsageProviderKind,
+  type UsageQuotaCost,
   type UsageSource,
   type UsageSummary,
   type UsageSummaryInput,
@@ -35,6 +36,7 @@ import * as Semaphore from "effect/Semaphore";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
 import { ServerConfig } from "../config.ts";
+import { writeFileStringAtomically } from "../atomicWrite.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
@@ -45,15 +47,26 @@ import {
   readDirectoryVolumeId,
   readTranscriptRecords,
   selectTranscriptFilesForScan,
+  transcriptCursorIsLineBoundary,
+  type TranscriptFile,
 } from "./usageTranscriptReader.ts";
 import {
   decodeScanCache,
+  decodeScanCoverage,
   dedupeWithinFile,
   encodeScanCache,
+  planTranscriptScan,
   pruneScanCache,
   type ScanCache,
+  type ScanCoverage,
 } from "./usageScanCache.ts";
 import type { UsageRecord } from "./usageTranscripts.ts";
+import { UsageSummaryCache, usageSummaryCacheKey } from "./usageSummaryCache.ts";
+import {
+  QuotaCostAccumulator,
+  readQuotaHistory,
+  validQuotaIntervals,
+} from "./usageQuotaHistory.ts";
 
 const LITELLM_RATES_URL =
   "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
@@ -73,6 +86,19 @@ const CACHE_RETENTION_DAYS = 365;
 
 /** Keeps a first-time usage read responsive even with very large transcripts. */
 const MAX_COLD_SCAN_BYTES_PER_SOURCE = 128 * 1024 * 1024;
+
+/** Files changed in this span are checked between complete directory audits. */
+const RECENT_TRANSCRIPT_WINDOW_MS = 48 * 60 * 60 * 1000;
+
+/** Range switches inside this span reuse the inventory from the previous read. */
+const INCREMENTAL_SCAN_TTL_MS = 15 * 1000;
+
+/** Full audits catch deleted history without putting a tree walk on every request. */
+const FULL_SCAN_INTERVAL_MS = 15 * 60 * 1000;
+
+/** Matches the client query TTL while deduplicating requests across clients. */
+const SUMMARY_CACHE_TTL_MS = 60 * 1000;
+const MAX_SUMMARY_CACHE_ENTRIES = 16;
 
 /** On-disk shape of the rate snapshot. */
 const RatesCacheFile = Schema.Struct({
@@ -131,6 +157,9 @@ export const make = Effect.gen(function* () {
   const scanSemaphore = yield* Semaphore.make(1);
 
   const fileCache: ScanCache = new Map();
+  const scanCoverage = new Map<string, ScanCoverage>();
+  const recentScanAt = new Map<string, number>();
+  const summaryCache = new UsageSummaryCache(SUMMARY_CACHE_TTL_MS, MAX_SUMMARY_CACHE_ENTRIES);
   let cacheDirty = false;
 
   const ratesCachePath = path.join(config.stateDir, "usage-model-rates.json");
@@ -239,29 +268,36 @@ export const make = Effect.gen(function* () {
   });
 
   /**
-   * Loads the persisted scan cache exactly once per process.
-   *
-   * `Effect.cached` makes concurrent first readers await the same load rather
-   * than each seeing a "loaded" flag set before the read finished and cold
-   * scanning against an empty cache.
+   * Loads once under the scan semaphore, marking completion only after the read.
+   * A cancelled first reader leaves the next request free to load the cache.
    */
-  const ensureScanCacheLoaded = yield* Effect.cached(
-    Effect.gen(function* () {
-      const document = yield* fileSystem.readFileString(scanCachePath).pipe(
-        Effect.flatMap((raw) => decodeScanCacheFile(raw)),
-        Effect.catchCause(() => Effect.succeed(null)),
-      );
-      if (document === null) return;
+  let scanCacheLoaded = false;
+  const ensureScanCacheLoaded = Effect.gen(function* () {
+    if (scanCacheLoaded) return;
+    const document = yield* fileSystem.readFileString(scanCachePath).pipe(
+      Effect.flatMap((raw) => decodeScanCacheFile(raw)),
+      Effect.orElseSucceed(() => null),
+    );
+    if (document !== null) {
       for (const [path, entry] of decodeScanCache(document)) fileCache.set(path, entry);
-    }),
-  );
+      for (const entry of decodeScanCoverage(document)) {
+        scanCoverage.set(`${entry.provider}\u0000${entry.rootPath}`, entry);
+      }
+    }
+    scanCacheLoaded = true;
+  });
 
   const persistScanCache = Effect.fn("UsageService.persistScanCache")(function* () {
     if (!cacheDirty) return;
     // Cleared only after the write lands, so a failed persist is retried on
     // the next scan instead of leaving disk permanently stale.
-    yield* encodeScanCacheFile(encodeScanCache(fileCache)).pipe(
-      Effect.flatMap((serialized) => fileSystem.writeFileString(scanCachePath, serialized)),
+    yield* encodeScanCacheFile(encodeScanCache(fileCache, [...scanCoverage.values()])).pipe(
+      Effect.flatMap((contents) =>
+        writeFileStringAtomically({ filePath: scanCachePath, contents }).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, path),
+        ),
+      ),
       Effect.map(() => {
         cacheDirty = false;
       }),
@@ -276,6 +312,7 @@ export const make = Effect.gen(function* () {
     size: number,
     mtimeMs: number,
     provider: UsageProviderKind,
+    startByte: number,
   ): Effect.Effect<readonly UsageRecord[]> =>
     Effect.gen(function* () {
       const cached = fileCache.get(filePath);
@@ -290,15 +327,33 @@ export const make = Effect.gen(function* () {
         return cached.records;
       }
 
-      const parsed = yield* Effect.promise(() => readTranscriptRecords(filePath, provider));
+      const appendable = cached !== undefined && startByte > 0;
+      const parsed = yield* Effect.promise(() =>
+        readTranscriptRecords(filePath, provider, {
+          startByte,
+          endByte: size - 1,
+          ...(appendable && provider === "codex" && cached?.codexState !== undefined
+            ? { codexState: cached.codexState }
+            : {}),
+        }),
+      );
       // A read failure is not an empty transcript: caching it under this
       // (size, mtime) would silently drop the file's usage until it changes.
       if (parsed === null) return [];
       // Stored already de-duplicated within the file, which is 99% of all
       // duplicates. The aggregator still runs the cross-file dedupe pass.
-      const records = dedupeWithinFile(parsed);
+      const records = dedupeWithinFile([
+        ...(appendable && cached !== undefined ? cached.records : []),
+        ...parsed.records,
+      ]);
 
-      fileCache.set(filePath, { size, mtimeMs, provider, records });
+      fileCache.set(filePath, {
+        size,
+        mtimeMs,
+        provider,
+        records,
+        ...(parsed.codexState === undefined ? {} : { codexState: parsed.codexState }),
+      });
       cacheDirty = true;
       return records;
     });
@@ -338,6 +393,42 @@ export const make = Effect.gen(function* () {
     }
 
     const startedAtMs = yield* Clock.currentTimeMillis;
+    const quotaIntervals = input.quotaIntervals ?? [];
+    if (!validQuotaIntervals(quotaIntervals, input.sinceDay, input.untilDay)) {
+      return yield* new UsageReadError({
+        reason: "invalidWindow",
+        detail:
+          "Quota intervals must be ordered, disjoint, and inside the scanned window with two days of padding.",
+      });
+    }
+    const quotaHistory =
+      input.includeQuotaHistory || input.quotaHistoryOnly
+        ? yield* readQuotaHistory(undefined).pipe(
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.provideService(Path.Path, path),
+          )
+        : undefined;
+    if (input.quotaHistoryOnly) {
+      const finishedAtMs = yield* Clock.currentTimeMillis;
+      return {
+        contractVersion: USAGE_CONTRACT_VERSION,
+        readAt: DateTime.formatIso(DateTime.makeUnsafe(finishedAtMs)),
+        timeZone: input.timeZone,
+        sinceDay: input.sinceDay,
+        untilDay: input.untilDay,
+        buckets: [],
+        sources: [],
+        pricing: {
+          status: "unavailable",
+          source: "Not requested",
+          fetchedAt: null,
+          knownModels: 0,
+        },
+        scanDurationMs: Math.max(0, finishedAtMs - startedAtMs),
+        quotaHistory,
+      } satisfies UsageSummary;
+    }
+    const quotaCosts: UsageQuotaCost[] = [];
     yield* ensureRates();
     yield* ensureScanCacheLoaded;
 
@@ -365,10 +456,9 @@ export const make = Effect.gen(function* () {
     });
 
     const sources: UsageSource[] = [];
-    const livePaths = new Set<string>();
-    const walkedRoots: string[] = [];
-
     for (const { provider, dir } of dirs) {
+      // Reset comparisons use the main Codex quota, never other providers.
+      if (input.quotaIntervals !== undefined && provider !== "codex") continue;
       const volumeId = yield* Effect.promise(() => readDirectoryVolumeId(dir));
       const exists = yield* fileSystem
         .exists(dir)
@@ -387,30 +477,93 @@ export const make = Effect.gen(function* () {
         continue;
       }
 
-      walkedRoots.push(dir);
-      const files = yield* Effect.promise(() => listTranscriptFiles(dir, windowStartMs, provider));
-      for (const file of files) livePaths.add(file.path);
-      const selection = selectTranscriptFilesForScan(
+      const coverageKey = `${provider}\u0000${dir}`;
+      const coverage = scanCoverage.get(coverageKey);
+      const lastRecentScanAt = recentScanAt.get(coverageKey) ?? 0;
+      const { hasCurrentCoverage, shouldRefresh, scanStartMs } = planTranscriptScan({
+        coverage,
+        windowStartMs,
+        nowMs: startedAtMs,
+        lastRecentScanAtMs: lastRecentScanAt,
+        incrementalScanTtlMs: input.refresh ? 0 : INCREMENTAL_SCAN_TTL_MS,
+        recentTranscriptWindowMs: RECENT_TRANSCRIPT_WINDOW_MS,
+        fullScanIntervalMs: FULL_SCAN_INTERVAL_MS,
+      });
+      const discoveredFiles = shouldRefresh
+        ? yield* Effect.promise(() => listTranscriptFiles(dir, scanStartMs, provider))
+        : [];
+      const filesByPath = new Map<string, TranscriptFile>();
+
+      if (hasCurrentCoverage) {
+        for (const [filePath, entry] of fileCache) {
+          if (entry.provider !== provider || entry.mtimeMs < windowStartMs) continue;
+          const relative = path.relative(dir, filePath);
+          if (
+            relative === ".." ||
+            relative.startsWith(`..${path.sep}`) ||
+            path.isAbsolute(relative)
+          ) {
+            continue;
+          }
+          filesByPath.set(filePath, {
+            path: filePath,
+            size: entry.size,
+            mtimeMs: entry.mtimeMs,
+          });
+        }
+      }
+      for (const file of discoveredFiles) filesByPath.set(file.path, file);
+      const files = [...filesByPath.values()];
+      const plannedFiles = yield* Effect.forEach(
         files,
-        (file) => {
+        Effect.fnUntraced(function* (file) {
           const cached = fileCache.get(file.path);
-          return (
+          const warm =
             cached !== undefined &&
             cached.size === file.size &&
             cached.mtimeMs === file.mtimeMs &&
-            cached.provider === provider
-          );
-        },
+            cached.provider === provider;
+          const appendable =
+            !warm &&
+            cached !== undefined &&
+            cached.provider === provider &&
+            file.size > cached.size &&
+            (provider === "claude" || (provider === "codex" && cached.codexState !== undefined)) &&
+            (yield* Effect.promise(() => transcriptCursorIsLineBoundary(file.path, cached.size)));
+          return { ...file, startByte: warm ? file.size : appendable ? cached.size : 0 };
+        }),
+        { concurrency: 16 },
+      );
+      const selection = selectTranscriptFilesForScan(
+        plannedFiles,
+        (file) => file.size - file.startByte,
         MAX_COLD_SCAN_BYTES_PER_SOURCE,
       );
+
+      if (shouldRefresh) {
+        const pruned = pruneScanCache(fileCache, {
+          livePaths: new Set(discoveredFiles.map((file) => file.path)),
+          walkedRoots: [dir],
+          windowStartMs: scanStartMs,
+          retentionCutoffMs: startedAtMs - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+        });
+        if (pruned > 0) cacheDirty = true;
+      }
       let scannedFiles = 0;
       let skippedFiles = selection.deferredFiles;
       // Distinct per directory. Buckets carry per-cell session counts, but a
       // session spans days and models, so clients total this figure instead.
       const sessionIds = new Set<string>();
+      const quota = new QuotaCostAccumulator(provider === "codex" ? quotaIntervals : [], rates);
 
       for (const file of selection.files) {
-        const records = yield* readFileRecords(file.path, file.size, file.mtimeMs, provider);
+        const records = yield* readFileRecords(
+          file.path,
+          file.size,
+          file.mtimeMs,
+          provider,
+          file.startByte,
+        );
         if (records.length === 0) {
           skippedFiles += 1;
           continue;
@@ -419,12 +572,44 @@ export const make = Effect.gen(function* () {
         for (const record of records) {
           // Only sessions that contributed in-window count: the mtime slack
           // admits boundary files whose records fall outside the range.
-          if (aggregator.add(record) && record.sessionId.length > 0) {
-            sessionIds.add(record.sessionId);
+          if (aggregator.add(record)) {
+            if (record.sessionId.length > 0) sessionIds.add(record.sessionId);
+            if (quotaIntervals.length > 0) quota.add(record);
           }
         }
       }
 
+      const scanCompleted =
+        selection.deferredFiles === 0 &&
+        selection.files.every((file) => {
+          const cached = fileCache.get(file.path);
+          return (
+            cached !== undefined &&
+            cached.size === file.size &&
+            cached.mtimeMs === file.mtimeMs &&
+            cached.provider === provider
+          );
+        });
+      if (shouldRefresh && scanCompleted) {
+        recentScanAt.set(coverageKey, startedAtMs);
+        if (!hasCurrentCoverage) {
+          scanCoverage.set(coverageKey, {
+            provider,
+            rootPath: dir,
+            sinceMs: scanStartMs,
+            scannedAtMs: startedAtMs,
+          });
+          cacheDirty = true;
+        }
+      }
+
+      for (const { start: _start, end: _end, ...cost } of quota.rows) {
+        quotaCosts.push({
+          ...cost,
+          complete: scanCompleted,
+          fingerprint: { hostId, provider, resolvedHomePath: dir, volumeId },
+        });
+      }
       sources.push({
         fingerprint: { hostId, provider, resolvedHomePath: dir, volumeId },
         status: selection.deferredFiles > 0 ? "partial" : "ok",
@@ -440,8 +625,8 @@ export const make = Effect.gen(function* () {
     }
 
     const pruned = pruneScanCache(fileCache, {
-      livePaths,
-      walkedRoots,
+      livePaths: new Set(),
+      walkedRoots: [],
       windowStartMs,
       retentionCutoffMs: startedAtMs - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000,
     });
@@ -475,6 +660,8 @@ export const make = Effect.gen(function* () {
         knownModels: rates.size,
       },
       scanDurationMs: Math.max(0, finishedAtMs - startedAtMs),
+      ...(quotaHistory === undefined ? {} : { quotaHistory }),
+      ...(input.quotaIntervals === undefined ? {} : { quotaCosts }),
     } satisfies UsageSummary;
   });
 
@@ -482,7 +669,23 @@ export const make = Effect.gen(function* () {
   // scans makes that decision single-flight: a second window waits for the
   // first scan to persist its newly warm files instead of parsing them again.
   const readSummary: UsageService["Service"]["readSummary"] = (input) =>
-    scanSemaphore.withPermits(1)(readSummaryUnlocked(input));
+    input.quotaHistoryOnly
+      ? readSummaryUnlocked(input)
+      : scanSemaphore.withPermits(1)(
+          Effect.gen(function* () {
+            const startedAtMs = yield* Clock.currentTimeMillis;
+            const key = usageSummaryCacheKey(input);
+            const cached = input.refresh ? undefined : summaryCache.get(key, startedAtMs);
+            if (cached !== undefined) return cached;
+
+            const summary = yield* readSummaryUnlocked(input);
+            if (summary.sources.every((source) => source.status !== "partial")) {
+              const finishedAtMs = yield* Clock.currentTimeMillis;
+              summaryCache.set(key, finishedAtMs, summary);
+            }
+            return summary;
+          }),
+        );
 
   return { readSummary } as const;
 });

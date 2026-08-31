@@ -58,6 +58,7 @@ const ANSI_ESCAPE_CHAR = String.fromCharCode(27);
 const ANSI_ESCAPE_REGEX = new RegExp(`${ANSI_ESCAPE_CHAR}\\[[0-9;]*m`, "g");
 const CODEX_STDERR_LOG_REGEX =
   /^\d{4}-\d{2}-\d{2}T\S+\s+(TRACE|DEBUG|INFO|WARN|ERROR)\s+\S+:\s+(.*)$/;
+const CODEX_STRUCTURED_STDERR_LEVELS = new Set(["TRACE", "DEBUG", "INFO", "WARN", "ERROR"]);
 const BENIGN_ERROR_LOG_SNIPPETS = [
   "state db missing rollout path for thread",
   "state db record_discrepancy: find_thread_path_by_id_str_in_subdir, falling_back",
@@ -647,10 +648,57 @@ export function buildTurnStartParams(input: {
   );
 }
 
-function classifyCodexStderrLine(rawLine: string): { readonly message: string } | null {
+interface CodexStructuredStderrLine {
+  readonly level: string;
+  readonly message: string;
+  readonly target: string | null;
+}
+
+function parseCodexStructuredStderrLine(line: string): CodexStructuredStderrLine | null {
+  if (!line.startsWith("{")) return null;
+  try {
+    const parsed = JSON.parse(line) as unknown;
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+    const root = parsed as Record<string, unknown>;
+    const fields =
+      typeof root.fields === "object" && root.fields !== null && !Array.isArray(root.fields)
+        ? (root.fields as Record<string, unknown>)
+        : null;
+    const level = typeof root.level === "string" ? root.level.toUpperCase() : "";
+    const message = typeof fields?.message === "string" ? fields.message.trim() : "";
+    const target = typeof root.target === "string" ? root.target : null;
+    return CODEX_STRUCTURED_STDERR_LEVELS.has(level) && message.length > 0
+      ? { level, message, target }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+const isMcpTransportLog = (line: CodexStructuredStderrLine): boolean => {
+  const haystack = `${line.target ?? ""} ${line.message}`.toLowerCase();
+  return (
+    haystack.includes("rmcp") ||
+    haystack.includes("streamable http") ||
+    haystack.includes("mcp initialize") ||
+    haystack.includes("post_message") ||
+    haystack.includes("transport channel closed")
+  );
+};
+
+export function classifyCodexStderrLine(rawLine: string): { readonly message: string } | null {
   const line = rawLine.replaceAll(ANSI_ESCAPE_REGEX, "").trim();
   if (!line) {
     return null;
+  }
+
+  const structured = parseCodexStructuredStderrLine(line);
+  if (structured) {
+    if (structured.level !== "ERROR" || isMcpTransportLog(structured)) return null;
+    if (BENIGN_ERROR_LOG_SNIPPETS.some((snippet) => structured.message.includes(snippet))) {
+      return null;
+    }
+    return { message: structured.message };
   }
 
   const match = line.match(CODEX_STDERR_LOG_REGEX);
@@ -2209,15 +2257,9 @@ export const makeCodexSessionRuntime = (
             DEFAULT_CODEX_COMPUTER_CONTROL_MODE;
           const computerControlAvailable = yield* Ref.get(computerControlAvailableRef);
           yield* Ref.set(computerControlModeRef, computerControlMode);
-          if (hasConfiguredMcpServer(options.appServerArgs)) {
-            yield* client.request("config/mcpServer/reload", undefined).pipe(
-              Effect.catch((cause) =>
-                Effect.logWarning("Failed to refresh Codex MCP tool catalog before turn.", {
-                  cause,
-                }),
-              ),
-            );
-          }
+          // The T3 MCP endpoint and inherited-server disable overrides are process startup
+          // arguments. Reloading the catalog here makes Codex 0.148 retry disabled inherited
+          // HTTP servers before every turn, adding latency and leaking RMCP transport logs.
           const normalizedModel = normalizeCodexModelSlug(
             input.model ?? (yield* Ref.get(sessionRef)).model,
           );

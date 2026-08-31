@@ -185,6 +185,8 @@ import {
   ResourceTelemetrySnapshot,
 } from "./resourceTelemetry.ts";
 import { UsageReadError, UsageSummary, UsageSummaryInput } from "./usage.ts";
+import { ResetCheckState } from "./resetCheck.ts";
+import { CommunityCheckState } from "./communityCheck.ts";
 import { ServerSettings, ServerSettingsError, ServerSettingsPatch } from "./settings.ts";
 import {
   WorkerApprovalResponseInput,
@@ -301,6 +303,12 @@ export const WS_METHODS = {
   serverReportHostPowerState: "server.reportHostPowerState",
   serverGetBackgroundPolicy: "server.getBackgroundPolicy",
   serverGetUsageSummary: "server.getUsageSummary",
+  serverGetResetCheck: "server.getResetCheck",
+  serverStartResetCheck: "server.startResetCheck",
+  serverCancelResetCheck: "server.cancelResetCheck",
+  serverGetCommunityCheck: "server.getCommunityCheck",
+  serverStartCommunityCheck: "server.startCommunityCheck",
+  serverCancelCommunityCheck: "server.cancelCommunityCheck",
 
   // Persistent T3-managed Worker methods
   workersList: "workers.list",
@@ -473,6 +481,38 @@ export const WsServerGetUsageSummaryRpc = Rpc.make(WS_METHODS.serverGetUsageSumm
   payload: UsageSummaryInput,
   success: UsageSummary,
   error: Schema.Union([EnvironmentAuthorizationError, UsageReadError]),
+});
+
+export const WsServerGetResetCheckRpc = Rpc.make(WS_METHODS.serverGetResetCheck, {
+  payload: Schema.Struct({}),
+  success: ResetCheckState,
+  error: EnvironmentAuthorizationError,
+});
+export const WsServerStartResetCheckRpc = Rpc.make(WS_METHODS.serverStartResetCheck, {
+  payload: Schema.Struct({}),
+  success: ResetCheckState,
+  error: EnvironmentAuthorizationError,
+});
+export const WsServerCancelResetCheckRpc = Rpc.make(WS_METHODS.serverCancelResetCheck, {
+  payload: Schema.Struct({}),
+  success: ResetCheckState,
+  error: EnvironmentAuthorizationError,
+});
+
+export const WsServerGetCommunityCheckRpc = Rpc.make(WS_METHODS.serverGetCommunityCheck, {
+  payload: Schema.Struct({}),
+  success: CommunityCheckState,
+  error: EnvironmentAuthorizationError,
+});
+export const WsServerStartCommunityCheckRpc = Rpc.make(WS_METHODS.serverStartCommunityCheck, {
+  payload: Schema.Struct({}),
+  success: CommunityCheckState,
+  error: EnvironmentAuthorizationError,
+});
+export const WsServerCancelCommunityCheckRpc = Rpc.make(WS_METHODS.serverCancelCommunityCheck, {
+  payload: Schema.Struct({}),
+  success: CommunityCheckState,
+  error: EnvironmentAuthorizationError,
 });
 
 export const WsServerSignalProcessRpc = Rpc.make(WS_METHODS.serverSignalProcess, {
@@ -1114,6 +1154,12 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetResourceTelemetryHistoryRpc,
   WsServerRetryResourceTelemetryRpc,
   WsServerGetUsageSummaryRpc,
+  WsServerGetResetCheckRpc,
+  WsServerStartResetCheckRpc,
+  WsServerCancelResetCheckRpc,
+  WsServerGetCommunityCheckRpc,
+  WsServerStartCommunityCheckRpc,
+  WsServerCancelCommunityCheckRpc,
   WsServerSignalProcessRpc,
   WsServerReportClientActivityRpc,
   WsServerReportHostPowerStateRpc,

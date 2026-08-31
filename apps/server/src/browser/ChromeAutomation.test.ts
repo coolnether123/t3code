@@ -63,7 +63,12 @@ const makeFakePage = (input: {
       url = nextUrl;
       title = `Title for ${nextUrl}`;
     },
-    snapshot: async () => input.snapshot ?? emptySnapshot,
+    snapshot: async ({ includeDom }) => {
+      const snapshot = input.snapshot ?? emptySnapshot;
+      return includeDom
+        ? snapshot
+        : { accessibilityTree: snapshot.accessibilityTree, refs: snapshot.refs };
+    },
     click: async (selector: string) => {
       calls.push({ kind: "click", selector });
     },
@@ -223,6 +228,13 @@ it.effect("lists, selects, navigates, and reports tabs", () =>
           options: { waitUntil: "domcontentloaded", timeoutMs: 321 },
         },
       ]);
+
+      yield* automation.navigate("https://two.test/default-wait");
+      assert.deepEqual(second.calls.at(-1), {
+        kind: "goto",
+        url: "https://two.test/default-wait",
+        options: { waitUntil: "domcontentloaded", timeoutMs: 15_000 },
+      });
     }),
   ),
 );
@@ -255,7 +267,9 @@ it.effect("stores snapshot refs and supports click, fill, and type", () =>
       const automation = yield* ChromeAutomationModule.make({ adapter: fake.adapter });
       yield* automation.start();
 
-      const snapshot = yield* automation.snapshot();
+      const compactSnapshot = yield* automation.snapshot();
+      assert.equal(compactSnapshot.dom, undefined);
+      const snapshot = yield* automation.snapshot({ includeDom: true });
       assert.equal(snapshot.tabId, "tab-1");
       assert.equal(snapshot.refs[0]?.selector, "#submit");
       yield* automation.click({ ref: "ref-submit" });

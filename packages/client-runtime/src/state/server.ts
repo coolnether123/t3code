@@ -40,7 +40,7 @@ import {
   subscribe,
   type EnvironmentRpcInput,
 } from "../rpc/client.ts";
-import { followStreamInEnvironment } from "./runtime.ts";
+import { createEnvironmentQueryAtomFamily, followStreamInEnvironment } from "./runtime.ts";
 
 export type ServerUpdateStage = "downloading" | "installing" | "resuming";
 
@@ -723,10 +723,40 @@ export function createServerEnvironmentAtoms<R, E>(
     }),
     // A cold transcript scan is measured in seconds, so keep the result around
     // long enough that switching windows or re-rendering does not rescan.
-    usageSummary: createEnvironmentRpcQueryAtomFamily(runtime, {
+    usageSummary: createEnvironmentQueryAtomFamily(runtime, {
       label: "environment-data:server:usage-summary",
-      tag: WS_METHODS.serverGetUsageSummary,
+      // The client SWR cache handles window switching. A network revalidation
+      // must check recent files, not receive another cached server summary.
+      execute: (input: EnvironmentRpcInput<typeof WS_METHODS.serverGetUsageSummary>) =>
+        request(WS_METHODS.serverGetUsageSummary, { ...input, refresh: true }),
       staleTimeMs: 60_000,
+    }),
+    resetCheck: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:reset-check",
+      tag: WS_METHODS.serverGetResetCheck,
+      staleTimeMs: 1_000,
+    }),
+    communityCheck: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:community-check",
+      tag: WS_METHODS.serverGetCommunityCheck,
+      staleTimeMs: 1_000,
+    }),
+    startCommunityCheck: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:server:start-community-check",
+      tag: WS_METHODS.serverStartCommunityCheck,
+    }),
+    cancelCommunityCheck: createEnvironmentRpcCommand(runtime, {
+      label: "environment-command:server:cancel-community-check",
+      tag: WS_METHODS.serverCancelCommunityCheck,
+    }),
+    startResetCheck: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:start-reset-check",
+      tag: WS_METHODS.serverStartResetCheck,
+      concurrency: { mode: "singleFlight", key: ({ environmentId }) => environmentId },
+    }),
+    cancelResetCheck: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:cancel-reset-check",
+      tag: WS_METHODS.serverCancelResetCheck,
     }),
     configProjection,
     welcome: createEnvironmentRpcSubscriptionAtomFamily(runtime, {

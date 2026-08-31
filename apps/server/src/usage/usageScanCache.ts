@@ -16,20 +16,64 @@
  */
 import type { UsageProviderKind } from "@t3tools/contracts";
 
-import type { UsageRecord } from "./usageTranscripts.ts";
+import type { CodexScanState, UsageRecord } from "./usageTranscripts.ts";
 
-// v2: Codex fork-copy suppression changed what a file parses to, so v1
-// entries would keep serving double-counted records forever.
-export const USAGE_SCAN_CACHE_VERSION = 2 as const;
+// v2 changed fork-copy suppression. v3 added root coverage. v4 persists the
+// Codex parser cursor so growing JSONL files can resume from their old size.
+export const USAGE_SCAN_CACHE_VERSION = 4 as const;
 
 export interface CachedFile {
   readonly size: number;
   readonly mtimeMs: number;
   readonly provider: UsageProviderKind;
   readonly records: readonly UsageRecord[];
+  readonly codexState?: CodexScanState;
 }
 
 export type ScanCache = Map<string, CachedFile>;
+
+export interface ScanCoverage {
+  readonly provider: UsageProviderKind;
+  readonly rootPath: string;
+  readonly sinceMs: number;
+  readonly scannedAtMs: number;
+}
+
+export interface TranscriptScanPlanOptions {
+  readonly coverage: ScanCoverage | undefined;
+  readonly windowStartMs: number;
+  readonly nowMs: number;
+  readonly lastRecentScanAtMs: number;
+  readonly incrementalScanTtlMs: number;
+  readonly recentTranscriptWindowMs: number;
+  readonly fullScanIntervalMs: number;
+}
+
+export interface TranscriptScanPlan {
+  readonly hasCurrentCoverage: boolean;
+  readonly shouldRefresh: boolean;
+  readonly scanStartMs: number;
+}
+
+/** Chooses a recent refresh or a complete audit for one provider root. */
+export function planTranscriptScan(options: TranscriptScanPlanOptions): TranscriptScanPlan {
+  const coverageIncludesWindow =
+    options.coverage !== undefined && options.coverage.sinceMs <= options.windowStartMs;
+  const hasCurrentCoverage =
+    options.coverage !== undefined &&
+    coverageIncludesWindow &&
+    options.nowMs - options.coverage.scannedAtMs < options.fullScanIntervalMs;
+  const shouldRefresh =
+    !hasCurrentCoverage ||
+    options.nowMs - options.lastRecentScanAtMs >= options.incrementalScanTtlMs;
+  const scanStartMs = hasCurrentCoverage
+    ? Math.max(options.windowStartMs, options.nowMs - options.recentTranscriptWindowMs)
+    : coverageIncludesWindow && options.coverage !== undefined
+      ? options.coverage.sinceMs
+      : options.windowStartMs;
+
+  return { hasCurrentCoverage, shouldRefresh, scanStartMs };
+}
 
 /**
  * Row layout for the serialised form. Positional and interned rather than
@@ -54,6 +98,7 @@ interface SerializedFile {
   readonly m: number;
   readonly p: UsageProviderKind;
   readonly r: readonly SerializedRecord[];
+  readonly c?: readonly [string, string, string | null, boolean, boolean, number];
 }
 
 interface SerializedCache {
@@ -61,10 +106,14 @@ interface SerializedCache {
   readonly models: readonly string[];
   readonly sessions: readonly string[];
   readonly files: Readonly<Record<string, SerializedFile>>;
+  readonly coverage?: readonly [UsageProviderKind, string, number, number][];
 }
 
 /** Serialises the cache, interning the repeated model and session strings. */
-export function encodeScanCache(cache: ScanCache): SerializedCache {
+export function encodeScanCache(
+  cache: ScanCache,
+  coverage: readonly ScanCoverage[] = [],
+): SerializedCache {
   const models: string[] = [];
   const sessions: string[] = [];
   const modelIndex = new Map<string, number>();
@@ -85,6 +134,18 @@ export function encodeScanCache(cache: ScanCache): SerializedCache {
       s: entry.size,
       m: entry.mtimeMs,
       p: entry.provider,
+      ...(entry.codexState === undefined
+        ? {}
+        : {
+            c: [
+              entry.codexState.model,
+              entry.codexState.sessionId,
+              entry.codexState.lastUsageSignature,
+              entry.codexState.sawSessionMeta,
+              entry.codexState.suppressingForkCopies,
+              entry.codexState.forkCopyAnchorMs,
+            ] as const,
+          }),
       r: entry.records.map((record) => [
         record.timestampMs,
         intern(models, modelIndex, record.model),
@@ -100,7 +161,18 @@ export function encodeScanCache(cache: ScanCache): SerializedCache {
     };
   }
 
-  return { version: USAGE_SCAN_CACHE_VERSION, models, sessions, files };
+  return {
+    version: USAGE_SCAN_CACHE_VERSION,
+    models,
+    sessions,
+    files,
+    coverage: coverage.map((entry) => [
+      entry.provider,
+      entry.rootPath,
+      entry.sinceMs,
+      entry.scannedAtMs,
+    ]),
+  };
 }
 
 function isRecordArray(value: unknown): value is readonly unknown[] {
@@ -118,7 +190,9 @@ export function decodeScanCache(document: unknown): ScanCache {
   if (typeof document !== "object" || document === null) return cache;
 
   const root = document as Partial<SerializedCache>;
-  if (root.version !== USAGE_SCAN_CACHE_VERSION) return cache;
+  if (root.version !== 2 && root.version !== 3 && root.version !== USAGE_SCAN_CACHE_VERSION) {
+    return cache;
+  }
   if (!isRecordArray(root.models) || !isRecordArray(root.sessions)) return cache;
   if (typeof root.files !== "object" || root.files === null) return cache;
 
@@ -201,10 +275,73 @@ export function decodeScanCache(document: unknown): ScanCache {
     }
 
     if (corrupt) continue;
-    cache.set(path, { size: entry.s, mtimeMs: entry.m, provider, records });
+    let codexState: CodexScanState | undefined;
+    if (root.version === USAGE_SCAN_CACHE_VERSION && entry.c !== undefined) {
+      const [model, sessionId, lastUsageSignature, sawSessionMeta, suppressingForkCopies, anchor] =
+        entry.c;
+      if (
+        typeof model !== "string" ||
+        typeof sessionId !== "string" ||
+        (lastUsageSignature !== null && typeof lastUsageSignature !== "string") ||
+        typeof sawSessionMeta !== "boolean" ||
+        typeof suppressingForkCopies !== "boolean" ||
+        typeof anchor !== "number" ||
+        !Number.isFinite(anchor)
+      ) {
+        continue;
+      }
+      codexState = {
+        model,
+        sessionId,
+        lastUsageSignature,
+        sawSessionMeta,
+        suppressingForkCopies,
+        forkCopyAnchorMs: anchor,
+      };
+    }
+    cache.set(path, {
+      size: entry.s,
+      mtimeMs: entry.m,
+      provider,
+      records,
+      ...(codexState === undefined ? {} : { codexState }),
+    });
   }
 
   return cache;
+}
+
+/** Reads provider-root coverage. v2 caches remain valid but start uncovered. */
+export function decodeScanCoverage(document: unknown): readonly ScanCoverage[] {
+  if (typeof document !== "object" || document === null) return [];
+  const root = document as Partial<SerializedCache>;
+  if (
+    (root.version !== 3 && root.version !== USAGE_SCAN_CACHE_VERSION) ||
+    !Array.isArray(root.coverage)
+  ) {
+    return [];
+  }
+
+  const coverage: ScanCoverage[] = [];
+  for (const row of root.coverage) {
+    if (!Array.isArray(row) || row.length !== 4) continue;
+    const [provider, rootPath, sinceMs, scannedAtMs] = row;
+    if (
+      (provider !== "claude" &&
+        provider !== "codex" &&
+        provider !== "gemini" &&
+        provider !== "opencode") ||
+      typeof rootPath !== "string" ||
+      typeof sinceMs !== "number" ||
+      !Number.isFinite(sinceMs) ||
+      typeof scannedAtMs !== "number" ||
+      !Number.isFinite(scannedAtMs)
+    ) {
+      continue;
+    }
+    coverage.push({ provider, rootPath, sinceMs, scannedAtMs });
+  }
+  return coverage;
 }
 
 export interface PruneOptions {

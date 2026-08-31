@@ -1,5 +1,8 @@
 import { ApprovalRequestId, isToolLifecycleItemType } from "@t3tools/contracts";
-import { normalizeDiagnosticDetail } from "@t3tools/client-runtime/diagnostics";
+import {
+  isTechnicalRuntimeDiagnostic,
+  normalizeDiagnosticDetail,
+} from "@t3tools/client-runtime/diagnostics";
 import type {
   OrchestrationLatestTurn,
   OrchestrationThread,
@@ -331,6 +334,10 @@ function deriveWorkLogEntries(
     if (activity.summary === "Checkpoint captured") continue;
     if (isPlanBoundaryToolActivity(activity)) continue;
     if (isAgentInternalActivity(activity)) continue;
+    if (activity.kind === "runtime.warning") {
+      const payload = asRecord(activity.payload);
+      if (isTechnicalRuntimeDiagnostic(payload?.detail ?? payload?.message)) continue;
+    }
     entries.push(toDerivedWorkLogEntry(activity));
   }
   return collapseDerivedWorkLogEntries(entries);

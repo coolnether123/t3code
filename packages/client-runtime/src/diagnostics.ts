@@ -79,6 +79,17 @@ function parseDiagnosticValue(raw: string): { message: string; technicalDetail: 
   };
 }
 
+export function isTechnicalRuntimeDiagnostic(rawValue: unknown): boolean {
+  if (typeof rawValue !== "string") return false;
+  const value = rawValue.trim();
+  return (
+    value.startsWith("{") &&
+    /["']timestamp["']\s*:/u.test(value) &&
+    /["']level["']\s*:\s*["'](?:TRACE|DEBUG|INFO|WARN|ERROR)["']/u.test(value) &&
+    /["']fields["']\s*:/u.test(value)
+  );
+}
+
 function endpointName(value: string): string | null {
   const arrowMatch = /(?:mcp|rmcp)?\s*([a-z0-9][a-z0-9_-]{2,})\s*[-=]>\s*https?:\/\//i.exec(value);
   if (arrowMatch?.[1]) return arrowMatch[1];

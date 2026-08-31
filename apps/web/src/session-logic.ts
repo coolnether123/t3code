@@ -1,6 +1,9 @@
 import * as Option from "effect/Option";
 import * as Arr from "effect/Array";
-import { normalizeDiagnosticDetail } from "@t3tools/client-runtime/diagnostics";
+import {
+  isTechnicalRuntimeDiagnostic,
+  normalizeDiagnosticDetail,
+} from "@t3tools/client-runtime/diagnostics";
 import { isBackgroundTaskActivity } from "@t3tools/client-runtime/state/subagentRuntime";
 import {
   ApprovalRequestId,
@@ -906,6 +909,10 @@ export function deriveWorkLogEntries(
     if (activity.summary === "Checkpoint captured") continue;
     if (isPlanBoundaryToolActivity(activity)) continue;
     if (isAgentInternalActivity(activity)) continue;
+    if (activity.kind === "runtime.warning") {
+      const payload = asRecord(activity.payload);
+      if (isTechnicalRuntimeDiagnostic(payload?.detail ?? payload?.message)) continue;
+    }
     entries.push(toDerivedWorkLogEntry(activity, knownWorkers));
   }
   return collapseDerivedWorkLogEntries(entries);

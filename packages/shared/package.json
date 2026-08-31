@@ -226,6 +226,14 @@
     "./usageFormat": {
       "types": "./src/usageFormat.ts",
       "import": "./src/usageFormat.ts"
+    },
+    "./usageQuotaForecast": {
+      "types": "./src/usageQuotaForecast.ts",
+      "import": "./src/usageQuotaForecast.ts"
+    },
+    "./usageQuota": {
+      "types": "./src/usageQuota.ts",
+      "import": "./src/usageQuota.ts"
     }
   },
   "scripts": {

@@ -67,7 +67,8 @@ const chromeService = (calls: Array<string>) =>
     listTabs: () => Effect.sync(() => (calls.push("tabs"), [chromeTab])),
     selectTab: (tabId) => Effect.sync(() => (calls.push(`select:${tabId}`), chromeTab)),
     navigate: (url) => Effect.sync(() => (calls.push(`navigate:${url}`), chromeTab)),
-    snapshot: () => Effect.sync(() => (calls.push("snapshot"), chromeSnapshot)),
+    snapshot: (options) =>
+      Effect.sync(() => (calls.push(`snapshot:${options?.includeDom === true}`), chromeSnapshot)),
     click: (target) =>
       Effect.sync(() => calls.push(`click:${"ref" in target ? target.ref : target.selector}`)),
     fill: (target, value) =>
@@ -156,7 +157,9 @@ it.effect("routes managed Chrome operations through the authenticated service", 
         }),
       ),
     ).toEqual(chromeTab);
-    expect(yield* provide(computerHandlers.computer_snapshot())).toEqual(chromeSnapshot);
+    expect(yield* provide(computerHandlers.computer_snapshot({ includeDom: true }))).toEqual(
+      chromeSnapshot,
+    );
     expect(yield* provide(computerHandlers.computer_click({ target: { ref: "ref-1" } }))).toEqual({
       completed: true,
     });
@@ -178,7 +181,7 @@ it.effect("routes managed Chrome operations through the authenticated service", 
       "tabs",
       "select:tab-1",
       "navigate:https://example.test/next",
-      "snapshot",
+      "snapshot:true",
       "click:ref-1",
       "fill:#email:a@example.test",
       "type:#note:hello",

@@ -54,7 +54,10 @@ export const computerHandlers = {
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
       }),
     ),
-  computer_snapshot: () => withChromeAutomation("snapshot", (automation) => automation.snapshot()),
+  computer_snapshot: ({ includeDom }) =>
+    withChromeAutomation("snapshot", (automation) =>
+      automation.snapshot({ includeDom: includeDom === true }),
+    ),
   computer_click: ({ target }) =>
     withChromeAutomation("click", (automation) => automation.click(target)).pipe(
       Effect.as({ completed: true as const }),

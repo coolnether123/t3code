@@ -12,7 +12,9 @@ import * as ServerConfig from "../config.ts";
 
 const PROFILE_DIRECTORY = "browser/chrome-profile";
 const DEFAULT_TIMEOUT_MS = 15_000;
-const MAX_SNAPSHOT_CHARS = 100_000;
+const MAX_ACCESSIBILITY_SNAPSHOT_CHARS = 24_000;
+const MAX_DOM_SNAPSHOT_CHARS = 100_000;
+const MAX_SNAPSHOT_REFS = 300;
 const UNAVAILABLE_MESSAGE = "T3 managed Chrome is unavailable.";
 const INTERACTIVE_SELECTOR =
   'button, a, input, textarea, select, summary, [role], [contenteditable="true"]';
@@ -53,7 +55,7 @@ export interface ChromeAutomationRef {
 
 export interface ChromeAutomationPageSnapshot {
   readonly accessibilityTree: string;
-  readonly dom: string;
+  readonly dom?: string;
   readonly refs: ReadonlyArray<ChromeAutomationRef>;
 }
 
@@ -78,7 +80,9 @@ export interface ChromeAutomationPageAdapter {
       readonly timeoutMs: number;
     },
   ) => Promise<void>;
-  readonly snapshot: () => Promise<ChromeAutomationPageSnapshot>;
+  readonly snapshot: (options: {
+    readonly includeDom: boolean;
+  }) => Promise<ChromeAutomationPageSnapshot>;
   readonly click: (selector: string) => Promise<void>;
   readonly fill: (selector: string, value: string) => Promise<void>;
   readonly type: (selector: string, value: string) => Promise<void>;
@@ -133,7 +137,9 @@ export class ChromeAutomation extends Context.Service<
         readonly timeoutMs?: number;
       },
     ) => Effect.Effect<ChromeAutomationTab, ChromeAutomationError>;
-    readonly snapshot: () => Effect.Effect<
+    readonly snapshot: (options?: {
+      readonly includeDom?: boolean;
+    }) => Effect.Effect<
       ChromeAutomationPageSnapshot & { readonly tabId: string },
       ChromeAutomationError
     >;
@@ -170,7 +176,17 @@ interface ManagedTab {
 
 interface SnapshotElement {
   readonly tagName: string;
+  readonly id: string;
+  readonly innerText: string;
+  readonly parentElement: SnapshotElement | null;
   readonly previousElementSibling: SnapshotElement | null;
+  readonly getAttribute: (name: string) => string | null;
+  readonly getBoundingClientRect: () => {
+    readonly x: number;
+    readonly y: number;
+    readonly width: number;
+    readonly height: number;
+  };
 }
 
 const errorDetail = (cause: unknown): string =>
@@ -202,13 +218,10 @@ const isRecoverableTransportFailure = (cause: ChromeAutomationError): boolean =>
   ].some((marker) => detail.includes(marker));
 };
 
-const escapeCssIdentifier = (value: string): string =>
-  value.replace(/[^a-zA-Z0-9_-]/g, (character) => `\\${character}`);
-
-const truncate = (value: string): string =>
-  value.length <= MAX_SNAPSHOT_CHARS
+const truncate = (value: string, maxChars: number): string =>
+  value.length <= maxChars
     ? value
-    : `${value.slice(0, MAX_SNAPSHOT_CHARS)}\n[truncated by T3 Chrome automation]`;
+    : `${value.slice(0, maxChars)}\n[truncated by T3 Chrome automation]`;
 
 const targetSelector = (
   target: ChromeAutomationTarget,
@@ -376,48 +389,45 @@ const makePlaywrightPageAdapter = (page: Page): ChromeAutomationPageAdapter => (
   goto: async (url, options) => {
     await page.goto(url, { waitUntil: options.waitUntil, timeout: options.timeoutMs });
   },
-  snapshot: async () => {
-    const [accessibilityTree, dom, refs] = await Promise.all([
+  snapshot: async ({ includeDom }) => {
+    const [accessibilityTree, refs, dom] = await Promise.all([
       page.locator("body").ariaSnapshot({ timeout: DEFAULT_TIMEOUT_MS }),
-      page.locator("body").evaluate((element) => element.outerHTML),
-      page.locator(INTERACTIVE_SELECTOR).evaluateAll((elements) =>
-        elements.map((element, index) => {
-          const htmlElement = element as unknown as {
-            readonly tagName: string;
-            readonly id: string;
-            readonly innerText: string;
-            readonly previousElementSibling: SnapshotElement | null;
-            readonly getAttribute: (name: string) => string | null;
-            readonly getBoundingClientRect: () => {
-              readonly x: number;
-              readonly y: number;
-              readonly width: number;
-              readonly height: number;
-            };
-          };
+      page.locator(INTERACTIVE_SELECTOR).evaluateAll((elements, maxRefs) => {
+        const escapeAttributeValue = (value: string): string =>
+          value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+        const selectorFor = (element: SnapshotElement): string => {
+          const segments: string[] = [];
+          let current: SnapshotElement | null = element;
+          while (current !== null) {
+            if (current.id) {
+              segments.unshift(`[id="${escapeAttributeValue(current.id)}"]`);
+              break;
+            }
+            const tag = current.tagName.toLowerCase();
+            let sameTagIndex = 1;
+            let sibling = current.previousElementSibling;
+            while (sibling !== null) {
+              if (sibling.tagName === current.tagName) sameTagIndex += 1;
+              sibling = sibling.previousElementSibling;
+            }
+            segments.unshift(`${tag}:nth-of-type(${sameTagIndex})`);
+            current = current.parentElement;
+          }
+          return segments.join(" > ");
+        };
+        const snapshots: ChromeAutomationRef[] = [];
+        for (const element of elements) {
+          if (snapshots.length >= maxRefs) break;
+          const htmlElement = element as unknown as SnapshotElement;
           const rect = htmlElement.getBoundingClientRect();
-          const id = htmlElement.id;
-          const testId = htmlElement.getAttribute("data-testid");
-          const selector = id
-            ? `#${escapeCssIdentifier(id)}`
-            : testId
-              ? `[data-testid="${testId.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"]`
-              : `${htmlElement.tagName.toLowerCase()}:nth-of-type(${(() => {
-                  let sameTagIndex = 1;
-                  let sibling = htmlElement.previousElementSibling;
-                  while (sibling !== null) {
-                    if (sibling.tagName === htmlElement.tagName) sameTagIndex += 1;
-                    sibling = sibling.previousElementSibling;
-                  }
-                  return sameTagIndex;
-                })()})`;
+          if (rect.width <= 0 || rect.height <= 0) continue;
           const role = htmlElement.getAttribute("role");
           const name =
             htmlElement.getAttribute("aria-label") ??
             htmlElement.innerText.trim().replace(/\s+/g, " ").slice(0, 200);
-          return {
-            ref: `ref-${index + 1}`,
-            selector,
+          snapshots.push({
+            ref: `ref-${snapshots.length + 1}`,
+            selector: selectorFor(htmlElement),
             tag: htmlElement.tagName.toLowerCase(),
             role,
             name,
@@ -425,11 +435,15 @@ const makePlaywrightPageAdapter = (page: Page): ChromeAutomationPageAdapter => (
             y: rect.y,
             width: rect.width,
             height: rect.height,
-          };
-        }),
-      ),
+          });
+        }
+        return snapshots;
+      }, MAX_SNAPSHOT_REFS),
+      includeDom
+        ? page.locator("body").evaluate((element) => element.outerHTML)
+        : Promise.resolve(undefined),
     ]);
-    return { accessibilityTree, dom, refs };
+    return { accessibilityTree, ...(dom === undefined ? {} : { dom }), refs };
   },
   click: (selector) => page.locator(selector).click({ timeout: DEFAULT_TIMEOUT_MS }),
   fill: (selector, value) => page.locator(selector).fill(value, { timeout: DEFAULT_TIMEOUT_MS }),
@@ -808,7 +822,7 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
           yield* Effect.tryPromise({
             try: () =>
               tab.page.goto(url, {
-                waitUntil: options.waitUntil ?? "load",
+                waitUntil: options.waitUntil ?? "domcontentloaded",
                 timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
               }),
             catch: (cause) => failure("navigate", cause),
@@ -817,19 +831,24 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
           return yield* tabInfo(tab);
         }),
       ),
-    snapshot: () =>
+    snapshot: (options = {}) =>
       action("snapshot", () =>
         Effect.gen(function* () {
           const tab = yield* selectedTab();
           const snapshot = yield* Effect.tryPromise({
-            try: () => tab.page.snapshot(),
+            try: () => tab.page.snapshot({ includeDom: options.includeDom === true }),
             catch: (cause) => failure("snapshot", cause),
           });
           tab.refs = new Map(snapshot.refs.map((ref) => [ref.ref, ref.selector]));
           return {
             ...snapshot,
-            accessibilityTree: truncate(snapshot.accessibilityTree),
-            dom: truncate(snapshot.dom),
+            accessibilityTree: truncate(
+              snapshot.accessibilityTree,
+              MAX_ACCESSIBILITY_SNAPSHOT_CHARS,
+            ),
+            ...(snapshot.dom === undefined
+              ? {}
+              : { dom: truncate(snapshot.dom, MAX_DOM_SNAPSHOT_CHARS) }),
             tabId: tab.id,
           };
         }),

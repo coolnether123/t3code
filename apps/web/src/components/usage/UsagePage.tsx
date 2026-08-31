@@ -1,4 +1,5 @@
 import type { UsageProviderKind } from "@t3tools/contracts";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { CheckIcon, RefreshCwIcon, XIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 
@@ -32,6 +33,7 @@ import {
 import { WorkspacePageContainer } from "../WorkspacePageContainer";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { UsageProviderChart, type UsageChartMetric } from "./UsageProviderChart";
+import { CodexUsageButton } from "./CodexUsageButton";
 import { PROVIDER_ORDER, PROVIDER_PRESENTATION, providersWithUsage } from "./usageProviders";
 
 const WINDOW_OPTIONS = [
@@ -44,6 +46,7 @@ const WINDOW_OPTIONS = [
 ] as const;
 
 export function UsagePage() {
+  const navigate = useNavigate();
   const [windowSelection, setWindowSelection] = useState(() => ({
     days: 30,
     window: makeWindow(30),
@@ -58,6 +61,7 @@ export function UsagePage() {
   // totals while devices are still answering makes every number on the page
   // jump as each one lands.
   const settling = isPending || isPartial;
+  const refreshing = environments.some((entry) => entry.isPending && entry.summary !== null);
 
   const days = useMemo(
     () => enumerateDays(window.sinceDay, window.untilDay),
@@ -86,6 +90,7 @@ export function UsagePage() {
     });
   };
   const refreshWindow = () => {
+    if (refreshing) return;
     const nextWindow = makeWindow(windowDays, undefined, isPast24Hours ? "hour" : "day");
     if (
       nextWindow.sinceDay === window.sinceDay &&
@@ -144,8 +149,15 @@ export function UsagePage() {
             </Toggle>
           ))}
         </ToggleGroup>
-        <Button onClick={refreshWindow} aria-label="Refresh usage" size="icon-sm" variant="ghost">
-          <RefreshCwIcon className="size-3.5" />
+        <Button
+          onClick={refreshWindow}
+          aria-label="Refresh usage"
+          aria-busy={refreshing}
+          disabled={refreshing}
+          size="icon-sm"
+          variant="ghost"
+        >
+          <RefreshCwIcon className={`size-3.5 ${refreshing ? "motion-safe:animate-spin" : ""}`} />
         </Button>
       </div>
       <div className="ms-auto flex min-w-0 items-center justify-end gap-1 lg:hidden">
@@ -187,8 +199,15 @@ export function UsagePage() {
             ))}
           </SelectPopup>
         </Select>
-        <Button onClick={refreshWindow} aria-label="Refresh usage" size="icon-sm" variant="ghost">
-          <RefreshCwIcon className="size-3.5" />
+        <Button
+          onClick={refreshWindow}
+          aria-label="Refresh usage"
+          aria-busy={refreshing}
+          disabled={refreshing}
+          size="icon-sm"
+          variant="ghost"
+        >
+          <RefreshCwIcon className={`size-3.5 ${refreshing ? "motion-safe:animate-spin" : ""}`} />
         </Button>
       </div>
     </div>
@@ -201,6 +220,14 @@ export function UsagePage() {
 
         <ScrollArea className="min-h-0 flex-1">
           <WorkspacePageContainer width="wide">
+            <div className="mb-5 flex justify-end">
+              <Link
+                to="/usage-resets"
+                className="inline-flex min-h-11 w-full items-center justify-center rounded-md border border-border px-3 py-2 text-center text-sm text-foreground hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring sm:w-auto"
+              >
+                Codex usage &amp; resets
+              </Link>
+            </div>
             {settling ? (
               <>
                 {environments.length > 1 ? <UsageDeviceStrip environments={environments} /> : null}
@@ -227,6 +254,12 @@ export function UsagePage() {
                           ? `${formatCount(merged.sessions)} sessions · API estimate`
                           : `${formatCount(merged.sessions)} sessions`}
                       </span>
+                      {merged.costQuality.unpricedShare > 0 ? (
+                        <p className="text-xs text-muted-foreground" role="status">
+                          Some usage is unpriced and excluded from dollar totals. A zero cost does
+                          not mean that usage was free.
+                        </p>
+                      ) : null}
                     </div>
 
                     {activeProviders.map((provider) => {
@@ -248,11 +281,24 @@ export function UsagePage() {
                                   backgroundColor: PROVIDER_PRESENTATION[provider].color,
                                 }}
                               />
-                              <ProviderMark provider={provider} className="size-4" />
-                              <span className="flex min-w-0 items-baseline gap-1.5">
-                                <span className="truncate">
-                                  {PROVIDER_PRESENTATION[provider].label}
-                                </span>
+                              <span className="flex min-w-0 flex-wrap items-center gap-x-1.5">
+                                {provider === "codex" ? (
+                                  <CodexUsageButton
+                                    onOpen={() => {
+                                      void navigate({ to: "/usage-resets" });
+                                    }}
+                                  >
+                                    <ProviderMark provider={provider} className="size-4" />
+                                    <span>Codex</span>
+                                  </CodexUsageButton>
+                                ) : (
+                                  <span className="inline-flex items-center gap-2">
+                                    <ProviderMark provider={provider} className="size-4" />
+                                    <span className="truncate">
+                                      {PROVIDER_PRESENTATION[provider].label}
+                                    </span>
+                                  </span>
+                                )}
                                 <span className="shrink-0 whitespace-nowrap text-[11px] text-muted-foreground tabular-nums">
                                   {sessionLabel}
                                 </span>
@@ -269,6 +315,14 @@ export function UsagePage() {
                               ? `${formatPercent(share)} of cost · ${formatTokens(totals?.totalTokens ?? 0)} tokens`
                               : `${formatPercent(share)} of tokens · ${formatUsd(totals?.costUsd ?? 0)}`}
                           </span>
+                          {provider === "codex" ? (
+                            <Link
+                              to="/usage-resets"
+                              className="inline-flex min-h-11 w-fit items-center gap-2 rounded-md text-sm underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-ring"
+                            >
+                              Usage &amp; resets <span aria-hidden="true">→</span>
+                            </Link>
+                          ) : null}
                         </div>
                       );
                     })}

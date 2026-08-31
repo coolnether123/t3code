@@ -329,18 +329,29 @@ export async function executeAtomCommand<A, E>(
 export async function executeAtomQuery<A, E>(
   registry: AtomRegistry.AtomRegistry,
   atom: Atom.Atom<AsyncResult.AsyncResult<A, E>>,
-  options: AtomCommandOptions = {},
+  options: AtomCommandOptions & { readonly refresh?: boolean; readonly timeoutMs?: number } = {},
   reporter: AtomCommandReporter = console,
 ): Promise<AtomCommandResult<A, E>> {
   const query = Effect.scoped(
     Effect.gen(function* () {
       yield* AtomRegistry.mount(registry, atom);
+      // Join a pending read instead of cancelling it on repeated refreshes.
+      if (options.refresh && !registry.get(atom).waiting) registry.refresh(atom);
       return yield* AtomRegistry.getResult(registry, atom, {
         suspendOnWaiting: true,
       });
     }),
   );
-  return executeAtomCommand(() => Effect.runPromiseExit(query), options, reporter);
+  const bounded =
+    options.timeoutMs === undefined
+      ? query
+      : query.pipe(
+          Effect.timeoutOrElse({
+            duration: options.timeoutMs,
+            orElse: () => Effect.die(new Error("Query refresh timed out.")),
+          }),
+        );
+  return executeAtomCommand(() => Effect.runPromiseExit(bounded), options, reporter);
 }
 
 export function createRuntimeCommand<R, ER, W, A, E>(

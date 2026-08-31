@@ -5,6 +5,7 @@ import {
   ComputerChromeNavigateInput,
   ComputerChromeSelectTabInput,
   ComputerChromeSnapshot,
+  ComputerChromeSnapshotInput,
   ComputerChromeStatus,
   ComputerChromeTab,
   ComputerChromeTargetInput,
@@ -132,8 +133,8 @@ export const ComputerSnapshotTool = computerTool(
   readOnlyChromeTool(
     Tool.make("computer_snapshot", {
       description:
-        "Inspect the selected managed Chrome tab and return its accessibility tree, DOM, and fresh interaction refs.",
-      parameters: ComputerChromeEmptyInput,
+        "Inspect the selected managed Chrome tab and return a compact accessibility tree plus fresh interaction refs. Set includeDom only when the accessibility view is insufficient because full DOM output is expensive.",
+      parameters: ComputerChromeSnapshotInput,
       success: ComputerChromeSnapshot,
       failure: chromeFailure,
       dependencies: chromeDependencies,

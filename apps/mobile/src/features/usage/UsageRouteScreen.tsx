@@ -17,12 +17,14 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AndroidScreenHeader } from "../../components/AndroidScreenHeader";
 import { AppText as Text } from "../../components/AppText";
+import { ProviderIcon } from "../../components/ProviderIcon";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { useUsage, type EnvironmentUsageStatus } from "../../state/usage";
 import { SettingsSection } from "../settings/components/SettingsSection";
 import { UsageDailyChart } from "./UsageDailyChart";
 import type { UsageChartMetric } from "./usageChartData";
 import { PROVIDER_LABEL, useProviderColors } from "./usageProviders";
+import { UsageResetScreen } from "./UsageResetScreen";
 
 const WINDOW_OPTIONS = [
   { days: 1, label: "Past 24h" },
@@ -34,6 +36,15 @@ const WINDOW_OPTIONS = [
 const CHART_HEIGHT = 180;
 
 export function UsageRouteScreen() {
+  const [showResets, setShowResets] = useState(false);
+  return showResets ? (
+    <UsageResetScreen onBack={() => setShowResets(false)} />
+  ) : (
+    <UsageTotalsScreen onShowResets={() => setShowResets(true)} />
+  );
+}
+
+function UsageTotalsScreen({ onShowResets }: { readonly onShowResets: () => void }) {
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
   const [windowSelection, setWindowSelection] = useState(() => ({
@@ -80,6 +91,7 @@ export function UsageRouteScreen() {
     });
   };
   const refreshWindow = () => {
+    if (refreshing) return;
     const nextWindow = makeWindow(windowDays, undefined, isPast24Hours ? "hour" : "day");
     if (
       nextWindow.sinceDay === window.sinceDay &&
@@ -95,6 +107,7 @@ export function UsageRouteScreen() {
 
   return (
     <View collapsable={false} className="flex-1 bg-sheet">
+      <NativeStackScreenOptions options={{ title: "Usage" }} />
       {Platform.OS === "android" ? (
         <>
           <NativeStackScreenOptions options={{ headerShown: false }} />
@@ -109,6 +122,13 @@ export function UsageRouteScreen() {
         contentContainerStyle={{ paddingBottom: Math.max(insets.bottom, 18) + 18 }}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refreshWindow} />}
       >
+        <Pressable
+          className="min-h-11 justify-center rounded-md border border-subtle px-3 py-2"
+          accessibilityRole="button"
+          onPress={onShowResets}
+        >
+          <Text className="text-sm text-foreground">Codex usage &amp; resets</Text>
+        </Pressable>
         <SegmentedControl
           options={WINDOW_OPTIONS.map((option) => ({ value: option.days, label: option.label }))}
           selected={windowDays}
@@ -138,7 +158,7 @@ export function UsageRouteScreen() {
               isPast24Hours={isPast24Hours}
               timeZone={window.timeZone}
             />
-            <ProviderSection merged={merged} metric={metric} />
+            <ProviderSection merged={merged} metric={metric} onShowResets={onShowResets} />
             <TotalsSection merged={merged} isPast24Hours={isPast24Hours} />
             <ModelsSection merged={merged} />
           </>
@@ -217,6 +237,12 @@ function ChartCard(props: {
         </View>
         <MetricToggle metric={metric} onChange={props.onMetricChange} />
       </View>
+      {merged.costQuality.unpricedShare > 0 ? (
+        <Text className="text-sm text-foreground-muted">
+          Some usage is unpriced and excluded from dollar totals. A zero cost does not mean that
+          usage was free.
+        </Text>
+      ) : null}
 
       {hasActivity ? (
         <UsageDailyChart
@@ -295,8 +321,9 @@ function MetricToggle(props: {
 function ProviderSection(props: {
   readonly merged: MergedUsage;
   readonly metric: UsageChartMetric;
+  readonly onShowResets: () => void;
 }) {
-  const { merged, metric } = props;
+  const { merged, metric, onShowResets } = props;
   const colors = useProviderColors();
   if (merged.providers.length === 0) return null;
 
@@ -321,7 +348,23 @@ function ProviderSection(props: {
                   className="size-2.5 rounded-full"
                   style={{ backgroundColor: colors[provider.provider] }}
                 />
-                <Text className="text-lg text-foreground">{PROVIDER_LABEL[provider.provider]}</Text>
+                {provider.provider === "codex" ? (
+                  <Pressable
+                    className="min-h-11 flex-row items-center gap-2"
+                    accessibilityRole="button"
+                    accessibilityLabel="Open Codex usage and resets"
+                    onPress={onShowResets}
+                    onLongPress={onShowResets}
+                    delayLongPress={550}
+                  >
+                    <ProviderIcon provider="codex" size={18} />
+                    <Text className="text-lg text-foreground">Codex</Text>
+                  </Pressable>
+                ) : (
+                  <Text className="text-lg text-foreground">
+                    {PROVIDER_LABEL[provider.provider]}
+                  </Text>
+                )}
               </View>
               <Text className="text-lg tabular-nums text-foreground">
                 {metric === "cost"
@@ -341,6 +384,15 @@ function ProviderSection(props: {
                 ? `${formatPercent(share)} of cost · ${formatTokens(provider.totalTokens)} tokens`
                 : `${formatPercent(share)} of tokens · ${formatUsd(provider.costUsd)}`}
             </Text>
+            {provider.provider === "codex" ? (
+              <Pressable
+                className="min-h-11 justify-center"
+                accessibilityRole="button"
+                onPress={onShowResets}
+              >
+                <Text className="text-sm text-foreground underline">Usage &amp; resets →</Text>
+              </Pressable>
+            ) : null}
           </View>
         );
       })}

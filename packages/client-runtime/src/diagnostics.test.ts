@@ -1,7 +1,21 @@
 import { describe, expect, it } from "vite-plus/test";
-import { normalizeDiagnosticDetail } from "./diagnostics.js";
+import { isTechnicalRuntimeDiagnostic, normalizeDiagnosticDetail } from "./diagnostics.js";
 
 describe("normalizeDiagnosticDetail", () => {
+  it("identifies complete and projected structured runtime logs", () => {
+    expect(
+      isTechnicalRuntimeDiagnostic(
+        '{"timestamp":"2026-08-24T16:47:37Z","level":"WARN","fields":{"message":"streamable HTTP post_message failed"}}',
+      ),
+    ).toBe(true);
+    expect(
+      isTechnicalRuntimeDiagnostic(
+        '{"timestamp":"2026-08-24T16:47:37Z","level":"ERROR","fields":{"message":"worker quit with fatal...", "endpoin...',
+      ),
+    ).toBe(true);
+    expect(isTechnicalRuntimeDiagnostic("Provider request failed")).toBe(false);
+  });
+
   it("extracts a useful message from serialized diagnostics and preserves the raw payload", () => {
     const result = normalizeDiagnosticDetail(
       '{"timestamp":"2026-08-24T18:17:43Z","level":"WARN","fields":{"message":"http/request send failed"}}',

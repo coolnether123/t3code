@@ -20,6 +20,7 @@ import {
   buildPermissionsApprovalResponse,
   buildCodexAppServerCommandArgs,
   buildTurnStartParams,
+  classifyCodexStderrLine,
   codexSubagentBackendAppServerArgs,
   assertCodexSubagentIsolationConfig,
   hasConfiguredMcpServer,
@@ -33,6 +34,29 @@ import {
 } from "./CodexSessionRuntime.ts";
 import { isWorkerLifecycleToolName } from "../../worker/WorkerThreadBoundary.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
+
+describe("Codex stderr classification", () => {
+  it("drops exact structured MCP retry payloads captured from the live provider", () => {
+    const payloads = [
+      '{"timestamp":"2026-08-24T16:47:37.859069Z","level":"WARN","fields":{"message":"streamable HTTP post_message failed","endpoint_scheme":"http","endpoint_host":"localhost","endpoint_port":27985},"target":"rmcp::transport"}',
+      '{"timestamp":"2026-08-24T16:47:37.859107Z","level":"ERROR","fields":{"message":"worker quit with fatal: Transport channel closed, when Client(HttpRequest(HttpRequest(\\"http/request failed\\")))"},"target":"rmcp::service"}',
+      '{"timestamp":"2026-08-24T16:47:37.859158Z","level":"WARN","fields":{"message":"streamable HTTP MCP initialize failed with a retryable error; retrying","attempt":2,"max_attempts":3},"target":"rmcp::transport"}',
+    ];
+
+    for (const payload of payloads) {
+      NodeAssert.equal(classifyCodexStderrLine(payload), null);
+    }
+  });
+
+  it("keeps genuine structured provider errors without transport metadata", () => {
+    NodeAssert.deepStrictEqual(
+      classifyCodexStderrLine(
+        '{"timestamp":"2026-08-24T16:47:37Z","level":"ERROR","fields":{"message":"failed to connect to websocket: HTTP 503"},"target":"codex_api::responses"}',
+      ),
+      { message: "failed to connect to websocket: HTTP 503" },
+    );
+  });
+});
 
 describe("CodexSessionRuntimeIdentifierGenerationError", () => {
   it("retains identifier purpose and the random source failure", () => {
