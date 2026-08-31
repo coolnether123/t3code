@@ -732,6 +732,7 @@ export function runtimeEventToActivities(
               ? { detail: truncateDetail(event.payload.description) }
               : {}),
             ...(event.payload.endedAt ? { endedAt: event.payload.endedAt } : {}),
+            ...(event.payload.lastTurn ? { lastTurn: event.payload.lastTurn } : {}),
             ...(event.payload.isBackgrounded !== undefined
               ? { isBackgrounded: event.payload.isBackgrounded }
               : {}),

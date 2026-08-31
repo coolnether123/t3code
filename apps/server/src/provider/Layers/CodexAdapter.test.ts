@@ -977,6 +977,61 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       }),
   );
 
+  it.effect("preserves completed child turn facts through persisted activity reconstruction", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 3)).pipe(
+        Effect.forkChild,
+      );
+      yield* runtime.emit({
+        id: asEventId("child-completed-facts"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-08-31T00:49:58.896Z",
+        method: "collabAgent/turnCompleted",
+        threadId: asThreadId("thread-1"),
+        payload: {
+          agentThreadId: "child-1",
+          agentPath: "/root/child_a",
+          turn: {
+            id: "child-turn",
+            status: "completed",
+            startedAt: 1788137387,
+            completedAt: 1788137398,
+            durationMs: 11592,
+            items: [{ type: "agentMessage", text: "CHILD_A_COMPLETE" }],
+          },
+        },
+      });
+      yield* runtime.emit({
+        id: asEventId("child-later-metadata"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-08-31T00:50:00.000Z",
+        method: "collabAgent/statusChanged",
+        threadId: asThreadId("thread-1"),
+        payload: { agentThreadId: "child-1", status: { type: "idle" } },
+      });
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      const rows = new Map(
+        events
+          .flatMap((event) => runtimeEventToActivities(event))
+          .map((activity) => [activity.id, activity]),
+      );
+      const [child] = foldSubagentActivities(Array.from(rows.values()));
+      NodeAssert.equal(child?.status, "idle");
+      NodeAssert.equal(child?.completedAt, null);
+      NodeAssert.equal(child?.model, null);
+      NodeAssert.deepEqual(child?.lastTurn, {
+        turnId: "child-turn",
+        outcome: "completed",
+        completedAt: "2026-08-31T00:49:58.000Z",
+        durationMs: 11592,
+        result: "CHILD_A_COMPLETE",
+      });
+    }),
+  );
+
   it.effect("preserves child output and wire identity without changing the parent turn", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

@@ -627,6 +627,17 @@ const TaskProgressPayload = Schema.Struct({
 });
 export type TaskProgressPayload = typeof TaskProgressPayload.Type;
 
+/** Last terminal turn of a reusable provider task, independent of thread status. */
+export const RuntimeTaskLastTurn = Schema.Struct({
+  turnId: TrimmedNonEmptyStringSchema,
+  outcome: Schema.Literals(["completed", "failed", "interrupted"]),
+  completedAt: Schema.optional(IsoDateTime),
+  durationMs: Schema.optional(NonNegativeInt),
+  result: Schema.optional(TrimmedNonEmptyStringSchema),
+  error: Schema.optional(TrimmedNonEmptyStringSchema),
+});
+export type RuntimeTaskLastTurn = typeof RuntimeTaskLastTurn.Type;
+
 /**
  * Non-terminal status patch (from the Claude SDK's task_updated, which main
  * previously dropped). killed→cancelled and paused→idle are mapped at the
@@ -638,6 +649,7 @@ const TaskUpdatedPayload = Schema.Struct({
   description: Schema.optional(TrimmedNonEmptyStringSchema),
   error: Schema.optional(TrimmedNonEmptyStringSchema),
   endedAt: Schema.optional(IsoDateTime),
+  lastTurn: Schema.optional(RuntimeTaskLastTurn),
   isBackgrounded: Schema.optional(Schema.Boolean),
   ...taskAgentLinkageFields,
 });
