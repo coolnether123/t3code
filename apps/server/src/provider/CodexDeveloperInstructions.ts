@@ -30,7 +30,7 @@ const T3_CODE_CHROME_TOOL_INSTRUCTIONS = `
 
 The \`t3-code\` MCP server exposes managed Chrome tools. For browser work in this provider, call \`computer_start\` or \`computer_status\`, use \`computer_tabs\` and \`computer_select_tab\` when choosing a tab, then \`computer_navigate\`, \`computer_snapshot\`, \`computer_click\`, \`computer_fill\`, and \`computer_type\`. Use refs from the latest \`computer_snapshot\` for interaction, and call \`computer_close\` when the browser session is no longer needed.
 
-These tools operate T3's separate persistent Chrome profile. They do not control the user's regular Chrome profile, the Codex Chrome extension, the Codex built-in browser, or Windows desktop applications. If the user explicitly requests one of those targets, explain this limitation before switching providers or profiles.
+These tools operate T3's separate persistent Chrome profile. They do not control the user's regular Chrome profile, the Codex Chrome extension, the Codex built-in browser, or Windows desktop applications. If the user explicitly requests one of those targets, check its installed skill and configured tools. Explain this toolkit's limitation before proposing a different provider or profile; do not treat it as proof that the requested provider is unavailable.
 
 Tool availability is not an approval. Follow the task's sandbox, tool approvals, and confirmation requirements. A browser-provider selection does not authorize new sites, uploads, purchases, account changes, or other consequential actions beyond the user's request. Inspect tool errors and report missing authentication or unavailable runtime controls without inventing access.
 
@@ -41,9 +41,20 @@ const CODEX_DESKTOP_CONTROL_LIMITATION = `
 
 ## Desktop control availability
 
-The saved desktop-control preference does not attach Codex desktop Computer Use to T3. T3's managed Chrome is a browser-only fallback with its own profile. Do not claim access to Windows input, screenshots, or Codex app browser sessions from this preference, a plugin name, or a remote-control connection.
+The saved desktop-control preference alone does not attach Codex desktop Computer Use to T3. T3's managed Chrome is a browser-only fallback with its own profile. Do not claim access to Windows input, screenshots, or Codex app browser sessions from this preference, a plugin name, or a remote-control connection.
 
-An independently configured MCP server may provide desktop tools. Use only controls actually listed in this turn, follow their documentation and approvals, and identify that provider accurately. Do not install a new desktop bridge, use a private desktop-app endpoint, or bypass an unavailable plugin's host runtime.
+An independently configured MCP server may provide desktop tools, including a JavaScript runtime used by the installed Computer Use skill. Check that route through its documented API before reporting desktop control unavailable.
+`;
+
+const CONFIGURED_COMPUTER_USE_INSTRUCTIONS = `
+
+## Configured Windows Computer Use
+
+The Browser provider preference selects T3's browser toolkit; it does not disable independently configured MCP tools or skills. For a Windows app task, inspect the installed Computer Use skill and the current turn's tools before claiming Computer Use is unavailable.
+
+When the task permits Windows automation and that skill and its configured JavaScript tool are available, read the skill and its runtime, API, and confirmation guidance. Use the documented package entry point through the existing runtime. Start with the skill's lightweight host check in the current session. A callable JavaScript tool alone does not prove that the host is connected. Do not install a bridge, spawn a helper, use private endpoints, or bypass a failed connection.
+
+Host reachability is not app approval or permission to act. Select exactly one target window from returned app/window objects, follow host app approvals and the skill's action-time confirmations, and retain its prohibited targets and actions. Windows input uses the active desktop, so coordinate foreground ownership with the user. Observe the selected window before acting, refresh after each action, and stop on cancellation or a locked desktop. Do not reuse stale window state after an error or runtime reset.
 `;
 
 function computerControlInstructions(
@@ -278,7 +289,7 @@ export function buildCodexDeveloperInstructions(
     runtime.subagentBackend === "v1" || runtime.subagentBackend === "v2"
       ? CODEX_NATIVE_SUBAGENT_PARENT_INSTRUCTIONS
       : "";
-  return `${base}${controlInstructions}${workerInstructions}${nativeSubagentInstructions}
+  return `${base}${controlInstructions}${CONFIGURED_COMPUTER_USE_INSTRUCTIONS}${workerInstructions}${nativeSubagentInstructions}
 
 <runtime_info>In case you're asked: you are running in T3 Code through the Codex harness, as ${toSingleLine(runtime.model)} with ${toSingleLine(runtime.reasoningEffort)} reasoning effort. No need to mention this otherwise.</runtime_info>`;
 }

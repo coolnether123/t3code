@@ -6,14 +6,14 @@ not by itself give a T3 session browser or desktop control.
 
 ## Providers and ownership
 
-| Provider                   | State owner                                                        | T3 integration                           |
-| -------------------------- | ------------------------------------------------------------------ | ---------------------------------------- |
-| T3 managed Chrome          | T3 server, separate persistent Chrome profile                      | T3 `computer_*` MCP toolkit              |
-| T3 preview                 | T3 collaborative preview                                           | T3 `preview_*` MCP toolkit               |
-| Codex Chrome               | OpenAI desktop host and browser extension, regular browser profile | No supported T3 host adapter implemented |
-| Codex built-in browser     | OpenAI desktop host, separate browser profile                      | No supported T3 host adapter implemented |
-| Codex desktop Computer Use | OpenAI desktop host, app approvals, Windows foreground input       | No supported T3 host adapter implemented |
-| Responses API computer use | The API integrator supplies screenshots and executes model actions | Not used by this integration             |
+| Provider                   | State owner                                                        | T3 integration                                                     |
+| -------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------ |
+| T3 managed Chrome          | T3 server, separate persistent Chrome profile                      | T3 `computer_*` MCP toolkit                                        |
+| T3 preview                 | T3 collaborative preview                                           | T3 `preview_*` MCP toolkit                                         |
+| Codex Chrome               | OpenAI desktop host and browser extension, regular browser profile | Installed skill route; verify its host in the current session      |
+| Codex built-in browser     | OpenAI desktop host, separate browser profile                      | Installed skill route; verify its host in the current session      |
+| Windows Computer Use       | OpenAI Computer Use host, app approvals, Windows foreground input  | Configured MCP JavaScript runtime and installed Computer Use skill |
+| Responses API computer use | The API integrator supplies screenshots and executes model actions | Not used by this integration                                       |
 
 The OpenAI desktop documentation separates the
 [built-in browser](https://learn.chatgpt.com/docs/browser),
@@ -49,11 +49,13 @@ Use the provider's status and action results for runtime state. Refresh discover
 when the tool catalog changes and before a new turn; do not retain availability
 after disconnect or a failed inventory read.
 
-The three Codex desktop entries remain unavailable in T3's capability report.
-Their presence documents distinct provider identities; it does not make them
-selectable. Add a desktop provider only after a supported host connection and its
-approval, cancellation, target selection, and observation paths are implemented
-and verified. Do not infer this support from:
+The capability report's `available` field describes catalog-derived selectable
+T3 routes, not whether a configured skill's host is reachable. The Codex browser
+and Windows entries need session-scoped host verification and are not offered as
+selector choices. This does not disable their configured MCP tools or skills.
+Advertise a desktop choice only after its host connection, approval, cancellation,
+target selection, and observation paths are verified in the relevant runtime.
+Do not infer this support from:
 
 - `remoteControl/status/changed`, which reports remote connection identity;
 - `browser_use`, `browser_use_external`, or `computer_use` feature flags;
@@ -64,10 +66,25 @@ and verified. Do not infer this support from:
 ## Supported external tools
 
 [Codex MCP configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)
-supports independently configured tool servers. A user-supplied browser or OS
-automation MCP server can therefore run through the same Codex conversation.
-Preserve that server's tool identity and approvals. This is a custom MCP provider,
-not proof that the OpenAI desktop Computer Use or Chrome host is portable.
+supports independently configured tool servers. A browser or OS automation MCP
+server can therefore run through the same Codex conversation. Preserve that
+server's tool identity and approvals.
+
+The installed Computer Use skill documents the official `@oai/sky` package as
+its entry point through `node_repl`. This is a documented skill route, not a
+private endpoint or a custom helper protocol. A T3-backed Codex session has
+successfully called `sky.list_apps()` through its configured `node_repl` MCP
+server. That proves host reachability for that session. It does not prove that
+another instance, app, window, or later session is connected or approved.
+
+Follow the installed skill's initialization, runtime guidance, API reference,
+and confirmation policy. Select exactly one returned target window. Observe
+before acting and refresh after each action. Coordinate ownership of Windows
+foreground input with the user. Honor host app approvals and action-time
+confirmations; the skill's prohibited targets and actions still apply. Stop on
+cancellation or a locked desktop. Do not launch a helper, extract credentials,
+copy browser state, or create a private host client to recover an unavailable
+connection.
 
 The [App Server reference](https://learn.chatgpt.com/docs/app-server) documents
 thread-scoped MCP inventory, tool calls, progress, results, and elicitation. It
@@ -78,12 +95,12 @@ clients not to use them. T3 must not make capability discovery depend on those
 plugin-management methods.
 
 The installed CLI 0.148.0 protocol exposes MCP tool calls but no dedicated
-browser-navigation or Windows-input client request. The inspected local setup
-also advertises a configured `node_repl` MCP server from the desktop app's bundled
-runtime. That proves a tool transport exists, not that the browser or Computer Use
-host is attached or publicly supported for third-party clients. No private
-desktop endpoint, credential extraction, or copied browser state is part of T3's
-integration.
+browser-navigation or Windows-input client request. The successful Windows host
+check used that MCP path, so absence of a dedicated App Server request does not
+establish that Computer Use is unavailable. In the same live verification,
+the built-in browser and Codex Chrome skill routes returned `Browser is not
+available`. That result does not establish that the Chrome extension is missing,
+and it says nothing about Windows Computer Use reachability.
 
 ## Model support is not host support
 
@@ -113,6 +130,9 @@ value against the available choices without presenting it as Windows control.
 contains T3's managed Chrome toolkit. It defaults to false. The separate
 `browserToolsAvailable` argument describes preview availability. Neither flag
 should come from a remote-environment connection notification.
+The instruction builder permits the documented configured Computer Use skill
+route regardless of browser preference. It does not infer a connected Windows
+host from either browser flag or from a JavaScript tool name.
 
 Keep Codex tool calls, progress, completion/error results, and approval requests
 visible in the normal event path. Image-bearing MCP results belong to the tool

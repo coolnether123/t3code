@@ -69,4 +69,42 @@ describe("Codex browser provider instructions", () => {
     expect(instructions).toContain("preview_status");
     expect(instructions).not.toContain("computer_start");
   });
+
+  it("allows the documented configured Windows skill route independently of browser preference", () => {
+    for (const computerControlMode of ["preview", "chrome", "desktop"] as const) {
+      const instructions = buildCodexDeveloperInstructions(
+        "default",
+        { ...runtime, computerControlMode, computerControlAvailable: false },
+        false,
+      );
+      expect(instructions).toContain(
+        "does not disable independently configured MCP tools or skills",
+      );
+      expect(instructions).toContain("installed Computer Use skill");
+      expect(instructions).toContain("documented package entry point through the existing runtime");
+      expect(instructions).toContain("lightweight host check in the current session");
+      expect(instructions).toContain("A callable JavaScript tool alone does not prove");
+      expect(instructions).toContain("Host reachability is not app approval or permission to act");
+      expect(instructions).toContain("Select exactly one target window");
+      expect(instructions).toContain("action-time confirmations");
+      expect(instructions).toContain("coordinate foreground ownership with the user");
+      expect(instructions).toContain("stop on cancellation or a locked desktop");
+      expect(instructions).toContain(
+        "Do not install a bridge, spawn a helper, use private endpoints",
+      );
+      expect(instructions).not.toMatch(/computer_start|preview_status/);
+    }
+  });
+
+  it("does not treat a managed Chrome limitation as a denial of a requested configured provider", () => {
+    const instructions = buildCodexDeveloperInstructions(
+      "default",
+      { ...runtime, computerControlMode: "chrome", computerControlAvailable: true },
+      false,
+    );
+    expect(instructions).toContain("check its installed skill and configured tools");
+    expect(instructions).toContain(
+      "do not treat it as proof that the requested provider is unavailable",
+    );
+  });
 });

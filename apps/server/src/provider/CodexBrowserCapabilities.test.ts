@@ -48,6 +48,20 @@ describe("Codex browser capabilities", () => {
     expect(providers.every((provider) => !provider.available)).toBe(true);
   });
 
+  it("marks configured Windows skill reachability as unverified by the catalog, not unsupported", () => {
+    const providers = resolveCodexBrowserCapabilities([{ name: "node_repl", tools: { js: {} } }]);
+    const desktop = providers.find((provider) => provider.id === "codex-computer-use");
+    expect(desktop).toMatchObject({
+      available: false,
+      transport: "mcp",
+      profile: "desktop",
+    });
+    expect(desktop?.reason).toContain("does not verify Windows Computer Use");
+    expect(desktop?.reason).toContain("official API");
+    expect(desktop?.reason).toContain("current session");
+    expect(desktop?.reason).not.toMatch(/no supported adapter|unavailable|impossible/);
+  });
+
   it("keeps the separate browser profiles and Windows input owner explicit", () => {
     const providers = resolveCodexBrowserCapabilities([{ name: "t3-code", tools: managedTools }]);
     expect(providers.map(({ id, available, profile }) => ({ id, available, profile }))).toEqual([

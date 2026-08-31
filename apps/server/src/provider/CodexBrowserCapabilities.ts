@@ -46,6 +46,7 @@ export const hasT3PreviewBrowserTools = (servers: ReadonlyArray<CodexMcpToolInve
 export interface CodexBrowserCapability {
   readonly id: "t3-managed-chrome" | "codex-chrome" | "codex-browser" | "codex-computer-use";
   readonly label: string;
+  /** Whether the supplied catalog establishes a selectable T3 route, not host reachability. */
   readonly available: boolean;
   readonly reason: string;
   readonly transport: "mcp" | "desktop-host";
@@ -53,9 +54,8 @@ export interface CodexBrowserCapability {
 }
 
 /**
- * The desktop integrations require a supported host adapter, not just an installed
- * plugin, a feature flag, `node_repl`, or a remote-control connection. T3 does not
- * yet have a verified profile-specific adapter for those routes.
+ * A tool catalog cannot establish the host connection behind a skill's JavaScript
+ * runtime. Those routes need a session-scoped check through their documented API.
  */
 export function resolveCodexBrowserCapabilities(
   servers: ReadonlyArray<CodexMcpToolInventory>,
@@ -77,7 +77,7 @@ export function resolveCodexBrowserCapabilities(
       label: "Codex Chrome",
       available: false,
       reason:
-        "T3 has no supported adapter to the Codex desktop browser-extension host or its normal browser profile.",
+        "This catalog does not verify the Codex Chrome extension host or its normal browser profile. Check the installed Chrome skill's runtime in the current session.",
       transport: "desktop-host",
       profile: "user-browser",
     },
@@ -86,17 +86,17 @@ export function resolveCodexBrowserCapabilities(
       label: "Codex built-in browser",
       available: false,
       reason:
-        "T3 has no supported adapter to the Codex desktop app's built-in browser and its separate profile.",
+        "This catalog does not verify the Codex built-in browser host or its separate profile. Check the installed Browser skill's runtime in the current session.",
       transport: "desktop-host",
       profile: "codex-browser",
     },
     {
       id: "codex-computer-use",
-      label: "Codex desktop Computer Use",
+      label: "Windows Computer Use via configured skill",
       available: false,
       reason:
-        "T3 has no supported adapter to the Codex desktop Computer Use host, app approvals, and foreground input ownership.",
-      transport: "desktop-host",
+        "This catalog does not verify Windows Computer Use. A configured MCP JavaScript runtime can expose the installed Computer Use skill's official API; check host reachability and target-app approvals in the current session.",
+      transport: "mcp",
       profile: "desktop",
     },
   ];
