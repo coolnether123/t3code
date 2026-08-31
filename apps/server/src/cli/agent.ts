@@ -28,6 +28,7 @@ import {
   AGENT_ACTION_MAX_BYTES,
   AGENT_COMMAND_TYPES,
   AGENT_OUTPUT_MAX_BYTES,
+  AGENT_RECEIPT_METADATA_MAX_BYTES,
   AgentCliError,
   agentCommandSchema,
   compactAgentSnapshot,
@@ -36,6 +37,7 @@ import {
   validateAgentAction,
   validateAgentIdentity,
   validateAgentOrigin,
+  validateAgentReceiptMetadata,
   type AgentAction,
 } from "./agentProtocol.ts";
 
@@ -216,6 +218,7 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
           limits: {
             actionBytes: AGENT_ACTION_MAX_BYTES,
             outputBytes: AGENT_OUTPUT_MAX_BYTES,
+            receiptMetadataBytes: AGENT_RECEIPT_METADATA_MAX_BYTES,
             turnLimit: 5,
           },
           restrictions: [
@@ -286,6 +289,13 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
         ...(command.type === "thread.turn.interrupt" ? { turnId: command.turnId } : {}),
         ...("requestId" in command ? { requestId: command.requestId } : {}),
       };
+      const receiptMetadata = {
+        ...context,
+        commandId: command.commandId,
+        commandType: command.type,
+        target: commandTarget,
+      };
+      yield* checked(() => validateAgentReceiptMetadata(receiptMetadata));
       const receipt = yield* Effect.result(
         client.orchestration
           .dispatch({ headers, payload: command } as Parameters<
@@ -295,22 +305,16 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
       );
       if (receipt._tag === "Failure" && isDispatchRejection(receipt.failure))
         return {
-          ...context,
+          ...receiptMetadata,
           status: "rejected",
-          commandId: command.commandId,
-          commandType: command.type,
-          target: commandTarget,
           rejection: { code: receipt.failure.code, traceId: receipt.failure.traceId },
           message:
             "The server rejected the request before orchestration dispatch. No action was retried.",
         };
       if (receipt._tag === "Failure")
         return {
-          ...context,
+          ...receiptMetadata,
           status: "unknown",
-          commandId: command.commandId,
-          commandType: command.type,
-          target: commandTarget,
           message:
             "Dispatch did not return a receipt. It may have been accepted. Inspect the target before any further action; this CLI did not retry.",
         };
@@ -323,11 +327,8 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
         }),
       );
       return {
-        ...context,
+        ...receiptMetadata,
         status: "accepted",
-        commandId: command.commandId,
-        commandType: command.type,
-        target: commandTarget,
         sequence: receipt.success.sequence,
         providerCompletion: "not-confirmed",
         projectionObserved:

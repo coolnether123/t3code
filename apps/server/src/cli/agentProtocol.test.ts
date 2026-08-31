@@ -7,6 +7,9 @@ import {
   compactAgentSnapshot,
   validateAgentOrigin,
   encodeAgentOutput,
+  validateAgentReceiptMetadata,
+  AGENT_RECEIPT_METADATA_MAX_BYTES,
+  AGENT_OUTPUT_MAX_BYTES,
 } from "./agentProtocol.ts";
 
 const now = "2026-08-31T04:00:00.000Z";
@@ -144,6 +147,39 @@ describe("agent action boundary", () => {
 });
 
 describe("agent snapshot", () => {
+  it("budgets complete encoded receipt metadata and leaves room for fallback output", () => {
+    const metadata = {
+      ...identity,
+      origin: "http://127.0.0.1:8282",
+      commandId: "i".repeat(AGENT_RECEIPT_METADATA_MAX_BYTES - 1000),
+      commandType: "thread.turn.steer",
+      target: { threadId: "thread-a", turnId: "turn-a", messageId: "message-a" },
+    };
+    expect(() => validateAgentReceiptMetadata(metadata)).not.toThrow();
+    expect(() =>
+      validateAgentReceiptMetadata({ ...metadata, environmentId: "界".repeat(40000) }),
+    ).toThrow();
+    expect(() =>
+      validateAgentReceiptMetadata({
+        ...metadata,
+        commandId: "normal",
+        target: { projectId: "\u0000".repeat(20000) },
+      }),
+    ).toThrow();
+    for (const status of ["accepted", "unknown"]) {
+      const output = encodeAgentOutput({
+        ...metadata,
+        status,
+        sequence: 13,
+        providerCompletion: "not-confirmed",
+        projectionObserved: false,
+        readback: "x".repeat(AGENT_OUTPUT_MAX_BYTES),
+      });
+      expect(Buffer.byteLength(output, "utf8")).toBeLessThanOrEqual(AGENT_OUTPUT_MAX_BYTES);
+      expect(output).toContain(metadata.commandId);
+      expect(output).toContain(`"status":"${status}"`);
+    }
+  });
   it("keeps IDs, pagination and old approval evidence outside the activity tail", () => {
     const approval = {
       id: "approval-event",

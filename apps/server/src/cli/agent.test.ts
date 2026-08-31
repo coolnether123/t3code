@@ -15,7 +15,7 @@ import {
 } from "@t3tools/contracts";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import { resolveAgentTarget, withAgentSession, executeAgentRequest } from "./agent.ts";
-import { agentCommandSchema, decodeAgentAction } from "./agentProtocol.ts";
+import { agentCommandSchema, decodeAgentAction, encodeAgentOutput } from "./agentProtocol.ts";
 
 const now = "2026-08-31T04:00:00.000Z";
 const runtime = {
@@ -124,6 +124,54 @@ describe("agent authentication", () => {
 });
 
 describe("agent HTTP action receipt", () => {
+  it.effect("rejects oversized receipt identity before HTTP dispatch", () =>
+    Effect.gen(function* () {
+      const state = fakeAuth();
+      let dispatches = 0;
+      const action = decodeAgentAction(
+        json({
+          environmentId: "env-a",
+          runtime: { pid: 123, startedAt: now },
+          command: {
+            type: "project.create",
+            commandId: "x".repeat(200 * 1024),
+            projectId: "project-a",
+            title: "Scratch",
+            workspaceRoot: "/scratch",
+            createdAt: now,
+          },
+        }),
+      );
+      expect(() =>
+        encodeAgentOutput({
+          status: "accepted",
+          commandId: action.command.commandId,
+          sequence: 13,
+        }),
+      ).toThrow();
+      const result = yield* Effect.result(
+        Effect.gen(function* () {
+          const target = yield* resolveAgentTarget("/sandbox");
+          return yield* executeAgentRequest(target, { kind: "act", action }, state.auth);
+        }).pipe(
+          Effect.provide(testLayer),
+          Effect.provideService(
+            FetchHttpClient.Fetch,
+            mockFetch(async (url) => {
+              if (String(url).endsWith("/dispatch")) {
+                dispatches++;
+                return Response.json({ sequence: 13 });
+              }
+              return Response.json(String(url).includes("/.well-known/") ? descriptor : shell);
+            }),
+          ),
+        ),
+      );
+      expect(dispatches).toBe(0);
+      expect(result._tag).toBe("Failure");
+      expect(state.revoked).toEqual(["session-a"]);
+    }),
+  );
   it.effect("reports an explicit auth refusal as rejected, not a provider failure", () =>
     Effect.gen(function* () {
       const state = fakeAuth();

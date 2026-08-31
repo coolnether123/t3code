@@ -11,6 +11,7 @@ import * as Schema from "effect/Schema";
 
 export const AGENT_ACTION_MAX_BYTES = 256 * 1024;
 export const AGENT_OUTPUT_MAX_BYTES = 192 * 1024;
+export const AGENT_RECEIPT_METADATA_MAX_BYTES = AGENT_OUTPUT_MAX_BYTES / 2;
 export const AGENT_COMMAND_TYPES = [
   "project.create",
   "project.meta.update",
@@ -420,6 +421,15 @@ export function compactAgentSnapshot(
       : undefined,
     navigation: "client-local; this command does not select a visible tab",
   };
+}
+
+/** Reserve output space for every outcome before the command can be dispatched. */
+export function validateAgentReceiptMetadata(metadata: unknown): void {
+  if (Buffer.byteLength(encodeJson(metadata), "utf8") > AGENT_RECEIPT_METADATA_MAX_BYTES) {
+    reject(
+      "Receipt identity exceeds 96 KiB of encoded JSON. Use shorter identifiers before dispatch.",
+    );
+  }
 }
 
 /** A large readback must not hide a receipt for an action already dispatched. */
