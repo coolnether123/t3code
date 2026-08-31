@@ -358,36 +358,25 @@ export const chromePathCandidates = (
   return candidates;
 };
 
+/** Read-only executable discovery; absence does not imply that a Playwright channel is installed. */
+export const findInstalledChrome = Effect.fn("ChromeAutomation.findInstalledChrome")(function* () {
+  const platform = yield* HostProcessPlatform;
+  const env = yield* HostProcessEnvironment;
+  for (const candidate of chromePathCandidates(platform, env)) {
+    const resolved = yield* resolveCommandPath(candidate, { env }).pipe(Effect.option);
+    if (resolved._tag === "Some") return resolved.value;
+  }
+  return undefined;
+});
+
 export const resolveInstalledChrome = Effect.fn("ChromeAutomation.resolveInstalledChrome")(
   function* () {
-    const platform = yield* HostProcessPlatform;
-    const env = yield* HostProcessEnvironment;
-    const fileSystem = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-
-    const candidates = chromePathCandidates(platform, env);
-    for (const candidate of candidates) {
-      if (!path.isAbsolute(candidate)) {
-        const resolved = yield* resolveCommandPath(candidate, { env }).pipe(Effect.option);
-        if (resolved._tag === "Some") {
-          return {
-            executablePath: resolved.value,
-            channel: undefined,
-          } satisfies ChromeAutomationLaunchTarget;
-        }
-        continue;
-      }
-      if (yield* fileSystem.exists(candidate).pipe(Effect.orElseSucceed(() => false))) {
-        return {
-          executablePath: candidate,
-          channel: undefined,
-        } satisfies ChromeAutomationLaunchTarget;
-      }
+    const executablePath = yield* findInstalledChrome();
+    if (executablePath !== undefined) {
+      return { executablePath, channel: undefined } satisfies ChromeAutomationLaunchTarget;
     }
-
     yield* Effect.logInfo(
       "managed Chrome path discovery found no explicit executable; trying Playwright channel",
-      { platform, candidates },
     );
     return {
       executablePath: undefined,
