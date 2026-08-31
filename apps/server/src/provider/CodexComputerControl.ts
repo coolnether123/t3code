@@ -5,7 +5,7 @@ export const CODEX_COMPUTER_CONTROL_OPTION_ID = "computerControl";
 // browser toolkit, not Codex desktop Computer Use or Windows input control.
 export const CODEX_COMPUTER_CONTROL_MODES = ["preview", "chrome", "desktop"] as const;
 export type CodexComputerControlMode = (typeof CODEX_COMPUTER_CONTROL_MODES)[number];
-export const DEFAULT_CODEX_COMPUTER_CONTROL_MODE: CodexComputerControlMode = "desktop";
+export const DEFAULT_CODEX_COMPUTER_CONTROL_MODE: CodexComputerControlMode = "chrome";
 
 export function normalizeCodexComputerControlMode(
   value: string | null | undefined,

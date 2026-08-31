@@ -1,14 +1,24 @@
 import { assert, it } from "@effect/vitest";
+import { NodeServices } from "@effect/platform-node";
+import { CodexSettings } from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as CodexSchema from "effect-codex-app-server/schema";
+import { getProviderOptionDescriptors } from "@t3tools/shared/model";
+
+import { ComputerToolkit } from "../../mcp/toolkits/computer/tools.ts";
+import { PreviewToolkit } from "../../mcp/toolkits/preview/tools.ts";
+import { normalizeCodexComputerControlMode } from "../CodexComputerControl.ts";
 
 import {
   applyPreferredCodexDefaultModel,
+  checkCodexProviderStatus,
   isLegacyCodexModel,
   mapCodexModelCapabilities,
 } from "./CodexProvider.ts";
 
 const decodeModelListResponse = Schema.decodeUnknownSync(CodexSchema.V2ModelListResponse);
+const defaultCodexSettings = Schema.decodeSync(CodexSettings)({});
 
 const CODEX_0_148_MODEL_LIST_SANITIZED = {
   data: [
@@ -183,32 +193,6 @@ it("maps current Codex model capability fields", () => {
       ],
       currentValue: "flex",
     },
-    {
-      id: "computerControl",
-      label: "Browser provider",
-      type: "select",
-      options: [
-        {
-          id: "desktop",
-          label: "Managed Chrome (legacy preference)",
-          description:
-            "Use T3's separate Chrome profile when attached. Windows desktop control is unavailable.",
-          isDefault: true,
-        },
-        {
-          id: "chrome",
-          label: "T3 managed Chrome",
-          description:
-            "Use T3's separate persistent Chrome profile when its tools are attached, with normal approvals.",
-        },
-        {
-          id: "preview",
-          label: "T3 Preview",
-          description: "Prefer T3's isolated collaborative preview browser.",
-        },
-      ],
-      currentValue: "desktop",
-    },
   ]);
 });
 
@@ -322,32 +306,6 @@ it("uses standard routing when the catalog has no default service tier", () => {
       ],
       currentValue: "default",
     },
-    {
-      id: "computerControl",
-      label: "Browser provider",
-      type: "select",
-      options: [
-        {
-          id: "desktop",
-          label: "Managed Chrome (legacy preference)",
-          description:
-            "Use T3's separate Chrome profile when attached. Windows desktop control is unavailable.",
-          isDefault: true,
-        },
-        {
-          id: "chrome",
-          label: "T3 managed Chrome",
-          description:
-            "Use T3's separate persistent Chrome profile when its tools are attached, with normal approvals.",
-        },
-        {
-          id: "preview",
-          label: "T3 Preview",
-          description: "Prefer T3's isolated collaborative preview browser.",
-        },
-      ],
-      currentValue: "desktop",
-    },
   ]);
 });
 
@@ -365,6 +323,84 @@ it("marks the most preferred available model as default", () => {
     ],
   );
 });
+
+it("offers only provisionable T3 browser routes with a valid default", () => {
+  const model = decodeModelListResponse(CODEX_0_148_MODEL_LIST_SANITIZED).data[0]!;
+  const cases = [
+    { tools: {}, ids: [], currentValue: undefined },
+    { tools: { computer_open_url: {} }, ids: [], currentValue: undefined },
+    { tools: ComputerToolkit.tools, ids: ["chrome"], currentValue: "chrome" },
+    { tools: PreviewToolkit.tools, ids: ["preview"], currentValue: "preview" },
+    {
+      tools: { ...ComputerToolkit.tools, ...PreviewToolkit.tools },
+      ids: ["chrome", "preview"],
+      currentValue: "chrome",
+    },
+  ];
+  for (const { tools, ids, currentValue } of cases) {
+    const capabilities = mapCodexModelCapabilities(model, [{ name: "t3-code", tools }]);
+    const descriptor = capabilities.optionDescriptors?.find(
+      (option) => option.id === "computerControl",
+    );
+    assert.deepStrictEqual(
+      descriptor?.type === "select" ? descriptor.options.map((option) => option.id) : [],
+      ids,
+    );
+    assert.equal(descriptor?.currentValue, currentValue);
+    if (descriptor?.type === "select") {
+      assert.equal(descriptor.options.find((option) => option.isDefault)?.id, currentValue);
+    }
+  }
+});
+
+it("does not offer host-specific routes based only on JavaScript or plugin tool names", () => {
+  const model = decodeModelListResponse(CODEX_0_148_MODEL_LIST_SANITIZED).data[0]!;
+  const capabilities = mapCodexModelCapabilities(model, [
+    { name: "node_repl", tools: { js: {} } },
+    { name: "chrome", tools: ComputerToolkit.tools },
+    { name: "computer-use", tools: ComputerToolkit.tools },
+  ]);
+  assert.equal(
+    capabilities.optionDescriptors?.some((option) => option.id === "computerControl"),
+    false,
+  );
+});
+
+it("retains saved desktop compatibility without offering it as a new provider", () => {
+  const model = decodeModelListResponse(CODEX_0_148_MODEL_LIST_SANITIZED).data[0]!;
+  const caps = mapCodexModelCapabilities(model, [
+    { name: "t3-code", tools: ComputerToolkit.tools },
+  ]);
+  const descriptor = getProviderOptionDescriptors({
+    caps,
+    selections: [{ id: "computerControl", value: "desktop" }],
+  }).find((option) => option.id === "computerControl");
+  assert.equal(normalizeCodexComputerControlMode("desktop"), "desktop");
+  assert.equal(normalizeCodexComputerControlMode(undefined), "chrome");
+  assert.equal(descriptor?.currentValue, "chrome");
+});
+
+it.effect("passes detected browser readiness through the provider catalog probe", () =>
+  Effect.gen(function* () {
+    const tools = [{ name: "t3-code", tools: PreviewToolkit.tools }];
+    let observedTools: unknown;
+    yield* checkCodexProviderStatus(
+      defaultCodexSettings,
+      (input) => {
+        observedTools = input.browserTools;
+        return Effect.succeed({
+          account: { account: null, requiresOpenaiAuth: false },
+          version: undefined,
+          models: [],
+          skills: [],
+        });
+      },
+      {},
+      tools,
+    );
+    assert.deepStrictEqual(observedTools, tools);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
 
 it("prefers sol over terra when both are available", () => {
   const models = applyPreferredCodexDefaultModel([

@@ -29,10 +29,19 @@ tool as a connected Codex Chrome provider.
 
 ## Capability discovery
 
-`CodexBrowserCapabilities.ts` consumes the thread-scoped tool inventory from
-`mcpServerStatus/list`. Follow pagination. The managed provider requires the
-expected managed Chrome tools on the `t3-code` server. Preview has a separate
-tool check because a session can receive either toolkit independently.
+`CodexDriver.ts` builds the Browser provider choices from routes T3 can provision.
+Managed Chrome requires a discovered executable and the registered `computer_*`
+toolkit. Preview requires `enableAgentBrowserAccess` and its registered toolkit.
+The driver checks executable paths without launching Chrome or reading its
+profile. Provider refresh rechecks discovery, and a Preview setting change
+refreshes the choices. If neither route is available, no browser selector appears.
+
+`CodexBrowserCapabilities.ts` checks tool names for both the provider catalog and
+the thread-scoped inventory from `mcpServerStatus/list`. Before each turn, the
+runtime follows pagination and checks the tools actually attached to that thread.
+Preview has a separate tool check because a session can receive either toolkit
+independently. The selector cannot rely only on a previous turn's inventory:
+selecting Preview removes the managed Chrome toolkit from that session.
 
 An available toolkit means the agent can attempt those tool calls. It does not
 mean Chrome is running, authentication succeeded, or an action has approval.
@@ -96,6 +105,9 @@ The persisted `computerControl` option retains `preview`, `chrome`, and the lega
 `desktop` value. `desktop` grants the T3 browser toolkit, not Windows access.
 Instructions describe its managed Chrome fallback explicitly. The mode selection
 does not grant permissions or authorize unrelated consequential actions.
+New choices omit `desktop`; the default is managed Chrome when provisionable,
+otherwise Preview. Existing selection normalization resolves a saved desktop
+value against the available choices without presenting it as Windows control.
 
 `computerControlAvailable` in the instruction builder means the thread inventory
 contains T3's managed Chrome toolkit. It defaults to false. The separate

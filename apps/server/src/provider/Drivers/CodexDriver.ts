@@ -34,6 +34,9 @@ import { makeCodexTextGeneration } from "../../textGeneration/CodexTextGeneratio
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { findInstalledChrome } from "../../browser/ChromeAutomation.ts";
+import { ComputerToolkit } from "../../mcp/toolkits/computer/tools.ts";
+import { PreviewToolkit } from "../../mcp/toolkits/preview/tools.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeCodexAdapter } from "../Layers/CodexAdapter.ts";
 import { checkCodexProviderStatus, makePendingCodexProvider } from "../Layers/CodexProvider.ts";
@@ -118,6 +121,8 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
@@ -178,13 +183,25 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       });
       const textGeneration = yield* makeCodexTextGeneration(effectiveConfig, processEnv);
 
-      // Build a managed snapshot whose settings never change — mutations come
-      // in as instance rebuilds from the registry rather than in-place
-      // updates. Pre-provide `ChildProcessSpawner` so the check fits
-      // `makeManagedServerProvider.checkProvider`'s `R = never`.
-      const checkProvider = checkCodexProviderStatus(effectiveConfig, undefined, processEnv).pipe(
+      // These are routes T3 can provision when selected, not a claim that a
+      // running Codex thread has attached them. Each turn checks its own catalog.
+      const checkProvider = Effect.gen(function* () {
+        const settings = yield* serverSettings.getSettings;
+        const chromeExecutable = yield* findInstalledChrome();
+        return yield* checkCodexProviderStatus(effectiveConfig, undefined, processEnv, [
+          {
+            name: "t3-code",
+            tools: {
+              ...(chromeExecutable ? ComputerToolkit.tools : {}),
+              ...(settings.enableAgentBrowserAccess ? PreviewToolkit.tools : {}),
+            },
+          },
+        ]);
+      }).pipe(
         Effect.map(stampIdentity),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
       );
       const snapshotSettings = makeProviderSnapshotSettingsSource(effectiveConfig, serverSettings);
       const snapshot = yield* makeManagedServerProvider<ProviderSnapshotSettings<CodexSettings>>({

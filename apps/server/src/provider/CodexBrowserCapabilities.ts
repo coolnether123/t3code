@@ -1,4 +1,4 @@
-/** A thread-scoped inventory returned by Codex `mcpServerStatus/list`. */
+/** A server tool catalog, either registered by T3 or returned by Codex for a thread. */
 export interface CodexMcpToolInventory {
   readonly name: string;
   readonly tools: Readonly<Record<string, unknown>>;
@@ -54,7 +54,8 @@ export interface CodexBrowserCapability {
 
 /**
  * The desktop integrations require a supported host adapter, not just an installed
- * plugin, a feature flag, `node_repl`, or a remote-control connection. T3 has none.
+ * plugin, a feature flag, `node_repl`, or a remote-control connection. T3 does not
+ * yet have a verified profile-specific adapter for those routes.
  */
 export function resolveCodexBrowserCapabilities(
   servers: ReadonlyArray<CodexMcpToolInventory>,
