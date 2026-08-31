@@ -40,6 +40,62 @@ afterEach(() => {
 });
 
 describe("birthday settings", () => {
+  it("edits private notes, preserves the date, and explicitly clears the saved notes", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    state.saved = { month: 5, day: 14, enabled: true, tapEffects: false, notes: ["An old wish."] };
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<BirthdaySettings />));
+      const field = container.querySelector("textarea")!;
+      expect(field.value).toBe("An old wish.");
+      const write = async (text: string) =>
+        act(async () => {
+          Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(
+            field,
+            text,
+          );
+          field.dispatchEvent(new Event("input", { bubbles: true }));
+        });
+      const submit = async () =>
+        act(async () =>
+          container
+            .querySelector("form")!
+            .dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+        );
+      await write("  A project wish.  \n\nAnother birthday note.");
+      await submit();
+      expect(state.update).toHaveBeenLastCalledWith({
+        birthdayCelebration: {
+          month: 5,
+          day: 14,
+          enabled: true,
+          tapEffects: false,
+          notes: ["A project wish.", "Another birthday note."],
+        },
+      });
+      state.update.mockClear();
+      await write("x".repeat(361));
+      await submit();
+      expect(state.update).not.toHaveBeenCalled();
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain("360");
+      await write("");
+      await submit();
+      expect(state.update).toHaveBeenLastCalledWith({
+        birthdayCelebration: {
+          month: 5,
+          day: 14,
+          enabled: true,
+          tapEffects: false,
+          notes: [],
+        },
+      });
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
   it("saves an editable private date and removes it without a code default", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     state.saved = { month: 5, day: 14, enabled: true, tapEffects: true };

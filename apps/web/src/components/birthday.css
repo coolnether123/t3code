@@ -145,6 +145,7 @@ html[data-birthday] [data-slot="sidebar"] {
   border-radius: 2px 12px 12px 2px;
 }
 .birthday-note p {
+  overflow-wrap: anywhere;
   font-size: 14px;
   font-style: italic;
   line-height: 1.65;

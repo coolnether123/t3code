@@ -11,15 +11,21 @@ import { Link } from "@tanstack/react-router";
 import { usePrimarySettings } from "../hooks/useSettings";
 import "./birthday.css";
 
-const BirthdayContext = createContext({ active: false, year: 0, noteIndex: 0, nextNote: () => {} });
 const CONFETTI_COLORS = ["#ffaf91", "#f8d477", "#a8dcca", "#d5b7f4"];
-const BIRTHDAY_NOTES = [
+const BIRTHDAY_NOTES: readonly string[] = [
   "The cake has requested a code freeze. Your wish has higher priority.",
   "Wishing you a year with more good surprises and fewer mystery bugs.",
   "Today's most important metric: one more year of being you.",
   "A tiny birthday present from the pixels you spend your day with.",
   "May your next year have excellent snacks, kind people, and very boring error logs.",
 ];
+const BirthdayContext = createContext({
+  active: false,
+  year: 0,
+  noteIndex: 0,
+  notes: BIRTHDAY_NOTES,
+  nextNote: () => {},
+});
 const BIRTHDAY_CAKES = [
   { name: "Strawberry birthday cake", layer: "#b881aa", icing: "#ffd0bd", sprinkles: "#9d496c" },
   { name: "Chocolate birthday cake", layer: "#8b5b49", icing: "#e8ba8c", sprinkles: "#634037" },
@@ -41,9 +47,10 @@ export function BirthdayCelebration({ children }: { readonly children: ReactNode
     birthday.day === today.getDate();
   const effects = active && birthday?.tapEffects === true;
   const year = today.getFullYear();
+  const notes = birthday?.notes?.length ? birthday.notes : BIRTHDAY_NOTES;
   const context = useMemo(
-    () => ({ active, year, noteIndex, nextNote: () => setNoteIndex((index) => index + 1) }),
-    [active, year, noteIndex],
+    () => ({ active, year, noteIndex, notes, nextNote: () => setNoteIndex((index) => index + 1) }),
+    [active, year, noteIndex, notes],
   );
 
   useEffect(() => {
@@ -155,7 +162,7 @@ export function BirthdayCelebration({ children }: { readonly children: ReactNode
 }
 
 export function BirthdayGreeting() {
-  const { active, year, noteIndex, nextNote } = useContext(BirthdayContext);
+  const { active, year, noteIndex, notes, nextNote } = useContext(BirthdayContext);
   const [wished, setWished] = useState(false);
   const [noteOpen, setNoteOpen] = useState(false);
   if (!active) return null;
@@ -222,7 +229,7 @@ export function BirthdayGreeting() {
       </button>
       {noteOpen ? (
         <div className="birthday-note">
-          <p aria-live="polite">{BIRTHDAY_NOTES[(year + noteIndex) % BIRTHDAY_NOTES.length]}</p>
+          <p aria-live="polite">{notes[(year + noteIndex) % notes.length]}</p>
           <button type="button" onClick={nextNote}>
             There's another one →
           </button>

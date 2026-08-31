@@ -127,6 +127,33 @@ describe("birthday celebration", () => {
     expect(container.querySelector("svg title")!.textContent).not.toBe(cake);
     expect(container.querySelector(".birthday-note p")!.textContent).not.toBe(note);
   });
+  it("replaces built-in notes with private plain text and updates when the saved notes change", async () => {
+    state.birthday = {
+      ...state.birthday!,
+      notes: ["A birthday for the example project.", "<b>More cake</b>"],
+    };
+    await act(async () => render());
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>(".birthday-note-toggle")!.click(),
+    );
+    expect(container.querySelector(".birthday-note p")!.textContent).toBe(
+      "A birthday for the example project.",
+    );
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>(".birthday-note button")!.click(),
+    );
+    expect(container.querySelector(".birthday-note p")!.textContent).toBe("<b>More cake</b>");
+    expect(container.querySelector(".birthday-note b")).toBeNull();
+    state.birthday = { ...state.birthday!, notes: ["A newly saved wish."] };
+    await act(async () => render());
+    expect(container.querySelector(".birthday-note p")!.textContent).toBe("A newly saved wish.");
+    state.birthday = { ...state.birthday!, notes: [] };
+    await act(async () => render());
+    expect(container.querySelector(".birthday-note p")!.textContent).toBeTruthy();
+    expect(container.querySelector(".birthday-note p")!.textContent).not.toBe(
+      "A newly saved wish.",
+    );
+  });
   it("adds bounded short bursts without replacing the button action", async () => {
     await act(async () => render());
     const button = [...container.querySelectorAll("button")].find(

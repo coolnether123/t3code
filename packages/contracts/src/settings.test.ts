@@ -20,6 +20,40 @@ const encodeServerSettings = Schema.encodeSync(ServerSettings);
 
 describe("private birthday settings", () => {
   const birthday = { month: 5, day: 14, enabled: true, tapEffects: true };
+  it("round-trips private notes and accepts clearing them without changing the date", () => {
+    const preference = {
+      ...birthday,
+      notes: ["A wish for the example project.", "Enjoy the cake."],
+    };
+    expect(
+      encodeServerSettings(decodeServerSettings({ birthdayCelebration: preference }))
+        .birthdayCelebration,
+    ).toEqual(preference);
+    expect(
+      decodeServerSettingsPatch({ birthdayCelebration: { ...birthday, notes: [] } })
+        .birthdayCelebration,
+    ).toEqual({ ...birthday, notes: [] });
+  });
+  it("accepts the documented note count and length limits", () => {
+    const notes = Array.from({ length: 24 }, () => "x".repeat(360));
+    expect(
+      decodeServerSettingsPatch({ birthdayCelebration: { ...birthday, notes } }).birthdayCelebration
+        ?.notes,
+    ).toEqual(notes);
+  });
+  it.each(
+    [
+      [""],
+      ["   "],
+      ["two\nlines"],
+      ["x".repeat(361)],
+      Array.from({ length: 25 }, () => "A note"),
+    ].map((notes) => ({ notes })),
+  )("rejects invalid or oversized notes: %j", ({ notes }) => {
+    expect(() =>
+      decodeServerSettingsPatch({ birthdayCelebration: { ...birthday, notes } }),
+    ).toThrow();
+  });
   it("has no default personal date and round-trips the configured preference", () => {
     expect(decodeServerSettings({}).birthdayCelebration).toBeNull();
     const decoded = decodeServerSettings({ birthdayCelebration: { ...birthday, year: 1990 } });

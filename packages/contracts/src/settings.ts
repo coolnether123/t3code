@@ -606,12 +606,25 @@ export const BackgroundActivitySettings = Schema.Struct({
 }).pipe(Schema.withDecodingDefault(Effect.succeed({})));
 export type BackgroundActivitySettings = typeof BackgroundActivitySettings.Type;
 
-/** A recurring month/day, stored with private environment settings, never a birth year. */
+export const MAX_BIRTHDAY_NOTES = 24;
+export const MAX_BIRTHDAY_NOTE_LENGTH = 360;
+
+/** A recurring month/day and optional notes stored with private environment settings. */
 export const BirthdayCelebrationPreference = Schema.Struct({
   month: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 12 })),
   day: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 31 })),
   enabled: Schema.Boolean,
   tapEffects: Schema.Boolean,
+  notes: Schema.optionalKey(
+    Schema.Array(
+      Schema.String.check(
+        Schema.isMaxLength(MAX_BIRTHDAY_NOTE_LENGTH),
+        Schema.makeFilter((note) => note.trim().length > 0 && !/[\r\n]/.test(note), {
+          message: "Birthday notes must be nonempty single lines.",
+        }),
+      ),
+    ).check(Schema.isMaxLength(MAX_BIRTHDAY_NOTES)),
+  ),
 }).check(
   Schema.makeFilter(
     ({ month, day }) => day <= [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1]!,

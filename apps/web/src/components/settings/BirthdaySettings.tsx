@@ -1,4 +1,8 @@
-import { BirthdayCelebrationPreference } from "@t3tools/contracts";
+import {
+  BirthdayCelebrationPreference,
+  MAX_BIRTHDAY_NOTES,
+  MAX_BIRTHDAY_NOTE_LENGTH,
+} from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { useEffect, useState } from "react";
 import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSettings";
@@ -17,6 +21,8 @@ export function BirthdaySettings() {
   const [day, setDay] = useState(saved?.day.toString() ?? "");
   const [enabled, setEnabled] = useState(saved?.enabled ?? true);
   const [tapEffects, setTapEffects] = useState(saved?.tapEffects ?? true);
+  const savedNotes = saved?.notes?.join("\n") ?? "";
+  const [notesText, setNotesText] = useState(savedNotes);
   const [error, setError] = useState("");
   useEffect(() => {
     setMonth(saved?.month.toString() ?? "");
@@ -24,6 +30,7 @@ export function BirthdaySettings() {
     setEnabled(saved?.enabled ?? true);
     setTapEffects(saved?.tapEffects ?? true);
   }, [saved?.month, saved?.day, saved?.enabled, saved?.tapEffects]);
+  useEffect(() => setNotesText(savedNotes), [savedNotes]);
 
   return (
     <SettingsSection {...searchableSetting("birthday-celebration")}>
@@ -35,7 +42,26 @@ export function BirthdaySettings() {
         className="mt-4 space-y-3"
         onSubmit={(event) => {
           event.preventDefault();
-          const next = { month: Number(month), day: Number(day), enabled, tapEffects };
+          const notes = notesText
+            .split(/\r?\n/)
+            .map((note) => note.trim())
+            .filter(Boolean);
+          if (
+            notes.length > MAX_BIRTHDAY_NOTES ||
+            notes.some((note) => note.length > MAX_BIRTHDAY_NOTE_LENGTH)
+          ) {
+            setError(
+              `Use up to ${MAX_BIRTHDAY_NOTES} notes, each ${MAX_BIRTHDAY_NOTE_LENGTH} characters or fewer.`,
+            );
+            return;
+          }
+          const next = {
+            month: Number(month),
+            day: Number(day),
+            enabled,
+            tapEffects,
+            ...(notes.length || saved?.notes !== undefined ? { notes } : {}),
+          };
           if (!isBirthdayPreference(next)) {
             setError("Choose a valid month and day.");
             return;
@@ -102,6 +128,22 @@ export function BirthdaySettings() {
           Reduced motion turns animations off. The date is saved privately on your connected T3
           server, shared with its paired clients, and never added to the code repository. No birth
           year is stored.
+        </p>
+        <label className="flex flex-col gap-2 text-sm">
+          Personal birthday notes
+          <textarea
+            aria-describedby="birthday-notes-help"
+            value={notesText}
+            onChange={(event) => setNotesText(event.target.value)}
+            rows={6}
+            className="min-h-36 w-full resize-y rounded-md border border-input bg-background p-3 text-base leading-relaxed"
+          />
+        </label>
+        <p id="birthday-notes-help" className="text-xs leading-relaxed text-muted-foreground">
+          One note per line, up to {MAX_BIRTHDAY_NOTES} notes of {MAX_BIRTHDAY_NOTE_LENGTH}{" "}
+          characters. Saved privately with your birthday, not in Git. These replace the built-in
+          notes and appear in Usage and Codex monitor. Leave blank to use the built-in notes again.
+          Opening a note never reads your chats or calls a model.
         </p>
         {error ? (
           <p role="alert" className="text-sm text-destructive">
