@@ -1454,7 +1454,17 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             threadId: event.payload.threadId,
             turnId: event.payload.turnId,
           });
-          const nextState = event.payload.status === "error" ? "error" : "completed";
+          // Checkpoint metadata cannot turn an interrupted or failed provider
+          // turn into a successful one. A terminal checkpoint failure still
+          // records an error regardless of the previous turn outcome.
+          const nextState =
+            event.payload.status === "error"
+              ? "error"
+              : Option.isSome(existingTurn) &&
+                  (existingTurn.value.state === "interrupted" ||
+                    existingTurn.value.state === "error")
+                ? existingTurn.value.state
+                : "completed";
           yield* projectionTurnRepository.clearCheckpointTurnConflict({
             threadId: event.payload.threadId,
             turnId: event.payload.turnId,

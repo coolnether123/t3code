@@ -8,6 +8,7 @@ import {
   ThreadId,
   TurnId,
   ProviderInstanceId,
+  type OrchestrationCheckpointStatus,
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
@@ -1498,6 +1499,140 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
       assert.deepEqual(threadRows, [{ latestTurnId: turnId }]);
     }),
   );
+
+  for (const scenario of [
+    { outcome: "interrupted", checkpointFirst: false },
+    { outcome: "error", checkpointFirst: false },
+    { outcome: "completed", checkpointFirst: false },
+    { outcome: "interrupted", checkpointFirst: true },
+  ] as const) {
+    it.effect(
+      `preserves ${scenario.outcome} turn outcomes across checkpoint updates${scenario.checkpointFirst ? " arriving before interruption" : ""}`,
+      () =>
+        Effect.gen(function* () {
+          const projectionPipeline = yield* OrchestrationProjectionPipeline;
+          const eventStore = yield* OrchestrationEventStore;
+          const sql = yield* SqlClient.SqlClient;
+          const threadId = ThreadId.make(
+            `thread-checkpoint-${scenario.outcome}-${scenario.checkpointFirst}`,
+          );
+          const turnId = TurnId.make(`turn-${threadId}`);
+          const now = "2026-08-31T00:48:00.000Z";
+          let sequence = 0;
+          const envelope = () => ({
+            eventId: EventId.make(`evt-${threadId}-${sequence++}`),
+            aggregateKind: "thread" as const,
+            aggregateId: threadId,
+            occurredAt: now,
+            commandId: null,
+            causationEventId: null,
+            correlationId: null,
+            metadata: {},
+          });
+          const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+            eventStore
+              .append(event)
+              .pipe(Effect.flatMap((saved) => projectionPipeline.projectEvent(saved)));
+          const setSession = (status: "running" | "ready" | "error") =>
+            appendAndProject({
+              ...envelope(),
+              type: "thread.session-set",
+              payload: {
+                threadId,
+                session: {
+                  threadId,
+                  status,
+                  providerName: "codex",
+                  runtimeMode: "approval-required",
+                  activeTurnId: status === "running" ? turnId : null,
+                  lastError: status === "error" ? "Provider turn failed" : null,
+                  updatedAt: now,
+                },
+              },
+            });
+          const checkpoint = (status: OrchestrationCheckpointStatus) =>
+            appendAndProject({
+              ...envelope(),
+              type: "thread.turn-diff-completed",
+              payload: {
+                threadId,
+                turnId,
+                checkpointTurnCount: 1,
+                checkpointRef: CheckpointRef.make(`refs/t3/checkpoints/${threadId}/turn/1`),
+                status,
+                files: [],
+                assistantMessageId: MessageId.make(`assistant-${threadId}`),
+                completedAt: now,
+              },
+            });
+          const assertTurn = (state: string, checkpointStatus: OrchestrationCheckpointStatus) =>
+            Effect.gen(function* () {
+              const rows = yield* sql<{
+                readonly state: string;
+                readonly checkpointStatus: string;
+              }>`
+                SELECT state, checkpoint_status AS "checkpointStatus"
+                FROM projection_turns
+                WHERE thread_id = ${threadId} AND turn_id = ${turnId}
+              `;
+              assert.deepEqual(rows, [{ state, checkpointStatus }]);
+            });
+
+          yield* appendAndProject({
+            ...envelope(),
+            type: "thread.created",
+            payload: {
+              threadId,
+              projectId: ProjectId.make(`project-${threadId}`),
+              title: "Checkpoint outcome",
+              modelSelection: {
+                instanceId: ProviderInstanceId.make("codex"),
+                model: "gpt-5-codex",
+              },
+              runtimeMode: "approval-required",
+              branch: null,
+              worktreePath: null,
+              createdAt: now,
+              updatedAt: now,
+            },
+          });
+          yield* setSession("running");
+          yield* checkpoint("missing");
+          yield* assertTurn("running", "missing");
+          yield* checkpoint("error");
+          yield* assertTurn("running", "error");
+
+          if (scenario.checkpointFirst) {
+            yield* setSession("ready");
+            yield* checkpoint("ready");
+            yield* assertTurn("completed", "ready");
+          }
+          if (scenario.outcome === "interrupted") {
+            yield* appendAndProject({
+              ...envelope(),
+              type: "thread.turn-interrupt-requested",
+              payload: { threadId, turnId, createdAt: now },
+            });
+          }
+          yield* setSession(scenario.outcome === "error" ? "error" : "ready");
+          // A ready session after an error does not change the finished turn.
+          yield* setSession("ready");
+          for (const status of ["missing", "ready"] as const) {
+            yield* checkpoint(status);
+            yield* assertTurn(scenario.outcome, status);
+          }
+
+          // Terminal checkpoint failures remain visible, including after an
+          // interrupted or completed provider turn and later checkpoint retries.
+          yield* checkpoint("error");
+          yield* assertTurn("error", "error");
+          for (const status of ["ready", "missing"] as const) {
+            yield* checkpoint(status);
+            yield* assertTurn("error", status);
+          }
+        }),
+    );
+  }
 
   it.effect("settles a superseded running turn when a new turn becomes active", () =>
     Effect.gen(function* () {
