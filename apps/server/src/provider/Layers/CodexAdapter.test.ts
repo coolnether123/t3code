@@ -403,7 +403,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         yield* adapter.sendTurn({ threadId, input: "ordinary", attachments: [] });
         NodeAssert.deepStrictEqual(runtime.sendTurnImpl.mock.calls[0]?.[0], {
           input: "ordinary",
-          computerControlMode: "desktop",
+          computerControlMode: "chrome",
         });
 
         const explicitControl = yield* adapter
