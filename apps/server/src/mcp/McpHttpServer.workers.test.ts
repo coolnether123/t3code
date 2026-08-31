@@ -55,6 +55,7 @@ const makeCatalogLayer = (enableT3Workers: boolean) =>
           selectTab: () => Effect.die("unused select"),
           navigate: () => Effect.die("unused navigate"),
           snapshot: () => Effect.die("unused snapshot"),
+          screenshot: () => Effect.die("unused screenshot"),
           click: () => Effect.die("unused click"),
           fill: () => Effect.die("unused fill"),
           type: () => Effect.die("unused type"),

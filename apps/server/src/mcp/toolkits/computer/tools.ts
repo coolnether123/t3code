@@ -5,6 +5,7 @@ import {
   ComputerChromeNavigateInput,
   ComputerChromeSelectTabInput,
   ComputerChromeSnapshot,
+  ComputerChromeScreenshot,
   ComputerChromeStatus,
   ComputerChromeTab,
   ComputerChromeTargetInput,
@@ -117,7 +118,7 @@ export const ComputerNavigateTool = computerTool(
   safeChromeTool(
     Tool.make("computer_navigate", {
       description:
-        "Navigate the selected managed Chrome tab to an exact absolute HTTP or HTTPS URL, or reset it with exactly about:blank.",
+        "Navigate the specified managed Chrome tab to an exact absolute HTTP or HTTPS URL, or reset it with exactly about:blank. Obtain tabId from computer_tabs; actions do not follow another agent's tab selection.",
       parameters: ComputerChromeNavigateInput,
       success: ComputerChromeTab,
       failure: chromeFailure,
@@ -132,8 +133,8 @@ export const ComputerSnapshotTool = computerTool(
   readOnlyChromeTool(
     Tool.make("computer_snapshot", {
       description:
-        "Inspect the selected managed Chrome tab and return its accessibility tree, DOM, and fresh interaction refs.",
-      parameters: ComputerChromeEmptyInput,
+        "Inspect the specified managed Chrome tab and return its accessibility tree, DOM, and fresh interaction refs. Obtain tabId from computer_tabs. Refs belong to this tab and snapshot.",
+      parameters: ComputerChromeSelectTabInput,
       success: ComputerChromeSnapshot,
       failure: chromeFailure,
       dependencies: chromeDependencies,
@@ -146,7 +147,8 @@ export const ComputerSnapshotTool = computerTool(
 export const ComputerClickTool = computerTool(
   mutatingChromeTool(
     Tool.make("computer_click", {
-      description: "Click one ref from the latest snapshot or one explicit CSS selector.",
+      description:
+        "Click one ref from the latest snapshot or one explicit CSS selector in the specified tab. Use the tabId returned by computer_tabs or computer_snapshot.",
       parameters: ComputerChromeTargetInput,
       success: ComputerChromeActionResult,
       failure: chromeFailure,
@@ -157,11 +159,26 @@ export const ComputerClickTool = computerTool(
   ),
 );
 
+export const ComputerScreenshotTool = computerTool(
+  readOnlyChromeTool(
+    Tool.make("computer_screenshot", {
+      description:
+        "Capture a PNG of the specified managed Chrome tab's viewport. Obtain tabId from computer_tabs. The viewport must be at most 4096 pixels per dimension; output is limited to 5 MiB.",
+      parameters: ComputerChromeSelectTabInput,
+      success: ComputerChromeScreenshot,
+      failure: chromeFailure,
+      dependencies: chromeDependencies,
+    })
+      .annotate(Tool.Title, "Screenshot T3 Chrome")
+      .annotate(Tool.OpenWorld, true),
+  ),
+);
+
 export const ComputerFillTool = computerTool(
   mutatingChromeTool(
     Tool.make("computer_fill", {
       description:
-        "Replace the value of one snapshot ref or explicit CSS selector with literal text.",
+        "Replace the value of one snapshot ref or explicit CSS selector with literal text in the specified tab. Use the tabId returned by computer_tabs or computer_snapshot.",
       parameters: ComputerChromeValueInput,
       success: ComputerChromeActionResult,
       failure: chromeFailure,
@@ -175,7 +192,8 @@ export const ComputerFillTool = computerTool(
 export const ComputerTypeTool = computerTool(
   mutatingChromeTool(
     Tool.make("computer_type", {
-      description: "Type literal text into one snapshot ref or explicit CSS selector.",
+      description:
+        "Type literal text into one snapshot ref or explicit CSS selector in the specified tab. Use the tabId returned by computer_tabs or computer_snapshot.",
       parameters: ComputerChromeValueInput,
       success: ComputerChromeActionResult,
       failure: chromeFailure,
@@ -221,9 +239,25 @@ export const ComputerToolkit = Toolkit.make(
   ComputerSelectTabTool,
   ComputerNavigateTool,
   ComputerSnapshotTool,
+  ComputerScreenshotTool,
   ComputerClickTool,
   ComputerFillTool,
   ComputerTypeTool,
   ComputerCloseTool,
   ComputerOpenUrlTool,
 );
+
+export const ComputerStandardToolkit = Toolkit.make(
+  ComputerStartTool,
+  ComputerStatusTool,
+  ComputerTabsTool,
+  ComputerSelectTabTool,
+  ComputerNavigateTool,
+  ComputerSnapshotTool,
+  ComputerClickTool,
+  ComputerFillTool,
+  ComputerTypeTool,
+  ComputerCloseTool,
+  ComputerOpenUrlTool,
+);
+export const ComputerScreenshotToolkit = Toolkit.make(ComputerScreenshotTool);

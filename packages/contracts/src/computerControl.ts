@@ -94,6 +94,19 @@ export const ComputerChromeSnapshot = Schema.Struct({
 });
 export type ComputerChromeSnapshot = typeof ComputerChromeSnapshot.Type;
 
+export const ComputerChromeScreenshot = Schema.Struct({
+  tabId: NonEmptyString,
+  mimeType: Schema.Literal("image/png"),
+  data: Schema.String.check(Schema.isMaxLength(6_990_508)),
+  width: Schema.Number.check(Schema.isInt()).check(
+    Schema.isBetween({ minimum: 1, maximum: 4_096 }),
+  ),
+  height: Schema.Number.check(Schema.isInt()).check(
+    Schema.isBetween({ minimum: 1, maximum: 4_096 }),
+  ),
+});
+export type ComputerChromeScreenshot = typeof ComputerChromeScreenshot.Type;
+
 export const ComputerChromeEmptyInput = Schema.Struct({});
 export type ComputerChromeEmptyInput = typeof ComputerChromeEmptyInput.Type;
 
@@ -106,16 +119,23 @@ const ComputerChromeTarget = Schema.Union([
 ]);
 
 export const ComputerChromeNavigateInput = Schema.Struct({
+  tabId: NonEmptyString,
   url: ChromeNavigateUrl,
   waitUntil: Schema.optionalKey(Schema.Literals(["load", "domcontentloaded", "commit"])),
-  timeoutMs: Schema.optionalKey(Schema.Number),
+  timeoutMs: Schema.optionalKey(
+    Schema.Number.check(Schema.isInt()).check(Schema.isBetween({ minimum: 1, maximum: 120_000 })),
+  ),
 });
 export type ComputerChromeNavigateInput = typeof ComputerChromeNavigateInput.Type;
 
-export const ComputerChromeTargetInput = Schema.Struct({ target: ComputerChromeTarget });
+export const ComputerChromeTargetInput = Schema.Struct({
+  tabId: NonEmptyString,
+  target: ComputerChromeTarget,
+});
 export type ComputerChromeTargetInput = typeof ComputerChromeTargetInput.Type;
 
 export const ComputerChromeValueInput = Schema.Struct({
+  tabId: NonEmptyString,
   target: ComputerChromeTarget,
   value: Schema.String,
 });

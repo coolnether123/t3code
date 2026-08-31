@@ -8,7 +8,7 @@ import {
 import * as ChromeAutomation from "../../../browser/ChromeAutomation.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as ExternalLauncher from "../../../process/externalLauncher.ts";
-import { ComputerToolkit } from "./tools.ts";
+import { ComputerToolkit, ComputerStandardToolkit, ComputerScreenshotToolkit } from "./tools.ts";
 
 const withChromeAutomation = Effect.fn("ComputerToolkit.withChromeAutomation")(function* <A>(
   operation: string,
@@ -47,24 +47,28 @@ export const computerHandlers = {
   computer_tabs: () => withChromeAutomation("tabs", (automation) => automation.listTabs()),
   computer_select_tab: ({ tabId }) =>
     withChromeAutomation("selectTab", (automation) => automation.selectTab(tabId)),
-  computer_navigate: ({ url, waitUntil, timeoutMs }) =>
+  computer_navigate: ({ tabId, url, waitUntil, timeoutMs }) =>
     withChromeAutomation("navigate", (automation) =>
       automation.navigate(url, {
+        tabId,
         ...(waitUntil === undefined ? {} : { waitUntil }),
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
       }),
     ),
-  computer_snapshot: () => withChromeAutomation("snapshot", (automation) => automation.snapshot()),
-  computer_click: ({ target }) =>
-    withChromeAutomation("click", (automation) => automation.click(target)).pipe(
+  computer_snapshot: ({ tabId }) =>
+    withChromeAutomation("snapshot", (automation) => automation.snapshot(tabId)),
+  computer_screenshot: ({ tabId }) =>
+    withChromeAutomation("screenshot", (automation) => automation.screenshot(tabId)),
+  computer_click: ({ tabId, target }) =>
+    withChromeAutomation("click", (automation) => automation.click(target, tabId)).pipe(
       Effect.as({ completed: true as const }),
     ),
-  computer_fill: ({ target, value }) =>
-    withChromeAutomation("fill", (automation) => automation.fill(target, value)).pipe(
+  computer_fill: ({ tabId, target, value }) =>
+    withChromeAutomation("fill", (automation) => automation.fill(target, value, tabId)).pipe(
       Effect.as({ completed: true as const }),
     ),
-  computer_type: ({ target, value }) =>
-    withChromeAutomation("type", (automation) => automation.type(target, value)).pipe(
+  computer_type: ({ tabId, target, value }) =>
+    withChromeAutomation("type", (automation) => automation.type(target, value, tabId)).pipe(
       Effect.as({ completed: true as const }),
     ),
   computer_close: () =>
@@ -93,3 +97,9 @@ export const computerHandlers = {
 } satisfies Parameters<typeof ComputerToolkit.toLayer>[0];
 
 export const ComputerToolkitHandlersLive = ComputerToolkit.toLayer(computerHandlers);
+const { computer_screenshot, ...standardHandlers } = computerHandlers;
+export const ComputerStandardToolkitHandlersLive =
+  ComputerStandardToolkit.toLayer(standardHandlers);
+export const ComputerScreenshotToolkitHandlersLive = ComputerScreenshotToolkit.toLayer({
+  computer_screenshot,
+});

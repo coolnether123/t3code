@@ -6,6 +6,7 @@ import * as Option from "effect/Option";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import type * as Types from "effect/Types";
+import type { ComputerChromeScreenshot } from "@t3tools/contracts";
 import { McpProtocol, McpSchema, McpServer, Tool } from "effect/unstable/ai";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 
@@ -14,8 +15,16 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
-import { ComputerToolkitHandlersLive } from "./toolkits/computer/handlers.ts";
-import { ComputerToolkit } from "./toolkits/computer/tools.ts";
+import {
+  ComputerStandardToolkitHandlersLive,
+  ComputerScreenshotToolkitHandlersLive,
+} from "./toolkits/computer/handlers.ts";
+import {
+  ComputerStandardToolkit,
+  ComputerScreenshotToolkit,
+  ComputerScreenshotTool,
+} from "./toolkits/computer/tools.ts";
+import * as ChromeAutomation from "../browser/ChromeAutomation.ts";
 import {
   PreviewSnapshotToolkitHandlersLive,
   PreviewStandardToolkitHandlersLive,
@@ -101,7 +110,11 @@ const McpAuthMiddlewareLive = HttpRouter.middleware<{
   provides: McpInvocationContext.McpInvocationContext;
 }>()(makeMcpAuthMiddleware).layer;
 
-const previewSnapshotFailure = <E>(cause: Cause.Cause<E>) => {
+const browserImageFailure = <E>(
+  cause: Cause.Cause<E>,
+  operation: "snapshot" | "screenshot",
+  label: string,
+) => {
   if (Cause.hasInterrupts(cause) || cause.reasons.some(Cause.isDieReason)) {
     return Effect.failCause(cause).pipe(Effect.orDie);
   }
@@ -119,14 +132,14 @@ const previewSnapshotFailure = <E>(cause: Cause.Cause<E>) => {
     structuredContent: {
       error: {
         _tag: errorTag,
-        operation: "snapshot",
+        operation,
         failureCount: failures.length,
       },
     },
-    content: [{ type: "text", text: "Preview snapshot failed." }],
+    content: [{ type: "text", text: `${label} failed.` }],
   });
-  return Effect.logWarning("preview snapshot failed", {
-    operation: "snapshot",
+  return Effect.logWarning(`${label} failed`, {
+    operation,
     errorTag,
     failureCount: failures.length,
   }).pipe(Effect.as(result));
@@ -167,7 +180,7 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
           Effect.provideService(PreviewAutomationBroker.PreviewAutomationBroker, broker),
           Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
           Effect.matchCauseEffect({
-            onFailure: previewSnapshotFailure,
+            onFailure: (cause) => browserImageFailure(cause, "snapshot", "Preview snapshot"),
             onSuccess: ({ encodedResult }) => {
               const snapshot = encodedResult as {
                 readonly screenshot: {
@@ -225,8 +238,73 @@ export const WorkerToolkitRegistrationLive = McpServer.toolkit(WorkerToolkit).pi
   Layer.provide(WorkerToolkitHandlersLive),
 );
 
-export const ComputerToolkitRegistrationLive = McpServer.toolkit(ComputerToolkit).pipe(
-  Layer.provide(ComputerToolkitHandlersLive),
+const registerComputerScreenshot = Effect.fn("McpHttpServer.registerComputerScreenshot")(
+  function* () {
+    const server = yield* McpServer.McpServer;
+    const automation = yield* ChromeAutomation.ChromeAutomation;
+    const built = yield* ComputerScreenshotToolkit;
+    const tool = ComputerScreenshotTool;
+    yield* server.addTool({
+      tool: new McpSchema.Tool({
+        name: tool.name,
+        description: Tool.getDescription(tool),
+        inputSchema: Tool.getJsonSchema(tool),
+        annotations: {
+          title: "Screenshot T3 Chrome",
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
+      }),
+      annotations: tool.annotations,
+      handle: (payload) =>
+        Effect.withFiber((fiber) => {
+          const invocation = Context.getUnsafe(
+            fiber.context,
+            McpInvocationContext.McpInvocationContext,
+          );
+          return built.handle("computer_screenshot", payload).pipe(
+            Stream.unwrap,
+            Stream.run(Sink.last()),
+            Effect.flatMap(Effect.fromOption),
+            Effect.provideService(ChromeAutomation.ChromeAutomation, automation),
+            Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+            Effect.matchCauseEffect({
+              onFailure: (cause) => browserImageFailure(cause, "screenshot", "Chrome screenshot"),
+              onSuccess: ({ encodedResult }) => {
+                const { data, ...metadata } = encodedResult as ComputerChromeScreenshot;
+                return Effect.succeed(
+                  new McpSchema.CallToolResult({
+                    isError: false,
+                    structuredContent: metadata,
+                    content: [
+                      { type: "text", text: JSON.stringify(metadata) },
+                      {
+                        type: "image",
+                        mimeType: metadata.mimeType,
+                        data: new Uint8Array(Buffer.from(data, "base64")),
+                      },
+                    ],
+                  }),
+                );
+              },
+            }),
+          );
+        }),
+    });
+  },
+);
+
+export const ComputerScreenshotRegistrationLive = Layer.effectDiscard(
+  registerComputerScreenshot(),
+).pipe(Layer.provide(ComputerScreenshotToolkitHandlersLive));
+
+export const ComputerToolkitRegistrationLive = Layer.mergeAll(
+  McpServer.toolkit(ComputerStandardToolkit).pipe(
+    Layer.provide(ComputerStandardToolkitHandlersLive),
+  ),
+  ComputerScreenshotRegistrationLive,
 );
 
 /**

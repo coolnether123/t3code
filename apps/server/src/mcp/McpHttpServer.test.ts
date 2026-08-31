@@ -11,6 +11,7 @@ import { HttpBody, HttpClient, HttpRouter, HttpServerResponse } from "effect/uns
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import * as ChromeAutomation from "../browser/ChromeAutomation.ts";
 
 const environmentId = EnvironmentId.make("environment-mcp-test");
 const threadId = ThreadId.make("thread-mcp-test");
@@ -50,6 +51,82 @@ it("normalizes empty successful notification responses to accepted", () => {
   );
   expect(resultResponse.status).toBe(200);
 });
+
+it.effect("returns Chrome screenshots as MCP images without base64 in metadata", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const result = yield* server
+        .callTool({ name: "computer_screenshot", arguments: { tabId: "chrome-tab" } })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, {
+            ...invocation,
+            capabilities: new Set(["computer"] as const),
+          }),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+      expect(result.isError).toBe(false);
+      expect(result.structuredContent).toEqual({
+        tabId: "chrome-tab",
+        mimeType: "image/png",
+        width: 1,
+        height: 1,
+      });
+      expect(result.content).toEqual([
+        {
+          type: "text",
+          text: '{"tabId":"chrome-tab","mimeType":"image/png","width":1,"height":1}',
+        },
+        { type: "image", mimeType: "image/png", data: new Uint8Array([1, 2, 3]) },
+      ]);
+    }),
+  ).pipe(
+    Effect.provide(
+      McpHttpServer.ComputerScreenshotRegistrationLive.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(
+          Layer.mock(ChromeAutomation.ChromeAutomation)({
+            screenshot: (requestedTabId) =>
+              Effect.succeed({
+                tabId: requestedTabId,
+                mimeType: "image/png",
+                data: "AQID",
+                width: 1,
+                height: 1,
+              }),
+          }),
+        ),
+      ),
+    ),
+  ),
+);
+
+it.effect("does not capture a Chrome screenshot without the computer capability", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const result = yield* server
+        .callTool({ name: "computer_screenshot", arguments: { tabId: "chrome-tab" } })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+      expect(result.isError).toBe(true);
+      expect(result.content).toEqual([{ type: "text", text: "Chrome screenshot failed." }]);
+    }),
+  ).pipe(
+    Effect.provide(
+      McpHttpServer.ComputerScreenshotRegistrationLive.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(
+          Layer.mock(ChromeAutomation.ChromeAutomation)({
+            screenshot: () => Effect.die("unauthorized screenshot must not reach Chrome"),
+          }),
+        ),
+      ),
+    ),
+  ),
+);
 
 it.effect("returns bounded structural preview snapshot failures", () =>
   Effect.scoped(
