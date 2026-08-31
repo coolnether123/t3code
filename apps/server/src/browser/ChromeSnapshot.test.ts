@@ -9,6 +9,7 @@ const element = (
   previousElementSibling: SnapshotElement | null = null,
   attributes: Readonly<Record<string, string>> = {},
 ): SnapshotElement => ({
+  isConnected: true,
   tagName,
   parentElement,
   previousElementSibling,

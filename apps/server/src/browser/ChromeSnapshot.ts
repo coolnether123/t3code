@@ -1,5 +1,6 @@
 /** The DOM shape used by the browser-side snapshot, without requiring DOM globals on the server. */
 export interface SnapshotElement {
+  readonly isConnected: boolean;
   readonly tagName: string;
   readonly parentElement: SnapshotElement | null;
   readonly previousElementSibling: SnapshotElement | null;
@@ -19,6 +20,8 @@ export interface SnapshotElement {
 export const collectSnapshotRefs = (elements: ReadonlyArray<unknown>) =>
   elements.map((entry, index) => {
     const element = entry as SnapshotElement;
+    if (!element.isConnected)
+      throw new Error("Snapshot element is detached. Take a fresh snapshot.");
     const segments: Array<string> = [];
     let ancestry: Array<string> = [];
     let ancestor: SnapshotElement | undefined | null = element;

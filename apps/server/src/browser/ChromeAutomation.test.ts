@@ -16,6 +16,7 @@ import {
   type ChromeAutomationLaunchOptions,
   type ChromeAutomationPageAdapter,
   type ChromeAutomationPageSnapshot,
+  type ChromeAutomationTarget,
 } from "./ChromeAutomation.ts";
 
 interface FakePageFixture {
@@ -85,6 +86,12 @@ const makeFakePage = (input: {
   let snapshotCount = 0;
   let documentVersion = 0;
   const calls: Array<FakeCall> = [];
+  const selectorFor = (target: ChromeAutomationTarget): string => {
+    if ("selector" in target) return target.selector;
+    const ref = (input.snapshot ?? emptySnapshot).refs.find((entry) => entry.ref === target.ref);
+    if (ref === undefined) throw new Error("Unknown fixture ref");
+    return ref.selector;
+  };
   const page = {
     url: () => url,
     documentVersion: () => documentVersion,
@@ -109,17 +116,20 @@ const makeFakePage = (input: {
       if (input.screenshotError !== undefined) throw input.screenshotError;
       return input.screenshotBytes ?? screenshotPng;
     },
-    click: async (selector: string) => {
+    click: async (target: ChromeAutomationTarget) => {
+      const selector = selectorFor(target);
       calls.push({ kind: "click", selector });
       await input.beforeAction?.();
       if (input.actionError !== undefined) throw input.actionError;
     },
-    fill: async (selector: string, value: string) => {
+    fill: async (target: ChromeAutomationTarget, value: string) => {
+      const selector = selectorFor(target);
       calls.push({ kind: "fill", selector, value });
       await input.beforeAction?.();
       if (input.actionError !== undefined) throw input.actionError;
     },
-    type: async (selector: string, value: string) => {
+    type: async (target: ChromeAutomationTarget, value: string) => {
+      const selector = selectorFor(target);
       calls.push({ kind: "type", selector, value });
       await input.beforeAction?.();
       if (input.actionError !== undefined) throw input.actionError;

@@ -7,7 +7,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Semaphore from "effect/Semaphore";
-import { chromium, type Page } from "playwright-core";
+import { chromium, type ElementHandle, type Locator, type Page } from "playwright-core";
 
 import * as ServerConfig from "../config.ts";
 import { collectSnapshotRefs } from "./ChromeSnapshot.ts";
@@ -94,9 +94,9 @@ export interface ChromeAutomationPageAdapter {
   ) => Promise<void>;
   readonly snapshot: () => Promise<ChromeAutomationPageSnapshot>;
   readonly screenshotPng: () => Promise<Uint8Array>;
-  readonly click: (selector: string) => Promise<void>;
-  readonly fill: (selector: string, value: string) => Promise<void>;
-  readonly type: (selector: string, value: string) => Promise<void>;
+  readonly click: (target: ChromeAutomationTarget) => Promise<void>;
+  readonly fill: (target: ChromeAutomationTarget, value: string) => Promise<void>;
+  readonly type: (target: ChromeAutomationTarget, value: string) => Promise<void>;
 }
 
 export interface ChromeAutomationBrowserAdapter {
@@ -236,24 +236,24 @@ const isSupportedScreenshotSize = (width: number, height: number): boolean =>
   width <= MAX_SCREENSHOT_DIMENSION &&
   height <= MAX_SCREENSHOT_DIMENSION;
 
-const targetSelector = (
+const resolvePageTarget = (
   target: ChromeAutomationTarget,
   refs: ReadonlyMap<string, string>,
-): string => {
+): ChromeAutomationTarget => {
   if ("selector" in target) {
     if (target.selector.trim().length === 0) {
       throw new ChromeAutomationError("target", "A selector cannot be empty.");
     }
-    return target.selector;
+    return target;
   }
-  const selector = refs.get(target.ref);
-  if (selector === undefined) {
+  const pageRef = refs.get(target.ref);
+  if (pageRef === undefined) {
     throw new ChromeAutomationError(
       "target",
       `Snapshot ref ${JSON.stringify(target.ref)} is not available. Take a fresh snapshot.`,
     );
   }
-  return selector;
+  return { ref: pageRef };
 };
 
 export const profileArguments = (): ReadonlyArray<string> => [
@@ -398,25 +398,84 @@ export const resolveInstalledChrome = Effect.fn("ChromeAutomation.resolveInstall
 
 export const makePlaywrightPageAdapter = (page: Page): ChromeAutomationPageAdapter => {
   let documentVersion = 0;
+  let snapshotHandles = new Map<string, ElementHandle>();
+  const releaseHandles = async (handles: Iterable<ElementHandle>) => {
+    await Promise.all(Array.from(handles, (handle) => handle.dispose().catch(() => undefined)));
+  };
+  const clearSnapshotHandles = async () => {
+    const previous = snapshotHandles;
+    snapshotHandles = new Map();
+    await releaseHandles(previous.values());
+  };
+  const withTarget = async (
+    target: ChromeAutomationTarget,
+    use: (element: Locator | ElementHandle) => Promise<void>,
+  ) => {
+    try {
+      if ("selector" in target) {
+        await use(page.locator(target.selector));
+        return;
+      }
+      const handle = snapshotHandles.get(target.ref);
+      if (handle === undefined) {
+        throw new ChromeAutomationError(
+          "target",
+          "Snapshot ref is no longer available. Take a fresh snapshot.",
+        );
+      }
+      if (!(await handle.evaluate((element) => element.isConnected))) {
+        throw new ChromeAutomationError(
+          "target",
+          "Snapshot element is detached. Take a fresh snapshot.",
+        );
+      }
+      await use(handle);
+    } finally {
+      await clearSnapshotHandles();
+    }
+  };
   page.on("framenavigated", (frame) => {
-    if (frame === page.mainFrame()) documentVersion += 1;
+    if (frame === page.mainFrame()) {
+      documentVersion += 1;
+      void clearSnapshotHandles();
+    }
+  });
+  page.on("close", () => {
+    void clearSnapshotHandles();
   });
   return {
     url: () => page.url(),
     documentVersion: () => documentVersion,
     title: () => page.title(),
     goto: async (url, options) => {
+      await clearSnapshotHandles();
       await page.goto(url, { waitUntil: options.waitUntil, timeout: options.timeoutMs });
     },
     snapshot: async () => {
-      const [accessibilityTree, dom, refs] = await Promise.all([
-        page.locator("body").ariaSnapshot({ timeout: DEFAULT_TIMEOUT_MS }),
-        page
-          .locator("body")
-          .evaluate((element) => element.outerHTML, undefined, { timeout: DEFAULT_TIMEOUT_MS }),
-        page.locator(INTERACTIVE_SELECTOR).evaluateAll(collectSnapshotRefs),
-      ]);
-      return { accessibilityTree, dom, refs };
+      await clearSnapshotHandles();
+      const capturedDocumentVersion = documentVersion;
+      const handles = await page.locator(INTERACTIVE_SELECTOR).elementHandles();
+      try {
+        const [accessibilityTree, dom, refs]: [string, string, ReadonlyArray<ChromeAutomationRef>] =
+          await Promise.all([
+            page.locator("body").ariaSnapshot({ timeout: DEFAULT_TIMEOUT_MS }),
+            page
+              .locator("body")
+              .evaluate((element) => element.outerHTML, undefined, { timeout: DEFAULT_TIMEOUT_MS }),
+            page.evaluate(collectSnapshotRefs, handles),
+          ] as const);
+        if (documentVersion !== capturedDocumentVersion) {
+          throw new ChromeAutomationError(
+            "snapshot",
+            "The page navigated during the snapshot. Take a fresh snapshot.",
+          );
+        }
+        snapshotHandles = new Map(refs.map((ref, index) => [ref.ref, handles[index]!]));
+        return { accessibilityTree, dom, refs };
+      } catch (cause) {
+        await releaseHandles(handles);
+        throw cause;
+      }
     },
     screenshotPng: async () => {
       const viewport = page.viewportSize();
@@ -433,10 +492,16 @@ export const makePlaywrightPageAdapter = (page: Page): ChromeAutomationPageAdapt
         timeout: DEFAULT_TIMEOUT_MS,
       });
     },
-    click: (selector) => page.locator(selector).click({ timeout: DEFAULT_TIMEOUT_MS }),
-    fill: (selector, value) => page.locator(selector).fill(value, { timeout: DEFAULT_TIMEOUT_MS }),
-    type: (selector, value) =>
-      page.locator(selector).pressSequentially(value, { timeout: DEFAULT_TIMEOUT_MS }),
+    click: (target) =>
+      withTarget(target, (element) => element.click({ timeout: DEFAULT_TIMEOUT_MS })),
+    fill: (target, value) =>
+      withTarget(target, (element) => element.fill(value, { timeout: DEFAULT_TIMEOUT_MS })),
+    type: (target, value) =>
+      withTarget(target, (element) =>
+        "pressSequentially" in element
+          ? element.pressSequentially(value, { timeout: DEFAULT_TIMEOUT_MS })
+          : element.type(value, { timeout: DEFAULT_TIMEOUT_MS }),
+      ),
   };
 };
 
@@ -913,7 +978,7 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
               ...ref,
               ref: `${tab.id}-snapshot-${snapshotId}-ref-${index + 1}`,
             }));
-            tab.refs = new Map(refs.map((ref) => [ref.ref, ref.selector]));
+            tab.refs = new Map(refs.map((ref, index) => [ref.ref, snapshot.refs[index]!.ref]));
             tab.snapshotDocumentVersion = documentVersion;
             return {
               ...snapshot,
@@ -989,14 +1054,14 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
       action("click", () =>
         Effect.gen(function* () {
           const tab = yield* selectedTab(tabId);
-          const selector = yield* Effect.try({
-            try: () => targetSelector(target, tab.refs),
+          const pageTarget = yield* Effect.try({
+            try: () => resolvePageTarget(target, tab.refs),
             catch: (cause) =>
               cause instanceof ChromeAutomationError ? cause : failure("target", cause),
           });
           tab.refs = new Map();
           yield* Effect.tryPromise({
-            try: () => tab.page.click(selector),
+            try: () => tab.page.click(pageTarget),
             catch: (cause) => failure("click", cause),
           });
         }),
@@ -1005,14 +1070,14 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
       action("fill", () =>
         Effect.gen(function* () {
           const tab = yield* selectedTab(tabId);
-          const selector = yield* Effect.try({
-            try: () => targetSelector(target, tab.refs),
+          const pageTarget = yield* Effect.try({
+            try: () => resolvePageTarget(target, tab.refs),
             catch: (cause) =>
               cause instanceof ChromeAutomationError ? cause : failure("target", cause),
           });
           tab.refs = new Map();
           yield* Effect.tryPromise({
-            try: () => tab.page.fill(selector, value),
+            try: () => tab.page.fill(pageTarget, value),
             catch: (cause) => failure("fill", cause),
           });
         }),
@@ -1021,14 +1086,14 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
       action("type", () =>
         Effect.gen(function* () {
           const tab = yield* selectedTab(tabId);
-          const selector = yield* Effect.try({
-            try: () => targetSelector(target, tab.refs),
+          const pageTarget = yield* Effect.try({
+            try: () => resolvePageTarget(target, tab.refs),
             catch: (cause) =>
               cause instanceof ChromeAutomationError ? cause : failure("target", cause),
           });
           tab.refs = new Map();
           yield* Effect.tryPromise({
-            try: () => tab.page.type(selector, value),
+            try: () => tab.page.type(pageTarget, value),
             catch: (cause) => failure("type", cause),
           });
         }),
