@@ -88,7 +88,7 @@ describe("weekly pace chart", () => {
     vi.spyOn(Date, "now").mockReturnValue(at);
     const sparse = renderToStaticMarkup(<UsagePaceChart samples={samples} />);
     expect(sparse).toContain('aria-label="Show recent pace"');
-    expect(sparse).toContain("at least four readings across 15 minutes");
+    expect(sparse).toContain("Waiting for an observed percentage drop and a timed interval");
     expect(sparse).not.toContain('aria-label="Recent pace projection"');
     vi.spyOn(Date, "now").mockReturnValue(at + 16 * 60_000);
     const stale = renderToStaticMarkup(<UsagePaceChart samples={samples} />);
@@ -101,7 +101,7 @@ describe("weekly pace chart", () => {
     const rows = Array.from({ length: 7 }, (_, index) => ({
       ...samples[0]!,
       observedAt: new Date(at - (6 - index) * 300_000).toISOString(),
-      remainingPercent: 81,
+      remainingPercent: [83, 82, 81, 81, 81, 81, 81][index]!,
     }));
     const container = document.createElement("div");
     const root = createRoot(container);
@@ -112,8 +112,11 @@ describe("weekly pace chart", () => {
       )!;
       expect(toggle.checked).toBe(true);
       expect(container.querySelector('[aria-label="Recent pace projection"]')).not.toBeNull();
-      expect(container.textContent).toContain("Last 30 minutes, smoothed across 7 readings");
-      expect(container.textContent).toContain("A flat line does not prove zero usage");
+      expect(container.textContent).toContain("Last observed 1% drop: 5.0 min per 1%");
+      expect(container.textContent).toContain(
+        "No further drop for 20.0 min through the last reading",
+      );
+      expect(container.textContent).toContain("Projecting 1% per 20.0 min");
       expect(container.textContent).toContain("81%");
       await act(async () => toggle.click());
       expect(toggle.checked).toBe(false);

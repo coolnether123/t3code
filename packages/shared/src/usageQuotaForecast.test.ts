@@ -123,14 +123,15 @@ describe("recent Codex burn projection", () => {
       ),
     );
 
-  it("fits the last 30 minutes without importing an older burn rate", () => {
+  it("uses the last drop-to-drop interval without importing an older average", () => {
     const result = quotaForecast(
       [sample("2026-08-30T03:00:00Z", 100), ...recent([90, 89, 88, 87, 86, 85, 84])],
       now,
     )!;
     expect(result.recentPace).toMatchObject({
-      windowMinutes: 30,
-      sampleCount: 7,
+      lastPercentIntervalMs: 5 * 60_000,
+      elapsedSinceDropMs: 0,
+      percentIntervalMs: 5 * 60_000,
       percentPerHour: 12,
     });
     expect(result.recentPace!.percentPerHour).not.toBeCloseTo(result.expectedPercentPerDay / 24);
@@ -138,32 +139,105 @@ describe("recent Codex burn projection", () => {
     expect(result.usedPercent).toBe(16);
   });
 
-  it("shows a conditional flat line for rounded flat readings", () => {
+  it("does not invent a drop time or zero burn from an unchanged initial balance", () => {
     const result = quotaForecast(recent([81, 81, 81, 81, 81, 81, 81]), now)!;
-    expect(result.recentPace).toMatchObject({
-      percentPerHour: 0,
-      remainingAtReset: 81,
-      exhaustionAt: null,
-      projectionEndX: 1,
-    });
+    expect(result.recentPace).toBeNull();
     expect(result.expectedPercentPerDay).toBeGreaterThan(0);
     expect(result.usedPercent).toBe(19);
   });
 
-  it("waits for enough distinct observations instead of using a five-minute burst", () => {
+  it("waits for a timed interval after the first drop and ignores duplicate readings", () => {
     const rows = recent([81, 80]);
     expect(quotaForecast(rows, now)!.recentPace).toBeNull();
     expect(quotaForecast([...rows, ...rows, ...rows], now)!.recentPace).toBeNull();
-    expect(quotaForecast(recent([83, 82, 81, 80], 2), now)!.recentPace).toBeNull();
+    const timed = recent([82, 81, 81]);
+    expect(quotaForecast(timed, now)!.recentPace).toMatchObject({
+      lastPercentIntervalMs: null,
+      elapsedSinceDropMs: 5 * 60_000,
+      percentIntervalMs: 5 * 60_000,
+      percentPerHour: 12,
+    });
+    expect(quotaForecast([...timed, ...timed], now)!.recentPace).toEqual(
+      quotaForecast(timed, now)!.recentPace,
+    );
   });
 
-  it("excludes resets and long gaps from the recent fit", () => {
-    expect(quotaForecast(recent([85, 84, 83, 82], 15), now)!.recentPace).toBeNull();
-    expect(quotaForecast(recent([20, 19, 18, 17, 100, 99, 98]), now)!.recentPace).toBeNull();
+  it("slows down when the wait for the next percent exceeds the last interval", () => {
+    const rows = [-40, -35, -25, -20, -10, 0].map((minute, index) =>
+      sample(
+        DateTime.formatIso(DateTime.makeUnsafe(now + minute * 60_000)),
+        [95, 94, 93, 93, 93, 93][index]!,
+      ),
+    );
+    const result = quotaForecast(rows, now)!;
+    expect(result.recentPace).toMatchObject({
+      lastPercentIntervalMs: 10 * 60_000,
+      elapsedSinceDropMs: 25 * 60_000,
+      percentIntervalMs: 25 * 60_000,
+      percentPerHour: 2.4,
+    });
+    expect(result.latest.remainingPercent).toBe(93);
+    expect(result.usedPercent).toBe(7);
+    const next = sample(DateTime.formatIso(DateTime.makeUnsafe(now + 5 * 60_000)), 92);
+    expect(quotaForecast([...rows, next], Date.parse(next.observedAt))!.recentPace).toMatchObject({
+      lastPercentIntervalMs: 30 * 60_000,
+      elapsedSinceDropMs: 0,
+      percentPerHour: 2,
+    });
+    const faster = sample(DateTime.formatIso(DateTime.makeUnsafe(now + 10 * 60_000)), 91);
+    expect(
+      quotaForecast([...rows, next, faster], Date.parse(faster.observedAt))!.recentPace!
+        .percentPerHour,
+    ).toBe(12);
+  });
+
+  it("keeps the last interval while the next drop is not overdue", () => {
+    const result = quotaForecast(recent([83, 82, 81, 81], 5), now)!.recentPace!;
+    expect(result.lastPercentIntervalMs).toBe(5 * 60_000);
+    expect(result.percentPerHour).toBe(12);
+    const rows = recent([83, 82, 81]);
+    const later = sample(DateTime.formatIso(DateTime.makeUnsafe(now + 2 * 60_000)), 81);
+    expect(
+      quotaForecast([...rows, later], Date.parse(later.observedAt))!.recentPace!.percentPerHour,
+    ).toBe(12);
+  });
+
+  it("extends waiting only with fresh readings, not with the client's clock", () => {
+    const rows = recent([83, 82, 81]);
+    const initial = quotaForecast(rows, now)!.recentPace!;
+    const clockOnly = quotaForecast(rows, now + 14 * 60_000)!.recentPace!;
+    expect(clockOnly.percentIntervalMs).toBe(initial.percentIntervalMs);
+    expect(clockOnly.exhaustionAt).toBe(initial.exhaustionAt);
+    const confirmed = sample(DateTime.formatIso(DateTime.makeUnsafe(now + 14 * 60_000)), 81);
+    expect(
+      quotaForecast([...rows, confirmed], Date.parse(confirmed.observedAt))!.recentPace!
+        .percentIntervalMs,
+    ).toBe(14 * 60_000);
+  });
+
+  it("keeps slowing beyond 30 minutes without turning unchanged percentages into zero burn", () => {
+    const rows = recent([83, 82, 81, ...Array<number>(9).fill(81)], 10);
+    const result = quotaForecast(rows, now)!.recentPace!;
+    expect(result.elapsedSinceDropMs).toBe(90 * 60_000);
+    expect(result.percentPerHour).toBeCloseTo(2 / 3);
+    expect(result.exhaustionAt).not.toBeNull();
+  });
+
+  it("averages multi-point drops per percent without inventing individual drop times", () => {
+    const result = quotaForecast(recent([90, 89, 89, 87]), now)!.recentPace!;
+    expect(result.lastDropPoints).toBe(2);
+    expect(result.lastPercentIntervalMs).toBe(5 * 60_000);
+    expect(result.percentPerHour).toBe(12);
+  });
+
+  it("does not time drops across stale gaps, resets, or changed reset clocks", () => {
+    expect(quotaForecast(recent([85, 84, 83, 82], 16), now)!.recentPace).toBeNull();
+    expect(quotaForecast(recent([20, 19, 18, 17, 100, 100, 99]), now)!.recentPace).toBeNull();
     const rows = recent([85, 84, 83, 82, 81, 80, 79]);
     rows[4] = { ...rows[4]!, resetsAt: "2026-09-07T00:00:00Z" };
     rows[5] = { ...rows[5]!, resetsAt: "2026-09-07T00:00:00Z" };
-    rows[6] = { ...rows[6]!, resetsAt: "2026-09-07T00:00:00Z" };
+    rows[6] = { ...rows[6]!, remainingPercent: 80, resetsAt: "2026-09-07T00:00:00Z" };
+    rows[5] = { ...rows[5]!, remainingPercent: 81 };
     expect(quotaForecast(rows, now)!.recentPace).toBeNull();
   });
 
@@ -186,16 +260,16 @@ describe("recent Codex burn projection", () => {
     expect(low.projectionEndX).toBeCloseTo(0.4);
   });
 
-  it("uses every timestamp to smooth uneven sampling and reports the actual window", () => {
-    const rows = [0, 4, 9, 15, 20].map((minute) =>
+  it("uses actual drop timestamps with uneven sampling", () => {
+    const rows = [0, 4, 9, 15, 20].map((minute, index) =>
       sample(
         DateTime.formatIso(DateTime.makeUnsafe(now - (20 - minute) * 60_000)),
-        90 - minute / 5,
+        [90, 89, 89, 88, 88][index]!,
       ),
     );
     const result = quotaForecast(rows, now)!.recentPace!;
-    expect(result.windowMinutes).toBe(20);
-    expect(result.sampleCount).toBe(5);
-    expect(result.percentPerHour).toBeCloseTo(12);
+    expect(result.lastPercentIntervalMs).toBe(11 * 60_000);
+    expect(result.elapsedSinceDropMs).toBe(5 * 60_000);
+    expect(result.percentPerHour).toBeCloseTo(60 / 11);
   });
 });

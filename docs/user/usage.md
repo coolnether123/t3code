@@ -48,13 +48,19 @@ that leaves 3% unused. The forecast blends the observed pace with the current we
 Earlier cycles do not influence it. Gaps over an hour are not joined.
 
 Turn **Recent pace** on or off beneath the chart to compare a second, cyan projection.
-It fits the latest 30 minutes of readings and shows the usage left at reset if that pace holds.
-The shorter window responds to a slowdown without letting one five-minute, rounded reading
-set the whole forecast. The caption shows the actual window and number of readings used.
-It needs at least four distinct readings over 15 minutes, excludes resets and gaps over ten
-minutes, and stops projecting when readings become stale. If the readings are flat, the line
-stays flat, but rounded percentages cannot prove that no usage was consumed. Neither line
-changes measured usage or predicts future changes in your workload.
+It uses the time between the last two observed percentage drops, expressed as time per 1%.
+If fresh readings show the next drop is taking longer, that longer wait sets the pace instead.
+For example, a last interval of 10 minutes becomes 25 minutes per 1% after 25 minutes with no
+further drop. Another drop starts the timing again. A drop of several points uses the interval's
+average time per point; the tracker cannot see the individual drop times between readings.
+
+The caption shows the completed interval, the wait through the latest reading, and the timing
+used for the projection. Before two drops are observed, a confirmed wait after the first drop
+can provide a provisional pace. An unchanged initial balance alone cannot establish the time
+of a drop. Resets and observation gaps over 15 minutes restart timing, and stale readings stop
+the projection. Clock time without a fresh account reading does not count as confirmed waiting.
+Neither line changes measured usage or predicts future workload. Rounded readings make drop
+times approximate, and an unchanged percentage does not mean zero usage.
 
 An earlier public reset announcement changes the planning deadline, not your account balance.
 The original weekly timer stays under **Source and weekly timer**. Announcements come from

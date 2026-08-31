@@ -339,9 +339,9 @@ export function UsagePaceChart({
         </div>
       </dl>
       <p className="mt-4 text-xs leading-relaxed text-muted-foreground">
-        Orange blends monitored usage with the weekly average. Recent pace uses only the latest 30
-        minutes. Both assume their pace continues. Percentages are rounded, so actual remaining
-        usage may be lower.
+        Orange blends monitored usage with the weekly average. Recent pace uses the last observed 1%
+        interval, slowing down when fresh readings show the next drop is taking longer. Percentages
+        are rounded and checked periodically, so drop times are approximate.
       </p>
     </section>
   );

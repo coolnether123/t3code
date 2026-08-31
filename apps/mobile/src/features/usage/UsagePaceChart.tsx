@@ -263,9 +263,9 @@ export function UsagePaceChart({
         % / {f.resetInMs < 86_400_000 ? "hour" : "day"} to leave {f.reserve}% at reset.
       </Text>
       <Text className="text-xs text-foreground-muted">
-        Orange blends monitored usage with the weekly average. Recent pace uses only the latest 30
-        minutes. Both assume their pace continues. Percentages are rounded, so actual remaining
-        usage may be lower.
+        Orange blends monitored usage with the weekly average. Recent pace uses the last observed 1%
+        interval, slowing down when fresh readings show the next drop is taking longer. Percentages
+        are rounded and checked periodically, so drop times are approximate.
       </Text>
     </View>
   );
