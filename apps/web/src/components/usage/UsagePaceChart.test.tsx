@@ -83,4 +83,52 @@ describe("weekly pace chart", () => {
     expect(markup).toContain("not account confirmation");
     expect(markup).toContain('href="https://x.com/thsottiaux/status/2094144275957350900"');
   });
+  it("shows a recent-pace switch and explains why sparse or stale data cannot project", () => {
+    const at = Date.parse(samples[0]!.observedAt);
+    vi.spyOn(Date, "now").mockReturnValue(at);
+    const sparse = renderToStaticMarkup(<UsagePaceChart samples={samples} />);
+    expect(sparse).toContain('aria-label="Show recent pace"');
+    expect(sparse).toContain("at least four readings across 15 minutes");
+    expect(sparse).not.toContain('aria-label="Recent pace projection"');
+    vi.spyOn(Date, "now").mockReturnValue(at + 16 * 60_000);
+    const stale = renderToStaticMarkup(<UsagePaceChart samples={samples} />);
+    expect(stale).toContain("Recent pace needs a fresh reading.");
+  });
+  it("lets the user hide and restore the recent projection without changing recorded usage", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const at = Date.parse(samples[0]!.observedAt);
+    vi.spyOn(Date, "now").mockReturnValue(at);
+    const rows = Array.from({ length: 7 }, (_, index) => ({
+      ...samples[0]!,
+      observedAt: new Date(at - (6 - index) * 300_000).toISOString(),
+      remainingPercent: 81,
+    }));
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<UsagePaceChart samples={rows} />));
+      const toggle = container.querySelector<HTMLInputElement>(
+        'input[aria-label="Show recent pace"]',
+      )!;
+      expect(toggle.checked).toBe(true);
+      expect(container.querySelector('[aria-label="Recent pace projection"]')).not.toBeNull();
+      expect(container.textContent).toContain("Last 30 minutes, smoothed across 7 readings");
+      expect(container.textContent).toContain("A flat line does not prove zero usage");
+      expect(container.textContent).toContain("81%");
+      await act(async () => toggle.click());
+      expect(toggle.checked).toBe(false);
+      expect(container.querySelector('[aria-label="Recent pace projection"]')).toBeNull();
+      expect(container.textContent).toContain("81%");
+      await act(async () => toggle.click());
+      expect(container.querySelector('[aria-label="Recent pace projection"]')).not.toBeNull();
+      const recorded = Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent === "Recorded",
+      )!;
+      await act(async () => recorded.click());
+      expect(container.querySelector('[aria-label="Recent pace projection"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
 });

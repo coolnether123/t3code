@@ -3,7 +3,11 @@ import {
   currentResetAnnouncement,
   type ResetNews,
 } from "@t3tools/client-runtime/resetAnnouncements";
-import { quotaDuration, quotaForecast } from "@t3tools/shared/usageQuotaForecast";
+import {
+  describeRecentQuotaPace,
+  quotaDuration,
+  quotaForecast,
+} from "@t3tools/shared/usageQuotaForecast";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 const date = (value: string) =>
@@ -31,6 +35,7 @@ export function UsagePaceChart({
 }) {
   const [now, setNow] = useState(Date.now);
   const [view, setView] = useState<"forecast" | "observed">("forecast");
+  const [showRecentPace, setShowRecentPace] = useState(true);
   useEffect(() => setNow(Date.now()), [samples]);
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 60_000);
@@ -197,8 +202,9 @@ export function UsagePaceChart({
             }
           >
             <desc>
-              Solid: saved readings. Dashed: target pace. Orange: projected usage. Gaps are not
-              joined.
+              Solid: saved readings. Dashed: target pace. Orange: blended projection.
+              {showRecentPace && f.recentPace && !observed ? " Cyan: recent pace projection." : ""}
+              {" Gaps are not joined."}
             </desc>
             {[4, 100, 196].map((lineY) => (
               <line
@@ -224,6 +230,17 @@ export function UsagePaceChart({
                   strokeDasharray="4 5"
                   vectorEffect="non-scaling-stroke"
                 />
+                {showRecentPace && f.recentPace ? (
+                  <path
+                    aria-label="Recent pace projection"
+                    d={`M${f.observationX * 960},${y(f.latest.remainingPercent)} L${f.recentPace.projectionEndX * 960},${y(f.recentPace.projectionEndPercent)} L960,${y(f.recentPace.projectionEndPercent)}`}
+                    fill="none"
+                    stroke="#52b8bf"
+                    strokeWidth={2}
+                    strokeDasharray="3 3"
+                    vectorEffect="non-scaling-stroke"
+                  />
+                ) : null}
                 <line
                   x1={f.observationX * 960}
                   y1={y(f.latest.remainingPercent)}
@@ -263,10 +280,29 @@ export function UsagePaceChart({
         {!observed ? (
           <>
             <span className="text-muted-foreground">┄┄ Target</span>
-            <span style={{ color: "#d88d42" }}>┄┄ Projected</span>
+            <span style={{ color: "#d88d42" }}>┄┄ Blended pace</span>
           </>
         ) : null}
       </div>
+      {!observed ? (
+        <div className="mt-2">
+          <label className="flex min-h-11 w-fit cursor-pointer items-center gap-3 text-sm">
+            <input
+              type="checkbox"
+              aria-label="Show recent pace"
+              className="size-4 accent-[#52b8bf]"
+              checked={showRecentPace}
+              onChange={(event) => setShowRecentPace(event.target.checked)}
+            />
+            <span style={{ color: "#52b8bf" }}>┄ Recent pace</span>
+          </label>
+          {showRecentPace ? (
+            <p role="status" className="text-xs leading-relaxed text-muted-foreground">
+              {describeRecentQuotaPace(f)}
+            </p>
+          ) : null}
+        </div>
+      ) : null}
       <dl className="mt-6 grid grid-cols-2 gap-x-5 gap-y-5 border-t border-border pt-5 [&>div]:min-w-0">
         <div>
           <dt className="text-xs text-muted-foreground">
@@ -292,7 +328,7 @@ export function UsagePaceChart({
           <dd className="mt-1 text-xs text-muted-foreground">To leave {f.reserve}% unused</dd>
         </div>
         <div>
-          <dt className="text-xs text-muted-foreground">Current burn</dt>
+          <dt className="text-xs text-muted-foreground">Blended burn</dt>
           <dd className="mt-1 tabular-nums">{(f.expectedPercentPerDay / 24).toFixed(2)}% / hour</dd>
         </div>
         <div>
@@ -303,7 +339,8 @@ export function UsagePaceChart({
         </div>
       </dl>
       <p className="mt-4 text-xs leading-relaxed text-muted-foreground">
-        Forecast assumes the current pace continues. Percentages are rounded, so actual remaining
+        Orange blends monitored usage with the weekly average. Recent pace uses only the latest 30
+        minutes. Both assume their pace continues. Percentages are rounded, so actual remaining
         usage may be lower.
       </p>
     </section>

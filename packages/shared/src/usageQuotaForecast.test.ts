@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
+import * as DateTime from "effect/DateTime";
 import { quotaForecast } from "./usageQuotaForecast.ts";
 import { quotaMonitoringSamples } from "./usageQuota.ts";
 
@@ -107,5 +108,94 @@ describe("Codex weekly forecast", () => {
     expect(result.usedPercent).toBe(0);
     expect(result.monitoredUsedPercent).toBe(0);
     expect(result.expectedPercentPerDay).toBe(0);
+  });
+});
+
+describe("recent Codex burn projection", () => {
+  const now = Date.parse("2026-08-31T02:00:00Z");
+  const recent = (remaining: readonly number[], step = 5) =>
+    remaining.map((value, index) =>
+      sample(
+        DateTime.formatIso(
+          DateTime.makeUnsafe(now - (remaining.length - index - 1) * step * 60_000),
+        ),
+        value,
+      ),
+    );
+
+  it("fits the last 30 minutes without importing an older burn rate", () => {
+    const result = quotaForecast(
+      [sample("2026-08-30T03:00:00Z", 100), ...recent([90, 89, 88, 87, 86, 85, 84])],
+      now,
+    )!;
+    expect(result.recentPace).toMatchObject({
+      windowMinutes: 30,
+      sampleCount: 7,
+      percentPerHour: 12,
+    });
+    expect(result.recentPace!.percentPerHour).not.toBeCloseTo(result.expectedPercentPerDay / 24);
+    expect(result.latest.remainingPercent).toBe(84);
+    expect(result.usedPercent).toBe(16);
+  });
+
+  it("shows a conditional flat line for rounded flat readings", () => {
+    const result = quotaForecast(recent([81, 81, 81, 81, 81, 81, 81]), now)!;
+    expect(result.recentPace).toMatchObject({
+      percentPerHour: 0,
+      remainingAtReset: 81,
+      exhaustionAt: null,
+      projectionEndX: 1,
+    });
+    expect(result.expectedPercentPerDay).toBeGreaterThan(0);
+    expect(result.usedPercent).toBe(19);
+  });
+
+  it("waits for enough distinct observations instead of using a five-minute burst", () => {
+    const rows = recent([81, 80]);
+    expect(quotaForecast(rows, now)!.recentPace).toBeNull();
+    expect(quotaForecast([...rows, ...rows, ...rows], now)!.recentPace).toBeNull();
+    expect(quotaForecast(recent([83, 82, 81, 80], 2), now)!.recentPace).toBeNull();
+  });
+
+  it("excludes resets and long gaps from the recent fit", () => {
+    expect(quotaForecast(recent([85, 84, 83, 82], 15), now)!.recentPace).toBeNull();
+    expect(quotaForecast(recent([20, 19, 18, 17, 100, 99, 98]), now)!.recentPace).toBeNull();
+    const rows = recent([85, 84, 83, 82, 81, 80, 79]);
+    rows[4] = { ...rows[4]!, resetsAt: "2026-09-07T00:00:00Z" };
+    rows[5] = { ...rows[5]!, resetsAt: "2026-09-07T00:00:00Z" };
+    rows[6] = { ...rows[6]!, resetsAt: "2026-09-07T00:00:00Z" };
+    expect(quotaForecast(rows, now)!.recentPace).toBeNull();
+  });
+
+  it("withholds a recent forecast when readings are stale or in the future", () => {
+    const rows = recent([84, 83, 82, 81]);
+    expect(quotaForecast(rows, now + 16 * 60_000)!.recentPace).toBeNull();
+    expect(quotaForecast(rows, now - 1)!.recentPace).toBeNull();
+    expect(quotaForecast(rows, Date.parse(reset))!.recentPace).toBeNull();
+  });
+
+  it("uses the current planning deadline and clamps exhausted usage to zero", () => {
+    const deadline = DateTime.formatIso(DateTime.makeUnsafe(now + 3_600_000));
+    const result = quotaForecast(recent([84, 83, 82, 81]), now, 3, deadline)!;
+    expect(result.recentPace!.remainingAtReset).toBeCloseTo(69);
+    expect(result.recentPace!.exhaustsBeforeReset).toBe(false);
+    const low = quotaForecast(recent([6, 5, 4, 3]), now, 3, deadline)!.recentPace!;
+    expect(low.remainingAtReset).toBe(0);
+    expect(low.exhaustionInMs).toBeCloseTo(15 * 60_000);
+    expect(low.exhaustsBeforeReset).toBe(true);
+    expect(low.projectionEndX).toBeCloseTo(0.4);
+  });
+
+  it("uses every timestamp to smooth uneven sampling and reports the actual window", () => {
+    const rows = [0, 4, 9, 15, 20].map((minute) =>
+      sample(
+        DateTime.formatIso(DateTime.makeUnsafe(now - (20 - minute) * 60_000)),
+        90 - minute / 5,
+      ),
+    );
+    const result = quotaForecast(rows, now)!.recentPace!;
+    expect(result.windowMinutes).toBe(20);
+    expect(result.sampleCount).toBe(5);
+    expect(result.percentPerHour).toBeCloseTo(12);
   });
 });

@@ -49,6 +49,67 @@ export function quotaForecast(
       : null;
   const x = (time: number) => Math.max(0, Math.min(1, (time - start) / Math.max(reset - start, 1)));
   const currentSamples = monitored.filter((sample) => sample.observedAt >= period.first.observedAt);
+  const stale = now - observed > QUOTA_STALE_MS || now < observed || now >= weeklyReset;
+  const recentSamples = [
+    ...new Map(
+      currentSamples
+        .filter((sample) => Date.parse(sample.observedAt) >= observed - 30 * 60_000)
+        .map((sample) => [Date.parse(sample.observedAt), sample] as const),
+    ).values(),
+  ];
+  let continuousStart = 0;
+  for (let index = 1; index < recentSamples.length; index++) {
+    if (
+      Date.parse(recentSamples[index]!.observedAt) -
+        Date.parse(recentSamples[index - 1]!.observedAt) >
+      10 * 60_000
+    )
+      continuousStart = index;
+  }
+  const continuous = recentSamples.slice(continuousStart);
+  const recentStart = continuous[0] ? Date.parse(continuous[0].observedAt) : observed;
+  const recentSpan = observed - recentStart;
+  // Fit all recent readings, not one rounded five-minute change or the weekly average.
+  let recentPace = null;
+  if (!stale && continuous.length >= 4 && recentSpan >= 15 * 60_000) {
+    const minutes = continuous.map(
+      (sample) => (Date.parse(sample.observedAt) - recentStart) / 60_000,
+    );
+    const meanTime = minutes.reduce((sum, value) => sum + value, 0) / minutes.length;
+    const meanRemaining =
+      continuous.reduce((sum, sample) => sum + sample.remainingPercent, 0) / continuous.length;
+    const variance = minutes.reduce((sum, value) => sum + (value - meanTime) ** 2, 0);
+    const covariance = continuous.reduce(
+      (sum, sample, index) =>
+        sum + (minutes[index]! - meanTime) * (sample.remainingPercent - meanRemaining),
+      0,
+    );
+    const percentPerHour = Math.max(0, (-covariance / variance) * 60);
+    const recentExhaustion =
+      latest.remainingPercent === 0
+        ? observed
+        : percentPerHour > 0
+          ? observed + (latest.remainingPercent / percentPerHour) * 3_600_000
+          : null;
+    const remaining = Math.max(
+      0,
+      latest.remainingPercent - (percentPerHour * Math.max(0, reset - observed)) / 3_600_000,
+    );
+    recentPace = {
+      windowMinutes: recentSpan / 60_000,
+      sampleCount: continuous.length,
+      percentPerHour,
+      remainingAtReset: remaining,
+      exhaustionAt:
+        recentExhaustion !== null && recentExhaustion - observed <= 100_000 * DAY
+          ? DateTime.formatIso(DateTime.makeUnsafe(recentExhaustion))
+          : null,
+      exhaustionInMs: recentExhaustion === null ? null : Math.max(0, recentExhaustion - now),
+      exhaustsBeforeReset: recentExhaustion !== null && recentExhaustion < reset,
+      projectionEndX: x(Math.min(recentExhaustion ?? reset, reset)),
+      projectionEndPercent: remaining,
+    };
+  }
   return {
     latest,
     first: period.first,
@@ -57,7 +118,11 @@ export function quotaForecast(
     usesAnnouncement,
     planningResetAt: DateTime.formatIso(DateTime.makeUnsafe(reset)),
     startsAt: DateTime.formatIso(DateTime.makeUnsafe(start)),
-    stale: now - observed > QUOTA_STALE_MS || now < observed || now >= weeklyReset,
+    stale,
+    recentPace,
+    recentPaceUnavailableReason: stale
+      ? "Recent pace needs a fresh reading."
+      : "Recent pace needs at least four readings across 15 minutes, without a gap over 10 minutes.",
     resetInMs: Math.max(reset - now, 0),
     exhaustionInMs: exhaustion === null ? null : Math.max(exhaustion - now, 0),
     exhaustionAt,
@@ -81,6 +146,19 @@ export function quotaForecast(
 }
 
 export type QuotaForecast = NonNullable<ReturnType<typeof quotaForecast>>;
+
+export function describeRecentQuotaPace(forecast: QuotaForecast): string {
+  const pace = forecast.recentPace;
+  if (pace === null) return forecast.recentPaceUnavailableReason;
+  const outcome = pace.exhaustsBeforeReset
+    ? `Empty in ${quotaDuration(pace.exhaustionInMs!)} if this pace holds.`
+    : `About ${pace.remainingAtReset.toFixed(1)}% left at reset if this pace holds.`;
+  const rounding =
+    pace.percentPerHour === 0
+      ? " No whole-percentage drop was observed. A flat line does not prove zero usage."
+      : "";
+  return `Last ${pace.windowMinutes.toFixed(0)} minutes, smoothed across ${pace.sampleCount} readings: ${pace.percentPerHour.toFixed(2)} percentage points / hour. ${outcome}${rounding}`;
+}
 
 export function quotaDuration(milliseconds: number): string {
   const minutes = Math.max(0, Math.floor(milliseconds / 60_000));

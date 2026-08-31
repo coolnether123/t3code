@@ -3,9 +3,13 @@ import {
   currentResetAnnouncement,
   type ResetNews,
 } from "@t3tools/client-runtime/resetAnnouncements";
-import { quotaDuration, quotaForecast } from "@t3tools/shared/usageQuotaForecast";
+import {
+  describeRecentQuotaPace,
+  quotaDuration,
+  quotaForecast,
+} from "@t3tools/shared/usageQuotaForecast";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Linking, Pressable, View } from "react-native";
+import { Linking, Pressable, Switch, View } from "react-native";
 import Svg, { Circle, Line, Path } from "react-native-svg";
 import { AppText as Text } from "../../components/AppText";
 import { useProviderColors } from "./usageProviders";
@@ -22,6 +26,7 @@ export function UsagePaceChart({
   const [now, setNow] = useState(Date.now);
   const [width, setWidth] = useState(1);
   const [recorded, setRecorded] = useState(false);
+  const [showRecentPace, setShowRecentPace] = useState(true);
   const colors = useProviderColors();
   useEffect(() => setNow(Date.now()), [samples]);
   useEffect(() => {
@@ -190,6 +195,16 @@ export function UsagePaceChart({
                 strokeDasharray="2 5"
               />
             ) : null}
+            {!recorded && showRecentPace && f.recentPace ? (
+              <Path
+                accessibilityLabel="Recent pace projection"
+                d={`M${f.observationX * width},${y(f.latest.remainingPercent)} L${f.recentPace.projectionEndX * width},${y(f.recentPace.projectionEndPercent)} L${width},${y(f.recentPace.projectionEndPercent)}`}
+                fill="none"
+                stroke="#52b8bf"
+                strokeWidth={2.5}
+                strokeDasharray="3 3"
+              />
+            ) : null}
           </Svg>
         </View>
       </View>
@@ -204,8 +219,25 @@ export function UsagePaceChart({
       <Text className="text-xs text-foreground-muted">
         {recorded
           ? "Saved account readings"
-          : `Solid: recorded · Dashed: target, ${f.reserve}% reserve · Orange: projected`}
+          : `Solid: recorded · Dashed: target, ${f.reserve}% reserve · Orange: blended pace`}
       </Text>
+      {!recorded ? (
+        <View className="gap-1">
+          <View className="min-h-11 flex-row items-center justify-between gap-3">
+            <Text className="text-sm" style={{ color: "#52b8bf" }}>
+              ┄ Recent pace
+            </Text>
+            <Switch
+              accessibilityLabel="Show recent pace"
+              value={showRecentPace}
+              onValueChange={setShowRecentPace}
+            />
+          </View>
+          {showRecentPace ? (
+            <Text className="text-xs text-foreground-muted">{describeRecentQuotaPace(f)}</Text>
+          ) : null}
+        </View>
+      ) : null}
       <Text className="text-sm text-foreground">
         {f.stale ? "Last projected exhaustion" : "Projected exhaustion"}:{" "}
         {f.exhaustionAt ? date(f.exhaustionAt) : "No burn observed"}
@@ -220,7 +252,7 @@ export function UsagePaceChart({
         {f.remainingAtReset.toFixed(0)}% projected left at reset.
       </Text>
       <Text className="text-sm text-foreground">
-        Current burn: {(f.expectedPercentPerDay / 24).toFixed(2)}% / hour.
+        Blended burn: {(f.expectedPercentPerDay / 24).toFixed(2)}% / hour.
       </Text>
       <Text className="text-sm text-foreground">
         Pace to reset:{" "}
@@ -231,7 +263,8 @@ export function UsagePaceChart({
         % / {f.resetInMs < 86_400_000 ? "hour" : "day"} to leave {f.reserve}% at reset.
       </Text>
       <Text className="text-xs text-foreground-muted">
-        Forecast assumes the current pace continues. Percentages are rounded, so actual remaining
+        Orange blends monitored usage with the weekly average. Recent pace uses only the latest 30
+        minutes. Both assume their pace continues. Percentages are rounded, so actual remaining
         usage may be lower.
       </Text>
     </View>

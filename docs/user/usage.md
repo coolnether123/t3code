@@ -47,6 +47,15 @@ a two-percentage-point drop. Those two points are not the cycle total.
 that leaves 3% unused. The forecast blends the observed pace with the current weekly average.
 Earlier cycles do not influence it. Gaps over an hour are not joined.
 
+Turn **Recent pace** on or off beneath the chart to compare a second, cyan projection.
+It fits the latest 30 minutes of readings and shows the usage left at reset if that pace holds.
+The shorter window responds to a slowdown without letting one five-minute, rounded reading
+set the whole forecast. The caption shows the actual window and number of readings used.
+It needs at least four distinct readings over 15 minutes, excludes resets and gaps over ten
+minutes, and stops projecting when readings become stale. If the readings are flat, the line
+stays flat, but rounded percentages cannot prove that no usage was consumed. Neither line
+changes measured usage or predicts future changes in your workload.
+
 An earlier public reset announcement changes the planning deadline, not your account balance.
 The original weekly timer stays under **Source and weekly timer**. Announcements come from
 Tibo's public posts through the independent Reset Beacon feed. The source link and time
