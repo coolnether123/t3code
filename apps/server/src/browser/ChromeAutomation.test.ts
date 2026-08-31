@@ -5,11 +5,11 @@ import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import type { Page } from "playwright-core";
 
 import * as ServerConfig from "../config.ts";
 import * as ChromeAutomationModule from "./ChromeAutomation.ts";
 import {
-  ChromeAutomation,
   ChromeAutomationError,
   type ChromeAutomationBrowser,
   type ChromeAutomationBrowserAdapter,
@@ -25,6 +25,7 @@ interface FakePageFixture {
 }
 
 type FakeCall =
+  | { readonly kind: "screenshot" }
   | {
       readonly kind: "goto";
       readonly url: string;
@@ -42,10 +43,27 @@ const emptySnapshot: ChromeAutomationPageSnapshot = {
   refs: [],
 };
 
+const screenshotPng = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l4EAAAAASUVORK5CYII=",
+  "base64",
+);
+
 const interactiveSnapshot: ChromeAutomationPageSnapshot = {
   accessibilityTree: "- button Submit",
   dom: '<button id="submit">Submit</button>',
-  refs: [{ ref: "ref-1", selector: "#submit", tag: "button", role: "button", name: "Submit", x: 0, y: 0, width: 80, height: 30 }],
+  refs: [
+    {
+      ref: "ref-1",
+      selector: "#submit",
+      tag: "button",
+      role: "button",
+      name: "Submit",
+      x: 0,
+      y: 0,
+      width: 80,
+      height: 30,
+    },
+  ],
 };
 
 const makeFakePage = (input: {
@@ -58,6 +76,9 @@ const makeFakePage = (input: {
   readonly actionError?: unknown;
   readonly snapshotErrors?: ReadonlyArray<unknown | undefined>;
   readonly beforeSnapshot?: () => void;
+  readonly screenshotBytes?: Uint8Array;
+  readonly screenshotError?: unknown;
+  readonly beforeScreenshot?: () => void;
 }): FakePageFixture => {
   let url = input.url;
   let title = input.title;
@@ -82,6 +103,12 @@ const makeFakePage = (input: {
       if (error !== undefined) throw error;
       return input.snapshot ?? emptySnapshot;
     },
+    screenshotPng: async () => {
+      calls.push({ kind: "screenshot" });
+      input.beforeScreenshot?.();
+      if (input.screenshotError !== undefined) throw input.screenshotError;
+      return input.screenshotBytes ?? screenshotPng;
+    },
     click: async (selector: string) => {
       calls.push({ kind: "click", selector });
       await input.beforeAction?.();
@@ -98,7 +125,13 @@ const makeFakePage = (input: {
       if (input.actionError !== undefined) throw input.actionError;
     },
   } satisfies ChromeAutomationPageAdapter;
-  return { page, calls, reload: () => { documentVersion += 1; } };
+  return {
+    page,
+    calls,
+    reload: () => {
+      documentVersion += 1;
+    },
+  };
 };
 
 const makeFakeBrowser = (input: {
@@ -166,10 +199,12 @@ const makeFakeBrowser = (input: {
 const provideTestServices = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   Effect.gen(function* () {
     const crypto = yield* Crypto.Crypto;
-    return yield* effect.pipe(Effect.provideService(Crypto.Crypto, {
-      ...crypto,
-      randomUUIDv4: Effect.succeed("test"),
-    }));
+    return yield* effect.pipe(
+      Effect.provideService(Crypto.Crypto, {
+        ...crypto,
+        randomUUIDv4: Effect.succeed("test"),
+      }),
+    );
   }).pipe(
     Effect.provide(
       ServerConfig.layerTest(process.cwd(), {
@@ -432,9 +467,7 @@ it.effect("returns one unavailable error when recovery cannot relaunch Chrome", 
       });
       const automation = yield* ChromeAutomationModule.make({ adapter: fake.adapter });
 
-      const error = yield* automation
-        .snapshot()
-        .pipe(Effect.flip);
+      const error = yield* automation.snapshot().pipe(Effect.flip);
 
       assert.equal(error.operation, "snapshot");
       assert.equal(error.detail, "T3 managed Chrome is unavailable.");
@@ -488,8 +521,16 @@ it.effect("reuses the same persistent profile across automation instances", () =
 it.effect("keeps explicit action targets independent of global tab selection", () =>
   provideTestServices(
     Effect.gen(function* () {
-      const first = makeFakePage({ url: "https://one.test", title: "One", snapshot: interactiveSnapshot });
-      const second = makeFakePage({ url: "https://two.test", title: "Two", snapshot: interactiveSnapshot });
+      const first = makeFakePage({
+        url: "https://one.test",
+        title: "One",
+        snapshot: interactiveSnapshot,
+      });
+      const second = makeFakePage({
+        url: "https://two.test",
+        title: "Two",
+        snapshot: interactiveSnapshot,
+      });
       const fake = makeFakeBrowser({ pages: [first, second] });
       const automation = yield* ChromeAutomationModule.make({ adapter: fake.adapter });
       const firstSnapshot = yield* automation.snapshot("tab-1-test");
@@ -498,7 +539,10 @@ it.effect("keeps explicit action targets independent of global tab selection", (
       yield* automation.fill({ selector: "input" }, "first", "tab-1-test");
       yield* automation.type({ selector: "textarea" }, "message", "tab-1-test");
       yield* automation.navigate("https://one.test/next", { tabId: "tab-1-test" });
-      assert.deepEqual(first.calls.map((call) => call.kind), ["click", "fill", "type", "goto"]);
+      assert.deepEqual(
+        first.calls.map((call) => call.kind),
+        ["click", "fill", "type", "goto"],
+      );
       assert.equal(second.calls.length, 0);
       assert.equal((yield* automation.status()).selectedTabId, "tab-2-test");
     }),
@@ -508,17 +552,34 @@ it.effect("keeps explicit action targets independent of global tab selection", (
 it.effect("rejects stale refs after a newer snapshot or another tab's snapshot", () =>
   provideTestServices(
     Effect.gen(function* () {
-      const first = makeFakePage({ url: "https://one.test", title: "One", snapshot: interactiveSnapshot });
-      const second = makeFakePage({ url: "https://two.test", title: "Two", snapshot: interactiveSnapshot });
-      const automation = yield* ChromeAutomationModule.make({ adapter: makeFakeBrowser({ pages: [first, second] }).adapter });
+      const first = makeFakePage({
+        url: "https://one.test",
+        title: "One",
+        snapshot: interactiveSnapshot,
+      });
+      const second = makeFakePage({
+        url: "https://two.test",
+        title: "Two",
+        snapshot: interactiveSnapshot,
+      });
+      const automation = yield* ChromeAutomationModule.make({
+        adapter: makeFakeBrowser({ pages: [first, second] }).adapter,
+      });
       const firstSnapshot = yield* automation.snapshot("tab-1-test");
       const newSnapshot = yield* automation.snapshot("tab-1-test");
       const otherSnapshot = yield* automation.snapshot("tab-2-test");
       const stale = firstSnapshot.refs[0]!.ref;
       assert.notEqual(stale, newSnapshot.refs[0]!.ref);
       assert.notEqual(newSnapshot.refs[0]!.ref, otherSnapshot.refs[0]!.ref);
-      assert.equal((yield* automation.click({ ref: stale }, "tab-1-test").pipe(Effect.flip)).operation, "target");
-      assert.equal((yield* automation.click({ ref: newSnapshot.refs[0]!.ref }, "tab-2-test").pipe(Effect.flip)).operation, "target");
+      assert.equal(
+        (yield* automation.click({ ref: stale }, "tab-1-test").pipe(Effect.flip)).operation,
+        "target",
+      );
+      assert.equal(
+        (yield* automation.click({ ref: newSnapshot.refs[0]!.ref }, "tab-2-test").pipe(Effect.flip))
+          .operation,
+        "target",
+      );
       assert.equal(first.calls.length + second.calls.length, 0);
     }),
   ),
@@ -527,11 +588,19 @@ it.effect("rejects stale refs after a newer snapshot or another tab's snapshot",
 it.effect("invalidates refs on same-URL page reloads", () =>
   provideTestServices(
     Effect.gen(function* () {
-      const page = makeFakePage({ url: "https://form.test", title: "Form", snapshot: interactiveSnapshot });
-      const automation = yield* ChromeAutomationModule.make({ adapter: makeFakeBrowser({ pages: [page] }).adapter });
+      const page = makeFakePage({
+        url: "https://form.test",
+        title: "Form",
+        snapshot: interactiveSnapshot,
+      });
+      const automation = yield* ChromeAutomationModule.make({
+        adapter: makeFakeBrowser({ pages: [page] }).adapter,
+      });
       const snapshot = yield* automation.snapshot("tab-1-test");
       page.reload();
-      const error = yield* automation.click({ ref: snapshot.refs[0]!.ref }, "tab-1-test").pipe(Effect.flip);
+      const error = yield* automation
+        .click({ ref: snapshot.refs[0]!.ref }, "tab-1-test")
+        .pipe(Effect.flip);
       assert.equal(error.operation, "target");
       assert.equal(page.calls.length, 0);
     }),
@@ -550,39 +619,58 @@ it.effect("does not redirect actions to a surviving tab when the selected tab cl
       const tabs = yield* automation.listTabs();
       assert.equal(tabs.length, 1);
       assert.equal(tabs[0]?.selected, false);
-      assert.equal((yield* automation.click({ selector: "button" }).pipe(Effect.flip)).operation, "tab");
-      assert.equal((yield* automation.click({ selector: "button" }, "tab-1-test").pipe(Effect.flip)).operation, "tab");
+      assert.equal(
+        (yield* automation.click({ selector: "button" }).pipe(Effect.flip)).operation,
+        "tab",
+      );
+      assert.equal(
+        (yield* automation.click({ selector: "button" }, "tab-1-test").pipe(Effect.flip)).operation,
+        "tab",
+      );
       assert.equal(second.calls.length, 0);
       assert.equal(fake.launchCount, 1);
+      assert.equal((yield* automation.screenshot("tab-1-test").pipe(Effect.flip)).operation, "tab");
+      assert.equal(second.calls.length, 0);
     }),
   ),
 );
 
-it.effect.each(["click", "fill", "type"] as const)("does not replay %s after losing its acknowledgement", (operation) =>
-  provideTestServices(
-    Effect.gen(function* () {
-      const page = makeFakePage({ url: "https://form.test", title: "Form", actionError: new Error("Connection closed") });
-      const fake = makeFakeBrowser({ pages: [page] });
-      const automation = yield* ChromeAutomationModule.make({ adapter: fake.adapter });
-      yield* automation.start();
-      const request = operation === "click"
-        ? automation.click({ selector: "button" }, "tab-1-test")
-        : automation[operation]({ selector: "input" }, "hello", "tab-1-test");
-      const error = yield* request.pipe(Effect.flip);
-      assert.include(error.detail, "outcome is unknown");
-      assert.equal(page.calls.length, 1);
-      assert.equal(fake.launchCount, 1);
-      const nextError = yield* automation.click({ selector: "button" }, "tab-1-test").pipe(Effect.flip);
-      assert.include(nextError.detail, "List tabs");
-      assert.equal(page.calls.length, 1);
-      yield* automation.listTabs();
-      assert.equal(fake.closeCount, 1);
-      assert.equal(fake.launchCount, 2);
-      const staleTabError = yield* automation.click({ selector: "button" }, "tab-1-test").pipe(Effect.flip);
-      assert.equal(staleTabError.operation, "tab");
-      assert.equal(page.calls.length, 1);
-    }),
-  ),
+it.effect.each(["click", "fill", "type"] as const)(
+  "does not replay %s after losing its acknowledgement",
+  (operation) =>
+    provideTestServices(
+      Effect.gen(function* () {
+        const page = makeFakePage({
+          url: "https://form.test",
+          title: "Form",
+          actionError: new Error("Connection closed"),
+        });
+        const fake = makeFakeBrowser({ pages: [page] });
+        const automation = yield* ChromeAutomationModule.make({ adapter: fake.adapter });
+        yield* automation.start();
+        const request =
+          operation === "click"
+            ? automation.click({ selector: "button" }, "tab-1-test")
+            : automation[operation]({ selector: "input" }, "hello", "tab-1-test");
+        const error = yield* request.pipe(Effect.flip);
+        assert.include(error.detail, "outcome is unknown");
+        assert.equal(page.calls.length, 1);
+        assert.equal(fake.launchCount, 1);
+        const nextError = yield* automation
+          .click({ selector: "button" }, "tab-1-test")
+          .pipe(Effect.flip);
+        assert.include(nextError.detail, "List tabs");
+        assert.equal(page.calls.length, 1);
+        yield* automation.listTabs();
+        assert.equal(fake.closeCount, 1);
+        assert.equal(fake.launchCount, 2);
+        const staleTabError = yield* automation
+          .click({ selector: "button" }, "tab-1-test")
+          .pipe(Effect.flip);
+        assert.equal(staleTabError.operation, "tab");
+        assert.equal(page.calls.length, 1);
+      }),
+    ),
 );
 
 it.effect("ignores late disconnect notifications from replaced contexts", () =>
@@ -607,21 +695,27 @@ it.effect("cleans up a browser whose launch completes after cancellation", () =>
       const fake = makeFakeBrowser({ pages: [] });
       const launching = Promise.withResolvers<void>();
       const release = Promise.withResolvers<void>();
-      yield* Effect.scoped(Effect.gen(function* () {
-        const automation = yield* ChromeAutomationModule.make({ adapter: {
-          launchPersistentContext: async (options) => {
-            const browser = await fake.adapter.launchPersistentContext(options);
-            launching.resolve();
-            await release.promise;
-            return browser;
-          },
-        } });
-        const starting = yield* Effect.forkChild(automation.start());
-        yield* Effect.promise(() => launching.promise);
-        const interrupting = yield* Effect.forkChild(Fiber.interrupt(starting), { startImmediately: true });
-        release.resolve();
-        yield* Fiber.join(interrupting);
-      }));
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const automation = yield* ChromeAutomationModule.make({
+            adapter: {
+              launchPersistentContext: async (options) => {
+                const browser = await fake.adapter.launchPersistentContext(options);
+                launching.resolve();
+                await release.promise;
+                return browser;
+              },
+            },
+          });
+          const starting = yield* Effect.forkChild(automation.start());
+          yield* Effect.promise(() => launching.promise);
+          const interrupting = yield* Effect.forkChild(Fiber.interrupt(starting), {
+            startImmediately: true,
+          });
+          release.resolve();
+          yield* Fiber.join(interrupting);
+        }),
+      );
       assert.equal(fake.closeCount, 1);
     }),
   ),
@@ -633,42 +727,64 @@ it.effect("holds the action lock until cancelled browser input has settled", () 
       const acting = Promise.withResolvers<void>();
       const release = Promise.withResolvers<void>();
       let first = true;
-      const page = makeFakePage({ url: "https://form.test", title: "Form", beforeAction: async () => {
-        if (!first) return;
-        first = false;
-        acting.resolve();
-        await release.promise;
-      } });
-      const automation = yield* ChromeAutomationModule.make({ adapter: makeFakeBrowser({ pages: [page] }).adapter });
+      const page = makeFakePage({
+        url: "https://form.test",
+        title: "Form",
+        beforeAction: async () => {
+          if (!first) return;
+          first = false;
+          acting.resolve();
+          await release.promise;
+        },
+      });
+      const automation = yield* ChromeAutomationModule.make({
+        adapter: makeFakeBrowser({ pages: [page] }).adapter,
+      });
       const clicking = yield* Effect.forkChild(automation.click({ selector: "button" }));
       yield* Effect.promise(() => acting.promise);
-      const interrupting = yield* Effect.forkChild(Fiber.interrupt(clicking), { startImmediately: true });
-      const filling = yield* Effect.forkChild(automation.fill({ selector: "input" }, "hello"), { startImmediately: true });
+      const interrupting = yield* Effect.forkChild(Fiber.interrupt(clicking), {
+        startImmediately: true,
+      });
+      const filling = yield* Effect.forkChild(automation.fill({ selector: "input" }, "hello"), {
+        startImmediately: true,
+      });
       assert.equal(page.calls.length, 1);
       release.resolve();
       yield* Fiber.join(interrupting);
       yield* Fiber.join(filling);
-      assert.deepEqual(page.calls.map((call) => call.kind), ["click", "fill"]);
+      assert.deepEqual(
+        page.calls.map((call) => call.kind),
+        ["click", "fill"],
+      );
     }),
   ),
 );
 
-it.effect.each([0, -1, Infinity, NaN, 120_001])("rejects unbounded navigation timeout %s", (timeoutMs) =>
-  provideTestServices(
-    Effect.gen(function* () {
-      const page = makeFakePage({ url: "https://form.test", title: "Form" });
-      const automation = yield* ChromeAutomationModule.make({ adapter: makeFakeBrowser({ pages: [page] }).adapter });
-      const error = yield* automation.navigate("https://form.test/next", { timeoutMs }).pipe(Effect.flip);
-      assert.include(error.detail, "timeoutMs must be between");
-      assert.equal(page.calls.length, 0);
-    }),
-  ),
+it.effect.each([0, -1, Infinity, NaN, 120_001])(
+  "rejects unbounded navigation timeout %s",
+  (timeoutMs) =>
+    provideTestServices(
+      Effect.gen(function* () {
+        const page = makeFakePage({ url: "https://form.test", title: "Form" });
+        const automation = yield* ChromeAutomationModule.make({
+          adapter: makeFakeBrowser({ pages: [page] }).adapter,
+        });
+        const error = yield* automation
+          .navigate("https://form.test/next", { timeoutMs })
+          .pipe(Effect.flip);
+        assert.include(error.detail, "timeoutMs must be between");
+        assert.equal(page.calls.length, 0);
+      }),
+    ),
 );
 
 it.effect("retains the browser handle when close fails so cleanup can be retried", () =>
   provideTestServices(
     Effect.gen(function* () {
-      const fake = makeFakeBrowser({ pages: [], closeErrors: [new Error("close failed"), undefined] });
+      const fake = makeFakeBrowser({
+        pages: [],
+        closeErrors: [new Error("close failed"), undefined],
+      });
       const automation = yield* ChromeAutomationModule.make({ adapter: fake.adapter });
       yield* automation.start();
       yield* automation.stop().pipe(Effect.flip);
@@ -683,7 +799,11 @@ it.effect("retains the browser handle when close fails so cleanup can be retried
 it.effect("reports failed status when a read-only retry also loses its transport", () =>
   provideTestServices(
     Effect.gen(function* () {
-      const page = makeFakePage({ url: "https://form.test", title: "Form", snapshotErrors: [new Error("Connection closed"), new Error("Connection closed")] });
+      const page = makeFakePage({
+        url: "https://form.test",
+        title: "Form",
+        snapshotErrors: [new Error("Connection closed"), new Error("Connection closed")],
+      });
       const fake = makeFakeBrowser({ pages: [page] });
       const automation = yield* ChromeAutomationModule.make({ adapter: fake.adapter });
       const error = yield* automation.snapshot().pipe(Effect.flip);
@@ -697,8 +817,15 @@ it.effect("reports failed status when a read-only retry also loses its transport
 it.effect("rejects a snapshot that spans a main-document navigation", () =>
   provideTestServices(
     Effect.gen(function* () {
-      const page = makeFakePage({ url: "https://form.test", title: "Form", snapshot: interactiveSnapshot, beforeSnapshot: () => page.reload() });
-      const automation = yield* ChromeAutomationModule.make({ adapter: makeFakeBrowser({ pages: [page] }).adapter });
+      const page = makeFakePage({
+        url: "https://form.test",
+        title: "Form",
+        snapshot: interactiveSnapshot,
+        beforeSnapshot: () => page.reload(),
+      });
+      const automation = yield* ChromeAutomationModule.make({
+        adapter: makeFakeBrowser({ pages: [page] }).adapter,
+      });
       const error = yield* automation.snapshot().pipe(Effect.flip);
       assert.include(error.detail, "navigated during the snapshot");
       assert.equal(page.calls.length, 0);
@@ -709,8 +836,15 @@ it.effect("rejects a snapshot that spans a main-document navigation", () =>
 it.effect("discards previous refs when snapshot collection fails", () =>
   provideTestServices(
     Effect.gen(function* () {
-      const page = makeFakePage({ url: "https://form.test", title: "Form", snapshot: interactiveSnapshot, snapshotErrors: [undefined, new Error("snapshot failed")] });
-      const automation = yield* ChromeAutomationModule.make({ adapter: makeFakeBrowser({ pages: [page] }).adapter });
+      const page = makeFakePage({
+        url: "https://form.test",
+        title: "Form",
+        snapshot: interactiveSnapshot,
+        snapshotErrors: [undefined, new Error("snapshot failed")],
+      });
+      const automation = yield* ChromeAutomationModule.make({
+        adapter: makeFakeBrowser({ pages: [page] }).adapter,
+      });
       const oldSnapshot = yield* automation.snapshot();
       yield* automation.snapshot().pipe(Effect.flip);
       const error = yield* automation.click({ ref: oldSnapshot.refs[0]!.ref }).pipe(Effect.flip);
@@ -725,19 +859,178 @@ it.effect("does not reuse tab identities across server service lifetimes", () =>
     Effect.gen(function* () {
       const crypto = yield* Crypto.Crypto;
       let instance = 0;
-      const cryptoWithFreshIds = { ...crypto, randomUUIDv4: Effect.sync(() => `instance-${++instance}`) };
-      const page = makeFakePage({ url: "https://form.test", title: "Form", snapshot: interactiveSnapshot });
+      const cryptoWithFreshIds = {
+        ...crypto,
+        randomUUIDv4: Effect.sync(() => `instance-${++instance}`),
+      };
+      const page = makeFakePage({
+        url: "https://form.test",
+        title: "Form",
+        snapshot: interactiveSnapshot,
+      });
       const fake = makeFakeBrowser({ pages: [page] });
-      const first = yield* ChromeAutomationModule.make({ adapter: fake.adapter }).pipe(Effect.provideService(Crypto.Crypto, cryptoWithFreshIds));
+      const first = yield* ChromeAutomationModule.make({ adapter: fake.adapter }).pipe(
+        Effect.provideService(Crypto.Crypto, cryptoWithFreshIds),
+      );
       const firstSnapshot = yield* first.snapshot();
       yield* first.stop();
-      const second = yield* ChromeAutomationModule.make({ adapter: fake.adapter }).pipe(Effect.provideService(Crypto.Crypto, cryptoWithFreshIds));
+      const second = yield* ChromeAutomationModule.make({ adapter: fake.adapter }).pipe(
+        Effect.provideService(Crypto.Crypto, cryptoWithFreshIds),
+      );
       const secondSnapshot = yield* second.snapshot();
       assert.notEqual(firstSnapshot.tabId, secondSnapshot.tabId);
       assert.notEqual(firstSnapshot.refs[0]?.ref, secondSnapshot.refs[0]?.ref);
-      const error = yield* second.click({ selector: "button" }, firstSnapshot.tabId).pipe(Effect.flip);
+      const error = yield* second
+        .click({ selector: "button" }, firstSnapshot.tabId)
+        .pipe(Effect.flip);
       assert.equal(error.operation, "tab");
       assert.equal(page.calls.length, 0);
     }),
   ),
 );
+
+it.effect("returns a PNG for the explicit screenshot tab without changing global selection", () =>
+  provideTestServices(
+    Effect.gen(function* () {
+      const first = makeFakePage({
+        url: "https://one.test",
+        title: "One",
+        snapshot: interactiveSnapshot,
+      });
+      const second = makeFakePage({ url: "https://two.test", title: "Two" });
+      const automation = yield* ChromeAutomationModule.make({
+        adapter: makeFakeBrowser({ pages: [first, second] }).adapter,
+      });
+      yield* automation.start();
+      yield* automation.selectTab("tab-2-test");
+      const snapshot = yield* automation.snapshot("tab-1-test");
+      assert.deepEqual(yield* automation.screenshot("tab-1-test"), {
+        tabId: "tab-1-test",
+        mimeType: "image/png",
+        data: screenshotPng.toString("base64"),
+        width: 1,
+        height: 1,
+      });
+      yield* automation.click({ ref: snapshot.refs[0]!.ref }, "tab-1-test");
+      assert.deepEqual(first.calls, [
+        { kind: "screenshot" },
+        { kind: "click", selector: "#submit" },
+      ]);
+      assert.equal(second.calls.length, 0);
+      assert.equal((yield* automation.status()).selectedTabId, "tab-2-test");
+    }),
+  ),
+);
+
+it.effect("rejects screenshot capture spanning navigation", () =>
+  provideTestServices(
+    Effect.gen(function* () {
+      const page = makeFakePage({
+        url: "https://form.test",
+        title: "Form",
+        beforeScreenshot: () => page.reload(),
+      });
+      const automation = yield* ChromeAutomationModule.make({
+        adapter: makeFakeBrowser({ pages: [page] }).adapter,
+      });
+      const error = yield* automation.screenshot("tab-1-test").pipe(Effect.flip);
+      assert.include(error.detail, "navigated during capture");
+    }),
+  ),
+);
+
+it.effect("does not redirect screenshots after transport recovery replaces tab identities", () =>
+  provideTestServices(
+    Effect.gen(function* () {
+      const page = makeFakePage({
+        url: "https://form.test",
+        title: "Form",
+        screenshotError: new Error("Connection closed"),
+      });
+      const fake = makeFakeBrowser({ pages: [page] });
+      const automation = yield* ChromeAutomationModule.make({ adapter: fake.adapter });
+      const error = yield* automation.screenshot("tab-1-test").pipe(Effect.flip);
+      assert.equal(error.operation, "tab");
+      assert.equal(fake.launchCount, 2);
+      assert.deepEqual(page.calls, [{ kind: "screenshot" }]);
+    }),
+  ),
+);
+
+it.effect.each([
+  { label: "oversized PNG", bytes: new Uint8Array(5 * 1024 * 1024 + 1), message: "5 MiB limit" },
+  { label: "invalid PNG", bytes: new Uint8Array([1, 2, 3]), message: "valid PNG" },
+  {
+    label: "oversized dimensions",
+    bytes: (() => {
+      const bytes = Buffer.from(screenshotPng);
+      bytes.writeUInt32BE(4097, 16);
+      return bytes;
+    })(),
+    message: "dimensions must be between",
+  },
+  {
+    label: "zero dimensions",
+    bytes: (() => {
+      const bytes = Buffer.from(screenshotPng);
+      bytes.writeUInt32BE(0, 20);
+      return bytes;
+    })(),
+    message: "dimensions must be between",
+  },
+])("rejects $label screenshot output", ({ bytes, message }) =>
+  provideTestServices(
+    Effect.gen(function* () {
+      const page = makeFakePage({
+        url: "https://form.test",
+        title: "Form",
+        screenshotBytes: bytes,
+      });
+      const fake = makeFakeBrowser({ pages: [page] });
+      const automation = yield* ChromeAutomationModule.make({ adapter: fake.adapter });
+      const error = yield* automation.screenshot("tab-1-test").pipe(Effect.flip);
+      assert.include(error.detail, message);
+      assert.equal(fake.launchCount, 1);
+    }),
+  ),
+);
+
+it.each([
+  null,
+  { width: 4097, height: 720 },
+  { width: 1280, height: 4097 },
+  { width: 0, height: 720 },
+])("rejects an unbounded or oversized viewport before capture: %j", async (viewport) => {
+  let captureCount = 0;
+  const page = {
+    on: () => undefined,
+    viewportSize: () => viewport,
+    screenshot: async () => {
+      captureCount += 1;
+      return screenshotPng;
+    },
+  } as unknown as Page;
+  await NodeAssert.rejects(
+    ChromeAutomationModule.makePlaywrightPageAdapter(page).screenshotPng(),
+    /viewport dimensions/,
+  );
+  assert.equal(captureCount, 0);
+});
+
+it("captures only the CSS-scaled viewport with a bounded timeout", async () => {
+  const options: Array<Parameters<Page["screenshot"]>[0]> = [];
+  const page = {
+    on: () => undefined,
+    viewportSize: () => ({ width: 1280, height: 720 }),
+    screenshot: async (input: Parameters<Page["screenshot"]>[0]) => {
+      options.push(input);
+      return screenshotPng;
+    },
+  } as unknown as Page;
+  assert.deepEqual(
+    await ChromeAutomationModule.makePlaywrightPageAdapter(page).screenshotPng(),
+    screenshotPng,
+  );
+  assert.deepEqual(options, [{ type: "png", fullPage: false, scale: "css", timeout: 15_000 }]);
+});
+import * as NodeAssert from "node:assert/strict";

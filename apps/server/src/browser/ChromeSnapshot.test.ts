@@ -1,4 +1,4 @@
-import { runInNewContext } from "node:vm";
+import * as NodeVM from "node:vm";
 import { assert, it } from "@effect/vitest";
 
 import { collectSnapshotRefs, type SnapshotElement } from "./ChromeSnapshot.ts";
@@ -20,7 +20,7 @@ const element = (
 
 it("serializes the actual browser callback without closing over server helpers", () => {
   const button = element("BUTTON", element("BODY"), null, { id: "submit:123" });
-  const refs: ReturnType<typeof collectSnapshotRefs> = runInNewContext(
+  const refs: ReturnType<typeof collectSnapshotRefs> = NodeVM.runInNewContext(
     `(${collectSnapshotRefs.toString()})(elements)`,
     { elements: [button] },
   );
@@ -35,8 +35,14 @@ it("distinguishes repeated controls under different parents and duplicate ids", 
   const first = element("BUTTON", firstSection, null, { id: "submit" });
   const second = element("BUTTON", secondSection, null, { id: "submit" });
   const refs = collectSnapshotRefs([first, second]);
-  assert.equal(refs[0]?.selector, "body:nth-of-type(1) > section:nth-of-type(1) > button:nth-of-type(1)");
-  assert.equal(refs[1]?.selector, "body:nth-of-type(1) > section:nth-of-type(2) > button:nth-of-type(1)");
+  assert.equal(
+    refs[0]?.selector,
+    "body:nth-of-type(1) > section:nth-of-type(1) > button:nth-of-type(1)",
+  );
+  assert.equal(
+    refs[1]?.selector,
+    "body:nth-of-type(1) > section:nth-of-type(2) > button:nth-of-type(1)",
+  );
 });
 
 it("keeps open shadow-root controls scoped to their host", () => {

@@ -15,6 +15,8 @@ import { collectSnapshotRefs } from "./ChromeSnapshot.ts";
 const PROFILE_DIRECTORY = "browser/chrome-profile";
 const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_TIMEOUT_MS = 120_000;
+const MAX_SCREENSHOT_BYTES = 5 * 1024 * 1024;
+const MAX_SCREENSHOT_DIMENSION = 4096;
 const MAX_SNAPSHOT_CHARS = 100_000;
 const UNAVAILABLE_MESSAGE = "T3 managed Chrome is unavailable.";
 const INTERACTIVE_SELECTOR =
@@ -60,6 +62,14 @@ export interface ChromeAutomationPageSnapshot {
   readonly refs: ReadonlyArray<ChromeAutomationRef>;
 }
 
+export interface ChromeAutomationScreenshot {
+  readonly tabId: string;
+  readonly mimeType: "image/png";
+  readonly data: string;
+  readonly width: number;
+  readonly height: number;
+}
+
 export type ChromeAutomationTarget = { readonly ref: string } | { readonly selector: string };
 
 export interface ChromeAutomationLaunchOptions {
@@ -83,6 +93,7 @@ export interface ChromeAutomationPageAdapter {
     },
   ) => Promise<void>;
   readonly snapshot: () => Promise<ChromeAutomationPageSnapshot>;
+  readonly screenshotPng: () => Promise<Uint8Array>;
   readonly click: (selector: string) => Promise<void>;
   readonly fill: (selector: string, value: string) => Promise<void>;
   readonly type: (selector: string, value: string) => Promise<void>;
@@ -138,11 +149,19 @@ export class ChromeAutomation extends Context.Service<
         readonly timeoutMs?: number;
       },
     ) => Effect.Effect<ChromeAutomationTab, ChromeAutomationError>;
-    readonly snapshot: (tabId?: string) => Effect.Effect<
+    readonly snapshot: (
+      tabId?: string,
+    ) => Effect.Effect<
       ChromeAutomationPageSnapshot & { readonly tabId: string },
       ChromeAutomationError
     >;
-    readonly click: (target: ChromeAutomationTarget, tabId?: string) => Effect.Effect<void, ChromeAutomationError>;
+    readonly screenshot: (
+      tabId: string,
+    ) => Effect.Effect<ChromeAutomationScreenshot, ChromeAutomationError>;
+    readonly click: (
+      target: ChromeAutomationTarget,
+      tabId?: string,
+    ) => Effect.Effect<void, ChromeAutomationError>;
     readonly fill: (
       target: ChromeAutomationTarget,
       value: string,
@@ -208,6 +227,14 @@ const truncate = (value: string): string =>
   value.length <= MAX_SNAPSHOT_CHARS
     ? value
     : `${value.slice(0, MAX_SNAPSHOT_CHARS)}\n[truncated by T3 Chrome automation]`;
+
+const isSupportedScreenshotSize = (width: number, height: number): boolean =>
+  Number.isInteger(width) &&
+  Number.isInteger(height) &&
+  width > 0 &&
+  height > 0 &&
+  width <= MAX_SCREENSHOT_DIMENSION &&
+  height <= MAX_SCREENSHOT_DIMENSION;
 
 const targetSelector = (
   target: ChromeAutomationTarget,
@@ -369,30 +396,47 @@ export const resolveInstalledChrome = Effect.fn("ChromeAutomation.resolveInstall
   },
 );
 
-const makePlaywrightPageAdapter = (page: Page): ChromeAutomationPageAdapter => {
+export const makePlaywrightPageAdapter = (page: Page): ChromeAutomationPageAdapter => {
   let documentVersion = 0;
   page.on("framenavigated", (frame) => {
     if (frame === page.mainFrame()) documentVersion += 1;
   });
   return {
-  url: () => page.url(),
-  documentVersion: () => documentVersion,
-  title: () => page.title(),
-  goto: async (url, options) => {
-    await page.goto(url, { waitUntil: options.waitUntil, timeout: options.timeoutMs });
-  },
-  snapshot: async () => {
-    const [accessibilityTree, dom, refs] = await Promise.all([
-      page.locator("body").ariaSnapshot({ timeout: DEFAULT_TIMEOUT_MS }),
-      page.locator("body").evaluate((element) => element.outerHTML, undefined, { timeout: DEFAULT_TIMEOUT_MS }),
-      page.locator(INTERACTIVE_SELECTOR).evaluateAll(collectSnapshotRefs),
-    ]);
-    return { accessibilityTree, dom, refs };
-  },
-  click: (selector) => page.locator(selector).click({ timeout: DEFAULT_TIMEOUT_MS }),
-  fill: (selector, value) => page.locator(selector).fill(value, { timeout: DEFAULT_TIMEOUT_MS }),
-  type: (selector, value) =>
-    page.locator(selector).pressSequentially(value, { timeout: DEFAULT_TIMEOUT_MS }),
+    url: () => page.url(),
+    documentVersion: () => documentVersion,
+    title: () => page.title(),
+    goto: async (url, options) => {
+      await page.goto(url, { waitUntil: options.waitUntil, timeout: options.timeoutMs });
+    },
+    snapshot: async () => {
+      const [accessibilityTree, dom, refs] = await Promise.all([
+        page.locator("body").ariaSnapshot({ timeout: DEFAULT_TIMEOUT_MS }),
+        page
+          .locator("body")
+          .evaluate((element) => element.outerHTML, undefined, { timeout: DEFAULT_TIMEOUT_MS }),
+        page.locator(INTERACTIVE_SELECTOR).evaluateAll(collectSnapshotRefs),
+      ]);
+      return { accessibilityTree, dom, refs };
+    },
+    screenshotPng: async () => {
+      const viewport = page.viewportSize();
+      if (viewport === null || !isSupportedScreenshotSize(viewport.width, viewport.height)) {
+        throw new ChromeAutomationError(
+          "screenshot",
+          `Chrome viewport dimensions must be between 1 and ${MAX_SCREENSHOT_DIMENSION} pixels.`,
+        );
+      }
+      return page.screenshot({
+        type: "png",
+        fullPage: false,
+        scale: "css",
+        timeout: DEFAULT_TIMEOUT_MS,
+      });
+    },
+    click: (selector) => page.locator(selector).click({ timeout: DEFAULT_TIMEOUT_MS }),
+    fill: (selector, value) => page.locator(selector).fill(value, { timeout: DEFAULT_TIMEOUT_MS }),
+    type: (selector, value) =>
+      page.locator(selector).pressSequentially(value, { timeout: DEFAULT_TIMEOUT_MS }),
   };
 };
 
@@ -584,7 +628,10 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
     const tab = tabs.get(targetTabId);
     if (tab === undefined) {
       return yield* Effect.fail(
-        new ChromeAutomationError("tab", `Tab ${targetTabId} no longer exists. List tabs and select a target.`),
+        new ChromeAutomationError(
+          "tab",
+          `Tab ${targetTabId} no longer exists. List tabs and select a target.`,
+        ),
       );
     }
     if (tab.snapshotDocumentVersion !== tab.page.documentVersion()) tab.refs = new Map();
@@ -688,7 +735,13 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
       yield* Effect.tryPromise({
         try: () => currentBrowser.close(),
         catch: (cause) => unavailableFailure(operation, cause),
-      }).pipe(Effect.tapError(() => Effect.sync(() => { browser = currentBrowser; })));
+      }).pipe(
+        Effect.tapError(() =>
+          Effect.sync(() => {
+            browser = currentBrowser;
+          }),
+        ),
+      );
     }
     yield* startOnce.pipe(
       Effect.mapError(() =>
@@ -705,10 +758,12 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
     mutex.withPermit(
       Effect.gen(function* () {
         if (!replaySafe && status.lifecycle === "failed") {
-          return yield* Effect.fail(new ChromeAutomationError(
-            operation,
-            "Chrome disconnected. List tabs and inspect the target before retrying an action.",
-          ));
+          return yield* Effect.fail(
+            new ChromeAutomationError(
+              operation,
+              "Chrome disconnected. List tabs and inspect the target before retrying an action.",
+            ),
+          );
         }
         yield* ensureConnected();
         const first = yield* Effect.result(use());
@@ -724,11 +779,13 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
         if (!replaySafe) {
           status = { ...status, lifecycle: "failed", error: UNAVAILABLE_MESSAGE };
           for (const tab of tabs.values()) tab.refs = new Map();
-          return yield* Effect.fail(new ChromeAutomationError(
-            operation,
-            "Chrome disconnected during the action. Its outcome is unknown and it was not replayed. List tabs and inspect the target before retrying.",
-            first._tag === "Failure" ? first.failure : undefined,
-          ));
+          return yield* Effect.fail(
+            new ChromeAutomationError(
+              operation,
+              "Chrome disconnected during the action. Its outcome is unknown and it was not replayed. List tabs and inspect the target before retrying.",
+              first._tag === "Failure" ? first.failure : undefined,
+            ),
+          );
         }
         yield* recoverOnce(operation);
         const second = yield* Effect.result(use());
@@ -775,34 +832,48 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
     stop: () => stop,
     status: () => Effect.succeed({ ...status, selectedTabId }),
     listTabs: () =>
-      action("tabs", () =>
-        Effect.gen(function* () {
-          const managed = yield* refreshTabs();
-          return yield* Effect.forEach(managed.values(), tabInfo);
-        }),
+      action(
+        "tabs",
+        () =>
+          Effect.gen(function* () {
+            const managed = yield* refreshTabs();
+            return yield* Effect.forEach(managed.values(), tabInfo);
+          }),
         true,
       ),
     selectTab: (tabId) =>
-      action("selectTab", () =>
-        Effect.gen(function* () {
-          yield* refreshTabs();
-          const tab = tabs.get(tabId);
-          if (tab === undefined) {
-            return yield* Effect.fail(
-              new ChromeAutomationError("selectTab", `Unknown tab ${tabId}.`),
-            );
-          }
-          selectedTabId = tabId;
-          status = { ...status, selectedTabId };
-          return yield* tabInfo(tab);
-        }),
+      action(
+        "selectTab",
+        () =>
+          Effect.gen(function* () {
+            yield* refreshTabs();
+            const tab = tabs.get(tabId);
+            if (tab === undefined) {
+              return yield* Effect.fail(
+                new ChromeAutomationError("selectTab", `Unknown tab ${tabId}.`),
+              );
+            }
+            selectedTabId = tabId;
+            status = { ...status, selectedTabId };
+            return yield* tabInfo(tab);
+          }),
         true,
       ),
     navigate: (url, options = {}) =>
       action("navigate", () =>
         Effect.gen(function* () {
-          if (options.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 1 || options.timeoutMs > MAX_TIMEOUT_MS)) {
-            return yield* Effect.fail(new ChromeAutomationError("navigate", `timeoutMs must be between 1 and ${MAX_TIMEOUT_MS}.`));
+          if (
+            options.timeoutMs !== undefined &&
+            (!Number.isFinite(options.timeoutMs) ||
+              options.timeoutMs < 1 ||
+              options.timeoutMs > MAX_TIMEOUT_MS)
+          ) {
+            return yield* Effect.fail(
+              new ChromeAutomationError(
+                "navigate",
+                `timeoutMs must be between 1 and ${MAX_TIMEOUT_MS}.`,
+              ),
+            );
           }
           const tab = yield* selectedTab(options.tabId);
           tab.refs = new Map();
@@ -818,33 +889,100 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
         }),
       ),
     snapshot: (tabId) =>
-      action("snapshot", () =>
-        Effect.gen(function* () {
-          const tab = yield* selectedTab(tabId);
-          tab.refs = new Map();
-          const documentVersion = tab.page.documentVersion();
-          const snapshot = yield* Effect.tryPromise({
-            try: () => tab.page.snapshot(),
-            catch: (cause) => failure("snapshot", cause),
-          });
-          if (documentVersion !== tab.page.documentVersion()) {
-            return yield* Effect.fail(new ChromeAutomationError("snapshot", "The page navigated during the snapshot. Take a fresh snapshot."));
-          }
-          const snapshotId = ++snapshotSequence;
-          const refs = snapshot.refs.map((ref, index) => ({
-            ...ref,
-            ref: `${tab.id}-snapshot-${snapshotId}-ref-${index + 1}`,
-          }));
-          tab.refs = new Map(refs.map((ref) => [ref.ref, ref.selector]));
-          tab.snapshotDocumentVersion = documentVersion;
-          return {
-            ...snapshot,
-            refs,
-            accessibilityTree: truncate(snapshot.accessibilityTree),
-            dom: truncate(snapshot.dom),
-            tabId: tab.id,
-          };
-        }),
+      action(
+        "snapshot",
+        () =>
+          Effect.gen(function* () {
+            const tab = yield* selectedTab(tabId);
+            tab.refs = new Map();
+            const documentVersion = tab.page.documentVersion();
+            const snapshot = yield* Effect.tryPromise({
+              try: () => tab.page.snapshot(),
+              catch: (cause) => failure("snapshot", cause),
+            });
+            if (documentVersion !== tab.page.documentVersion()) {
+              return yield* Effect.fail(
+                new ChromeAutomationError(
+                  "snapshot",
+                  "The page navigated during the snapshot. Take a fresh snapshot.",
+                ),
+              );
+            }
+            const snapshotId = ++snapshotSequence;
+            const refs = snapshot.refs.map((ref, index) => ({
+              ...ref,
+              ref: `${tab.id}-snapshot-${snapshotId}-ref-${index + 1}`,
+            }));
+            tab.refs = new Map(refs.map((ref) => [ref.ref, ref.selector]));
+            tab.snapshotDocumentVersion = documentVersion;
+            return {
+              ...snapshot,
+              refs,
+              accessibilityTree: truncate(snapshot.accessibilityTree),
+              dom: truncate(snapshot.dom),
+              tabId: tab.id,
+            };
+          }),
+        true,
+      ),
+    screenshot: (tabId) =>
+      action(
+        "screenshot",
+        () =>
+          Effect.gen(function* () {
+            const tab = yield* selectedTab(tabId);
+            const documentVersion = tab.page.documentVersion();
+            const bytes = yield* Effect.tryPromise({
+              try: () => tab.page.screenshotPng(),
+              catch: (cause) => failure("screenshot", cause),
+            });
+            if (documentVersion !== tab.page.documentVersion()) {
+              return yield* Effect.fail(
+                new ChromeAutomationError(
+                  "screenshot",
+                  "The page navigated during capture. Take a fresh screenshot.",
+                ),
+              );
+            }
+            if (bytes.byteLength > MAX_SCREENSHOT_BYTES) {
+              return yield* Effect.fail(
+                new ChromeAutomationError(
+                  "screenshot",
+                  "The PNG screenshot exceeds the 5 MiB limit. Reduce the Chrome viewport size.",
+                ),
+              );
+            }
+            const png = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+            if (
+              png.length < 24 ||
+              png.subarray(0, 8).toString("hex") !== "89504e470d0a1a0a" ||
+              png.toString("ascii", 12, 16) !== "IHDR"
+            ) {
+              return yield* Effect.fail(
+                new ChromeAutomationError(
+                  "screenshot",
+                  "Chrome did not return a valid PNG screenshot.",
+                ),
+              );
+            }
+            const width = png.readUInt32BE(16);
+            const height = png.readUInt32BE(20);
+            if (!isSupportedScreenshotSize(width, height)) {
+              return yield* Effect.fail(
+                new ChromeAutomationError(
+                  "screenshot",
+                  `Screenshot dimensions must be between 1 and ${MAX_SCREENSHOT_DIMENSION} pixels.`,
+                ),
+              );
+            }
+            return {
+              tabId: tab.id,
+              mimeType: "image/png" as const,
+              data: png.toString("base64"),
+              width,
+              height,
+            };
+          }),
         true,
       ),
     click: (target, tabId) =>
