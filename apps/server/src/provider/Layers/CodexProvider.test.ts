@@ -185,20 +185,21 @@ it("maps current Codex model capability fields", () => {
     },
     {
       id: "computerControl",
-      label: "Computer control",
+      label: "Browser provider",
       type: "select",
       options: [
         {
           id: "desktop",
-          label: "Full desktop",
-          description: "Use unrestricted Chrome and Windows computer-control tools with fallbacks.",
+          label: "Managed Chrome (legacy preference)",
+          description:
+            "Use T3's separate Chrome profile when attached. Windows desktop control is unavailable.",
           isDefault: true,
         },
         {
           id: "chrome",
-          label: "Full Chrome",
+          label: "T3 managed Chrome",
           description:
-            "Use the existing Chrome session, DevTools, downloads, uploads, and web tools.",
+            "Use T3's separate persistent Chrome profile when its tools are attached, with normal approvals.",
         },
         {
           id: "preview",
@@ -323,20 +324,21 @@ it("uses standard routing when the catalog has no default service tier", () => {
     },
     {
       id: "computerControl",
-      label: "Computer control",
+      label: "Browser provider",
       type: "select",
       options: [
         {
           id: "desktop",
-          label: "Full desktop",
-          description: "Use unrestricted Chrome and Windows computer-control tools with fallbacks.",
+          label: "Managed Chrome (legacy preference)",
+          description:
+            "Use T3's separate Chrome profile when attached. Windows desktop control is unavailable.",
           isDefault: true,
         },
         {
           id: "chrome",
-          label: "Full Chrome",
+          label: "T3 managed Chrome",
           description:
-            "Use the existing Chrome session, DevTools, downloads, uploads, and web tools.",
+            "Use T3's separate persistent Chrome profile when its tools are attached, with normal approvals.",
         },
         {
           id: "preview",

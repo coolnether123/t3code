@@ -814,10 +814,22 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const routed = yield* resolveRoutableSession({
         threadId: input.threadId,
         operation: "ProviderService.sendTurn",
-        allowRecovery: true,
+        allowRecovery: input.expectedTurnId === undefined,
       });
       metricProvider = routed.adapter.provider;
-      const activeModelSelection = input.modelSelection ?? routed.modelSelection;
+      if (
+        input.expectedTurnId !== undefined &&
+        (routed.adapter.provider !== "codex" || !routed.isActive)
+      ) {
+        return yield* toValidationError(
+          "ProviderService.sendTurn",
+          "Steering requires an active Codex session.",
+        );
+      }
+      const activeModelSelection =
+        input.expectedTurnId !== undefined
+          ? routed.modelSelection
+          : (input.modelSelection ?? routed.modelSelection);
       metricModel = activeModelSelection?.model;
       yield* Effect.annotateCurrentSpan({
         "provider.kind": routed.adapter.provider,

@@ -1013,6 +1013,79 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
+  it.effect(
+    "steers Codex without changing persisted model selection or recovering inactive sessions",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+        const repository = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+        const threadId = asThreadId("thread-steer-route");
+        const modelSelection = createModelSelection(codexInstanceId, "gpt-5.6-sol");
+        yield* provider.startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          threadId,
+          runtimeMode: "full-access",
+          modelSelection,
+        });
+        routing.codex.sendTurn.mockClear();
+        yield* provider.sendTurn({
+          threadId,
+          input: "focus on tests",
+          attachments: [],
+          expectedTurnId: asTurnId("active-turn"),
+          modelSelection: createModelSelection(codexInstanceId, "ignored-model"),
+        });
+        assert.equal(routing.codex.sendTurn.mock.calls[0]?.[0].expectedTurnId, "active-turn");
+        const row = yield* repository.getByThreadId({ threadId });
+        assert.isTrue(Option.isSome(row));
+        if (Option.isSome(row)) {
+          assert.deepEqual(
+            (row.value.runtimePayload as { modelSelection?: unknown }).modelSelection,
+            modelSelection,
+          );
+        }
+        yield* routing.codex.stopSession(threadId);
+        routing.codex.startSession.mockClear();
+        routing.codex.sendTurn.mockClear();
+        yield* provider
+          .sendTurn({
+            threadId,
+            input: "do not resume",
+            attachments: [],
+            expectedTurnId: asTurnId("active-turn"),
+          })
+          .pipe(Effect.flip);
+        assert.equal(routing.codex.startSession.mock.calls.length, 0);
+        assert.equal(routing.codex.sendTurn.mock.calls.length, 0);
+      }),
+  );
+
+  it.effect("rejects steering for non-Codex providers", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-steer-unsupported");
+      yield* provider.startSession(threadId, {
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId: claudeAgentInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+      routing.claude.sendTurn.mockClear();
+      const error = yield* provider
+        .sendTurn({
+          threadId,
+          input: "steer",
+          attachments: [],
+          expectedTurnId: asTurnId("active-turn"),
+        })
+        .pipe(Effect.flip);
+      assert.instanceOf(error, ProviderValidationError);
+      assert.include(error.issue, "active Codex session");
+      assert.equal(routing.claude.sendTurn.mock.calls.length, 0);
+    }),
+  );
+
   it.effect("routes feedback to the Codex adapter and returns its feedback ID", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;

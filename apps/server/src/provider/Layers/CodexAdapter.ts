@@ -12,6 +12,7 @@ import {
   type CanonicalRequestType,
   type CodexSettings,
   ProviderDriverKind,
+  EventId,
   type ProviderEvent,
   ProviderInstanceId,
   type ProviderRuntimeEvent,
@@ -452,13 +453,61 @@ function eventRawSource(event: ProviderEvent): NonNullable<ProviderRuntimeEvent[
   return event.kind === "request" ? "codex.app-server.request" : "codex.app-server.notification";
 }
 
+function originalCodexNotification(event: ProviderEvent): {
+  readonly method: string;
+  readonly params: unknown;
+} {
+  const payload = event.payload;
+  if (
+    event.method.startsWith("collabAgent/") &&
+    typeof payload === "object" &&
+    payload !== null &&
+    "wire" in payload
+  ) {
+    const wire = payload.wire;
+    if (
+      typeof wire === "object" &&
+      wire !== null &&
+      "method" in wire &&
+      typeof wire.method === "string" &&
+      "params" in wire
+    ) {
+      return { method: wire.method, params: wire.params };
+    }
+  }
+  return { method: event.method, params: payload ?? {} };
+}
+
 function providerRefsFromEvent(
   event: ProviderEvent,
 ): ProviderRuntimeEvent["providerRefs"] | undefined {
   const refs: Record<string, string> = {};
+  const wire = originalCodexNotification(event);
+  const params =
+    typeof wire.params === "object" && wire.params !== null
+      ? (wire.params as Record<string, unknown>)
+      : undefined;
+  const thread =
+    typeof params?.thread === "object" && params.thread !== null
+      ? (params.thread as Record<string, unknown>)
+      : undefined;
+  const turn =
+    typeof params?.turn === "object" && params.turn !== null
+      ? (params.turn as Record<string, unknown>)
+      : undefined;
+  const item =
+    typeof params?.item === "object" && params.item !== null
+      ? (params.item as Record<string, unknown>)
+      : undefined;
   if (event.turnId) refs.providerTurnId = event.turnId;
   if (event.itemId) refs.providerItemId = event.itemId;
   if (event.requestId) refs.providerRequestId = event.requestId;
+  const providerThreadId = params?.threadId ?? thread?.id;
+  const providerTurnId = params?.turnId ?? turn?.id;
+  const providerItemId = params?.itemId ?? item?.id;
+  if (typeof providerThreadId === "string") refs.providerThreadId = providerThreadId;
+  if (typeof providerTurnId === "string") refs.providerTurnId = providerTurnId;
+  if (typeof providerItemId === "string") refs.providerItemId = providerItemId;
 
   return Object.keys(refs).length > 0 ? (refs as ProviderRuntimeEvent["providerRefs"]) : undefined;
 }
@@ -468,6 +517,7 @@ function runtimeEventBase(
   canonicalThreadId: ThreadId,
 ): Omit<ProviderRuntimeEvent, "type" | "payload"> {
   const refs = providerRefsFromEvent(event);
+  const wire = originalCodexNotification(event);
   return {
     eventId: event.id,
     provider: event.provider,
@@ -479,8 +529,8 @@ function runtimeEventBase(
     ...(refs ? { providerRefs: refs } : {}),
     raw: {
       source: eventRawSource(event),
-      method: event.method,
-      payload: event.payload ?? {},
+      method: wire.method,
+      payload: wire.params,
     },
   };
 }
@@ -564,6 +614,9 @@ function mapCollabAgentEvent(
     role,
     ...(knownName ? { title: knownName } : {}),
     ...(agentPath ? { agentPath } : {}),
+    ...(typeof payload.parentThreadId === "string"
+      ? { parentAgentId: payload.parentThreadId }
+      : {}),
     timelineBypass: true,
   } as const;
 
@@ -612,6 +665,9 @@ function mapCollabAgentEvent(
               title,
               role,
               ...(agentPath ? { agentPath } : {}),
+              ...(typeof payload.parentThreadId === "string"
+                ? { parentAgentId: payload.parentThreadId }
+                : {}),
               timelineBypass: true,
             },
           },
@@ -636,6 +692,22 @@ function mapCollabAgentEvent(
           ? (payload.turn as Record<string, unknown>)
           : undefined;
       const turnStatus = typeof turn?.status === "string" ? turn.status : undefined;
+      const lastMessage = Array.isArray(turn?.items)
+        ? (turn.items.findLast(
+            (item: unknown) =>
+              typeof item === "object" &&
+              item !== null &&
+              "type" in item &&
+              item.type === "agentMessage" &&
+              "text" in item &&
+              typeof item.text === "string",
+          ) as { text: string } | undefined)
+        : undefined;
+      const summary = lastMessage ? trimText(lastMessage.text)?.slice(-16_000) : undefined;
+      const turnError =
+        typeof turn?.error === "object" && turn.error !== null
+          ? (turn.error as Record<string, unknown>)
+          : undefined;
       const status =
         turnStatus === "failed"
           ? ("failed" as const)
@@ -643,10 +715,25 @@ function mapCollabAgentEvent(
             ? ("interrupted" as const)
             : ("idle" as const);
       return [
+        ...(summary
+          ? [
+              {
+                ...base,
+                eventId: EventId.make(`${base.eventId}:result`),
+                type: "task.progress" as const,
+                payload: { taskId, description: title, summary, ...statusLinkage },
+              },
+            ]
+          : []),
         {
           ...base,
           type: "task.updated",
-          payload: { taskId, status, ...statusLinkage },
+          payload: {
+            taskId,
+            status,
+            ...(typeof turnError?.message === "string" ? { error: turnError.message } : {}),
+            ...statusLinkage,
+          },
         },
       ];
     }
@@ -751,11 +838,12 @@ function mapCollabAgentEvent(
       // this boundary (synthetic event payload), so read best-effort fields
       // rather than force a schema decode.
       const looseSummary =
+        (typeof item?.text === "string" ? trimText(item.text) : undefined) ??
         (typeof item?.command === "string" ? item.command : undefined) ??
         (typeof item?.title === "string" ? item.title : undefined) ??
         (typeof item?.query === "string" ? item.query : undefined);
       const canonical = toCanonicalItemType(itemTypeRaw);
-      const summary = looseSummary ?? canonical.replaceAll("_", " ");
+      const summary = looseSummary?.slice(-16_000) ?? canonical.replaceAll("_", " ");
       return [
         {
           ...base,
@@ -765,7 +853,38 @@ function mapCollabAgentEvent(
             description: title,
             ...(knownName ? { title: knownName } : {}),
             summary,
-            timelineBypass: true,
+            ...statusLinkage,
+          },
+        },
+      ];
+    }
+    case "collabAgent/notification": {
+      const wire = originalCodexNotification(event);
+      const params =
+        typeof wire.params === "object" && wire.params !== null
+          ? (wire.params as Record<string, unknown>)
+          : undefined;
+      const summary =
+        typeof payload.summary === "string"
+          ? trimText(payload.summary)
+          : typeof params?.delta === "string"
+            ? trimText(params.delta)
+            : undefined;
+      const settings =
+        typeof params?.threadSettings === "object" && params.threadSettings !== null
+          ? (params.threadSettings as Record<string, unknown>)
+          : undefined;
+      return [
+        {
+          ...base,
+          type: "task.progress",
+          payload: {
+            taskId,
+            description: title,
+            ...(summary ? { summary } : {}),
+            ...statusLinkage,
+            ...(typeof settings?.model === "string" ? { model: settings.model } : {}),
+            ...(typeof settings?.effort === "string" ? { effort: settings.effort } : {}),
           },
         },
       ];
@@ -775,7 +894,7 @@ function mapCollabAgentEvent(
         {
           ...base,
           type: "task.updated",
-          payload: { taskId, status: "interrupted", ...statusLinkage },
+          payload: { taskId, ...statusLinkage },
         },
       ];
     default:
@@ -787,6 +906,7 @@ function mapToRuntimeEvents(
   event: ProviderEvent,
   canonicalThreadId: ThreadId,
 ): ReadonlyArray<ProviderRuntimeEvent> {
+  if (event.method === "codex/rawNotification") return [];
   if (event.kind === "notification" && event.method.startsWith("collabAgent/")) {
     return mapCollabAgentEvent(event, canonicalThreadId);
   }
@@ -1899,6 +2019,19 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       (attachment) => resolveAttachment(input, attachment),
       { concurrency: 1 },
     );
+
+    if (input.expectedTurnId !== undefined) {
+      const session = yield* requireSession(input.threadId);
+      return yield* session.runtime
+        .sendTurn({
+          expectedTurnId: input.expectedTurnId,
+          ...(input.input !== undefined ? { input: input.input } : {}),
+          ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
+        })
+        .pipe(
+          Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/steer", cause)),
+        );
+    }
 
     const t3WorkersSettingEnabled =
       !isWorkerLinkedProviderThreadId(input.threadId) &&

@@ -857,6 +857,106 @@ function startLifecycleRuntime() {
 }
 
 lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
+  it.effect("preserves child output and wire identity without changing the parent turn", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 4)).pipe(
+        Effect.forkChild,
+      );
+      const wire = {
+        method: "item/agentMessage/delta",
+        params: {
+          threadId: "child-1",
+          turnId: "child-turn",
+          itemId: "child-item",
+          delta: "Actual child output",
+          futureField: { retained: true },
+        },
+      };
+      yield* runtime.emit({
+        id: asEventId("raw-only"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "codex/rawNotification",
+        threadId: asThreadId("thread-1"),
+        payload: wire,
+      });
+      yield* runtime.emit({
+        id: asEventId("child-delta"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "collabAgent/notification",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("spawn-turn"),
+        payload: {
+          agentThreadId: "child-1",
+          agentPath: "/root/review",
+          parentThreadId: "parent-provider-thread",
+          wire,
+        },
+      });
+      yield* runtime.emit({
+        id: asEventId("child-completed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "collabAgent/turnCompleted",
+        threadId: asThreadId("thread-1"),
+        payload: {
+          agentThreadId: "child-1",
+          turn: {
+            id: "child-turn",
+            status: "completed",
+            items: [{ type: "agentMessage", text: "Final child result" }],
+          },
+        },
+      });
+      yield* runtime.emit({
+        id: asEventId("child-closed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "collabAgent/closed",
+        threadId: asThreadId("thread-1"),
+        payload: {
+          agentThreadId: "child-1",
+          agentPath: "/root/review",
+          wire: { method: "thread/closed", params: { threadId: "child-1" } },
+        },
+      });
+      const [delta, result, completed, closed] = Array.from(yield* Fiber.join(eventsFiber));
+      NodeAssert.equal(delta?.type, "task.progress");
+      NodeAssert.equal(delta?.turnId, "spawn-turn");
+      NodeAssert.deepStrictEqual(delta?.providerRefs, {
+        providerThreadId: "child-1",
+        providerTurnId: "child-turn",
+        providerItemId: "child-item",
+      });
+      NodeAssert.deepStrictEqual(delta?.raw, {
+        source: "codex.app-server.notification",
+        method: wire.method,
+        payload: wire.params,
+      });
+      if (delta?.type === "task.progress") {
+        NodeAssert.equal(delta.payload.summary, "Actual child output");
+        NodeAssert.equal(delta.payload.timelineBypass, true);
+        NodeAssert.equal(delta.payload.parentAgentId, "parent-provider-thread");
+      }
+      NodeAssert.equal(closed?.type, "task.updated");
+      NodeAssert.equal(completed?.type, "task.updated");
+      if (completed?.type === "task.updated") {
+        NodeAssert.equal(completed.payload.status, "idle");
+      }
+      NodeAssert.equal(result?.type, "task.progress");
+      NodeAssert.notEqual(result?.eventId, completed?.eventId);
+      if (result?.type === "task.progress")
+        NodeAssert.equal(result.payload.summary, "Final child result");
+      if (closed?.type === "task.updated") NodeAssert.equal(closed.payload.status, undefined);
+    }),
+  );
+
   it.effect("does not reactivate an idle child after a parent interaction", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

@@ -34,6 +34,50 @@ const decodeConsumeRateLimitResetCreditResponse = Schema.decodeUnknownEffect(
 );
 
 it.layer(NodeServices.layer)("effect-codex-app-server protocol", (it) => {
+  it.effect("keeps reading sibling events and RPC responses while approvals are pending", () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const approval = yield* Deferred.make<{ decision: string }>();
+      const entered = yield* Deferred.make<void>();
+      const sibling = yield* Deferred.make<CodexProtocol.CodexAppServerIncomingNotification>();
+      const transport = yield* CodexProtocol.makeCodexAppServerPatchedProtocol({
+        stdio,
+        onRequest: () =>
+          Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(approval))),
+        onNotification: (event) => Deferred.succeed(sibling, event).pipe(Effect.asVoid),
+      });
+      yield* Queue.offer(
+        input,
+        encodeJsonl({
+          id: "approval-1",
+          method: "item/commandExecution/requestApproval",
+          params: {},
+        }),
+      );
+      yield* Deferred.await(entered);
+      const pending = yield* transport
+        .request("turn/interrupt", { threadId: "parent", turnId: "turn-1" })
+        .pipe(Effect.forkScoped);
+      const request = yield* decodeJson(yield* Queue.take(output));
+      assert.deepInclude(request, { id: 1, method: "turn/interrupt" });
+      yield* Queue.offer(
+        input,
+        encodeJsonl({
+          method: "item/agentMessage/delta",
+          params: { threadId: "sibling", delta: "still streaming" },
+        }),
+      );
+      yield* Queue.offer(input, encodeJsonl({ id: 1, result: {} }));
+      assert.equal((yield* Deferred.await(sibling)).method, "item/agentMessage/delta");
+      assert.deepEqual(yield* Fiber.join(pending), {});
+      yield* Deferred.succeed(approval, { decision: "decline" });
+      assert.deepEqual(yield* decodeJson(yield* Queue.take(output)), {
+        id: "approval-1",
+        result: { decision: "decline" },
+      });
+    }),
+  );
+
   it.effect("maps account usage responses to the upstream token usage schema", () =>
     Effect.gen(function* () {
       assert.strictEqual(

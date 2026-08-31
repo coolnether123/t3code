@@ -27,6 +27,23 @@ rl.on("line", (line) => {
     return;
   }
   const { id, method } = message;
+  if (id !== undefined && method === undefined) {
+    write({ method: "probe/response", params: message });
+    return;
+  }
+  if (method === "mcpServerStatus/list") {
+    write({ id, result: { data: [], nextCursor: null } });
+    return;
+  }
+  if (method === "turn/steer") {
+    if (message.params.expectedTurnId !== script.expectedActiveTurnId) {
+      write({ id, error: { code: -32600, message: "active turn mismatch" } });
+    } else {
+      write({ id, result: { turnId: script.expectedActiveTurnId } });
+    }
+    write({ method: "probe/steer", params: message.params });
+    return;
+  }
   if (method === "initialize") {
     write({
       id,
@@ -59,7 +76,7 @@ rl.on("line", (line) => {
       });
     }
     for (const notification of script.notifications) {
-      write({ jsonrpc: "2.0", method: notification.method, params: notification.params });
+      write({ jsonrpc: "2.0", ...notification });
     }
     if (script.holdTurnOpen !== true) {
       write({
