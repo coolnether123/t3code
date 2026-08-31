@@ -66,6 +66,75 @@ function fold(rows: ReadonlyArray<OrchestrationThreadActivity>) {
 }
 
 describe("foldSubagentActivities", () => {
+  it("retains last-turn facts separately from idle status and a subsequent activation", () => {
+    const lastTurn = {
+      turnId: "child-turn-1",
+      outcome: "completed",
+      completedAt: "2026-08-31T00:49:58.000Z",
+      durationMs: 11592,
+      result: "CHILD_A_COMPLETE",
+    };
+    const rows = [
+      activity("task.updated", { taskId: "child", status: "idle", lastTurn }),
+      activity("task.updated", { taskId: "child", title: "Child" }),
+    ];
+    expect(fold(rows)[0]).toMatchObject({ status: "idle", completedAt: null, lastTurn });
+    const resumed = fold([
+      ...rows,
+      activity("task.updated", { taskId: "child", status: "running" }),
+      activity("task.progress", { taskId: "child", summary: "New work" }),
+    ])[0];
+    expect(resumed).toMatchObject({ status: "running", lastTurn, progress: "New work" });
+    expect(resumed?.result).toBeNull();
+  });
+
+  it("keeps last-turn facts idempotent and ignores older or invalid completion data", () => {
+    const lastTurn = {
+      turnId: "newer",
+      outcome: "completed",
+      completedAt: "2026-08-31T00:50:00.000Z",
+      durationMs: 0,
+      result: "First result",
+    };
+    const agent = fold([
+      activity("task.updated", { taskId: "child", status: "idle", lastTurn }),
+      activity("task.updated", { taskId: "child", lastTurn: { ...lastTurn, result: "Duplicate" } }),
+      activity("task.updated", {
+        taskId: "child",
+        lastTurn: { ...lastTurn, turnId: "older", completedAt: "2026-08-31T00:49:00.000Z" },
+      }),
+      activity("task.updated", {
+        taskId: "child",
+        lastTurn: { turnId: "invalid", outcome: "running" },
+      }),
+    ])[0];
+    expect(agent?.lastTurn).toEqual(lastTurn);
+  });
+
+  it("replaces last-turn facts for a newer completion and bounds retained output", () => {
+    const agent = fold([
+      activity("task.updated", {
+        taskId: "child",
+        lastTurn: { turnId: "first", outcome: "completed", result: "Old result" },
+      }),
+      activity("task.updated", {
+        taskId: "child",
+        status: "idle",
+        lastTurn: {
+          turnId: "second",
+          outcome: "completed",
+          result: "x".repeat(20000),
+          durationMs: -1,
+          completedAt: "invalid",
+        },
+      }),
+    ])[0];
+    expect(agent?.lastTurn?.turnId).toBe("second");
+    expect(agent?.lastTurn?.result).toHaveLength(16000);
+    expect(agent?.lastTurn?.durationMs).toBeUndefined();
+    expect(agent?.lastTurn?.completedAt).toBeUndefined();
+  });
+
   it("builds an agent from start → progress → completion", () => {
     const agents = fold([
       activity("task.started", {
@@ -541,6 +610,22 @@ describe("deriveAgentPanelModel", () => {
     ];
     expect(allIds).toContain("v2-only");
     expect(allIds).not.toContain("direct-1");
+  });
+
+  it("exposes native parent names without changing stable first-seen order", () => {
+    const agents = fold([
+      activity("task.started", { taskId: "child", title: "Child", parentAgentId: "root" }),
+      activity("task.started", { taskId: "sibling", title: "Sibling", parentAgentId: "root" }),
+      activity("task.started", {
+        taskId: "grandchild",
+        title: "Grandchild",
+        parentAgentId: "child",
+      }),
+    ]);
+    const rows = deriveAgentPanelModel({ agents }).directAgents;
+    expect(rows.map((agent) => agent.id)).toEqual(["child", "sibling", "grandchild"]);
+    expect(rows[2]).toMatchObject({ parentAgentId: "child", parentTitle: "Child" });
+    expect(rows[0]).not.toHaveProperty("parentTitle");
   });
 
   it("orphaned members fall back to the direct list", () => {

@@ -17,7 +17,7 @@
  * folding (completion can create an agent; a late start only fills
  * metadata).
  */
-import type { OrchestrationThreadActivity } from "@t3tools/contracts";
+import type { OrchestrationThreadActivity, RuntimeTaskLastTurn } from "@t3tools/contracts";
 
 export type RuntimeSubagentStatus =
   | "pending"
@@ -86,6 +86,7 @@ export interface RuntimeSubagent {
   readonly firstSeenAt: string;
   readonly startedAt: string | null;
   readonly completedAt: string | null;
+  readonly lastTurn?: RuntimeTaskLastTurn;
   readonly updatedAt: string;
 }
 
@@ -257,6 +258,7 @@ interface MutableAgent {
   firstSeenAt: string;
   startedAt: string | null;
   completedAt: string | null;
+  lastTurn?: RuntimeTaskLastTurn;
   updatedAt: string;
 }
 
@@ -457,6 +459,29 @@ function asRuntimeStatus(value: unknown): RuntimeSubagentStatus | undefined {
     : undefined;
 }
 
+/** Persisted legacy activities are untyped; accept only reported terminal-turn facts. */
+function asLastTurn(value: unknown): RuntimeTaskLastTurn | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const record = value as Record<string, unknown>;
+  const turnId = asString(record.turnId);
+  const outcome = record.outcome;
+  if (!turnId || (outcome !== "completed" && outcome !== "failed" && outcome !== "interrupted")) {
+    return undefined;
+  }
+  const completedAt = asString(record.completedAt);
+  const durationMs = asCount(record.durationMs);
+  const result = asString(record.result);
+  const error = asString(record.error);
+  return {
+    turnId,
+    outcome,
+    ...(completedAt && Number.isFinite(Date.parse(completedAt)) ? { completedAt } : {}),
+    ...(durationMs !== undefined && Number.isSafeInteger(durationMs) ? { durationMs } : {}),
+    ...(result ? { result: bounded(result, DETAIL_CHAR_LIMIT) } : {}),
+    ...(error ? { error: bounded(error, DETAIL_CHAR_LIMIT) } : {}),
+  };
+}
+
 /**
  * Folds a thread's persisted activities into subagent state. Tolerant by
  * construction: malformed rows are skipped individually; unknown kinds are
@@ -565,6 +590,18 @@ export function foldSubagentActivities(
         const wasTerminal = isTerminalSubagentStatus(agent.status);
         const status = asRuntimeStatus(payload.status);
         if (status) applyStatus(agent, status, at);
+        const lastTurn = asLastTurn(payload.lastTurn);
+        if (lastTurn) {
+          if (agent.lastTurn?.turnId === lastTurn.turnId) {
+            agent.lastTurn = { ...lastTurn, ...agent.lastTurn };
+          } else if (
+            !agent.lastTurn?.completedAt ||
+            !lastTurn.completedAt ||
+            Date.parse(lastTurn.completedAt) >= Date.parse(agent.lastTurn.completedAt)
+          ) {
+            agent.lastTurn = lastTurn;
+          }
+        }
         const error = asString(payload.error);
         if (error) agent.error = bounded(error, DETAIL_CHAR_LIMIT);
         // Provider end time beats ingestion time for the transition that
@@ -703,7 +740,7 @@ export interface AgentPanelWorkflowGroup {
 
 export interface AgentPanelModel {
   readonly workflows: ReadonlyArray<AgentPanelWorkflowGroup>;
-  readonly directAgents: ReadonlyArray<RuntimeSubagent>;
+  readonly directAgents: ReadonlyArray<RuntimeSubagent & { readonly parentTitle?: string }>;
   readonly runningCount: number;
   readonly waitingCount: number;
   readonly idleCount: number;
@@ -752,6 +789,7 @@ export function deriveAgentPanelModel({
     .slice()
     .sort((a, b) => a.firstSeenAt.localeCompare(b.firstSeenAt) || a.id.localeCompare(b.id));
   const workflowIds = new Set(workflows.map((workflow) => workflow.id));
+  const agentsById = new Map(source.map((agent) => [agent.id, agent]));
   const members = new Map<string, RuntimeSubagent[]>();
   const direct: RuntimeSubagent[] = [];
 
@@ -856,7 +894,11 @@ export function deriveAgentPanelModel({
     // that remain visible.
     directAgents: direct
       .slice()
-      .sort((a, b) => a.firstSeenAt.localeCompare(b.firstSeenAt) || a.id.localeCompare(b.id)),
+      .sort((a, b) => a.firstSeenAt.localeCompare(b.firstSeenAt) || a.id.localeCompare(b.id))
+      .map((agent) => {
+        const parent = agent.parentAgentId ? agentsById.get(agent.parentAgentId) : undefined;
+        return parent && parent.id !== agent.id ? { ...agent, parentTitle: parent.title } : agent;
+      }),
     runningCount,
     waitingCount,
     idleCount,

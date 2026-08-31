@@ -107,11 +107,18 @@ function AgentElapsed({ agent }: { agent: RuntimeSubagent }) {
   }, [live, startedAt]);
 
   if (!startedAt) {
-    return null;
+    return !live && agent.lastTurn?.durationMs !== undefined ? (
+      <span className="tabular-nums">{formatElapsedSeconds(agent.lastTurn.durationMs / 1000)}</span>
+    ) : null;
   }
   return (
     <span ref={textRef} className="tabular-nums">
-      {elapsedBetween(startedAt, live ? null : agent.completedAt)}
+      {!live && agent.lastTurn?.durationMs !== undefined
+        ? formatElapsedSeconds(agent.lastTurn.durationMs / 1000)
+        : elapsedBetween(
+            startedAt,
+            live ? null : (agent.lastTurn?.completedAt ?? agent.completedAt),
+          )}
     </span>
   );
 }
@@ -141,15 +148,28 @@ function agentActivityText(agent: RuntimeSubagent): string | null {
 }
 
 /** Fixed-height status row; details open without rearranging the roster. */
-function AgentRow({ agent }: { agent: RuntimeSubagent }) {
+function AgentRow({
+  agent,
+  parentTitle,
+}: {
+  agent: RuntimeSubagent;
+  parentTitle?: string | undefined;
+}) {
   const visuals = STATUS_VISUALS[agent.status];
   const activity = agentActivityText(agent);
+  const showCurrentActivity =
+    agent.status === "running" ||
+    agent.status === "pending" ||
+    agent.status === "waiting" ||
+    (!agent.lastTurn?.result && !agent.lastTurn?.error);
   const modelLabel = formatSubagentModelLabel(agent.model, agent.effort);
   const role =
     agent.role?.trim().toLocaleLowerCase() === agent.title.trim().toLocaleLowerCase()
       ? null
       : agent.role;
   const metadata = [
+    parentTitle ? `via ${parentTitle}` : null,
+    agent.lastTurn && agent.status === "idle" ? `last turn ${agent.lastTurn.outcome}` : null,
     modelLabel,
     agent.usage ? `${formatSubagentTokenCount(agent.usage.totalTokens)} tok` : "— tok",
     agent.usage?.toolUses !== undefined ? `${agent.usage.toolUses} tools` : null,
@@ -209,10 +229,18 @@ function AgentRow({ agent }: { agent: RuntimeSubagent }) {
             {[
               ["Agent ID", agent.id],
               ["Parent agent", agent.parentAgentId],
+              ["Parent name", parentTitle],
               ["Event source thread", agent.providerThreadId],
               ["Provider turn", agent.providerTurnId],
               ["Started", agent.startedAt],
               ["Completed", agent.completedAt],
+              ["Last turn", agent.lastTurn?.turnId],
+              ["Last turn outcome", agent.lastTurn?.outcome],
+              ["Last turn completed", agent.lastTurn?.completedAt],
+              [
+                "Last turn duration",
+                agent.lastTurn?.durationMs !== undefined ? `${agent.lastTurn.durationMs} ms` : null,
+              ],
               ["Updated", agent.updatedAt],
             ].map(([label, value]) =>
               value ? (
@@ -223,17 +251,29 @@ function AgentRow({ agent }: { agent: RuntimeSubagent }) {
               ) : null,
             )}
           </dl>
-          <section className="mt-5">
-            <h3 className="mb-2 text-sm font-medium">
-              {agent.error ? "Error" : agent.result ? "Result" : "Latest activity"}
-            </h3>
-            <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">
-              {agent.error ??
-                agent.result ??
-                agent.progress ??
-                "No child output has been reported yet."}
-            </pre>
-          </section>
+          {showCurrentActivity ? (
+            <section className="mt-5">
+              <h3 className="mb-2 text-sm font-medium">
+                {agent.error ? "Error" : agent.result ? "Result" : "Latest activity"}
+              </h3>
+              <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">
+                {agent.error ??
+                  agent.result ??
+                  agent.progress ??
+                  "No child output has been reported yet."}
+              </pre>
+            </section>
+          ) : null}
+          {agent.lastTurn?.result || agent.lastTurn?.error ? (
+            <section className="mt-5">
+              <h3 className="mb-2 text-sm font-medium">
+                {agent.lastTurn.error ? "Last turn error" : "Last turn result"}
+              </h3>
+              <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">
+                {agent.lastTurn.error ?? agent.lastTurn.result}
+              </pre>
+            </section>
+          ) : null}
           {agent.recentActivity.length > 0 ? (
             <section className="mt-5">
               <h3 className="mb-2 text-sm font-medium">Recent activity</h3>
@@ -620,10 +660,10 @@ export function AgentsPanel({
           {model.directAgents.length > 0 ? (
             <section>
               <div className="px-1.5 pt-1 text-[.65rem] font-medium uppercase tracking-wider text-muted-foreground">
-                Direct spawns
+                Agents
               </div>
               {model.directAgents.map((agent) => (
-                <AgentRow key={agent.id} agent={agent} />
+                <AgentRow key={agent.id} agent={agent} parentTitle={agent.parentTitle} />
               ))}
             </section>
           ) : null}

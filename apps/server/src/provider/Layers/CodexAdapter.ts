@@ -22,6 +22,7 @@ import {
   RuntimeItemId,
   RuntimeRequestId,
   RuntimeTaskId,
+  type RuntimeTaskLastTurn,
   type RuntimeTaskUsage,
   ProviderApprovalDecision,
   ThreadId,
@@ -31,10 +32,12 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Queue from "effect/Queue";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -714,6 +717,34 @@ function mapCollabAgentEvent(
           : turnStatus === "interrupted"
             ? ("interrupted" as const)
             : ("idle" as const);
+      const completedAt =
+        typeof turn?.completedAt === "number"
+          ? DateTime.make(turn.completedAt * 1000).pipe(
+              Option.map(DateTime.formatIso),
+              Option.getOrUndefined,
+            )
+          : undefined;
+      const errorMessage =
+        typeof turnError?.message === "string"
+          ? trimText(turnError.message)?.slice(-16_000)
+          : undefined;
+      const lastTurn: RuntimeTaskLastTurn | undefined =
+        typeof turn?.id === "string" &&
+        turn.id.trim().length > 0 &&
+        (turnStatus === "completed" || turnStatus === "failed" || turnStatus === "interrupted")
+          ? {
+              turnId: turn.id,
+              outcome: turnStatus,
+              ...(completedAt ? { completedAt } : {}),
+              ...(typeof turn.durationMs === "number" &&
+              Number.isSafeInteger(turn.durationMs) &&
+              turn.durationMs >= 0
+                ? { durationMs: turn.durationMs }
+                : {}),
+              ...(summary ? { result: summary } : {}),
+              ...(errorMessage ? { error: errorMessage } : {}),
+            }
+          : undefined;
       return [
         ...(summary
           ? [
@@ -731,6 +762,7 @@ function mapCollabAgentEvent(
           payload: {
             taskId,
             status,
+            ...(lastTurn ? { lastTurn } : {}),
             ...(typeof turnError?.message === "string" ? { error: turnError.message } : {}),
             ...statusLinkage,
           },

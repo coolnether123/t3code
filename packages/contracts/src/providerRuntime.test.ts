@@ -6,6 +6,25 @@ import { classifyTaskAgentKind, ProviderRuntimeEvent } from "./providerRuntime.t
 const decodeRuntimeEvent = Schema.decodeUnknownSync(ProviderRuntimeEvent);
 
 describe("ProviderRuntimeEvent", () => {
+  it("keeps completed turn facts separate from a reusable idle task", () => {
+    const lastTurn = {
+      turnId: "child-turn",
+      outcome: "completed",
+      completedAt: "2026-08-31T00:49:58.000Z",
+      durationMs: 11592,
+      result: "CHILD_A_COMPLETE",
+    };
+    const parsed = decodeRuntimeEvent({
+      type: "task.updated",
+      eventId: "event-child-turn-completed",
+      provider: "codex",
+      createdAt: "2026-08-31T00:49:58.896Z",
+      threadId: "parent",
+      payload: { taskId: "child", status: "idle", lastTurn },
+    });
+    expect(parsed.payload).toMatchObject({ status: "idle", lastTurn });
+  });
+
   it("preserves the backend thread identity separately from the T3 thread", () => {
     const parsed = decodeRuntimeEvent({
       type: "session.started",
