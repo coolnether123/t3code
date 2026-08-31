@@ -860,6 +860,49 @@ function startLifecycleRuntime() {
 
 lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
   it.effect(
+    "persists correlated file-change approval detail without altering the wire request",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const eventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+        const payload = {
+          threadId: "provider-thread",
+          turnId: "provider-turn",
+          itemId: "patch-1",
+          reason: null,
+          grantRoot: null,
+          startedAtMs: 1,
+        };
+        const detail =
+          "1 proposed file change:\nADD A:\\project\\arithmetic.mjs\n\nChange 1 diff:\n+export const add = (a, b) => a + b;";
+        yield* runtime.emit({
+          id: asEventId("file-approval"),
+          kind: "request",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("provider-turn"),
+          itemId: asItemId("patch-1"),
+          requestId: ApprovalRequestId.make("approval-1"),
+          method: "item/fileChange/requestApproval",
+          requestKind: "file-change",
+          payload,
+          message: detail,
+        });
+        const event = Option.getOrThrow(yield* Fiber.join(eventFiber));
+        NodeAssert.equal(event.type, "request.opened");
+        if (event.type !== "request.opened") return;
+        NodeAssert.equal(event.payload.detail, detail);
+        NodeAssert.deepEqual(event.payload.args, payload);
+        NodeAssert.deepEqual(event.raw?.payload, payload);
+        const activity = runtimeEventToActivities(event)[0];
+        NodeAssert.ok(activity);
+        NodeAssert.equal(activity?.kind, "approval.requested");
+        NodeAssert.equal((activity.payload as { detail: string }).detail, detail);
+      }),
+  );
+
+  it.effect(
     "retains completed child output when reconstructing after metadata-only notifications",
     () =>
       Effect.gen(function* () {

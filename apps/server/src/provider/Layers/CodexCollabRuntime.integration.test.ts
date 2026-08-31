@@ -107,6 +107,107 @@ const peerPath = Effect.map(HostProcessPlatform, (platform) =>
 
 describe("CodexSessionRuntime collab integration", () => {
   it.effect(
+    "correlates null-reason file approvals only with the matching provider thread, turn, and item",
+    () =>
+      Effect.gen(function* () {
+        const requests = [
+          { threadId: CHILD_A, turnId: "approval-turn", itemId: "patch-item" },
+          { threadId: ROOT, turnId: "another-turn", itemId: "patch-item" },
+          { threadId: ROOT, turnId: "approval-turn", itemId: "another-item" },
+          { threadId: ROOT, turnId: "approval-turn", itemId: "patch-item" },
+        ];
+        NodeFS.writeFileSync(
+          scriptPath,
+          encodeScript({
+            rootThreadId: ROOT,
+            holdTurnOpen: true,
+            notifications: [
+              {
+                method: "item/started",
+                params: {
+                  threadId: ROOT,
+                  turnId: "approval-turn",
+                  startedAtMs: 1,
+                  item: {
+                    type: "fileChange",
+                    id: "patch-item",
+                    status: "inProgress",
+                    changes: [
+                      {
+                        path: "A:\\project\\arithmetic.mjs",
+                        kind: { type: "add" },
+                        diff: "export const add = (a, b) => a + b;",
+                      },
+                      {
+                        path: "A:\\project\\old.mjs",
+                        kind: { type: "update", move_path: "A:\\project\\new.mjs" },
+                        diff: "-old\n+new",
+                      },
+                    ],
+                  },
+                },
+              },
+              ...requests.map((request, index) => ({
+                id: `approval-${index}`,
+                method: "item/fileChange/requestApproval",
+                params: { ...request, reason: null, grantRoot: null, startedAtMs: 2 },
+              })),
+            ],
+          }),
+          "utf8",
+        );
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => NodeFS.rmSync(scriptPath, { force: true })),
+        );
+        const runtime = yield* makeCodexSessionRuntime({
+          threadId: ThreadId.make("approval-context-test"),
+          binaryPath: yield* peerPath,
+          cwd: NodeOS.tmpdir(),
+          runtimeMode: "approval-required",
+          environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: scriptPath },
+        });
+        const events = yield* runtime.events.pipe(
+          Stream.filter((event) => event.kind === "request"),
+          Stream.tap((event) =>
+            event.requestId ? runtime.respondToRequest(event.requestId, "decline") : Effect.void,
+          ),
+          Stream.take(4),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        yield* runtime.start();
+        yield* runtime.sendTurn({ input: "propose changes" });
+        const approvals = Array.from(yield* Fiber.join(events));
+        const matching = approvals.find((event) => {
+          const payload = event.payload as { threadId: string; turnId: string; itemId: string };
+          return (
+            payload.threadId === ROOT &&
+            payload.turnId === "approval-turn" &&
+            payload.itemId === "patch-item"
+          );
+        });
+        assert.include(matching?.message ?? "", "ADD A:\\project\\arithmetic.mjs");
+        assert.include(matching?.message ?? "", "export const add = (a, b) => a + b;");
+        assert.include(
+          matching?.message ?? "",
+          "UPDATE A:\\project\\old.mjs -> A:\\project\\new.mjs",
+        );
+        assert.include(matching?.message ?? "", "-old\n+new");
+        assert.deepEqual(matching?.payload, {
+          ...requests[3],
+          reason: null,
+          grantRoot: null,
+          startedAtMs: 2,
+        });
+        for (const approval of approvals.filter((event) => event !== matching)) {
+          assert.notInclude(approval.message ?? "", "arithmetic.mjs");
+          assert.include(approval.message ?? "", "unavailable");
+        }
+        yield* runtime.close;
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
     "steers the existing turn without applying turn overrides or starting a replacement",
     () =>
       Effect.gen(function* () {

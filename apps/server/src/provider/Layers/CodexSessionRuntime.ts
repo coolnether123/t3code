@@ -51,6 +51,7 @@ import {
 } from "../CodexDeveloperInstructions.ts";
 import { isWorkerLifecycleToolName } from "../../worker/WorkerThreadBoundary.ts";
 import { recoverCodexDenyReadAclState } from "./CodexSandboxRecovery.ts";
+import { makeCodexFileChangeApprovalContext } from "./CodexFileChangeApprovalContext.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
 
 const PROVIDER = ProviderDriverKind.make("codex");
@@ -1141,6 +1142,8 @@ export const makeCodexSessionRuntime = (
     const stderrChunks = yield* Queue.unbounded<string>();
     const pendingApprovalsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingApproval>());
     const approvalCorrelationsRef = yield* Ref.make(new Map<string, ApprovalCorrelation>());
+    const fileChangeApprovalContext = makeCodexFileChangeApprovalContext();
+    yield* Effect.addFinalizer(() => Effect.sync(() => fileChangeApprovalContext.clear()));
     const pendingUserInputsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingUserInput>());
     const collabReceiverTurnsRef = yield* Ref.make(new Map<string, TurnId>());
     const collabChildAgentsRef = yield* Ref.make(new Map<string, CollabChildAgentState>());
@@ -1830,6 +1833,15 @@ export const makeCodexSessionRuntime = (
 
     yield* client.handleServerRequest("item/fileChange/requestApproval", (payload) =>
       Effect.gen(function* () {
+        const changeDetail = fileChangeApprovalContext.take(payload);
+        const detail = [
+          payload.reason,
+          payload.grantRoot ? `Requested write root: ${payload.grantRoot}` : undefined,
+          changeDetail ??
+            "File-change details are unavailable for this request. Review the complete file-change item before approving.",
+        ]
+          .filter((part): part is string => typeof part === "string" && part.length > 0)
+          .join("\n\n");
         const requestId = ApprovalRequestId.make(
           yield* randomUUIDv4("file-change-approval-request"),
         );
@@ -1864,6 +1876,7 @@ export const makeCodexSessionRuntime = (
           kind: "request",
           threadId: options.threadId,
           method: "item/fileChange/requestApproval",
+          message: detail,
           requestId,
           requestKind: "file-change",
           ...(turnId ? { turnId } : {}),
@@ -2060,9 +2073,37 @@ export const makeCodexSessionRuntime = (
 
     const registerServerNotification = <M extends CodexRpc.ServerNotificationMethod>(method: M) =>
       client.handleServerNotification(method, (params) =>
-        Queue.offer(serverNotifications, makeCodexServerNotification(method, params)).pipe(
-          Effect.asVoid,
-        ),
+        Effect.gen(function* () {
+          const notification = makeCodexServerNotification(method, params);
+          // Capture before enqueueing UI work. The protocol awaits this callback
+          // before dispatching the following approval request.
+          switch (notification.method) {
+            case "item/started":
+              if (notification.params.item.type === "fileChange") {
+                fileChangeApprovalContext.remember(
+                  { ...notification.params, itemId: notification.params.item.id },
+                  notification.params.item.changes,
+                );
+              }
+              break;
+            case "item/completed":
+              fileChangeApprovalContext.discard({
+                ...notification.params,
+                itemId: notification.params.item.id,
+              });
+              break;
+            case "turn/completed":
+              fileChangeApprovalContext.discard({
+                threadId: notification.params.threadId,
+                turnId: notification.params.turn.id,
+              });
+              break;
+            case "thread/closed":
+              fileChangeApprovalContext.discard({ threadId: notification.params.threadId });
+              break;
+          }
+          yield* Queue.offer(serverNotifications, notification);
+        }),
       );
 
     yield* Effect.forEach(

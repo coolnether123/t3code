@@ -967,7 +967,7 @@ function mapToRuntimeEvents(
             EffectCodexSchema.ServerRequest__FileChangeRequestApprovalParams,
             event.payload,
           );
-          return payload?.reason ?? undefined;
+          return event.message ?? payload?.reason ?? undefined;
         }
         case "item/permissions/requestApproval": {
           const payload = readPayload(
