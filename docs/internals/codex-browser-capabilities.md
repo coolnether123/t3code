@@ -80,6 +80,11 @@ successfully called `sky.list_apps()` through its configured `node_repl` MCP
 server. That proves host reachability for that session. It does not prove that
 another instance, app, window, or later session is connected or approved.
 
+The same route also delivered the host's `Allow Codex to use notepad?` request
+through `mcpServer/elicitation/request`. T3 displayed it as a permission approval
+in both local and Tailscale clients. Window capture and input still require the
+user's app-permission decision; host discovery alone does not verify either.
+
 Follow the installed skill's initialization, runtime guidance, API reference,
 and confirmation policy. Select exactly one returned target window. Observe
 before acting and refresh after each action. Coordinate ownership of Windows

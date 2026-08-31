@@ -54,8 +54,13 @@ including when you connect remotely.
 
 Codex desktop Computer Use, the Codex built-in browser, and the Codex Chrome extension are separate
 capabilities. Installing those plugins does not connect their desktop host to T3. T3 does not offer
-them as working providers without that connection. Older saved **Full desktop** selections use the
-available T3 browser route; they do not grant Windows desktop control.
+them as working browser choices without that connection. A configured Computer Use skill can run
+through the Codex session independently of the browser choice. The agent must check its host
+connection and obtain app permission before controlling a window. Review that permission request
+in T3, and avoid using Windows foreground input while the agent controls the selected app.
+
+Older saved **Full desktop** selections use the available T3 browser route; they do not grant
+Windows desktop control.
 
 The `computer_open_url` tool can open a URL in your regular browser. Opening a URL does not give
 the agent a way to inspect or control that browser afterward.
