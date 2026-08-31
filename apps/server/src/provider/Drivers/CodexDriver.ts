@@ -27,6 +27,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
@@ -37,6 +38,8 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import { findInstalledChrome } from "../../browser/ChromeAutomation.ts";
 import { ComputerToolkit } from "../../mcp/toolkits/computer/tools.ts";
 import { PreviewToolkit } from "../../mcp/toolkits/preview/tools.ts";
+import { PreviewAutomationBroker } from "../../mcp/PreviewAutomationBroker.ts";
+import { ServerEnvironment } from "../../environment/ServerEnvironment.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeCodexAdapter } from "../Layers/CodexAdapter.ts";
 import { checkCodexProviderStatus, makePendingCodexProvider } from "../Layers/CodexProvider.ts";
@@ -85,6 +88,8 @@ export type CodexDriverEnv =
   | HttpClient.HttpClient
   | Path.Path
   | ProviderEventLoggers
+  | PreviewAutomationBroker
+  | ServerEnvironment
   | ServerConfig
   | ServerSettingsService;
 
@@ -126,6 +131,8 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
+      const previewBroker = yield* PreviewAutomationBroker;
+      const environmentId = yield* (yield* ServerEnvironment).getEnvironmentId;
       const processEnv = mergeProviderInstanceEnvironment(environment);
       const homeLayout = yield* resolveCodexHomeLayout(
         config.useDesktopAppDaemon ? { ...config, shadowHomePath: "" } : config,
@@ -188,12 +195,15 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const checkProvider = Effect.gen(function* () {
         const settings = yield* serverSettings.getSettings;
         const chromeExecutable = yield* findInstalledChrome();
+        const previewAvailable =
+          settings.enableAgentBrowserAccess &&
+          (yield* previewBroker.isBrowserAvailable(environmentId));
         return yield* checkCodexProviderStatus(effectiveConfig, undefined, processEnv, [
           {
             name: "t3-code",
             tools: {
               ...(chromeExecutable ? ComputerToolkit.tools : {}),
-              ...(settings.enableAgentBrowserAccess ? PreviewToolkit.tools : {}),
+              ...(previewAvailable ? PreviewToolkit.tools : {}),
             },
           },
         ]);
@@ -204,10 +214,33 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         Effect.provideService(Path.Path, path),
       );
       const snapshotSettings = makeProviderSnapshotSettingsSource(effectiveConfig, serverSettings);
-      const snapshot = yield* makeManagedServerProvider<ProviderSnapshotSettings<CodexSettings>>({
+      const getSnapshotSettings = Effect.gen(function* () {
+        const settings = yield* snapshotSettings.getSettings;
+        return {
+          ...settings,
+          previewAvailable:
+            settings.enableAgentBrowserAccess &&
+            (yield* previewBroker.isBrowserAvailable(environmentId)),
+        };
+      });
+      const snapshot = yield* makeManagedServerProvider<
+        ProviderSnapshotSettings<CodexSettings> & { readonly previewAvailable: boolean }
+      >({
         maintenanceCapabilities,
-        getSettings: snapshotSettings.getSettings,
-        streamSettings: snapshotSettings.streamSettings,
+        getSettings: getSnapshotSettings,
+        streamSettings: Stream.merge(
+          snapshotSettings.streamSettings,
+          previewBroker.streamBrowserAvailability(environmentId),
+        ).pipe(
+          Stream.filterMapEffect(() =>
+            getSnapshotSettings.pipe(
+              Effect.tapError((cause) =>
+                Effect.logWarning("failed to refresh Codex browser readiness", { cause }),
+              ),
+              Effect.result,
+            ),
+          ),
+        ),
         haveSettingsChanged: haveProviderSnapshotSettingsChanged,
         initialSnapshot: (settings) =>
           makePendingCodexProvider(settings.provider).pipe(Effect.map(stampIdentity)),
