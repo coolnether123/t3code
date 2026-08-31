@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import { buildCodexDeveloperInstructions } from "./CodexDeveloperInstructions.ts";
 
@@ -14,7 +14,9 @@ describe("Codex browser provider instructions", () => {
       );
       expect(instructions).not.toContain("computer_start");
       expect(instructions).not.toContain("preview_status");
-      expect(instructions).not.toMatch(/@oai\/sky|mcp__node_repl__js|explicitly trusts|unrestricted/);
+      expect(instructions).not.toMatch(
+        /@oai\/sky|mcp__node_repl__js|explicitly trusts|unrestricted/,
+      );
     }
   });
 
@@ -24,7 +26,9 @@ describe("Codex browser provider instructions", () => {
       { ...runtime, computerControlMode: "chrome", computerControlAvailable: true },
       false,
     );
-    expect(instructions).toMatch(/computer_start.*computer_status.*computer_tabs.*computer_select_tab/s);
+    expect(instructions).toMatch(
+      /computer_start.*computer_status.*computer_tabs.*computer_select_tab/s,
+    );
     expect(instructions).toMatch(/computer_navigate.*computer_snapshot.*computer_click/s);
     expect(instructions).toMatch(/computer_fill.*computer_type.*computer_close/s);
     expect(instructions).toContain("separate persistent Chrome profile");

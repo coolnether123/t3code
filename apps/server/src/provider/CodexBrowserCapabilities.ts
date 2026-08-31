@@ -33,26 +33,18 @@ const hasT3Tools = (
   servers.some(
     (server) =>
       server.name === "t3-code" &&
-      requiredTools.every((name) =>
-        Object.prototype.hasOwnProperty.call(server.tools, name),
-      ),
+      requiredTools.every((name) => Object.prototype.hasOwnProperty.call(server.tools, name)),
   );
 
 /** Tool availability does not imply that Chrome has started or that an action is approved. */
-export const hasT3ManagedChromeTools = (
-  servers: ReadonlyArray<CodexMcpToolInventory>,
-): boolean => hasT3Tools(servers, T3_MANAGED_CHROME_TOOLS);
+export const hasT3ManagedChromeTools = (servers: ReadonlyArray<CodexMcpToolInventory>): boolean =>
+  hasT3Tools(servers, T3_MANAGED_CHROME_TOOLS);
 
-export const hasT3PreviewBrowserTools = (
-  servers: ReadonlyArray<CodexMcpToolInventory>,
-): boolean => hasT3Tools(servers, T3_PREVIEW_BROWSER_TOOLS);
+export const hasT3PreviewBrowserTools = (servers: ReadonlyArray<CodexMcpToolInventory>): boolean =>
+  hasT3Tools(servers, T3_PREVIEW_BROWSER_TOOLS);
 
 export interface CodexBrowserCapability {
-  readonly id:
-    | "t3-managed-chrome"
-    | "codex-chrome"
-    | "codex-browser"
-    | "codex-computer-use";
+  readonly id: "t3-managed-chrome" | "codex-chrome" | "codex-browser" | "codex-computer-use";
   readonly label: string;
   readonly available: boolean;
   readonly reason: string;

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import {
   hasT3ManagedChromeTools,
@@ -12,10 +12,12 @@ const managedTools = Object.fromEntries(T3_MANAGED_CHROME_TOOLS.map((name) => [n
 
 describe("Codex browser capabilities", () => {
   it("discovers preview separately from managed Chrome", () => {
-    const servers = [{
-      name: "t3-code",
-      tools: Object.fromEntries(T3_PREVIEW_BROWSER_TOOLS.map((name) => [name, {}])),
-    }];
+    const servers = [
+      {
+        name: "t3-code",
+        tools: Object.fromEntries(T3_PREVIEW_BROWSER_TOOLS.map((name) => [name, {}])),
+      },
+    ];
     expect(hasT3PreviewBrowserTools(servers)).toBe(true);
     expect(hasT3ManagedChromeTools(servers)).toBe(false);
     expect(hasT3PreviewBrowserTools([{ name: "t3-code", tools: managedTools }])).toBe(false);
@@ -25,9 +27,9 @@ describe("Codex browser capabilities", () => {
   it("requires the complete tool catalog on the T3 MCP server", () => {
     expect(hasT3ManagedChromeTools([])).toBe(false);
     expect(hasT3ManagedChromeTools([{ name: "other", tools: managedTools }])).toBe(false);
-    expect(
-      hasT3ManagedChromeTools([{ name: "t3-code", tools: { computer_open_url: {} } }]),
-    ).toBe(false);
+    expect(hasT3ManagedChromeTools([{ name: "t3-code", tools: { computer_open_url: {} } }])).toBe(
+      false,
+    );
     for (const missing of T3_MANAGED_CHROME_TOOLS) {
       const tools = { ...managedTools };
       delete tools[missing];
@@ -58,9 +60,11 @@ describe("Codex browser capabilities", () => {
   });
 
   it("does not retain availability after the advertised tools disappear", () => {
-    expect(resolveCodexBrowserCapabilities([{ name: "t3-code", tools: managedTools }])[0]?.available)
-      .toBe(true);
-    expect(resolveCodexBrowserCapabilities([{ name: "t3-code", tools: {} }])[0]?.available)
-      .toBe(false);
+    expect(
+      resolveCodexBrowserCapabilities([{ name: "t3-code", tools: managedTools }])[0]?.available,
+    ).toBe(true);
+    expect(resolveCodexBrowserCapabilities([{ name: "t3-code", tools: {} }])[0]?.available).toBe(
+      false,
+    );
   });
 });

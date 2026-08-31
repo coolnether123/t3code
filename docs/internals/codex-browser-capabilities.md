@@ -6,14 +6,14 @@ not by itself give a T3 session browser or desktop control.
 
 ## Providers and ownership
 
-| Provider | State owner | T3 integration |
-| --- | --- | --- |
-| T3 managed Chrome | T3 server, separate persistent Chrome profile | T3 `computer_*` MCP toolkit |
-| T3 preview | T3 collaborative preview | T3 `preview_*` MCP toolkit |
-| Codex Chrome | OpenAI desktop host and browser extension, regular browser profile | No supported T3 host adapter implemented |
-| Codex built-in browser | OpenAI desktop host, separate browser profile | No supported T3 host adapter implemented |
-| Codex desktop Computer Use | OpenAI desktop host, app approvals, Windows foreground input | No supported T3 host adapter implemented |
-| Responses API computer use | The API integrator supplies screenshots and executes model actions | Not used by this integration |
+| Provider                   | State owner                                                        | T3 integration                           |
+| -------------------------- | ------------------------------------------------------------------ | ---------------------------------------- |
+| T3 managed Chrome          | T3 server, separate persistent Chrome profile                      | T3 `computer_*` MCP toolkit              |
+| T3 preview                 | T3 collaborative preview                                           | T3 `preview_*` MCP toolkit               |
+| Codex Chrome               | OpenAI desktop host and browser extension, regular browser profile | No supported T3 host adapter implemented |
+| Codex built-in browser     | OpenAI desktop host, separate browser profile                      | No supported T3 host adapter implemented |
+| Codex desktop Computer Use | OpenAI desktop host, app approvals, Windows foreground input       | No supported T3 host adapter implemented |
+| Responses API computer use | The API integrator supplies screenshots and executes model actions | Not used by this integration             |
 
 The OpenAI desktop documentation separates the
 [built-in browser](https://learn.chatgpt.com/docs/browser),
