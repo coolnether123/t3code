@@ -3,6 +3,14 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./attachmentIds": {
+      "types": "./src/attachmentIds.ts",
+      "import": "./src/attachmentIds.ts"
+    },
+    "./toolScreenshot": {
+      "types": "./src/toolScreenshot.ts",
+      "import": "./src/toolScreenshot.ts"
+    },
     "./themePalettes": {
       "types": "./src/themePalettes.ts",
       "import": "./src/themePalettes.ts"

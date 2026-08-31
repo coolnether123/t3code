@@ -21,6 +21,36 @@ function activity(payload: Record<string, unknown>): OrchestrationThreadActivity
  * assertions are the tripwire.
  */
 describe("projectActivityPayload", () => {
+  it("preserves screenshot pointers across repeated projection without image bytes", () => {
+    const screenshot = {
+      threadId: "thread-1",
+      attachmentId: "thread-1-12345678-1234-1234-1234-123456789abc",
+      mimeType: "image/png",
+      width: 1280,
+      height: 720,
+    };
+    const input = activity({
+      itemType: "mcp_tool_call",
+      data: {
+        item: {
+          tool: "computer_screenshot",
+          result: {
+            content: [
+              { type: "text", text: JSON.stringify({ screenshot }) },
+              { type: "image", mimeType: "image/png", data: "large-image-bytes".repeat(100_000) },
+            ],
+          },
+        },
+      },
+    });
+    const projected = projectActivityPayload(input);
+    expect(projected.payload).toMatchObject({
+      data: { item: { result: { screenshot, content: "Screenshot 1280 × 720" } } },
+    });
+    expect(projectActivityPayload(projected)).toEqual(projected);
+    expect(JSON.stringify(projected).length).toBeLessThan(1024);
+    expect(JSON.stringify(projected)).not.toContain("large-image-bytes");
+  });
   it("preserves tool attribution (agentId/parentToolUseId) through data slimming", () => {
     const projected = projectActivityPayload(
       activity({

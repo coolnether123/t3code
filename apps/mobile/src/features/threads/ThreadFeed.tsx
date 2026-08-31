@@ -1211,6 +1211,8 @@ function renderFeedEntry(
 
   return (
     <ThreadWorkLog
+      environmentId={props.environmentId}
+      onPressImage={props.onPressImage}
       activities={entry.activities}
       copiedRowId={props.copiedRowId}
       expandedRows={props.expandedWorkRows}

@@ -180,6 +180,42 @@ function makeThread(
 }
 
 describe("buildThreadFeed", () => {
+  it("exposes screenshot attachments only in their owning thread", () => {
+    const screenshot = {
+      threadId: ThreadId.make("thread-1"),
+      attachmentId: "thread-1-12345678-1234-1234-1234-123456789abc",
+      mimeType: "image/png",
+      width: 1280,
+      height: 720,
+    };
+    for (const id of ["thread-1", "thread-2"]) {
+      const feed = buildThreadFeed(
+        makeThread({
+          id: ThreadId.make(id),
+          projectId: ProjectId.make("project"),
+          title: "Screenshot",
+          activities: [
+            makeActivity({
+              id: EventId.make("screenshot"),
+              kind: "tool.completed",
+              summary: "Screenshot",
+              createdAt: "2026-08-30T00:00:00.000Z",
+              tone: "tool",
+              payload: {
+                itemType: "mcp_tool_call",
+                status: "completed",
+                data: { item: { tool: "computer_screenshot", result: { screenshot } } },
+              },
+            }),
+          ],
+        }),
+      );
+      const group = feed.find((entry) => entry.type === "activity-group");
+      expect(group?.type).toBe("activity-group");
+      if (group?.type === "activity-group")
+        expect(group.activities[0]?.screenshot).toEqual(id === "thread-1" ? screenshot : undefined);
+    }
+  });
   it("keeps diagnostics compact while exposing raw payload only in expanded details", () => {
     const thread = makeThread({
       id: ThreadId.make("thread-diagnostics"),

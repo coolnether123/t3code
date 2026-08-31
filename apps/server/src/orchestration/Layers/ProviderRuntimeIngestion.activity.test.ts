@@ -16,6 +16,63 @@ const base = {
 };
 
 describe("runtimeEventToActivities task progress", () => {
+  it.each(["item.started", "item.updated", "item.completed"] as const)(
+    "persists compact screenshot metadata for %s",
+    (type) => {
+      const screenshot = {
+        threadId: base.threadId,
+        attachmentId: "thread-1-12345678-1234-1234-1234-123456789abc",
+        mimeType: "image/png",
+        width: 1280,
+        height: 720,
+      };
+      const activities = runtimeEventToActivities({
+        ...base,
+        eventId: EventId.make("screenshot"),
+        type,
+        payload: {
+          itemType: "mcp_tool_call",
+          data: {
+            item: {
+              tool: "computer_screenshot",
+              result: {
+                structuredContent: { screenshot },
+                content: [{ type: "image", data: "large-image-bytes".repeat(100_000) }],
+              },
+            },
+          },
+        },
+      });
+      expect(activities[0]?.payload).toMatchObject({ data: { item: { result: { screenshot } } } });
+      expect(JSON.stringify(activities).length).toBeLessThan(1024);
+    },
+  );
+
+  it("drops screenshot pointers belonging to a different thread before persistence", () => {
+    const activities = runtimeEventToActivities({
+      ...base,
+      eventId: EventId.make("screenshot"),
+      type: "item.completed",
+      payload: {
+        itemType: "mcp_tool_call",
+        data: {
+          item: {
+            tool: "computer_screenshot",
+            result: {
+              screenshot: {
+                threadId: "thread-2",
+                attachmentId: "thread-2-12345678-1234-1234-1234-123456789abc",
+                mimeType: "image/png",
+                width: 1,
+                height: 1,
+              },
+            },
+          },
+        },
+      },
+    });
+    expect(activities[0]?.payload).not.toHaveProperty("data.item.result.screenshot");
+  });
   it("retains Codex child identity on every persisted lifecycle snapshot", () => {
     const taskId = RuntimeTaskId.make("codex-child");
     const providerRefs = {

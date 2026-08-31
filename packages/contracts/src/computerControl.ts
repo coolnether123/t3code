@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import { ThreadId } from "./baseSchemas.ts";
 
 const HttpUrl = Schema.String.check(Schema.isTrimmed())
   .check(Schema.isNonEmpty())
@@ -106,6 +107,20 @@ export const ComputerChromeScreenshot = Schema.Struct({
   ),
 });
 export type ComputerChromeScreenshot = typeof ComputerChromeScreenshot.Type;
+
+/** Persisted image pointer, without image bytes, host paths, or expiring access tokens. */
+export const ToolScreenshot = Schema.Struct({
+  threadId: ThreadId,
+  attachmentId: Schema.String.check(Schema.isMaxLength(117)).check(
+    Schema.isPattern(
+      /^[a-z0-9_]+(?:-[a-z0-9_]+)*-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    ),
+  ),
+  mimeType: Schema.Literal("image/png"),
+  width: ComputerChromeScreenshot.fields.width,
+  height: ComputerChromeScreenshot.fields.height,
+});
+export type ToolScreenshot = typeof ToolScreenshot.Type;
 
 export const ComputerChromeEmptyInput = Schema.Struct({});
 export type ComputerChromeEmptyInput = typeof ComputerChromeEmptyInput.Type;

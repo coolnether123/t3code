@@ -807,6 +807,8 @@ it.layer(
       const removeAttachmentId = "thread-revert-files-00000000-0000-4000-8000-000000000002";
       const otherThreadAttachmentId =
         "thread-revert-files-extra-00000000-0000-4000-8000-000000000003";
+      const keepScreenshotId = "thread-revert-files-00000000-0000-4000-8000-000000000004";
+      const removeScreenshotId = "thread-revert-files-00000000-0000-4000-8000-000000000005";
 
       const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
         eventStore
@@ -968,9 +970,57 @@ it.layer(
 
       const keepPath = path.join(attachmentsDir, `${keepAttachmentId}.png`);
       const removePath = path.join(attachmentsDir, `${removeAttachmentId}.png`);
+      for (const [suffix, attachmentId, turnId] of [
+        ["keep", keepScreenshotId, TurnId.make("turn-keep")],
+        ["remove", removeScreenshotId, TurnId.make("turn-remove")],
+      ] as const) {
+        yield* appendAndProject({
+          type: "thread.activity-appended",
+          eventId: EventId.make(`screenshot-${suffix}`),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: CommandId.make(`screenshot-${suffix}`),
+          causationEventId: null,
+          correlationId: CorrelationId.make(`screenshot-${suffix}`),
+          metadata: {},
+          payload: {
+            threadId,
+            activity: {
+              id: EventId.make(`screenshot-${suffix}`),
+              kind: "tool.completed",
+              tone: "tool",
+              summary: "Screenshot",
+              createdAt: now,
+              turnId,
+              payload: {
+                itemType: "mcp_tool_call",
+                data: {
+                  item: {
+                    tool: "computer_screenshot",
+                    result: {
+                      screenshot: {
+                        threadId,
+                        attachmentId,
+                        mimeType: "image/png",
+                        width: 1,
+                        height: 1,
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        });
+      }
+      const keepScreenshotPath = path.join(attachmentsDir, `${keepScreenshotId}.png`);
+      const removeScreenshotPath = path.join(attachmentsDir, `${removeScreenshotId}.png`);
       yield* fileSystem.makeDirectory(attachmentsDir, { recursive: true });
       yield* fileSystem.writeFileString(keepPath, "keep");
       yield* fileSystem.writeFileString(removePath, "remove");
+      yield* fileSystem.writeFileString(keepScreenshotPath, "keep screenshot");
+      yield* fileSystem.writeFileString(removeScreenshotPath, "remove screenshot");
       const otherThreadPath = path.join(attachmentsDir, `${otherThreadAttachmentId}.png`);
       yield* fileSystem.writeFileString(otherThreadPath, "other");
       assert.isTrue(yield* exists(keepPath));
@@ -996,6 +1046,8 @@ it.layer(
       assert.isTrue(yield* exists(keepPath));
       assert.isFalse(yield* exists(removePath));
       assert.isTrue(yield* exists(otherThreadPath));
+      assert.isTrue(yield* exists(keepScreenshotPath));
+      assert.isFalse(yield* exists(removeScreenshotPath));
     }),
   );
 });

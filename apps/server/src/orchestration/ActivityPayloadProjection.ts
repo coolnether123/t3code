@@ -5,6 +5,7 @@ import {
   type OrchestrationThreadDetailSnapshot,
   type T3WorkerToolName,
 } from "@t3tools/contracts";
+import { isChromeScreenshotTool, readToolScreenshot } from "@t3tools/shared/toolScreenshot";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -448,7 +449,10 @@ function projectT3WorkerResult(
  * keep the expanded-row UI working. Keep the fields the UI actually renders
  * and summarize the result like regular tool output.
  */
-function projectMcpToolCallData(data: Record<string, unknown>): Record<string, unknown> {
+function projectMcpToolCallData(
+  data: Record<string, unknown>,
+  threadId?: string,
+): Record<string, unknown> {
   const projectedData: Record<string, unknown> = {};
 
   const item = asRecord(data.item);
@@ -460,9 +464,14 @@ function projectMcpToolCallData(data: Record<string, unknown>): Record<string, u
       }
     }
     const workerToolName = t3WorkerToolName(item.tool);
-    const result = workerToolName
-      ? (projectT3WorkerResult(workerToolName, item.result) ?? summarizeMcpResult(item.result))
-      : summarizeMcpResult(item.result);
+    const screenshot = isChromeScreenshotTool(item.tool)
+      ? readToolScreenshot(item.result, threadId)
+      : null;
+    const result = screenshot
+      ? { screenshot, content: `Screenshot ${screenshot.width} × ${screenshot.height}` }
+      : workerToolName
+        ? (projectT3WorkerResult(workerToolName, item.result) ?? summarizeMcpResult(item.result))
+        : summarizeMcpResult(item.result);
     if (result) {
       projectedItem.result = result;
     }
@@ -477,9 +486,14 @@ function projectMcpToolCallData(data: Record<string, unknown>): Record<string, u
   }
   if (!item) {
     const workerToolName = t3WorkerToolName(data.toolName);
-    const result = workerToolName
-      ? (projectT3WorkerResult(workerToolName, data.result) ?? summarizeMcpResult(data.result))
-      : summarizeMcpResult(data.result);
+    const screenshot = isChromeScreenshotTool(data.toolName)
+      ? readToolScreenshot(data.result, threadId)
+      : null;
+    const result = screenshot
+      ? { screenshot, content: `Screenshot ${screenshot.width} × ${screenshot.height}` }
+      : workerToolName
+        ? (projectT3WorkerResult(workerToolName, data.result) ?? summarizeMcpResult(data.result))
+        : summarizeMcpResult(data.result);
     if (result) {
       projectedData.result = result;
     }
@@ -499,6 +513,14 @@ function projectMcpToolCallData(data: Record<string, unknown>): Record<string, u
   }
 
   return projectedData;
+}
+
+/** Screenshots persist only their attachment pointer, including terminal tool activities. */
+export function projectChromeScreenshotData(data: unknown, threadId: string): unknown {
+  const source = asRecord(data);
+  if (!source || !isChromeScreenshotTool(asRecord(source.item)?.tool ?? source.toolName))
+    return data;
+  return projectMcpToolCallData(source, threadId);
 }
 
 function projectRawOutput(value: unknown): Record<string, unknown> | undefined {

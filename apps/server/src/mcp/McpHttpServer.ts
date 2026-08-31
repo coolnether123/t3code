@@ -25,6 +25,7 @@ import {
   ComputerScreenshotTool,
 } from "./toolkits/computer/tools.ts";
 import * as ChromeAutomation from "../browser/ChromeAutomation.ts";
+import { makeChromeScreenshotStore } from "../browser/ChromeScreenshotStore.ts";
 import {
   PreviewSnapshotToolkitHandlersLive,
   PreviewStandardToolkitHandlersLive,
@@ -242,6 +243,7 @@ const registerComputerScreenshot = Effect.fn("McpHttpServer.registerComputerScre
   function* () {
     const server = yield* McpServer.McpServer;
     const automation = yield* ChromeAutomation.ChromeAutomation;
+    const storeScreenshot = yield* makeChromeScreenshotStore();
     const built = yield* ComputerScreenshotToolkit;
     const tool = ComputerScreenshotTool;
     yield* server.addTool({
@@ -268,12 +270,18 @@ const registerComputerScreenshot = Effect.fn("McpHttpServer.registerComputerScre
             Stream.unwrap,
             Stream.run(Sink.last()),
             Effect.flatMap(Effect.fromOption),
+            Effect.flatMap(({ encodedResult }) =>
+              storeScreenshot(invocation.threadId, encodedResult as ComputerChromeScreenshot).pipe(
+                Effect.map((screenshot) => ({ encodedResult, screenshot })),
+              ),
+            ),
             Effect.provideService(ChromeAutomation.ChromeAutomation, automation),
             Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
             Effect.matchCauseEffect({
               onFailure: (cause) => browserImageFailure(cause, "screenshot", "Chrome screenshot"),
-              onSuccess: ({ encodedResult }) => {
-                const { data, ...metadata } = encodedResult as ComputerChromeScreenshot;
+              onSuccess: ({ encodedResult, screenshot }) => {
+                const { data, ...captureMetadata } = encodedResult as ComputerChromeScreenshot;
+                const metadata = { ...captureMetadata, screenshot };
                 return Effect.succeed(
                   new McpSchema.CallToolResult({
                     isError: false,

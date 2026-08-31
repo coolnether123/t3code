@@ -9,6 +9,8 @@ import type {
   UserInputQuestion,
 } from "@t3tools/contracts";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
+import { toolScreenshotFromItem } from "@t3tools/shared/toolScreenshot";
+import type { ToolScreenshot } from "@t3tools/contracts";
 
 import * as Arr from "effect/Array";
 import * as Order from "effect/Order";
@@ -32,6 +34,7 @@ export interface PendingUserInputDraftAnswer {
 }
 
 export interface ThreadFeedActivity {
+  readonly screenshot?: ToolScreenshot;
   readonly id: string;
   readonly createdAt: string;
   readonly turnId: TurnId | null;
@@ -1615,6 +1618,7 @@ export function buildThreadFeed(
           );
         })
         .map<RawThreadFeedEntry>((entry) => {
+          const screenshot = toolScreenshotFromItem(entry.toolData, thread.id);
           const summary = workEntryHeading(entry);
           const detail = workEntryPreview(entry);
           const getFullDetail = memoizeValue(() => buildWorkEntryExpandedBody(entry));
@@ -1642,6 +1646,7 @@ export function buildThreadFeed(
               icon: workEntryIcon(entry),
               toolLike: workLogEntryIsToolLike(entry),
               status: workEntryStatus(entry),
+              ...(screenshot === null ? {} : { screenshot }),
             },
           };
         }),
