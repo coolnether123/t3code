@@ -31,10 +31,13 @@ tool as a connected Codex Chrome provider.
 
 `CodexDriver.ts` builds the Browser provider choices from routes T3 can provision.
 Managed Chrome requires a discovered executable and the registered `computer_*`
-toolkit. Preview requires `enableAgentBrowserAccess` and its registered toolkit.
+toolkit. Preview requires `enableAgentBrowserAccess`, its registered toolkit, and
+a connected desktop host in the same environment that supports the core browser
+operations.
 The driver checks executable paths without launching Chrome or reading its
-profile. Provider refresh rechecks discovery, and a Preview setting change
-refreshes the choices. If neither route is available, no browser selector appears.
+profile. Provider refresh rechecks discovery. Preview setting changes and desktop
+host connections, replacements, and disconnections refresh the choices. If neither
+route is available, no browser selector appears.
 
 `CodexBrowserCapabilities.ts` checks tool names for both the provider catalog and
 the thread-scoped inventory from `mcpServerStatus/list`. Before each turn, the
