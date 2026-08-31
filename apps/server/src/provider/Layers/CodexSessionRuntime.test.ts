@@ -557,10 +557,11 @@ describe("buildCodexDeveloperInstructions", () => {
 });
 
 describe("T3 browser developer instructions", () => {
-  it("does not invent desktop control or blanket consent by default", () => {
+  it("does not invent desktop control or blanket consent for the legacy desktop preference", () => {
     const instructions = buildCodexDeveloperInstructions("default", {
       model: "gpt-5.6-sol",
       reasoningEffort: "high",
+      computerControlMode: "desktop",
     });
 
     NodeAssert.match(instructions, /does not attach Codex desktop Computer Use/);
