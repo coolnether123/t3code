@@ -109,6 +109,27 @@ beforeEach(() => {
 });
 
 describe("UsagePage hourly breakdown", () => {
+  it("distinguishes API Fast Mode estimates, user corrections and unknown history", () => {
+    const view = testState.useUsage();
+    testState.useUsage.mockReturnValue({
+      ...view,
+      merged: {
+        ...view.merged,
+        codexServiceTiers: {
+          fastCostUsd: 24,
+          fastRecords: 9,
+          userReportedRecords: 3,
+          unknownRecords: 7,
+        },
+      },
+    });
+    const markup = renderToStaticMarkup(<UsagePage />);
+    expect(markup).toContain('aria-label="Codex Fast Mode accounting"');
+    expect(markup).toContain("$24.00");
+    expect(markup).toContain("3 responses use a user-reported Fast Mode window");
+    expect(markup).toContain("7 Codex responses have no speed metadata");
+    expect(markup).toContain("2.5× Codex credits");
+  });
   it("makes only Codex's provider row open its usage and reset details", () => {
     const view = testState.useUsage();
     testState.useUsage.mockReturnValue({

@@ -212,6 +212,7 @@ describe("CodexSessionRuntime collab integration", () => {
     () =>
       Effect.gen(function* () {
         const turnId = "existing-provider-turn";
+        const observedTiers: Array<{ sessionId: string; turnId: string; serviceTier: string }> = [];
         NodeFS.writeFileSync(
           scriptPath,
           encodeScript({
@@ -228,6 +229,10 @@ describe("CodexSessionRuntime collab integration", () => {
         );
         const runtime = yield* makeCodexSessionRuntime({
           threadId: ThreadId.make("steer-thread"),
+          onTurnServiceTier: (observation) =>
+            Effect.sync(() => {
+              observedTiers.push(observation);
+            }),
           binaryPath: yield* peerPath,
           cwd: NodeOS.tmpdir(),
           runtimeMode: "full-access",
@@ -244,15 +249,17 @@ describe("CodexSessionRuntime collab integration", () => {
           Effect.forkScoped,
         );
         yield* runtime.start();
-        yield* runtime.sendTurn({ input: "start work" });
+        yield* runtime.sendTurn({ input: "start work", serviceTier: "priority" });
         const result = yield* runtime.sendTurn({
           expectedTurnId: TurnId.make(turnId),
           input: "focus on tests",
           model: "ignored-model",
+          serviceTier: "default",
           interactionMode: "plan",
           computerControlMode: "desktop",
         });
         assert.equal(result.turnId, turnId);
+        assert.deepEqual(observedTiers, [{ sessionId: ROOT, turnId, serviceTier: "priority" }]);
         assert.deepEqual(result.resumeCursor, { threadId: ROOT });
         const captured = Array.from(yield* Fiber.join(wire))[0]?.payload as { params?: unknown };
         assert.deepEqual(captured.params, {

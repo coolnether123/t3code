@@ -62,6 +62,12 @@ export interface CostQuality {
 }
 
 export interface MergedUsage {
+  readonly codexServiceTiers?: {
+    readonly fastCostUsd: number;
+    readonly fastRecords: number;
+    readonly userReportedRecords: number;
+    readonly unknownRecords: number;
+  };
   readonly costUsd: number;
   readonly uncachedInputTokens: number;
   readonly cachedInputTokens: number;
@@ -233,6 +239,12 @@ export function mergeUsage(
   let cacheSavingsUsd = 0;
   let providerReportedRecords = 0;
   let unpricedRecords = 0;
+  const codexServiceTiers = {
+    fastCostUsd: 0,
+    fastRecords: 0,
+    userReportedRecords: 0,
+    unknownRecords: 0,
+  };
 
   const providerAccumulator = new Map<
     UsageProviderKind,
@@ -281,6 +293,16 @@ export function mergeUsage(
 
     for (const bucket of buckets) {
       const tokens = bucketTokens(bucket);
+      if (bucket.provider === "codex") {
+        if (bucket.serviceTier === "priority" || bucket.serviceTier === "fast") {
+          codexServiceTiers.fastCostUsd += bucket.costUsd;
+          codexServiceTiers.fastRecords += bucket.records;
+        }
+        if (bucket.serviceTierSource === "userReported")
+          codexServiceTiers.userReportedRecords += bucket.records;
+        if (bucket.serviceTier === undefined || bucket.serviceTier === "unknown")
+          codexServiceTiers.unknownRecords += bucket.records;
+      }
 
       costUsd += bucket.costUsd;
       cacheSavingsUsd += bucket.cacheSavingsUsd;
@@ -390,6 +412,7 @@ export function mergeUsage(
   );
 
   return {
+    codexServiceTiers,
     costUsd,
     uncachedInputTokens,
     cachedInputTokens,

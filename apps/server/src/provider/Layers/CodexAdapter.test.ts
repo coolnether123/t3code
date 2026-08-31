@@ -297,7 +297,10 @@ validationLayer("CodexAdapterLive validation", (it) => {
         runtimeMode: "full-access",
       });
 
-      NodeAssert.deepStrictEqual(validationRuntimeFactory.factory.mock.calls[0]?.[0], {
+      const { onTurnServiceTier, ...runtimeOptions } =
+        validationRuntimeFactory.factory.mock.calls[0]![0];
+      NodeAssert.equal(typeof onTurnServiceTier, "function");
+      NodeAssert.deepStrictEqual(runtimeOptions, {
         binaryPath: "codex",
         cwd: process.cwd(),
         launchArgs: "",

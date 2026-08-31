@@ -243,6 +243,30 @@ function ChartCard(props: {
           usage was free.
         </Text>
       ) : null}
+      {merged.codexServiceTiers ? (
+        <View className="gap-1" accessibilityLabel="Codex Fast Mode accounting">
+          <Text className="text-sm text-foreground-muted">
+            {formatUsd(merged.codexServiceTiers.fastCostUsd)} of this estimate is Codex Fast Mode,
+            across {formatCount(merged.codexServiceTiers.fastRecords)} responses.
+          </Text>
+          {merged.codexServiceTiers.userReportedRecords > 0 ? (
+            <Text className="text-sm text-foreground-muted">
+              {formatCount(merged.codexServiceTiers.userReportedRecords)} responses use a
+              user-reported Fast Mode window.
+            </Text>
+          ) : null}
+          {merged.codexServiceTiers.unknownRecords > 0 ? (
+            <Text className="text-sm text-foreground-muted">
+              {formatCount(merged.codexServiceTiers.unknownRecords)} Codex responses have no speed
+              metadata and use standard API rates.
+            </Text>
+          ) : null}
+          <Text className="text-sm text-foreground-muted">
+            GPT-5.6 Fast Mode uses 2.5× Codex credits and 2× API rates. The quota graph already
+            includes credit consumption.
+          </Text>
+        </View>
+      ) : null}
 
       {hasActivity ? (
         <UsageDailyChart

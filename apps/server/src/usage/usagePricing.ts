@@ -12,8 +12,8 @@ import type { UsageCostSource, UsageTokenTotals } from "@t3tools/contracts";
 /**
  * The subset of a LiteLLM entry we price against. All values are USD per token.
  *
- * Context-length tiers use each request's input count. Service tiers default to
- * standard rates; transcript token totals don't identify fast/flex/batch billing.
+ * Context-length and service tiers use each request's metadata. Missing service
+ * tier metadata retains the standard estimate and is identified in the UI.
  */
 export interface ModelRate {
   readonly inputCostPerToken: number;
@@ -22,12 +22,15 @@ export interface ModelRate {
   readonly cacheCreationCostPerToken: number | null;
   readonly above200kTokens?: ModelRate;
   readonly above272kTokens?: ModelRate;
+  readonly priority?: ModelRate;
+  readonly flex?: ModelRate;
 }
 
 export type RateTable = ReadonlyMap<string, ModelRate>;
 
 /** Raw shape of one LiteLLM entry, narrowed to the fields we read. */
 interface LiteLlmEntry {
+  readonly [key: string]: unknown;
   readonly input_cost_per_token?: unknown;
   readonly output_cost_per_token?: unknown;
   readonly cache_read_input_token_cost?: unknown;
@@ -69,7 +72,7 @@ export function parseRateTable(document: unknown): RateTable {
     const aboveOutput = finiteNumber(entry.output_cost_per_token_above_272k_tokens);
     const above200Input = finiteNumber(entry.input_cost_per_token_above_200k_tokens);
     const above200Output = finiteNumber(entry.output_cost_per_token_above_200k_tokens);
-    table.set(normalizeModelName(name), {
+    const rate: ModelRate = {
       inputCostPerToken: input,
       outputCostPerToken: output,
       cacheReadCostPerToken:
@@ -104,7 +107,57 @@ export function parseRateTable(document: unknown): RateTable {
             },
           }
         : {}),
-    });
+    };
+    const tiers: { priority?: ModelRate; flex?: ModelRate } = {};
+    for (const tier of ["priority", "flex"] as const) {
+      const tierInput = finiteNumber(entry[`input_cost_per_token_${tier}`]);
+      const tierOutput = finiteNumber(entry[`output_cost_per_token_${tier}`]);
+      if (tierInput === null || tierOutput === null) continue;
+      const contexts: { above200kTokens?: ModelRate; above272kTokens?: ModelRate } = {};
+      for (const limit of [200, 272] as const) {
+        const suffix = `_above_${limit}k_tokens_${tier}`;
+        const longInput = finiteNumber(entry[`input_cost_per_token${suffix}`]);
+        const longOutput = finiteNumber(entry[`output_cost_per_token${suffix}`]);
+        const standardLong = limit === 272 ? rate.above272kTokens : rate.above200kTokens;
+        if (longInput !== null && longOutput !== null) {
+          contexts[`above${limit}kTokens`] = {
+            inputCostPerToken: longInput,
+            outputCostPerToken: longOutput,
+            cacheReadCostPerToken: finiteNumber(entry[`cache_read_input_token_cost${suffix}`]),
+            cacheCreationCostPerToken: finiteNumber(
+              entry[`cache_creation_input_token_cost${suffix}`],
+            ),
+          };
+        } else if (
+          standardLong &&
+          tier === "priority" &&
+          /^(?:openai\/)?gpt-5\.6-(?:sol|terra|luna)$/.test(normalizeModelName(name))
+        ) {
+          // OpenAI Fast mode pricing, verified 2026-08-30: 2x at both context lengths.
+          // https://developers.openai.com/api/docs/pricing
+          contexts[`above${limit}kTokens`] = {
+            inputCostPerToken: standardLong.inputCostPerToken * 2,
+            outputCostPerToken: standardLong.outputCostPerToken * 2,
+            cacheReadCostPerToken:
+              standardLong.cacheReadCostPerToken === null
+                ? null
+                : standardLong.cacheReadCostPerToken * 2,
+            cacheCreationCostPerToken:
+              standardLong.cacheCreationCostPerToken === null
+                ? null
+                : standardLong.cacheCreationCostPerToken * 2,
+          };
+        }
+      }
+      tiers[tier] = {
+        inputCostPerToken: tierInput,
+        outputCostPerToken: tierOutput,
+        cacheReadCostPerToken: finiteNumber(entry[`cache_read_input_token_cost_${tier}`]),
+        cacheCreationCostPerToken: finiteNumber(entry[`cache_creation_input_token_cost_${tier}`]),
+        ...contexts,
+      };
+    }
+    table.set(normalizeModelName(name), { ...rate, ...tiers });
   }
   return table;
 }
@@ -158,11 +211,29 @@ export interface PricedUsage {
   readonly costSource: UsageCostSource;
 }
 
-function rateForTotals(rate: ModelRate, totals: UsageTokenTotals): ModelRate {
+function rateForTotals(
+  base: ModelRate,
+  totals: UsageTokenTotals,
+  serviceTier?: string,
+): ModelRate | null {
+  const tier = serviceTier === "fast" ? "priority" : serviceTier;
+  const rate =
+    tier === undefined || tier === "default"
+      ? base
+      : tier === "priority"
+        ? base.priority
+        : tier === "flex"
+          ? base.flex
+          : undefined;
+  if (rate === undefined) return null;
   const inputTokens =
     totals.uncachedInputTokens + totals.cachedInputTokens + totals.cacheCreationTokens;
-  if (inputTokens > 272_000 && rate.above272kTokens !== undefined) return rate.above272kTokens;
-  if (inputTokens > 200_000 && rate.above200kTokens !== undefined) return rate.above200kTokens;
+  if (inputTokens > 272_000 && (base.above272kTokens || rate.above272kTokens)) {
+    return rate.above272kTokens ?? null;
+  }
+  if (inputTokens > 200_000 && (base.above200kTokens || rate.above200kTokens)) {
+    return rate.above200kTokens ?? null;
+  }
   return rate;
 }
 
@@ -177,6 +248,7 @@ export function priceUsage(
   model: string,
   totals: UsageTokenTotals,
   reportedCostUsd: number | null,
+  serviceTier?: string,
 ): PricedUsage {
   if (reportedCostUsd !== null && finiteNumber(reportedCostUsd) !== null) {
     return { costUsd: reportedCostUsd, costSource: "providerReported" };
@@ -184,7 +256,8 @@ export function priceUsage(
 
   const baseRate = lookupRate(table, model);
   if (baseRate === null) return { costUsd: 0, costSource: "unpriced" };
-  const rate = rateForTotals(baseRate, totals);
+  const rate = rateForTotals(baseRate, totals, serviceTier);
+  if (rate === null) return { costUsd: 0, costSource: "unpriced" };
   if (
     (totals.cachedInputTokens > 0 && rate.cacheReadCostPerToken === null) ||
     (totals.cacheCreationTokens > 0 && rate.cacheCreationCostPerToken === null)
@@ -204,10 +277,15 @@ export function priceUsage(
  * What the cached input would have cost at full input rates, minus what it
  * actually cost. Drives the "cache savings" figure.
  */
-export function cacheSavingsUsd(table: RateTable, model: string, totals: UsageTokenTotals): number {
+export function cacheSavingsUsd(
+  table: RateTable,
+  model: string,
+  totals: UsageTokenTotals,
+  serviceTier?: string,
+): number {
   const baseRate = lookupRate(table, model);
   if (baseRate === null) return 0;
-  const rate = rateForTotals(baseRate, totals);
-  if (rate.cacheReadCostPerToken === null) return 0;
+  const rate = rateForTotals(baseRate, totals, serviceTier);
+  if (rate === null || rate.cacheReadCostPerToken === null) return 0;
   return totals.cachedInputTokens * (rate.inputCostPerToken - rate.cacheReadCostPerToken);
 }

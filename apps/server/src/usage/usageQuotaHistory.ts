@@ -161,7 +161,13 @@ export class QuotaCostAccumulator {
     }
     const row = this.rows[low];
     if (!row || record.timestampMs <= row.start) return;
-    const priced = priceUsage(this.rates, record.model, record.totals, record.reportedCostUsd);
+    const priced = priceUsage(
+      this.rates,
+      record.model,
+      record.totals,
+      record.reportedCostUsd,
+      record.serviceTier,
+    );
     row.costUsd += priced.costUsd;
     row.records++;
     if (priced.costSource === "unpriced") row.unpricedRecords++;

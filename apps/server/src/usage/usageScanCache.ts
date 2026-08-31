@@ -91,6 +91,8 @@ type SerializedRecord = readonly [
   reasoningTokens: number,
   dedupeKey: string | null,
   reportedCostUsd: number | null,
+  serviceTier?: string | null,
+  turnId?: string | null,
 ];
 
 interface SerializedFile {
@@ -98,7 +100,16 @@ interface SerializedFile {
   readonly m: number;
   readonly p: UsageProviderKind;
   readonly r: readonly SerializedRecord[];
-  readonly c?: readonly [string, string, string | null, boolean, boolean, number];
+  readonly c?: readonly [
+    string,
+    string,
+    string | null,
+    boolean,
+    boolean,
+    number,
+    (string | null)?,
+    (string | null)?,
+  ];
 }
 
 interface SerializedCache {
@@ -144,6 +155,8 @@ export function encodeScanCache(
               entry.codexState.sawSessionMeta,
               entry.codexState.suppressingForkCopies,
               entry.codexState.forkCopyAnchorMs,
+              entry.codexState.serviceTier ?? null,
+              entry.codexState.turnId ?? null,
             ] as const,
           }),
       r: entry.records.map((record) => [
@@ -157,6 +170,8 @@ export function encodeScanCache(
         record.totals.reasoningTokens,
         record.dedupeKey,
         record.reportedCostUsd,
+        record.serviceTier ?? null,
+        record.turnId ?? null,
       ]),
     };
   }
@@ -240,6 +255,8 @@ export function decodeScanCache(document: unknown): ScanCache {
         reasoning,
         dedupeKey,
         reportedCostUsd,
+        serviceTier,
+        turnId,
       ] = row as SerializedRecord;
 
       const model = typeof modelIndex === "number" ? models[modelIndex] : undefined;
@@ -270,6 +287,10 @@ export function decodeScanCache(document: unknown): ScanCache {
           reasoningTokens: reasoning,
         },
         reportedCostUsd: typeof reportedCostUsd === "number" ? reportedCostUsd : null,
+        ...(typeof serviceTier === "string"
+          ? { serviceTier, serviceTierSource: "transcript" as const }
+          : {}),
+        ...(typeof turnId === "string" ? { turnId } : {}),
         dedupeKey: typeof dedupeKey === "string" ? dedupeKey : null,
       });
     }
@@ -277,8 +298,16 @@ export function decodeScanCache(document: unknown): ScanCache {
     if (corrupt) continue;
     let codexState: CodexScanState | undefined;
     if (root.version === USAGE_SCAN_CACHE_VERSION && entry.c !== undefined) {
-      const [model, sessionId, lastUsageSignature, sawSessionMeta, suppressingForkCopies, anchor] =
-        entry.c;
+      const [
+        model,
+        sessionId,
+        lastUsageSignature,
+        sawSessionMeta,
+        suppressingForkCopies,
+        anchor,
+        serviceTier,
+        turnId,
+      ] = entry.c;
       if (
         typeof model !== "string" ||
         typeof sessionId !== "string" ||
@@ -297,6 +326,8 @@ export function decodeScanCache(document: unknown): ScanCache {
         sawSessionMeta,
         suppressingForkCopies,
         forkCopyAnchorMs: anchor,
+        ...(typeof serviceTier === "string" ? { serviceTier } : {}),
+        ...(typeof turnId === "string" ? { turnId } : {}),
       };
     }
     cache.set(path, {

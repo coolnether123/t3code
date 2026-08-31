@@ -7,6 +7,7 @@
  * @module usageTranscripts
  */
 import type { UsageProviderKind, UsageTokenTotals } from "@t3tools/contracts";
+import { normalizeServiceTier } from "./codexServiceTier.ts";
 
 export interface UsageRecord {
   readonly provider: UsageProviderKind;
@@ -15,6 +16,9 @@ export interface UsageRecord {
   readonly sessionId: string;
   readonly totals: UsageTokenTotals;
   readonly reportedCostUsd: number | null;
+  readonly serviceTier?: string;
+  readonly serviceTierSource?: "transcript" | "t3Request" | "userReported";
+  readonly turnId?: string;
   /**
    * Key for cross-file de-duplication, or `null` when the record is inherently
    * unique and needs no dedup.
@@ -323,6 +327,8 @@ export function parseOpenCodeMessageValue(
  */
 export interface CodexScanState {
   model: string;
+  serviceTier?: string | undefined;
+  turnId?: string | undefined;
   sessionId: string;
   lastUsageSignature: string | null;
   sawSessionMeta: boolean;
@@ -404,6 +410,11 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
 
   if (record["type"] === "turn_context") {
     if (typeof payloadRecord["model"] === "string") state.model = payloadRecord["model"];
+    state.serviceTier = normalizeServiceTier(
+      payloadRecord["service_tier"] ?? payloadRecord["serviceTier"],
+    );
+    state.turnId =
+      typeof payloadRecord["turn_id"] === "string" ? payloadRecord["turn_id"] : undefined;
     return null;
   }
 
@@ -457,10 +468,16 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
 
   if (totalTokens(totals) === 0) return null;
 
+  const tier =
+    normalizeServiceTier(
+      (info as Record<string, unknown>)["service_tier"] ?? payloadRecord["service_tier"],
+    ) ?? state.serviceTier;
   return {
     provider: "codex",
     timestampMs,
     model: state.model,
+    ...(state.turnId === undefined ? {} : { turnId: state.turnId }),
+    ...(tier === undefined ? {} : { serviceTier: tier, serviceTierSource: "transcript" as const }),
     sessionId: state.sessionId,
     totals,
     // Codex does not report cost in the rollout.

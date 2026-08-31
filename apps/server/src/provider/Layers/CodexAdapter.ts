@@ -66,6 +66,7 @@ import {
 import { type CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import { CODEX_TIER_JOURNAL } from "../../usage/codexServiceTier.ts";
 import { isWorkerLinkedProviderThreadId } from "../../worker/WorkerThreadBoundary.ts";
 import {
   CodexResumeCursorSchema,
@@ -1905,6 +1906,18 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           : [];
         const runtimeInput: CodexSessionRuntimeOptions = {
           threadId: input.threadId,
+          onTurnServiceTier: (observation) =>
+            fileSystem
+              .writeFileString(
+                `${serverConfig.stateDir}/${CODEX_TIER_JOURNAL}`,
+                `${JSON.stringify(observation)}\n`,
+                { flag: "a" },
+              )
+              .pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logWarning("Could not record Codex service tier", { cause }),
+                ),
+              ),
           providerInstanceId: boundInstanceId,
           cwd: input.cwd ?? process.cwd(),
           binaryPath: codexConfig.binaryPath,

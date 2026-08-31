@@ -52,6 +52,7 @@ import {
 import { isWorkerLifecycleToolName } from "../../worker/WorkerThreadBoundary.ts";
 import { recoverCodexDenyReadAclState } from "./CodexSandboxRecovery.ts";
 import { makeCodexFileChangeApprovalContext } from "./CodexFileChangeApprovalContext.ts";
+import { normalizeServiceTier, type CodexTierObservation } from "../../usage/codexServiceTier.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
 
 const PROVIDER = ProviderDriverKind.make("codex");
@@ -269,6 +270,7 @@ export interface CodexSessionRuntimeOptions {
   readonly runtimeMode: RuntimeMode;
   readonly model?: string;
   readonly serviceTier?: CodexServiceTier | undefined;
+  readonly onTurnServiceTier?: (observation: CodexTierObservation) => Effect.Effect<void>;
   readonly computerControlMode?: CodexComputerControlMode;
   readonly resumeCursor?: CodexResumeCursor;
   readonly appServerArgs?: ReadonlyArray<string>;
@@ -1200,6 +1202,7 @@ export const makeCodexSessionRuntime = (
     const collabChildLiveTurnsRef = yield* Ref.make(new Map<string, string>());
     const suppressMemoryConsolidationNotification = makeMemoryConsolidationNotificationFilter();
     const closedRef = yield* Ref.make(false);
+    let currentServiceTier = normalizeServiceTier(options.serviceTier);
 
     // `~` is not shell-expanded when env vars are set via
     // `child_process.spawn`; `expandHomePath` lets a configured
@@ -2273,6 +2276,7 @@ export const makeCodexSessionRuntime = (
       });
 
       const providerThreadId = opened.thread.id;
+      currentServiceTier = normalizeServiceTier(opened.serviceTier) ?? currentServiceTier;
       const session = {
         ...(yield* Ref.get(sessionRef)),
         status: "ready",
@@ -2387,6 +2391,14 @@ export const makeCodexSessionRuntime = (
             ),
           );
           const turnId = TurnId.make(response.turn.id);
+          currentServiceTier = normalizeServiceTier(input.serviceTier) ?? currentServiceTier;
+          if (options.onTurnServiceTier && currentServiceTier !== undefined) {
+            yield* options.onTurnServiceTier({
+              sessionId: providerThreadId,
+              turnId,
+              serviceTier: currentServiceTier,
+            });
+          }
           yield* updateSession(sessionRef, (session) => ({
             status: "running",
             // Codex accepts follow-ups while the current turn is still

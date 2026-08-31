@@ -260,6 +260,34 @@ export function UsagePage() {
                           not mean that usage was free.
                         </p>
                       ) : null}
+                      {merged.codexServiceTiers ? (
+                        <div
+                          className="mt-2 space-y-1 text-xs text-muted-foreground"
+                          aria-label="Codex Fast Mode accounting"
+                        >
+                          <p>
+                            {formatUsd(merged.codexServiceTiers.fastCostUsd)} of this estimate is
+                            Codex Fast Mode, across{" "}
+                            {formatCount(merged.codexServiceTiers.fastRecords)} responses.
+                          </p>
+                          {merged.codexServiceTiers.userReportedRecords > 0 ? (
+                            <p>
+                              {formatCount(merged.codexServiceTiers.userReportedRecords)} responses
+                              use a user-reported Fast Mode window.
+                            </p>
+                          ) : null}
+                          {merged.codexServiceTiers.unknownRecords > 0 ? (
+                            <p>
+                              {formatCount(merged.codexServiceTiers.unknownRecords)} Codex responses
+                              have no speed metadata and use standard API rates.
+                            </p>
+                          ) : null}
+                          <p>
+                            Fast Mode uses 2.5× Codex credits for GPT-5.6 and GPT-5.5, but API rates
+                            are separate. The quota graph already includes credit consumption.
+                          </p>
+                        </div>
+                      ) : null}
                     </div>
 
                     {activeProviders.map((provider) => {

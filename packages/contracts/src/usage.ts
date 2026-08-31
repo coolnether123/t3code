@@ -87,6 +87,11 @@ export const UsageBucket = Schema.Struct({
   hourStart: Schema.optional(TrimmedNonEmptyString),
   provider: UsageProviderKind,
   model: TrimmedNonEmptyString,
+  /** Omitted by older servers. Unknown metadata uses the standard estimate. */
+  serviceTier: Schema.optional(Schema.String),
+  serviceTierSource: Schema.optional(
+    Schema.Literals(["transcript", "t3Request", "userReported", "unknown"]),
+  ),
   totals: UsageTokenTotals,
   costUsd: Schema.Number,
   /**

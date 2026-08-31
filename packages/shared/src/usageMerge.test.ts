@@ -74,6 +74,39 @@ function environment(id: string, usageSummary: UsageSummary): EnvironmentUsage {
 }
 
 describe("mergeUsage", () => {
+  it("keeps Fast Mode provenance without double counting mirrored sources", () => {
+    const source = { provider: "codex" as const, hostId: "desktop", homePath: "/codex" };
+    const data = summary(
+      [
+        bucket({
+          provider: "codex",
+          serviceTier: "priority",
+          serviceTierSource: "userReported",
+          costUsd: 20,
+          records: 2,
+        }),
+        bucket({
+          provider: "codex",
+          serviceTier: "unknown",
+          serviceTierSource: "unknown",
+          costUsd: 10,
+          records: 3,
+        }),
+      ],
+      [source],
+    );
+    const merged = mergeUsage(
+      [environment("a", data), environment("b", data)],
+      USAGE_CONTRACT_VERSION,
+    );
+    expect(merged.costUsd).toBe(30);
+    expect(merged.codexServiceTiers).toEqual({
+      fastCostUsd: 20,
+      fastRecords: 2,
+      userReportedRecords: 2,
+      unknownRecords: 3,
+    });
+  });
   it("sums environments that read different transcript directories", () => {
     const merged = mergeUsage(
       [

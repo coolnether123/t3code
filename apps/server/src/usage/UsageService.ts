@@ -61,6 +61,13 @@ import {
   type ScanCoverage,
 } from "./usageScanCache.ts";
 import type { UsageRecord } from "./usageTranscripts.ts";
+import {
+  applyCodexServiceTier,
+  CODEX_FAST_WINDOWS,
+  CODEX_TIER_JOURNAL,
+  parseCodexFastWindows,
+  parseCodexTierJournal,
+} from "./codexServiceTier.ts";
 import { UsageSummaryCache, usageSummaryCacheKey } from "./usageSummaryCache.ts";
 import {
   QuotaCostAccumulator,
@@ -431,6 +438,21 @@ export const make = Effect.gen(function* () {
     const quotaCosts: UsageQuotaCost[] = [];
     yield* ensureRates();
     yield* ensureScanCacheLoaded;
+    const tierJournal = yield* fileSystem
+      .readFileString(path.join(config.stateDir, CODEX_TIER_JOURNAL))
+      .pipe(Effect.catchCause(() => Effect.succeed("")));
+    const tiers = parseCodexTierJournal(tierJournal);
+    const fastWindowText = yield* fileSystem
+      .readFileString(path.join(config.stateDir, CODEX_FAST_WINDOWS))
+      .pipe(Effect.catchCause(() => Effect.succeed("[]")));
+    const fastWindows = yield* Effect.try({
+      try: () => parseCodexFastWindows(fastWindowText),
+      catch: (cause) =>
+        new UsageReadError({
+          reason: "scanFailed",
+          detail: `Invalid local Codex Fast Mode windows: ${String(cause)}`,
+        }),
+    });
 
     const hostId = NodeOS.hostname();
     // The home resolvers ask for `Path` themselves; satisfy them from the
@@ -569,7 +591,8 @@ export const make = Effect.gen(function* () {
           continue;
         }
         scannedFiles += 1;
-        for (const record of records) {
+        for (const rawRecord of records) {
+          const record = applyCodexServiceTier(rawRecord, tiers, fastWindows);
           // Only sessions that contributed in-window count: the mtime slack
           // admits boundary files whose records fall outside the range.
           if (aggregator.add(record)) {
