@@ -1,6 +1,7 @@
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { resolveCommandPath } from "@t3tools/shared/shell";
 import * as Context from "effect/Context";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -9,9 +10,11 @@ import * as Semaphore from "effect/Semaphore";
 import { chromium, type Page } from "playwright-core";
 
 import * as ServerConfig from "../config.ts";
+import { collectSnapshotRefs } from "./ChromeSnapshot.ts";
 
 const PROFILE_DIRECTORY = "browser/chrome-profile";
 const DEFAULT_TIMEOUT_MS = 15_000;
+const MAX_TIMEOUT_MS = 120_000;
 const MAX_SNAPSHOT_CHARS = 100_000;
 const UNAVAILABLE_MESSAGE = "T3 managed Chrome is unavailable.";
 const INTERACTIVE_SELECTOR =
@@ -70,6 +73,7 @@ export interface ChromeAutomationLaunchOptions {
 
 export interface ChromeAutomationPageAdapter {
   readonly url: () => string;
+  readonly documentVersion: () => number;
   readonly title: () => Promise<string>;
   readonly goto: (
     url: string,
@@ -129,22 +133,25 @@ export class ChromeAutomation extends Context.Service<
     readonly navigate: (
       url: string,
       options?: {
+        readonly tabId?: string;
         readonly waitUntil?: "load" | "domcontentloaded" | "commit";
         readonly timeoutMs?: number;
       },
     ) => Effect.Effect<ChromeAutomationTab, ChromeAutomationError>;
-    readonly snapshot: () => Effect.Effect<
+    readonly snapshot: (tabId?: string) => Effect.Effect<
       ChromeAutomationPageSnapshot & { readonly tabId: string },
       ChromeAutomationError
     >;
-    readonly click: (target: ChromeAutomationTarget) => Effect.Effect<void, ChromeAutomationError>;
+    readonly click: (target: ChromeAutomationTarget, tabId?: string) => Effect.Effect<void, ChromeAutomationError>;
     readonly fill: (
       target: ChromeAutomationTarget,
       value: string,
+      tabId?: string,
     ) => Effect.Effect<void, ChromeAutomationError>;
     readonly type: (
       target: ChromeAutomationTarget,
       value: string,
+      tabId?: string,
     ) => Effect.Effect<void, ChromeAutomationError>;
   }
 >()("t3/browser/ChromeAutomation") {}
@@ -166,11 +173,7 @@ interface ManagedTab {
   readonly id: string;
   readonly page: ChromeAutomationPageAdapter;
   refs: ReadonlyMap<string, string>;
-}
-
-interface SnapshotElement {
-  readonly tagName: string;
-  readonly previousElementSibling: SnapshotElement | null;
+  snapshotDocumentVersion: number | undefined;
 }
 
 const errorDetail = (cause: unknown): string =>
@@ -196,14 +199,10 @@ const isRecoverableTransportFailure = (cause: ChromeAutomationError): boolean =>
     "connection reset",
     "econnreset",
     "epipe",
-    "protocol error",
     "transport closed",
     "browser disconnected",
   ].some((marker) => detail.includes(marker));
 };
-
-const escapeCssIdentifier = (value: string): string =>
-  value.replace(/[^a-zA-Z0-9_-]/g, (character) => `\\${character}`);
 
 const truncate = (value: string): string =>
   value.length <= MAX_SNAPSHOT_CHARS
@@ -370,8 +369,14 @@ export const resolveInstalledChrome = Effect.fn("ChromeAutomation.resolveInstall
   },
 );
 
-const makePlaywrightPageAdapter = (page: Page): ChromeAutomationPageAdapter => ({
+const makePlaywrightPageAdapter = (page: Page): ChromeAutomationPageAdapter => {
+  let documentVersion = 0;
+  page.on("framenavigated", (frame) => {
+    if (frame === page.mainFrame()) documentVersion += 1;
+  });
+  return {
   url: () => page.url(),
+  documentVersion: () => documentVersion,
   title: () => page.title(),
   goto: async (url, options) => {
     await page.goto(url, { waitUntil: options.waitUntil, timeout: options.timeoutMs });
@@ -379,55 +384,8 @@ const makePlaywrightPageAdapter = (page: Page): ChromeAutomationPageAdapter => (
   snapshot: async () => {
     const [accessibilityTree, dom, refs] = await Promise.all([
       page.locator("body").ariaSnapshot({ timeout: DEFAULT_TIMEOUT_MS }),
-      page.locator("body").evaluate((element) => element.outerHTML),
-      page.locator(INTERACTIVE_SELECTOR).evaluateAll((elements) =>
-        elements.map((element, index) => {
-          const htmlElement = element as unknown as {
-            readonly tagName: string;
-            readonly id: string;
-            readonly innerText: string;
-            readonly previousElementSibling: SnapshotElement | null;
-            readonly getAttribute: (name: string) => string | null;
-            readonly getBoundingClientRect: () => {
-              readonly x: number;
-              readonly y: number;
-              readonly width: number;
-              readonly height: number;
-            };
-          };
-          const rect = htmlElement.getBoundingClientRect();
-          const id = htmlElement.id;
-          const testId = htmlElement.getAttribute("data-testid");
-          const selector = id
-            ? `#${escapeCssIdentifier(id)}`
-            : testId
-              ? `[data-testid="${testId.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"]`
-              : `${htmlElement.tagName.toLowerCase()}:nth-of-type(${(() => {
-                  let sameTagIndex = 1;
-                  let sibling = htmlElement.previousElementSibling;
-                  while (sibling !== null) {
-                    if (sibling.tagName === htmlElement.tagName) sameTagIndex += 1;
-                    sibling = sibling.previousElementSibling;
-                  }
-                  return sameTagIndex;
-                })()})`;
-          const role = htmlElement.getAttribute("role");
-          const name =
-            htmlElement.getAttribute("aria-label") ??
-            htmlElement.innerText.trim().replace(/\s+/g, " ").slice(0, 200);
-          return {
-            ref: `ref-${index + 1}`,
-            selector,
-            tag: htmlElement.tagName.toLowerCase(),
-            role,
-            name,
-            x: rect.x,
-            y: rect.y,
-            width: rect.width,
-            height: rect.height,
-          };
-        }),
-      ),
+      page.locator("body").evaluate((element) => element.outerHTML, undefined, { timeout: DEFAULT_TIMEOUT_MS }),
+      page.locator(INTERACTIVE_SELECTOR).evaluateAll(collectSnapshotRefs),
     ]);
     return { accessibilityTree, dom, refs };
   },
@@ -435,7 +393,8 @@ const makePlaywrightPageAdapter = (page: Page): ChromeAutomationPageAdapter => (
   fill: (selector, value) => page.locator(selector).fill(value, { timeout: DEFAULT_TIMEOUT_MS }),
   type: (selector, value) =>
     page.locator(selector).pressSequentially(value, { timeout: DEFAULT_TIMEOUT_MS }),
-});
+  };
+};
 
 const makePlaywrightAdapter = (): ChromeAutomationBrowserAdapter => ({
   launchPersistentContext: async (options) => {
@@ -443,6 +402,7 @@ const makePlaywrightAdapter = (): ChromeAutomationBrowserAdapter => ({
       ...(options.executablePath === undefined ? {} : { executablePath: options.executablePath }),
       ...(options.channel === undefined ? {} : { channel: options.channel }),
       headless: options.headless,
+      timeout: DEFAULT_TIMEOUT_MS,
       args: [...options.args],
     });
     context.on("close", options.onDisconnected);
@@ -469,6 +429,8 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const mutex = yield* Semaphore.make(1);
+  const crypto = yield* Crypto.Crypto;
+  const sessionId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
   const profileDir = path.join(config.stateDir, PROFILE_DIRECTORY);
   const adapter = options.adapter ?? makePlaywrightAdapter();
   const shouldDiscoverExecutable =
@@ -480,6 +442,7 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
   let browser: ChromeAutomationBrowser | undefined;
   let selectedTabId: string | undefined;
   let tabSequence = 0;
+  let snapshotSequence = 0;
   let tabs = new Map<string, ManagedTab>();
   let status: ChromeAutomationStatus = {
     lifecycle: "stopped",
@@ -512,8 +475,8 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
     }
   };
 
-  const setFailed = () => {
-    browser = undefined;
+  const setFailed = (retainedBrowser?: ChromeAutomationBrowser) => {
+    browser = retainedBrowser;
     tabs = new Map();
     selectedTabId = undefined;
     status = {
@@ -551,13 +514,15 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
       });
       const currentBrowser = browser;
       expectedDisconnect = true;
+      let retainedBrowser: ChromeAutomationBrowser | undefined;
       if (currentBrowser !== undefined) {
-        yield* Effect.tryPromise({
+        const closed = yield* Effect.tryPromise({
           try: () => currentBrowser.close(),
           catch: (closeCause) => failure("cleanup", closeCause),
-        }).pipe(Effect.orElseSucceed(() => undefined));
+        }).pipe(Effect.result);
+        if (closed._tag === "Failure") retainedBrowser = currentBrowser;
       }
-      setFailed();
+      setFailed(retainedBrowser);
     });
 
   const onDisconnected = (connection: number) => {
@@ -585,14 +550,14 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
       const tab =
         existing ??
         ({
-          id: `tab-${++tabSequence}`,
+          id: `tab-${++tabSequence}-${sessionId}`,
           page,
           refs: new Map<string, string>(),
+          snapshotDocumentVersion: undefined,
         } satisfies ManagedTab);
       nextTabs.set(tab.id, tab);
     }
     tabs = nextTabs;
-    if (selectedTabId !== undefined && !tabs.has(selectedTabId)) selectedTabId = undefined;
     if (selectedTabId === undefined && preferredTabUrl !== undefined) {
       for (const tab of tabs.values()) {
         const currentUrl = yield* Effect.try({
@@ -610,17 +575,19 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
     return tabs;
   });
 
-  const selectedTab = Effect.fn("ChromeAutomation.selectedTab")(function* () {
+  const selectedTab = Effect.fn("ChromeAutomation.selectedTab")(function* (tabId?: string) {
     yield* refreshTabs();
-    if (selectedTabId === undefined) {
+    const targetTabId = tabId ?? selectedTabId;
+    if (targetTabId === undefined) {
       return yield* Effect.fail(new ChromeAutomationError("tab", "Chrome has no open tabs."));
     }
-    const tab = tabs.get(selectedTabId);
+    const tab = tabs.get(targetTabId);
     if (tab === undefined) {
       return yield* Effect.fail(
-        new ChromeAutomationError("tab", "The selected tab no longer exists."),
+        new ChromeAutomationError("tab", `Tab ${targetTabId} no longer exists. List tabs and select a target.`),
       );
     }
+    if (tab.snapshotDocumentVersion !== tab.page.documentVersion()) tab.refs = new Map();
     return tab;
   });
 
@@ -639,6 +606,16 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
 
   const startConnected = Effect.gen(function* () {
     if (status.lifecycle === "connected" && browser !== undefined) return status;
+    if (browser !== undefined) {
+      const staleBrowser = browser;
+      expectedDisconnect = true;
+      activeConnection = ++connectionSequence;
+      yield* Effect.tryPromise({
+        try: () => staleBrowser.close(),
+        catch: (cause) => failure("cleanup", cause),
+      });
+      browser = undefined;
+    }
     status = { ...status, lifecycle: "starting", error: undefined };
     expectedDisconnect = false;
     launchChannel = undefined;
@@ -682,8 +659,8 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
         try: () => browser!.newPage(),
         catch: (cause) => failure("start", cause),
       });
-      const id = `tab-${++tabSequence}`;
-      tabs.set(id, { id, page, refs: new Map() });
+      const id = `tab-${++tabSequence}-${sessionId}`;
+      tabs.set(id, { id, page, refs: new Map(), snapshotDocumentVersion: undefined });
       selectedTabId = id;
     }
     status = { ...status, lifecycle: "connected", selectedTabId, error: undefined };
@@ -694,6 +671,7 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
   const startOnce = startConnected.pipe(
     Effect.tapError(failStart),
     Effect.mapError((cause) => unavailableFailure("start", cause)),
+    Effect.uninterruptible,
   );
 
   const start = mutex.withPermit(startOnce);
@@ -709,8 +687,8 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
     if (currentBrowser !== undefined) {
       yield* Effect.tryPromise({
         try: () => currentBrowser.close(),
-        catch: () => undefined,
-      }).pipe(Effect.orElseSucceed(() => undefined));
+        catch: (cause) => unavailableFailure(operation, cause),
+      }).pipe(Effect.tapError(() => Effect.sync(() => { browser = currentBrowser; })));
     }
     yield* startOnce.pipe(
       Effect.mapError(() =>
@@ -722,9 +700,16 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
   const action = <A>(
     operation: string,
     use: () => Effect.Effect<A, ChromeAutomationError>,
+    replaySafe = false,
   ): Effect.Effect<A, ChromeAutomationError> =>
     mutex.withPermit(
       Effect.gen(function* () {
+        if (!replaySafe && status.lifecycle === "failed") {
+          return yield* Effect.fail(new ChromeAutomationError(
+            operation,
+            "Chrome disconnected. List tabs and inspect the target before retrying an action.",
+          ));
+        }
         yield* ensureConnected();
         const first = yield* Effect.result(use());
         if (first._tag === "Success" && status.lifecycle !== "failed") return first.success;
@@ -736,6 +721,15 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
           return yield* Effect.fail(first.failure);
         }
 
+        if (!replaySafe) {
+          status = { ...status, lifecycle: "failed", error: UNAVAILABLE_MESSAGE };
+          for (const tab of tabs.values()) tab.refs = new Map();
+          return yield* Effect.fail(new ChromeAutomationError(
+            operation,
+            "Chrome disconnected during the action. Its outcome is unknown and it was not replayed. List tabs and inspect the target before retrying.",
+            first._tag === "Failure" ? first.failure : undefined,
+          ));
+        }
         yield* recoverOnce(operation);
         const second = yield* Effect.result(use());
         if (second._tag === "Success" && status.lifecycle !== "failed") return second.success;
@@ -743,10 +737,11 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
           return yield* Effect.fail(unavailableFailure(operation, "Chrome disconnected."));
         }
         if (isRecoverableTransportFailure(second.failure) || status.lifecycle === "failed") {
+          setFailed(browser);
           return yield* Effect.fail(unavailableFailure(operation, second.failure));
         }
         return yield* Effect.fail(second.failure);
-      }),
+      }).pipe(Effect.uninterruptible),
     );
 
   const stop = mutex.withPermit(
@@ -770,7 +765,7 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
       preferredTabUrl = undefined;
       status = { ...status, lifecycle: "stopped", selectedTabId: undefined, error: undefined };
       return status;
-    }).pipe(Effect.tapError(() => Effect.sync(() => setFailed()))),
+    }).pipe(Effect.tapError(() => Effect.sync(() => setFailed(browser)))),
   );
 
   yield* Effect.addFinalizer(() => Effect.ignore(stop));
@@ -785,6 +780,7 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
           const managed = yield* refreshTabs();
           return yield* Effect.forEach(managed.values(), tabInfo);
         }),
+        true,
       ),
     selectTab: (tabId) =>
       action("selectTab", () =>
@@ -800,11 +796,16 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
           status = { ...status, selectedTabId };
           return yield* tabInfo(tab);
         }),
+        true,
       ),
     navigate: (url, options = {}) =>
       action("navigate", () =>
         Effect.gen(function* () {
-          const tab = yield* selectedTab();
+          if (options.timeoutMs !== undefined && (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 1 || options.timeoutMs > MAX_TIMEOUT_MS)) {
+            return yield* Effect.fail(new ChromeAutomationError("navigate", `timeoutMs must be between 1 and ${MAX_TIMEOUT_MS}.`));
+          }
+          const tab = yield* selectedTab(options.tabId);
+          tab.refs = new Map();
           yield* Effect.tryPromise({
             try: () =>
               tab.page.goto(url, {
@@ -813,73 +814,85 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
               }),
             catch: (cause) => failure("navigate", cause),
           });
-          tab.refs = new Map();
           return yield* tabInfo(tab);
         }),
       ),
-    snapshot: () =>
+    snapshot: (tabId) =>
       action("snapshot", () =>
         Effect.gen(function* () {
-          const tab = yield* selectedTab();
+          const tab = yield* selectedTab(tabId);
+          tab.refs = new Map();
+          const documentVersion = tab.page.documentVersion();
           const snapshot = yield* Effect.tryPromise({
             try: () => tab.page.snapshot(),
             catch: (cause) => failure("snapshot", cause),
           });
-          tab.refs = new Map(snapshot.refs.map((ref) => [ref.ref, ref.selector]));
+          if (documentVersion !== tab.page.documentVersion()) {
+            return yield* Effect.fail(new ChromeAutomationError("snapshot", "The page navigated during the snapshot. Take a fresh snapshot."));
+          }
+          const snapshotId = ++snapshotSequence;
+          const refs = snapshot.refs.map((ref, index) => ({
+            ...ref,
+            ref: `${tab.id}-snapshot-${snapshotId}-ref-${index + 1}`,
+          }));
+          tab.refs = new Map(refs.map((ref) => [ref.ref, ref.selector]));
+          tab.snapshotDocumentVersion = documentVersion;
           return {
             ...snapshot,
+            refs,
             accessibilityTree: truncate(snapshot.accessibilityTree),
             dom: truncate(snapshot.dom),
             tabId: tab.id,
           };
         }),
+        true,
       ),
-    click: (target) =>
+    click: (target, tabId) =>
       action("click", () =>
         Effect.gen(function* () {
-          const tab = yield* selectedTab();
+          const tab = yield* selectedTab(tabId);
           const selector = yield* Effect.try({
             try: () => targetSelector(target, tab.refs),
             catch: (cause) =>
               cause instanceof ChromeAutomationError ? cause : failure("target", cause),
           });
+          tab.refs = new Map();
           yield* Effect.tryPromise({
             try: () => tab.page.click(selector),
             catch: (cause) => failure("click", cause),
           });
-          tab.refs = new Map();
         }),
       ),
-    fill: (target, value) =>
+    fill: (target, value, tabId) =>
       action("fill", () =>
         Effect.gen(function* () {
-          const tab = yield* selectedTab();
+          const tab = yield* selectedTab(tabId);
           const selector = yield* Effect.try({
             try: () => targetSelector(target, tab.refs),
             catch: (cause) =>
               cause instanceof ChromeAutomationError ? cause : failure("target", cause),
           });
+          tab.refs = new Map();
           yield* Effect.tryPromise({
             try: () => tab.page.fill(selector, value),
             catch: (cause) => failure("fill", cause),
           });
-          tab.refs = new Map();
         }),
       ),
-    type: (target, value) =>
+    type: (target, value, tabId) =>
       action("type", () =>
         Effect.gen(function* () {
-          const tab = yield* selectedTab();
+          const tab = yield* selectedTab(tabId);
           const selector = yield* Effect.try({
             try: () => targetSelector(target, tab.refs),
             catch: (cause) =>
               cause instanceof ChromeAutomationError ? cause : failure("target", cause),
           });
+          tab.refs = new Map();
           yield* Effect.tryPromise({
             try: () => tab.page.type(selector, value),
             catch: (cause) => failure("type", cause),
           });
-          tab.refs = new Map();
         }),
       ),
   };
