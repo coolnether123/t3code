@@ -41,6 +41,18 @@ import {
 
 const fail = (message: string) => Effect.fail(new AgentCliError({ message }));
 const isAgentCliError = Schema.is(AgentCliError);
+/** Expected CLI refusals must let pending native close callbacks drain on Windows. */
+export const handleAgentCliFailure = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  effect.pipe(
+    Effect.catchIf(isAgentCliError, (error) =>
+      Effect.gen(function* () {
+        yield* Console.error(`Agent request rejected: ${error.message}`);
+        yield* Effect.sync(() => {
+          process.exitCode = 1;
+        });
+      }),
+    ),
+  );
 const isDispatchRejection = Schema.is(
   Schema.Union([
     EnvironmentAuthInvalidError,
@@ -403,7 +415,7 @@ const capabilitiesCommand = Command.make("capabilities", {
     runAgent(flags.baseDir, {
       kind: "capabilities",
       ...Option.match(flags.command, { onNone: () => ({}), onSome: (command) => ({ command }) }),
-    }),
+    }).pipe(handleAgentCliFailure),
   ),
 );
 const snapshotCommand = Command.make("snapshot", {
@@ -427,7 +439,7 @@ const snapshotCommand = Command.make("snapshot", {
   ),
   Command.withHandler((flags) => {
     if (Option.isSome(flags.beforeCursor) && Option.isNone(flags.thread))
-      return fail("--before-cursor requires --thread.");
+      return fail("--before-cursor requires --thread.").pipe(handleAgentCliFailure);
     return runAgent(flags.baseDir, {
       kind: "snapshot",
       turnLimit: flags.turnLimit,
@@ -437,7 +449,7 @@ const snapshotCommand = Command.make("snapshot", {
         onNone: () => ({}),
         onSome: (beforeCursor) => ({ beforeCursor }),
       }),
-    });
+    }).pipe(handleAgentCliFailure);
   }),
 );
 const actCommand = Command.make("act", {
@@ -454,7 +466,7 @@ const actCommand = Command.make("act", {
         return yield* fail("act requires --confirm after inspecting the action and its target.");
       const action = yield* readAgentActionFile(flags.file);
       yield* runAgent(flags.baseDir, { kind: "act", action });
-    }),
+    }, handleAgentCliFailure),
   ),
 );
 
