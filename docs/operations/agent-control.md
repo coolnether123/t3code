@@ -64,6 +64,9 @@ up to 20 open-request records separately. Omission counts and truncated-question
 flags identify incomplete evidence. Do not answer a request whose choices have
 been truncated. Action files are limited to 256 KiB and JSON output to 192 KiB;
 these limits do not cap the HTTP response's memory use before compaction.
+The environment and action identifiers needed for a receipt must fit 96 KiB
+of encoded JSON. This is checked before dispatch so an oversized identifier
+cannot hide a receipt for an action that has already run.
 
 ## Submit an explicit action
 
