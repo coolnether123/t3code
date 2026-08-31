@@ -49,6 +49,8 @@ import {
   type CodexThreadSnapshot,
 } from "./CodexSessionRuntime.ts";
 import { makeCodexAdapter } from "./CodexAdapter.ts";
+import { runtimeEventToActivities } from "../../orchestration/Layers/ProviderRuntimeIngestion.ts";
+import { foldSubagentActivities } from "../../../../../packages/client-runtime/src/state/subagentRuntime.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
 // Test-local service tag so the rest of the file can keep using `yield* CodexAdapter`.
@@ -857,6 +859,81 @@ function startLifecycleRuntime() {
 }
 
 lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
+  it.effect(
+    "retains completed child output when reconstructing after metadata-only notifications",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const notifications = [
+          {
+            method: "thread/settings/updated",
+            params: { threadSettings: { model: "gpt-5.6-sol", effort: "high" } },
+          },
+          { method: "thread/name/updated", params: { threadName: "review" } },
+          { method: "thread/archived", params: {} },
+          { method: "rawResponseItem/completed", params: { item: { type: "reasoning" } } },
+          { method: "item/agentMessage/delta", params: { delta: "  " } },
+        ];
+        const eventsFiber = yield* Stream.runCollect(
+          Stream.take(adapter.streamEvents, 2 + notifications.length),
+        ).pipe(Effect.forkChild);
+        yield* runtime.emit({
+          id: asEventId("child-final-output"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "collabAgent/turnCompleted",
+          threadId: asThreadId("thread-1"),
+          payload: {
+            agentThreadId: "child-1",
+            agentPath: "/root/review",
+            turn: {
+              id: "child-turn",
+              status: "completed",
+              items: [{ type: "agentMessage", text: "Verified child result" }],
+            },
+          },
+        });
+        for (const [index, notification] of notifications.entries()) {
+          yield* runtime.emit({
+            id: asEventId(`child-metadata-${index}`),
+            kind: "notification",
+            provider: ProviderDriverKind.make("codex"),
+            createdAt: `2026-01-01T00:00:0${index + 1}.000Z`,
+            method: "collabAgent/notification",
+            threadId: asThreadId("thread-1"),
+            payload: {
+              agentThreadId: "child-1",
+              agentPath: "/root/review",
+              parentThreadId: "provider-root",
+              wire: {
+                method: notification.method,
+                params: { threadId: "child-1", ...notification.params },
+              },
+            },
+          });
+        }
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        // Persisted activities replace rows by id. Rebuild the agent from that
+        // snapshot rather than folding the unbounded notification history.
+        const rows = new Map(
+          events
+            .flatMap((event) => runtimeEventToActivities(event))
+            .map((activity) => [activity.id, activity]),
+        );
+        const [child] = foldSubagentActivities(Array.from(rows.values()));
+        NodeAssert.equal(child?.progress, "Verified child result");
+        NodeAssert.equal(child?.status, "idle");
+        NodeAssert.equal(child?.model, "gpt-5.6-sol");
+        NodeAssert.equal(child?.effort, "high");
+        NodeAssert.equal(child?.parentAgentId, "provider-root");
+        NodeAssert.deepEqual(
+          events.slice(2).map((event) => event.type),
+          notifications.map(() => "task.updated"),
+        );
+      }),
+  );
+
   it.effect("preserves child output and wire identity without changing the parent turn", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

@@ -874,17 +874,23 @@ function mapCollabAgentEvent(
         typeof params?.threadSettings === "object" && params.threadSettings !== null
           ? (params.threadSettings as Record<string, unknown>)
           : undefined;
+      const metadata = {
+        taskId,
+        description: title,
+        ...statusLinkage,
+        ...(typeof settings?.model === "string" ? { model: settings.model } : {}),
+        ...(typeof settings?.effort === "string" ? { effort: settings.effort } : {}),
+      };
+      if (!summary) {
+        return [{ ...base, type: "task.updated", payload: metadata }];
+      }
       return [
         {
           ...base,
           type: "task.progress",
           payload: {
-            taskId,
-            description: title,
-            ...(summary ? { summary } : {}),
-            ...statusLinkage,
-            ...(typeof settings?.model === "string" ? { model: settings.model } : {}),
-            ...(typeof settings?.effort === "string" ? { effort: settings.effort } : {}),
+            ...metadata,
+            summary,
           },
         },
       ];
