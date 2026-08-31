@@ -797,13 +797,11 @@ try {
 
     Write-Phase "dependencies"
     if ($dependencyNeedsInstall) {
-        # The source lockfile is authoritative for the deploy projection. vp i
-        # may otherwise rewrite it while repairing a stale node_modules tree,
-        # making every safe repeat appear to need another install.
+        # Install the exact source lockfile without resolving or rewriting versions.
         $oldNpmConfigLockfile = $env:npm_config_lockfile
         try {
-            $env:npm_config_lockfile = "false"
-            Invoke-ProjectCommand "vp i" @("i") $commandLogPath
+            $env:npm_config_lockfile = "true"
+            Invoke-ProjectCommand "vp i --frozen-lockfile" @("i", "--frozen-lockfile") $commandLogPath
         }
         finally {
             if ($null -eq $oldNpmConfigLockfile) {
