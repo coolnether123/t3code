@@ -103,6 +103,10 @@ An empty database is a bad test. Seed your worktree's `.t3` with a copy of real 
 
 ## Verifying
 
+- Prefer `t3 agent` for T3 state and supported actions. Follow
+  `docs/operations/agent-control.md` for environment targeting and readback.
+  Use browser verification for client rendering; direct T3 control does not
+  require Computer Use.
 - Smallest proof that the change works. `vp test run <files>` for the tests you touched, targeted lint and typecheck for the scope you changed.
 - **Do not run repo-wide checks.** No `vp check`, no `vp run -r test`, no `vp run -r typecheck` unless I ask. CI owns the full suite.
 - Backend behavior changes ship with focused tests for that behavior.
