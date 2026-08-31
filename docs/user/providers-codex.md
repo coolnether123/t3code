@@ -40,11 +40,17 @@ Open the model traits menu in a Codex thread and choose an available browser pro
 
 - **T3 managed Chrome** uses a separate Chrome profile owned by T3. It can navigate, inspect pages,
   fill fields, click controls, and take screenshots. It does not use your regular Chrome profile.
-- **T3 Preview** uses the collaborative preview browser when agent browser access is enabled.
+- **T3 Preview** uses the collaborative preview browser when agent browser access is enabled and a
+  T3 desktop browser host is connected to the environment.
 
 T3 offers only providers it can provision. Refresh the Codex provider in Settings after installing
 Chrome or changing its availability. Selecting a provider does not start a browser or approve its
 actions. Normal tool approvals still apply.
+
+Expand a managed Chrome screenshot entry in the work log to view its image, then select the image
+to enlarge it. Previews are available for new screenshot calls; older calls without a saved image
+still show their recorded tool output. Images use the thread's authenticated attachment access,
+including when you connect remotely.
 
 Codex desktop Computer Use, the Codex built-in browser, and the Codex Chrome extension are separate
 capabilities. Installing those plugins does not connect their desktop host to T3. T3 does not offer
