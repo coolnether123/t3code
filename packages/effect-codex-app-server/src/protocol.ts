@@ -166,6 +166,7 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
     const nextRequestId = yield* Ref.make(1);
     const remainder = yield* Ref.make("");
     const terminationHandled = yield* Ref.make(false);
+    const protocolScope = yield* Scope.Scope;
 
     const logProtocol = (event: CodexAppServerProtocolLogEvent) => {
       if (event.direction === "incoming" && !options.logIncoming) {
@@ -317,7 +318,9 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
       message: unknown,
     ): Effect.Effect<void, CodexError.CodexAppServerError> => {
       if (isIncomingRequest(message)) {
-        return handleRequest(message);
+        // Approvals and client tools can wait for user input. Keep reading
+        // sibling events and RPC responses while that request is pending.
+        return handleRequest(message).pipe(Effect.forkIn(protocolScope), Effect.asVoid);
       }
       if (isIncomingNotification(message)) {
         return handleNotification(message);

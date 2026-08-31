@@ -1,5 +1,5 @@
 import type { ApprovalRequestId, ProviderApprovalDecision } from "@t3tools/contracts";
-import { Pressable, View } from "react-native";
+import { Pressable, ScrollView, useWindowDimensions, View } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
 import type { PendingApproval } from "../../lib/threadActivity";
@@ -14,6 +14,7 @@ export interface PendingApprovalCardProps {
 }
 
 export function PendingApprovalCard(props: PendingApprovalCardProps) {
+  const { height } = useWindowDimensions();
   // Opaque for the same reason as PendingUserInputCard: nothing blurs the feed
   // behind this card, so a translucent surface bleeds messages through it.
   return (
@@ -25,9 +26,18 @@ export function PendingApprovalCard(props: PendingApprovalCardProps) {
         {props.approval.requestKind}
       </Text>
       {props.approval.detail ? (
-        <Text className="font-sans text-sm leading-normal text-neutral-600 dark:text-neutral-400">
-          {props.approval.detail}
-        </Text>
+        <ScrollView
+          accessibilityLabel="Approval details"
+          nestedScrollEnabled
+          style={{ maxHeight: Math.min(240, height * 0.28) }}
+        >
+          <Text
+            selectable
+            className="font-sans text-sm leading-normal text-neutral-600 dark:text-neutral-400"
+          >
+            {props.approval.detail}
+          </Text>
+        </ScrollView>
       ) : null}
       <View className="flex-row flex-wrap gap-2.5">
         <Pressable

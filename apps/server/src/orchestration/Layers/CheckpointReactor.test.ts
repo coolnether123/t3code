@@ -12,6 +12,7 @@ import {
   ProviderInstanceId,
 } from "@t3tools/contracts";
 import {
+  CheckpointRef,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   EventId,
@@ -717,6 +718,133 @@ describe("CheckpointReactor", () => {
       ),
     ).toBe("v2\n");
   });
+
+  it.each([
+    ["completed", "ready"],
+    ["interrupted", "missing"],
+    ["failed", "error"],
+  ] as const)(
+    "attributes edits after a mid-turn diff to the %s turn, not the following no-edit turn",
+    async (completionState, checkpointStatus) => {
+      const harness = await createHarness({ seedFilesystemCheckpoints: false });
+      const threadId = ThreadId.make("thread-1");
+      const turnId = asTurnId("turn-with-late-edit");
+      const createdAt = "2026-01-01T00:00:00.000Z";
+
+      await harness.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-running-late-edit"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: turnId,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      });
+      harness.provider.emit({
+        type: "turn.started",
+        eventId: EventId.make("evt-late-edit-started"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId,
+        createdAt,
+      });
+      await harness.drain();
+      expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 0))).toBe(true);
+
+      NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "v2\n", "utf8");
+      // This is the domain placeholder produced by an in-progress turn.diff.updated.
+      await harness.dispatch({
+        type: "thread.turn.diff.complete",
+        commandId: CommandId.make("cmd-in-progress-diff-placeholder"),
+        threadId,
+        turnId,
+        checkpointTurnCount: 1,
+        checkpointRef: CheckpointRef.make("provider-diff:mid-turn"),
+        status: "missing",
+        files: [],
+        assistantMessageId: MessageId.make("assistant:mid-turn"),
+        completedAt: createdAt,
+        createdAt,
+      });
+      await harness.drain();
+      expect.soft(gitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 1))).toBe(false);
+
+      NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "v3\n", "utf8");
+      harness.provider.emit({
+        type: "turn.completed",
+        eventId: EventId.make("evt-late-edit-completed"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId,
+        createdAt: "2026-01-01T00:01:00.000Z",
+        payload: { state: completionState },
+      });
+      await harness.drain();
+
+      await harness.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-running-no-edit"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: asTurnId("turn-no-edit"),
+          lastError: null,
+          updatedAt: "2026-01-01T00:02:00.000Z",
+        },
+        createdAt: "2026-01-01T00:02:00.000Z",
+      });
+      harness.provider.emit({
+        type: "turn.started",
+        eventId: EventId.make("evt-no-edit-started"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId: asTurnId("turn-no-edit"),
+        createdAt: "2026-01-01T00:02:00.000Z",
+      });
+      await harness.drain();
+      harness.provider.emit({
+        type: "turn.completed",
+        eventId: EventId.make("evt-no-edit-completed"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId: asTurnId("turn-no-edit"),
+        createdAt: "2026-01-01T00:03:00.000Z",
+        payload: { state: "completed" },
+      });
+      await harness.drain();
+
+      const snapshot = await harness.readModel();
+      const checkpoints = snapshot.threads.find((thread) => thread.id === threadId)?.checkpoints;
+      expect.soft(checkpoints).toMatchObject([
+        {
+          turnId,
+          checkpointTurnCount: 1,
+          status: checkpointStatus,
+          files: [{ path: "README.md", additions: 1, deletions: 1 }],
+        },
+        { turnId: "turn-no-edit", checkpointTurnCount: 2, status: "ready", files: [] },
+      ]);
+      expect(
+        gitShowFileAtRef(harness.cwd, checkpointRefForThreadTurn(threadId, 1), "README.md"),
+      ).toBe("v3\n");
+      expect(
+        runGit(harness.cwd, [
+          "diff",
+          checkpointRefForThreadTurn(threadId, 1),
+          checkpointRefForThreadTurn(threadId, 2),
+        ]),
+      ).toBe("");
+    },
+  );
 
   it("refreshes local git status state on turn completion using the session cwd", async () => {
     const gitStatusRefreshCalls: string[] = [];

@@ -4,6 +4,8 @@ param(
     [switch]$Fast,
     [switch]$Full,
     [switch]$SkipBuild,
+    # Sync and build for an existing service owner without restarting it or changing Serve.
+    [switch]$PrepareOnly,
     [ValidateRange(15, 600)]
     [int]$WaitSeconds = 120
 )
@@ -831,6 +833,7 @@ try {
         Invoke-ProjectCommand "web build" @("build", "--logLevel", "error") $commandLogPath (Join-Path $deployRoot "apps\web")
         Invoke-ProjectCommand "server bundle" @("pack", "--logLevel", "error") $commandLogPath (Join-Path $deployRoot "apps\server")
         Invoke-ProjectCommand "server service-launcher bundle" @("pack", "src/service-launcher.ts", "--out-dir", "dist", "--no-clean", "--logLevel", "error") $commandLogPath (Join-Path $deployRoot "apps\server")
+        Invoke-ProjectCommand "desktop bundle" @("pack", "--logLevel", "error") $commandLogPath (Join-Path $deployRoot "apps\desktop")
         Invoke-ProjectCommand "desktop Electron runtime" @("run", "--filter", "@t3tools/desktop", "ensure:electron") $commandLogPath
     }
 
@@ -858,6 +861,7 @@ try {
     Write-Host "  MagicDNS $dnsName"
     Write-Host "  HTTPS $tailnetUrl -> $expectedTailnetProxy"
 
+    if (-not $PrepareOnly) {
     Write-Phase "desktop"
     Stop-ManagedDesktop $t3Home
     $desktopProcess = Start-ManagedDesktop $t3Home $desktopStdOutPath $desktopStdErrPath
@@ -926,6 +930,8 @@ try {
         Write-Host "  Electron command $(Get-ProcessCommandLine $finalElectronRoots[0])"
     }
 
+    }
+
     $finalSourceFiles = @(Get-IncludedFiles $sourceRoot)
     $finalDeployFiles = @(Get-IncludedFiles $deployRoot)
     $finalSourceMap = Get-FingerprintMap $sourceRoot $finalSourceFiles
@@ -954,13 +960,20 @@ try {
         if ($finalParity -ne 0) {
             throw "Source/deploy parity check found $finalParity mismatched files after sync."
         }
-        Write-Phase "ready"
+        if ($PrepareOnly) { Write-Phase "prepared" }
+        else { Write-Phase "ready" }
         Write-Host "  source commit $sourceCommit"
         Write-Host "  deploy detached commit $deployCommitAfter"
         Write-Host "  projection parity exact, excluded state preserved"
-        Write-Host "  process exactly one managed desktop root"
-        Write-Host "  endpoints http://127.0.0.1:$serverPort, http://127.0.0.1:$webPort, $tailnetUrl"
-        Write-Host "  server/web/Tailscale readiness passed"
+        if ($PrepareOnly) {
+            Write-Host "  code and bundles prepared; running processes and Tailscale settings unchanged"
+            Write-Host "  restart and verify the existing service owner separately"
+        }
+        else {
+            Write-Host "  process exactly one managed desktop root"
+            Write-Host "  endpoints http://127.0.0.1:$serverPort, http://127.0.0.1:$webPort, $tailnetUrl"
+            Write-Host "  server/web/Tailscale readiness passed"
+        }
         Write-Host "  logs $transcriptPath"
         Write-Host "  command output $commandLogPath"
     }

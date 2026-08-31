@@ -36,27 +36,54 @@ and share with OpenAI employees.
 
 ## Choose browser and computer control
 
-Open the model traits menu in a Codex thread and choose **Computer control**:
+Open the model traits menu in a Codex thread and choose an available browser provider:
 
-- **Full desktop** is the default. Codex can use Chrome and Windows apps, including native dialogs,
-  downloads, and controls that browser automation cannot reach.
-- **Full Chrome** prioritizes the existing Chrome session and its browser-development tools, then
-  uses Windows Computer Use on that same Chrome window when the extension connection is unavailable.
-- **T3 Preview** uses the isolated collaborative preview browser and keeps its normal approval flow.
+- **T3 managed Chrome** uses a separate Chrome profile owned by T3. It can navigate, inspect pages,
+  fill fields, click controls, and take screenshots. It does not use your regular Chrome profile.
+- **T3 Preview** uses the collaborative preview browser when agent browser access is enabled and a
+  T3 desktop browser host is connected to the environment.
 
-Full Chrome and Full desktop do not add a T3 domain allowlist, an action-word filter, a read-only
-browser mode, or a preview-only requirement. T3 accepts typed tool and computer-use permission
-requests for the current Codex session. An unattended turn does not wait for a hidden approval.
-Authentication challenges and operating-system permission prompts can still need your input.
+T3 offers only providers it can provision. Refresh the Codex provider in Settings after installing
+Chrome or changing its availability. Selecting a provider does not start a browser or approve its
+actions. Normal tool approvals still apply.
 
-Chrome, Browser, and Computer Use are Codex plugins. Enable the plugins in the same `CODEX_HOME`
-that the T3 provider uses. Full desktop can continue through Windows control when Chrome's extension
-connection is unavailable. It keeps the existing Chrome window as the target and changes the control
-mechanism instead of asking to launch a replacement window. T3 also exposes `computer_open_url` in
-Full Chrome and Full desktop so an agent can hand an exact HTTP or HTTPS URL—including long sign-in
-relay links—to Chrome when neither the extension nor accessibility focus can reach the
-address bar. The tool has no domain allowlist. Chrome-specific page structure, console, and network
-inspection require a working Chrome plugin connection.
+Expand a managed Chrome screenshot entry in the work log to view its image, then select the image
+to enlarge it. Previews are available for new screenshot calls; older calls without a saved image
+still show their recorded tool output. Images use the thread's authenticated attachment access,
+including when you connect remotely.
+
+Codex desktop Computer Use, the Codex built-in browser, and the Codex Chrome extension are separate
+capabilities. Installing those plugins does not connect their desktop host to T3. T3 does not offer
+them as working browser choices without that connection. A configured Computer Use skill can run
+through the Codex session independently of the browser choice. The agent must check its host
+connection and obtain app permission before controlling a window. Review that permission request
+in T3, and avoid using Windows foreground input while the agent controls the selected app.
+
+Older saved **Full desktop** selections use the available T3 browser route; they do not grant
+Windows desktop control.
+
+The `computer_open_url` tool can open a URL in your regular browser. Opening a URL does not give
+the agent a way to inspect or control that browser afterward.
+
+## Steer or stop a running turn
+
+Choose **Steer active turn** to send an additional instruction to the running Codex turn. Its model
+and permissions stay unchanged, and the instruction does not create a queued turn. If that turn
+ends while the dialog is open, close the dialog before choosing another turn.
+
+Choose **Stop generation** to interrupt the active turn. You can send another message in the same
+thread afterward. T3 resumes the original Codex conversation; a failed resume reports an error
+instead of silently starting a replacement conversation.
+
+## Inspect native subagents
+
+When Codex spawns subagents, choose **Open Agents** in the work log. The roster shows their reported
+status, activity, model, and reasoning effort when Codex supplies them. Choose an agent's name to
+see its identity, parent relationship, recent activity, and available result or error.
+
+Agent details are a compact view of reported activity, not a separate interactive child
+conversation. Nested agents appear when the runtime reports them; their availability depends on
+that runtime's delegation tools and limits.
 
 ## I Want Work And Personal Codex Accounts
 

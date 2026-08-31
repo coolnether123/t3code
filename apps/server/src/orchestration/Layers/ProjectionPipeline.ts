@@ -5,6 +5,7 @@ import {
   type OrchestrationSessionStatus,
   ThreadId,
 } from "@t3tools/contracts";
+import { toolScreenshotFromItem } from "@t3tools/shared/toolScreenshot";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -346,6 +347,7 @@ function retainProjectionProposedPlansAfterRevert(
 function collectThreadAttachmentRelativePaths(
   threadId: string,
   messages: ReadonlyArray<ProjectionThreadMessage>,
+  activities: ReadonlyArray<ProjectionThreadActivity> = [],
 ): Set<string> {
   const threadSegment = toSafeThreadAttachmentSegment(threadId);
   if (!threadSegment) {
@@ -363,6 +365,11 @@ function collectThreadAttachmentRelativePaths(
       }
       relativePaths.add(attachmentRelativePath(attachment));
     }
+  }
+  for (const activity of activities) {
+    const data = (activity.payload as { data?: { item?: unknown } } | null)?.data;
+    const screenshot = toolScreenshotFromItem(data?.item ?? data, threadId);
+    if (screenshot !== null) relativePaths.add(`${screenshot.attachmentId}.png`);
   }
   return relativePaths;
 }
@@ -1031,7 +1038,18 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           }).pipe(Effect.asVoid);
           attachmentSideEffects.prunedThreadRelativePaths.set(
             event.payload.threadId,
-            collectThreadAttachmentRelativePaths(event.payload.threadId, keptRows),
+            collectThreadAttachmentRelativePaths(
+              event.payload.threadId,
+              keptRows,
+              retainProjectionActivitiesAfterRevert(
+                yield* projectionThreadActivityRepository.listByThreadId({
+                  threadId: event.payload.threadId,
+                }),
+                existingTurns,
+                event.payload.turnCount,
+                event.payload.cutoffCreatedAt,
+              ),
+            ),
           );
           return;
         }
@@ -1095,7 +1113,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
 
     const applyThreadActivitiesProjection: ProjectorDefinition["apply"] = Effect.fn(
       "applyThreadActivitiesProjection",
-    )(function* (event, _attachmentSideEffects) {
+    )(function* (event, attachmentSideEffects) {
       switch (event.type) {
         case "thread.activity-appended":
           yield* projectionThreadActivityRepository.upsert({
@@ -1132,6 +1150,16 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           if (keptRows.length === existingRows.length) {
             return;
           }
+          attachmentSideEffects.prunedThreadRelativePaths.set(
+            event.payload.threadId,
+            collectThreadAttachmentRelativePaths(
+              event.payload.threadId,
+              yield* projectionThreadMessageRepository.listByThreadId({
+                threadId: event.payload.threadId,
+              }),
+              keptRows,
+            ),
+          );
           yield* projectionThreadActivityRepository.deleteByThreadId({
             threadId: event.payload.threadId,
           });
@@ -1426,7 +1454,17 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             threadId: event.payload.threadId,
             turnId: event.payload.turnId,
           });
-          const nextState = event.payload.status === "error" ? "error" : "completed";
+          // Checkpoint metadata cannot turn an interrupted or failed provider
+          // turn into a successful one. A terminal checkpoint failure still
+          // records an error regardless of the previous turn outcome.
+          const nextState =
+            event.payload.status === "error"
+              ? "error"
+              : Option.isSome(existingTurn) &&
+                  (existingTurn.value.state === "interrupted" ||
+                    existingTurn.value.state === "error")
+                ? existingTurn.value.state
+                : "completed";
           yield* projectionTurnRepository.clearCheckpointTurnConflict({
             threadId: event.payload.threadId,
             turnId: event.payload.turnId,

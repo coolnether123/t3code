@@ -554,6 +554,74 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.runtimeMode).toBe("approval-required");
   });
 
+  it.each(["codex-turn-1", "new-provider-turn"])(
+    "steers only the exact active Codex turn, runtime turn %s",
+    async (runtimeTurnId) => {
+      const harness = await createHarness();
+      const threadId = ThreadId.make("thread-1");
+      const expectedTurnId = asTurnId("codex-turn-1");
+      const now = "2026-01-01T00:00:00.000Z";
+      harness.runtimeSessions.push({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        status: "running",
+        runtimeMode: "approval-required",
+        activeTurnId: asTurnId(runtimeTurnId),
+        createdAt: now,
+        updatedAt: now,
+      });
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-steer-session"),
+          threadId,
+          session: {
+            threadId,
+            status: "running",
+            providerName: "codex",
+            runtimeMode: "approval-required",
+            activeTurnId: expectedTurnId,
+            lastError: null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        }),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.steer",
+          commandId: CommandId.make("cmd-steer"),
+          threadId,
+          expectedTurnId,
+          messageId: asMessageId("steering-message"),
+          text: "Check the target tab.",
+          createdAt: now,
+        }),
+      );
+      await harness.drain();
+      expect(harness.startSession).not.toHaveBeenCalled();
+      if (runtimeTurnId === expectedTurnId) {
+        expect(harness.sendTurn).toHaveBeenCalledExactlyOnceWith({
+          threadId,
+          expectedTurnId,
+          input: "Check the target tab.",
+        });
+      } else {
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+        const state = await harness.readModel();
+        expect(
+          state.threads[0]?.activities.some(
+            (activity) => activity.kind === "provider.turn.steer.failed",
+          ),
+        ).toBe(true);
+      }
+      const state = await harness.readModel();
+      expect(
+        state.threads[0]?.messages.find((message) => message.id === "steering-message")?.turnId,
+      ).toBe(expectedTurnId);
+    },
+  );
+
   effectIt.effect("projects starting before a slow provider session finishes", () =>
     Effect.gen(function* () {
       const releaseStart = yield* Deferred.make<void>();

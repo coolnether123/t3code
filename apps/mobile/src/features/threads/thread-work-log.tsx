@@ -1,6 +1,9 @@
 import * as Haptics from "expo-haptics";
+import type { EnvironmentId, ToolScreenshot } from "@t3tools/contracts";
+import { useState } from "react";
+import { useAssetUrlState } from "../../state/assets";
 import { type AppSymbolName, SymbolView } from "../../components/AppSymbol";
-import { LayoutAnimation, Pressable, ScrollView, View } from "react-native";
+import { Image, LayoutAnimation, Pressable, ScrollView, View } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
 import { scaledTypographyLineHeight } from "../../lib/appearancePreferences";
@@ -121,6 +124,8 @@ export function collapsedWorkLogHeight(
 }
 
 export function ThreadWorkLog(props: {
+  readonly environmentId: EnvironmentId;
+  readonly onPressImage: (uri: string) => void;
   readonly activities: ReadonlyArray<ThreadFeedActivity>;
   readonly copiedRowId: string | null;
   readonly expandedRows: Readonly<Record<string, boolean>>;
@@ -250,6 +255,13 @@ export function ThreadWorkLog(props: {
 
               {fullDetail ? (
                 <View className="ml-7 border-l border-neutral-300/60 pb-1 pl-3 pt-0.5 dark:border-white/[0.12]">
+                  {row.screenshot ? (
+                    <ToolScreenshotImage
+                      environmentId={props.environmentId}
+                      screenshot={row.screenshot}
+                      onPressImage={props.onPressImage}
+                    />
+                  ) : null}
                   <ScrollView
                     nestedScrollEnabled
                     directionalLockEnabled
@@ -283,6 +295,46 @@ export function ThreadWorkLog(props: {
         })}
       </View>
     </View>
+  );
+}
+
+function ToolScreenshotImage(props: {
+  readonly environmentId: EnvironmentId;
+  readonly screenshot: ToolScreenshot;
+  readonly onPressImage: (uri: string) => void;
+}) {
+  const asset = useAssetUrlState(props.environmentId, {
+    _tag: "attachment",
+    attachmentId: props.screenshot.attachmentId,
+  });
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  if (asset._tag === "Failure" || (asset._tag === "Success" && failedUrl === asset.url)) {
+    return (
+      <Text accessibilityRole="text" className="mb-2 text-xs text-foreground-muted">
+        Screenshot unavailable
+      </Text>
+    );
+  }
+  if (asset._tag !== "Success")
+    return <Text className="mb-2 text-xs text-foreground-muted">Loading screenshot…</Text>;
+  return (
+    <Pressable
+      accessibilityRole="imagebutton"
+      accessibilityLabel={`Expand Chrome screenshot, ${props.screenshot.width} by ${props.screenshot.height}`}
+      onPress={() => props.onPressImage(asset.url)}
+      className="mb-2"
+    >
+      <Image
+        source={{ uri: asset.url }}
+        resizeMode="contain"
+        style={{
+          width: "100%",
+          aspectRatio: props.screenshot.width / props.screenshot.height,
+          maxHeight: 320,
+        }}
+        onError={() => setFailedUrl(asset.url)}
+      />
+    </Pressable>
   );
 }
 

@@ -80,6 +80,7 @@ import {
 } from "./ThreadComposer";
 import { ThreadFeed } from "./ThreadFeed";
 import { EditFromHereDialog } from "./EditFromHereDialog";
+import { SteerTurnDialog } from "./SteerTurnDialog";
 import type { EditFromHereMode } from "./editFromHere";
 import type { ThreadContentPresentation } from "./threadContentPresentation";
 import { resolveThreadFeedSubmissionAnchor } from "./thread-feed-live-follow";
@@ -794,6 +795,15 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
             {/* Hidden (not unmounted) while a user-input request owns the
                 composer slot, so composer drafts and editor state survive. */}
             <View style={activeUserInputRequestId !== null ? { display: "none" } : undefined}>
+              <SteerTurnDialog
+                key={selectedThreadKey}
+                environmentId={props.environmentId}
+                threadId={props.selectedThread.id}
+                session={props.selectedThread.session}
+                disabled={
+                  props.connectionStateLabel !== "connected" || props.editFromHereMode !== null
+                }
+              />
               <ThreadComposer
                 editorRef={composerEditorRef}
                 draftMessage={props.draftMessage}

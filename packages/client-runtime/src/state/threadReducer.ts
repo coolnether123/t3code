@@ -258,6 +258,9 @@ export function applyThreadDetailEvent(
         },
       };
 
+    case "thread.turn-steer-requested":
+      return { kind: "unchanged" };
+
     case "thread.turn-interrupt-requested": {
       if (event.payload.turnId === undefined) {
         return { kind: "unchanged" };

@@ -27,6 +27,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
@@ -34,6 +35,11 @@ import { makeCodexTextGeneration } from "../../textGeneration/CodexTextGeneratio
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { findInstalledChrome } from "../../browser/ChromeAutomation.ts";
+import { ComputerToolkit } from "../../mcp/toolkits/computer/tools.ts";
+import { PreviewToolkit } from "../../mcp/toolkits/preview/tools.ts";
+import { PreviewAutomationBroker } from "../../mcp/PreviewAutomationBroker.ts";
+import { ServerEnvironment } from "../../environment/ServerEnvironment.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeCodexAdapter } from "../Layers/CodexAdapter.ts";
 import { checkCodexProviderStatus, makePendingCodexProvider } from "../Layers/CodexProvider.ts";
@@ -82,6 +88,8 @@ export type CodexDriverEnv =
   | HttpClient.HttpClient
   | Path.Path
   | ProviderEventLoggers
+  | PreviewAutomationBroker
+  | ServerEnvironment
   | ServerConfig
   | ServerSettingsService;
 
@@ -118,9 +126,13 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
+      const previewBroker = yield* PreviewAutomationBroker;
+      const environmentId = yield* (yield* ServerEnvironment).getEnvironmentId;
       const processEnv = mergeProviderInstanceEnvironment(environment);
       const homeLayout = yield* resolveCodexHomeLayout(
         config.useDesktopAppDaemon ? { ...config, shadowHomePath: "" } : config,
@@ -178,19 +190,57 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       });
       const textGeneration = yield* makeCodexTextGeneration(effectiveConfig, processEnv);
 
-      // Build a managed snapshot whose settings never change — mutations come
-      // in as instance rebuilds from the registry rather than in-place
-      // updates. Pre-provide `ChildProcessSpawner` so the check fits
-      // `makeManagedServerProvider.checkProvider`'s `R = never`.
-      const checkProvider = checkCodexProviderStatus(effectiveConfig, undefined, processEnv).pipe(
+      // These are routes T3 can provision when selected, not a claim that a
+      // running Codex thread has attached them. Each turn checks its own catalog.
+      const checkProvider = Effect.gen(function* () {
+        const settings = yield* serverSettings.getSettings;
+        const chromeExecutable = yield* findInstalledChrome();
+        const previewAvailable =
+          settings.enableAgentBrowserAccess &&
+          (yield* previewBroker.isBrowserAvailable(environmentId));
+        return yield* checkCodexProviderStatus(effectiveConfig, undefined, processEnv, [
+          {
+            name: "t3-code",
+            tools: {
+              ...(chromeExecutable ? ComputerToolkit.tools : {}),
+              ...(previewAvailable ? PreviewToolkit.tools : {}),
+            },
+          },
+        ]);
+      }).pipe(
         Effect.map(stampIdentity),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
       );
       const snapshotSettings = makeProviderSnapshotSettingsSource(effectiveConfig, serverSettings);
-      const snapshot = yield* makeManagedServerProvider<ProviderSnapshotSettings<CodexSettings>>({
+      const getSnapshotSettings = Effect.gen(function* () {
+        const settings = yield* snapshotSettings.getSettings;
+        return {
+          ...settings,
+          previewAvailable:
+            settings.enableAgentBrowserAccess &&
+            (yield* previewBroker.isBrowserAvailable(environmentId)),
+        };
+      });
+      const snapshot = yield* makeManagedServerProvider<
+        ProviderSnapshotSettings<CodexSettings> & { readonly previewAvailable: boolean }
+      >({
         maintenanceCapabilities,
-        getSettings: snapshotSettings.getSettings,
-        streamSettings: snapshotSettings.streamSettings,
+        getSettings: getSnapshotSettings,
+        streamSettings: Stream.merge(
+          snapshotSettings.streamSettings,
+          previewBroker.streamBrowserAvailability(environmentId),
+        ).pipe(
+          Stream.filterMapEffect(() =>
+            getSnapshotSettings.pipe(
+              Effect.tapError((cause) =>
+                Effect.logWarning("failed to refresh Codex browser readiness", { cause }),
+              ),
+              Effect.result,
+            ),
+          ),
+        ),
         haveSettingsChanged: haveProviderSnapshotSettingsChanged,
         initialSnapshot: (settings) =>
           makePendingCodexProvider(settings.provider).pipe(Effect.map(stampIdentity)),

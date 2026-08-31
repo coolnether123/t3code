@@ -13,6 +13,7 @@ import * as ExternalLauncher from "../process/externalLauncher.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import * as ServerConfig from "../config.ts";
 
 const workerService = WorkerService.WorkerService.of({
   start: () => Effect.die("unused start"),
@@ -55,6 +56,7 @@ const makeCatalogLayer = (enableT3Workers: boolean) =>
           selectTab: () => Effect.die("unused select"),
           navigate: () => Effect.die("unused navigate"),
           snapshot: () => Effect.die("unused snapshot"),
+          screenshot: () => Effect.die("unused screenshot"),
           click: () => Effect.die("unused click"),
           fill: () => Effect.die("unused fill"),
           type: () => Effect.die("unused type"),
@@ -62,6 +64,11 @@ const makeCatalogLayer = (enableT3Workers: boolean) =>
       ),
     ),
     Layer.provide(Layer.succeed(WorkerService.WorkerService, workerService)),
+    Layer.provide(
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-catalog-" }).pipe(
+        Layer.provideMerge(NodeServices.layer),
+      ),
+    ),
   );
 
 const workerToolNames = [

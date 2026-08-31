@@ -5,6 +5,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
+  TurnId,
   type OrchestrationReadModel,
   type OrchestrationSession,
   type OrchestrationThread,
@@ -77,6 +78,58 @@ function makeSession(status: OrchestrationSession["status"]): OrchestrationSessi
 }
 
 it.layer(NodeServices.layer)("settled thread decider", (it) => {
+  it.effect("binds a steering message to the active turn without requesting another turn", () =>
+    Effect.gen(function* () {
+      const turnId = TurnId.make("codex-turn-1");
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.turn.steer",
+          commandId: CommandId.make("cmd-steer"),
+          threadId: ThreadId.make("thread-1"),
+          expectedTurnId: turnId,
+          messageId: MessageId.make("steering-message"),
+          text: "Focus on the browser test.",
+          createdAt: NOW,
+        },
+        readModel: makeReadModel(null, null, { ...makeSession("running"), activeTurnId: turnId }),
+      });
+      const events = Array.isArray(result) ? result : [result];
+      expect(events.map((event) => event.type)).toEqual([
+        "thread.message-sent",
+        "thread.turn-steer-requested",
+      ]);
+      expect(events[0]?.payload).toMatchObject({ turnId, text: "Focus on the browser test." });
+      expect(events[1]?.payload).toMatchObject({
+        expectedTurnId: turnId,
+        messageId: "steering-message",
+      });
+    }),
+  );
+
+  it.effect("rejects stale steering instead of queuing a new turn", () =>
+    Effect.gen(function* () {
+      for (const session of [
+        null,
+        makeSession("ready"),
+        { ...makeSession("running"), activeTurnId: TurnId.make("new-turn") },
+      ]) {
+        const error = yield* decideOrchestrationCommand({
+          command: {
+            type: "thread.turn.steer",
+            commandId: CommandId.make("cmd-stale-steer"),
+            threadId: ThreadId.make("thread-1"),
+            expectedTurnId: TurnId.make("old-turn"),
+            messageId: MessageId.make("steering-message"),
+            text: "Do not start a new turn.",
+            createdAt: NOW,
+          },
+          readModel: makeReadModel(null, null, session),
+        }).pipe(Effect.flip);
+        expect(error._tag).toBe("OrchestrationCommandInvariantError");
+      }
+    }),
+  );
+
   it.effect("settles awake threads without a redundant wake and re-emits idempotently", () =>
     Effect.gen(function* () {
       const event = yield* decideOrchestrationCommand({

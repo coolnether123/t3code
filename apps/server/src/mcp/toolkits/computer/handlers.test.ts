@@ -66,18 +66,28 @@ const chromeService = (calls: Array<string>) =>
     status: () => Effect.succeed(chromeStatus),
     listTabs: () => Effect.sync(() => (calls.push("tabs"), [chromeTab])),
     selectTab: (tabId) => Effect.sync(() => (calls.push(`select:${tabId}`), chromeTab)),
-    navigate: (url) => Effect.sync(() => (calls.push(`navigate:${url}`), chromeTab)),
-    snapshot: (options) =>
-      Effect.sync(() => (calls.push(`snapshot:${options?.includeDom === true}`), chromeSnapshot)),
-    click: (target) =>
-      Effect.sync(() => calls.push(`click:${"ref" in target ? target.ref : target.selector}`)),
-    fill: (target, value) =>
-      Effect.sync(() =>
-        calls.push(`fill:${"ref" in target ? target.ref : target.selector}:${value}`),
+    navigate: (url, options) =>
+      Effect.sync(() => (calls.push(`navigate:${options?.tabId}:${url}`), chromeTab)),
+    snapshot: (tabId, options) =>
+      Effect.sync(
+        () => (calls.push(`snapshot:${tabId}:${options?.includeDom === true}`), chromeSnapshot),
       ),
-    type: (target, value) =>
+    screenshot: (tabId) =>
+      Effect.sync(() => {
+        calls.push(`screenshot:${tabId}`);
+        return { tabId, mimeType: "image/png" as const, data: "AA==", width: 1, height: 1 };
+      }),
+    click: (target, tabId) =>
       Effect.sync(() =>
-        calls.push(`type:${"ref" in target ? target.ref : target.selector}:${value}`),
+        calls.push(`click:${tabId}:${"ref" in target ? target.ref : target.selector}`),
+      ),
+    fill: (target, value, tabId) =>
+      Effect.sync(() =>
+        calls.push(`fill:${tabId}:${"ref" in target ? target.ref : target.selector}:${value}`),
+      ),
+    type: (target, value, tabId) =>
+      Effect.sync(() =>
+        calls.push(`type:${tabId}:${"ref" in target ? target.ref : target.selector}:${value}`),
       ),
   });
 
@@ -151,26 +161,42 @@ it.effect("routes managed Chrome operations through the authenticated service", 
     expect(
       yield* provide(
         computerHandlers.computer_navigate({
+          tabId: "tab-2",
           url: "https://example.test/next",
           waitUntil: "domcontentloaded",
           timeoutMs: 100,
         }),
       ),
     ).toEqual(chromeTab);
-    expect(yield* provide(computerHandlers.computer_snapshot({ includeDom: true }))).toEqual(
-      chromeSnapshot,
-    );
-    expect(yield* provide(computerHandlers.computer_click({ target: { ref: "ref-1" } }))).toEqual({
+    expect(
+      yield* provide(computerHandlers.computer_snapshot({ tabId: "tab-2", includeDom: true })),
+    ).toEqual(chromeSnapshot);
+    expect(yield* provide(computerHandlers.computer_screenshot({ tabId: "tab-2" }))).toMatchObject({
+      tabId: "tab-2",
+      mimeType: "image/png",
+      data: "AA==",
+    });
+    expect(
+      yield* provide(computerHandlers.computer_click({ tabId: "tab-2", target: { ref: "ref-1" } })),
+    ).toEqual({
       completed: true,
     });
     expect(
       yield* provide(
-        computerHandlers.computer_fill({ target: { selector: "#email" }, value: "a@example.test" }),
+        computerHandlers.computer_fill({
+          tabId: "tab-2",
+          target: { selector: "#email" },
+          value: "a@example.test",
+        }),
       ),
     ).toEqual({ completed: true });
     expect(
       yield* provide(
-        computerHandlers.computer_type({ target: { selector: "#note" }, value: "hello" }),
+        computerHandlers.computer_type({
+          tabId: "tab-2",
+          target: { selector: "#note" },
+          value: "hello",
+        }),
       ),
     ).toEqual({ completed: true });
     expect(yield* provide(computerHandlers.computer_close())).toMatchObject({
@@ -180,11 +206,12 @@ it.effect("routes managed Chrome operations through the authenticated service", 
       "start",
       "tabs",
       "select:tab-1",
-      "navigate:https://example.test/next",
-      "snapshot:true",
-      "click:ref-1",
-      "fill:#email:a@example.test",
-      "type:#note:hello",
+      "navigate:tab-2:https://example.test/next",
+      "snapshot:tab-2:true",
+      "screenshot:tab-2",
+      "click:tab-2:ref-1",
+      "fill:tab-2:#email:a@example.test",
+      "type:tab-2:#note:hello",
       "stop",
     ]);
   }),

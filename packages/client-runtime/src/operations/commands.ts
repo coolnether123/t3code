@@ -1,5 +1,6 @@
 import {
   CommandId,
+  MessageId,
   ORCHESTRATION_WS_METHODS,
   type ClientOrchestrationCommand,
 } from "@t3tools/contracts";
@@ -52,6 +53,9 @@ export type UpdateThreadMetadataInput = CommandInput<"thread.meta.update">;
 export type SetThreadRuntimeModeInput = CommandInput<"thread.runtime-mode.set">;
 export type SetThreadInteractionModeInput = CommandInput<"thread.interaction-mode.set">;
 export type StartThreadTurnInput = CommandInput<"thread.turn.start">;
+export type SteerThreadTurnInput = Omit<CommandInput<"thread.turn.steer">, "messageId"> & {
+  readonly messageId?: MessageId;
+};
 export type InterruptThreadTurnInput = CommandInput<"thread.turn.interrupt">;
 export type RespondToThreadApprovalInput = CommandInput<"thread.approval.respond">;
 export type RespondToThreadUserInputInput = CommandInput<"thread.user-input.respond">;
@@ -289,6 +293,20 @@ export const interruptThreadTurn: (input: InterruptThreadTurnInput) => CommandEf
   return yield* dispatch({
     ...input,
     type: "thread.turn.interrupt",
+    commandId: metadata.commandId,
+    createdAt: metadata.createdAt,
+  });
+});
+
+export const steerThreadTurn: (input: SteerThreadTurnInput) => CommandEffect = Effect.fn(
+  "EnvironmentCommands.steerThreadTurn",
+)(function* (input) {
+  const metadata = yield* timestampedCommandMetadata(input);
+  const crypto = yield* Crypto.Crypto;
+  return yield* dispatch({
+    ...input,
+    type: "thread.turn.steer",
+    messageId: input.messageId ?? MessageId.make(yield* crypto.randomUUIDv4.pipe(Effect.orDie)),
     commandId: metadata.commandId,
     createdAt: metadata.createdAt,
   });

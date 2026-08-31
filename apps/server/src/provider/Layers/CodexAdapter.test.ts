@@ -49,6 +49,8 @@ import {
   type CodexThreadSnapshot,
 } from "./CodexSessionRuntime.ts";
 import { makeCodexAdapter } from "./CodexAdapter.ts";
+import { runtimeEventToActivities } from "../../orchestration/Layers/ProviderRuntimeIngestion.ts";
+import { foldSubagentActivities } from "../../../../../packages/client-runtime/src/state/subagentRuntime.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
 // Test-local service tag so the rest of the file can keep using `yield* CodexAdapter`.
@@ -401,7 +403,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         yield* adapter.sendTurn({ threadId, input: "ordinary", attachments: [] });
         NodeAssert.deepStrictEqual(runtime.sendTurnImpl.mock.calls[0]?.[0], {
           input: "ordinary",
-          computerControlMode: "desktop",
+          computerControlMode: "chrome",
         });
 
         const explicitControl = yield* adapter
@@ -857,6 +859,279 @@ function startLifecycleRuntime() {
 }
 
 lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
+  it.effect(
+    "persists correlated file-change approval detail without altering the wire request",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const eventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+        const payload = {
+          threadId: "provider-thread",
+          turnId: "provider-turn",
+          itemId: "patch-1",
+          reason: null,
+          grantRoot: null,
+          startedAtMs: 1,
+        };
+        const detail =
+          "1 proposed file change:\nADD A:\\project\\arithmetic.mjs\n\nChange 1 diff:\n+export const add = (a, b) => a + b;";
+        yield* runtime.emit({
+          id: asEventId("file-approval"),
+          kind: "request",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("provider-turn"),
+          itemId: asItemId("patch-1"),
+          requestId: ApprovalRequestId.make("approval-1"),
+          method: "item/fileChange/requestApproval",
+          requestKind: "file-change",
+          payload,
+          message: detail,
+        });
+        const event = Option.getOrThrow(yield* Fiber.join(eventFiber));
+        NodeAssert.equal(event.type, "request.opened");
+        if (event.type !== "request.opened") return;
+        NodeAssert.equal(event.payload.detail, detail);
+        NodeAssert.deepEqual(event.payload.args, payload);
+        NodeAssert.deepEqual(event.raw?.payload, payload);
+        const activity = runtimeEventToActivities(event)[0];
+        NodeAssert.ok(activity);
+        NodeAssert.equal(activity?.kind, "approval.requested");
+        NodeAssert.equal((activity.payload as { detail: string }).detail, detail);
+      }),
+  );
+
+  it.effect(
+    "retains completed child output when reconstructing after metadata-only notifications",
+    () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const notifications = [
+          {
+            method: "thread/settings/updated",
+            params: { threadSettings: { model: "gpt-5.6-sol", effort: "high" } },
+          },
+          { method: "thread/name/updated", params: { threadName: "review" } },
+          { method: "thread/archived", params: {} },
+          { method: "rawResponseItem/completed", params: { item: { type: "reasoning" } } },
+          { method: "item/agentMessage/delta", params: { delta: "  " } },
+        ];
+        const eventsFiber = yield* Stream.runCollect(
+          Stream.take(adapter.streamEvents, 2 + notifications.length),
+        ).pipe(Effect.forkChild);
+        yield* runtime.emit({
+          id: asEventId("child-final-output"),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "collabAgent/turnCompleted",
+          threadId: asThreadId("thread-1"),
+          payload: {
+            agentThreadId: "child-1",
+            agentPath: "/root/review",
+            turn: {
+              id: "child-turn",
+              status: "completed",
+              items: [{ type: "agentMessage", text: "Verified child result" }],
+            },
+          },
+        });
+        for (const [index, notification] of notifications.entries()) {
+          yield* runtime.emit({
+            id: asEventId(`child-metadata-${index}`),
+            kind: "notification",
+            provider: ProviderDriverKind.make("codex"),
+            createdAt: `2026-01-01T00:00:0${index + 1}.000Z`,
+            method: "collabAgent/notification",
+            threadId: asThreadId("thread-1"),
+            payload: {
+              agentThreadId: "child-1",
+              agentPath: "/root/review",
+              parentThreadId: "provider-root",
+              wire: {
+                method: notification.method,
+                params: { threadId: "child-1", ...notification.params },
+              },
+            },
+          });
+        }
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        // Persisted activities replace rows by id. Rebuild the agent from that
+        // snapshot rather than folding the unbounded notification history.
+        const rows = new Map(
+          events
+            .flatMap((event) => runtimeEventToActivities(event))
+            .map((activity) => [activity.id, activity]),
+        );
+        const [child] = foldSubagentActivities(Array.from(rows.values()));
+        NodeAssert.equal(child?.progress, "Verified child result");
+        NodeAssert.equal(child?.status, "idle");
+        NodeAssert.equal(child?.model, "gpt-5.6-sol");
+        NodeAssert.equal(child?.effort, "high");
+        NodeAssert.equal(child?.parentAgentId, "provider-root");
+        NodeAssert.deepEqual(
+          events.slice(2).map((event) => event.type),
+          notifications.map(() => "task.updated"),
+        );
+      }),
+  );
+
+  it.effect("preserves completed child turn facts through persisted activity reconstruction", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 3)).pipe(
+        Effect.forkChild,
+      );
+      yield* runtime.emit({
+        id: asEventId("child-completed-facts"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-08-31T00:49:58.896Z",
+        method: "collabAgent/turnCompleted",
+        threadId: asThreadId("thread-1"),
+        payload: {
+          agentThreadId: "child-1",
+          agentPath: "/root/child_a",
+          turn: {
+            id: "child-turn",
+            status: "completed",
+            startedAt: 1788137387,
+            completedAt: 1788137398,
+            durationMs: 11592,
+            items: [{ type: "agentMessage", text: "CHILD_A_COMPLETE" }],
+          },
+        },
+      });
+      yield* runtime.emit({
+        id: asEventId("child-later-metadata"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-08-31T00:50:00.000Z",
+        method: "collabAgent/statusChanged",
+        threadId: asThreadId("thread-1"),
+        payload: { agentThreadId: "child-1", status: { type: "idle" } },
+      });
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      const rows = new Map(
+        events
+          .flatMap((event) => runtimeEventToActivities(event))
+          .map((activity) => [activity.id, activity]),
+      );
+      const [child] = foldSubagentActivities(Array.from(rows.values()));
+      NodeAssert.equal(child?.status, "idle");
+      NodeAssert.equal(child?.completedAt, null);
+      NodeAssert.equal(child?.model, null);
+      NodeAssert.deepEqual(child?.lastTurn, {
+        turnId: "child-turn",
+        outcome: "completed",
+        completedAt: "2026-08-31T00:49:58.000Z",
+        durationMs: 11592,
+        result: "CHILD_A_COMPLETE",
+      });
+    }),
+  );
+
+  it.effect("preserves child output and wire identity without changing the parent turn", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(Stream.take(adapter.streamEvents, 4)).pipe(
+        Effect.forkChild,
+      );
+      const wire = {
+        method: "item/agentMessage/delta",
+        params: {
+          threadId: "child-1",
+          turnId: "child-turn",
+          itemId: "child-item",
+          delta: "Actual child output",
+          futureField: { retained: true },
+        },
+      };
+      yield* runtime.emit({
+        id: asEventId("raw-only"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "codex/rawNotification",
+        threadId: asThreadId("thread-1"),
+        payload: wire,
+      });
+      yield* runtime.emit({
+        id: asEventId("child-delta"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "collabAgent/notification",
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("spawn-turn"),
+        payload: {
+          agentThreadId: "child-1",
+          agentPath: "/root/review",
+          parentThreadId: "parent-provider-thread",
+          wire,
+        },
+      });
+      yield* runtime.emit({
+        id: asEventId("child-completed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "collabAgent/turnCompleted",
+        threadId: asThreadId("thread-1"),
+        payload: {
+          agentThreadId: "child-1",
+          turn: {
+            id: "child-turn",
+            status: "completed",
+            items: [{ type: "agentMessage", text: "Final child result" }],
+          },
+        },
+      });
+      yield* runtime.emit({
+        id: asEventId("child-closed"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "collabAgent/closed",
+        threadId: asThreadId("thread-1"),
+        payload: {
+          agentThreadId: "child-1",
+          agentPath: "/root/review",
+          wire: { method: "thread/closed", params: { threadId: "child-1" } },
+        },
+      });
+      const [delta, result, completed, closed] = Array.from(yield* Fiber.join(eventsFiber));
+      NodeAssert.equal(delta?.type, "task.progress");
+      NodeAssert.equal(delta?.turnId, "spawn-turn");
+      NodeAssert.deepStrictEqual(delta?.providerRefs, {
+        providerThreadId: "child-1",
+        providerTurnId: "child-turn",
+        providerItemId: "child-item",
+      });
+      NodeAssert.deepStrictEqual(delta?.raw, {
+        source: "codex.app-server.notification",
+        method: wire.method,
+        payload: wire.params,
+      });
+      if (delta?.type === "task.progress") {
+        NodeAssert.equal(delta.payload.summary, "Actual child output");
+        NodeAssert.equal(delta.payload.timelineBypass, true);
+        NodeAssert.equal(delta.payload.parentAgentId, "parent-provider-thread");
+      }
+      NodeAssert.equal(closed?.type, "task.updated");
+      NodeAssert.equal(completed?.type, "task.updated");
+      if (completed?.type === "task.updated") {
+        NodeAssert.equal(completed.payload.status, "idle");
+      }
+      NodeAssert.equal(result?.type, "task.progress");
+      NodeAssert.notEqual(result?.eventId, completed?.eventId);
+      if (result?.type === "task.progress")
+        NodeAssert.equal(result.payload.summary, "Final child result");
+      if (closed?.type === "task.updated") NodeAssert.equal(closed.payload.status, undefined);
+    }),
+  );
+
   it.effect("does not reactivate an idle child after a parent interaction", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

@@ -85,6 +85,7 @@ import {
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { isElectron } from "../env";
+import { SteerTurnDialog } from "./chat/SteerTurnDialog";
 import { useDiffPanelStore } from "../diffPanelStore";
 import {
   collapseExpandedComposerCursor,
@@ -6870,6 +6871,19 @@ function ChatViewContent(props: ChatViewProps) {
                   )}
                   {threadSyncPhase && !activeEnvironmentUnavailable ? (
                     <ThreadSyncStatusPill phase={threadSyncPhase} />
+                  ) : null}
+                  {selectedProvider === "codex" && isServerThread && activeThread ? (
+                    <SteerTurnDialog
+                      key={activeThread.id}
+                      environmentId={environmentId}
+                      threadId={activeThread.id}
+                      activeTurnId={
+                        activeThread.session?.status === "running"
+                          ? activeThread.session.activeTurnId
+                          : null
+                      }
+                      disabled={activeEnvironmentUnavailable || isEditingFromHere}
+                    />
                   ) : null}
                   <div
                     className="relative"

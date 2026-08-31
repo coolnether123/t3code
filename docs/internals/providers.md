@@ -44,7 +44,7 @@ orchestration, contract, or client change is required for the common case.
 Clients never call a provider directly. They dispatch orchestration commands over the RPC method
 `orchestration.dispatchCommand`, defined with the rest of the orchestration surface in
 [`orchestration.ts`][contracts]. The client-dispatchable provider-facing commands are
-`thread.turn.start`, `thread.turn.interrupt`, `thread.approval.respond`,
+`thread.turn.start`, `thread.turn.steer`, `thread.turn.interrupt`, `thread.approval.respond`,
 `thread.user-input.respond`, `thread.checkpoint.revert`, and `thread.session.stop`, plus the mode
 setters `thread.runtime-mode.set` and `thread.interaction-mode.set`.
 
@@ -52,6 +52,29 @@ The engine persists an event for the command, and a server-side reactor performs
 Provider output comes back as internal commands such as `thread.message.assistant.delta` and
 `thread.session.set`, which clients observe through `orchestration.subscribeThread`. See
 [overview.md](./overview.md) for the command/event loop.
+
+### Codex identity and active turns
+
+Codex uses the supported App Server protocol. The adapter stores the authoritative Codex thread ID
+in its resume cursor. New sessions use `thread/start`; continuation uses `thread/resume`, and an
+explicit fork uses `thread/fork`. A failed resume remains an error. T3 does not create a replacement
+thread containing reconstructed conversation text.
+
+Steering carries `expectedTurnId` through the orchestration command and provider service to
+`turn/steer`. The service rejects a stale target rather than steering a later turn or queuing new
+work. Steering does not override model, sandbox, or approval settings. Normal submission and
+interruption use `turn/start` and `turn/interrupt`.
+
+The provider event log retains native notifications as `codex/rawNotification`, including fields
+the current normalizer does not recognize. This logging path records notifications, not outgoing
+requests or authentication responses. Canonical events retain provider thread, turn, item, and
+child identities where supplied. The client folds child events into bounded activity and result
+previews; Codex remains authoritative for full child conversation history.
+
+File-change approval previews use the matching session, provider thread, turn, and item. A preview
+is consumed once and has explicit size bounds. The protocol reader handles approval requests
+without blocking unrelated notifications. Browser selection never grants approval; see
+[Codex browser capability boundaries](./codex-browser-capabilities.md).
 
 ## Server-side workers
 

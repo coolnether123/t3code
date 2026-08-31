@@ -24,10 +24,9 @@ import {
   codexSubagentBackendAppServerArgs,
   assertCodexSubagentIsolationConfig,
   hasConfiguredMcpServer,
-  isCodexRemoteControlAvailable,
+  readCodexBrowserAvailability,
   isComputerUseMcpApproval,
   isMcpToolApproval,
-  isRecoverableThreadResumeError,
   makeMemoryConsolidationNotificationFilter,
   mcpApprovalRequestKind,
   openCodexThread,
@@ -582,20 +581,26 @@ describe("buildCodexDeveloperInstructions", () => {
 });
 
 describe("T3 browser developer instructions", () => {
-  it("defaults to trusted full desktop control", () => {
+  it("does not invent desktop control or blanket consent for the legacy desktop preference", () => {
     const instructions = buildCodexDeveloperInstructions("default", {
       model: "gpt-5.6-sol",
       reasoningEffort: "high",
+      computerControlMode: "desktop",
     });
 
-    NodeAssert.match(instructions, /Full Windows and Chrome control/);
-    NodeAssert.match(instructions, /upload, download/);
-    NodeAssert.match(instructions, /no domain allowlist/);
-    NodeAssert.doesNotMatch(instructions, /Do not switch to global browser skills/);
+    NodeAssert.match(instructions, /does not attach Codex desktop Computer Use/);
+    NodeAssert.doesNotMatch(
+      instructions,
+      /Full Windows and Chrome control|no domain allowlist|mcp__node_repl__js/,
+    );
   });
 
-  it("keeps preview, full Chrome, and full desktop as explicit per-turn options", () => {
-    const common = { model: "gpt-5.6-sol", reasoningEffort: "high" } as const;
+  it("distinguishes preview, managed Chrome, and the unsupported desktop preference", () => {
+    const common = {
+      model: "gpt-5.6-sol",
+      reasoningEffort: "high",
+      computerControlAvailable: true,
+    } as const;
     const preview = buildCodexDeveloperInstructions("default", {
       ...common,
       computerControlMode: "preview",
@@ -611,9 +616,9 @@ describe("T3 browser developer instructions", () => {
 
     NodeAssert.match(preview, /preview_status/);
     NodeAssert.match(preview, /Do not switch to global browser skills/);
-    NodeAssert.match(chrome, /Full Chrome control/);
-    NodeAssert.match(chrome, /Chrome DevTools/);
-    NodeAssert.match(desktop, /Full Windows and Chrome control/);
+    NodeAssert.match(chrome, /T3 managed Chrome/);
+    NodeAssert.match(chrome, /separate persistent Chrome profile/);
+    NodeAssert.match(desktop, /does not attach Codex desktop Computer Use/);
   });
 
   it("prefers authenticated T3 Chrome tools when they are attached", () => {
@@ -622,6 +627,7 @@ describe("T3 browser developer instructions", () => {
         model: "gpt-5.6-sol",
         reasoningEffort: "high",
         computerControlMode,
+        computerControlAvailable: true,
       });
 
       NodeAssert.match(
@@ -635,7 +641,7 @@ describe("T3 browser developer instructions", () => {
     }
   });
 
-  it("uses the private Windows fallback only when T3 browser tools are absent", () => {
+  it("reports unavailable desktop control without a private fallback", () => {
     const instructions = buildCodexDeveloperInstructions(
       "default",
       {
@@ -646,9 +652,8 @@ describe("T3 browser developer instructions", () => {
       false,
     );
 
-    NodeAssert.match(instructions, /mcp__node_repl__js/);
-    NodeAssert.match(instructions, /Chrome plugin reports/);
-    NodeAssert.doesNotMatch(instructions, /computer_start/);
+    NodeAssert.match(instructions, /does not attach Codex desktop Computer Use/);
+    NodeAssert.doesNotMatch(instructions, /computer_start|mcp__node_repl__js|@oai\/sky/);
   });
 
   it("keeps the base collaboration modes independent from browser availability", () => {
@@ -695,22 +700,29 @@ describe("hasConfiguredMcpServer", () => {
   });
 });
 
-describe("isCodexRemoteControlAvailable", () => {
-  it("requires a connected status and a nonblank environment id", () => {
-    for (const status of ["disabled", "connecting", "errored"] as const) {
-      NodeAssert.equal(isCodexRemoteControlAvailable({ status, environmentId: "env-1" }), false);
-    }
-    for (const environmentId of [undefined, null, "", "   "]) {
-      NodeAssert.equal(
-        isCodexRemoteControlAvailable({ status: "connected", environmentId }),
-        false,
-      );
-    }
-    NodeAssert.equal(
-      isCodexRemoteControlAvailable({ status: "connected", environmentId: "env-1" }),
-      true,
-    );
-  });
+describe("readCodexBrowserAvailability", () => {
+  it.effect("reads the complete thread-scoped inventory before claiming browser tools", () =>
+    Effect.gen(function* () {
+      const calls: Array<EffectCodexSchema.V2ListMcpServerStatusParams> = [];
+      const client = {
+        request: (
+          _method: "mcpServerStatus/list",
+          params: EffectCodexSchema.V2ListMcpServerStatusParams,
+        ) => {
+          calls.push(params);
+          return Effect.succeed({ data: [], nextCursor: calls.length === 1 ? "page-2" : null });
+        },
+      };
+      NodeAssert.deepStrictEqual(yield* readCodexBrowserAvailability(client, "thread-browser"), {
+        managedChrome: false,
+        previewBrowser: false,
+      });
+      NodeAssert.deepStrictEqual(calls, [
+        { threadId: "thread-browser", detail: "toolsAndAuthOnly" },
+        { threadId: "thread-browser", detail: "toolsAndAuthOnly", cursor: "page-2" },
+      ]);
+    }),
+  );
 });
 
 describe("Codex sub-agent tool catalog routing", () => {
@@ -1008,67 +1020,8 @@ describe("codexSessionAppServerArgs", () => {
   });
 });
 
-describe("isRecoverableThreadResumeError", () => {
-  it("matches missing thread errors", () => {
-    NodeAssert.equal(
-      isRecoverableThreadResumeError(
-        new CodexErrors.CodexAppServerRequestError({
-          code: -32603,
-          errorMessage: "Thread does not exist",
-        }),
-      ),
-      true,
-    );
-  });
-
-  it("matches a missing rollout for a known thread id", () => {
-    NodeAssert.equal(
-      isRecoverableThreadResumeError(
-        new CodexErrors.CodexAppServerRequestError({
-          code: -32603,
-          errorMessage: "no rollout found for thread id 019fdf74-aaa9-7950-b252-7cc7a8650470",
-        }),
-      ),
-      true,
-    );
-  });
-
-  it("ignores non-recoverable resume errors", () => {
-    NodeAssert.equal(
-      isRecoverableThreadResumeError(
-        new CodexErrors.CodexAppServerRequestError({
-          code: -32603,
-          errorMessage: "Permission denied",
-        }),
-      ),
-      false,
-    );
-  });
-
-  it("ignores unrelated missing-resource errors that do not mention threads", () => {
-    NodeAssert.equal(
-      isRecoverableThreadResumeError(
-        new CodexErrors.CodexAppServerRequestError({
-          code: -32603,
-          errorMessage: "Config file not found",
-        }),
-      ),
-      false,
-    );
-    NodeAssert.equal(
-      isRecoverableThreadResumeError(
-        new CodexErrors.CodexAppServerRequestError({
-          code: -32603,
-          errorMessage: "Model does not exist",
-        }),
-      ),
-      false,
-    );
-  });
-});
-
 describe("openCodexThread", () => {
-  it.effect("falls back to thread/start when resume fails recoverably", () =>
+  it.effect("preserves a missing thread's identity instead of starting a replacement", () =>
     Effect.gen(function* () {
       const calls: Array<{
         method: "thread/start" | "thread/resume" | "thread/fork";
@@ -1093,7 +1046,7 @@ describe("openCodexThread", () => {
         },
       };
 
-      const opened = yield* openCodexThread({
+      const error = yield* openCodexThread({
         client,
         threadId: ThreadId.make("thread-1"),
         runtimeMode: "full-access",
@@ -1101,13 +1054,15 @@ describe("openCodexThread", () => {
         requestedModel: "gpt-5.3-codex",
         serviceTier: undefined,
         resumeThreadId: "stale-thread",
-      });
+      }).pipe(Effect.flip);
 
-      NodeAssert.equal(opened.thread.id, "fresh-thread");
+      NodeAssert.ok(isCodexAppServerRequestError(error));
+      NodeAssert.equal(error.errorMessage, "thread not found");
       NodeAssert.deepStrictEqual(
         calls.map((call) => call.method),
-        ["thread/resume", "thread/start"],
+        ["thread/resume"],
       );
+      NodeAssert.equal((calls[0]!.payload as { threadId: string }).threadId, "stale-thread");
     }),
   );
 

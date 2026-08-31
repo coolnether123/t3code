@@ -122,6 +122,8 @@ import { useUiStateStore } from "~/uiStateStore";
 import { type TimestampFormat } from "@t3tools/contracts/settings";
 import { formatChatTimestampTooltip, formatDayAwareTimestamp } from "../../timestampFormat";
 import { useMessageCopyMenu } from "./useMessageCopyMenu";
+import { toolScreenshotFromItem } from "@t3tools/shared/toolScreenshot";
+import { ToolScreenshotPreview } from "./ToolScreenshotPreview";
 
 import {
   buildInlineTerminalContextText,
@@ -2945,6 +2947,11 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
   isExpandedToolGroupEntry: boolean;
 }) {
   const { workEntry, workspaceRoot, isExpandedToolGroupEntry } = props;
+  const ctx = use(TimelineRowCtx);
+  const screenshot =
+    ctx.threadRef === null
+      ? null
+      : toolScreenshotFromItem(workEntry.toolData, ctx.threadRef.threadId);
   const [expanded, setExpanded] = useState(false);
   const iconConfig = workToneIcon(workEntry.tone);
   const showWarningIndicator = workEntry.sourceActivityKind === "runtime.warning";
@@ -3044,6 +3051,13 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
           onClick={stopRowToggle}
           onPointerDown={stopRowToggle}
         >
+          {screenshot !== null ? (
+            <ToolScreenshotPreview
+              environmentId={ctx.activeThreadEnvironmentId}
+              screenshot={screenshot}
+              onImageExpand={ctx.onImageExpand}
+            />
+          ) : null}
           <pre className={toolCallExpandedBodyClassName}>{expandedBody}</pre>
         </div>
       ) : null}

@@ -19,6 +19,7 @@ import type {
   ServerProviderState,
   ModelCapabilities,
   ProviderOptionDescriptor,
+  ProviderOptionChoice,
   ServerProviderModel,
   ServerProviderSkill,
 } from "@t3tools/contracts";
@@ -27,10 +28,12 @@ import { PREFERRED_DEFAULT_CODEX_MODELS, ServerSettingsError } from "@t3tools/co
 import { createModelCapabilities } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { codexLaunchArgv, resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
+import { CODEX_COMPUTER_CONTROL_OPTION_ID } from "../CodexComputerControl.ts";
 import {
-  CODEX_COMPUTER_CONTROL_OPTION_ID,
-  DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
-} from "../CodexDeveloperInstructions.ts";
+  type CodexMcpToolInventory,
+  hasT3PreviewBrowserTools,
+  resolveCodexBrowserCapabilities,
+} from "../CodexBrowserCapabilities.ts";
 import {
   AUTH_PROBE_TIMEOUT_MS,
   buildServerProvider,
@@ -131,6 +134,7 @@ function codexAccountEmail(account: CodexSchema.V2GetAccountResponse["account"])
 
 export function mapCodexModelCapabilities(
   model: CodexSchema.V2ModelListResponse__Model,
+  browserTools: ReadonlyArray<CodexMcpToolInventory> = [],
 ): ModelCapabilities {
   const reasoningOptions = model.supportedReasoningEfforts.map(({ reasoningEffort }) =>
     reasoningEffort === model.defaultReasoningEffort
@@ -207,31 +211,37 @@ export function mapCodexModelCapabilities(
       currentValue: defaultServiceTier,
     });
   }
-  optionDescriptors.push({
-    id: CODEX_COMPUTER_CONTROL_OPTION_ID,
-    label: "Computer control",
-    type: "select",
-    options: [
-      {
-        id: "desktop",
-        label: "Full desktop",
-        description: "Use unrestricted Chrome and Windows computer-control tools with fallbacks.",
-        isDefault: true,
-      },
-      {
+  const browserOptions: ProviderOptionChoice[] = [];
+  for (const capability of resolveCodexBrowserCapabilities(browserTools)) {
+    if (capability.id === "t3-managed-chrome" && capability.available) {
+      browserOptions.push({
         id: "chrome",
-        label: "Full Chrome",
+        label: capability.label,
         description:
-          "Use the existing Chrome session, DevTools, downloads, uploads, and web tools.",
-      },
-      {
-        id: "preview",
-        label: "T3 Preview",
-        description: "Prefer T3's isolated collaborative preview browser.",
-      },
-    ],
-    currentValue: DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
-  });
+          "Use T3's separate persistent Chrome profile. This does not control your normal Chrome profile or Windows desktop.",
+      });
+    }
+  }
+  if (hasT3PreviewBrowserTools(browserTools)) {
+    browserOptions.push({
+      id: "preview",
+      label: "T3 Preview",
+      description: "Use T3's isolated collaborative preview browser.",
+    });
+  }
+  const defaultBrowser = browserOptions[0];
+  if (defaultBrowser) {
+    optionDescriptors.push({
+      id: CODEX_COMPUTER_CONTROL_OPTION_ID,
+      label: "Browser provider",
+      type: "select",
+      options: browserOptions.map((option) => ({
+        ...option,
+        ...(option.id === defaultBrowser.id ? { isDefault: true } : {}),
+      })),
+      currentValue: defaultBrowser.id,
+    });
+  }
 
   return createModelCapabilities({
     optionDescriptors,
@@ -262,6 +272,7 @@ const toDisplayName = (model: CodexSchema.V2ModelListResponse__Model): string =>
 
 function parseCodexModelListResponse(
   response: CodexSchema.V2ModelListResponse,
+  browserTools: ReadonlyArray<CodexMcpToolInventory>,
 ): ReadonlyArray<ServerProviderModel> {
   return response.data.map((model) => ({
     slug: model.model,
@@ -269,7 +280,7 @@ function parseCodexModelListResponse(
     isCustom: false,
     ...(model.isDefault ? { isDefault: true } : {}),
     ...(isLegacyCodexModel(model.model) ? { isLegacy: true } : {}),
-    capabilities: mapCodexModelCapabilities(model),
+    capabilities: mapCodexModelCapabilities(model, browserTools),
   }));
 }
 
@@ -371,6 +382,7 @@ function parseCodexSkillsListResponse(
 
 const requestAllCodexModels = Effect.fn("requestAllCodexModels")(function* (
   client: CodexClient.CodexAppServerClient["Service"],
+  browserTools: ReadonlyArray<CodexMcpToolInventory>,
 ) {
   const models: ServerProviderModel[] = [];
   let cursor: string | null | undefined = undefined;
@@ -380,7 +392,7 @@ const requestAllCodexModels = Effect.fn("requestAllCodexModels")(function* (
       "model/list",
       cursor ? { cursor } : {},
     );
-    models.push(...parseCodexModelListResponse(response));
+    models.push(...parseCodexModelListResponse(response, browserTools));
     cursor = response.nextCursor;
   } while (cursor);
 
@@ -410,6 +422,7 @@ const probeCodexAppServerProviderOnce = Effect.fn("probeCodexAppServerProviderOn
     readonly customModels?: ReadonlyArray<string>;
     readonly environment?: NodeJS.ProcessEnv;
     readonly appServerTransport?: CodexAppServerTransport;
+    readonly browserTools: ReadonlyArray<CodexMcpToolInventory>;
   }) {
     // `~` is not shell-expanded when env vars are set via `child_process.spawn`,
     // so `CODEX_HOME=~/.codex_work` would reach codex verbatim and trip
@@ -496,7 +509,7 @@ const probeCodexAppServerProviderOnce = Effect.fn("probeCodexAppServerProviderOn
         client.request("skills/list", {
           cwds: [input.cwd],
         }),
-        requestAllCodexModels(client),
+        requestAllCodexModels(client, input.browserTools),
       ],
       { concurrency: "unbounded" },
     );
@@ -615,12 +628,14 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     readonly customModels: ReadonlyArray<string>;
     readonly environment?: NodeJS.ProcessEnv;
     readonly appServerTransport?: CodexAppServerTransport;
+    readonly browserTools: ReadonlyArray<CodexMcpToolInventory>;
   }) => Effect.Effect<
     CodexAppServerProviderSnapshot,
     CodexErrors.CodexAppServerError,
     ChildProcessSpawner.ChildProcessSpawner | Scope.Scope
   > = probeCodexAppServerProvider,
   environment?: NodeJS.ProcessEnv,
+  browserTools: ReadonlyArray<CodexMcpToolInventory> = [],
 ): Effect.fn.Return<
   ServerProviderDraft,
   ServerSettingsError,
@@ -655,6 +670,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     customModels: codexSettings.customModels,
     environment: resolvedEnvironment,
     appServerTransport: codexAppServerTransport(codexSettings),
+    browserTools,
   }).pipe(
     Effect.scoped,
     Effect.timeoutOption(Duration.millis(AUTH_PROBE_TIMEOUT_MS)),
