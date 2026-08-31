@@ -1,3 +1,4 @@
+import { BirthdayGreeting } from "../BirthdayCelebration";
 import {
   watchResetAnnouncements,
   type ResetNews,
@@ -171,6 +172,7 @@ export function UsageResetPage() {
           width="readable"
           className="pb-[calc(env(safe-area-inset-bottom)+3rem)]"
         >
+          <BirthdayGreeting />
           <p role="status" aria-live="polite" className="text-xs text-muted-foreground">
             {refreshMessage || "Refresh checks saved readings, API costs and reset news."}
           </p>

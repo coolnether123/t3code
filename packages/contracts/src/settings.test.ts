@@ -18,6 +18,37 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 
+describe("private birthday settings", () => {
+  const birthday = { month: 5, day: 14, enabled: true, tapEffects: true };
+  it("has no default personal date and round-trips the configured preference", () => {
+    expect(decodeServerSettings({}).birthdayCelebration).toBeNull();
+    const decoded = decodeServerSettings({ birthdayCelebration: { ...birthday, year: 1990 } });
+    expect(encodeServerSettings(decoded).birthdayCelebration).toEqual(birthday);
+    expect(decodeServerSettingsPatch({ birthdayCelebration: null }).birthdayCelebration).toBeNull();
+    expect(
+      decodeServerSettingsPatch({ birthdayCelebration: birthday }).birthdayCelebration,
+    ).toEqual(birthday);
+  });
+  it.each([
+    { month: 2, day: 30 },
+    { month: 4, day: 31 },
+    { month: 0, day: 1 },
+    { month: 13, day: 1 },
+    { month: 1, day: 0 },
+    { month: 5, day: 1.5 },
+  ])("rejects invalid recurring dates: %j", (date) => {
+    expect(() =>
+      decodeServerSettingsPatch({ birthdayCelebration: { ...birthday, ...date } }),
+    ).toThrow();
+  });
+  it("accepts leap day without substituting a different birthday", () => {
+    expect(
+      decodeServerSettings({ birthdayCelebration: { ...birthday, month: 2, day: 29 } })
+        .birthdayCelebration?.day,
+    ).toBe(29);
+  });
+});
+
 describe("ServerSettings T3 Workers", () => {
   it("defaults the experimental Worker surface off and accepts opt-in", () => {
     expect(decodeServerSettings({}).enableT3Workers).toBe(false);

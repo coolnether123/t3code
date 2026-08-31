@@ -606,7 +606,24 @@ export const BackgroundActivitySettings = Schema.Struct({
 }).pipe(Schema.withDecodingDefault(Effect.succeed({})));
 export type BackgroundActivitySettings = typeof BackgroundActivitySettings.Type;
 
+/** A recurring month/day, stored with private environment settings, never a birth year. */
+export const BirthdayCelebrationPreference = Schema.Struct({
+  month: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 12 })),
+  day: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 31 })),
+  enabled: Schema.Boolean,
+  tapEffects: Schema.Boolean,
+}).check(
+  Schema.makeFilter(
+    ({ month, day }) => day <= [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1]!,
+    { message: "Choose a valid birthday month and day." },
+  ),
+);
+export type BirthdayCelebrationPreference = typeof BirthdayCelebrationPreference.Type;
+
 export const ServerSettings = Schema.Struct({
+  birthdayCelebration: Schema.NullOr(BirthdayCelebrationPreference).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   // Legacy token-by-token assistant output. Deliberately a fresh key (was
   // `enableAssistantStreaming`): decoding drops the old key, so everyone,
   // including prior opt-ins, resets to the buffered default.
@@ -834,6 +851,7 @@ const OpenCodeSettingsPatch = Schema.Struct({
 
 export const ServerSettingsPatch = Schema.Struct({
   // Server settings
+  birthdayCelebration: Schema.optionalKey(Schema.NullOr(BirthdayCelebrationPreference)),
   enableLegacyTokenStreaming: Schema.optionalKey(Schema.Boolean),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   enableT3Workers: Schema.optionalKey(Schema.Boolean),

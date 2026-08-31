@@ -43,6 +43,11 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
  */
 export const SETTINGS_SEARCH_ITEMS = [
   {
+    id: "birthday-celebration",
+    title: "Birthday celebration",
+    to: "/settings/appearance",
+  },
+  {
     id: "color-scheme",
     title: "Color scheme",
     to: "/settings/appearance",

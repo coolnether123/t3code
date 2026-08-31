@@ -120,6 +120,7 @@ import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ThemeLibrary } from "./ThemeSettings";
+import { BirthdaySettings } from "./BirthdaySettings";
 import {
   backgroundActivityOverrideSettings,
   backgroundActivitySharedPolicySettings,
@@ -1163,6 +1164,7 @@ export function AppearanceSettingsPanel() {
         ) : null}
       </SettingsSection>
 
+      <BirthdaySettings />
       <TypographySection />
     </SettingsPageContainer>
   );

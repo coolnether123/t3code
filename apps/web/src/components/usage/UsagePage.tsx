@@ -8,6 +8,7 @@ import type { DailyTotals, HourlyTotals } from "@t3tools/shared/usageMerge";
 import { isElectron } from "../../env";
 import { cn } from "../../lib/utils";
 import { useUsage, type EnvironmentUsageStatus } from "../../state/usage";
+import { BirthdayGreeting } from "../BirthdayCelebration";
 import {
   enumerateDays,
   enumerateHourStarts,
@@ -220,6 +221,7 @@ export function UsagePage() {
 
         <ScrollArea className="min-h-0 flex-1">
           <WorkspacePageContainer width="wide">
+            <BirthdayGreeting />
             <div className="mb-5 flex justify-end">
               <Link
                 to="/usage-resets"
