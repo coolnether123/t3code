@@ -106,6 +106,53 @@ const peerPath = Effect.map(HostProcessPlatform, (platform) =>
 );
 
 describe("CodexSessionRuntime collab integration", () => {
+  it.effect("records standard, fast, inherited fast and restored standard by native turn", () =>
+    Effect.gen(function* () {
+      const turnIds = ["standard-1", "fast-1", "fast-2", "standard-2"];
+      const observedTiers: Array<{ sessionId: string; turnId: string; serviceTier: string }> = [];
+      NodeFS.writeFileSync(
+        scriptPath,
+        encodeScript({ rootThreadId: ROOT, turnIds, notifications: [] }),
+        "utf8",
+      );
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => NodeFS.rmSync(scriptPath, { force: true })),
+      );
+      const runtime = yield* makeCodexSessionRuntime({
+        threadId: ThreadId.make("automatic-speed-tracking"),
+        serviceTier: "default",
+        onTurnServiceTier: (observation) =>
+          Effect.sync(() => {
+            observedTiers.push(observation);
+          }),
+        binaryPath: yield* peerPath,
+        cwd: NodeOS.tmpdir(),
+        runtimeMode: "approval-required",
+        environment: { ...process.env, T3_CODEX_COLLAB_SCRIPT: scriptPath },
+      });
+      yield* runtime.start();
+      for (const serviceTier of [undefined, "fast", undefined, "default"]) {
+        const completed = yield* runtime.events.pipe(
+          Stream.filter((event) => event.method === "turn/completed"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        yield* runtime.sendTurn({ input: "Check speed", serviceTier });
+        yield* Fiber.join(completed);
+      }
+      assert.deepEqual(
+        observedTiers,
+        ["default", "priority", "priority", "default"].map((serviceTier, index) => ({
+          sessionId: ROOT,
+          turnId: turnIds[index],
+          serviceTier,
+        })),
+      );
+      yield* runtime.close;
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect(
     "correlates null-reason file approvals only with the matching provider thread, turn, and item",
     () =>

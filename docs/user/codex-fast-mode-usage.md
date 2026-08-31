@@ -20,6 +20,12 @@ the request explicitly selects one. Transcript metadata takes precedence over
 that requested tier, including a recorded downgrade to standard service.
 User-reported periods apply only when neither source identifies the tier.
 
+Future turns sent from T3 do not need manual time windows. Choose Fast or
+Standard in the conversation's speed options; T3 records the selected tier
+with the native turn and includes it in the next usage update. Switching Fast
+Mode off explicitly restores standard service for the next turn, including
+older saved boolean toggles. Steering an active turn does not change its speed.
+
 Some Codex versions do not save speed settings in transcripts. T3 cannot
 reconstruct those settings from token totals or today's Fast Mode switch.
 Older unidentified responses keep standard estimates and appear in the
