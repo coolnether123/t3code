@@ -72,6 +72,8 @@ export interface RuntimeSubagent {
   readonly error: string | null;
   readonly outputFile: string | null;
   readonly parentAgentId: string | null;
+  readonly providerThreadId?: string;
+  readonly providerTurnId?: string;
   readonly agentIndex: number | null;
   readonly phaseIndex: number | null;
   readonly phaseTitle: string | null;
@@ -106,6 +108,7 @@ export function isActiveSubagentStatus(status: RuntimeSubagentStatus): boolean {
 
 const RECENT_ACTIVITY_LIMIT = 6;
 const SUMMARY_CHAR_LIMIT = 180;
+const DETAIL_CHAR_LIMIT = 16_000;
 const ROSTER_LIMIT = 100;
 
 /**
@@ -120,8 +123,8 @@ export function isBackgroundTaskActivity(payload: Record<string, unknown>): bool
   return payload.agentKind !== "agent";
 }
 
-function bounded(value: string): string {
-  return value.length <= SUMMARY_CHAR_LIMIT ? value : `${value.slice(0, SUMMARY_CHAR_LIMIT - 1)}…`;
+function bounded(value: string, limit = SUMMARY_CHAR_LIMIT): string {
+  return value.length <= limit ? value : `${value.slice(0, limit - 1)}…`;
 }
 
 /** Appends to the ring buffer, deduping consecutive identical summaries. */
@@ -241,6 +244,8 @@ interface MutableAgent {
   error: string | null;
   outputFile: string | null;
   parentAgentId: string | null;
+  providerThreadId?: string;
+  providerTurnId?: string;
   agentIndex: number | null;
   phaseIndex: number | null;
   phaseTitle: string | null;
@@ -314,6 +319,13 @@ function getOrCreate(
 
 /** Metadata fill from any payload: never downgrades known values to null. */
 function fillMetadata(agent: MutableAgent, payload: Record<string, unknown>): void {
+  if (typeof payload.providerRefs === "object" && payload.providerRefs !== null) {
+    const refs = payload.providerRefs as Record<string, unknown>;
+    const providerThreadId = asString(refs.providerThreadId);
+    if (providerThreadId) agent.providerThreadId = providerThreadId;
+    const providerTurnId = asString(refs.providerTurnId);
+    if (providerTurnId) agent.providerTurnId = providerTurnId;
+  }
   const title = asString(payload.title);
   if (title) agent.title = title;
   const role = asString(payload.role);
@@ -521,7 +533,7 @@ export function foldSubagentActivities(
         }
         const summary = asString(payload.summary);
         if (summary) {
-          agent.progress = bounded(summary);
+          agent.progress = bounded(summary, DETAIL_CHAR_LIMIT);
           agent.recentActivity = appendActivity(agent.recentActivity, at, summary);
         }
         const lastToolName = asString(payload.lastToolName);
@@ -532,7 +544,7 @@ export function foldSubagentActivities(
           }
         }
         const error = asString(payload.error);
-        if (error) agent.error = bounded(error);
+        if (error) agent.error = bounded(error, DETAIL_CHAR_LIMIT);
         agent.usage = mergeUsageMax(agent.usage, asUsage(payload.typedUsage));
         agent.updatedAt = at;
         break;
@@ -554,7 +566,7 @@ export function foldSubagentActivities(
         const status = asRuntimeStatus(payload.status);
         if (status) applyStatus(agent, status, at);
         const error = asString(payload.error);
-        if (error) agent.error = bounded(error);
+        if (error) agent.error = bounded(error, DETAIL_CHAR_LIMIT);
         // Provider end time beats ingestion time for the transition that
         // actually settled the run (applyStatus fills completedAt with the
         // activity timestamp first, so check the transition, not null).
@@ -586,9 +598,9 @@ export function foldSubagentActivities(
         if (isTerminalSubagentStatus(agent.status)) {
           if (summary) {
             if (agent.status === "failed") {
-              agent.error = agent.error ?? bounded(summary);
+              agent.error = agent.error ?? bounded(summary, DETAIL_CHAR_LIMIT);
             } else {
-              agent.result = agent.result ?? bounded(summary);
+              agent.result = agent.result ?? bounded(summary, DETAIL_CHAR_LIMIT);
             }
           }
           agent.usage = mergeUsageMax(agent.usage, asUsage(payload.typedUsage));
@@ -598,9 +610,9 @@ export function foldSubagentActivities(
         applyStatus(agent, status, at);
         if (summary) {
           if (status === "failed") {
-            agent.error = agent.error ?? bounded(summary);
+            agent.error = agent.error ?? bounded(summary, DETAIL_CHAR_LIMIT);
           } else {
-            agent.result = bounded(summary);
+            agent.result = bounded(summary, DETAIL_CHAR_LIMIT);
           }
         }
         agent.usage = mergeUsageMax(agent.usage, asUsage(payload.typedUsage));

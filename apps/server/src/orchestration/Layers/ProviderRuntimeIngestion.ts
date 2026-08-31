@@ -18,6 +18,7 @@ import {
   type OrchestrationThread,
   type OrchestrationThreadActivity,
   type ProviderRuntimeEvent,
+  type ProviderRefs,
 } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
@@ -369,8 +370,12 @@ function requestKindFromCanonicalRequestType(
  * into the persisted activity payload. Identity fields ride on every row so
  * client folds survive activity retention; absent fields stay absent.
  */
-function taskLinkageActivityFields(payload: Record<string, unknown>): Record<string, unknown> {
+function taskLinkageActivityFields(
+  payload: Record<string, unknown>,
+  providerRefs: ProviderRefs | undefined,
+): Record<string, unknown> {
   const fields: Record<string, unknown> = {
+    ...(providerRefs ? { providerRefs } : {}),
     // Server-stamped classification: persisted rows are self-describing, so
     // clients trust the stamp instead of re-deriving agent-vs-background
     // from taskType denylists and marker heuristics (legacy rows without a
@@ -613,7 +618,10 @@ export function runtimeEventToActivities(
             ...(event.payload.description
               ? { detail: truncateDetail(event.payload.description) }
               : {}),
-            ...taskLinkageActivityFields(event.payload as Record<string, unknown>),
+            ...taskLinkageActivityFields(
+              event.payload as Record<string, unknown>,
+              event.providerRefs,
+            ),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -622,7 +630,10 @@ export function runtimeEventToActivities(
     }
 
     case "task.progress": {
-      const linkage = taskLinkageActivityFields(event.payload as Record<string, unknown>);
+      const linkage = taskLinkageActivityFields(
+        event.payload as Record<string, unknown>,
+        event.providerRefs,
+      );
       // Usage and activity are independent latest-state streams. Keeping them
       // under separate stable ids prevents a command/reasoning update from
       // replacing the last known token count (and prevents a usage-only tick
@@ -661,7 +672,7 @@ export function runtimeEventToActivities(
                   ...title,
                   detail: truncateDetail(event.payload.summary ?? event.payload.description),
                   ...(event.payload.summary
-                    ? { summary: truncateDetail(event.payload.summary) }
+                    ? { summary: truncateDetail(event.payload.summary, 16_000) }
                     : {}),
                   ...(event.payload.lastToolName
                     ? { lastToolName: event.payload.lastToolName }
@@ -721,7 +732,10 @@ export function runtimeEventToActivities(
             ...(event.payload.isBackgrounded !== undefined
               ? { isBackgrounded: event.payload.isBackgrounded }
               : {}),
-            ...taskLinkageActivityFields(event.payload as Record<string, unknown>),
+            ...taskLinkageActivityFields(
+              event.payload as Record<string, unknown>,
+              event.providerRefs,
+            ),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -784,12 +798,15 @@ export function runtimeEventToActivities(
             // summary and keep detail for the preview/expanded body.
             ...(event.payload.summary
               ? {
-                  summary: truncateDetail(event.payload.summary),
+                  summary: truncateDetail(event.payload.summary, 16_000),
                   detail: truncateDetail(event.payload.summary),
                 }
               : {}),
             ...(event.payload.usage !== undefined ? { usage: event.payload.usage } : {}),
-            ...taskLinkageActivityFields(event.payload as Record<string, unknown>),
+            ...taskLinkageActivityFields(
+              event.payload as Record<string, unknown>,
+              event.providerRefs,
+            ),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,

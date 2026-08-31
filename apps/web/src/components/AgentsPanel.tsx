@@ -29,17 +29,20 @@ import { cn } from "~/lib/utils";
 import { orchestrationEnvironment } from "~/state/orchestration";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { Button } from "~/components/ui/button";
+import {
+  Dialog,
+  DialogTrigger,
+  DialogPopup,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogPanel,
+} from "~/components/ui/dialog";
 
-/**
- * In-flight states all present as Working (one steady state, per the
- * monitoring-pill design: detail belongs in the activity sub-line, and a
- * stalled/waiting/queued subagent is still the fleet doing its job, not a
- * user problem). Only settled states differentiate.
- */
 const STATUS_VISUALS: Record<RuntimeSubagent["status"], { dotClass: string; label: string }> = {
-  pending: { dotClass: "bg-info", label: "Working" },
+  pending: { dotClass: "bg-info", label: "Pending" },
   running: { dotClass: "bg-info", label: "Working" },
-  waiting: { dotClass: "bg-info", label: "Working" },
+  waiting: { dotClass: "bg-info", label: "Waiting" },
   // Idle reads as settled (muted, not sky): a resting Codex child looks done
   // unless resumed — live-test: sky idle dots read as stuck in-progress.
   idle: { dotClass: "bg-muted-foreground/50", label: "Idle · resumable" },
@@ -137,7 +140,7 @@ function agentActivityText(agent: RuntimeSubagent): string | null {
   );
 }
 
-/** Flat, non-interactive agent status line. No unfold. */
+/** Fixed-height status row; details open without rearranging the roster. */
 function AgentRow({ agent }: { agent: RuntimeSubagent }) {
   const visuals = STATUS_VISUALS[agent.status];
   const activity = agentActivityText(agent);
@@ -154,39 +157,99 @@ function AgentRow({ agent }: { agent: RuntimeSubagent }) {
   ].filter((value): value is string => value !== null);
 
   return (
-    <div className="grid h-[3.875rem] grid-cols-[0.375rem_minmax(0,1fr)_auto] grid-rows-[1.25rem_1.125rem_1rem] items-center gap-x-2 rounded-md px-1.5 py-1">
-      <span className="col-start-1 row-start-1 flex items-center">
-        <StatusDot status={agent.status} />
-      </span>
-      <span className="col-start-2 row-start-1 flex min-w-0 items-baseline gap-2">
-        <span className="min-w-0 truncate text-sm font-medium">{agent.title}</span>
-        {role ? (
-          <span className="max-w-28 shrink-0 truncate rounded-sm border border-border/60 px-1 font-mono text-[.65rem] text-muted-foreground">
-            {role}
-          </span>
-        ) : null}
-      </span>
-      <span className="col-start-3 row-start-1 min-w-14 text-right font-mono text-[.7rem] text-muted-foreground/80">
-        <span className="inline-flex items-center gap-1">
-          <AgentElapsed agent={agent} />
-          {agent.status === "completed" ? (
-            <Check aria-hidden className="size-3 text-success" />
+    <Dialog>
+      <div className="grid h-[3.875rem] grid-cols-[0.375rem_minmax(0,1fr)_auto] grid-rows-[1.25rem_1.125rem_1rem] items-center gap-x-2 rounded-md px-1.5 py-1">
+        <span className="col-start-1 row-start-1 flex items-center">
+          <StatusDot status={agent.status} />
+        </span>
+        <span className="col-start-2 row-start-1 flex min-w-0 items-baseline gap-2">
+          <DialogTrigger
+            className="min-w-0 truncate rounded-sm text-left text-sm font-medium hover:underline focus-visible:outline-2 focus-visible:outline-ring"
+            aria-label={`View details for ${agent.title}`}
+          >
+            {agent.title}
+          </DialogTrigger>
+          {role ? (
+            <span className="max-w-28 shrink-0 truncate rounded-sm border border-border/60 px-1 font-mono text-[.65rem] text-muted-foreground">
+              {role}
+            </span>
           ) : null}
         </span>
-      </span>
-      <span
-        className={cn(
-          "col-start-2 col-end-4 row-start-2 block truncate text-xs",
-          agent.status === "failed" ? "text-destructive-foreground" : "text-muted-foreground",
-        )}
-      >
-        {activity ?? visuals.label}
-      </span>
-      <span className="col-start-2 col-end-4 row-start-3 truncate font-mono text-[.7rem] tabular-nums text-muted-foreground/70">
-        {metadata.join(" · ")}
-      </span>
-      <span className="sr-only">{visuals.label}</span>
-    </div>
+        <span className="col-start-3 row-start-1 min-w-14 text-right font-mono text-[.7rem] text-muted-foreground/80">
+          <span className="inline-flex items-center gap-1">
+            <AgentElapsed agent={agent} />
+            {agent.status === "completed" ? (
+              <Check aria-hidden className="size-3 text-success" />
+            ) : null}
+          </span>
+        </span>
+        <span
+          className={cn(
+            "col-start-2 col-end-4 row-start-2 block truncate text-xs",
+            agent.status === "failed" ? "text-destructive-foreground" : "text-muted-foreground",
+          )}
+        >
+          {activity ?? visuals.label}
+        </span>
+        <span className="col-start-2 col-end-4 row-start-3 truncate font-mono text-[.7rem] tabular-nums text-muted-foreground/70">
+          {metadata.join(" · ")}
+        </span>
+        <span className="sr-only">{visuals.label}</span>
+      </div>
+      <DialogPopup className="w-full sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>{agent.title}</DialogTitle>
+          <DialogDescription>
+            {visuals.label}
+            {modelLabel ? ` · ${modelLabel}` : ""}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogPanel>
+          <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-xs">
+            {[
+              ["Agent ID", agent.id],
+              ["Parent agent", agent.parentAgentId],
+              ["Event source thread", agent.providerThreadId],
+              ["Provider turn", agent.providerTurnId],
+              ["Started", agent.startedAt],
+              ["Completed", agent.completedAt],
+              ["Updated", agent.updatedAt],
+            ].map(([label, value]) =>
+              value ? (
+                <div key={label} className="contents">
+                  <dt className="text-muted-foreground">{label}</dt>
+                  <dd className="break-all font-mono">{value}</dd>
+                </div>
+              ) : null,
+            )}
+          </dl>
+          <section className="mt-5">
+            <h3 className="mb-2 text-sm font-medium">
+              {agent.error ? "Error" : agent.result ? "Result" : "Latest activity"}
+            </h3>
+            <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">
+              {agent.error ??
+                agent.result ??
+                agent.progress ??
+                "No child output has been reported yet."}
+            </pre>
+          </section>
+          {agent.recentActivity.length > 0 ? (
+            <section className="mt-5">
+              <h3 className="mb-2 text-sm font-medium">Recent activity</h3>
+              <ol className="space-y-2 text-xs text-muted-foreground">
+                {agent.recentActivity.map((entry) => (
+                  <li key={`${entry.at}:${entry.summary}`}>
+                    <time dateTime={entry.at}>{entry.at}</time>
+                    <p>{entry.summary}</p>
+                  </li>
+                ))}
+              </ol>
+            </section>
+          ) : null}
+        </DialogPanel>
+      </DialogPopup>
+    </Dialog>
   );
 }
 

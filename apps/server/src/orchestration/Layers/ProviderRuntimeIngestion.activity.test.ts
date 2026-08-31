@@ -16,6 +16,62 @@ const base = {
 };
 
 describe("runtimeEventToActivities task progress", () => {
+  it("retains Codex child identity on every persisted lifecycle snapshot", () => {
+    const taskId = RuntimeTaskId.make("codex-child");
+    const providerRefs = {
+      providerThreadId: "codex-child",
+      providerTurnId: "codex-child-turn",
+    };
+    const linkage = { taskId, parentAgentId: "codex-parent", timelineBypass: true };
+    const events: ReadonlyArray<ProviderRuntimeEvent> = [
+      {
+        ...base,
+        providerRefs,
+        eventId: EventId.make("start"),
+        type: "task.started",
+        payload: { ...linkage, description: "Inspect browser", taskType: "agent" },
+      },
+      {
+        ...base,
+        providerRefs,
+        eventId: EventId.make("progress"),
+        type: "task.progress",
+        payload: {
+          ...linkage,
+          description: "Inspect browser",
+          summary: "Running a check",
+          typedUsage: { totalTokens: 12 },
+        },
+      },
+      {
+        ...base,
+        providerRefs,
+        eventId: EventId.make("update"),
+        type: "task.updated",
+        payload: { ...linkage, status: "waiting" },
+      },
+      {
+        ...base,
+        providerRefs,
+        eventId: EventId.make("complete"),
+        type: "task.completed",
+        payload: { ...linkage, status: "completed", summary: "Check passed" },
+      },
+    ];
+
+    for (const event of events) {
+      const activities = runtimeEventToActivities(event);
+      expect(activities.length).toBeGreaterThan(0);
+      for (const activity of activities) {
+        expect(activity.payload).toMatchObject({
+          taskId: "codex-child",
+          parentAgentId: "codex-parent",
+          providerRefs,
+        });
+      }
+    }
+  });
+
   it("persists usage independently from replaceable activity", () => {
     const taskId = RuntimeTaskId.make("agent-1");
     const usageOnly = {

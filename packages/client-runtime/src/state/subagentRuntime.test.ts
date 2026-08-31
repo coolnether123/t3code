@@ -263,6 +263,46 @@ describe("foldSubagentActivities", () => {
     expect(agents).toHaveLength(0);
   });
 
+  it("retains useful child output and backend identity without expanding activity previews", () => {
+    const output = `${"Analysis line. ".repeat(60)}Final finding.`;
+    const rows = [
+      activity("task.started", {
+        taskId: "child-t3",
+        taskType: "local_agent",
+        parentAgentId: "parent-provider",
+        providerRefs: { providerThreadId: "child-provider", providerTurnId: "turn-provider" },
+      }),
+      activity("task.progress", { taskId: "child-t3", summary: output }),
+      activity("task.completed", { taskId: "child-t3", status: "completed", summary: output }),
+    ];
+    const agent = fold(rows)[0]!;
+    expect(agent.providerThreadId).toBe("child-provider");
+    expect(agent.providerTurnId).toBe("turn-provider");
+    expect(agent.parentAgentId).toBe("parent-provider");
+    expect(agent.progress).toBe(output);
+    expect(agent.result).toBe(output);
+    expect(agent.recentActivity[0]!.summary.length).toBe(180);
+    expect(fold(rows)[0]).toEqual(agent);
+  });
+
+  it("caps retained child output and clears the result when the same child resumes", () => {
+    const completed = [
+      activity("task.completed", {
+        taskId: "child-large",
+        taskType: "local_agent",
+        status: "completed",
+        summary: "x".repeat(20_000),
+      }),
+    ];
+    expect(fold(completed)[0]!.result).toHaveLength(16_000);
+    expect(
+      fold([
+        ...completed,
+        activity("task.updated", { taskId: "child-large", status: "running" }),
+      ])[0]!.result,
+    ).toBeNull();
+  });
+
   it("workflow members key by stable slot and attach to their coordinator", () => {
     const agents = fold([
       activity("task.started", {
