@@ -10,6 +10,8 @@ export const PROVIDER_ORDER: readonly UsageProviderKind[] = [
   "claude",
   "gemini",
   "opencode",
+  "chatgpt",
+  "aistudio",
 ];
 
 export const PROVIDER_LABEL: Record<UsageProviderKind, string> = {
@@ -17,6 +19,8 @@ export const PROVIDER_LABEL: Record<UsageProviderKind, string> = {
   codex: "Codex",
   gemini: "Gemini",
   opencode: "OpenCode",
+  chatgpt: "ChatGPT archive",
+  aistudio: "AI Studio archive",
 };
 
 /**
@@ -30,5 +34,7 @@ export function useProviderColors(): Record<UsageProviderKind, string> {
     codex: scheme === "dark" ? "#e6e6e6" : "#3c3c43",
     gemini: "#4e8cff",
     opencode: "#7c9cff",
+    chatgpt: "#10a37f",
+    aistudio: "#f9ab00",
   };
 }

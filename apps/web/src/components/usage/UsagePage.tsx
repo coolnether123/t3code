@@ -581,7 +581,22 @@ function UsageCoverageNotice({
   const stale = environments.filter((environment) =>
     staleEnvironments.includes(environment.environmentId),
   );
-  if (failed.length === 0 && stale.length === 0 && duplicateSources.length === 0) {
+  const sourceMessages = [
+    ...new Set(
+      environments.flatMap(
+        (environment) =>
+          environment.summary?.sources.flatMap((source) =>
+            source.message === null || source.status === "missing" ? [] : [source.message],
+          ) ?? [],
+      ),
+    ),
+  ];
+  if (
+    failed.length === 0 &&
+    stale.length === 0 &&
+    duplicateSources.length === 0 &&
+    sourceMessages.length === 0
+  ) {
     return null;
   }
 
@@ -601,6 +616,9 @@ function UsageCoverageNotice({
           {duplicateSources.join(", ")}
         </span>
       ) : null}
+      {sourceMessages.map((message) => (
+        <span key={message}>{message}</span>
+      ))}
     </div>
   );
 }

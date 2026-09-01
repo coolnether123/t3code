@@ -188,11 +188,31 @@ const UNPRICEABLE_MODELS = new Set([
   "fable",
 ]);
 
+/**
+ * First-party preview IDs whose token rates matched the stable family they
+ * became. This is intentionally narrow: models without a documented paid
+ * equivalent remain unpriced instead of borrowing a vaguely similar rate.
+ */
+const MODEL_RATE_ALIASES = new Map([
+  ["gemini-2.0-flash-exp", "gemini-2.0-flash"],
+  ["gemini-2.0-flash-thinking-exp-01-21", "gemini-2.0-flash"],
+  ["gemini-2.5-flash-preview-04-17", "gemini-2.5-flash"],
+  ["gemini-2.5-flash-preview-05-20", "gemini-2.5-flash"],
+  ["gemini-2.5-pro-exp-03-25", "gemini-2.5-pro"],
+  ["gemini-2.5-pro-preview-03-25", "gemini-2.5-pro"],
+  ["gemini-2.5-pro-preview-05-06", "gemini-2.5-pro"],
+  ["gemini-2.5-pro-preview-06-05", "gemini-2.5-pro"],
+]);
+
 export function lookupRate(table: RateTable, model: string): ModelRate | null {
   const normalized = normalizeModelName(model);
   if (normalized.length === 0 || UNPRICEABLE_MODELS.has(normalized)) return null;
   const exact = table.get(normalized);
   if (exact !== undefined) return exact;
+  const alias = MODEL_RATE_ALIASES.get(normalized);
+  if (alias !== undefined) {
+    return table.get(alias) ?? table.get(`gemini/${alias}`) ?? null;
+  }
   // First-party transcript spellings may differ from the catalogue's namespace.
   // Never strip arbitrary reseller or local-router prefixes.
   if (/^(openai\/gpt-|anthropic\/claude-)/.test(normalized)) {

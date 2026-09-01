@@ -112,11 +112,23 @@ const RatesCacheFile = Schema.Struct({
   fetchedAtMs: Schema.Number,
   document: Schema.Unknown,
 });
+const UsageImportsFile = Schema.Struct({
+  version: Schema.Literal(1),
+  sources: Schema.Array(
+    Schema.Struct({
+      provider: Schema.Literals(["chatgpt", "aistudio"]),
+      path: Schema.String,
+    }),
+  ),
+});
 const decodeRatesCache = Schema.decodeUnknownEffect(
   Schema.fromJsonString(RatesCacheFile as unknown as Schema.Codec<typeof RatesCacheFile.Type>),
 );
 const encodeRatesCache = Schema.encodeEffect(
   Schema.fromJsonString(RatesCacheFile as unknown as Schema.Codec<typeof RatesCacheFile.Type>),
+);
+const decodeUsageImports = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(UsageImportsFile as unknown as Schema.Codec<typeof UsageImportsFile.Type>),
 );
 
 /** The scan cache is narrowed by hand in `usageScanCache`, so JSON is enough here. */
@@ -171,6 +183,7 @@ export const make = Effect.gen(function* () {
 
   const ratesCachePath = path.join(config.stateDir, "usage-model-rates.json");
   const scanCachePath = path.join(config.stateDir, "usage-scan-cache.json");
+  const usageImportsPath = path.join(config.stateDir, "usage-imports.json");
   let rates: RateTable = new Map();
   let ratesFetchedAtMs: number | null = null;
   let ratesStatus: UsageSummary["pricing"]["status"] = "unavailable";
@@ -263,6 +276,10 @@ export const make = Effect.gen(function* () {
     const codexHome = codexLayout.sharedHomePath;
     const geminiHome = path.join(NodeOS.homedir(), ".gemini");
     const openCodeHome = path.join(NodeOS.homedir(), ".local", "share", "opencode");
+    const imports = yield* fileSystem.readFileString(usageImportsPath).pipe(
+      Effect.flatMap((raw) => decodeUsageImports(raw)),
+      Effect.orElseSucceed(() => null),
+    );
 
     return [
       { provider: "claude" as const, dir: claudeDir },
@@ -271,6 +288,9 @@ export const make = Effect.gen(function* () {
       { provider: "gemini" as const, dir: path.join(geminiHome, "tmp") },
       { provider: "gemini" as const, dir: path.join(geminiHome, "antigravity", "brain") },
       { provider: "opencode" as const, dir: openCodeHome },
+      ...(imports?.sources ?? [])
+        .filter((source) => source.path.trim().length > 0)
+        .map((source) => ({ provider: source.provider, dir: path.resolve(source.path) })),
     ];
   });
 
@@ -494,7 +514,10 @@ export const make = Effect.gen(function* () {
           skippedFiles: 0,
           malformedRecords: 0,
           distinctSessions: 0,
-          message: "No transcript directory on this environment.",
+          message:
+            provider === "chatgpt" || provider === "aistudio"
+              ? "Configured chat archive directory was not found on this environment."
+              : "No transcript directory on this environment.",
         });
         continue;
       }
@@ -643,7 +666,13 @@ export const make = Effect.gen(function* () {
         message:
           selection.deferredFiles > 0
             ? `Usage is partial while the transcript cache warms; ${selection.deferredFiles} older or oversized transcript files were deferred.`
-            : null,
+            : provider === "aistudio"
+              ? "AI Studio exports include exact per-message counts but no request ledger or original chat dates; input context is reconstructed and the graph uses each downloaded file's timestamp."
+              : provider === "chatgpt"
+                ? scannedFiles === 0
+                  ? "ChatGPT import is ready; no conversations.json export has been downloaded yet."
+                  : "ChatGPT exports contain message dates but no token ledger; token counts and API-equivalent cost are estimated from chat text."
+                : null,
       });
     }
 
@@ -659,20 +688,21 @@ export const make = Effect.gen(function* () {
     const aggregated = aggregator.finish();
     const readAt = yield* DateTime.now;
     const finishedAtMs = yield* Clock.currentTimeMillis;
-    const supportsOpenCode = (input.clientContractVersion ?? 5) >= 6;
+    const clientContractVersion = input.clientContractVersion ?? 5;
+    const supportsOpenCode = clientContractVersion >= 6;
+    const supportsImports = clientContractVersion >= 7;
+    const supportsProvider = (provider: UsageProviderKind) =>
+      (provider !== "opencode" || supportsOpenCode) &&
+      ((provider !== "chatgpt" && provider !== "aistudio") || supportsImports);
 
     return {
-      contractVersion: supportsOpenCode ? USAGE_CONTRACT_VERSION : 5,
+      contractVersion: supportsImports ? USAGE_CONTRACT_VERSION : supportsOpenCode ? 6 : 5,
       readAt: DateTime.formatIso(readAt),
       timeZone: input.timeZone,
       sinceDay: input.sinceDay,
       untilDay: input.untilDay,
-      buckets: supportsOpenCode
-        ? aggregated.buckets
-        : aggregated.buckets.filter((bucket) => bucket.provider !== "opencode"),
-      sources: supportsOpenCode
-        ? sources
-        : sources.filter((source) => source.fingerprint.provider !== "opencode"),
+      buckets: aggregated.buckets.filter((bucket) => supportsProvider(bucket.provider)),
+      sources: sources.filter((source) => supportsProvider(source.fingerprint.provider)),
       pricing: {
         status: ratesStatus,
         source: LITELLM_RATES_URL,

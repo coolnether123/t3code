@@ -34,6 +34,16 @@ export const PROVIDER_PRESENTATION = {
     color: "#7c9cff",
     mark: OpenCodeIcon,
   },
+  chatgpt: {
+    label: "ChatGPT archive",
+    color: "#10a37f",
+    mark: OpenAI,
+  },
+  aistudio: {
+    label: "AI Studio archive",
+    color: "#f9ab00",
+    mark: Gemini,
+  },
 } satisfies Record<UsageProviderKind, UsageProviderPresentation>;
 
 /** Stable provider reading order across charts, summaries, tables, and hover rows. */

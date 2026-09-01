@@ -227,7 +227,9 @@ export function decodeScanCache(document: unknown): ScanCache {
       entry.p !== "claude" &&
       entry.p !== "codex" &&
       entry.p !== "gemini" &&
-      entry.p !== "opencode"
+      entry.p !== "opencode" &&
+      entry.p !== "chatgpt" &&
+      entry.p !== "aistudio"
     ) {
       continue;
     }
@@ -361,7 +363,9 @@ export function decodeScanCoverage(document: unknown): readonly ScanCoverage[] {
       (provider !== "claude" &&
         provider !== "codex" &&
         provider !== "gemini" &&
-        provider !== "opencode") ||
+        provider !== "opencode" &&
+        provider !== "chatgpt" &&
+        provider !== "aistudio") ||
       typeof rootPath !== "string" ||
       typeof sinceMs !== "number" ||
       !Number.isFinite(sinceMs) ||

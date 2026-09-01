@@ -15,6 +15,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
 import * as NodeSqlite from "node:sqlite";
+import { createHash } from "node:crypto";
 
 import type { UsageProviderKind } from "@t3tools/contracts";
 
@@ -31,6 +32,7 @@ import {
   type CodexScanState,
   type UsageRecord,
 } from "./usageTranscripts.ts";
+import { parseAiStudioExport, parseChatGptExport } from "./usageImportedChats.ts";
 
 export interface TranscriptFile {
   readonly path: string;
@@ -115,11 +117,15 @@ export async function listTranscriptFiles(
         continue;
       }
       const isTranscript =
-        provider === "gemini"
-          ? (entry.name.startsWith("session-") &&
-              (entry.name.endsWith(".json") || entry.name.endsWith(".jsonl"))) ||
-            entry.name === "tokens_cache.json"
-          : entry.name.endsWith(".jsonl");
+        provider === "aistudio"
+          ? true
+          : provider === "chatgpt"
+            ? entry.name === "conversations.json"
+            : provider === "gemini"
+              ? (entry.name.startsWith("session-") &&
+                  (entry.name.endsWith(".json") || entry.name.endsWith(".jsonl"))) ||
+                entry.name === "tokens_cache.json"
+              : entry.name.endsWith(".jsonl");
       if (!isTranscript) continue;
       transcripts.push(child);
     }
@@ -239,6 +245,10 @@ export async function readTranscriptRecords(
   provider: UsageProviderKind,
   options: TranscriptReadOptions = {},
 ): Promise<TranscriptReadResult | null> {
+  if (provider === "aistudio" || provider === "chatgpt") {
+    const records = await readImportedChatRecords(filePath, provider);
+    return records === null ? null : { records };
+  }
   if (provider === "gemini") {
     const records = await readGeminiTranscriptRecords(filePath);
     return records === null ? null : { records };
@@ -289,6 +299,25 @@ export async function readTranscriptRecords(
   }
 
   return provider === "codex" ? { records, codexState } : { records };
+}
+
+/** Reads one already-local product export; raw chat text never leaves the server. */
+async function readImportedChatRecords(
+  filePath: string,
+  provider: "aistudio" | "chatgpt",
+): Promise<readonly UsageRecord[] | null> {
+  try {
+    const raw = await NodeFSP.readFile(filePath, "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    const stats = await NodeFSP.stat(filePath);
+    if (provider === "chatgpt") {
+      return parseChatGptExport(parsed, { importedAtMs: stats.mtimeMs });
+    }
+    const conversationId = createHash("sha256").update(raw).digest("hex");
+    return parseAiStudioExport(parsed, { conversationId, importedAtMs: stats.mtimeMs });
+  } catch {
+    return null;
+  }
 }
 
 interface OpenCodeMessageRow {

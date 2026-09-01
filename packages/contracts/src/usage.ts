@@ -23,9 +23,16 @@ import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
  * client renders partial coverage when an environment reports an older version
  * rather than failing the whole page.
  */
-export const USAGE_CONTRACT_VERSION = 6 as const;
+export const USAGE_CONTRACT_VERSION = 7 as const;
 
-export const UsageProviderKind = Schema.Literals(["claude", "codex", "gemini", "opencode"]);
+export const UsageProviderKind = Schema.Literals([
+  "claude",
+  "codex",
+  "gemini",
+  "opencode",
+  "chatgpt",
+  "aistudio",
+]);
 export type UsageProviderKind = typeof UsageProviderKind.Type;
 
 /**
@@ -204,9 +211,8 @@ export type UsageQuotaCost = typeof UsageQuotaCost.Type;
 
 export const UsageSummaryInput = Schema.Struct({
   /**
-   * Highest response contract understood by the client. Omitted by clients
-   * older than usage contract v6, which only understand the original three
-   * providers.
+   * Highest response contract understood by the client. Contract v6 added
+   * OpenCode and v7 added imported ChatGPT and AI Studio archives.
    */
   clientContractVersion: Schema.optional(NonNegativeInt),
   /** Revalidate recent files while retaining parsed, unchanged transcripts. */

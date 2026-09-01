@@ -1,4 +1,4 @@
-import { describe, expect, it } from "@effect/vitest";
+import { describe, expect, it } from "vite-plus/test";
 import type { UsageTokenTotals } from "@t3tools/contracts";
 
 import { cacheSavingsUsd, lookupRate, parseRateTable, priceUsage } from "./usagePricing.ts";
@@ -18,6 +18,18 @@ const opus = {
 };
 
 describe("usage pricing", () => {
+  it("uses stable-family rates for documented Gemini preview IDs", () => {
+    const rate = {
+      inputCostPerToken: 1.25e-6,
+      outputCostPerToken: 10e-6,
+      cacheReadCostPerToken: 0.125e-6,
+      cacheCreationCostPerToken: null,
+    };
+    const table = new Map([["gemini/gemini-2.5-pro", rate]]);
+
+    expect(lookupRate(table, "gemini-2.5-pro-preview-05-06")).toBe(rate);
+  });
+
   it.each([false, true])("keeps reseller prices independent of document order (%s)", (reverse) => {
     const entries = [
       ["claude-opus-5", opus],

@@ -539,11 +539,22 @@ function UsageCoverageNotice(props: {
     props.merged.staleEnvironments.includes(environment.environmentId),
   );
   const duplicateSources = props.merged.duplicateSources;
+  const sourceMessages = [
+    ...new Set(
+      props.environments.flatMap(
+        (environment) =>
+          environment.summary?.sources.flatMap((source) =>
+            source.message === null || source.status === "missing" ? [] : [source.message],
+          ) ?? [],
+      ),
+    ),
+  ];
   if (
     failed.length === 0 &&
     stale.length === 0 &&
     duplicateSources.length === 0 &&
-    !props.isPartial
+    !props.isPartial &&
+    sourceMessages.length === 0
   ) {
     return null;
   }
@@ -571,6 +582,11 @@ function UsageCoverageNotice(props: {
           {duplicateSources.join(", ")}
         </Text>
       ) : null}
+      {sourceMessages.map((message) => (
+        <Text key={message} className="text-sm text-foreground-muted">
+          {message}
+        </Text>
+      ))}
     </View>
   );
 }

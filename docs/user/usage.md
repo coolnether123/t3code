@@ -2,10 +2,10 @@
 
 For a birthday palette and tap effects on these screens, see [Celebrate your birthday](birthday-theme.md).
 
-The Usage page combines Codex, Claude Code, Gemini, and OpenCode activity from your connected environments. It reads
-the providers' local session history and shows API-equivalent token cost, processed tokens, cache
-savings, provider shares, and model breakdowns. Subscription billing is separate from the raw token
-cost shown here.
+The Usage page combines Codex, Claude Code, Gemini, OpenCode, and configured chat archives from
+your connected environments. It reads local history and shows API-equivalent token cost, processed
+tokens, cache savings, provider shares, and model breakdowns. Subscription billing is separate from
+the raw token cost shown here.
 
 Use **Past 24h** for an hourly chart covering the exact rolling 24-hour period. The **7 days**,
 **30 days**, **90 days**, **120 days**, and **1 year** ranges use daily resolution. Cost and token
@@ -34,6 +34,25 @@ flex, batch, regional, or negotiated pricing. Cache-write estimates use the stan
 cache rate; storage duration, long-lived cache premiums, audio/image-specific rates, and tool fees
 are not reconstructed from token totals. Provider-reported costs may themselves be estimates from
 the local harness. A subscription's quota percentage is not a dollar balance.
+
+### Import product chat archives
+
+Configured ChatGPT and Google AI Studio exports appear as **ChatGPT archive** and **AI Studio
+archive**. Raw chat text stays on the environment that reads it. Only aggregate token and cost
+buckets cross the T3 connection.
+
+ChatGPT exports retain message dates and model names but do not include an API token ledger. Usage
+estimates each message from its text, reconstructs the parent context for each assistant response,
+and places the result on the original message date. Reimporting an overlapping export does not count
+the same conversation message twice.
+
+AI Studio exports include per-message token counts but omit the original chat date and request-level
+usage ledger. Usage reconstructs the input context for each model turn and uses the downloaded
+file's timestamp on the graph. A notice stays visible while this source contributes. Exact duplicate
+files are counted once by content; separate branches remain separate chats.
+
+Imported product chats are API-equivalent estimates, not proof of API charges. Unknown experimental
+models remain unpriced when no documented paid equivalent exists.
 
 ## Monitor Codex usage
 
