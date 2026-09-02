@@ -55,6 +55,11 @@ describe("usage route recovery", () => {
     try {
       await act(async () => root.render(<UsageProbe />));
       expect(state.execute).toHaveBeenCalledTimes(1);
+      expect(state.execute.mock.calls[0]?.[1]).toEqual(
+        expect.objectContaining({
+          input: expect.objectContaining({ refresh: true }),
+        }),
+      );
       await act(async () => root.render(<UsageProbe />));
       expect(state.execute).toHaveBeenCalledTimes(1);
     } finally {

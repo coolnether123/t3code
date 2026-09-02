@@ -117,6 +117,28 @@ describe("UsageAggregator", () => {
     expect(losAngeles.buckets[0]?.day).toBe("2026-08-06");
   });
 
+  it("keeps exact local-day boundaries in offset time zones", () => {
+    const aggregator = new UsageAggregator({
+      timeZone: "Asia/Kathmandu",
+      sinceDay: "2026-08-01",
+      untilDay: "2026-08-01",
+      rates,
+    });
+    for (const timestamp of [
+      "2026-07-31T18:14:59.999Z",
+      "2026-07-31T18:15:00.000Z",
+      "2026-08-01T18:14:59.999Z",
+      "2026-08-01T18:15:00.000Z",
+    ]) {
+      aggregator.add(record({ timestampMs: Date.parse(timestamp) }));
+    }
+
+    const result = aggregator.finish();
+    expect(result.outOfWindow).toBe(2);
+    expect(result.buckets[0]?.day).toBe("2026-08-01");
+    expect(result.buckets[0]?.records).toBe(2);
+  });
+
   it("splits an hourly request into fixed buckets anchored to its exact start", () => {
     const result = aggregate(
       [

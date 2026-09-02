@@ -100,11 +100,15 @@ export function useUsage(input: UsageSummaryInput): UsageView {
       const input = nextInput
         ? usageQueryInput(nextInput, USAGE_CONTRACT_VERSION)
         : (JSON.parse(windowKey) as UsageSummaryInput);
+      const requestInput = { ...input, refresh: nextInput?.refresh ?? true };
       return Promise.all(
         environments.map(async (environment) => {
           const result = await executeAtomQuery(
             appAtomRegistry,
-            serverEnvironment.usageSummary({ environmentId: environment.environmentId, input }),
+            serverEnvironment.usageSummary({
+              environmentId: environment.environmentId,
+              input: requestInput,
+            }),
             { refresh: true, timeoutMs: 30_000, reportFailure: false, reportDefect: false },
           );
           return {
@@ -160,7 +164,12 @@ export function useUsage(input: UsageSummaryInput): UsageView {
     if (!hasDeferredTranscripts || environments.some((environment) => environment.isPending)) {
       return;
     }
-    const timer = window.setTimeout(refresh, 750);
+    const timer = window.setTimeout(() => {
+      void refresh({
+        ...(JSON.parse(windowKey) as UsageSummaryInput),
+        refresh: false,
+      });
+    }, 750);
     return () => window.clearTimeout(timer);
   }, [environments, hasDeferredTranscripts, refresh]);
 

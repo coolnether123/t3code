@@ -98,7 +98,7 @@ const MAX_COLD_SCAN_BYTES_PER_SOURCE = 128 * 1024 * 1024;
 const RECENT_TRANSCRIPT_WINDOW_MS = 48 * 60 * 60 * 1000;
 
 /** Range switches inside this span reuse the inventory from the previous read. */
-const INCREMENTAL_SCAN_TTL_MS = 15 * 1000;
+const INCREMENTAL_SCAN_TTL_MS = 60 * 1000;
 
 /** Full audits catch deleted history without putting a tree walk on every request. */
 const FULL_SCAN_INTERVAL_MS = 15 * 60 * 1000;
@@ -498,15 +498,49 @@ export const make = Effect.gen(function* () {
     });
 
     const sources: UsageSource[] = [];
-    for (const { provider, dir } of dirs) {
-      // Reset comparisons use the main Codex quota, never other providers.
-      if (input.quotaIntervals !== undefined && provider !== "codex") continue;
-      const volumeId = yield* Effect.promise(() => readDirectoryVolumeId(dir));
-      const exists = yield* fileSystem
-        .exists(dir)
-        .pipe(Effect.catchCause(() => Effect.succeed(false)));
+    const activeDirs = dirs.filter(
+      ({ provider }) => input.quotaIntervals === undefined || provider === "codex",
+    );
+    const plannedSources = yield* Effect.forEach(
+      activeDirs,
+      Effect.fnUntraced(function* ({ provider, dir }) {
+        const volumeId = yield* Effect.promise(() => readDirectoryVolumeId(dir));
+        const exists = yield* fileSystem
+          .exists(dir)
+          .pipe(Effect.catchCause(() => Effect.succeed(false)));
+        if (!exists) return { provider, dir, volumeId, exists: false as const };
 
-      if (!exists) {
+        const coverageKey = `${provider}\u0000${dir}`;
+        const coverage = scanCoverage.get(coverageKey);
+        const lastRecentScanAt = recentScanAt.get(coverageKey) ?? 0;
+        const plan = planTranscriptScan({
+          coverage,
+          windowStartMs,
+          nowMs: startedAtMs,
+          lastRecentScanAtMs: lastRecentScanAt,
+          incrementalScanTtlMs: input.refresh ? 0 : INCREMENTAL_SCAN_TTL_MS,
+          recentTranscriptWindowMs: RECENT_TRANSCRIPT_WINDOW_MS,
+          fullScanIntervalMs: FULL_SCAN_INTERVAL_MS,
+        });
+        const discoveredFiles = plan.shouldRefresh
+          ? yield* Effect.promise(() => listTranscriptFiles(dir, plan.scanStartMs, provider))
+          : [];
+        return {
+          provider,
+          dir,
+          volumeId,
+          exists: true as const,
+          coverageKey,
+          discoveredFiles,
+          ...plan,
+        };
+      }),
+      { concurrency: 8 },
+    );
+
+    for (const source of plannedSources) {
+      const { provider, dir, volumeId } = source;
+      if (!source.exists) {
         sources.push({
           fingerprint: { hostId, provider, resolvedHomePath: dir, volumeId },
           status: "missing",
@@ -522,21 +556,8 @@ export const make = Effect.gen(function* () {
         continue;
       }
 
-      const coverageKey = `${provider}\u0000${dir}`;
-      const coverage = scanCoverage.get(coverageKey);
-      const lastRecentScanAt = recentScanAt.get(coverageKey) ?? 0;
-      const { hasCurrentCoverage, shouldRefresh, scanStartMs } = planTranscriptScan({
-        coverage,
-        windowStartMs,
-        nowMs: startedAtMs,
-        lastRecentScanAtMs: lastRecentScanAt,
-        incrementalScanTtlMs: input.refresh ? 0 : INCREMENTAL_SCAN_TTL_MS,
-        recentTranscriptWindowMs: RECENT_TRANSCRIPT_WINDOW_MS,
-        fullScanIntervalMs: FULL_SCAN_INTERVAL_MS,
-      });
-      const discoveredFiles = shouldRefresh
-        ? yield* Effect.promise(() => listTranscriptFiles(dir, scanStartMs, provider))
-        : [];
+      const { coverageKey, discoveredFiles, hasCurrentCoverage, shouldRefresh, scanStartMs } =
+        source;
       const filesByPath = new Map<string, TranscriptFile>();
 
       if (hasCurrentCoverage) {

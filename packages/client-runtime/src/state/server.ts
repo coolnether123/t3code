@@ -40,7 +40,7 @@ import {
   subscribe,
   type EnvironmentRpcInput,
 } from "../rpc/client.ts";
-import { createEnvironmentQueryAtomFamily, followStreamInEnvironment } from "./runtime.ts";
+import { followStreamInEnvironment } from "./runtime.ts";
 
 export type ServerUpdateStage = "downloading" | "installing" | "resuming";
 
@@ -723,12 +723,9 @@ export function createServerEnvironmentAtoms<R, E>(
     }),
     // A cold transcript scan is measured in seconds, so keep the result around
     // long enough that switching windows or re-rendering does not rescan.
-    usageSummary: createEnvironmentQueryAtomFamily(runtime, {
+    usageSummary: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:server:usage-summary",
-      // The client SWR cache handles window switching. A network revalidation
-      // must check recent files, not receive another cached server summary.
-      execute: (input: EnvironmentRpcInput<typeof WS_METHODS.serverGetUsageSummary>) =>
-        request(WS_METHODS.serverGetUsageSummary, { ...input, refresh: true }),
+      tag: WS_METHODS.serverGetUsageSummary,
       staleTimeMs: 60_000,
     }),
     resetCheck: createEnvironmentRpcQueryAtomFamily(runtime, {

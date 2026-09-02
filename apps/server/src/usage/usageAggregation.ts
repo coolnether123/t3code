@@ -45,6 +45,60 @@ export function makeDayFormatter(timeZone: string): (timestampMs: number) => str
 }
 
 const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+
+interface DailyWindowIndex {
+  readonly sinceTimeMs: number;
+  readonly untilTimeMs: number;
+  readonly dayAt: (timestampMs: number) => string | null;
+}
+
+function nextIsoDay(day: string): string {
+  return new Date(Date.parse(`${day}T00:00:00Z`) + DAY_MS).toISOString().slice(0, 10);
+}
+
+/** Builds exact local-day boundaries once instead of formatting every record. */
+function makeDailyWindowIndex(
+  toDay: (timestampMs: number) => string,
+  sinceDay: string,
+  untilDay: string,
+): DailyWindowIndex {
+  const firstInstantOfDay = (day: string): number => {
+    const center = Date.parse(`${day}T00:00:00Z`);
+    let low = center - 26 * HOUR_MS;
+    let high = center + 26 * HOUR_MS;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (toDay(middle) < day) low = middle + 1;
+      else high = middle;
+    }
+    return low;
+  };
+
+  const days: string[] = [];
+  const starts: number[] = [];
+  for (let day = sinceDay; day <= untilDay; day = nextIsoDay(day)) {
+    days.push(day);
+    starts.push(firstInstantOfDay(day));
+  }
+  const untilTimeMs = firstInstantOfDay(nextIsoDay(untilDay));
+
+  return {
+    sinceTimeMs: starts[0] ?? untilTimeMs,
+    untilTimeMs,
+    dayAt: (timestampMs) => {
+      if (timestampMs < (starts[0] ?? untilTimeMs) || timestampMs >= untilTimeMs) return null;
+      let low = 0;
+      let high = starts.length;
+      while (low < high) {
+        const middle = Math.floor((low + high) / 2);
+        if ((starts[middle] ?? untilTimeMs) <= timestampMs) low = middle + 1;
+        else high = middle;
+      }
+      return days[low - 1] ?? null;
+    },
+  };
+}
 
 interface MutableBucket {
   totals: UsageTokenTotals;
@@ -86,6 +140,7 @@ export class UsageAggregator {
   readonly #seen = new Set<string>();
   readonly #toDay: (timestampMs: number) => string;
   readonly #hourlyWindow: { readonly sinceTimeMs: number; readonly untilTimeMs: number } | null;
+  readonly #dailyWindow: DailyWindowIndex | null;
   readonly #options: AggregateOptions;
   #duplicatesDropped = 0;
   #outOfWindow = 0;
@@ -101,8 +156,10 @@ export class UsageAggregator {
         sinceTimeMs: options.sinceTimeMs,
         untilTimeMs: options.untilTimeMs,
       };
+      this.#dailyWindow = null;
     } else {
       this.#hourlyWindow = null;
+      this.#dailyWindow = makeDailyWindowIndex(this.#toDay, options.sinceDay, options.untilDay);
     }
   }
 
@@ -128,12 +185,11 @@ export class UsageAggregator {
       this.#outOfWindow += 1;
       return false;
     }
-
-    const day = this.#toDay(record.timestampMs);
-    if (
-      this.#hourlyWindow === null &&
-      (day < this.#options.sinceDay || day > this.#options.untilDay)
-    ) {
+    const day =
+      this.#dailyWindow === null
+        ? this.#toDay(record.timestampMs)
+        : this.#dailyWindow.dayAt(record.timestampMs);
+    if (day === null) {
       this.#outOfWindow += 1;
       return false;
     }

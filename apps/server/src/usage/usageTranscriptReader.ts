@@ -101,55 +101,66 @@ export async function listTranscriptFiles(
   if (provider === "opencode") return listOpenCodeDatabase(root, sinceMs);
 
   const found: TranscriptFile[] = [];
+  const directories = [root];
+  const transcripts: string[] = [];
 
-  const walk = async (dir: string): Promise<void> => {
-    let entries;
-    try {
-      entries = await NodeFSP.readdir(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    const transcripts: string[] = [];
-    for (const entry of entries) {
-      const child = NodePath.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        await walk(child);
-        continue;
-      }
-      const isTranscript =
-        provider === "aistudio"
-          ? true
-          : provider === "chatgpt"
-            ? entry.name === "conversations.json"
-            : provider === "gemini"
-              ? (entry.name.startsWith("session-") &&
-                  (entry.name.endsWith(".json") || entry.name.endsWith(".jsonl"))) ||
-                entry.name === "tokens_cache.json"
-              : entry.name.endsWith(".jsonl");
-      if (!isTranscript) continue;
-      transcripts.push(child);
-    }
-    // Bound concurrent metadata reads, including on slower network-backed homes.
-    for (let offset = 0; offset < transcripts.length; offset += 32) {
-      const batch = await Promise.all(
-        transcripts.slice(offset, offset + 32).map(async (child) => {
-          try {
-            const stats = await NodeFSP.stat(child);
-            return stats.mtimeMs >= sinceMs
-              ? { path: child, size: stats.size, mtimeMs: stats.mtimeMs }
-              : null;
-          } catch {
-            return null;
-          }
-        }),
-      );
-      for (const file of batch) {
-        if (file !== null) found.push(file);
+  // The provider homes contain thousands of nested directories. Walking one
+  // directory at a time made a warm refresh spend tens of seconds on metadata.
+  // Breadth-first batches keep I/O bounded while allowing independent folders
+  // to resolve together.
+  for (let offset = 0; offset < directories.length; ) {
+    const batch = directories.slice(offset, offset + 64);
+    offset += batch.length;
+    const listings = await Promise.all(
+      batch.map(async (dir) => {
+        try {
+          return { dir, entries: await NodeFSP.readdir(dir, { withFileTypes: true }) };
+        } catch {
+          return { dir, entries: [] };
+        }
+      }),
+    );
+    for (const { dir, entries } of listings) {
+      for (const entry of entries) {
+        const child = NodePath.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          directories.push(child);
+          continue;
+        }
+        const isTranscript =
+          provider === "aistudio"
+            ? true
+            : provider === "chatgpt"
+              ? entry.name === "conversations.json"
+              : provider === "gemini"
+                ? (entry.name.startsWith("session-") &&
+                    (entry.name.endsWith(".json") || entry.name.endsWith(".jsonl"))) ||
+                  entry.name === "tokens_cache.json"
+                : entry.name.endsWith(".jsonl");
+        if (isTranscript) transcripts.push(child);
       }
     }
-  };
+  }
 
-  await walk(root);
+  // Bound concurrent metadata reads, including on slower network-backed homes.
+  for (let offset = 0; offset < transcripts.length; offset += 128) {
+    const batch = await Promise.all(
+      transcripts.slice(offset, offset + 128).map(async (child) => {
+        try {
+          const stats = await NodeFSP.stat(child);
+          return stats.mtimeMs >= sinceMs
+            ? { path: child, size: stats.size, mtimeMs: stats.mtimeMs }
+            : null;
+        } catch {
+          return null;
+        }
+      }),
+    );
+    for (const file of batch) {
+      if (file !== null) found.push(file);
+    }
+  }
+
   return found;
 }
 
