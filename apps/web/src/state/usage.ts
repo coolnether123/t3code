@@ -17,7 +17,7 @@ import {
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 
 import { mergeUsage, type EnvironmentUsage, type MergedUsage } from "@t3tools/shared/usageMerge";
 import { appAtomRegistry } from "../rpc/atomRegistry";
@@ -90,6 +90,7 @@ export function useUsage(input: UsageSummaryInput): UsageView {
   );
   const atom = usageByWindowAtom(windowKey);
   const environments = useAtomValue(atom);
+  const retriedFailures = useRef(new Set<string>());
 
   // Refreshing only the derived atom would re-read the per-environment SWR
   // queries within their stale window and change nothing. Refresh each
@@ -117,6 +118,21 @@ export function useUsage(input: UsageSummaryInput): UsageView {
     },
     [environments, windowKey],
   );
+
+  // Route navigation can remount this view while its shared atom still holds a
+  // transient disconnected result. Retry that result once on entry so mobile
+  // users do not need to reload the whole browser tab.
+  useEffect(() => {
+    const failedIds = environments
+      .filter((environment) => environment.error !== null)
+      .map((environment) => environment.environmentId)
+      .sort();
+    if (failedIds.length === 0) return;
+    const retryKey = `${windowKey}:${failedIds.join(",")}`;
+    if (retriedFailures.current.has(retryKey)) return;
+    retriedFailures.current.add(retryKey);
+    void refresh();
+  }, [environments, refresh, windowKey]);
 
   const merged = useMemo(() => {
     const answered: EnvironmentUsage[] = environments.flatMap((environment) =>

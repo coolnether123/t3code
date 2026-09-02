@@ -1,3 +1,4 @@
+// @effect-diagnostics globalDate:off nodeBuiltinImport:off
 /**
  * Parsers for user-requested chat archives.
  *
@@ -8,6 +9,8 @@
  *
  * @module usageImportedChats
  */
+import * as NodeCrypto from "node:crypto";
+
 import type { UsageRecord } from "./usageTranscripts.ts";
 
 type UnknownRecord = Readonly<Record<string, unknown>>;
@@ -53,9 +56,19 @@ function stringContent(value: unknown): string {
 }
 
 function timestampMs(value: unknown, fallbackMs: number): number {
+  if (typeof value === "string") {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallbackMs;
+  }
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return fallbackMs;
-  // ChatGPT exports use Unix seconds.
+  // ChatGPT exports use Unix seconds; other importers can already carry milliseconds.
   return value < 10_000_000_000 ? Math.trunc(value * 1000) : Math.trunc(value);
+}
+
+function optionalTimestampMs(value: unknown): number | null {
+  const sentinel = -1;
+  const parsed = timestampMs(value, sentinel);
+  return parsed === sentinel ? null : parsed;
 }
 
 function normalizeImportedModel(value: unknown, fallback: string): string {
@@ -63,24 +76,58 @@ function normalizeImportedModel(value: unknown, fallback: string): string {
   return value.trim().replace(/^models\//, "");
 }
 
-/** Converts one Google AI Studio JSON export into one record per model turn. */
-export function parseAiStudioExport(
-  value: unknown,
+function digest(value: string): string {
+  return NodeCrypto.createHash("sha256").update(value).digest("hex");
+}
+
+/** Stable billing identity for one exported prompt chunk, excluding display-only branch metadata. */
+function aiStudioChunkIdentity(chunk: UnknownRecord): string {
+  const attachment = (key: string) => {
+    const record = asRecord(chunk[key]);
+    return typeof record?.["id"] === "string" ? record["id"] : null;
+  };
+  const inline = (key: string) => {
+    const record = asRecord(chunk[key]);
+    const data = typeof record?.["data"] === "string" ? record["data"] : "";
+    return data.length === 0
+      ? null
+      : {
+          mimeType: typeof record?.["mimeType"] === "string" ? record["mimeType"] : "",
+          digest: digest(data),
+        };
+  };
+  return JSON.stringify({
+    role: typeof chunk["role"] === "string" ? chunk["role"] : "",
+    text: stringContent(chunk["text"] ?? chunk["parts"]),
+    tokenCount: positiveInt(chunk["tokenCount"]),
+    isThought: chunk["isThought"] === true,
+    driveDocument: attachment("driveDocument"),
+    driveImage: attachment("driveImage"),
+    driveVideo: attachment("driveVideo"),
+    youtubeVideo: attachment("youtubeVideo"),
+    inlineFile: inline("inlineFile"),
+    inlineImage: inline("inlineImage"),
+  });
+}
+
+function advanceHistory(history: string, chunk: UnknownRecord): string {
+  return digest(`${history}\n${aiStudioChunkIdentity(chunk)}`);
+}
+
+function parseAiStudioPrompt(
+  runSettings: UnknownRecord,
+  systemInstruction: UnknownRecord | null,
+  chunks: readonly unknown[],
   input: {
     readonly conversationId: string;
-    /** AI Studio exports omit chat timestamps; this is the downloaded file time. */
     readonly importedAtMs: number;
+    readonly dedupeVariant?: string;
   },
 ): readonly UsageRecord[] {
-  const root = asRecord(value);
-  const runSettings = asRecord(root?.["runSettings"]);
-  const chunkedPrompt = asRecord(root?.["chunkedPrompt"]);
-  const chunks = chunkedPrompt?.["chunks"];
-  if (root === null || runSettings === null || !Array.isArray(chunks)) return [];
-
   const model = normalizeImportedModel(runSettings["model"], "gemini-unknown");
-  const systemInstruction = asRecord(root["systemInstruction"]);
-  let contextTokens = estimateChatTokens(stringContent(systemInstruction?.["text"]));
+  const systemText = stringContent(systemInstruction?.["text"]);
+  let contextTokens = estimateChatTokens(systemText);
+  let history = digest(JSON.stringify({ model, systemText }));
   let responseIndex = 0;
   const records: UsageRecord[] = [];
 
@@ -92,21 +139,26 @@ export function parseAiStudioExport(
     }
     const role = chunk["role"];
     if (role !== "model") {
-      const text = stringContent(chunk["text"]);
+      const text = stringContent(chunk["text"] ?? chunk["parts"]);
       contextTokens += positiveInt(chunk["tokenCount"]) || estimateChatTokens(text);
+      history = advanceHistory(history, chunk);
       index += 1;
       continue;
     }
 
     let outputTokens = 0;
     let reasoningTokens = 0;
+    let responseTimestampMs: number | null = null;
+    let responseHistory = history;
     while (index < chunks.length) {
       const modelChunk = asRecord(chunks[index]);
       if (modelChunk?.["role"] !== "model") break;
-      const text = stringContent(modelChunk["text"]);
+      const text = stringContent(modelChunk["text"] ?? modelChunk["parts"]);
       const tokens = positiveInt(modelChunk["tokenCount"]) || estimateChatTokens(text);
       outputTokens += tokens;
       if (modelChunk["isThought"] === true) reasoningTokens += tokens;
+      responseTimestampMs = optionalTimestampMs(modelChunk["createTime"]) ?? responseTimestampMs;
+      responseHistory = advanceHistory(responseHistory, modelChunk);
       index += 1;
     }
     if (outputTokens === 0) continue;
@@ -114,11 +166,12 @@ export function parseAiStudioExport(
     responseIndex += 1;
     records.push({
       provider: "aistudio",
-      // Preserve turn order without implying real wall-clock precision.
-      timestampMs: input.importedAtMs + responseIndex,
+      timestampMs: responseTimestampMs ?? input.importedAtMs + responseIndex,
       model,
       sessionId: `aistudio:${input.conversationId}`,
       totals: {
+        // This is the complete exported conversation context immediately before
+        // this model turn, not the archive total repeated for every response.
         uncachedInputTokens: contextTokens,
         cachedInputTokens: 0,
         cacheCreationTokens: 0,
@@ -126,9 +179,68 @@ export function parseAiStudioExport(
         reasoningTokens: Math.min(reasoningTokens, outputTokens),
       },
       reportedCostUsd: null,
-      dedupeKey: `aistudio:${input.conversationId}:${responseIndex}`,
+      // Branch exports repeat their shared prefix. A content-chain key drops
+      // those copied turns globally while keeping each branch's new response.
+      dedupeKey:
+        input.dedupeVariant === undefined
+          ? `aistudio-turn:${responseHistory}`
+          : `aistudio-turn:${input.dedupeVariant}:${responseHistory}`,
     });
     contextTokens += outputTokens;
+    history = responseHistory;
+  }
+
+  return records;
+}
+
+/** Converts one Google AI Studio JSON export into one record per model turn. */
+export function parseAiStudioExport(
+  value: unknown,
+  input: {
+    readonly conversationId: string;
+    /** Used only by older AI Studio exports whose chunks have no `createTime`. */
+    readonly importedAtMs: number;
+  },
+): readonly UsageRecord[] {
+  const root = asRecord(value);
+  if (root === null) return [];
+  const records: UsageRecord[] = [];
+
+  const runSettings = asRecord(root["runSettings"]);
+  const chunkedPrompt = asRecord(root["chunkedPrompt"]);
+  const chunks = chunkedPrompt?.["chunks"];
+  if (runSettings !== null && Array.isArray(chunks)) {
+    records.push(
+      ...parseAiStudioPrompt(runSettings, asRecord(root["systemInstruction"]), chunks, input),
+    );
+  }
+
+  // AI Studio's compare mode stores each billed candidate as a separate prompt
+  // and may omit the ordinary root prompt entirely.
+  const comparison = asRecord(root["comparisonPrompt"]);
+  const candidates = comparison?.["data"];
+  if (Array.isArray(candidates)) {
+    for (let index = 0; index < candidates.length; index += 1) {
+      const candidate = asRecord(candidates[index]);
+      const candidateSettings = asRecord(candidate?.["runSettings"]);
+      const candidatePrompt = asRecord(candidate?.["chunkedPrompt"]);
+      const candidateChunks = candidatePrompt?.["chunks"];
+      if (candidateSettings === null || !Array.isArray(candidateChunks)) continue;
+      records.push(
+        ...parseAiStudioPrompt(
+          candidateSettings,
+          asRecord(candidate?.["systemInstruction"]),
+          candidateChunks,
+          {
+            ...input,
+            conversationId: `${input.conversationId}:comparison:${index}`,
+            // Two comparison candidates are two billed requests even if the
+            // model happens to return byte-identical output for both.
+            dedupeVariant: `comparison:${index}`,
+          },
+        ),
+      );
+    }
   }
 
   return records;

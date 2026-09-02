@@ -119,6 +119,26 @@ describe("scan cache round trip", () => {
     expect(decodeScanCoverage(JSON.parse(JSON.stringify(v3)))).toEqual(coverage);
   });
 
+  it("keeps v4 provider caches but invalidates old AI Studio parsing and coverage", () => {
+    const cache = cacheWith([["/codex.jsonl", 100, [record({ provider: "codex" })]]]);
+    cache.set("/ai-studio.json", {
+      size: 10,
+      mtimeMs: 100,
+      provider: "aistudio",
+      records: [record({ provider: "aistudio" })],
+    });
+    const encoded = encodeScanCache(cache, [
+      { provider: "codex", rootPath: "/sessions", sinceMs: 100, scannedAtMs: 200 },
+      { provider: "aistudio", rootPath: "/imports", sinceMs: 100, scannedAtMs: 200 },
+    ]);
+    const v4 = { ...encoded, version: 4 };
+
+    expect([...decodeScanCache(JSON.parse(JSON.stringify(v4))).keys()]).toEqual(["/codex.jsonl"]);
+    expect(decodeScanCoverage(JSON.parse(JSON.stringify(v4)))).toEqual([
+      { provider: "codex", rootPath: "/sessions", sinceMs: 100, scannedAtMs: 200 },
+    ]);
+  });
+
   it("treats a corrupt or foreign document as an empty cache", () => {
     // A bad cache should cost one cold scan, never a broken page.
     expect(decodeScanCache(null).size).toBe(0);

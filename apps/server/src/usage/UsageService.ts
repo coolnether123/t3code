@@ -667,7 +667,7 @@ export const make = Effect.gen(function* () {
           selection.deferredFiles > 0
             ? `Usage is partial while the transcript cache warms; ${selection.deferredFiles} older or oversized transcript files were deferred.`
             : provider === "aistudio"
-              ? "AI Studio exports include exact per-message counts but no request ledger or original chat dates; input context is reconstructed and the graph uses each downloaded file's timestamp."
+              ? "AI Studio exports use exact chunk counts and source message dates when present. Older exports without createTime remain on their downloaded-file date; per-turn input context is reconstructed and copied branch prefixes are counted once."
               : provider === "chatgpt"
                 ? scannedFiles === 0
                   ? "ChatGPT import is ready; no conversations.json export has been downloaded yet."

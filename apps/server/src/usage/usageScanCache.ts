@@ -19,8 +19,9 @@ import type { UsageProviderKind } from "@t3tools/contracts";
 import type { CodexScanState, UsageRecord } from "./usageTranscripts.ts";
 
 // v2 changed fork-copy suppression. v3 added root coverage. v4 persists the
-// Codex parser cursor so growing JSONL files can resume from their old size.
-export const USAGE_SCAN_CACHE_VERSION = 4 as const;
+// Codex parser cursor. v5 reparses AI Studio files for source dates and branch
+// de-duplication while retaining the expensive caches for every other provider.
+export const USAGE_SCAN_CACHE_VERSION = 5 as const;
 
 export interface CachedFile {
   readonly size: number;
@@ -205,7 +206,12 @@ export function decodeScanCache(document: unknown): ScanCache {
   if (typeof document !== "object" || document === null) return cache;
 
   const root = document as Partial<SerializedCache>;
-  if (root.version !== 2 && root.version !== 3 && root.version !== USAGE_SCAN_CACHE_VERSION) {
+  if (
+    root.version !== 2 &&
+    root.version !== 3 &&
+    root.version !== 4 &&
+    root.version !== USAGE_SCAN_CACHE_VERSION
+  ) {
     return cache;
   }
   if (!isRecordArray(root.models) || !isRecordArray(root.sessions)) return cache;
@@ -236,6 +242,7 @@ export function decodeScanCache(document: unknown): ScanCache {
     if (!isRecordArray(entry.r)) continue;
 
     const provider: UsageProviderKind = entry.p;
+    if (root.version < USAGE_SCAN_CACHE_VERSION && provider === "aistudio") continue;
     const records: UsageRecord[] = [];
     // Any corrupt row disqualifies the whole entry. Keeping the survivors
     // under the original (size, mtime) would read as a valid warm hit and the
@@ -299,7 +306,7 @@ export function decodeScanCache(document: unknown): ScanCache {
 
     if (corrupt) continue;
     let codexState: CodexScanState | undefined;
-    if (root.version === USAGE_SCAN_CACHE_VERSION && entry.c !== undefined) {
+    if (root.version >= 4 && entry.c !== undefined) {
       const [
         model,
         sessionId,
@@ -349,7 +356,7 @@ export function decodeScanCoverage(document: unknown): readonly ScanCoverage[] {
   if (typeof document !== "object" || document === null) return [];
   const root = document as Partial<SerializedCache>;
   if (
-    (root.version !== 3 && root.version !== USAGE_SCAN_CACHE_VERSION) ||
+    (root.version !== 3 && root.version !== 4 && root.version !== USAGE_SCAN_CACHE_VERSION) ||
     !Array.isArray(root.coverage)
   ) {
     return [];
@@ -359,6 +366,7 @@ export function decodeScanCoverage(document: unknown): readonly ScanCoverage[] {
   for (const row of root.coverage) {
     if (!Array.isArray(row) || row.length !== 4) continue;
     const [provider, rootPath, sinceMs, scannedAtMs] = row;
+    if (root.version < USAGE_SCAN_CACHE_VERSION && provider === "aistudio") continue;
     if (
       (provider !== "claude" &&
         provider !== "codex" &&
