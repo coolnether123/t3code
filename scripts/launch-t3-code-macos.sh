@@ -12,6 +12,7 @@ EXPECTED_COMMIT="${T3CODE_EXPECTED_COMMIT:-}"; SERVER_PORT="${T3CODE_PORT:-3773}
 ARCH="${T3CODE_DESKTOP_ARCH:-}"; WAIT_SECONDS=120
 DRY_RUN=0; PREPARE_ONLY=0; BUILD_ONLY=0; SKIP_BUILD=0
 RUN_ID=""; RUN_DIR=""; LOG_PATH=/dev/null; STATE_PATH=""; STAGED_APP=""; PREVIOUS_APP=""
+EXPECTED_ENVIRONMENT_ID=""
 VP_PATH=""; declare -a OWNED_PIDS=()
 
 usage() {
@@ -97,7 +98,9 @@ validate() {
     same_or_below "$T3_HOME" "$BACKUP_ROOT" && fail "T3 home is inside backup root"
     same_or_below "$APP_SUPPORT_PATH" "$BACKUP_ROOT" && fail "Electron support path is inside backup root"
     [[ "$BACKUP_ROOT" != /Applications/* ]] || fail "backup root must not be under /Applications"
-    [[ "$BACKUP_ROOT" != "$SOURCE_ROOT" && "$SOURCE_ROOT" != "$BACKUP_ROOT/"* ]] || fail "backup root is source checkout"
+    [[ "$BACKUP_ROOT" != "$SOURCE_ROOT" ]] || fail "backup root is source checkout"
+    [[ "$BACKUP_ROOT" != "$SOURCE_ROOT/"* ]] || fail "backup root is inside source checkout"
+    [[ "$SOURCE_ROOT" != "$BACKUP_ROOT/"* ]] || fail "source checkout is inside backup root"
   fi
 }
 
@@ -119,7 +122,7 @@ dirs() {
   broad "$ARTIFACT_DIR" "artifact directory"; broad "$BACKUP_ROOT" "backup root"
   [[ ! -e "$ARTIFACT_DIR" ]] || fail "artifact directory already exists; pass a fresh --artifact-dir"
   [[ ! -L "$ARTIFACT_DIR" && ! -L "$BACKUP_ROOT" ]] || fail "artifact or backup root is a symlink"
-  mkdir -p "$ARTIFACT_DIR" "$RUN_DIR"
+  mkdir -p "$ARTIFACT_DIR" "$RUN_DIR"; chmod 700 "$RUN_DIR"
   [[ ! -L "$ARTIFACT_DIR" && ! -L "$BACKUP_ROOT" ]] || fail "artifact or backup root is a symlink"
   : >"$LOG_PATH"; chmod 600 "$LOG_PATH"
 }
@@ -133,7 +136,15 @@ bundle_exec() {
 validate_app() {
   local app="$1"; local require_hash="${2:-0}"; real_dir "$app" "T3 app bundle"; [[ "$app" == *.app ]] || fail "not an app bundle"
   local exe; exe="$(bundle_exec "$app")"; real_file "$app/Contents/Resources/app.asar" "app archive"
-  if [[ "$require_hash" -eq 1 ]]; then strings "$app/Contents/Resources/app.asar" | grep -Fq "$EXPECTED_COMMIT" || fail "app.asar lacks expected source commit"; fi
+  if [[ "$require_hash" -eq 1 ]]; then
+    local expected_short matches actual match_count
+    expected_short="$(printf '%s' "$EXPECTED_COMMIT" | cut -c1-12)"
+    matches="$(strings "$app/Contents/Resources/app.asar" | grep -Eo '"t3codeCommitHash"[[:space:]]*:[[:space:]]*"[0-9a-fA-F]{12}"' || true)"
+    match_count="$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l | tr -d ' ')"
+    [[ "$match_count" == 1 ]] || fail "app.asar must contain exactly one t3codeCommitHash metadata entry"
+    actual="$(printf '%s\n' "$matches" | sed -E 's/.*:[[:space:]]*"([0-9a-fA-F]{12})"$/\1/')"
+    [[ "$actual" == "$expected_short" ]] || fail "app.asar source commit prefix is $actual, expected $expected_short"
+  fi
   printf '%s' "$exe"
 }
 roots() {
@@ -180,6 +191,125 @@ backup() {
   [[ "$(sqlite3 -readonly "$out" 'PRAGMA integrity_check;' 2>>"$LOG_PATH")" == ok ]] || fail "backup SQLite integrity_check failed"
   if [[ -d "$APP_SUPPORT_PATH" ]]; then plan "Backing up Electron support data to $RUN_DIR/application-support; live data stays in place."; ditto "$APP_SUPPORT_PATH" "$RUN_DIR/application-support" >>"$LOG_PATH" 2>&1 || fail "Electron support backup failed"; fi
 }
+record_environment_identity() {
+  local identity_path="$T3_HOME/userdata/environment-id"
+  real_file "$identity_path" "environment identity"
+  EXPECTED_ENVIRONMENT_ID="$(tr -d '\r\n' <"$identity_path")"
+  [[ -n "$EXPECTED_ENVIRONMENT_ID" && "$EXPECTED_ENVIRONMENT_ID" != *[[:space:]]* ]] || fail "environment identity is empty or malformed"
+  printf 'environment_id=%s\nrecorded_at=%s\n' "$EXPECTED_ENVIRONMENT_ID" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$RUN_DIR/environment-identity"
+  chmod 600 "$RUN_DIR/environment-identity"
+  plan "Recorded environment identity before restart."
+}
+sqlite_query() {
+  local db="$1" statement="$2" result
+  if ! result="$(sqlite3 -readonly -batch -noheader -separator '|' "$db" "$statement" 2>>"$LOG_PATH")"; then
+    fail "read-only SQLite idle check query failed; refusing to restart"
+  fi
+  printf '%s' "$result"
+}
+sqlite_columns() {
+  local db="$1" table="$2"
+  sqlite_query "$db" "PRAGMA table_info($table);" | awk -F'|' '{print $2}'
+}
+require_sqlite_columns() {
+  local db="$1" table="$2" columns column
+  shift 2; columns="$(sqlite_columns "$db" "$table")"
+  [[ -n "$columns" ]] || fail "SQLite idle check cannot inspect $table schema; refusing to restart"
+  for column in "$@"; do
+    printf '%s\n' "$columns" | grep -Fxq "$column" || fail "SQLite idle check requires $table.$column; refusing to restart"
+  done
+}
+sqlite_count() {
+  local db="$1" statement="$2" result
+  result="$(sqlite_query "$db" "$statement")"
+  [[ "$result" =~ ^[0-9]+$ ]] || fail "SQLite idle check returned an uncertain count; refusing to restart"
+  printf '%s' "$result"
+}
+sqlite_idle_gate() {
+  local db="$T3_HOME/userdata/state.sqlite" busy_sessions pending_approvals pending_inputs unknown_sessions unknown_approvals invalid_inputs
+  real_file "$db" "live SQLite database"
+  command -v sqlite3 >/dev/null || fail "sqlite3 is required for the read-only idle fallback"
+  require_sqlite_columns "$db" projection_thread_sessions thread_id status active_turn_id
+  require_sqlite_columns "$db" projection_pending_approvals request_id thread_id status
+  require_sqlite_columns "$db" projection_threads thread_id pending_user_input_count
+  unknown_sessions="$(sqlite_count "$db" "SELECT COUNT(*) FROM projection_thread_sessions WHERE status IS NULL OR status NOT IN ('idle','starting','running','ready','interrupted','stopped','error');")"
+  [[ "$unknown_sessions" == 0 ]] || fail "SQLite idle check found an unknown session status; refusing to restart"
+  unknown_approvals="$(sqlite_count "$db" "SELECT COUNT(*) FROM projection_pending_approvals WHERE status IS NULL OR status NOT IN ('pending','resolved','stale');")"
+  [[ "$unknown_approvals" == 0 ]] || fail "SQLite idle check found an unknown approval status; refusing to restart"
+  invalid_inputs="$(sqlite_count "$db" "SELECT COUNT(*) FROM projection_threads WHERE pending_user_input_count IS NULL OR pending_user_input_count < 0;")"
+  [[ "$invalid_inputs" == 0 ]] || fail "SQLite idle check found an invalid pending-input count; refusing to restart"
+  busy_sessions="$(sqlite_count "$db" "SELECT COUNT(*) FROM projection_thread_sessions WHERE status IN ('starting','running') OR active_turn_id IS NOT NULL;")"
+  pending_approvals="$(sqlite_count "$db" "SELECT COUNT(*) FROM projection_pending_approvals WHERE status = 'pending';")"
+  pending_inputs="$(sqlite_count "$db" "SELECT COUNT(*) FROM projection_threads WHERE pending_user_input_count > 0;")"
+  [[ "$busy_sessions" == 0 ]] || fail "T3 has active or starting turns; refusing to restart"
+  [[ "$pending_approvals" == 0 ]] || fail "T3 has pending approvals; refusing to restart"
+  [[ "$pending_inputs" == 0 ]] || fail "T3 has pending user input; refusing to restart"
+  plan "Read-only SQLite idle check passed (sessions, approvals, and user input are clear)."
+}
+agent_snapshot() {
+  local -a command_path=()
+  local output parsed environment_id next_offset state offset=0 previous_offset=-1 stderr_path
+  if ! command -v node >/dev/null 2>&1; then
+    return 2
+  elif command -v t3 >/dev/null 2>&1; then
+    command_path=("$(command -v t3)" agent snapshot --base-dir "$T3_HOME")
+  elif [[ -f "$SOURCE_ROOT/apps/server/src/bin.ts" ]] && command -v node >/dev/null 2>&1; then
+    command_path=("$(command -v node)" "$SOURCE_ROOT/apps/server/src/bin.ts" agent snapshot --base-dir "$T3_HOME")
+  else
+    return 2
+  fi
+  while :; do
+    stderr_path="$RUN_DIR/agent-snapshot-$offset.stderr"
+    if ! output="$("${command_path[@]}" --offset "$offset" 2>"$stderr_path")"; then
+      return 2
+    fi
+    if ! parsed="$(printf '%s' "$output" | node -e '
+      const fs = require("node:fs");
+      let snapshot;
+      try { snapshot = JSON.parse(fs.readFileSync(0, "utf8")); } catch { process.exit(2); }
+      if (!snapshot || typeof snapshot.environmentId !== "string" || snapshot.environmentId.length === 0 ||
+          !Array.isArray(snapshot.threads) || !snapshot.listPage ||
+          typeof snapshot.threadCount !== "number" || snapshot.threadCount < 0) process.exit(2);
+      const statuses = new Set(["idle", "starting", "running", "ready", "interrupted", "stopped", "error"]);
+      let state = "idle";
+      for (const thread of snapshot.threads) {
+        if (!thread || typeof thread !== "object") process.exit(2);
+        if (thread.hasPendingApprovals !== true && thread.hasPendingApprovals !== false) process.exit(2);
+        if (thread.hasPendingUserInput !== true && thread.hasPendingUserInput !== false) process.exit(2);
+        if (thread.sessionStatus !== undefined && !statuses.has(thread.sessionStatus)) process.exit(2);
+        if (thread.activeTurnId !== undefined && thread.activeTurnId !== null) state = "busy:active turn";
+        if (thread.sessionStatus === "starting" || thread.sessionStatus === "running") state = "busy:session " + thread.sessionStatus;
+        if (thread.latestTurn !== undefined && thread.latestTurn !== null) {
+          if (!thread.latestTurn || typeof thread.latestTurn !== "object" ||
+              !["running", "interrupted", "completed", "error"].includes(thread.latestTurn.state)) process.exit(2);
+          if (thread.latestTurn.state === "running") state = "busy:running turn";
+        }
+        if (thread.hasPendingApprovals) state = "busy:pending approval";
+        if (thread.hasPendingUserInput) state = "busy:pending user input";
+      }
+      const next = snapshot.listPage.nextOffset;
+      if (next !== null && (!Number.isInteger(next) || next < 0)) process.exit(2);
+      process.stdout.write(snapshot.environmentId + "|" + (next === null ? "" : String(next)) + "|" + state);
+    ')"; then
+      return 2
+    fi
+    environment_id="${parsed%%|*}"; parsed="${parsed#*|}"; next_offset="${parsed%%|*}"; state="${parsed#*|}"
+    [[ "$environment_id" == "$EXPECTED_ENVIRONMENT_ID" ]] || return 3
+    [[ "$state" == idle ]] || { printf 't3 agent snapshot reports %s\n' "$state" >&2; return 1; }
+    [[ -z "$next_offset" ]] && { plan "t3 agent snapshot idle gate passed across all pages."; return 0; }
+    [[ "$next_offset" =~ ^[0-9]+$ && "$next_offset" -gt "$offset" && "$next_offset" -gt "$previous_offset" ]] || return 2
+    previous_offset="$offset"; offset="$next_offset"
+  done
+}
+idle_gate() {
+  local snapshot_status
+  if agent_snapshot; then return 0; else snapshot_status=$?; fi
+  case "$snapshot_status" in
+    1) fail "T3 is not idle; refusing to stop or restart the app";;
+    3) fail "running T3 environment identity differs from the recorded identity; refusing to restart";;
+    *) plan "t3 agent snapshot is unavailable or incompatible; using the documented read-only SQLite fallback."; sqlite_idle_gate;;
+  esac
+}
 backup_app() {
   [[ -d "$APP_PATH" && ! -L "$APP_PATH" ]] || fail "installed app is absent or a symlink"; mkdir -p "$RUN_DIR/installed-app"
   plan "Backing up installed app to $RUN_DIR/installed-app"; ditto "$APP_PATH" "$RUN_DIR/installed-app/$(basename "$APP_PATH")" >>"$LOG_PATH" 2>&1 || fail "app backup failed"
@@ -216,11 +346,24 @@ package_app() {
   if [[ "$DRY_RUN" -eq 1 ]]; then plan "Would create artifact directory $ARTIFACT_DIR"; vp_run "macOS DMG/ZIP packaging" run dist:desktop:artifact --platform mac --target dmg --arch "$ARCH" --output-dir "$ARTIFACT_DIR" --skip-build; return; fi
   mkdir -p "$ARTIFACT_DIR"; vp_run "macOS DMG/ZIP packaging" run dist:desktop:artifact --platform mac --target dmg --arch "$ARCH" --output-dir "$ARTIFACT_DIR" --skip-build; extract_app
 }
+environment_id_from_json() {
+  local body="$1" identity
+  identity="$(printf '%s' "$body" | tr -d '\r\n' | LC_ALL=C sed -nE 's/.*"environmentId"[[:space:]]*:[[:space:]]*"([^"\\]+)".*/\1/p')"
+  [[ -n "$identity" && "$identity" != *[[:space:]]* ]] || return 1
+  printf '%s' "$identity"
+}
 launch_verify() {
-  local exe root_pid i log; exe="$(validate_app "$APP_PATH")"; log="$RUN_DIR/runtime-$(date -u +%Y%m%d-%H%M%S).log"; plan "Launching $exe with T3CODE_HOME=$T3_HOME and T3CODE_PORT=$SERVER_PORT."
+  local exe root_pid i log environment_body actual_environment_id session_body; exe="$(validate_app "$APP_PATH")"; log="$RUN_DIR/runtime-$(date -u +%Y%m%d-%H%M%S).log"; plan "Launching $exe with T3CODE_HOME=$T3_HOME and T3CODE_PORT=$SERVER_PORT."
   [[ "$DRY_RUN" -eq 1 ]] && return; T3CODE_HOME="$T3_HOME" T3CODE_PORT="$SERVER_PORT" "$exe" >>"$log" 2>&1 & local started="$!"
   for ((i=0; i<WAIT_SECONDS; i++)); do if ! alive "$started"; then printf 'app exited during startup; see %s\n' "$log" >&2; return 1; fi; root_pid="$(root "$exe")"
-    if [[ -n "$root_pid" ]]; then capture_tree "$root_pid"; check_listeners; if curl --fail --silent --max-time 5 "http://127.0.0.1:$SERVER_PORT/.well-known/t3/environment" >/dev/null 2>>"$log" && curl --fail --silent --max-time 5 "http://127.0.0.1:$SERVER_PORT/api/auth/session" >/dev/null 2>>"$log"; then check_listeners; printf 'health passed: PID %s, environment/session APIs on 127.0.0.1:%s\n' "$root_pid" "$SERVER_PORT"; return; fi; fi
+    if [[ -n "$root_pid" ]]; then
+      capture_tree "$root_pid"; check_listeners
+      if environment_body="$(curl --fail --silent --show-error --max-time 5 "http://127.0.0.1:$SERVER_PORT/.well-known/t3/environment" 2>>"$log")" && actual_environment_id="$(environment_id_from_json "$environment_body")"; then
+        if [[ "$actual_environment_id" == "$EXPECTED_ENVIRONMENT_ID" ]] && session_body="$(curl --fail --silent --show-error --max-time 5 "http://127.0.0.1:$SERVER_PORT/api/auth/session" 2>>"$log")" && [[ -n "$session_body" ]]; then
+          check_listeners; printf 'health passed: PID %s, environment identity and auth/session APIs on 127.0.0.1:%s\n' "$root_pid" "$SERVER_PORT"; return 0
+        fi
+      fi
+    fi
     sleep 1
   done; printf 'app did not pass API health within %s seconds; see %s\n' "$WAIT_SECONDS" "$log" >&2; return 1
 }
@@ -230,7 +373,7 @@ rollback() {
 }
 deploy() {
   [[ -d "$APP_PATH" ]] || fail "installed app missing; refusing deployment"; local old new
-  old="$(validate_app "$APP_PATH")"; backup_app; backup; stop_existing "$old"; PREVIOUS_APP="$(dirname "$APP_PATH")/.T3 Code (Alpha).app.previous.$RUN_ID"; new="$(dirname "$APP_PATH")/.T3 Code (Alpha).app.new.$RUN_ID"
+  old="$(validate_app "$APP_PATH")"; record_environment_identity; idle_gate; backup_app; backup; idle_gate; stop_existing "$old"; PREVIOUS_APP="$(dirname "$APP_PATH")/.T3 Code (Alpha).app.previous.$RUN_ID"; new="$(dirname "$APP_PATH")/.T3 Code (Alpha).app.new.$RUN_ID"
   [[ ! -e "$PREVIOUS_APP" && ! -e "$new" ]] || fail "app staging path exists"; ditto "$STAGED_APP" "$new" >>"$LOG_PATH" 2>&1 || fail "candidate staging copy failed"; validate_app "$new" 1 >/dev/null; STAGED_APP="$new"; write_state ready-to-swap
   mv "$APP_PATH" "$PREVIOUS_APP"; write_state old-moved; mv "$STAGED_APP" "$APP_PATH"; write_state new-installed
   if ! launch_verify; then printf 'new app health failed; rolling back\n' >&2; rollback; fail "deployment rolled back"; fi

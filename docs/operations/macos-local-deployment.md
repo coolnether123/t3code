@@ -23,12 +23,19 @@ and prints the build/install plan without creating output, stopping a process,
 or reading live data:
 
 ```sh
+EXPECTED_COMMIT="$(git -C /path/to/t3code rev-parse HEAD)"
 bash scripts/launch-t3-code-macos.sh \
   --dry-run \
-  --expected-branch feat/t3-workers-prototype \
-  --expected-commit 2689260a9a16ab348fdcf14dfa45df1816652431 \
-  --backup-root "/Users/christinesmith/Codex_Workroom/_T3_Backups"
+  --source-root "/path/to/t3code" \
+  --expected-branch your-fork-branch \
+  --expected-commit "$EXPECTED_COMMIT" \
+  --backup-root "/Users/you/_T3_Backups"
 ```
+
+Replace the source path, fork branch, and backup path with the values for the
+checkout being deployed. The commit is deliberately resolved from that
+checkout at run time; no historical commit is implied to be the fork's final
+commit.
 
 `--prepare-only` installs dependencies with the frozen lockfile, runs the
 workspace typecheck and repository checks, and builds the desktop/server
@@ -42,10 +49,12 @@ fresh, empty output directory.
 Run during an idle window, with the existing app's work complete:
 
 ```sh
+EXPECTED_COMMIT="$(git -C /path/to/t3code rev-parse HEAD)"
 bash scripts/launch-t3-code-macos.sh \
-  --expected-branch feat/t3-workers-prototype \
-  --expected-commit 2689260a9a16ab348fdcf14dfa45df1816652431 \
-  --backup-root "/Users/christinesmith/Codex_Workroom/_T3_Backups"
+  --source-root "/path/to/t3code" \
+  --expected-branch your-fork-branch \
+  --expected-commit "$EXPECTED_COMMIT" \
+  --backup-root "/Users/you/_T3_Backups"
 ```
 
 The script builds a DMG/ZIP artifact, verifies the candidate's embedded source
@@ -74,6 +83,27 @@ The previous app sibling is intentionally retained for manual recovery. The
 backup run directory contains the complete app and data backups plus runtime
 logs. Do not delete a run directory until its restore files are no longer
 needed.
+
+Immediately before each possible stop, the workflow requires an idle gate. It
+first reads every page of `t3 agent snapshot --base-dir <T3_HOME>` and refuses
+to continue for an active/starting session, running turn, pending approval, or
+pending user input. The snapshot's environment identity must match the
+identity recorded from `<T3_HOME>/userdata/environment-id`. If an older
+desktop server does not support `agent snapshot`, the script uses a documented
+read-only SQLite fallback. That fallback requires these schemas and stops on
+missing columns, query errors, unknown statuses, or invalid counts:
+
+* `projection_thread_sessions(thread_id, status, active_turn_id)` for active
+  and starting turns;
+* `projection_pending_approvals(request_id, thread_id, status)` for pending
+  approvals; and
+* `projection_threads(thread_id, pending_user_input_count)` for pending user
+  input.
+
+After launch, the public environment endpoint must return the same identity,
+and the authenticated `/api/auth/session` health check must return a non-empty
+successful response. A `200` response from an unrelated environment is not
+accepted.
 
 ## macOS boundaries
 
