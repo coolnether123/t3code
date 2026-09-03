@@ -328,6 +328,7 @@ recover() {
   local a s p r phase exe rt; a="$(state_value app_path)"; s="$(state_value staged_app)"; p="$(state_value previous_app)"; r="$(state_value run_dir)"; phase="$(state_value phase)"
   [[ "$a" == "$APP_PATH" && "$s" == "$APP_PATH.new."* && "$p" == "$APP_PATH.previous."* && "$r" == "$BACKUP_ROOT/"* ]] || fail "deployment state is not for this exact app/backup"
   real_dir "$r" "deployment backup run directory"
+  record_environment_identity; idle_gate
   if [[ -d "$APP_PATH" ]]; then exe="$(bundle_exec "$APP_PATH")"; else exe="$(bundle_exec "$p")"; fi
   rt="$(root "$exe")"; if [[ -n "$rt" ]]; then capture_tree "$rt"; check_listeners; stop_tree; fi
   case "$phase" in
@@ -371,7 +372,7 @@ launch_verify() {
   done; printf 'app did not pass API health within %s seconds; see %s\n' "$WAIT_SECONDS" "$log" >&2; return 1
 }
 rollback() {
-  local exe rt failed; exe="$(bundle_exec "$APP_PATH")"; rt="$(root "$exe")"; if [[ -n "$rt" ]]; then capture_tree "$rt"; check_listeners; stop_tree; fi
+  local exe rt failed; idle_gate; exe="$(bundle_exec "$APP_PATH")"; rt="$(root "$exe")"; if [[ -n "$rt" ]]; then capture_tree "$rt"; check_listeners; stop_tree; fi
   failed="$RUN_DIR/failed-candidate-$(basename "$APP_PATH")"; [[ ! -e "$failed" ]] || fail "rollback destination exists"; [[ -d "$APP_PATH" ]] && mv "$APP_PATH" "$failed"; [[ -d "$PREVIOUS_APP" ]] || fail "previous app unavailable"; mv "$PREVIOUS_APP" "$APP_PATH"; write_state rolled-back; rm -f "$STATE_PATH"; launch_verify || fail "rollback health verification failed"; printf 'rollback passed; failed candidate retained at %s\n' "$failed"
 }
 deploy() {
