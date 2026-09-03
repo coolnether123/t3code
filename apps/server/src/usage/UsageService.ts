@@ -14,7 +14,10 @@
 import * as NodeOS from "node:os";
 
 import {
+  CodexSettings,
   USAGE_CONTRACT_VERSION,
+  type CodexSettings as CodexSettingsValue,
+  type ServerSettings as ServerSettingsValue,
   type UsageProviderKind,
   type UsageQuotaCost,
   type UsageSource,
@@ -118,6 +121,29 @@ const MAC_QUOTA_SAMPLE_INTERVAL_MS = 5 * 60 * 1000;
 /** Matches the client query TTL while deduplicating requests across clients. */
 const SUMMARY_CACHE_TTL_MS = 60 * 1000;
 const MAX_SUMMARY_CACHE_ENTRIES = 16;
+
+const decodeCodexQuotaSettings = Schema.decodeUnknownOption(CodexSettings);
+
+/** Resolve the enabled Codex instance that owns the quota window, preferring the default ID. */
+export function resolveCodexQuotaSettings(
+  settings: ServerSettingsValue,
+): CodexSettingsValue | null {
+  const instances = Object.entries(settings.providerInstances)
+    .filter(([, instance]) => instance.driver === "codex")
+    .sort(([left], [right]) => {
+      if (left === "codex") return -1;
+      if (right === "codex") return 1;
+      return left.localeCompare(right);
+    });
+
+  for (const [, instance] of instances) {
+    if (instance.enabled === false) continue;
+    const decoded = Option.getOrUndefined(decodeCodexQuotaSettings(instance.config ?? {}));
+    if (decoded?.enabled === true) return decoded;
+  }
+
+  return settings.providers.codex.enabled ? settings.providers.codex : null;
+}
 
 /** On-disk shape of the rate snapshot. */
 const RatesCacheFile = Schema.Struct({
@@ -365,8 +391,8 @@ export const make = Effect.gen(function* () {
         lastMacQuotaCollectionAtMs = now;
 
         const settings = yield* settingsService.getSettings;
-        const codex = settings.providers.codex;
-        if (!codex.enabled) return;
+        const codex = resolveCodexQuotaSettings(settings);
+        if (codex === null) return;
         const homeLayout = yield* resolveCodexHomeLayout(
           codex.useDesktopAppDaemon ? { ...codex, shadowHomePath: "" } : codex,
         );
