@@ -93,11 +93,11 @@ desktop server does not support `agent snapshot`, the script uses a documented
 read-only SQLite fallback. That fallback requires these schemas and stops on
 missing columns, query errors, unknown statuses, or invalid counts:
 
-* `projection_thread_sessions(thread_id, status, active_turn_id)` for active
+- `projection_thread_sessions(thread_id, status, active_turn_id)` for active
   and starting turns;
-* `projection_pending_approvals(request_id, thread_id, status)` for pending
+- `projection_pending_approvals(request_id, thread_id, status)` for pending
   approvals; and
-* `projection_threads(thread_id, pending_user_input_count)` for pending user
+- `projection_threads(thread_id, pending_user_input_count)` for pending user
   input.
 
 After launch, the public environment endpoint must return the same identity,
