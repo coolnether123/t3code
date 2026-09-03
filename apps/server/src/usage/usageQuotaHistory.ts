@@ -16,6 +16,7 @@ const SOURCE = "Codex Limits saved history";
 const decodeHistoryJson = Schema.decodeUnknownEffect(
   Schema.fromJsonString(Schema.Unknown as unknown as Schema.Codec<unknown>),
 );
+const encodeHistoryJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 function object(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -73,6 +74,18 @@ export function decodeQuotaHistory(document: unknown): UsageQuotaHistory {
     samples: [...samples.values()].sort((a, b) => a.observedAt.localeCompare(b.observedAt)),
     message: null,
   };
+}
+
+/** Encode native samples in the Codex Limits tracker's PascalCase schema. */
+export function encodeQuotaHistory(samples: readonly UsageQuotaSample[]): string {
+  return encodeHistoryJson({
+    Snapshot: { MainLimit: { LimitId: "codex", Window: { DurationMinutes: 10080 } } },
+    Samples: samples.map((sample) => ({
+      ObservedAt: sample.observedAt,
+      RemainingPercent: sample.remainingPercent,
+      ResetsAt: sample.resetsAt,
+    })),
+  });
 }
 
 export const readQuotaHistory = Effect.fn("UsageQuotaHistory.read")(

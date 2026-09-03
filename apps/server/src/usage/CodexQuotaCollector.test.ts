@@ -2,7 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 
 import type { V2GetAccountRateLimitsResponse } from "effect-codex-app-server/schema";
 
-import { quotaSampleFromRateLimits } from "./CodexQuotaCollector.ts";
+import { codexQuotaChildEnvironment, quotaSampleFromRateLimits } from "./CodexQuotaCollector.ts";
 
 const observedAtMs = Date.parse("2026-08-30T12:00:00.000Z");
 const resetsAt = Date.parse("2026-09-05T20:00:00.000Z") / 1_000;
@@ -55,6 +55,16 @@ describe("macOS Codex quota collector", () => {
     expect(quotaSampleFromRateLimits(otherLimit, observedAtMs)).toBeNull();
   });
 
+  it("fails closed when a limit map omits Codex, even if the legacy field is usable", () => {
+    const response = {
+      rateLimits: { primary: weeklyWindow },
+      rateLimitsByLimitId: {
+        other: { limitId: "other", primary: weeklyWindow },
+      },
+    } satisfies V2GetAccountRateLimitsResponse;
+    expect(quotaSampleFromRateLimits(response, observedAtMs)).toBeNull();
+  });
+
   it("rejects invalid or already-expired readings", () => {
     const expired = {
       rateLimits: {
@@ -66,5 +76,22 @@ describe("macOS Codex quota collector", () => {
     } satisfies V2GetAccountRateLimitsResponse;
     expect(quotaSampleFromRateLimits(expired, observedAtMs)).toBeNull();
     expect(quotaSampleFromRateLimits(invalid, observedAtMs)).toBeNull();
+  });
+
+  it("allowlists only the Codex child environment and expands a shared home", () => {
+    expect(
+      codexQuotaChildEnvironment(
+        {
+          PATH: "/usr/bin",
+          HOME: "/Users/tester",
+          CODEX_HOME: "/Users/tester/.codex",
+        },
+        "/Users/tester/.codex-shared",
+      ),
+    ).toEqual({
+      PATH: "/usr/bin",
+      HOME: "/Users/tester",
+      CODEX_HOME: "/Users/tester/.codex-shared",
+    });
   });
 });

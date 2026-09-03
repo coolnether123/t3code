@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
   decodeQuotaHistory,
+  encodeQuotaHistory,
   QuotaCostAccumulator,
   readQuotaHistory,
   validQuotaIntervals,
@@ -73,6 +74,36 @@ describe("saved quota history", () => {
       expect((yield* readQuotaHistory(file)).status).toBe("invalid");
       yield* fs.writeFileString(file, " ".repeat(2 * 1024 * 1024 + 1));
       expect((yield* readQuotaHistory(file)).status).toBe("invalid");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+  it.effect("round-trips native samples through the Codex Limits schema", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped({
+        prefix: "t3-native-quota-history-test-",
+      });
+      const file = path.join(directory, "state.json");
+      yield* fs.writeFileString(
+        file,
+        encodeQuotaHistory([
+          {
+            observedAt: "2026-08-30T12:00:00.000Z",
+            remainingPercent: 83,
+            resetsAt: "2026-09-05T20:00:00.000Z",
+          },
+        ]),
+      );
+      expect(yield* readQuotaHistory(file)).toMatchObject({
+        status: "ready",
+        samples: [
+          {
+            observedAt: "2026-08-30T12:00:00.000Z",
+            remainingPercent: 83,
+            resetsAt: "2026-09-05T20:00:00.000Z",
+          },
+        ],
+      });
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
   it("bounds and validates cost intervals independently of client schemas", () => {

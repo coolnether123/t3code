@@ -35,7 +35,7 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import { ServerConfig } from "../config.ts";
 import { writeFileStringAtomically } from "../atomicWrite.ts";
@@ -79,6 +79,7 @@ import {
 import { UsageSummaryCache, usageSummaryCacheKey } from "./usageSummaryCache.ts";
 import {
   QuotaCostAccumulator,
+  encodeQuotaHistory,
   readQuotaHistory,
   validQuotaIntervals,
 } from "./usageQuotaHistory.ts";
@@ -146,7 +147,6 @@ const decodeUsageImports = Schema.decodeUnknownEffect(
 const ScanCacheJson = Schema.fromJsonString(Schema.Unknown as unknown as Schema.Codec<unknown>);
 const decodeScanCacheFile = Schema.decodeUnknownEffect(ScanCacheJson);
 const encodeScanCacheFile = Schema.encodeEffect(ScanCacheJson);
-const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 export class UsageService extends Context.Service<
   UsageService,
@@ -185,9 +185,11 @@ export const make = Effect.gen(function* () {
   const config = yield* ServerConfig;
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const httpClient = yield* HttpClient.HttpClient;
+  const hostEnvironment = yield* HostProcessEnvironment;
   const hostPlatform = yield* HostProcessPlatform;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const scanSemaphore = yield* Semaphore.make(1);
+  const macQuotaCollectionSemaphore = yield* Semaphore.make(1);
 
   const fileCache: ScanCache = new Map();
   const scanCoverage = new Map<string, ScanCoverage>();
@@ -355,58 +357,66 @@ export const make = Effect.gen(function* () {
    * app-server protocol and retain only the same sanitized weekly sample.
    */
   const collectMacQuotaSample = Effect.fn("UsageService.collectMacQuotaSample")(function* () {
-    if (hostPlatform !== "darwin") return;
-    const now = yield* Clock.currentTimeMillis;
-    if (now - lastMacQuotaCollectionAtMs < MAC_QUOTA_SAMPLE_INTERVAL_MS) return;
-    lastMacQuotaCollectionAtMs = now;
+    yield* macQuotaCollectionSemaphore.withPermits(1)(
+      Effect.gen(function* () {
+        if (hostPlatform !== "darwin") return;
+        const now = yield* Clock.currentTimeMillis;
+        if (now - lastMacQuotaCollectionAtMs < MAC_QUOTA_SAMPLE_INTERVAL_MS) return;
+        lastMacQuotaCollectionAtMs = now;
 
-    const settings = yield* settingsService.getSettings;
-    const codex = settings.providers.codex;
-    if (!codex.enabled) return;
-    const homeLayout = yield* resolveCodexHomeLayout(
-      codex.useDesktopAppDaemon ? { ...codex, shadowHomePath: "" } : codex,
-    );
-    const environment: NodeJS.ProcessEnv = {
-      ...process.env,
-      OPENAI_API_KEY: undefined,
-      CODEX_API_KEY: undefined,
-      ...(homeLayout.effectiveHomePath ? { CODEX_HOME: homeLayout.effectiveHomePath } : {}),
-    };
-    const binaryPath = yield* resolveCodexBinaryPath(codex);
-    const launchArgs = resolveCodexLaunchArgs(codex.launchArgs, environment);
-    const sample = yield* readCodexQuotaSample({
-      binaryPath,
-      transport: codexAppServerTransport(codex),
-      environment,
-      cwd: process.cwd(),
-      launchArgs: codexLaunchArgv(launchArgs),
-      ...(homeLayout.effectiveHomePath ? { homePath: homeLayout.effectiveHomePath } : {}),
-    }).pipe(
-      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-      Effect.scoped,
-      Effect.timeout("10 seconds"),
-      Effect.catchCause(() => Effect.succeed(null)),
-    );
-    if (sample === null) return;
+        const settings = yield* settingsService.getSettings;
+        const codex = settings.providers.codex;
+        if (!codex.enabled) return;
+        const homeLayout = yield* resolveCodexHomeLayout(
+          codex.useDesktopAppDaemon ? { ...codex, shadowHomePath: "" } : codex,
+        );
+        // Resolve launch arguments from the host, but pass only this allowlist
+        // to the child. Provider/API secrets must never cross this boundary.
+        const environment = {
+          PATH: hostEnvironment.PATH,
+          HOME: hostEnvironment.HOME,
+          ...(homeLayout.effectiveHomePath
+            ? { CODEX_HOME: homeLayout.effectiveHomePath }
+            : hostEnvironment.CODEX_HOME
+              ? { CODEX_HOME: hostEnvironment.CODEX_HOME }
+              : {}),
+        };
+        const binaryPath = yield* resolveCodexBinaryPath(codex);
+        const launchArgs = resolveCodexLaunchArgs(codex.launchArgs, hostEnvironment);
+        const sample = yield* readCodexQuotaSample({
+          binaryPath,
+          transport: codexAppServerTransport(codex),
+          environment,
+          cwd: process.cwd(),
+          launchArgs: codexLaunchArgv(launchArgs),
+          ...(homeLayout.effectiveHomePath ? { homePath: homeLayout.effectiveHomePath } : {}),
+        }).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          Effect.scoped,
+          Effect.timeout("10 seconds"),
+          Effect.catchCause(() => Effect.succeed(null)),
+        );
+        if (sample === null) return;
 
-    const prior = yield* readQuotaHistory(macQuotaHistoryPath).pipe(
-      Effect.provideService(HostProcessPlatform, hostPlatform),
-    );
-    // Keep this map typed from the parsed value without exposing the source
-    // response or account metadata to the rest of the application.
-    const retained = prior.status === "ready" ? prior.samples : [];
-    const nextSamples = new Map(retained.map((entry) => [Date.parse(entry.observedAt), entry]));
-    nextSamples.set(Date.parse(sample.observedAt), sample);
-    const contents = encodeJson({
-      Snapshot: { MainLimit: { LimitId: "codex", Window: { DurationMinutes: 10_080 } } },
-      Samples: [...nextSamples.values()]
-        .sort((a, b) => a.observedAt.localeCompare(b.observedAt))
-        .slice(-5_000),
-    });
-    yield* writeFileStringAtomically({ filePath: macQuotaHistoryPath, contents }).pipe(
-      Effect.provideService(FileSystem.FileSystem, fileSystem),
-      Effect.provideService(Path.Path, path),
-      Effect.catchCause(() => Effect.void),
+        const prior = yield* readQuotaHistory(macQuotaHistoryPath).pipe(
+          Effect.provideService(HostProcessPlatform, hostPlatform),
+        );
+        // Keep this map typed from the parsed value without exposing the source
+        // response or account metadata to the rest of the application.
+        const retained = prior.status === "ready" ? prior.samples : [];
+        const nextSamples = new Map(retained.map((entry) => [Date.parse(entry.observedAt), entry]));
+        nextSamples.set(Date.parse(sample.observedAt), sample);
+        const contents = encodeQuotaHistory(
+          [...nextSamples.values()]
+            .sort((a, b) => a.observedAt.localeCompare(b.observedAt))
+            .slice(-5_000),
+        );
+        yield* writeFileStringAtomically({ filePath: macQuotaHistoryPath, contents }).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, path),
+          Effect.catchCause(() => Effect.void),
+        );
+      }),
     );
   });
 

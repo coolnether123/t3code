@@ -6,6 +6,7 @@ import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexSchema from "effect-codex-app-server/schema";
+import * as NodeOS from "node:os";
 
 import type { UsageQuotaSample } from "@t3tools/contracts";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
@@ -26,7 +27,12 @@ export interface CodexQuotaCollectorInput {
   readonly binaryPath: string;
   readonly homePath?: string;
   readonly transport: CodexAppServerTransport;
-  readonly environment: NodeJS.ProcessEnv;
+  /** Only process variables needed to locate and authenticate the CLI. */
+  readonly environment: {
+    readonly PATH?: string | undefined;
+    readonly HOME?: string | undefined;
+    readonly CODEX_HOME?: string | undefined;
+  };
   readonly launchArgs?: ReadonlyArray<string>;
   readonly cwd: string;
 }
@@ -37,8 +43,13 @@ type RateLimitsResponse = CodexSchema.V2GetAccountRateLimitsResponse;
 
 function mainSnapshot(response: RateLimitsResponse): RateLimitSnapshot | null {
   const byLimitId = response.rateLimitsByLimitId;
-  if (byLimitId && Object.prototype.hasOwnProperty.call(byLimitId, CODEX_LIMIT_ID)) {
-    return byLimitId[CODEX_LIMIT_ID] ?? null;
+  if (byLimitId !== undefined && byLimitId !== null) {
+    // A map is authoritative. Falling back to the legacy field when it is
+    // present but does not contain Codex could attribute another allowance to
+    // the weekly Codex tracker.
+    return Object.prototype.hasOwnProperty.call(byLimitId, CODEX_LIMIT_ID)
+      ? (byLimitId[CODEX_LIMIT_ID] ?? null)
+      : null;
   }
 
   // Older app-server versions returned the weekly window directly. If a
@@ -50,6 +61,28 @@ function mainSnapshot(response: RateLimitsResponse): RateLimitSnapshot | null {
     legacy.limitId === CODEX_LIMIT_ID
     ? legacy
     : null;
+}
+
+/**
+ * Build the allowlisted environment used by the short-lived app-server
+ * process. In particular, do not let an API key or an unrelated provider
+ * variable leak into this child. `HOME` is explicit so direct stdio and the
+ * desktop bridge resolve the same Codex home as the parent.
+ */
+export function codexQuotaChildEnvironment(
+  environment: CodexQuotaCollectorInput["environment"],
+  homePath?: string,
+): NodeJS.ProcessEnv {
+  const resolvedHomePath = homePath
+    ? expandHomePath(homePath)
+    : environment.CODEX_HOME
+      ? expandHomePath(environment.CODEX_HOME)
+      : undefined;
+  return {
+    ...(environment.PATH ? { PATH: environment.PATH } : {}),
+    HOME: environment.HOME ?? NodeOS.homedir(),
+    ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
+  };
 }
 
 /**
@@ -95,21 +128,17 @@ export const readCodexQuotaSample = Effect.fn("CodexQuotaCollector.read")(functi
 ) {
   return yield* Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const resolvedHomePath = input.homePath ? expandHomePath(input.homePath) : undefined;
-    const environment = {
-      ...input.environment,
-      ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
-    };
+    const environment = codexQuotaChildEnvironment(input.environment, input.homePath);
     const commandArgs = codexAppServerCommandArgs(input.transport, input.launchArgs);
     const spawnCommand = yield* resolveSpawnCommand(input.binaryPath, commandArgs, {
       env: environment,
-      extendEnv: true,
+      extendEnv: false,
     });
     const child = yield* spawner.spawn(
       ChildProcess.make(spawnCommand.command, spawnCommand.args, {
         cwd: input.cwd,
         env: environment,
-        extendEnv: true,
+        extendEnv: false,
         shell: spawnCommand.shell,
         forceKillAfter: FORCE_KILL_AFTER,
       }),
