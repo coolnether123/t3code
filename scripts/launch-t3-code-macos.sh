@@ -90,8 +90,8 @@ validate() {
   [[ -z "$(git -C "$SOURCE_ROOT" status --porcelain --untracked-files=normal)" ]] || fail "source checkout has uncommitted changes"
   broad "$APP_PATH" "installed app path"; [[ "$APP_PATH" == *.app && "$(dirname "$APP_PATH")" == /Applications ]] || fail "app must be directly under /Applications"
   broad "$T3_HOME" "T3 home"; broad "$APP_SUPPORT_PATH" "Electron support path"
-  if [[ "$PREPARE_ONLY" -eq 0 && "$BUILD_ONLY" -eq 0 ]]; then
-    [[ -n "$BACKUP_ROOT" ]] || fail "deployment requires explicit --backup-root"; broad "$BACKUP_ROOT" "backup root"
+  if [[ -n "$BACKUP_ROOT" ]]; then
+    broad "$BACKUP_ROOT" "backup root"
     same_or_below "$BACKUP_ROOT" "$APP_PATH" && fail "backup root is inside app path"
     same_or_below "$BACKUP_ROOT" "$T3_HOME" && fail "backup root is inside T3 home"
     same_or_below "$BACKUP_ROOT" "$APP_SUPPORT_PATH" && fail "backup root is inside Electron support path"
@@ -101,6 +101,9 @@ validate() {
     [[ "$BACKUP_ROOT" != "$SOURCE_ROOT" ]] || fail "backup root is source checkout"
     [[ "$BACKUP_ROOT" != "$SOURCE_ROOT/"* ]] || fail "backup root is inside source checkout"
     [[ "$SOURCE_ROOT" != "$BACKUP_ROOT/"* ]] || fail "source checkout is inside backup root"
+  fi
+  if [[ "$PREPARE_ONLY" -eq 0 && "$BUILD_ONLY" -eq 0 ]]; then
+    [[ -n "$BACKUP_ROOT" ]] || fail "deployment requires explicit --backup-root"
   fi
 }
 
