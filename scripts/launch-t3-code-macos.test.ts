@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - verifies a real shell dry-run and filesystem no-write contract.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
