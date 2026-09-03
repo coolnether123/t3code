@@ -141,7 +141,7 @@ validate_app() {
   local exe; exe="$(bundle_exec "$app")"; real_file "$app/Contents/Resources/app.asar" "app archive"
   if [[ "$require_hash" -eq 1 ]]; then
     local expected_short matches actual match_count
-    expected_short="$(printf '%s' "$EXPECTED_COMMIT" | cut -c1-12)"
+    expected_short="$(printf '%s' "$EXPECTED_COMMIT" | cut -c1-12 | tr 'A-Z' 'a-z')"
     matches="$(strings "$app/Contents/Resources/app.asar" | grep -Eo '"t3codeCommitHash"[[:space:]]*:[[:space:]]*"[0-9a-fA-F]{12}"' || true)"
     match_count="$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l | tr -d ' ')"
     [[ "$match_count" == 1 ]] || fail "app.asar must contain exactly one t3codeCommitHash metadata entry"
