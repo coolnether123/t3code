@@ -48,6 +48,7 @@ describe("launch-t3-code-macos", () => {
     assert.include(source, "write_state ready-to-swap");
     assert.include(source, "write_state old-moved");
     assert.include(source, "write_state new-installed");
+    assert.include(source, 'new="$app_parent/.$app_name.new.$RUN_ID.app"');
     assert.include(source, "failed-candidate-");
     assert.include(source, "/.well-known/t3/environment");
     assert.include(source, "/api/auth/session");

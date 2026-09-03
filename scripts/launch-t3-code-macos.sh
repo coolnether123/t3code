@@ -326,8 +326,11 @@ write_state() {
 state_value() { awk -F= -v key="$1" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$STATE_PATH"; }
 recover() {
   [[ -f "$STATE_PATH" ]] || return 0; [[ "$DRY_RUN" -eq 0 ]] || { plan "Would recover $STATE_PATH"; return; }
-  local a s p r phase exe rt; a="$(state_value app_path)"; s="$(state_value staged_app)"; p="$(state_value previous_app)"; r="$(state_value run_dir)"; phase="$(state_value phase)"
-  [[ "$a" == "$APP_PATH" && "$s" == "$APP_PATH.new."* && "$p" == "$APP_PATH.previous."* && "$r" == "$BACKUP_ROOT/"* ]] || fail "deployment state is not for this exact app/backup"
+  local a s p r phase exe rt app_parent app_name new_prefix previous_prefix
+  a="$(state_value app_path)"; s="$(state_value staged_app)"; p="$(state_value previous_app)"; r="$(state_value run_dir)"; phase="$(state_value phase)"
+  app_parent="$(dirname "$APP_PATH")"; app_name="$(basename "$APP_PATH" .app)"
+  new_prefix="$app_parent/.$app_name.new."; previous_prefix="$app_parent/.$app_name.previous."
+  [[ "$a" == "$APP_PATH" && "$s" == "$new_prefix"*.app && "$p" == "$previous_prefix"*.app && "$r" == "$BACKUP_ROOT/"* ]] || fail "deployment state is not for this exact app/backup"
   real_dir "$r" "deployment backup run directory"
   record_environment_identity; idle_gate
   if [[ -d "$APP_PATH" ]]; then exe="$(bundle_exec "$APP_PATH")"; else exe="$(bundle_exec "$p")"; fi
@@ -377,8 +380,10 @@ rollback() {
   failed="$RUN_DIR/failed-candidate-$(basename "$APP_PATH")"; [[ ! -e "$failed" ]] || fail "rollback destination exists"; [[ -d "$APP_PATH" ]] && mv "$APP_PATH" "$failed"; [[ -d "$PREVIOUS_APP" ]] || fail "previous app unavailable"; mv "$PREVIOUS_APP" "$APP_PATH"; write_state rolled-back; rm -f "$STATE_PATH"; launch_verify || fail "rollback health verification failed"; printf 'rollback passed; failed candidate retained at %s\n' "$failed"
 }
 deploy() {
-  [[ -d "$APP_PATH" ]] || fail "installed app missing; refusing deployment"; local old new
-  old="$(validate_app "$APP_PATH")"; record_environment_identity; idle_gate; backup_app; backup; idle_gate; stop_existing "$old"; PREVIOUS_APP="$(dirname "$APP_PATH")/.T3 Code (Alpha).app.previous.$RUN_ID"; new="$(dirname "$APP_PATH")/.T3 Code (Alpha).app.new.$RUN_ID"
+  [[ -d "$APP_PATH" ]] || fail "installed app missing; refusing deployment"; local old new app_parent app_name
+  old="$(validate_app "$APP_PATH")"; record_environment_identity; idle_gate; backup_app; backup; idle_gate; stop_existing "$old"
+  app_parent="$(dirname "$APP_PATH")"; app_name="$(basename "$APP_PATH" .app)"
+  PREVIOUS_APP="$app_parent/.$app_name.previous.$RUN_ID.app"; new="$app_parent/.$app_name.new.$RUN_ID.app"
   [[ ! -e "$PREVIOUS_APP" && ! -e "$new" ]] || fail "app staging path exists"; ditto "$STAGED_APP" "$new" >>"$LOG_PATH" 2>&1 || fail "candidate staging copy failed"; validate_app "$new" 1 >/dev/null; STAGED_APP="$new"; write_state ready-to-swap
   mv "$APP_PATH" "$PREVIOUS_APP"; write_state old-moved; mv "$STAGED_APP" "$APP_PATH"; write_state new-installed
   if ! launch_verify; then printf 'new app health failed; rolling back\n' >&2; rollback; fail "deployment rolled back"; fi
