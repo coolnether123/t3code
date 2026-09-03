@@ -63,11 +63,15 @@ describe("launch-t3-code-macos", () => {
     if (process.platform !== "darwin") return;
 
     const sourceRoot = NodePath.resolve(NodePath.dirname(scriptPath), "..");
-    const temporaryRoot = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3code-macos-dry-run-"));
+    const temporaryRoot = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "t3code-macos-dry-run-"),
+    );
     const backupRoot = NodePath.join(temporaryRoot, "backup-root");
     const artifactDir = NodePath.join(temporaryRoot, "artifact-output");
     const git = (args: string[]) =>
-      NodeChildProcess.execFileSync("git", ["-C", sourceRoot, ...args], { encoding: "utf8" }).trim();
+      NodeChildProcess.execFileSync("git", ["-C", sourceRoot, ...args], {
+        encoding: "utf8",
+      }).trim();
     const beforeStatus = git(["status", "--porcelain", "--untracked-files=normal"]);
 
     try {
