@@ -2,13 +2,22 @@ import { describe, expect, it } from "@effect/vitest";
 
 import type { V2GetAccountRateLimitsResponse } from "effect-codex-app-server/schema";
 
-import { codexQuotaChildEnvironment, quotaSampleFromRateLimits } from "./CodexQuotaCollector.ts";
+import {
+  codexQuotaChildEnvironment,
+  isSafeCodexQuotaTransport,
+  quotaSampleFromRateLimits,
+} from "./CodexQuotaCollector.ts";
 
 const observedAtMs = Date.parse("2026-08-30T12:00:00.000Z");
 const resetsAt = Date.parse("2026-09-05T20:00:00.000Z") / 1_000;
 const weeklyWindow = { usedPercent: 17, resetsAt, windowDurationMins: 10_080 } as const;
 
 describe("macOS Codex quota collector", () => {
+  it("uses only the shared desktop daemon transport", () => {
+    expect(isSafeCodexQuotaTransport("desktop-daemon")).toBe(true);
+    expect(isSafeCodexQuotaTransport("stdio")).toBe(false);
+  });
+
   it("maps the named weekly Codex limit to a sanitized sample", () => {
     const response = {
       rateLimits: { primary: { usedPercent: 99, windowDurationMins: 60 } },

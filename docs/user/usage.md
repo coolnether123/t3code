@@ -91,10 +91,10 @@ A countdown reaching zero never creates a reset observation or changes usage to 
 
 The page checks readings every minute and public news every five minutes while open.
 On Windows, the separate Codex Limits collector records every five minutes while its computer is
-awake and signed in, even with T3 closed. On macOS, T3 asks the signed-in Codex app-server for a
-reading when reset history is requested and throttles that request to once every five minutes.
-Readings older than 15 minutes are labeled stale. News requests send no account credentials,
-usage totals, or chat data.
+awake and signed in, even with T3 closed. On macOS, T3 asks the signed-in Codex desktop daemon for
+a reading when reset history is requested and throttles that request to once every five minutes.
+Direct CLI mode does not start a second app-server for quota tracking. Readings older than 15
+minutes are labeled stale. News requests send no account credentials, usage totals, or chat data.
 
 Press **Refresh** to reload saved readings, refresh public reset news, and check API costs for
 the newly read interval. The button shows progress and ignores repeated taps until it finishes.

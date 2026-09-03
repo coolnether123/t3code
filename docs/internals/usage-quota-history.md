@@ -13,10 +13,11 @@ The server reads Codex Limits' Windows `LOCALAPPDATA/CodexLimits/state.json` (or
 filesystem paths. The import is read-only, bounded to 2 MiB and 5,000 samples, and accepts only
 the main `codex` limit with a 10,080-minute window. It returns sanitized observation time,
 remaining percentage, and scheduled reset time. On macOS, when no external history file exists,
-the reset-history read asks the configured Codex app-server for `account/rateLimits/read` at most
-once every five minutes and stores the same sanitized samples in the T3 state directory. The
-desktop-daemon transport is supported, and the request never starts a model turn. External
-Codex Limits files remain read-only; the native fallback owns only its T3 state file.
+the reset-history read asks the configured Codex desktop daemon for `account/rateLimits/read` at
+most once every five minutes and stores the same sanitized samples in the T3 state directory.
+Direct CLI mode fails closed instead of starting a second app-server against an active Codex home,
+and the request never starts a model turn. External Codex Limits files remain read-only; the
+native fallback owns only its T3 state file.
 
 `packages/shared/src/usageQuota.ts` groups consecutive observations. Reset-clock changes within
 one minute are treated as timestamp jitter. A percentage increase or a larger clock change

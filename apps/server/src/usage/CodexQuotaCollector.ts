@@ -41,6 +41,11 @@ type RateLimitWindow = CodexSchema.V2GetAccountRateLimitsResponse__RateLimitWind
 type RateLimitSnapshot = CodexSchema.V2GetAccountRateLimitsResponse__RateLimitSnapshot;
 type RateLimitsResponse = CodexSchema.V2GetAccountRateLimitsResponse;
 
+/** Quota reads must share the desktop daemon instead of opening a second app-server. */
+export function isSafeCodexQuotaTransport(transport: CodexAppServerTransport): boolean {
+  return transport === "desktop-daemon";
+}
+
 function mainSnapshot(response: RateLimitsResponse): RateLimitSnapshot | null {
   const byLimitId = response.rateLimitsByLimitId;
   if (byLimitId !== undefined && byLimitId !== null) {
@@ -126,6 +131,7 @@ export function quotaSampleFromRateLimits(
 export const readCodexQuotaSample = Effect.fn("CodexQuotaCollector.read")(function* (
   input: CodexQuotaCollectorInput,
 ) {
+  if (!isSafeCodexQuotaTransport(input.transport)) return null;
   return yield* Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const environment = codexQuotaChildEnvironment(input.environment, input.homePath);
