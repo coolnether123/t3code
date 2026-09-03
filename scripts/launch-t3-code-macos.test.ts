@@ -34,6 +34,7 @@ describe("launch-t3-code-macos", () => {
 
   it("uses scoped process ownership and consistent SQLite backup", () => {
     assert.include(source, "ps -axo pid=,command=");
+    assert.include(source, 'row="${row#"${row%%[![:space:]]*}"}"');
     assert.include(source, "ps -axo pid=,ppid=");
     assert.include(source, "lsof -nP -t -iTCP:");
     assert.include(source, "VACUUM INTO");

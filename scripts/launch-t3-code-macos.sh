@@ -153,6 +153,7 @@ validate_app() {
 roots() {
   local exe="$1" row pid command
   ps -axo pid=,command= | while IFS= read -r row; do
+    row="${row#"${row%%[![:space:]]*}"}"
     pid="${row%% *}"; command="${row#"$pid"}"; command="${command#"${command%%[![:space:]]*}"}"; [[ "$pid" =~ ^[0-9]+$ ]] || continue
     case "$command" in "$exe"|"$exe "*)
       [[ "$command" == *" --type="* || "$command" == *" --process-type="* || "$command" == *"apps/server/dist"* || "$command" == *"--bootstrap-fd"* ]] || printf '%s\n' "$pid";; esac
