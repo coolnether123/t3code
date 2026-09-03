@@ -15,7 +15,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
 import * as NodeSqlite from "node:sqlite";
-import { createHash } from "node:crypto";
+import * as NodeCrypto from "node:crypto";
 
 import type { UsageProviderKind } from "@t3tools/contracts";
 
@@ -324,7 +324,7 @@ async function readImportedChatRecords(
     if (provider === "chatgpt") {
       return parseChatGptExport(parsed, { importedAtMs: stats.mtimeMs });
     }
-    const conversationId = createHash("sha256").update(raw).digest("hex");
+    const conversationId = NodeCrypto.createHash("sha256").update(raw).digest("hex");
     return parseAiStudioExport(parsed, { conversationId, importedAtMs: stats.mtimeMs });
   } catch {
     return null;
