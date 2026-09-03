@@ -44,10 +44,7 @@ import { ServerConfig } from "../config.ts";
 import { writeFileStringAtomically } from "../atomicWrite.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
-import {
-  resolveCodexBinaryPath,
-  codexAppServerTransport,
-} from "../provider/CodexAppServerTransport.ts";
+import { resolveCodexBinaryPath } from "../provider/CodexAppServerTransport.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { codexLaunchArgv, resolveCodexLaunchArgs } from "../provider/Layers/codexLaunchArgs.ts";
 import { readCodexQuotaSample } from "./CodexQuotaCollector.ts";
@@ -411,7 +408,10 @@ export const make = Effect.gen(function* () {
         const launchArgs = resolveCodexLaunchArgs(codex.launchArgs, hostEnvironment);
         const sample = yield* readCodexQuotaSample({
           binaryPath,
-          transport: codexAppServerTransport(codex),
+          // The macOS desktop build does not always publish the optional
+          // app-server proxy socket. A short-lived stdio server can still use
+          // the same authenticated Codex home for this read-only request.
+          transport: "stdio",
           environment,
           cwd: process.cwd(),
           launchArgs: codexLaunchArgv(launchArgs),

@@ -13,9 +13,9 @@ const resetsAt = Date.parse("2026-09-05T20:00:00.000Z") / 1_000;
 const weeklyWindow = { usedPercent: 17, resetsAt, windowDurationMins: 10_080 } as const;
 
 describe("macOS Codex quota collector", () => {
-  it("uses only the shared desktop daemon transport", () => {
+  it("supports both authenticated app-server transports", () => {
     expect(isSafeCodexQuotaTransport("desktop-daemon")).toBe(true);
-    expect(isSafeCodexQuotaTransport("stdio")).toBe(false);
+    expect(isSafeCodexQuotaTransport("stdio")).toBe(true);
   });
 
   it("maps the named weekly Codex limit to a sanitized sample", () => {
