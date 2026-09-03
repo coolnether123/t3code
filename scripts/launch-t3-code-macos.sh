@@ -173,7 +173,7 @@ capture_tree() {
 listeners() { lsof -nP -t -iTCP:"$SERVER_PORT" -sTCP:LISTEN 2>/dev/null | sort -u || true; }
 check_listeners() { local p; while read -r p; do [[ -z "$p" ]] || in_owned "$p" || fail "port $SERVER_PORT held by unrelated PID $p"; done < <(listeners); }
 stop_tree() {
-  local p i live; [[ "${#OWNED_PIDS[@]}" -gt 0 ]] || return; plan "Stopping captured T3 PID ${OWNED_PIDS[0]} and its descendants."
+  local p i live; [[ "${#OWNED_PIDS[@]}" -gt 0 ]] || return 0; plan "Stopping captured T3 PID ${OWNED_PIDS[0]} and its descendants."
   [[ "$DRY_RUN" -eq 1 ]] && return; kill -TERM "${OWNED_PIDS[0]}" 2>/dev/null || true
   for i in {1..10}; do live=0; for p in "${OWNED_PIDS[@]}"; do alive "$p" && live=1; done; [[ "$live" -eq 0 ]] && return; sleep 1; done
   for (( i=${#OWNED_PIDS[@]}-1; i>=0; i-- )); do p="${OWNED_PIDS[i]}"; alive "$p" && kill -KILL "$p" 2>/dev/null || true; done
@@ -324,7 +324,7 @@ write_state() {
 }
 state_value() { awk -F= -v key="$1" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$STATE_PATH"; }
 recover() {
-  [[ -f "$STATE_PATH" ]] || return; [[ "$DRY_RUN" -eq 0 ]] || { plan "Would recover $STATE_PATH"; return; }
+  [[ -f "$STATE_PATH" ]] || return 0; [[ "$DRY_RUN" -eq 0 ]] || { plan "Would recover $STATE_PATH"; return; }
   local a s p r phase exe rt; a="$(state_value app_path)"; s="$(state_value staged_app)"; p="$(state_value previous_app)"; r="$(state_value run_dir)"; phase="$(state_value phase)"
   [[ "$a" == "$APP_PATH" && "$s" == "$APP_PATH.new."* && "$p" == "$APP_PATH.previous."* && "$r" == "$BACKUP_ROOT/"* ]] || fail "deployment state is not for this exact app/backup"
   real_dir "$r" "deployment backup run directory"

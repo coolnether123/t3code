@@ -56,6 +56,7 @@ describe("launch-t3-code-macos", () => {
     assert.include(source, "pending_user_input_count");
     assert.include(source, "EXPECTED_ENVIRONMENT_ID");
     assert.include(source, "dry run complete: no files, processes, app/data");
+    assert.include(source, '[[ -f "$STATE_PATH" ]] || return 0');
   });
 
   it("executes a real dry-run without creating output or deployment state", () => {
