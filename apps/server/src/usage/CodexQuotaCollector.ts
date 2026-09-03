@@ -1,0 +1,137 @@
+import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as ChildProcess from "effect/unstable/process/ChildProcess";
+import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+import * as CodexClient from "effect-codex-app-server/client";
+import * as CodexSchema from "effect-codex-app-server/schema";
+
+import type { UsageQuotaSample } from "@t3tools/contracts";
+import { resolveSpawnCommand } from "@t3tools/shared/shell";
+
+import {
+  codexAppServerCommandArgs,
+  type CodexAppServerTransport,
+} from "../provider/CodexAppServerTransport.ts";
+import { expandHomePath } from "../pathExpansion.ts";
+
+const FORCE_KILL_AFTER = "2 seconds" as const;
+
+/** The Codex Limits tracker records only the main weekly Codex window. */
+const CODEX_LIMIT_ID = "codex";
+const CODEX_WINDOW_MINUTES = 10_080;
+
+export interface CodexQuotaCollectorInput {
+  readonly binaryPath: string;
+  readonly homePath?: string;
+  readonly transport: CodexAppServerTransport;
+  readonly environment: NodeJS.ProcessEnv;
+  readonly launchArgs?: ReadonlyArray<string>;
+  readonly cwd: string;
+}
+
+type RateLimitWindow = CodexSchema.V2GetAccountRateLimitsResponse__RateLimitWindow;
+type RateLimitSnapshot = CodexSchema.V2GetAccountRateLimitsResponse__RateLimitSnapshot;
+type RateLimitsResponse = CodexSchema.V2GetAccountRateLimitsResponse;
+
+function mainSnapshot(response: RateLimitsResponse): RateLimitSnapshot | null {
+  const byLimitId = response.rateLimitsByLimitId;
+  if (byLimitId && Object.prototype.hasOwnProperty.call(byLimitId, CODEX_LIMIT_ID)) {
+    return byLimitId[CODEX_LIMIT_ID] ?? null;
+  }
+
+  // Older app-server versions returned the weekly window directly. If a
+  // newer response names another limit, fail closed instead of recording it as
+  // Codex usage.
+  const legacy = response.rateLimits;
+  return legacy.limitId === undefined ||
+    legacy.limitId === null ||
+    legacy.limitId === CODEX_LIMIT_ID
+    ? legacy
+    : null;
+}
+
+/**
+ * Convert one app-server response to the same sanitized sample shape used by
+ * the external Codex Limits tracker. No account identity or raw response data
+ * is retained.
+ */
+export function quotaSampleFromRateLimits(
+  response: RateLimitsResponse,
+  observedAtMs: number,
+): UsageQuotaSample | null {
+  if (!Number.isFinite(observedAtMs)) return null;
+  const snapshot = mainSnapshot(response);
+  const window: RateLimitWindow | null =
+    [snapshot?.primary, snapshot?.secondary].find(
+      (candidate) => candidate?.windowDurationMins === CODEX_WINDOW_MINUTES,
+    ) ?? null;
+  if (
+    window === null ||
+    window.windowDurationMins !== CODEX_WINDOW_MINUTES ||
+    !Number.isInteger(window.usedPercent) ||
+    window.usedPercent < 0 ||
+    window.usedPercent > 100 ||
+    window.resetsAt === undefined ||
+    window.resetsAt === null ||
+    !Number.isFinite(window.resetsAt)
+  ) {
+    return null;
+  }
+
+  const resetsAtMs = window.resetsAt * 1_000;
+  if (!Number.isFinite(resetsAtMs) || resetsAtMs < observedAtMs) return null;
+  return {
+    observedAt: DateTime.formatIso(DateTime.makeUnsafe(observedAtMs)),
+    remainingPercent: 100 - window.usedPercent,
+    resetsAt: DateTime.formatIso(DateTime.makeUnsafe(resetsAtMs)),
+  };
+}
+
+/** Read the current weekly Codex allowance over the authenticated app-server protocol. */
+export const readCodexQuotaSample = Effect.fn("CodexQuotaCollector.read")(function* (
+  input: CodexQuotaCollectorInput,
+) {
+  return yield* Effect.gen(function* () {
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const resolvedHomePath = input.homePath ? expandHomePath(input.homePath) : undefined;
+    const environment = {
+      ...input.environment,
+      ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
+    };
+    const commandArgs = codexAppServerCommandArgs(input.transport, input.launchArgs);
+    const spawnCommand = yield* resolveSpawnCommand(input.binaryPath, commandArgs, {
+      env: environment,
+      extendEnv: true,
+    });
+    const child = yield* spawner.spawn(
+      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+        cwd: input.cwd,
+        env: environment,
+        extendEnv: true,
+        shell: spawnCommand.shell,
+        forceKillAfter: FORCE_KILL_AFTER,
+      }),
+    );
+    const clientContext = yield* Layer.build(CodexClient.layerChildProcess(child));
+    const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
+      Effect.provide(clientContext),
+    );
+    yield* client.request("initialize", {
+      clientInfo: {
+        name: "t3code_usage_tracker",
+        title: "T3 Code Usage Tracker",
+        version: "0.1.0",
+      },
+      capabilities: { experimentalApi: true },
+    });
+    yield* client.notify("initialized", undefined);
+    const response = yield* client.request("account/rateLimits/read", undefined);
+    const observedAtMs = yield* Clock.currentTimeMillis;
+    return quotaSampleFromRateLimits(response, observedAtMs);
+  }).pipe(
+    Effect.scoped,
+    Effect.orElseSucceed(() => null),
+  );
+});

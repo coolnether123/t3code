@@ -3,8 +3,10 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as NodeOS from "node:os";
 
 import type { UsageQuotaHistory, UsageQuotaInterval, UsageQuotaSample } from "@t3tools/contracts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import { priceUsage, type RateTable } from "./usagePricing.ts";
 import type { UsageRecord } from "./usageTranscripts.ts";
@@ -77,12 +79,21 @@ export const readQuotaHistory = Effect.fn("UsageQuotaHistory.read")(
   function* (override: string | null | undefined) {
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
+    const platform = yield* HostProcessPlatform;
     const filePath =
       override === undefined
         ? process.env.T3CODE_QUOTA_HISTORY_PATH ||
           (process.env.LOCALAPPDATA
             ? path.join(process.env.LOCALAPPDATA, "CodexLimits", "state.json")
-            : null)
+            : platform === "darwin"
+              ? path.join(
+                  NodeOS.homedir(),
+                  "Library",
+                  "Application Support",
+                  "CodexLimits",
+                  "state.json",
+                )
+              : null)
         : override;
     const missing: UsageQuotaHistory = {
       status: "missing",

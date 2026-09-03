@@ -90,9 +90,11 @@ interpretation remain visible. A missing or expired announcement falls back to t
 A countdown reaching zero never creates a reset observation or changes usage to 100%.
 
 The page checks readings every minute and public news every five minutes while open.
-The separate Codex Limits collector records every five minutes while its computer is awake
-and signed in, even with T3 closed. Readings older than 15 minutes are labeled stale.
-News requests send no account credentials, usage totals, or chat data.
+On Windows, the separate Codex Limits collector records every five minutes while its computer is
+awake and signed in, even with T3 closed. On macOS, T3 asks the signed-in Codex app-server for a
+reading when reset history is requested and throttles that request to once every five minutes.
+Readings older than 15 minutes are labeled stale. News requests send no account credentials,
+usage totals, or chat data.
 
 Press **Refresh** to reload saved readings, refresh public reset news, and check API costs for
 the newly read interval. The button shows progress and ignores repeated taps until it finishes.

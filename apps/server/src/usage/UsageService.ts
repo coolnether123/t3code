@@ -34,12 +34,20 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
+import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import { ServerConfig } from "../config.ts";
 import { writeFileStringAtomically } from "../atomicWrite.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
+import {
+  resolveCodexBinaryPath,
+  codexAppServerTransport,
+} from "../provider/CodexAppServerTransport.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
+import { codexLaunchArgv, resolveCodexLaunchArgs } from "../provider/Layers/codexLaunchArgs.ts";
+import { readCodexQuotaSample } from "./CodexQuotaCollector.ts";
 import { UsageAggregator } from "./usageAggregation.ts";
 import { parseRateTable, type RateTable } from "./usagePricing.ts";
 import {
@@ -103,6 +111,9 @@ const INCREMENTAL_SCAN_TTL_MS = 60 * 1000;
 /** Full audits catch deleted history without putting a tree walk on every request. */
 const FULL_SCAN_INTERVAL_MS = 15 * 60 * 1000;
 
+/** A macOS server can collect one authenticated allowance reading per cycle. */
+const MAC_QUOTA_SAMPLE_INTERVAL_MS = 5 * 60 * 1000;
+
 /** Matches the client query TTL while deduplicating requests across clients. */
 const SUMMARY_CACHE_TTL_MS = 60 * 1000;
 const MAX_SUMMARY_CACHE_ENTRIES = 16;
@@ -135,6 +146,7 @@ const decodeUsageImports = Schema.decodeUnknownEffect(
 const ScanCacheJson = Schema.fromJsonString(Schema.Unknown as unknown as Schema.Codec<unknown>);
 const decodeScanCacheFile = Schema.decodeUnknownEffect(ScanCacheJson);
 const encodeScanCacheFile = Schema.encodeEffect(ScanCacheJson);
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 export class UsageService extends Context.Service<
   UsageService,
@@ -173,6 +185,8 @@ export const make = Effect.gen(function* () {
   const config = yield* ServerConfig;
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const httpClient = yield* HttpClient.HttpClient;
+  const hostPlatform = yield* HostProcessPlatform;
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const scanSemaphore = yield* Semaphore.make(1);
 
   const fileCache: ScanCache = new Map();
@@ -184,6 +198,8 @@ export const make = Effect.gen(function* () {
   const ratesCachePath = path.join(config.stateDir, "usage-model-rates.json");
   const scanCachePath = path.join(config.stateDir, "usage-scan-cache.json");
   const usageImportsPath = path.join(config.stateDir, "usage-imports.json");
+  const macQuotaHistoryPath = path.join(config.stateDir, "usage-codex-quota-history.json");
+  let lastMacQuotaCollectionAtMs = 0;
   let rates: RateTable = new Map();
   let ratesFetchedAtMs: number | null = null;
   let ratesStatus: UsageSummary["pricing"]["status"] = "unavailable";
@@ -333,6 +349,85 @@ export const make = Effect.gen(function* () {
     );
   });
 
+  /**
+   * macOS does not have the separately installed Windows Codex Limits task.
+   * When no external history file is present, use the authenticated Codex
+   * app-server protocol and retain only the same sanitized weekly sample.
+   */
+  const collectMacQuotaSample = Effect.fn("UsageService.collectMacQuotaSample")(function* () {
+    if (hostPlatform !== "darwin") return;
+    const now = yield* Clock.currentTimeMillis;
+    if (now - lastMacQuotaCollectionAtMs < MAC_QUOTA_SAMPLE_INTERVAL_MS) return;
+    lastMacQuotaCollectionAtMs = now;
+
+    const settings = yield* settingsService.getSettings;
+    const codex = settings.providers.codex;
+    if (!codex.enabled) return;
+    const homeLayout = yield* resolveCodexHomeLayout(
+      codex.useDesktopAppDaemon ? { ...codex, shadowHomePath: "" } : codex,
+    );
+    const environment: NodeJS.ProcessEnv = {
+      ...process.env,
+      OPENAI_API_KEY: undefined,
+      CODEX_API_KEY: undefined,
+      ...(homeLayout.effectiveHomePath ? { CODEX_HOME: homeLayout.effectiveHomePath } : {}),
+    };
+    const binaryPath = yield* resolveCodexBinaryPath(codex);
+    const launchArgs = resolveCodexLaunchArgs(codex.launchArgs, environment);
+    const sample = yield* readCodexQuotaSample({
+      binaryPath,
+      transport: codexAppServerTransport(codex),
+      environment,
+      cwd: process.cwd(),
+      launchArgs: codexLaunchArgv(launchArgs),
+      ...(homeLayout.effectiveHomePath ? { homePath: homeLayout.effectiveHomePath } : {}),
+    }).pipe(
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      Effect.scoped,
+      Effect.timeout("10 seconds"),
+      Effect.catchCause(() => Effect.succeed(null)),
+    );
+    if (sample === null) return;
+
+    const prior = yield* readQuotaHistory(macQuotaHistoryPath).pipe(
+      Effect.provideService(HostProcessPlatform, hostPlatform),
+    );
+    // Keep this map typed from the parsed value without exposing the source
+    // response or account metadata to the rest of the application.
+    const retained = prior.status === "ready" ? prior.samples : [];
+    const nextSamples = new Map(retained.map((entry) => [Date.parse(entry.observedAt), entry]));
+    nextSamples.set(Date.parse(sample.observedAt), sample);
+    const contents = encodeJson({
+      Snapshot: { MainLimit: { LimitId: "codex", Window: { DurationMinutes: 10_080 } } },
+      Samples: [...nextSamples.values()]
+        .sort((a, b) => a.observedAt.localeCompare(b.observedAt))
+        .slice(-5_000),
+    });
+    yield* writeFileStringAtomically({ filePath: macQuotaHistoryPath, contents }).pipe(
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.provideService(Path.Path, path),
+      Effect.catchCause(() => Effect.void),
+    );
+  });
+
+  const readQuotaHistoryForEnvironment = Effect.fn("UsageService.readQuotaHistoryForEnvironment")(
+    function* () {
+      const imported = yield* readQuotaHistory(undefined).pipe(
+        Effect.provideService(HostProcessPlatform, hostPlatform),
+      );
+      if (
+        imported.status !== "missing" ||
+        hostPlatform !== "darwin" ||
+        process.env.T3CODE_QUOTA_HISTORY_PATH?.trim()
+      )
+        return imported;
+      yield* collectMacQuotaSample().pipe(Effect.catchCause(() => Effect.void));
+      return yield* readQuotaHistory(macQuotaHistoryPath).pipe(
+        Effect.provideService(HostProcessPlatform, hostPlatform),
+      );
+    },
+  );
+
   /** Parses one transcript, reusing the cached result when it is unchanged. */
   const readFileRecords = (
     filePath: string,
@@ -430,7 +525,7 @@ export const make = Effect.gen(function* () {
     }
     const quotaHistory =
       input.includeQuotaHistory || input.quotaHistoryOnly
-        ? yield* readQuotaHistory(undefined).pipe(
+        ? yield* readQuotaHistoryForEnvironment().pipe(
             Effect.provideService(FileSystem.FileSystem, fileSystem),
             Effect.provideService(Path.Path, path),
           )

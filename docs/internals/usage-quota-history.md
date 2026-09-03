@@ -7,12 +7,16 @@ request scans only Codex sources. Ordinary usage requests continue to include al
 Old clients and servers can continue using usage contract 6. New clients detect missing optional
 fields and show an unsupported-server state rather than treating missing values as zero.
 
-The server reads Codex Limits' Windows `LOCALAPPDATA/CodexLimits/state.json`. Operators can set
+The server reads Codex Limits' Windows `LOCALAPPDATA/CodexLimits/state.json` (or macOS
+`~/Library/Application Support/CodexLimits/state.json`). Operators can set
 `T3CODE_QUOTA_HISTORY_PATH` to a compatible saved file on another platform. Clients cannot supply
 filesystem paths. The import is read-only, bounded to 2 MiB and 5,000 samples, and accepts only
 the main `codex` limit with a 10,080-minute window. It returns sanitized observation time,
-remaining percentage, and scheduled reset time. It never reads credentials, starts the tracker,
-or queries an account. Codex Limits owns collection and retention. T3 does not archive its file.
+remaining percentage, and scheduled reset time. On macOS, when no external history file exists,
+the reset-history read asks the configured Codex app-server for `account/rateLimits/read` at most
+once every five minutes and stores the same sanitized samples in the T3 state directory. The
+desktop-daemon transport is supported, and the request never starts a model turn. External
+Codex Limits files remain read-only; the native fallback owns only its T3 state file.
 
 `packages/shared/src/usageQuota.ts` groups consecutive observations. Reset-clock changes within
 one minute are treated as timestamp jitter. A percentage increase or a larger clock change
@@ -58,7 +62,9 @@ The Windows Codex Limits app now supports `--collect-once` with no window. Its s
 Windows task records every five minutes and at user sign-in. Collection is independent of T3,
 uses `account/rateLimits/read`, and never starts a model turn. A process mutex prevents concurrent
 writers. The parser selects the 10,080-minute main Codex window explicitly, rather than selecting
-whichever short or weekly window has less remaining. Failed reads leave history intact.
+whichever short or weekly window has less remaining. Failed reads leave history intact. On macOS,
+the T3-native fallback collects when reset history is requested and applies the same five-minute
+throttle; it does not run a background collector while T3 is closed.
 
 Web and native reset pages refresh only the history query every minute and on foreground return.
 The timer does not trigger cost scans unless observations actually change. The quota-history
