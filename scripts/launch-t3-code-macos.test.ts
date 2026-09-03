@@ -2,12 +2,12 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import { fileURLToPath } from "node:url";
+import * as NodeURL from "node:url";
 
 import { assert, describe, it } from "@effect/vitest";
 
 const scriptPath = NodePath.join(
-  NodePath.dirname(fileURLToPath(import.meta.url)),
+  NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),
   "launch-t3-code-macos.sh",
 );
 
@@ -60,7 +60,7 @@ describe("launch-t3-code-macos", () => {
   it("executes a real dry-run without creating output or deployment state", () => {
     // The launcher is intentionally macOS-only. Run this integration check on
     // the target platform; static tests above still protect the contract on CI.
-    if (process.platform !== "darwin") return;
+    if (NodeOS.type() !== "Darwin") return;
 
     const sourceRoot = NodePath.resolve(NodePath.dirname(scriptPath), "..");
     const temporaryRoot = NodeFS.mkdtempSync(
