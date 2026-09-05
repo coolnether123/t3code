@@ -307,6 +307,7 @@ import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
+import { SteerTurnDialog } from "./chat/SteerTurnDialog";
 import { EditFromHereDialog, type EditFromHereMode } from "./chat/EditFromHereDialog";
 import type { AssistantCitationRequest } from "./chat/AssistantCitationSource";
 import { resolveTimelineIsAtEnd } from "./chat/MessagesTimeline.logic";
@@ -3026,21 +3027,25 @@ export default function ChatView(props: ChatViewProps) {
     }
     return byMessageId;
   }, [turnDiffSummaries]);
-  const revertTurnCountByUserMessageId = useMemo(
-    () =>
-      buildRevertTurnCountByUserMessageId({
+  const lastRevertTurnCountRef = useRef<Map<MessageId, number> | null>(null);
+  const revertTurnCountByUserMessageId = useMemo(() => {
+    const next = buildRevertTurnCountByUserMessageId(
+      {
         supportsConversationRollback,
         timelineEntries,
         turnDiffSummaryByAssistantMessageId,
         inferredCheckpointTurnCountByTurnId,
-      }),
-    [
-      supportsConversationRollback,
-      inferredCheckpointTurnCountByTurnId,
-      timelineEntries,
-      turnDiffSummaryByAssistantMessageId,
-    ],
-  );
+      },
+      lastRevertTurnCountRef.current,
+    );
+    lastRevertTurnCountRef.current = next;
+    return next;
+  }, [
+    supportsConversationRollback,
+    inferredCheckpointTurnCountByTurnId,
+    timelineEntries,
+    turnDiffSummaryByAssistantMessageId,
+  ]);
 
   const gitCwd = activeProject
     ? projectScriptCwd({
@@ -8107,6 +8112,19 @@ export default function ChatView(props: ChatViewProps) {
                         />
                       </div>
                     </div>
+                  ) : null}
+                  {selectedProvider === "codex" && isServerThread && activeThread ? (
+                    <SteerTurnDialog
+                      key={activeThread.id}
+                      environmentId={environmentId}
+                      threadId={activeThread.id}
+                      activeTurnId={
+                        activeThread.session?.status === "running"
+                          ? activeThread.session.activeTurnId
+                          : null
+                      }
+                      disabled={activeEnvironmentUnavailable || isEditingFromHere}
+                    />
                   ) : null}
                   <div
                     className="relative"

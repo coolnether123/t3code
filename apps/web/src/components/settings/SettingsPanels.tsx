@@ -160,6 +160,7 @@ import {
 } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
 import { ProjectFavicon } from "../ProjectFavicon";
+import { BrowserNotificationSettingsSection } from "../../notifications/BrowserNotificationSettingsSection";
 import { PanelAnimationsPreview } from "./PanelAnimationsPreview";
 
 const ENVIRONMENT_IDENTIFICATION_LABELS: Record<EnvironmentIdentificationMode, string> = {
@@ -2902,6 +2903,8 @@ export function GeneralSettingsPanel() {
           }
         />
       </SettingsSection>
+
+      <BrowserNotificationSettingsSection />
 
       <SettingsSection id="about" title="About">
         {isElectron || HOSTED_APP_CHANNEL ? (

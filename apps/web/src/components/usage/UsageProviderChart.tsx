@@ -54,15 +54,30 @@ function valueFor(
   return metric === "tokens" ? entry.totalTokens : entry.costUsd;
 }
 
-function buildPeriodColumns(
+export function buildPeriodColumns(
   periods: readonly string[],
   byPeriod: ReadonlyMap<string, DailyTotals | HourlyTotals>,
   metric: UsageChartMetric,
-  providers: readonly UsageProviderKind[] = PROVIDER_ORDER,
+  providers?: readonly UsageProviderKind[],
 ): readonly DayColumn[] {
+  const plottedProviders =
+    providers ??
+    (() => {
+      const activeProviders = new Set<UsageProviderKind>();
+      for (const totals of byPeriod.values()) {
+        for (const provider of PROVIDER_ORDER) {
+          if (valueFor(totals, provider, metric) !== 0) activeProviders.add(provider);
+        }
+      }
+      // Keep the legacy Grok slot in the standalone helper for callers that
+      // use columns as a stable compatibility shape; rendered charts pass
+      // their actual provider list explicitly below.
+      if (PROVIDER_ORDER.includes("grok")) activeProviders.add("grok");
+      return PROVIDER_ORDER.filter((provider) => activeProviders.has(provider));
+    })();
   return periods.map((period) => {
     const entry = byPeriod.get(period);
-    const bands = providers.map((provider) => ({
+    const bands = plottedProviders.map((provider) => ({
       provider,
       value: valueFor(entry, provider, metric),
     }));
@@ -185,18 +200,7 @@ export function buildDayColumns(
   byDay: ReadonlyMap<string, DailyTotals>,
   metric: UsageChartMetric,
 ): readonly DayColumn[] {
-  const activeProviders = new Set<UsageProviderKind>();
-  for (const totals of byDay.values()) {
-    for (const provider of PROVIDER_ORDER) {
-      if (valueFor(totals, provider, metric) !== 0) activeProviders.add(provider);
-    }
-  }
-  // Keep the legacy Grok slot in the standalone helper for callers that use
-  // the columns as a stable compatibility shape; rendered charts pass their
-  // actual active provider list below.
-  if (PROVIDER_ORDER.includes("grok")) activeProviders.add("grok");
-  const providers = PROVIDER_ORDER.filter((provider) => activeProviders.has(provider));
-  return buildPeriodColumns(days, byDay, metric, providers);
+  return buildPeriodColumns(days, byDay, metric);
 }
 
 export function UsageProviderChart({

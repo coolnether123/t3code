@@ -91,7 +91,7 @@ type ServerNotificationHandler = (
   payload: unknown,
 ) => Effect.Effect<void, CodexError.CodexAppServerError>;
 
-export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make")(function* (
+const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make")(function* (
   stdio: Stdio.Stdio,
   options: CodexAppServerClientOptions = {},
   terminationError?: (
@@ -260,6 +260,14 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
   });
 });
 
+/**
+ * Build a client layer around an already-created stdio transport.
+ *
+ * Desktop daemon transports use this entry point after they have performed
+ * their own acquisition and cleanup. Keeping the constructor public also
+ * preserves the package's transport-neutral API for callers that provide a
+ * Unix WebSocket or another Stdio-compatible implementation.
+ */
 export const layer = (
   stdio: Stdio.Stdio,
   options: CodexAppServerClientOptions = {},
