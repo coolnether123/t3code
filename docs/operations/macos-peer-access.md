@@ -163,4 +163,3 @@ does not grant permission to merge, copy, or rewrite session history.
 - No response from port `3773`: confirm T3 is running on the peer and that
   Tailscale is connected. Do not restart another agent's T3 process from this
   runbook.
-
