@@ -59,7 +59,7 @@ class MacPeerTunnelStdlibTests(unittest.TestCase):
                 "-o",
                 "ServerAliveCountMax=3",
                 "-L",
-                "13773:127.0.0.1:3773",
+                "127.0.0.1:13773:127.0.0.1:3773",
                 "wanda-codex",
             ],
         )
@@ -91,6 +91,10 @@ class MacPeerTunnelStdlibTests(unittest.TestCase):
             payload = plistlib.loads(config.plist_path.read_bytes())
             self.assertEqual(payload, MODULE.build_plist(config))
 
+            with self.assertRaises(MODULE.SetupError):
+                MODULE.write_plist(config)
+            self.assertEqual(payload, plistlib.loads(config.plist_path.read_bytes()))
+
     def test_different_existing_plist_is_never_overwritten(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
@@ -111,6 +115,109 @@ class MacPeerTunnelStdlibTests(unittest.TestCase):
                     MODULE.check_conflicts(config, loaded=False)
             self.assertFalse(config.plist_path.exists())
 
+    def test_missing_lsof_fails_closed(self):
+        with mock.patch.object(MODULE.shutil, "which", return_value=None):
+            with self.assertRaises(MODULE.SetupError):
+                MODULE.listener_pids(13773)
+
+    def test_launchd_snapshot_parses_current_owner_fields(self):
+        output = """gui/501/com.example.mac-peer-test = {
+    path = /tmp/peer.plist
+    program = /usr/bin/ssh
+    arguments = {
+        /usr/bin/ssh
+        -N
+        -T
+        -L
+        127.0.0.1:13773:127.0.0.1:3773
+        wanda-codex
+    }
+    pid = 4321
+}
+"""
+        completed = mock.Mock(returncode=0, stdout=output, stderr="")
+        with (
+            mock.patch.object(MODULE.shutil, "which", return_value="/bin/launchctl"),
+            mock.patch.object(MODULE.subprocess, "run", return_value=completed),
+        ):
+            snapshot = MODULE.launchd_job_snapshot("com.example.mac-peer-test", uid=501)
+
+        self.assertEqual(snapshot["path"], "/tmp/peer.plist")
+        self.assertEqual(snapshot["program"], "/usr/bin/ssh")
+        self.assertEqual(snapshot["pid"], 4321)
+        self.assertEqual(snapshot["arguments"][-2:], [
+            "127.0.0.1:13773:127.0.0.1:3773",
+            "wanda-codex",
+        ])
+
+    def test_loaded_label_without_matching_plist_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = self.make_config(pathlib.Path(temporary))
+            expected = MODULE.build_plist(config)
+            job = {
+                "path": str(config.plist_path),
+                "program": MODULE.SSH_PATH,
+                "arguments": [str(value) for value in expected["ProgramArguments"]],
+                "pid": 4321,
+            }
+            with mock.patch.object(MODULE, "listener_pids", return_value=[]):
+                with self.assertRaisesRegex(MODULE.SetupError, "plist is missing"):
+                    MODULE.check_conflicts(config, job=job)
+
+    def test_loaded_job_must_own_plist_command_and_listener_pid(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            config = self.make_config(root)
+            MODULE.write_plist(config)
+            expected = MODULE.build_plist(config)
+            job = {
+                "path": str(config.plist_path),
+                "program": MODULE.SSH_PATH,
+                "arguments": [str(value) for value in expected["ProgramArguments"]],
+                "pid": 4321,
+            }
+            with mock.patch.object(MODULE, "listener_pids", return_value=[4321]):
+                self.assertTrue(MODULE.check_conflicts(config, job=job))
+
+            with mock.patch.object(MODULE, "listener_pids", return_value=[9876]):
+                with self.assertRaises(MODULE.SetupError):
+                    MODULE.check_conflicts(config, job=job)
+
+            wrong_job = dict(job, path=str(root / "other.plist"))
+            with mock.patch.object(MODULE, "listener_pids", return_value=[]):
+                with self.assertRaisesRegex(MODULE.SetupError, "different plist"):
+                    MODULE.check_conflicts(config, job=wrong_job)
+
+    def test_symlinked_plist_and_log_paths_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            config = self.make_config(root)
+
+            target = root / "real-peer.plist"
+            target.write_bytes(MODULE.plist_bytes(config))
+            config.plist_path.parent.mkdir(parents=True)
+            config.plist_path.symlink_to(target)
+            with self.assertRaises(MODULE.SetupError):
+                MODULE.check_conflicts(config, loaded=False)
+
+            config.plist_path.unlink()
+            real_logs = root / "real-logs"
+            real_logs.mkdir()
+            config.log_path.parent.symlink_to(real_logs, target_is_directory=True)
+            with self.assertRaises(MODULE.SetupError):
+                MODULE.ensure_log_parent(config)
+
+    def test_custom_log_parent_is_created_only_after_install_check(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config = self.make_config(pathlib.Path(temporary))
+            self.assertFalse(config.log_path.parent.exists())
+            MODULE.ensure_log_parent(config)
+            self.assertTrue(config.log_path.parent.is_dir())
+            self.assertEqual(
+                stat.S_IMODE(config.log_path.parent.stat().st_mode) & 0o777,
+                0o700,
+            )
+
     def test_dry_run_prints_plan_without_writing_or_loading(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
@@ -118,7 +225,7 @@ class MacPeerTunnelStdlibTests(unittest.TestCase):
             log_path = root / "Logs" / "peer.log"
             output = io.StringIO()
             with (
-                mock.patch.object(MODULE, "launchd_loaded", return_value=False),
+                mock.patch.object(MODULE, "launchd_job_snapshot", return_value=None),
                 mock.patch.object(MODULE, "listener_pids", return_value=[]),
                 mock.patch.object(MODULE.sys, "platform", "darwin"),
                 contextlib.redirect_stdout(output),
