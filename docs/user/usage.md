@@ -1,39 +1,64 @@
-# Review usage
+# Usage and limits
 
-For a birthday palette and tap effects on these screens, see [Celebrate your birthday](birthday-theme.md).
+## Understand your usage
 
-The Usage page combines Codex, Claude Code, Gemini, OpenCode, and configured chat archives from
-your connected environments. It reads local history and shows API-equivalent token cost, processed
-tokens, cache savings, provider shares, and model breakdowns. Subscription billing is separate from
-the raw token cost shown here.
+**Usage** combines Codex, Claude Code, Grok Build, Gemini, OpenCode, and imported chat history from your connected
+environments. It shows token use, cache savings, model breakdowns, and estimated API-equivalent
+cost. These estimates are not your subscription bill.
 
-Use **Past 24h** for an hourly chart covering the exact rolling 24-hour period. The **7 days**,
-**30 days**, **90 days**, **120 days**, and **1 year** ranges use daily resolution. Cost and token
-toggles update both the headline and chart, and refreshing rescans every connected environment.
+Totals depend on the history available on each server. Grok turns without a saved completed-turn
+record are missing from the totals.
 
-Parsed transcripts are cached individually on the environment that owns them. Expanding to a range
-that has not been viewed before may briefly warm older history; afterward, unchanged chats reuse
-their cached records and only new or edited transcript files are parsed again.
+On web and desktop, use the environment dropdown to filter costs, tokens, and limits. All
+environments are selected by default. The dropdown shows which environments are still scanning;
+results appear as each one responds.
 
-Usage history is independent from the providers enabled for new T3 Code chats. Disabling Claude
-Code or leaving Gemini unavailable as a chat provider does not remove their locally stored history
-from Usage. Gemini totals include Gemini CLI sessions and locally recorded Antigravity token totals.
-OpenCode totals come from its local session database and remain available when OpenCode is disabled
-as a provider for new chats.
+If recent work is missing or a new model shows no cost, refresh to rescan session history and
+update model pricing.
 
-## Understand API estimates
+## Set custom model prices
 
-Recorded dollar costs take precedence over token estimates. Otherwise, Usage applies the latest
-cached model prices at standard text-token rates, including each request's context-length tier.
-Provider namespaces are kept separate: a reseller's rate cannot replace a direct provider's rate.
-Unknown models and missing rates are marked unpriced, not treated as free usage. Reasoning tokens
-already included in output are not charged twice.
+On web or desktop, open the environment dropdown on **Usage**, then choose **Model prices** to add,
+edit, or reset a model's estimated price. **Apply to** starts with your current Usage filter;
+choose all environments or select individual destinations. Enter the exact model ID and USD
+rates per million input and output tokens. You can enter any model ID, including models
+without public pricing.
 
-These are current-price equivalents, not historical invoices. They do not reconstruct fast,
-flex, batch, regional, or negotiated pricing. Cache-write estimates use the standard short-lived
-cache rate; storage duration, long-lived cache premiums, audio/image-specific rates, and tool fees
-are not reconstructed from token totals. Provider-reported costs may themselves be estimates from
-the local harness. A subscription's quota percentage is not a dollar balance.
+Cache read and cache write rates are optional and use the input rate when blank. Enter `0` for
+tokens that are free. Saved prices replace automatic pricing for all of that environment's
+history and are shared with clients connected to it. When environments have different prices,
+cells show **Mixed**. Edit rates directly in the table, then choose **Save changes** to apply all
+edited rows. Untouched cells keep each environment's rate. Select one environment to inspect its
+prices. **Reset to automatic** marks a model's override for removal when you save; you can undo
+it before saving.
+
+Each destination reports whether the change saved. Offline or unavailable environments are
+marked **Not saved**. Reconnect them and choose **Retry failed saves** to finish the same change
+without writing again to environments that already saved. Changes are not queued after you close
+the dialog.
+
+## Track subscription limits
+
+**Usage → Limits** shows quota use and reset times for Codex and Claude subscriptions. It also
+compares quota consumed with time elapsed in each window, so you can judge your pace before the
+next reset.
+
+If a window looks stale, refresh Limits to re-check every provider and hub.
+
+API-key accounts may not report subscription limits. This also applies to Claude connections
+using a proxy through `ANTHROPIC_AUTH_TOKEN`.
+
+## Connect a CLIProxyAPI hub
+
+To see pooled accounts, open **Settings → Providers → Usage providers → Add hub**. Choose the
+environment that will connect to the hub and enter its URL and management key.
+
+The accounts appear under **Usage → Limits**. This connection supplies usage information; configure
+the provider separately to send agent requests through the hub. Remove the hub from the same
+settings section when you no longer need it.
+
+For birthday colors and tap effects, see [Celebrate your birthday](birthday-theme.md).
+For Fast Mode and service-tier estimates, see [Codex Fast Mode usage](codex-fast-mode-usage.md).
 
 ### Import product chat archives
 
@@ -93,7 +118,7 @@ The page checks readings every minute and public news every five minutes while o
 On Windows, the separate Codex Limits collector records every five minutes while its computer is
 awake and signed in, even with T3 closed. On macOS, T3 asks the signed-in Codex desktop daemon for
 a reading when reset history is requested and throttles that request to once every five minutes.
-Direct CLI mode does not start a second app-server for quota tracking. Readings older than 15
+Direct CLI mode reads quota through its configured Codex app-server transport. Readings older than 15
 minutes are labeled stale. News requests send no account credentials, usage totals, or chat data.
 
 Press **Refresh** to reload saved readings, refresh public reset news, and check API costs for

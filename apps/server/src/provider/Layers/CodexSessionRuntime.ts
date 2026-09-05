@@ -6,18 +6,20 @@ import {
   ProviderItemId,
   type ProviderInstanceId,
   type ProviderApprovalDecision,
+  type ProviderApprovalOption,
   type ProviderEvent,
   type ProviderInteractionMode,
   type ProviderRequestKind,
   type ProviderSession,
+  type SubagentBackend,
   type ProviderTurnStartResult,
   type ProviderUserInputAnswers,
-  type SubagentBackend,
   RuntimeMode,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { normalizeModelSlug } from "@t3tools/shared/model";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -37,22 +39,15 @@ import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { buildCodexInitializeParams } from "./CodexProvider.ts";
-import { hasT3ManagedChromeTools, hasT3PreviewBrowserTools } from "../CodexBrowserCapabilities.ts";
-import { codexLaunchArgv } from "./codexLaunchArgs.ts";
+import type { CodexAppServerTransport } from "../CodexAppServerTransport.ts";
+import { codexAppServerCommandArgs } from "../CodexAppServerTransport.ts";
+import { codexLaunchArgv, codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import {
-  codexAppServerCommandArgs,
-  type CodexAppServerTransport,
-} from "../CodexAppServerTransport.ts";
+  makeCodexDesktopDaemonStdio,
+  useCodexDesktopDaemonSocketTransport,
+} from "../CodexDesktopDaemonTransport.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
-import {
-  buildCodexDeveloperInstructions,
-  DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
-  type CodexComputerControlMode,
-} from "../CodexDeveloperInstructions.ts";
-import { isWorkerLifecycleToolName } from "../../worker/WorkerThreadBoundary.ts";
-import { recoverCodexDenyReadAclState } from "./CodexSandboxRecovery.ts";
-import { makeCodexFileChangeApprovalContext } from "./CodexFileChangeApprovalContext.ts";
-import { normalizeServiceTier, type CodexTierObservation } from "../../usage/codexServiceTier.ts";
+import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
 
 const PROVIDER = ProviderDriverKind.make("codex");
@@ -61,56 +56,24 @@ const ANSI_ESCAPE_CHAR = String.fromCharCode(27);
 const ANSI_ESCAPE_REGEX = new RegExp(`${ANSI_ESCAPE_CHAR}\\[[0-9;]*m`, "g");
 const CODEX_STDERR_LOG_REGEX =
   /^\d{4}-\d{2}-\d{2}T\S+\s+(TRACE|DEBUG|INFO|WARN|ERROR)\s+\S+:\s+(.*)$/;
-const CODEX_STRUCTURED_STDERR_LEVELS = new Set(["TRACE", "DEBUG", "INFO", "WARN", "ERROR"]);
 const BENIGN_ERROR_LOG_SNIPPETS = [
   "state db missing rollout path for thread",
   "state db record_discrepancy: find_thread_path_by_id_str_in_subdir, falling_back",
 ];
 const CODEX_APP_SERVER_FORCE_KILL_AFTER = "2 seconds" as const;
+const RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS = [
+  "not found",
+  "missing thread",
+  "no such thread",
+  "unknown thread",
+  "does not exist",
+  "no rollout found",
+];
 
 export function hasConfiguredMcpServer(appServerArgs: ReadonlyArray<string> | undefined): boolean {
   return appServerArgs?.some((argument) => argument.includes("mcp_servers.")) === true;
 }
 
-export const readCodexBrowserAvailability = Effect.fn("readCodexBrowserAvailability")(function* (
-  client: {
-    readonly request: (
-      method: "mcpServerStatus/list",
-      params: EffectCodexSchema.V2ListMcpServerStatusParams,
-    ) => Effect.Effect<
-      EffectCodexSchema.V2ListMcpServerStatusResponse,
-      CodexErrors.CodexAppServerError
-    >;
-  },
-  threadId: string,
-) {
-  let cursor: string | undefined;
-  const seen = new Set<string>();
-  let managedChrome = false;
-  let previewBrowser = false;
-  do {
-    const page = yield* client.request("mcpServerStatus/list", {
-      threadId,
-      detail: "toolsAndAuthOnly",
-      ...(cursor ? { cursor } : {}),
-    });
-    managedChrome ||= hasT3ManagedChromeTools(page.data);
-    previewBrowser ||= hasT3PreviewBrowserTools(page.data);
-    if (managedChrome && previewBrowser) break;
-    cursor = page.nextCursor ?? undefined;
-    if (cursor && seen.has(cursor)) break;
-    if (cursor) seen.add(cursor);
-  } while (cursor);
-  return { managedChrome, previewBrowser };
-});
-
-/**
- * Codex app-server chooses its native collaboration tool catalog when the
- * process starts. Keep these overrides at the provider boundary so a T3
- * Workers parent never receives native agent tools (including through
- * ALL_TOOLS metadata), while explicit Codex V1/V2 selections get exactly one
- * native runtime.
- */
 export function codexSubagentBackendAppServerArgs(input: {
   readonly subagentBackend?: SubagentBackend;
   readonly enableT3Workers: boolean;
@@ -153,60 +116,21 @@ export function codexSubagentBackendAppServerArgs(input: {
   return [];
 }
 
-type CodexEffectiveConfig = EffectCodexSchema.V2ConfigReadResponse["config"];
-
-function readRecordProperty(value: unknown, property: string): Record<string, unknown> | undefined {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return undefined;
-  }
-  const candidate = (value as Record<string, unknown>)[property];
-  return typeof candidate === "object" && candidate !== null && !Array.isArray(candidate)
-    ? (candidate as Record<string, unknown>)
-    : undefined;
-}
-
 /**
- * Attest the effective process-scoped Codex configuration before opening an
- * isolated thread. Codex constructs and dispatches native collaboration tools
- * inside app-server, so a T3 dynamic-tool filter cannot secure this boundary.
+ * Keep the worker-isolation command builder available to the Windows
+ * integration probe while the runtime's normal launch options are being
+ * shared with the upstream app-server implementation. These settings are
+ * deliberately applied at process startup: filtering the collaboration tool
+ * catalog after initialization would be too late to isolate a worker.
  */
-export function assertCodexSubagentIsolationConfig(
-  config: CodexEffectiveConfig,
-): Effect.Effect<void, CodexErrors.CodexAppServerRequestError> {
-  const agents = readRecordProperty(config, "agents");
-  const features = readRecordProperty(config, "features");
-  if (
-    agents?.["enabled"] === false &&
-    features?.["multi_agent"] === false &&
-    features?.["multi_agent_v2"] === false
-  ) {
-    return Effect.void;
-  }
-
-  return Effect.fail(
-    CodexErrors.CodexAppServerRequestError.internalError(
-      "Codex app-server did not apply the required sub-agent isolation configuration.",
-      {
-        agentsEnabled: agents?.["enabled"] ?? null,
-        multiAgent: features?.["multi_agent"] ?? null,
-        multiAgentV2: features?.["multi_agent_v2"] ?? null,
-      },
-      { method: "config/read", operation: "receive-response" },
-    ),
-  );
-}
-
-export function buildCodexAppServerCommandArgs(
-  options: Pick<
-    CodexSessionRuntimeOptions,
-    | "appServerArgs"
-    | "appServerTransport"
-    | "enableT3Workers"
-    | "launchArgs"
-    | "subagentBackend"
-    | "workerSession"
-  >,
-): ReadonlyArray<string> {
+export function buildCodexAppServerCommandArgs(options: {
+  readonly appServerArgs?: ReadonlyArray<string>;
+  readonly appServerTransport?: CodexAppServerTransport;
+  readonly enableT3Workers?: boolean;
+  readonly launchArgs?: string;
+  readonly subagentBackend?: SubagentBackend;
+  readonly workerSession?: boolean;
+}): ReadonlyArray<string> {
   return codexAppServerCommandArgs(options.appServerTransport ?? "stdio", [
     ...codexLaunchArgv(options.launchArgs),
     ...(options.appServerArgs ?? []),
@@ -222,22 +146,64 @@ export function buildCodexAppServerCommandArgs(
 
 export const CodexResumeCursorSchema = Schema.Struct({
   threadId: Schema.String,
-  forkLastTurnId: Schema.optional(Schema.String),
 });
 const CodexUserInputAnswerObject = Schema.Struct({
   answers: Schema.Array(Schema.String),
 });
 const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
 const isCodexUserInputAnswerObject = Schema.is(CodexUserInputAnswerObject);
-const ComputerUseMcpApprovalMeta = Schema.Struct({
-  codex_approval_kind: Schema.Literal("mcp_tool_call"),
-  connector_id: Schema.Literal("computer-use"),
+const NullableMcpElicitationString = Schema.NullOr(Schema.String);
+const McpElicitationMetadata = Schema.Struct({
+  app: Schema.optionalKey(NullableMcpElicitationString),
+  app_name: Schema.optionalKey(NullableMcpElicitationString),
+  appName: Schema.optionalKey(NullableMcpElicitationString),
+  connector_name: Schema.optionalKey(NullableMcpElicitationString),
+  connectorName: Schema.optionalKey(NullableMcpElicitationString),
+  allowPersistentApproval: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
+  persist: Schema.optionalKey(
+    Schema.NullOr(Schema.Union([Schema.String, Schema.Array(Schema.String)])),
+  ),
+  target: Schema.optionalKey(
+    Schema.NullOr(
+      Schema.Struct({
+        app: Schema.optionalKey(NullableMcpElicitationString),
+        name: Schema.optionalKey(NullableMcpElicitationString),
+      }),
+    ),
+  ),
+  tool_params: Schema.optionalKey(
+    Schema.NullOr(
+      Schema.Struct({
+        app: Schema.optionalKey(NullableMcpElicitationString),
+        app_name: Schema.optionalKey(NullableMcpElicitationString),
+      }),
+    ),
+  ),
 });
-const McpToolApprovalMeta = Schema.Struct({
-  codex_approval_kind: Schema.Literal("mcp_tool_call"),
+const McpElicitationFormField = Schema.Struct({
+  type: Schema.optionalKey(NullableMcpElicitationString),
+  title: Schema.optionalKey(NullableMcpElicitationString),
+  description: Schema.optionalKey(NullableMcpElicitationString),
+  default: Schema.optionalKey(Schema.Unknown),
+  enum: Schema.optionalKey(Schema.NullOr(Schema.Array(Schema.String))),
+  enumNames: Schema.optionalKey(Schema.NullOr(Schema.Array(Schema.String))),
+  oneOf: Schema.optionalKey(
+    Schema.NullOr(
+      Schema.Array(
+        Schema.Struct({
+          const: Schema.String,
+          title: Schema.optionalKey(NullableMcpElicitationString),
+        }),
+      ),
+    ),
+  ),
 });
-const isComputerUseApprovalMeta = Schema.is(ComputerUseMcpApprovalMeta);
-const isMcpToolApprovalMeta = Schema.is(McpToolApprovalMeta);
+const McpElicitationForm = Schema.Struct({
+  properties: Schema.optionalKey(Schema.Record(Schema.String, McpElicitationFormField)),
+  required: Schema.optionalKey(Schema.NullOr(Schema.Array(Schema.String))),
+});
+const isMcpElicitationMetadata = Schema.is(McpElicitationMetadata);
+const isMcpElicitationForm = Schema.is(McpElicitationForm);
 
 // TODO: Verify `packages/effect-codex-app-server/scripts/generate.ts` so the generated
 // `V2TurnStartParams` schema includes `collaborationMode` directly.
@@ -249,6 +215,12 @@ const CodexTurnStartParamsWithCollaborationMode = EffectCodexSchema.V2TurnStartP
 const decodeCodexTurnStartParamsWithCollaborationMode = Schema.decodeUnknownEffect(
   CodexTurnStartParamsWithCollaborationMode,
 );
+const CodexChildResumeMetadata = Schema.Struct({
+  thread: Schema.Struct({ id: Schema.String }),
+  model: Schema.String,
+  reasoningEffort: Schema.optionalKey(Schema.NullOr(Schema.String)),
+});
+const decodeCodexChildResumeMetadata = Schema.decodeUnknownEffect(CodexChildResumeMetadata);
 
 export type CodexTurnStartParamsWithCollaborationMode =
   typeof CodexTurnStartParamsWithCollaborationMode.Type;
@@ -270,18 +242,12 @@ export interface CodexSessionRuntimeOptions {
   readonly runtimeMode: RuntimeMode;
   readonly model?: string;
   readonly serviceTier?: CodexServiceTier | undefined;
-  readonly onTurnServiceTier?: (observation: CodexTierObservation) => Effect.Effect<void>;
-  readonly computerControlMode?: CodexComputerControlMode;
   readonly resumeCursor?: CodexResumeCursor;
   readonly appServerArgs?: ReadonlyArray<string>;
-  readonly subagentBackend?: SubagentBackend;
-  readonly enableT3Workers?: boolean;
-  readonly workerSession?: boolean;
   readonly appServerTransport?: CodexAppServerTransport;
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
-  readonly expectedTurnId?: TurnId;
   readonly input?: string;
   readonly attachments?: ReadonlyArray<{
     readonly type: "image";
@@ -290,10 +256,7 @@ export interface CodexSessionRuntimeSendTurnInput {
   readonly model?: string;
   readonly serviceTier?: CodexServiceTier | undefined;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort | undefined;
-  readonly computerControlMode?: CodexComputerControlMode;
   readonly interactionMode?: ProviderInteractionMode;
-  readonly subagentBackend?: SubagentBackend;
-  readonly enableT3Workers?: boolean;
 }
 
 export interface CodexThreadTurnSnapshot {
@@ -312,6 +275,7 @@ export interface CodexSessionRuntimeShape {
   readonly sendTurn: (
     input: CodexSessionRuntimeSendTurnInput,
   ) => Effect.Effect<ProviderTurnStartResult, CodexSessionRuntimeError>;
+  readonly compactThread: Effect.Effect<void, CodexSessionRuntimeError>;
   readonly interruptTurn: (turnId?: TurnId) => Effect.Effect<void, CodexSessionRuntimeError>;
   readonly readThread: Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
   readonly rollbackThread: (
@@ -330,50 +294,6 @@ export interface CodexSessionRuntimeShape {
   ) => Effect.Effect<void, CodexSessionRuntimeError>;
   readonly events: Stream.Stream<ProviderEvent, never>;
   readonly close: Effect.Effect<void>;
-}
-
-export function buildPermissionsApprovalResponse(
-  permissions: EffectCodexSchema.PermissionsRequestApprovalParams["permissions"],
-  decision: ProviderApprovalDecision,
-): EffectCodexSchema.PermissionsRequestApprovalResponse {
-  return {
-    permissions: decision === "accept" || decision === "acceptForSession" ? permissions : {},
-    scope: decision === "acceptForSession" ? "session" : "turn",
-  };
-}
-
-export function isComputerUseMcpApproval(
-  payload: EffectCodexSchema.McpServerElicitationRequestParams,
-): boolean {
-  return payload.mode !== "url" && isComputerUseApprovalMeta(payload._meta);
-}
-
-export function isMcpToolApproval(
-  payload: EffectCodexSchema.McpServerElicitationRequestParams,
-): boolean {
-  return payload.mode !== "url" && isMcpToolApprovalMeta(payload._meta);
-}
-
-export function mcpApprovalRequestKind(
-  payload: EffectCodexSchema.McpServerElicitationRequestParams,
-): ProviderRequestKind | undefined {
-  if (!isMcpToolApproval(payload)) return undefined;
-  return isComputerUseMcpApproval(payload) ? "permissions" : "tool";
-}
-
-export function buildMcpApprovalResponse(
-  decision: ProviderApprovalDecision,
-): EffectCodexSchema.McpServerElicitationRequestResponse {
-  switch (decision) {
-    case "accept":
-      return { action: "accept" };
-    case "acceptForSession":
-      return { action: "accept", _meta: { persist: "session" } };
-    case "decline":
-      return { action: "decline" };
-    case "cancel":
-      return { action: "cancel" };
-  }
 }
 
 export type CodexSessionRuntimeError =
@@ -448,6 +368,172 @@ interface PendingUserInput {
   readonly turnId: TurnId | undefined;
   readonly itemId: ProviderItemId | undefined;
   readonly answers: Deferred.Deferred<ProviderUserInputAnswers>;
+}
+
+type McpElicitationPersistenceDecision = Extract<
+  ProviderApprovalDecision,
+  "acceptForSession" | "acceptAlways"
+>;
+
+function mcpElicitationPersistenceDecision(
+  value: string,
+): McpElicitationPersistenceDecision | null {
+  const normalized = value.toLowerCase();
+  if (normalized.includes("session")) return "acceptForSession";
+  if (
+    normalized.includes("always") ||
+    normalized.includes("permanent") ||
+    normalized.includes("forever") ||
+    normalized.includes("persistent")
+  ) {
+    return "acceptAlways";
+  }
+  return null;
+}
+
+function mcpElicitationFormFields(payload: EffectCodexSchema.McpServerElicitationRequestParams) {
+  if (payload.mode === "url" || !isMcpElicitationForm(payload.requestedSchema)) {
+    return undefined;
+  }
+  return payload.requestedSchema;
+}
+
+function mcpElicitationFieldOptions(field: typeof McpElicitationFormField.Type) {
+  if (field.oneOf) {
+    return field.oneOf.map((option) => ({ value: option.const, label: option.title }));
+  }
+  return (field.enum ?? []).map((value, index) => ({
+    value,
+    label: field.enumNames?.[index],
+  }));
+}
+
+function isMcpElicitationPersistenceField(
+  key: string,
+  field: typeof McpElicitationFormField.Type,
+): boolean {
+  return (
+    mcpElicitationPersistenceDecision(key) !== null ||
+    key.toLowerCase() === "persist" ||
+    mcpElicitationPersistenceDecision(field.title ?? "") !== null ||
+    mcpElicitationPersistenceDecision(field.description ?? "") !== null
+  );
+}
+
+/** Returns the app and approval choices advertised by an MCP elicitation. */
+export function describeMcpElicitation(
+  payload: EffectCodexSchema.McpServerElicitationRequestParams,
+): { readonly appName: string; readonly options: ReadonlyArray<ProviderApprovalOption> } {
+  const metadata = isMcpElicitationMetadata(payload._meta) ? payload._meta : undefined;
+  const appName =
+    metadata?.app_name ??
+    metadata?.appName ??
+    metadata?.app ??
+    metadata?.target?.app ??
+    metadata?.target?.name ??
+    metadata?.tool_params?.app_name ??
+    metadata?.tool_params?.app ??
+    payload.message.match(/^Allow ChatGPT to use (.+?)\?$/i)?.[1] ??
+    metadata?.connector_name ??
+    metadata?.connectorName ??
+    payload.serverName;
+  const persistenceOptions = new Map<McpElicitationPersistenceDecision, string>();
+  const persist = metadata?.persist;
+  for (const value of typeof persist === "string" ? [persist] : (persist ?? [])) {
+    const decision = mcpElicitationPersistenceDecision(value);
+    if (decision) persistenceOptions.set(decision, "");
+  }
+  if (metadata?.allowPersistentApproval) {
+    persistenceOptions.set("acceptAlways", "");
+  }
+
+  const form = mcpElicitationFormFields(payload);
+  for (const [key, field] of Object.entries(form?.properties ?? {})) {
+    for (const option of mcpElicitationFieldOptions(field)) {
+      const decision = mcpElicitationPersistenceDecision(option.value);
+      if (decision) persistenceOptions.set(decision, option.label ?? "");
+    }
+    if (field.type === "boolean" && isMcpElicitationPersistenceField(key, field)) {
+      persistenceOptions.set("acceptAlways", field.title ?? "");
+    }
+  }
+
+  return {
+    appName,
+    options: [
+      { decision: "cancel", label: "Cancel" },
+      { decision: "decline", label: "Decline" },
+      ...(persistenceOptions.has("acceptForSession") &&
+      toMcpElicitationResponse(payload, "acceptForSession").action === "accept"
+        ? [
+            {
+              decision: "acceptForSession" as const,
+              label: persistenceOptions.get("acceptForSession") || "Always allow this session",
+            },
+          ]
+        : []),
+      ...(persistenceOptions.has("acceptAlways") &&
+      toMcpElicitationResponse(payload, "acceptAlways").action === "accept"
+        ? [
+            {
+              decision: "acceptAlways" as const,
+              label: persistenceOptions.get("acceptAlways") || "Always allow",
+            },
+          ]
+        : []),
+      { decision: "accept", label: "Approve" },
+    ],
+  };
+}
+
+/** Converts a T3 approval decision into the MCP elicitation wire response. */
+export function toMcpElicitationResponse(
+  payload: EffectCodexSchema.McpServerElicitationRequestParams,
+  decision: ProviderApprovalDecision,
+): EffectCodexSchema.McpServerElicitationRequestResponse {
+  if (decision === "decline" || decision === "cancel") {
+    return { action: decision };
+  }
+
+  if (payload.mode === "url") {
+    return { action: "decline" };
+  }
+
+  const persist =
+    decision === "acceptForSession"
+      ? "session"
+      : decision === "acceptAlways"
+        ? "always"
+        : undefined;
+  const form = mcpElicitationFormFields(payload);
+  const content: Record<string, unknown> = {};
+
+  for (const [key, field] of Object.entries(form?.properties ?? {})) {
+    const options = mcpElicitationFieldOptions(field);
+    const chosenOption = options.find((option) =>
+      persist
+        ? mcpElicitationPersistenceDecision(option.value) === decision
+        : /once|accept|approve|allow/i.test(option.value) &&
+          mcpElicitationPersistenceDecision(option.value) === null,
+    );
+    if (chosenOption) {
+      content[key] = chosenOption.value;
+    } else if (field.type === "boolean" && isMcpElicitationPersistenceField(key, field)) {
+      content[key] = decision === "acceptAlways";
+    } else if (field.default !== undefined && field.default !== null) {
+      content[key] = field.default;
+    }
+  }
+
+  if (form?.required?.some((key) => !Object.hasOwn(content, key))) {
+    return { action: "decline" };
+  }
+
+  return {
+    action: "accept",
+    ...(persist ? { _meta: { persist } } : {}),
+    ...(form ? { content } : {}),
+  };
 }
 
 type CodexServerNotification = {
@@ -562,20 +648,13 @@ function buildCodexCollaborationMode(input: {
   readonly interactionMode?: ProviderInteractionMode;
   readonly model?: string;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort;
-  readonly enableT3Workers?: boolean;
   readonly browserToolsAvailable?: boolean;
-  readonly computerControlMode?: CodexComputerControlMode;
-  readonly computerControlAvailable?: boolean;
-  readonly subagentBackend?: SubagentBackend;
 }): EffectCodexSchema.V2TurnStartParams__CollaborationMode | undefined {
   if (input.interactionMode === undefined) {
     return undefined;
   }
   const model = normalizeCodexModelSlug(input.model) ?? DEFAULT_MODEL;
   const reasoningEffort = input.effort ?? "medium";
-  const enableT3Workers =
-    input.enableT3Workers === true &&
-    (input.subagentBackend === undefined || input.subagentBackend === "native-v1-control");
   return {
     mode: input.interactionMode,
     settings: {
@@ -583,14 +662,7 @@ function buildCodexCollaborationMode(input: {
       reasoning_effort: reasoningEffort,
       developer_instructions: buildCodexDeveloperInstructions(
         input.interactionMode,
-        {
-          model,
-          reasoningEffort,
-          ...(input.subagentBackend ? { subagentBackend: input.subagentBackend } : {}),
-          ...(enableT3Workers ? { enableT3Workers: true } : {}),
-          computerControlMode: input.computerControlMode ?? DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
-          computerControlAvailable: input.computerControlAvailable ?? false,
-        },
+        { model, reasoningEffort },
         input.browserToolsAvailable ?? true,
       ),
     },
@@ -609,13 +681,8 @@ export function buildTurnStartParams(input: {
   readonly serviceTier?: CodexServiceTier;
   readonly effort?: EffectCodexSchema.V2TurnStartParams__ReasoningEffort;
   readonly interactionMode?: ProviderInteractionMode;
-  readonly subagentBackend?: SubagentBackend;
-  readonly enableT3Workers?: boolean;
   /** Defaults to true so callers that predate the agent-access gate are unchanged. */
   readonly browserToolsAvailable?: boolean;
-  readonly computerControlMode?: CodexComputerControlMode;
-  /** Requires a discovered managed Chrome tool catalog. */
-  readonly computerControlAvailable?: boolean;
 }): Effect.Effect<
   CodexTurnStartParamsWithCollaborationMode,
   CodexErrors.CodexAppServerProtocolParseError
@@ -634,14 +701,8 @@ export function buildTurnStartParams(input: {
   const config = runtimeModeToThreadConfig(input.runtimeMode);
   const collaborationMode = buildCodexCollaborationMode({
     ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
-    ...(input.enableT3Workers ? { enableT3Workers: true } : {}),
-    ...(input.computerControlMode ? { computerControlMode: input.computerControlMode } : {}),
-    ...(input.subagentBackend ? { subagentBackend: input.subagentBackend } : {}),
     ...(input.model ? { model: input.model } : {}),
     ...(input.effort ? { effort: input.effort } : {}),
-    ...(input.computerControlAvailable !== undefined
-      ? { computerControlAvailable: input.computerControlAvailable }
-      : {}),
     browserToolsAvailable: input.browserToolsAvailable ?? true,
   });
 
@@ -666,57 +727,10 @@ export function buildTurnStartParams(input: {
   );
 }
 
-interface CodexStructuredStderrLine {
-  readonly level: string;
-  readonly message: string;
-  readonly target: string | null;
-}
-
-function parseCodexStructuredStderrLine(line: string): CodexStructuredStderrLine | null {
-  if (!line.startsWith("{")) return null;
-  try {
-    const parsed = JSON.parse(line) as unknown;
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
-    const root = parsed as Record<string, unknown>;
-    const fields =
-      typeof root.fields === "object" && root.fields !== null && !Array.isArray(root.fields)
-        ? (root.fields as Record<string, unknown>)
-        : null;
-    const level = typeof root.level === "string" ? root.level.toUpperCase() : "";
-    const message = typeof fields?.message === "string" ? fields.message.trim() : "";
-    const target = typeof root.target === "string" ? root.target : null;
-    return CODEX_STRUCTURED_STDERR_LEVELS.has(level) && message.length > 0
-      ? { level, message, target }
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-const isMcpTransportLog = (line: CodexStructuredStderrLine): boolean => {
-  const haystack = `${line.target ?? ""} ${line.message}`.toLowerCase();
-  return (
-    haystack.includes("rmcp") ||
-    haystack.includes("streamable http") ||
-    haystack.includes("mcp initialize") ||
-    haystack.includes("post_message") ||
-    haystack.includes("transport channel closed")
-  );
-};
-
-export function classifyCodexStderrLine(rawLine: string): { readonly message: string } | null {
+function classifyCodexStderrLine(rawLine: string): { readonly message: string } | null {
   const line = rawLine.replaceAll(ANSI_ESCAPE_REGEX, "").trim();
   if (!line) {
     return null;
-  }
-
-  const structured = parseCodexStructuredStderrLine(line);
-  if (structured) {
-    if (structured.level !== "ERROR" || isMcpTransportLog(structured)) return null;
-    if (BENIGN_ERROR_LOG_SNIPPETS.some((snippet) => structured.message.includes(snippet))) {
-      return null;
-    }
-    return { message: structured.message };
   }
 
   const match = line.match(CODEX_STDERR_LOG_REGEX);
@@ -733,12 +747,19 @@ export function classifyCodexStderrLine(rawLine: string): { readonly message: st
   return { message: line };
 }
 
+export function isRecoverableThreadResumeError(error: unknown): boolean {
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  if (!message.includes("thread")) {
+    return false;
+  }
+  return RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS.some((snippet) => message.includes(snippet));
+}
+
 type CodexThreadOpenResponse =
   | CodexRpc.ClientRequestResponsesByMethod["thread/start"]
-  | CodexRpc.ClientRequestResponsesByMethod["thread/resume"]
-  | CodexRpc.ClientRequestResponsesByMethod["thread/fork"];
+  | CodexRpc.ClientRequestResponsesByMethod["thread/resume"];
 
-type CodexThreadOpenMethod = "thread/start" | "thread/resume" | "thread/fork";
+type CodexThreadOpenMethod = "thread/start" | "thread/resume";
 
 interface CodexThreadOpenClient {
   readonly request: <M extends CodexThreadOpenMethod>(
@@ -755,7 +776,6 @@ export const openCodexThread = (input: {
   readonly requestedModel: string | undefined;
   readonly serviceTier: CodexServiceTier | undefined;
   readonly resumeThreadId: string | undefined;
-  readonly forkLastTurnId?: string;
 }): Effect.Effect<CodexThreadOpenResponse, CodexErrors.CodexAppServerError> => {
   const resumeThreadId = input.resumeThreadId;
   const startParams = buildThreadStartParams({
@@ -769,26 +789,22 @@ export const openCodexThread = (input: {
     return input.client.request("thread/start", startParams);
   }
 
-  if (input.forkLastTurnId !== undefined) {
-    const forkRuntime = runtimeModeToThreadConfig(input.runtimeMode);
-    const forkParams: EffectCodexSchema.V2ThreadForkParams = {
+  return input.client
+    .request("thread/resume", {
       threadId: resumeThreadId,
-      lastTurnId: input.forkLastTurnId,
-      cwd: input.cwd,
-      approvalPolicy: forkRuntime.approvalPolicy,
-      approvalsReviewer: forkRuntime.approvalsReviewer,
-      sandbox: forkRuntime.sandbox,
-      ...(input.requestedModel ? { model: input.requestedModel } : {}),
-      ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
-    };
-    return input.client.request("thread/fork", forkParams);
-  }
-
-  // A missing rollout is an error, not permission to replace the conversation.
-  return input.client.request("thread/resume", {
-    threadId: resumeThreadId,
-    ...startParams,
-  });
+      ...startParams,
+    })
+    .pipe(
+      Effect.catchIf(isRecoverableThreadResumeError, (error) =>
+        Effect.logWarning("codex app-server thread resume fell back to fresh start", {
+          threadId: input.threadId,
+          requestedRuntimeMode: input.runtimeMode,
+          resumeThreadId,
+          recoverable: true,
+          cause: error,
+        }).pipe(Effect.andThen(input.client.request("thread/start", startParams))),
+      ),
+    );
 };
 
 function readNotificationThreadId(notification: CodexServerNotification): string | undefined {
@@ -801,7 +817,9 @@ function readNotificationThreadId(notification: CodexServerNotification): string
     case "thread/unarchived":
     case "thread/closed":
     case "thread/name/updated":
+    case "thread/settings/updated":
     case "thread/tokenUsage/updated":
+    case "model/rerouted":
     case "turn/started":
     case "hook/started":
     case "turn/completed":
@@ -835,9 +853,7 @@ function readNotificationThreadId(notification: CodexServerNotification): string
     case "thread/realtime/closed":
       return notification.params.threadId;
     default:
-      return "threadId" in notification.params && typeof notification.params.threadId === "string"
-        ? notification.params.threadId
-        : undefined;
+      return undefined;
   }
 }
 
@@ -976,6 +992,35 @@ interface CollabChildAgentState {
   readonly spawnTurnId: TurnId | undefined;
 }
 
+interface CollabChildMetadataState {
+  readonly model: string | undefined;
+  readonly effort: string | undefined;
+  readonly lookupStarted: boolean;
+  readonly closed: boolean;
+}
+
+function collabChildIdentity(
+  child: CollabChildAgentState,
+  metadata: CollabChildMetadataState | undefined,
+) {
+  return {
+    agentThreadId: child.agentThreadId,
+    ...(child.nickname ? { nickname: child.nickname } : {}),
+    ...(child.role ? { role: child.role } : {}),
+    ...(child.agentPath ? { agentPath: child.agentPath } : {}),
+    ...(metadata?.model ? { model: metadata.model } : {}),
+    ...(metadata?.effort ? { effort: metadata.effort } : {}),
+  };
+}
+
+function nonEmptyMetadataValue(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 function readThreadSpawnSource(thread: { readonly source: unknown }):
   | {
       nickname: string | undefined;
@@ -1041,7 +1086,9 @@ function shouldSuppressChildConversationNotification(
     method === "thread/closed" ||
     method === "thread/compacted" ||
     method === "thread/name/updated" ||
+    method === "thread/settings/updated" ||
     method === "thread/tokenUsage/updated" ||
+    method === "model/rerouted" ||
     method === "turn/started" ||
     method === "turn/completed" ||
     method === "turn/plan/updated" ||
@@ -1055,9 +1102,12 @@ function shouldSuppressChildConversationNotification(
  * Exported and pure so the routing table can be asserted against captured
  * wire traces (see codexMultiAgentWire.json) rather than only read.
  *
- * Child lifecycle, deltas and metadata become agent events. Approval
- * correlation cleanup and unrecognized methods retain the parent route.
- * Every original notification is also retained by the native log collector.
+ * - "agent-event": map to a synthetic collabAgent/* event (Agents surface).
+ * - "parent": pass through to the parent path — it carries state the parent
+ *   still owns (approval correlation cleanup).
+ *
+ * Child lifecycle, deltas and metadata become agent events. Unknown methods
+ * retain the parent route so a new wire method surfaces instead of vanishing.
  */
 export type CodexChildNotificationRoute = "agent-event" | "parent";
 
@@ -1066,6 +1116,8 @@ const CHILD_AGENT_EVENT_METHODS: ReadonlySet<string> = new Set([
   "turn/completed",
   "thread/status/changed",
   "thread/tokenUsage/updated",
+  "thread/settings/updated",
+  "model/rerouted",
   "item/started",
   "item/completed",
   "thread/closed",
@@ -1084,11 +1136,12 @@ const CHILD_CHATTER_METHODS: ReadonlySet<string> = new Set([
   "turn/plan/updated",
   "turn/diff/updated",
   "thread/name/updated",
-  "thread/settings/updated",
   "rawResponseItem/completed",
-  // Keep child-owned thread state out of the parent lifecycle.
+  // Child-owned thread lifecycle: the parent adapter maps these onto the
+  // PARENT thread (archived/compacted state), so a child compacting would
+  // rewrite the parent. Keep them child-scoped instead of leaking them into
+  // the parent lifecycle.
   "thread/archived",
-  "thread/deleted",
   "thread/unarchived",
   "thread/compacted",
   // Registration path 1 handles a child's first thread/started; a repeat
@@ -1181,28 +1234,22 @@ export const makeCodexSessionRuntime = (
   ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | Scope.Scope
 > =>
   Effect.gen(function* () {
-    // Codex's Windows sandbox reads this user-level state before the app-server
-    // handshake. Quarantine the one known all-NUL corruption before spawning so
-    // a thread start does not inherit a process that is guaranteed to exit.
-    yield* recoverCodexDenyReadAclState();
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const platform = yield* HostProcessPlatform;
     const runtimeScope = yield* Scope.Scope;
     const crypto = yield* Crypto.Crypto;
     const events = yield* Queue.unbounded<ProviderEvent>();
-    const stderrChunks = yield* Queue.unbounded<string>();
     const pendingApprovalsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingApproval>());
     const approvalCorrelationsRef = yield* Ref.make(new Map<string, ApprovalCorrelation>());
-    const fileChangeApprovalContext = makeCodexFileChangeApprovalContext();
-    yield* Effect.addFinalizer(() => Effect.sync(() => fileChangeApprovalContext.clear()));
     const pendingUserInputsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingUserInput>());
     const collabReceiverTurnsRef = yield* Ref.make(new Map<string, TurnId>());
     const collabChildAgentsRef = yield* Ref.make(new Map<string, CollabChildAgentState>());
+    const collabChildMetadataRef = yield* Ref.make(new Map<string, CollabChildMetadataState>());
     const childDisplayText = new Map<string, { itemKey: string; text: string }>();
     /** Child provider-thread id → its currently running provider turn id. */
     const collabChildLiveTurnsRef = yield* Ref.make(new Map<string, string>());
     const suppressMemoryConsolidationNotification = makeMemoryConsolidationNotificationFilter();
     const closedRef = yield* Ref.make(false);
-    let currentServiceTier = normalizeServiceTier(options.serviceTier);
 
     // `~` is not shell-expanded when env vars are set via
     // `child_process.spawn`; `expandHomePath` lets a configured
@@ -1212,36 +1259,57 @@ export const makeCodexSessionRuntime = (
       ...options.environment,
       ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
     };
+    const daemonEnvironment = options.environment === undefined ? { ...process.env, ...env } : env;
     const extendEnv = options.environment === undefined;
-    const commandArgs = buildCodexAppServerCommandArgs(options);
-    const spawnCommand = yield* resolveSpawnCommand(options.binaryPath, commandArgs, {
-      env,
-      extendEnv,
-    });
-    const child = yield* spawner
-      .spawn(
-        ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-          cwd: options.cwd,
-          env,
-          extendEnv,
-          forceKillAfter: CODEX_APP_SERVER_FORCE_KILL_AFTER,
-          shell: spawnCommand.shell,
-        }),
-      )
-      .pipe(
-        Effect.provideService(Scope.Scope, runtimeScope),
-        Effect.mapError(
-          (cause) =>
-            new CodexErrors.CodexAppServerSpawnError({
-              command: `${options.binaryPath} ${commandArgs.join(" ")}`,
-              cause,
-            }),
-        ),
-      );
+    const appServerArgs = codexSessionAppServerArgs(options.appServerArgs, options.launchArgs);
+    const transport = options.appServerTransport ?? "stdio";
+    const useDesktopDaemonSocket = useCodexDesktopDaemonSocketTransport(transport, platform);
+    const child = !useDesktopDaemonSocket
+      ? yield* Effect.gen(function* () {
+          const spawnCommand = yield* resolveSpawnCommand(options.binaryPath, appServerArgs, {
+            env,
+            extendEnv,
+          });
+          return yield* spawner
+            .spawn(
+              ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+                cwd: options.cwd,
+                env,
+                extendEnv,
+                forceKillAfter: CODEX_APP_SERVER_FORCE_KILL_AFTER,
+                shell: spawnCommand.shell,
+              }),
+            )
+            .pipe(
+              Effect.provideService(Scope.Scope, runtimeScope),
+              Effect.mapError(
+                (cause) =>
+                  new CodexErrors.CodexAppServerSpawnError({
+                    command: `${options.binaryPath} ${appServerArgs.join(" ")}`,
+                    cause,
+                  }),
+              ),
+            );
+        })
+      : undefined;
 
-    const clientContext = yield* CodexClient.layerChildProcess(child, {
-      onStderr: (chunk) => Queue.offer(stderrChunks, chunk).pipe(Effect.asVoid),
-    }).pipe(Layer.build, Effect.provideService(Scope.Scope, runtimeScope));
+    const desktopDaemonTermination = yield* Deferred.make<CodexErrors.CodexAppServerError>();
+    const clientContext = child
+      ? yield* CodexClient.layerChildProcess(child).pipe(
+          Layer.build,
+          Effect.provideService(Scope.Scope, runtimeScope),
+        )
+      : yield* Layer.build(
+          CodexClient.layer(
+            yield* makeCodexDesktopDaemonStdio(resolvedHomePath, daemonEnvironment).pipe(
+              Effect.provideService(Scope.Scope, runtimeScope),
+            ),
+            {
+              onTermination: (error) =>
+                Deferred.succeed(desktopDaemonTermination, error).pipe(Effect.asVoid),
+            },
+          ),
+        ).pipe(Effect.provideService(Scope.Scope, runtimeScope));
     const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
       Effect.provide(clientContext),
     );
@@ -1293,6 +1361,133 @@ export const makeCodexSessionRuntime = (
         message,
       });
 
+    const updateCollabChildMetadata = (
+      agentThreadId: string,
+      update: { readonly model?: string; readonly effort?: string },
+      overwriteKnown: boolean,
+    ) =>
+      Ref.modify(collabChildMetadataRef, (current) => {
+        const previous = current.get(agentThreadId) ?? {
+          model: undefined,
+          effort: undefined,
+          lookupStarted: false,
+          closed: false,
+        };
+        const model =
+          update.model && (overwriteKnown || !previous.model) ? update.model : previous.model;
+        const effort =
+          update.effort && (overwriteKnown || !previous.effort) ? update.effort : previous.effort;
+        const changed = model !== previous.model || effort !== previous.effort;
+        if (!changed) {
+          return [false, current] as const;
+        }
+        const next = new Map(current);
+        next.set(agentThreadId, { ...previous, model, effort });
+        return [true, next] as const;
+      });
+
+    const markCollabChildClosed = (agentThreadId: string) =>
+      Ref.update(collabChildMetadataRef, (current) => {
+        const previous = current.get(agentThreadId) ?? {
+          model: undefined,
+          effort: undefined,
+          lookupStarted: false,
+          closed: false,
+        };
+        if (previous.closed) {
+          return current;
+        }
+        const next = new Map(current);
+        next.set(agentThreadId, { ...previous, closed: true });
+        return next;
+      });
+
+    const markCollabChildOpen = (agentThreadId: string) =>
+      Ref.update(collabChildMetadataRef, (current) => {
+        const previous = current.get(agentThreadId);
+        if (!previous?.closed) {
+          return current;
+        }
+        const next = new Map(current);
+        next.set(agentThreadId, { ...previous, closed: false });
+        return next;
+      });
+
+    const emitCollabChildMetadataUpdated = Effect.fn(
+      "CodexSessionRuntime.emitCollabChildMetadataUpdated",
+    )(function* (agentThreadId: string) {
+      const child = (yield* Ref.get(collabChildAgentsRef)).get(agentThreadId);
+      const metadata = (yield* Ref.get(collabChildMetadataRef)).get(agentThreadId);
+      if (!child || metadata?.closed) {
+        return;
+      }
+      yield* emitEvent({
+        kind: "notification",
+        threadId: options.threadId,
+        ...(child.spawnTurnId ? { turnId: child.spawnTurnId } : {}),
+        method: "collabAgent/metadataUpdated",
+        payload: collabChildIdentity(child, metadata),
+      });
+    });
+
+    const startCollabChildMetadataLookup = Effect.fn(
+      "CodexSessionRuntime.startCollabChildMetadataLookup",
+    )(function* (agentThreadId: string) {
+      const shouldStart = yield* Ref.modify(collabChildMetadataRef, (current) => {
+        const previous = current.get(agentThreadId) ?? {
+          model: undefined,
+          effort: undefined,
+          lookupStarted: false,
+          closed: false,
+        };
+        if (previous.lookupStarted || previous.closed) {
+          return [false, current] as const;
+        }
+        const next = new Map(current);
+        next.set(agentThreadId, { ...previous, lookupStarted: true });
+        return [true, next] as const;
+      });
+      if (!shouldStart) {
+        return;
+      }
+
+      // The child is already loaded. This rejoins it without starting a turn,
+      // and excludeTurns avoids loading or replaying its history.
+      yield* client.raw
+        .request("thread/resume", { threadId: agentThreadId, excludeTurns: true })
+        .pipe(
+          Effect.flatMap(decodeCodexChildResumeMetadata),
+          Effect.timeout("5 seconds"),
+          Effect.flatMap((response) =>
+            Effect.gen(function* () {
+              if (response.thread.id !== agentThreadId) {
+                return;
+              }
+              const child = (yield* Ref.get(collabChildAgentsRef)).get(agentThreadId);
+              const metadata = (yield* Ref.get(collabChildMetadataRef)).get(agentThreadId);
+              if (!child || metadata?.closed) {
+                return;
+              }
+              const model = nonEmptyMetadataValue(response.model);
+              const effort = nonEmptyMetadataValue(response.reasoningEffort);
+              const changed = yield* updateCollabChildMetadata(
+                agentThreadId,
+                {
+                  ...(model ? { model } : {}),
+                  ...(effort ? { effort } : {}),
+                },
+                false,
+              );
+              if (changed) {
+                yield* emitCollabChildMetadataUpdated(agentThreadId);
+              }
+            }),
+          ),
+          Effect.catch(() => Effect.void),
+          Effect.forkIn(runtimeScope),
+        );
+    });
+
     const settlePendingApprovals = (decision: ProviderApprovalDecision) =>
       Ref.get(pendingApprovalsRef).pipe(
         Effect.flatMap((pendingApprovals) =>
@@ -1329,11 +1524,12 @@ export const makeCodexSessionRuntime = (
         // subAgent thread_spawn source.
         if (notification.method === "thread/started") {
           const thread = notification.params.thread;
-          if (thread.id === currentProviderThreadId(yield* Ref.get(sessionRef))) {
-            return false;
-          }
           const spawn = readThreadSpawnSource(thread);
           if (!spawn) {
+            return false;
+          }
+          const rootProviderThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
+          if (thread.id === rootProviderThreadId) {
             return false;
           }
           // Merge with any subAgentActivity registration that got here
@@ -1362,21 +1558,19 @@ export const makeCodexSessionRuntime = (
             next.set(thread.id, state);
             return next;
           });
+          const metadata = (yield* Ref.get(collabChildMetadataRef)).get(thread.id);
           yield* emitEvent({
             kind: "notification",
             threadId: options.threadId,
             method: "collabAgent/started",
             ...(state.spawnTurnId ? { turnId: state.spawnTurnId } : {}),
             payload: {
-              wire: notification,
-              agentThreadId: state.agentThreadId,
-              ...(state.nickname ? { nickname: state.nickname } : {}),
-              ...(state.role ? { role: state.role } : {}),
-              ...(state.agentPath ? { agentPath: state.agentPath } : {}),
+              ...collabChildIdentity(state, metadata),
               ...(state.depth !== undefined ? { depth: state.depth } : {}),
               ...(state.parentThreadId ? { parentThreadId: state.parentThreadId } : {}),
             },
           });
+          yield* startCollabChildMetadataLookup(thread.id);
           return true;
         }
 
@@ -1420,35 +1614,28 @@ export const makeCodexSessionRuntime = (
               role: existing?.role,
               agentPath: existing?.agentPath ?? item.agentPath,
               depth: existing?.depth,
-              parentThreadId:
-                existing?.parentThreadId ??
-                (item.agentPath.slice(0, item.agentPath.lastIndexOf("/")) === "/root"
-                  ? rootProviderThreadId
-                  : Array.from(current.values()).find(
-                      (candidate) =>
-                        candidate.agentPath ===
-                        item.agentPath.slice(0, item.agentPath.lastIndexOf("/")),
-                    )?.agentThreadId),
+              parentThreadId: existing?.parentThreadId,
               spawnTurnId: existing ? existing.spawnTurnId : activitySpawnTurnId,
             });
             return next;
           });
           const registeredChild = (yield* Ref.get(collabChildAgentsRef)).get(item.agentThreadId);
+          const metadata = (yield* Ref.get(collabChildMetadataRef)).get(item.agentThreadId);
           yield* emitEvent({
             kind: "notification",
             threadId: options.threadId,
             method: "collabAgent/activity",
             ...(registeredChild?.spawnTurnId ? { turnId: registeredChild.spawnTurnId } : {}),
             payload: {
-              wire: notification,
-              agentThreadId: item.agentThreadId,
-              agentPath: item.agentPath,
+              ...(registeredChild
+                ? collabChildIdentity(registeredChild, metadata)
+                : { agentThreadId: item.agentThreadId, agentPath: item.agentPath }),
               activityKind: item.kind,
-              ...(registeredChild?.parentThreadId
-                ? { parentThreadId: registeredChild.parentThreadId }
-                : {}),
             },
           });
+          if (item.kind === "started") {
+            yield* startCollabChildMetadataLookup(item.agentThreadId);
+          }
           return true;
         }
 
@@ -1464,21 +1651,45 @@ export const makeCodexSessionRuntime = (
         if (providerConversationId === interceptRootId) {
           return false;
         }
+
+        if (
+          interceptRootId !== undefined &&
+          (notification.method === "thread/settings/updated" ||
+            notification.method === "model/rerouted")
+        ) {
+          const model = nonEmptyMetadataValue(
+            notification.method === "thread/settings/updated"
+              ? notification.params.threadSettings.model
+              : notification.params.toModel,
+          );
+          const effort =
+            notification.method === "thread/settings/updated"
+              ? nonEmptyMetadataValue(notification.params.threadSettings.effort)
+              : undefined;
+          const changed = yield* updateCollabChildMetadata(
+            providerConversationId,
+            {
+              ...(model ? { model } : {}),
+              ...(effort ? { effort } : {}),
+            },
+            true,
+          );
+          if (changed && (yield* Ref.get(collabChildAgentsRef)).has(providerConversationId)) {
+            yield* emitCollabChildMetadataUpdated(providerConversationId);
+          }
+          return true;
+        }
+
         const children = yield* Ref.get(collabChildAgentsRef);
         const child = children.get(providerConversationId);
         if (!child) {
           return false;
         }
-        const childIdentity = {
-          wire: notification,
-          agentThreadId: child.agentThreadId,
-          ...(child.nickname ? { nickname: child.nickname } : {}),
-          ...(child.role ? { role: child.role } : {}),
-          ...(child.agentPath ? { agentPath: child.agentPath } : {}),
-          ...(child.parentThreadId ? { parentThreadId: child.parentThreadId } : {}),
-        };
+        const metadata = (yield* Ref.get(collabChildMetadataRef)).get(child.agentThreadId);
+        const childIdentity = collabChildIdentity(child, metadata);
         switch (notification.method) {
           case "turn/started": {
+            yield* markCollabChildOpen(child.agentThreadId);
             const childTurnId =
               typeof (notification.params as { turn?: { id?: unknown } }).turn?.id === "string"
                 ? ((notification.params as { turn: { id: string } }).turn.id as string)
@@ -1562,6 +1773,7 @@ export const makeCodexSessionRuntime = (
               next.delete(child.agentThreadId);
               return next;
             });
+            yield* markCollabChildClosed(child.agentThreadId);
             yield* emitEvent({
               kind: "notification",
               threadId: options.threadId,
@@ -1581,13 +1793,6 @@ export const makeCodexSessionRuntime = (
             // path.
             const willRetry = (notification.params as { willRetry?: boolean }).willRetry === true;
             if (willRetry) {
-              yield* emitEvent({
-                kind: "notification",
-                threadId: options.threadId,
-                ...(child.spawnTurnId ? { turnId: child.spawnTurnId } : {}),
-                method: "collabAgent/notification",
-                payload: childIdentity,
-              });
               return true;
             }
             yield* Ref.update(collabChildLiveTurnsRef, (current) => {
@@ -1608,6 +1813,9 @@ export const makeCodexSessionRuntime = (
             return true;
           }
           default:
+            // Preserve child deltas, metadata, and newly added child chatter
+            // as synthetic events. Approval correlation and other parent-owned
+            // methods retain the parent route.
             if (routeCodexChildNotification(notification.method) === "parent") {
               return false;
             }
@@ -1877,22 +2085,13 @@ export const makeCodexSessionRuntime = (
           ),
         );
         return {
-          decision: resolved,
+          decision: resolved === "acceptAlways" ? "acceptForSession" : resolved,
         } satisfies EffectCodexSchema.CommandExecutionRequestApprovalResponse;
       }),
     );
 
     yield* client.handleServerRequest("item/fileChange/requestApproval", (payload) =>
       Effect.gen(function* () {
-        const changeDetail = fileChangeApprovalContext.take(payload);
-        const detail = [
-          payload.reason,
-          payload.grantRoot ? `Requested write root: ${payload.grantRoot}` : undefined,
-          changeDetail ??
-            "File-change details are unavailable for this request. Review the complete file-change item before approving.",
-        ]
-          .filter((part): part is string => typeof part === "string" && part.length > 0)
-          .join("\n\n");
         const requestId = ApprovalRequestId.make(
           yield* randomUUIDv4("file-change-approval-request"),
         );
@@ -1927,7 +2126,6 @@ export const makeCodexSessionRuntime = (
           kind: "request",
           threadId: options.threadId,
           method: "item/fileChange/requestApproval",
-          message: detail,
           requestId,
           requestKind: "file-change",
           ...(turnId ? { turnId } : {}),
@@ -1945,88 +2143,49 @@ export const makeCodexSessionRuntime = (
           ),
         );
         return {
-          decision: resolved,
+          decision: resolved === "acceptAlways" ? "acceptForSession" : resolved,
         } satisfies EffectCodexSchema.FileChangeRequestApprovalResponse;
       }),
     );
 
-    yield* client.handleServerRequest("item/permissions/requestApproval", (payload) =>
+    yield* client.handleServerRequest("mcpServer/elicitation/request", (payload) =>
       Effect.gen(function* () {
-        const requestId = ApprovalRequestId.make(
-          yield* randomUUIDv4("permissions-approval-request"),
-        );
-        const turnId = TurnId.make(payload.turnId);
-        const itemId = ProviderItemId.make(payload.itemId);
+        if (toMcpElicitationResponse(payload, "accept").action !== "accept") {
+          yield* Effect.logWarning("Declined an unsupported MCP elicitation.", {
+            serverName: payload.serverName,
+            mode: payload.mode,
+          });
+          return {
+            action: "decline",
+          } satisfies EffectCodexSchema.McpServerElicitationRequestResponse;
+        }
+
+        const requestId = ApprovalRequestId.make(yield* randomUUIDv4("mcp-elicitation-request"));
+        const turnId = payload.turnId
+          ? TurnId.make(payload.turnId)
+          : (yield* Ref.get(sessionRef)).activeTurnId;
+        const jsonRpcId = payload.mode === "url" ? payload.elicitationId : requestId;
         const decision = yield* Deferred.make<ProviderApprovalDecision>();
 
         yield* Ref.update(pendingApprovalsRef, (current) => {
           const next = new Map(current);
           next.set(requestId, {
             requestId,
-            jsonRpcId: payload.itemId,
-            requestKind: "permissions",
+            jsonRpcId,
+            requestKind: "mcp-elicitation",
             turnId,
-            itemId,
+            itemId: undefined,
             decision,
           });
           return next;
         });
         yield* Ref.update(approvalCorrelationsRef, (current) => {
           const next = new Map(current);
-          next.set(payload.itemId, {
+          next.set(jsonRpcId, {
             requestId,
-            requestKind: "permissions",
-            turnId,
-            itemId,
-          });
-          return next;
-        });
-
-        yield* emitEvent({
-          kind: "request",
-          threadId: options.threadId,
-          method: "item/permissions/requestApproval",
-          requestId,
-          requestKind: "permissions",
-          turnId,
-          itemId,
-          payload,
-        });
-
-        const resolved = yield* Deferred.await(decision).pipe(
-          Effect.ensuring(
-            Ref.update(pendingApprovalsRef, (current) => {
-              const next = new Map(current);
-              next.delete(requestId);
-              return next;
-            }),
-          ),
-        );
-        return buildPermissionsApprovalResponse(payload.permissions, resolved);
-      }),
-    );
-
-    yield* client.handleServerRequest("mcpServer/elicitation/request", (payload) =>
-      Effect.gen(function* () {
-        const requestKind = mcpApprovalRequestKind(payload);
-        if (!requestKind) {
-          return yield* CodexErrors.CodexAppServerRequestError.methodNotFound(
-            "mcpServer/elicitation/request",
-          );
-        }
-        const requestId = ApprovalRequestId.make(yield* randomUUIDv4("mcp-approval-request"));
-        const turnId = payload.turnId ? TurnId.make(payload.turnId) : undefined;
-        const decision = yield* Deferred.make<ProviderApprovalDecision>();
-
-        yield* Ref.update(pendingApprovalsRef, (current) => {
-          const next = new Map(current);
-          next.set(requestId, {
-            requestId,
-            jsonRpcId: payload.serverName,
-            requestKind,
+            requestKind: "mcp-elicitation",
             turnId,
             itemId: undefined,
-            decision,
           });
           return next;
         });
@@ -2036,7 +2195,7 @@ export const makeCodexSessionRuntime = (
           threadId: options.threadId,
           method: "mcpServer/elicitation/request",
           requestId,
-          requestKind,
+          requestKind: "mcp-elicitation",
           ...(turnId ? { turnId } : {}),
           payload,
         });
@@ -2050,7 +2209,7 @@ export const makeCodexSessionRuntime = (
             }),
           ),
         );
-        return buildMcpApprovalResponse(resolved);
+        return toMcpElicitationResponse(payload, resolved);
       }),
     );
 
@@ -2104,57 +2263,15 @@ export const makeCodexSessionRuntime = (
       }),
     );
 
-    if (options.workerSession === true) {
-      yield* client.handleServerRequest("item/tool/call", (payload) => {
-        const toolName = payload.namespace ? `${payload.namespace}.${payload.tool}` : payload.tool;
-        return isWorkerLifecycleToolName(payload.tool, payload.namespace)
-          ? Effect.fail(
-              CodexErrors.CodexAppServerRequestError.invalidParams(
-                `Worker sessions cannot invoke agent lifecycle tool '${toolName}'.`,
-                { tool: toolName },
-              ),
-            )
-          : Effect.fail(CodexErrors.CodexAppServerRequestError.methodNotFound("item/tool/call"));
-      });
-    }
-
     yield* client.handleUnknownServerRequest((method) =>
       Effect.fail(CodexErrors.CodexAppServerRequestError.methodNotFound(method)),
     );
 
     const registerServerNotification = <M extends CodexRpc.ServerNotificationMethod>(method: M) =>
       client.handleServerNotification(method, (params) =>
-        Effect.gen(function* () {
-          const notification = makeCodexServerNotification(method, params);
-          // Capture before enqueueing UI work. The protocol awaits this callback
-          // before dispatching the following approval request.
-          switch (notification.method) {
-            case "item/started":
-              if (notification.params.item.type === "fileChange") {
-                fileChangeApprovalContext.remember(
-                  { ...notification.params, itemId: notification.params.item.id },
-                  notification.params.item.changes,
-                );
-              }
-              break;
-            case "item/completed":
-              fileChangeApprovalContext.discard({
-                ...notification.params,
-                itemId: notification.params.item.id,
-              });
-              break;
-            case "turn/completed":
-              fileChangeApprovalContext.discard({
-                threadId: notification.params.threadId,
-                turnId: notification.params.turn.id,
-              });
-              break;
-            case "thread/closed":
-              fileChangeApprovalContext.discard({ threadId: notification.params.threadId });
-              break;
-          }
-          yield* Queue.offer(serverNotifications, notification);
-        }),
+        Queue.offer(serverNotifications, makeCodexServerNotification(method, params)).pipe(
+          Effect.asVoid,
+        ),
       );
 
     yield* Effect.forEach(
@@ -2170,95 +2287,96 @@ export const makeCodexSessionRuntime = (
       Effect.forkIn(runtimeScope),
     );
 
-    // Capture before schema projection so new item variants and unknown fields
-    // remain available in the native log even when this client cannot render them.
-    yield* client.raw.notifications.pipe(
-      Stream.runForEach((notification) =>
-        emitEvent({
-          kind: "notification",
-          threadId: options.threadId,
-          method: "codex/rawNotification",
-          payload: notification,
-        }),
-      ),
-      Effect.forkIn(runtimeScope),
-    );
+    if (!child) {
+      yield* Deferred.await(desktopDaemonTermination).pipe(
+        Effect.flatMap((error) =>
+          Ref.get(closedRef).pipe(
+            Effect.flatMap((closed) => {
+              if (closed) return Effect.void;
+              return updateSession(sessionRef, {
+                status: "error",
+                activeTurnId: undefined,
+              }).pipe(
+                Effect.andThen(
+                  emitSessionEvent(
+                    "session/exited",
+                    `Codex App Server connection closed: ${error.message}`,
+                  ),
+                ),
+              );
+            }),
+          ),
+        ),
+        Effect.forkIn(runtimeScope),
+      );
+    }
 
     const stderrRemainderRef = yield* Ref.make("");
-    yield* Stream.fromQueue(stderrChunks).pipe(
-      Stream.runForEach((chunk) =>
-        Ref.modify(stderrRemainderRef, (current) => {
-          const combined = current + chunk;
-          const lines = combined.split("\n");
-          const remainder = lines.pop() ?? "";
-          return [lines.map((line) => line.replace(/\r$/, "")), remainder] as const;
-        }).pipe(
-          Effect.flatMap((lines) =>
-            Effect.forEach(
-              lines,
-              (line) => {
-                const classified = classifyCodexStderrLine(line);
-                if (!classified) {
-                  return Effect.void;
-                }
-                return emitEvent({
-                  kind: "notification",
-                  threadId: options.threadId,
-                  method: "process/stderr",
-                  message: classified.message,
-                });
-              },
-              { discard: true },
+    if (child) {
+      yield* child.stderr.pipe(
+        Stream.decodeText(),
+        Stream.runForEach((chunk) =>
+          Ref.modify(stderrRemainderRef, (current) => {
+            const combined = current + chunk;
+            const lines = combined.split("\n");
+            const remainder = lines.pop() ?? "";
+            return [lines.map((line) => line.replace(/\r$/, "")), remainder] as const;
+          }).pipe(
+            Effect.flatMap((lines) =>
+              Effect.forEach(
+                lines,
+                (line) => {
+                  const classified = classifyCodexStderrLine(line);
+                  if (!classified) {
+                    return Effect.void;
+                  }
+                  return emitEvent({
+                    kind: "notification",
+                    threadId: options.threadId,
+                    method: "process/stderr",
+                    message: classified.message,
+                  });
+                },
+                { discard: true },
+              ),
             ),
           ),
         ),
-      ),
-      Effect.forkIn(runtimeScope),
-    );
+        Effect.forkIn(runtimeScope),
+      );
 
-    yield* child.exitCode.pipe(
-      Effect.flatMap((exitCode) =>
-        Ref.get(closedRef).pipe(
-          Effect.flatMap((closed) => {
-            if (closed) {
-              return Effect.void;
-            }
-            const nextStatus = exitCode === 0 ? "closed" : "error";
-            return updateSession(sessionRef, {
-              status: nextStatus,
-              activeTurnId: undefined,
-            }).pipe(
-              Effect.andThen(
-                emitSessionEvent(
-                  "session/exited",
-                  exitCode === 0
-                    ? "Codex App Server exited."
-                    : `Codex App Server exited with code ${exitCode}.`,
+      yield* child.exitCode.pipe(
+        Effect.flatMap((exitCode) =>
+          Ref.get(closedRef).pipe(
+            Effect.flatMap((closed) => {
+              if (closed) {
+                return Effect.void;
+              }
+              const nextStatus = exitCode === 0 ? "closed" : "error";
+              return updateSession(sessionRef, {
+                status: nextStatus,
+                activeTurnId: undefined,
+              }).pipe(
+                Effect.andThen(
+                  emitSessionEvent(
+                    "session/exited",
+                    exitCode === 0
+                      ? "Codex App Server exited."
+                      : `Codex App Server exited with code ${exitCode}.`,
+                  ),
                 ),
-              ),
-            );
-          }),
+              );
+            }),
+          ),
         ),
-      ),
-      Effect.forkIn(runtimeScope),
-    );
+        Effect.forkIn(runtimeScope),
+      );
+    }
 
     const start = Effect.fn("CodexSessionRuntime.start")(function* () {
       yield* emitSessionEvent("session/connecting", "Starting Codex App Server session.");
       yield* client.request("initialize", buildCodexInitializeParams());
       yield* client.notify("initialized", undefined);
-
-      const requiresSubagentIsolation =
-        options.workerSession === true ||
-        options.subagentBackend === "native-v1-control" ||
-        (options.subagentBackend === undefined && options.enableT3Workers === true);
-      if (requiresSubagentIsolation) {
-        const effectiveConfig = yield* client.request("config/read", {
-          includeLayers: false,
-          cwd: options.cwd,
-        });
-        yield* assertCodexSubagentIsolationConfig(effectiveConfig.config);
-      }
 
       const requestedModel = normalizeCodexModelSlug(options.model);
 
@@ -2270,13 +2388,9 @@ export const makeCodexSessionRuntime = (
         requestedModel,
         serviceTier: options.serviceTier,
         resumeThreadId: readResumeCursorThreadId(options.resumeCursor),
-        ...(options.resumeCursor?.forkLastTurnId !== undefined
-          ? { forkLastTurnId: options.resumeCursor.forkLastTurnId }
-          : {}),
       });
 
       const providerThreadId = opened.thread.id;
-      currentServiceTier = normalizeServiceTier(opened.serviceTier) ?? currentServiceTier;
       const session = {
         ...(yield* Ref.get(sessionRef)),
         status: "ready",
@@ -2324,41 +2438,22 @@ export const makeCodexSessionRuntime = (
     return {
       start,
       getSession: Ref.get(sessionRef),
+      compactThread: Effect.gen(function* () {
+        const providerThreadId = yield* readProviderThreadId;
+        yield* client.request("thread/compact/start", { threadId: providerThreadId });
+      }),
       sendTurn: (input) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;
-          if (input.expectedTurnId !== undefined) {
-            const turnInput: Array<EffectCodexSchema.V2TurnSteerParams["input"][number]> = [];
-            if (input.input) turnInput.push({ type: "text", text: input.input });
-            turnInput.push(...(input.attachments ?? []));
-            const response = yield* client.request("turn/steer", {
-              threadId: providerThreadId,
-              expectedTurnId: input.expectedTurnId,
-              input: turnInput,
-            });
-            return {
-              threadId: options.threadId,
-              turnId: TurnId.make(response.turnId),
-              resumeCursor: { threadId: providerThreadId },
-            } satisfies ProviderTurnStartResult;
+          if (hasConfiguredMcpServer(options.appServerArgs)) {
+            yield* client.request("config/mcpServer/reload", undefined).pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("Failed to refresh Codex MCP tool catalog before turn.", {
+                  cause,
+                }),
+              ),
+            );
           }
-          const computerControlMode =
-            input.computerControlMode ??
-            options.computerControlMode ??
-            DEFAULT_CODEX_COMPUTER_CONTROL_MODE;
-          // MCP endpoints and inherited-server overrides are fixed at process startup.
-          const browserAvailability = yield* readCodexBrowserAvailability(
-            client,
-            providerThreadId,
-          ).pipe(
-            Effect.timeoutOption("5 seconds"),
-            Effect.map((result) =>
-              result._tag === "Some"
-                ? result.value
-                : { managedChrome: false, previewBrowser: false },
-            ),
-            Effect.orElseSucceed(() => ({ managedChrome: false, previewBrowser: false })),
-          );
           const normalizedModel = normalizeCodexModelSlug(
             input.model ?? (yield* Ref.get(sessionRef)).model,
           );
@@ -2371,14 +2466,10 @@ export const makeCodexSessionRuntime = (
             ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
             ...(input.effort ? { effort: input.effort } : {}),
             ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
-            ...(input.subagentBackend ? { subagentBackend: input.subagentBackend } : {}),
-            ...(input.enableT3Workers ? { enableT3Workers: true } : {}),
             // Derived from the session's own MCP configuration rather than the
             // setting, so the prompt describes the tools this turn actually
             // has even if the setting changed after the session started.
-            browserToolsAvailable: browserAvailability.previewBrowser,
-            computerControlMode,
-            computerControlAvailable: browserAvailability.managedChrome,
+            browserToolsAvailable: hasConfiguredMcpServer(options.appServerArgs),
           });
           const rawResponse = yield* client.raw.request("turn/start", params);
           const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
@@ -2391,14 +2482,6 @@ export const makeCodexSessionRuntime = (
             ),
           );
           const turnId = TurnId.make(response.turn.id);
-          currentServiceTier = normalizeServiceTier(input.serviceTier) ?? currentServiceTier;
-          if (options.onTurnServiceTier && currentServiceTier !== undefined) {
-            yield* options.onTurnServiceTier({
-              sessionId: providerThreadId,
-              turnId,
-              serviceTier: currentServiceTier,
-            });
-          }
           yield* updateSession(sessionRef, (session) => ({
             status: "running",
             // Codex accepts follow-ups while the current turn is still

@@ -382,6 +382,7 @@ export function shouldRecoverCodexSandboxExit(
 export function withCodexSandboxStartupRecovery<A, E, R>(input: {
   readonly run: () => Effect.Effect<A, E, R>;
   readonly homeDirectory?: string;
+  readonly platform?: string;
 }): Effect.Effect<A, E, R> {
   return Effect.gen(function* () {
     const first = yield* Effect.result(input.run());
@@ -391,7 +392,12 @@ export function withCodexSandboxStartupRecovery<A, E, R>(input: {
     }
 
     const recovery = yield* recoverCodexDenyReadAclState(
-      input.homeDirectory === undefined ? {} : { homeDirectory: input.homeDirectory },
+      input.homeDirectory === undefined && input.platform === undefined
+        ? {}
+        : {
+            ...(input.homeDirectory === undefined ? {} : { homeDirectory: input.homeDirectory }),
+            ...(input.platform === undefined ? {} : { platform: input.platform }),
+          },
     );
     if (!recovery) return yield* Effect.fail(first.failure);
     return yield* input.run();

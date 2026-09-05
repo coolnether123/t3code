@@ -7,14 +7,14 @@
  * @module state/usage
  */
 import { useAtomValue } from "@effect/atom-react";
-import { executeAtomQuery } from "@t3tools/client-runtime/state/runtime";
-import { usageQueryInput } from "@t3tools/client-runtime/usageRefresh";
 import {
   USAGE_CONTRACT_VERSION,
   type EnvironmentId,
   type UsageSummary,
   type UsageSummaryInput,
 } from "@t3tools/contracts";
+import { executeAtomQuery, runAtomCommand } from "@t3tools/client-runtime/state/runtime";
+import { usageQueryInput } from "@t3tools/client-runtime/usageRefresh";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
 import { useCallback, useEffect, useMemo, useRef } from "react";
@@ -62,7 +62,8 @@ const usageByWindowAtom = Atom.family((windowKey: string) =>
 export interface UsageView {
   readonly merged: MergedUsage;
   readonly environments: readonly EnvironmentUsageStatus[];
-  /** True until at least one environment has answered. */
+  readonly selectedEnvironments: readonly EnvironmentUsageStatus[];
+  /** True until at least one selected environment has answered. */
   readonly isPending: boolean;
   /**
    * True while environments that have not failed are still answering. Failed
@@ -70,10 +71,16 @@ export interface UsageView {
    * improve by waiting on them, so they must not read as "still reporting".
    */
   readonly isPartial: boolean;
-  readonly refresh: (input?: UsageSummaryInput) => Promise<readonly EnvironmentUsageStatus[]>;
+  readonly refresh: (
+    input?: UsageSummaryInput,
+    refreshRates?: boolean,
+  ) => Promise<readonly EnvironmentUsageStatus[]>;
 }
 
-export function useUsage(input: UsageSummaryInput): UsageView {
+export function useUsage(
+  input: UsageSummaryInput,
+  selectedEnvironmentIds: ReadonlySet<EnvironmentId> | null = null,
+): UsageView {
   const windowKey = useMemo(
     () => JSON.stringify(usageQueryInput(input, USAGE_CONTRACT_VERSION)),
     [
@@ -91,25 +98,52 @@ export function useUsage(input: UsageSummaryInput): UsageView {
   const atom = usageByWindowAtom(windowKey);
   const environments = useAtomValue(atom);
   const retriedFailures = useRef(new Set<string>());
+  const selectedEnvironments = useMemo(
+    () =>
+      selectedEnvironmentIds === null
+        ? environments
+        : environments.filter((environment) =>
+            selectedEnvironmentIds.has(environment.environmentId),
+          ),
+    [environments, selectedEnvironmentIds],
+  );
 
   // Refreshing only the derived atom would re-read the per-environment SWR
   // queries within their stale window and change nothing. Refresh each
   // environment's query so the button always rescans.
+  //
+  // Each environment refetches model pricing first, so a model released since
+  // its last daily fetch gets priced by the rescan. The rescan runs whether or
+  // not the refetch succeeds: an offline environment still recounts tokens.
   const refresh = useCallback(
-    async (nextInput?: UsageSummaryInput) => {
+    async (nextInput?: UsageSummaryInput, refreshRates = true) => {
       const input = nextInput
         ? usageQueryInput(nextInput, USAGE_CONTRACT_VERSION)
         : (JSON.parse(windowKey) as UsageSummaryInput);
       const requestInput = { ...input, refresh: nextInput?.refresh ?? true };
       return Promise.all(
-        environments.map(async (environment) => {
+        selectedEnvironments.map(async (environment) => {
+          const { environmentId } = environment;
+          if (refreshRates && !input.quotaHistoryOnly) {
+            await runAtomCommand(
+              appAtomRegistry,
+              serverEnvironment.refreshUsageRates,
+              { environmentId, input: {} },
+              { reportFailure: false },
+            );
+          }
           const result = await executeAtomQuery(
             appAtomRegistry,
-            serverEnvironment.usageSummary({
-              environmentId: environment.environmentId,
-              input: requestInput,
-            }),
+            serverEnvironment.usageSummary({ environmentId, input: requestInput }),
             { refresh: true, timeoutMs: 30_000, reportFailure: false, reportDefect: false },
+          );
+          // A forced scan has a distinct request key. Invalidate the query
+          // observed by this view so it reads the freshly computed server cache.
+          appAtomRegistry.refresh(
+            serverEnvironment.usageSummary({
+              environmentId,
+              input: JSON.parse(windowKey) as UsageSummaryInput,
+            }),
           );
           return {
             ...environment,
@@ -120,14 +154,13 @@ export function useUsage(input: UsageSummaryInput): UsageView {
         }),
       );
     },
-    [environments, windowKey],
+    [selectedEnvironments, windowKey],
   );
 
-  // Route navigation can remount this view while its shared atom still holds a
-  // transient disconnected result. Retry that result once on entry so mobile
-  // users do not need to reload the whole browser tab.
+  // A retained connection failure should recover when this route is reopened.
+  // Retry each failed set once per window, without refetching public prices.
   useEffect(() => {
-    const failedIds = environments
+    const failedIds = selectedEnvironments
       .filter((environment) => environment.error !== null)
       .map((environment) => environment.environmentId)
       .sort();
@@ -135,11 +168,11 @@ export function useUsage(input: UsageSummaryInput): UsageView {
     const retryKey = `${windowKey}:${failedIds.join(",")}`;
     if (retriedFailures.current.has(retryKey)) return;
     retriedFailures.current.add(retryKey);
-    void refresh();
-  }, [environments, refresh, windowKey]);
+    void refresh(undefined, false);
+  }, [selectedEnvironments, refresh, windowKey]);
 
   const merged = useMemo(() => {
-    const answered: EnvironmentUsage[] = environments.flatMap((environment) =>
+    const answered: EnvironmentUsage[] = selectedEnvironments.flatMap((environment) =>
       environment.summary === null
         ? []
         : [
@@ -151,36 +184,37 @@ export function useUsage(input: UsageSummaryInput): UsageView {
           ],
     );
     return mergeUsage(answered, USAGE_CONTRACT_VERSION);
-  }, [environments]);
+  }, [selectedEnvironments]);
 
-  const hasDeferredTranscripts = environments.some((environment) =>
+  const hasDeferredTranscripts = selectedEnvironments.some((environment) =>
     environment.summary?.sources.some((source) => source.status === "partial"),
   );
-
-  // A bounded server scan intentionally returns partial data while its cache is
-  // cold. Keep advancing that cache while the Usage page is mounted so totals
-  // converge without asking the user to click Refresh once per 128 MiB batch.
   useEffect(() => {
-    if (!hasDeferredTranscripts || environments.some((environment) => environment.isPending)) {
+    if (
+      !hasDeferredTranscripts ||
+      selectedEnvironments.some((environment) => environment.isPending)
+    )
       return;
-    }
-    const timer = window.setTimeout(() => {
-      void refresh({
-        ...(JSON.parse(windowKey) as UsageSummaryInput),
-        refresh: false,
-      });
-    }, 750);
-    return () => window.clearTimeout(timer);
-  }, [environments, hasDeferredTranscripts, refresh]);
+    // Continue bounded scans without re-fetching public prices for every batch.
+    const timer = setTimeout(
+      () =>
+        void refresh({ ...(JSON.parse(windowKey) as UsageSummaryInput), refresh: false }, false),
+      750,
+    );
+    return () => clearTimeout(timer);
+  }, [selectedEnvironments, hasDeferredTranscripts, refresh, windowKey]);
 
-  const answeredCount = environments.filter((environment) => environment.summary !== null).length;
-  const stillReporting = environments.filter(
+  const answeredCount = selectedEnvironments.filter(
+    (environment) => environment.summary !== null,
+  ).length;
+  const stillReporting = selectedEnvironments.filter(
     (environment) => environment.summary === null && environment.error === null,
   ).length;
 
   return {
     merged,
     environments,
+    selectedEnvironments,
     isPending: answeredCount === 0 && stillReporting > 0,
     isPartial: answeredCount > 0 && stillReporting > 0,
     refresh,

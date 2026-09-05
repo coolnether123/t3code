@@ -131,7 +131,7 @@ function parseAiStudioPrompt(
   let responseIndex = 0;
   const records: UsageRecord[] = [];
 
-  for (let index = 0; index < chunks.length; ) {
+  for (let index = 0; index < chunks.length;) {
     const chunk = asRecord(chunks[index]);
     if (chunk === null) {
       index += 1;

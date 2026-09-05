@@ -2,12 +2,10 @@
  * Usage reporting contract.
  *
  * Each environment scans the provider CLIs' own on-disk session transcripts
- * (`~/.claude/projects/**\/*.jsonl`, `~/.codex/{sessions,archived_sessions}/**\/*.jsonl`,
- * `~/.gemini/tmp/<project>/chats/session-*`, `~/.local/share/opencode/opencode.db`)
- * rather than
- * relying on T3 Code's own orchestration projections, so usage stays complete
- * even for turns that were never driven through T3 Code. This mirrors the
- * approach `ccusage` takes.
+ * (`~/.claude/projects/**\/*.jsonl`, `~/.codex/sessions/**\/*.jsonl`,
+ * `~/.grok/sessions/**\/updates.jsonl`) rather than relying on T3 Code's own
+ * orchestration projections, so usage stays complete even for turns that were
+ * never driven through T3 Code. This mirrors the approach `ccusage` takes.
  *
  * Environments return pre-aggregated `(day, hourStart?, provider, model)`
  * buckets. Raw transcript records never cross the wire.
@@ -23,7 +21,18 @@ import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
  * client renders partial coverage when an environment reports an older version
  * rather than failing the whole page.
  */
-export const USAGE_CONTRACT_VERSION = 7 as const;
+// v8 combines the fork's imported providers with upstream Grok support.
+// Older fork v7 clients do not recognize Grok and must not receive its rows.
+export const USAGE_CONTRACT_VERSION = 8 as const;
+
+/**
+ * Oldest {@link UsageSummary} version a current client will still merge.
+ *
+ * Official v5 only adds `grok` to {@link UsageProviderKind}; v4 Claude/Codex buckets
+ * remain valid, so mixed-version environments keep those totals instead of
+ * treating every older server as stale.
+ */
+export const USAGE_MERGE_COMPATIBLE_SINCE = 4 as const;
 
 export const UsageProviderKind = Schema.Literals([
   "claude",
@@ -32,6 +41,7 @@ export const UsageProviderKind = Schema.Literals([
   "opencode",
   "chatgpt",
   "aistudio",
+  "grok",
 ]);
 export type UsageProviderKind = typeof UsageProviderKind.Type;
 
@@ -55,7 +65,7 @@ export type UsageResolution = typeof UsageResolution.Type;
  * Why a bucket's cost is what it is.
  *
  * - `providerReported` - the transcript carried an explicit cost figure.
- * - `modelPriced` - we matched the model against the LiteLLM rate table.
+ * - `modelPriced` - we used a custom price override or the LiteLLM rate table.
  * - `unpriced` - tokens are known, rates are not. Counted in totals, excluded
  *   from cost.
  */
@@ -67,9 +77,8 @@ export type UsageCostSource = typeof UsageCostSource.Type;
  *
  * `cachedInputTokens` and `cacheCreationTokens` are disjoint from
  * `uncachedInputTokens`; summing all three gives total input. `reasoningTokens`
- * is a *subset* of `outputTokens` (Codex reports it that way, Gemini thoughts
- * are folded into output, and Anthropic does not break thinking out), so it
- * must never be added on top.
+ * is a *subset* of `outputTokens` (Codex reports it that way, and Anthropic
+ * folds thinking into output), so it must never be added on top.
  */
 export const UsageTokenTotals = Schema.Struct({
   uncachedInputTokens: NonNegativeInt,
@@ -94,7 +103,6 @@ export const UsageBucket = Schema.Struct({
   hourStart: Schema.optional(TrimmedNonEmptyString),
   provider: UsageProviderKind,
   model: TrimmedNonEmptyString,
-  /** Omitted by older servers. Unknown metadata uses the standard estimate. */
   serviceTier: Schema.optional(Schema.String),
   serviceTierSource: Schema.optional(
     Schema.Literals(["transcript", "t3Request", "userReported", "unknown"]),
@@ -175,7 +183,6 @@ export const UsagePricing = Schema.Struct({
 });
 export type UsagePricing = typeof UsagePricing.Type;
 
-/** Sanitized observations imported from an external quota tracker. */
 export const UsageQuotaSample = Schema.Struct({
   observedAt: Schema.String,
   remainingPercent: Schema.Number,
@@ -191,7 +198,6 @@ export const UsageQuotaHistory = Schema.Struct({
 });
 export type UsageQuotaHistory = typeof UsageQuotaHistory.Type;
 
-/** Cost is measured after the first observation and through the last one. */
 export const UsageQuotaInterval = Schema.Struct({
   id: TrimmedNonEmptyString,
   sinceTime: TrimmedNonEmptyString,
@@ -210,12 +216,7 @@ export const UsageQuotaCost = Schema.Struct({
 export type UsageQuotaCost = typeof UsageQuotaCost.Type;
 
 export const UsageSummaryInput = Schema.Struct({
-  /**
-   * Highest response contract understood by the client. Contract v6 added
-   * OpenCode and v7 added imported ChatGPT and AI Studio archives.
-   */
   clientContractVersion: Schema.optional(NonNegativeInt),
-  /** Revalidate recent files while retaining parsed, unchanged transcripts. */
   refresh: Schema.optional(Schema.Boolean),
   /** Inclusive first day of the window, in `timeZone`. */
   sinceDay: UsageDay,
@@ -233,7 +234,6 @@ export const UsageSummaryInput = Schema.Struct({
   /** Exclusive UTC instant for an hourly rolling window. */
   untilTime: Schema.optional(TrimmedNonEmptyString),
   includeQuotaHistory: Schema.optional(Schema.Boolean),
-  /** Read saved observations without scanning transcripts or fetching prices. */
   quotaHistoryOnly: Schema.optional(Schema.Boolean),
   quotaIntervals: Schema.optional(Schema.Array(UsageQuotaInterval).check(Schema.isMaxLength(64))),
 });

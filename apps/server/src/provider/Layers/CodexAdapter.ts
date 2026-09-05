@@ -8,36 +8,36 @@
  * @module CodexAdapterLive
  */
 import {
+  EventId,
   type CanonicalItemType,
   type CanonicalRequestType,
   type CodexSettings,
   ProviderDriverKind,
-  EventId,
   type ProviderEvent,
   ProviderInstanceId,
   type ProviderRuntimeEvent,
   type ProviderRequestKind,
   type ThreadTokenUsageSnapshot,
+  type ToolActivityIcon,
+  type ToolActivityNativeAppReference,
+  type ToolActivitySource,
   type ProviderUserInputAnswers,
   RuntimeItemId,
   RuntimeRequestId,
   RuntimeTaskId,
-  type RuntimeTaskLastTurn,
   type RuntimeTaskUsage,
+  type TurnTokenUsage,
   ProviderApprovalDecision,
   ThreadId,
   ProviderSendTurnInput,
-  type ProviderSessionStartInput,
-  type SubagentBackend,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as NodeCrypto from "node:crypto";
 import * as Crypto from "effect/Crypto";
-import * as DateTime from "effect/DateTime";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Queue from "effect/Queue";
-import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -48,12 +48,6 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
-import { codexAppServerTransport } from "../CodexAppServerTransport.ts";
-import {
-  CODEX_COMPUTER_CONTROL_OPTION_ID,
-  DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
-  normalizeCodexComputerControlMode,
-} from "../CodexDeveloperInstructions.ts";
 
 import {
   ProviderAdapterRequestError,
@@ -66,24 +60,19 @@ import {
 import { type CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
-import { CODEX_TIER_JOURNAL } from "../../usage/codexServiceTier.ts";
-import { isWorkerLinkedProviderThreadId } from "../../worker/WorkerThreadBoundary.ts";
 import {
   CodexResumeCursorSchema,
-  type CodexResumeCursor,
   CodexSessionRuntimeThreadIdMissingError,
+  describeMcpElicitation,
   makeCodexSessionRuntime,
   type CodexSessionRuntimeError,
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeShape,
 } from "./CodexSessionRuntime.ts";
+import { codexAppServerTransport } from "../CodexAppServerTransport.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
-import { codexLaunchArgv, resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
-import {
-  codexMcpDisableOverride,
-  type CodexMcpPreflightInput,
-  type CodexMcpPreflightResult,
-} from "./CodexMcpPreflight.ts";
+import { resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
+import { codexRateLimitsToUpdate } from "./codexUsageLimits.ts";
 const isCodexAppServerProcessExitedError = Schema.is(CodexErrors.CodexAppServerProcessExitedError);
 const isCodexAppServerTransportError = Schema.is(CodexErrors.CodexAppServerTransportError);
 const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
@@ -105,10 +94,6 @@ export interface CodexAdapterLiveOptions {
   >;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
-  readonly enableT3Workers?: Effect.Effect<boolean>;
-  readonly preflightMcpServers?: (
-    input: CodexMcpPreflightInput,
-  ) => Effect.Effect<CodexMcpPreflightResult>;
 }
 
 interface CodexAdapterSessionContext {
@@ -116,9 +101,32 @@ interface CodexAdapterSessionContext {
   readonly scope: Scope.Closeable;
   readonly runtime: CodexSessionRuntimeShape;
   readonly eventFiber: Fiber.Fiber<void, never>;
-  readonly launchBackend?: SubagentBackend;
-  readonly startInput: ProviderSessionStartInput;
+  readonly turnTokenUsage: CodexTurnTokenUsageState;
   stopped: boolean;
+}
+
+type CodexCumulativeTokenUsage = {
+  readonly inputTokens: number;
+  readonly cachedInputTokens: number;
+  readonly cacheCreationTokens?: number;
+  readonly outputTokens: number;
+  readonly reasoningTokens: number;
+};
+
+interface CodexTurnTokenUsageAccumulator {
+  inputTokens: number;
+  cachedInputTokens: number;
+  cacheCreationTokens: number | undefined;
+  outputTokens: number;
+  reasoningTokens: number;
+  observed: boolean;
+  hasSubagents: boolean;
+}
+
+interface CodexTurnTokenUsageState {
+  baseline: CodexCumulativeTokenUsage | undefined;
+  activeTurnId: string | undefined;
+  readonly byTurnId: Map<string, CodexTurnTokenUsageAccumulator>;
 }
 
 function mapCodexRuntimeError(
@@ -175,6 +183,236 @@ function trimText(value: string | undefined | null): string | undefined {
   return trimmed && trimmed.length > 0 ? trimmed : undefined;
 }
 
+function asUnknownRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
+}
+
+function normalizeMcpIntentTitle(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().replace(/\s+/gu, " ");
+  if (!normalized) return undefined;
+  const characters = Array.from(normalized);
+  return characters.length <= 80 ? normalized : `${characters.slice(0, 79).join("")}…`;
+}
+
+function normalizedHttpUrl(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length > 4096) return undefined;
+  try {
+    const url = new URL(value);
+    const href = url.href;
+    return (url.protocol === "http:" || url.protocol === "https:") && href.length <= 4096
+      ? href
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizedImageUrl(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length > 4096) return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:" || url.protocol === "data:"
+      ? url.href
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizedAppId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const appId = value.trim();
+  return appId.length > 0 && appId.length <= 512 && /^[A-Za-z0-9._-]+$/u.test(appId)
+    ? appId
+    : undefined;
+}
+
+function normalizedDisplayName(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const displayName = value.trim().replace(/\s+/gu, " ");
+  return displayName && displayName.length <= 160 ? displayName : undefined;
+}
+
+function normalizedSourceKeyPart(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function nativeAppSourceKey(appId: string): string {
+  const key = `native-app:${appId.toLowerCase()}`;
+  if (key.length <= 512) return key;
+  const digest = NodeCrypto.createHash("sha256").update(key).digest("hex");
+  return `${key.slice(0, 512 - digest.length - 1)}:${digest}`;
+}
+
+function browserDisplayName(value: unknown): string | undefined {
+  const normalized = normalizedDisplayName(value)?.toLowerCase();
+  if (!normalized) return undefined;
+  if (normalized.includes("chrome") || normalized === "chromium") return "Chrome";
+  if (normalized.includes("edge")) return "Microsoft Edge";
+  if (normalized.includes("firefox")) return "Firefox";
+  if (normalized.includes("safari")) return "Safari";
+  if (normalized.includes("arc")) return "Arc";
+  if (normalized === "iab" || normalized.includes("in-app")) return "Browser";
+  return normalizedDisplayName(value);
+}
+
+function browserNativeAppReference(name: string): ToolActivityNativeAppReference | undefined {
+  switch (name) {
+    case "Chrome":
+      return { _tag: "display-name", displayName: "Google Chrome" };
+    case "Microsoft Edge":
+    case "Firefox":
+    case "Safari":
+    case "Arc":
+      return { _tag: "display-name", displayName: name };
+    default:
+      return undefined;
+  }
+}
+
+function appDisplayNameFromId(appId: string): string | undefined {
+  const knownNames: Readonly<Record<string, string>> = {
+    "com.apple.finder": "Finder",
+    "com.apple.safari": "Safari",
+    "com.google.chrome": "Chrome",
+    "com.microsoft.edgemac": "Microsoft Edge",
+    "org.mozilla.firefox": "Firefox",
+    "company.thebrowser.browser": "Arc",
+  };
+  return knownNames[appId.toLowerCase()];
+}
+
+function nativeAppReference(value: unknown): ToolActivityNativeAppReference | undefined {
+  const app = asUnknownRecord(value);
+  if (app?.kind === "appId") {
+    const appId = normalizedAppId(app.appId);
+    return appId ? { _tag: "app-id", appId } : undefined;
+  }
+  if (app?.kind === "displayName") {
+    const displayName = normalizedDisplayName(app.displayName);
+    return displayName ? { _tag: "display-name", displayName } : undefined;
+  }
+  return undefined;
+}
+
+function themedLogoIcon(
+  ...records: ReadonlyArray<Record<string, unknown> | undefined>
+): ToolActivityIcon | undefined {
+  for (const record of records) {
+    const logoUrl = normalizedImageUrl(record?.logoUrl);
+    if (!logoUrl) continue;
+    const logoUrlDark = normalizedImageUrl(record?.logoUrlDark ?? record?.logoDarkUrl);
+    return {
+      _tag: "themed-logo",
+      logoUrl,
+      ...(logoUrlDark ? { logoUrlDark } : {}),
+    };
+  }
+  return undefined;
+}
+
+interface McpToolPresentation {
+  readonly toolSurface?: "browser" | "computer";
+  readonly toolIcon?: ToolActivityIcon;
+  readonly toolSource?: ToolActivitySource;
+}
+
+function mcpToolPresentation(
+  item: Extract<CodexLifecycleItem, { readonly type: "mcpToolCall" }>,
+): McpToolPresentation {
+  const result = asUnknownRecord(item.result);
+  const metadata = asUnknownRecord(result?._meta);
+  const surface = asUnknownRecord(metadata?.["codex/toolSurface"]);
+  const sourceMetadata = asUnknownRecord(metadata?.source);
+  const appContext = asUnknownRecord(item.appContext);
+  const sourceLogo = themedLogoIcon(surface, sourceMetadata, appContext);
+  if (surface?.kind === "browserUse") {
+    const screenshot = asUnknownRecord(surface.screenshot);
+    const browserUse = asUnknownRecord(metadata?.browser_use);
+    const openTabs = Array.isArray(surface.openTabs) ? surface.openTabs : [];
+    const latestOpenTab = openTabs
+      .toReversed()
+      .map(asUnknownRecord)
+      .find((tab) => normalizedHttpUrl(tab?.url) !== undefined);
+    const selectedPage = [
+      { record: screenshot, url: screenshot?.pageUrl },
+      { record: browserUse, url: browserUse?.url },
+      { record: latestOpenTab, url: latestOpenTab?.url },
+    ]
+      .map((candidate) => ({ ...candidate, pageUrl: normalizedHttpUrl(candidate.url) }))
+      .find((candidate) => candidate.pageUrl !== undefined);
+    const pageUrl = selectedPage?.pageUrl;
+    const faviconUrl = normalizedImageUrl(
+      selectedPage?.record?.faviconUrl ?? selectedPage?.record?.favIconUrl,
+    );
+    const faviconUrlDark = normalizedImageUrl(
+      selectedPage?.record?.faviconUrlDark ?? selectedPage?.record?.favIconUrlDark,
+    );
+    const name =
+      browserDisplayName(appContext?.appName) ??
+      browserDisplayName(surface.browserFamily) ??
+      browserDisplayName(surface.backend) ??
+      "Browser";
+    const nativeBrowserIcon = browserNativeAppReference(name);
+    const sourceIcon =
+      sourceLogo ??
+      (nativeBrowserIcon ? ({ _tag: "native-app", app: nativeBrowserIcon } as const) : undefined);
+    const sourceKeyPart = normalizedSourceKeyPart(name) || "browser";
+    return {
+      toolSurface: "browser",
+      ...(pageUrl
+        ? {
+            toolIcon: {
+              _tag: "website",
+              pageUrl,
+              ...(faviconUrl ? { faviconUrl } : {}),
+              ...(faviconUrlDark ? { faviconUrlDark } : {}),
+            } as const,
+          }
+        : {}),
+      toolSource: {
+        key: `browser-use:${sourceKeyPart}`,
+        name,
+        kind: name === "Browser" ? "browser" : "integration",
+        ...(sourceIcon ? { icon: sourceIcon } : {}),
+      },
+    };
+  }
+  if (surface?.kind === "computerUse") {
+    const app = nativeAppReference(surface.app);
+    const args = asUnknownRecord(item.arguments);
+    const argumentAppName =
+      normalizedDisplayName(args?.appName) ??
+      normalizedDisplayName(args?.application) ??
+      normalizedDisplayName(typeof args?.app === "string" ? args.app : undefined);
+    const name =
+      normalizedDisplayName(appContext?.appName) ??
+      argumentAppName ??
+      (app?._tag === "display-name" ? app.displayName : undefined) ??
+      (app?._tag === "app-id" ? appDisplayNameFromId(app.appId) : undefined) ??
+      "Computer Use";
+    const sourceIcon = sourceLogo ?? (app ? ({ _tag: "native-app", app } as const) : undefined);
+    const sourceKey = app
+      ? app._tag === "app-id"
+        ? nativeAppSourceKey(app.appId)
+        : `native-app-name:${normalizedSourceKeyPart(app.displayName)}`
+      : "computer-use";
+    return {
+      toolSurface: "computer",
+      ...(app ? { toolIcon: { _tag: "native-app", app } as const } : {}),
+      toolSource: {
+        key: sourceKey,
+        name,
+        kind: "computer",
+        ...(sourceIcon ? { icon: sourceIcon } : {}),
+      },
+    };
+  }
+
+  return {};
+}
+
 const FATAL_CODEX_STDERR_SNIPPETS = ["failed to connect to websocket"];
 
 function isFatalCodexProcessStderrMessage(message: string): boolean {
@@ -215,6 +453,162 @@ function normalizeCodexTokenUsage(
       ? { lastReasoningOutputTokens: reasoningOutputTokens }
       : {}),
     compactsAutomatically: true,
+  };
+}
+
+function codexTokenUsageBreakdown(
+  usage: EffectCodexSchema.V2ThreadTokenUsageUpdatedNotification__TokenUsageBreakdown,
+): CodexCumulativeTokenUsage {
+  return {
+    inputTokens: usage.inputTokens,
+    cachedInputTokens: usage.cachedInputTokens,
+    ...(usage.cacheWriteInputTokens !== undefined
+      ? { cacheCreationTokens: usage.cacheWriteInputTokens }
+      : {}),
+    outputTokens: usage.outputTokens,
+    reasoningTokens: usage.reasoningOutputTokens,
+  };
+}
+
+function makeCodexTurnTokenUsageState(): CodexTurnTokenUsageState {
+  return {
+    baseline: undefined,
+    activeTurnId: undefined,
+    byTurnId: new Map(),
+  };
+}
+
+function getCodexTurnAccumulator(
+  state: CodexTurnTokenUsageState,
+  turnId: string,
+): CodexTurnTokenUsageAccumulator {
+  const existing = state.byTurnId.get(turnId);
+  if (existing) return existing;
+  const created: CodexTurnTokenUsageAccumulator = {
+    inputTokens: 0,
+    cachedInputTokens: 0,
+    cacheCreationTokens: 0,
+    outputTokens: 0,
+    reasoningTokens: 0,
+    observed: false,
+    hasSubagents: false,
+  };
+  state.byTurnId.set(turnId, created);
+  return created;
+}
+
+/**
+ * Usage added by one `thread/tokenUsage/updated` notification. Codex reports a
+ * running `total` for the thread and `last`, the usage of the newest model
+ * response. Within a turn the growth of `total` equals `last`. Without a prior
+ * total (first update after resume or rollback), or when Codex reset the
+ * running total, `last` is the delta.
+ */
+function codexTurnTokenUsageDelta(
+  previous: CodexCumulativeTokenUsage | undefined,
+  current: CodexCumulativeTokenUsage,
+  last: CodexCumulativeTokenUsage,
+): CodexCumulativeTokenUsage {
+  if (
+    previous === undefined ||
+    current.inputTokens < previous.inputTokens ||
+    current.cachedInputTokens < previous.cachedInputTokens ||
+    current.outputTokens < previous.outputTokens ||
+    current.reasoningTokens < previous.reasoningTokens
+  ) {
+    return last;
+  }
+  return {
+    inputTokens: current.inputTokens - previous.inputTokens,
+    cachedInputTokens: current.cachedInputTokens - previous.cachedInputTokens,
+    ...(current.cacheCreationTokens !== undefined &&
+    previous.cacheCreationTokens !== undefined &&
+    current.cacheCreationTokens >= previous.cacheCreationTokens
+      ? { cacheCreationTokens: current.cacheCreationTokens - previous.cacheCreationTokens }
+      : {}),
+    outputTokens: current.outputTokens - previous.outputTokens,
+    reasoningTokens: current.reasoningTokens - previous.reasoningTokens,
+  };
+}
+
+function accumulateCodexTurnTokenUsage(
+  state: CodexTurnTokenUsageState,
+  turnId: string,
+  usage: EffectCodexSchema.V2ThreadTokenUsageUpdatedNotification["tokenUsage"],
+): void {
+  const current = codexTokenUsageBreakdown(usage.total);
+  if (state.activeTurnId !== turnId) {
+    // The total is thread-wide, so every update moves the baseline. A late
+    // update for a finished turn is not counted toward the live turn.
+    state.baseline = current;
+    return;
+  }
+
+  const accumulator = getCodexTurnAccumulator(state, turnId);
+  const delta = codexTurnTokenUsageDelta(
+    state.baseline,
+    current,
+    codexTokenUsageBreakdown(usage.last),
+  );
+  state.baseline = current;
+
+  if (
+    delta.inputTokens > 0 ||
+    delta.cachedInputTokens > 0 ||
+    delta.outputTokens > 0 ||
+    delta.reasoningTokens > 0
+  ) {
+    accumulator.observed = true;
+  }
+  accumulator.inputTokens += delta.inputTokens;
+  accumulator.cachedInputTokens += delta.cachedInputTokens;
+  accumulator.outputTokens += delta.outputTokens;
+  accumulator.reasoningTokens += delta.reasoningTokens;
+  if (delta.cacheCreationTokens === undefined) {
+    accumulator.cacheCreationTokens = undefined;
+  } else if (accumulator.cacheCreationTokens !== undefined) {
+    accumulator.cacheCreationTokens += delta.cacheCreationTokens;
+  }
+}
+
+function completeCodexTurnTokenUsage(
+  state: CodexTurnTokenUsageState,
+  turnId: string,
+  completed: boolean,
+): TurnTokenUsage {
+  const usage = state.byTurnId.get(turnId);
+  state.byTurnId.delete(turnId);
+  if (state.activeTurnId === turnId) state.activeTurnId = undefined;
+  if (!usage) {
+    return {
+      usageStatus: "unavailable",
+      usageScope: "main_agent",
+      hasSubagents: false,
+    };
+  }
+
+  if (!usage.observed) {
+    return {
+      usageStatus: "unavailable",
+      usageScope: "main_agent",
+      hasSubagents: usage.hasSubagents,
+    };
+  }
+
+  // Codex counts cache reads and writes inside inputTokens. Clamp the
+  // subsets so the record keeps the documented relationships even if a
+  // counter drifts.
+  return {
+    usageStatus: completed ? "complete" : "partial",
+    usageScope: "main_agent",
+    inputTokens: usage.inputTokens,
+    cachedInputTokens: Math.min(usage.inputTokens, usage.cachedInputTokens),
+    ...(usage.cacheCreationTokens !== undefined
+      ? { cacheCreationTokens: Math.min(usage.inputTokens, usage.cacheCreationTokens) }
+      : {}),
+    outputTokens: usage.outputTokens,
+    reasoningTokens: Math.min(usage.outputTokens, usage.reasoningTokens),
+    hasSubagents: usage.hasSubagents,
   };
 }
 
@@ -264,8 +658,82 @@ function toCanonicalItemType(raw: string | undefined | null): CanonicalItemType 
   return "unknown";
 }
 
-function itemTitle(itemType: CanonicalItemType, item?: CodexLifecycleItem): string | undefined {
+function boundedToolArgument(value: unknown): string | undefined {
+  const normalized = typeof value === "string" ? value.trim().replace(/\s+/gu, " ") : "";
+  if (!normalized) return undefined;
+  return normalized.length <= 48 ? normalized : `${normalized.slice(0, 47)}…`;
+}
+
+function normalizedMcpToolName(value: string): string {
+  return (
+    value
+      .split(/__|[./:]/u)
+      .at(-1)
+      ?.trim() ?? value.trim()
+  );
+}
+
+function computerUseToolTitle(
+  item: Extract<CodexLifecycleItem, { readonly type: "mcpToolCall" }>,
+  presentation: McpToolPresentation,
+): string | undefined {
+  if (normalizeItemType(item.server) !== "computer use") return undefined;
+  if (item.status === "failed") return undefined;
+  const tool = normalizeItemType(normalizedMcpToolName(item.tool)).replace(/ /gu, "_");
+  const inProgress = item.status === "inProgress";
+  const args = asUnknownRecord(item.arguments);
+  const appName =
+    (presentation.toolSource?.kind === "computer" && presentation.toolSource.name !== "Computer Use"
+      ? presentation.toolSource.name
+      : undefined) ??
+    normalizedDisplayName(args?.appName) ??
+    normalizedDisplayName(args?.application) ??
+    normalizedDisplayName(typeof args?.app === "string" ? args.app : undefined);
+  const withApp = (label: string) => (appName ? `${label} in ${appName}` : label);
+  switch (tool) {
+    case "list_apps":
+      return inProgress ? "Listing apps" : "Listed apps";
+    case "click":
+      return withApp(inProgress ? "Clicking" : "Clicked");
+    case "drag":
+      return withApp(inProgress ? "Dragging" : "Dragged");
+    case "get_app_state":
+    case "get_state":
+      return appName
+        ? `${inProgress ? "Looking at" : "Looked at"} ${appName}`
+        : inProgress
+          ? "Looking at the screen"
+          : "Looked at the screen";
+    case "perform_accessibility_action":
+    case "perform_secondary_action":
+      return inProgress ? "Performing accessibility action" : "Performed accessibility action";
+    case "press_key":
+      return withApp(inProgress ? "Pressing key" : "Pressed key");
+    case "scroll": {
+      const direction = boundedToolArgument(args?.direction)?.toLowerCase();
+      return withApp(`${inProgress ? "Scrolling" : "Scrolled"}${direction ? ` ${direction}` : ""}`);
+    }
+    case "set_value":
+      return withApp(inProgress ? "Setting value" : "Set value");
+    case "type_text":
+      return withApp(inProgress ? "Typing text" : "Typed text");
+    default:
+      return undefined;
+  }
+}
+
+function itemTitle(
+  itemType: CanonicalItemType,
+  item?: CodexLifecycleItem,
+  presentation: McpToolPresentation = {},
+): string | undefined {
   if (itemType === "mcp_tool_call" && item?.type === "mcpToolCall") {
+    if (normalizedMcpToolName(item.tool) === "js") {
+      const intentTitle = normalizeMcpIntentTitle(asUnknownRecord(item.arguments)?.title);
+      if (intentTitle) return intentTitle;
+    }
+    const computerUseTitle = computerUseToolTitle(item, presentation);
+    if (computerUseTitle) return computerUseTitle;
     return `${item.server} · ${item.tool}`;
   }
   switch (itemType) {
@@ -320,6 +788,36 @@ function itemDetail(itemType: CanonicalItemType, item: CodexLifecycleItem): stri
   return undefined;
 }
 
+// Codex sends `reason` only sometimes, and sends it blank rather than absent
+// often enough to matter, so an empty one must not outrank the paths below.
+function nonEmptyDetail(value: string | null | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed === undefined || trimmed.length === 0 ? undefined : trimmed;
+}
+
+// Keeps one oversized patch from pushing a wall of paths through every consumer
+// of the approval, while still saying how much it covers.
+const MAX_DESCRIBED_FILE_CHANGES = 20;
+
+// An apply-patch approval carries the edited paths as the keys of `fileChanges`.
+// Without them the approval card has nothing to show but its own title — the
+// command-execution branch already falls back to the command for the same reason.
+function describeFileChanges(
+  fileChanges: EffectCodexSchema.ServerRequest__ApplyPatchApprovalParams["fileChanges"] | undefined,
+): string | undefined {
+  if (fileChanges === undefined) return undefined;
+  const entries = Object.entries(fileChanges).toSorted(([left], [right]) =>
+    left.localeCompare(right),
+  );
+  if (entries.length === 0) return undefined;
+  const described = entries.slice(0, MAX_DESCRIBED_FILE_CHANGES).map(([path, change]) => {
+    const movePath = change.type === "update" ? change.move_path : undefined;
+    return movePath ? `${change.type} ${path} -> ${movePath}` : `${change.type} ${path}`;
+  });
+  const remaining = entries.length - described.length;
+  return remaining > 0 ? `${described.join("\n")}\n+${remaining} more` : described.join("\n");
+}
+
 function toRequestTypeFromMethod(method: string): CanonicalRequestType {
   switch (method) {
     case "item/commandExecution/requestApproval":
@@ -328,8 +826,8 @@ function toRequestTypeFromMethod(method: string): CanonicalRequestType {
       return "file_read_approval";
     case "item/fileChange/requestApproval":
       return "file_change_approval";
-    case "item/permissions/requestApproval":
-      return "permissions_approval";
+    case "mcpServer/elicitation/request":
+      return "mcp_elicitation_approval";
     case "applyPatchApproval":
       return "apply_patch_approval";
     case "execCommandApproval":
@@ -353,10 +851,8 @@ function toRequestTypeFromKind(kind: ProviderRequestKind | undefined): Canonical
       return "file_read_approval";
     case "file-change":
       return "file_change_approval";
-    case "permissions":
-      return "permissions_approval";
-    case "tool":
-      return "tool_approval";
+    case "mcp-elicitation":
+      return "mcp_elicitation_approval";
     default:
       return "unknown";
   }
@@ -457,61 +953,13 @@ function eventRawSource(event: ProviderEvent): NonNullable<ProviderRuntimeEvent[
   return event.kind === "request" ? "codex.app-server.request" : "codex.app-server.notification";
 }
 
-function originalCodexNotification(event: ProviderEvent): {
-  readonly method: string;
-  readonly params: unknown;
-} {
-  const payload = event.payload;
-  if (
-    event.method.startsWith("collabAgent/") &&
-    typeof payload === "object" &&
-    payload !== null &&
-    "wire" in payload
-  ) {
-    const wire = payload.wire;
-    if (
-      typeof wire === "object" &&
-      wire !== null &&
-      "method" in wire &&
-      typeof wire.method === "string" &&
-      "params" in wire
-    ) {
-      return { method: wire.method, params: wire.params };
-    }
-  }
-  return { method: event.method, params: payload ?? {} };
-}
-
 function providerRefsFromEvent(
   event: ProviderEvent,
 ): ProviderRuntimeEvent["providerRefs"] | undefined {
   const refs: Record<string, string> = {};
-  const wire = originalCodexNotification(event);
-  const params =
-    typeof wire.params === "object" && wire.params !== null
-      ? (wire.params as Record<string, unknown>)
-      : undefined;
-  const thread =
-    typeof params?.thread === "object" && params.thread !== null
-      ? (params.thread as Record<string, unknown>)
-      : undefined;
-  const turn =
-    typeof params?.turn === "object" && params.turn !== null
-      ? (params.turn as Record<string, unknown>)
-      : undefined;
-  const item =
-    typeof params?.item === "object" && params.item !== null
-      ? (params.item as Record<string, unknown>)
-      : undefined;
   if (event.turnId) refs.providerTurnId = event.turnId;
   if (event.itemId) refs.providerItemId = event.itemId;
   if (event.requestId) refs.providerRequestId = event.requestId;
-  const providerThreadId = params?.threadId ?? thread?.id;
-  const providerTurnId = params?.turnId ?? turn?.id;
-  const providerItemId = params?.itemId ?? item?.id;
-  if (typeof providerThreadId === "string") refs.providerThreadId = providerThreadId;
-  if (typeof providerTurnId === "string") refs.providerTurnId = providerTurnId;
-  if (typeof providerItemId === "string") refs.providerItemId = providerItemId;
 
   return Object.keys(refs).length > 0 ? (refs as ProviderRuntimeEvent["providerRefs"]) : undefined;
 }
@@ -521,7 +969,6 @@ function runtimeEventBase(
   canonicalThreadId: ThreadId,
 ): Omit<ProviderRuntimeEvent, "type" | "payload"> {
   const refs = providerRefsFromEvent(event);
-  const wire = originalCodexNotification(event);
   return {
     eventId: event.id,
     provider: event.provider,
@@ -533,8 +980,8 @@ function runtimeEventBase(
     ...(refs ? { providerRefs: refs } : {}),
     raw: {
       source: eventRawSource(event),
-      method: wire.method,
-      payload: wire.params,
+      method: event.method,
+      payload: event.payload ?? {},
     },
   };
 }
@@ -557,6 +1004,8 @@ function mapItemLifecycle(
   }
 
   const detail = itemDetail(itemType, item);
+  const toolPresentation = item.type === "mcpToolCall" ? mcpToolPresentation(item) : {};
+  const title = itemTitle(itemType, item, toolPresentation);
   const status =
     lifecycle === "item.started"
       ? "inProgress"
@@ -572,8 +1021,9 @@ function mapItemLifecycle(
     payload: {
       itemType,
       ...(status ? { status } : {}),
-      ...(itemTitle(itemType, item) ? { title: itemTitle(itemType, item) } : {}),
+      ...(title ? { title } : {}),
       ...(detail ? { detail } : {}),
+      ...toolPresentation,
       ...(event.payload !== undefined ? { data: event.payload } : {}),
     },
   };
@@ -611,16 +1061,17 @@ function mapCollabAgentEvent(
   // finding: progress rows renamed math_one to its UUID).
   const knownName = nickname ?? pathLeaf;
   const title = knownName ?? agentThreadId;
+  const model = typeof payload.model === "string" ? payload.model.trim() : "";
+  const effort = typeof payload.effort === "string" ? payload.effort.trim() : "";
   // Identity repeated on every status patch so rows are self-describing when
   // the start row ages out of activity retention (review finding: a
   // reconstructed agent had a UUID name and no role/path).
-  const statusLinkage = {
+  const linkage = {
     role,
     ...(knownName ? { title: knownName } : {}),
+    ...(model ? { model } : {}),
+    ...(effort ? { effort } : {}),
     ...(agentPath ? { agentPath } : {}),
-    ...(typeof payload.parentThreadId === "string"
-      ? { parentAgentId: payload.parentThreadId }
-      : {}),
     timelineBypass: true,
   } as const;
 
@@ -634,13 +1085,19 @@ function mapCollabAgentEvent(
             taskId,
             description: title,
             title,
-            role,
-            ...(agentPath ? { agentPath } : {}),
+            ...linkage,
             ...(typeof payload.parentThreadId === "string"
               ? { parentAgentId: payload.parentThreadId }
               : {}),
-            timelineBypass: true,
           },
+        },
+      ];
+    case "collabAgent/metadataUpdated":
+      return [
+        {
+          ...base,
+          type: "task.updated",
+          payload: { taskId, ...linkage },
         },
       ];
     case "collabAgent/activity": {
@@ -650,7 +1107,7 @@ function mapCollabAgentEvent(
           {
             ...base,
             type: "task.updated",
-            payload: { taskId, status: "interrupted", ...statusLinkage },
+            payload: { taskId, status: "interrupted", ...linkage },
           },
         ];
       }
@@ -667,12 +1124,7 @@ function mapCollabAgentEvent(
               taskId,
               description: title,
               title,
-              role,
-              ...(agentPath ? { agentPath } : {}),
-              ...(typeof payload.parentThreadId === "string"
-                ? { parentAgentId: payload.parentThreadId }
-                : {}),
-              timelineBypass: true,
+              ...linkage,
             },
           },
         ];
@@ -686,7 +1138,7 @@ function mapCollabAgentEvent(
         {
           ...base,
           type: "task.updated",
-          payload: { taskId, status: "running", ...statusLinkage },
+          payload: { taskId, status: "running", ...linkage },
         },
       ];
     case "collabAgent/turnCompleted": {
@@ -696,77 +1148,17 @@ function mapCollabAgentEvent(
           ? (payload.turn as Record<string, unknown>)
           : undefined;
       const turnStatus = typeof turn?.status === "string" ? turn.status : undefined;
-      const lastMessage = Array.isArray(turn?.items)
-        ? (turn.items.findLast(
-            (item: unknown) =>
-              typeof item === "object" &&
-              item !== null &&
-              "type" in item &&
-              item.type === "agentMessage" &&
-              "text" in item &&
-              typeof item.text === "string",
-          ) as { text: string } | undefined)
-        : undefined;
-      const summary = lastMessage ? trimText(lastMessage.text)?.slice(-16_000) : undefined;
-      const turnError =
-        typeof turn?.error === "object" && turn.error !== null
-          ? (turn.error as Record<string, unknown>)
-          : undefined;
       const status =
         turnStatus === "failed"
           ? ("failed" as const)
           : turnStatus === "interrupted"
             ? ("interrupted" as const)
             : ("idle" as const);
-      const completedAt =
-        typeof turn?.completedAt === "number"
-          ? DateTime.make(turn.completedAt * 1000).pipe(
-              Option.map(DateTime.formatIso),
-              Option.getOrUndefined,
-            )
-          : undefined;
-      const errorMessage =
-        typeof turnError?.message === "string"
-          ? trimText(turnError.message)?.slice(-16_000)
-          : undefined;
-      const lastTurn: RuntimeTaskLastTurn | undefined =
-        typeof turn?.id === "string" &&
-        turn.id.trim().length > 0 &&
-        (turnStatus === "completed" || turnStatus === "failed" || turnStatus === "interrupted")
-          ? {
-              turnId: turn.id,
-              outcome: turnStatus,
-              ...(completedAt ? { completedAt } : {}),
-              ...(typeof turn.durationMs === "number" &&
-              Number.isSafeInteger(turn.durationMs) &&
-              turn.durationMs >= 0
-                ? { durationMs: turn.durationMs }
-                : {}),
-              ...(summary ? { result: summary } : {}),
-              ...(errorMessage ? { error: errorMessage } : {}),
-            }
-          : undefined;
       return [
-        ...(summary
-          ? [
-              {
-                ...base,
-                eventId: EventId.make(`${base.eventId}:result`),
-                type: "task.progress" as const,
-                payload: { taskId, description: title, summary, ...statusLinkage },
-              },
-            ]
-          : []),
         {
           ...base,
           type: "task.updated",
-          payload: {
-            taskId,
-            status,
-            ...(lastTurn ? { lastTurn } : {}),
-            ...(typeof turnError?.message === "string" ? { error: turnError.message } : {}),
-            ...statusLinkage,
-          },
+          payload: { taskId, status, ...linkage },
         },
       ];
     }
@@ -782,7 +1174,7 @@ function mapCollabAgentEvent(
           {
             ...base,
             type: "task.updated",
-            payload: { taskId, status: "failed", ...statusLinkage },
+            payload: { taskId, status: "failed", ...linkage },
           },
         ];
       }
@@ -795,7 +1187,7 @@ function mapCollabAgentEvent(
           {
             ...base,
             type: "task.updated",
-            payload: { taskId, status: waiting ? "waiting" : "running", ...statusLinkage },
+            payload: { taskId, status: waiting ? "waiting" : "running", ...linkage },
           },
         ];
       }
@@ -804,7 +1196,7 @@ function mapCollabAgentEvent(
           {
             ...base,
             type: "task.updated",
-            payload: { taskId, status: "idle", ...statusLinkage },
+            payload: { taskId, status: "idle", ...linkage },
           },
         ];
       }
@@ -851,9 +1243,8 @@ function mapCollabAgentEvent(
           payload: {
             taskId,
             description: title,
-            ...(knownName ? { title: knownName } : {}),
+            ...linkage,
             typedUsage,
-            timelineBypass: true,
           },
         },
       ];
@@ -871,12 +1262,11 @@ function mapCollabAgentEvent(
       // this boundary (synthetic event payload), so read best-effort fields
       // rather than force a schema decode.
       const looseSummary =
-        (typeof item?.text === "string" ? trimText(item.text) : undefined) ??
         (typeof item?.command === "string" ? item.command : undefined) ??
         (typeof item?.title === "string" ? item.title : undefined) ??
         (typeof item?.query === "string" ? item.query : undefined);
       const canonical = toCanonicalItemType(itemTypeRaw);
-      const summary = looseSummary?.slice(-16_000) ?? canonical.replaceAll("_", " ");
+      const summary = looseSummary ?? canonical.replaceAll("_", " ");
       return [
         {
           ...base,
@@ -884,45 +1274,7 @@ function mapCollabAgentEvent(
           payload: {
             taskId,
             description: title,
-            ...(knownName ? { title: knownName } : {}),
-            summary,
-            ...statusLinkage,
-          },
-        },
-      ];
-    }
-    case "collabAgent/notification": {
-      const wire = originalCodexNotification(event);
-      const params =
-        typeof wire.params === "object" && wire.params !== null
-          ? (wire.params as Record<string, unknown>)
-          : undefined;
-      const summary =
-        typeof payload.summary === "string"
-          ? trimText(payload.summary)
-          : typeof params?.delta === "string"
-            ? trimText(params.delta)
-            : undefined;
-      const settings =
-        typeof params?.threadSettings === "object" && params.threadSettings !== null
-          ? (params.threadSettings as Record<string, unknown>)
-          : undefined;
-      const metadata = {
-        taskId,
-        description: title,
-        ...statusLinkage,
-        ...(typeof settings?.model === "string" ? { model: settings.model } : {}),
-        ...(typeof settings?.effort === "string" ? { effort: settings.effort } : {}),
-      };
-      if (!summary) {
-        return [{ ...base, type: "task.updated", payload: metadata }];
-      }
-      return [
-        {
-          ...base,
-          type: "task.progress",
-          payload: {
-            ...metadata,
+            ...linkage,
             summary,
           },
         },
@@ -933,7 +1285,7 @@ function mapCollabAgentEvent(
         {
           ...base,
           type: "task.updated",
-          payload: { taskId, ...statusLinkage },
+          payload: { taskId, status: "interrupted", ...linkage },
         },
       ];
     default:
@@ -945,7 +1297,6 @@ function mapToRuntimeEvents(
   event: ProviderEvent,
   canonicalThreadId: ThreadId,
 ): ReadonlyArray<ProviderRuntimeEvent> {
-  if (event.method === "codex/rawNotification") return [];
   if (event.kind === "notification" && event.method.startsWith("collabAgent/")) {
     return mapCollabAgentEvent(event, canonicalThreadId);
   }
@@ -986,6 +1337,11 @@ function mapToRuntimeEvents(
       ];
     }
 
+    const elicitation =
+      event.method === "mcpServer/elicitation/request"
+        ? readPayload(EffectCodexSchema.McpServerElicitationRequestParams, event.payload)
+        : undefined;
+    const elicitationApproval = elicitation ? describeMcpElicitation(elicitation) : undefined;
     const detail = (() => {
       switch (event.method) {
         case "item/commandExecution/requestApproval": {
@@ -1000,28 +1356,22 @@ function mapToRuntimeEvents(
             EffectCodexSchema.ServerRequest__FileChangeRequestApprovalParams,
             event.payload,
           );
-          return event.message ?? payload?.reason ?? undefined;
+          // These params carry no path of their own, only the root the agent
+          // wants to write under.
+          return nonEmptyDetail(payload?.reason) ?? nonEmptyDetail(payload?.grantRoot);
         }
-        case "item/permissions/requestApproval": {
-          const payload = readPayload(
-            EffectCodexSchema.ServerRequest__PermissionsRequestApprovalParams,
-            event.payload,
-          );
-          return payload?.reason ?? undefined;
-        }
-        case "mcpServer/elicitation/request": {
-          const payload = readPayload(
-            EffectCodexSchema.ServerRequest__McpServerElicitationRequestParams,
-            event.payload,
-          );
-          return payload?.message ?? undefined;
-        }
+        case "mcpServer/elicitation/request":
+          return elicitation?.message;
         case "applyPatchApproval": {
           const payload = readPayload(
             EffectCodexSchema.ServerRequest__ApplyPatchApprovalParams,
             event.payload,
           );
-          return payload?.reason ?? undefined;
+          return (
+            nonEmptyDetail(payload?.reason) ??
+            describeFileChanges(payload?.fileChanges) ??
+            nonEmptyDetail(payload?.grantRoot)
+          );
         }
         case "execCommandApproval": {
           const payload = readPayload(
@@ -1047,10 +1397,14 @@ function mapToRuntimeEvents(
         ...runtimeEventBase(event, canonicalThreadId),
         type: "request.opened",
         payload: {
-          requestType: event.requestKind
-            ? toRequestTypeFromKind(event.requestKind)
-            : toRequestTypeFromMethod(event.method),
+          requestType: toRequestTypeFromMethod(event.method),
           ...(detail ? { detail } : {}),
+          ...(elicitationApproval
+            ? {
+                appName: elicitationApproval.appName,
+                options: elicitationApproval.options,
+              }
+            : {}),
           ...(event.payload !== undefined ? { args: event.payload } : {}),
         },
       },
@@ -1312,6 +1666,27 @@ function mapToRuntimeEvents(
     if (!item) {
       return [];
     }
+    if (item.type === "agentMessage" && item.delivery === "async" && item.questions?.length) {
+      return [
+        {
+          ...runtimeEventBase(event, canonicalThreadId),
+          type: "user-input.requested",
+          requestId: RuntimeRequestId.make(`codex-async:${canonicalThreadId}:${item.id}`),
+          eventId: EventId.make(`codex-async:${canonicalThreadId}:${item.id}`),
+          payload: {
+            responseMode: "message",
+            questions: item.questions.map((question, index) => ({
+              id: String(index),
+              header: "Question",
+              question: question.title,
+              options: (question.options ?? []).map((label) => ({ label, description: "" })),
+              allowCustomAnswer: true,
+              multiSelect: false,
+            })),
+          },
+        },
+      ];
+    }
     const itemType = toCanonicalItemType(item.type);
     if (itemType === "plan") {
       const detail = itemDetail(itemType, item);
@@ -1329,7 +1704,18 @@ function mapToRuntimeEvents(
       ];
     }
     const completed = mapItemLifecycle(event, canonicalThreadId, "item.completed");
-    return completed ? [completed] : [];
+    if (!completed || itemType !== "context_compaction") {
+      return completed ? [completed] : [];
+    }
+    return [
+      completed,
+      {
+        ...runtimeEventBase(event, canonicalThreadId),
+        eventId: EventId.make(`${event.id}:thread-compacted`),
+        type: "thread.state.changed",
+        payload: { state: "compacted" },
+      },
+    ];
   }
 
   if (
@@ -1592,16 +1978,19 @@ function mapToRuntimeEvents(
   }
 
   if (event.method === "account/rateLimits/updated") {
-    if (!readPayload(EffectCodexSchema.V2AccountRateLimitsUpdatedNotification, event.payload)) {
+    const payload = readPayload(
+      EffectCodexSchema.V2AccountRateLimitsUpdatedNotification,
+      event.payload,
+    );
+    const limits = payload ? codexRateLimitsToUpdate(payload.rateLimits) : undefined;
+    if (!limits) {
       return [];
     }
     return [
       {
         type: "account.rate-limits.updated",
         ...runtimeEventBase(event, canonicalThreadId),
-        payload: {
-          rateLimits: event.payload ?? {},
-        },
+        payload: { limits },
       },
     ];
   }
@@ -1840,7 +2229,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
   const sessions = new Map<ThreadId, CodexAdapterSessionContext>();
-  const appServerTransport = codexAppServerTransport(codexConfig);
 
   const startSession: CodexAdapterShape["startSession"] = (input) =>
     Effect.scoped(
@@ -1862,100 +2250,40 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           input.modelSelection?.instanceId === boundInstanceId
             ? getCodexServiceTierOptionValue(input.modelSelection)
             : undefined;
-        const computerControlMode =
-          input.modelSelection?.instanceId === boundInstanceId
-            ? normalizeCodexComputerControlMode(
-                getModelSelectionStringOptionValue(
-                  input.modelSelection,
-                  CODEX_COMPUTER_CONTROL_OPTION_ID,
-                ),
-              )
-            : DEFAULT_CODEX_COMPUTER_CONTROL_MODE;
-        const workerSession = isWorkerLinkedProviderThreadId(input.threadId);
-        const t3WorkersSettingEnabled =
-          !workerSession && (yield* options?.enableT3Workers ?? Effect.succeed(false));
-        if (input.subagentBackend === "native-v1-control" && !t3WorkersSettingEnabled) {
-          return yield* new ProviderAdapterValidationError({
-            provider: PROVIDER,
-            operation: "startSession",
-            issue: "Native V1 control requires T3 Workers to be enabled in settings.",
-          });
-        }
-        const mcpPreflight = options?.preflightMcpServers
-          ? yield* options.preflightMcpServers({
-              homePath: codexConfig.homePath,
-              cwd: input.cwd ?? process.cwd(),
-              ...(options.environment !== undefined ? { environment: options.environment } : {}),
-              appServerArgs: codexLaunchArgv(
-                resolveCodexLaunchArgs(codexConfig.launchArgs, options.environment),
-              ),
-            })
-          : ({ disabledServerNames: [], unavailable: [] } satisfies CodexMcpPreflightResult);
-        for (const diagnostic of mcpPreflight.unavailable) {
-          yield* Effect.logWarning("codex.mcp.unavailable", diagnostic);
-        }
         const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
-        const inheritedMcpOverrides = mcpPreflight.disabledServerNames.map(codexMcpDisableOverride);
-        const t3McpArgs = mcpSession
-          ? [
-              "-c",
-              `mcp_servers.t3-code.url=${mcpSession.endpoint}`,
-              "-c",
-              'mcp_servers.t3-code.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
-            ]
-          : [];
         const runtimeInput: CodexSessionRuntimeOptions = {
           threadId: input.threadId,
-          onTurnServiceTier: (observation) =>
-            fileSystem
-              .writeFileString(
-                `${serverConfig.stateDir}/${CODEX_TIER_JOURNAL}`,
-                `${JSON.stringify(observation)}\n`,
-                { flag: "a" },
-              )
-              .pipe(
-                Effect.catchCause((cause) =>
-                  Effect.logWarning("Could not record Codex service tier", { cause }),
-                ),
-              ),
           providerInstanceId: boundInstanceId,
           cwd: input.cwd ?? process.cwd(),
           binaryPath: codexConfig.binaryPath,
           launchArgs: resolveCodexLaunchArgs(codexConfig.launchArgs, options?.environment),
-          ...(appServerTransport === "desktop-daemon" ? { appServerTransport } : {}),
+          appServerTransport: codexAppServerTransport(codexConfig),
           ...(options?.environment ? { environment: options.environment } : {}),
           ...(codexConfig.homePath ? { homePath: codexConfig.homePath } : {}),
           ...(isCodexResumeCursorSchema(input.resumeCursor)
             ? { resumeCursor: input.resumeCursor }
             : {}),
           runtimeMode: input.runtimeMode,
-          ...(workerSession ? { workerSession: true } : {}),
           ...(input.modelSelection?.instanceId === boundInstanceId
             ? { model: input.modelSelection.model }
             : {}),
           ...(serviceTier ? { serviceTier } : {}),
-          computerControlMode,
-          ...(input.subagentBackend !== undefined
-            ? { subagentBackend: input.subagentBackend }
-            : {}),
-          ...(t3WorkersSettingEnabled ? { enableT3Workers: true } : {}),
           ...(mcpSession
             ? {
                 environment: {
                   ...(options?.environment ?? process.env),
                   T3_MCP_BEARER_TOKEN: mcpSession.authorizationHeader.replace(/^Bearer\s+/, ""),
                 },
-              }
-            : {}),
-          ...(inheritedMcpOverrides.length > 0 || t3McpArgs.length > 0
-            ? {
                 appServerArgs: [
-                  ...inheritedMcpOverrides.flatMap((override) => ["-c", override]),
-                  ...t3McpArgs,
+                  "-c",
+                  `mcp_servers.t3-code.url=${mcpSession.endpoint}`,
+                  "-c",
+                  'mcp_servers.t3-code.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
                 ],
               }
             : {}),
         };
+        const turnTokenUsage = makeCodexTurnTokenUsageState();
         const sessionScope = yield* Scope.make("sequential");
         let sessionScopeTransferred = false;
         yield* Effect.addFinalizer(() =>
@@ -1984,7 +2312,64 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>
           Effect.gen(function* () {
             yield* writeNativeEvent(event);
-            const runtimeEvents = mapToRuntimeEvents(event, event.threadId);
+            if (event.method === "turn/started" && event.turnId) {
+              if (turnTokenUsage.activeTurnId !== event.turnId) {
+                turnTokenUsage.byTurnId.clear();
+                turnTokenUsage.activeTurnId = event.turnId;
+                getCodexTurnAccumulator(turnTokenUsage, event.turnId);
+              }
+            } else if (event.method === "thread/tokenUsage/updated") {
+              const payload = readPayload(
+                EffectCodexSchema.V2ThreadTokenUsageUpdatedNotification,
+                event.payload,
+              );
+              if (payload) {
+                accumulateCodexTurnTokenUsage(turnTokenUsage, payload.turnId, payload.tokenUsage);
+              }
+            } else if (turnTokenUsage.activeTurnId) {
+              const collabPayload =
+                typeof event.payload === "object" && event.payload !== null
+                  ? (event.payload as Record<string, unknown>)
+                  : undefined;
+              const isCollabSpawn =
+                event.method === "collabAgent/started" ||
+                (event.method === "collabAgent/activity" &&
+                  collabPayload?.activityKind === "started");
+              if (isCollabSpawn && event.turnId === turnTokenUsage.activeTurnId) {
+                getCodexTurnAccumulator(turnTokenUsage, turnTokenUsage.activeTurnId).hasSubagents =
+                  true;
+              }
+            }
+
+            const runtimeEvents = mapToRuntimeEvents(event, event.threadId).map((runtimeEvent) => {
+              if (runtimeEvent.type === "turn.completed" && runtimeEvent.turnId) {
+                return {
+                  ...runtimeEvent,
+                  payload: {
+                    ...runtimeEvent.payload,
+                    tokenUsage: completeCodexTurnTokenUsage(
+                      turnTokenUsage,
+                      String(runtimeEvent.turnId),
+                      runtimeEvent.payload.state === "completed",
+                    ),
+                  },
+                } satisfies ProviderRuntimeEvent;
+              }
+              if (runtimeEvent.type === "turn.aborted" && runtimeEvent.turnId) {
+                return {
+                  ...runtimeEvent,
+                  payload: {
+                    ...runtimeEvent.payload,
+                    tokenUsage: completeCodexTurnTokenUsage(
+                      turnTokenUsage,
+                      String(runtimeEvent.turnId),
+                      false,
+                    ),
+                  },
+                } satisfies ProviderRuntimeEvent;
+              }
+              return runtimeEvent;
+            });
             if (runtimeEvents.length === 0) {
               yield* Effect.logDebug("ignoring unhandled Codex provider event", {
                 method: event.method,
@@ -2022,8 +2407,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           scope: sessionScope,
           runtime,
           eventFiber,
-          ...(input.subagentBackend !== undefined ? { launchBackend: input.subagentBackend } : {}),
-          startInput: input,
+          turnTokenUsage,
           stopped: false,
         });
         sessionScopeTransferred = true;
@@ -2065,60 +2449,16 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   });
 
   const sendTurn: CodexAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
+    // Codex ingests images only. Anything else would be base64-encoded as an
+    // image and rejected or misread; generic files reach the agent through the
+    // path line ProviderService puts in the prompt.
     const codexAttachments = yield* Effect.forEach(
-      input.attachments ?? [],
+      (input.attachments ?? []).filter((attachment) => attachment.type === "image"),
       (attachment) => resolveAttachment(input, attachment),
       { concurrency: 1 },
     );
 
-    if (input.expectedTurnId !== undefined) {
-      const session = yield* requireSession(input.threadId);
-      return yield* session.runtime
-        .sendTurn({
-          expectedTurnId: input.expectedTurnId,
-          ...(input.input !== undefined ? { input: input.input } : {}),
-          ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
-        })
-        .pipe(
-          Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/steer", cause)),
-        );
-    }
-
-    const t3WorkersSettingEnabled =
-      !isWorkerLinkedProviderThreadId(input.threadId) &&
-      (yield* options?.enableT3Workers ?? Effect.succeed(false));
-    if (input.subagentBackend === "native-v1-control" && !t3WorkersSettingEnabled) {
-      return yield* new ProviderAdapterValidationError({
-        provider: PROVIDER,
-        operation: "sendTurn",
-        issue: "Native V1 control requires T3 Workers to be enabled in settings.",
-      });
-    }
-    let session = yield* requireSession(input.threadId);
-    if (input.subagentBackend !== undefined && session.launchBackend !== input.subagentBackend) {
-      const currentProviderSession = yield* session.runtime.getSession.pipe(
-        Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "session/read", cause)),
-      );
-      if (!isCodexResumeCursorSchema(currentProviderSession.resumeCursor)) {
-        return yield* new ProviderAdapterValidationError({
-          provider: PROVIDER,
-          operation: "sendTurn",
-          issue:
-            "Cannot switch the sub-agent backend because the active Codex session has no resumable thread cursor.",
-        });
-      }
-
-      yield* startSession({
-        ...session.startInput,
-        resumeCursor: currentProviderSession.resumeCursor,
-        subagentBackend: input.subagentBackend,
-        ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
-      });
-      session = yield* requireSession(input.threadId);
-    }
-    const enableT3Workers =
-      t3WorkersSettingEnabled &&
-      (input.subagentBackend === undefined || input.subagentBackend === "native-v1-control");
+    const session = yield* requireSession(input.threadId);
     const reasoningEffort =
       input.modelSelection?.instanceId === boundInstanceId
         ? getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort")
@@ -2127,15 +2467,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       input.modelSelection?.instanceId === boundInstanceId
         ? getCodexServiceTierOptionValue(input.modelSelection)
         : undefined;
-    const computerControlMode =
-      input.modelSelection?.instanceId === boundInstanceId
-        ? normalizeCodexComputerControlMode(
-            getModelSelectionStringOptionValue(
-              input.modelSelection,
-              CODEX_COMPUTER_CONTROL_OPTION_ID,
-            ),
-          )
-        : DEFAULT_CODEX_COMPUTER_CONTROL_MODE;
     return yield* session.runtime
       .sendTurn({
         ...(input.input !== undefined ? { input: input.input } : {}),
@@ -2148,31 +2479,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             }
           : {}),
         ...(serviceTier ? { serviceTier } : {}),
-        computerControlMode,
         ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
-        ...(input.subagentBackend !== undefined ? { subagentBackend: input.subagentBackend } : {}),
-        ...(enableT3Workers ? { enableT3Workers: true } : {}),
         ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
       })
       .pipe(Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/start", cause)));
   });
-
-  const createForkResumeCursor: NonNullable<CodexAdapterShape["createForkResumeCursor"]> =
-    Effect.fn("createForkResumeCursor")(function* (sourceThreadId, lastTurnId) {
-      const source = yield* requireSession(sourceThreadId);
-      const sourceSession = yield* source.runtime.getSession;
-      if (!isCodexResumeCursorSchema(sourceSession.resumeCursor)) {
-        return yield* new ProviderAdapterValidationError({
-          provider: PROVIDER,
-          operation: "createForkResumeCursor",
-          issue: `Source thread '${sourceThreadId}' has no resumable Codex thread cursor.`,
-        });
-      }
-      return {
-        threadId: sourceSession.resumeCursor.threadId,
-        forkLastTurnId: String(lastTurnId),
-      } satisfies CodexResumeCursor;
-    });
 
   const requireSession = Effect.fn("requireSession")(function* (threadId: ThreadId) {
     const session = sessions.get(threadId);
@@ -2194,6 +2505,15 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           : mapCodexRuntimeError(threadId, "turn/interrupt", cause),
       ),
     );
+
+  const compactThread: NonNullable<CodexAdapterShape["compactThread"]> = Effect.fn("compactThread")(
+    function* (threadId) {
+      const session = yield* requireSession(threadId);
+      yield* session.runtime.compactThread.pipe(
+        Effect.mapError((cause) => mapCodexRuntimeError(threadId, "thread/compact/start", cause)),
+      );
+    },
+  );
 
   const readThread: CodexAdapterShape["readThread"] = (threadId) =>
     requireSession(threadId).pipe(
@@ -2221,7 +2541,17 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     }
 
     return requireSession(threadId).pipe(
-      Effect.flatMap((session) => session.runtime.rollbackThread(numTurns)),
+      Effect.flatMap((session) =>
+        session.runtime.rollbackThread(numTurns).pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              session.turnTokenUsage.baseline = undefined;
+              session.turnTokenUsage.activeTurnId = undefined;
+              session.turnTokenUsage.byTurnId.clear();
+            }),
+          ),
+        ),
+      ),
       Effect.mapError((cause) =>
         cause._tag === "ProviderAdapterSessionNotFoundError"
           ? cause
@@ -2326,10 +2656,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     provider: PROVIDER,
     capabilities: {
       sessionModelSwitch: "in-session",
+      promptlessTurnContinuation: true,
     },
     startSession,
-    createForkResumeCursor,
     sendTurn,
+    compactThread,
     interruptTurn,
     readThread,
     rollbackThread,

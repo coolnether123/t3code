@@ -29,6 +29,8 @@ export interface CodexAppServerClientOptions {
     event: CodexProtocol.CodexAppServerProtocolLogEvent,
   ) => Effect.Effect<void, never>;
   readonly onStderr?: (chunk: string) => Effect.Effect<void, never>;
+  /** Called once when the app-server input stream terminates. */
+  readonly onTermination?: (error: CodexError.CodexAppServerError) => Effect.Effect<void, never>;
 }
 
 interface CodexAppServerClientRaw {
@@ -197,6 +199,7 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
     ...(options.logIncoming !== undefined ? { logIncoming: options.logIncoming } : {}),
     ...(options.logOutgoing !== undefined ? { logOutgoing: options.logOutgoing } : {}),
     ...(options.logger ? { logger: options.logger } : {}),
+    ...(options.onTermination ? { onTermination: options.onTermination } : {}),
     onNotification: dispatchNotification,
     onRequest: dispatchRequest,
   });

@@ -33,8 +33,11 @@ else
   open -a ChatGPT
 fi
 
-echo "Starting the managed Codex daemon with Remote Control enabled..."
-"$codex_binary" remote-control start --json
+echo "Bootstrapping the managed Codex app-server daemon..."
+"$codex_binary" app-server daemon bootstrap
+
+echo "Checking the managed Codex app-server daemon..."
+"$codex_binary" app-server daemon version
 
 echo
 echo "The host bridge is ready. In T3 Code, open Settings > Providers > Codex"

@@ -21,6 +21,7 @@ import {
   type UsageProviderKind,
   type UsageQuotaCost,
   type UsageSource,
+  type UsagePricing,
   type UsageSummary,
   type UsageSummaryInput,
   UsageReadError,
@@ -29,6 +30,7 @@ import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -41,6 +43,7 @@ import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawne
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import { ServerConfig } from "../config.ts";
+import { expandHomePath } from "../pathExpansion.ts";
 import { writeFileStringAtomically } from "../atomicWrite.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
@@ -49,7 +52,7 @@ import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { codexLaunchArgv, resolveCodexLaunchArgs } from "../provider/Layers/codexLaunchArgs.ts";
 import { readCodexQuotaSample } from "./CodexQuotaCollector.ts";
 import { UsageAggregator } from "./usageAggregation.ts";
-import { parseRateTable, type RateTable } from "./usagePricing.ts";
+import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
 import {
   listTranscriptFiles,
   readDirectoryVolumeId,
@@ -89,6 +92,7 @@ const LITELLM_RATES_URL =
 
 /** Rates move rarely; a day-old table keeps the page working offline. */
 const RATES_TTL_MS = 24 * 60 * 60 * 1000;
+const RATES_REFRESH_FLOOR_MS = 60 * 1000;
 
 /**
  * Files are filtered by mtime before opening. The slack covers a session whose
@@ -175,6 +179,7 @@ export class UsageService extends Context.Service<
   UsageService,
   {
     readonly readSummary: (input: UsageSummaryInput) => Effect.Effect<UsageSummary, UsageReadError>;
+    readonly refreshRates: Effect.Effect<UsagePricing>;
   }
 >()("t3/usage/UsageService") {}
 
@@ -199,6 +204,12 @@ export const layerTest = Layer.succeed(
         },
         scanDurationMs: 0,
       }),
+    refreshRates: Effect.succeed({
+      status: "unavailable",
+      source: LITELLM_RATES_URL,
+      fetchedAt: null,
+      knownModels: 0,
+    }),
   }),
 );
 
@@ -211,7 +222,6 @@ export const make = Effect.gen(function* () {
   const hostEnvironment = yield* HostProcessEnvironment;
   const hostPlatform = yield* HostProcessPlatform;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const scanSemaphore = yield* Semaphore.make(1);
   const macQuotaCollectionSemaphore = yield* Semaphore.make(1);
 
   const fileCache: ScanCache = new Map();
@@ -227,16 +237,26 @@ export const make = Effect.gen(function* () {
   let lastMacQuotaCollectionAtMs = 0;
   let rates: RateTable = new Map();
   let ratesFetchedAtMs: number | null = null;
-  let ratesStatus: UsageSummary["pricing"]["status"] = "unavailable";
+  let ratesStatus: UsagePricing["status"] = "unavailable";
+  const ratesLock = yield* Semaphore.make(1);
+
+  const pricing = (): UsagePricing => ({
+    status: ratesStatus,
+    source: LITELLM_RATES_URL,
+    fetchedAt:
+      ratesFetchedAtMs === null ? null : DateTime.formatIso(DateTime.makeUnsafe(ratesFetchedAtMs)),
+    knownModels: rates.size,
+  });
 
   /**
    * Loads the LiteLLM rate table, preferring a fresh copy and falling back to
    * the on-disk snapshot. With neither, every model reports as unpriced rather
    * than the page failing.
    */
-  const ensureRates = Effect.fn("UsageService.ensureRates")(function* () {
+  const loadRates = Effect.fn("UsageService.loadRates")(function* (force: boolean) {
     const now = yield* Clock.currentTimeMillis;
-    if (ratesFetchedAtMs !== null && now - ratesFetchedAtMs < RATES_TTL_MS) return;
+    const maxAgeMs = force ? RATES_REFRESH_FLOOR_MS : RATES_TTL_MS;
+    if (ratesFetchedAtMs !== null && now - ratesFetchedAtMs < maxAgeMs) return;
 
     if (ratesFetchedAtMs === null) {
       const fromDisk = yield* fileSystem.readFileString(ratesCachePath).pipe(
@@ -249,7 +269,7 @@ export const make = Effect.gen(function* () {
           rates = parsed;
           ratesFetchedAtMs = fromDisk.fetchedAtMs;
           ratesStatus = "cached";
-          if (now - fromDisk.fetchedAtMs < RATES_TTL_MS) return;
+          if (now - fromDisk.fetchedAtMs < maxAgeMs) return;
         }
       }
     }
@@ -280,6 +300,12 @@ export const make = Effect.gen(function* () {
     );
   });
 
+  const ensureRates = (force = false) => ratesLock.withPermit(loadRates(force));
+  const refreshRates = ensureRates(true).pipe(
+    Effect.map(pricing),
+    Effect.withSpan("UsageService.refreshRates"),
+  );
+
   /**
    * Claude's config dir is the home itself when overridden, but a default
    * install nests transcripts under `~/.claude/projects`. Probe both.
@@ -293,30 +319,32 @@ export const make = Effect.gen(function* () {
       return nestedExists ? nested : path.join(homePath, "projects");
     });
 
-  /** Resolves the transcript directory for each provider. */
-  const resolveTranscriptDirs = Effect.fn("UsageService.resolveTranscriptDirs")(function* () {
-    // A settings failure must surface as an error: swallowing it here would
-    // present "zero usage from every provider" as a valid answer.
-    const settings = yield* settingsService.getSettings.pipe(
-      Effect.catchCause(
-        (cause) =>
-          new UsageReadError({
-            reason: "scanFailed",
-            // Bounded description; the squashed failure travels as the cause.
-            // Squashed, not the Cause tree: a full tree in a Defect field is
-            // the unbounded wire payload the bounded detail exists to avoid.
-            detail: "Server settings could not be read.",
-            cause: Cause.squash(cause),
-          }),
-      ),
-    );
+  const readSettings = settingsService.getSettings.pipe(
+    Effect.catchCause(
+      (cause) =>
+        new UsageReadError({
+          reason: "scanFailed",
+          detail: "Server settings could not be read.",
+          cause: Cause.squash(cause),
+        }),
+    ),
+  );
 
+  /** Resolves the transcript directory for each provider. */
+  const resolveTranscriptDirs = Effect.fn("UsageService.resolveTranscriptDirs")(function* (
+    settings: ServerSettingsValue,
+  ) {
     const claudeHome = yield* resolveClaudeHomePath(settings.providers.claudeAgent);
     const claudeDir = yield* resolveClaudeTranscriptDir(claudeHome);
     const codexLayout = yield* resolveCodexHomeLayout(settings.providers.codex);
     const codexHome = codexLayout.sharedHomePath;
     const geminiHome = path.join(NodeOS.homedir(), ".gemini");
     const openCodeHome = path.join(NodeOS.homedir(), ".local", "share", "opencode");
+    const grokHomeEnv = hostEnvironment["GROK_HOME"]?.trim() ?? "";
+    const grokHome =
+      grokHomeEnv.length > 0
+        ? path.resolve(expandHomePath(grokHomeEnv))
+        : path.join(NodeOS.homedir(), ".grok");
     const imports = yield* fileSystem.readFileString(usageImportsPath).pipe(
       Effect.flatMap((raw) => decodeUsageImports(raw)),
       Effect.orElseSucceed(() => null),
@@ -329,6 +357,11 @@ export const make = Effect.gen(function* () {
       { provider: "gemini" as const, dir: path.join(geminiHome, "tmp") },
       { provider: "gemini" as const, dir: path.join(geminiHome, "antigravity", "brain") },
       { provider: "opencode" as const, dir: openCodeHome },
+      {
+        provider: "grok" as const,
+        dir: path.join(grokHome, "sessions"),
+        fileName: "updates.jsonl",
+      },
       ...(imports?.sources ?? [])
         .filter((source) => source.path.trim().length > 0)
         .map((source) => ({ provider: source.provider, dir: path.resolve(source.path) })),
@@ -408,10 +441,10 @@ export const make = Effect.gen(function* () {
         const launchArgs = resolveCodexLaunchArgs(codex.launchArgs, hostEnvironment);
         const sample = yield* readCodexQuotaSample({
           binaryPath,
-          // The macOS desktop build does not always publish the optional
-          // app-server proxy socket. A short-lived stdio server can still use
-          // the same authenticated Codex home for this read-only request.
-          transport: "stdio",
+          // Reuse the configured desktop bridge when enabled; it is the
+          // managed Unix-socket transport that shares the signed-in account.
+          // Headless installs use a short-lived authenticated stdio server.
+          transport: codex.useDesktopAppDaemon ? "desktop-daemon" : "stdio",
           environment,
           cwd: process.cwd(),
           launchArgs: codexLaunchArgv(launchArgs),
@@ -470,7 +503,6 @@ export const make = Effect.gen(function* () {
     size: number,
     mtimeMs: number,
     provider: UsageProviderKind,
-    startByte: number,
   ): Effect.Effect<readonly UsageRecord[]> =>
     Effect.gen(function* () {
       const cached = fileCache.get(filePath);
@@ -485,39 +517,38 @@ export const make = Effect.gen(function* () {
         return cached.records;
       }
 
-      const appendable = cached !== undefined && startByte > 0;
+      const resumeFrom =
+        cached !== undefined && cached.provider === provider && size > cached.size
+          ? cached.position
+          : undefined;
       const parsed = yield* Effect.promise(() =>
-        readTranscriptRecords(filePath, provider, {
-          startByte,
-          endByte: size - 1,
-          ...(appendable && provider === "codex" && cached?.codexState !== undefined
-            ? { codexState: cached.codexState }
-            : {}),
-        }),
+        readTranscriptRecords(filePath, provider, resumeFrom),
       );
       // A read failure is not an empty transcript: caching it under this
       // (size, mtime) would silently drop the file's usage until it changes.
       if (parsed === null) return [];
       // Stored already de-duplicated within the file, which is 99% of all
       // duplicates. The aggregator still runs the cross-file dedupe pass.
-      const records = dedupeWithinFile([
-        ...(appendable && cached !== undefined ? cached.records : []),
-        ...parsed.records,
-      ]);
+      const base = parsed.resumed && cached !== undefined ? cached.records : [];
+      const seen = new Set<string>();
+      const records = dedupeWithinFile([...base, ...parsed.records], seen);
+      const tailRecords = dedupeWithinFile(parsed.tailRecords, seen);
 
       fileCache.set(filePath, {
         size,
         mtimeMs,
         provider,
         records,
-        ...(parsed.codexState === undefined ? {} : { codexState: parsed.codexState }),
+        tailRecords,
+        position: parsed.position,
       });
       cacheDirty = true;
-      return records;
+      return tailRecords.length === 0 ? records : [...records, ...tailRecords];
     });
 
   const readSummaryUnlocked = Effect.fn("UsageService.readSummaryUnlocked")(function* (
     input: UsageSummaryInput,
+    settings: ServerSettingsValue,
   ) {
     if (input.sinceDay > input.untilDay) {
       return yield* new UsageReadError({
@@ -608,7 +639,9 @@ export const make = Effect.gen(function* () {
     const hostId = NodeOS.hostname();
     // The home resolvers ask for `Path` themselves; satisfy them from the
     // instance we already hold so `readSummary` stays context-free.
-    const dirs = yield* resolveTranscriptDirs().pipe(Effect.provideService(Path.Path, path));
+    const dirs = yield* resolveTranscriptDirs(settings).pipe(
+      Effect.provideService(Path.Path, path),
+    );
     const windowStart = DateTime.make(`${input.sinceDay}T00:00:00Z`);
     if (Option.isNone(windowStart)) {
       return yield* new UsageReadError({
@@ -619,6 +652,10 @@ export const make = Effect.gen(function* () {
     const windowStartMs =
       (hourlyWindow?.sinceTimeMs ?? DateTime.toEpochMillis(windowStart.value)) - MTIME_SLACK_MS;
 
+    const priceOverrides = createOverrideRateTable(settings.usagePriceOverrides);
+    const quotaRates = new Map(rates);
+    for (const [model, override] of priceOverrides) quotaRates.set(model, override);
+
     const aggregator = new UsageAggregator({
       timeZone: input.timeZone,
       sinceDay: input.sinceDay,
@@ -626,6 +663,7 @@ export const make = Effect.gen(function* () {
       resolution: input.resolution ?? "day",
       ...hourlyWindow,
       rates,
+      priceOverrides,
     });
 
     const sources: UsageSource[] = [];
@@ -649,7 +687,11 @@ export const make = Effect.gen(function* () {
           windowStartMs,
           nowMs: startedAtMs,
           lastRecentScanAtMs: lastRecentScanAt,
-          incrementalScanTtlMs: input.refresh ? 0 : INCREMENTAL_SCAN_TTL_MS,
+          // A usage read must notice an actively appended transcript even when
+          // two requests arrive inside the warm inventory TTL. The walk is
+          // still bounded to the recent window; the full audit remains on its
+          // longer cadence via `fullScanIntervalMs`.
+          incrementalScanTtlMs: 0,
           recentTranscriptWindowMs: RECENT_TRANSCRIPT_WINDOW_MS,
           fullScanIntervalMs: FULL_SCAN_INTERVAL_MS,
         });
@@ -725,9 +767,9 @@ export const make = Effect.gen(function* () {
             cached !== undefined &&
             cached.provider === provider &&
             file.size > cached.size &&
-            (provider === "claude" || (provider === "codex" && cached.codexState !== undefined)) &&
             (yield* Effect.promise(() => transcriptCursorIsLineBoundary(file.path, cached.size)));
-          return { ...file, startByte: warm ? file.size : appendable ? cached.size : 0 };
+          const resumeOffset = cached?.position.resumeOffset ?? 0;
+          return { ...file, startByte: warm ? file.size : appendable ? resumeOffset : 0 };
         }),
         { concurrency: 16 },
       );
@@ -751,16 +793,13 @@ export const make = Effect.gen(function* () {
       // Distinct per directory. Buckets carry per-cell session counts, but a
       // session spans days and models, so clients total this figure instead.
       const sessionIds = new Set<string>();
-      const quota = new QuotaCostAccumulator(provider === "codex" ? quotaIntervals : [], rates);
+      const quota = new QuotaCostAccumulator(
+        provider === "codex" ? quotaIntervals : [],
+        quotaRates,
+      );
 
       for (const file of selection.files) {
-        const records = yield* readFileRecords(
-          file.path,
-          file.size,
-          file.mtimeMs,
-          provider,
-          file.startByte,
-        );
+        const records = yield* readFileRecords(file.path, file.size, file.mtimeMs, provider);
         if (records.length === 0) {
           skippedFiles += 1;
           continue;
@@ -842,13 +881,25 @@ export const make = Effect.gen(function* () {
     const finishedAtMs = yield* Clock.currentTimeMillis;
     const clientContractVersion = input.clientContractVersion ?? 5;
     const supportsOpenCode = clientContractVersion >= 6;
+    // Contract v5 predates Gemini in the provider enum. Keep that legacy
+    // response shape valid until clients advertise v6 or newer.
+    const supportsGemini = clientContractVersion >= 6;
     const supportsImports = clientContractVersion >= 7;
+    const supportsGrok = clientContractVersion >= 8;
     const supportsProvider = (provider: UsageProviderKind) =>
       (provider !== "opencode" || supportsOpenCode) &&
+      (provider !== "gemini" || supportsGemini) &&
+      (provider !== "grok" || supportsGrok) &&
       ((provider !== "chatgpt" && provider !== "aistudio") || supportsImports);
 
     return {
-      contractVersion: supportsImports ? USAGE_CONTRACT_VERSION : supportsOpenCode ? 6 : 5,
+      contractVersion: supportsGrok
+        ? USAGE_CONTRACT_VERSION
+        : supportsImports
+          ? Math.min(USAGE_CONTRACT_VERSION, 7)
+          : supportsOpenCode
+            ? 6
+            : 5,
       readAt: DateTime.formatIso(readAt),
       timeZone: input.timeZone,
       sinceDay: input.sinceDay,
@@ -870,29 +921,68 @@ export const make = Effect.gen(function* () {
     } satisfies UsageSummary;
   });
 
-  // A cache miss is decided from mutable per-file state. Serializing summary
-  // scans makes that decision single-flight: a second window waits for the
-  // first scan to persist its newly warm files instead of parsing them again.
+  /**
+   * In-flight scans are keyed by both the query and custom prices. Identical
+   * requests share one detached scan; a settings change starts an independent
+   * scan so a caller never waits behind a stale-priced request.
+   */
+  const inflightScans = new Map<string, Deferred.Deferred<UsageSummary, UsageReadError>>();
+  const scanKey = (
+    input: UsageSummaryInput,
+    priceOverrides: ServerSettingsValue["usagePriceOverrides"],
+  ): string => JSON.stringify([usageSummaryCacheKey(input), priceOverrides]);
+
   const readSummary: UsageService["Service"]["readSummary"] = (input) =>
-    input.quotaHistoryOnly
-      ? readSummaryUnlocked(input)
-      : scanSemaphore.withPermits(1)(
-          Effect.gen(function* () {
-            const startedAtMs = yield* Clock.currentTimeMillis;
-            const key = usageSummaryCacheKey(input);
-            const cached = input.refresh ? undefined : summaryCache.get(key, startedAtMs);
-            if (cached !== undefined) return cached;
+    Effect.gen(function* () {
+      const settings = yield* readSettings;
+      if (input.quotaHistoryOnly) return yield* readSummaryUnlocked(input, settings);
+      if (input.sinceDay > input.untilDay) return yield* readSummaryUnlocked(input, settings);
 
-            const summary = yield* readSummaryUnlocked(input);
-            if (summary.sources.every((source) => source.status !== "partial")) {
-              const finishedAtMs = yield* Clock.currentTimeMillis;
-              summaryCache.set(key, finishedAtMs, summary);
-            }
-            return summary;
-          }),
-        );
+      // Load the durable cache before enrolling a detached scan. If this
+      // interruptible first read is canceled, the next caller must be able to
+      // retry the cache load rather than inherit a permanently blocked flight.
+      yield* ensureScanCacheLoaded;
 
-  return { readSummary } as const;
+      const key = scanKey(input, settings.usagePriceOverrides);
+      const startedAtMs = yield* Clock.currentTimeMillis;
+      // Transcript summaries must re-check the recent append window on every
+      // request. Keep the bounded process cache for quota-history queries,
+      // whose source is a separately sampled history file.
+      const cacheable = input.includeQuotaHistory === true;
+      if (cacheable && !input.refresh) {
+        const cached = summaryCache.get(key, startedAtMs);
+        if (cached !== undefined) return cached;
+      }
+
+      const deferred = yield* Effect.uninterruptible(
+        Effect.gen(function* () {
+          const existing = inflightScans.get(key);
+          if (existing !== undefined) return existing;
+          const created = Deferred.makeUnsafe<UsageSummary, UsageReadError>();
+          inflightScans.set(key, created);
+          yield* readSummaryUnlocked(input, settings).pipe(
+            Effect.tap((summary) =>
+              Effect.gen(function* () {
+                if (cacheable && summary.sources.every((source) => source.status !== "partial")) {
+                  const finishedAtMs = yield* Clock.currentTimeMillis;
+                  summaryCache.set(key, finishedAtMs, summary);
+                }
+              }),
+            ),
+            Effect.onExit((exit) =>
+              Effect.sync(() => inflightScans.delete(key)).pipe(
+                Effect.andThen(Deferred.done(created, exit)),
+              ),
+            ),
+            Effect.forkDetach,
+          );
+          return created;
+        }),
+      );
+      return yield* Deferred.await(deferred);
+    });
+
+  return { readSummary, refreshRates } as const;
 });
 
 export const layer = Layer.effect(UsageService, make);

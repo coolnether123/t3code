@@ -15,8 +15,8 @@ This is the Mac that is signed in to Codex and owns the projects, Chrome
 profile, plugins, and Computer Use permissions.
 
 1. Install the current Codex desktop app and sign in.
-2. In Codex, open **Settings > Connections > Computer** and turn on Remote
-   Control.
+2. Keep the Codex desktop app signed in. Remote Control is not required for the
+   T3 desktop bridge; the bridge uses the local app-server daemon.
 3. Install and enable the Chrome and Computer Use plugins in Codex. Complete
    the Chrome extension setup and approve the macOS permissions requested by
    Computer Use.
@@ -54,24 +54,25 @@ This is the Mac where T3 is displayed.
 2. Select the host environment and the Codex provider instance configured for
    desktop bridge mode.
 3. Start or continue a thread normally. T3 sends turns through the host's local
-   daemon proxy and streams the authoritative thread events back to this Mac.
+   daemon connection and streams the authoritative thread events back to this Mac.
 
 ## Verify or repair the host
 
-Run these commands with the bundled binary shown during setup:
+Run these commands with the bundled binary path printed during setup. The
+usual paths are:
 
 ```sh
+/Applications/Codex.app/Contents/Resources/codex app-server daemon bootstrap
 /Applications/Codex.app/Contents/Resources/codex app-server daemon version
-/Applications/Codex.app/Contents/Resources/codex remote-control start --json
 ```
 
-If the daemon is stale after an app update, stop and start it with the same
-bundled binary:
+If the host uses ChatGPT instead of Codex, substitute
+`/Applications/ChatGPT.app/Contents/Resources/codex`.
 
-```sh
-/Applications/Codex.app/Contents/Resources/codex remote-control stop --json
-/Applications/Codex.app/Contents/Resources/codex remote-control start --json
-```
+`daemon bootstrap` is the supported repair path after an app update. It
+reconciles the durable managed daemon with the bundled client; it does not
+enable Remote Control or expose a new network endpoint. Run `daemon version`
+again afterward and confirm that the reported daemon is running.
 
 The desktop bridge uses the supported app-server protocol for thread reads,
 turns, streaming, and approvals. It never writes `~/.codex/sessions` files or

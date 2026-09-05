@@ -1,6 +1,6 @@
 import type { UsageProviderKind } from "@t3tools/contracts";
 
-import { ClaudeAI, Gemini, type Icon, OpenAI, OpenCodeIcon } from "../Icons";
+import { ClaudeAI, Gemini, GrokIcon, type Icon, OpenAI, OpenCodeIcon } from "../Icons";
 
 type UsageProviderPresentation = {
   readonly label: string;
@@ -43,6 +43,12 @@ export const PROVIDER_PRESENTATION = {
     label: "AI Studio archive",
     color: "#f9ab00",
     mark: Gemini,
+  },
+  grok: {
+    label: "Grok Build",
+    // Contrast-aware neutral between the Codex series and muted chart chrome.
+    color: "color-mix(in oklab, var(--contrast-foreground) 72%, var(--background))",
+    mark: GrokIcon,
   },
 } satisfies Record<UsageProviderKind, UsageProviderPresentation>;
 
