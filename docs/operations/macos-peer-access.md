@@ -1,38 +1,51 @@
 # macOS peer access for Wanda and Millie
 
-This runbook describes the host-local SSH and T3 connection between the two
-Macs. It keeps the existing CodexDeck connection separate from a durable
-Millie-to-Wanda T3 tunnel.
+This runbook describes the host-local SSH and T3 connections between the two
+Macs. It keeps the two durable peer tunnels separate from CodexDeck and from
+any temporary desktop forward.
 
 ## Connection layout
 
-On Millie, the peer tunnel listens on `127.0.0.1:13773` and forwards through
-the `wanda-codex` SSH alias to Wanda's loopback T3 server at
-`127.0.0.1:3773`:
+Each Mac has its own local loopback port. The durable forwards are:
+
+- Wanda `127.0.0.1:13773` through `millie-codex` to Millie's
+  `127.0.0.1:3773`.
+- Millie `127.0.0.1:13773` through `wanda-codex` to Wanda's
+  `127.0.0.1:3773`.
+
+Install each direction on the host that owns that direction. Each host's
+LaunchAgent is independent, so reviewing or installing one direction does not
+replace the other.
 
 ```text
-Millie 127.0.0.1:13773
-    │  SSH local forward through wanda-codex
-    ▼
-Wanda 127.0.0.1:3773
+Wanda 127.0.0.1:13773                  Millie 127.0.0.1:13773
+    │  through millie-codex                 │  through wanda-codex
+    ▼                                       ▼
+Millie 127.0.0.1:3773                 Wanda 127.0.0.1:3773
 ```
 
 The SSH alias, private key, known-host entry, and authorized key remain in the
 host-local `~/.ssh` directories. Nothing in this repository contains a key or
 credential.
 
-The two existing connections are separate and must stay in place:
+The durable peer connections are separate from the other local connections:
 
-- Wanda's managed T3 connection uses its existing SSH forward to Millie's
-  loopback T3 port. Keep its current local port and owner unchanged.
+- Keep each peer forward's current local port and owner unchanged when
+  installing or reviewing the other direction.
 - CodexDeck uses the existing `com.christine.codexdeck.tunnel` LaunchAgent
   and remote loopback port `8787`. Do not point this installer at `8787` or
   replace that LaunchAgent.
 
+A managed T3 desktop connection was previously observed on port `58929`; its
+current port and owner may vary. Start desktop access only through its
+existing owner when specifically needed. Do not add it to this LaunchAgent,
+reuse an observed desktop port for a peer T3 tunnel, or restart its process
+while diagnosing port `13773`.
+
 ## Prerequisites
 
 Before installing the peer tunnel, verify the following on the Mac that will
-run the LaunchAgent (normally Millie):
+run the LaunchAgent:
 
 1. macOS is awake and connected to power when the tunnel is needed. `KeepAlive`
    reconnects after a sleep or network interruption, but it cannot connect to
@@ -45,16 +58,30 @@ run the LaunchAgent (normally Millie):
 Check the alias before installing:
 
 ```sh
+# From Wanda to Millie
+ssh -o BatchMode=yes -o ConnectTimeout=15 millie-codex 'hostname; whoami'
+
+# From Millie to Wanda
 ssh -o BatchMode=yes -o ConnectTimeout=15 wanda-codex 'hostname; whoami'
 ```
 
-The command must identify Wanda's Mac and the expected macOS user. A failed
+Each command must identify the peer Mac and the expected macOS user. A failed
 login, host-key warning, or unexpected identity is a stop condition.
 
 ## Install or review the tunnel
 
-Run the installer from a checkout of this repository on Millie. Start with a
-no-write plan:
+Run the installer from a checkout of this repository on the Mac that will own
+the direction. Start with a no-write plan. For Wanda-to-Millie:
+
+```sh
+python3 scripts/setup-macos-peer-tunnel.py \
+  --ssh-alias millie-codex \
+  --local-port 13773 \
+  --remote-port 3773 \
+  --dry-run
+```
+
+For Millie-to-Wanda, use the opposite alias from a Millie checkout:
 
 ```sh
 python3 scripts/setup-macos-peer-tunnel.py \
@@ -64,14 +91,8 @@ python3 scripts/setup-macos-peer-tunnel.py \
   --dry-run
 ```
 
-The default values are the same, so the short form is equivalent:
-
-```sh
-python3 scripts/setup-macos-peer-tunnel.py --dry-run
-```
-
-After reviewing the alias, ports, and LaunchAgent path, run the same command
-without `--dry-run`. It creates
+After reviewing the alias, ports, and LaunchAgent path, run the selected
+command without `--dry-run`. It creates
 `~/Library/LaunchAgents/com.t3tools.macos-peer-tunnel.plist` with owner-only
 permissions and loads it into the current user's launchd domain. It does not
 create SSH keys, change `~/.ssh`, or copy data between machines.
@@ -96,14 +117,16 @@ Inspect the user job and its listener without restarting it:
 ```sh
 launchctl print "gui/$(id -u)/com.t3tools.macos-peer-tunnel"
 lsof -nP -iTCP:13773 -sTCP:LISTEN
-curl --max-time 5 -sS -o /dev/null -w '%{http_code}\n' \
-  http://127.0.0.1:13773/
+curl --max-time 5 -sS -w '\nhttp=%{http_code}\n' \
+  http://127.0.0.1:13773/.well-known/t3/environment
 ```
 
-The HTTP response depends on the T3 server's route, but the listener should be
-owned by the managed SSH process and the request should reach the peer. If the
-peer is asleep or T3 is stopped, the listener may be absent until launchd
-reconnects successfully.
+The listener should be owned by the managed SSH process and the request should
+reach the peer with HTTP 200. Inspect the response body and confirm that its
+peer label and platform/host identity match the expected remote Mac. Record
+environment IDs only in private operational evidence. If the peer is asleep
+or T3 is stopped, the listener may be absent until launchd reconnects
+successfully.
 
 To stop the service deliberately, unload the exact label and then remove the
 plist after reviewing it:
@@ -112,8 +135,8 @@ plist after reviewing it:
 launchctl bootout "gui/$(id -u)/com.t3tools.macos-peer-tunnel"
 ```
 
-Do not stop the Deck tunnel or Wanda's existing T3 forward while diagnosing
-this service.
+Do not stop the Deck tunnel, a managed desktop forward, or the other peer T3
+forward while diagnosing this service.
 
 ## SSH, file, and Codex session access
 
