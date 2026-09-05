@@ -15,20 +15,26 @@ This is the Mac that is signed in to Codex and owns the projects, Chrome
 profile, plugins, and Computer Use permissions.
 
 1. Install the current Codex desktop app and sign in.
-2. In Codex, open **Settings > Connections > Computer** and turn on Remote
-   Control.
-3. Install and enable the Chrome and Computer Use plugins in Codex. Complete
+2. Install the standalone Codex CLI from the [official CLI instructions](https://developers.openai.com/codex/cli/).
+   The desktop app bundle alone is not enough for daemon management: the setup
+   script needs the managed CLI at
+   `$CODEX_HOME/packages/standalone/current/codex` (normally
+   `~/.codex/packages/standalone/current/codex`). If `CODEX_HOME` is set, use
+   the same value for setup and for the T3 host environment.
+3. Keep the Codex desktop app signed in. Remote Control is not required for the
+   T3 desktop bridge; the bridge uses the local app-server daemon.
+4. Install and enable the Chrome and Computer Use plugins in Codex. Complete
    the Chrome extension setup and approve the macOS permissions requested by
    Computer Use.
-4. Keep the Codex app open. Keep the Mac awake and connected to power while it
+5. Keep the Codex app open. Keep the Mac awake and connected to power while it
    is acting as a host.
-5. From this repository, run:
+6. From this repository, run:
 
    ```sh
    sh scripts/setup-macos-codex-desktop-bridge.sh
    ```
 
-6. Start the T3 backend on this Mac. In **Settings > Providers > Codex**, enable
+7. Start the T3 backend on this Mac. In **Settings > Providers > Codex**, enable
    **Use Codex desktop bridge**. Leave **Binary path** as `codex`; T3 checks the
    standard Codex and ChatGPT application bundle paths first. If the app is in
    a nonstandard location, enter its bundled binary explicitly, for example:
@@ -37,7 +43,7 @@ profile, plugins, and Computer Use permissions.
    /Applications/Codex.app/Contents/Resources/codex
    ```
 
-7. Leave **Shadow home path** empty. Desktop bridge mode deliberately uses the
+8. Leave **Shadow home path** empty. Desktop bridge mode deliberately uses the
    app's real Codex home so authentication, threads, plugins, and app
    connections stay consistent.
 
@@ -54,24 +60,27 @@ This is the Mac where T3 is displayed.
 2. Select the host environment and the Codex provider instance configured for
    desktop bridge mode.
 3. Start or continue a thread normally. T3 sends turns through the host's local
-   daemon proxy and streams the authoritative thread events back to this Mac.
+   daemon connection and streams the authoritative thread events back to this Mac.
 
 ## Verify or repair the host
 
-Run these commands with the bundled binary shown during setup:
+Run these commands with the managed CLI path used by setup. The usual command
+is:
 
 ```sh
-/Applications/Codex.app/Contents/Resources/codex app-server daemon version
-/Applications/Codex.app/Contents/Resources/codex remote-control start --json
+"${CODEX_HOME:-$HOME/.codex}/packages/standalone/current/codex" app-server daemon bootstrap
+"${CODEX_HOME:-$HOME/.codex}/packages/standalone/current/codex" app-server daemon version
 ```
 
-If the daemon is stale after an app update, stop and start it with the same
-bundled binary:
+The app-bundled binary printed by setup is used for desktop-app discovery and
+opening the app. It is not a substitute for the standalone managed CLI. If the
+managed path is missing, install the CLI from the [official CLI instructions](https://developers.openai.com/codex/cli/)
+and rerun setup; the script does not install it silently.
 
-```sh
-/Applications/Codex.app/Contents/Resources/codex remote-control stop --json
-/Applications/Codex.app/Contents/Resources/codex remote-control start --json
-```
+`daemon bootstrap` is the supported repair path after an app update. It
+reconciles the durable managed daemon with the bundled client; it does not
+enable Remote Control or expose a new network endpoint. Run `daemon version`
+again afterward and confirm that the reported daemon is running.
 
 The desktop bridge uses the supported app-server protocol for thread reads,
 turns, streaming, and approvals. It never writes `~/.codex/sessions` files or

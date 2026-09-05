@@ -9,12 +9,17 @@ import * as CodexSchema from "effect-codex-app-server/schema";
 import * as NodeOS from "node:os";
 
 import type { UsageQuotaSample } from "@t3tools/contracts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 
 import {
   codexAppServerCommandArgs,
   type CodexAppServerTransport,
 } from "../provider/CodexAppServerTransport.ts";
+import {
+  makeCodexDesktopDaemonStdio,
+  useCodexDesktopDaemonSocketTransport,
+} from "../provider/CodexDesktopDaemonTransport.ts";
 import { expandHomePath } from "../pathExpansion.ts";
 
 const FORCE_KILL_AFTER = "2 seconds" as const;
@@ -132,23 +137,39 @@ export const readCodexQuotaSample = Effect.fn("CodexQuotaCollector.read")(functi
   input: CodexQuotaCollectorInput,
 ) {
   return yield* Effect.gen(function* () {
-    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const platform = yield* HostProcessPlatform;
     const environment = codexQuotaChildEnvironment(input.environment, input.homePath);
-    const commandArgs = codexAppServerCommandArgs(input.transport, input.launchArgs);
-    const spawnCommand = yield* resolveSpawnCommand(input.binaryPath, commandArgs, {
-      env: environment,
-      extendEnv: false,
-    });
-    const child = yield* spawner.spawn(
-      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-        cwd: input.cwd,
-        env: environment,
-        extendEnv: false,
-        shell: spawnCommand.shell,
-        forceKillAfter: FORCE_KILL_AFTER,
-      }),
-    );
-    const clientContext = yield* Layer.build(CodexClient.layerChildProcess(child));
+    const useDesktopDaemonSocket = useCodexDesktopDaemonSocketTransport(input.transport, platform);
+    const clientContext = useDesktopDaemonSocket
+      ? yield* Layer.build(
+          CodexClient.layer(
+            yield* makeCodexDesktopDaemonStdio(
+              input.homePath ? expandHomePath(input.homePath) : undefined,
+              environment,
+            ),
+          ),
+        )
+      : yield* Effect.gen(function* () {
+          const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+          const commandArgs = codexAppServerCommandArgs(
+            useDesktopDaemonSocket ? input.transport : "stdio",
+            input.launchArgs,
+          );
+          const spawnCommand = yield* resolveSpawnCommand(input.binaryPath, commandArgs, {
+            env: environment,
+            extendEnv: false,
+          });
+          const child = yield* spawner.spawn(
+            ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+              cwd: input.cwd,
+              env: environment,
+              extendEnv: false,
+              shell: spawnCommand.shell,
+              forceKillAfter: FORCE_KILL_AFTER,
+            }),
+          );
+          return yield* Layer.build(CodexClient.layerChildProcess(child));
+        });
     const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
       Effect.provide(clientContext),
     );

@@ -5,49 +5,11 @@ import {
   normalizeFileCommentRange,
   remapFileCommentAnnotations,
 } from "./fileCommentAnnotations";
-import { isMarkdownPreviewFile, setMarkdownTaskChecked } from "./filePreviewMode";
-import { resolveFilePreviewPaneVisibility } from "./FilePreviewPanel";
-
-describe("resolveFilePreviewPaneVisibility", () => {
-  it("uses one pane at a time on compact screens", () => {
-    expect(
-      resolveFilePreviewPaneVisibility({
-        compact: true,
-        compactExplorerOpen: false,
-        explorerOpen: true,
-        relativePath: "src/index.ts",
-      }),
-    ).toEqual({ showExplorer: false, showFile: true });
-
-    expect(
-      resolveFilePreviewPaneVisibility({
-        compact: true,
-        compactExplorerOpen: true,
-        explorerOpen: false,
-        relativePath: "src/index.ts",
-      }),
-    ).toEqual({ showExplorer: true, showFile: false });
-  });
-
-  it("keeps the desktop split view preference and always shows an empty explorer", () => {
-    expect(
-      resolveFilePreviewPaneVisibility({
-        compact: false,
-        compactExplorerOpen: false,
-        explorerOpen: true,
-        relativePath: "src/index.ts",
-      }),
-    ).toEqual({ showExplorer: true, showFile: true });
-    expect(
-      resolveFilePreviewPaneVisibility({
-        compact: true,
-        compactExplorerOpen: false,
-        explorerOpen: false,
-        relativePath: null,
-      }),
-    ).toEqual({ showExplorer: true, showFile: false });
-  });
-});
+import {
+  isMarkdownPreviewFile,
+  setMarkdownTaskChecked,
+  shouldShowFileExplorer,
+} from "./filePreviewMode";
 
 describe("file comment annotations", () => {
   it("normalizes and formats selected line ranges", () => {
@@ -105,6 +67,42 @@ describe("isMarkdownPreviewFile", () => {
   it("does not treat other text files as markdown", () => {
     expect(isMarkdownPreviewFile("docs/guide.txt")).toBe(false);
     expect(isMarkdownPreviewFile("docs/markdown.ts")).toBe(false);
+  });
+});
+
+describe("shouldShowFileExplorer", () => {
+  it("hides the workspace tree for host files and attachments", () => {
+    expect(
+      shouldShowFileExplorer({
+        relativePath: "/tmp/report.pdf",
+        explorerOpen: true,
+        attachmentOpen: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldShowFileExplorer({
+        relativePath: "report.pdf",
+        explorerOpen: true,
+        attachmentOpen: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps the saved explorer preference for workspace files", () => {
+    expect(
+      shouldShowFileExplorer({
+        relativePath: "docs/report.pdf",
+        explorerOpen: true,
+        attachmentOpen: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldShowFileExplorer({
+        relativePath: "docs/report.pdf",
+        explorerOpen: false,
+        attachmentOpen: false,
+      }),
+    ).toBe(false);
   });
 });
 

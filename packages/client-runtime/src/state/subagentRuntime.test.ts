@@ -66,73 +66,43 @@ function fold(rows: ReadonlyArray<OrchestrationThreadActivity>) {
 }
 
 describe("foldSubagentActivities", () => {
-  it("retains last-turn facts separately from idle status and a subsequent activation", () => {
-    const lastTurn = {
-      turnId: "child-turn-1",
-      outcome: "completed",
-      completedAt: "2026-08-31T00:49:58.000Z",
-      durationMs: 11592,
-      result: "CHILD_A_COMPLETE",
-    };
-    const rows = [
-      activity("task.updated", { taskId: "child", status: "idle", lastTurn }),
-      activity("task.updated", { taskId: "child", title: "Child" }),
-    ];
-    expect(fold(rows)[0]).toMatchObject({ status: "idle", completedAt: null, lastTurn });
-    const resumed = fold([
-      ...rows,
-      activity("task.updated", { taskId: "child", status: "running" }),
-      activity("task.progress", { taskId: "child", summary: "New work" }),
-    ])[0];
-    expect(resumed).toMatchObject({ status: "running", lastTurn, progress: "New work" });
-    expect(resumed?.result).toBeNull();
-  });
-
-  it("keeps last-turn facts idempotent and ignores older or invalid completion data", () => {
-    const lastTurn = {
-      turnId: "newer",
-      outcome: "completed",
-      completedAt: "2026-08-31T00:50:00.000Z",
-      durationMs: 0,
-      result: "First result",
-    };
-    const agent = fold([
-      activity("task.updated", { taskId: "child", status: "idle", lastTurn }),
-      activity("task.updated", { taskId: "child", lastTurn: { ...lastTurn, result: "Duplicate" } }),
+  it("shows the batch status limit after its parent turn ends without claiming a result", () => {
+    const running = activity("task.progress", {
+      taskId: "batch-1",
+      taskType: "subagent_batch",
+      title: "Antigravity subagent batch",
+      status: "running",
+      summary: "Launch readers",
+    });
+    const agents = fold([
+      running,
       activity("task.updated", {
-        taskId: "child",
-        lastTurn: { ...lastTurn, turnId: "older", completedAt: "2026-08-31T00:49:00.000Z" },
-      }),
-      activity("task.updated", {
-        taskId: "child",
-        lastTurn: { turnId: "invalid", outcome: "running" },
-      }),
-    ])[0];
-    expect(agent?.lastTurn).toEqual(lastTurn);
-  });
-
-  it("replaces last-turn facts for a newer completion and bounds retained output", () => {
-    const agent = fold([
-      activity("task.updated", {
-        taskId: "child",
-        lastTurn: { turnId: "first", outcome: "completed", result: "Old result" },
-      }),
-      activity("task.updated", {
-        taskId: "child",
+        taskId: "batch-1",
+        taskType: "subagent_batch",
         status: "idle",
-        lastTurn: {
-          turnId: "second",
-          outcome: "completed",
-          result: "x".repeat(20000),
-          durationMs: -1,
-          completedAt: "invalid",
-        },
+        detail: "Turn ended. Individual agent status is unavailable.",
+        timelineBypass: true,
       }),
-    ])[0];
-    expect(agent?.lastTurn?.turnId).toBe("second");
-    expect(agent?.lastTurn?.result).toHaveLength(16000);
-    expect(agent?.lastTurn?.durationMs).toBeUndefined();
-    expect(agent?.lastTurn?.completedAt).toBeUndefined();
+    ]);
+    expect(agents).toHaveLength(1);
+    expect(agents[0]).toMatchObject({
+      title: "Antigravity subagent batch",
+      kind: "subagent_batch",
+      status: "idle",
+      progress: "Turn ended. Individual agent status is unavailable.",
+      result: null,
+      error: null,
+    });
+  });
+
+  it("learns batch identity from a later update and retains it on sparse updates", () => {
+    const agents = fold([
+      activity("task.progress", { taskId: "batch-1", taskType: "subagent", status: "running" }),
+      activity("task.updated", { taskId: "batch-1", taskType: "subagent_batch", status: "idle" }),
+      activity("task.updated", { taskId: "batch-1", status: "idle" }),
+    ]);
+    expect(agents).toHaveLength(1);
+    expect(agents[0]).toMatchObject({ kind: "subagent_batch", status: "idle" });
   });
 
   it("builds an agent from start → progress → completion", () => {
@@ -330,46 +300,6 @@ describe("foldSubagentActivities", () => {
   it("plan tasks are not agents", () => {
     const agents = fold([activity("task.started", { taskId: "plan-1", taskType: "plan" })]);
     expect(agents).toHaveLength(0);
-  });
-
-  it("retains useful child output and backend identity without expanding activity previews", () => {
-    const output = `${"Analysis line. ".repeat(60)}Final finding.`;
-    const rows = [
-      activity("task.started", {
-        taskId: "child-t3",
-        taskType: "local_agent",
-        parentAgentId: "parent-provider",
-        providerRefs: { providerThreadId: "child-provider", providerTurnId: "turn-provider" },
-      }),
-      activity("task.progress", { taskId: "child-t3", summary: output }),
-      activity("task.completed", { taskId: "child-t3", status: "completed", summary: output }),
-    ];
-    const agent = fold(rows)[0]!;
-    expect(agent.providerThreadId).toBe("child-provider");
-    expect(agent.providerTurnId).toBe("turn-provider");
-    expect(agent.parentAgentId).toBe("parent-provider");
-    expect(agent.progress).toBe(output);
-    expect(agent.result).toBe(output);
-    expect(agent.recentActivity[0]!.summary.length).toBe(180);
-    expect(fold(rows)[0]).toEqual(agent);
-  });
-
-  it("caps retained child output and clears the result when the same child resumes", () => {
-    const completed = [
-      activity("task.completed", {
-        taskId: "child-large",
-        taskType: "local_agent",
-        status: "completed",
-        summary: "x".repeat(20_000),
-      }),
-    ];
-    expect(fold(completed)[0]!.result).toHaveLength(16_000);
-    expect(
-      fold([
-        ...completed,
-        activity("task.updated", { taskId: "child-large", status: "running" }),
-      ])[0]!.result,
-    ).toBeNull();
   });
 
   it("workflow members key by stable slot and attach to their coordinator", () => {
@@ -612,22 +542,6 @@ describe("deriveAgentPanelModel", () => {
     expect(allIds).not.toContain("direct-1");
   });
 
-  it("exposes native parent names without changing stable first-seen order", () => {
-    const agents = fold([
-      activity("task.started", { taskId: "child", title: "Child", parentAgentId: "root" }),
-      activity("task.started", { taskId: "sibling", title: "Sibling", parentAgentId: "root" }),
-      activity("task.started", {
-        taskId: "grandchild",
-        title: "Grandchild",
-        parentAgentId: "child",
-      }),
-    ]);
-    const rows = deriveAgentPanelModel({ agents }).directAgents;
-    expect(rows.map((agent) => agent.id)).toEqual(["child", "sibling", "grandchild"]);
-    expect(rows[2]).toMatchObject({ parentAgentId: "child", parentTitle: "Child" });
-    expect(rows[0]).not.toHaveProperty("parentTitle");
-  });
-
   it("orphaned members fall back to the direct list", () => {
     const orphans = fold([
       activity("task.progress", {
@@ -726,6 +640,43 @@ describe("model and effort attribution", () => {
     expect(agents).toHaveLength(1);
     expect(agents[0]!.model).toBe("claude-sonnet-5[1m]");
     expect(agents[0]!.effort).toBe("high");
+  });
+
+  it("applies metadata-only updates without changing the current status", () => {
+    const waitingRows = [
+      activity("task.updated", {
+        taskId: "task-metadata",
+        title: "Check metadata",
+        status: "waiting",
+      }),
+      activity("task.updated", {
+        taskId: "task-metadata",
+        model: "gpt-5.6-sol",
+        effort: "high",
+      }),
+    ];
+    const waitingAgent = fold(waitingRows)[0]!;
+    expect(waitingAgent.status).toBe("waiting");
+    expect(formatSubagentModelLabel(waitingAgent.model, waitingAgent.effort)).toBe(
+      "gpt-5.6-sol · high",
+    );
+
+    const idleRows = [
+      ...waitingRows,
+      activity("task.updated", { taskId: "task-metadata", status: "idle" }),
+      activity("task.updated", { taskId: "task-metadata", model: "gpt-5.6-sol" }),
+    ];
+    expect(fold(idleRows)[0]!.status).toBe("idle");
+
+    const completedAgent = fold([
+      ...idleRows,
+      activity("task.progress", { taskId: "task-metadata", typedUsage: { totalTokens: 42 } }),
+      activity("task.completed", { taskId: "task-metadata", status: "completed" }),
+      activity("task.updated", { taskId: "task-metadata", effort: "high" }),
+    ])[0]!;
+    expect(completedAgent.status).toBe("completed");
+    expect(completedAgent.model).toBe("gpt-5.6-sol");
+    expect(completedAgent.effort).toBe("high");
   });
 
   it("formatSubagentModelLabel compacts ids and appends effort", () => {

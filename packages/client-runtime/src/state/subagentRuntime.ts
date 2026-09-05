@@ -58,7 +58,7 @@ export interface SubagentRunHandles {
 
 export interface RuntimeSubagent {
   readonly id: string;
-  readonly kind: "subagent" | "workflow" | "workflow_agent";
+  readonly kind: "subagent" | "subagent_batch" | "workflow" | "workflow_agent";
   readonly title: string;
   readonly role: string | null;
   readonly model: string | null;
@@ -266,6 +266,9 @@ function kindFromPayload(
   payload: Record<string, unknown>,
   agentId: string,
 ): RuntimeSubagent["kind"] {
+  if (payload.taskType === "subagent_batch") {
+    return "subagent_batch";
+  }
   if (asString(payload.taskType) === "local_workflow") {
     return "workflow";
   }
@@ -321,6 +324,7 @@ function getOrCreate(
 
 /** Metadata fill from any payload: never downgrades known values to null. */
 function fillMetadata(agent: MutableAgent, payload: Record<string, unknown>): void {
+  if (payload.taskType === "subagent_batch") agent.kind = "subagent_batch";
   if (typeof payload.providerRefs === "object" && payload.providerRefs !== null) {
     const refs = payload.providerRefs as Record<string, unknown>;
     const providerThreadId = asString(refs.providerThreadId);
@@ -583,6 +587,8 @@ export function foldSubagentActivities(
         if (!agents.has(taskId) && isBackgroundTaskActivity(payload)) break;
         const agent = getOrCreate(agents, taskId, payload, at);
         fillMetadata(agent, payload);
+        const detail = asString(payload.detail);
+        if (detail) agent.progress = bounded(detail, DETAIL_CHAR_LIMIT);
         // A task first seen via task.updated (start row aged out) has run at
         // least once — zero activations would misreport "run 0" and let a
         // later start row treat it as never-started (review finding).
@@ -789,7 +795,6 @@ export function deriveAgentPanelModel({
     .slice()
     .sort((a, b) => a.firstSeenAt.localeCompare(b.firstSeenAt) || a.id.localeCompare(b.id));
   const workflowIds = new Set(workflows.map((workflow) => workflow.id));
-  const agentsById = new Map(source.map((agent) => [agent.id, agent]));
   const members = new Map<string, RuntimeSubagent[]>();
   const direct: RuntimeSubagent[] = [];
 
@@ -896,7 +901,9 @@ export function deriveAgentPanelModel({
       .slice()
       .sort((a, b) => a.firstSeenAt.localeCompare(b.firstSeenAt) || a.id.localeCompare(b.id))
       .map((agent) => {
-        const parent = agent.parentAgentId ? agentsById.get(agent.parentAgentId) : undefined;
+        const parent = agent.parentAgentId
+          ? source.find((candidate) => candidate.id === agent.parentAgentId)
+          : undefined;
         return parent && parent.id !== agent.id ? { ...agent, parentTitle: parent.title } : agent;
       }),
     runningCount,

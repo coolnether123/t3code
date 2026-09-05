@@ -107,4 +107,30 @@ describe("Codex browser provider instructions", () => {
       "do not treat it as proof that the requested provider is unavailable",
     );
   });
+
+  it("retains T3 worker and native sub-agent guidance when those backends are active", () => {
+    const instructions = buildCodexDeveloperInstructions(
+      "default",
+      {
+        ...runtime,
+        enableT3Workers: true,
+        subagentBackend: "v2",
+        computerControlMode: "preview",
+        computerControlAvailable: false,
+      },
+      false,
+    );
+    expect(instructions).toContain("## T3 Workers");
+    expect(instructions).toContain("worker_start");
+    expect(instructions).toContain("## Codex native sub-agents");
+    expect(instructions).toContain("Do not instruct a child agent to create another child");
+  });
+
+  it("includes the current Codex runtime context and response media guidance", () => {
+    const instructions = buildCodexDeveloperInstructions("default", runtime, false);
+    expect(instructions).toContain(
+      "you are running in T3 Code through the Codex harness, as gpt-5.6-sol with high reasoning effort",
+    );
+    expect(instructions).toContain("embed images and videos");
+  });
 });

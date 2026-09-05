@@ -28,7 +28,19 @@ vi.mock("./usageTranscriptReader.ts", async (importOriginal) => ({
   listTranscriptFiles: vi.fn(async (root: string) => (/[\\/]sessions$/.test(root) ? files : [])),
   readDirectoryVolumeId: vi.fn(async () => "fixture"),
   transcriptCursorIsLineBoundary: vi.fn(async () => true),
-  readTranscriptRecords: vi.fn(async () => ({ records: [], codexState: initialCodexScanState() })),
+  readTranscriptRecords: vi.fn(
+    async (_path: string, _provider: string, resumeFrom?: { resumeOffset: number }) => ({
+      records: [],
+      tailRecords: [],
+      resumed: resumeFrom !== undefined,
+      position: {
+        resumeOffset: resumeFrom?.resumeOffset ?? 0,
+        guardLength: 0,
+        guardHash: 0,
+        codexState: initialCodexScanState(),
+      },
+    }),
+  ),
 }));
 
 const testLayer = Layer.mergeAll(
@@ -66,7 +78,13 @@ describe("incremental scan integration", () => {
                 ...file,
                 provider: "codex" as const,
                 records: index === 0 ? [usage] : [],
-                codexState: initialCodexScanState(),
+                tailRecords: [],
+                position: {
+                  resumeOffset: file.size,
+                  guardLength: 0,
+                  guardHash: 0,
+                  codexState: initialCodexScanState(),
+                },
               },
             ]),
           ),
@@ -187,7 +205,13 @@ describe("incremental scan integration", () => {
               mtimeMs: file.mtimeMs - 1,
               provider: "codex" as const,
               records: [],
-              codexState: initialCodexScanState(),
+              tailRecords: [],
+              position: {
+                resumeOffset: file.size - (index === 0 ? 40 : 60),
+                guardLength: 0,
+                guardHash: 0,
+                codexState: initialCodexScanState(),
+              },
             },
           ]),
         ),
@@ -225,12 +249,12 @@ describe("incremental scan integration", () => {
       expect(readTranscriptRecords).toHaveBeenCalledWith(
         files[0]!.path,
         "codex",
-        expect.objectContaining({ startByte: 200_000_000 }),
+        expect.objectContaining({ resumeOffset: 200_000_000 }),
       );
       expect(readTranscriptRecords).toHaveBeenCalledWith(
         files[1]!.path,
         "codex",
-        expect.objectContaining({ startByte: 70_000_000 }),
+        expect.objectContaining({ resumeOffset: 70_000_000 }),
       );
       expect(transcriptCursorIsLineBoundary).toHaveBeenCalledTimes(2);
       expect(writes.some((path) => path.endsWith("contents.tmp"))).toBe(true);

@@ -395,7 +395,9 @@ const runAgent = Effect.fn("runAgent")(
       const auth = yield* EnvironmentAuth.EnvironmentAuth;
       return yield* executeAgentRequest(target, request, auth);
     }).pipe(
-      Effect.provide(EnvironmentAuth.runtimeLayer.pipe(Layer.provide(ServerConfig.layer(config)))),
+      Effect.provide(
+        EnvironmentAuth.existingRuntimeLayer.pipe(Layer.provide(ServerConfig.layer(config))),
+      ),
     );
     yield* printOutput(result);
   },

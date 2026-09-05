@@ -33,6 +33,7 @@ const launcher = (
 ) =>
   ExternalLauncher.ExternalLauncher.of({
     resolveAvailableEditors: () => Effect.succeed([]),
+    resolveFileManagerRevealKind: () => Effect.succeed(undefined),
     launchBrowser,
     launchEditor: () => Effect.die("unused launchEditor"),
   });

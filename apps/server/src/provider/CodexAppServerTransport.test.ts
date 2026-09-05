@@ -5,6 +5,10 @@ import {
   codexAppServerTransport,
   macDesktopCodexBinaryCandidates,
 } from "./CodexAppServerTransport.ts";
+import {
+  codexDesktopDaemonSocketPath,
+  useCodexDesktopDaemonSocketTransport,
+} from "./CodexDesktopDaemonTransport.ts";
 
 describe("CodexAppServerTransport", () => {
   it("uses the managed daemon proxy only when the desktop bridge is enabled", () => {
@@ -29,5 +33,37 @@ describe("CodexAppServerTransport", () => {
       "/Applications/ChatGPT.app/Contents/Resources/codex",
       "/Users/christinesmith/Applications/ChatGPT.app/Contents/Resources/codex",
     ]);
+  });
+
+  it("resolves the managed daemon socket from Codex home and host environment", () => {
+    expect(codexDesktopDaemonSocketPath("/tmp/codex-home/")).toBe(
+      "/tmp/codex-home/app-server-control/app-server-control.sock",
+    );
+    expect(
+      codexDesktopDaemonSocketPath(undefined, {
+        CODEX_HOME: "/tmp/from-codex-home",
+        HOME: "/tmp/from-home",
+      }),
+    ).toBe("/tmp/from-codex-home/app-server-control/app-server-control.sock");
+    expect(codexDesktopDaemonSocketPath(undefined, { HOME: "/tmp/from-home" })).toBe(
+      "/tmp/from-home/.codex/app-server-control/app-server-control.sock",
+    );
+    expect(
+      codexDesktopDaemonSocketPath("~/.codex-work", {
+        HOME: "/tmp/from-home",
+      }),
+    ).toBe("/tmp/from-home/.codex-work/app-server-control/app-server-control.sock");
+    expect(
+      codexDesktopDaemonSocketPath(undefined, {
+        CODEX_HOME: "~/.codex-work",
+        HOME: "/tmp/from-home",
+      }),
+    ).toBe("/tmp/from-home/.codex-work/app-server-control/app-server-control.sock");
+  });
+
+  it("uses the Unix desktop adapter only on macOS", () => {
+    expect(useCodexDesktopDaemonSocketTransport("desktop-daemon", "darwin")).toBe(true);
+    expect(useCodexDesktopDaemonSocketTransport("desktop-daemon", "win32")).toBe(false);
+    expect(useCodexDesktopDaemonSocketTransport("stdio", "darwin")).toBe(false);
   });
 });

@@ -7,5 +7,7 @@ export function toSafeThreadAttachmentSegment(threadId: string): string | null {
     .replace(/^[-_]+|[-_]+$/g, "")
     .slice(0, 80)
     .replace(/[-_]+$/g, "");
-  return segment.length > 0 ? segment : null;
+  if (segment.length === 0) return null;
+  // The server reserves this segment for uploads awaiting a task.
+  return segment === "pending" ? "_pending" : segment;
 }

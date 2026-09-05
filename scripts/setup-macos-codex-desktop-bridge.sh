@@ -33,8 +33,24 @@ else
   open -a ChatGPT
 fi
 
-echo "Starting the managed Codex daemon with Remote Control enabled..."
-"$codex_binary" remote-control start --json
+codex_home="${CODEX_HOME:-$HOME/.codex}"
+managed_codex="$codex_home/packages/standalone/current/codex"
+if [ ! -x "$managed_codex" ]; then
+  echo >&2
+  echo "The desktop app was found, but its bundled CLI cannot bootstrap the managed daemon." >&2
+  echo "Install the standalone Codex CLI from the official instructions:" >&2
+  echo "https://developers.openai.com/codex/cli/" >&2
+  echo "Then rerun this script. Expected managed CLI: $managed_codex" >&2
+  exit 1
+fi
+
+echo "Using managed Codex CLI at $managed_codex"
+
+echo "Bootstrapping the managed Codex app-server daemon..."
+"$managed_codex" app-server daemon bootstrap
+
+echo "Checking the managed Codex app-server daemon..."
+"$managed_codex" app-server daemon version
 
 echo
 echo "The host bridge is ready. In T3 Code, open Settings > Providers > Codex"

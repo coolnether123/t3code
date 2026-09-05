@@ -39,10 +39,16 @@ import {
   DialogPanel,
 } from "~/components/ui/dialog";
 
+/**
+ * In-flight states all present as Working (one steady state, per the
+ * monitoring-pill design: detail belongs in the activity sub-line, and a
+ * stalled/waiting/queued subagent is still the fleet doing its job, not a
+ * user problem). Only settled states differentiate.
+ */
 const STATUS_VISUALS: Record<RuntimeSubagent["status"], { dotClass: string; label: string }> = {
-  pending: { dotClass: "bg-info", label: "Pending" },
+  pending: { dotClass: "bg-info", label: "Working" },
   running: { dotClass: "bg-info", label: "Working" },
-  waiting: { dotClass: "bg-info", label: "Waiting" },
+  waiting: { dotClass: "bg-info", label: "Working" },
   // Idle reads as settled (muted, not sky): a resting Codex child looks done
   // unless resumed — live-test: sky idle dots read as stuck in-progress.
   idle: { dotClass: "bg-muted-foreground/50", label: "Idle · resumable" },
@@ -83,11 +89,32 @@ function elapsedBetween(startedAt: string, endIso: string | null): string {
   return formatElapsedSeconds((end - start) / 1000);
 }
 
+type AgentLastTurnDetails = {
+  readonly turnId?: string;
+  readonly outcome?: string;
+  readonly completedAt?: string;
+  readonly durationMs?: number;
+  readonly result?: string;
+  readonly error?: string;
+};
+
+type AgentWithDetails = RuntimeSubagent & {
+  readonly parentTitle?: string;
+  readonly providerThreadId?: string;
+  readonly providerTurnId?: string;
+  readonly lastTurn?: AgentLastTurnDetails;
+};
+
+function agentWithDetails(agent: RuntimeSubagent): AgentWithDetails {
+  return agent as AgentWithDetails;
+}
+
 /**
  * Elapsed time for the current activation. Live agents self-tick via DOM
  * writes (zero React commits per tick); settled agents freeze at completedAt.
  */
 function AgentElapsed({ agent }: { agent: RuntimeSubagent }) {
+  const details = agentWithDetails(agent);
   const textRef = useRef<HTMLSpanElement>(null);
   const live = agent.status === "running" || agent.status === "waiting";
   const startedAt = agent.startedAt;
@@ -107,17 +134,19 @@ function AgentElapsed({ agent }: { agent: RuntimeSubagent }) {
   }, [live, startedAt]);
 
   if (!startedAt) {
-    return !live && agent.lastTurn?.durationMs !== undefined ? (
-      <span className="tabular-nums">{formatElapsedSeconds(agent.lastTurn.durationMs / 1000)}</span>
+    return !live && details.lastTurn?.durationMs !== undefined ? (
+      <span className="tabular-nums">
+        {formatElapsedSeconds(details.lastTurn.durationMs / 1000)}
+      </span>
     ) : null;
   }
   return (
     <span ref={textRef} className="tabular-nums">
-      {!live && agent.lastTurn?.durationMs !== undefined
-        ? formatElapsedSeconds(agent.lastTurn.durationMs / 1000)
+      {!live && details.lastTurn?.durationMs !== undefined
+        ? formatElapsedSeconds(details.lastTurn.durationMs / 1000)
         : elapsedBetween(
             startedAt,
-            live ? null : (agent.lastTurn?.completedAt ?? agent.completedAt),
+            live ? null : (details.lastTurn?.completedAt ?? agent.completedAt),
           )}
     </span>
   );
@@ -155,13 +184,14 @@ function AgentRow({
   agent: RuntimeSubagent;
   parentTitle?: string | undefined;
 }) {
+  const details = agentWithDetails(agent);
   const visuals = STATUS_VISUALS[agent.status];
   const activity = agentActivityText(agent);
   const showCurrentActivity =
     agent.status === "running" ||
     agent.status === "pending" ||
     agent.status === "waiting" ||
-    (!agent.lastTurn?.result && !agent.lastTurn?.error);
+    (!details.lastTurn?.result && !details.lastTurn?.error);
   const modelLabel = formatSubagentModelLabel(agent.model, agent.effort);
   const role =
     agent.role?.trim().toLocaleLowerCase() === agent.title.trim().toLocaleLowerCase()
@@ -169,7 +199,7 @@ function AgentRow({
       : agent.role;
   const metadata = [
     parentTitle ? `via ${parentTitle}` : null,
-    agent.lastTurn && agent.status === "idle" ? `last turn ${agent.lastTurn.outcome}` : null,
+    details.lastTurn && agent.status === "idle" ? `last turn ${details.lastTurn.outcome}` : null,
     modelLabel,
     agent.usage ? `${formatSubagentTokenCount(agent.usage.totalTokens)} tok` : "— tok",
     agent.usage?.toolUses !== undefined ? `${agent.usage.toolUses} tools` : null,
@@ -230,16 +260,18 @@ function AgentRow({
               ["Agent ID", agent.id],
               ["Parent agent", agent.parentAgentId],
               ["Parent name", parentTitle],
-              ["Event source thread", agent.providerThreadId],
-              ["Provider turn", agent.providerTurnId],
+              ["Event source thread", details.providerThreadId],
+              ["Provider turn", details.providerTurnId],
               ["Started", agent.startedAt],
               ["Completed", agent.completedAt],
-              ["Last turn", agent.lastTurn?.turnId],
-              ["Last turn outcome", agent.lastTurn?.outcome],
-              ["Last turn completed", agent.lastTurn?.completedAt],
+              ["Last turn", details.lastTurn?.turnId],
+              ["Last turn outcome", details.lastTurn?.outcome],
+              ["Last turn completed", details.lastTurn?.completedAt],
               [
                 "Last turn duration",
-                agent.lastTurn?.durationMs !== undefined ? `${agent.lastTurn.durationMs} ms` : null,
+                details.lastTurn?.durationMs !== undefined
+                  ? `${details.lastTurn.durationMs} ms`
+                  : null,
               ],
               ["Updated", agent.updatedAt],
             ].map(([label, value]) =>
@@ -264,13 +296,13 @@ function AgentRow({
               </pre>
             </section>
           ) : null}
-          {agent.lastTurn?.result || agent.lastTurn?.error ? (
+          {details.lastTurn?.result || details.lastTurn?.error ? (
             <section className="mt-5">
               <h3 className="mb-2 text-sm font-medium">
-                {agent.lastTurn.error ? "Last turn error" : "Last turn result"}
+                {details.lastTurn.error ? "Last turn error" : "Last turn result"}
               </h3>
               <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">
-                {agent.lastTurn.error ?? agent.lastTurn.result}
+                {details.lastTurn.error ?? details.lastTurn.result}
               </pre>
             </section>
           ) : null}
@@ -663,7 +695,11 @@ export function AgentsPanel({
                 Agents
               </div>
               {model.directAgents.map((agent) => (
-                <AgentRow key={agent.id} agent={agent} parentTitle={agent.parentTitle} />
+                <AgentRow
+                  key={agent.id}
+                  agent={agent}
+                  parentTitle={agentWithDetails(agent).parentTitle}
+                />
               ))}
             </section>
           ) : null}

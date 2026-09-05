@@ -4,7 +4,6 @@ import { KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, View } fr
 import { AppText as Text, AppTextInput as TextInput } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
 import { cn } from "../../lib/cn";
-import { useThemeColor } from "../../lib/useThemeColor";
 
 import type { EditFromHereMode } from "./editFromHere";
 
@@ -24,7 +23,6 @@ interface EditFromHereDialogProps {
 
 export function EditFromHereDialog(props: EditFromHereDialogProps) {
   const [editedText, setEditedText] = useState(props.initialText);
-  const mutedColor = String(useThemeColor("--color-foreground-muted"));
 
   useEffect(() => {
     if (props.open) {
@@ -84,7 +82,7 @@ export function EditFromHereDialog(props: EditFromHereDialogProps) {
                 <SymbolView
                   name={{ ios: "arrow.clockwise", android: "refresh" }}
                   size={14}
-                  tintColor={mutedColor}
+                  tintColorClassName="text-foreground-muted"
                   type="monochrome"
                 />
                 <Text className="flex-1 text-xs text-foreground-muted">

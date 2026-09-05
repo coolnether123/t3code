@@ -9,7 +9,7 @@ import {
   type ServerProvider,
   type ServerProviderModel,
 } from "@t3tools/contracts";
-import { createModelCapabilities, normalizeModelSlug } from "@t3tools/shared/model";
+import { createModelCapabilities, resolveSelectableModel } from "@t3tools/shared/model";
 
 const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],
@@ -65,37 +65,12 @@ export function getProviderModels(
   return getProviderSnapshot(providers, provider)?.models ?? [];
 }
 
-export function getProviderSnapshot(
+function getProviderSnapshot(
   providers: ReadonlyArray<ServerProvider>,
   provider: ProviderDriverKind,
 ): ServerProvider | undefined {
   const defaultInstanceId = defaultInstanceIdForDriver(provider);
   return providers.find((candidate) => candidate.instanceId === defaultInstanceId);
-}
-
-export function getProviderDisplayName(
-  providers: ReadonlyArray<ServerProvider>,
-  provider: ProviderDriverKind,
-): string {
-  const snapshot = getProviderSnapshot(providers, provider);
-  return snapshot?.displayName?.trim() || formatProviderDriverKindLabel(provider);
-}
-
-export function getProviderInteractionModeToggle(
-  providers: ReadonlyArray<ServerProvider>,
-  provider: ProviderDriverKind,
-): boolean {
-  return getProviderSnapshot(providers, provider)?.showInteractionModeToggle ?? true;
-}
-
-export function isProviderEnabled(
-  providers: ReadonlyArray<ServerProvider>,
-  provider: ProviderDriverKind,
-): boolean {
-  if (providers.length === 0) {
-    return true;
-  }
-  return getProviderSnapshot(providers, provider)?.enabled ?? false;
 }
 
 // Resolve an instance selection to the correlated live driver. If the
@@ -118,9 +93,9 @@ export function getProviderModelCapabilities(
   provider: ProviderDriverKind,
   planModeEnabled = true,
 ): ModelCapabilities {
-  const slug = normalizeModelSlug(model, provider);
-  const caps =
-    models.find((candidate) => candidate.slug === slug)?.capabilities ?? EMPTY_CAPABILITIES;
+  const slug = resolveSelectableModel(provider, model, models);
+  const selectedModel = models.find((candidate) => candidate.slug === slug);
+  const caps = selectedModel?.capabilities ?? EMPTY_CAPABILITIES;
   if (planModeEnabled) {
     return caps;
   }
@@ -166,7 +141,11 @@ export function getSubagentBackendOptions(
 }> {
   const capabilities = getProviderModelCapabilities(models, model, provider);
   return SUBAGENT_BACKEND_OPTIONS.map((option) => {
-    const capability = capabilities.subagentBackends?.[option.value];
+    const capability =
+      option.value === "native-v1-control"
+        ? (capabilities.subagentBackends?.["native-v1-control"] ??
+          capabilities.subagentBackends?.nativeV1Control)
+        : capabilities.subagentBackends?.[option.value];
     const workersDisabled =
       option.value === "native-v1-control" && options?.workersEnabled === false;
     return {

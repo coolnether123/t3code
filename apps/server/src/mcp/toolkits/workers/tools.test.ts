@@ -99,7 +99,7 @@ it("makes Worker provider identity optional and explains deterministic inheritan
   );
   expect(WorkerToolkit.tools.worker_wait.description).toContain("identity, lifecycle, and usage");
   expect(WorkerToolkit.tools.worker_wait.description).toContain(
-    "call worker_status after a wake when detailed tool activity is needed",
+    "call worker_status only after a wake when detailed tool activity is needed",
   );
   expect(WorkerToolkit.tools.worker_status.description).toContain("detailed tool activity");
 });

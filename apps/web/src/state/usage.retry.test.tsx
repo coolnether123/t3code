@@ -23,7 +23,7 @@ vi.mock("@effect/atom-react", () => ({ useAtomValue: () => state.environments })
 vi.mock("@t3tools/client-runtime/state/runtime", () => ({
   executeAtomQuery: (...args: unknown[]) => state.execute(...args),
 }));
-vi.mock("../rpc/atomRegistry", () => ({ appAtomRegistry: {} }));
+vi.mock("../rpc/atomRegistry", () => ({ appAtomRegistry: { refresh: vi.fn() } }));
 vi.mock("./presentation", () => ({
   environmentPresentations: { presentationsAtom: {} },
 }));
