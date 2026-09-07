@@ -7,7 +7,11 @@
  *
  * @module usagePricing
  */
-import type { UsageCostSource, UsageTokenTotals } from "@t3tools/contracts";
+import type {
+  UsageCostSource,
+  UsageModelPriceOverride,
+  UsageTokenTotals,
+} from "@t3tools/contracts";
 
 /**
  * The subset of a LiteLLM entry we price against. All values are USD per token.
@@ -27,6 +31,25 @@ export interface ModelRate {
 }
 
 export type RateTable = ReadonlyMap<string, ModelRate>;
+
+/** Custom prices use the exact model key supplied by the user. */
+export function createOverrideRateTable(
+  overrides: Readonly<Record<string, UsageModelPriceOverride>>,
+): RateTable {
+  return new Map(
+    Object.entries(overrides).map(([model, prices]) => [
+      model.trim(),
+      {
+        inputCostPerToken: prices.inputCostPerMillionTokens / 1_000_000,
+        outputCostPerToken: prices.outputCostPerMillionTokens / 1_000_000,
+        cacheReadCostPerToken:
+          (prices.cacheReadCostPerMillionTokens ?? prices.inputCostPerMillionTokens) / 1_000_000,
+        cacheCreationCostPerToken:
+          (prices.cacheWriteCostPerMillionTokens ?? prices.inputCostPerMillionTokens) / 1_000_000,
+      },
+    ]),
+  );
+}
 
 /** Raw shape of one LiteLLM entry, narrowed to the fields we read. */
 interface LiteLlmEntry {
@@ -269,12 +292,13 @@ export function priceUsage(
   totals: UsageTokenTotals,
   reportedCostUsd: number | null,
   serviceTier?: string,
+  overrides?: RateTable,
 ): PricedUsage {
   if (reportedCostUsd !== null && finiteNumber(reportedCostUsd) !== null) {
     return { costUsd: reportedCostUsd, costSource: "providerReported" };
   }
 
-  const baseRate = lookupRate(table, model);
+  const baseRate = lookupRate(overrides ?? table, model) ?? lookupRate(table, model);
   if (baseRate === null) return { costUsd: 0, costSource: "unpriced" };
   const rate = rateForTotals(baseRate, totals, serviceTier);
   if (rate === null) return { costUsd: 0, costSource: "unpriced" };
@@ -302,8 +326,9 @@ export function cacheSavingsUsd(
   model: string,
   totals: UsageTokenTotals,
   serviceTier?: string,
+  overrides?: RateTable,
 ): number {
-  const baseRate = lookupRate(table, model);
+  const baseRate = lookupRate(overrides ?? table, model) ?? lookupRate(table, model);
   if (baseRate === null) return 0;
   const rate = rateForTotals(baseRate, totals, serviceTier);
   if (rate === null || rate.cacheReadCostPerToken === null) return 0;

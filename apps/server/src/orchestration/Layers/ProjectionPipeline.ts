@@ -363,7 +363,8 @@ function collectThreadAttachmentRelativePaths(
       if (!attachmentThreadSegment || attachmentThreadSegment !== threadSegment) {
         continue;
       }
-      relativePaths.add(attachmentRelativePath(attachment));
+      const relativePath = attachmentRelativePath(attachment);
+      if (relativePath !== null) relativePaths.add(relativePath);
     }
   }
   for (const activity of activities) {
@@ -520,6 +521,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             defaultModelSelection: event.payload.defaultModelSelection,
             defaultThreadEnvMode: null,
             faviconPath: event.payload.faviconPath ?? null,
+            autoPull: false,
             scripts: event.payload.scripts,
             createdAt: event.payload.createdAt,
             updatedAt: event.payload.updatedAt,
@@ -638,6 +640,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             createdAt: event.payload.createdAt,
             updatedAt: event.payload.updatedAt,
             archivedAt: null,
+            unsettledAt: null,
             settledOverride: null,
             settledAt: null,
             snoozedUntil: null,
@@ -1764,6 +1767,16 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         ),
       );
 
+    const projectEventDeferred: OrchestrationProjectionPipelineShape["projectEventDeferred"] = (
+      event,
+    ) =>
+      projectEvent(event).pipe(
+        Effect.as(Effect.void),
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
+        Effect.provideService(ServerConfig, serverConfig),
+      );
+
     const bootstrap: OrchestrationProjectionPipelineShape["bootstrap"] = Effect.forEach(
       projectors,
       bootstrapProjector,
@@ -1786,6 +1799,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     return {
       bootstrap,
       projectEvent,
+      projectEventDeferred,
     } satisfies OrchestrationProjectionPipelineShape;
   },
 );

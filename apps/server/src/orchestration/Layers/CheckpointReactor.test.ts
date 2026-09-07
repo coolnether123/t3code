@@ -393,6 +393,7 @@ describe("CheckpointReactor", () => {
           }),
         ),
       refreshStatus: () => Effect.die("refreshStatus should not be called in this test"),
+      refreshPullRequestStatus: () => Effect.succeed(null),
       streamStatus: () => Stream.empty,
     });
     const reconcileParentAfterRewind = vi.fn(() => Effect.succeed([]));

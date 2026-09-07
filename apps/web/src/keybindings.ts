@@ -314,6 +314,15 @@ export function shouldShowThreadJumpHintsForModifiers(
   return false;
 }
 
+/** Compatibility entry point for callers that already have a keyboard event. */
+export function shouldShowThreadJumpHints(
+  event: ShortcutEventLike,
+  keybindings: ResolvedKeybindingsConfig,
+  options?: ShortcutMatchOptions,
+): boolean {
+  return shouldShowThreadJumpHintsForModifiers(event, keybindings, options);
+}
+
 export function modelPickerJumpCommandForIndex(
   index: number,
 ): ModelPickerJumpKeybindingCommand | null {

@@ -2400,7 +2400,7 @@ export function GeneralSettingsPanel() {
         {isElectron ? (
           <SettingsRow
             {...searchableSetting("quit-confirmation")}
-            description="Require holding the quit shortcut before the desktop app quits. A quick tap shows a hint instead."
+            description="Choose how the desktop app confirms quitting."
             resetAction={
               settings.confirmQuit !== DEFAULT_UNIFIED_SETTINGS.confirmQuit ? (
                 <SettingResetButton
@@ -2412,11 +2412,35 @@ export function GeneralSettingsPanel() {
               ) : null
             }
             control={
-              <Switch
-                checked={settings.confirmQuit}
-                onCheckedChange={(checked) => updateSettings({ confirmQuit: Boolean(checked) })}
-                aria-label="Hold to quit"
-              />
+              <Select
+                value={settings.confirmQuit}
+                onValueChange={(value) => {
+                  if (value === "direct" || value === "hold" || value === "double-click") {
+                    updateSettings({ confirmQuit: value });
+                  }
+                }}
+              >
+                <SelectTrigger className="w-full sm:w-40" aria-label="Quit confirmation">
+                  <SelectValue>
+                    {settings.confirmQuit === "direct"
+                      ? "Direct"
+                      : settings.confirmQuit === "double-click"
+                        ? "Double click"
+                        : "Hold"}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  <SelectItem hideIndicator value="direct">
+                    Direct
+                  </SelectItem>
+                  <SelectItem hideIndicator value="hold">
+                    Hold
+                  </SelectItem>
+                  <SelectItem hideIndicator value="double-click">
+                    Double click
+                  </SelectItem>
+                </SelectPopup>
+              </Select>
             }
           />
         ) : null}

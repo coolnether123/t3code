@@ -71,7 +71,6 @@ const DRIVER_KIND = ProviderDriverKind.make("codex");
 const UPDATE = makePackageManagedProviderMaintenanceResolver({
   provider: DRIVER_KIND,
   npmPackageName: "@openai/codex",
-  homebrewFormula: "codex",
   nativeUpdate: null,
 });
 
@@ -226,7 +225,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const snapshot = yield* makeManagedServerProvider<
         ProviderSnapshotSettings<CodexSettings> & { readonly previewAvailable: boolean }
       >({
-        maintenanceCapabilities,
+        resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
         getSettings: getSnapshotSettings,
         streamSettings: Stream.merge(
           snapshotSettings.streamSettings,

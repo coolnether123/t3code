@@ -121,7 +121,6 @@ const isEnvironmentHttpCommonError = Schema.is(EnvironmentHttpCommonError);
 
 export interface ServerPairingLinkRecord {
   readonly id: string;
-  readonly credential: string;
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
   readonly subject: string;
   readonly label?: string;
@@ -407,7 +406,6 @@ export async function listServerPairingLinks(): Promise<ReadonlyArray<ServerPair
       if (pairingLink.label === undefined) {
         return {
           id: pairingLink.id,
-          credential: pairingLink.credential,
           scopes: pairingLink.scopes,
           subject: pairingLink.subject,
           createdAt: timestamps.createdAt,
@@ -416,7 +414,6 @@ export async function listServerPairingLinks(): Promise<ReadonlyArray<ServerPair
       }
       return {
         id: pairingLink.id,
-        credential: pairingLink.credential,
         scopes: pairingLink.scopes,
         subject: pairingLink.subject,
         label: pairingLink.label,

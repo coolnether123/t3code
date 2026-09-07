@@ -5,6 +5,7 @@ import {
   readQuotaHistory,
   validQuotaIntervals,
 } from "./usageQuotaHistory.ts";
+import { createOverrideRateTable } from "./usagePricing.ts";
 import { EMPTY_TOTALS, type UsageRecord } from "./usageTranscripts.ts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -134,5 +135,34 @@ describe("quota cost matching", () => {
     const accumulator = new QuotaCostAccumulator(intervals, new Map());
     accumulator.add({ ...record("2026-07-21T16:30:00Z"), reportedCostUsd: null });
     expect(accumulator.rows[0]).toMatchObject({ records: 1, costUsd: 0, unpricedRecords: 1 });
+  });
+  it("uses custom prices when quota records have no provider-reported cost", () => {
+    const accumulator = new QuotaCostAccumulator(
+      intervals,
+      new Map([
+        [
+          "example-model",
+          {
+            inputCostPerToken: 1e-6,
+            outputCostPerToken: 1e-6,
+            cacheReadCostPerToken: 1e-6,
+            cacheCreationCostPerToken: 1e-6,
+          },
+        ],
+      ]),
+      createOverrideRateTable({
+        "example-model": { inputCostPerMillionTokens: 4, outputCostPerMillionTokens: 8 },
+      }),
+    );
+    accumulator.add({
+      ...record("2026-07-21T16:30:00Z", "example-model"),
+      reportedCostUsd: null,
+    });
+    expect(accumulator.rows[0]).toMatchObject({ records: 1, unpricedRecords: 0 });
+    expect(accumulator.rows[0]?.costUsd).toBeCloseTo(0.0004, 12);
+    expect(accumulator.rows[0]?.models).toMatchObject([
+      { model: "example-model", unpricedRecords: 0 },
+    ]);
+    expect(accumulator.rows[0]?.models[0]?.costUsd).toBeCloseTo(0.0004, 12);
   });
 });

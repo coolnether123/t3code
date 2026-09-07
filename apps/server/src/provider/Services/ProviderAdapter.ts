@@ -32,7 +32,21 @@ export interface ProviderAdapterCapabilities {
    * Declares whether changing the model on an existing session is supported.
    */
   readonly sessionModelSwitch: ProviderSessionModelSwitchMode;
+  /** Whether provider-native conversation rewind is supported. */
+  readonly supportsConversationRollback?: boolean;
+  /** Whether a continuation can be sent without a user prompt. */
+  readonly promptlessTurnContinuation?: boolean;
 }
+
+export type ProviderCompaction<TError> =
+  | { readonly type: "slash-command"; readonly command: string }
+  | {
+      readonly type: "native";
+      readonly start: (
+        threadId: ThreadId,
+        modelSelection?: ProviderSendTurnInput["modelSelection"],
+      ) => Effect.Effect<void, TError>;
+    };
 
 export interface ProviderThreadTurnSnapshot {
   readonly id: TurnId;
@@ -50,6 +64,7 @@ export interface ProviderAdapterShape<TError> {
    */
   readonly provider: ProviderDriverKind;
   readonly capabilities: ProviderAdapterCapabilities;
+  readonly compaction?: ProviderCompaction<TError>;
 
   /**
    * Start a provider-backed session.

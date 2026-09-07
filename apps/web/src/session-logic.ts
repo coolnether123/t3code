@@ -12,6 +12,8 @@ import {
   type OrchestrationThreadActivity,
   type OrchestrationProposedPlanId,
   ProviderDriverKind,
+  ProviderRequestKind,
+  type ProviderApprovalOption,
   type ToolLifecycleItemType,
   type UserInputQuestion,
   type ThreadId,
@@ -149,15 +151,18 @@ const derivedWorkLogEntryByActivity = new WeakMap<
 
 export interface PendingApproval {
   requestId: ApprovalRequestId;
-  requestKind: "command" | "file-read" | "file-change" | "tool" | "permissions";
+  requestKind: ProviderRequestKind;
   createdAt: string;
   detail?: string;
+  appName?: string;
+  options?: ReadonlyArray<ProviderApprovalOption>;
 }
 
 export interface PendingUserInput {
   requestId: ApprovalRequestId;
   createdAt: string;
   questions: ReadonlyArray<UserInputQuestion>;
+  dismissible?: boolean;
 }
 
 export interface ActivePlanState {
@@ -1035,7 +1040,8 @@ function toDerivedWorkLogEntry(
   const itemType = extractWorkLogItemType(payload);
   const requestKind = extractWorkLogRequestKind(payload);
   if (diagnostic) {
-    entry.detail = diagnostic.preview;
+    const rawDiagnostic = asTrimmedString(payload?.detail ?? payload?.message);
+    if (rawDiagnostic && rawDiagnostic !== entry.label) entry.detail = rawDiagnostic;
     entry.diagnosticKey = diagnostic.key;
     if (diagnostic.technicalDetail) entry.technicalDetail = diagnostic.technicalDetail;
   } else if (detail) {

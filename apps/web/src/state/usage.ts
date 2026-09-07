@@ -62,6 +62,7 @@ const usageByWindowAtom = Atom.family((windowKey: string) =>
 export interface UsageView {
   readonly merged: MergedUsage;
   readonly environments: readonly EnvironmentUsageStatus[];
+  readonly selectedEnvironments: readonly EnvironmentUsageStatus[];
   /** True until at least one environment has answered. */
   readonly isPending: boolean;
   /**
@@ -73,7 +74,10 @@ export interface UsageView {
   readonly refresh: (input?: UsageSummaryInput) => Promise<readonly EnvironmentUsageStatus[]>;
 }
 
-export function useUsage(input: UsageSummaryInput): UsageView {
+export function useUsage(
+  input: UsageSummaryInput,
+  selectedEnvironmentIds: ReadonlySet<EnvironmentId> | null = null,
+): UsageView {
   const windowKey = useMemo(
     () => JSON.stringify(usageQueryInput(input, USAGE_CONTRACT_VERSION)),
     [
@@ -90,6 +94,12 @@ export function useUsage(input: UsageSummaryInput): UsageView {
   );
   const atom = usageByWindowAtom(windowKey);
   const observedEnvironments = useAtomValue(atom);
+  const selectedObservedEnvironments =
+    selectedEnvironmentIds === null
+      ? observedEnvironments
+      : observedEnvironments.filter((environment) =>
+          selectedEnvironmentIds.has(environment.environmentId),
+        );
   const [refreshed, setRefreshed] = useState<{
     readonly windowKey: string;
     readonly generation: number;
@@ -97,9 +107,9 @@ export function useUsage(input: UsageSummaryInput): UsageView {
     readonly baselineReadAt: ReadonlyMap<string, string | undefined>;
   } | null>(null);
   const environments = useMemo(() => {
-    if (refreshed?.windowKey !== windowKey) return observedEnvironments;
+    if (refreshed?.windowKey !== windowKey) return selectedObservedEnvironments;
     const byId = new Map(refreshed.statuses.map((status) => [status.environmentId, status]));
-    return observedEnvironments.map((environment) => {
+    return selectedObservedEnvironments.map((environment) => {
       const refreshedEnvironment = byId.get(environment.environmentId);
       if (refreshedEnvironment === undefined) return environment;
       const observedAt = environment.summary?.readAt;
@@ -117,7 +127,7 @@ export function useUsage(input: UsageSummaryInput): UsageView {
       }
       return refreshedEnvironment;
     });
-  }, [observedEnvironments, refreshed, windowKey]);
+  }, [selectedObservedEnvironments, refreshed, windowKey]);
   const retriedFailures = useRef(new Set<string>());
   const refreshGeneration = useRef(0);
 
@@ -155,7 +165,7 @@ export function useUsage(input: UsageSummaryInput): UsageView {
               environmentId: environment.environmentId,
               input: requestInput,
             }),
-            { refresh: true, timeoutMs: 30_000, reportFailure: false, reportDefect: false },
+            { refresh: true, reportFailure: false, reportDefect: false },
           );
           const status = {
             ...environment,
@@ -241,6 +251,7 @@ export function useUsage(input: UsageSummaryInput): UsageView {
   return {
     merged,
     environments,
+    selectedEnvironments: environments,
     isPending: answeredCount === 0 && stillReporting > 0,
     isPartial: answeredCount > 0 && stillReporting > 0,
     refresh,

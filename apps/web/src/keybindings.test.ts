@@ -20,6 +20,7 @@ import {
   isTerminalToggleShortcut,
   resolveShortcutCommand,
   shouldShowThreadJumpHintsForModifiers,
+  shouldShowThreadJumpHints,
   shortcutLabelForCommand,
   terminalDeleteShortcutData,
   terminalNavigationShortcutData,

@@ -71,6 +71,8 @@ export const ProviderSendTurnInput = Schema.Struct({
   threadId: ThreadId,
   /** Explicit Codex steering. Must match the active provider turn. */
   expectedTurnId: Schema.optional(TurnId),
+  /** Internal recovery signal for provider sessions resumed after a restart. */
+  continuation: Schema.optional(Schema.Boolean),
   input: Schema.optional(
     TrimmedNonEmptyString.check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)),
   ),

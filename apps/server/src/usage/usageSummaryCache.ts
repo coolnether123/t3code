@@ -1,6 +1,9 @@
 import type { UsageSummary, UsageSummaryInput } from "@t3tools/contracts";
 
-export function usageSummaryCacheKey(input: UsageSummaryInput): string {
+export function usageSummaryCacheKey(
+  input: UsageSummaryInput,
+  priceOverrides?: Readonly<Record<string, unknown>>,
+): string {
   return JSON.stringify([
     input.timeZone,
     input.sinceDay,
@@ -12,6 +15,7 @@ export function usageSummaryCacheKey(input: UsageSummaryInput): string {
     input.includeQuotaHistory ?? false,
     input.quotaHistoryOnly ?? false,
     input.quotaIntervals ?? null,
+    priceOverrides ?? null,
   ]);
 }
 

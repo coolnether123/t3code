@@ -1890,7 +1890,7 @@ function AssistantChangedFilesSectionInner({
       showCompactPreview={isLatestTurn}
       allDirectoriesExpanded={allDirectoriesExpanded}
       resolvedTheme={resolvedTheme}
-      onExpandedChange={(nextExpanded) =>
+      onExpandedChange={(nextExpanded: boolean) =>
         setExpanded(routeThreadKey, turnSummary.turnId, nextExpanded)
       }
       onToggleAllDirectories={() => setAllDirectoriesExpanded((current) => !current)}

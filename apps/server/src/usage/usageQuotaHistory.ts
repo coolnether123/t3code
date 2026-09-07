@@ -150,8 +150,10 @@ export function validQuotaIntervals(
 export class QuotaCostAccumulator {
   readonly rows;
   readonly rates: RateTable;
-  constructor(intervals: readonly UsageQuotaInterval[], rates: RateTable) {
+  readonly overrides: RateTable | undefined;
+  constructor(intervals: readonly UsageQuotaInterval[], rates: RateTable, overrides?: RateTable) {
     this.rates = rates;
+    this.overrides = overrides;
     this.rows = intervals.map((interval) => ({
       intervalId: interval.id,
       start: Date.parse(interval.sinceTime),
@@ -188,6 +190,7 @@ export class QuotaCostAccumulator {
       record.totals,
       record.reportedCostUsd,
       record.serviceTier,
+      this.overrides,
     );
     row.costUsd += priced.costUsd;
     row.records++;

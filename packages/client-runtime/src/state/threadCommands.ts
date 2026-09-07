@@ -20,6 +20,7 @@ import {
   type SetThreadRuntimeModeInput,
   type PinThreadInput,
   type ReorderPinnedThreadInput,
+  type ReorderActiveThreadInput,
   type SettleThreadInput,
   type SnoozeThreadInput,
   type StartThreadTurnInput,
@@ -42,6 +43,7 @@ import {
   setThreadRuntimeMode,
   pinThread,
   reorderPinnedThread,
+  reorderActiveThread,
   settleThread,
   snoozeThread,
   startThreadTurn,
@@ -68,6 +70,7 @@ export type {
   SetThreadRuntimeModeInput,
   PinThreadInput,
   ReorderPinnedThreadInput,
+  ReorderActiveThreadInput,
   SettleThreadInput,
   SnoozeThreadInput,
   StartThreadTurnInput,
@@ -86,8 +89,13 @@ export function createThreadEnvironmentAtoms<R, E>(
   const scheduler = createAtomCommandScheduler();
   const concurrency = {
     mode: "serial" as const,
-    key: ({ environmentId, input }: { environmentId: string; input: { threadId: string } }) =>
-      JSON.stringify([environmentId, input.threadId]),
+    key: ({ environmentId, input }: { environmentId: string; input: unknown }) => {
+      const threadId =
+        typeof input === "object" && input !== null && "threadId" in input
+          ? String(input.threadId)
+          : "";
+      return JSON.stringify([environmentId, threadId]);
+    },
   };
   return {
     create: createEnvironmentCommand(runtime, {
@@ -153,6 +161,12 @@ export function createThreadEnvironmentAtoms<R, E>(
     reorderPin: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:reorder-pin",
       execute: (input: ReorderPinnedThreadInput) => reorderPinnedThread(input),
+      scheduler,
+      concurrency,
+    }),
+    reorderActive: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:reorder-active",
+      execute: (input: ReorderActiveThreadInput) => reorderActiveThread(input),
       scheduler,
       concurrency,
     }),

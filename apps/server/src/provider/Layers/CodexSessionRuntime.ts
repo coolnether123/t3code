@@ -337,9 +337,18 @@ export function buildPermissionsApprovalResponse(
   decision: ProviderApprovalDecision,
 ): EffectCodexSchema.PermissionsRequestApprovalResponse {
   return {
-    permissions: decision === "accept" || decision === "acceptForSession" ? permissions : {},
+    permissions:
+      decision === "accept" || decision === "acceptForSession" || decision === "acceptAlways"
+        ? permissions
+        : {},
     scope: decision === "acceptForSession" ? "session" : "turn",
   };
+}
+
+function toCodexApprovalDecision(
+  decision: ProviderApprovalDecision,
+): "accept" | "acceptForSession" | "decline" | "cancel" {
+  return decision === "acceptAlways" ? "acceptForSession" : decision;
 }
 
 export function isComputerUseMcpApproval(
@@ -369,6 +378,8 @@ export function buildMcpApprovalResponse(
       return { action: "accept" };
     case "acceptForSession":
       return { action: "accept", _meta: { persist: "session" } };
+    case "acceptAlways":
+      return { action: "accept" };
     case "decline":
       return { action: "decline" };
     case "cancel":
@@ -1877,7 +1888,7 @@ export const makeCodexSessionRuntime = (
           ),
         );
         return {
-          decision: resolved,
+          decision: toCodexApprovalDecision(resolved),
         } satisfies EffectCodexSchema.CommandExecutionRequestApprovalResponse;
       }),
     );
@@ -1945,7 +1956,7 @@ export const makeCodexSessionRuntime = (
           ),
         );
         return {
-          decision: resolved,
+          decision: toCodexApprovalDecision(resolved),
         } satisfies EffectCodexSchema.FileChangeRequestApprovalResponse;
       }),
     );
@@ -2014,7 +2025,7 @@ export const makeCodexSessionRuntime = (
             "mcpServer/elicitation/request",
           );
         }
-        const requestId = ApprovalRequestId.make(yield* randomUUIDv4("mcp-approval-request"));
+        const requestId = ApprovalRequestId.make(yield* randomUUIDv4("mcp-elicitation-request"));
         const turnId = payload.turnId ? TurnId.make(payload.turnId) : undefined;
         const decision = yield* Deferred.make<ProviderApprovalDecision>();
 

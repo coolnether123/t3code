@@ -388,6 +388,7 @@ export function projectEvent(
           threads: updateThread(nextBase.threads, payload.threadId, {
             settledOverride: "settled",
             settledAt: payload.settledAt,
+            activeOrderKey: null,
             updatedAt: payload.updatedAt,
           }),
         })),
@@ -480,6 +481,9 @@ export function projectEvent(
               : {}),
             ...(payload.branch !== undefined ? { branch: payload.branch } : {}),
             ...(payload.worktreePath !== undefined ? { worktreePath: payload.worktreePath } : {}),
+            ...(payload.activeOrderKey !== undefined
+              ? { activeOrderKey: payload.activeOrderKey }
+              : {}),
             updatedAt: payload.updatedAt,
           }),
         })),
@@ -762,12 +766,24 @@ export function projectEvent(
             .toSorted((left, right) => left.checkpointTurnCount - right.checkpointTurnCount)
             .slice(-MAX_THREAD_CHECKPOINTS);
           const retainedTurnIds = new Set(checkpoints.map((checkpoint) => checkpoint.turnId));
-          const messages = retainThreadMessagesAfterRevert(
+          const revertedMessages = retainThreadMessagesAfterRevert(
             thread.messages,
             retainedTurnIds,
             payload.turnCount,
             payload.sourceMessageId,
-          ).slice(-MAX_THREAD_MESSAGES);
+          );
+          // Imported history is immutable context and has no turn id, so a
+          // revert to turn zero must not erase it along with live turns.
+          const importedMessages = thread.messages.filter((message) =>
+            message.id.startsWith("import:"),
+          );
+          const retainedMessageIds = new Set([
+            ...revertedMessages.map((message) => message.id),
+            ...importedMessages.map((message) => message.id),
+          ]);
+          const messages = thread.messages
+            .filter((message) => retainedMessageIds.has(message.id))
+            .slice(-MAX_THREAD_MESSAGES);
           const proposedPlans = retainThreadProposedPlansAfterRevert(
             thread.proposedPlans,
             retainedTurnIds,

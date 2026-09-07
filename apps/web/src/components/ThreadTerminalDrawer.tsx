@@ -3,7 +3,11 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { type TerminalSessionState } from "@t3tools/client-runtime/state/terminal";
+import {
+  terminalOutputText,
+  type TerminalSessionState,
+  type TerminalOutputUpdate,
+} from "@t3tools/client-runtime/state/terminal";
 import {
   Plus,
   SquareSplitHorizontal,
@@ -122,6 +126,14 @@ function writeTerminalBuffer(terminal: GhosttyTerminalSurface, buffer: string): 
   terminal.resetAndWrite(buffer);
 }
 
+export function writeTerminalOutputUpdate(
+  terminal: Pick<GhosttyTerminalSurface, "write" | "resetAndWrite">,
+  update: TerminalOutputUpdate,
+): void {
+  if (update.type === "reset") terminal.resetAndWrite(update.data);
+  else if (update.type === "append") terminal.write(update.data);
+}
+
 function parseTerminalColor(value: string, fallback: GhosttyColor): GhosttyColor {
   if (typeof document === "undefined") return fallback;
 
@@ -186,7 +198,6 @@ export function terminalThemeFromApp(mountElement?: HTMLElement | null): Ghostty
     document.body;
   const drawerStyles = getComputedStyle(drawerSurface);
   const bodyStyles = getComputedStyle(document.body);
-  const themeStyles = getComputedStyle(document.documentElement);
   const background = normalizeComputedColor(
     drawerStyles.backgroundColor,
     normalizeComputedColor(bodyStyles.backgroundColor, fallbackBackground),
@@ -195,15 +206,18 @@ export function terminalThemeFromApp(mountElement?: HTMLElement | null): Ghostty
     drawerStyles.color,
     normalizeComputedColor(bodyStyles.color, fallbackForeground),
   );
-  const terminalBackground = readThemeColor(themeStyles, "--terminal-background", background);
-  const terminalForeground = readThemeColor(themeStyles, "--terminal-foreground", foreground);
+  // Read terminal variables from the drawer surface so embedded terminals keep
+  // their environment's theme when the document shell has a different theme.
+  const terminalStyles = drawerStyles;
+  const terminalBackground = readThemeColor(terminalStyles, "--terminal-background", background);
+  const terminalForeground = readThemeColor(terminalStyles, "--terminal-foreground", foreground);
   const terminalCursor = readThemeColor(
-    themeStyles,
+    terminalStyles,
     "--terminal-cursor",
     isDark ? "rgb(180, 203, 255)" : "rgb(38, 56, 78)",
   );
   const terminalSelection = readThemeColor(
-    themeStyles,
+    terminalStyles,
     "--terminal-selection-background",
     isDark ? "rgba(180, 203, 255, 0.25)" : "rgba(37, 63, 99, 0.2)",
   );
@@ -284,9 +298,13 @@ export function terminalSelectionLineRange(position: {
 export type TerminalContextMenuAction = "add-to-chat" | "copy" | "paste";
 
 /** Post-selection popup: just the two selection actions, always enabled. */
-export function terminalSelectionMenuItems(): ContextMenuItem<"add-to-chat" | "copy">[] {
+export function terminalSelectionMenuItems(options?: {
+  canAddToChat?: boolean;
+}): ContextMenuItem<"add-to-chat" | "copy">[] {
   return [
-    { id: "add-to-chat", label: "Add to chat" },
+    ...(options?.canAddToChat === false
+      ? []
+      : [{ id: "add-to-chat" as const, label: "Add to chat" }]),
     { id: "copy", label: "Copy" },
   ];
 }
@@ -299,9 +317,10 @@ export function terminalSelectionMenuItems(): ContextMenuItem<"add-to-chat" | "c
  */
 export function terminalContextMenuItems(options: {
   hasSelection: boolean;
+  canAddToChat?: boolean;
 }): ContextMenuItem<TerminalContextMenuAction>[] {
   return [
-    ...terminalSelectionMenuItems().map((item) => ({
+    ...terminalSelectionMenuItems(options).map((item) => ({
       ...item,
       disabled: !options.hasSelection,
     })),
@@ -317,11 +336,15 @@ export function terminalContextMenuItems(options: {
  * newer context-menu flow instead.
  */
 export function shouldClearTerminalSelectionAction(options: {
-  timerPending: boolean;
+  timerPending?: boolean;
+  actionPending?: boolean;
   openMenuRequestId: number | null;
   currentRequestId: number;
 }): boolean {
-  return options.timerPending || options.openMenuRequestId === options.currentRequestId;
+  return (
+    (options.timerPending ?? options.actionPending ?? false) ||
+    options.openMenuRequestId === options.currentRequestId
+  );
 }
 
 export function shouldHandleTerminalExit(
@@ -344,7 +367,7 @@ interface TerminalViewportProps {
   worktreePath?: string | null;
   runtimeEnv?: Record<string, string>;
   onSessionExited: () => void;
-  onAddTerminalContext: (selection: TerminalContextSelection) => void;
+  onAddTerminalContext?: (selection: TerminalContextSelection) => void;
   focusRequestId: number;
   autoFocus: boolean;
   visible: boolean;
@@ -411,7 +434,7 @@ export function TerminalViewport({
     onSessionExited();
   });
   const handleAddTerminalContext = useEffectEvent((selection: TerminalContextSelection) => {
-    onAddTerminalContext(selection);
+    onAddTerminalContext?.(selection);
   });
   const readTerminalLabel = useEffectEvent(() => terminalLabel);
   const terminalFontFamily = useClientSettings((settings) =>
@@ -451,7 +474,7 @@ export function TerminalViewport({
       input: { threadId, terminalId, cols, rows },
     }),
   );
-  const terminalBuffer = terminalSession.buffer;
+  const terminalBuffer = terminalOutputText(terminalSession.output);
   const terminalError = terminalSession.error;
   const terminalStatus = terminalSession.status;
   const synchronizedStatusRef = useRef<TerminalSessionState["status"]>("closed");
@@ -800,10 +823,8 @@ export function TerminalViewport({
           };
           void openTerminalLinkInPreview({
             url: text,
-            position: { x: event.clientX, y: event.clientY },
             threadRef,
             openPreview,
-            localApi,
             fallbackToBrowser,
           });
           return;

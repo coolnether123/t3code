@@ -416,7 +416,11 @@ export function pruneScanCache(cache: ScanCache, options: PruneOptions): number 
   let removed = 0;
   for (const [path, entry] of cache) {
     const agedOut = entry.mtimeMs < options.retentionCutoffMs;
-    const underWalkedRoot = options.walkedRoots.some((root) => path.startsWith(root));
+    const underWalkedRoot = options.walkedRoots.some(
+      (root) =>
+        path === root ||
+        path.startsWith(root.endsWith("/") || root.endsWith("\\") ? root : `${root}/`),
+    );
     const deleted =
       underWalkedRoot && entry.mtimeMs >= options.windowStartMs && !options.livePaths.has(path);
     if (agedOut || deleted) {

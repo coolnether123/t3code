@@ -1,9 +1,12 @@
-import type { ComposerFileAttachment } from "../../composerDraftStore";
-import { type ChatImageAttachment, isVideoAttachment } from "../../types";
+import {
+  type ChatAttachment,
+  type ChatFileAttachment,
+  isFileAttachment,
+  isVideoAttachment,
+} from "../../types";
 import type {
   AssetCreateUrlResult,
   AssetResource,
-  ChatFileAttachment,
   EnvironmentId,
   ScopedThreadRef,
 } from "@t3tools/contracts";
@@ -129,11 +132,17 @@ export function attachVideoThumbnail(video: HTMLVideoElement, file: File): () =>
 }
 
 export function buildExpandedImagePreview(
-  images: ReadonlyArray<ChatImageAttachment | ComposerFileAttachment>,
+  images: ReadonlyArray<ChatAttachment>,
   selectedImageId: string,
 ): ExpandedImagePreview | null {
   const selected = images.find((image) => image.id === selectedImageId);
-  if (selected?.type === "file" && selected.file && isVideoAttachment(selected)) {
+  if (
+    selected &&
+    isFileAttachment(selected) &&
+    "file" in selected &&
+    selected.file instanceof Blob &&
+    isVideoAttachment(selected)
+  ) {
     return {
       images: [{ src: URL.createObjectURL(selected.file), name: selected.name, type: "video" }],
       index: 0,

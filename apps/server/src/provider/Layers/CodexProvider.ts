@@ -15,6 +15,7 @@ import * as CodexErrors from "effect-codex-app-server/errors";
 
 import type {
   CodexSettings,
+  CustomModelSetting,
   ServerProvider,
   ServerProviderState,
   ModelCapabilities,
@@ -118,7 +119,13 @@ function codexAccountAuthLabel(account: CodexSchema.V2GetAccountResponse["accoun
     case "enterprise":
       return "ChatGPT Enterprise Subscription";
     case "edu":
+    case "edu_plus":
+    case "edu_pro":
       return "ChatGPT Edu Subscription";
+    case "ent26":
+    case "enterprise_cbp_automation":
+    case "self_serve_business_prolite":
+      return "ChatGPT Enterprise Subscription";
     case "unknown":
       return "ChatGPT Subscription";
     default:
@@ -311,7 +318,7 @@ export function applyPreferredCodexDefaultModel(
 
 function appendCustomCodexModels(
   models: ReadonlyArray<ServerProviderModel>,
-  customModels: ReadonlyArray<string>,
+  customModels: ReadonlyArray<CustomModelSetting>,
 ): ReadonlyArray<ServerProviderModel> {
   if (customModels.length === 0) {
     return models;
@@ -321,7 +328,7 @@ function appendCustomCodexModels(
   const fallbackCapabilities = models.find((model) => model.capabilities)?.capabilities ?? null;
   const customEntries: ServerProviderModel[] = [];
   for (const rawModel of customModels) {
-    const slug = rawModel.trim();
+    const slug = (typeof rawModel === "string" ? rawModel : rawModel.slug).trim();
     if (!slug || seen.has(slug)) {
       continue;
     }
@@ -419,7 +426,7 @@ const probeCodexAppServerProviderOnce = Effect.fn("probeCodexAppServerProviderOn
     readonly homePath?: string;
     readonly launchArgs?: string;
     readonly cwd: string;
-    readonly customModels?: ReadonlyArray<string>;
+    readonly customModels?: ReadonlyArray<CustomModelSetting>;
     readonly environment?: NodeJS.ProcessEnv;
     readonly appServerTransport?: CodexAppServerTransport;
     readonly browserTools: ReadonlyArray<CodexMcpToolInventory>;
@@ -536,7 +543,7 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
 const emptyCodexModelsFromSettings = (codexSettings: CodexSettings): ServerProvider["models"] => {
   const models = new Set<string>();
   for (const model of codexSettings.customModels) {
-    const trimmed = model.trim();
+    const trimmed = (typeof model === "string" ? model : model.slug).trim();
     if (trimmed.length > 0) {
       models.add(trimmed);
     }
@@ -625,7 +632,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     readonly homePath?: string;
     readonly launchArgs?: string;
     readonly cwd: string;
-    readonly customModels: ReadonlyArray<string>;
+    readonly customModels: ReadonlyArray<CustomModelSetting>;
     readonly environment?: NodeJS.ProcessEnv;
     readonly appServerTransport?: CodexAppServerTransport;
     readonly browserTools: ReadonlyArray<CodexMcpToolInventory>;

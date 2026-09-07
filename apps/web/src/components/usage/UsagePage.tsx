@@ -1,6 +1,6 @@
-import type { UsageProviderKind } from "@t3tools/contracts";
+import type { EnvironmentId, UsageProviderKind } from "@t3tools/contracts";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { CheckIcon, RefreshCwIcon, XIcon } from "lucide-react";
+import { CheckIcon, RefreshCwIcon, SlidersHorizontalIcon, XIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import type { DailyTotals, HourlyTotals } from "@t3tools/shared/usageMerge";
@@ -22,6 +22,14 @@ import {
   makeWindow,
 } from "@t3tools/shared/usageFormat";
 import { Button } from "../ui/button";
+import {
+  Menu,
+  MenuCheckboxItem,
+  MenuItem,
+  MenuPopup,
+  MenuSeparator,
+  MenuTrigger,
+} from "../ui/menu";
 import { ScrollArea } from "../ui/scroll-area";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { SidebarInset } from "../ui/sidebar";
@@ -35,6 +43,8 @@ import { WorkspacePageContainer } from "../WorkspacePageContainer";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { UsageProviderChart, type UsageChartMetric } from "./UsageProviderChart";
 import { CodexUsageButton } from "./CodexUsageButton";
+import { UsageLimitsSection } from "./UsageLimits";
+import { UsagePriceOverrides } from "./UsagePriceOverrides";
 import { PROVIDER_ORDER, PROVIDER_PRESENTATION, providersWithUsage } from "./usageProviders";
 
 const WINDOW_OPTIONS = [
@@ -54,6 +64,8 @@ export function UsagePage() {
   }));
   const [metric, setMetric] = useState<UsageChartMetric>("cost");
   const [breakdown, setBreakdown] = useState<"model" | "time">("model");
+  const [selectedEnvironmentIds, setSelectedEnvironmentIds] =
+    useState<ReadonlySet<EnvironmentId> | null>(null);
   const { days: windowDays, window } = windowSelection;
   const isPast24Hours = windowDays === 1;
   const { merged, environments, isPending, refresh } = useUsage(window);
@@ -119,6 +131,11 @@ export function UsagePage() {
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
       <div className="ms-auto hidden min-w-0 items-center justify-end gap-2 lg:flex">
+        <UsageEnvironmentMenu
+          environments={environments}
+          selectedEnvironmentIds={selectedEnvironmentIds}
+          onSelectionChange={setSelectedEnvironmentIds}
+        />
         <ToggleGroup
           aria-label="Usage metric"
           variant="segmented"
@@ -241,6 +258,8 @@ export function UsagePage() {
                   duplicateSources={merged.duplicateSources}
                   staleEnvironments={merged.staleEnvironments}
                 />
+
+                <UsageLimitsSection selectedEnvironmentIds={selectedEnvironmentIds} />
 
                 <section className="grid gap-6 lg:grid-cols-[minmax(0,16rem)_minmax(0,1fr)]">
                   <div className="flex min-w-0 flex-col gap-5">
@@ -537,6 +556,78 @@ export function UsagePage() {
         </ScrollArea>
       </div>
     </SidebarInset>
+  );
+}
+
+function UsageEnvironmentMenu({
+  environments,
+  selectedEnvironmentIds,
+  onSelectionChange,
+}: {
+  readonly environments: readonly EnvironmentUsageStatus[];
+  readonly selectedEnvironmentIds: ReadonlySet<EnvironmentId> | null;
+  readonly onSelectionChange: (ids: ReadonlySet<EnvironmentId> | null) => void;
+}) {
+  const [modelPricesOpen, setModelPricesOpen] = useState(false);
+  const allSelected = selectedEnvironmentIds === null;
+  const label = allSelected
+    ? "All environments"
+    : selectedEnvironmentIds.size === 1
+      ? (environments.find((entry) => selectedEnvironmentIds.has(entry.environmentId))?.label ??
+        "1 environment")
+      : `${selectedEnvironmentIds.size} environments`;
+  return (
+    <>
+      <Menu>
+        <MenuTrigger className="inline-flex min-w-0 max-w-48 items-center gap-1 rounded-sm px-1 text-left text-sm text-muted-foreground hover:text-foreground">
+          <span className="truncate">{label}</span>
+        </MenuTrigger>
+        <MenuPopup align="end" className="w-72 max-w-[calc(100vw-2rem)]">
+          <MenuCheckboxItem
+            checked={allSelected}
+            closeOnClick={false}
+            onCheckedChange={(checked) => onSelectionChange(checked ? null : new Set())}
+          >
+            All environments
+          </MenuCheckboxItem>
+          <MenuSeparator />
+          {environments.map((environment) => {
+            const checked = allSelected || selectedEnvironmentIds.has(environment.environmentId);
+            return (
+              <MenuCheckboxItem
+                key={environment.environmentId}
+                checked={checked}
+                closeOnClick={false}
+                onCheckedChange={(nextChecked) => {
+                  const next = new Set(
+                    allSelected
+                      ? environments.map((entry) => entry.environmentId)
+                      : selectedEnvironmentIds,
+                  );
+                  if (nextChecked) next.add(environment.environmentId);
+                  else next.delete(environment.environmentId);
+                  onSelectionChange(next.size === environments.length ? null : next);
+                }}
+              >
+                {environment.label}
+              </MenuCheckboxItem>
+            );
+          })}
+          <MenuSeparator />
+          <MenuItem onClick={() => setModelPricesOpen(true)}>
+            <SlidersHorizontalIcon aria-hidden />
+            Model prices
+          </MenuItem>
+        </MenuPopup>
+      </Menu>
+      {modelPricesOpen ? (
+        <UsagePriceOverrides
+          usage={environments}
+          initialSelectedEnvironmentIds={selectedEnvironmentIds}
+          onOpenChange={setModelPricesOpen}
+        />
+      ) : null}
+    </>
   );
 }
 

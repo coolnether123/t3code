@@ -9,6 +9,7 @@
  */
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { ScopedThreadRef } from "@t3tools/contracts";
+import type { ChatFileAttachment } from "./types";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
@@ -40,11 +41,12 @@ export type RightPanelSurface =
   | { id: "diff"; kind: "diff" }
   | { id: "files"; kind: "files" }
   | {
-      id: `file:${string}`;
+      id: `file:${string}` | `attachment:${string}`;
       kind: "file";
       relativePath: string;
       revealLine: number | null;
       revealRequestId: number;
+      attachment?: ChatFileAttachment;
     }
   | {
       /**
@@ -86,12 +88,20 @@ export interface ThreadRightPanelState {
 
 interface RightPanelStoreState {
   byThreadKey: Record<string, ThreadRightPanelState>;
+  userActionRevisionByThreadKey: Record<string, number>;
+  getUserActionRevision: (ref: ScopedThreadRef) => number;
+  openProactive: (
+    ref: ScopedThreadRef,
+    surface: Extract<RightPanelSurface, { kind: "diff" | "pull-request" }>,
+    expectedUserActionRevision: number,
+  ) => boolean;
   open: (
     ref: ScopedThreadRef,
     kind: Exclude<RightPanelKind, "file" | "terminal" | "pull-request">,
   ) => void;
   openBrowser: (ref: ScopedThreadRef, tabId: string | null) => void;
   openFile: (ref: ScopedThreadRef, relativePath: string, line?: number) => void;
+  openAttachment: (ref: ScopedThreadRef, attachment: ChatFileAttachment) => void;
   openPullRequest: (
     ref: ScopedThreadRef,
     target: { environmentId?: string; projectId: string; repository: string; number: number },
@@ -152,12 +162,14 @@ const fileSurface = (
   relativePath: string,
   revealLine: number | null,
   revealRequestId: number,
+  attachment?: ChatFileAttachment,
 ): RightPanelSurface => ({
-  id: `file:${relativePath}`,
+  id: attachment ? `attachment:${attachment.id}` : `file:${relativePath}`,
   kind: "file",
   relativePath,
   revealLine,
   revealRequestId,
+  ...(attachment ? { attachment } : {}),
 });
 
 const terminalSurface = (terminalId: string): RightPanelSurface => ({
@@ -366,8 +378,32 @@ export function migratePersistedRightPanelState(persistedState: unknown): {
 
 export const useRightPanelStore = create<RightPanelStoreState>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       byThreadKey: {},
+      userActionRevisionByThreadKey: {},
+      getUserActionRevision: (ref) =>
+        get().userActionRevisionByThreadKey[scopedThreadKey(ref)] ?? 0,
+      openProactive: (ref, surface, expectedUserActionRevision) => {
+        let opened = false;
+        set((state) => {
+          const threadKey = scopedThreadKey(ref);
+          if ((state.userActionRevisionByThreadKey[threadKey] ?? 0) !== expectedUserActionRevision)
+            return state;
+          opened = true;
+          return {
+            ...state,
+            byThreadKey: updateThread(state.byThreadKey, threadKey, (current) =>
+              upsertSurface(
+                current,
+                surface,
+                surface.kind === "pull-request" ||
+                  !current.surfaces.some((entry) => entry.kind === "pull-request"),
+              ),
+            ),
+          };
+        });
+        return opened;
+      },
       open: (ref, kind) =>
         set((state) => ({
           byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => {
@@ -377,6 +413,11 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
             }
             return upsertSurface(current, singletonSurface(kind));
           }),
+          userActionRevisionByThreadKey: {
+            ...state.userActionRevisionByThreadKey,
+            [scopedThreadKey(ref)]:
+              (state.userActionRevisionByThreadKey[scopedThreadKey(ref)] ?? 0) + 1,
+          },
         })),
       openBrowser: (ref, tabId) =>
         set((state) => ({
@@ -387,6 +428,11 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
               : current.surfaces;
             return upsertSurface({ ...current, surfaces: withoutPlaceholder }, surface);
           }),
+          userActionRevisionByThreadKey: {
+            ...state.userActionRevisionByThreadKey,
+            [scopedThreadKey(ref)]:
+              (state.userActionRevisionByThreadKey[scopedThreadKey(ref)] ?? 0) + 1,
+          },
         })),
       openPullRequest: (ref, target) =>
         set((state) => ({
@@ -420,6 +466,30 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
                 : [...withoutStandaloneExplorer, surface],
             };
           }),
+          userActionRevisionByThreadKey: {
+            ...state.userActionRevisionByThreadKey,
+            [scopedThreadKey(ref)]:
+              (state.userActionRevisionByThreadKey[scopedThreadKey(ref)] ?? 0) + 1,
+          },
+        })),
+      openAttachment: (ref, attachment) =>
+        set((state) => ({
+          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => {
+            const surfaces = current.surfaces.filter((surface) => surface.kind !== "files");
+            const surface = fileSurface(attachment.name, null, 0, attachment);
+            return {
+              isOpen: true,
+              activeSurfaceId: surface.id,
+              surfaces: surfaces.some((entry) => entry.id === surface.id)
+                ? surfaces.map((entry) => (entry.id === surface.id ? surface : entry))
+                : [...surfaces, surface],
+            };
+          }),
+          userActionRevisionByThreadKey: {
+            ...state.userActionRevisionByThreadKey,
+            [scopedThreadKey(ref)]:
+              (state.userActionRevisionByThreadKey[scopedThreadKey(ref)] ?? 0) + 1,
+          },
         })),
       openTerminal: (ref, terminalId) =>
         set((state) => ({
@@ -597,7 +667,9 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
           byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => {
             if (workspaceAvailable) return current;
             const surfaces = current.surfaces.filter(
-              (surface) => surface.kind !== "files" && surface.kind !== "file",
+              (surface) =>
+                surface.kind !== "files" &&
+                (surface.kind !== "file" || surface.attachment !== undefined),
             );
             if (surfaces.length === current.surfaces.length) return current;
             const activeStillExists = surfaces.some(

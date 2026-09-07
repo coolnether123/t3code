@@ -2,19 +2,23 @@ import {
   DEFAULT_MODEL,
   DEFAULT_MODEL_BY_PROVIDER,
   MODEL_SLUG_ALIASES_BY_PROVIDER,
-  type ModelCapabilities,
+  ModelCapabilities,
   type ModelSelection,
   ProviderDriverKind,
   ProviderInstanceId,
   type ProviderOptionDescriptor,
   type ProviderOptionSelection,
+  type CustomModelSetting,
 } from "@t3tools/contracts";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 
 const DEFAULT_PROVIDER_DRIVER_KIND = ProviderDriverKind.make("codex");
 
 export interface SelectableModelOption {
   slug: string;
   name: string;
+  aliases?: ReadonlyArray<string> | undefined;
 }
 
 export function createModelCapabilities(input: {
@@ -214,6 +218,16 @@ export function buildProviderOptionSelectionsFromDescriptors(
   return nextSelections.length > 0 ? nextSelections : undefined;
 }
 
+export function buildExplicitProviderOptionSelectionsFromDescriptors(
+  descriptors: ReadonlyArray<ProviderOptionDescriptor> | null | undefined,
+  selections: ReadonlyArray<ProviderOptionSelection> | null | undefined,
+): Array<ProviderOptionSelection> | undefined {
+  if (!descriptors || !selections || selections.length === 0) return undefined;
+  const allowed = new Set(descriptors.map((descriptor) => descriptor.id));
+  const result = selections.filter((selection) => allowed.has(selection.id));
+  return result.length > 0 ? result.map((selection) => ({ ...selection })) : undefined;
+}
+
 export function getModelSelectionOptionDescriptors(
   modelSelection: ModelSelection | null | undefined,
   caps?: ModelCapabilities | null | undefined,
@@ -259,6 +273,63 @@ export function normalizeCustomModelSlug(model: string | null | undefined): stri
   return model.trim() || null;
 }
 
+export interface CustomModelDefinition {
+  readonly slug: string;
+  readonly name: string;
+  readonly capabilities: ModelCapabilities | null;
+}
+
+const decodeCustomModelCapabilities = Schema.decodeUnknownOption(ModelCapabilities);
+
+export function readCustomModelEntries(value: unknown): CustomModelDefinition[] {
+  if (!Array.isArray(value)) return [];
+  const entries: CustomModelDefinition[] = [];
+  const seen = new Set<string>();
+  for (const raw of value) {
+    const record =
+      typeof raw === "string"
+        ? { slug: raw }
+        : raw !== null && typeof raw === "object"
+          ? (raw as { slug?: unknown; name?: unknown; capabilities?: unknown })
+          : null;
+    if (!record) continue;
+    const slug = normalizeCustomModelSlug(typeof record.slug === "string" ? record.slug : null);
+    if (!slug || seen.has(slug)) continue;
+    seen.add(slug);
+    const name =
+      (typeof record.name === "string" ? normalizeCustomModelSlug(record.name) : null) ?? slug;
+    const capabilities =
+      record.capabilities === undefined || record.capabilities === null
+        ? null
+        : Option.getOrNull(decodeCustomModelCapabilities(record.capabilities));
+    entries.push({
+      slug,
+      name,
+      capabilities: capabilities
+        ? createModelCapabilities({ optionDescriptors: capabilities.optionDescriptors ?? [] })
+        : null,
+    });
+  }
+  return entries;
+}
+
+export function readCustomModelSlugs(value: unknown): string[] {
+  return readCustomModelEntries(value).map((entry) => entry.slug);
+}
+
+export function toCustomModelSetting(entry: CustomModelDefinition): CustomModelSetting {
+  const descriptors = entry.capabilities?.optionDescriptors ?? [];
+  const name = entry.name !== entry.slug ? entry.name : undefined;
+  if (!name && descriptors.length === 0) return entry.slug;
+  return {
+    slug: entry.slug,
+    ...(name ? { name } : {}),
+    ...(descriptors.length > 0
+      ? { capabilities: createModelCapabilities({ optionDescriptors: descriptors }) }
+      : {}),
+  };
+}
+
 export function resolveSelectableModel(
   provider: ProviderDriverKind,
   value: string | null | undefined,
@@ -281,6 +352,13 @@ export function resolveSelectableModel(
   const byName = options.find((option) => option.name.toLowerCase() === trimmed.toLowerCase());
   if (byName) {
     return byName.slug;
+  }
+
+  const byAlias = options.find((option) =>
+    option.aliases?.some((alias) => alias.toLowerCase() === trimmed.toLowerCase()),
+  );
+  if (byAlias) {
+    return byAlias.slug;
   }
 
   const normalized = normalizeModelSlug(trimmed, provider);

@@ -40,6 +40,7 @@ const makeCatalogLayer = (enableT3Workers: boolean) =>
         ExternalLauncher.ExternalLauncher,
         ExternalLauncher.ExternalLauncher.of({
           resolveAvailableEditors: () => Effect.succeed([]),
+          resolveFileManagerRevealKind: () => Effect.succeed(undefined),
           launchBrowser: () => Effect.void,
           launchEditor: () => Effect.void,
         }),

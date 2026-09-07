@@ -43,6 +43,8 @@ import { previewBridge } from "./preview/previewBridge";
 import { PierreEntryIcon } from "./chat/PierreEntryIcon";
 
 interface RightPanelTabsProps {
+  open?: boolean;
+  environmentId?: string;
   mode: PreviewPanelMode;
   maximized?: boolean;
   /** Forwarded to PreviewPanelShell so this surface persists its own width. */
@@ -69,6 +71,7 @@ interface RightPanelTabsProps {
   onCloseAllSurfaces: () => void;
   onCopyFilePath: (relativePath: string) => void;
   onAddBrowser: () => void;
+  onAddBrowserInProfile?: () => void;
   onAddTerminal: () => void;
   onAddDiff: () => void;
   onAddFiles: () => void;
@@ -82,7 +85,8 @@ interface RightPanelTabsProps {
   pullRequestAvailable: boolean;
   agentsAvailable: boolean;
   workersAvailable?: boolean;
-  pullRequestStatuses?: Readonly<Record<string, PullRequestTabStatus>>;
+  pullRequestStatuses?: Readonly<Record<string, PullRequestTabStatus | PullRequestTabStatusSeed>>;
+  pullRequestStatusSeeds?: Readonly<Record<string, PullRequestTabStatusSeed>>;
   /** Running + waiting subagents; badges the Agents card in the empty state. */
   liveAgentCount: number;
   children: ReactNode;
@@ -95,6 +99,7 @@ export interface PullRequestTabStatus {
   state: PullRequestState;
   isDraft: boolean;
 }
+export type PullRequestTabStatusSeed = Pick<PullRequestTabStatus, "state" | "isDraft">;
 
 const SURFACE_DISABLED_REASONS = {
   browser: "Browser previews are only available in the T3 Code desktop app.",
@@ -569,7 +574,9 @@ function SurfaceIcon({
   sessions: Readonly<Record<string, PreviewSessionSnapshot>>;
   desktopByTabId: Readonly<Record<string, DesktopPreviewOverlay>>;
   theme: "light" | "dark";
-  pullRequestStatuses: Readonly<Record<string, PullRequestTabStatus>> | undefined;
+  pullRequestStatuses:
+    | Readonly<Record<string, PullRequestTabStatus | PullRequestTabStatusSeed>>
+    | undefined;
 }) {
   switch (surface.kind) {
     case "preview": {
@@ -622,6 +629,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
   const tabListRef = useRef<HTMLDivElement>(null);
   const [addSurfaceMenuOpen, setAddSurfaceMenuOpen] = useState(false);
   const workersAvailable = props.workersAvailable === true;
+  const effectivePullRequestStatuses = props.pullRequestStatuses ?? props.pullRequestStatusSeeds;
   const onAddWorkers = props.onAddWorkers ?? (() => {});
   const visibleSurfaces = props.surfaces.filter(
     (surface) => surface.kind !== "workers" || workersAvailable,
@@ -810,6 +818,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
   return (
     <PreviewPanelShell
       mode={props.mode}
+      {...(props.open !== undefined ? { "data-right-panel-open": props.open } : {})}
       {...(props.maximized !== undefined ? { maximized: props.maximized } : {})}
       {...(props.widthStorageKey !== undefined ? { widthStorageKey: props.widthStorageKey } : {})}
       {...(props.defaultWidth !== undefined ? { defaultWidth: props.defaultWidth } : {})}
@@ -873,7 +882,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                         sessions={props.previewSessions}
                         desktopByTabId={props.desktopByTabId}
                         theme={resolvedTheme}
-                        pullRequestStatuses={props.pullRequestStatuses}
+                        pullRequestStatuses={effectivePullRequestStatuses}
                       />
                       {pending ? (
                         <span

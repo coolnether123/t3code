@@ -31,9 +31,9 @@ import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
 import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
-import { isGitRepository } from "../../git/Utils.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import { ThreadPlanProgressService } from "../ThreadPlanProgress.ts";
@@ -714,6 +714,10 @@ export function runtimeEventToActivities(
     }
 
     case "task.updated": {
+      const lastTurn =
+        typeof event.payload === "object" && event.payload !== null && "lastTurn" in event.payload
+          ? event.payload.lastTurn
+          : undefined;
       return [
         {
           id: event.eventId,
@@ -732,7 +736,7 @@ export function runtimeEventToActivities(
               ? { detail: truncateDetail(event.payload.description) }
               : {}),
             ...(event.payload.endedAt ? { endedAt: event.payload.endedAt } : {}),
-            ...(event.payload.lastTurn ? { lastTurn: event.payload.lastTurn } : {}),
+            ...(lastTurn ? { lastTurn } : {}),
             ...(event.payload.isBackgrounded !== undefined
               ? { isBackgrounded: event.payload.isBackgrounded }
               : {}),
@@ -965,6 +969,7 @@ export function runtimeEventToActivities(
 }
 
 const make = Effect.gen(function* () {
+  const checkpointStore = yield* CheckpointStore.CheckpointStore;
   const threadBackgroundLiveness = yield* ThreadBackgroundLivenessService;
   const threadPlanProgress = yield* ThreadPlanProgressService;
   const crypto = yield* Crypto.Crypto;
@@ -2012,7 +2017,14 @@ const make = Effect.gen(function* () {
           : undefined;
         const workspaceCwd =
           checkpointContext?.worktreePath ?? checkpointContext?.workspaceRoot ?? undefined;
-        if (turnId && checkpointContext && workspaceCwd && isGitRepository(workspaceCwd)) {
+        if (
+          turnId &&
+          checkpointContext &&
+          workspaceCwd &&
+          (yield* checkpointStore
+            .isGitRepository(workspaceCwd)
+            .pipe(Effect.orElseSucceed(() => false)))
+        ) {
           // Skip if a checkpoint already exists for this turn. A real
           // (non-placeholder) capture from CheckpointReactor should not
           // be clobbered, and dispatching a duplicate placeholder for the

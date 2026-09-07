@@ -2456,7 +2456,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     <ComposerStashBadge
       count={stashQueue.length}
       menuOpen={isStashMenuOpen}
-      placement="inline"
       pulseKey={stashPulse.key}
       pulsing={stashPulse.active}
       onToggleMenu={toggleInlineStashMenu}
@@ -3178,6 +3177,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 <ComposerCommandMenuLayer anchor={composerMenuAnchor}>
                   <ComposerStashMenu
                     entries={stashQueue}
+                    stashShortcutLabel={null}
                     onRestore={restoreStashEntry}
                     onDelete={deleteStashEntry}
                     onClose={() => setIsStashMenuOpen(false)}

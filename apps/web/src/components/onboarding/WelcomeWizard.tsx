@@ -990,7 +990,6 @@ function AgentInstallTerminal({
             terminalId={terminalId}
             terminalLabel={`Install ${driver}`}
             cwd={cwd}
-            providerInstanceId={providerInstanceId}
             advancedTypography={advancedTypography}
             onSessionExited={onClose}
             focusRequestId={1}

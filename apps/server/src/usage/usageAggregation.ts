@@ -115,6 +115,7 @@ export interface AggregateOptions {
   readonly sinceDay: string;
   readonly untilDay: string;
   readonly rates: RateTable;
+  readonly priceOverrides?: RateTable;
   readonly resolution?: UsageResolution;
   readonly sinceTimeMs?: number;
   readonly untilTimeMs?: number;
@@ -222,6 +223,7 @@ export class UsageAggregator {
       record.totals,
       record.reportedCostUsd,
       record.serviceTier,
+      this.#options.priceOverrides,
     );
 
     bucket.totals = addTotals(bucket.totals, record.totals);
@@ -231,6 +233,7 @@ export class UsageAggregator {
       record.model,
       record.totals,
       record.serviceTier,
+      this.#options.priceOverrides,
     );
     bucket.records += 1;
     if (priced.costSource === "unpriced") bucket.unpricedRecords += 1;

@@ -26,6 +26,7 @@ import {
   type RuntimeTaskUsage,
   ProviderApprovalDecision,
   ThreadId,
+  TurnId,
   ProviderSendTurnInput,
   type ProviderSessionStartInput,
   type SubagentBackend,
@@ -49,6 +50,7 @@ import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { codexAppServerTransport } from "../CodexAppServerTransport.ts";
+import { codexRateLimitsToUpdate } from "./codexUsageLimits.ts";
 import {
   CODEX_COMPUTER_CONTROL_OPTION_ID,
   DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
@@ -734,7 +736,7 @@ function mapCollabAgentEvent(
         turn.id.trim().length > 0 &&
         (turnStatus === "completed" || turnStatus === "failed" || turnStatus === "interrupted")
           ? {
-              turnId: turn.id,
+              turnId: TurnId.make(turn.id),
               outcome: turnStatus,
               ...(completedAt ? { completedAt } : {}),
               ...(typeof turn.durationMs === "number" &&
@@ -1592,16 +1594,20 @@ function mapToRuntimeEvents(
   }
 
   if (event.method === "account/rateLimits/updated") {
-    if (!readPayload(EffectCodexSchema.V2AccountRateLimitsUpdatedNotification, event.payload)) {
+    const rateLimits = readPayload(
+      EffectCodexSchema.V2AccountRateLimitsUpdatedNotification,
+      event.payload,
+    );
+    if (!rateLimits) {
       return [];
     }
+    const limits = codexRateLimitsToUpdate(rateLimits.rateLimits);
+    if (!limits) return [];
     return [
       {
         type: "account.rate-limits.updated",
         ...runtimeEventBase(event, canonicalThreadId),
-        payload: {
-          rateLimits: event.payload ?? {},
-        },
+        payload: { limits },
       },
     ];
   }
@@ -2326,6 +2332,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     provider: PROVIDER,
     capabilities: {
       sessionModelSwitch: "in-session",
+      promptlessTurnContinuation: true,
     },
     startSession,
     createForkResumeCursor,

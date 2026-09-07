@@ -101,14 +101,14 @@ interface DiffPanelProps {
   mode?: DiffPanelMode;
   composerDraftTarget: ScopedThreadRef | DraftId;
   initialGitScope: "branch" | "unstaged";
-  workspaceMutationId: string | null;
+  workspaceMutationId?: string | null;
 }
 
 export default function DiffPanel({
   mode = "inline",
   composerDraftTarget,
   initialGitScope: initialGitScopeProp,
-  workspaceMutationId,
+  workspaceMutationId = null,
 }: DiffPanelProps) {
   const { resolvedTheme } = useTheme();
   const settings = useClientSettings();

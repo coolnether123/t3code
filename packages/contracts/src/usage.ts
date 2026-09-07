@@ -24,6 +24,7 @@ import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
  * rather than failing the whole page.
  */
 export const USAGE_CONTRACT_VERSION = 7 as const;
+export const USAGE_MERGE_COMPATIBLE_SINCE = 4 as const;
 
 export const UsageProviderKind = Schema.Literals([
   "claude",
