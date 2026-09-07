@@ -20,8 +20,9 @@ import type { CodexScanState, UsageRecord } from "./usageTranscripts.ts";
 
 // v2 changed fork-copy suppression. v3 added root coverage. v4 persists the
 // Codex parser cursor. v5 reparses AI Studio files for source dates and branch
-// de-duplication while retaining the expensive caches for every other provider.
-export const USAGE_SCAN_CACHE_VERSION = 5 as const;
+// de-duplication. v6 adds stable Codex cross-file keys; old Codex entries are
+// cold-rebuilt so migrated shared/private rollouts cannot be double counted.
+export const USAGE_SCAN_CACHE_VERSION = 6 as const;
 
 export interface CachedFile {
   readonly size: number;
@@ -210,6 +211,7 @@ export function decodeScanCache(document: unknown): ScanCache {
     root.version !== 2 &&
     root.version !== 3 &&
     root.version !== 4 &&
+    root.version !== 5 &&
     root.version !== USAGE_SCAN_CACHE_VERSION
   ) {
     return cache;
@@ -242,7 +244,7 @@ export function decodeScanCache(document: unknown): ScanCache {
     if (!isRecordArray(entry.r)) continue;
 
     const provider: UsageProviderKind = entry.p;
-    if (root.version < USAGE_SCAN_CACHE_VERSION && provider === "aistudio") continue;
+    if (root.version < USAGE_SCAN_CACHE_VERSION && provider === "codex") continue;
     const records: UsageRecord[] = [];
     // Any corrupt row disqualifies the whole entry. Keeping the survivors
     // under the original (size, mtime) would read as a valid warm hit and the

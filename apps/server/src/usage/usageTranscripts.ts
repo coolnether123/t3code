@@ -482,9 +482,11 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
     totals,
     // Codex does not report cost in the rollout.
     reportedCostUsd: null,
-    // Events surviving the fork-copy suppression above are unique to this
-    // rollout, so they need no global dedup.
-    dedupeKey: null,
+    // The same rollout may temporarily exist in the legacy shared home and a
+    // T3-owned home during resume migration. Keep a stable cross-file key so
+    // usage counts that copied event once while preserving distinct turns.
+    dedupeKey:
+      state.sessionId.length > 0 ? `codex:${state.sessionId}:${timestampMs}:${signature}` : null,
   };
 }
 

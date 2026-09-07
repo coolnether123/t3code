@@ -1,4 +1,5 @@
 import {
+  DEFAULT_RUNTIME_MODE,
   type ModelSelection,
   type ProviderOptionSelection,
   type WorkerDetail,
@@ -56,6 +57,16 @@ const resolveWorkerModelSelection = (
     );
   }
   const requestedModel = input.modelSelection?.model;
+  if (input.backendPreference === "codex-desktop" && requestedModel !== undefined) {
+    // Native Desktop owns model validation. Keep the parent provider instance
+    // as T3 ownership metadata while allowing an exact native model slug.
+    const options = mergeModelOptions(inherited.options, input.modelSelection?.options);
+    return Effect.succeed({
+      instanceId: inherited.instanceId,
+      model: requestedModel,
+      ...(options.length === 0 ? {} : { options }),
+    });
+  }
   if (requestedModel !== undefined && requestedModel !== inherited.model) {
     return Effect.fail(
       new WorkerOperationError({
@@ -91,7 +102,7 @@ export const mapWorkerStartRequest = (
         ...(input.backendPreference === undefined
           ? {}
           : { backendPreference: input.backendPreference }),
-        runtimeMode: scope.runtimeMode ?? "approval-required",
+        runtimeMode: scope.runtimeMode ?? DEFAULT_RUNTIME_MODE,
         parentThreadId: scope.threadId,
         ...(cwd === undefined ? {} : { cwd }),
         modelSelection,

@@ -54,6 +54,7 @@ it("keeps execution permission controls out of worker_start", () => {
   };
   const properties = schema.properties ?? {};
   expect(properties).toHaveProperty("displayName");
+  expect(properties).toHaveProperty("backendPreference");
   expect(schema.required ?? []).not.toContain("displayName");
   for (const forbidden of [
     "runtimeMode",
@@ -72,6 +73,9 @@ it("keeps execution permission controls out of worker_start", () => {
   );
   expect(WorkerToolkit.tools.worker_start.description).toContain(
     "State the task once in assignment",
+  );
+  expect(WorkerToolkit.tools.worker_start.description).toContain(
+    "backendPreference to codex-desktop",
   );
 });
 

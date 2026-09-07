@@ -34,6 +34,8 @@ import * as ProviderSessionRuntime from "./persistence/ProviderSessionRuntime.ts
 import { ProviderAdapterRegistryLive } from "./provider/Layers/ProviderAdapterRegistry.ts";
 import * as ModelManifest from "./provider/ModelManifest.ts";
 import * as CodexResetCredit from "./provider/Layers/codexResetCredit.ts";
+import { codexDesktopRouteLayer } from "./provider/CodexDesktopHttp.ts";
+import * as CodexDesktopStore from "./provider/CodexDesktopStore.ts";
 import * as ProviderEventLoggers from "./provider/Layers/ProviderEventLoggers.ts";
 import { ProviderServiceLive } from "./provider/Layers/ProviderService.ts";
 import { ProviderAuthServiceLive } from "./provider/Layers/ProviderAuthService.ts";
@@ -145,6 +147,11 @@ import {
   WorkerObserverRunnerLive,
 } from "./worker/WorkerObserver.ts";
 import { WorkerService, WorkerServiceLive } from "./worker/WorkerService.ts";
+import {
+  createCodexDesktopMailboxLayout,
+  resolveCodexDesktopMailboxRoot,
+  waitForCodexDesktopMailboxChange,
+} from "./worker/CodexDesktopMailbox.ts";
 
 // MCP handoff thread IDs include escaped provenance and can exceed
 // find-my-way's default path parameter length.
@@ -482,6 +489,23 @@ const WorkerRuntimeLayerLive = Layer.effectDiscard(
     const workers = yield* WorkerService;
     const provider = yield* ProviderService.ProviderService;
     yield* workers.recover;
+    // Native Codex Desktop has no ProviderService event stream. Reconcile at
+    // startup, then wait on receipt directories with a bounded timeout so a
+    // missed filesystem notification is eventually recovered without a tight
+    // polling loop.
+    yield* Effect.gen(function* () {
+      if (workers.reconcileDesktop === undefined) return;
+      const config = yield* ServerConfig.ServerConfig;
+      const layout = createCodexDesktopMailboxLayout(
+        resolveCodexDesktopMailboxRoot(config.baseDir),
+      );
+      while (true) {
+        yield* workers.reconcileDesktop;
+        yield* Effect.tryPromise(() => waitForCodexDesktopMailboxChange(layout, 30_000)).pipe(
+          Effect.catch(() => Effect.succeed("timeout" as const)),
+        );
+      }
+    }).pipe(Effect.forkScoped);
     yield* provider.streamEvents.pipe(
       Stream.runForEach(workers.handleProviderEvent),
       Effect.forkScoped,
@@ -583,6 +607,7 @@ export const makeRoutesLayer = Layer.mergeAll(
       Layer.provide(environmentAuthenticatedAuthLayer),
     ),
     otlpTracesProxyRouteLayer,
+    codexDesktopRouteLayer.pipe(Layer.provide(CodexDesktopStore.layer)),
     assetRouteLayer,
     staticAndDevRouteLayer,
     websocketRpcRouteLayer,

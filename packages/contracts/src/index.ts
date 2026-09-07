@@ -42,4 +42,5 @@ export * from "./communityCheck.ts";
 export * from "./worker.ts";
 export * from "./agentSessions.ts";
 export * from "./assistantCitations.ts";
+export * from "./codexDesktop.ts";
 export * from "./rpc.ts";

@@ -24,7 +24,9 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -53,6 +55,7 @@ import { isWorkerLifecycleToolName } from "../../worker/WorkerThreadBoundary.ts"
 import { recoverCodexDenyReadAclState } from "./CodexSandboxRecovery.ts";
 import { makeCodexFileChangeApprovalContext } from "./CodexFileChangeApprovalContext.ts";
 import { normalizeServiceTier, type CodexTierObservation } from "../../usage/codexServiceTier.ts";
+import { migrateCodexResumeRollout } from "../Drivers/CodexHomeLayout.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
 
 const PROVIDER = ProviderDriverKind.make("codex");
@@ -264,6 +267,8 @@ export interface CodexSessionRuntimeOptions {
   readonly providerInstanceId?: ProviderInstanceId;
   readonly binaryPath: string;
   readonly homePath?: string;
+  /** Legacy home containing a rollout to copy when resuming into an isolated home. */
+  readonly sharedHomePath?: string;
   readonly launchArgs?: string;
   readonly environment?: NodeJS.ProcessEnv;
   readonly cwd: string;
@@ -1189,9 +1194,29 @@ export const makeCodexSessionRuntime = (
 ): Effect.Effect<
   CodexSessionRuntimeShape,
   CodexErrors.CodexAppServerError,
-  ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | Scope.Scope
+  | ChildProcessSpawner.ChildProcessSpawner
+  | Crypto.Crypto
+  | FileSystem.FileSystem
+  | Path.Path
+  | Scope.Scope
 > =>
   Effect.gen(function* () {
+    const resolvedHomePath = options.homePath ? expandHomePath(options.homePath) : undefined;
+    if (options.sharedHomePath && resolvedHomePath) {
+      yield* migrateCodexResumeRollout({
+        sharedHomePath: expandHomePath(options.sharedHomePath),
+        effectiveHomePath: resolvedHomePath,
+        resumeThreadId: options.resumeCursor?.threadId,
+      }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new CodexErrors.CodexAppServerSpawnError({
+              command: options.binaryPath,
+              cause,
+            }),
+        ),
+      );
+    }
     // Codex's Windows sandbox reads this user-level state before the app-server
     // handshake. Quarantine the one known all-NUL corruption before spawning so
     // a thread start does not inherit a process that is guaranteed to exit.
@@ -1218,7 +1243,6 @@ export const makeCodexSessionRuntime = (
     // `~` is not shell-expanded when env vars are set via
     // `child_process.spawn`; `expandHomePath` lets a configured
     // `CODEX_HOME=~/.codex_work` reach codex as an absolute path.
-    const resolvedHomePath = options.homePath ? expandHomePath(options.homePath) : undefined;
     const env = {
       ...options.environment,
       ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),

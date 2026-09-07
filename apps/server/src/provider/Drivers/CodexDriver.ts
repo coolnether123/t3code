@@ -62,6 +62,7 @@ import {
 } from "../providerUpdateSettings.ts";
 import {
   codexContinuationIdentity,
+  codexIsolatedHomePath,
   materializeCodexShadowHome,
   resolveCodexHomeLayout,
 } from "./CodexHomeLayout.ts";
@@ -131,11 +132,19 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
       const previewBroker = yield* PreviewAutomationBroker;
+      const serverConfig = yield* ServerConfig;
       const environmentId = yield* (yield* ServerEnvironment).getEnvironmentId;
       const processEnv = mergeProviderInstanceEnvironment(environment);
-      const homeLayout = yield* resolveCodexHomeLayout(
-        config.useDesktopAppDaemon ? { ...config, shadowHomePath: "" } : config,
-      );
+      const desktopDaemonConfig = config.useDesktopAppDaemon
+        ? { ...config, shadowHomePath: "" }
+        : config;
+      const isolatedHomePath =
+        !config.useDesktopAppDaemon && config.shadowHomePath.trim().length === 0
+          ? codexIsolatedHomePath(path, serverConfig.baseDir, String(instanceId))
+          : undefined;
+      const homeLayout = yield* resolveCodexHomeLayout(desktopDaemonConfig, {
+        ...(isolatedHomePath ? { isolatedHomePath } : {}),
+      });
       const binaryPath = yield* resolveCodexBinaryPath(config);
       const continuationIdentity = codexContinuationIdentity(homeLayout);
       const stampIdentity = withInstanceIdentity({
@@ -176,6 +185,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const adapter = yield* makeCodexAdapter(effectiveConfig, {
         instanceId,
         environment: processEnv,
+        ...(homeLayout.mode === "isolated" ? { sharedHomePath: homeLayout.sharedHomePath } : {}),
         enableT3Workers: serverSettings.getSettings.pipe(
           Effect.map((settings) => settings.enableT3Workers),
           Effect.catch((cause) =>

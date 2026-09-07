@@ -15,6 +15,7 @@ import * as NodeOS from "node:os";
 
 import {
   USAGE_CONTRACT_VERSION,
+  CodexSettings,
   type UsageProviderKind,
   type UsageQuotaCost,
   type ServerSettings as ServerSettingsValue,
@@ -43,7 +44,10 @@ import { ServerConfig } from "../config.ts";
 import { writeFileStringAtomically } from "../atomicWrite.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
-import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
+import {
+  codexIsolatedHomePath,
+  resolveCodexHomeLayout,
+} from "../provider/Drivers/CodexHomeLayout.ts";
 import { UsageAggregator } from "./usageAggregation.ts";
 import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
 import { UsageSummaryCache, usageSummaryCacheKey } from "./usageSummaryCache.ts";
@@ -309,8 +313,27 @@ export const make = Effect.gen(function* () {
   ) {
     const claudeHome = yield* resolveClaudeHomePath(settings.providers.claudeAgent);
     const claudeDir = yield* resolveClaudeTranscriptDir(claudeHome);
-    const codexLayout = yield* resolveCodexHomeLayout(settings.providers.codex);
-    const codexHome = codexLayout.sharedHomePath;
+    const codexHomes = new Set<string>();
+    const addCodexHome = Effect.fn("UsageService.addCodexHome")(function* (
+      instanceId: string,
+      codexConfig: CodexSettings,
+    ) {
+      const layout = yield* resolveCodexHomeLayout(codexConfig);
+      // Usage must retain the legacy source while also seeing new T3-owned
+      // transcripts. The private home is derived exactly as in CodexDriver.
+      codexHomes.add(layout.sharedHomePath);
+      if (!codexConfig.useDesktopAppDaemon && codexConfig.shadowHomePath.trim().length === 0) {
+        codexHomes.add(codexIsolatedHomePath(path, config.baseDir, instanceId));
+      }
+    });
+    yield* addCodexHome("codex", settings.providers.codex);
+    for (const [instanceId, instance] of Object.entries(settings.providerInstances)) {
+      if (String(instance.driver) !== "codex") continue;
+      const codexConfig = yield* Schema.decodeUnknownEffect(CodexSettings)(
+        instance.config ?? {},
+      ).pipe(Effect.orElseSucceed(() => null));
+      if (codexConfig !== null) yield* addCodexHome(instanceId, codexConfig);
+    }
     const geminiHome = path.join(NodeOS.homedir(), ".gemini");
     const openCodeHome = path.join(NodeOS.homedir(), ".local", "share", "opencode");
     const imports = yield* fileSystem.readFileString(usageImportsPath).pipe(
@@ -320,8 +343,10 @@ export const make = Effect.gen(function* () {
 
     return [
       { provider: "claude" as const, dir: claudeDir },
-      { provider: "codex" as const, dir: path.join(codexHome, "sessions") },
-      { provider: "codex" as const, dir: path.join(codexHome, "archived_sessions") },
+      ...[...codexHomes].flatMap((codexHome) => [
+        { provider: "codex" as const, dir: path.join(codexHome, "sessions") },
+        { provider: "codex" as const, dir: path.join(codexHome, "archived_sessions") },
+      ]),
       { provider: "gemini" as const, dir: path.join(geminiHome, "tmp") },
       { provider: "gemini" as const, dir: path.join(geminiHome, "antigravity", "brain") },
       { provider: "opencode" as const, dir: openCodeHome },

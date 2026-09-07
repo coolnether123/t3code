@@ -263,6 +263,9 @@ export const WorkerActivation = Schema.Struct({
   status: WorkerActivationStatus,
   providerInstanceId: ProviderInstanceId,
   providerThreadId: ThreadId,
+  /** Native Codex Desktop child identity, kept separate from T3's synthetic key. */
+  nativeThreadId: Schema.optionalKey(ThreadId),
+  nativeCursor: Schema.optionalKey(Schema.Unknown),
   providerTurnId: Schema.optionalKey(TurnId),
   parentTurnId: Schema.optionalKey(TurnId),
   assignment: Schema.optionalKey(Schema.String),

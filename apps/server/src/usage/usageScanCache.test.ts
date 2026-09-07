@@ -45,6 +45,23 @@ function cacheWith(entries: readonly [string, number, readonly UsageRecord[]][])
 }
 
 describe("scan cache round trip", () => {
+  it("invalidates pre-cross-home-dedup caches", () => {
+    const encoded = encodeScanCache(
+      new Map([
+        [
+          "/codex.jsonl",
+          {
+            size: 10,
+            mtimeMs: 100,
+            provider: "codex" as const,
+            records: [record({ provider: "codex" })],
+          },
+        ],
+      ]),
+    );
+    expect(decodeScanCache({ ...JSON.parse(JSON.stringify(encoded)), version: 5 }).size).toBe(0);
+  });
+
   it("restores records unchanged", () => {
     const original = cacheWith([
       ["/a.jsonl", 100, [record(), record({ dedupeKey: "msg_2:", model: "claude-opus-5" })]],
@@ -211,8 +228,9 @@ describe("scan cache round trip", () => {
     expect(decodeScanCoverage(JSON.parse(JSON.stringify(v3)))).toEqual(coverage);
   });
 
-  it("keeps v4 provider caches but invalidates old AI Studio parsing and coverage", () => {
+  it("invalidates old Codex parsing while retaining its coverage", () => {
     const cache = cacheWith([["/codex.jsonl", 100, [record({ provider: "codex" })]]]);
+    cache.set("/codex.jsonl", { ...cache.get("/codex.jsonl")!, provider: "codex" });
     cache.set("/ai-studio.json", {
       size: 10,
       mtimeMs: 100,
@@ -225,7 +243,9 @@ describe("scan cache round trip", () => {
     ]);
     const v4 = { ...encoded, version: 4 };
 
-    expect([...decodeScanCache(JSON.parse(JSON.stringify(v4))).keys()]).toEqual(["/codex.jsonl"]);
+    expect([...decodeScanCache(JSON.parse(JSON.stringify(v4))).keys()]).toEqual([
+      "/ai-studio.json",
+    ]);
     expect(decodeScanCoverage(JSON.parse(JSON.stringify(v4)))).toEqual([
       { provider: "codex", rootPath: "/sessions", sinceMs: 100, scannedAtMs: 200 },
     ]);

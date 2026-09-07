@@ -74,6 +74,7 @@ const T3_CODE_WORKER_PARENT_INSTRUCTIONS = `
 ## T3 Workers
 
 T3 Workers are enabled for this parent thread. Use the T3-owned Worker tools for bounded background assignments: \`worker_start\`, \`worker_list\`, \`worker_wait\`, \`worker_status\`, \`worker_observe\`, \`worker_send\`, \`worker_interrupt\`, \`worker_close\`, and \`worker_approval_respond\`.
+When an assignment needs Codex Desktop's native browser or Windows app tools, set \`backendPreference: "codex-desktop"\` on \`worker_start\`. T3 keeps the parent Worker identity separate while the configured Desktop coordinator creates and manages the native child automatically; do not ask the user to choose a second interface.
 
 Use these tools instead of Codex-native collaboration tools. The user creates only this parent thread; the parent agent is the only actor that may create or control Workers. Do not ask the user to create, start, steer, or configure a Worker. Do not call the V2 tools \`spawn_agent\`, \`send_message\`, \`followup_task\`, \`interrupt_agent\`, \`list_agents\`, or \`wait_agent\`, and do not call namespaced \`multi_agent_v1\` tools. Workers are single-level: never give a Worker instructions to spawn, create, resume, message, or delegate to another Worker or native subagent. Pass explicit context because Workers do not inherit this conversation. Use \`worker_wait\` instead of polling. Use \`worker_status\` before interrupting, and use \`worker_observe\` when mechanical status does not answer the question. A completed Worker remains resumable until you explicitly close it.
 

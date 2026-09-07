@@ -153,6 +153,12 @@ it.effect("inherits parent permissions and strips model-authored permission over
       untrustedInput,
     );
     expect(restricted.input.runtimeMode).toBe("approval-required");
+
+    const defaulted = yield* mapWorkerStartRequest(
+      { ...invocation(), runtimeMode: undefined },
+      untrustedInput,
+    );
+    expect(defaulted.input.runtimeMode).toBe("full-access");
   });
 });
 
