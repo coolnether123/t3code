@@ -20,12 +20,9 @@ import {
   resolveTerminalMouseTrackingState,
   shouldBlinkTerminalCursor,
   shouldReportTerminalMouse,
-  shouldShowTerminalLinkHover,
   terminalGridCellAt,
   terminalScrollbarGeometry,
   terminalScrollbarOffsetAtPointer,
-  terminalLinkAtColumn,
-  terminalLinkAtPosition,
   terminalLinkAtPositionWithRange,
   terminalContentOriginY,
   terminalFontFamily,
@@ -434,7 +431,7 @@ describe("shouldBlinkTerminalCursor", () => {
   });
 });
 
-describe("terminalLinkAtColumn", () => {
+describe("terminalLinkAtPositionWithRange", () => {
   it("maps terminal cells to UTF-16 offsets after a wide emoji", () => {
     const cells = [
       cell("🙂"),
@@ -451,9 +448,11 @@ describe("terminalLinkAtColumn", () => {
       wrapsToNext: false,
     };
 
-    expect(terminalLinkAtColumn(row, 2)).toBe("https://t3.codes");
-    expect(terminalLinkAtColumn(row, cells.length - 1)).toBe("https://t3.codes");
-    expect(terminalLinkAtColumn(row, 0)).toBeNull();
+    expect(terminalLinkAtPositionWithRange([row], 0, 2)?.text).toBe("https://t3.codes");
+    expect(terminalLinkAtPositionWithRange([row], 0, cells.length - 1)?.text).toBe(
+      "https://t3.codes",
+    );
+    expect(terminalLinkAtPositionWithRange([row], 0, 0)).toBeNull();
     expect(terminalLinkAtPositionWithRange([row], 0, 8)?.range).toEqual({
       start: { x: 2, y: 0 },
       end: { x: cells.length - 1, y: 0 },
@@ -474,10 +473,10 @@ describe("terminalLinkAtColumn", () => {
       row("C:\\repo\\file.ts", false),
     ];
 
-    expect(terminalLinkAtPosition(rows, 0, 8)).toBe("https://example.com/reference");
-    expect(terminalLinkAtPosition(rows, 1, 4)).toBe("https://example.com/reference");
-    expect(terminalLinkAtPosition(rows, 2, 2)).toBe("~/project/file");
-    expect(terminalLinkAtPosition(rows, 3, 4)).toBe("C:\\repo\\file.ts");
+    expect(terminalLinkAtPositionWithRange(rows, 0, 8)?.text).toBe("https://example.com/reference");
+    expect(terminalLinkAtPositionWithRange(rows, 1, 4)?.text).toBe("https://example.com/reference");
+    expect(terminalLinkAtPositionWithRange(rows, 2, 2)?.text).toBe("~/project/file");
+    expect(terminalLinkAtPositionWithRange(rows, 3, 4)?.text).toBe("C:\\repo\\file.ts");
     expect(terminalLinkAtPositionWithRange(rows, 1, 4)).toEqual({
       text: "https://example.com/reference",
       range: {
@@ -496,13 +495,13 @@ describe("terminalLinkAtColumn", () => {
     });
     // The head of the wrapped line scrolled above the viewport.
     const headCut = [row("ple.com/missing", true), row("head", true)];
-    expect(terminalLinkAtPosition(headCut, 0, 4)).toBeNull();
+    expect(terminalLinkAtPositionWithRange(headCut, 0, 4)).toBeNull();
     // The bottom row soft-wraps on below the viewport.
     const tailCut = [row("https://t3.codes", false, true)];
-    expect(terminalLinkAtPosition(tailCut, 0, 8)).toBeNull();
+    expect(terminalLinkAtPositionWithRange(tailCut, 0, 8)).toBeNull();
     // A partial bottom row is provably complete and still resolves.
     const complete = [row("https://t3.codes", false), row("", false)];
-    expect(terminalLinkAtPosition(complete, 0, 8)).toBe("https://t3.codes");
+    expect(terminalLinkAtPositionWithRange(complete, 0, 8)?.text).toBe("https://t3.codes");
     // A wide grapheme earlier in the row must not break truncation detection:
     // the soft-wrap flag decides, not string-length-versus-cell-count.
     const wideFull: GhosttyRow = {
@@ -515,7 +514,7 @@ describe("terminalLinkAtColumn", () => {
       isWrapContinuation: false,
       wrapsToNext: true,
     };
-    expect(terminalLinkAtPosition([wideFull], 0, 8)).toBeNull();
+    expect(terminalLinkAtPositionWithRange([wideFull], 0, 8)).toBeNull();
     // Unwritten trailing cells prove the bottom row is complete.
     const unwrittenTail: GhosttyRow = {
       cells: [
@@ -527,7 +526,7 @@ describe("terminalLinkAtColumn", () => {
       isWrapContinuation: false,
       wrapsToNext: false,
     };
-    expect(terminalLinkAtPosition([unwrittenTail], 0, 8)).toBe("https://t3.codes");
+    expect(terminalLinkAtPositionWithRange([unwrittenTail], 0, 8)?.text).toBe("https://t3.codes");
   });
 });
 
@@ -757,13 +756,6 @@ describe("application mouse reporting", () => {
       tracking: false,
       motionData: "\u001b[<35;8;4M",
     });
-  });
-
-  it("only shows link hover during mouse tracking when the link modifier is held", () => {
-    expect(shouldShowTerminalLinkHover(false, false)).toBe(true);
-    expect(shouldShowTerminalLinkHover(false, true)).toBe(true);
-    expect(shouldShowTerminalLinkHover(true, false)).toBe(false);
-    expect(shouldShowTerminalLinkHover(true, true)).toBe(true);
   });
 });
 

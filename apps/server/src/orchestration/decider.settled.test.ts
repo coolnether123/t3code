@@ -5,7 +5,7 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
-  TurnId,
+  type OrchestrationEvent,
   type OrchestrationReadModel,
   type OrchestrationSession,
   type OrchestrationThread,
@@ -15,9 +15,12 @@ import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 
 import { decideOrchestrationCommand } from "./decider.ts";
+import { projectEvent } from "./projector.ts";
 
 const NOW = "2026-01-01T00:00:00.000Z";
 const SETTLED_AT = "2025-12-30T00:00:00.000Z";
+const SETTLE_BLOCKED_MESSAGE =
+  "This thread still needs attention. Resolve or interrupt it first, then try again.";
 
 function makeReadModel(
   settledOverride: OrchestrationThread["settledOverride"],
@@ -78,55 +81,41 @@ function makeSession(status: OrchestrationSession["status"]): OrchestrationSessi
 }
 
 it.layer(NodeServices.layer)("settled thread decider", (it) => {
-  it.effect("binds a steering message to the active turn without requesting another turn", () =>
+  it.effect("preserves the activity stamp when automatically settling", () =>
     Effect.gen(function* () {
-      const turnId = TurnId.make("codex-turn-1");
       const result = yield* decideOrchestrationCommand({
         command: {
-          type: "thread.turn.steer",
-          commandId: CommandId.make("cmd-steer"),
+          type: "thread.auto-settle",
+          commandId: CommandId.make("cmd-auto-settle-inactive"),
           threadId: ThreadId.make("thread-1"),
-          expectedTurnId: turnId,
-          messageId: MessageId.make("steering-message"),
-          text: "Focus on the browser test.",
-          createdAt: NOW,
+          snapshotSequence: 0,
+          settledAt: SETTLED_AT,
         },
-        readModel: makeReadModel(null, null, { ...makeSession("running"), activeTurnId: turnId }),
+        readModel: makeReadModel(null),
       });
       const events = Array.isArray(result) ? result : [result];
-      expect(events.map((event) => event.type)).toEqual([
-        "thread.message-sent",
-        "thread.turn-steer-requested",
-      ]);
-      expect(events[0]?.payload).toMatchObject({ turnId, text: "Focus on the browser test." });
-      expect(events[1]?.payload).toMatchObject({
-        expectedTurnId: turnId,
-        messageId: "steering-message",
-      });
+      const settled = events.find((event) => event.type === "thread.settled");
+      expect(settled?.payload.settledAt).toBe(SETTLED_AT);
+      // updatedAt stays the command time so the row still moves on settle.
+      expect(settled?.payload.updatedAt).toBe(settled?.occurredAt);
+      expect(settled?.payload.updatedAt).not.toBe(SETTLED_AT);
     }),
   );
 
-  it.effect("rejects stale steering instead of queuing a new turn", () =>
+  it.effect("rejects an automatic settle when the thread is pinned active", () =>
     Effect.gen(function* () {
-      for (const session of [
-        null,
-        makeSession("ready"),
-        { ...makeSession("running"), activeTurnId: TurnId.make("new-turn") },
-      ]) {
-        const error = yield* decideOrchestrationCommand({
-          command: {
-            type: "thread.turn.steer",
-            commandId: CommandId.make("cmd-stale-steer"),
-            threadId: ThreadId.make("thread-1"),
-            expectedTurnId: TurnId.make("old-turn"),
-            messageId: MessageId.make("steering-message"),
-            text: "Do not start a new turn.",
-            createdAt: NOW,
-          },
-          readModel: makeReadModel(null, null, session),
-        }).pipe(Effect.flip);
-        expect(error._tag).toBe("OrchestrationCommandInvariantError");
-      }
+      const command = {
+        type: "thread.auto-settle" as const,
+        commandId: CommandId.make("cmd-auto-settle"),
+        threadId: ThreadId.make("thread-1"),
+        snapshotSequence: 0,
+        settledAt: SETTLED_AT,
+      };
+      const pinnedActive = yield* decideOrchestrationCommand({
+        command,
+        readModel: makeReadModel("active"),
+      }).pipe(Effect.flip);
+      expect(pinnedActive._tag).toBe("OrchestrationCommandInvariantError");
     }),
   );
 
@@ -249,7 +238,11 @@ it.layer(NodeServices.layer)("settled thread decider", (it) => {
           },
           readModel: makeReadModel(null, null, makeSession(status)),
         }).pipe(Effect.flip);
-        expect(error._tag).toBe("OrchestrationCommandInvariantError");
+        expect(error).toMatchObject({
+          _tag: "OrchestrationThreadSettleBlockedError",
+          threadId: ThreadId.make("thread-1"),
+          message: SETTLE_BLOCKED_MESSAGE,
+        });
       }
       // Stopped/error sessions are settleable — only live work is protected.
       const settled = yield* decideOrchestrationCommand({
@@ -289,7 +282,11 @@ it.layer(NodeServices.layer)("settled thread decider", (it) => {
           requestActivity("approval.requested", "req-1", NOW),
         ]),
       }).pipe(Effect.flip);
-      expect(openError._tag).toBe("OrchestrationCommandInvariantError");
+      expect(openError).toMatchObject({
+        _tag: "OrchestrationThreadSettleBlockedError",
+        threadId: ThreadId.make("thread-1"),
+        message: SETTLE_BLOCKED_MESSAGE,
+      });
 
       // Same request later resolved: settleable again.
       const settled = yield* decideOrchestrationCommand({
@@ -317,7 +314,117 @@ it.layer(NodeServices.layer)("settled thread decider", (it) => {
           requestActivity("user-input.requested", "req-2", NOW),
         ]),
       }).pipe(Effect.flip);
-      expect(inputError._tag).toBe("OrchestrationCommandInvariantError");
+      expect(inputError).toMatchObject({
+        _tag: "OrchestrationThreadSettleBlockedError",
+        threadId: ThreadId.make("thread-1"),
+        message: SETTLE_BLOCKED_MESSAGE,
+      });
+    }),
+  );
+
+  it.effect("manual settlement dismisses async questions without starting a turn", () =>
+    Effect.gen(function* () {
+      const question = (requestId: string): OrchestrationThread["activities"][number] => ({
+        id: EventId.make(requestId),
+        kind: "user-input.requested",
+        summary: "Question",
+        tone: "approval",
+        turnId: null,
+        createdAt: "1969-12-31T00:00:00.000Z",
+        payload: { requestId, responseMode: "message" },
+      });
+      const readModel = makeReadModel(null, null, makeSession("ready"), [
+        question("first"),
+        question("second"),
+        question("answered"),
+        {
+          ...question("answered"),
+          id: EventId.make("answer"),
+          createdAt: "1969-12-31T01:00:00.000Z",
+          kind: "user-input.resolved",
+        },
+      ]);
+      const command = {
+        type: "thread.settle" as const,
+        commandId: CommandId.make("settle-async"),
+        threadId: ThreadId.make("thread-1"),
+      };
+      const result = yield* decideOrchestrationCommand({ command, readModel });
+      const events = Array.isArray(result) ? result : [result];
+      expect(events.map((event) => event.type)).toEqual([
+        "thread.settled",
+        "thread.activity-appended",
+        "thread.activity-appended",
+      ]);
+      expect(events.slice(1).map((event) => event.payload)).toEqual(
+        ["first", "second"].map((requestId) => ({
+          threadId: command.threadId,
+          activity: expect.objectContaining({
+            kind: "user-input.resolved",
+            summary: "User input dismissed",
+            payload: { requestId, responseMode: "message" },
+          }),
+        })),
+      );
+      let projected = readModel;
+      for (const [index, event] of events.entries()) {
+        projected = yield* projectEvent(projected, { ...event, sequence: index + 1 });
+      }
+      expect(projected.threads[0]?.settledOverride).toBe("settled");
+      expect(projected.threads[0]?.messages).toEqual([]);
+      const repeated = yield* decideOrchestrationCommand({ command, readModel: projected });
+      expect(repeated).toMatchObject({ type: "thread.settled" });
+    }),
+  );
+
+  it.effect("async questions do not bypass automatic settlement or other blockers", () =>
+    Effect.gen(function* () {
+      const question: OrchestrationThread["activities"][number] = {
+        id: EventId.make("async-question"),
+        kind: "user-input.requested",
+        summary: "Question",
+        tone: "approval",
+        turnId: null,
+        createdAt: NOW,
+        payload: { requestId: "async-question", responseMode: "message" },
+      };
+      for (const blocker of ["auto", "running", "starting", "approval", "native"] as const) {
+        const error = yield* decideOrchestrationCommand({
+          command:
+            blocker === "auto"
+              ? {
+                  type: "thread.auto-settle",
+                  commandId: CommandId.make(`settle-${blocker}`),
+                  threadId: ThreadId.make("thread-1"),
+                  snapshotSequence: 0,
+                  settledAt: NOW,
+                }
+              : {
+                  type: "thread.settle",
+                  commandId: CommandId.make(`settle-${blocker}`),
+                  threadId: ThreadId.make("thread-1"),
+                },
+          readModel: makeReadModel(
+            null,
+            null,
+            makeSession(blocker === "running" || blocker === "starting" ? blocker : "ready"),
+            [
+              question,
+              ...(blocker === "approval" || blocker === "native"
+                ? [
+                    {
+                      ...question,
+                      id: EventId.make("blocking-request"),
+                      kind: blocker === "approval" ? "approval.requested" : "user-input.requested",
+                      payload: { requestId: "blocking-request" },
+                    },
+                  ]
+                : []),
+            ],
+          ),
+        }).pipe(Effect.flip);
+        expect(error).toMatchObject({ _tag: "OrchestrationThreadSettleBlockedError" });
+      }
     }),
   );
 
@@ -338,8 +445,7 @@ it.layer(NodeServices.layer)("settled thread decider", (it) => {
           createdAt: NOW,
         }) as OrchestrationThread["activities"][number];
 
-      // Stale-failure detail clears the request — mirrors the projection's
-      // pending accounting, which is what the client's canSettle sees.
+      // Stale-failure details clear the request, matching the projection flags.
       const settled = yield* decideOrchestrationCommand({
         command: {
           type: "thread.settle",
@@ -375,7 +481,11 @@ it.layer(NodeServices.layer)("settled thread decider", (it) => {
           }),
         ]),
       }).pipe(Effect.flip);
-      expect(stillOpen._tag).toBe("OrchestrationCommandInvariantError");
+      expect(stillOpen).toMatchObject({
+        _tag: "OrchestrationThreadSettleBlockedError",
+        threadId: ThreadId.make("thread-1"),
+        message: SETTLE_BLOCKED_MESSAGE,
+      });
     }),
   );
 
@@ -403,7 +513,11 @@ it.layer(NodeServices.layer)("settled thread decider", (it) => {
         },
         readModel: makeReadModel(null, null, null, [], [userMessage("1969-12-31T23:59:30.000Z")]),
       }).pipe(Effect.flip);
-      expect(queuedError._tag).toBe("OrchestrationCommandInvariantError");
+      expect(queuedError).toMatchObject({
+        _tag: "OrchestrationThreadSettleBlockedError",
+        threadId: ThreadId.make("thread-1"),
+        message: SETTLE_BLOCKED_MESSAGE,
+      });
 
       // Message timestamp far in the FUTURE (client clock ahead of server):
       // a negative age must not read as queued forever — past the grace
@@ -478,6 +592,42 @@ it.layer(NodeServices.layer)("settled thread decider", (it) => {
       const userAgainEvents = Array.isArray(userAgain) ? userAgain : [userAgain];
       expect(userAgainEvents).toHaveLength(1);
       expect(userAgainEvents[0]?.type).toBe("thread.unsettled");
+    }),
+  );
+
+  // Command-to-projection: an accepted un-settle must land as the re-entry
+  // stamp clients sort by (max of createdAt and unsettledAt, see
+  // activeThreadAnchorTimestampMs in client-runtime), so the thread surfaces
+  // above threads created after it. The projector tests feed events directly;
+  // this one proves the decider actually emits what they consume.
+  it.effect("an accepted un-settle re-anchors the thread for the active list", () =>
+    Effect.gen(function* () {
+      const readModel = makeReadModel("settled");
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.unsettle",
+          commandId: CommandId.make("cmd-unsettle-anchor"),
+          threadId: ThreadId.make("thread-1"),
+          reason: "user",
+        },
+        readModel,
+      });
+      const events = Array.isArray(result) ? result : [result];
+      const unsettled = events[0]!;
+      expect(unsettled.type).toBe("thread.unsettled");
+
+      const projected = yield* projectEvent(readModel, {
+        ...unsettled,
+        sequence: readModel.snapshotSequence + 1,
+      } as OrchestrationEvent);
+      const thread = projected.threads[0]!;
+      expect(thread.settledOverride).toBe("active");
+      // The stamp is the decider's accept time: every thread created before
+      // the un-settle anchors below it.
+      expect(thread.unsettledAt).toBe(unsettled.occurredAt);
+      if (unsettled.type === "thread.unsettled") {
+        expect(thread.unsettledAt).toBe(unsettled.payload.updatedAt);
+      }
     }),
   );
 

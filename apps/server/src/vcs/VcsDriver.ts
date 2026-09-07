@@ -58,6 +58,7 @@ export interface VcsDiffCheckpointsInput {
   readonly toCheckpointRef: CheckpointRef;
   readonly fallbackFromToHead?: boolean;
   readonly ignoreWhitespace: boolean;
+  readonly format?: "patch" | "numstat";
 }
 
 export interface VcsDeleteCheckpointRefsInput {

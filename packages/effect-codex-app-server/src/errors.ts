@@ -1,15 +1,15 @@
 import * as Schema from "effect/Schema";
 import type * as SchemaIssue from "effect/SchemaIssue";
 
-export const CodexAppServerRequestOperation = Schema.Literals([
+const CodexAppServerRequestOperation = Schema.Literals([
   "decode-payload",
   "encode-payload",
   "handle-request",
   "receive-response",
 ]);
-export type CodexAppServerRequestOperation = typeof CodexAppServerRequestOperation.Type;
+type CodexAppServerRequestOperation = typeof CodexAppServerRequestOperation.Type;
 
-export const CodexAppServerSchemaIssueKind = Schema.Literals([
+const CodexAppServerSchemaIssueKind = Schema.Literals([
   "Filter",
   "Encoding",
   "Pointer",
@@ -22,9 +22,9 @@ export const CodexAppServerSchemaIssueKind = Schema.Literals([
   "Forbidden",
   "OneOf",
 ]);
-export type CodexAppServerSchemaIssueKind = typeof CodexAppServerSchemaIssueKind.Type;
+type CodexAppServerSchemaIssueKind = typeof CodexAppServerSchemaIssueKind.Type;
 
-export interface CodexAppServerSchemaIssueDiagnostics {
+interface CodexAppServerSchemaIssueDiagnostics {
   readonly issueCount: number;
   readonly issueKinds: ReadonlyArray<CodexAppServerSchemaIssueKind>;
   readonly maximumPathDepth: number;
@@ -62,7 +62,7 @@ const schemaIssueDiagnostics = (root: SchemaIssue.Issue): CodexAppServerSchemaIs
   };
 };
 
-export const CodexAppServerPayloadKind = Schema.Literals([
+const CodexAppServerPayloadKind = Schema.Literals([
   "null",
   "array",
   "string",
@@ -74,7 +74,7 @@ export const CodexAppServerPayloadKind = Schema.Literals([
   "function",
   "undefined",
 ]);
-export type CodexAppServerPayloadKind = typeof CodexAppServerPayloadKind.Type;
+type CodexAppServerPayloadKind = typeof CodexAppServerPayloadKind.Type;
 
 const payloadKind = (payload: unknown): CodexAppServerPayloadKind => {
   if (payload === null) return "null";
@@ -84,8 +84,7 @@ const payloadKind = (payload: unknown): CodexAppServerPayloadKind => {
 
 const protocolMessageFields = ["id", "method", "params", "result", "error"] as const;
 
-export const CodexAppServerProtocolMessageField = Schema.Literals(protocolMessageFields);
-export type CodexAppServerProtocolMessageField = typeof CodexAppServerProtocolMessageField.Type;
+const CodexAppServerProtocolMessageField = Schema.Literals(protocolMessageFields);
 
 export interface CodexAppServerRequestDiagnostics {
   readonly method?: string;
@@ -118,8 +117,7 @@ export const CodexAppServerIdentifierPurpose = Schema.Literals([
   "provider-event",
   "command-approval-request",
   "file-change-approval-request",
-  "permissions-approval-request",
-  "mcp-approval-request",
+  "mcp-elicitation-request",
   "user-input-request",
 ]);
 export type CodexAppServerIdentifierPurpose = typeof CodexAppServerIdentifierPurpose.Type;
@@ -149,29 +147,13 @@ export class CodexAppServerProcessExitedError extends Schema.TaggedErrorClass<Co
   {
     code: Schema.optional(Schema.Number),
     pid: Schema.optionalKey(Schema.Int),
-    stderr: Schema.optionalKey(Schema.String),
-    stderrTruncated: Schema.optionalKey(Schema.Boolean),
-    method: Schema.optionalKey(Schema.String),
-    requestId: Schema.optionalKey(Schema.String),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
   override get message() {
-    const exitMessage =
-      this.code === undefined
-        ? "Codex App Server process exited"
-        : `Codex App Server process exited with code ${this.code}`;
-    const requestContext =
-      this.method === undefined
-        ? ""
-        : ` while handling method '${this.method}'${
-            this.requestId === undefined ? "" : ` (request ${this.requestId})`
-          }`;
-    const stderr = this.stderr === undefined ? "" : ` Stderr: ${this.stderr}`;
-    const truncation = this.stderrTruncated === true ? " [stderr truncated]" : "";
-    const separator = requestContext.length > 0 && stderr.length > 0 ? "." : "";
-    const stderrPrefix = requestContext.length === 0 && stderr.length > 0 ? "." : "";
-    return `${exitMessage}${requestContext}${separator}${stderrPrefix}${stderr}${truncation}`;
+    return this.code === undefined
+      ? "Codex App Server process exited"
+      : `Codex App Server process exited with code ${this.code}`;
   }
 }
 

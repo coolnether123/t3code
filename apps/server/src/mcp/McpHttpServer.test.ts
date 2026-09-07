@@ -2,6 +2,7 @@ import { expect, it } from "@effect/vitest";
 import { NodeHttpServer } from "@effect/platform-node";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { EnvironmentId, PreviewTabId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -12,20 +13,12 @@ import { HttpBody, HttpClient, HttpRouter, HttpServerResponse } from "effect/uns
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
-import * as ChromeAutomation from "../browser/ChromeAutomation.ts";
-import * as ServerConfig from "../config.ts";
-
-const screenshotPng =
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l4EAAAAASUVORK5CYII=";
-const decodeJsonText = Schema.decodeEffect(Schema.fromJsonString(Schema.Unknown));
-const ScreenshotTestServices = ServerConfig.layerTest(process.cwd(), {
-  prefix: "t3-mcp-screenshot-",
-}).pipe(Layer.provideMerge(NodeServices.layer));
 
 const environmentId = EnvironmentId.make("environment-mcp-test");
 const threadId = ThreadId.make("thread-mcp-test");
 const tabId = PreviewTabId.make("tab-mcp-test");
 const alternateTabId = PreviewTabId.make("tab-mcp-alternate");
+const encodeJsonText = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const invocation = {
   environmentId,
   threadId,
@@ -61,132 +54,177 @@ it("normalizes empty successful notification responses to accepted", () => {
   expect(resultResponse.status).toBe(200);
 });
 
-it.effect("returns Chrome screenshots as MCP images without base64 in metadata", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const server = yield* McpServer.McpServer;
-      const result = yield* server
-        .callTool({ name: "computer_screenshot", arguments: { tabId: "chrome-tab" } })
-        .pipe(
-          Effect.provideService(McpInvocationContext.McpInvocationContext, {
-            ...invocation,
-            capabilities: new Set(["computer"] as const),
-          }),
-          Effect.provideService(McpSchema.McpServerClient, client),
-        );
-      expect(result.isError).toBe(false);
-      expect(result.structuredContent).toMatchObject({
-        tabId: "chrome-tab",
-        mimeType: "image/png",
-        width: 1,
-        height: 1,
-        screenshot: { threadId, mimeType: "image/png", width: 1, height: 1 },
-      });
-      const firstContent = result.content[0];
-      expect(firstContent?.type).toBe("text");
-      if (firstContent?.type === "text")
-        expect(yield* decodeJsonText(firstContent.text)).toEqual(result.structuredContent);
-      expect(result.content[1]).toEqual({
-        type: "image",
-        mimeType: "image/png",
-        data: new Uint8Array(Buffer.from(screenshotPng, "base64")),
-      });
-      expect(result.structuredContent).not.toHaveProperty("data");
-    }),
-  ).pipe(
-    Effect.provide(
-      McpHttpServer.ComputerScreenshotRegistrationLive.pipe(
-        Layer.provideMerge(McpServer.McpServer.layer),
-        Layer.provide(
-          Layer.mock(ChromeAutomation.ChromeAutomation)({
-            screenshot: (requestedTabId) =>
-              Effect.succeed({
-                tabId: requestedTabId,
-                mimeType: "image/png",
-                data: screenshotPng,
-                width: 1,
-                height: 1,
+it.effect.each([{}, { includeImage: false }])(
+  "returns bounded structural preview snapshot failures %#",
+  (input) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const server = yield* McpServer.McpServer;
+        const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+        const events = yield* broker.connect({
+          clientId: "mcp-failure-client",
+          environmentId,
+        });
+        yield* Stream.runForEach(events, (event) =>
+          event.type === "connected"
+            ? Effect.void
+            : broker.respond({
+                clientId: "mcp-failure-client",
+                connectionId: event.connectionId,
+                requestId: event.request.requestId,
+                ok: false,
+                error: {
+                  _tag: "PreviewAutomationExecutionError",
+                  message: "sensitive renderer failure",
+                  detail: { consoleOutput: "sensitive browser output" },
+                },
               }),
-          }),
-        ),
-        Layer.provide(ScreenshotTestServices),
-      ),
-    ),
-  ),
+        ).pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
+
+        const snapshot = yield* server
+          .callTool({ name: "preview_snapshot", arguments: input })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+            Effect.provideService(McpSchema.McpServerClient, client),
+          );
+
+        expect(snapshot.isError).toBe(true);
+        expect(snapshot.content).toEqual([{ type: "text", text: "Preview snapshot failed." }]);
+        expect(snapshot.structuredContent).toEqual({
+          error: {
+            _tag: "PreviewAutomationExecutionError",
+            operation: "snapshot",
+            failureCount: 1,
+          },
+        });
+      }),
+    ).pipe(Effect.provide(TestLayer)),
 );
 
-it.effect("does not capture a Chrome screenshot without the computer capability", () =>
+it.effect.each([
+  { mode: "default", input: {}, images: true },
+  { mode: "explicit image", input: { includeImage: true }, images: true },
+  { mode: "text only", input: { includeImage: false }, images: false },
+])("returns fresh $mode snapshots on repeated MCP calls", ({ input, images }) =>
   Effect.scoped(
     Effect.gen(function* () {
       const server = yield* McpServer.McpServer;
+      const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+      const connected = yield* Deferred.make<void>();
+      const png =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
+      const page = {
+        url: "http://example.test/",
+        loading: false,
+        visibleText: "Save your changes",
+        interactiveElements: [
+          {
+            tag: "button",
+            role: "button",
+            name: "Save",
+            selector: "#save",
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 10,
+          },
+        ],
+        accessibilityTree: { role: "document", name: "Example" },
+        consoleEntries: [],
+        networkEntries: [],
+        actionTimeline: [],
+      };
+      const screenshot = { mimeType: "image/png", width: 1, height: 1 };
+      let requests = 0;
+      const events = yield* broker.connect({ clientId: "mcp-image-option-client", environmentId });
+      yield* Stream.runForEach(events, (event) => {
+        if (event.type === "connected") return Deferred.succeed(connected, undefined);
+        requests += 1;
+        expect(event.request).toMatchObject({
+          operation: "snapshot",
+          tabId: alternateTabId,
+          threadId,
+        });
+        expect(event.request.input).toEqual({});
+        return broker.respond({
+          clientId: "mcp-image-option-client",
+          connectionId: event.connectionId,
+          requestId: event.request.requestId,
+          ok: true,
+          result: {
+            ...page,
+            title: `Snapshot ${requests}`,
+            screenshot: { ...screenshot, data: png },
+          },
+        });
+      }).pipe(Effect.forkScoped);
+      yield* Deferred.await(connected);
+
+      for (const call of [1, 2, 3, 4, 5, 6]) {
+        const snapshot = yield* server
+          .callTool({
+            name: "preview_snapshot",
+            arguments: { ...input, tabId: alternateTabId },
+          })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+            Effect.provideService(McpSchema.McpServerClient, client),
+          );
+        const metadata = { ...page, title: `Snapshot ${call}`, screenshot };
+        expect(snapshot.isError).toBe(false);
+        expect(snapshot.structuredContent).toEqual(metadata);
+        expect(snapshot.content).toEqual([
+          { type: "text", text: encodeJsonText(snapshot.structuredContent) },
+          ...(images
+            ? [
+                {
+                  type: "image",
+                  mimeType: "image/png",
+                  data: new Uint8Array(Buffer.from(png, "base64")),
+                },
+              ]
+            : []),
+        ]);
+      }
+
+      // Output selection belongs to this call, not the MCP session's history.
+      const nextDefault = yield* server
+        .callTool({
+          name: "preview_snapshot",
+          arguments: { tabId: alternateTabId },
+        })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+      expect(nextDefault.content.map((content) => content.type)).toEqual(["text", "image"]);
+      expect(nextDefault.structuredContent).toEqual({ ...page, title: "Snapshot 7", screenshot });
+      expect(requests).toBe(7);
+    }),
+  ).pipe(Effect.provide(TestLayer)),
+);
+
+it.effect("rejects non-boolean snapshot image options before selecting a browser host", () =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    for (const includeImage of ["false", 0, null]) {
       const result = yield* server
-        .callTool({ name: "computer_screenshot", arguments: { tabId: "chrome-tab" } })
+        .callTool({
+          name: "preview_snapshot",
+          arguments: { includeImage },
+        })
         .pipe(
           Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
           Effect.provideService(McpSchema.McpServerClient, client),
         );
       expect(result.isError).toBe(true);
-      expect(result.content).toEqual([{ type: "text", text: "Chrome screenshot failed." }]);
-    }),
-  ).pipe(
-    Effect.provide(
-      McpHttpServer.ComputerScreenshotRegistrationLive.pipe(
-        Layer.provideMerge(McpServer.McpServer.layer),
-        Layer.provide(
-          Layer.mock(ChromeAutomation.ChromeAutomation)({
-            screenshot: () => Effect.die("unauthorized screenshot must not reach Chrome"),
-          }),
-        ),
-        Layer.provide(ScreenshotTestServices),
-      ),
-    ),
-  ),
-);
-
-it.effect("returns bounded structural preview snapshot failures", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const server = yield* McpServer.McpServer;
-      const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
-      const events = yield* broker.connect({
-        clientId: "mcp-failure-client",
-        environmentId,
+      expect(result.content).toEqual([{ type: "text", text: "Preview snapshot failed." }]);
+      expect(result.structuredContent).toEqual({
+        error: { _tag: "AiError", operation: "snapshot", failureCount: 1 },
       });
-      yield* Stream.runForEach(events, (event) =>
-        event.type === "connected"
-          ? Effect.void
-          : broker.respond({
-              clientId: "mcp-failure-client",
-              connectionId: event.connectionId,
-              requestId: event.request.requestId,
-              ok: false,
-              error: {
-                _tag: "PreviewAutomationExecutionError",
-                message: "sensitive renderer failure",
-                detail: { consoleOutput: "sensitive browser output" },
-              },
-            }),
-      ).pipe(Effect.forkScoped);
-      yield* Effect.yieldNow;
-
-      const snapshot = yield* server
-        .callTool({ name: "preview_snapshot", arguments: {} })
-        .pipe(
-          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
-          Effect.provideService(McpSchema.McpServerClient, client),
-        );
-
-      expect(snapshot.isError).toBe(true);
-      expect(snapshot.content).toEqual([{ type: "text", text: "Preview snapshot failed." }]);
-      expect(snapshot.structuredContent).toEqual({
-        error: {
-          _tag: "PreviewAutomationExecutionError",
-          operation: "snapshot",
-          failureCount: 1,
-        },
-      });
-    }),
-  ).pipe(Effect.provide(TestLayer)),
+    }
+  }).pipe(Effect.provide(TestLayer)),
 );
 
 it.effect("terminates HTTP MCP sessions with DELETE", () =>

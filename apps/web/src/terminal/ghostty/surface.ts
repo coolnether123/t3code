@@ -1,4 +1,5 @@
 import { isMacPlatform } from "../../lib/utils";
+import { SELECTION_MULTI_CLICK_INTERVAL_MS } from "../../lib/selectionActions";
 import { collectWrappedTerminalLinkLine, extractTerminalLinks } from "../../terminal-links";
 import {
   GhosttyTerminalCore,
@@ -243,14 +244,6 @@ function terminalColumnOffset(row: GhosttySnapshot["rowData"][number], column: n
   return offset;
 }
 
-export function terminalLinkAtPosition(
-  rows: GhosttySnapshot["rowData"],
-  rowIndex: number,
-  column: number,
-): string | null {
-  return terminalLinkAtPositionWithRange(rows, rowIndex, column)?.text ?? null;
-}
-
 export interface TerminalLinkWithRange {
   readonly text: string;
   readonly range: GhosttyCellRange;
@@ -322,10 +315,6 @@ export function terminalLinkAtPositionWithRange(
     }
   }
   return null;
-}
-
-export function terminalLinkAtColumn(row: GhosttySnapshot["rowData"][number], column: number) {
-  return terminalLinkAtPosition([row], 0, column);
 }
 
 export function isTerminalCopyShortcut(
@@ -483,13 +472,6 @@ export function isTerminalLinkPointerGesture(
     : event.ctrlKey && !event.metaKey;
 }
 
-export function shouldShowTerminalLinkHover(
-  mouseTracking: boolean,
-  linkModifierActive: boolean,
-): boolean {
-  return !mouseTracking || linkModifierActive;
-}
-
 export function ghosttyMouseButton(button: number): number | null {
   switch (button) {
     case 0:
@@ -520,7 +502,7 @@ export function advanceTerminalSelectionClickSequence(
 ): TerminalSelectionClickSequence {
   const repeats =
     previous !== null &&
-    event.timeStamp - previous.time <= 500 &&
+    event.timeStamp - previous.time <= SELECTION_MULTI_CLICK_INTERVAL_MS &&
     Math.hypot(event.clientX - previous.x, event.clientY - previous.y) <= 4;
   return {
     count: repeats ? (previous.count >= 3 ? 1 : previous.count + 1) : 1,
@@ -1434,10 +1416,7 @@ export class GhosttyTerminalSurface {
 
   private refreshHoveredLink(): void {
     const pointer = this.hoverPointer;
-    const link =
-      pointer && shouldShowTerminalLinkHover(this.core.isMouseTracking(), this.linkModifierActive)
-        ? this.linkAt(pointer.x, pointer.y)
-        : null;
+    const link = pointer && this.linkModifierActive ? this.linkAt(pointer.x, pointer.y) : null;
     this.setHoveredLink(link);
   }
 

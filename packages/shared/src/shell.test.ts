@@ -8,7 +8,6 @@ import * as TestClock from "effect/testing/TestClock";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
-  extractPathFromShellOutput,
   CommandAvailability,
   CommandResolutionCache,
   type CommandAvailabilityChecker,
@@ -38,28 +37,6 @@ const withWindowsEnvironmentMocks = <A, E, R>(
     Effect.provideService(WindowsShellEnvironment, readEnvironment),
     Effect.provideService(CommandAvailability, commandAvailable),
   );
-
-describe("extractPathFromShellOutput", () => {
-  it("extracts the path between capture markers", () => {
-    expect(
-      extractPathFromShellOutput(
-        "__T3CODE_PATH_START__\n/opt/homebrew/bin:/usr/bin\n__T3CODE_PATH_END__\n",
-      ),
-    ).toBe("/opt/homebrew/bin:/usr/bin");
-  });
-
-  it("ignores shell startup noise around the capture markers", () => {
-    expect(
-      extractPathFromShellOutput(
-        "Welcome to fish\n__T3CODE_PATH_START__\n/opt/homebrew/bin:/usr/bin\n__T3CODE_PATH_END__\nBye\n",
-      ),
-    ).toBe("/opt/homebrew/bin:/usr/bin");
-  });
-
-  it("returns null when the markers are missing", () => {
-    expect(extractPathFromShellOutput("/opt/homebrew/bin /usr/bin")).toBeNull();
-  });
-});
 
 describe("readPathFromLoginShell", () => {
   it("uses a shell-agnostic printenv PATH probe", () => {
@@ -308,7 +285,7 @@ describe("readEnvironmentFromWindowsShell", () => {
 });
 
 describe("mergePathValues", () => {
-  it("dedupes case-insensitively on Windows while preserving preferred order", () => {
+  it("sanitizes and dedupes Windows entries while preserving preferred order", () => {
     expect(
       mergePathValues(
         'C:\\Users\\testuser\\AppData\\Roaming\\npm;"C:\\Program Files\\nodejs"',
@@ -316,8 +293,18 @@ describe("mergePathValues", () => {
         "win32",
       ),
     ).toBe(
-      'C:\\Users\\testuser\\AppData\\Roaming\\npm;"C:\\Program Files\\nodejs";C:\\Windows\\System32',
+      "C:\\Users\\testuser\\AppData\\Roaming\\npm;C:\\Program Files\\nodejs;C:\\Windows\\System32",
     );
+  });
+
+  it("removes stray quotes from Windows entries", () => {
+    expect(
+      mergePathValues(
+        'C:\\Windows\\System32;C:\\cloudflared.exe;C:";C:\\Program Files\\nodejs',
+        undefined,
+        "win32",
+      ),
+    ).toBe("C:\\Windows\\System32;C:\\cloudflared.exe;C:;C:\\Program Files\\nodejs");
   });
 
   it("dedupes case-sensitively on POSIX", () => {
@@ -571,7 +558,7 @@ effectIt.layer(NodeServices.layer)("resolveSpawnCommand", (it) => {
 });
 
 effectIt.layer(NodeServices.layer)("resolveWindowsEnvironment", (it) => {
-  it.effect("returns the baseline no-profile PATH patch when node is already available", () =>
+  it.effect("uses known CLI directories as a fallback without changing shell PATH priority", () =>
     Effect.gen(function* () {
       const readEnvironment = vi.fn(
         (_names: ReadonlyArray<string>, options?: { loadProfile?: boolean }) =>
@@ -594,6 +581,8 @@ effectIt.layer(NodeServices.layer)("resolveWindowsEnvironment", (it) => {
         ),
       ).toEqual({
         PATH: [
+          "C:\\Shell\\Bin",
+          "C:\\Windows\\System32",
           "C:\\Users\\testuser\\AppData\\Roaming\\npm",
           "C:\\Users\\testuser\\AppData\\Local\\Programs\\nodejs",
           "C:\\Users\\testuser\\AppData\\Local\\Volta\\bin",
@@ -601,8 +590,6 @@ effectIt.layer(NodeServices.layer)("resolveWindowsEnvironment", (it) => {
           "C:\\Users\\testuser\\.local\\bin",
           "C:\\Users\\testuser\\.bun\\bin",
           "C:\\Users\\testuser\\scoop\\shims",
-          "C:\\Shell\\Bin",
-          "C:\\Windows\\System32",
         ].join(";"),
       });
       expect(readEnvironment).toHaveBeenCalledTimes(1);
@@ -643,6 +630,7 @@ effectIt.layer(NodeServices.layer)("resolveWindowsEnvironment", (it) => {
         PATH: [
           "C:\\Profile\\Node",
           "C:\\Windows\\System32",
+          "C:\\Shell\\Bin",
           "C:\\Users\\testuser\\AppData\\Roaming\\npm",
           "C:\\Users\\testuser\\AppData\\Local\\Programs\\nodejs",
           "C:\\Users\\testuser\\AppData\\Local\\Volta\\bin",
@@ -650,7 +638,6 @@ effectIt.layer(NodeServices.layer)("resolveWindowsEnvironment", (it) => {
           "C:\\Users\\testuser\\.local\\bin",
           "C:\\Users\\testuser\\.bun\\bin",
           "C:\\Users\\testuser\\scoop\\shims",
-          "C:\\Shell\\Bin",
         ].join(";"),
         FNM_DIR: "C:\\Users\\testuser\\AppData\\Roaming\\fnm",
         FNM_MULTISHELL_PATH: "C:\\Users\\testuser\\AppData\\Local\\fnm_multishells\\123",
@@ -687,11 +674,11 @@ effectIt.layer(NodeServices.layer)("resolveWindowsEnvironment", (it) => {
         ),
       ).toEqual({
         PATH: [
+          "C:\\Windows\\System32",
           "C:\\Users\\testuser\\AppData\\Roaming\\npm",
           "C:\\Users\\testuser\\.local\\bin",
           "C:\\Users\\testuser\\.bun\\bin",
           "C:\\Users\\testuser\\scoop\\shims",
-          "C:\\Windows\\System32",
         ].join(";"),
         FNM_DIR: "C:\\Users\\testuser\\AppData\\Roaming\\fnm",
       });
