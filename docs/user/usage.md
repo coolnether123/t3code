@@ -11,6 +11,10 @@ Use **Past 24h** for an hourly chart covering the exact rolling 24-hour period. 
 **30 days**, **90 days**, **120 days**, and **1 year** ranges use daily resolution. Cost and token
 toggles update both the headline and chart, and refreshing rescans every connected environment.
 
+In **Hourly model usage**, each bar shows processed tokens for Astra, Sol, Luna, Terra, or another
+recorded model. Select an hour to see its token total and estimated dollar cost; token totals include
+cached input, and empty hours remain visible so the timeline stays accurate.
+
 Parsed transcripts are cached individually on the environment that owns them. Expanding to a range
 that has not been viewed before may briefly warm older history; afterward, unchanged chats reuse
 their cached records and only new or edited transcript files are parsed again.

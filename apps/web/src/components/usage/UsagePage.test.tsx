@@ -91,6 +91,18 @@ beforeEach(() => {
           costUsd: 13,
           totalTokens: 13_000,
           byProvider: providerTotals(7, 6),
+          byModel: new Map([
+            [
+              "codex:gpt-5.6-luna",
+              {
+                model: "gpt-5.6-luna",
+                provider: "codex",
+                costUsd: 7,
+                totalTokens: 7_000,
+                records: 1,
+              },
+            ],
+          ]),
         },
         {
           day: "2026-08-11",
@@ -98,6 +110,18 @@ beforeEach(() => {
           costUsd: 11,
           totalTokens: 11_000,
           byProvider: providerTotals(6, 5),
+          byModel: new Map([
+            [
+              "codex:gpt-5.6-sol",
+              {
+                model: "gpt-5.6-sol",
+                provider: "codex",
+                costUsd: 6,
+                totalTokens: 6_000,
+                records: 1,
+              },
+            ],
+          ]),
         },
       ],
     },

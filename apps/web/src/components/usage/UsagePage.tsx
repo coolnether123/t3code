@@ -42,6 +42,7 @@ import {
 import { WorkspacePageContainer } from "../WorkspacePageContainer";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { UsageProviderChart, type UsageChartMetric } from "./UsageProviderChart";
+import { UsageModelHourlyChart } from "./UsageModelHourlyChart";
 import { CodexUsageButton } from "./CodexUsageButton";
 import { UsageLimitsSection } from "./UsageLimits";
 import { UsagePriceOverrides } from "./UsagePriceOverrides";
@@ -394,6 +395,17 @@ export function UsagePage() {
                     />
                   </div>
                 </section>
+
+                {isPast24Hours ? (
+                  <section className="flex min-w-0 flex-col gap-3">
+                    <h2 className="text-sm font-medium text-foreground">Hourly model usage</h2>
+                    <UsageModelHourlyChart
+                      hours={hours}
+                      hourly={merged.hourly}
+                      timeZone={window.timeZone}
+                    />
+                  </section>
+                ) : null}
 
                 <section className="flex flex-col gap-2">
                   <h2 className="text-sm font-medium text-foreground">Totals</h2>
