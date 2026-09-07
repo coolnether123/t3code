@@ -15,7 +15,11 @@ import * as ServerSettings from "../serverSettings.ts";
 import { make } from "./UsageService.ts";
 import { encodeScanCache } from "./usageScanCache.ts";
 import { initialCodexScanState } from "./usageTranscripts.ts";
-import { readTranscriptRecords, transcriptCursorIsLineBoundary } from "./usageTranscriptReader.ts";
+import {
+  listTranscriptFiles,
+  readTranscriptRecords,
+  transcriptCursorIsLineBoundary,
+} from "./usageTranscriptReader.ts";
 
 const files = [
   { path: "/fixture/large.jsonl", size: 200_000_040, mtimeMs: Date.parse("2026-08-30T23:00:00Z") },
@@ -130,6 +134,50 @@ describe("incremental scan integration", () => {
         const removed = yield* service.readSummary(input);
         expect(removed.buckets[0]!.costUsd).toBeCloseTo(0.006);
       }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.effect("serves a cached window while another range is blocked on the scan semaphore", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const loading = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      let directoryExists = false;
+      const service = yield* make.pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          exists: () => Effect.succeed(directoryExists),
+        }),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("Offline fixture")),
+        ),
+      );
+      const cachedInput = {
+        sinceDay: UsageDay.make("2026-08-29"),
+        untilDay: UsageDay.make("2026-09-02"),
+        timeZone: "UTC",
+        quotaIntervals: [],
+      };
+      yield* service.readSummary(cachedInput);
+      directoryExists = true;
+      vi.mocked(readTranscriptRecords).mockImplementationOnce(async () => {
+        loading.resolve();
+        await release.promise;
+        return { records: [], codexState: initialCodexScanState() };
+      });
+      const blocked = yield* service
+        .readSummary({ ...cachedInput, sinceDay: UsageDay.make("2026-08-28") })
+        .pipe(Effect.forkChild);
+      yield* Effect.promise(() => loading.promise);
+      // Keep a generous guard so a semaphore regression cannot hang the suite;
+      // this is not a cache-latency target.
+      const cached = yield* service
+        .readSummary(cachedInput)
+        .pipe(Effect.timeout(1_000), Effect.exit);
+      expect(cached._tag).toBe("Success");
+      release.resolve();
+      yield* Fiber.join(blocked);
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
   it.effect("retries the cache load after its first reader is cancelled", () =>
     Effect.gen(function* () {

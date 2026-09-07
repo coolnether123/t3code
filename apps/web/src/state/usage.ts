@@ -17,7 +17,7 @@ import {
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { mergeUsage, type EnvironmentUsage, type MergedUsage } from "@t3tools/shared/usageMerge";
 import { appAtomRegistry } from "../rpc/atomRegistry";
@@ -89,8 +89,37 @@ export function useUsage(input: UsageSummaryInput): UsageView {
     ],
   );
   const atom = usageByWindowAtom(windowKey);
-  const environments = useAtomValue(atom);
+  const observedEnvironments = useAtomValue(atom);
+  const [refreshed, setRefreshed] = useState<{
+    readonly windowKey: string;
+    readonly generation: number;
+    readonly statuses: readonly EnvironmentUsageStatus[];
+    readonly baselineReadAt: ReadonlyMap<string, string | undefined>;
+  } | null>(null);
+  const environments = useMemo(() => {
+    if (refreshed?.windowKey !== windowKey) return observedEnvironments;
+    const byId = new Map(refreshed.statuses.map((status) => [status.environmentId, status]));
+    return observedEnvironments.map((environment) => {
+      const refreshedEnvironment = byId.get(environment.environmentId);
+      if (refreshedEnvironment === undefined) return environment;
+      const observedAt = environment.summary?.readAt;
+      const refreshedAt = refreshedEnvironment.summary?.readAt;
+      const baselineAt = refreshed.baselineReadAt.get(environment.environmentId);
+      // Imperative refreshes are kept locally because the shared atom can
+      // finish on a later turn. Once that atom has a newer server reading,
+      // let it win so a refresh cannot pin the page to an older answer.
+      if (
+        observedAt !== undefined &&
+        ((refreshedAt !== undefined && observedAt > refreshedAt) ||
+          (refreshedAt === undefined && observedAt !== baselineAt))
+      ) {
+        return environment;
+      }
+      return refreshedEnvironment;
+    });
+  }, [observedEnvironments, refreshed, windowKey]);
   const retriedFailures = useRef(new Set<string>());
+  const refreshGeneration = useRef(0);
 
   // Refreshing only the derived atom would re-read the per-environment SWR
   // queries within their stale window and change nothing. Refresh each
@@ -100,8 +129,25 @@ export function useUsage(input: UsageSummaryInput): UsageView {
       const input = nextInput
         ? usageQueryInput(nextInput, USAGE_CONTRACT_VERSION)
         : (JSON.parse(windowKey) as UsageSummaryInput);
+      const requestWindowKey = JSON.stringify(input);
       const requestInput = { ...input, refresh: nextInput?.refresh ?? true };
-      return Promise.all(
+      const generation = refreshGeneration.current + 1;
+      refreshGeneration.current = generation;
+      const baselineReadAt = new Map(
+        environments.map((environment) => [environment.environmentId, environment.summary?.readAt]),
+      );
+      const requestStatuses = environments.map((environment) =>
+        requestWindowKey === windowKey
+          ? { ...environment, isPending: true }
+          : { ...environment, isPending: true, error: null, summary: null },
+      );
+      setRefreshed({
+        windowKey: requestWindowKey,
+        generation,
+        statuses: requestStatuses,
+        baselineReadAt,
+      });
+      const statuses = await Promise.all(
         environments.map(async (environment) => {
           const result = await executeAtomQuery(
             appAtomRegistry,
@@ -111,14 +157,28 @@ export function useUsage(input: UsageSummaryInput): UsageView {
             }),
             { refresh: true, timeoutMs: 30_000, reportFailure: false, reportDefect: false },
           );
-          return {
+          const status = {
             ...environment,
             isPending: false,
             error: result._tag === "Failure" ? "This environment could not report usage." : null,
             summary: Option.getOrNull(AsyncResult.value(result)),
           };
+          setRefreshed((previous) => {
+            if (previous?.generation !== generation) return previous;
+            const nextStatuses = previous.statuses.map((entry) =>
+              entry.environmentId === status.environmentId ? status : entry,
+            );
+            return { ...previous, statuses: nextStatuses };
+          });
+          return status;
         }),
       );
+      setRefreshed((previous) =>
+        previous?.generation === generation
+          ? { ...previous, windowKey: requestWindowKey, statuses }
+          : previous,
+      );
+      return statuses;
     },
     [environments, windowKey],
   );

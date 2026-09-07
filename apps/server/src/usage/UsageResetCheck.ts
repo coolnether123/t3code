@@ -1,9 +1,4 @@
-import {
-  CommunityCheckFinding,
-  CommunityCheckState,
-  ResetCheckFinding,
-  ResetCheckState,
-} from "@t3tools/contracts";
+import { CommunityCheckFinding, CommunityCheckState, ResetCheckState } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
@@ -28,27 +23,20 @@ import {
   resetCheckArgs,
   resetCheckPrompt,
   RESET_CHECK_TIMEOUT_MS,
-  validateResetFinding,
+  ResetResearchFinding,
+  ResetPublicFeed,
+  validateResearchFinding,
 } from "./resetCheckResearch.ts";
 import { communityCheckPrompt, validateCommunityFinding } from "./communityCheckResearch.ts";
 
 export class ResetResearchFailed extends Data.TaggedError("ResetResearchFailed")<{
   readonly stage?: string;
 }> {}
-const decodeFinding = Schema.decodeUnknownEffect(Schema.fromJsonString(ResetCheckFinding));
+const decodeFinding = Schema.decodeUnknownEffect(Schema.fromJsonString(ResetResearchFinding));
 const decodeState = Schema.decodeUnknownEffect(Schema.fromJsonString(ResetCheckState));
 const encodeState = Schema.encodeEffect(Schema.fromJsonString(ResetCheckState));
 const encodeUnknown = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
-const decodePublicFeed = Schema.decodeUnknownEffect(
-  Schema.fromJsonString(
-    Schema.Struct({
-      calculatedAt: Schema.String,
-      validUntil: Schema.String,
-      latestReset: Schema.Unknown,
-      answer: Schema.Unknown,
-    }),
-  ),
-);
+const decodePublicFeed = Schema.decodeUnknownEffect(Schema.fromJsonString(ResetPublicFeed));
 export const IDLE_RESET_CHECK = {
   status: "idle",
   startedAt: null,
@@ -68,7 +56,7 @@ const makeLunaResearch = Effect.gen(function* () {
   return <Finding>(definition: {
     readonly schema: Schema.Top;
     readonly decode: (raw: string) => Effect.Effect<Finding, Schema.SchemaError>;
-    readonly validate: (finding: Finding, checkedAt: number) => Finding;
+    readonly validate: (finding: Finding, checkedAt: number) => Omit<Finding, "timingBasis">;
     readonly prompt: (now: string, publicEvidence: string | null) => string;
   }) =>
     (now: string) =>
@@ -169,9 +157,9 @@ const makeLunaResearch = Effect.gen(function* () {
 export const makeResetResearch = makeLunaResearch.pipe(
   Effect.map((create) =>
     create({
-      schema: ResetCheckFinding,
+      schema: ResetResearchFinding,
       decode: decodeFinding,
-      validate: validateResetFinding,
+      validate: validateResearchFinding,
       prompt: resetCheckPrompt,
     }),
   ),

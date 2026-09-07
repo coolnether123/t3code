@@ -27,6 +27,9 @@ import { SidebarInset } from "../ui/sidebar";
 import { WorkspacePageContainer } from "../WorkspacePageContainer";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
 
+import { TokenBudgetPanel } from "./TokenBudgetPanel";
+import { monitoredModels } from "./usageTokenBudget";
+import { apiPaceInterval } from "./usageApiPace";
 import { UsagePaceChart } from "./UsagePaceChart";
 import { ResetCheckPanel } from "./ResetCheckPanel";
 import { CommunityCheckPanel } from "./CommunityCheckPanel";
@@ -88,11 +91,30 @@ export function UsageResetPage() {
   const samples = useMemo(() => quotaMonitoringSamples(rawSamples ?? []), [rawSamples]);
   const periods = useMemo(() => quotaPeriods(samples), [samples]);
   const intervals = useMemo(() => quotaIntervals(periods), [periods]);
+  const paceInterval = useMemo(() => apiPaceInterval(intervals.at(-1)), [intervals]);
   const costInput = useMemo(
     () => quotaCostWindow(intervals) ?? historyInput,
     [historyInput, intervals],
   );
   const costs = useUsage(costInput);
+  const paceInput = useMemo(
+    () => (paceInterval ? quotaCostWindow([paceInterval])! : historyInput),
+    [paceInterval, historyInput],
+  );
+  const paceCosts = useUsage(paceInput);
+  const paceModels = useMemo(
+    () =>
+      paceInterval
+        ? monitoredModels(
+            paceInterval.id,
+            paceCosts.environments.filter(
+              (environment) =>
+                selectedIds === null || selectedIds.includes(environment.environmentId),
+            ),
+          )
+        : null,
+    [paceInterval, paceCosts.environments, selectedIds],
+  );
   const selected = useMemo(
     () =>
       costs.environments.filter(
@@ -115,6 +137,8 @@ export function UsageResetPage() {
     value: quotaValueWithSnapshot(current, snapshots),
   }));
   const last = samples.at(-1);
+  const trackedManualResetCount = tracker?.summary?.quotaHistory?.bankedResetCount;
+  const trackedManualResetCheckedAt = tracker?.summary?.quotaHistory?.bankedResetCheckedAt;
   const refreshMonitor = async () => {
     if (refreshActive.current) return;
     refreshActive.current = true;
@@ -125,7 +149,15 @@ export function UsageResetPage() {
         await refreshCodexMonitor({
           trackerId: tracker?.environmentId,
           refreshHistory: history.refresh,
-          refreshCosts: costs.refresh,
+          refreshCosts: async (input) => {
+            const recentInterval = apiPaceInterval(input.quotaIntervals?.at(-1));
+            const recentInput = recentInterval ? quotaCostWindow([recentInterval]) : null;
+            const replies = await Promise.all([
+              costs.refresh(input),
+              recentInput ? paceCosts.refresh(recentInput) : Promise.resolve([]),
+            ]);
+            return replies.flat();
+          },
           refreshNews: () => newsWatcher.current?.refresh() ?? Promise.resolve(false),
           onProgress: setRefreshMessage,
         }),
@@ -140,6 +172,10 @@ export function UsageResetPage() {
 
   const current = values.at(-1);
   const completed = values.slice(0, -1);
+  const models = useMemo(
+    () => (current ? monitoredModels(current.period.id, selected) : null),
+    [current?.period.id, selected],
+  );
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden bg-background text-foreground">
       <WorkspacePageHeader electron={isElectron}>
@@ -154,6 +190,20 @@ export function UsageResetPage() {
             /
           </span>
           <h1 className="truncate text-sm font-medium">Codex monitor</h1>
+          <nav
+            aria-label="Monitor sections"
+            className="ms-4 hidden items-center gap-4 text-xs text-muted-foreground md:flex"
+          >
+            <a className="hover:text-foreground" href="#api-value">
+              API value
+            </a>
+            <a className="hover:text-foreground" href="#token-budget">
+              Token planner
+            </a>
+            <a className="hover:text-foreground" href="#luna-research">
+              Luna research
+            </a>
+          </nav>
           <Button
             className="ms-auto size-11"
             variant="ghost"
@@ -169,12 +219,11 @@ export function UsageResetPage() {
       </WorkspacePageHeader>
       <ScrollArea className="min-h-0 flex-1">
         <WorkspacePageContainer
-          width="readable"
+          width="expanded"
           className="pb-[calc(env(safe-area-inset-bottom)+3rem)]"
         >
-          <BirthdayGreeting />
           <p role="status" aria-live="polite" className="text-xs text-muted-foreground">
-            {refreshMessage || "Refresh checks saved readings, API costs and reset news."}
+            {refreshMessage || "Weekly usage, model value and reset research"}
           </p>
           {history.isPending && !last ? <p role="status">Reading Codex usage…</p> : null}
           {history.environments.map((environment) => {
@@ -206,22 +255,34 @@ export function UsageResetPage() {
               <UsagePaceChart
                 samples={samples}
                 news={news}
-                resetCheck={
-                  <>
-                    <ResetCheckPanel
-                      key={tracker.environmentId}
-                      environmentId={tracker.environmentId}
-                      label={tracker.label}
-                    />
-                    <CommunityCheckPanel
-                      key={`community-${tracker.environmentId}`}
-                      environmentId={tracker.environmentId}
-                      label={tracker.label}
-                    />
-                  </>
+                manualResets={
+                  trackedManualResetCount === undefined
+                    ? null
+                    : {
+                        availableCount: trackedManualResetCount,
+                        verified: trackedManualResetCheckedAt !== undefined,
+                        ...(trackedManualResetCheckedAt === undefined
+                          ? {}
+                          : { checkedAt: trackedManualResetCheckedAt }),
+                      }
+                }
+                apiPace={
+                  paceInterval
+                    ? {
+                        interval: paceInterval,
+                        models: paceModels,
+                        remainingValueUsd: current.value.cachedAt
+                          ? null
+                          : current.value.remainingValueUsd,
+                      }
+                    : null
                 }
               />
-              <section className="border-t border-border pt-5" aria-label="Tracked API value">
+              <section
+                id="api-value"
+                className="rounded-xl border border-border bg-card/20 p-5"
+                aria-label="Tracked API value"
+              >
                 <div className="flex flex-wrap items-baseline justify-between gap-2">
                   <h2 className="text-sm font-medium">API-equivalent value</h2>
                   <span className="text-xs text-muted-foreground">This monitored cycle only</span>
@@ -267,6 +328,34 @@ export function UsageResetPage() {
                 </p>
               </section>
 
+              <div id="token-budget">
+                <TokenBudgetPanel
+                  budgetUsd={current.value.remainingValueUsd}
+                  models={models}
+                  observedAt={current.period.last.observedAt}
+                />
+              </div>
+              <BirthdayGreeting />
+              <section id="luna-research" aria-label="Reset research" className="min-w-0">
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <h2 className="text-sm font-medium">Reset research</h2>
+                  <span className="text-xs text-muted-foreground">
+                    Luna · public sources · on demand
+                  </span>
+                </div>
+                <div className="grid items-start gap-4 xl:grid-cols-2">
+                  <ResetCheckPanel
+                    key={tracker.environmentId}
+                    environmentId={tracker.environmentId}
+                    label={tracker.label}
+                  />
+                  <CommunityCheckPanel
+                    key={`community-${tracker.environmentId}`}
+                    environmentId={tracker.environmentId}
+                    label={tracker.label}
+                  />
+                </div>
+              </section>
               <section className="border-t border-border pt-5" aria-label="Resets while monitored">
                 <h2 className="text-sm font-medium">Resets while monitored</h2>
                 {completed.length === 0 ? (

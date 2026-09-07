@@ -34,6 +34,16 @@ export function decodeQuotaHistory(document: unknown): UsageQuotaHistory {
   const main = object(object(root?.Snapshot)?.MainLimit);
   if (main?.LimitId !== "codex" || object(main.Window)?.DurationMinutes !== 10080) return invalid;
   if (!Array.isArray(rows) || rows.length > 5000) return invalid;
+  const snapshot = object(root?.Snapshot);
+  const emergencyResetCount = snapshot?.EmergencyResetCount;
+  const bankedResetCount =
+    typeof emergencyResetCount === "number" &&
+    Number.isSafeInteger(emergencyResetCount) &&
+    emergencyResetCount >= 0
+      ? emergencyResetCount
+      : undefined;
+  const fetchedAt = snapshot?.FetchedAt;
+  const fetchedAtMs = typeof fetchedAt === "string" ? Date.parse(fetchedAt) : NaN;
   const samples = new Map<number, UsageQuotaSample>();
   for (const row of rows) {
     const item = object(row);
@@ -69,6 +79,10 @@ export function decodeQuotaHistory(document: unknown): UsageQuotaHistory {
     status: "ready",
     source: SOURCE,
     samples: [...samples.values()].sort((a, b) => a.observedAt.localeCompare(b.observedAt)),
+    ...(bankedResetCount === undefined ? {} : { bankedResetCount }),
+    ...(bankedResetCount === undefined || !Number.isFinite(fetchedAtMs)
+      ? {}
+      : { bankedResetCheckedAt: DateTime.formatIso(DateTime.makeUnsafe(fetchedAtMs)) }),
     message: null,
   };
 }
@@ -145,6 +159,13 @@ export class QuotaCostAccumulator {
       costUsd: 0,
       records: 0,
       unpricedRecords: 0,
+      models: [] as {
+        model: string;
+        totals: UsageRecord["totals"];
+        costUsd: number;
+        records: number;
+        unpricedRecords: number;
+      }[],
     }));
   }
 
@@ -171,5 +192,32 @@ export class QuotaCostAccumulator {
     row.costUsd += priced.costUsd;
     row.records++;
     if (priced.costSource === "unpriced") row.unpricedRecords++;
+    let model = row.models.find((entry) => entry.model === record.model);
+    if (!model) {
+      model = {
+        model: record.model,
+        totals: {
+          uncachedInputTokens: 0,
+          cachedInputTokens: 0,
+          cacheCreationTokens: 0,
+          outputTokens: 0,
+          reasoningTokens: 0,
+        },
+        costUsd: 0,
+        records: 0,
+        unpricedRecords: 0,
+      };
+      row.models.push(model);
+    }
+    model.totals = {
+      uncachedInputTokens: model.totals.uncachedInputTokens + record.totals.uncachedInputTokens,
+      cachedInputTokens: model.totals.cachedInputTokens + record.totals.cachedInputTokens,
+      cacheCreationTokens: model.totals.cacheCreationTokens + record.totals.cacheCreationTokens,
+      outputTokens: model.totals.outputTokens + record.totals.outputTokens,
+      reasoningTokens: model.totals.reasoningTokens + record.totals.reasoningTokens,
+    };
+    model.costUsd += priced.costUsd;
+    model.records++;
+    if (priced.costSource === "unpriced") model.unpricedRecords++;
   }
 }

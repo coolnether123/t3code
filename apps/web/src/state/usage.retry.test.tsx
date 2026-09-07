@@ -1,7 +1,7 @@
 /** @vitest-environment happy-dom */
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { UsageDay } from "@t3tools/contracts";
+import { USAGE_CONTRACT_VERSION, UsageDay, type UsageSummary } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -12,8 +12,8 @@ const state = vi.hoisted(() => ({
       environmentId: "desktop",
       label: "Desktop",
       isPending: false,
-      error: "This environment could not report usage.",
-      summary: null,
+      error: "This environment could not report usage." as string | null,
+      summary: null as UsageSummary | null,
     },
   ],
   execute: vi.fn(),
@@ -42,7 +42,84 @@ function UsageProbe() {
   return null;
 }
 
+const refreshedSummary: UsageSummary = {
+  contractVersion: USAGE_CONTRACT_VERSION,
+  readAt: "2026-09-01T12:00:00.000Z",
+  timeZone: "America/Chicago",
+  sinceDay: UsageDay.make("2026-08-01"),
+  untilDay: UsageDay.make("2026-09-01"),
+  buckets: [],
+  sources: [],
+  pricing: { status: "unavailable", source: "test", fetchedAt: null, knownModels: 0 },
+  scanDurationMs: 1,
+};
+
+function RefreshProbe() {
+  const usage = useUsage({
+    sinceDay: UsageDay.make("2026-08-01"),
+    untilDay: UsageDay.make("2026-09-01"),
+    timeZone: "America/Chicago",
+  });
+  return (
+    <button type="button" onClick={() => void usage.refresh()}>
+      {usage.environments[0]?.summary?.readAt ?? "missing"}
+    </button>
+  );
+}
+
+function RefreshStatusesProbe() {
+  const usage = useUsage({
+    sinceDay: UsageDay.make("2026-08-01"),
+    untilDay: UsageDay.make("2026-09-01"),
+    timeZone: "America/Chicago",
+  });
+  return (
+    <div>
+      <button type="button" onClick={() => void usage.refresh()}>
+        refresh
+      </button>
+      {usage.environments.map((environment) => (
+        <span key={environment.environmentId}>
+          {environment.environmentId}:
+          {environment.summary?.readAt ?? environment.error ?? "pending"}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function RefreshDifferentWindowProbe() {
+  const usage = useUsage({
+    sinceDay: UsageDay.make("2026-08-01"),
+    untilDay: UsageDay.make("2026-09-01"),
+    timeZone: "America/Chicago",
+  });
+  return (
+    <button
+      type="button"
+      onClick={() =>
+        void usage.refresh({
+          sinceDay: UsageDay.make("2026-08-02"),
+          untilDay: UsageDay.make("2026-09-01"),
+          timeZone: "America/Chicago",
+        })
+      }
+    >
+      {usage.environments[0]?.summary?.readAt ?? "missing"}
+    </button>
+  );
+}
+
 beforeEach(() => {
+  state.environments = [
+    {
+      environmentId: "desktop",
+      label: "Desktop",
+      isPending: false,
+      error: "This environment could not report usage.",
+      summary: null,
+    },
+  ];
   state.execute
     .mockReset()
     .mockResolvedValue(AsyncResult.failure(Cause.fail(new Error("disconnected"))));
@@ -62,6 +139,140 @@ describe("usage route recovery", () => {
       );
       await act(async () => root.render(<UsageProbe />));
       expect(state.execute).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  it("adopts the result fetched by a manual refresh", async () => {
+    state.execute.mockResolvedValue(AsyncResult.success(refreshedSummary));
+    state.environments = [
+      {
+        environmentId: "desktop",
+        label: "Desktop",
+        isPending: false,
+        error: null,
+        summary: null,
+      },
+    ];
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<RefreshProbe />));
+      await act(async () => container.querySelector("button")?.click());
+      expect(container.textContent).toBe(refreshedSummary.readAt);
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  it("allows a newer shared answer to replace the manual refresh overlay", async () => {
+    state.execute.mockResolvedValue(AsyncResult.success(refreshedSummary));
+    state.environments = [
+      {
+        environmentId: "desktop",
+        label: "Desktop",
+        isPending: false,
+        error: null,
+        summary: null,
+      },
+    ];
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<RefreshProbe />));
+      await act(async () => container.querySelector("button")?.click());
+      expect(container.textContent).toBe(refreshedSummary.readAt);
+
+      state.environments = [
+        {
+          environmentId: "desktop",
+          label: "Desktop",
+          isPending: false,
+          error: null,
+          summary: { ...refreshedSummary, readAt: "2026-09-01T12:01:00.000Z" },
+        },
+      ];
+      await act(async () => root.render(<RefreshProbe />));
+      expect(container.textContent).toBe("2026-09-01T12:01:00.000Z");
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  it("publishes fast environment results while a slower refresh is pending", async () => {
+    let finishSlow!: (result: unknown) => void;
+    const slow = new Promise((resolve) => {
+      finishSlow = resolve;
+    });
+    const quickSummary = { ...refreshedSummary, readAt: "2026-09-01T12:02:00.000Z" };
+    state.environments = [
+      {
+        environmentId: "desktop",
+        label: "Desktop",
+        isPending: false,
+        error: null,
+        summary: null,
+      },
+      {
+        environmentId: "laptop",
+        label: "Laptop",
+        isPending: false,
+        error: null,
+        summary: null,
+      },
+    ];
+    state.execute.mockImplementation((_registry: unknown, request: { environmentId: string }) =>
+      request.environmentId === "desktop"
+        ? Promise.resolve(AsyncResult.success(quickSummary))
+        : slow,
+    );
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<RefreshStatusesProbe />));
+      await act(async () => container.querySelector("button")?.click());
+      await act(async () => Promise.resolve());
+      expect(container.textContent).toContain("desktop:2026-09-01T12:02:00.000Z");
+      expect(container.textContent).toContain("laptop:pending");
+
+      finishSlow(AsyncResult.failure(Cause.fail(new Error("disconnected"))));
+      await act(async () => slow);
+      state.environments = [
+        {
+          environmentId: "laptop",
+          label: "Laptop",
+          isPending: false,
+          error: null,
+          summary: { ...refreshedSummary, readAt: "2026-09-01T12:03:00.000Z" },
+        },
+        state.environments[0]!,
+      ];
+      await act(async () => root.render(<RefreshStatusesProbe />));
+      expect(container.textContent).toContain("laptop:2026-09-01T12:03:00.000Z");
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  it("does not show the old window while refreshing a different request key", async () => {
+    state.execute.mockResolvedValue(AsyncResult.success(refreshedSummary));
+    state.environments = [
+      {
+        environmentId: "desktop",
+        label: "Desktop",
+        isPending: false,
+        error: null,
+        summary: refreshedSummary,
+      },
+    ];
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<RefreshDifferentWindowProbe />));
+      const button = container.querySelector("button")!;
+      await act(async () => button.click());
+      expect(button.textContent).toBe(refreshedSummary.readAt);
     } finally {
       await act(async () => root.unmount());
     }

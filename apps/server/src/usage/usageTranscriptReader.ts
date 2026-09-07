@@ -62,7 +62,7 @@ export function selectTranscriptFilesForScan<File extends TranscriptFile>(
   let deferredFiles = 0;
   let deferredBytes = 0;
   let coldBytes = 0;
-  let selectedColdFile = false;
+  const oversized: File[] = [];
 
   const newestFirst = [...files].sort(
     (left, right) => right.mtimeMs - left.mtimeMs || left.path.localeCompare(right.path),
@@ -73,14 +73,27 @@ export function selectTranscriptFilesForScan<File extends TranscriptFile>(
       selected.push(file);
       continue;
     }
-    if (readBytes <= maxColdBytes - coldBytes || !selectedColdFile) {
+    if (readBytes <= maxColdBytes - coldBytes) {
       selected.push(file);
       coldBytes += readBytes;
-      selectedColdFile = true;
       continue;
     }
+    oversized.push(file);
     deferredFiles += 1;
     deferredBytes += readBytes;
+  }
+
+  // A single giant rollout must make progress eventually, but it should not
+  // block the first useful result while smaller cold files can fill the
+  // bounded batch. Once those files are warm, the next pass admits the newest
+  // oversized file and keeps the partial totals visible while it is parsed.
+  if (coldBytes === 0 && oversized.length > 0) {
+    const file = oversized[0]!;
+    const readBytes = bytesToRead(file);
+    selected.push(file);
+    coldBytes = readBytes;
+    deferredFiles -= 1;
+    deferredBytes -= readBytes;
   }
 
   return { files: selected, deferredFiles, deferredBytes, coldBytes };

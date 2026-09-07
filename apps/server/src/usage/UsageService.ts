@@ -745,21 +745,32 @@ export const make = Effect.gen(function* () {
   const readSummary: UsageService["Service"]["readSummary"] = (input) =>
     input.quotaHistoryOnly
       ? readSummaryUnlocked(input)
-      : scanSemaphore.withPermits(1)(
-          Effect.gen(function* () {
-            const startedAtMs = yield* Clock.currentTimeMillis;
-            const key = usageSummaryCacheKey(input);
-            const cached = input.refresh ? undefined : summaryCache.get(key, startedAtMs);
+      : Effect.gen(function* () {
+          const key = usageSummaryCacheKey(input);
+          // A complete warm answer is independent of an unrelated cold scan.
+          // Check before taking the semaphore so navigation can use it while a
+          // different range is still warming in the background.
+          if (!input.refresh) {
+            const cached = summaryCache.get(key, yield* Clock.currentTimeMillis);
             if (cached !== undefined) return cached;
-
-            const summary = yield* readSummaryUnlocked(input);
-            if (summary.sources.every((source) => source.status !== "partial")) {
-              const finishedAtMs = yield* Clock.currentTimeMillis;
-              summaryCache.set(key, finishedAtMs, summary);
-            }
-            return summary;
-          }),
-        );
+          }
+          return yield* scanSemaphore.withPermits(1)(
+            Effect.gen(function* () {
+              // Recheck after waiting: another request may have populated this
+              // exact key while this one was queued.
+              if (!input.refresh) {
+                const cached = summaryCache.get(key, yield* Clock.currentTimeMillis);
+                if (cached !== undefined) return cached;
+              }
+              const summary = yield* readSummaryUnlocked(input);
+              if (summary.sources.every((source) => source.status !== "partial")) {
+                const finishedAtMs = yield* Clock.currentTimeMillis;
+                summaryCache.set(key, finishedAtMs, summary);
+              }
+              return summary;
+            }),
+          );
+        });
 
   return { readSummary } as const;
 });

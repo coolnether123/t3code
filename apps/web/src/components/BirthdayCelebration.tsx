@@ -15,8 +15,8 @@ const CONFETTI_COLORS = ["#ffaf91", "#f8d477", "#a8dcca", "#d5b7f4"];
 const BIRTHDAY_NOTES: readonly string[] = [
   "The cake has requested a code freeze. Your wish has higher priority.",
   "Wishing you a year with more good surprises and fewer mystery bugs.",
-  "Today's most important metric: one more year of being you.",
-  "A tiny birthday present from the pixels you spend your day with.",
+  "Another trip around the sun. No rollback requested.",
+  "Birthday checks passed. Cake coverage remains below target.",
   "May your next year have excellent snacks, kind people, and very boring error logs.",
 ];
 const BirthdayContext = createContext({
@@ -170,14 +170,17 @@ export function BirthdayGreeting() {
   return (
     <section className="birthday-greeting" aria-label="Birthday celebration">
       <div className="birthday-greeting-copy">
-        <p className="birthday-eyebrow">A little celebration</p>
+        <p className="birthday-eyebrow">
+          <span aria-hidden="true">⌘</span> birthday/{year}{" "}
+          <span className="birthday-status">{wished ? "completed" : "ready"}</span>
+        </p>
         <h2>
           Happy birthday<span aria-hidden="true"> ✦</span>
         </h2>
-        <p>
+        <p role="status" aria-live="polite">
           {wished
-            ? "Wish made. Here's to a good year ahead."
-            : "This corner of the internet is celebrating you today."}
+            ? "Wish made. Delivery date classified."
+            : "One candle. Unlimited retries. Make this next year a good one."}
         </p>
         <button
           type="button"
@@ -185,7 +188,7 @@ export function BirthdayGreeting() {
           aria-expanded={noteOpen}
           onClick={() => setNoteOpen(!noteOpen)}
         >
-          {noteOpen ? "Fold the note" : "A note tucked in for you"}
+          {noteOpen ? "Close birthday.log" : "Open birthday.log"}
           <span aria-hidden="true"> ↗</span>
         </button>
       </div>
@@ -225,13 +228,13 @@ export function BirthdayGreeting() {
           />
           <ellipse cx="44" cy="83" rx="34" ry="4" fill="#a8dcca" opacity=".65" />
         </svg>
-        <span>{wished ? "One more wish?" : "Make a wish"}</span>
+        <span>{wished ? "↻ Run again" : "▶ Make a wish"}</span>
       </button>
       {noteOpen ? (
         <div className="birthday-note">
           <p aria-live="polite">{notes[(year + noteIndex) % notes.length]}</p>
           <button type="button" onClick={nextNote}>
-            There's another one →
+            Next entry →
           </button>
         </div>
       ) : null}

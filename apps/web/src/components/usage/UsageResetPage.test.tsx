@@ -8,9 +8,10 @@ const state = vi.hoisted(() => ({
   environments: [] as unknown[],
   refresh: vi.fn(),
   news: vi.fn(),
+  useUsage: vi.fn(),
 }));
 vi.mock("../../state/usage", () => ({
-  useUsage: () => ({ environments: state.environments, isPending: false, refresh: state.refresh }),
+  useUsage: (..._args: unknown[]) => state.useUsage(),
 }));
 vi.mock("@t3tools/client-runtime/resetAnnouncements", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@t3tools/client-runtime/resetAnnouncements")>()),
@@ -34,10 +35,20 @@ beforeEach(() => {
   state.environments = [];
   state.refresh.mockReset().mockResolvedValue([]);
   state.news.mockReset().mockResolvedValue(undefined);
+  state.useUsage.mockReset().mockImplementation(() => ({
+    environments: state.environments,
+    isPending: false,
+    refresh: state.refresh,
+  }));
   vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-08-30T22:00:00Z"));
 });
 
 describe("Codex monitor page", () => {
+  it("uses separate full-cycle and recent cost reads", () => {
+    renderToStaticMarkup(<UsageResetPage />);
+    expect(state.useUsage).toHaveBeenCalledTimes(3);
+  });
+
   it("shows progress, ignores repeated taps, then enables retry after failure", async () => {
     let reject!: (reason: Error) => void;
     state.refresh.mockReturnValue(
@@ -143,5 +154,9 @@ describe("Codex monitor page", () => {
     expect(markup).not.toContain("Unexpected usage return");
     expect(markup).toContain("Tracking and computers");
     expect(markup).toContain("Check community with Luna");
+    expect(markup.indexOf("Usage over time")).toBeLessThan(
+      markup.indexOf("Check community with Luna"),
+    );
+    expect(markup).toContain("How far could the rest go?");
   });
 });

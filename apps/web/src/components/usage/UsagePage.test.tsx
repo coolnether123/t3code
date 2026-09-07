@@ -160,6 +160,29 @@ describe("UsagePage hourly breakdown", () => {
     expect(markup).toContain("Codex usage &amp; resets");
   });
 
+  it("shows completed totals while another environment is still scanning", () => {
+    const view = testState.useUsage();
+    testState.useUsage.mockReturnValue({
+      ...view,
+      environments: [
+        {
+          environmentId: "desktop",
+          label: "Desktop",
+          isPending: false,
+          error: null,
+          summary: { sources: [] },
+        },
+        { environmentId: "laptop", label: "Laptop", isPending: true, error: null, summary: null },
+      ],
+      isPending: false,
+      isPartial: true,
+    });
+
+    const markup = renderToStaticMarkup(<UsagePage />);
+    expect(markup).toContain("Totals");
+    expect(markup).toContain("Laptop is still scanning usage.");
+  });
+
   it("warns that missing prices are not free usage", () => {
     const view = testState.useUsage();
     testState.useUsage.mockReturnValue({

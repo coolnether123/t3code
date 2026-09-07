@@ -187,6 +187,10 @@ export const UsageQuotaHistory = Schema.Struct({
   status: Schema.Literals(["ready", "missing", "invalid"]),
   source: Schema.String,
   samples: Schema.Array(UsageQuotaSample),
+  /** Number of manual reset credits currently reported by the local tracker. */
+  bankedResetCount: Schema.optional(NonNegativeInt),
+  /** Timestamp of the local tracker's snapshot used for bankedResetCount. */
+  bankedResetCheckedAt: Schema.optional(Schema.String),
   message: Schema.NullOr(Schema.String),
 });
 export type UsageQuotaHistory = typeof UsageQuotaHistory.Type;
@@ -206,6 +210,17 @@ export const UsageQuotaCost = Schema.Struct({
   records: NonNegativeInt,
   unpricedRecords: NonNegativeInt,
   complete: Schema.Boolean,
+  models: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        model: Schema.String,
+        totals: UsageTokenTotals,
+        costUsd: Schema.Number,
+        records: NonNegativeInt,
+        unpricedRecords: NonNegativeInt,
+      }),
+    ),
+  ),
 });
 export type UsageQuotaCost = typeof UsageQuotaCost.Type;
 

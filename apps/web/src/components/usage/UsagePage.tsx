@@ -56,12 +56,11 @@ export function UsagePage() {
   const [breakdown, setBreakdown] = useState<"model" | "time">("model");
   const { days: windowDays, window } = windowSelection;
   const isPast24Hours = windowDays === 1;
-  const { merged, environments, isPending, isPartial, refresh } = useUsage(window);
+  const { merged, environments, isPending, refresh } = useUsage(window);
 
-  // Hold the content until every environment is terminal. Rendering merged
-  // totals while devices are still answering makes every number on the page
-  // jump as each one lands.
-  const settling = isPending || isPartial;
+  // An offline or slow device must not hide totals already reported by the
+  // other environments. The coverage notice identifies pending devices.
+  const settling = isPending;
   const refreshing = environments.some((entry) => entry.isPending && entry.summary !== null);
 
   const days = useMemo(
@@ -564,9 +563,8 @@ function Metric({ label, value }: { readonly label: string; readonly value: stri
 
 /**
  * Says plainly when the totals are incomplete: an environment that failed, or
- * one whose transcripts another environment already reported. Environments
- * that are still answering never reach this notice; the page shows the
- * loading skeleton until every one is terminal.
+ * one whose transcripts another environment already reported. Pending
+ * environments are named without hiding totals that have already arrived.
  */
 function UsageCoverageNotice({
   environments,
@@ -578,6 +576,9 @@ function UsageCoverageNotice({
   readonly staleEnvironments: readonly string[];
 }) {
   const failed = environments.filter((environment) => environment.error !== null);
+  const pending = environments.filter(
+    (environment) => environment.summary === null && environment.error === null,
+  );
   const stale = environments.filter((environment) =>
     staleEnvironments.includes(environment.environmentId),
   );
@@ -593,6 +594,7 @@ function UsageCoverageNotice({
   ];
   if (
     failed.length === 0 &&
+    pending.length === 0 &&
     stale.length === 0 &&
     duplicateSources.length === 0 &&
     sourceMessages.length === 0
@@ -604,6 +606,9 @@ function UsageCoverageNotice({
     <div className="flex flex-col gap-1 border border-border px-3 py-2 text-xs text-muted-foreground">
       {failed.map((environment) => (
         <span key={environment.label}>{environment.label} could not report usage.</span>
+      ))}
+      {pending.map((environment) => (
+        <span key={environment.label}>{environment.label} is still scanning usage.</span>
       ))}
       {stale.map((environment) => (
         <span key={environment.label}>

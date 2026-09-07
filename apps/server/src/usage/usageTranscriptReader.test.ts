@@ -61,16 +61,29 @@ describe("selectTranscriptFilesForScan", () => {
     expect(selection.deferredFiles).toBe(0);
   });
 
-  it("selects one oversized transcript so it cannot be deferred forever", () => {
+  it("returns smaller files before an oversized transcript", () => {
     const selection = selectTranscriptFilesForScan(
       [file("oversized", 1_000, 3), file("small", 50, 2)],
       ({ size }) => size,
       100,
     );
 
-    expect(selection.files.map(({ path }) => path)).toEqual(["oversized"]);
+    expect(selection.files.map(({ path }) => path)).toEqual(["small"]);
     expect(selection.deferredFiles).toBe(1);
-    expect(selection.deferredBytes).toBe(50);
+    expect(selection.deferredBytes).toBe(1_000);
+    expect(selection.coldBytes).toBe(50);
+  });
+
+  it("selects one oversized transcript when it is the only cold work", () => {
+    const selection = selectTranscriptFilesForScan(
+      [file("oversized", 1_000, 3)],
+      ({ size }) => size,
+      100,
+    );
+
+    expect(selection.files.map(({ path }) => path)).toEqual(["oversized"]);
+    expect(selection.deferredFiles).toBe(0);
+    expect(selection.deferredBytes).toBe(0);
     expect(selection.coldBytes).toBe(1_000);
   });
 

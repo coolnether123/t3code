@@ -83,52 +83,80 @@ describe("weekly pace chart", () => {
     expect(markup).toContain("not account confirmation");
     expect(markup).toContain('href="https://x.com/thsottiaux/status/2094144275957350900"');
   });
-  it("shows a recent-pace switch and explains why sparse or stale data cannot project", () => {
+  it("shows an API-cost switch and explains why incomplete or stale data cannot project", () => {
     const at = Date.parse(samples[0]!.observedAt);
     vi.spyOn(Date, "now").mockReturnValue(at);
     const sparse = renderToStaticMarkup(<UsagePaceChart samples={samples} />);
-    expect(sparse).toContain('aria-label="Show recent pace"');
-    expect(sparse).toContain("Waiting for an observed percentage drop and a timed interval");
-    expect(sparse).not.toContain('aria-label="Recent pace projection"');
+    expect(sparse).toContain('aria-label="Show API cost pace"');
+    expect(sparse).toContain("complete, priced costs");
+    expect(sparse).not.toContain('aria-label="API cost projection"');
     vi.spyOn(Date, "now").mockReturnValue(at + 16 * 60_000);
     const stale = renderToStaticMarkup(<UsagePaceChart samples={samples} />);
-    expect(stale).toContain("Recent pace needs a fresh reading.");
+    expect(stale).toContain("API cost pace needs a fresh account reading.");
   });
-  it("lets the user hide and restore the recent projection without changing recorded usage", async () => {
+  it("lets the user hide and restore the API projection without changing recorded usage", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const at = Date.parse(samples[0]!.observedAt);
     vi.spyOn(Date, "now").mockReturnValue(at);
     const rows = Array.from({ length: 7 }, (_, index) => ({
       ...samples[0]!,
-      observedAt: new Date(at - (6 - index) * 300_000).toISOString(),
+      observedAt: new Date(at - (6 - index) * 3_600_000).toISOString(),
       remainingPercent: [83, 82, 81, 81, 81, 81, 81][index]!,
     }));
     const container = document.createElement("div");
     const root = createRoot(container);
     try {
-      await act(async () => root.render(<UsagePaceChart samples={rows} />));
+      await act(async () =>
+        root.render(
+          <UsagePaceChart
+            samples={rows}
+            apiPace={{
+              interval: {
+                id: "pace",
+                sinceTime: rows[0]!.observedAt,
+                untilTime: rows.at(-1)!.observedAt,
+              },
+              remainingValueUsd: 50,
+              models: [
+                {
+                  model: "gpt-5.6-luna",
+                  costUsd: 60,
+                  unpricedRecords: 0,
+                  totals: {
+                    uncachedInputTokens: 0,
+                    cachedInputTokens: 0,
+                    cacheCreationTokens: 0,
+                    outputTokens: 50e6,
+                    reasoningTokens: 0,
+                  },
+                },
+              ],
+            }}
+            manualResets={{ availableCount: 3, verified: true }}
+          />,
+        ),
+      );
       const toggle = container.querySelector<HTMLInputElement>(
-        'input[aria-label="Show recent pace"]',
+        'input[aria-label="Show API cost pace"]',
       )!;
       expect(toggle.checked).toBe(true);
-      expect(container.querySelector('[aria-label="Recent pace projection"]')).not.toBeNull();
-      expect(container.textContent).toContain("Last observed 1% drop: 5.0 min per 1%");
-      expect(container.textContent).toContain(
-        "No further drop for 20.0 min through the last reading",
-      );
-      expect(container.textContent).toContain("Projecting 1% per 20.0 min");
+      expect(container.querySelector('[aria-label="API cost projection"]')).not.toBeNull();
+      expect(container.textContent).toContain("$10.00/hour over the last 6.0 hours");
+      expect(container.textContent).toContain("Empty in 5h 0m");
       expect(container.textContent).toContain("81%");
+      expect(container.textContent).toContain("Banked manual resets");
+      expect(container.textContent).toContain("3 available");
       await act(async () => toggle.click());
       expect(toggle.checked).toBe(false);
-      expect(container.querySelector('[aria-label="Recent pace projection"]')).toBeNull();
+      expect(container.querySelector('[aria-label="API cost projection"]')).toBeNull();
       expect(container.textContent).toContain("81%");
       await act(async () => toggle.click());
-      expect(container.querySelector('[aria-label="Recent pace projection"]')).not.toBeNull();
+      expect(container.querySelector('[aria-label="API cost projection"]')).not.toBeNull();
       const recorded = Array.from(container.querySelectorAll("button")).find(
         (button) => button.textContent === "Recorded",
       )!;
       await act(async () => recorded.click());
-      expect(container.querySelector('[aria-label="Recent pace projection"]')).toBeNull();
+      expect(container.querySelector('[aria-label="API cost projection"]')).toBeNull();
     } finally {
       await act(async () => root.unmount());
       vi.unstubAllGlobals();

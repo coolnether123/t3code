@@ -86,7 +86,10 @@ export function CommunityCheckResult({
   const running = state?.status === "running";
   const finding = state?.result;
   return (
-    <section aria-label="Luna community check" className="mt-3 border-b border-border pb-4">
+    <section
+      aria-label="Luna community check"
+      className="mt-4 rounded-lg border border-border bg-card/20 p-3 sm:p-4"
+    >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-sm font-medium">What people are saying</h3>
         <Button
@@ -117,6 +120,14 @@ export function CommunityCheckResult({
           {error ?? "Community checker unavailable. Update or reconnect this computer's T3 server."}
         </p>
       ) : null}
+      <a
+        href="https://x.com/search?q=Codex%20reset&f=live"
+        target="_blank"
+        rel="noreferrer"
+        className="inline-flex min-h-9 items-center text-xs text-muted-foreground underline underline-offset-4"
+      >
+        Open latest discussion on X
+      </a>
       {state?.status === "failed" ? (
         <p role="alert" className="mt-2 text-sm">
           {state.error}
