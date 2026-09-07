@@ -25,6 +25,10 @@ it.layer(NodeSqliteClient.layerMemory())("050_ProjectionThreadsSchemaCompatibili
         INSERT INTO effect_sql_migrations (migration_id, created_at, name)
         VALUES (48, '2026-01-01T00:00:00.000Z', 'ProjectionThreadLinkedPullRequestCompatibility')
       `;
+      yield* sql`
+        INSERT INTO effect_sql_migrations (migration_id, created_at, name)
+        VALUES (49, '2026-01-01T00:00:00.000Z', 'WorkersCompatibility')
+      `;
       yield* runMigrations({ toMigrationInclusive: 50 });
       const columns = yield* sql<{ readonly name: string }>`PRAGMA table_info(projection_threads)`;
       const rows = yield* sql<{
