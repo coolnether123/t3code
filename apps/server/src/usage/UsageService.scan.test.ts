@@ -29,7 +29,9 @@ const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const emptyScanCache = encodeJson(encodeScanCache(new Map()));
 vi.mock("./usageTranscriptReader.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./usageTranscriptReader.ts")>()),
-  listTranscriptFiles: vi.fn(async (root: string) => (/[\\/]sessions$/.test(root) ? files : [])),
+  listTranscriptFiles: vi.fn(async (root: string) =>
+    /[\\/]sessions$/.test(root) && !/[\\/]codex-home[\\/]/.test(root) ? files : [],
+  ),
   readDirectoryVolumeId: vi.fn(async () => "fixture"),
   transcriptCursorIsLineBoundary: vi.fn(async () => true),
   readTranscriptRecords: vi.fn(async () => ({ records: [], codexState: initialCodexScanState() })),

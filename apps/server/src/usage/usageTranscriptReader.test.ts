@@ -98,6 +98,19 @@ describe("selectTranscriptFilesForScan", () => {
     expect(selection.deferredFiles).toBe(0);
   });
 
+  it("does not starve oversized history while active rollouts only append", () => {
+    const selection = selectTranscriptFilesForScan(
+      [file("active", 2_000, 3), file("oversized", 1_000, 2), file("oversized-2", 900, 1)],
+      ({ path, size }) => (path === "active" ? 40 : size),
+      100,
+    );
+
+    expect(selection.files.map(({ path }) => path)).toEqual(["active", "oversized"]);
+    expect(selection.deferredFiles).toBe(1);
+    expect(selection.deferredBytes).toBe(900);
+    expect(selection.coldBytes).toBe(1_040);
+  });
+
   it("budgets only appended bytes so growing large chats do not starve other files", () => {
     const selection = selectTranscriptFilesForScan(
       [
