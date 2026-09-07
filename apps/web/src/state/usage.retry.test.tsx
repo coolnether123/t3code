@@ -1,6 +1,7 @@
 /** @vitest-environment happy-dom */
 import { act } from "react";
 import { createRoot } from "react-dom/client";
+import { useState } from "react";
 import { USAGE_CONTRACT_VERSION, UsageDay, type UsageSummary } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/unstable/reactivity";
@@ -110,6 +111,44 @@ function RefreshDifferentWindowProbe() {
   );
 }
 
+function RetainPreviousProbe() {
+  const usage = useUsage({
+    sinceDay: UsageDay.make("2026-08-01"),
+    untilDay: UsageDay.make("2026-09-01"),
+    timeZone: "America/Chicago",
+  });
+  return (
+    <button type="button" onClick={() => void usage.refresh()}>
+      {usage.environments[0]?.summary?.readAt ?? "missing"}
+    </button>
+  );
+}
+
+function DifferentWindowResultProbe() {
+  const usage = useUsage({
+    sinceDay: UsageDay.make("2026-08-01"),
+    untilDay: UsageDay.make("2026-09-01"),
+    timeZone: "America/Chicago",
+  });
+  const [readAt, setReadAt] = useState("pending");
+  return (
+    <button
+      type="button"
+      onClick={() =>
+        void usage
+          .refresh({
+            sinceDay: UsageDay.make("2026-08-02"),
+            untilDay: UsageDay.make("2026-09-01"),
+            timeZone: "America/Chicago",
+          })
+          .then((statuses) => setReadAt(statuses[0]?.summary?.readAt ?? "missing"))
+      }
+    >
+      {readAt}
+    </button>
+  );
+}
+
 beforeEach(() => {
   state.environments = [
     {
@@ -163,6 +202,68 @@ describe("usage route recovery", () => {
       expect(container.textContent).toBe(refreshedSummary.readAt);
     } finally {
       await act(async () => root.unmount());
+    }
+  });
+
+  it("keeps the last successful summary visible when a refresh disconnects", async () => {
+    state.environments = [
+      {
+        environmentId: "desktop",
+        label: "Desktop",
+        isPending: false,
+        error: null,
+        summary: refreshedSummary,
+      },
+    ];
+    state.execute.mockResolvedValue(AsyncResult.failure(Cause.fail(new Error("disconnected"))));
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<RetainPreviousProbe />));
+      await act(async () => container.querySelector("button")?.click());
+      expect(container.textContent).toBe(refreshedSummary.readAt);
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  it("does not carry same-environment totals into a failed different-window refresh", async () => {
+    state.environments = [
+      {
+        environmentId: "desktop",
+        label: "Desktop",
+        isPending: false,
+        error: null,
+        summary: refreshedSummary,
+      },
+    ];
+    state.execute.mockResolvedValue(AsyncResult.failure(Cause.fail(new Error("disconnected"))));
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<DifferentWindowResultProbe />));
+      await act(async () => container.querySelector("button")?.click());
+      expect(container.textContent).toBe("missing");
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  it("keeps one delayed retry alive while a remote connection recovers", async () => {
+    vi.useFakeTimers();
+    state.execute
+      .mockResolvedValueOnce(AsyncResult.failure(Cause.fail(new Error("disconnected"))))
+      .mockResolvedValue(AsyncResult.success(refreshedSummary));
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<UsageProbe />));
+      expect(state.execute).toHaveBeenCalledTimes(1);
+      await act(async () => vi.advanceTimersByTimeAsync(3_000));
+      expect(state.execute).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => root.unmount());
+      vi.useRealTimers();
     }
   });
 

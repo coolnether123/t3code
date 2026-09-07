@@ -129,7 +129,10 @@ export function useUsage(
     });
   }, [selectedObservedEnvironments, refreshed, windowKey]);
   const retriedFailures = useRef(new Set<string>());
+  const delayedRetryTimers = useRef(new Map<string, number>());
   const refreshGeneration = useRef(0);
+  const windowKeyRef = useRef(windowKey);
+  windowKeyRef.current = windowKey;
 
   // Refreshing only the derived atom would re-read the per-environment SWR
   // queries within their stale window and change nothing. Refresh each
@@ -171,7 +174,10 @@ export function useUsage(
             ...environment,
             isPending: false,
             error: result._tag === "Failure" ? "This environment could not report usage." : null,
-            summary: Option.getOrNull(AsyncResult.value(result)),
+            summary:
+              result._tag === "Failure" && requestWindowKey === windowKey
+                ? environment.summary
+                : Option.getOrNull(AsyncResult.value(result)),
           };
           setRefreshed((previous) => {
             if (previous?.generation !== generation) return previous;
@@ -201,12 +207,35 @@ export function useUsage(
       .filter((environment) => environment.error !== null)
       .map((environment) => environment.environmentId)
       .sort();
-    if (failedIds.length === 0) return;
+    if (failedIds.length === 0) {
+      // A successful reading closes the previous reconnect episode; a later
+      // disconnect must be eligible for its own recovery retry.
+      retriedFailures.current.clear();
+      for (const timer of delayedRetryTimers.current.values()) window.clearTimeout(timer);
+      delayedRetryTimers.current.clear();
+      return;
+    }
     const retryKey = `${windowKey}:${failedIds.join(",")}`;
     if (retriedFailures.current.has(retryKey)) return;
     retriedFailures.current.add(retryKey);
     void refresh();
+    // A first read can be interrupted while a remote WebSocket is reconnecting.
+    // Keep one delayed retry alive across the transient pending/error renders.
+    const timer = window.setTimeout(() => {
+      delayedRetryTimers.current.delete(retryKey);
+      if (windowKeyRef.current !== windowKey) return;
+      void refresh();
+    }, 3_000);
+    delayedRetryTimers.current.set(retryKey, timer);
   }, [environments, refresh, windowKey]);
+
+  useEffect(() => {
+    const timers = delayedRetryTimers.current;
+    return () => {
+      for (const timer of timers.values()) window.clearTimeout(timer);
+      timers.clear();
+    };
+  }, [windowKey]);
 
   const merged = useMemo(() => {
     const answered: EnvironmentUsage[] = environments.flatMap((environment) =>
