@@ -129,7 +129,12 @@ export function useUsage(
     });
   }, [selectedObservedEnvironments, refreshed, windowKey]);
   const retriedFailures = useRef(new Set<string>());
+  const delayedRetries = useRef(new Set<string>());
   const delayedRetryTimers = useRef(new Map<string, number>());
+  const refreshInFlight = useRef<{
+    readonly requestWindowKey: string;
+    readonly promise: Promise<readonly EnvironmentUsageStatus[]>;
+  } | null>(null);
   const refreshGeneration = useRef(0);
   const windowKeyRef = useRef(windowKey);
   windowKeyRef.current = windowKey;
@@ -143,6 +148,10 @@ export function useUsage(
         ? usageQueryInput(nextInput, USAGE_CONTRACT_VERSION)
         : (JSON.parse(windowKey) as UsageSummaryInput);
       const requestWindowKey = JSON.stringify(input);
+      const inFlight = refreshInFlight.current;
+      if (inFlight?.requestWindowKey === requestWindowKey) {
+        return inFlight.promise;
+      }
       const requestInput = { ...input, refresh: nextInput?.refresh ?? true };
       const generation = refreshGeneration.current + 1;
       refreshGeneration.current = generation;
@@ -160,71 +169,112 @@ export function useUsage(
         statuses: requestStatuses,
         baselineReadAt,
       });
-      const statuses = await Promise.all(
-        environments.map(async (environment) => {
-          const result = await executeAtomQuery(
-            appAtomRegistry,
-            serverEnvironment.usageSummary({
-              environmentId: environment.environmentId,
-              input: requestInput,
-            }),
-            { refresh: true, reportFailure: false, reportDefect: false },
-          );
-          const status = {
-            ...environment,
-            isPending: false,
-            error: result._tag === "Failure" ? "This environment could not report usage." : null,
-            summary:
-              result._tag === "Failure" && requestWindowKey === windowKey
-                ? environment.summary
-                : Option.getOrNull(AsyncResult.value(result)),
-          };
-          setRefreshed((previous) => {
-            if (previous?.generation !== generation) return previous;
-            const nextStatuses = previous.statuses.map((entry) =>
-              entry.environmentId === status.environmentId ? status : entry,
+      const promise = (async () => {
+        const statuses = await Promise.all(
+          environments.map(async (environment) => {
+            const result = await executeAtomQuery(
+              appAtomRegistry,
+              serverEnvironment.usageSummary({
+                environmentId: environment.environmentId,
+                input: requestInput,
+              }),
+              { refresh: true, reportFailure: false, reportDefect: false },
             );
-            return { ...previous, statuses: nextStatuses };
-          });
-          return status;
-        }),
-      );
-      setRefreshed((previous) =>
-        previous?.generation === generation
-          ? { ...previous, windowKey: requestWindowKey, statuses }
-          : previous,
-      );
-      return statuses;
+            const status = {
+              ...environment,
+              isPending: false,
+              error: result._tag === "Failure" ? "This environment could not report usage." : null,
+              summary:
+                result._tag === "Failure" && requestWindowKey === windowKey
+                  ? environment.summary
+                  : Option.getOrNull(AsyncResult.value(result)),
+            };
+            setRefreshed((previous) => {
+              if (previous?.generation !== generation) return previous;
+              const nextStatuses = previous.statuses.map((entry) =>
+                entry.environmentId === status.environmentId ? status : entry,
+              );
+              return { ...previous, statuses: nextStatuses };
+            });
+            return status;
+          }),
+        );
+        setRefreshed((previous) =>
+          previous?.generation === generation
+            ? { ...previous, windowKey: requestWindowKey, statuses }
+            : previous,
+        );
+        return statuses;
+      })();
+      refreshInFlight.current = { requestWindowKey, promise };
+      const settleInFlight = (statuses?: readonly EnvironmentUsageStatus[]) => {
+        if (refreshInFlight.current?.promise === promise) refreshInFlight.current = null;
+        if (
+          statuses?.some((status) => status.error !== null) === true &&
+          windowKeyRef.current === requestWindowKey
+        ) {
+          const pendingRetryKeys = [...delayedRetries.current].filter((retryKey) =>
+            retryKey.startsWith(`${requestWindowKey}:`),
+          );
+          for (const retryKey of pendingRetryKeys) delayedRetries.current.delete(retryKey);
+          if (pendingRetryKeys.length > 0) void refreshRef.current();
+        }
+      };
+      void promise.then(settleInFlight, () => settleInFlight());
+      return promise;
     },
     [environments, windowKey],
   );
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
 
   // Route navigation can remount this view while its shared atom still holds a
   // transient disconnected result. Retry that result once on entry so mobile
   // users do not need to reload the whole browser tab.
   useEffect(() => {
     const failedIds = environments
-      .filter((environment) => environment.error !== null)
+      .filter((environment) => environment.error !== null && !environment.isPending)
       .map((environment) => environment.environmentId)
       .sort();
     if (failedIds.length === 0) {
+      // A refresh keeps a prior error on its pending overlay so the delayed
+      // reconnect retry survives until the request settles. Do not clear its
+      // budget or timer merely because that overlay is pending.
+      if (environments.some((environment) => environment.error !== null)) return;
       // A successful reading closes the previous reconnect episode; a later
       // disconnect must be eligible for its own recovery retry.
       retriedFailures.current.clear();
+      delayedRetries.current.clear();
       for (const timer of delayedRetryTimers.current.values()) window.clearTimeout(timer);
       delayedRetryTimers.current.clear();
       return;
     }
     const retryKey = `${windowKey}:${failedIds.join(",")}`;
+    if (delayedRetries.current.has(retryKey)) {
+      if (refreshInFlight.current?.requestWindowKey === windowKey) return;
+      // The delayed retry elapsed while the first recovery request was still
+      // active. Consume it once after that request settles, without resetting
+      // the episode budget and allowing an unbounded retry loop.
+      delayedRetries.current.delete(retryKey);
+      void refreshRef.current();
+      return;
+    }
     if (retriedFailures.current.has(retryKey)) return;
     retriedFailures.current.add(retryKey);
-    void refresh();
+    void refreshRef.current();
     // A first read can be interrupted while a remote WebSocket is reconnecting.
     // Keep one delayed retry alive across the transient pending/error renders.
     const timer = window.setTimeout(() => {
       delayedRetryTimers.current.delete(retryKey);
       if (windowKeyRef.current !== windowKey) return;
-      void refresh();
+      if (refreshInFlight.current?.requestWindowKey === windowKey) {
+        // The first recovery request is still active. Let its settled result
+        // drive this effect so a slow scan cannot be duplicated. The marker
+        // is consumed by that settled result exactly once.
+        delayedRetries.current.add(retryKey);
+        return;
+      }
+      void refreshRef.current();
     }, 3_000);
     delayedRetryTimers.current.set(retryKey, timer);
   }, [environments, refresh, windowKey]);
@@ -234,6 +284,7 @@ export function useUsage(
     return () => {
       for (const timer of timers.values()) window.clearTimeout(timer);
       timers.clear();
+      delayedRetries.current.clear();
     };
   }, [windowKey]);
 

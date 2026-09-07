@@ -32,12 +32,15 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
+import * as Scope from "effect/Scope";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
 import { ServerConfig } from "../config.ts";
@@ -193,6 +196,7 @@ export const make = Effect.gen(function* () {
   const config = yield* ServerConfig;
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const httpClient = yield* HttpClient.HttpClient;
+  const serviceScope = yield* Scope.make("sequential");
   const scanSemaphore = yield* Semaphore.make(1);
 
   const fileCache: ScanCache = new Map();
@@ -217,6 +221,17 @@ export const make = Effect.gen(function* () {
     ),
   );
   let cacheDirty = false;
+  let cacheRevision = 0;
+
+  // A scan response must not wait for the complete JSON cache to be encoded
+  // and atomically replaced. The cache is an optimization; the in-memory
+  // records already used to build the response are authoritative for this
+  // process. Revisions let the worker tell whether another scan made changes
+  // while it was serializing or writing its snapshot.
+  const markCacheDirty = () => {
+    cacheDirty = true;
+    cacheRevision += 1;
+  };
 
   const ratesCachePath = path.join(config.stateDir, "usage-model-rates.json");
   const scanCachePath = path.join(config.stateDir, "usage-scan-cache.json");
@@ -376,24 +391,51 @@ export const make = Effect.gen(function* () {
     scanCacheLoaded = true;
   });
 
-  const persistScanCache = Effect.fn("UsageService.persistScanCache")(function* () {
-    if (!cacheDirty) return;
+  const persistScanCacheOnce = Effect.fn("UsageService.persistScanCache")(function* () {
+    if (!cacheDirty) return true;
+    const revision = cacheRevision;
     // Cleared only after the write lands, so a failed persist is retried on
-    // the next scan instead of leaving disk permanently stale.
-    yield* encodeScanCacheFile(encodeScanCache(fileCache, [...scanCoverage.values()])).pipe(
+    // the next scan instead of leaving disk permanently stale. If a newer
+    // scan changed the maps meanwhile, its revision remains dirty and the
+    // worker publishes that newer snapshot next.
+    return yield* encodeScanCacheFile(encodeScanCache(fileCache, [...scanCoverage.values()])).pipe(
       Effect.flatMap((contents) =>
-        writeFileStringAtomically({ filePath: scanCachePath, contents }).pipe(
-          Effect.provideService(FileSystem.FileSystem, fileSystem),
-          Effect.provideService(Path.Path, path),
+        Effect.uninterruptible(
+          writeFileStringAtomically({ filePath: scanCachePath, contents }).pipe(
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.provideService(Path.Path, path),
+          ),
         ),
       ),
       Effect.map(() => {
-        cacheDirty = false;
+        if (cacheRevision === revision) cacheDirty = false;
+        return true;
       }),
       // A cache we cannot write is a slower next start, not a failed read.
-      Effect.catchCause(() => Effect.void),
+      Effect.catchCause(() => Effect.succeed(false)),
     );
   });
+  const persistQueue = yield* Queue.dropping<void>(1);
+  const runPersistWorker = Effect.gen(function* () {
+    while (true) {
+      yield* Queue.take(persistQueue);
+      yield* persistScanCacheOnce();
+    }
+  });
+  // Keep exactly one consumer alive for the service lifetime. Queue wakes are
+  // deliberately lossy: the revision check in persistScanCacheOnce means a
+  // single wake is enough to publish all changes made before it runs.
+  const persistWorker = yield* Effect.forkIn(runPersistWorker, serviceScope, {
+    startImmediately: true,
+  });
+  yield* Effect.addFinalizer(() =>
+    Effect.uninterruptible(
+      Scope.close(serviceScope, Exit.void).pipe(
+        Effect.andThen(Fiber.await(persistWorker)),
+        Effect.ignore,
+      ),
+    ),
+  );
 
   /** Parses one transcript, reusing the cached result when it is unchanged. */
   const readFileRecords = (
@@ -443,7 +485,7 @@ export const make = Effect.gen(function* () {
         records,
         ...(parsed.codexState === undefined ? {} : { codexState: parsed.codexState }),
       });
-      cacheDirty = true;
+      markCacheDirty();
       return records;
     });
 
@@ -681,7 +723,7 @@ export const make = Effect.gen(function* () {
           windowStartMs: scanStartMs,
           retentionCutoffMs: startedAtMs - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000,
         });
-        if (pruned > 0) cacheDirty = true;
+        if (pruned > 0) markCacheDirty();
       }
       let scannedFiles = 0;
       let skippedFiles = selection.deferredFiles;
@@ -738,7 +780,7 @@ export const make = Effect.gen(function* () {
             sinceMs: scanStartMs,
             scannedAtMs: startedAtMs,
           });
-          cacheDirty = true;
+          markCacheDirty();
         }
       }
 
@@ -775,8 +817,10 @@ export const make = Effect.gen(function* () {
       windowStartMs,
       retentionCutoffMs: startedAtMs - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000,
     });
-    if (pruned > 0) cacheDirty = true;
-    yield* persistScanCache();
+    if (pruned > 0) markCacheDirty();
+    // Cache persistence is derived work. Wake the permanent consumer without
+    // making the response wait for JSON encoding or atomic replacement.
+    yield* Queue.offer(persistQueue, undefined);
 
     const aggregated = aggregator.finish();
     const readAt = yield* DateTime.now;

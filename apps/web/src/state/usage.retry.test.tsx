@@ -267,6 +267,96 @@ describe("usage route recovery", () => {
     }
   });
 
+  it("does not retry a failure while the original query is still pending", async () => {
+    vi.useFakeTimers();
+    state.environments = [
+      {
+        environmentId: "desktop",
+        label: "Desktop",
+        isPending: true,
+        error: "This environment could not report usage.",
+        summary: null,
+      },
+    ];
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<UsageProbe />));
+      expect(state.execute).not.toHaveBeenCalled();
+      await act(async () => vi.advanceTimersByTimeAsync(3_000));
+      expect(state.execute).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      vi.useRealTimers();
+    }
+  });
+
+  it("coalesces a delayed retry with an active same-window refresh", async () => {
+    vi.useFakeTimers();
+    let finish!: (result: unknown) => void;
+    state.execute.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<UsageProbe />));
+      expect(state.execute).toHaveBeenCalledTimes(1);
+      await act(async () => vi.advanceTimersByTimeAsync(3_000));
+      expect(state.execute).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        finish(AsyncResult.failure(Cause.fail(new Error("disconnected"))));
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(state.execute).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => root.unmount());
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds retries when the deferred retry also fails slowly", async () => {
+    vi.useFakeTimers();
+    const finishers: Array<(result: unknown) => void> = [];
+    state.execute.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishers.push(resolve);
+        }),
+    );
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<UsageProbe />));
+      expect(state.execute).toHaveBeenCalledTimes(1);
+      await act(async () => vi.advanceTimersByTimeAsync(3_000));
+      expect(state.execute).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        finishers[0]?.(AsyncResult.failure(Cause.fail(new Error("disconnected"))));
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(state.execute).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        finishers[1]?.(AsyncResult.failure(Cause.fail(new Error("still disconnected"))));
+        await Promise.resolve();
+        await Promise.resolve();
+        vi.advanceTimersByTime(30_000);
+      });
+      expect(state.execute).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => root.unmount());
+      vi.useRealTimers();
+    }
+  });
+
   it("allows a newer shared answer to replace the manual refresh overlay", async () => {
     state.execute.mockResolvedValue(AsyncResult.success(refreshedSummary));
     state.environments = [

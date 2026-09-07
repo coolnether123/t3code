@@ -165,6 +165,7 @@ describe("UsageService", () => {
         const summary = yield* service.readSummary(WINDOW);
         assert.strictEqual(totalOutputTokens(summary), 10);
       }).pipe(
+        Effect.scoped,
         Effect.provide(
           serviceLayers({ prefix: "usage-service-codex-isolation-test", home, settings }),
         ),
@@ -208,6 +209,7 @@ describe("UsageService", () => {
         const restored = yield* service.readSummary(WINDOW);
         assert.deepStrictEqual(restored.buckets, original.buckets);
       }).pipe(
+        Effect.scoped,
         Effect.provide(
           serviceLayers({ prefix: "usage-service-price-overrides-test", home, settings }),
         ),
@@ -287,6 +289,7 @@ describe("UsageService", () => {
         assert.strictEqual(original.buckets[0]?.costUsd, 0);
         assert.closeTo(updated.buckets[0]?.costUsd ?? -1, 0.00006, 1e-12);
       }).pipe(
+        Effect.scoped,
         Effect.provide(serviceLayers({ prefix: "usage-service-price-race-test", home, settings })),
       );
     }).pipe(Effect.scoped),
