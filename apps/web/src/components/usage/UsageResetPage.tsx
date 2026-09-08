@@ -112,10 +112,6 @@ export function UsageResetPage() {
   );
   const paceCosts = useUsage(paceInput);
   const historical = historicalPeriods.at(-2);
-  const historicalInterval = useMemo(
-    () => (historical ? (quotaIntervals([historical]).at(0) ?? null) : null),
-    [historical],
-  );
   const paceModels = useMemo(
     () =>
       paceInterval
@@ -196,10 +192,28 @@ export function UsageResetPage() {
       value: quotaValueWithHistoricalCalibration(
         { ...current, value },
         previous ? { ...previous, value: quotaValueWithSnapshot(previous, snapshots) } : undefined,
+        currentValues.slice(0, index - 1).map((candidate) => ({
+          ...candidate,
+          value: quotaValueWithSnapshot(candidate, snapshots),
+        })),
       ),
     };
   });
   const last = samples.at(-1);
+  const current = values.at(-1);
+  const calibrationPeriod = useMemo(() => {
+    const calibration = current?.value.historicalCalibration;
+    if (!calibration) return historical;
+    return historicalPeriods.find(
+      (period) =>
+        period.first.observedAt === calibration.since &&
+        period.last.observedAt === calibration.until,
+    );
+  }, [current?.value.historicalCalibration, historical, historicalPeriods]);
+  const calibrationInterval = useMemo(
+    () => (calibrationPeriod ? (quotaIntervals([calibrationPeriod]).at(0) ?? null) : null),
+    [calibrationPeriod],
+  );
   const trackedManualResetCount = tracker?.summary?.quotaHistory?.bankedResetCount;
   const trackedManualResetCheckedAt = tracker?.summary?.quotaHistory?.bankedResetCheckedAt;
   const refreshMonitor = async () => {
@@ -233,16 +247,18 @@ export function UsageResetPage() {
     }
   };
 
-  const current = values.at(-1);
   const priorApiPace = useMemo<PriorApiPaceInput | null>(() => {
-    if (!historical || !historicalInterval || !current) return null;
+    if (!calibrationPeriod || !calibrationInterval || !current) return null;
     return {
-      interval: historicalInterval,
-      period: historical,
-      models: monitoredModels(historicalInterval, selectedWithSavedCosts),
+      interval: calibrationInterval,
+      period: calibrationPeriod,
+      models: monitoredModels(calibrationInterval, selectedWithSavedCosts),
       remainingValueUsd: current.value.remainingValueUsd,
+      ...(current.value.historicalCalibration && calibrationPeriod.id !== historical?.id
+        ? { calibrationTargetSince: current.period.first.observedAt }
+        : {}),
     };
-  }, [historical, historicalInterval, selectedWithSavedCosts, current]);
+  }, [calibrationPeriod, calibrationInterval, selectedWithSavedCosts, current, historical]);
   const completed = values.slice(0, -1);
   const currentModels = useMemo(() => {
     if (!current) return null;

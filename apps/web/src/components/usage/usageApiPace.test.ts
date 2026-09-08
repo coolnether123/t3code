@@ -88,6 +88,60 @@ describe("API cost pace", () => {
     expect(result.exhaustionAt).toBe("2026-09-04T16:10:00.000Z");
   });
 
+  it("accepts a shared-validated target across contiguous zero-use periods", () => {
+    const currentSamples = [
+      { ...samples[0]!, observedAt: "2026-09-04T14:00:00.000Z", remainingPercent: 60 },
+      { ...samples[1]!, observedAt: "2026-09-04T15:00:00.000Z", remainingPercent: 40 },
+      {
+        observedAt: "2026-09-04T15:10:00.000Z",
+        remainingPercent: 100,
+        resetsAt: "2026-09-11T16:00:00.000Z",
+      },
+      {
+        observedAt: "2026-09-04T15:15:00.000Z",
+        remainingPercent: 100,
+        resetsAt: "2026-09-11T17:00:00.000Z",
+      },
+      {
+        observedAt: "2026-09-04T15:20:00.000Z",
+        remainingPercent: 100,
+        resetsAt: "2026-09-11T18:00:00.000Z",
+      },
+      {
+        observedAt: "2026-09-04T15:25:00.000Z",
+        remainingPercent: 98,
+        resetsAt: "2026-09-11T18:00:00.000Z",
+      },
+    ];
+    const currentForecast = quotaForecast(currentSamples, Date.parse("2026-09-04T15:25:00.000Z"))!;
+    const sourcePeriod = quotaPeriods(currentSamples)[0]!;
+    const result = apiCostPace(currentForecast, null, Date.parse("2026-09-04T15:25:00.000Z"), {
+      interval: {
+        id: "prior",
+        sinceTime: "2026-09-04T14:00:00.000Z",
+        untilTime: "2026-09-04T15:00:00.000Z",
+      },
+      models: input.models,
+      remainingValueUsd: 50,
+      period: sourcePeriod,
+      calibrationTargetSince: "2026-09-04T15:20:00.000Z",
+    });
+    expect(result?.provisional).toBe(true);
+    expect(
+      apiCostPace(currentForecast, null, Date.parse("2026-09-04T15:25:00.000Z"), {
+        interval: {
+          id: "prior",
+          sinceTime: "2026-09-04T14:00:00.000Z",
+          untilTime: "2026-09-04T15:00:00.000Z",
+        },
+        models: input.models,
+        remainingValueUsd: 50,
+        period: sourcePeriod,
+        calibrationTargetSince: "2026-09-04T15:15:00.000Z",
+      }),
+    ).toBeNull();
+  });
+
   it("prefers valid current-cycle evidence over a provisional prior cycle", () => {
     const prior = {
       interval,
@@ -124,6 +178,7 @@ describe("API cost pace", () => {
       models: input.models,
       remainingValueUsd: 50,
       period: periods[0]!,
+      calibrationTargetSince: "2026-09-04T18:00:00.000Z",
     } satisfies PriorApiPaceInput;
     const longGapForecast = quotaForecast(
       [

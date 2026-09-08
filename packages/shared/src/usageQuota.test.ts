@@ -172,6 +172,297 @@ describe("quota value estimates", () => {
     });
   });
 
+  it("crosses zero-use ambiguous timer-adjustment periods to the last completed calibration", () => {
+    const periods = quotaPeriods([
+      sample("2026-07-21T16:00:00Z", 80, "2026-07-21T17:20:00Z"),
+      sample("2026-07-21T17:00:00Z", 60, "2026-07-21T17:20:00Z"),
+      sample("2026-07-21T17:10:00Z", 100, "2026-07-21T17:30:00Z"),
+      sample("2026-07-21T17:20:00Z", 100, "2026-07-21T17:35:00Z"),
+      sample("2026-07-21T17:30:00Z", 100, "2026-07-21T17:40:00Z"),
+      sample("2026-07-21T17:40:00Z", 98, "2026-07-21T17:40:00Z"),
+    ]);
+    expect(periods.map((candidate) => candidate.resetKind)).toEqual([
+      "unexpected",
+      "ambiguous",
+      "ambiguous",
+      "unobserved",
+    ]);
+    const source = {
+      period: periods[0]!,
+      value: {
+        costUsd: 40,
+        usdPerPercentagePoint: 2,
+        remainingValueUsd: 80,
+        unusedValueUsd: 40,
+        reason: null,
+      },
+      key: "source",
+      calculatedAt: "2026-07-21T17:00:00Z",
+    };
+    const bridge = (period: (typeof periods)[number], key: string) => ({
+      period,
+      value: {
+        costUsd: null,
+        usdPerPercentagePoint: null,
+        remainingValueUsd: null,
+        unusedValueUsd: null,
+        reason: "waiting",
+      },
+      key,
+      calculatedAt: "2026-07-21T17:30:00Z",
+    });
+    const current = {
+      period: periods[3]!,
+      value: {
+        costUsd: 4,
+        usdPerPercentagePoint: null,
+        remainingValueUsd: null,
+        unusedValueUsd: null,
+        reason: "waiting",
+      },
+      key: "current",
+      calculatedAt: "2026-07-21T17:30:00Z",
+    };
+    const bridged = quotaValueWithHistoricalCalibration(current, bridge(periods[2]!, "bridge-2"), [
+      source,
+      bridge(periods[1]!, "bridge-1"),
+    ]);
+    expect(bridged).toMatchObject({
+      costUsd: 4,
+      usdPerPercentagePoint: 2,
+      remainingValueUsd: 196,
+      historicalCalibration: {
+        since: periods[0]!.first.observedAt,
+        until: periods[0]!.last.observedAt,
+      },
+    });
+  });
+
+  it("rejects a timer bridge when usage begins across its boundary", () => {
+    const periods = quotaPeriods([
+      sample("2026-07-21T16:00:00Z", 80, "2026-07-21T17:20:00Z"),
+      sample("2026-07-21T17:00:00Z", 60, "2026-07-21T17:20:00Z"),
+      sample("2026-07-21T17:10:00Z", 100, "2026-07-21T17:30:00Z"),
+      sample("2026-07-21T17:20:00Z", 100, "2026-07-21T17:35:00Z"),
+      sample("2026-07-21T17:30:00Z", 99, "2026-07-21T17:40:00Z"),
+      sample("2026-07-21T17:40:00Z", 98, "2026-07-21T17:40:00Z"),
+    ]);
+    const source = {
+      period: periods[0]!,
+      value: {
+        costUsd: 40,
+        usdPerPercentagePoint: 2,
+        remainingValueUsd: 80,
+        unusedValueUsd: 40,
+        reason: null,
+      },
+      key: "source",
+      calculatedAt: "2026-07-21T17:00:00Z",
+    };
+    const bridge = (period: (typeof periods)[number], key: string) => ({
+      period,
+      value: {
+        costUsd: null,
+        usdPerPercentagePoint: null,
+        remainingValueUsd: null,
+        unusedValueUsd: null,
+        reason: "waiting",
+      },
+      key,
+      calculatedAt: "2026-07-21T17:30:00Z",
+    });
+    const current = {
+      period: periods[3]!,
+      value: {
+        costUsd: 4,
+        usdPerPercentagePoint: null,
+        remainingValueUsd: null,
+        unusedValueUsd: null,
+        reason: "waiting",
+      },
+      key: "current",
+      calculatedAt: "2026-07-21T17:40:00Z",
+    };
+    expect(
+      quotaValueWithHistoricalCalibration(current, bridge(periods[2]!, "bridge"), [
+        source,
+        bridge(periods[1]!, "bridge-1"),
+      ]),
+    ).toMatchObject({ costUsd: 4, usdPerPercentagePoint: null, remainingValueUsd: null });
+  });
+
+  it("does not cross a broken adjacency", () => {
+    const periods = quotaPeriods([
+      sample("2026-07-21T16:00:00Z", 80, "2026-07-21T17:20:00Z"),
+      sample("2026-07-21T17:00:00Z", 60, "2026-07-21T17:20:00Z"),
+      sample("2026-07-21T17:10:00Z", 100, "2026-07-21T17:30:00Z"),
+      sample("2026-07-21T17:20:00Z", 100, "2026-07-21T17:35:00Z"),
+      sample("2026-07-21T17:30:00Z", 100, "2026-07-21T17:40:00Z"),
+      sample("2026-07-21T17:40:00Z", 98, "2026-07-21T17:40:00Z"),
+    ]);
+    const source = {
+      period: periods[0]!,
+      value: {
+        costUsd: 40,
+        usdPerPercentagePoint: 2,
+        remainingValueUsd: 80,
+        unusedValueUsd: 40,
+        reason: null,
+      },
+      key: "source",
+      calculatedAt: "2026-07-21T17:00:00Z",
+    };
+    const bridge = (period: (typeof periods)[number], key: string) => ({
+      period,
+      value: {
+        costUsd: null,
+        usdPerPercentagePoint: null,
+        remainingValueUsd: null,
+        unusedValueUsd: null,
+        reason: "waiting",
+      },
+      key,
+      calculatedAt: "2026-07-21T17:20:00Z",
+    });
+    const current = {
+      period: periods[3]!,
+      value: {
+        costUsd: 4,
+        usdPerPercentagePoint: null,
+        remainingValueUsd: null,
+        unusedValueUsd: null,
+        reason: "waiting",
+      },
+      key: "current",
+      calculatedAt: "2026-07-21T17:20:00Z",
+    };
+    const broken = { ...periods[1]!, next: periods[0]!.first };
+    expect(
+      quotaValueWithHistoricalCalibration(current, bridge(periods[2]!, "bridge"), [
+        source,
+        bridge(broken, "broken"),
+      ]),
+    ).toMatchObject({
+      costUsd: 4,
+      usdPerPercentagePoint: null,
+    });
+  });
+
+  it("does not cross a long elapsed span when bridge balances remain unchanged", () => {
+    const periods = quotaPeriods([
+      sample("2026-07-21T16:00:00Z", 80, "2026-07-21T17:20:00Z"),
+      sample("2026-07-21T17:00:00Z", 60, "2026-07-21T17:20:00Z"),
+      sample("2026-07-21T17:10:00Z", 100, "2026-07-21T17:30:00Z"),
+      sample("2026-07-21T17:20:00Z", 100, "2026-07-21T17:35:00Z"),
+      sample("2026-07-21T18:30:00Z", 100, "2026-07-21T18:40:00Z"),
+      sample("2026-07-21T18:40:00Z", 98, "2026-07-21T18:40:00Z"),
+    ]);
+    expect(periods).toHaveLength(4);
+    expect(periods[2]!.next?.observedAt).toBe(periods[3]!.first.observedAt);
+    const source = {
+      period: periods[0]!,
+      value: {
+        costUsd: 40,
+        usdPerPercentagePoint: 2,
+        remainingValueUsd: 80,
+        unusedValueUsd: 40,
+        reason: null,
+      },
+      key: "source",
+      calculatedAt: "2026-07-21T17:00:00Z",
+    };
+    const bridge = (period: (typeof periods)[number], key: string) => ({
+      period,
+      value: {
+        costUsd: null,
+        usdPerPercentagePoint: null,
+        remainingValueUsd: null,
+        unusedValueUsd: null,
+        reason: "waiting",
+      },
+      key,
+      calculatedAt: "2026-07-21T18:40:00Z",
+    });
+    const current = {
+      period: periods.at(-1)!,
+      value: {
+        costUsd: 4,
+        usdPerPercentagePoint: null,
+        remainingValueUsd: null,
+        unusedValueUsd: null,
+        reason: "waiting",
+      },
+      key: "current",
+      calculatedAt: "2026-07-21T18:40:00Z",
+    };
+    expect(
+      quotaValueWithHistoricalCalibration(current, bridge(periods[2]!, "bridge"), [
+        source,
+        bridge(periods[1]!, "bridge-1"),
+      ]),
+    ).toMatchObject({
+      costUsd: 4,
+      usdPerPercentagePoint: null,
+    });
+  });
+
+  it("does not cross a timer bridge that contains positive usage", () => {
+    const periods = quotaPeriods([
+      sample("2026-07-21T16:00:00Z", 80, "2026-07-21T17:20:00Z"),
+      sample("2026-07-21T17:00:00Z", 60, "2026-07-21T17:20:00Z"),
+      sample("2026-07-21T17:10:00Z", 100, "2026-07-21T17:30:00Z"),
+      sample("2026-07-21T17:15:00Z", 99, "2026-07-21T17:30:00Z"),
+      sample("2026-07-21T17:20:00Z", 99, "2026-07-21T17:35:00Z"),
+      sample("2026-07-21T17:30:00Z", 99, "2026-07-21T17:40:00Z"),
+      sample("2026-07-21T17:40:00Z", 98, "2026-07-21T17:40:00Z"),
+    ]);
+    const source = {
+      period: periods[0]!,
+      value: {
+        costUsd: 40,
+        usdPerPercentagePoint: 2,
+        remainingValueUsd: 80,
+        unusedValueUsd: 40,
+        reason: null,
+      },
+      key: "source",
+      calculatedAt: "2026-07-21T17:00:00Z",
+    };
+    const empty = (period: (typeof periods)[number], key: string) => ({
+      period,
+      value: {
+        costUsd: null,
+        usdPerPercentagePoint: null,
+        remainingValueUsd: null,
+        unusedValueUsd: null,
+        reason: "waiting",
+      },
+      key,
+      calculatedAt: "2026-07-21T17:40:00Z",
+    });
+    const current = {
+      period: periods.at(-1)!,
+      value: {
+        costUsd: 4,
+        usdPerPercentagePoint: null,
+        remainingValueUsd: null,
+        unusedValueUsd: null,
+        reason: "waiting",
+      },
+      key: "current",
+      calculatedAt: "2026-07-21T17:40:00Z",
+    };
+    expect(
+      quotaValueWithHistoricalCalibration(current, empty(periods[2]!, "bridge"), [
+        source,
+        empty(periods[1]!, "positive"),
+      ]),
+    ).toMatchObject({
+      costUsd: 4,
+      usdPerPercentagePoint: null,
+    });
+  });
+
   it("does not borrow calibration across ambiguous or prolonged reset gaps", () => {
     const periods = quotaPeriods([
       sample("2026-07-21T16:00:00Z", 80),

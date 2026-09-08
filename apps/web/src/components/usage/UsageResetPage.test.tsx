@@ -407,6 +407,127 @@ describe("Codex monitor page", () => {
     expect(markup).not.toContain("$0.00 unused");
   });
 
+  it.each(["short", "long"] as const)(
+    "uses the selected calibration chain only for a safe %s bridge",
+    (bridge) => {
+      const fingerprint = {
+        hostId: "desktop",
+        provider: "codex",
+        resolvedHomePath: "/sessions",
+        volumeId: "1",
+      };
+      const models = ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"].map(
+        (model) => ({
+          model,
+          costUsd: 7.5,
+          unpricedRecords: 0,
+          records: 4,
+          totals: {
+            uncachedInputTokens: 10,
+            cachedInputTokens: 2,
+            cacheCreationTokens: 1,
+            outputTokens: 7,
+            reasoningTokens: 3,
+          },
+        }),
+      );
+      const currentStart = bridge === "short" ? "2026-08-30T19:20:00Z" : "2026-08-30T20:10:00Z";
+      const currentEnd = bridge === "short" ? "2026-08-30T19:25:00Z" : "2026-08-30T20:15:00Z";
+      const currentSamples = [
+        {
+          observedAt: "2026-08-30T18:00:00Z",
+          remainingPercent: 80,
+          resetsAt: "2026-08-31T00:00:00Z",
+        },
+        {
+          observedAt: "2026-08-30T19:00:00Z",
+          remainingPercent: 60,
+          resetsAt: "2026-08-31T00:00:00Z",
+        },
+        {
+          observedAt: "2026-08-30T19:10:00Z",
+          remainingPercent: 100,
+          resetsAt: "2026-09-06T00:00:00Z",
+        },
+        {
+          observedAt: "2026-08-30T19:15:00Z",
+          remainingPercent: 100,
+          resetsAt: "2026-09-06T01:00:00Z",
+        },
+        { observedAt: currentStart, remainingPercent: 100, resetsAt: "2026-09-06T02:00:00Z" },
+        { observedAt: currentEnd, remainingPercent: 98, resetsAt: "2026-09-06T02:00:00Z" },
+      ];
+      const historyEnvironment = {
+        environmentId: "desktop",
+        label: "Desktop",
+        isPending: false,
+        error: null,
+        summary: {
+          sources: [{ fingerprint, status: "ok" }],
+          quotaCostSnapshots: [
+            {
+              intervalId: "2026-08-30T18:00:00Z",
+              fingerprint,
+              sinceTime: "2026-08-30T18:00:00Z",
+              untilTime: "2026-08-30T19:00:00Z",
+              costUsd: 30,
+              records: 4,
+              recordedAt: "2026-08-30T19:30:00Z",
+              firstRemainingPercent: 80,
+              lastRemainingPercent: 60,
+              resetsAt: "2026-08-31T00:00:00Z",
+              models,
+            },
+          ],
+          quotaHistory: {
+            status: "ready",
+            source: "fixture",
+            message: null,
+            samples: currentSamples,
+          },
+        },
+      };
+      state.useUsage.mockImplementation((input: { quotaHistoryOnly?: boolean }) =>
+        input.quotaHistoryOnly
+          ? { environments: [historyEnvironment], isPending: false, refresh: state.refresh }
+          : {
+              environments: [
+                {
+                  environmentId: "desktop",
+                  label: "Desktop",
+                  isPending: true,
+                  error: null,
+                  summary: null,
+                },
+              ],
+              isPending: true,
+              refresh: state.refresh,
+            },
+      );
+      const markup = renderToStaticMarkup(<UsageResetPage />);
+      const tokenPlanner = markup.slice(
+        markup.indexOf('aria-label="Remaining token estimates"'),
+        markup.indexOf('aria-label="Remaining token estimates"') + 5000,
+      );
+      if (bridge === "short") {
+        for (const label of ["Astra", "Sol", "Terra", "Luna"]) {
+          const rowStart = tokenPlanner.indexOf(`<span>${label}</span>`);
+          const row = tokenPlanner.slice(rowStart, tokenPlanner.indexOf("</tr>", rowStart));
+          expect(row).toMatch(/≈ [0-9.,]+[KMB]/);
+        }
+        expect(tokenPlanner).not.toContain("Pending");
+        expect(tokenPlanner).toContain("Provisional value from the previous completed cycle.");
+        const sourceDates = `${new Date("2026-08-30T18:00:00Z").toLocaleString()} to ${new Date(
+          "2026-08-30T19:00:00Z",
+        ).toLocaleString()}`;
+        expect(tokenPlanner).toContain(`Calibration: ${sourceDates}.`);
+      } else {
+        expect(tokenPlanner).toContain("Pending");
+        expect(tokenPlanner).not.toContain("Provisional value from the previous completed cycle.");
+      }
+    },
+  );
+
   it("defaults estimates to the healthy history tracker and preserves explicit pending opt-in", async () => {
     const fingerprint = {
       hostId: "desktop",

@@ -29,6 +29,8 @@ export interface PriorApiPaceInput {
   readonly period: QuotaPeriod;
   /** Current cycle's observed balance; prior usage only supplies the burn rate. */
   readonly remainingValueUsd: number | null;
+  /** Target cycle start after the shared calibration selector validated the bridge. */
+  readonly calibrationTargetSince?: string;
 }
 
 export type ApiCostPace = NonNullable<ReturnType<typeof apiCostPace>>;
@@ -210,11 +212,14 @@ export function apiCostPace(
       !Number.isFinite(priorSince) ||
       !Number.isFinite(priorUntil) ||
       priorUntil - priorSince < HOUR ||
+      !Number.isFinite(currentStart) ||
+      currentStart - priorUntil > HOUR ||
       priorUntil > currentStart ||
       priorUntil >= observed ||
       (priorCycle.period.resetKind !== "scheduled" &&
         priorCycle.period.resetKind !== "unexpected") ||
-      priorCycle.period.next?.observedAt !== forecast.first.observedAt ||
+      (priorCycle.period.next?.observedAt !== forecast.first.observedAt &&
+        priorCycle.calibrationTargetSince !== forecast.first.observedAt) ||
       priorCycle.period.first.observedAt !== priorCycle.interval.sinceTime ||
       priorCycle.period.last.observedAt !== priorCycle.interval.untilTime ||
       (priorCycle.period.observationGapMs ?? Infinity) > 60 * 60_000 ||

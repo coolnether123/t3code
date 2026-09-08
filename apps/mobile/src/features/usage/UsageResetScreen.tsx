@@ -126,6 +126,10 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
       value: quotaValueWithHistoricalCalibration(
         { ...current, value },
         previous ? { ...previous, value: quotaValueWithSnapshot(previous, snapshots) } : undefined,
+        currentValues.slice(0, index - 1).map((candidate) => ({
+          ...candidate,
+          value: quotaValueWithSnapshot(candidate, snapshots),
+        })),
       ),
     };
   });

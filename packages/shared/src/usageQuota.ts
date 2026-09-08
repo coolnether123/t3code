@@ -43,6 +43,8 @@ export function quotaPeriods(samples: readonly UsageQuotaSample[]): readonly Quo
   for (const sample of sorted) {
     const group = groups.at(-1);
     const previous = group?.at(-1);
+    // A clock-only adjustment may be ambiguous, but it is safe to cross only
+    // when the period used nothing and its balance is unchanged at both edges.
     if (
       !group ||
       !previous ||
@@ -204,26 +206,45 @@ export function quotaValueWithSnapshot(
 export function quotaValueWithHistoricalCalibration(
   current: QuotaValueSnapshot,
   previous: QuotaValueSnapshot | undefined,
+  earlier: readonly QuotaValueSnapshot[] = [],
 ): QuotaValue {
-  if (
-    current.value.usdPerPercentagePoint !== null ||
-    previous === undefined ||
-    (previous.period.resetKind !== "scheduled" && previous.period.resetKind !== "unexpected") ||
-    previous.period.next?.observedAt !== current.period.first.observedAt ||
-    (previous.period.observationGapMs ?? Infinity) > 60 * MINUTE_MS ||
-    previous.value.usdPerPercentagePoint === null ||
-    !Number.isFinite(previous.value.usdPerPercentagePoint) ||
-    previous.value.usdPerPercentagePoint <= 0
-  )
-    return current.value;
-  const calibration = previous.value.usdPerPercentagePoint;
+  if (current.value.usdPerPercentagePoint !== null || previous === undefined) return current.value;
+  const candidates = [previous, ...[...earlier].reverse()];
+  let source: QuotaValueSnapshot | undefined;
+  for (const [index, candidate] of candidates.entries()) {
+    const next = index === 0 ? current : candidates[index - 1];
+    if (candidate.period.next?.observedAt !== next?.period.first.observedAt) break;
+    if (
+      Date.parse(current.period.first.observedAt) - Date.parse(candidate.period.last.observedAt) >
+      60 * MINUTE_MS
+    )
+      break;
+    if (
+      (candidate.period.resetKind === "scheduled" || candidate.period.resetKind === "unexpected") &&
+      candidate.value.usdPerPercentagePoint !== null &&
+      Number.isFinite(candidate.value.usdPerPercentagePoint) &&
+      candidate.value.usdPerPercentagePoint > 0
+    ) {
+      source = candidate;
+      break;
+    }
+    if (
+      (candidate.period.resetKind !== "scheduled" && candidate.period.resetKind !== "ambiguous") ||
+      candidate.period.usedPercentagePoints !== 0 ||
+      candidate.period.first.remainingPercent !== candidate.period.last.remainingPercent ||
+      candidate.period.last.remainingPercent !== next?.period.first.remainingPercent
+    )
+      break;
+  }
+  if (source === undefined) return current.value;
+  const calibration = source.value.usdPerPercentagePoint!;
   return {
     ...current.value,
     usdPerPercentagePoint: calibration,
     remainingValueUsd: calibration * current.period.last.remainingPercent,
     historicalCalibration: {
-      since: previous.period.first.observedAt,
-      until: previous.period.last.observedAt,
+      since: source.period.first.observedAt,
+      until: source.period.last.observedAt,
     },
   };
 }

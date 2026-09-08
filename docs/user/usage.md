@@ -202,12 +202,16 @@ another note. Confetti is brief and respects the tap-effects and reduced-motion 
 
 **Used while monitored** prices Codex transcripts from the same observed interval.
 **Value of usage remaining** uses that cost per observed percentage point. It shows **Learning**
-until at least five points have been observed. The full cycle total cannot calibrate a shorter
-transcript interval. Spark is excluded because it has a separate quota.
+until at least five points have been observed. A qualified earlier reset cycle can calibrate a
+shorter interval provisionally until current measured costs are ready. Bounded zero-use timer
+changes totaling up to 60 minutes can bridge the interval without counting as resets. Spark is
+excluded because it has a separate quota.
 
 Dollar values are API-equivalent estimates, not subscription bills, cash balances, or credits.
-Model mix and missing history affect them. Incomplete scans, missing prices, and unavailable
-computers withhold the estimate. A previous complete calculation is labeled with its time.
+Model mix and missing history affect them. Incomplete scans and missing prices withhold a new
+current estimate while a refresh is pending; previously saved exact costs remain labeled with
+their calculation time. A qualified earlier reset cycle can provide a labeled provisional model
+and value estimate until current costs are ready.
 
 The monitor defaults to the quota-source computer. Use **Tracking and computers** to opt in to
 other computers for cost comparison. Selecting an unavailable computer withholds the combined
