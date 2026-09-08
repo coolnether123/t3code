@@ -406,4 +406,104 @@ describe("Codex monitor page", () => {
     expect(markup).toContain("No quota use observed in this interval");
     expect(markup).not.toContain("$0.00 unused");
   });
+
+  it("defaults estimates to the healthy history tracker and preserves explicit pending opt-in", async () => {
+    const fingerprint = {
+      hostId: "desktop",
+      provider: "codex",
+      resolvedHomePath: "/sessions",
+      volumeId: "1",
+    };
+    const healthy = {
+      environmentId: "healthy",
+      label: "Healthy computer",
+      isPending: false,
+      error: null,
+      summary: {
+        sources: [{ fingerprint, status: "ok" }],
+        quotaCosts: [
+          {
+            intervalId: "2026-08-30T20:00:00Z",
+            fingerprint,
+            complete: true,
+            unpricedRecords: 0,
+            costUsd: 40,
+            records: 4,
+            models: [
+              {
+                model: "gpt-6-astra",
+                costUsd: 40,
+                unpricedRecords: 0,
+                records: 4,
+                totals: {
+                  uncachedInputTokens: 10,
+                  cachedInputTokens: 2,
+                  cacheCreationTokens: 1,
+                  outputTokens: 7,
+                  reasoningTokens: 3,
+                },
+              },
+            ],
+          },
+        ],
+        quotaHistory: {
+          status: "ready",
+          source: "fixture",
+          message: null,
+          samples: [
+            {
+              observedAt: "2026-08-30T20:00:00Z",
+              remainingPercent: 80,
+              resetsAt: "2026-09-06T00:00:00Z",
+            },
+            {
+              observedAt: "2026-08-30T21:00:00Z",
+              remainingPercent: 70,
+              resetsAt: "2026-09-06T00:00:00Z",
+            },
+          ],
+        },
+      },
+    };
+    const pending = {
+      environmentId: "pending",
+      label: "Pending computer",
+      isPending: true,
+      error: null,
+      summary: null,
+    };
+    state.environments = [healthy, pending];
+    const markup = renderToStaticMarkup(<UsageResetPage />);
+    expect(markup).toContain("$40.00");
+    expect(markup).toContain("Transcript costs from Healthy computer");
+    expect(markup).not.toContain("Pending computer is still reading Codex transcripts");
+    const tokenPlanner = markup.slice(
+      markup.indexOf('aria-label="Remaining token estimates"'),
+      markup.indexOf('aria-label="Remaining token estimates"') + 5000,
+    );
+    expect(tokenPlanner).toMatch(/≈ [0-9.,]+[KMB]/);
+    expect(tokenPlanner).not.toContain("Pending");
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<UsageResetPage />));
+      const computers = container.querySelectorAll<HTMLInputElement>(
+        'fieldset input[type="checkbox"]',
+      );
+      expect(computers).toHaveLength(2);
+      await act(async () => computers[1]!.click());
+      expect(container.textContent).toContain(
+        "Pending computer is still reading Codex transcripts",
+      );
+      expect(container.textContent).toContain(
+        "Transcript costs from Healthy computer, Pending computer",
+      );
+      expect(container.textContent).toContain("Pending");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
 });

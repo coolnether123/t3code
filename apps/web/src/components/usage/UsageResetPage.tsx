@@ -89,6 +89,10 @@ export function UsageResetPage() {
   );
   const tracker =
     trackers.find((environment) => environment.environmentId === trackerId) ?? trackers[0];
+  const effectiveSelectedIds = useMemo<readonly string[] | null>(
+    () => selectedIds ?? (tracker ? [tracker.environmentId] : null),
+    [selectedIds, tracker?.environmentId],
+  );
   const rawSamples = tracker?.summary?.quotaHistory?.samples;
   const samples = useMemo(() => quotaMonitoringSamples(rawSamples ?? []), [rawSamples]);
   // Keep the complete saved stream for chart/fallback presentation. Cost queries
@@ -119,11 +123,12 @@ export function UsageResetPage() {
             paceInterval.id,
             paceCosts.environments.filter(
               (environment) =>
-                selectedIds === null || selectedIds.includes(environment.environmentId),
+                effectiveSelectedIds === null ||
+                effectiveSelectedIds.includes(environment.environmentId),
             ),
           )
         : null,
-    [paceInterval, paceCosts.environments, selectedIds],
+    [paceInterval, paceCosts.environments, effectiveSelectedIds],
   );
   // A new interval changes the cost query key. While that query is warming,
   // retain the history response for environments that have not answered yet;
@@ -142,9 +147,10 @@ export function UsageResetPage() {
   const selected = useMemo(
     () =>
       costEnvironments.filter(
-        (environment) => selectedIds === null || selectedIds.includes(environment.environmentId),
+        (environment) =>
+          effectiveSelectedIds === null || effectiveSelectedIds.includes(environment.environmentId),
       ),
-    [costEnvironments, selectedIds],
+    [costEnvironments, effectiveSelectedIds],
   );
   const selectedWithSavedCosts = useMemo(
     () =>
@@ -170,6 +176,8 @@ export function UsageResetPage() {
       }),
     [history.environments, selected],
   );
+  const costScope =
+    selected.length === 0 ? "No computers selected" : selected.map((e) => e.label).join(", ");
   const currentValues = useMemo(
     () => quotaValueSnapshots(tracker?.environmentId, historicalPeriods, selectedWithSavedCosts),
     [tracker?.environmentId, historicalPeriods, selectedWithSavedCosts],
@@ -373,7 +381,9 @@ export function UsageResetPage() {
               >
                 <div className="flex flex-wrap items-baseline justify-between gap-2">
                   <h2 className="text-sm font-medium">API-equivalent value</h2>
-                  <span className="text-xs text-muted-foreground">Measured use this cycle</span>
+                  <span className="text-xs text-muted-foreground">
+                    Transcript costs from {costScope} · measured use this cycle
+                  </span>
                 </div>
                 <dl className="mt-4 grid grid-cols-2 gap-5 [&>div]:min-w-0">
                   <div>
@@ -558,16 +568,17 @@ export function UsageResetPage() {
                           type="checkbox"
                           className="size-5 shrink-0"
                           checked={
-                            selectedIds === null || selectedIds.includes(environment.environmentId)
+                            effectiveSelectedIds === null ||
+                            effectiveSelectedIds.includes(environment.environmentId)
                           }
                           onChange={(event) => {
-                            const ids =
-                              selectedIds ?? costs.environments.map((entry) => entry.environmentId);
-                            setSelectedIds(
-                              event.target.checked
-                                ? [...ids, environment.environmentId]
-                                : ids.filter((id) => id !== environment.environmentId),
+                            const ids = new Set(
+                              effectiveSelectedIds ??
+                                costs.environments.map((entry) => entry.environmentId),
                             );
+                            if (event.target.checked) ids.add(environment.environmentId);
+                            else ids.delete(environment.environmentId);
+                            setSelectedIds([...ids]);
                           }}
                         />
                         <span className="break-words">{environment.label}</span>

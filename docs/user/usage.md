@@ -209,7 +209,8 @@ Dollar values are API-equivalent estimates, not subscription bills, cash balance
 Model mix and missing history affect them. Incomplete scans, missing prices, and unavailable
 computers withhold the estimate. A previous complete calculation is labeled with its time.
 
-Expand **Tracking and computers** to choose the quota source and computers for cost comparison.
-Select computers using the same Codex account. Percentages are never added across machines.
+The monitor defaults to the quota-source computer. Use **Tracking and computers** to opt in to
+other computers for cost comparison. Selecting an unavailable computer withholds the combined
+estimate. Select computers using the same Codex account. Percentages are never added across machines.
 The tracker does not verify account identity or identify chats copied between distinct sources.
 The power monitor is separate and does not contribute to Codex quota totals.
