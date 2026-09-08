@@ -13,6 +13,7 @@ import {
   quotaIntervals,
   quotaPeriods,
   quotaValueSnapshots,
+  quotaValueWithHistoricalCalibration,
   quotaValueWithSnapshot,
   retainQuotaValueSnapshots,
   type QuotaValueSnapshot,
@@ -68,6 +69,7 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
   const tracker = trackers.find((entry) => entry.environmentId === trackerId) ?? trackers[0];
   const rawSamples = tracker?.summary?.quotaHistory?.samples;
   const samples = useMemo(() => quotaMonitoringSamples(rawSamples ?? []), [rawSamples]);
+  const historicalPeriods = useMemo(() => quotaPeriods(rawSamples ?? []), [rawSamples]);
   const periods = useMemo(() => quotaPeriods(samples), [samples]);
   const intervals = useMemo(() => quotaIntervals(periods), [periods]);
   const input = useMemo(
@@ -82,9 +84,33 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
       ),
     [costs.environments, selectedIds],
   );
+  const selectedWithSavedCosts = useMemo(
+    () =>
+      selected.map((environment) => {
+        const historyEnvironment = history.environments.find(
+          (candidate) => candidate.environmentId === environment.environmentId,
+        );
+        const saved = historyEnvironment?.summary?.quotaCostSnapshots;
+        return saved === undefined
+          ? environment
+          : {
+              ...environment,
+              summary: environment.summary
+                ? {
+                    ...environment.summary,
+                    quotaCostSnapshots: [
+                      ...(environment.summary.quotaCostSnapshots ?? []),
+                      ...saved,
+                    ],
+                  }
+                : (historyEnvironment?.summary ?? environment.summary),
+            };
+      }),
+    [history.environments, selected],
+  );
   const currentValues = useMemo(
-    () => quotaValueSnapshots(tracker?.environmentId, periods, selected),
-    [tracker?.environmentId, periods, selected],
+    () => quotaValueSnapshots(tracker?.environmentId, historicalPeriods, selectedWithSavedCosts),
+    [tracker?.environmentId, historicalPeriods, selectedWithSavedCosts],
   );
   const [snapshots, setSnapshots] = useState<ReadonlyMap<string, QuotaValueSnapshot>>(
     () => new Map(),
@@ -92,10 +118,17 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
   useEffect(() => {
     setSnapshots((previous) => retainQuotaValueSnapshots(previous, currentValues));
   }, [currentValues]);
-  const values = currentValues.map((current) => ({
-    period: current.period,
-    value: quotaValueWithSnapshot(current, snapshots),
-  }));
+  const values = currentValues.map((current, index) => {
+    const value = quotaValueWithSnapshot(current, snapshots);
+    const previous = index > 0 ? currentValues[index - 1] : undefined;
+    return {
+      period: current.period,
+      value: quotaValueWithHistoricalCalibration(
+        { ...current, value },
+        previous ? { ...previous, value: quotaValueWithSnapshot(previous, snapshots) } : undefined,
+      ),
+    };
+  });
   const last = samples.at(-1);
   const refreshMonitor = async () => {
     if (refreshActive.current) return;
@@ -181,7 +214,7 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
         {current && last ? (
           <>
             <UsagePaceChart
-              samples={samples}
+              samples={rawSamples ?? samples}
               news={news}
               resetCheck={
                 <>
@@ -216,7 +249,16 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
                   </Text>
                 </View>
               </View>
-              {current.period.usedPercentagePoints < 5 ? (
+              {current.value.historicalCalibration ? (
+                <Text className="text-xs text-foreground-muted">
+                  Remaining value is provisional, calibrated from{" "}
+                  {new Date(current.value.historicalCalibration.since).toLocaleString()} to{" "}
+                  {new Date(current.value.historicalCalibration.until).toLocaleString()}.
+                  Current-cycle calibration replaces it after enough measured usage.
+                </Text>
+              ) : null}
+              {current.period.usedPercentagePoints < 5 &&
+              current.value.remainingValueUsd === null ? (
                 <Text className="text-xs text-foreground-muted">
                   {current.period.usedPercentagePoints} of 5 percentage points observed. The{" "}
                   {100 - last.remainingPercent}% cycle total includes usage before monitoring and
@@ -239,29 +281,40 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
               <Text className="text-base font-t3-medium text-foreground">
                 Resets while monitored
               </Text>
-              {completed.length === 0 ? (
+              {historicalPeriods.length < 2 ? (
                 <Text className="text-sm text-foreground-muted">
                   No reset observed since {new Date(samples[0]!.observedAt).toLocaleString()}. New
                   resets will appear here with the usage left beforehand.
                 </Text>
               ) : (
-                completed.toReversed().map(({ period, value }) => (
-                  <View key={period.id} className="gap-1">
-                    <Text className="text-sm text-foreground">
-                      {period.resetKind === "ambiguous" ? "Usage window changed" : "Usage returned"}{" "}
-                      · {period.last.remainingPercent}% left beforehand
-                    </Text>
-                    <Text className="text-xs text-foreground-muted">
-                      {new Date(period.last.observedAt).toLocaleString()} to{" "}
-                      {new Date(period.next!.observedAt).toLocaleString()}
-                    </Text>
-                    <Text className="text-xs text-foreground-muted">
-                      {value.unusedValueUsd === null
-                        ? "Dollar estimate not established"
-                        : `≈ ${formatUsd(value.unusedValueUsd)} unused`}
-                    </Text>
-                  </View>
-                ))
+                historicalPeriods
+                  .slice(0, -1)
+                  .toReversed()
+                  .map((period) => {
+                    const value = values.find((entry) => entry.period.id === period.id)?.value;
+                    return (
+                      <View key={period.id} className="gap-1">
+                        <Text className="text-sm text-foreground">
+                          {period.resetKind === "ambiguous"
+                            ? "Usage window changed"
+                            : "Usage returned"}{" "}
+                          · {period.last.remainingPercent}% left beforehand
+                        </Text>
+                        <Text className="text-xs text-foreground-muted">
+                          {new Date(period.last.observedAt).toLocaleString()} to{" "}
+                          {new Date(period.next!.observedAt).toLocaleString()}
+                        </Text>
+                        <Text className="text-xs text-foreground-muted">
+                          {value?.costUsd !== null && value !== undefined
+                            ? `${formatUsd(value.costUsd)} observed cost · `
+                            : ""}
+                          {value?.unusedValueUsd === null || value === undefined
+                            ? "Dollar estimate not established"
+                            : `≈ ${formatUsd(value.unusedValueUsd)} unused`}
+                        </Text>
+                      </View>
+                    );
+                  })
               )}
             </View>
             <Pressable

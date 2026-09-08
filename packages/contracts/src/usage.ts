@@ -225,6 +225,22 @@ export const UsageQuotaCost = Schema.Struct({
 });
 export type UsageQuotaCost = typeof UsageQuotaCost.Type;
 
+/** Durable, complete priced cost for one observed quota interval. */
+export const UsageQuotaCostSnapshot = Schema.Struct({
+  intervalId: Schema.String,
+  fingerprint: UsageSourceFingerprint,
+  sinceTime: Schema.String,
+  untilTime: Schema.String,
+  costUsd: Schema.Number,
+  records: NonNegativeInt,
+  recordedAt: Schema.String,
+  firstRemainingPercent: Schema.Number,
+  lastRemainingPercent: Schema.Number,
+  resetsAt: Schema.String,
+  models: Schema.optional(UsageQuotaCost.fields.models),
+});
+export type UsageQuotaCostSnapshot = typeof UsageQuotaCostSnapshot.Type;
+
 export const UsageSummaryInput = Schema.Struct({
   /**
    * Highest response contract understood by the client. Contract v6 added
@@ -268,6 +284,7 @@ export const UsageSummary = Schema.Struct({
   scanDurationMs: NonNegativeInt,
   quotaHistory: Schema.optional(UsageQuotaHistory),
   quotaCosts: Schema.optional(Schema.Array(UsageQuotaCost)),
+  quotaCostSnapshots: Schema.optional(Schema.Array(UsageQuotaCostSnapshot)),
 });
 export type UsageSummary = typeof UsageSummary.Type;
 

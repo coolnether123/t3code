@@ -127,4 +127,26 @@ describe("UsageModelHourlyChart", () => {
       container.querySelector('[aria-label="Usage for selected hour"]')?.textContent,
     ).toContain("No model usage recorded for this hour.");
   });
+
+  it("selects an hour and model from focused or clicked chart marks", async () => {
+    const starts = ["2026-08-11T10:00:00.000Z", "2026-08-11T11:00:00.000Z"];
+    const hourly = [
+      hour(starts[0]!, [["codex:gpt-5.6-astra", "gpt-5.6-astra", "codex", 1.25, 1200]]),
+      hour(starts[1]!, [["codex:gpt-5.6-sol", "gpt-5.6-sol", "codex", 4.5, 3400]]),
+    ];
+    await act(async () =>
+      root.render(<UsageModelHourlyChart hours={starts} hourly={hourly} timeZone="UTC" />),
+    );
+    const marks = container.querySelectorAll<SVGRectElement>('rect[role="button"]');
+    expect(marks).toHaveLength(4);
+    await act(async () => marks[0]!.focus());
+    expect(container.querySelector('[role="tooltip"]')?.textContent).toContain("Astra");
+    expect(container.querySelector('[role="tooltip"]')?.textContent).toContain("1.20K tokens");
+    await act(async () => marks[3]!.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(container.querySelector('[role="tooltip"]')?.textContent).toContain("Sol");
+    await act(async () =>
+      marks[0]!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })),
+    );
+    expect(container.querySelector('[role="tooltip"]')?.textContent).toContain("Astra");
+  });
 });

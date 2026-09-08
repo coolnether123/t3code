@@ -85,6 +85,12 @@ import {
   readQuotaHistory,
   validQuotaIntervals,
 } from "./usageQuotaHistory.ts";
+import {
+  readQuotaCostLedger,
+  upsertQuotaCostLedger,
+  writeQuotaCostLedger,
+  type QuotaCostLedgerRow,
+} from "./usageQuotaCostLedger.ts";
 
 const LITELLM_RATES_URL =
   "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
@@ -236,6 +242,10 @@ export const make = Effect.gen(function* () {
   const ratesCachePath = path.join(config.stateDir, "usage-model-rates.json");
   const scanCachePath = path.join(config.stateDir, "usage-scan-cache.json");
   const usageImportsPath = path.join(config.stateDir, "usage-imports.json");
+  const quotaCostLedgerPath = path.join(config.stateDir, "usage-quota-cost-ledger.json");
+  let quotaCostLedger: readonly QuotaCostLedgerRow[] =
+    yield* readQuotaCostLedger(quotaCostLedgerPath);
+  let quotaCostLedgerDirty = false;
   let rates: RateTable = new Map();
   let ratesFetchedAtMs: number | null = null;
   let ratesStatus: UsageSummary["pricing"]["status"] = "unavailable";
@@ -416,9 +426,21 @@ export const make = Effect.gen(function* () {
     );
   });
   const persistQueue = yield* Queue.dropping<void>(1);
+  const persistQuotaCostLedgerOnce = Effect.fn("UsageService.persistQuotaCostLedger")(function* () {
+    if (!quotaCostLedgerDirty) return true;
+    const rows = quotaCostLedger;
+    const persisted = yield* writeQuotaCostLedger(quotaCostLedgerPath, rows).pipe(
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.provideService(Path.Path, path),
+      Effect.catchCause(() => Effect.succeed(false)),
+    );
+    if (persisted && rows === quotaCostLedger) quotaCostLedgerDirty = false;
+    return persisted;
+  });
   const runPersistWorker = Effect.gen(function* () {
     while (true) {
       yield* Queue.take(persistQueue);
+      yield* persistQuotaCostLedgerOnce();
       yield* persistScanCacheOnce();
     }
   });
@@ -432,6 +454,7 @@ export const make = Effect.gen(function* () {
     Effect.uninterruptible(
       Scope.close(serviceScope, Exit.void).pipe(
         Effect.andThen(Fiber.await(persistWorker)),
+        Effect.andThen(persistQuotaCostLedgerOnce()),
         Effect.ignore,
       ),
     ),
@@ -533,7 +556,7 @@ export const make = Effect.gen(function* () {
       });
     }
     const quotaHistory =
-      input.includeQuotaHistory || input.quotaHistoryOnly
+      input.includeQuotaHistory || input.quotaHistoryOnly || input.quotaIntervals !== undefined
         ? yield* readQuotaHistory(undefined).pipe(
             Effect.provideService(FileSystem.FileSystem, fileSystem),
             Effect.provideService(Path.Path, path),
@@ -557,6 +580,12 @@ export const make = Effect.gen(function* () {
         },
         scanDurationMs: Math.max(0, finishedAtMs - startedAtMs),
         quotaHistory,
+        quotaCostSnapshots:
+          input.quotaIntervals === undefined
+            ? quotaCostLedger
+            : quotaCostLedger.filter((row) =>
+                input.quotaIntervals!.some((interval) => interval.id === row.intervalId),
+              ),
       } satisfies UsageSummary;
     }
     const quotaCosts: UsageQuotaCost[] = [];
@@ -817,6 +846,33 @@ export const make = Effect.gen(function* () {
       windowStartMs,
       retentionCutoffMs: startedAtMs - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000,
     });
+    const recordedAt = DateTime.formatIso(DateTime.makeUnsafe(startedAtMs));
+    for (const cost of quotaCosts) {
+      const interval = quotaIntervals.find((candidate) => candidate.id === cost.intervalId);
+      const first = quotaHistory?.samples.find(
+        (sample) => sample.observedAt === interval?.sinceTime,
+      );
+      const last = quotaHistory?.samples.find(
+        (sample) => sample.observedAt === interval?.untilTime,
+      );
+      if (!interval || !first || !last) continue;
+      const next = upsertQuotaCostLedger(
+        quotaCostLedger,
+        cost,
+        cost.fingerprint,
+        {
+          ...interval,
+          firstRemainingPercent: first.remainingPercent,
+          lastRemainingPercent: last.remainingPercent,
+          resetsAt: first.resetsAt,
+        },
+        recordedAt,
+      );
+      if (next !== quotaCostLedger) {
+        quotaCostLedger = next;
+        quotaCostLedgerDirty = true;
+      }
+    }
     if (pruned > 0) markCacheDirty();
     // Cache persistence is derived work. Wake the permanent consumer without
     // making the response wait for JSON encoding or atomic replacement.
@@ -852,6 +908,13 @@ export const make = Effect.gen(function* () {
       scanDurationMs: Math.max(0, finishedAtMs - startedAtMs),
       ...(quotaHistory === undefined ? {} : { quotaHistory }),
       ...(input.quotaIntervals === undefined ? {} : { quotaCosts }),
+      ...(input.quotaIntervals === undefined
+        ? {}
+        : {
+            quotaCostSnapshots: quotaCostLedger.filter((row) =>
+              input.quotaIntervals!.some((interval) => interval.id === row.intervalId),
+            ),
+          }),
     } satisfies UsageSummary;
   });
 

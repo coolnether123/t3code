@@ -13,10 +13,16 @@ export function TokenBudgetPanel({
   budgetUsd,
   models,
   observedAt,
+  provisional = false,
+  calibration,
+  priorModelMix = false,
 }: {
   readonly budgetUsd: number | null;
   readonly models: ReturnType<typeof monitoredModels>;
   readonly observedAt: string;
+  readonly provisional?: boolean;
+  readonly calibration?: { readonly since: string; readonly until: string };
+  readonly priorModelMix?: boolean;
 }) {
   const [scenario, setScenario] = useState("observed");
   const [longContext, setLongContext] = useState(false);
@@ -66,8 +72,16 @@ export function TokenBudgetPanel({
         <div>
           <h2 className="text-sm font-medium">How far could the rest go?</h2>
           <p className="mt-1 text-xs text-muted-foreground">
-            Spend the same estimated API value on a different model.
+            {provisional
+              ? "Provisional value from the previous completed cycle."
+              : "Spend the same estimated API value on a different model."}
           </p>
+          {provisional && calibration ? (
+            <p className="mt-1 text-xs text-muted-foreground">
+              Calibration: {new Date(calibration.since).toLocaleString()} to{" "}
+              {new Date(calibration.until).toLocaleString()}.
+            </p>
+          ) : null}
         </div>
         <span className="font-mono text-lg tabular-nums">
           {budgetUsd === null ? "Learning" : `≈ ${formatUsd(budgetUsd)}`}
@@ -82,7 +96,9 @@ export function TokenBudgetPanel({
             onChange={(event) => setScenario(event.target.value)}
             className="h-9 rounded-md border border-input bg-background px-2 text-sm"
           >
-            <option value="observed">This cycle's mix</option>
+            <option value="observed">
+              {priorModelMix ? "Previous cycle mix" : "This cycle's mix"}
+            </option>
             <option value="coding">Example: cached coding</option>
             <option value="custom">Custom mix</option>
             <option value="output">Output only</option>

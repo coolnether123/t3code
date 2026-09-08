@@ -109,6 +109,8 @@ The page checks readings every minute and public news every five minutes while o
 The separate Codex Limits collector records every five minutes while its computer is awake
 and signed in, even with T3 closed. Readings older than 15 minutes are labeled stale.
 News requests send no account credentials, usage totals, or chat data.
+Saved quota history and completed cost snapshots survive page navigation and server restarts,
+with bounded retention. Chart readings support hover, tap, and keyboard inspection.
 
 Press **Refresh** to reload saved readings, refresh public reset news, and check API costs for
 the newly read interval. The button shows progress and ignores repeated taps until it finishes.
@@ -117,10 +119,13 @@ Growing chats read only their appended text when the saved cursor is valid. Publ
 updates independently and does not hold the usage refresh open.
 Refresh does not force a new collector sample or run Luna. Use **Check X with Luna** separately.
 
-The view starts with the latest continuous monitoring run. A gap over 24 hours begins another
-run. Older samples remain saved, but do not appear here or enter its dollar comparisons.
-**Resets while monitored** fills as new account readings show usage returning. The observation
-interval is not an exact reset timestamp. A banked reset or account change can look similar.
+The view uses the latest continuous monitoring run for current measurements. A gap over 24 hours
+begins another run. Older samples remain saved and appear in **Reset history**. When a new cycle
+has too little current data to calibrate a pace or dollar value, the monitor may show a provisional
+estimate based on the immediately preceding completed cycle. It includes that cycle's local date
+range and is replaced automatically when current-cycle calibration is valid. Percentages are never
+combined across reset boundaries. The observation interval is not an exact reset timestamp. A banked
+reset or account change can look similar.
 
 The runway baseline uses the account timer. **Banked manual resets** are shown separately and
 never get added to the current balance or treated as an extension of the current timer. A full
@@ -168,7 +173,7 @@ is shown as unavailable, not as evidence that nobody is discussing the reset.
 ### Understand the dollar estimate
 
 The web monitor puts the chart first. Use the header links to jump to API value,
-the token planner, or Luna research. Expand **Inspect recorded readings** to scrub
+the token planner, Reset history, or Luna research. Expand **Inspect recorded readings** to scrub
 through the saved observations with a pointer or arrow keys.
 
 **How far could the rest go?** compares alternative uses of the estimated remaining

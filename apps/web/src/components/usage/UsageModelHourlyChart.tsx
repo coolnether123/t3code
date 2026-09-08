@@ -49,6 +49,7 @@ export function UsageModelHourlyChart({
   const byHour = useMemo(() => new Map(hourly.map((entry) => [entry.hourStart, entry])), [hourly]);
   const modelKeys = useMemo(() => collectHourlyModelKeys(hourly), [hourly]);
   const [selectedIndex, setSelectedIndex] = useState(Math.max(0, hours.length - 1));
+  const [selectedModelKey, setSelectedModelKey] = useState<string | null>(null);
   const modelMetadata = useMemo(
     () => new Map(hourly.flatMap((entry) => [...entry.byModel.entries()])),
     [hourly],
@@ -64,6 +65,10 @@ export function UsageModelHourlyChart({
   );
   const selectedHour = hours[selectedIndex];
   const selectedModels = selectedHour === undefined ? undefined : byHour.get(selectedHour)?.byModel;
+  const selectPoint = (index: number, key: string) => {
+    setSelectedIndex((current) => (current === index ? current : index));
+    setSelectedModelKey((current) => (current === key ? current : key));
+  };
   if (hours.length === 0 || modelKeys.length === 0)
     return (
       <p className="text-xs text-muted-foreground">
@@ -141,7 +146,32 @@ export function UsageModelHourlyChart({
                         height={height}
                         rx={2}
                         fill={colorFor(key, value)}
-                        opacity={index === selectedIndex ? 1 : 0.72}
+                        opacity={
+                          index === selectedIndex &&
+                          (selectedModelKey === null || selectedModelKey === key)
+                            ? 1
+                            : 0.72
+                        }
+                        stroke={
+                          index === selectedIndex && selectedModelKey === key
+                            ? "currentColor"
+                            : undefined
+                        }
+                        strokeWidth={
+                          index === selectedIndex && selectedModelKey === key ? 2 : undefined
+                        }
+                        tabIndex={height > 0 ? 0 : -1}
+                        role="button"
+                        aria-label={`${formatHourShort(start, timeZone)} ${modelDisplayName(key, value)}`}
+                        onMouseEnter={() => selectPoint(index, key)}
+                        onFocus={() => selectPoint(index, key)}
+                        onClick={() => selectPoint(index, key)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            selectPoint(index, key);
+                          }
+                        }}
                       >
                         <title>
                           {formatHourShort(start, timeZone)} · {modelDisplayName(key, value)}:{" "}
@@ -170,13 +200,32 @@ export function UsageModelHourlyChart({
           <span>{formatHourShort(hours.at(-1)!, timeZone)}</span>
         </div>
       </div>
+      <div className="min-h-12">
+        {selectedModelKey !== null &&
+        selectedHour !== undefined &&
+        selectedModels?.get(selectedModelKey) ? (
+          <div role="tooltip" className="rounded-lg border border-border/70 px-3 py-2 text-xs">
+            <div className="text-muted-foreground">
+              {formatHourShort(selectedHour, timeZone)} ·{" "}
+              {modelDisplayName(selectedModelKey, selectedModels.get(selectedModelKey))}
+            </div>
+            <div className="mt-1 tabular-nums">
+              {formatTokens(selectedModels.get(selectedModelKey)!.totalTokens)} tokens ·{" "}
+              {formatUsd(selectedModels.get(selectedModelKey)!.costUsd)}
+            </div>
+          </div>
+        ) : null}
+      </div>
       <label className="flex w-full flex-col gap-1 text-[11px] text-muted-foreground">
         Inspect hour
         <select
           aria-label="Inspect hourly model usage"
           className="h-9 w-full rounded-md border border-border bg-background px-2 text-xs text-foreground"
           value={selectedIndex}
-          onChange={(event) => setSelectedIndex(Number(event.target.value))}
+          onChange={(event) => {
+            setSelectedIndex(Number(event.target.value));
+            setSelectedModelKey(null);
+          }}
         >
           {hours.map((start, index) => (
             <option key={start} value={index}>

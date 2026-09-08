@@ -11,6 +11,35 @@ const sample = (observedAt: string, remainingPercent: number, resetsAt = reset) 
 });
 
 describe("Codex weekly forecast", () => {
+  it("uses the prior completed cycle for early post-reset pace and labels its provenance", () => {
+    const at = "2026-08-30T23:10:00.000Z";
+    const result = quotaForecast(
+      [
+        sample("2026-08-30T22:00:00.000Z", 80),
+        sample("2026-08-30T23:00:00.000Z", 60),
+        sample("2026-08-30T23:10:00.000Z", 100, reset),
+        sample(at, 100, reset),
+      ],
+      Date.parse(at),
+    )!;
+    expect(result.historicalPace).toMatchObject({ percentPerDay: 480 });
+    expect(result.expectedPercentPerDay).toBe(480);
+  });
+  it("clears historical pace once a one-hour current measurement is available", () => {
+    const at = "2026-08-30T23:10:00.000Z";
+    const result = quotaForecast(
+      [
+        sample("2026-08-30T20:00:00.000Z", 80),
+        sample("2026-08-30T21:00:00.000Z", 60),
+        sample("2026-08-30T21:10:00.000Z", 100, reset),
+        sample("2026-08-30T22:10:00.000Z", 99, reset),
+        sample(at, 98, reset),
+      ],
+      Date.parse(at),
+    )!;
+    expect(result.historicalPace).toBeNull();
+    expect(result.expectedPercentPerDay).toBeLessThan(480);
+  });
   it("forecasts from the real weekly window even with a single observation", () => {
     const at = "2026-08-31T00:00:00.000Z";
     const result = quotaForecast([sample(at, 80)], Date.parse(at))!;

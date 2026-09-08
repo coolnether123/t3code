@@ -8,6 +8,7 @@ import {
   quotaValue,
   quotaValueSnapshots,
   quotaValueWithSnapshot,
+  quotaValueWithHistoricalCalibration,
   retainQuotaValueSnapshots,
   type QuotaEnvironment,
 } from "./usageQuota.ts";
@@ -132,6 +133,205 @@ describe("quota observations", () => {
 });
 
 describe("quota value estimates", () => {
+  it("uses the immediately completed cycle as provisional calibration after a reset", () => {
+    const periods = quotaPeriods([
+      sample("2026-07-21T16:00:00Z", 80),
+      sample("2026-07-21T17:00:00Z", 60),
+      sample("2026-07-21T17:10:00Z", 100, "2026-07-28T17:00:00Z"),
+      sample("2026-07-21T17:20:00Z", 98, "2026-07-28T17:00:00Z"),
+    ]);
+    const previous = {
+      period: periods[0]!,
+      value: {
+        costUsd: 40,
+        usdPerPercentagePoint: 2,
+        remainingValueUsd: 80,
+        unusedValueUsd: 40,
+        reason: null,
+      },
+      key: "previous",
+      calculatedAt: "2026-07-21T17:00:00Z",
+    };
+    const current = {
+      period: periods[1]!,
+      value: {
+        costUsd: 4,
+        usdPerPercentagePoint: null,
+        remainingValueUsd: null,
+        unusedValueUsd: null,
+        reason: "At least 5 percentage points of observed usage are needed for a conversion.",
+      },
+      key: "current",
+      calculatedAt: "2026-07-21T17:20:00Z",
+    };
+    expect(quotaValueWithHistoricalCalibration(current, previous)).toMatchObject({
+      costUsd: 4,
+      usdPerPercentagePoint: 2,
+      remainingValueUsd: 196,
+      historicalCalibration: { since: "2026-07-21T16:00:00Z", until: "2026-07-21T17:00:00Z" },
+    });
+  });
+
+  it("does not borrow calibration across ambiguous or prolonged reset gaps", () => {
+    const periods = quotaPeriods([
+      sample("2026-07-21T16:00:00Z", 80),
+      sample("2026-07-21T17:00:00Z", 60),
+      sample("2026-07-21T20:00:00Z", 100, "2026-07-28T17:00:00Z"),
+      sample("2026-07-21T20:10:00Z", 98, "2026-07-28T17:00:00Z"),
+    ]);
+    const previous = {
+      period: periods[0]!,
+      value: {
+        costUsd: 40,
+        usdPerPercentagePoint: 2,
+        remainingValueUsd: 80,
+        unusedValueUsd: 40,
+        reason: null,
+      },
+      key: "previous",
+      calculatedAt: "2026-07-21T17:00:00Z",
+    };
+    const current = {
+      period: periods[1]!,
+      value: {
+        costUsd: 4,
+        usdPerPercentagePoint: null,
+        remainingValueUsd: null,
+        unusedValueUsd: null,
+        reason: "waiting",
+      },
+      key: "current",
+      calculatedAt: "2026-07-21T20:10:00Z",
+    };
+    expect(quotaValueWithHistoricalCalibration(current, previous).remainingValueUsd).toBeNull();
+  });
+
+  it("preserves current scan warnings and accepts a pending calibration at five points", () => {
+    const periods = quotaPeriods([
+      sample("2026-07-21T16:00:00Z", 80),
+      sample("2026-07-21T17:00:00Z", 60),
+      sample("2026-07-21T17:10:00Z", 100, "2026-07-28T17:00:00Z"),
+      sample("2026-07-21T17:20:00Z", 95, "2026-07-28T17:00:00Z"),
+    ]);
+    const previous = {
+      period: periods[0]!,
+      value: {
+        costUsd: 40,
+        usdPerPercentagePoint: 2,
+        remainingValueUsd: 80,
+        unusedValueUsd: 40,
+        reason: null,
+      },
+      key: "previous",
+      calculatedAt: "2026-07-21T17:00:00Z",
+    };
+    const current = {
+      period: periods[1]!,
+      value: {
+        costUsd: null,
+        usdPerPercentagePoint: null,
+        remainingValueUsd: null,
+        unusedValueUsd: null,
+        reason: "desktop scan is incomplete",
+      },
+      key: "current",
+      calculatedAt: "2026-07-21T17:20:00Z",
+    };
+    expect(quotaValueWithHistoricalCalibration(current, previous)).toMatchObject({
+      costUsd: null,
+      remainingValueUsd: 190,
+      reason: "desktop scan is incomplete",
+    });
+  });
+
+  it("switches away from historical calibration when current calibration is valid", () => {
+    const current = {
+      period,
+      value: {
+        costUsd: 50,
+        usdPerPercentagePoint: 3,
+        remainingValueUsd: 90,
+        unusedValueUsd: null,
+        reason: null,
+      },
+      key: "current",
+      calculatedAt: "2026-07-22T18:00:00Z",
+    };
+    expect(quotaValueWithHistoricalCalibration(current, current)).toBe(current.value);
+  });
+
+  it("uses an exact saved snapshot when the live interval cost is unavailable", () => {
+    const saved = {
+      intervalId: period.id,
+      fingerprint,
+      sinceTime: period.first.observedAt,
+      untilTime: period.last.observedAt,
+      costUsd: 230,
+      records: 10,
+      recordedAt: "2026-07-22T18:00:00Z",
+      firstRemainingPercent: period.first.remainingPercent,
+      lastRemainingPercent: period.last.remainingPercent,
+      resetsAt: period.last.resetsAt,
+    };
+    const value = quotaValue(period, [
+      env("desktop", { quotaCosts: [], quotaCostSnapshots: [saved] }),
+    ]);
+    expect(value.costUsd).toBe(230);
+    expect(value.usdPerPercentagePoint).toBeCloseTo(10);
+  });
+  it("reads saved costs from a history-only summary without live sources", () => {
+    const saved = {
+      intervalId: period.id,
+      fingerprint,
+      sinceTime: period.first.observedAt,
+      untilTime: period.last.observedAt,
+      costUsd: 230,
+      records: 10,
+      recordedAt: "2026-07-22T18:00:00Z",
+      firstRemainingPercent: period.first.remainingPercent,
+      lastRemainingPercent: period.last.remainingPercent,
+      resetsAt: period.last.resetsAt,
+    };
+    const value = quotaValue(period, [
+      env("desktop", { sources: [], quotaCosts: undefined, quotaCostSnapshots: [saved] }),
+    ]);
+    expect(value.costUsd).toBe(230);
+    expect(value.historicalCostRecordedAt).toBe("2026-07-22T18:00:00Z");
+  });
+
+  it("rejects an ambiguous clock-only boundary", () => {
+    const periods = quotaPeriods([
+      sample("2026-07-21T16:00:00Z", 80),
+      sample("2026-07-21T17:00:00Z", 60),
+      sample("2026-07-21T17:10:00Z", 60, "2026-07-28T17:02:00Z"),
+      sample("2026-07-21T17:20:00Z", 59, "2026-07-28T17:02:00Z"),
+    ]);
+    const previous = {
+      period: periods[0]!,
+      value: {
+        costUsd: 40,
+        usdPerPercentagePoint: 2,
+        remainingValueUsd: 80,
+        unusedValueUsd: 40,
+        reason: null,
+      },
+      key: "previous",
+      calculatedAt: "2026-07-21T17:00:00Z",
+    };
+    const current = {
+      period: periods[1]!,
+      value: {
+        costUsd: 4,
+        usdPerPercentagePoint: null,
+        remainingValueUsd: null,
+        unusedValueUsd: null,
+        reason: "waiting",
+      },
+      key: "current",
+      calculatedAt: "2026-07-21T17:20:00Z",
+    };
+    expect(quotaValueWithHistoricalCalibration(current, previous).remainingValueUsd).toBeNull();
+  });
   it("retains complete calculations through partial refreshes without caching partial totals", () => {
     const complete = quotaValueSnapshots("tracker", [period], [env()]);
     const cache = retainQuotaValueSnapshots(new Map(), complete);

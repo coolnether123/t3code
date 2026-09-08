@@ -1,5 +1,6 @@
 import type { UsageQuotaInterval } from "@t3tools/contracts";
 import type { QuotaForecast } from "@t3tools/shared/usageQuotaForecast";
+import type { QuotaPeriod } from "@t3tools/shared/usageQuota";
 import { monitoredModels } from "./usageTokenBudget";
 
 const HOUR = 3_600_000;
@@ -18,6 +19,15 @@ export function apiPaceInterval(
 export interface ApiPaceInput {
   readonly interval: UsageQuotaInterval;
   readonly models: ReturnType<typeof monitoredModels>;
+  readonly remainingValueUsd: number | null;
+}
+
+/** A complete prior cycle used only to provisionally calibrate a new cycle. */
+export interface PriorApiPaceInput {
+  readonly interval: UsageQuotaInterval;
+  readonly models: ReturnType<typeof monitoredModels>;
+  readonly period: QuotaPeriod;
+  /** Current cycle's observed balance; prior usage only supplies the burn rate. */
   readonly remainingValueUsd: number | null;
 }
 
@@ -172,8 +182,64 @@ export function usageRunwayPlan(
 }
 
 /** Price recent transcript usage, then spend the calibrated balance at that hourly rate. */
-export function apiCostPace(forecast: QuotaForecast, input: ApiPaceInput | null, now: number) {
-  if (!input || forecast.stale || input.models === null) return null;
+export function apiCostPace(
+  forecast: QuotaForecast,
+  input: ApiPaceInput | null,
+  now: number,
+  priorCycle?: PriorApiPaceInput | null,
+) {
+  if (forecast.stale) return null;
+  const currentUsable =
+    input !== null &&
+    input.models !== null &&
+    input.remainingValueUsd !== null &&
+    Number.isFinite(input.remainingValueUsd) &&
+    input.remainingValueUsd >= 0 &&
+    input.interval.untilTime === forecast.latest.observedAt &&
+    Date.parse(input.interval.untilTime) - Date.parse(input.interval.sinceTime) >= HOUR &&
+    input.models.every(
+      (row) => row.unpricedRecords === 0 && Number.isFinite(row.costUsd) && row.costUsd >= 0,
+    );
+  if (!currentUsable) {
+    if (!priorCycle || priorCycle.models === null) return null;
+    const priorSince = Date.parse(priorCycle.interval.sinceTime);
+    const priorUntil = Date.parse(priorCycle.interval.untilTime);
+    const currentStart = Date.parse(forecast.first.observedAt);
+    const observed = Date.parse(forecast.latest.observedAt);
+    if (
+      !Number.isFinite(priorSince) ||
+      !Number.isFinite(priorUntil) ||
+      priorUntil - priorSince < HOUR ||
+      priorUntil > currentStart ||
+      priorUntil >= observed ||
+      (priorCycle.period.resetKind !== "scheduled" &&
+        priorCycle.period.resetKind !== "unexpected") ||
+      priorCycle.period.next?.observedAt !== forecast.first.observedAt ||
+      priorCycle.period.first.observedAt !== priorCycle.interval.sinceTime ||
+      priorCycle.period.last.observedAt !== priorCycle.interval.untilTime ||
+      (priorCycle.period.observationGapMs ?? Infinity) > 60 * 60_000 ||
+      priorCycle.models.some(
+        (row) => row.unpricedRecords > 0 || !Number.isFinite(row.costUsd) || row.costUsd < 0,
+      )
+    )
+      return null;
+    const costUsd = priorCycle.models.reduce((sum, row) => sum + row.costUsd, 0);
+    const hours = (priorUntil - priorSince) / HOUR;
+    const remainingValueUsd = priorCycle.remainingValueUsd;
+    if (remainingValueUsd === null || !Number.isFinite(remainingValueUsd) || remainingValueUsd < 0)
+      return null;
+    return projectApiCostPace(
+      forecast,
+      now,
+      costUsd,
+      hours,
+      remainingValueUsd,
+      true,
+      priorCycle.interval.sinceTime,
+      priorCycle.interval.untilTime,
+    );
+  }
+  if (!input || input.models === null) return null;
   const { interval, models, remainingValueUsd } = input;
   const observed = Date.parse(interval.untilTime);
   const since = Date.parse(interval.sinceTime);
@@ -191,7 +257,30 @@ export function apiCostPace(forecast: QuotaForecast, input: ApiPaceInput | null,
     return null;
   const costUsd = models.reduce((sum, row) => sum + row.costUsd, 0);
   const hours = (observed - since) / HOUR;
+  return projectApiCostPace(
+    forecast,
+    now,
+    costUsd,
+    hours,
+    remainingValueUsd,
+    false,
+    interval.sinceTime,
+    interval.untilTime,
+  );
+}
+
+function projectApiCostPace(
+  forecast: QuotaForecast,
+  now: number,
+  costUsd: number,
+  hours: number,
+  remainingValueUsd: number,
+  provisional: boolean,
+  sourceSince: string,
+  sourceUntil: string,
+) {
   const usdPerHour = costUsd / hours;
+  const observed = Date.parse(forecast.latest.observedAt);
   const reset = Date.parse(forecast.planningResetAt);
   const exhaustion =
     remainingValueUsd === 0
@@ -227,5 +316,8 @@ export function apiCostPace(forecast: QuotaForecast, input: ApiPaceInput | null,
       remainingValueUsd > 0
         ? (forecast.latest.remainingPercent * remainingAtResetUsd) / remainingValueUsd
         : 0,
+    provisional,
+    sourceSince,
+    sourceUntil,
   };
 }

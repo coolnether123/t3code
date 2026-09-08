@@ -1,4 +1,4 @@
-import type { UsageTokenTotals } from "@t3tools/contracts";
+import type { UsageQuotaInterval, UsageTokenTotals } from "@t3tools/contracts";
 import type { QuotaEnvironment } from "@t3tools/shared/usageQuota";
 
 // USD per million tokens, standard processing. Verified against OpenAI on 2026-09-05.
@@ -23,7 +23,13 @@ export function formatTokens(value: number) {
 }
 
 /** Same physical-source deduplication and exact interval as the dollar calibration. */
-export function monitoredModels(intervalId: string, environments: readonly QuotaEnvironment[]) {
+export function monitoredModels(
+  interval: string | UsageQuotaInterval,
+  environments: readonly QuotaEnvironment[],
+) {
+  const intervalId = typeof interval === "string" ? interval : interval.id;
+  const sinceTime = typeof interval === "string" ? undefined : interval.sinceTime;
+  const untilTime = typeof interval === "string" ? undefined : interval.untilTime;
   const seen = new Set<string>();
   const models = new Map<
     string,
@@ -37,8 +43,24 @@ export function monitoredModels(intervalId: string, environments: readonly Quota
     const sources = summary.sources.filter(
       (entry) => entry.fingerprint.provider === "codex" && entry.status !== "missing",
     );
-    if (sources.length === 0) return null;
-    for (const source of sources) {
+    const savedSources = (summary.quotaCostSnapshots ?? [])
+      .filter(
+        (entry) =>
+          entry.intervalId === intervalId &&
+          (sinceTime === undefined || entry.sinceTime === sinceTime) &&
+          (untilTime === undefined || entry.untilTime === untilTime) &&
+          entry.fingerprint.provider === "codex",
+      )
+      .map((entry) => ({ fingerprint: entry.fingerprint, status: "ok" as const }));
+    const sourceEntries = [...sources, ...savedSources].filter(
+      (entry, index, all) =>
+        all.findIndex(
+          (candidate) =>
+            JSON.stringify(candidate.fingerprint) === JSON.stringify(entry.fingerprint),
+        ) === index,
+    );
+    if (sourceEntries.length === 0) return null;
+    for (const source of sourceEntries) {
       if (source.status !== "ok") return null;
       const key = JSON.stringify([
         source.fingerprint.hostId,
@@ -55,9 +77,20 @@ export function monitoredModels(intervalId: string, environments: readonly Quota
           entry.fingerprint.volumeId === source.fingerprint.volumeId &&
           entry.fingerprint.provider === "codex",
       );
-      if (!row?.complete || !row.models) return null;
+      const saved = summary.quotaCostSnapshots?.find(
+        (entry) =>
+          entry.intervalId === intervalId &&
+          (sinceTime === undefined || entry.sinceTime === sinceTime) &&
+          (untilTime === undefined || entry.untilTime === untilTime) &&
+          entry.fingerprint.hostId === source.fingerprint.hostId &&
+          entry.fingerprint.resolvedHomePath === source.fingerprint.resolvedHomePath &&
+          entry.fingerprint.volumeId === source.fingerprint.volumeId &&
+          entry.fingerprint.provider === "codex",
+      );
+      const costRow = row?.complete && row.unpricedRecords === 0 ? row : saved;
+      if (!costRow?.models) return null;
       seen.add(key);
-      for (const item of row.models) {
+      for (const item of costRow.models) {
         const previous = models.get(item.model);
         models.set(
           item.model,

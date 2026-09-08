@@ -14,6 +14,7 @@ import {
   quotaIntervals,
   quotaPeriods,
   quotaValueSnapshots,
+  quotaValueWithHistoricalCalibration,
   quotaValueWithSnapshot,
   retainQuotaValueSnapshots,
   type QuotaValueSnapshot,
@@ -30,6 +31,7 @@ import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { TokenBudgetPanel } from "./TokenBudgetPanel";
 import { monitoredModels } from "./usageTokenBudget";
 import { apiPaceInterval } from "./usageApiPace";
+import type { PriorApiPaceInput } from "./usageApiPace";
 import { UsagePaceChart } from "./UsagePaceChart";
 import { ResetCheckPanel } from "./ResetCheckPanel";
 import { CommunityCheckPanel } from "./CommunityCheckPanel";
@@ -89,6 +91,9 @@ export function UsageResetPage() {
     trackers.find((environment) => environment.environmentId === trackerId) ?? trackers[0];
   const rawSamples = tracker?.summary?.quotaHistory?.samples;
   const samples = useMemo(() => quotaMonitoringSamples(rawSamples ?? []), [rawSamples]);
+  // Keep the complete saved stream for chart/fallback presentation. Cost queries
+  // below continue to use only the active monitoring run.
+  const historicalPeriods = useMemo(() => quotaPeriods(rawSamples ?? []), [rawSamples]);
   const periods = useMemo(() => quotaPeriods(samples), [samples]);
   const intervals = useMemo(() => quotaIntervals(periods), [periods]);
   const paceInterval = useMemo(() => apiPaceInterval(intervals.at(-1)), [intervals]);
@@ -102,6 +107,11 @@ export function UsageResetPage() {
     [paceInterval, historyInput],
   );
   const paceCosts = useUsage(paceInput);
+  const historical = historicalPeriods.at(-2);
+  const historicalInterval = useMemo(
+    () => (historical ? (quotaIntervals([historical]).at(0) ?? null) : null),
+    [historical],
+  );
   const paceModels = useMemo(
     () =>
       paceInterval
@@ -122,9 +132,33 @@ export function UsageResetPage() {
       ),
     [costs.environments, selectedIds],
   );
+  const selectedWithSavedCosts = useMemo(
+    () =>
+      selected.map((environment) => {
+        const historyEnvironment = history.environments.find(
+          (candidate) => candidate.environmentId === environment.environmentId,
+        );
+        const snapshots = historyEnvironment?.summary?.quotaCostSnapshots;
+        return snapshots === undefined
+          ? environment
+          : {
+              ...environment,
+              summary: environment.summary
+                ? {
+                    ...environment.summary,
+                    quotaCostSnapshots: [
+                      ...(environment.summary.quotaCostSnapshots ?? []),
+                      ...snapshots,
+                    ],
+                  }
+                : (historyEnvironment?.summary ?? environment.summary),
+            };
+      }),
+    [history.environments, selected],
+  );
   const currentValues = useMemo(
-    () => quotaValueSnapshots(tracker?.environmentId, periods, selected),
-    [tracker?.environmentId, periods, selected],
+    () => quotaValueSnapshots(tracker?.environmentId, historicalPeriods, selectedWithSavedCosts),
+    [tracker?.environmentId, historicalPeriods, selectedWithSavedCosts],
   );
   const [snapshots, setSnapshots] = useState<ReadonlyMap<string, QuotaValueSnapshot>>(
     () => new Map(),
@@ -132,10 +166,17 @@ export function UsageResetPage() {
   useEffect(() => {
     setSnapshots((previous) => retainQuotaValueSnapshots(previous, currentValues));
   }, [currentValues]);
-  const values = currentValues.map((current) => ({
-    period: current.period,
-    value: quotaValueWithSnapshot(current, snapshots),
-  }));
+  const values = currentValues.map((current, index) => {
+    const value = quotaValueWithSnapshot(current, snapshots);
+    const previous = index > 0 ? currentValues[index - 1] : undefined;
+    return {
+      period: current.period,
+      value: quotaValueWithHistoricalCalibration(
+        { ...current, value },
+        previous ? { ...previous, value: quotaValueWithSnapshot(previous, snapshots) } : undefined,
+      ),
+    };
+  });
   const last = samples.at(-1);
   const trackedManualResetCount = tracker?.summary?.quotaHistory?.bankedResetCount;
   const trackedManualResetCheckedAt = tracker?.summary?.quotaHistory?.bankedResetCheckedAt;
@@ -171,11 +212,33 @@ export function UsageResetPage() {
   };
 
   const current = values.at(-1);
+  const priorApiPace = useMemo<PriorApiPaceInput | null>(() => {
+    if (!historical || !historicalInterval || !current) return null;
+    return {
+      interval: historicalInterval,
+      period: historical,
+      models: monitoredModels(historicalInterval, selectedWithSavedCosts),
+      remainingValueUsd: current.value.remainingValueUsd,
+    };
+  }, [historical, historicalInterval, selectedWithSavedCosts, current]);
   const completed = values.slice(0, -1);
-  const models = useMemo(
-    () => (current ? monitoredModels(current.period.id, selected) : null),
-    [current?.period.id, selected],
+  const currentModels = useMemo(
+    () =>
+      current
+        ? monitoredModels(
+            {
+              id: current.period.id,
+              sinceTime: current.period.first.observedAt,
+              untilTime: current.period.last.observedAt,
+            },
+            selectedWithSavedCosts,
+          )
+        : null,
+    [current?.period.id, selectedWithSavedCosts],
   );
+  const models =
+    currentModels ??
+    (current?.value.historicalCalibration !== undefined ? (priorApiPace?.models ?? null) : null);
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden bg-background text-foreground">
       <WorkspacePageHeader electron={isElectron}>
@@ -196,6 +259,9 @@ export function UsageResetPage() {
           >
             <a className="hover:text-foreground" href="#api-value">
               API value
+            </a>
+            <a className="hover:text-foreground" href="#reset-history">
+              Reset history
             </a>
             <a className="hover:text-foreground" href="#token-budget">
               Token planner
@@ -253,7 +319,7 @@ export function UsageResetPage() {
           {tracker && last && current ? (
             <>
               <UsagePaceChart
-                samples={samples}
+                samples={rawSamples ?? samples}
                 news={news}
                 manualResets={
                   trackedManualResetCount === undefined
@@ -277,6 +343,7 @@ export function UsageResetPage() {
                       }
                     : null
                 }
+                priorApiPace={priorApiPace}
               />
               <section
                 id="api-value"
@@ -285,7 +352,7 @@ export function UsageResetPage() {
               >
                 <div className="flex flex-wrap items-baseline justify-between gap-2">
                   <h2 className="text-sm font-medium">API-equivalent value</h2>
-                  <span className="text-xs text-muted-foreground">This monitored cycle only</span>
+                  <span className="text-xs text-muted-foreground">Measured use this cycle</span>
                 </div>
                 <dl className="mt-4 grid grid-cols-2 gap-5 [&>div]:min-w-0">
                   <div>
@@ -305,7 +372,16 @@ export function UsageResetPage() {
                     </dd>
                   </div>
                 </dl>
-                {current.period.usedPercentagePoints < 5 ? (
+                {current.value.historicalCalibration ? (
+                  <p className="mt-3 text-xs text-muted-foreground">
+                    Remaining value is provisional, calibrated from{" "}
+                    {dateTime(current.value.historicalCalibration.since)} to{" "}
+                    {dateTime(current.value.historicalCalibration.until)}. Current-cycle calibration
+                    replaces it after enough measured usage.
+                  </p>
+                ) : null}
+                {current.period.usedPercentagePoints < 5 &&
+                current.value.remainingValueUsd === null ? (
                   <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
                     {current.period.usedPercentagePoints} of 5 percentage points observed. More
                     readings are needed to estimate dollars left. The {100 - last.remainingPercent}%
@@ -333,9 +409,74 @@ export function UsageResetPage() {
                   budgetUsd={current.value.remainingValueUsd}
                   models={models}
                   observedAt={current.period.last.observedAt}
+                  provisional={current.value.historicalCalibration !== undefined}
+                  priorModelMix={
+                    currentModels === null && current.value.historicalCalibration !== undefined
+                  }
+                  {...(current.value.historicalCalibration
+                    ? { calibration: current.value.historicalCalibration }
+                    : {})}
                 />
               </div>
               <BirthdayGreeting />
+              <section
+                id="reset-history"
+                className="border-t border-border pt-5"
+                aria-label="Reset history"
+              >
+                <h2 className="text-sm font-medium">Resets while monitored</h2>
+                {historicalPeriods.length < 2 ? (
+                  <p className="mt-3 text-sm text-muted-foreground">
+                    No reset observed since {dateTime(samples[0]!.observedAt)}. New resets will
+                    appear here with the usage left beforehand.
+                  </p>
+                ) : (
+                  <div className="mt-3 divide-y divide-border">
+                    {historicalPeriods
+                      .slice(0, -1)
+                      .toReversed()
+                      .map((period) => {
+                        const value = values.find((entry) => entry.period.id === period.id)?.value;
+                        return (
+                          <div
+                            key={period.id}
+                            className="flex flex-wrap justify-between gap-3 py-3"
+                          >
+                            <div>
+                              <p className="text-sm">
+                                {(period.observationGapMs ?? Infinity) > 60 * 60_000
+                                  ? "Window changed across an observation gap"
+                                  : period.resetKind === "ambiguous"
+                                    ? "Usage window changed"
+                                    : "Usage returned"}
+                              </p>
+                              <p className="mt-1 text-xs text-muted-foreground">
+                                {dateTime(period.last.observedAt)} to{" "}
+                                {dateTime(period.next!.observedAt)}
+                              </p>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-sm tabular-nums">
+                                {period.last.remainingPercent}% left · {period.usedPercentagePoints}
+                                % used
+                              </p>
+                              <p className="mt-1 text-xs text-muted-foreground">
+                                {value?.costUsd !== null && value !== undefined
+                                  ? `${estimate(value.costUsd)} observed cost · `
+                                  : ""}
+                                {(period.observationGapMs ?? Infinity) > 60 * 60_000 ||
+                                value?.unusedValueUsd === null ||
+                                value === undefined
+                                  ? "Dollar estimate not established"
+                                  : `≈ ${estimate(value.unusedValueUsd)} unused`}
+                              </p>
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
+              </section>
               <section id="luna-research" aria-label="Reset research" className="min-w-0">
                 <div className="flex flex-wrap items-baseline justify-between gap-2">
                   <h2 className="text-sm font-medium">Reset research</h2>
@@ -356,44 +497,6 @@ export function UsageResetPage() {
                   />
                 </div>
               </section>
-              <section className="border-t border-border pt-5" aria-label="Resets while monitored">
-                <h2 className="text-sm font-medium">Resets while monitored</h2>
-                {completed.length === 0 ? (
-                  <p className="mt-3 text-sm text-muted-foreground">
-                    No reset observed since {dateTime(samples[0]!.observedAt)}. New resets will
-                    appear here with the usage left beforehand.
-                  </p>
-                ) : (
-                  <div className="mt-3 divide-y divide-border">
-                    {completed.toReversed().map(({ period, value }) => (
-                      <div key={period.id} className="flex flex-wrap justify-between gap-3 py-3">
-                        <div>
-                          <p className="text-sm">
-                            {period.resetKind === "ambiguous"
-                              ? "Usage window changed"
-                              : "Usage returned"}
-                          </p>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            {dateTime(period.last.observedAt)} to{" "}
-                            {dateTime(period.next!.observedAt)}
-                          </p>
-                        </div>
-                        <div className="text-right">
-                          <p className="text-sm tabular-nums">
-                            {period.last.remainingPercent}% left beforehand
-                          </p>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            {value.unusedValueUsd === null
-                              ? "Dollar estimate not established"
-                              : `≈ ${estimate(value.unusedValueUsd)} unused`}
-                          </p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </section>
-
               <details className="border-t border-border">
                 <summary className="min-h-11 cursor-pointer content-center text-sm">
                   Tracking and computers

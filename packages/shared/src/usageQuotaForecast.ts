@@ -17,6 +17,7 @@ export function quotaForecast(
   const periods = quotaPeriods(monitored);
   const period = periods.at(-1);
   if (!period) return null;
+  const prior = periods.at(-2);
   const latest = period.last;
   const observed = Date.parse(latest.observedAt);
   const weeklyReset = Date.parse(latest.resetsAt);
@@ -35,7 +36,19 @@ export function quotaForecast(
     monitoredDays >= 1 / 24 && period.usedPercentagePoints >= 1
       ? period.usedPercentagePoints / monitoredDays
       : null;
-  const expectedRate = recentRate === null ? windowRate : 0.7 * recentRate + 0.3 * windowRate;
+  const historicalRate =
+    period.usedPercentagePoints < 5 &&
+    prior !== undefined &&
+    (prior.resetKind === "scheduled" || prior.resetKind === "unexpected") &&
+    prior.next?.observedAt === period.first.observedAt &&
+    (prior.observationGapMs ?? Infinity) <= 60 * 60_000 &&
+    prior.usedPercentagePoints >= 5 &&
+    Date.parse(prior.last.observedAt) - Date.parse(prior.first.observedAt) >= 60 * 60_000
+      ? (prior.usedPercentagePoints * DAY) /
+        (Date.parse(prior.last.observedAt) - Date.parse(prior.first.observedAt))
+      : null;
+  const expectedRate =
+    recentRate === null ? (historicalRate ?? windowRate) : 0.7 * recentRate + 0.3 * windowRate;
   const remainingAtReset = Math.max(latest.remainingPercent - expectedRate * daysLeft, 0);
   const exhaustion =
     latest.remainingPercent === 0
@@ -112,6 +125,14 @@ export function quotaForecast(
     recentPaceUnavailableReason: stale
       ? "Recent pace needs a fresh reading."
       : "Waiting for an observed percentage drop and a timed interval. Resets and stale gaps restart timing.",
+    historicalPace:
+      historicalRate === null || recentRate !== null || prior === undefined
+        ? null
+        : {
+            percentPerDay: historicalRate,
+            since: prior.first.observedAt,
+            until: prior.last.observedAt,
+          },
     resetInMs: Math.max(reset - now, 0),
     exhaustionInMs: exhaustion === null ? null : Math.max(exhaustion - now, 0),
     exhaustionAt,

@@ -7,6 +7,7 @@ import {
   manualResetScenario,
   usageRunwayPlan,
   type ApiPaceInput,
+  type PriorApiPaceInput,
 } from "./usageApiPace";
 
 const now = Date.parse("2026-09-05T12:00:00Z");
@@ -44,6 +45,108 @@ const input: ApiPaceInput = {
 };
 
 describe("API cost pace", () => {
+  it("uses a complete prior cycle provisionally while the current cycle is too short", () => {
+    const currentSamples = [
+      { ...samples[0]!, observedAt: "2026-09-04T14:00:00.000Z", remainingPercent: 60 },
+      { ...samples[1]!, observedAt: "2026-09-04T15:00:00.000Z", remainingPercent: 40 },
+      {
+        observedAt: "2026-09-04T15:10:00.000Z",
+        remainingPercent: 100,
+        resetsAt: "2026-09-11T15:00:00.000Z",
+      },
+      {
+        observedAt: "2026-09-04T15:20:00.000Z",
+        remainingPercent: 99,
+        resetsAt: "2026-09-11T15:00:00.000Z",
+      },
+    ];
+    const currentForecast = quotaForecast(currentSamples, Date.parse("2026-09-04T15:20:00.000Z"))!;
+    const currentPeriods = quotaPeriods(currentSamples);
+    const prior: PriorApiPaceInput = {
+      interval: {
+        id: "prior",
+        sinceTime: "2026-09-04T14:00:00.000Z",
+        untilTime: "2026-09-04T15:00:00.000Z",
+      },
+      models: input.models,
+      remainingValueUsd: 50,
+      period: currentPeriods[0]!,
+    };
+    const result = apiCostPace(
+      currentForecast,
+      null,
+      Date.parse("2026-09-04T15:20:00.000Z"),
+      prior,
+    )!;
+    expect(result).toMatchObject({
+      provisional: true,
+      usdPerHour: 60,
+      remainingValueUsd: 50,
+      sourceSince: prior.interval.sinceTime,
+      sourceUntil: prior.interval.untilTime,
+    });
+    expect(result.exhaustionAt).toBe("2026-09-04T16:10:00.000Z");
+  });
+
+  it("prefers valid current-cycle evidence over a provisional prior cycle", () => {
+    const prior = {
+      interval,
+      models: input.models,
+      remainingValueUsd: 50,
+      period: quotaPeriods(samples)[0]!,
+    } satisfies PriorApiPaceInput;
+    const result = apiCostPace(forecast, input, now, prior)!;
+    expect(result.provisional).toBe(false);
+    expect(result.sourceSince).toBe(interval.sinceTime);
+  });
+
+  it("rejects prior evidence without a classified adjacent reset and short gap", () => {
+    const periods = quotaPeriods([
+      { ...samples[0]!, observedAt: "2026-09-04T14:00:00.000Z", remainingPercent: 60 },
+      { ...samples[1]!, observedAt: "2026-09-04T15:00:00.000Z", remainingPercent: 40 },
+      {
+        observedAt: "2026-09-04T18:00:00.000Z",
+        remainingPercent: 100,
+        resetsAt: "2026-09-11T15:00:00.000Z",
+      },
+      {
+        observedAt: "2026-09-04T18:10:00.000Z",
+        remainingPercent: 99,
+        resetsAt: "2026-09-11T15:00:00.000Z",
+      },
+    ]);
+    const longGap = {
+      interval: {
+        id: "prior",
+        sinceTime: "2026-09-04T14:00:00.000Z",
+        untilTime: "2026-09-04T15:00:00.000Z",
+      },
+      models: input.models,
+      remainingValueUsd: 50,
+      period: periods[0]!,
+    } satisfies PriorApiPaceInput;
+    const longGapForecast = quotaForecast(
+      [
+        { ...samples[0]!, observedAt: "2026-09-04T14:00:00.000Z", remainingPercent: 60 },
+        { ...samples[1]!, observedAt: "2026-09-04T15:00:00.000Z", remainingPercent: 40 },
+        {
+          observedAt: "2026-09-04T18:00:00.000Z",
+          remainingPercent: 100,
+          resetsAt: "2026-09-11T15:00:00.000Z",
+        },
+        {
+          observedAt: "2026-09-04T18:10:00.000Z",
+          remainingPercent: 99,
+          resetsAt: "2026-09-11T15:00:00.000Z",
+        },
+      ],
+      Date.parse("2026-09-04T18:10:00.000Z"),
+    )!;
+    expect(
+      apiCostPace(longGapForecast, null, Date.parse("2026-09-04T18:10:00.000Z"), longGap),
+    ).toBeNull();
+  });
+
   it("uses the most recent six hours and respects a new cycle's start", () => {
     expect(interval.sinceTime).toBe("2026-09-05T06:00:00.000Z");
     const newCycle = quotaPeriods([

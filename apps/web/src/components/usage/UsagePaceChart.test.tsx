@@ -162,4 +162,52 @@ describe("weekly pace chart", () => {
       vi.unstubAllGlobals();
     }
   });
+  it("uses time-positioned future hit testing and returns to recorded values with keyboard", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const at = Date.parse("2026-08-31T00:00:00.000Z");
+    vi.spyOn(Date, "now").mockReturnValue(at + 30 * 60_000);
+    const rows = [
+      {
+        ...samples[0]!,
+        observedAt: new Date(at - 6 * 3_600_000).toISOString(),
+        remainingPercent: 90,
+      },
+      {
+        ...samples[0]!,
+        observedAt: new Date(at - 30 * 60_000).toISOString(),
+        remainingPercent: 80,
+      },
+    ];
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<UsagePaceChart samples={rows} />));
+      const plot = container.querySelector("svg")!;
+      vi.spyOn(plot, "getBoundingClientRect").mockReturnValue({
+        left: 0,
+        top: 0,
+        width: 100,
+        height: 200,
+        right: 100,
+        bottom: 200,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      });
+      await act(async () =>
+        plot.dispatchEvent(new MouseEvent("mousemove", { clientX: 95, bubbles: true })),
+      );
+      const tooltip = container.querySelector('[role="status"].pointer-events-none')!;
+      expect(tooltip.textContent).toContain("Projection");
+      expect(container.textContent).toContain("target");
+      await act(async () =>
+        plot.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true })),
+      );
+      expect(tooltip.textContent).toContain("Recorded");
+      expect(tooltip.textContent).not.toContain("Projection");
+    } finally {
+      await act(async () => root.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
 });

@@ -131,6 +131,8 @@ export interface QuotaValue {
   readonly remainingValueUsd: number | null;
   readonly unusedValueUsd: number | null;
   readonly reason: string | null;
+  readonly historicalCalibration?: { readonly since: string; readonly until: string };
+  readonly historicalCostRecordedAt?: string;
 }
 
 export interface QuotaValueSnapshot {
@@ -195,6 +197,37 @@ export function quotaValueWithSnapshot(
   };
 }
 
+/**
+ * Carries a completed cycle's price calibration across a confirmed reset.
+ * The current cycle's measured cost is deliberately left untouched.
+ */
+export function quotaValueWithHistoricalCalibration(
+  current: QuotaValueSnapshot,
+  previous: QuotaValueSnapshot | undefined,
+): QuotaValue {
+  if (
+    current.value.usdPerPercentagePoint !== null ||
+    previous === undefined ||
+    (previous.period.resetKind !== "scheduled" && previous.period.resetKind !== "unexpected") ||
+    previous.period.next?.observedAt !== current.period.first.observedAt ||
+    (previous.period.observationGapMs ?? Infinity) > 60 * MINUTE_MS ||
+    previous.value.usdPerPercentagePoint === null ||
+    !Number.isFinite(previous.value.usdPerPercentagePoint) ||
+    previous.value.usdPerPercentagePoint <= 0
+  )
+    return current.value;
+  const calibration = previous.value.usdPerPercentagePoint;
+  return {
+    ...current.value,
+    usdPerPercentagePoint: calibration,
+    remainingValueUsd: calibration * current.period.last.remainingPercent,
+    historicalCalibration: {
+      since: previous.period.first.observedAt,
+      until: previous.period.last.observedAt,
+    },
+  };
+}
+
 function sourceKey(source: UsageSourceFingerprint): string {
   return JSON.stringify([source.hostId, source.provider, source.resolvedHomePath, source.volumeId]);
 }
@@ -219,6 +252,7 @@ export function quotaValue(
   let costUsd = 0;
   let records = 0;
   let unpricedRecords = 0;
+  let savedCostRecordedAt: string | undefined;
   for (const environment of [...environments].sort((a, b) =>
     a.environmentId.localeCompare(b.environmentId),
   )) {
@@ -231,6 +265,25 @@ export function quotaValue(
     }
     if (!summary) {
       return unavailable(`${label} has not supplied a complete usage result.`);
+    }
+    const savedOnly = (summary.quotaCostSnapshots ?? []).filter(
+      (candidate) =>
+        candidate.intervalId === period.id &&
+        candidate.sinceTime === period.first.observedAt &&
+        candidate.untilTime === period.last.observedAt,
+    );
+    if (summary.quotaCosts === undefined && savedOnly.length > 0) {
+      for (const saved of savedOnly) {
+        if (!Number.isFinite(saved.costUsd) || saved.costUsd < 0)
+          return unavailable("A saved cost result is invalid.");
+        const key = sourceKey(saved.fingerprint);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        costUsd += saved.costUsd;
+        records += saved.records;
+        savedCostRecordedAt = saved.recordedAt;
+      }
+      continue;
     }
     if (summary.quotaCosts === undefined)
       return unavailable(`${label} needs a server with reset-history support.`);
@@ -247,14 +300,22 @@ export function quotaValue(
         (candidate) =>
           candidate.intervalId === period.id && sourceKey(candidate.fingerprint) === key,
       );
-      if (!row) return unavailable(`${label} has not supplied costs for this observed period.`);
-      if (!row.complete) return unavailable(`${label}'s matching transcript scan is incomplete.`);
-      if (!Number.isFinite(row.costUsd) || row.costUsd < 0)
+      const saved = summary.quotaCostSnapshots?.find(
+        (candidate) =>
+          candidate.intervalId === period.id &&
+          candidate.sinceTime === period.first.observedAt &&
+          candidate.untilTime === period.last.observedAt &&
+          sourceKey(candidate.fingerprint) === key,
+      );
+      const cost = row?.complete && row.unpricedRecords === 0 ? row : saved;
+      if (!cost) return unavailable(`${label} has not supplied costs for this observed period.`);
+      if (!Number.isFinite(cost.costUsd) || cost.costUsd < 0)
         return unavailable("A cost result is invalid.");
       seen.add(key);
-      costUsd += row.costUsd;
-      records += row.records;
-      unpricedRecords += row.unpricedRecords;
+      costUsd += cost.costUsd;
+      records += cost.records;
+      unpricedRecords += "unpricedRecords" in cost ? cost.unpricedRecords : 0;
+      if (row !== cost && saved !== undefined) savedCostRecordedAt = saved.recordedAt;
     }
   }
   if (records === 0)
@@ -267,6 +328,7 @@ export function quotaValue(
     remainingValueUsd: null,
     unusedValueUsd: null,
     reason: null,
+    ...(savedCostRecordedAt === undefined ? {} : { historicalCostRecordedAt: savedCostRecordedAt }),
   };
   if (period.usedPercentagePoints < 5)
     return {

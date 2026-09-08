@@ -148,15 +148,92 @@ describe("Codex monitor page", () => {
     expect(markup).toContain("$40.00");
     expect(markup).toContain("Learning");
     expect(markup).toContain("2 of 5 percentage points");
-    expect(markup).toContain("No reset observed since");
-    expect(markup).not.toContain("Jul");
-    expect(markup).not.toContain("12%");
+    expect(markup).not.toContain("No reset observed since");
+    expect(markup).toContain("Jul");
+    expect(markup).toContain("12% left");
+    expect(markup).toContain("Window changed across an observation gap");
     expect(markup).not.toContain("Unexpected usage return");
     expect(markup).toContain("Tracking and computers");
     expect(markup).toContain("Check community with Luna");
     expect(markup.indexOf("Usage over time")).toBeLessThan(
       markup.indexOf("Check community with Luna"),
     );
+    expect(markup.indexOf("Reset history")).toBeLessThan(
+      markup.indexOf("Check community with Luna"),
+    );
     expect(markup).toContain("How far could the rest go?");
+  });
+  it("shows a saved dollar cost for an older cycle after a monitoring gap", () => {
+    const fingerprint = {
+      hostId: "desktop",
+      provider: "codex",
+      resolvedHomePath: "/sessions",
+      volumeId: "1",
+    };
+    state.environments = [
+      {
+        environmentId: "desktop",
+        label: "Desktop",
+        isPending: false,
+        error: null,
+        summary: {
+          sources: [{ fingerprint, status: "ok" }],
+          quotaCosts: [
+            {
+              intervalId: "2026-08-30T20:00:00Z",
+              fingerprint,
+              costUsd: 5,
+              records: 1,
+              unpricedRecords: 0,
+              complete: true,
+            },
+          ],
+          quotaCostSnapshots: [
+            {
+              intervalId: "2026-08-27T20:00:00Z",
+              fingerprint,
+              sinceTime: "2026-08-27T20:00:00Z",
+              untilTime: "2026-08-27T21:00:00Z",
+              costUsd: 30,
+              records: 4,
+              recordedAt: "2026-08-27T22:00:00Z",
+              firstRemainingPercent: 80,
+              lastRemainingPercent: 60,
+              resetsAt: "2026-08-28T00:00:00Z",
+            },
+          ],
+          quotaHistory: {
+            status: "ready",
+            source: "fixture",
+            message: null,
+            samples: [
+              {
+                observedAt: "2026-08-27T20:00:00Z",
+                remainingPercent: 80,
+                resetsAt: "2026-08-28T00:00:00Z",
+              },
+              {
+                observedAt: "2026-08-27T21:00:00Z",
+                remainingPercent: 60,
+                resetsAt: "2026-08-28T00:00:00Z",
+              },
+              {
+                observedAt: "2026-08-30T20:00:00Z",
+                remainingPercent: 100,
+                resetsAt: "2026-09-06T00:00:00Z",
+              },
+              {
+                observedAt: "2026-08-30T22:00:00Z",
+                remainingPercent: 99,
+                resetsAt: "2026-09-06T00:00:00Z",
+              },
+            ],
+          },
+        },
+      },
+    ];
+    const markup = renderToStaticMarkup(<UsageResetPage />);
+    expect(markup).toContain("$30 observed cost");
+    expect(markup).toContain("Dollar estimate not established");
   });
 });

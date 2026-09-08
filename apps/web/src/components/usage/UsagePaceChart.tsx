@@ -4,7 +4,12 @@ import {
   type ResetNews,
 } from "@t3tools/client-runtime/resetAnnouncements";
 import { quotaDuration, quotaForecast } from "@t3tools/shared/usageQuotaForecast";
-import { apiCostPace, type ApiPaceInput, type ManualResetSummary } from "./usageApiPace";
+import {
+  apiCostPace,
+  type ApiPaceInput,
+  type ManualResetSummary,
+  type PriorApiPaceInput,
+} from "./usageApiPace";
 import { UsageRunwayPlanner } from "./UsageRunwayPlanner";
 import { formatUsd } from "@t3tools/shared/usageFormat";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
@@ -28,18 +33,21 @@ export function UsagePaceChart({
   news,
   resetCheck,
   apiPace = null,
+  priorApiPace = null,
   manualResets = null,
 }: {
   readonly samples: readonly UsageQuotaSample[];
   readonly news?: ResetNews;
   readonly resetCheck?: ReactNode;
   readonly apiPace?: ApiPaceInput | null;
+  readonly priorApiPace?: PriorApiPaceInput | null;
   readonly manualResets?: ManualResetSummary | null;
 }) {
   const [now, setNow] = useState(Date.now);
   const [view, setView] = useState<"forecast" | "observed">("forecast");
   const [showApiPace, setShowApiPace] = useState(true);
   const [inspected, setInspected] = useState<number | null>(null);
+  const [pointerX, setPointerX] = useState<number | null>(null);
   useEffect(() => setNow(Date.now()), [samples]);
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 60_000);
@@ -52,7 +60,7 @@ export function UsagePaceChart({
   );
   if (!forecast) return null;
   const f = forecast;
-  const costPace = apiCostPace(f, apiPace, now);
+  const costPace = apiCostPace(f, apiPace, now, priorApiPace);
   const observed = view === "observed";
   const y = (percent: number) => 196 - percent * 1.92;
   const pointX = (p: (typeof f.points)[number]) =>
@@ -65,6 +73,42 @@ export function UsagePaceChart({
     .join(" ");
   const ending = observed ? f.latest.observedAt : f.planningResetAt;
   const inspectedPoint = f.points[Math.min(inspected ?? f.points.length - 1, f.points.length - 1)]!;
+  const futureFraction =
+    pointerX !== null && !observed && pointerX > f.observationX ? pointerX : null;
+  const futureAt =
+    futureFraction === null
+      ? null
+      : new Date(
+          Date.parse(f.first.observedAt) +
+            futureFraction * (Date.parse(f.planningResetAt) - Date.parse(f.first.observedAt)),
+        ).toISOString();
+  const clampPercent = (value: number) => Math.max(0, Math.min(100, value));
+  const targetAtFuture =
+    futureFraction === null
+      ? null
+      : clampPercent(
+          f.latest.remainingPercent +
+            (f.reserve - f.latest.remainingPercent) *
+              ((futureFraction - f.observationX) / Math.max(1 - f.observationX, 1e-9)),
+        );
+  const blendedAtFuture =
+    futureFraction === null
+      ? null
+      : clampPercent(
+          f.latest.remainingPercent +
+            (f.projectionEndPercent - f.latest.remainingPercent) *
+              ((futureFraction - f.observationX) /
+                Math.max(f.projectionEndX - f.observationX, 1e-9)),
+        );
+  const apiAtFuture =
+    futureFraction === null || !showApiPace || !costPace
+      ? null
+      : clampPercent(
+          f.latest.remainingPercent +
+            (costPace.projectionEndPercent - f.latest.remainingPercent) *
+              ((futureFraction - f.observationX) /
+                Math.max(costPace.projectionEndX - f.observationX, 1e-9)),
+        );
   const hourly = f.resetInMs < 86_400_000;
   return (
     <section
@@ -111,6 +155,13 @@ export function UsagePaceChart({
           reading.
         </p>
       ) : null}
+      {f.historicalPace ? (
+        <p role="status" className="mt-3 border-l-2 border-sky-500 pl-3 text-sm">
+          Provisional pace uses the completed cycle from {date(f.historicalPace.since)} through{" "}
+          {date(f.historicalPace.until)} while this cycle warms. Fresh current-cycle readings
+          replace it automatically.
+        </p>
+      ) : null}
 
       <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-sm font-medium">Usage over time</h2>
@@ -151,6 +202,45 @@ export function UsagePaceChart({
             preserveAspectRatio="none"
             className="h-full w-full overflow-visible"
             role="img"
+            tabIndex={0}
+            onMouseMove={(event) => {
+              const rect = event.currentTarget.getBoundingClientRect();
+              const fraction = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+              setPointerX(fraction);
+              const nearest = f.points.reduce(
+                (best, point, index) =>
+                  Math.abs(pointX(point) - fraction) < Math.abs(pointX(f.points[best]!) - fraction)
+                    ? index
+                    : best,
+                0,
+              );
+              setInspected(nearest);
+            }}
+            onClick={(event) => {
+              const rect = event.currentTarget.getBoundingClientRect();
+              const fraction = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+              setPointerX(fraction);
+              const nearest = f.points.reduce(
+                (best, point, index) =>
+                  Math.abs(pointX(point) - fraction) < Math.abs(pointX(f.points[best]!) - fraction)
+                    ? index
+                    : best,
+                0,
+              );
+              setInspected(nearest);
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+              event.preventDefault();
+              setPointerX(null);
+              const delta = event.key === "ArrowLeft" ? -1 : 1;
+              setInspected((current) =>
+                Math.max(
+                  0,
+                  Math.min(f.points.length - 1, (current ?? f.points.length - 1) + delta),
+                ),
+              );
+            }}
             aria-label={
               observed
                 ? "Recorded Codex remaining usage"
@@ -218,6 +308,14 @@ export function UsagePaceChart({
             />
           </svg>
           <span
+            role="status"
+            className="pointer-events-none absolute left-2 top-2 rounded bg-background/95 px-2 py-1 text-xs text-foreground shadow-sm"
+          >
+            {futureAt
+              ? `Projection ${date(futureAt)} · target ${targetAtFuture!.toFixed(0)}% · blended ${blendedAtFuture!.toFixed(0)}%${apiAtFuture === null ? "" : ` · API ${apiAtFuture.toFixed(0)}%`}`
+              : `Recorded ${date(inspectedPoint.observedAt)} · ${inspectedPoint.remainingPercent}% remaining`}
+          </span>
+          <span
             aria-hidden
             className="absolute size-2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-foreground"
             style={{
@@ -274,10 +372,12 @@ export function UsagePaceChart({
           {showApiPace ? (
             <p role="status" className="text-xs leading-relaxed text-muted-foreground">
               {costPace
-                ? `${formatUsd(costPace.usdPerHour)}/hour over the last ${costPace.hours.toFixed(1)} hours, including idle time. ${formatUsd(costPace.remainingValueUsd)} estimated at the last reading. ${costPace.exhaustionInMs === null ? "No spending in this interval; no exhaustion time projected." : costPace.exhaustsBeforeReset ? `Empty in ${quotaDuration(costPace.exhaustionInMs)} if this spending rate continues.` : `About ${formatUsd(costPace.remainingAtResetUsd)} left at reset.`}`
-                : f.stale
-                  ? "API cost pace needs a fresh account reading."
-                  : "API cost pace needs at least an hour of monitored history and complete, priced costs for the same interval and remaining balance."}
+                ? `${costPace.provisional ? "Provisional: " : ""}${formatUsd(costPace.usdPerHour)}/hour ${costPace.provisional ? `over its ${costPace.hours.toFixed(1)}-hour source interval` : `over the last ${costPace.hours.toFixed(1)} hours`}, including idle time. ${formatUsd(costPace.remainingValueUsd)} estimated at the last reading.${costPace.provisional ? ` Source cycle: ${date(costPace.sourceSince)} to ${date(costPace.sourceUntil)}.` : ""} ${costPace.exhaustionInMs === null ? "No spending in this interval; no exhaustion time projected." : costPace.exhaustsBeforeReset ? `Empty in ${quotaDuration(costPace.exhaustionInMs)} if this spending rate continues.` : `About ${formatUsd(costPace.remainingAtResetUsd)} left at reset.`}`
+                : f.historicalPace
+                  ? `Current API burn is warming. The chart's orange pace uses the completed cycle from ${date(f.historicalPace.since)} through ${date(f.historicalPace.until)} as a provisional baseline.`
+                  : f.stale
+                    ? "API cost pace needs a fresh account reading."
+                    : "API cost pace needs at least an hour of monitored history and complete, priced costs for the same interval and remaining balance."}
             </p>
           ) : null}
         </div>
