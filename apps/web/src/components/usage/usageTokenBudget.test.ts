@@ -170,6 +170,104 @@ describe("remaining API token scenarios", () => {
       ),
     ).toMatchObject([{ costUsd: 2 }]);
   });
+  it("uses exact saved models for a failed current request", () => {
+    const fingerprint = {
+      hostId: "host",
+      provider: "codex",
+      resolvedHomePath: "/sessions",
+      volumeId: "one",
+    };
+    const model = {
+      model: "gpt-6-astra",
+      costUsd: 20,
+      unpricedRecords: 0,
+      records: 4,
+      totals: {
+        uncachedInputTokens: 10,
+        cachedInputTokens: 2,
+        cacheCreationTokens: 1,
+        outputTokens: 7,
+        reasoningTokens: 3,
+      },
+    };
+    const environment = {
+      environmentId: "one",
+      label: "Desktop",
+      error: "current scan failed",
+      isPending: false,
+      summary: {
+        sources: [{ fingerprint, status: "error" }],
+        quotaCostSnapshots: [
+          {
+            intervalId: "current",
+            fingerprint,
+            sinceTime: "2026-08-30T20:00:00Z",
+            untilTime: "2026-08-30T21:00:00Z",
+            costUsd: 20,
+            records: 4,
+            recordedAt: "2026-08-31T00:00:00Z",
+            firstRemainingPercent: 80,
+            lastRemainingPercent: 70,
+            resetsAt: "2026-09-05T00:00:00Z",
+            models: [model],
+          },
+        ],
+      },
+    } as unknown as QuotaEnvironment;
+    expect(
+      monitoredModels(
+        { id: "current", sinceTime: "2026-08-30T20:00:00Z", untilTime: "2026-08-30T21:00:00Z" },
+        [environment],
+      ),
+    ).toMatchObject([{ model: "gpt-6-astra", costUsd: 20 }]);
+  });
+  it("does not hide a failed source when another source has saved models", () => {
+    const good = {
+      hostId: "host-a",
+      provider: "codex",
+      resolvedHomePath: "/sessions-a",
+      volumeId: "one",
+    };
+    const failed = {
+      hostId: "host-b",
+      provider: "codex",
+      resolvedHomePath: "/sessions-b",
+      volumeId: "two",
+    };
+    const environment = {
+      environmentId: "one",
+      label: "Desktop",
+      error: null,
+      isPending: false,
+      summary: {
+        sources: [
+          { fingerprint: good, status: "ok" },
+          { fingerprint: failed, status: "error" },
+        ],
+        quotaCostSnapshots: [
+          {
+            intervalId: "current",
+            fingerprint: good,
+            sinceTime: "2026-08-30T20:00:00Z",
+            untilTime: "2026-08-30T21:00:00Z",
+            costUsd: 2,
+            records: 1,
+            recordedAt: "2026-08-31T00:00:00Z",
+            firstRemainingPercent: 80,
+            lastRemainingPercent: 70,
+            resetsAt: "2026-09-05T00:00:00Z",
+            models: [],
+          },
+        ],
+      },
+    } as unknown as QuotaEnvironment;
+    expect(
+      monitoredModels(
+        { id: "current", sinceTime: "2026-08-30T20:00:00Z", untilTime: "2026-08-30T21:00:00Z" },
+        [environment],
+      ),
+    ).toBeNull();
+  });
   it("rejects a saved model rollup with the wrong interval boundary", () => {
     const fingerprint = {
       hostId: "host",

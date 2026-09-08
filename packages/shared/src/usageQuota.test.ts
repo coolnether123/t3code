@@ -299,6 +299,142 @@ describe("quota value estimates", () => {
     expect(value.historicalCostRecordedAt).toBe("2026-07-22T18:00:00Z");
   });
 
+  it("uses an exact saved cost when the current environment request failed", () => {
+    const saved = {
+      intervalId: period.id,
+      fingerprint,
+      sinceTime: period.first.observedAt,
+      untilTime: period.last.observedAt,
+      costUsd: 230,
+      records: 10,
+      recordedAt: "2026-07-22T18:00:00Z",
+      firstRemainingPercent: period.first.remainingPercent,
+      lastRemainingPercent: period.last.remainingPercent,
+      resetsAt: period.last.resetsAt,
+    };
+    const value = quotaValue(period, [
+      {
+        environmentId: "laptop",
+        label: "Laptop",
+        summary: { ...summary, quotaCosts: undefined, quotaCostSnapshots: [saved] },
+        isPending: false,
+        error: "current request failed",
+      },
+    ]);
+    expect(value.costUsd).toBe(230);
+    expect(value.historicalCostRecordedAt).toBe("2026-07-22T18:00:00Z");
+    expect(value.reason).toContain("Laptop could not report current usage");
+  });
+
+  it("does not use a failed environment's live cost without an exact saved row", () => {
+    const value = quotaValue(period, [
+      {
+        environmentId: "laptop",
+        label: "Laptop",
+        summary,
+        isPending: false,
+        error: "current request failed",
+      },
+    ]);
+    expect(value.costUsd).toBeNull();
+    expect(value.reason).toContain("Laptop could not report usage");
+  });
+
+  it("uses an exact saved source row when the live scan is incomplete", () => {
+    const saved = {
+      intervalId: period.id,
+      fingerprint,
+      sinceTime: period.first.observedAt,
+      untilTime: period.last.observedAt,
+      costUsd: 230,
+      records: 10,
+      recordedAt: "2026-07-22T18:00:00Z",
+      firstRemainingPercent: period.first.remainingPercent,
+      lastRemainingPercent: period.last.remainingPercent,
+      resetsAt: period.last.resetsAt,
+    };
+    const value = quotaValue(period, [
+      env("desktop", {
+        sources: summary.sources.map((source) => ({ ...source, status: "partial" })),
+        quotaCosts: [],
+        quotaCostSnapshots: [saved],
+      }),
+    ]);
+    expect(value.costUsd).toBe(230);
+  });
+
+  it("prefers the exact saved row over a complete live row from a partial source", () => {
+    const saved = {
+      intervalId: period.id,
+      fingerprint,
+      sinceTime: period.first.observedAt,
+      untilTime: period.last.observedAt,
+      costUsd: 230,
+      records: 10,
+      recordedAt: "2026-07-22T18:00:00Z",
+      firstRemainingPercent: period.first.remainingPercent,
+      lastRemainingPercent: period.last.remainingPercent,
+      resetsAt: period.last.resetsAt,
+    };
+    const value = quotaValue(period, [
+      env("desktop", {
+        sources: summary.sources.map((source) => ({ ...source, status: "partial" })),
+        quotaCosts: summary.quotaCosts!.map((row) => ({ ...row, costUsd: 460 })),
+        quotaCostSnapshots: [saved],
+      }),
+    ]);
+    expect(value.costUsd).toBe(230);
+    expect(value.reason).toContain("transcript scan is incomplete");
+  });
+
+  it("rejects a failed environment when one known source lacks an exact saved row", () => {
+    const otherFingerprint = { ...fingerprint, hostId: "laptop" };
+    const value = quotaValue(period, [
+      {
+        ...env("desktop", {
+          sources: [...summary.sources, { ...summary.sources[0]!, fingerprint: otherFingerprint }],
+          quotaCosts: undefined,
+          quotaCostSnapshots: [
+            {
+              intervalId: period.id,
+              fingerprint,
+              sinceTime: period.first.observedAt,
+              untilTime: period.last.observedAt,
+              costUsd: 230,
+              records: 10,
+              recordedAt: "2026-07-22T18:00:00Z",
+              firstRemainingPercent: period.first.remainingPercent,
+              lastRemainingPercent: period.last.remainingPercent,
+              resetsAt: period.last.resetsAt,
+            },
+          ],
+        }),
+        error: "offline",
+      },
+    ]);
+    expect(value.costUsd).toBeNull();
+    expect(value.reason).toContain("could not report usage");
+  });
+
+  it("rejects saved rows with a mismatched observed interval", () => {
+    const saved = {
+      intervalId: period.id,
+      fingerprint,
+      sinceTime: period.first.observedAt,
+      untilTime: "2026-07-22T18:00:00Z",
+      costUsd: 230,
+      records: 10,
+      recordedAt: "2026-07-22T18:00:00Z",
+      firstRemainingPercent: period.first.remainingPercent,
+      lastRemainingPercent: period.last.remainingPercent,
+      resetsAt: period.last.resetsAt,
+    };
+    expect(
+      quotaValue(period, [env("desktop", { quotaCosts: undefined, quotaCostSnapshots: [saved] })])
+        .costUsd,
+    ).toBeNull();
+  });
+
   it("rejects an ambiguous clock-only boundary", () => {
     const periods = quotaPeriods([
       sample("2026-07-21T16:00:00Z", 80),

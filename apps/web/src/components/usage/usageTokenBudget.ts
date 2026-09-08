@@ -38,11 +38,8 @@ export function monitoredModels(
   for (const environment of [...environments].sort((a, b) =>
     a.environmentId.localeCompare(b.environmentId),
   )) {
-    if (environment.error || !environment.summary) return null;
+    if (!environment.summary) return null;
     const summary = environment.summary;
-    const sources = summary.sources.filter(
-      (entry) => entry.fingerprint.provider === "codex" && entry.status !== "missing",
-    );
     const savedSources = (summary.quotaCostSnapshots ?? [])
       .filter(
         (entry) =>
@@ -52,6 +49,13 @@ export function monitoredModels(
           entry.fingerprint.provider === "codex",
       )
       .map((entry) => ({ fingerprint: entry.fingerprint, status: "ok" as const }));
+    // A failed current scan may still carry an exact saved rollup from the
+    // completed source interval. Use that rollup for the provisional planner;
+    // current measured rows remain unavailable until the scan succeeds.
+    if (environment.error && savedSources.length === 0) return null;
+    const sources = summary.sources.filter(
+      (entry) => entry.fingerprint.provider === "codex" && entry.status !== "missing",
+    );
     const sourceEntries = [...sources, ...savedSources].filter(
       (entry, index, all) =>
         all.findIndex(
@@ -61,7 +65,6 @@ export function monitoredModels(
     );
     if (sourceEntries.length === 0) return null;
     for (const source of sourceEntries) {
-      if (source.status !== "ok") return null;
       const key = JSON.stringify([
         source.fingerprint.hostId,
         source.fingerprint.provider,
@@ -87,7 +90,11 @@ export function monitoredModels(
           entry.fingerprint.volumeId === source.fingerprint.volumeId &&
           entry.fingerprint.provider === "codex",
       );
-      const costRow = row?.complete && row.unpricedRecords === 0 ? row : saved;
+      if (source.status !== "ok" && saved === undefined) return null;
+      const costRow =
+        !environment.error && source.status === "ok" && row?.complete && row.unpricedRecords === 0
+          ? row
+          : saved;
       if (!costRow?.models) return null;
       seen.add(key);
       for (const item of costRow.models) {

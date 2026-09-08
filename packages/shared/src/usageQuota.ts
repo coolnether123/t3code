@@ -253,13 +253,11 @@ export function quotaValue(
   let records = 0;
   let unpricedRecords = 0;
   let savedCostRecordedAt: string | undefined;
+  let savedFallbackReason: string | undefined;
   for (const environment of [...environments].sort((a, b) =>
     a.environmentId.localeCompare(b.environmentId),
   )) {
     const { summary, label } = environment;
-    if (environment.error) {
-      return unavailable(`${label} could not report usage. Refresh to retry.`);
-    }
     if (environment.isPending && !summary) {
       return unavailable(`${label} is still reading Codex transcripts.`);
     }
@@ -268,13 +266,42 @@ export function quotaValue(
     }
     const savedOnly = (summary.quotaCostSnapshots ?? []).filter(
       (candidate) =>
+        candidate.fingerprint.provider === "codex" &&
         candidate.intervalId === period.id &&
         candidate.sinceTime === period.first.observedAt &&
         candidate.untilTime === period.last.observedAt,
     );
-    if (summary.quotaCosts === undefined && savedOnly.length > 0) {
-      for (const saved of savedOnly) {
-        if (!Number.isFinite(saved.costUsd) || saved.costUsd < 0)
+    const requiredSavedSources = summary.sources.filter(
+      (source) => source.fingerprint.provider === "codex" && source.status !== "missing",
+    );
+    const savedForRequiredSources = new Set(
+      savedOnly.map((candidate) => sourceKey(candidate.fingerprint)),
+    );
+    // A history-only response can be merged into a failed current request.
+    // Consume only the exact persisted interval in that case; never treat the
+    // failed request's live totals as authoritative.
+    const canUseSavedOnly =
+      savedOnly.length > 0 &&
+      requiredSavedSources.every((source) =>
+        savedForRequiredSources.has(sourceKey(source.fingerprint)),
+      );
+    if (canUseSavedOnly && (environment.error !== null || summary.quotaCosts === undefined)) {
+      const savedRows =
+        requiredSavedSources.length === 0
+          ? savedOnly
+          : savedOnly.filter((saved) =>
+              requiredSavedSources.some(
+                (source) => sourceKey(source.fingerprint) === sourceKey(saved.fingerprint),
+              ),
+            );
+      for (const saved of savedRows) {
+        if (
+          !Number.isFinite(saved.costUsd) ||
+          saved.costUsd < 0 ||
+          !Number.isSafeInteger(saved.records) ||
+          saved.records < 0 ||
+          !Number.isFinite(Date.parse(saved.recordedAt))
+        )
           return unavailable("A saved cost result is invalid.");
         const key = sourceKey(saved.fingerprint);
         if (seen.has(key)) continue;
@@ -283,7 +310,13 @@ export function quotaValue(
         records += saved.records;
         savedCostRecordedAt = saved.recordedAt;
       }
+      if (environment.error !== null) {
+        savedFallbackReason = `${label} could not report current usage; showing the saved cost for this observed period.`;
+      }
       continue;
+    }
+    if (environment.error) {
+      return unavailable(`${label} could not report usage. Refresh to retry.`);
     }
     if (summary.quotaCosts === undefined)
       return unavailable(`${label} needs a server with reset-history support.`);
@@ -293,7 +326,6 @@ export function quotaValue(
     if (sources.length === 0)
       return unavailable(`${label} has no readable Codex transcript source.`);
     for (const source of sources) {
-      if (source.status !== "ok") return unavailable(`${label}'s transcript scan is incomplete.`);
       const key = sourceKey(source.fingerprint);
       if (seen.has(key)) continue;
       const row = summary.quotaCosts.find(
@@ -307,7 +339,10 @@ export function quotaValue(
           candidate.untilTime === period.last.observedAt &&
           sourceKey(candidate.fingerprint) === key,
       );
-      const cost = row?.complete && row.unpricedRecords === 0 ? row : saved;
+      if (source.status !== "ok" && saved === undefined)
+        return unavailable(`${label}'s transcript scan is incomplete.`);
+      const cost =
+        source.status === "ok" && row?.complete && row.unpricedRecords === 0 ? row : saved;
       if (!cost) return unavailable(`${label} has not supplied costs for this observed period.`);
       if (!Number.isFinite(cost.costUsd) || cost.costUsd < 0)
         return unavailable("A cost result is invalid.");
@@ -315,7 +350,12 @@ export function quotaValue(
       costUsd += cost.costUsd;
       records += cost.records;
       unpricedRecords += "unpricedRecords" in cost ? cost.unpricedRecords : 0;
-      if (row !== cost && saved !== undefined) savedCostRecordedAt = saved.recordedAt;
+      if (row !== cost && saved !== undefined) {
+        savedCostRecordedAt = saved.recordedAt;
+        if (source.status !== "ok") {
+          savedFallbackReason = `${label}'s transcript scan is incomplete; showing the saved cost for this observed period.`;
+        }
+      }
     }
   }
   if (records === 0)
@@ -327,13 +367,17 @@ export function quotaValue(
     usdPerPercentagePoint: null,
     remainingValueUsd: null,
     unusedValueUsd: null,
-    reason: null,
+    reason: savedFallbackReason ?? null,
     ...(savedCostRecordedAt === undefined ? {} : { historicalCostRecordedAt: savedCostRecordedAt }),
   };
+  const withFallbackReason = (reason: string) =>
+    savedFallbackReason === undefined ? reason : `${reason} ${savedFallbackReason}`;
   if (period.usedPercentagePoints < 5)
     return {
       ...measured,
-      reason: "At least 5 percentage points of observed usage are needed for a conversion.",
+      reason: withFallbackReason(
+        "At least 5 percentage points of observed usage are needed for a conversion.",
+      ),
     };
   const usdPerPercentagePoint = costUsd / period.usedPercentagePoints;
   const calibrated = {
@@ -344,27 +388,31 @@ export function quotaValue(
   if (period.resetKind === "unobserved")
     return {
       ...calibrated,
-      reason:
+      reason: withFallbackReason(
         "Based on the last reading and current model mix. Usage after that reading is not included.",
+      ),
     };
   if (period.resetKind === "ambiguous")
     return {
       ...calibrated,
-      reason:
+      reason: withFallbackReason(
         "Value left is estimated at the last reading. This change cannot be identified as a reset.",
+      ),
     };
   if (period.observationGapMs === null || period.observationGapMs > 60 * MINUTE_MS) {
     return {
       ...calibrated,
-      reason:
+      reason: withFallbackReason(
         "Value left is estimated at the last reading. The reset observations are over an hour apart, so value left at the reset is unknown.",
+      ),
     };
   }
   return {
     ...calibrated,
     unusedValueUsd: usdPerPercentagePoint * period.last.remainingPercent,
-    reason:
+    reason: withFallbackReason(
       "Based on the last pre-reset observation and the same model mix. Usage between observations is unknown.",
+    ),
   };
 }
 

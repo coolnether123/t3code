@@ -11,7 +11,7 @@ const state = vi.hoisted(() => ({
   useUsage: vi.fn(),
 }));
 vi.mock("../../state/usage", () => ({
-  useUsage: (..._args: unknown[]) => state.useUsage(),
+  useUsage: (...args: unknown[]) => state.useUsage(...args),
 }));
 vi.mock("@t3tools/client-runtime/resetAnnouncements", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@t3tools/client-runtime/resetAnnouncements")>()),
@@ -235,5 +235,175 @@ describe("Codex monitor page", () => {
     const markup = renderToStaticMarkup(<UsageResetPage />);
     expect(markup).toContain("$30 observed cost");
     expect(markup).toContain("Dollar estimate not established");
+  });
+
+  it.each(["failed", "empty"] as const)(
+    "keeps saved values visible for a %s newest cost query",
+    (scenario) => {
+      const fingerprint = {
+        hostId: "desktop",
+        provider: "codex",
+        resolvedHomePath: "/sessions",
+        volumeId: "1",
+      };
+      const priorModels = ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"].map(
+        (model) => ({
+          model,
+          costUsd: 7.5,
+          unpricedRecords: 0,
+          records: 4,
+          totals: {
+            uncachedInputTokens: 10,
+            cachedInputTokens: 2,
+            cacheCreationTokens: 1,
+            outputTokens: 7,
+            reasoningTokens: 3,
+          },
+        }),
+      );
+      const historyEnvironment = {
+        environmentId: "desktop",
+        label: "Desktop",
+        isPending: false,
+        error: null,
+        summary: {
+          sources: [{ fingerprint, status: "ok" }],
+          quotaCostSnapshots: [
+            {
+              intervalId: "2026-08-30T19:00:00Z",
+              fingerprint,
+              sinceTime: "2026-08-30T19:00:00Z",
+              untilTime: "2026-08-30T19:10:00Z",
+              costUsd: 30,
+              records: 4,
+              recordedAt: "2026-08-30T19:20:00Z",
+              firstRemainingPercent: 80,
+              lastRemainingPercent: 60,
+              resetsAt: "2026-08-28T00:00:00Z",
+              models: priorModels,
+            },
+          ],
+          quotaHistory: {
+            status: "ready",
+            source: "fixture",
+            message: null,
+            samples: [
+              {
+                observedAt: "2026-08-30T19:00:00Z",
+                remainingPercent: 80,
+                resetsAt: "2026-08-31T00:00:00Z",
+              },
+              {
+                observedAt: "2026-08-30T19:10:00Z",
+                remainingPercent: 60,
+                resetsAt: "2026-08-31T00:00:00Z",
+              },
+              {
+                observedAt: "2026-08-30T20:00:00Z",
+                remainingPercent: 100,
+                resetsAt: "2026-09-06T00:00:00Z",
+              },
+            ],
+          },
+        },
+      };
+      state.useUsage.mockImplementation((input: { quotaHistoryOnly?: boolean }) =>
+        input.quotaHistoryOnly
+          ? { environments: [historyEnvironment], isPending: false, refresh: state.refresh }
+          : {
+              environments: [
+                scenario === "failed"
+                  ? {
+                      environmentId: "desktop",
+                      label: "Desktop",
+                      isPending: false,
+                      error: "cost query failed",
+                      summary: null,
+                    }
+                  : {
+                      environmentId: "desktop",
+                      label: "Desktop",
+                      isPending: false,
+                      error: null,
+                      summary: {
+                        sources: [{ fingerprint, status: "ok" }],
+                        quotaCosts: [
+                          {
+                            intervalId: "2026-08-30T20:00:00Z",
+                            fingerprint,
+                            complete: true,
+                            unpricedRecords: 0,
+                            costUsd: 0,
+                            records: 0,
+                            models: [],
+                          },
+                        ],
+                      },
+                    },
+              ],
+              isPending: true,
+              refresh: state.refresh,
+            },
+      );
+      const markup = renderToStaticMarkup(<UsageResetPage />);
+      expect(markup).toContain("$30 observed cost");
+      expect(markup).toContain("Astra");
+      expect(markup).toContain("Sol");
+      expect(markup).toContain("Terra");
+      expect(markup).toContain("Luna");
+      const tokenPlanner = markup.slice(
+        markup.indexOf('aria-label="Remaining token estimates"'),
+        markup.indexOf('aria-label="Remaining token estimates"') + 5000,
+      );
+      expect(tokenPlanner).toMatch(/≈ [0-9.,]+[KMB]/);
+      expect(tokenPlanner).not.toContain("Pending");
+      expect(tokenPlanner).not.toContain("Exact model totals are not available yet");
+    },
+  );
+
+  it("labels an ambiguous zero-use window without inventing a dollar value", () => {
+    const fingerprint = {
+      hostId: "desktop",
+      provider: "codex",
+      resolvedHomePath: "/sessions",
+      volumeId: "1",
+    };
+    state.environments = [
+      {
+        environmentId: "desktop",
+        label: "Desktop",
+        isPending: false,
+        error: null,
+        summary: {
+          sources: [{ fingerprint, status: "ok" }],
+          quotaCosts: [],
+          quotaHistory: {
+            status: "ready",
+            source: "fixture",
+            message: null,
+            samples: [
+              {
+                observedAt: "2026-08-30T19:00:00Z",
+                remainingPercent: 50,
+                resetsAt: "2026-08-31T00:00:00Z",
+              },
+              {
+                observedAt: "2026-08-30T20:00:00Z",
+                remainingPercent: 50,
+                resetsAt: "2026-09-06T00:00:00Z",
+              },
+              {
+                observedAt: "2026-08-30T20:10:00Z",
+                remainingPercent: 50,
+                resetsAt: "2026-09-06T00:00:00Z",
+              },
+            ],
+          },
+        },
+      },
+    ];
+    const markup = renderToStaticMarkup(<UsageResetPage />);
+    expect(markup).toContain("No quota use observed in this interval");
+    expect(markup).not.toContain("$0.00 unused");
   });
 });

@@ -125,12 +125,26 @@ export function UsageResetPage() {
         : null,
     [paceInterval, paceCosts.environments, selectedIds],
   );
+  // A new interval changes the cost query key. While that query is warming,
+  // retain the history response for environments that have not answered yet;
+  // its saved snapshots keep prior-cycle values visible without treating them
+  // as current measured cost. A completed cost response always wins.
+  const costEnvironments = useMemo(() => {
+    const historyById = new Map(
+      history.environments.map((environment) => [environment.environmentId, environment]),
+    );
+    const current = costs.environments.map((environment) => {
+      if (environment.summary !== null || environment.error !== null) return environment;
+      return historyById.get(environment.environmentId) ?? environment;
+    });
+    return current.length > 0 ? current : history.environments;
+  }, [costs.environments, history.environments]);
   const selected = useMemo(
     () =>
-      costs.environments.filter(
+      costEnvironments.filter(
         (environment) => selectedIds === null || selectedIds.includes(environment.environmentId),
       ),
-    [costs.environments, selectedIds],
+    [costEnvironments, selectedIds],
   );
   const selectedWithSavedCosts = useMemo(
     () =>
@@ -222,20 +236,27 @@ export function UsageResetPage() {
     };
   }, [historical, historicalInterval, selectedWithSavedCosts, current]);
   const completed = values.slice(0, -1);
-  const currentModels = useMemo(
-    () =>
-      current
-        ? monitoredModels(
-            {
-              id: current.period.id,
-              sinceTime: current.period.first.observedAt,
-              untilTime: current.period.last.observedAt,
-            },
-            selectedWithSavedCosts,
-          )
-        : null,
-    [current?.period.id, selectedWithSavedCosts],
-  );
+  const currentModels = useMemo(() => {
+    if (!current) return null;
+    const models = monitoredModels(
+      {
+        id: current.period.id,
+        sinceTime: current.period.first.observedAt,
+        untilTime: current.period.last.observedAt,
+      },
+      selectedWithSavedCosts,
+    );
+    return models !== null &&
+      models.length > 0 &&
+      models.some((row) => Object.values(row.totals).some((tokens) => tokens > 0))
+      ? models
+      : null;
+  }, [
+    current?.period.id,
+    current?.period.first.observedAt,
+    current?.period.last.observedAt,
+    selectedWithSavedCosts,
+  ]);
   const models =
     currentModels ??
     (current?.value.historicalCalibration !== undefined ? (priorApiPace?.models ?? null) : null);
@@ -437,6 +458,14 @@ export function UsageResetPage() {
                       .toReversed()
                       .map((period) => {
                         const value = values.find((entry) => entry.period.id === period.id)?.value;
+                        const unusedLabel =
+                          period.usedPercentagePoints === 0 && period.resetKind === "ambiguous"
+                            ? "No quota use observed in this interval"
+                            : (period.observationGapMs ?? Infinity) > 60 * 60_000 ||
+                                value?.unusedValueUsd === null ||
+                                value === undefined
+                              ? "Dollar estimate not established"
+                              : `≈ ${estimate(value.unusedValueUsd)} unused`;
                         return (
                           <div
                             key={period.id}
@@ -464,11 +493,7 @@ export function UsageResetPage() {
                                 {value?.costUsd !== null && value !== undefined
                                   ? `${estimate(value.costUsd)} observed cost · `
                                   : ""}
-                                {(period.observationGapMs ?? Infinity) > 60 * 60_000 ||
-                                value?.unusedValueUsd === null ||
-                                value === undefined
-                                  ? "Dollar estimate not established"
-                                  : `≈ ${estimate(value.unusedValueUsd)} unused`}
+                                {unusedLabel}
                               </p>
                             </div>
                           </div>
