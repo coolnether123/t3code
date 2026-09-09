@@ -207,6 +207,30 @@ describe("UsagePage hourly breakdown", () => {
     expect(markup).toContain("Laptop is still scanning usage.");
   });
 
+  it("does not present an all-failed window as zero activity", () => {
+    const view = testState.useUsage();
+    testState.useUsage.mockReturnValue({
+      ...view,
+      environments: [
+        {
+          environmentId: "desktop",
+          label: "Desktop",
+          isPending: false,
+          error: "This environment could not report usage.",
+          summary: null,
+        },
+      ],
+      isPending: false,
+      isPartial: false,
+      merged: { ...view.merged, daily: [], models: [], sessions: 0, costUsd: 0 },
+    });
+    const markup = renderToStaticMarkup(<UsagePage />);
+    expect(markup).toContain("Unavailable");
+    expect(markup).toContain("Desktop could not report usage.");
+    expect(markup).not.toContain("0 sessions");
+    expect(markup).not.toContain("No activity in this window.");
+  });
+
   it("warns that missing prices are not free usage", () => {
     const view = testState.useUsage();
     testState.useUsage.mockReturnValue({

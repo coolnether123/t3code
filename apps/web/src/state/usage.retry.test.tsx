@@ -55,6 +55,26 @@ const refreshedSummary: UsageSummary = {
   scanDurationMs: 1,
 };
 
+const deferredSummary: UsageSummary = {
+  ...refreshedSummary,
+  sources: [
+    {
+      fingerprint: {
+        hostId: "desktop",
+        provider: "codex",
+        resolvedHomePath: "/sessions",
+        volumeId: "1",
+      },
+      status: "partial",
+      scannedFiles: 1,
+      skippedFiles: 2,
+      malformedRecords: 0,
+      distinctSessions: 1,
+      message: "2 older or oversized transcript files deferred",
+    },
+  ],
+};
+
 function RefreshProbe() {
   const usage = useUsage({
     sinceDay: UsageDay.make("2026-08-01"),
@@ -351,6 +371,117 @@ describe("usage route recovery", () => {
         vi.advanceTimersByTime(30_000);
       });
       expect(state.execute).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => root.unmount());
+      vi.useRealTimers();
+    }
+  });
+
+  it("backs off and stops after five deferred scans make no progress", async () => {
+    vi.useFakeTimers();
+    state.environments = [
+      {
+        environmentId: "desktop",
+        label: "Desktop",
+        isPending: false,
+        error: null,
+        summary: deferredSummary,
+      },
+    ];
+    state.execute.mockResolvedValue(AsyncResult.success(deferredSummary));
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<UsageProbe />));
+      for (const delay of [750, 1_500, 3_000, 6_000, 8_000]) {
+        await act(async () => vi.advanceTimersByTimeAsync(delay));
+      }
+      expect(state.execute).toHaveBeenCalledTimes(5);
+      await act(async () => vi.advanceTimersByTimeAsync(30_000));
+      expect(state.execute).toHaveBeenCalledTimes(5);
+    } finally {
+      await act(async () => root.unmount());
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps warming a large deferred backlog while its count decreases", async () => {
+    vi.useFakeTimers();
+    let deferredCount = 30;
+    const summaryForCount = (count: number): UsageSummary => ({
+      ...deferredSummary,
+      sources: [
+        {
+          ...deferredSummary.sources[0]!,
+          skippedFiles: count,
+          message: `${count} older or oversized transcript files deferred`,
+        },
+      ],
+    });
+    state.environments = [
+      {
+        environmentId: "desktop",
+        label: "Desktop",
+        isPending: false,
+        error: null,
+        summary: summaryForCount(deferredCount),
+      },
+    ];
+    state.execute.mockImplementation(async () => {
+      deferredCount -= 1;
+      return AsyncResult.success(
+        deferredCount > 0 ? summaryForCount(deferredCount) : refreshedSummary,
+      );
+    });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<UsageProbe />));
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        await act(async () => vi.advanceTimersByTimeAsync(750));
+      }
+      expect(state.execute).toHaveBeenCalledTimes(30);
+      await act(async () => vi.advanceTimersByTimeAsync(30_000));
+      expect(state.execute).toHaveBeenCalledTimes(30);
+    } finally {
+      await act(async () => root.unmount());
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a scheduled deferred retry when the environment fails", async () => {
+    vi.useFakeTimers();
+    state.environments = [
+      {
+        environmentId: "desktop",
+        label: "Desktop",
+        isPending: false,
+        error: null,
+        summary: deferredSummary,
+      },
+    ];
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<UsageProbe />));
+      state.execute.mockClear();
+      state.environments = [
+        {
+          environmentId: "desktop",
+          label: "Desktop",
+          isPending: false,
+          error: "This environment could not report usage.",
+          summary: deferredSummary,
+        },
+      ];
+      await act(async () => root.render(<UsageProbe />));
+      state.execute.mockClear();
+      await act(async () => vi.advanceTimersByTimeAsync(30_000));
+      expect(
+        state.execute.mock.calls.filter(
+          ([, request]) => (request as { input?: { refresh?: boolean } }).input?.refresh === false,
+        ),
+      ).toHaveLength(0);
     } finally {
       await act(async () => root.unmount());
       vi.useRealTimers();

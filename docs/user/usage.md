@@ -118,6 +118,9 @@ Unchanged transcripts keep their cached records. On the mobile app, pulling down
 Growing chats read only their appended text when the saved cursor is valid. Public reset news
 updates independently and does not hold the usage refresh open.
 Refresh does not force a new collector sample or run Luna. Use **Check X with Luna** separately.
+Long windows such as **90 days** and **120 days** warm in bounded transcript batches while the
+page remains open. If every selected computer fails to return a result, the window is shown as
+**Unavailable** rather than as zero usage.
 
 The view uses the latest continuous monitoring run for current measurements. A gap over 24 hours
 begins another run. Older samples remain saved and appear in **Reset history**. When a new cycle
@@ -211,7 +214,9 @@ Dollar values are API-equivalent estimates, not subscription bills, cash balance
 Model mix and missing history affect them. Incomplete scans and missing prices withhold a new
 current estimate while a refresh is pending; previously saved exact costs remain labeled with
 their calculation time. A qualified earlier reset cycle can provide a labeled provisional model
-and value estimate until current costs are ready.
+and value estimate until current costs are ready. Within the same cycle, the last complete cost
+remains visible through its recorded date while the scan warms, using that saved percentage
+denominator until a newer complete reading replaces it.
 
 The monitor defaults to the quota-source computer. Use **Tracking and computers** to opt in to
 other computers for cost comparison. Selecting an unavailable computer withholds the combined

@@ -282,6 +282,23 @@ describe("Codex monitor page", () => {
               resetsAt: "2026-08-28T00:00:00Z",
               models: priorModels,
             },
+            ...(scenario === "failed"
+              ? [
+                  {
+                    intervalId: "2026-08-30T20:00:00Z",
+                    fingerprint,
+                    sinceTime: "2026-08-30T20:00:00Z",
+                    untilTime: "2026-08-30T20:05:00Z",
+                    costUsd: 30,
+                    records: 4,
+                    recordedAt: "2026-08-30T20:10:00Z",
+                    firstRemainingPercent: 100,
+                    lastRemainingPercent: 95,
+                    resetsAt: "2026-09-06T00:00:00Z",
+                    models: priorModels,
+                  },
+                ]
+              : []),
           ],
           quotaHistory: {
             status: "ready",
@@ -303,6 +320,20 @@ describe("Codex monitor page", () => {
                 remainingPercent: 100,
                 resetsAt: "2026-09-06T00:00:00Z",
               },
+              ...(scenario === "failed"
+                ? [
+                    {
+                      observedAt: "2026-08-30T20:05:00Z",
+                      remainingPercent: 95,
+                      resetsAt: "2026-09-06T00:00:00Z",
+                    },
+                    {
+                      observedAt: "2026-08-30T20:10:00Z",
+                      remainingPercent: 90,
+                      resetsAt: "2026-09-06T00:00:00Z",
+                    },
+                  ]
+                : []),
             ],
           },
         },
@@ -356,8 +387,13 @@ describe("Codex monitor page", () => {
         markup.indexOf('aria-label="Remaining token estimates"') + 5000,
       );
       expect(tokenPlanner).toMatch(/≈ [0-9.,]+[KMB]/);
+      if (scenario === "failed") expect(tokenPlanner).toContain("$540.00");
       expect(tokenPlanner).not.toContain("Pending");
       expect(tokenPlanner).not.toContain("Exact model totals are not available yet");
+      if (scenario === "failed") {
+        expect(markup).toContain("Observed cost is complete through");
+        expect(tokenPlanner).toContain("Provisional current-cycle value through");
+      }
     },
   );
 

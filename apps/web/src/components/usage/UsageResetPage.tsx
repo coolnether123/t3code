@@ -13,6 +13,7 @@ import {
   quotaCostWindow,
   quotaIntervals,
   quotaPeriods,
+  quotaSavedCostPrefix,
   quotaValueSnapshots,
   quotaValueWithHistoricalCalibration,
   quotaValueWithSnapshot,
@@ -262,14 +263,29 @@ export function UsageResetPage() {
   const completed = values.slice(0, -1);
   const currentModels = useMemo(() => {
     if (!current) return null;
-    const models = monitoredModels(
-      {
-        id: current.period.id,
-        sinceTime: current.period.first.observedAt,
-        untilTime: current.period.last.observedAt,
-      },
-      selectedWithSavedCosts,
-    );
+    const savedPrefix = quotaSavedCostPrefix(current.period, selectedWithSavedCosts);
+    const modelInterval = current.value.costObservedUntil
+      ? (savedPrefix?.interval ?? null)
+      : {
+          id: current.period.id,
+          sinceTime: current.period.first.observedAt,
+          untilTime: current.period.last.observedAt,
+        };
+    const modelEnvironments =
+      current.value.costObservedUntil && savedPrefix
+        ? selectedWithSavedCosts.map((environment) => ({
+            ...environment,
+            summary: environment.summary
+              ? {
+                  ...environment.summary,
+                  quotaCosts: undefined,
+                  quotaCostSnapshots: savedPrefix.rows,
+                }
+              : environment.summary,
+          }))
+        : selectedWithSavedCosts;
+    if (!modelInterval) return null;
+    const models = monitoredModels(modelInterval, modelEnvironments);
     return models !== null &&
       models.length > 0 &&
       models.some((row) => Object.values(row.totals).some((tokens) => tokens > 0))
@@ -279,6 +295,7 @@ export function UsageResetPage() {
     current?.period.id,
     current?.period.first.observedAt,
     current?.period.last.observedAt,
+    current?.value.costObservedUntil,
     selectedWithSavedCosts,
   ]);
   const models =
@@ -419,6 +436,12 @@ export function UsageResetPage() {
                     </dd>
                   </div>
                 </dl>
+                {current.value.costObservedUntil ? (
+                  <p className="mt-3 text-xs text-muted-foreground">
+                    Observed cost is complete through {dateTime(current.value.costObservedUntil)};
+                    newer transcript usage is still being read.
+                  </p>
+                ) : null}
                 {current.value.historicalCalibration ? (
                   <p className="mt-3 text-xs text-muted-foreground">
                     Remaining value is provisional, calibrated from{" "}
@@ -457,6 +480,9 @@ export function UsageResetPage() {
                   models={models}
                   observedAt={current.period.last.observedAt}
                   provisional={current.value.historicalCalibration !== undefined}
+                  {...(current.value.costObservedUntil && !current.value.historicalCalibration
+                    ? { currentPrefixThrough: current.value.costObservedUntil }
+                    : {})}
                   priorModelMix={
                     currentModels === null && current.value.historicalCalibration !== undefined
                   }
@@ -517,7 +543,11 @@ export function UsageResetPage() {
                               </p>
                               <p className="mt-1 text-xs text-muted-foreground">
                                 {value?.costUsd !== null && value !== undefined
-                                  ? `${estimate(value.costUsd)} observed cost · `
+                                  ? `${estimate(value.costUsd)} observed cost${
+                                      value.costObservedUntil
+                                        ? ` through ${dateTime(value.costObservedUntil)}`
+                                        : ""
+                                    } · `
                                   : ""}
                                 {unusedLabel}
                               </p>

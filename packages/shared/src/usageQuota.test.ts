@@ -570,6 +570,97 @@ describe("quota value estimates", () => {
     expect(value.costUsd).toBe(230);
     expect(value.usdPerPercentagePoint).toBeCloseTo(10);
   });
+
+  it("uses a same-cycle saved prefix while the current scan is incomplete", () => {
+    const extended = quotaPeriods([
+      sample("2026-07-21T16:00:00Z", 80),
+      sample("2026-07-21T17:00:00Z", 60),
+      sample("2026-07-21T18:00:00Z", 55),
+    ])[0]!;
+    const saved = {
+      intervalId: extended.id,
+      fingerprint,
+      sinceTime: extended.first.observedAt,
+      untilTime: "2026-07-21T17:00:00Z",
+      costUsd: 40,
+      records: 10,
+      recordedAt: "2026-07-21T18:10:00Z",
+      firstRemainingPercent: 80,
+      lastRemainingPercent: 60,
+      resetsAt: extended.first.resetsAt,
+    };
+    const value = quotaValue(extended, [
+      env("desktop", {
+        quotaCosts: undefined,
+        quotaCostSnapshots: [saved],
+      }),
+    ]);
+    expect(value).toMatchObject({
+      costUsd: 40,
+      usdPerPercentagePoint: 2,
+      remainingValueUsd: 110,
+      unusedValueUsd: null,
+      costObservedUntil: "2026-07-21T17:00:00Z",
+    });
+    const exact = quotaValue(extended, [
+      env("desktop", {
+        quotaCosts: [
+          {
+            intervalId: extended.id,
+            fingerprint,
+            costUsd: 60,
+            records: 12,
+            unpricedRecords: 0,
+            complete: true,
+          },
+        ],
+        quotaCostSnapshots: [saved],
+      }),
+    ]);
+    expect(exact.costUsd).toBe(60);
+    const partialExact = quotaValue(extended, [
+      env("desktop", {
+        sources: summary.sources.map((source) => ({ ...source, status: "partial" as const })),
+        quotaCosts: undefined,
+        quotaCostSnapshots: [saved, { ...saved, untilTime: extended.last.observedAt, costUsd: 60 }],
+      }),
+    ]);
+    expect(partialExact.costUsd).toBe(60);
+    expect(
+      quotaValue(extended, [
+        env("desktop", {
+          quotaCosts: undefined,
+          quotaCostSnapshots: [{ ...saved, untilTime: "2026-07-21T19:00:00Z" }],
+        }),
+      ]).costUsd,
+    ).toBeNull();
+    const short = quotaPeriods([
+      sample("2026-07-21T16:00:00Z", 80),
+      sample("2026-07-21T17:00:00Z", 79),
+      sample("2026-07-21T18:00:00Z", 78),
+    ])[0]!;
+    expect(
+      quotaValue(short, [
+        env("desktop", {
+          quotaCosts: undefined,
+          quotaCostSnapshots: [
+            {
+              ...saved,
+              intervalId: short.id,
+              sinceTime: short.first.observedAt,
+              untilTime: "2026-07-21T17:00:00Z",
+              firstRemainingPercent: 80,
+              lastRemainingPercent: 79,
+            },
+          ],
+        }),
+      ]),
+    ).toMatchObject({
+      costUsd: 40,
+      usdPerPercentagePoint: null,
+      costObservedUntil: "2026-07-21T17:00:00Z",
+    });
+  });
   it("reads saved costs from a history-only summary without live sources", () => {
     const saved = {
       intervalId: period.id,

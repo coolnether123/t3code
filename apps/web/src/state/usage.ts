@@ -24,6 +24,14 @@ import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentPresentations } from "./presentation";
 import { serverEnvironment } from "./server";
 
+const MAX_STALLED_DEFERRED_REFRESHES = 5;
+const DEFERRED_TRANSCRIPT_REFRESH_BASE_MS = 750;
+const DEFERRED_TRANSCRIPT_REFRESH_MAX_MS = 8_000;
+
+const isDeferredTranscriptSource = (
+  source: NonNullable<EnvironmentUsageStatus["summary"]>["sources"][number],
+) => source.status === "partial" && /\bdeferred\b/i.test(source.message ?? "");
+
 export interface EnvironmentUsageStatus {
   readonly environmentId: EnvironmentId;
   readonly label: string;
@@ -131,6 +139,12 @@ export function useUsage(
   const retriedFailures = useRef(new Set<string>());
   const delayedRetries = useRef(new Set<string>());
   const delayedRetryTimers = useRef(new Map<string, number>());
+  const deferredTranscriptRetry = useRef({
+    windowKey,
+    signature: "",
+    stalledAttempts: 0,
+    timer: null as number | null,
+  });
   const refreshInFlight = useRef<{
     readonly requestWindowKey: string;
     readonly promise: Promise<readonly EnvironmentUsageStatus[]>;
@@ -285,6 +299,9 @@ export function useUsage(
       for (const timer of timers.values()) window.clearTimeout(timer);
       timers.clear();
       delayedRetries.current.clear();
+      const deferred = deferredTranscriptRetry.current;
+      if (deferred.timer !== null) window.clearTimeout(deferred.timer);
+      deferred.timer = null;
     };
   }, [windowKey]);
 
@@ -304,24 +321,68 @@ export function useUsage(
   }, [environments]);
 
   const hasDeferredTranscripts = environments.some((environment) =>
-    environment.summary?.sources.some((source) => source.status === "partial"),
+    environment.summary?.sources.some(isDeferredTranscriptSource),
   );
 
   // A bounded server scan intentionally returns partial data while its cache is
   // cold. Keep advancing that cache while the Usage page is mounted so totals
   // converge without asking the user to click Refresh once per 128 MiB batch.
   useEffect(() => {
-    if (!hasDeferredTranscripts || environments.some((environment) => environment.isPending)) {
+    const retry = deferredTranscriptRetry.current;
+    if (retry.windowKey !== windowKey) {
+      if (retry.timer !== null) window.clearTimeout(retry.timer);
+      retry.windowKey = windowKey;
+      retry.signature = "";
+      retry.stalledAttempts = 0;
+      retry.timer = null;
+    }
+    if (!hasDeferredTranscripts) {
+      if (retry.timer !== null) window.clearTimeout(retry.timer);
+      retry.signature = "";
+      retry.stalledAttempts = 0;
+      retry.timer = null;
       return;
     }
-    const timer = window.setTimeout(() => {
+    const deferredSignature = environments
+      .flatMap((environment) =>
+        (environment.summary?.sources ?? [])
+          .filter(isDeferredTranscriptSource)
+          .map(
+            (source) =>
+              `${environment.environmentId}:${source.fingerprint.resolvedHomePath}:${source.scannedFiles}:${source.skippedFiles}:${source.message ?? ""}`,
+          ),
+      )
+      .sort()
+      .join("|");
+    if (retry.signature !== deferredSignature) {
+      retry.signature = deferredSignature;
+      retry.stalledAttempts = 0;
+    }
+    const waitingOrFailed = environments.some(
+      (environment) => environment.isPending || environment.error !== null,
+    );
+    if (waitingOrFailed) {
+      if (retry.timer !== null) window.clearTimeout(retry.timer);
+      retry.timer = null;
+      return;
+    }
+    if (retry.stalledAttempts >= MAX_STALLED_DEFERRED_REFRESHES || retry.timer !== null) {
+      return;
+    }
+    const delay = Math.min(
+      DEFERRED_TRANSCRIPT_REFRESH_MAX_MS,
+      DEFERRED_TRANSCRIPT_REFRESH_BASE_MS * 2 ** Math.min(retry.stalledAttempts, 4),
+    );
+    retry.timer = window.setTimeout(() => {
+      retry.timer = null;
+      if (windowKeyRef.current !== windowKey) return;
+      retry.stalledAttempts += 1;
       void refresh({
         ...(JSON.parse(windowKey) as UsageSummaryInput),
         refresh: false,
       });
-    }, 750);
-    return () => window.clearTimeout(timer);
-  }, [environments, hasDeferredTranscripts, refresh]);
+    }, delay);
+  }, [environments, hasDeferredTranscripts, refresh, windowKey]);
 
   const answeredCount = environments.filter((environment) => environment.summary !== null).length;
   const stillReporting = environments.filter(

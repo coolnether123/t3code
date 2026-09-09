@@ -16,6 +16,7 @@ export function TokenBudgetPanel({
   provisional = false,
   calibration,
   priorModelMix = false,
+  currentPrefixThrough,
 }: {
   readonly budgetUsd: number | null;
   readonly models: ReturnType<typeof monitoredModels>;
@@ -23,6 +24,7 @@ export function TokenBudgetPanel({
   readonly provisional?: boolean;
   readonly calibration?: { readonly since: string; readonly until: string };
   readonly priorModelMix?: boolean;
+  readonly currentPrefixThrough?: string;
 }) {
   const [scenario, setScenario] = useState("observed");
   const [longContext, setLongContext] = useState(false);
@@ -72,9 +74,11 @@ export function TokenBudgetPanel({
         <div>
           <h2 className="text-sm font-medium">How far could the rest go?</h2>
           <p className="mt-1 text-xs text-muted-foreground">
-            {provisional
-              ? "Provisional value from the previous completed cycle."
-              : "Spend the same estimated API value on a different model."}
+            {currentPrefixThrough
+              ? `Provisional current-cycle value through ${new Date(currentPrefixThrough).toLocaleString()}.`
+              : provisional
+                ? "Provisional value from the previous completed cycle."
+                : "Spend the same estimated API value on a different model."}
           </p>
           {provisional && calibration ? (
             <p className="mt-1 text-xs text-muted-foreground">

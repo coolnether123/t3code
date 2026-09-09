@@ -253,6 +253,13 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
                   </Text>
                 </View>
               </View>
+              {current.value.costObservedUntil ? (
+                <Text className="text-xs text-foreground-muted">
+                  Observed cost is complete through{" "}
+                  {new Date(current.value.costObservedUntil).toLocaleString()}; newer transcript
+                  usage is still being read.
+                </Text>
+              ) : null}
               {current.value.historicalCalibration ? (
                 <Text className="text-xs text-foreground-muted">
                   Remaining value is provisional, calibrated from{" "}
@@ -310,7 +317,11 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
                         </Text>
                         <Text className="text-xs text-foreground-muted">
                           {value?.costUsd !== null && value !== undefined
-                            ? `${formatUsd(value.costUsd)} observed cost · `
+                            ? `${formatUsd(value.costUsd)} observed cost${
+                                value.costObservedUntil
+                                  ? ` through ${dateTime(value.costObservedUntil)}`
+                                  : ""
+                              } · `
                             : ""}
                           {value?.unusedValueUsd === null || value === undefined
                             ? "Dollar estimate not established"

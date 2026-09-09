@@ -75,6 +75,9 @@ export function UsagePage() {
   // other environments. The coverage notice identifies pending devices.
   const settling = isPending;
   const refreshing = environments.some((entry) => entry.isPending && entry.summary !== null);
+  const usageUnavailable =
+    environments.length > 0 &&
+    environments.every((environment) => environment.summary === null && environment.error !== null);
 
   const days = useMemo(
     () => enumerateDays(window.sinceDay, window.untilDay),
@@ -266,14 +269,18 @@ export function UsagePage() {
                   <div className="flex min-w-0 flex-col gap-5">
                     <div className="flex flex-col gap-1">
                       <span className="text-4xl font-semibold text-foreground tabular-nums">
-                        {metric === "cost"
-                          ? formatUsd(merged.costUsd)
-                          : formatTokens(merged.totalTokens)}
+                        {usageUnavailable
+                          ? "Unavailable"
+                          : metric === "cost"
+                            ? formatUsd(merged.costUsd)
+                            : formatTokens(merged.totalTokens)}
                       </span>
                       <span className="text-xs text-muted-foreground">
-                        {metric === "cost"
-                          ? `${formatCount(merged.sessions)} sessions · API estimate`
-                          : `${formatCount(merged.sessions)} sessions`}
+                        {usageUnavailable
+                          ? "No usage result was returned for this window"
+                          : metric === "cost"
+                            ? `${formatCount(merged.sessions)} sessions · API estimate`
+                            : `${formatCount(merged.sessions)} sessions`}
                       </span>
                       {merged.costQuality.unpricedShare > 0 ? (
                         <p className="text-xs text-muted-foreground" role="status">
@@ -469,7 +476,9 @@ export function UsagePage() {
                         {merged.models.length === 0 ? (
                           <tr>
                             <td colSpan={4} className="py-6 text-center text-muted-foreground">
-                              No activity in this window.
+                              {usageUnavailable
+                                ? "Usage unavailable for this window."
+                                : "No activity in this window."}
                             </td>
                           </tr>
                         ) : (
@@ -527,7 +536,9 @@ export function UsagePage() {
                               colSpan={activeProviders.length + 3}
                               className="py-6 text-center text-muted-foreground"
                             >
-                              No activity in this window.
+                              {usageUnavailable
+                                ? "Usage unavailable for this window."
+                                : "No activity in this window."}
                             </td>
                           </tr>
                         ) : (

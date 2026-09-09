@@ -1,5 +1,6 @@
 import type {
   UsageQuotaInterval,
+  UsageQuotaCostSnapshot,
   UsageQuotaSample,
   UsageSourceFingerprint,
   UsageSummary,
@@ -135,6 +136,7 @@ export interface QuotaValue {
   readonly reason: string | null;
   readonly historicalCalibration?: { readonly since: string; readonly until: string };
   readonly historicalCostRecordedAt?: string;
+  readonly costObservedUntil?: string;
 }
 
 export interface QuotaValueSnapshot {
@@ -253,8 +255,108 @@ function sourceKey(source: UsageSourceFingerprint): string {
   return JSON.stringify([source.hostId, source.provider, source.resolvedHomePath, source.volumeId]);
 }
 
+export interface QuotaSavedCostPrefix {
+  readonly interval: UsageQuotaInterval;
+  readonly rows: readonly UsageQuotaCostSnapshot[];
+}
+
+/** Finds the newest complete same-cycle prefix shared by every selected source. */
+export function quotaSavedCostPrefix(
+  period: QuotaPeriod,
+  environments: readonly QuotaEnvironment[],
+): QuotaSavedCostPrefix | null {
+  const expected = new Set<string>();
+  const candidates = new Map<string, UsageQuotaCostSnapshot[]>();
+  const environmentRequirements: Array<{
+    readonly keys: Set<string>;
+    readonly byUntil: Map<string, Set<string>>;
+  }> = [];
+  for (const environment of environments) {
+    const summary = environment.summary;
+    if (!summary) return null;
+    const requirement = { keys: new Set<string>(), byUntil: new Map<string, Set<string>>() };
+    environmentRequirements.push(requirement);
+    const sources = summary.sources.filter(
+      (source) => source.fingerprint.provider === "codex" && source.status !== "missing",
+    );
+    for (const source of sources) {
+      const key = sourceKey(source.fingerprint);
+      expected.add(key);
+      requirement.keys.add(key);
+    }
+  }
+  for (const [environmentIndex, environment] of environments.entries()) {
+    const summary = environment.summary;
+    if (!summary) return null;
+    const requirement = environmentRequirements[environmentIndex]!;
+    for (const row of summary.quotaCostSnapshots ?? []) {
+      const key = sourceKey(row.fingerprint);
+      if (
+        row.fingerprint.provider !== "codex" ||
+        (expected.size > 0 && !expected.has(key)) ||
+        row.intervalId !== period.id ||
+        row.sinceTime !== period.first.observedAt ||
+        !Number.isFinite(Date.parse(row.sinceTime)) ||
+        !Number.isFinite(Date.parse(row.untilTime)) ||
+        Date.parse(row.sinceTime) >= Date.parse(row.untilTime) ||
+        row.untilTime >= period.last.observedAt ||
+        row.firstRemainingPercent !== period.first.remainingPercent ||
+        row.resetsAt !== period.first.resetsAt ||
+        !Number.isFinite(row.costUsd) ||
+        row.costUsd < 0 ||
+        !Number.isSafeInteger(row.records) ||
+        row.records < 0 ||
+        !Number.isFinite(row.firstRemainingPercent) ||
+        !Number.isFinite(row.lastRemainingPercent) ||
+        row.lastRemainingPercent < 0 ||
+        row.lastRemainingPercent > 100 ||
+        row.firstRemainingPercent <= row.lastRemainingPercent ||
+        row.lastRemainingPercent < period.last.remainingPercent
+      )
+        continue;
+      const rows = candidates.get(row.untilTime) ?? [];
+      rows.push(row);
+      candidates.set(row.untilTime, rows);
+      const keys = requirement.byUntil.get(row.untilTime) ?? new Set<string>();
+      keys.add(key);
+      requirement.byUntil.set(row.untilTime, keys);
+    }
+  }
+  if (expected.size === 0) {
+    for (const rows of candidates.values())
+      for (const row of rows) expected.add(sourceKey(row.fingerprint));
+  }
+  const untilTimes = [...candidates.keys()].sort((a, b) => Date.parse(b) - Date.parse(a));
+  for (const untilTime of untilTimes) {
+    const rows = candidates.get(untilTime)!;
+    const bySource = new Map(rows.map((row) => [sourceKey(row.fingerprint), row]));
+    if (![...expected].every((key) => bySource.has(key))) continue;
+    if (
+      !environmentRequirements.every((requirement) => {
+        const keys = requirement.byUntil.get(untilTime);
+        return (
+          keys !== undefined &&
+          (requirement.keys.size === 0
+            ? keys.size > 0
+            : [...requirement.keys].every((key) => keys.has(key)))
+        );
+      })
+    )
+      continue;
+    const selected = [...expected].map((key) => bySource.get(key)!);
+    if (!selected.every((row) => row.lastRemainingPercent === selected[0]!.lastRemainingPercent))
+      continue;
+    if (selected.reduce((total, row) => total + row.records, 0) === 0) continue;
+    return {
+      interval: { id: period.id, sinceTime: period.first.observedAt, untilTime },
+      rows: selected,
+    };
+  }
+  return null;
+}
+
 /** Estimates assume selected transcripts cover one account; percentages are never summed. */
-export function quotaValue(
+function quotaValueExact(
   period: QuotaPeriod,
   environments: readonly QuotaEnvironment[],
 ): QuotaValue {
@@ -434,6 +536,40 @@ export function quotaValue(
     reason: withFallbackReason(
       "Based on the last pre-reset observation and the same model mix. Usage between observations is unknown.",
     ),
+  };
+}
+
+export function quotaValue(
+  period: QuotaPeriod,
+  environments: readonly QuotaEnvironment[],
+): QuotaValue {
+  const exact = quotaValueExact(period, environments);
+  if (exact.costUsd !== null) return exact;
+  const savedPrefix = quotaSavedCostPrefix(period, environments);
+  if (savedPrefix === null) return exact;
+  const costUsd = savedPrefix.rows.reduce((total, row) => total + row.costUsd, 0);
+  const records = savedPrefix.rows.reduce((total, row) => total + row.records, 0);
+  const firstRemaining = savedPrefix.rows[0]!.firstRemainingPercent;
+  const lastRemaining = savedPrefix.rows[0]!.lastRemainingPercent;
+  const used = firstRemaining - lastRemaining;
+  if (records === 0) return exact;
+  if (used < 5)
+    return {
+      costUsd,
+      usdPerPercentagePoint: null,
+      remainingValueUsd: null,
+      unusedValueUsd: null,
+      reason: `Current transcript scan is incomplete; observed cost is complete through ${savedPrefix.interval.untilTime}. At least 5 percentage points of observed usage are needed for a conversion.`,
+      costObservedUntil: savedPrefix.interval.untilTime,
+    };
+  const usdPerPercentagePoint = costUsd / used;
+  return {
+    costUsd,
+    usdPerPercentagePoint,
+    remainingValueUsd: usdPerPercentagePoint * period.last.remainingPercent,
+    unusedValueUsd: null,
+    reason: `Current transcript scan is incomplete; observed cost is complete through ${savedPrefix.interval.untilTime}.`,
+    costObservedUntil: savedPrefix.interval.untilTime,
   };
 }
 
