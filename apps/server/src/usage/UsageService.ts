@@ -14,14 +14,14 @@
 import * as NodeOS from "node:os";
 
 import {
-  CodexSettings,
   USAGE_CONTRACT_VERSION,
+  CodexSettings,
   type CodexSettings as CodexSettingsValue,
-  type ServerSettings as ServerSettingsValue,
   type UsageProviderKind,
   type UsageQuotaCost,
-  type UsageSource,
+  type ServerSettings as ServerSettingsValue,
   type UsagePricing,
+  type UsageSource,
   type UsageSummary,
   type UsageSummaryInput,
   UsageReadError,
@@ -32,27 +32,34 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
+import * as Scope from "effect/Scope";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import { ServerConfig } from "../config.ts";
-import { expandHomePath } from "../pathExpansion.ts";
 import { writeFileStringAtomically } from "../atomicWrite.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
 import { resolveCodexBinaryPath } from "../provider/CodexAppServerTransport.ts";
-import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
+import {
+  codexIsolatedHomePath,
+  resolveCodexHomeLayout,
+} from "../provider/Drivers/CodexHomeLayout.ts";
 import { codexLaunchArgv, resolveCodexLaunchArgs } from "../provider/Layers/codexLaunchArgs.ts";
 import { readCodexQuotaSample } from "./CodexQuotaCollector.ts";
 import { UsageAggregator } from "./usageAggregation.ts";
 import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
+import { UsageSummaryCache, usageSummaryCacheKey } from "./usageSummaryCache.ts";
 import {
   listTranscriptFiles,
   readDirectoryVolumeId,
@@ -79,20 +86,28 @@ import {
   parseCodexFastWindows,
   parseCodexTierJournal,
 } from "./codexServiceTier.ts";
-import { UsageSummaryCache, usageSummaryCacheKey } from "./usageSummaryCache.ts";
 import {
   QuotaCostAccumulator,
   encodeQuotaHistory,
   readQuotaHistory,
   validQuotaIntervals,
 } from "./usageQuotaHistory.ts";
+import {
+  readQuotaCostLedger,
+  upsertQuotaCostLedger,
+  writeQuotaCostLedger,
+  type QuotaCostLedgerRow,
+} from "./usageQuotaCostLedger.ts";
 
 const LITELLM_RATES_URL =
   "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 
 /** Rates move rarely; a day-old table keeps the page working offline. */
 const RATES_TTL_MS = 24 * 60 * 60 * 1000;
+/** An explicit refresh ignores the TTL, but not a table fetched this recently. */
 const RATES_REFRESH_FLOOR_MS = 60 * 1000;
+const SUMMARY_CACHE_TTL_MS = 60 * 1000;
+const MAX_SUMMARY_CACHE_ENTRIES = 16;
 
 /**
  * Files are filtered by mtime before opening. The slack covers a session whose
@@ -120,31 +135,6 @@ const FULL_SCAN_INTERVAL_MS = 15 * 60 * 1000;
 const MAC_QUOTA_SAMPLE_INTERVAL_MS = 5 * 60 * 1000;
 
 /** Matches the client query TTL while deduplicating requests across clients. */
-const SUMMARY_CACHE_TTL_MS = 60 * 1000;
-const MAX_SUMMARY_CACHE_ENTRIES = 16;
-
-const decodeCodexQuotaSettings = Schema.decodeUnknownOption(CodexSettings);
-
-/** Resolve the enabled Codex instance that owns the quota window, preferring the default ID. */
-export function resolveCodexQuotaSettings(
-  settings: ServerSettingsValue,
-): CodexSettingsValue | null {
-  const instances = Object.entries(settings.providerInstances)
-    .filter(([, instance]) => instance.driver === "codex")
-    .sort(([left], [right]) => {
-      if (left === "codex") return -1;
-      if (right === "codex") return 1;
-      return left.localeCompare(right);
-    });
-
-  for (const [, instance] of instances) {
-    if (instance.enabled === false) continue;
-    const decoded = Option.getOrUndefined(decodeCodexQuotaSettings(instance.config ?? {}));
-    if (decoded?.enabled === true) return decoded;
-  }
-
-  return settings.providers.codex.enabled ? settings.providers.codex : null;
-}
 
 /** On-disk shape of the rate snapshot. */
 const RatesCacheFile = Schema.Struct({
@@ -175,13 +165,44 @@ const ScanCacheJson = Schema.fromJsonString(Schema.Unknown as unknown as Schema.
 const decodeScanCacheFile = Schema.decodeUnknownEffect(ScanCacheJson);
 const encodeScanCacheFile = Schema.encodeEffect(ScanCacheJson);
 
+const decodeCodexQuotaSettings = Schema.decodeUnknownOption(CodexSettings);
+
+/** Resolve the enabled Codex instance that owns the quota window, preferring the default ID. */
+export function resolveCodexQuotaSettings(
+  settings: ServerSettingsValue,
+): CodexSettingsValue | null {
+  const instances = Object.entries(settings.providerInstances)
+    .filter(([, instance]) => instance.driver === "codex")
+    .sort(([left], [right]) => {
+      if (left === "codex") return -1;
+      if (right === "codex") return 1;
+      return left.localeCompare(right);
+    });
+
+  for (const [, instance] of instances) {
+    if (instance.enabled === false) continue;
+    const decoded = Option.getOrUndefined(decodeCodexQuotaSettings(instance.config ?? {}));
+    if (decoded?.enabled === true) return decoded;
+  }
+
+  return settings.providers.codex.enabled ? settings.providers.codex : null;
+}
+
 export class UsageService extends Context.Service<
   UsageService,
   {
     readonly readSummary: (input: UsageSummaryInput) => Effect.Effect<UsageSummary, UsageReadError>;
+    /** Refetches the rate table ahead of its TTL. */
     readonly refreshRates: Effect.Effect<UsagePricing>;
   }
 >()("t3/usage/UsageService") {}
+
+const EMPTY_PRICING: UsagePricing = {
+  status: "unavailable",
+  source: LITELLM_RATES_URL,
+  fetchedAt: null,
+  knownModels: 0,
+};
 
 /** Empty summary, for suites that only need the RPC surface to resolve. */
 export const layerTest = Layer.succeed(
@@ -204,12 +225,7 @@ export const layerTest = Layer.succeed(
         },
         scanDurationMs: 0,
       }),
-    refreshRates: Effect.succeed({
-      status: "unavailable",
-      source: LITELLM_RATES_URL,
-      fetchedAt: null,
-      knownModels: 0,
-    }),
+    refreshRates: Effect.succeed(EMPTY_PRICING),
   }),
 );
 
@@ -222,24 +238,63 @@ export const make = Effect.gen(function* () {
   const hostEnvironment = yield* HostProcessEnvironment;
   const hostPlatform = yield* HostProcessPlatform;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const serviceScope = yield* Scope.make("sequential");
+  const scanSemaphore = yield* Semaphore.make(1);
   const macQuotaCollectionSemaphore = yield* Semaphore.make(1);
 
   const fileCache: ScanCache = new Map();
   const scanCoverage = new Map<string, ScanCoverage>();
   const recentScanAt = new Map<string, number>();
   const summaryCache = new UsageSummaryCache(SUMMARY_CACHE_TTL_MS, MAX_SUMMARY_CACHE_ENTRIES);
+  // Shares the result only while an identical scan is running. Completed
+  // provider-backed summaries are deliberately not retained because transcript
+  // changes must be visible to the next request.
+  const inFlightSummaries = new Map<
+    string,
+    Deferred.Deferred<Exit.Exit<UsageSummary, UsageReadError>, never>
+  >();
+  const readSettings = settingsService.getSettings.pipe(
+    Effect.catchCause(
+      (cause) =>
+        new UsageReadError({
+          reason: "scanFailed",
+          detail: "Server settings could not be read.",
+          cause: Cause.squash(cause),
+        }),
+    ),
+  );
   let cacheDirty = false;
+  let cacheRevision = 0;
+
+  // A scan response must not wait for the complete JSON cache to be encoded
+  // and atomically replaced. The cache is an optimization; the in-memory
+  // records already used to build the response are authoritative for this
+  // process. Revisions let the worker tell whether another scan made changes
+  // while it was serializing or writing its snapshot.
+  const markCacheDirty = () => {
+    cacheDirty = true;
+    cacheRevision += 1;
+  };
 
   const ratesCachePath = path.join(config.stateDir, "usage-model-rates.json");
   const scanCachePath = path.join(config.stateDir, "usage-scan-cache.json");
   const usageImportsPath = path.join(config.stateDir, "usage-imports.json");
   const macQuotaHistoryPath = path.join(config.stateDir, "usage-codex-quota-history.json");
   let lastMacQuotaCollectionAtMs = 0;
+  const quotaCostLedgerPath = path.join(config.stateDir, "usage-quota-cost-ledger.json");
+  let quotaCostLedger: readonly QuotaCostLedgerRow[] =
+    yield* readQuotaCostLedger(quotaCostLedgerPath);
+  let quotaCostLedgerDirty = false;
   let rates: RateTable = new Map();
   let ratesFetchedAtMs: number | null = null;
-  let ratesStatus: UsagePricing["status"] = "unavailable";
+  let ratesStatus: UsageSummary["pricing"]["status"] = "unavailable";
   const ratesLock = yield* Semaphore.make(1);
 
+  /**
+   * Loads the LiteLLM rate table, preferring a fresh copy and falling back to
+   * the on-disk snapshot. With neither, every model reports as unpriced rather
+   * than the page failing.
+   */
   const pricing = (): UsagePricing => ({
     status: ratesStatus,
     source: LITELLM_RATES_URL,
@@ -248,59 +303,56 @@ export const make = Effect.gen(function* () {
     knownModels: rates.size,
   });
 
-  /**
-   * Loads the LiteLLM rate table, preferring a fresh copy and falling back to
-   * the on-disk snapshot. With neither, every model reports as unpriced rather
-   * than the page failing.
-   */
-  const loadRates = Effect.fn("UsageService.loadRates")(function* (force: boolean) {
-    const now = yield* Clock.currentTimeMillis;
-    const maxAgeMs = force ? RATES_REFRESH_FLOOR_MS : RATES_TTL_MS;
-    if (ratesFetchedAtMs !== null && now - ratesFetchedAtMs < maxAgeMs) return;
+  const ensureRates = (force = false) =>
+    ratesLock.withPermits(1)(
+      Effect.gen(function* () {
+        const now = yield* Clock.currentTimeMillis;
+        const maxAgeMs = force ? RATES_REFRESH_FLOOR_MS : RATES_TTL_MS;
+        if (ratesFetchedAtMs !== null && now - ratesFetchedAtMs < maxAgeMs) return;
 
-    if (ratesFetchedAtMs === null) {
-      const fromDisk = yield* fileSystem.readFileString(ratesCachePath).pipe(
-        Effect.flatMap((raw) => decodeRatesCache(raw)),
-        Effect.catchCause(() => Effect.succeed(null)),
-      );
-      if (fromDisk !== null) {
-        const parsed = parseRateTable(fromDisk.document);
-        if (parsed.size > 0) {
-          rates = parsed;
-          ratesFetchedAtMs = fromDisk.fetchedAtMs;
-          ratesStatus = "cached";
-          if (now - fromDisk.fetchedAtMs < maxAgeMs) return;
+        if (ratesFetchedAtMs === null) {
+          const fromDisk = yield* fileSystem.readFileString(ratesCachePath).pipe(
+            Effect.flatMap((raw) => decodeRatesCache(raw)),
+            Effect.catchCause(() => Effect.succeed(null)),
+          );
+          if (fromDisk !== null) {
+            const parsed = parseRateTable(fromDisk.document);
+            if (parsed.size > 0) {
+              rates = parsed;
+              ratesFetchedAtMs = fromDisk.fetchedAtMs;
+              ratesStatus = "cached";
+              if (now - fromDisk.fetchedAtMs < maxAgeMs) return;
+            }
+          }
         }
-      }
-    }
 
-    const fetched = yield* httpClient.get(LITELLM_RATES_URL).pipe(
-      Effect.flatMap(HttpClientResponse.filterStatusOk),
-      Effect.flatMap((response) => response.json),
-      Effect.timeout(10_000),
-      Effect.catchCause(() => Effect.succeed(null)),
+        const fetched = yield* httpClient.get(LITELLM_RATES_URL).pipe(
+          Effect.flatMap(HttpClientResponse.filterStatusOk),
+          Effect.flatMap((response) => response.json),
+          Effect.timeout(10_000),
+          Effect.catchCause(() => Effect.succeed(null)),
+        );
+        if (fetched === null) {
+          // The refresh failed; whatever we are serving is now past its TTL and
+          // must not keep claiming to be fresh.
+          if (rates.size > 0) ratesStatus = "cached";
+          return;
+        }
+
+        const parsed = parseRateTable(fetched);
+        if (parsed.size === 0) return;
+
+        rates = parsed;
+        ratesFetchedAtMs = now;
+        ratesStatus = "fresh";
+
+        yield* encodeRatesCache({ fetchedAtMs: now, document: fetched }).pipe(
+          Effect.flatMap((serialized) => fileSystem.writeFileString(ratesCachePath, serialized)),
+          Effect.catchCause(() => Effect.void),
+        );
+      }),
     );
-    if (fetched === null) {
-      // The refresh failed; whatever we are serving is now past its TTL and
-      // must not keep claiming to be fresh.
-      if (rates.size > 0) ratesStatus = "cached";
-      return;
-    }
 
-    const parsed = parseRateTable(fetched);
-    if (parsed.size === 0) return;
-
-    rates = parsed;
-    ratesFetchedAtMs = now;
-    ratesStatus = "fresh";
-
-    yield* encodeRatesCache({ fetchedAtMs: now, document: fetched }).pipe(
-      Effect.flatMap((serialized) => fileSystem.writeFileString(ratesCachePath, serialized)),
-      Effect.catchCause(() => Effect.void),
-    );
-  });
-
-  const ensureRates = (force = false) => ratesLock.withPermit(loadRates(force));
   const refreshRates = ensureRates(true).pipe(
     Effect.map(pricing),
     Effect.withSpan("UsageService.refreshRates"),
@@ -319,32 +371,35 @@ export const make = Effect.gen(function* () {
       return nestedExists ? nested : path.join(homePath, "projects");
     });
 
-  const readSettings = settingsService.getSettings.pipe(
-    Effect.catchCause(
-      (cause) =>
-        new UsageReadError({
-          reason: "scanFailed",
-          detail: "Server settings could not be read.",
-          cause: Cause.squash(cause),
-        }),
-    ),
-  );
-
   /** Resolves the transcript directory for each provider. */
   const resolveTranscriptDirs = Effect.fn("UsageService.resolveTranscriptDirs")(function* (
     settings: ServerSettingsValue,
   ) {
     const claudeHome = yield* resolveClaudeHomePath(settings.providers.claudeAgent);
     const claudeDir = yield* resolveClaudeTranscriptDir(claudeHome);
-    const codexLayout = yield* resolveCodexHomeLayout(settings.providers.codex);
-    const codexHome = codexLayout.sharedHomePath;
+    const codexHomes = new Set<string>();
+    const addCodexHome = Effect.fn("UsageService.addCodexHome")(function* (
+      instanceId: string,
+      codexConfig: CodexSettings,
+    ) {
+      const layout = yield* resolveCodexHomeLayout(codexConfig);
+      // Usage must retain the legacy source while also seeing new T3-owned
+      // transcripts. The private home is derived exactly as in CodexDriver.
+      codexHomes.add(layout.sharedHomePath);
+      if (!codexConfig.useDesktopAppDaemon && codexConfig.shadowHomePath.trim().length === 0) {
+        codexHomes.add(codexIsolatedHomePath(path, config.baseDir, instanceId));
+      }
+    });
+    yield* addCodexHome("codex", settings.providers.codex);
+    for (const [instanceId, instance] of Object.entries(settings.providerInstances)) {
+      if (String(instance.driver) !== "codex") continue;
+      const codexConfig = yield* Schema.decodeUnknownEffect(CodexSettings)(
+        instance.config ?? {},
+      ).pipe(Effect.orElseSucceed(() => null));
+      if (codexConfig !== null) yield* addCodexHome(instanceId, codexConfig);
+    }
     const geminiHome = path.join(NodeOS.homedir(), ".gemini");
     const openCodeHome = path.join(NodeOS.homedir(), ".local", "share", "opencode");
-    const grokHomeEnv = hostEnvironment["GROK_HOME"]?.trim() ?? "";
-    const grokHome =
-      grokHomeEnv.length > 0
-        ? path.resolve(expandHomePath(grokHomeEnv))
-        : path.join(NodeOS.homedir(), ".grok");
     const imports = yield* fileSystem.readFileString(usageImportsPath).pipe(
       Effect.flatMap((raw) => decodeUsageImports(raw)),
       Effect.orElseSucceed(() => null),
@@ -352,16 +407,13 @@ export const make = Effect.gen(function* () {
 
     return [
       { provider: "claude" as const, dir: claudeDir },
-      { provider: "codex" as const, dir: path.join(codexHome, "sessions") },
-      { provider: "codex" as const, dir: path.join(codexHome, "archived_sessions") },
+      ...[...codexHomes].flatMap((codexHome) => [
+        { provider: "codex" as const, dir: path.join(codexHome, "sessions") },
+        { provider: "codex" as const, dir: path.join(codexHome, "archived_sessions") },
+      ]),
       { provider: "gemini" as const, dir: path.join(geminiHome, "tmp") },
       { provider: "gemini" as const, dir: path.join(geminiHome, "antigravity", "brain") },
       { provider: "opencode" as const, dir: openCodeHome },
-      {
-        provider: "grok" as const,
-        dir: path.join(grokHome, "sessions"),
-        fileName: "updates.jsonl",
-      },
       ...(imports?.sources ?? [])
         .filter((source) => source.path.trim().length > 0)
         .map((source) => ({ provider: source.provider, dir: path.resolve(source.path) })),
@@ -388,29 +440,69 @@ export const make = Effect.gen(function* () {
     scanCacheLoaded = true;
   });
 
-  const persistScanCache = Effect.fn("UsageService.persistScanCache")(function* () {
-    if (!cacheDirty) return;
+  const persistScanCacheOnce = Effect.fn("UsageService.persistScanCache")(function* () {
+    if (!cacheDirty) return true;
+    const revision = cacheRevision;
     // Cleared only after the write lands, so a failed persist is retried on
-    // the next scan instead of leaving disk permanently stale.
-    yield* encodeScanCacheFile(encodeScanCache(fileCache, [...scanCoverage.values()])).pipe(
+    // the next scan instead of leaving disk permanently stale. If a newer
+    // scan changed the maps meanwhile, its revision remains dirty and the
+    // worker publishes that newer snapshot next.
+    return yield* encodeScanCacheFile(encodeScanCache(fileCache, [...scanCoverage.values()])).pipe(
       Effect.flatMap((contents) =>
-        writeFileStringAtomically({ filePath: scanCachePath, contents }).pipe(
-          Effect.provideService(FileSystem.FileSystem, fileSystem),
-          Effect.provideService(Path.Path, path),
+        Effect.uninterruptible(
+          writeFileStringAtomically({ filePath: scanCachePath, contents }).pipe(
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.provideService(Path.Path, path),
+          ),
         ),
       ),
       Effect.map(() => {
-        cacheDirty = false;
+        if (cacheRevision === revision) cacheDirty = false;
+        return true;
       }),
       // A cache we cannot write is a slower next start, not a failed read.
-      Effect.catchCause(() => Effect.void),
+      Effect.catchCause(() => Effect.succeed(false)),
     );
   });
+  const persistQueue = yield* Queue.dropping<void>(1);
+  const persistQuotaCostLedgerOnce = Effect.fn("UsageService.persistQuotaCostLedger")(function* () {
+    if (!quotaCostLedgerDirty) return true;
+    const rows = quotaCostLedger;
+    const persisted = yield* writeQuotaCostLedger(quotaCostLedgerPath, rows).pipe(
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.provideService(Path.Path, path),
+      Effect.catchCause(() => Effect.succeed(false)),
+    );
+    if (persisted && rows === quotaCostLedger) quotaCostLedgerDirty = false;
+    return persisted;
+  });
+  const runPersistWorker = Effect.gen(function* () {
+    while (true) {
+      yield* Queue.take(persistQueue);
+      yield* persistQuotaCostLedgerOnce();
+      yield* persistScanCacheOnce();
+    }
+  });
+  // Keep exactly one consumer alive for the service lifetime. Queue wakes are
+  // deliberately lossy: the revision check in persistScanCacheOnce means a
+  // single wake is enough to publish all changes made before it runs.
+  const persistWorker = yield* Effect.forkIn(runPersistWorker, serviceScope, {
+    startImmediately: true,
+  });
+  yield* Effect.addFinalizer(() =>
+    Effect.uninterruptible(
+      Scope.close(serviceScope, Exit.void).pipe(
+        Effect.andThen(Fiber.await(persistWorker)),
+        Effect.andThen(persistQuotaCostLedgerOnce()),
+        Effect.ignore,
+      ),
+    ),
+  );
 
   /**
-   * macOS does not have the separately installed Windows Codex Limits task.
-   * When no external history file is present, use the authenticated Codex
-   * app-server protocol and retain only the same sanitized weekly sample.
+   * macOS has no separately installed Codex Limits task. When no external
+   * history exists, collect one sanitized sample through the configured Codex
+   * home and retain it locally.
    */
   const collectMacQuotaSample = Effect.fn("UsageService.collectMacQuotaSample")(function* () {
     yield* macQuotaCollectionSemaphore.withPermits(1)(
@@ -426,8 +518,6 @@ export const make = Effect.gen(function* () {
         const homeLayout = yield* resolveCodexHomeLayout(
           codex.useDesktopAppDaemon ? { ...codex, shadowHomePath: "" } : codex,
         );
-        // Resolve launch arguments from the host, but pass only this allowlist
-        // to the child. Provider/API secrets must never cross this boundary.
         const environment = {
           PATH: hostEnvironment.PATH,
           HOME: hostEnvironment.HOME,
@@ -441,16 +531,14 @@ export const make = Effect.gen(function* () {
         const launchArgs = resolveCodexLaunchArgs(codex.launchArgs, hostEnvironment);
         const sample = yield* readCodexQuotaSample({
           binaryPath,
-          // Reuse the configured desktop bridge when enabled; it is the
-          // managed Unix-socket transport that shares the signed-in account.
-          // Headless installs use a short-lived authenticated stdio server.
-          transport: codex.useDesktopAppDaemon ? "desktop-daemon" : "stdio",
+          transport: "stdio",
           environment,
           cwd: process.cwd(),
           launchArgs: codexLaunchArgv(launchArgs),
           ...(homeLayout.effectiveHomePath ? { homePath: homeLayout.effectiveHomePath } : {}),
         }).pipe(
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          Effect.provideService(HostProcessPlatform, hostPlatform),
           Effect.scoped,
           Effect.timeout("10 seconds"),
           Effect.catchCause(() => Effect.succeed(null)),
@@ -458,10 +546,10 @@ export const make = Effect.gen(function* () {
         if (sample === null) return;
 
         const prior = yield* readQuotaHistory(macQuotaHistoryPath).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, path),
           Effect.provideService(HostProcessPlatform, hostPlatform),
         );
-        // Keep this map typed from the parsed value without exposing the source
-        // response or account metadata to the rest of the application.
         const retained = prior.status === "ready" ? prior.samples : [];
         const nextSamples = new Map(retained.map((entry) => [Date.parse(entry.observedAt), entry]));
         nextSamples.set(Date.parse(sample.observedAt), sample);
@@ -482,16 +570,25 @@ export const make = Effect.gen(function* () {
   const readQuotaHistoryForEnvironment = Effect.fn("UsageService.readQuotaHistoryForEnvironment")(
     function* () {
       const imported = yield* readQuotaHistory(undefined).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
         Effect.provideService(HostProcessPlatform, hostPlatform),
       );
       if (
         imported.status !== "missing" ||
         hostPlatform !== "darwin" ||
         process.env.T3CODE_QUOTA_HISTORY_PATH?.trim()
-      )
+      ) {
         return imported;
-      yield* collectMacQuotaSample().pipe(Effect.catchCause(() => Effect.void));
+      }
+      yield* collectMacQuotaSample().pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
+        Effect.catchCause(() => Effect.void),
+      );
       return yield* readQuotaHistory(macQuotaHistoryPath).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
         Effect.provideService(HostProcessPlatform, hostPlatform),
       );
     },
@@ -503,6 +600,7 @@ export const make = Effect.gen(function* () {
     size: number,
     mtimeMs: number,
     provider: UsageProviderKind,
+    startByte: number,
   ): Effect.Effect<readonly UsageRecord[]> =>
     Effect.gen(function* () {
       const cached = fileCache.get(filePath);
@@ -517,38 +615,39 @@ export const make = Effect.gen(function* () {
         return cached.records;
       }
 
-      const resumeFrom =
-        cached !== undefined && cached.provider === provider && size > cached.size
-          ? cached.position
-          : undefined;
+      const appendable = cached !== undefined && startByte > 0;
       const parsed = yield* Effect.promise(() =>
-        readTranscriptRecords(filePath, provider, resumeFrom),
+        readTranscriptRecords(filePath, provider, {
+          startByte,
+          endByte: size - 1,
+          ...(appendable && provider === "codex" && cached?.codexState !== undefined
+            ? { codexState: cached.codexState }
+            : {}),
+        }),
       );
       // A read failure is not an empty transcript: caching it under this
       // (size, mtime) would silently drop the file's usage until it changes.
       if (parsed === null) return [];
       // Stored already de-duplicated within the file, which is 99% of all
       // duplicates. The aggregator still runs the cross-file dedupe pass.
-      const base = parsed.resumed && cached !== undefined ? cached.records : [];
-      const seen = new Set<string>();
-      const records = dedupeWithinFile([...base, ...parsed.records], seen);
-      const tailRecords = dedupeWithinFile(parsed.tailRecords, seen);
+      const records = dedupeWithinFile([
+        ...(appendable && cached !== undefined ? cached.records : []),
+        ...parsed.records,
+      ]);
 
       fileCache.set(filePath, {
         size,
         mtimeMs,
         provider,
         records,
-        tailRecords,
-        position: parsed.position,
+        ...(parsed.codexState === undefined ? {} : { codexState: parsed.codexState }),
       });
-      cacheDirty = true;
-      return tailRecords.length === 0 ? records : [...records, ...tailRecords];
+      markCacheDirty();
+      return records;
     });
 
   const readSummaryUnlocked = Effect.fn("UsageService.readSummaryUnlocked")(function* (
     input: UsageSummaryInput,
-    settings: ServerSettingsValue,
   ) {
     if (input.sinceDay > input.untilDay) {
       return yield* new UsageReadError({
@@ -591,11 +690,8 @@ export const make = Effect.gen(function* () {
       });
     }
     const quotaHistory =
-      input.includeQuotaHistory || input.quotaHistoryOnly
-        ? yield* readQuotaHistoryForEnvironment().pipe(
-            Effect.provideService(FileSystem.FileSystem, fileSystem),
-            Effect.provideService(Path.Path, path),
-          )
+      input.includeQuotaHistory || input.quotaHistoryOnly || input.quotaIntervals !== undefined
+        ? yield* readQuotaHistoryForEnvironment()
         : undefined;
     if (input.quotaHistoryOnly) {
       const finishedAtMs = yield* Clock.currentTimeMillis;
@@ -615,6 +711,12 @@ export const make = Effect.gen(function* () {
         },
         scanDurationMs: Math.max(0, finishedAtMs - startedAtMs),
         quotaHistory,
+        quotaCostSnapshots:
+          input.quotaIntervals === undefined
+            ? quotaCostLedger
+            : quotaCostLedger.filter((row) =>
+                input.quotaIntervals!.some((interval) => interval.id === row.intervalId),
+              ),
       } satisfies UsageSummary;
     }
     const quotaCosts: UsageQuotaCost[] = [];
@@ -639,6 +741,7 @@ export const make = Effect.gen(function* () {
     const hostId = NodeOS.hostname();
     // The home resolvers ask for `Path` themselves; satisfy them from the
     // instance we already hold so `readSummary` stays context-free.
+    const settings = yield* readSettings;
     const dirs = yield* resolveTranscriptDirs(settings).pipe(
       Effect.provideService(Path.Path, path),
     );
@@ -652,10 +755,6 @@ export const make = Effect.gen(function* () {
     const windowStartMs =
       (hourlyWindow?.sinceTimeMs ?? DateTime.toEpochMillis(windowStart.value)) - MTIME_SLACK_MS;
 
-    const priceOverrides = createOverrideRateTable(settings.usagePriceOverrides);
-    const quotaRates = new Map(rates);
-    for (const [model, override] of priceOverrides) quotaRates.set(model, override);
-
     const aggregator = new UsageAggregator({
       timeZone: input.timeZone,
       sinceDay: input.sinceDay,
@@ -663,7 +762,7 @@ export const make = Effect.gen(function* () {
       resolution: input.resolution ?? "day",
       ...hourlyWindow,
       rates,
-      priceOverrides,
+      priceOverrides: createOverrideRateTable(settings.usagePriceOverrides),
     });
 
     const sources: UsageSource[] = [];
@@ -687,10 +786,8 @@ export const make = Effect.gen(function* () {
           windowStartMs,
           nowMs: startedAtMs,
           lastRecentScanAtMs: lastRecentScanAt,
-          // A usage read must notice an actively appended transcript even when
-          // two requests arrive inside the warm inventory TTL. The walk is
-          // still bounded to the recent window; the full audit remains on its
-          // longer cadence via `fullScanIntervalMs`.
+          // Every summary read checks the current transcript inventory. The
+          // per-file cache still avoids rereading unchanged transcript bytes.
           incrementalScanTtlMs: 0,
           recentTranscriptWindowMs: RECENT_TRANSCRIPT_WINDOW_MS,
           fullScanIntervalMs: FULL_SCAN_INTERVAL_MS,
@@ -767,9 +864,9 @@ export const make = Effect.gen(function* () {
             cached !== undefined &&
             cached.provider === provider &&
             file.size > cached.size &&
+            (provider === "claude" || (provider === "codex" && cached.codexState !== undefined)) &&
             (yield* Effect.promise(() => transcriptCursorIsLineBoundary(file.path, cached.size)));
-          const resumeOffset = cached?.position.resumeOffset ?? 0;
-          return { ...file, startByte: warm ? file.size : appendable ? resumeOffset : 0 };
+          return { ...file, startByte: warm ? file.size : appendable ? cached.size : 0 };
         }),
         { concurrency: 16 },
       );
@@ -786,7 +883,7 @@ export const make = Effect.gen(function* () {
           windowStartMs: scanStartMs,
           retentionCutoffMs: startedAtMs - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000,
         });
-        if (pruned > 0) cacheDirty = true;
+        if (pruned > 0) markCacheDirty();
       }
       let scannedFiles = 0;
       let skippedFiles = selection.deferredFiles;
@@ -795,11 +892,18 @@ export const make = Effect.gen(function* () {
       const sessionIds = new Set<string>();
       const quota = new QuotaCostAccumulator(
         provider === "codex" ? quotaIntervals : [],
-        quotaRates,
+        rates,
+        createOverrideRateTable(settings.usagePriceOverrides),
       );
 
       for (const file of selection.files) {
-        const records = yield* readFileRecords(file.path, file.size, file.mtimeMs, provider);
+        const records = yield* readFileRecords(
+          file.path,
+          file.size,
+          file.mtimeMs,
+          provider,
+          file.startByte,
+        );
         if (records.length === 0) {
           skippedFiles += 1;
           continue;
@@ -836,7 +940,7 @@ export const make = Effect.gen(function* () {
             sinceMs: scanStartMs,
             scannedAtMs: startedAtMs,
           });
-          cacheDirty = true;
+          markCacheDirty();
         }
       }
 
@@ -873,33 +977,50 @@ export const make = Effect.gen(function* () {
       windowStartMs,
       retentionCutoffMs: startedAtMs - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000,
     });
-    if (pruned > 0) cacheDirty = true;
-    yield* persistScanCache();
+    const recordedAt = DateTime.formatIso(DateTime.makeUnsafe(startedAtMs));
+    for (const cost of quotaCosts) {
+      const interval = quotaIntervals.find((candidate) => candidate.id === cost.intervalId);
+      const first = quotaHistory?.samples.find(
+        (sample) => sample.observedAt === interval?.sinceTime,
+      );
+      const last = quotaHistory?.samples.find(
+        (sample) => sample.observedAt === interval?.untilTime,
+      );
+      if (!interval || !first || !last) continue;
+      const next = upsertQuotaCostLedger(
+        quotaCostLedger,
+        cost,
+        cost.fingerprint,
+        {
+          ...interval,
+          firstRemainingPercent: first.remainingPercent,
+          lastRemainingPercent: last.remainingPercent,
+          resetsAt: first.resetsAt,
+        },
+        recordedAt,
+      );
+      if (next !== quotaCostLedger) {
+        quotaCostLedger = next;
+        quotaCostLedgerDirty = true;
+      }
+    }
+    if (pruned > 0) markCacheDirty();
+    // Cache persistence is derived work. Wake the permanent consumer without
+    // making the response wait for JSON encoding or atomic replacement.
+    yield* Queue.offer(persistQueue, undefined);
 
     const aggregated = aggregator.finish();
     const readAt = yield* DateTime.now;
     const finishedAtMs = yield* Clock.currentTimeMillis;
     const clientContractVersion = input.clientContractVersion ?? 5;
     const supportsOpenCode = clientContractVersion >= 6;
-    // Contract v5 predates Gemini in the provider enum. Keep that legacy
-    // response shape valid until clients advertise v6 or newer.
-    const supportsGemini = clientContractVersion >= 6;
     const supportsImports = clientContractVersion >= 7;
-    const supportsGrok = clientContractVersion >= 8;
     const supportsProvider = (provider: UsageProviderKind) =>
       (provider !== "opencode" || supportsOpenCode) &&
-      (provider !== "gemini" || supportsGemini) &&
-      (provider !== "grok" || supportsGrok) &&
       ((provider !== "chatgpt" && provider !== "aistudio") || supportsImports);
 
     return {
-      contractVersion: supportsGrok
-        ? USAGE_CONTRACT_VERSION
-        : supportsImports
-          ? Math.min(USAGE_CONTRACT_VERSION, 7)
-          : supportsOpenCode
-            ? 6
-            : 5,
+      contractVersion: supportsImports ? USAGE_CONTRACT_VERSION : supportsOpenCode ? 6 : 5,
       readAt: DateTime.formatIso(readAt),
       timeZone: input.timeZone,
       sinceDay: input.sinceDay,
@@ -918,69 +1039,91 @@ export const make = Effect.gen(function* () {
       scanDurationMs: Math.max(0, finishedAtMs - startedAtMs),
       ...(quotaHistory === undefined ? {} : { quotaHistory }),
       ...(input.quotaIntervals === undefined ? {} : { quotaCosts }),
+      ...(input.quotaIntervals === undefined
+        ? {}
+        : {
+            quotaCostSnapshots: quotaCostLedger.filter((row) =>
+              input.quotaIntervals!.some((interval) => interval.id === row.intervalId),
+            ),
+          }),
     } satisfies UsageSummary;
   });
 
-  /**
-   * In-flight scans are keyed by both the query and custom prices. Identical
-   * requests share one detached scan; a settings change starts an independent
-   * scan so a caller never waits behind a stale-priced request.
-   */
-  const inflightScans = new Map<string, Deferred.Deferred<UsageSummary, UsageReadError>>();
-  const scanKey = (
-    input: UsageSummaryInput,
-    priceOverrides: ServerSettingsValue["usagePriceOverrides"],
-  ): string => JSON.stringify([usageSummaryCacheKey(input), priceOverrides]);
-
+  // A cache miss is decided from mutable per-file state. Serializing summary
+  // scans makes that decision single-flight: a second window waits for the
+  // first scan to persist its newly warm files instead of parsing them again.
   const readSummary: UsageService["Service"]["readSummary"] = (input) =>
-    Effect.gen(function* () {
-      const settings = yield* readSettings;
-      if (input.quotaHistoryOnly) return yield* readSummaryUnlocked(input, settings);
-      if (input.sinceDay > input.untilDay) return yield* readSummaryUnlocked(input, settings);
-
-      // Load the durable cache before enrolling a detached scan. If this
-      // interruptible first read is canceled, the next caller must be able to
-      // retry the cache load rather than inherit a permanently blocked flight.
-      yield* ensureScanCacheLoaded;
-
-      const key = scanKey(input, settings.usagePriceOverrides);
-      const startedAtMs = yield* Clock.currentTimeMillis;
-      // Transcript summaries must re-check the recent append window on every
-      // request. Keep the bounded process cache for quota-history queries,
-      // whose source is a separately sampled history file.
-      const cacheable = input.includeQuotaHistory === true;
-      if (cacheable && !input.refresh) {
-        const cached = summaryCache.get(key, startedAtMs);
-        if (cached !== undefined) return cached;
-      }
-
-      const deferred = yield* Effect.uninterruptible(
-        Effect.gen(function* () {
-          const existing = inflightScans.get(key);
-          if (existing !== undefined) return existing;
-          const created = Deferred.makeUnsafe<UsageSummary, UsageReadError>();
-          inflightScans.set(key, created);
-          yield* readSummaryUnlocked(input, settings).pipe(
-            Effect.tap((summary) =>
+    input.quotaHistoryOnly
+      ? readSummaryUnlocked(input)
+      : input.includeQuotaHistory
+        ? Effect.gen(function* () {
+            const settings = yield* readSettings;
+            const key = usageSummaryCacheKey(input, settings.usagePriceOverrides);
+            if (!input.refresh) {
+              const cached = summaryCache.get(key, yield* Clock.currentTimeMillis);
+              if (cached !== undefined) return cached;
+            }
+            return yield* scanSemaphore.withPermits(1)(
               Effect.gen(function* () {
-                if (cacheable && summary.sources.every((source) => source.status !== "partial")) {
-                  const finishedAtMs = yield* Clock.currentTimeMillis;
-                  summaryCache.set(key, finishedAtMs, summary);
+                if (!input.refresh) {
+                  const cached = summaryCache.get(key, yield* Clock.currentTimeMillis);
+                  if (cached !== undefined) return cached;
                 }
+                const summary = yield* readSummaryUnlocked(input);
+                // A provider-backed result must be rebuilt so changed transcript
+                // metadata can invalidate it. Empty-source history fixtures are
+                // safe to reuse and keep history-only navigation inexpensive.
+                if (summary.sources.every((source) => source.status === "missing")) {
+                  summaryCache.set(key, yield* Clock.currentTimeMillis, summary);
+                }
+                return summary;
               }),
-            ),
-            Effect.onExit((exit) =>
-              Effect.sync(() => inflightScans.delete(key)).pipe(
-                Effect.andThen(Deferred.done(created, exit)),
-              ),
-            ),
-            Effect.forkDetach,
-          );
-          return created;
-        }),
-      );
-      return yield* Deferred.await(deferred);
-    });
+            );
+          })
+        : // Reject an inverted calendar window before joining the single-flight
+          // map. Invalid input has no scan to share and must remain immediate.
+          input.sinceDay > input.untilDay
+          ? readSummaryUnlocked(input)
+          : Effect.gen(function* () {
+              const settings = yield* readSettings;
+              const key = usageSummaryCacheKey(input, settings.usagePriceOverrides);
+              if (!input.refresh) {
+                const cached = summaryCache.get(key, yield* Clock.currentTimeMillis);
+                if (cached !== undefined) return cached;
+              }
+
+              const registration = yield* Effect.sync(() => {
+                const existing = inFlightSummaries.get(key);
+                if (existing !== undefined) return { existing } as const;
+                const result = Deferred.makeUnsafe<Exit.Exit<UsageSummary, UsageReadError>>();
+                inFlightSummaries.set(key, result);
+                return { result } as const;
+              });
+              if ("existing" in registration) {
+                const exit = yield* Deferred.await(registration.existing);
+                if (Exit.isFailure(exit)) return yield* Effect.failCause(exit.cause);
+                return exit.value;
+              }
+
+              const result = registration.result;
+              // Registration is synchronous, so concurrent callers cannot both
+              // observe an empty map before the owner is installed.
+              const exit = yield* scanSemaphore
+                .withPermits(1)(readSummaryUnlocked(input))
+                .pipe(
+                  Effect.onExit((completed) =>
+                    Effect.sync(() => inFlightSummaries.delete(key)).pipe(
+                      Effect.andThen(Deferred.succeed(result, completed)),
+                    ),
+                  ),
+                  Effect.exit,
+                );
+              if (Exit.isFailure(exit)) return yield* Effect.failCause(exit.cause);
+              if (exit.value.sources.every((source) => source.status === "missing")) {
+                summaryCache.set(key, yield* Clock.currentTimeMillis, exit.value);
+              }
+              return exit.value;
+            });
 
   return { readSummary, refreshRates } as const;
 });

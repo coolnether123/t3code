@@ -10,7 +10,6 @@ import {
   EDITORS,
   ExternalLauncherError,
   ExternalLauncherBrowserSpawnError,
-  ExternalLauncherBrowserNotFoundError,
   ExternalLauncherCommandNotFoundError,
   ExternalLauncherEditorSpawnError,
   ExternalLauncherUnknownEditorError,
@@ -42,17 +41,12 @@ import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawne
 export {
   ExternalLauncherError,
   ExternalLauncherBrowserSpawnError,
-  ExternalLauncherBrowserNotFoundError,
   ExternalLauncherCommandNotFoundError,
   ExternalLauncherEditorSpawnError,
   ExternalLauncherUnknownEditorError,
   ExternalLauncherUnsupportedEditorError,
-  isExternalLauncherError,
 } from "@t3tools/contracts";
 export type { LaunchEditorInput };
-export interface LaunchBrowserOptions {
-  readonly application?: "chrome" | "default";
-}
 interface EditorLaunch {
   readonly editor: EditorId;
   readonly target: string;
@@ -108,11 +102,6 @@ const BrowserLaunchEnvConfig = Config.all({
   container: Config.string("container").pipe(Config.option),
   DISPLAY: Config.string("DISPLAY").pipe(Config.option),
   WAYLAND_DISPLAY: Config.string("WAYLAND_DISPLAY").pipe(Config.option),
-  ProgramFiles: Config.string("ProgramFiles").pipe(Config.option),
-  ProgramFilesX86: Config.string("ProgramFiles(x86)").pipe(Config.option),
-  LOCALAPPDATA: Config.string("LOCALAPPDATA").pipe(Config.option),
-  PATH: Config.string("PATH").pipe(Config.option),
-  PATHEXT: Config.string("PATHEXT").pipe(Config.option),
 }).pipe(Config.map(compactEnv));
 
 const CommandLookupEnvConfig = Config.all({
@@ -122,12 +111,8 @@ const CommandLookupEnvConfig = Config.all({
   PATHEXT: Config.string("PATHEXT").pipe(Config.option),
 }).pipe(Config.map(compactEnv));
 
-const readBrowserLaunchEnv = BrowserLaunchEnvConfig.pipe(
-  Effect.orElseSucceed((): NodeJS.ProcessEnv => ({})),
-);
-const readCommandLookupEnv = CommandLookupEnvConfig.pipe(
-  Effect.orElseSucceed((): NodeJS.ProcessEnv => ({})),
-);
+const readBrowserLaunchEnv = BrowserLaunchEnvConfig.pipe(Effect.orElseSucceed(() => ({})));
+const readCommandLookupEnv = CommandLookupEnvConfig.pipe(Effect.orElseSucceed(() => ({})));
 
 function parseTargetPathAndPosition(target: string): Option.Option<TargetPathAndPosition> {
   const match = TARGET_WITH_POSITION_PATTERN.exec(target);
@@ -461,69 +446,9 @@ const buildAvailableEditors = Effect.fn("externalLauncher.buildAvailableEditors"
 
 const resolveBrowserLaunch = Effect.fn("externalLauncher.resolveBrowserLaunch")(function* (
   target: string,
-  options: LaunchBrowserOptions = {},
-): Effect.fn.Return<ProcessLaunch, ExternalLauncherError, FileSystem.FileSystem | Path.Path> {
+) {
   const platform = yield* HostProcessPlatform;
   const env = yield* readBrowserLaunchEnv;
-  if (options.application === "chrome") {
-    if (platform === "darwin") {
-      return {
-        command: "open",
-        args: ["-a", "Google Chrome", target],
-        options: DETACHED_IGNORE_STDIO_OPTIONS,
-      };
-    }
-
-    const fileSystem = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    const windowsCandidates =
-      platform === "win32"
-        ? [
-            env.ProgramFilesX86
-              ? path.join(env.ProgramFilesX86, "Google", "Chrome", "Application", "chrome.exe")
-              : undefined,
-            env.ProgramFiles
-              ? path.join(env.ProgramFiles, "Google", "Chrome", "Application", "chrome.exe")
-              : undefined,
-            env.LOCALAPPDATA
-              ? path.join(env.LOCALAPPDATA, "Google", "Chrome", "Application", "chrome.exe")
-              : undefined,
-          ]
-        : shouldUseWindowsHostFromWsl(platform, env)
-          ? [
-              "/mnt/c/Program Files (x86)/Google/Chrome/Application/chrome.exe",
-              "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe",
-            ]
-          : [];
-    for (const candidate of windowsCandidates) {
-      if (
-        candidate !== undefined &&
-        (yield* fileSystem.exists(candidate).pipe(Effect.orElseSucceed(() => false)))
-      ) {
-        return {
-          command: candidate,
-          args: [target],
-          options: DETACHED_IGNORE_STDIO_OPTIONS,
-        };
-      }
-    }
-
-    if (platform === "linux" && !shouldUseWindowsHostFromWsl(platform, env)) {
-      const command = yield* resolveAvailableCommand(
-        ["google-chrome", "google-chrome-stable"],
-        env,
-      );
-      if (Option.isSome(command)) {
-        return {
-          command: command.value,
-          args: [target],
-          options: DETACHED_IGNORE_STDIO_OPTIONS,
-        };
-      }
-    }
-
-    return yield* new ExternalLauncherBrowserNotFoundError({ browser: "Google Chrome" });
-  }
   return buildBrowserLaunch(target, platform, env);
 });
 
@@ -579,10 +504,7 @@ export class ExternalLauncher extends Context.Service<
      */
     readonly resolveFileManagerRevealKind: () => Effect.Effect<FileManagerRevealKind | undefined>;
     /** Launch a URL target in the default browser. */
-    readonly launchBrowser: (
-      target: string,
-      options?: LaunchBrowserOptions,
-    ) => Effect.Effect<void, ExternalLauncherError>;
+    readonly launchBrowser: (target: string) => Effect.Effect<void, ExternalLauncherError>;
     /**
      * Launch a workspace path in a selected editor integration.
      *
@@ -777,13 +699,8 @@ const launchAndUnref = Effect.fn("externalLauncher.launchAndUnref")(function* (
 
 const launchBrowser = Effect.fn("externalLauncher.launchBrowser")(function* (
   target: string,
-  options?: LaunchBrowserOptions,
-): Effect.fn.Return<
-  void,
-  ExternalLauncherError,
-  ChildProcessSpawner.ChildProcessSpawner | FileSystem.FileSystem | Path.Path
-> {
-  const launch = yield* resolveBrowserLaunch(target, options);
+): Effect.fn.Return<void, ExternalLauncherError, ChildProcessSpawner.ChildProcessSpawner> {
+  const launch = yield* resolveBrowserLaunch(target);
   return yield* launchAndUnref(
     launch,
     (cause) =>
@@ -876,11 +793,9 @@ export const make = Effect.gen(function* () {
       provideCommandResolutionServices(resolveFileManagerRevealKind()).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       ),
-    launchBrowser: (target, options) =>
-      provideCommandResolutionServices(
-        launchBrowser(target, options).pipe(
-          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-        ),
+    launchBrowser: (target) =>
+      launchBrowser(target).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       ),
     launchEditor: (input) =>
       provideCommandResolutionServices(

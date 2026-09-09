@@ -7,7 +7,7 @@ import {
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { Clock3Icon, CheckCircle2Icon, AlertCircleIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { serverEnvironment } from "../../state/server";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -25,6 +25,7 @@ export function ResetCheckPanel({
   const start = useAtomCommand(serverEnvironment.startResetCheck, { reportFailure: false });
   const cancel = useAtomCommand(serverEnvironment.cancelResetCheck, { reportFailure: false });
   const [command, setCommand] = useState<ResetCheckState | null>(null);
+  const active = useRef(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const state = latestResetCheck(Option.getOrNull(AsyncResult.value(query)), command);
@@ -35,6 +36,8 @@ export function ResetCheckPanel({
     return () => window.clearInterval(timer);
   }, [queryAtom, running]);
   const act = async (action: typeof start) => {
+    if (active.current) return;
+    active.current = true;
     setSending(true);
     setError(null);
     try {
@@ -45,7 +48,10 @@ export function ResetCheckPanel({
           "Could not reach the reset checker. Reconnect or update this computer's T3 server.",
         );
       appAtomRegistry.refresh(queryAtom);
+    } catch {
+      setError("Could not reach the reset checker. Reconnect and try again.");
     } finally {
+      active.current = false;
       setSending(false);
     }
   };
@@ -88,13 +94,13 @@ export function ResetCheckResult({
   const Icon =
     running || sending
       ? Clock3Icon
-      : finding?.latestPostsVerified
+      : state?.status === "completed"
         ? CheckCircle2Icon
         : AlertCircleIcon;
   return (
     <section
       aria-label="Luna reset check"
-      className="mt-4 rounded-lg border border-border p-3 sm:p-4"
+      className="mt-4 rounded-lg border border-border bg-card/20 p-3 sm:p-4"
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex min-h-11 items-center gap-2 text-sm" role="status" aria-live="polite">
@@ -130,6 +136,14 @@ export function ResetCheckResult({
       <p className="mt-1 text-xs text-muted-foreground">
         Runs on {label}. Uses Codex allowance. Only checks when you press the button.
       </p>
+      <a
+        href="https://x.com/thsottiaux/with_replies"
+        target="_blank"
+        rel="noreferrer"
+        className="inline-flex min-h-9 items-center text-xs text-muted-foreground underline underline-offset-4"
+      >
+        Open Tibo's posts and replies
+      </a>
       {unavailable || error ? (
         <p role="alert" className="mt-3 text-sm">
           {error ?? "Reset checker unavailable. Reconnect or update this computer's T3 server."}
@@ -147,7 +161,11 @@ export function ResetCheckResult({
       ) : null}
       {finding ? (
         <div className="mt-4 space-y-2 text-sm">
+          <p className="text-xs text-muted-foreground">
+            Search completed · {finding.sources.length} sources
+          </p>
           <p className="font-medium">{presentation.title}</p>
+          <p className="text-muted-foreground">{finding.summary}</p>
           {presentation.range ? (
             <p className="text-base tabular-nums">{presentation.range}</p>
           ) : null}
@@ -174,7 +192,6 @@ export function ResetCheckResult({
               Sources and reasoning
             </summary>
             <div className="space-y-2 pt-2">
-              <p className="text-muted-foreground">{finding.summary}</p>
               <p className="text-muted-foreground">{finding.confidenceReason}</p>
               <p className="text-muted-foreground">{finding.accessNote}</p>
               <div className="flex flex-wrap gap-x-4">

@@ -4,6 +4,31 @@ For one account, use the default Codex provider with your normal Codex login.
 [Provider setup](./install.md#providers) covers installation, Settings > Providers,
 and custom binaries or environment variables.
 
+## Open native Codex chats
+
+Choose **Codex chats** in the sidebar to view your existing native Codex sessions.
+This view keeps Codex conversations separate from your T3 chats while still
+letting you search sessions, read their messages and tool activity, and send a
+follow-up from the same conversation. A direct link keeps the selected session
+open when you refresh or return to it later.
+
+The view works in the T3 Code desktop app, in a desktop browser, and in a mobile
+browser. The native React Native mobile app does not include this view; use the
+mobile browser when you need to reach native Codex sessions from a phone.
+
+Sending a follow-up requires the Codex host to be connected. T3 reports delivery
+as queued, sent, failed, or unconfirmed; the native Codex session remains the
+source of truth for the assistant turn and its progress. If the host is
+unavailable, reconnect it before sending. T3 watches a delivered turn for up to
+five minutes; if it is still running, choose **Keep watching** or refresh the
+conversation to continue observing it.
+
+Native Codex permission settings and the connected host's project policy
+continue to apply to these sessions. T3 can show that a session needs
+attention, but it cannot approve a Codex request that the connected host does
+not support. Use the native Codex session when it asks for an approval or other
+interaction.
+
 ## Use multiple accounts
 
 A shared Codex home with a shadow home lets work and personal accounts continue
@@ -54,7 +79,9 @@ contains a copied Codex setup. Use a fresh shadow directory and sign in again.
 Codex can ask a question and keep working. Answer it in the thread's question
 panel. The answer becomes a new message: it reaches the active turn, or starts
 another turn if Codex has finished. Unanswered questions survive reconnects.
-This requires a Codex version that supports async questions.
+If you do not want to answer, dismiss the question from its panel. Dismissing
+closes it without sending anything to Codex. This requires a Codex version that
+supports async questions.
 
 ## Approve app access
 
@@ -69,56 +96,3 @@ In an existing Codex thread, send `/feedback` with an optional description, for
 example `/feedback The agent stopped before finishing the tests`. This uploads
 the conversation and Codex logs to OpenAI. The returned thread ID can be shared
 with OpenAI support.
-
-## Choose browser and computer control
-
-Open the model traits menu in a Codex thread and choose an available browser provider:
-
-- **T3 managed Chrome** uses a separate Chrome profile owned by T3. It can navigate, inspect pages,
-  fill fields, click controls, and take screenshots. It does not use your regular Chrome profile.
-- **T3 Preview** uses the collaborative preview browser when agent browser access is enabled and a
-  T3 desktop browser host is connected to the environment.
-
-T3 offers only providers it can provision. Refresh the Codex provider in Settings after installing
-Chrome or changing its availability. Selecting a provider does not start a browser or approve its
-actions. Normal tool approvals still apply.
-
-Expand a managed Chrome screenshot entry in the work log to view its image, then select the image
-to enlarge it. Previews are available for new screenshot calls; older calls without a saved image
-still show their recorded tool output. Images use the thread's authenticated attachment access,
-including when you connect remotely.
-
-Codex desktop Computer Use, the Codex built-in browser, and the Codex Chrome extension are separate
-capabilities. On macOS, use the [Codex desktop bridge](../macos-codex-desktop-bridge.md)
-to connect to the host daemon and its installed plugins. In regular CLI mode, installing those
-plugins alone does not connect their desktop host to T3. T3 does not offer
-them as working browser choices without that connection. A configured Computer Use skill can run
-through the Codex session independently of the browser choice. The agent must check its host
-connection and obtain app permission before controlling a window. Review that permission request
-in T3, and avoid using Windows foreground input while the agent controls the selected app.
-
-Older saved **Full desktop** selections use the available T3 browser route; they do not grant
-Windows desktop control.
-
-The `computer_open_url` tool can open a URL in your regular browser. Opening a URL does not give
-the agent a way to inspect or control that browser afterward.
-
-## Steer or stop a running turn
-
-Choose **Steer active turn** to send an additional instruction to the running Codex turn. Its model
-and permissions stay unchanged, and the instruction does not create a queued turn. If that turn
-ends while the dialog is open, close the dialog before choosing another turn.
-
-Choose **Stop generation** to interrupt the active turn. You can send another message in the same
-thread afterward. T3 resumes the original Codex conversation; a failed resume reports an error
-instead of silently starting a replacement conversation.
-
-## Inspect native subagents
-
-When Codex spawns subagents, choose **Open Agents** in the work log. The roster shows their reported
-status, activity, model, and reasoning effort when Codex supplies them. Choose an agent's name to
-see its identity, parent relationship, recent activity, and available result or error.
-
-Agent details are a compact view of reported activity, not a separate interactive child
-conversation. Nested agents appear when the runtime reports them; their availability depends on
-that runtime's delegation tools and limits.

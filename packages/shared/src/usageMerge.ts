@@ -53,6 +53,16 @@ export interface HourlyTotals {
   readonly costUsd: number;
   readonly totalTokens: number;
   readonly byProvider: ReadonlyMap<UsageProviderKind, { costUsd: number; totalTokens: number }>;
+  /** Model rollups for this hour, keyed as `${provider}:${model}`. */
+  readonly byModel: ReadonlyMap<string, HourlyModelTotals>;
+}
+
+export interface HourlyModelTotals {
+  readonly model: string;
+  readonly provider: UsageProviderKind;
+  readonly costUsd: number;
+  readonly totalTokens: number;
+  readonly records: number;
 }
 
 export interface CostQuality {
@@ -279,6 +289,16 @@ export function mergeUsage(
       costUsd: number;
       totalTokens: number;
       byProvider: Map<UsageProviderKind, { costUsd: number; totalTokens: number }>;
+      byModel: Map<
+        string,
+        {
+          model: string;
+          provider: UsageProviderKind;
+          costUsd: number;
+          totalTokens: number;
+          records: number;
+        }
+      >;
     }
   >();
   const contributingEnvironments: EnvironmentId[] = [];
@@ -367,6 +387,7 @@ export function mergeUsage(
           costUsd: 0,
           totalTokens: 0,
           byProvider: new Map<UsageProviderKind, { costUsd: number; totalTokens: number }>(),
+          byModel: new Map(),
         };
         hour.costUsd += bucket.costUsd;
         hour.totalTokens += tokens;
@@ -377,6 +398,19 @@ export function mergeUsage(
         hourProvider.costUsd += bucket.costUsd;
         hourProvider.totalTokens += tokens;
         hour.byProvider.set(bucket.provider, hourProvider);
+
+        const hourlyModelKey = `${bucket.provider}:${bucket.model}`;
+        const hourlyModel = hour.byModel.get(hourlyModelKey) ?? {
+          model: bucket.model,
+          provider: bucket.provider,
+          costUsd: 0,
+          totalTokens: 0,
+          records: 0,
+        };
+        hourlyModel.costUsd += bucket.costUsd;
+        hourlyModel.totalTokens += tokens;
+        hourlyModel.records += bucket.records;
+        hour.byModel.set(hourlyModelKey, hourlyModel);
         hourlyAccumulator.set(bucket.hourStart, hour);
       }
     }

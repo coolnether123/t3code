@@ -829,8 +829,8 @@ export const make = Effect.gen(function* () {
     viewer: string,
   ): boolean => {
     if (filters === undefined) return true;
-    const labels = item.labels.map((label) => label.name.trim().toLowerCase());
-    const holds = (label: string) => labels.includes(label.trim().toLowerCase());
+    const labels = new Set(item.labels.map((label) => label.name.trim().toLowerCase()));
+    const holds = (label: string) => labels.has(label.trim().toLowerCase());
     return (
       (filters.draft === undefined || item.isDraft === (filters.draft === "only")) &&
       // Judged on the provider row rather than the entry, because the two absences mean
@@ -1257,6 +1257,8 @@ export const make = Effect.gen(function* () {
             ...(changeRequest.isDraft === true ? { isDraft: true } : {}),
             headBranch: changeRequest.headBranch,
             baseBranch: changeRequest.baseBranch,
+            closedAt: changeRequest.closedAt ?? null,
+            mergedAt: changeRequest.mergedAt ?? null,
             updatedAt: changeRequest.updatedAt,
           })),
         );
@@ -2316,6 +2318,8 @@ export const make = Effect.gen(function* () {
     ...(detail.isDraft === true ? { isDraft: true } : {}),
     headBranch: detail.headBranch,
     baseBranch: detail.baseBranch,
+    closedAt: detail.closedAt,
+    mergedAt: detail.mergedAt,
     updatedAt: detail.updatedAt,
   });
   const shouldReplaceHeldSummary = (key: string, next: PullRequestSummary) => {

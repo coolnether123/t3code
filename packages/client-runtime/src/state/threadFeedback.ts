@@ -44,7 +44,6 @@ export function codexFeedbackMessage(
         : submission.status === "failed"
           ? `Could not send feedback to OpenAI.\n\n${submission.errorMessage}`
           : "Sending feedback to OpenAI...";
-
   return {
     id: role === "user" ? submission.id : MessageId.make(`${submission.id}:feedback`),
     role,
@@ -54,6 +53,22 @@ export function codexFeedbackMessage(
     createdAt: submission.createdAt,
     updatedAt: submission.createdAt,
   };
+}
+
+export function codexFeedbackNotice(submission: CodexFeedbackSubmission) {
+  switch (submission.status) {
+    case "interrupted":
+      return null;
+    case "uploading":
+      return { title: "Sending feedback to OpenAI...", description: undefined };
+    case "sent":
+      return {
+        title: "Feedback sent to OpenAI",
+        description: `Thread ID: ${submission.feedbackId}`,
+      };
+    case "failed":
+      return { title: "Could not send feedback to OpenAI", description: submission.errorMessage };
+  }
 }
 
 export async function submitCodexFeedback<E>(input: {

@@ -13,7 +13,9 @@ import {
   quotaCostWindow,
   quotaIntervals,
   quotaPeriods,
+  quotaSavedCostPrefix,
   quotaValueSnapshots,
+  quotaValueWithHistoricalCalibration,
   quotaValueWithSnapshot,
   retainQuotaValueSnapshots,
   type QuotaValueSnapshot,
@@ -27,6 +29,10 @@ import { SidebarInset } from "../ui/sidebar";
 import { WorkspacePageContainer } from "../WorkspacePageContainer";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
 
+import { TokenBudgetPanel } from "./TokenBudgetPanel";
+import { monitoredModels } from "./usageTokenBudget";
+import { apiPaceInterval } from "./usageApiPace";
+import type { PriorApiPaceInput } from "./usageApiPace";
 import { UsagePaceChart } from "./UsagePaceChart";
 import { ResetCheckPanel } from "./ResetCheckPanel";
 import { CommunityCheckPanel } from "./CommunityCheckPanel";
@@ -84,25 +90,94 @@ export function UsageResetPage() {
   );
   const tracker =
     trackers.find((environment) => environment.environmentId === trackerId) ?? trackers[0];
+  const effectiveSelectedIds = useMemo<readonly string[] | null>(
+    () => selectedIds ?? (tracker ? [tracker.environmentId] : null),
+    [selectedIds, tracker?.environmentId],
+  );
   const rawSamples = tracker?.summary?.quotaHistory?.samples;
   const samples = useMemo(() => quotaMonitoringSamples(rawSamples ?? []), [rawSamples]);
+  // Keep the complete saved stream for chart/fallback presentation. Cost queries
+  // below continue to use only the active monitoring run.
+  const historicalPeriods = useMemo(() => quotaPeriods(rawSamples ?? []), [rawSamples]);
   const periods = useMemo(() => quotaPeriods(samples), [samples]);
   const intervals = useMemo(() => quotaIntervals(periods), [periods]);
+  const paceInterval = useMemo(() => apiPaceInterval(intervals.at(-1)), [intervals]);
   const costInput = useMemo(
     () => quotaCostWindow(intervals) ?? historyInput,
     [historyInput, intervals],
   );
   const costs = useUsage(costInput);
+  const paceInput = useMemo(
+    () => (paceInterval ? quotaCostWindow([paceInterval])! : historyInput),
+    [paceInterval, historyInput],
+  );
+  const paceCosts = useUsage(paceInput);
+  const historical = historicalPeriods.at(-2);
+  const paceModels = useMemo(
+    () =>
+      paceInterval
+        ? monitoredModels(
+            paceInterval.id,
+            paceCosts.environments.filter(
+              (environment) =>
+                effectiveSelectedIds === null ||
+                effectiveSelectedIds.includes(environment.environmentId),
+            ),
+          )
+        : null,
+    [paceInterval, paceCosts.environments, effectiveSelectedIds],
+  );
+  // A new interval changes the cost query key. While that query is warming,
+  // retain the history response for environments that have not answered yet;
+  // its saved snapshots keep prior-cycle values visible without treating them
+  // as current measured cost. A completed cost response always wins.
+  const costEnvironments = useMemo(() => {
+    const historyById = new Map(
+      history.environments.map((environment) => [environment.environmentId, environment]),
+    );
+    const current = costs.environments.map((environment) => {
+      if (environment.summary !== null || environment.error !== null) return environment;
+      return historyById.get(environment.environmentId) ?? environment;
+    });
+    return current.length > 0 ? current : history.environments;
+  }, [costs.environments, history.environments]);
   const selected = useMemo(
     () =>
-      costs.environments.filter(
-        (environment) => selectedIds === null || selectedIds.includes(environment.environmentId),
+      costEnvironments.filter(
+        (environment) =>
+          effectiveSelectedIds === null || effectiveSelectedIds.includes(environment.environmentId),
       ),
-    [costs.environments, selectedIds],
+    [costEnvironments, effectiveSelectedIds],
   );
+  const selectedWithSavedCosts = useMemo(
+    () =>
+      selected.map((environment) => {
+        const historyEnvironment = history.environments.find(
+          (candidate) => candidate.environmentId === environment.environmentId,
+        );
+        const snapshots = historyEnvironment?.summary?.quotaCostSnapshots;
+        return snapshots === undefined
+          ? environment
+          : {
+              ...environment,
+              summary: environment.summary
+                ? {
+                    ...environment.summary,
+                    quotaCostSnapshots: [
+                      ...(environment.summary.quotaCostSnapshots ?? []),
+                      ...snapshots,
+                    ],
+                  }
+                : (historyEnvironment?.summary ?? environment.summary),
+            };
+      }),
+    [history.environments, selected],
+  );
+  const costScope =
+    selected.length === 0 ? "No computers selected" : selected.map((e) => e.label).join(", ");
   const currentValues = useMemo(
-    () => quotaValueSnapshots(tracker?.environmentId, periods, selected),
-    [tracker?.environmentId, periods, selected],
+    () => quotaValueSnapshots(tracker?.environmentId, historicalPeriods, selectedWithSavedCosts),
+    [tracker?.environmentId, historicalPeriods, selectedWithSavedCosts],
   );
   const [snapshots, setSnapshots] = useState<ReadonlyMap<string, QuotaValueSnapshot>>(
     () => new Map(),
@@ -110,11 +185,38 @@ export function UsageResetPage() {
   useEffect(() => {
     setSnapshots((previous) => retainQuotaValueSnapshots(previous, currentValues));
   }, [currentValues]);
-  const values = currentValues.map((current) => ({
-    period: current.period,
-    value: quotaValueWithSnapshot(current, snapshots),
-  }));
+  const values = currentValues.map((current, index) => {
+    const value = quotaValueWithSnapshot(current, snapshots);
+    const previous = index > 0 ? currentValues[index - 1] : undefined;
+    return {
+      period: current.period,
+      value: quotaValueWithHistoricalCalibration(
+        { ...current, value },
+        previous ? { ...previous, value: quotaValueWithSnapshot(previous, snapshots) } : undefined,
+        currentValues.slice(0, index - 1).map((candidate) => ({
+          ...candidate,
+          value: quotaValueWithSnapshot(candidate, snapshots),
+        })),
+      ),
+    };
+  });
   const last = samples.at(-1);
+  const current = values.at(-1);
+  const calibrationPeriod = useMemo(() => {
+    const calibration = current?.value.historicalCalibration;
+    if (!calibration) return historical;
+    return historicalPeriods.find(
+      (period) =>
+        period.first.observedAt === calibration.since &&
+        period.last.observedAt === calibration.until,
+    );
+  }, [current?.value.historicalCalibration, historical, historicalPeriods]);
+  const calibrationInterval = useMemo(
+    () => (calibrationPeriod ? (quotaIntervals([calibrationPeriod]).at(0) ?? null) : null),
+    [calibrationPeriod],
+  );
+  const trackedManualResetCount = tracker?.summary?.quotaHistory?.bankedResetCount;
+  const trackedManualResetCheckedAt = tracker?.summary?.quotaHistory?.bankedResetCheckedAt;
   const refreshMonitor = async () => {
     if (refreshActive.current) return;
     refreshActive.current = true;
@@ -125,7 +227,15 @@ export function UsageResetPage() {
         await refreshCodexMonitor({
           trackerId: tracker?.environmentId,
           refreshHistory: history.refresh,
-          refreshCosts: costs.refresh,
+          refreshCosts: async (input) => {
+            const recentInterval = apiPaceInterval(input.quotaIntervals?.at(-1));
+            const recentInput = recentInterval ? quotaCostWindow([recentInterval]) : null;
+            const replies = await Promise.all([
+              costs.refresh(input),
+              recentInput ? paceCosts.refresh(recentInput) : Promise.resolve([]),
+            ]);
+            return replies.flat();
+          },
           refreshNews: () => newsWatcher.current?.refresh() ?? Promise.resolve(false),
           onProgress: setRefreshMessage,
         }),
@@ -138,8 +248,59 @@ export function UsageResetPage() {
     }
   };
 
-  const current = values.at(-1);
+  const priorApiPace = useMemo<PriorApiPaceInput | null>(() => {
+    if (!calibrationPeriod || !calibrationInterval || !current) return null;
+    return {
+      interval: calibrationInterval,
+      period: calibrationPeriod,
+      models: monitoredModels(calibrationInterval, selectedWithSavedCosts),
+      remainingValueUsd: current.value.remainingValueUsd,
+      ...(current.value.historicalCalibration && calibrationPeriod.id !== historical?.id
+        ? { calibrationTargetSince: current.period.first.observedAt }
+        : {}),
+    };
+  }, [calibrationPeriod, calibrationInterval, selectedWithSavedCosts, current, historical]);
   const completed = values.slice(0, -1);
+  const currentModels = useMemo(() => {
+    if (!current) return null;
+    const savedPrefix = quotaSavedCostPrefix(current.period, selectedWithSavedCosts);
+    const modelInterval = current.value.costObservedUntil
+      ? (savedPrefix?.interval ?? null)
+      : {
+          id: current.period.id,
+          sinceTime: current.period.first.observedAt,
+          untilTime: current.period.last.observedAt,
+        };
+    const modelEnvironments =
+      current.value.costObservedUntil && savedPrefix
+        ? selectedWithSavedCosts.map((environment) => ({
+            ...environment,
+            summary: environment.summary
+              ? {
+                  ...environment.summary,
+                  quotaCosts: undefined,
+                  quotaCostSnapshots: savedPrefix.rows,
+                }
+              : environment.summary,
+          }))
+        : selectedWithSavedCosts;
+    if (!modelInterval) return null;
+    const models = monitoredModels(modelInterval, modelEnvironments);
+    return models !== null &&
+      models.length > 0 &&
+      models.some((row) => Object.values(row.totals).some((tokens) => tokens > 0))
+      ? models
+      : null;
+  }, [
+    current?.period.id,
+    current?.period.first.observedAt,
+    current?.period.last.observedAt,
+    current?.value.costObservedUntil,
+    selectedWithSavedCosts,
+  ]);
+  const models =
+    currentModels ??
+    (current?.value.historicalCalibration !== undefined ? (priorApiPace?.models ?? null) : null);
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden bg-background text-foreground">
       <WorkspacePageHeader electron={isElectron}>
@@ -154,6 +315,23 @@ export function UsageResetPage() {
             /
           </span>
           <h1 className="truncate text-sm font-medium">Codex monitor</h1>
+          <nav
+            aria-label="Monitor sections"
+            className="ms-4 hidden items-center gap-4 text-xs text-muted-foreground md:flex"
+          >
+            <a className="hover:text-foreground" href="#api-value">
+              API value
+            </a>
+            <a className="hover:text-foreground" href="#reset-history">
+              Reset history
+            </a>
+            <a className="hover:text-foreground" href="#token-budget">
+              Token planner
+            </a>
+            <a className="hover:text-foreground" href="#luna-research">
+              Luna research
+            </a>
+          </nav>
           <Button
             className="ms-auto size-11"
             variant="ghost"
@@ -169,12 +347,11 @@ export function UsageResetPage() {
       </WorkspacePageHeader>
       <ScrollArea className="min-h-0 flex-1">
         <WorkspacePageContainer
-          width="readable"
+          width="expanded"
           className="pb-[calc(env(safe-area-inset-bottom)+3rem)]"
         >
-          <BirthdayGreeting />
           <p role="status" aria-live="polite" className="text-xs text-muted-foreground">
-            {refreshMessage || "Refresh checks saved readings, API costs and reset news."}
+            {refreshMessage || "Weekly usage, model value and reset research"}
           </p>
           {history.isPending && !last ? <p role="status">Reading Codex usage…</p> : null}
           {history.environments.map((environment) => {
@@ -204,27 +381,42 @@ export function UsageResetPage() {
           {tracker && last && current ? (
             <>
               <UsagePaceChart
-                samples={samples}
+                samples={rawSamples ?? samples}
                 news={news}
-                resetCheck={
-                  <>
-                    <ResetCheckPanel
-                      key={tracker.environmentId}
-                      environmentId={tracker.environmentId}
-                      label={tracker.label}
-                    />
-                    <CommunityCheckPanel
-                      key={`community-${tracker.environmentId}`}
-                      environmentId={tracker.environmentId}
-                      label={tracker.label}
-                    />
-                  </>
+                manualResets={
+                  trackedManualResetCount === undefined
+                    ? null
+                    : {
+                        availableCount: trackedManualResetCount,
+                        verified: trackedManualResetCheckedAt !== undefined,
+                        ...(trackedManualResetCheckedAt === undefined
+                          ? {}
+                          : { checkedAt: trackedManualResetCheckedAt }),
+                      }
                 }
+                apiPace={
+                  paceInterval
+                    ? {
+                        interval: paceInterval,
+                        models: paceModels,
+                        remainingValueUsd: current.value.cachedAt
+                          ? null
+                          : current.value.remainingValueUsd,
+                      }
+                    : null
+                }
+                priorApiPace={priorApiPace}
               />
-              <section className="border-t border-border pt-5" aria-label="Tracked API value">
+              <section
+                id="api-value"
+                className="rounded-xl border border-border bg-card/20 p-5"
+                aria-label="Tracked API value"
+              >
                 <div className="flex flex-wrap items-baseline justify-between gap-2">
                   <h2 className="text-sm font-medium">API-equivalent value</h2>
-                  <span className="text-xs text-muted-foreground">This monitored cycle only</span>
+                  <span className="text-xs text-muted-foreground">
+                    Transcript costs from {costScope} · measured use this cycle
+                  </span>
                 </div>
                 <dl className="mt-4 grid grid-cols-2 gap-5 [&>div]:min-w-0">
                   <div>
@@ -244,7 +436,22 @@ export function UsageResetPage() {
                     </dd>
                   </div>
                 </dl>
-                {current.period.usedPercentagePoints < 5 ? (
+                {current.value.costObservedUntil ? (
+                  <p className="mt-3 text-xs text-muted-foreground">
+                    Observed cost is complete through {dateTime(current.value.costObservedUntil)};
+                    newer transcript usage is still being read.
+                  </p>
+                ) : null}
+                {current.value.historicalCalibration ? (
+                  <p className="mt-3 text-xs text-muted-foreground">
+                    Remaining value is provisional, calibrated from{" "}
+                    {dateTime(current.value.historicalCalibration.since)} to{" "}
+                    {dateTime(current.value.historicalCalibration.until)}. Current-cycle calibration
+                    replaces it after enough measured usage.
+                  </p>
+                ) : null}
+                {current.period.usedPercentagePoints < 5 &&
+                current.value.remainingValueUsd === null ? (
                   <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
                     {current.period.usedPercentagePoints} of 5 percentage points observed. More
                     readings are needed to estimate dollars left. The {100 - last.remainingPercent}%
@@ -267,44 +474,110 @@ export function UsageResetPage() {
                 </p>
               </section>
 
-              <section className="border-t border-border pt-5" aria-label="Resets while monitored">
+              <div id="token-budget">
+                <TokenBudgetPanel
+                  budgetUsd={current.value.remainingValueUsd}
+                  models={models}
+                  observedAt={current.period.last.observedAt}
+                  provisional={current.value.historicalCalibration !== undefined}
+                  {...(current.value.costObservedUntil && !current.value.historicalCalibration
+                    ? { currentPrefixThrough: current.value.costObservedUntil }
+                    : {})}
+                  priorModelMix={
+                    currentModels === null && current.value.historicalCalibration !== undefined
+                  }
+                  {...(current.value.historicalCalibration
+                    ? { calibration: current.value.historicalCalibration }
+                    : {})}
+                />
+              </div>
+              <BirthdayGreeting />
+              <section
+                id="reset-history"
+                className="border-t border-border pt-5"
+                aria-label="Reset history"
+              >
                 <h2 className="text-sm font-medium">Resets while monitored</h2>
-                {completed.length === 0 ? (
+                {historicalPeriods.length < 2 ? (
                   <p className="mt-3 text-sm text-muted-foreground">
                     No reset observed since {dateTime(samples[0]!.observedAt)}. New resets will
                     appear here with the usage left beforehand.
                   </p>
                 ) : (
                   <div className="mt-3 divide-y divide-border">
-                    {completed.toReversed().map(({ period, value }) => (
-                      <div key={period.id} className="flex flex-wrap justify-between gap-3 py-3">
-                        <div>
-                          <p className="text-sm">
-                            {period.resetKind === "ambiguous"
-                              ? "Usage window changed"
-                              : "Usage returned"}
-                          </p>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            {dateTime(period.last.observedAt)} to{" "}
-                            {dateTime(period.next!.observedAt)}
-                          </p>
-                        </div>
-                        <div className="text-right">
-                          <p className="text-sm tabular-nums">
-                            {period.last.remainingPercent}% left beforehand
-                          </p>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            {value.unusedValueUsd === null
+                    {historicalPeriods
+                      .slice(0, -1)
+                      .toReversed()
+                      .map((period) => {
+                        const value = values.find((entry) => entry.period.id === period.id)?.value;
+                        const unusedLabel =
+                          period.usedPercentagePoints === 0 && period.resetKind === "ambiguous"
+                            ? "No quota use observed in this interval"
+                            : (period.observationGapMs ?? Infinity) > 60 * 60_000 ||
+                                value?.unusedValueUsd === null ||
+                                value === undefined
                               ? "Dollar estimate not established"
-                              : `≈ ${estimate(value.unusedValueUsd)} unused`}
-                          </p>
-                        </div>
-                      </div>
-                    ))}
+                              : `≈ ${estimate(value.unusedValueUsd)} unused`;
+                        return (
+                          <div
+                            key={period.id}
+                            className="flex flex-wrap justify-between gap-3 py-3"
+                          >
+                            <div>
+                              <p className="text-sm">
+                                {(period.observationGapMs ?? Infinity) > 60 * 60_000
+                                  ? "Window changed across an observation gap"
+                                  : period.resetKind === "ambiguous"
+                                    ? "Usage window changed"
+                                    : "Usage returned"}
+                              </p>
+                              <p className="mt-1 text-xs text-muted-foreground">
+                                {dateTime(period.last.observedAt)} to{" "}
+                                {dateTime(period.next!.observedAt)}
+                              </p>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-sm tabular-nums">
+                                {period.last.remainingPercent}% left · {period.usedPercentagePoints}
+                                % used
+                              </p>
+                              <p className="mt-1 text-xs text-muted-foreground">
+                                {value?.costUsd !== null && value !== undefined
+                                  ? `${estimate(value.costUsd)} observed cost${
+                                      value.costObservedUntil
+                                        ? ` through ${dateTime(value.costObservedUntil)}`
+                                        : ""
+                                    } · `
+                                  : ""}
+                                {unusedLabel}
+                              </p>
+                            </div>
+                          </div>
+                        );
+                      })}
                   </div>
                 )}
               </section>
-
+              <section id="luna-research" aria-label="Reset research" className="min-w-0">
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <h2 className="text-sm font-medium">Reset research</h2>
+                  <span className="text-xs text-muted-foreground">
+                    Luna · public sources · on demand
+                  </span>
+                </div>
+                <div className="grid items-start gap-4 xl:grid-cols-2">
+                  <ResetCheckPanel
+                    key={tracker.environmentId}
+                    environmentId={tracker.environmentId}
+                    label={tracker.label}
+                  />
+                  <CommunityCheckPanel
+                    key={`community-${tracker.environmentId}`}
+                    environmentId={tracker.environmentId}
+                    label={tracker.label}
+                  />
+                </div>
+              </section>
               <details className="border-t border-border">
                 <summary className="min-h-11 cursor-pointer content-center text-sm">
                   Tracking and computers
@@ -341,16 +614,17 @@ export function UsageResetPage() {
                           type="checkbox"
                           className="size-5 shrink-0"
                           checked={
-                            selectedIds === null || selectedIds.includes(environment.environmentId)
+                            effectiveSelectedIds === null ||
+                            effectiveSelectedIds.includes(environment.environmentId)
                           }
                           onChange={(event) => {
-                            const ids =
-                              selectedIds ?? costs.environments.map((entry) => entry.environmentId);
-                            setSelectedIds(
-                              event.target.checked
-                                ? [...ids, environment.environmentId]
-                                : ids.filter((id) => id !== environment.environmentId),
+                            const ids = new Set(
+                              effectiveSelectedIds ??
+                                costs.environments.map((entry) => entry.environmentId),
                             );
+                            if (event.target.checked) ids.add(environment.environmentId);
+                            else ids.delete(environment.environmentId);
+                            setSelectedIds([...ids]);
                           }}
                         />
                         <span className="break-words">{environment.label}</span>

@@ -1,6 +1,6 @@
 {
   "name": "t3",
-  "version": "0.0.38",
+  "version": "0.0.33",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -32,6 +32,8 @@
     "msgpackr-extract": "3.0.4",
     "node-pty": "^1.1.0",
     "playwright-core": "1.60.0",
+    "stream-chain": "^4.2.5",
+    "stream-json": "3.6.0",
     "ws": "^8.21.0",
     "yaml": "catalog:",
     "yauzl": "^3.4.0"

@@ -1,73 +1,10 @@
-/* A date-scoped override, removed without changing the saved theme. */
+/* The birthday panel follows the selected T3 theme. */
 html[data-birthday] {
-  --background: #fff7ef !important;
-  --foreground: #402733 !important;
-  --card: #fffaf4 !important;
-  --card-foreground: #402733 !important;
-  --popover: #fffaf4 !important;
-  --popover-foreground: #402733 !important;
-  --primary: #93496a !important;
-  --primary-foreground: #fffaf4 !important;
-  --secondary: #f6e5df !important;
-  --secondary-foreground: #593648 !important;
-  --muted: #f1e3df !important;
-  --muted-foreground: #785869 !important;
-  --accent: #f4ddd9 !important;
-  --accent-foreground: #593648 !important;
-  --border: #dfc3c4 !important;
-  --input: #dfc3c4 !important;
-  --ring: #ae536e !important;
-  --sidebar: #f4e6e5 !important;
-  --sidebar-foreground: #402733 !important;
-  --sidebar-accent: #ebd5d9 !important;
-  --sidebar-accent-foreground: #593648 !important;
-  --sidebar-border: #dfc3c4 !important;
-  --birthday-ink: #93496a;
-  --birthday-soft: #f6dfd9;
-  --birthday-paper: #fff1da;
-  --birthday-star: #b1733d;
+  --birthday-ink: var(--foreground);
+  --birthday-soft: var(--card);
+  --birthday-paper: var(--muted);
+  --birthday-star: #d88d42;
 }
-
-html.dark[data-birthday] {
-  --background: #1c1623 !important;
-  --foreground: #fff0df !important;
-  --card: #261d2c !important;
-  --card-foreground: #fff0df !important;
-  --popover: #2b2031 !important;
-  --popover-foreground: #fff0df !important;
-  --primary: #ffb395 !important;
-  --primary-foreground: #321d28 !important;
-  --secondary: #3b2b3c !important;
-  --secondary-foreground: #f4dccb !important;
-  --muted: #352839 !important;
-  --muted-foreground: #bea7b8 !important;
-  --accent: #46303f !important;
-  --accent-foreground: #ffe8d4 !important;
-  --border: #594052 !important;
-  --input: #594052 !important;
-  --ring: #ffb395 !important;
-  --sidebar: #211927 !important;
-  --sidebar-foreground: #fff0df !important;
-  --sidebar-accent: #3b2b3c !important;
-  --sidebar-accent-foreground: #ffe8d4 !important;
-  --sidebar-border: #594052 !important;
-  --birthday-ink: #ffbfaa;
-  --birthday-soft: #3a2739;
-  --birthday-paper: #2b2031;
-  --birthday-star: #f8d477;
-}
-
-html[data-birthday] ::selection {
-  background: var(--birthday-ink);
-  color: var(--background);
-}
-html[data-birthday] button:focus-visible {
-  outline-color: var(--ring);
-}
-html[data-birthday] [data-slot="sidebar"] {
-  background-color: var(--sidebar);
-}
-
 .birthday-greeting {
   position: relative;
   display: flex;
@@ -75,12 +12,11 @@ html[data-birthday] [data-slot="sidebar"] {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 24px;
-  padding: 20px;
+  margin-bottom: 0;
+  padding: 16px 20px;
   border: 1px solid var(--border);
-  border-radius: 18px 18px 18px 4px;
+  border-radius: 10px;
   background: var(--birthday-soft);
-  box-shadow: 4px 4px 0 var(--birthday-paper);
 }
 .birthday-greeting-copy {
   min-width: 0;
@@ -88,14 +24,13 @@ html[data-birthday] [data-slot="sidebar"] {
 }
 .birthday-eyebrow {
   font-size: 10px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+  font-family: var(--font-mono, monospace);
   color: var(--muted-foreground);
 }
 .birthday-greeting h2 {
   margin-top: 4px;
   color: var(--birthday-ink);
-  font-size: clamp(23px, 4.8vw, 32px);
+  font-size: 24px;
   font-weight: 600;
   letter-spacing: -0.04em;
   line-height: 1.15;
@@ -113,7 +48,9 @@ html[data-birthday] [data-slot="sidebar"] {
   flex-basis: 100%;
   display: inline-flex;
   align-items: center;
-  min-height: 44px;
+  min-height: 32px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
   font-size: 11px;
   text-decoration: underline;
   text-underline-offset: 4px;
@@ -142,12 +79,12 @@ html[data-birthday] [data-slot="sidebar"] {
   padding: 16px;
   background: var(--birthday-paper);
   border-left: 2px solid var(--birthday-star);
-  border-radius: 2px 12px 12px 2px;
+  border-radius: 4px;
 }
 .birthday-note p {
   overflow-wrap: anywhere;
   font-size: 14px;
-  font-style: italic;
+  font-family: var(--font-mono, monospace);
   line-height: 1.65;
 }
 .birthday-note button {
@@ -221,4 +158,12 @@ html[data-birthday] [data-slot="sidebar"] {
   .birthday-cake {
     width: 64px;
   }
+}
+
+.birthday-status {
+  margin-left: 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  color: var(--foreground);
 }

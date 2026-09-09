@@ -34,6 +34,16 @@ export interface CodexAppServerIncomingRequest {
   readonly params?: unknown;
 }
 
+export interface CodexAppServerTerminationContext {
+  readonly code?: number;
+  readonly pid?: number;
+  readonly cause?: unknown;
+  readonly stderr?: string;
+  readonly stderrTruncated?: boolean;
+  readonly method?: string;
+  readonly requestId?: string;
+}
+
 export interface CodexAppServerPatchedProtocolOptions {
   readonly stdio: Stdio.Stdio;
   readonly terminationError?: (
@@ -49,11 +59,6 @@ export interface CodexAppServerPatchedProtocolOptions {
     request: CodexAppServerIncomingRequest,
   ) => Effect.Effect<unknown, CodexError.CodexAppServerError>;
   readonly onTermination?: (error: CodexError.CodexAppServerError) => Effect.Effect<void, never>;
-}
-
-export interface CodexAppServerTerminationContext {
-  readonly method?: string;
-  readonly requestId?: string;
 }
 
 export interface CodexAppServerPatchedProtocol {
@@ -198,16 +203,6 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
           }),
         ),
         Effect.andThen(Ref.set(pending, new Map())),
-      );
-
-    const activeRequestContext = (): Effect.Effect<CodexAppServerTerminationContext> =>
-      Ref.get(pending).pipe(
-        Effect.map((current) => {
-          const last = [...current.entries()].at(-1);
-          if (last === undefined) return {};
-          const [requestId, request] = last;
-          return { method: request.method, requestId };
-        }),
       );
 
     const handleTermination = (classify: () => Effect.Effect<CodexError.CodexAppServerError>) =>
@@ -452,9 +447,21 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
               onFailure: (error) => handleTermination(() => Effect.succeed(error)),
               onSuccess: () =>
                 handleTermination(() =>
-                  options.terminationError
-                    ? Effect.flatMap(activeRequestContext(), options.terminationError)
-                    : Effect.succeed(new CodexError.CodexAppServerInputStreamEndedError({})),
+                  Effect.gen(function* () {
+                    const requests = yield* Ref.get(pending);
+                    const active = requests.values().next().value as
+                      | CodexAppServerPendingRequest
+                      | undefined;
+                    const requestId = active
+                      ? [...requests.entries()].find(([, value]) => value === active)?.[0]
+                      : undefined;
+                    const context = active
+                      ? { method: active.method, ...(requestId ? { requestId } : {}) }
+                      : {};
+                    return yield* options.terminationError
+                      ? options.terminationError(context)
+                      : Effect.succeed(new CodexError.CodexAppServerInputStreamEndedError({}));
+                  }),
                 ),
             }),
           ),

@@ -69,10 +69,6 @@ export function buildPeriodColumns(
           if (valueFor(totals, provider, metric) !== 0) activeProviders.add(provider);
         }
       }
-      // Keep the legacy Grok slot in the standalone helper for callers that
-      // use columns as a stable compatibility shape; rendered charts pass
-      // their actual provider list explicitly below.
-      if (PROVIDER_ORDER.includes("grok")) activeProviders.add("grok");
       return PROVIDER_ORDER.filter((provider) => activeProviders.has(provider));
     })();
   return periods.map((period) => {

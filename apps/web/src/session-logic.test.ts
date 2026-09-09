@@ -7,22 +7,20 @@ import {
   type OrchestrationThreadActivity,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
-import { resolveWorkEntryToolPresentation } from "@t3tools/client-runtime/work-log/presentation";
 
 import {
-  createMessageAttachmentPreviewProjector,
   deriveActiveWorkStartedAt,
   deriveActivePlanState,
+  deriveTurnPlans,
   derivePendingApprovals,
   derivePendingUserInputs,
   deriveTimelineEntries,
-  deriveTimelineEntriesWithState,
   deriveWorkLogEntries,
   findLatestProposedPlan,
   hasActionableProposedPlan,
   isLatestTurnSettled,
-  selectHandoffImageResources,
-  selectMessageImageResources,
+  workLogEntryIsStandaloneDomainFailure,
+  workLogEntryIsToolLike,
   workEntryIndicatesToolFailure,
   workEntryIndicatesToolNeutralStatus,
   workEntryIndicatesToolSuccess,
@@ -66,37 +64,6 @@ function makeActivity(overrides: {
 }
 
 describe("derivePendingApprovals", () => {
-  it.each([{}, { requestType: "unknown" }])(
-    "exposes legacy OpenCode approvals without a known request kind: %j",
-    (legacyPayload) => {
-      const requested = makeActivity({
-        kind: "approval.requested",
-        payload: { requestId: "per-legacy", detail: "*", ...legacyPayload },
-      });
-
-      expect(derivePendingApprovals([requested])).toEqual([
-        {
-          requestId: "per-legacy",
-          requestKind: "command",
-          createdAt: requested.createdAt,
-          detail: "*",
-        },
-      ]);
-    },
-  );
-
-  it.each(["tool_user_input", "auth_tokens_refresh"])(
-    "does not turn %s into an approval",
-    (requestType) => {
-      const activity = makeActivity({
-        kind: "approval.requested",
-        payload: { requestId: "not-an-approval", requestType },
-      });
-
-      expect(derivePendingApprovals([activity])).toEqual([]);
-    },
-  );
-
   it("tracks open approvals and removes resolved ones", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({
@@ -125,7 +92,7 @@ describe("derivePendingApprovals", () => {
         kind: "approval.requested",
         summary: "File-change approval requested",
         tone: "approval",
-        payload: { requestId: "req-2", requestType: "unknown" },
+        payload: { requestId: "req-2", requestKind: "file-change" },
       }),
     ];
 
@@ -165,35 +132,46 @@ describe("derivePendingApprovals", () => {
     ]);
   });
 
-  it("keeps app access approvals and persistence choices from remote activities", () => {
-    const options = [
-      { decision: "decline", label: "Decline" },
-      { decision: "acceptAlways", label: "Always allow Safari" },
-      { decision: "accept", label: "Approve" },
-    ];
-    const activities = [
+  it("maps MCP tool and permission requests into their own approval kinds", () => {
+    const activities: OrchestrationThreadActivity[] = [
       makeActivity({
+        id: "approval-open-tool",
+        createdAt: "2026-02-23T00:00:01.000Z",
         kind: "approval.requested",
-        summary: "App access approval requested",
+        summary: "Tool approval requested",
         tone: "approval",
         payload: {
-          requestId: "req-safari",
-          requestType: "mcp_elicitation_approval",
-          detail: "Allow ChatGPT to use Safari?",
-          appName: "Safari",
-          options,
+          requestId: "req-tool",
+          requestType: "tool_approval",
+          detail: "Use Chrome",
+        },
+      }),
+      makeActivity({
+        id: "approval-open-permissions",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "approval.requested",
+        summary: "Permission requested",
+        tone: "approval",
+        payload: {
+          requestId: "req-permissions",
+          requestType: "permissions_approval",
+          detail: "Control Windows",
         },
       }),
     ];
 
     expect(derivePendingApprovals(activities)).toEqual([
       {
-        requestId: "req-safari",
-        requestKind: "mcp-elicitation",
-        createdAt: "2026-02-23T00:00:00.000Z",
-        detail: "Allow ChatGPT to use Safari?",
-        appName: "Safari",
-        options,
+        requestId: "req-tool",
+        requestKind: "tool",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        detail: "Use Chrome",
+      },
+      {
+        requestId: "req-permissions",
+        requestKind: "permissions",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        detail: "Control Windows",
       },
     ]);
   });
@@ -234,7 +212,7 @@ describe("derivePendingApprovals", () => {
         tone: "approval",
         payload: {
           requestId: "req-stale-1",
-          requestType: "unknown",
+          requestKind: "command",
         },
       }),
       makeActivity({
@@ -285,50 +263,6 @@ describe("derivePendingApprovals", () => {
 });
 
 describe("derivePendingUserInputs", () => {
-  it("keeps free-text questions without suggested answers", () => {
-    const question = {
-      id: "0",
-      header: "Question",
-      question: "What should it be named?",
-      options: [],
-      allowCustomAnswer: true,
-      multiSelect: false,
-    };
-    const activities = [
-      makeActivity({
-        id: "async-question",
-        kind: "user-input.requested",
-        summary: "User input requested",
-        payload: { requestId: "async-1", responseMode: "message", questions: [question] },
-      }),
-    ];
-    expect(derivePendingUserInputs(activities)[0]?.questions).toEqual([question]);
-  });
-
-  it("preserves native choice values and the custom-answer restriction", () => {
-    const question = {
-      id: "interaction-result",
-      header: "Result",
-      question: "Which result should be used?",
-      options: [
-        { value: " first\t", label: "Result", description: "First result" },
-        { value: "second", label: "Result", description: "Second result" },
-      ],
-      allowCustomAnswer: false,
-      multiSelect: false,
-    };
-    const activities = [
-      makeActivity({
-        id: "native-user-input",
-        kind: "user-input.requested",
-        summary: "User input requested",
-        payload: { requestId: "req-native-choice", questions: [question] },
-      }),
-    ];
-
-    expect(derivePendingUserInputs(activities)[0]?.questions).toEqual([question]);
-  });
-
   it("tracks open structured prompts and removes resolved ones", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({
@@ -574,6 +508,73 @@ describe("deriveActivePlanState", () => {
       { durationMs: 3_000, step: "Check", status: "completed" },
     ]);
   });
+});
+
+describe("deriveTurnPlans", () => {
+  it("keeps one entry per turn, anchored at the first snapshot with the latest steps", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "plan-1a",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "turn.plan.updated",
+        summary: "Plan updated",
+        tone: "info",
+        turnId: "turn-1",
+        payload: {
+          plan: [{ step: "Inspect code", status: "inProgress" }],
+        },
+      }),
+      makeActivity({
+        id: "plan-1b",
+        createdAt: "2026-02-23T00:00:05.000Z",
+        kind: "turn.plan.updated",
+        summary: "Plan updated",
+        tone: "info",
+        turnId: "turn-1",
+        payload: {
+          plan: [{ step: "Inspect code", status: "completed" }],
+        },
+      }),
+      makeActivity({
+        id: "plan-2a",
+        createdAt: "2026-02-23T00:01:00.000Z",
+        kind: "turn.plan.updated",
+        summary: "Plan updated",
+        tone: "info",
+        turnId: "turn-2",
+        payload: {
+          plan: [{ step: "Ship it", status: "pending" }],
+        },
+      }),
+    ];
+
+    const turnPlans = deriveTurnPlans(activities);
+    expect(turnPlans).toHaveLength(2);
+    expect(turnPlans[0]).toMatchObject({
+      id: "turn-plan:turn-1",
+      createdAt: "2026-02-23T00:00:01.000Z",
+      turnId: "turn-1",
+    });
+    expect(turnPlans[0]?.plan.steps).toEqual([
+      { durationMs: 4_000, step: "Inspect code", status: "completed" },
+    ]);
+    expect(turnPlans[1]?.plan.steps).toEqual([{ step: "Ship it", status: "pending" }]);
+  });
+
+  it("skips activities without parseable steps", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "plan-bad",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "turn.plan.updated",
+        summary: "Plan updated",
+        tone: "info",
+        turnId: "turn-1",
+        payload: { plan: [] },
+      }),
+    ];
+    expect(deriveTurnPlans(activities)).toEqual([]);
+  });
 
   it("tracks repeated step labels independently", () => {
     const activities: OrchestrationThreadActivity[] = [
@@ -621,7 +622,7 @@ describe("deriveActivePlanState", () => {
       }),
     ];
 
-    expect(deriveActivePlanState(activities, TurnId.make("turn-1"))?.steps).toEqual([
+    expect(deriveTurnPlans(activities)[0]?.plan.steps).toEqual([
       { durationMs: 4_000, step: "Check", status: "completed" },
       { durationMs: 6_000, step: "Check", status: "completed" },
     ]);
@@ -673,13 +674,13 @@ describe("deriveActivePlanState", () => {
       }),
     ];
 
-    expect(deriveActivePlanState(activities, TurnId.make("turn-1"))?.steps).toEqual([
+    expect(deriveTurnPlans(activities)[0]?.plan.steps).toEqual([
       { durationMs: 5_000, step: "First", status: "completed" },
       { durationMs: 5_000, step: "Second", status: "completed" },
     ]);
   });
 
-  it("clears the active plan when a later snapshot has no steps", () => {
+  it("drops a turn's chip when a later snapshot clears the plan", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({
         id: "plan-set",
@@ -700,7 +701,7 @@ describe("deriveActivePlanState", () => {
         payload: { plan: [] },
       }),
     ];
-    expect(deriveActivePlanState(activities, TurnId.make("turn-1"))).toBeNull();
+    expect(deriveTurnPlans(activities)).toEqual([]);
   });
 });
 
@@ -927,31 +928,170 @@ describe("workEntryIndicatesToolFailure", () => {
 });
 
 describe("deriveWorkLogEntries", () => {
-  it("keeps the latest task progress without emitting plan-update log entries", () => {
-    const activities = [
-      makeActivity({ id: "before", kind: "tool.completed", summary: "Read files", sequence: 0 }),
+  it("groups consecutive waits for one Worker into one logical session", () => {
+    const firstWait = makeActivity({
+      id: "worker-wait-first",
+      createdAt: "2026-02-23T00:00:10.000Z",
+      kind: "tool.completed",
+      summary: "Wait for Workers",
+      payload: {
+        status: "completed",
+        itemType: "mcp_tool_call",
+        data: {
+          toolCallId: "wait-1",
+          item: {
+            tool: "worker_wait",
+            status: "completed",
+            arguments: { workerIds: ["worker-1"], timeoutMillis: 900_000 },
+            result: {
+              status: "woken",
+              reason: "message",
+              workers: [{ id: "worker-1", displayName: "Luna Pine", status: "running" }],
+            },
+          },
+        },
+      },
+      turnId: "turn-worker",
+      sequence: 1,
+    });
+    const continuedWait = makeActivity({
+      id: "worker-wait-second",
+      createdAt: "2026-02-23T00:00:12.000Z",
+      kind: "tool.updated",
+      summary: "Wait for Workers",
+      payload: {
+        status: "inProgress",
+        itemType: "mcp_tool_call",
+        data: {
+          toolCallId: "wait-2",
+          item: {
+            tool: "worker_wait",
+            status: "inProgress",
+            arguments: { workerIds: ["worker-1"], timeoutMillis: 900_000 },
+          },
+        },
+      },
+      turnId: "turn-worker",
+      sequence: 2,
+    });
+
+    const entries = deriveWorkLogEntries([firstWait, continuedWait]);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.workerToolCall).toMatchObject({
+      toolName: "worker_wait",
+      state: "inProgress",
+      workers: [{ name: "Luna Pine" }],
+      timeoutMillis: 900_000,
+    });
+    expect(entries[0]?.workerToolCall?.waitAttempts).toHaveLength(2);
+  });
+
+  it("keeps edit-from-here failures as standalone domain events with technical detail", () => {
+    const [entry] = deriveWorkLogEntries([
       makeActivity({
-        id: "plan-1",
-        kind: "turn.plan.updated",
-        summary: "Plan updated",
-        turnId: "turn-1",
-        sequence: 1,
-        payload: { plan: [{ step: "Verify the composer", status: "inProgress" }] },
+        id: "edit-from-here-failure",
+        createdAt: "2026-08-22T16:00:02.000Z",
+        kind: "thread.edit-from-here.failed",
+        summary: "Edit from here failed",
+        tone: "error",
+        payload: {
+          detail:
+            "Orchestration command invariant failed (thread.edit-from-here)\n    at A:\\Dev\\server.ts:12:3",
+        },
       }),
-      makeActivity({
-        id: "plan-2",
-        kind: "turn.plan.updated",
-        summary: "Plan updated",
-        turnId: "turn-1",
-        sequence: 2,
-        payload: { plan: [{ step: "Verify the composer", status: "completed" }] },
-      }),
-      makeActivity({ id: "after", kind: "tool.completed", summary: "Ran tests", sequence: 3 }),
-    ];
-    expect(deriveWorkLogEntries(activities).map((entry) => entry.id)).toEqual(["before", "after"]);
-    expect(deriveActivePlanState(activities, TurnId.make("turn-1"))?.steps).toMatchObject([
-      { step: "Verify the composer", status: "completed" },
     ]);
+
+    expect(entry).toMatchObject({
+      id: "edit-from-here-failure",
+      sourceActivityKind: "thread.edit-from-here.failed",
+    });
+    expect(entry?.detail).toContain("Orchestration command invariant failed");
+    expect(entry && workLogEntryIsStandaloneDomainFailure(entry)).toBe(true);
+    expect(entry && workLogEntryIsToolLike(entry)).toBe(false);
+  });
+
+  it("normalizes and groups adjacent provider diagnostics without losing technical detail", () => {
+    const entries = deriveWorkLogEntries([
+      makeActivity({
+        id: "provider-warning-1",
+        kind: "runtime.warning",
+        summary: "Work log",
+        tone: "error",
+        payload: {
+          detail:
+            '{"fields":{"message":"ai-game-developer -> http://localhost:27985 request send failed"}}',
+        },
+      }),
+      makeActivity({
+        id: "provider-warning-2",
+        kind: "runtime.warning",
+        summary: "Work log",
+        tone: "error",
+        payload: {
+          detail:
+            '{"fields":{"message":"ai-game-developer -> http://localhost:27985 request send failed"}}',
+        },
+      }),
+    ]);
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      detail: "ai-game-developer unavailable",
+      diagnosticKey: "mcp-unavailable:ai-game-developer",
+      diagnosticCount: 2,
+    });
+    expect(entries[0]?.technicalDetail).toContain('"fields"');
+  });
+
+  it("hides historical structured runtime logs from the normal work log", () => {
+    const rawMessage = String.raw`{"timestamp":"2026-08-24T18:17:46.473044Z","level":"ERROR","fields":{"message":"worker quit with fatal: Transport channel closed, when Client(HttpRequest(HttpRequest(\"http/request failed: error sending request for url (http://localhost:27985/)\")))"},"target":"rmcp::transport::worker"}`;
+    const entries = deriveWorkLogEntries([
+      makeActivity({
+        id: "historical-runtime-warning",
+        kind: "runtime.warning",
+        summary: "Work log",
+        tone: "error",
+        payload: { message: rawMessage },
+      }),
+    ]);
+
+    expect(entries).toEqual([]);
+  });
+
+  it("explains conversation-only rewinds without implying that files changed", () => {
+    const [entry] = deriveWorkLogEntries([
+      makeActivity({
+        id: "conversation-only-rewind",
+        kind: "thread.edit-from-here.files-not-restored",
+        summary: "Conversation rewound; files not restored",
+        tone: "info",
+        payload: {
+          filesRestored: false,
+          conversationOnly: true,
+          detail: "The task has no Git-backed workspace.",
+        },
+      }),
+    ]);
+
+    expect(entry).toMatchObject({
+      detail: "Only conversation history was rewound. Files were not changed.",
+      technicalDetail: "The task has no Git-backed workspace.",
+    });
+  });
+
+  it("keeps older conversation-only restore activities readable", () => {
+    const [entry] = deriveWorkLogEntries([
+      makeActivity({
+        id: "legacy-conversation-only-rewind",
+        kind: "checkpoint.revert.files-not-restored",
+        summary: "Conversation rewound; files not restored",
+        tone: "info",
+        payload: { filesRestored: false, detail: "Legacy server receipt." },
+      }),
+    ]);
+
+    expect(entry?.detail).toBe("Only conversation history was rewound. Files were not changed.");
+    expect(entry?.technicalDetail).toBe("Legacy server receipt.");
   });
 
   it("omits tool started entries and keeps completed entries", () => {
@@ -972,111 +1112,6 @@ describe("deriveWorkLogEntries", () => {
 
     const entries = deriveWorkLogEntries(activities);
     expect(entries.map((entry) => entry.id)).toEqual(["tool-complete"]);
-  });
-
-  it("omits routine setup updates before work starts and after later turn activity", () => {
-    const setupActivities = [
-      makeActivity({
-        id: "setup-requested",
-        kind: "setup-script.requested",
-        summary: "Preparing setup script",
-        tone: "info",
-        sequence: 1,
-      }),
-      makeActivity({
-        id: "setup-started",
-        kind: "setup-script.started",
-        summary: "Setup script started",
-        tone: "info",
-        sequence: 2,
-      }),
-    ];
-
-    expect(deriveWorkLogEntries(setupActivities)).toEqual([]);
-    expect(
-      deriveWorkLogEntries([
-        ...setupActivities,
-        makeActivity({
-          id: "first-turn-tool",
-          kind: "tool.completed",
-          summary: "Read project files",
-          turnId: "turn-1",
-          sequence: 3,
-        }),
-        makeActivity({
-          id: "later-turn-tool",
-          kind: "tool.completed",
-          summary: "Ran tests",
-          turnId: "turn-2",
-          sequence: 4,
-        }),
-      ]).map((entry) => entry.id),
-    ).toEqual(["first-turn-tool", "later-turn-tool"]);
-  });
-
-  it("preserves setup failures and unrelated info without a turn id", () => {
-    const entries = deriveWorkLogEntries([
-      makeActivity({
-        id: "setup-requested",
-        kind: "setup-script.requested",
-        summary: "Preparing setup script",
-        tone: "info",
-        sequence: 1,
-      }),
-      makeActivity({
-        id: "setup-failed",
-        kind: "setup-script.failed",
-        summary: "Setup script failed to start",
-        tone: "error",
-        payload: { detail: "Could not start the setup terminal" },
-        sequence: 2,
-      }),
-      makeActivity({
-        id: "runtime-notice",
-        kind: "runtime.warning",
-        summary: "Reconnecting to provider",
-        tone: "info",
-        sequence: 3,
-      }),
-    ]);
-
-    expect(entries).toMatchObject([
-      {
-        id: "setup-failed",
-        label: "Setup script failed to start",
-        tone: "error",
-        detail: "Could not start the setup terminal",
-        turnId: null,
-      },
-      {
-        id: "runtime-notice",
-        label: "Reconnecting to provider",
-        tone: "info",
-        turnId: null,
-      },
-    ]);
-  });
-
-  it("drops runtime warnings with no displayable content, keeps ones with a preview", () => {
-    const activities: OrchestrationThreadActivity[] = [
-      makeActivity({
-        id: "warning-noise",
-        createdAt: "2026-02-23T00:00:01.000Z",
-        kind: "runtime.warning",
-        summary: "Claude system message 'background_tasks_changed' (no displayable text content)",
-        tone: "info",
-      }),
-      makeActivity({
-        id: "warning-signal",
-        createdAt: "2026-02-23T00:00:02.000Z",
-        kind: "runtime.warning",
-        summary: "Reconnecting... 2/5",
-        tone: "info",
-      }),
-    ];
-
-    const entries = deriveWorkLogEntries(activities);
-    expect(entries.map((entry) => entry.id)).toEqual(["warning-signal"]);
   });
 
   it("omits task.started but shows task.progress and task.completed", () => {
@@ -1319,13 +1354,6 @@ describe("deriveWorkLogEntries", () => {
         payload: {
           itemType: "mcp_tool_call",
           title: "t3-code · preview_status",
-          toolSurface: "browser",
-          toolIcon: { _tag: "website", pageUrl: "https://example.com/checkout" },
-          toolSource: {
-            key: "browser-use:browser",
-            name: "Browser",
-            kind: "browser",
-          },
           data: { item },
         },
       }),
@@ -1333,48 +1361,8 @@ describe("deriveWorkLogEntries", () => {
 
     const [entry] = deriveWorkLogEntries(activities);
     expect(entry?.toolTitle).toBe("t3-code · preview_status");
-    expect(entry?.toolSurface).toBe("browser");
-    expect(entry?.toolIcon).toEqual({
-      _tag: "website",
-      pageUrl: "https://example.com/checkout",
-    });
-    expect(entry?.toolSource).toEqual({
-      key: "browser-use:browser",
-      name: "Browser",
-      kind: "browser",
-    });
     expect(entry?.toolData).toEqual(item);
   });
-
-  it.each([
-    ["inProgress", "Clicking in the preview browser"],
-    ["completed", "Clicked in the preview browser"],
-    ["failed", "Failed to click in the preview browser"],
-  ] as const)(
-    "preserves Claude MCP identity behind generic titles while %s",
-    (status, displayName) => {
-      const data = {
-        toolName: "mcp__t3_code__preview_click",
-        input: { selector: "#submit" },
-        ...(status === "inProgress"
-          ? {}
-          : { result: { type: "tool_result", is_error: status === "failed", content: "Result" } }),
-      };
-      const [entry] = deriveWorkLogEntries([
-        makeActivity({
-          kind: status === "inProgress" ? "tool.updated" : "tool.completed",
-          summary: "MCP tool call",
-          payload: { itemType: "mcp_tool_call", title: "MCP tool call", status, data },
-        }),
-      ]);
-
-      expect(entry).toMatchObject({ toolTitle: "MCP tool call", toolData: data });
-      expect(resolveWorkEntryToolPresentation(entry!)).toEqual({
-        displayName,
-        icon: "browser",
-      });
-    },
-  );
 
   it("keeps MCP payloads while collapsing lifecycle updates", () => {
     const item = {
@@ -1392,7 +1380,6 @@ describe("deriveWorkLogEntries", () => {
         payload: {
           itemType: "mcp_tool_call",
           toolCallId: "call-1",
-          toolSurface: "browser",
           data: { item },
         },
       }),
@@ -1403,7 +1390,6 @@ describe("deriveWorkLogEntries", () => {
         payload: {
           itemType: "mcp_tool_call",
           toolCallId: "call-1",
-          toolIcon: { _tag: "website", pageUrl: "https://example.com/result" },
         },
       }),
     ];
@@ -1411,14 +1397,6 @@ describe("deriveWorkLogEntries", () => {
     const [entry] = deriveWorkLogEntries(activities);
     expect(entry?.toolData).toEqual(item);
     expect(entry?.toolCallId).toBe("call-1");
-    expect(entry?.toolSurface).toBe("browser");
-    expect(entry?.toolIcon).toEqual({
-      _tag: "website",
-      pageUrl: "https://example.com/result",
-    });
-    expect(resolveWorkEntryToolPresentation(entry!)?.displayName).toBe(
-      "Took a snapshot of the preview page",
-    );
   });
 
   it("collapses interleaved lifecycle updates by tool call id", () => {
@@ -1613,26 +1591,6 @@ describe("deriveWorkLogEntries", () => {
     expect(entry?.rawCommand).toBeUndefined();
   });
 
-  it("preserves serialized shell wrappers with non-matching boundary quotes", () => {
-    const command =
-      "/bin/zsh -lc 'git status\nsed -n '\"'1,20p' apps/web/src/components/DiffPanel.tsx\"";
-    const activities: OrchestrationThreadActivity[] = [
-      makeActivity({
-        id: "command-tool-serialized-wrapper",
-        kind: "tool.completed",
-        summary: "Ran command",
-        payload: {
-          itemType: "command_execution",
-          data: { item: { command } },
-        },
-      }),
-    ];
-
-    const [entry] = deriveWorkLogEntries(activities);
-    expect(entry?.command).toBe(command);
-    expect(entry?.rawCommand).toBeUndefined();
-  });
-
   it("keeps compact Codex tool metadata used for icons and labels", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({
@@ -1807,44 +1765,6 @@ describe("deriveWorkLogEntries", () => {
       toolTitle: "Read File",
       detail: 'import * as Effect from "effect/Effect"',
       itemType: "dynamic_tool_call",
-    });
-  });
-
-  it("keeps viewed image metadata while collapsing a streamed Claude Read", () => {
-    const imagePath = `/workspace/${"nested folder/".repeat(16)}reference image.webp`;
-    const activities: OrchestrationThreadActivity[] = [
-      makeActivity({
-        id: "image-read-update",
-        createdAt: "2026-02-23T00:00:01.000Z",
-        kind: "tool.updated",
-        summary: "Image view",
-        payload: {
-          toolCallId: "tool-read-image",
-          itemType: "image_view",
-          detail: `${imagePath.slice(0, 177)}...`,
-          data: { imagePath },
-        },
-      }),
-      makeActivity({
-        id: "image-read-complete",
-        createdAt: "2026-02-23T00:00:02.000Z",
-        kind: "tool.completed",
-        summary: "Image view",
-        payload: {
-          toolCallId: "tool-read-image",
-          itemType: "image_view",
-          detail: `${imagePath.slice(0, 177)}...`,
-          data: {},
-        },
-      }),
-    ];
-
-    const entries = deriveWorkLogEntries(activities);
-    expect(entries).toHaveLength(1);
-    expect(entries[0]).toMatchObject({
-      id: "image-read-complete",
-      itemType: "image_view",
-      viewedImagePath: imagePath,
     });
   });
 
@@ -2077,295 +1997,7 @@ describe("deriveWorkLogEntries", () => {
   });
 });
 
-describe("image asset requests", () => {
-  const image = {
-    type: "image" as const,
-    id: "image",
-    name: "image.png",
-    mimeType: "image/png",
-    sizeBytes: 42,
-  };
-  const message = {
-    id: MessageId.make("image-message"),
-    role: "user" as const,
-    text: "Inspect these images",
-    turnId: null,
-    createdAt: "2026-09-04T00:00:00.000Z",
-    updatedAt: "2026-09-04T00:00:00.000Z",
-    streaming: false,
-    attachments: [image],
-  };
-
-  it("requests the whole row's gallery and crops without signing local preview IDs", () => {
-    const attachments = Object.freeze([
-      image,
-      { ...image, id: "second" },
-      { ...image, id: "crop", name: "preview-annotation-1.png" },
-      { ...image, id: "local", previewUrl: "blob:local" },
-      { ...image, id: "inline", previewUrl: "data:image/png;base64,AA==" },
-      { ...image, id: "provided", previewUrl: "https://preview.test/image" },
-      { ...image, type: "file" as const, id: "file", mimeType: "application/pdf" },
-      { ...image, type: "future", id: "unknown" },
-      image,
-    ]);
-
-    expect(selectMessageImageResources(attachments)).toEqual([
-      { _tag: "attachment", attachmentId: "image" },
-      { _tag: "attachment", attachmentId: "second" },
-      { _tag: "attachment", attachmentId: "crop" },
-      { _tag: "attachment", attachmentId: "provided" },
-    ]);
-  });
-
-  it("requests offscreen handoffs without signing the rest of the loaded history", () => {
-    const history = {
-      ...message,
-      id: MessageId.make("history"),
-      attachments: [{ ...image, id: "history-image" }],
-    };
-    const offscreen = {
-      ...message,
-      id: MessageId.make("offscreen"),
-      attachments: [image, { ...image, id: "crop", name: "preview-annotation-1.png" }],
-    };
-    const empty = {
-      ...message,
-      id: MessageId.make("empty"),
-      attachments: [{ ...image, id: "empty" }],
-    };
-    const assistant = {
-      ...message,
-      id: MessageId.make("assistant"),
-      role: "assistant" as const,
-      attachments: [{ ...image, id: "assistant-image" }],
-    };
-    expect(
-      selectHandoffImageResources([history, message, offscreen, empty, assistant], {
-        [message.id]: ["blob:message"],
-        [offscreen.id]: ["blob:offscreen", "blob:crop"],
-        [empty.id]: [],
-        [assistant.id]: ["blob:unused"],
-      }),
-    ).toEqual([
-      { _tag: "attachment", attachmentId: "image" },
-      { _tag: "attachment", attachmentId: "crop" },
-    ]);
-  });
-
-  it("does not scan history when no handoff is pending", () => {
-    let reads = 0;
-    const messages = new Proxy([message], {
-      get(target, property, receiver) {
-        if (property === "0") reads += 1;
-        return Reflect.get(target, property, receiver);
-      },
-    });
-    const empty = selectHandoffImageResources(messages, {});
-    expect(reads).toBe(0);
-    expect(empty).toHaveLength(0);
-    expect(selectHandoffImageResources(undefined, { missing: ["blob:missing"] })).toBe(empty);
-    expect(selectMessageImageResources(undefined)).toBe(empty);
-  });
-
-  it("hands signed URLs to a mounted row only after the local preview is released", () => {
-    const server = createMessageAttachmentPreviewProjector();
-    const handoff = createMessageAttachmentPreviewProjector();
-    const row = createMessageAttachmentPreviewProjector();
-    const pending = handoff(
-      server(message, () => undefined),
-      () => "blob:pending",
-    );
-    expect(selectMessageImageResources(pending.attachments)).toEqual([]);
-    expect(selectHandoffImageResources([message], { [message.id]: ["blob:pending"] })).toEqual([
-      { _tag: "attachment", attachmentId: image.id },
-    ]);
-
-    const ready = server(message, () => "https://server.test/image");
-    expect(selectMessageImageResources(handoff(ready, () => "blob:pending").attachments)).toEqual(
-      [],
-    );
-    const released = server(message, () => undefined);
-    expect(selectMessageImageResources(released.attachments)).toEqual([
-      { _tag: "attachment", attachmentId: image.id },
-    ]);
-    const displayed = row(released, () => "https://server.test/image");
-    expect(displayed).toEqual(ready);
-    expect(pending.attachments?.[0]).toMatchObject({ previewUrl: "blob:pending" });
-    expect(row(released, () => "https://server.test/renewed").attachments?.[0]).toMatchObject({
-      previewUrl: "https://server.test/renewed",
-    });
-    expect(displayed.attachments?.[0]).toMatchObject({ previewUrl: "https://server.test/image" });
-    expect(row(released, () => undefined)).toBe(message);
-  });
-});
-
 describe("deriveTimelineEntries", () => {
-  const streamingMessage = {
-    id: MessageId.make("streaming-message"),
-    role: "assistant" as const,
-    text: "",
-    turnId: TurnId.make("streaming-turn"),
-    createdAt: "2026-02-23T00:00:03.000Z",
-    updatedAt: "2026-02-23T00:00:03.000Z",
-    streaming: true,
-  };
-
-  it("reuses preview objects while preserving URL and attachment metadata changes", () => {
-    const image = {
-      type: "image" as const,
-      id: "image",
-      name: "image.png",
-      mimeType: "image/png",
-      sizeBytes: 42,
-    };
-    const file = {
-      type: "file" as const,
-      id: "file",
-      name: "file.txt",
-      mimeType: "text/plain",
-      sizeBytes: 8,
-    };
-    const message = { ...streamingMessage, attachments: Object.freeze([image, file]) };
-    const project = createMessageAttachmentPreviewProjector();
-    const urls = new Map([[image.id, "https://first.test/image"]]);
-    const first = project(message, (attachment) => urls.get(attachment.id));
-    Object.freeze(first.attachments);
-    expect(project(message, (attachment) => new Map(urls).get(attachment.id))).toBe(first);
-    const streamed = project({ ...message, text: "Next" }, (attachment) => urls.get(attachment.id));
-    expect(streamed.attachments).toBe(first.attachments);
-    expect(streamed.text).toBe("Next");
-    expect(first.text).toBe("");
-    expect(first.attachments?.[1]).toBe(file);
-
-    urls.set(image.id, "https://second.test/image");
-    const renewed = project(message, (attachment) => urls.get(attachment.id));
-    expect(renewed.attachments?.[0]).toMatchObject({ previewUrl: "https://second.test/image" });
-    expect(first.attachments?.[0]).toMatchObject({ previewUrl: "https://first.test/image" });
-    const renamed = project(
-      { ...message, attachments: [{ ...image, name: "renamed.png" }, file] },
-      (attachment) => urls.get(attachment.id),
-    );
-    expect(renamed.attachments?.[0]).toMatchObject({
-      name: "renamed.png",
-      previewUrl: "https://second.test/image",
-    });
-    expect(project(message, () => undefined)).toBe(message);
-  });
-
-  it("keeps pending preview handoffs stable and restores the current server URL", () => {
-    const message = {
-      ...streamingMessage,
-      role: "user" as const,
-      streaming: false,
-      attachments: [
-        {
-          type: "image" as const,
-          id: "image",
-          name: "image.png",
-          mimeType: "image/png",
-          sizeBytes: 42,
-        },
-      ],
-    };
-    const server = createMessageAttachmentPreviewProjector();
-    const handoff = createMessageAttachmentPreviewProjector();
-    const first = handoff(
-      server(message, () => undefined),
-      () => "blob:handoff",
-    );
-    expect(
-      handoff(
-        server(message, () => undefined),
-        () => "blob:handoff",
-      ),
-    ).toBe(first);
-    const ready = server(message, () => "https://server.test/image");
-    expect(handoff(ready, () => "blob:handoff").attachments?.[0]).toMatchObject({
-      previewUrl: "blob:handoff",
-    });
-    expect(handoff(ready, () => undefined)).toBe(ready);
-    expect(ready.attachments?.[0]).toMatchObject({ previewUrl: "https://server.test/image" });
-    expect(first.attachments?.[0]).toMatchObject({ previewUrl: "blob:handoff" });
-  });
-
-  it("reuses ordered history without changing an earlier projection", () => {
-    const history = { ...streamingMessage, id: MessageId.make("history"), streaming: false };
-    const work = [
-      { id: "work", createdAt: history.createdAt, label: "Ran tests", tone: "tool" as const },
-    ];
-    const first = deriveTimelineEntriesWithState([history, streamingMessage], [], work);
-    Object.freeze(first.entries);
-    for (const entry of first.entries) Object.freeze(entry);
-
-    const firstMessage = {
-      ...streamingMessage,
-      text: "First",
-      updatedAt: "2026-02-23T00:00:04.000Z",
-    };
-    const secondMessage = {
-      ...streamingMessage,
-      text: "Second",
-      updatedAt: "2026-02-23T00:00:05.000Z",
-    };
-    const firstBranch = deriveTimelineEntriesWithState([history, firstMessage], [], work, first);
-    const secondBranch = deriveTimelineEntriesWithState([history, secondMessage], [], work, first);
-
-    expect(firstBranch.entries).toEqual(deriveTimelineEntries([history, firstMessage], [], work));
-    expect(secondBranch.entries).toEqual(deriveTimelineEntries([history, secondMessage], [], work));
-    expect(firstBranch.entries[0]).toBe(first.entries[0]);
-    expect(firstBranch.entries[2]).toBe(first.entries[2]);
-    expect(first.entries[1]).toMatchObject({ message: { text: "" } });
-    expect(firstBranch.entries[1]).toMatchObject({ message: { text: "First" } });
-  });
-
-  it("preserves stable source ordering for ties, append, and older pages", () => {
-    const plan = {
-      id: "plan:thread:turn",
-      turnId: streamingMessage.turnId,
-      planMarkdown: "Plan",
-      implementedAt: null,
-      implementationThreadId: null,
-      createdAt: streamingMessage.createdAt,
-      updatedAt: streamingMessage.createdAt,
-    };
-    const firstWork = {
-      id: "work-1",
-      createdAt: streamingMessage.createdAt,
-      label: "Ran tests",
-      tone: "tool" as const,
-    };
-    const first = deriveTimelineEntriesWithState([streamingMessage], [plan], [firstWork]);
-    const appendedMessage = { ...streamingMessage, id: MessageId.make("appended") };
-    const appendedWork = { ...firstWork, id: "work-2" };
-    const messages = [streamingMessage, appendedMessage];
-    const work = [firstWork, appendedWork];
-    const appended = deriveTimelineEntriesWithState(messages, [plan], work, first);
-    expect(appended.entries.map((entry) => entry.id)).toEqual([
-      streamingMessage.id,
-      appendedMessage.id,
-      plan.id,
-      firstWork.id,
-      appendedWork.id,
-    ]);
-    expect(appended.entries[0]).toBe(first.entries[0]);
-
-    const older = {
-      ...streamingMessage,
-      id: MessageId.make("older"),
-      createdAt: "2026-02-22T00:00:00.000Z",
-    };
-    const prepended = deriveTimelineEntriesWithState([older, ...messages], [plan], work, appended);
-    expect(prepended.entries).toEqual(deriveTimelineEntries([older, ...messages], [plan], work));
-    const corrected = {
-      ...streamingMessage,
-      createdAt: "2026-02-24T00:00:00.000Z",
-      streaming: false,
-    };
-    expect(
-      deriveTimelineEntriesWithState([corrected, appendedMessage], [plan], work, appended).entries,
-    ).toEqual(deriveTimelineEntries([corrected, appendedMessage], [plan], work));
-  });
-
   it("includes proposed plans alongside messages and work entries in chronological order", () => {
     const entries = deriveTimelineEntries(
       [
@@ -2806,7 +2438,7 @@ describe("session activity performance", () => {
     expect(appendedEntries[1]).toBe(initialEntries[1]);
   });
 
-  it("reuses entries when appending to 20,000 ordered tool activities", () => {
+  it("updates 20,000 ordered tool activities within 100 ms", () => {
     const activities = Array.from({ length: 20_000 }, (_, index) =>
       makeActivity({
         id: `benchmark-tool-${index}`,
@@ -2824,8 +2456,7 @@ describe("session activity performance", () => {
         },
       }),
     );
-    const initialEntries = deriveWorkLogEntries(activities);
-    expect(initialEntries).toHaveLength(20_000);
+    deriveWorkLogEntries(activities);
     const updatedActivities = [
       ...activities,
       makeActivity({
@@ -2842,13 +2473,8 @@ describe("session activity performance", () => {
       }),
     ];
 
-    const updatedEntries = deriveWorkLogEntries(updatedActivities);
-    expect(updatedEntries).toHaveLength(20_001);
-    expect(initialEntries.every((entry, index) => updatedEntries[index] === entry)).toBe(true);
-    expect(updatedEntries.at(-1)).toMatchObject({
-      id: "benchmark-tool-appended",
-      command: "git diff",
-      toolLifecycleStatus: "completed",
-    });
+    const startedAt = performance.now();
+    expect(deriveWorkLogEntries(updatedActivities)).toHaveLength(20_001);
+    expect(performance.now() - startedAt).toBeLessThan(100);
   });
 });

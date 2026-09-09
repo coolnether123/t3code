@@ -6,6 +6,7 @@ import {
   readQuotaHistory,
   validQuotaIntervals,
 } from "./usageQuotaHistory.ts";
+import { createOverrideRateTable } from "./usagePricing.ts";
 import { EMPTY_TOTALS, type UsageRecord } from "./usageTranscripts.ts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -29,6 +30,11 @@ describe("saved quota history", () => {
   it("imports only sanitized observations and deduplicates timestamps", () => {
     const result = decodeQuotaHistory({
       ...document([sample, sample]),
+      Snapshot: {
+        MainLimit: { LimitId: "codex", Window: { DurationMinutes: 10080 } },
+        EmergencyResetCount: 3,
+        FetchedAt: "2026-07-21T12:00:00-05:00",
+      },
       OtherPrivateData: "not returned",
     });
     expect(result.samples).toEqual([
@@ -39,6 +45,8 @@ describe("saved quota history", () => {
       },
     ]);
     expect(JSON.stringify(result)).not.toContain("not returned");
+    expect(result.bankedResetCount).toBe(3);
+    expect(result.bankedResetCheckedAt).toBe("2026-07-21T17:00:00.000Z");
   });
   it("rejects malformed, conflicting, non-weekly, and other-account-limit records", () => {
     expect(decodeQuotaHistory(document([{ ...sample, RemainingPercent: 101 }])).status).toBe(
@@ -49,6 +57,15 @@ describe("saved quota history", () => {
     );
     expect(decodeQuotaHistory({ Samples: [sample] }).status).toBe("invalid");
     expect(decodeQuotaHistory(document([{ ...sample, ObservedAt: "bad" }])).status).toBe("invalid");
+    const malformedCount = decodeQuotaHistory({
+      ...document([sample]),
+      Snapshot: {
+        MainLimit: { LimitId: "codex", Window: { DurationMinutes: 10080 } },
+        EmergencyResetCount: -1,
+      },
+    });
+    expect(malformedCount.status).toBe("ready");
+    expect(malformedCount.bankedResetCount).toBeUndefined();
   });
   it.effect("reports missing input without inventing a balance", () =>
     Effect.gen(function* () {
@@ -135,6 +152,9 @@ describe("quota cost matching", () => {
     accumulator.add(record(intervals[0]!.untilTime));
     accumulator.add(record("2026-07-21T17:00:01Z"));
     expect(accumulator.rows[0]).toMatchObject({ records: 2, costUsd: 4 });
+    expect(accumulator.rows[0]?.models).toMatchObject([
+      { model: "unknown", costUsd: 4, records: 2, totals: { uncachedInputTokens: 200 } },
+    ]);
   });
   it("excludes other providers and Spark's independent quota", () => {
     const accumulator = new QuotaCostAccumulator(intervals, new Map());
@@ -146,5 +166,34 @@ describe("quota cost matching", () => {
     const accumulator = new QuotaCostAccumulator(intervals, new Map());
     accumulator.add({ ...record("2026-07-21T16:30:00Z"), reportedCostUsd: null });
     expect(accumulator.rows[0]).toMatchObject({ records: 1, costUsd: 0, unpricedRecords: 1 });
+  });
+  it("uses custom prices when quota records have no provider-reported cost", () => {
+    const accumulator = new QuotaCostAccumulator(
+      intervals,
+      new Map([
+        [
+          "example-model",
+          {
+            inputCostPerToken: 1e-6,
+            outputCostPerToken: 1e-6,
+            cacheReadCostPerToken: 1e-6,
+            cacheCreationCostPerToken: 1e-6,
+          },
+        ],
+      ]),
+      createOverrideRateTable({
+        "example-model": { inputCostPerMillionTokens: 4, outputCostPerMillionTokens: 8 },
+      }),
+    );
+    accumulator.add({
+      ...record("2026-07-21T16:30:00Z", "example-model"),
+      reportedCostUsd: null,
+    });
+    expect(accumulator.rows[0]).toMatchObject({ records: 1, unpricedRecords: 0 });
+    expect(accumulator.rows[0]?.costUsd).toBeCloseTo(0.0004, 12);
+    expect(accumulator.rows[0]?.models).toMatchObject([
+      { model: "example-model", unpricedRecords: 0 },
+    ]);
+    expect(accumulator.rows[0]?.models[0]?.costUsd).toBeCloseTo(0.0004, 12);
   });
 });

@@ -10,6 +10,7 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
+import type { ChangeRequestSettleSource } from "@t3tools/client-runtime/state/thread-settled";
 import { CheckIcon, ChevronDownIcon, CopyIcon, MoreHorizontalIcon, PlusIcon } from "lucide-react";
 import {
   memo,
@@ -36,10 +37,8 @@ import { useRemoteOpenState, type RemoteOpenMode } from "../../remoteOpen";
 import { usePrimaryEnvironmentId } from "../../state/environments";
 import { useT3ProjectFileScripts } from "~/hooks/useT3ProjectFileScripts";
 import { useThreadActionMenu } from "~/hooks/useThreadActionMenu";
-import { readLocalApi } from "~/localApi";
 import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { observeResponsiveBreakpointFade, usePanelAnimationSettings } from "../../panelAnimations";
 import { ProjectFavicon } from "../ProjectFavicon";
 import {
   WorkspaceBreadcrumb,
@@ -48,8 +47,8 @@ import {
 } from "../WorkspaceBreadcrumb";
 import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
-import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
+import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 
 interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
@@ -58,21 +57,21 @@ interface ChatHeaderProps {
   activeThreadTitle: string;
   /** Drafts have no server thread yet, so the title carries no action menu. */
   isServerThread: boolean;
+  /** PR feeding the settled classification, resolved by ChatView. */
+  changeRequest: ChangeRequestSettleSource | null;
   activeProjectName: string | undefined;
   activeProjectCwd: string | null;
   activeProjectFaviconPath: string | null;
-  activeProjectIcon: import("@t3tools/contracts").ProjectIconOverride | null;
   openInCwd: string | null;
   activeProjectScripts: ReadonlyArray<ProjectScript> | undefined;
   preferredScriptId: string | null;
-  transcript: string;
   keybindings: ResolvedKeybindingsConfig;
   availableEditors: ReadonlyArray<EditorId>;
   rightPanelOpen: boolean;
   gitCwd: string | null;
+  transcript: string;
   readonly onOpenPullRequest?: ((number: number) => void) | undefined;
   onNewThreadInProject: () => void;
-  onOpenProjectSettings?: (() => void) | undefined;
   onRunProjectScript: (script: ProjectScript) => void;
   onAddProjectScript: (input: NewProjectScriptInput) => Promise<ProjectScriptActionResult>;
   onUpdateProjectScript: (
@@ -82,7 +81,6 @@ interface ChatHeaderProps {
   onDeleteProjectScript: (scriptId: string) => Promise<ProjectScriptActionResult>;
 }
 
-/** Compact mobile task-actions menu, kept clear of the right-panel hit area. */
 export function CompactTaskActions({
   open,
   onOpenChange,
@@ -99,6 +97,9 @@ export function CompactTaskActions({
       data-mobile-chat-header-actions
       className={cn(
         "no-drag relative flex shrink-0 @xl/header-actions:hidden",
+        // PanelLayoutControls is an absolute two-button cluster at the same
+        // right inset. Reserve its full compact hit area while it is shown;
+        // otherwise its z-50 target sits over this button on touch screens.
         reservePanelControls ? "mr-[4.5rem]" : "mr-0",
       )}
     >
@@ -150,8 +151,6 @@ export function resolveRenameCommit(input: {
 // events (the second click dismisses it and dblclick still fires), so it
 // opens immediately.
 const TITLE_MENU_OPEN_DELAY_MS = 500;
-// Matches the @3xl/header-actions container breakpoint owned by this header.
-const HEADER_ACTIONS_EXPANDED_BREAKPOINT_REM = 48;
 
 export function shouldShowOpenInPicker(input: {
   readonly activeProjectName: string | undefined;
@@ -178,41 +177,25 @@ export const ChatHeader = memo(function ChatHeader({
   draftId,
   activeThreadTitle,
   isServerThread,
+  changeRequest,
   activeProjectName,
   activeProjectCwd,
   activeProjectFaviconPath,
-  activeProjectIcon,
   openInCwd,
   activeProjectScripts,
   preferredScriptId,
-  transcript,
   keybindings,
   availableEditors,
   rightPanelOpen,
   gitCwd,
+  transcript,
   onOpenPullRequest,
   onNewThreadInProject,
-  onOpenProjectSettings,
   onRunProjectScript,
   onAddProjectScript,
   onUpdateProjectScript,
   onDeleteProjectScript,
 }: ChatHeaderProps) {
-  const { active: panelAnimationsActive, durationMs: panelAnimationDurationMs } =
-    usePanelAnimationSettings();
-  const headerActionsRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    const actions = headerActionsRef.current;
-    const container = actions?.parentElement;
-    if (!actions || !container) return;
-    return observeResponsiveBreakpointFade({
-      target: actions,
-      container,
-      active: panelAnimationsActive,
-      durationMs: panelAnimationDurationMs,
-      breakpoint: { value: HEADER_ACTIONS_EXPANDED_BREAKPOINT_REM, unit: "rem" },
-    });
-  }, [panelAnimationDurationMs, panelAnimationsActive]);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const { copyToClipboard, isCopied } = useCopyToClipboard({
     target: "task transcript",
@@ -220,7 +203,6 @@ export const ChatHeader = memo(function ChatHeader({
     onError: (error) =>
       toastManager.add({ type: "error", title: "Could not copy chat", description: error.message }),
   });
-  const [mobileActionsOpen, setMobileActionsOpen] = useState(false);
   const fileScripts = useT3ProjectFileScripts(
     activeThreadEnvironmentId,
     activeProjectScripts ? activeProjectCwd : null,
@@ -336,31 +318,18 @@ export const ChatHeader = memo(function ChatHeader({
     },
     [cancelPendingTitleMenu, closeMenu, startRename],
   );
+  const [mobileActionsOpen, setMobileActionsOpen] = useState(false);
   const handleHeaderContextMenu = useCallback(
     (event: ReactMouseEvent) => {
-      if (renamingTitle !== null) return;
+      if (!isServerThread || renamingTitle !== null) return;
       // The right-side controls (git, scripts, open-in) keep their own
       // behavior; only the breadcrumb area opens the thread menu.
       if ((event.target as HTMLElement).closest("[data-chat-header-actions]")) return;
-      if (!isServerThread && onOpenProjectSettings === undefined) return;
       cancelPendingTitleMenu();
       event.preventDefault();
-      if (!isServerThread) {
-        const api = readLocalApi();
-        if (!api) return;
-        void api.contextMenu
-          .show([{ id: "project-settings", label: "Project settings", icon: "settings" }], {
-            x: event.clientX,
-            y: event.clientY,
-          })
-          .then((action) => {
-            if (action === "project-settings") onOpenProjectSettings?.();
-          });
-        return;
-      }
       openMenu({ x: event.clientX, y: event.clientY });
     },
-    [cancelPendingTitleMenu, isServerThread, onOpenProjectSettings, openMenu, renamingTitle],
+    [cancelPendingTitleMenu, isServerThread, openMenu, renamingTitle],
   );
   const handleRenameKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLInputElement>) => {
@@ -401,8 +370,6 @@ export const ChatHeader = memo(function ChatHeader({
                 <ProjectFavicon
                   environmentId={activeThreadEnvironmentId}
                   cwd={activeProjectCwd ?? ""}
-                  projectName={activeProjectName}
-                  projectIcon={activeProjectIcon}
                   faviconPath={activeProjectFaviconPath}
                   className="size-4 shrink-0"
                 />
@@ -426,8 +393,6 @@ export const ChatHeader = memo(function ChatHeader({
               <ProjectFavicon
                 environmentId={activeThreadEnvironmentId}
                 cwd={activeProjectCwd ?? ""}
-                projectName={activeProjectName}
-                projectIcon={activeProjectIcon}
                 faviconPath={activeProjectFaviconPath}
                 className="size-4 shrink-0"
               />
@@ -448,7 +413,7 @@ export const ChatHeader = memo(function ChatHeader({
             doesn't answer it. */}
         {activeProjectName ? (
           <>
-            <WorkspaceBreadcrumbItem className="shrink">
+            <WorkspaceBreadcrumbItem>
               <Tooltip>
                 <TooltipTrigger
                   render={
@@ -456,16 +421,14 @@ export const ChatHeader = memo(function ChatHeader({
                       type="button"
                       aria-label={`New thread in ${activeProjectName}`}
                       onClick={onNewThreadInProject}
-                      className="inline-flex min-w-0 max-w-full cursor-pointer items-center gap-1.5 rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                      className="inline-flex min-w-0 cursor-pointer items-center gap-1.5 rounded-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
                     />
                   }
                 >
                   <ProjectFavicon
                     environmentId={activeThreadEnvironmentId}
                     cwd={activeProjectCwd ?? ""}
-                    projectName={activeProjectName}
                     faviconPath={activeProjectFaviconPath}
-                    projectIcon={activeProjectIcon}
                     className="size-3.5"
                   />
                   <span className="max-w-40 truncate">{activeProjectName}</span>
@@ -476,7 +439,7 @@ export const ChatHeader = memo(function ChatHeader({
             <WorkspaceBreadcrumbSeparator />
           </>
         ) : null}
-        <WorkspaceBreadcrumbItem current className="min-w-10 flex-1">
+        <WorkspaceBreadcrumbItem current className="flex-1">
           {renamingTitle !== null ? (
             <input
               autoFocus
@@ -495,7 +458,6 @@ export const ChatHeader = memo(function ChatHeader({
               <TooltipTrigger
                 render={
                   <button
-                    ref={titleButtonRef}
                     type="button"
                     aria-label={`Thread actions for ${activeThreadTitle}`}
                     aria-haspopup="menu"
@@ -619,14 +581,36 @@ export const ChatHeader = memo(function ChatHeader({
         </div>
       </CompactTaskActions>
       <div
-        ref={headerActionsRef}
         data-chat-header-actions
         className={cn(
           "hidden shrink-0 items-center justify-end gap-2 @xl/header-actions:flex @3xl/header-actions:gap-3",
-          rightPanelOpen ? "pr-0" : "pr-16",
-          "[[data-panel-animations=true]_&]:motion-safe:transition-[padding-right] [[data-panel-animations=true]_&]:motion-safe:[transition-duration:var(--panel-animation-duration)] [[data-panel-animations=true]_&]:motion-safe:ease-out",
+          rightPanelOpen ? "pr-0" : "@xl/header-actions:pr-16",
         )}
       >
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="no-drag min-h-9 shrink-0 gap-1.5 px-2.5"
+                aria-label={isCopied ? "Chat copied" : "Copy chat"}
+                onClick={() => copyToClipboard(transcript, undefined)}
+              />
+            }
+          >
+            {isCopied ? (
+              <CheckIcon aria-hidden className="size-3.5" />
+            ) : (
+              <CopyIcon aria-hidden className="size-3.5" />
+            )}
+            <span>Copy chat</span>
+          </TooltipTrigger>
+          <TooltipPopup side="bottom">
+            {isCopied ? "Copied full chat" : "Copy full chat"}
+          </TooltipPopup>
+        </Tooltip>
         {activeProjectScripts && (
           <ProjectScriptsControl
             scripts={activeProjectScripts}

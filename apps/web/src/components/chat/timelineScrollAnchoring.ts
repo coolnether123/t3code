@@ -1,6 +1,17 @@
 // Match the titlebar fade inset so draft promotion preserves the first row's position.
 export const CHAT_TIMELINE_ANCHOR_OFFSET = 24;
 
+export function keepTimelineEndVisibleAfterOverlayGrowth(input: {
+  readonly timeline: { scrollToEnd: (options: { animated: boolean }) => unknown } | null;
+  readonly previousOverlayHeight: number;
+  readonly overlayHeight: number;
+  readonly followingEnd: boolean;
+}): void {
+  if (input.timeline && input.followingEnd && input.overlayHeight > input.previousOverlayHeight) {
+    void input.timeline.scrollToEnd({ animated: false });
+  }
+}
+
 export type TimelineScrollMode = "following-end" | "anchoring-new-turn" | "free-scrolling";
 
 export interface TimelineListMeasurementState {
@@ -35,6 +46,31 @@ export function getRowBottom(state: TimelineListMeasurementState, index: number)
   }
 
   return top + Math.max(1, height);
+}
+
+/**
+ * Whether the timeline's real rows extend past the viewport left above the
+ * composer. The list's own content length includes the composer inset
+ * spacer, so this measures from the last row instead. Unknown row geometry
+ * or an unmeasured viewport counts as fitting.
+ */
+export function timelineContentOverflowsViewport(
+  state: TimelineListMeasurementState | undefined,
+  input: { readonly composerInset: number; readonly anchorOffset: number },
+): boolean {
+  if (!state || !state.data || state.data.length === 0) {
+    return false;
+  }
+  const scrollLength = state.scrollLength;
+  if (typeof scrollLength !== "number" || !Number.isFinite(scrollLength) || scrollLength <= 0) {
+    return false;
+  }
+  const lastBottom = getRowBottom(state, state.data.length - 1);
+  if (lastBottom === null) {
+    return false;
+  }
+  const visibleScrollLength = Math.max(0, scrollLength - input.composerInset - input.anchorOffset);
+  return lastBottom > visibleScrollLength;
 }
 
 export function getAnchoredTurnMetrics({

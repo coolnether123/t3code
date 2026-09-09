@@ -1,23 +1,32 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { expect, it } from "@effect/vitest";
-import { ProviderInstanceId } from "@t3tools/contracts";
+import { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Sink from "effect/Sink";
+import * as Stream from "effect/Stream";
 import { HttpClient } from "effect/unstable/http";
+import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
+import * as ServerEnvironment from "../../environment/ServerEnvironment.ts";
+import * as PreviewAutomationBroker from "../../mcp/PreviewAutomationBroker.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { layerTest as codexResetCreditLayerTest } from "../Layers/codexResetCredit.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import * as ModelManifest from "../ModelManifest.ts";
+import {
+  createProviderVersionAdvisory,
+  ProviderVersionCache,
+  resolveLatestProviderVersion,
+} from "../providerMaintenance.ts";
 import { CodexDriver } from "./CodexDriver.ts";
 
 const testLayer = ServerConfig.layerTest(process.cwd(), {
@@ -33,6 +42,25 @@ const testLayer = ServerConfig.layerTest(process.cwd(), {
     }),
   ),
   Layer.provideMerge(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+  Layer.provideMerge(
+    Layer.succeed(
+      ServerEnvironment.ServerEnvironment,
+      ServerEnvironment.ServerEnvironment.of({
+        getEnvironmentId: Effect.succeed(EnvironmentId.make("test-environment")),
+        getDescriptor: Effect.die("unused descriptor"),
+      }),
+    ),
+  ),
+  Layer.provideMerge(
+    Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({
+      isBrowserAvailable: () => Effect.succeed(false),
+      streamBrowserAvailability: () => Stream.empty,
+      connect: () => Effect.die("unused connect"),
+      focusHost: () => Effect.die("unused focus"),
+      respond: () => Effect.die("unused respond"),
+      invoke: () => Effect.die("unused invoke"),
+    }),
+  ),
   Layer.provideMerge(
     Layer.succeed(
       HttpClient.HttpClient,
@@ -100,7 +128,9 @@ it.layer(testLayer)("CodexDriver", (it) => {
           binaryPath: NodePath.join(NodeOS.tmpdir(), "t3-codex-missing", "codex"),
         },
       });
-      expect((yield* instance.snapshot.resolveMaintenance()).update).toBeNull();
+      const maintenanceEffect = instance.snapshot.resolveMaintenance();
+      const maintenance = yield* maintenanceEffect;
+      expect(maintenance.update).toBeNull();
     }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, noSpawn), Effect.scoped),
   );
 
@@ -167,7 +197,7 @@ it.layer(testLayer)("CodexDriver", (it) => {
               "install",
               "-g",
               "--prefix",
-              NodeFS.realpathSync(installPath),
+              installPath,
               "--allow-scripts=@openai/codex",
               "@openai/codex@latest",
             ],
@@ -219,4 +249,147 @@ it.layer(testLayer)("CodexDriver", (it) => {
       ),
     );
   }
+
+  it.effect.each([
+    {
+      name: "conventional shim",
+      dataRoot: "mise",
+      commandName: "codex",
+      version: "0.153.4",
+      nodeFirst: false,
+    },
+    {
+      name: "custom data directory",
+      dataRoot: "custom-tool-data",
+      commandName: "codex",
+      version: "0.153.4",
+      nodeFirst: false,
+    },
+    {
+      name: "renamed configured command",
+      dataRoot: "mise",
+      commandName: "custom-codex",
+      version: "0.153.4",
+      nodeFirst: false,
+    },
+    {
+      name: "outdated provider",
+      dataRoot: "mise",
+      commandName: "codex",
+      version: "0.153.3",
+      nodeFirst: false,
+    },
+    {
+      name: "npm before shim",
+      dataRoot: "mise",
+      commandName: "codex",
+      version: "0.153.4",
+      nodeFirst: true,
+    },
+  ])(
+    "does not mistake Homebrew mise for Codex's installer: $name",
+    (fixture) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-codex-mise-shim-" });
+        const brewPrefix = NodePath.join(tempDir, "homebrew");
+        const brewPath = NodePath.join(brewPrefix, "bin", "brew");
+        const misePath = NodePath.join(brewPrefix, "Cellar", "mise", "2026.9.1", "bin", "mise");
+        const shimDir = NodePath.join(tempDir, fixture.dataRoot, "shims");
+        const npmPrefix = NodePath.join(tempDir, "mise", "installs", "node", "24.13.0");
+        const npmBin = NodePath.join(npmPrefix, "bin");
+        const npmEntry = NodePath.join(
+          npmPrefix,
+          "lib",
+          "node_modules",
+          "@openai",
+          "codex",
+          "bin",
+          "codex.js",
+        );
+        for (const file of [brewPath, misePath, npmEntry]) {
+          yield* fs.makeDirectory(NodePath.dirname(file), { recursive: true });
+          yield* fs.writeFileString(file, "#!/bin/sh\n");
+          yield* fs.chmod(file, 0o755);
+        }
+        yield* fs.makeDirectory(shimDir, { recursive: true });
+        yield* fs.makeDirectory(npmBin, { recursive: true });
+        yield* fs.symlink(misePath, NodePath.join(shimDir, fixture.commandName));
+        yield* fs.symlink(npmEntry, NodePath.join(npmBin, fixture.commandName));
+        const lookupPath = [
+          ...(fixture.nodeFirst ? [npmBin, shimDir] : [shimDir, npmBin]),
+          NodePath.dirname(brewPath),
+        ].join(NodePath.delimiter);
+        const probes: Array<ReadonlyArray<string>> = [];
+        const metadataSpawner = ChildProcessSpawner.make((command) => {
+          if (!ChildProcess.isStandardCommand(command) || command.command !== brewPath) {
+            return Effect.die("Provider resolution must not execute a provider or updater");
+          }
+          probes.push(command.args);
+          const stdout =
+            command.args[0] === "--prefix"
+              ? brewPrefix
+              : JSON.stringify({ formulae: [{ versions: { stable: "2026.9.1" } }] });
+          return Effect.succeed(
+            ChildProcessSpawner.makeHandle({
+              pid: ChildProcessSpawner.ProcessId(1),
+              exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+              isRunning: Effect.succeed(false),
+              kill: () => Effect.void,
+              unref: Effect.succeed(Effect.void),
+              stdin: Sink.drain,
+              stdout: Stream.encodeText(Stream.make(stdout)),
+              stderr: Stream.empty,
+              all: Stream.empty,
+              getInputFd: () => Sink.drain,
+              getOutputFd: () => Stream.empty,
+            }),
+          );
+        });
+        const instance = yield* CodexDriver.create({
+          instanceId: ProviderInstanceId.make("codex-mise-shim"),
+          displayName: "Codex shim test",
+          enabled: false,
+          environment: [{ name: "PATH", value: lookupPath, sensitive: false }],
+          config: {
+            ...CodexDriver.defaultConfig(),
+            binaryPath: fixture.commandName,
+            homePath: NodePath.join(tempDir, "codex-home"),
+          },
+        }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, metadataSpawner));
+        const capabilities = yield* instance.snapshot.resolveMaintenance();
+        const latestVersion = yield* resolveLatestProviderVersion(capabilities).pipe(
+          Effect.provideService(
+            ProviderVersionCache,
+            new Map([
+              ["@openai/codex", { expiresAt: Number.MAX_SAFE_INTEGER, version: "0.153.4" }],
+            ]),
+          ),
+        );
+        expect(probes).toEqual([]);
+        expect(latestVersion).toBe("0.153.4");
+        expect(
+          createProviderVersionAdvisory({
+            driver: CodexDriver.driverKind,
+            currentVersion: fixture.version,
+            latestVersion,
+            maintenanceCapabilities: capabilities,
+          }),
+        ).toMatchObject({
+          status: fixture.version === "0.153.4" ? "current" : "behind_latest",
+          currentVersion: fixture.version,
+          latestVersion: "0.153.4",
+          canUpdate: fixture.nodeFirst,
+        });
+        if (fixture.nodeFirst) {
+          expect(capabilities.update).toMatchObject({
+            executable: "npm",
+            args: expect.arrayContaining(["--prefix", npmPrefix, "@openai/codex@latest"]),
+          });
+        } else {
+          expect(capabilities.update).toBeNull();
+        }
+      }).pipe(Effect.scoped),
+    { skip: windowsHost },
+  );
 });

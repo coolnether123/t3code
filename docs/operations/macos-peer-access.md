@@ -42,6 +42,28 @@ existing owner when specifically needed. Do not add it to this LaunchAgent,
 reuse an observed desktop port for a peer T3 tunnel, or restart its process
 while diagnosing port `13773`.
 
+Do not leave both mechanisms presented as the canonical desktop connection to
+the same peer. When the packaged app already owns a healthy SSH connection,
+prefer that catalog connection and treat its local port as ephemeral. After
+verifying the app-managed endpoint, the redundant peer LaunchAgent can be
+unloaded without deleting its plist:
+
+```sh
+launchctl bootout "gui/$(id -u)/com.t3tools.macos-peer-tunnel"
+```
+
+That is recoverable with:
+
+```sh
+launchctl bootstrap "gui/$(id -u)" \
+  "$HOME/Library/LaunchAgents/com.t3tools.macos-peer-tunnel.plist"
+```
+
+If a stable loopback endpoint is required by terminal clients, scripts, or a
+non-desktop consumer, keep the LaunchAgent as the canonical owner instead and
+remove the duplicate desktop catalog entry through the app's supported
+connection settings. Never edit the encrypted connection catalog directly.
+
 ## Prerequisites
 
 Before installing the peer tunnel, verify the following on the Mac that will

@@ -1,6 +1,7 @@
 import { ProviderInteractionMode, RuntimeMode, type SubagentBackend } from "@t3tools/contracts";
 import { memo, type ReactNode } from "react";
 import { EllipsisIcon } from "lucide-react";
+import { Button } from "../ui/button";
 import {
   Menu,
   MenuPopup,
@@ -9,9 +10,6 @@ import {
   MenuSeparator as MenuDivider,
   MenuTrigger,
 } from "../ui/menu";
-import { ComposerControl, ComposerControlIcon } from "./ComposerControl";
-import { composerFloatingLayerProps } from "./composerEventScope";
-import { useComposerMenuState } from "./useComposerMenuState";
 
 export const CompactComposerControlsMenu = memo(function CompactComposerControlsMenu(props: {
   interactionMode: ProviderInteractionMode;
@@ -26,35 +24,25 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   }>;
   showInteractionModeToggle: boolean;
   traitsMenuContent?: ReactNode;
-  size?: "sm" | "xs";
-  /**
-   * The resting strip keeps this menu mounted out of flow while every block
-   * fits inline. Its portaled popup would outlive that transition, so an
-   * open menu closes when its trigger hides.
-   */
-  hidden?: boolean;
   onToggleInteractionMode: () => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
   onSubagentBackendChange: (backend: SubagentBackend) => void;
 }) {
-  const size = props.size ?? "sm";
-  const [open, setOpen] = useComposerMenuState(props.hidden);
-
   return (
-    <Menu open={open} onOpenChange={setOpen}>
+    <Menu>
       <MenuTrigger
         render={
-          <ComposerControl
-            size={size}
+          <Button
+            size="sm"
             variant="ghost"
-            className={size === "xs" ? "shrink-0" : "shrink-0 px-2"}
+            className="shrink-0 px-2 text-muted-foreground/70 hover:text-foreground/80"
             aria-label="More composer controls"
           />
         }
       >
-        <ComposerControlIcon icon={EllipsisIcon} size={size} />
+        <EllipsisIcon aria-hidden="true" className="size-4" />
       </MenuTrigger>
-      <MenuPopup align="start" {...composerFloatingLayerProps}>
+      <MenuPopup align="start">
         {props.traitsMenuContent ? (
           <>
             {props.traitsMenuContent}

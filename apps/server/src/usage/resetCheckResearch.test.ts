@@ -2,6 +2,9 @@ import { describe, expect, it } from "vite-plus/test";
 import { ResetCheckFinding } from "@t3tools/contracts";
 import { toJsonSchemaObject } from "../textGeneration/TextGenerationUtils.ts";
 import { resetCheckArgs, resetCheckPrompt, validateResetFinding } from "./resetCheckResearch.ts";
+import { ResetPublicFeed, validateResearchFinding } from "./resetCheckResearch.ts";
+import * as Schema from "effect/Schema";
+const decodePublicFeed = Schema.decodeUnknownSync(ResetPublicFeed);
 
 const now = Date.parse("2026-08-30T23:00:00Z");
 const finding: ResetCheckFinding = {
@@ -23,6 +26,40 @@ const finding: ResetCheckFinding = {
   ],
 };
 describe("reset research boundary", () => {
+  it("never turns a statistical forecast or banked credit into a broad reset window", () => {
+    for (const timingBasis of ["forecast", "banked", "none"] as const) {
+      expect(validateResearchFinding({ ...finding, timingBasis }, now)).toMatchObject({
+        outcome: "unavailable",
+        confidence: "low",
+        likelyAt: null,
+        earliestAt: null,
+        latestAt: null,
+      });
+    }
+    expect(validateResearchFinding({ ...finding, timingBasis: "announcement" }, now)).toEqual(
+      finding,
+    );
+  });
+  it("feeds Luna dated posts without statistical forecasts or rolling countdowns", () => {
+    const feed = decodePublicFeed({
+      calculatedAt: "2026-09-05T00:00:00Z",
+      validUntil: "2026-09-05T01:00:00Z",
+      probability: 55,
+      answer: {
+        state: "banked",
+        secondLine: "55% within 48 hours",
+        posts: [
+          {
+            sourceUrl: "https://x.com/thsottiaux/status/123",
+            quote: "A banked reset",
+            publishedAt: "2026-09-04T23:00:00Z",
+          },
+        ],
+      },
+    });
+    expect(JSON.stringify(feed)).not.toContain("55");
+    expect(feed.answer.posts[0]?.quote).toBe("A banked reset");
+  });
   it("generates a structured-output schema without unsupported allOf constraints", () => {
     expect(JSON.stringify(toJsonSchemaObject(ResetCheckFinding))).not.toContain('"allOf"');
   });

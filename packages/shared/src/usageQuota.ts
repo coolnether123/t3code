@@ -1,5 +1,6 @@
 import type {
   UsageQuotaInterval,
+  UsageQuotaCostSnapshot,
   UsageQuotaSample,
   UsageSourceFingerprint,
   UsageSummary,
@@ -43,6 +44,8 @@ export function quotaPeriods(samples: readonly UsageQuotaSample[]): readonly Quo
   for (const sample of sorted) {
     const group = groups.at(-1);
     const previous = group?.at(-1);
+    // A clock-only adjustment may be ambiguous, but it is safe to cross only
+    // when the period used nothing and its balance is unchanged at both edges.
     if (
       !group ||
       !previous ||
@@ -131,6 +134,9 @@ export interface QuotaValue {
   readonly remainingValueUsd: number | null;
   readonly unusedValueUsd: number | null;
   readonly reason: string | null;
+  readonly historicalCalibration?: { readonly since: string; readonly until: string };
+  readonly historicalCostRecordedAt?: string;
+  readonly costObservedUntil?: string;
 }
 
 export interface QuotaValueSnapshot {
@@ -195,12 +201,162 @@ export function quotaValueWithSnapshot(
   };
 }
 
+/**
+ * Carries a completed cycle's price calibration across a confirmed reset.
+ * The current cycle's measured cost is deliberately left untouched.
+ */
+export function quotaValueWithHistoricalCalibration(
+  current: QuotaValueSnapshot,
+  previous: QuotaValueSnapshot | undefined,
+  earlier: readonly QuotaValueSnapshot[] = [],
+): QuotaValue {
+  if (current.value.usdPerPercentagePoint !== null || previous === undefined) return current.value;
+  const candidates = [previous, ...[...earlier].reverse()];
+  let source: QuotaValueSnapshot | undefined;
+  for (const [index, candidate] of candidates.entries()) {
+    const next = index === 0 ? current : candidates[index - 1];
+    if (candidate.period.next?.observedAt !== next?.period.first.observedAt) break;
+    if (
+      Date.parse(current.period.first.observedAt) - Date.parse(candidate.period.last.observedAt) >
+      60 * MINUTE_MS
+    )
+      break;
+    if (
+      (candidate.period.resetKind === "scheduled" || candidate.period.resetKind === "unexpected") &&
+      candidate.value.usdPerPercentagePoint !== null &&
+      Number.isFinite(candidate.value.usdPerPercentagePoint) &&
+      candidate.value.usdPerPercentagePoint > 0
+    ) {
+      source = candidate;
+      break;
+    }
+    if (
+      (candidate.period.resetKind !== "scheduled" && candidate.period.resetKind !== "ambiguous") ||
+      candidate.period.usedPercentagePoints !== 0 ||
+      candidate.period.first.remainingPercent !== candidate.period.last.remainingPercent ||
+      candidate.period.last.remainingPercent !== next?.period.first.remainingPercent
+    )
+      break;
+  }
+  if (source === undefined) return current.value;
+  const calibration = source.value.usdPerPercentagePoint!;
+  return {
+    ...current.value,
+    usdPerPercentagePoint: calibration,
+    remainingValueUsd: calibration * current.period.last.remainingPercent,
+    historicalCalibration: {
+      since: source.period.first.observedAt,
+      until: source.period.last.observedAt,
+    },
+  };
+}
+
 function sourceKey(source: UsageSourceFingerprint): string {
   return JSON.stringify([source.hostId, source.provider, source.resolvedHomePath, source.volumeId]);
 }
 
+export interface QuotaSavedCostPrefix {
+  readonly interval: UsageQuotaInterval;
+  readonly rows: readonly UsageQuotaCostSnapshot[];
+}
+
+/** Finds the newest complete same-cycle prefix shared by every selected source. */
+export function quotaSavedCostPrefix(
+  period: QuotaPeriod,
+  environments: readonly QuotaEnvironment[],
+): QuotaSavedCostPrefix | null {
+  const expected = new Set<string>();
+  const candidates = new Map<string, UsageQuotaCostSnapshot[]>();
+  const environmentRequirements: Array<{
+    readonly keys: Set<string>;
+    readonly byUntil: Map<string, Set<string>>;
+  }> = [];
+  for (const environment of environments) {
+    const summary = environment.summary;
+    if (!summary) return null;
+    const requirement = { keys: new Set<string>(), byUntil: new Map<string, Set<string>>() };
+    environmentRequirements.push(requirement);
+    const sources = summary.sources.filter(
+      (source) => source.fingerprint.provider === "codex" && source.status !== "missing",
+    );
+    for (const source of sources) {
+      const key = sourceKey(source.fingerprint);
+      expected.add(key);
+      requirement.keys.add(key);
+    }
+  }
+  for (const [environmentIndex, environment] of environments.entries()) {
+    const summary = environment.summary;
+    if (!summary) return null;
+    const requirement = environmentRequirements[environmentIndex]!;
+    for (const row of summary.quotaCostSnapshots ?? []) {
+      const key = sourceKey(row.fingerprint);
+      if (
+        row.fingerprint.provider !== "codex" ||
+        (expected.size > 0 && !expected.has(key)) ||
+        row.intervalId !== period.id ||
+        row.sinceTime !== period.first.observedAt ||
+        !Number.isFinite(Date.parse(row.sinceTime)) ||
+        !Number.isFinite(Date.parse(row.untilTime)) ||
+        Date.parse(row.sinceTime) >= Date.parse(row.untilTime) ||
+        row.untilTime >= period.last.observedAt ||
+        row.firstRemainingPercent !== period.first.remainingPercent ||
+        row.resetsAt !== period.first.resetsAt ||
+        !Number.isFinite(row.costUsd) ||
+        row.costUsd < 0 ||
+        !Number.isSafeInteger(row.records) ||
+        row.records < 0 ||
+        !Number.isFinite(row.firstRemainingPercent) ||
+        !Number.isFinite(row.lastRemainingPercent) ||
+        row.lastRemainingPercent < 0 ||
+        row.lastRemainingPercent > 100 ||
+        row.firstRemainingPercent <= row.lastRemainingPercent ||
+        row.lastRemainingPercent < period.last.remainingPercent
+      )
+        continue;
+      const rows = candidates.get(row.untilTime) ?? [];
+      rows.push(row);
+      candidates.set(row.untilTime, rows);
+      const keys = requirement.byUntil.get(row.untilTime) ?? new Set<string>();
+      keys.add(key);
+      requirement.byUntil.set(row.untilTime, keys);
+    }
+  }
+  if (expected.size === 0) {
+    for (const rows of candidates.values())
+      for (const row of rows) expected.add(sourceKey(row.fingerprint));
+  }
+  const untilTimes = [...candidates.keys()].sort((a, b) => Date.parse(b) - Date.parse(a));
+  for (const untilTime of untilTimes) {
+    const rows = candidates.get(untilTime)!;
+    const bySource = new Map(rows.map((row) => [sourceKey(row.fingerprint), row]));
+    if (![...expected].every((key) => bySource.has(key))) continue;
+    if (
+      !environmentRequirements.every((requirement) => {
+        const keys = requirement.byUntil.get(untilTime);
+        return (
+          keys !== undefined &&
+          (requirement.keys.size === 0
+            ? keys.size > 0
+            : [...requirement.keys].every((key) => keys.has(key)))
+        );
+      })
+    )
+      continue;
+    const selected = [...expected].map((key) => bySource.get(key)!);
+    if (!selected.every((row) => row.lastRemainingPercent === selected[0]!.lastRemainingPercent))
+      continue;
+    if (selected.reduce((total, row) => total + row.records, 0) === 0) continue;
+    return {
+      interval: { id: period.id, sinceTime: period.first.observedAt, untilTime },
+      rows: selected,
+    };
+  }
+  return null;
+}
+
 /** Estimates assume selected transcripts cover one account; percentages are never summed. */
-export function quotaValue(
+function quotaValueExact(
   period: QuotaPeriod,
   environments: readonly QuotaEnvironment[],
 ): QuotaValue {
@@ -219,18 +375,71 @@ export function quotaValue(
   let costUsd = 0;
   let records = 0;
   let unpricedRecords = 0;
+  let savedCostRecordedAt: string | undefined;
+  let savedFallbackReason: string | undefined;
   for (const environment of [...environments].sort((a, b) =>
     a.environmentId.localeCompare(b.environmentId),
   )) {
     const { summary, label } = environment;
-    if (environment.error) {
-      return unavailable(`${label} could not report usage. Refresh to retry.`);
-    }
     if (environment.isPending && !summary) {
       return unavailable(`${label} is still reading Codex transcripts.`);
     }
     if (!summary) {
       return unavailable(`${label} has not supplied a complete usage result.`);
+    }
+    const savedOnly = (summary.quotaCostSnapshots ?? []).filter(
+      (candidate) =>
+        candidate.fingerprint.provider === "codex" &&
+        candidate.intervalId === period.id &&
+        candidate.sinceTime === period.first.observedAt &&
+        candidate.untilTime === period.last.observedAt,
+    );
+    const requiredSavedSources = summary.sources.filter(
+      (source) => source.fingerprint.provider === "codex" && source.status !== "missing",
+    );
+    const savedForRequiredSources = new Set(
+      savedOnly.map((candidate) => sourceKey(candidate.fingerprint)),
+    );
+    // A history-only response can be merged into a failed current request.
+    // Consume only the exact persisted interval in that case; never treat the
+    // failed request's live totals as authoritative.
+    const canUseSavedOnly =
+      savedOnly.length > 0 &&
+      requiredSavedSources.every((source) =>
+        savedForRequiredSources.has(sourceKey(source.fingerprint)),
+      );
+    if (canUseSavedOnly && (environment.error !== null || summary.quotaCosts === undefined)) {
+      const savedRows =
+        requiredSavedSources.length === 0
+          ? savedOnly
+          : savedOnly.filter((saved) =>
+              requiredSavedSources.some(
+                (source) => sourceKey(source.fingerprint) === sourceKey(saved.fingerprint),
+              ),
+            );
+      for (const saved of savedRows) {
+        if (
+          !Number.isFinite(saved.costUsd) ||
+          saved.costUsd < 0 ||
+          !Number.isSafeInteger(saved.records) ||
+          saved.records < 0 ||
+          !Number.isFinite(Date.parse(saved.recordedAt))
+        )
+          return unavailable("A saved cost result is invalid.");
+        const key = sourceKey(saved.fingerprint);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        costUsd += saved.costUsd;
+        records += saved.records;
+        savedCostRecordedAt = saved.recordedAt;
+      }
+      if (environment.error !== null) {
+        savedFallbackReason = `${label} could not report current usage; showing the saved cost for this observed period.`;
+      }
+      continue;
+    }
+    if (environment.error) {
+      return unavailable(`${label} could not report usage. Refresh to retry.`);
     }
     if (summary.quotaCosts === undefined)
       return unavailable(`${label} needs a server with reset-history support.`);
@@ -240,21 +449,36 @@ export function quotaValue(
     if (sources.length === 0)
       return unavailable(`${label} has no readable Codex transcript source.`);
     for (const source of sources) {
-      if (source.status !== "ok") return unavailable(`${label}'s transcript scan is incomplete.`);
       const key = sourceKey(source.fingerprint);
       if (seen.has(key)) continue;
       const row = summary.quotaCosts.find(
         (candidate) =>
           candidate.intervalId === period.id && sourceKey(candidate.fingerprint) === key,
       );
-      if (!row) return unavailable(`${label} has not supplied costs for this observed period.`);
-      if (!row.complete) return unavailable(`${label}'s matching transcript scan is incomplete.`);
-      if (!Number.isFinite(row.costUsd) || row.costUsd < 0)
+      const saved = summary.quotaCostSnapshots?.find(
+        (candidate) =>
+          candidate.intervalId === period.id &&
+          candidate.sinceTime === period.first.observedAt &&
+          candidate.untilTime === period.last.observedAt &&
+          sourceKey(candidate.fingerprint) === key,
+      );
+      if (source.status !== "ok" && saved === undefined)
+        return unavailable(`${label}'s transcript scan is incomplete.`);
+      const cost =
+        source.status === "ok" && row?.complete && row.unpricedRecords === 0 ? row : saved;
+      if (!cost) return unavailable(`${label} has not supplied costs for this observed period.`);
+      if (!Number.isFinite(cost.costUsd) || cost.costUsd < 0)
         return unavailable("A cost result is invalid.");
       seen.add(key);
-      costUsd += row.costUsd;
-      records += row.records;
-      unpricedRecords += row.unpricedRecords;
+      costUsd += cost.costUsd;
+      records += cost.records;
+      unpricedRecords += "unpricedRecords" in cost ? cost.unpricedRecords : 0;
+      if (row !== cost && saved !== undefined) {
+        savedCostRecordedAt = saved.recordedAt;
+        if (source.status !== "ok") {
+          savedFallbackReason = `${label}'s transcript scan is incomplete; showing the saved cost for this observed period.`;
+        }
+      }
     }
   }
   if (records === 0)
@@ -266,12 +490,17 @@ export function quotaValue(
     usdPerPercentagePoint: null,
     remainingValueUsd: null,
     unusedValueUsd: null,
-    reason: null,
+    reason: savedFallbackReason ?? null,
+    ...(savedCostRecordedAt === undefined ? {} : { historicalCostRecordedAt: savedCostRecordedAt }),
   };
+  const withFallbackReason = (reason: string) =>
+    savedFallbackReason === undefined ? reason : `${reason} ${savedFallbackReason}`;
   if (period.usedPercentagePoints < 5)
     return {
       ...measured,
-      reason: "At least 5 percentage points of observed usage are needed for a conversion.",
+      reason: withFallbackReason(
+        "At least 5 percentage points of observed usage are needed for a conversion.",
+      ),
     };
   const usdPerPercentagePoint = costUsd / period.usedPercentagePoints;
   const calibrated = {
@@ -282,27 +511,65 @@ export function quotaValue(
   if (period.resetKind === "unobserved")
     return {
       ...calibrated,
-      reason:
+      reason: withFallbackReason(
         "Based on the last reading and current model mix. Usage after that reading is not included.",
+      ),
     };
   if (period.resetKind === "ambiguous")
     return {
       ...calibrated,
-      reason:
+      reason: withFallbackReason(
         "Value left is estimated at the last reading. This change cannot be identified as a reset.",
+      ),
     };
   if (period.observationGapMs === null || period.observationGapMs > 60 * MINUTE_MS) {
     return {
       ...calibrated,
-      reason:
+      reason: withFallbackReason(
         "Value left is estimated at the last reading. The reset observations are over an hour apart, so value left at the reset is unknown.",
+      ),
     };
   }
   return {
     ...calibrated,
     unusedValueUsd: usdPerPercentagePoint * period.last.remainingPercent,
-    reason:
+    reason: withFallbackReason(
       "Based on the last pre-reset observation and the same model mix. Usage between observations is unknown.",
+    ),
+  };
+}
+
+export function quotaValue(
+  period: QuotaPeriod,
+  environments: readonly QuotaEnvironment[],
+): QuotaValue {
+  const exact = quotaValueExact(period, environments);
+  if (exact.costUsd !== null) return exact;
+  const savedPrefix = quotaSavedCostPrefix(period, environments);
+  if (savedPrefix === null) return exact;
+  const costUsd = savedPrefix.rows.reduce((total, row) => total + row.costUsd, 0);
+  const records = savedPrefix.rows.reduce((total, row) => total + row.records, 0);
+  const firstRemaining = savedPrefix.rows[0]!.firstRemainingPercent;
+  const lastRemaining = savedPrefix.rows[0]!.lastRemainingPercent;
+  const used = firstRemaining - lastRemaining;
+  if (records === 0) return exact;
+  if (used < 5)
+    return {
+      costUsd,
+      usdPerPercentagePoint: null,
+      remainingValueUsd: null,
+      unusedValueUsd: null,
+      reason: `Current transcript scan is incomplete; observed cost is complete through ${savedPrefix.interval.untilTime}. At least 5 percentage points of observed usage are needed for a conversion.`,
+      costObservedUntil: savedPrefix.interval.untilTime,
+    };
+  const usdPerPercentagePoint = costUsd / used;
+  return {
+    costUsd,
+    usdPerPercentagePoint,
+    remainingValueUsd: usdPerPercentagePoint * period.last.remainingPercent,
+    unusedValueUsd: null,
+    reason: `Current transcript scan is incomplete; observed cost is complete through ${savedPrefix.interval.untilTime}.`,
+    costObservedUntil: savedPrefix.interval.untilTime,
   };
 }
 

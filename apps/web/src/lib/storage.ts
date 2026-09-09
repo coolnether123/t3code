@@ -13,6 +13,11 @@ export interface DeferredStorage<TValue> {
   flush: () => void;
 }
 
+/** String storage adapter retained for callers using Zustand's JSON wrapper. */
+export interface DebouncedStorage<R = unknown> extends StateStorage<R> {
+  flush: () => void;
+}
+
 export function createMemoryStorage(): StateStorage {
   const store = new Map<string, string>();
   return {
@@ -26,7 +31,34 @@ export function createMemoryStorage(): StateStorage {
   };
 }
 
-export function isStateStorage(
+export function createDebouncedStorage(
+  baseStorage: Partial<StateStorage> | null | undefined,
+  debounceMs: number = 300,
+): DebouncedStorage {
+  const resolvedStorage = resolveStorage(baseStorage);
+  const debouncedSetItem = new Debouncer(
+    (name: string, value: string) => {
+      resolvedStorage.setItem(name, value);
+    },
+    { wait: debounceMs },
+  );
+
+  return {
+    getItem: (name) => resolvedStorage.getItem(name),
+    setItem: (name, value) => {
+      debouncedSetItem.maybeExecute(name, value);
+    },
+    removeItem: (name) => {
+      debouncedSetItem.cancel();
+      resolvedStorage.removeItem(name);
+    },
+    flush: () => {
+      debouncedSetItem.flush();
+    },
+  };
+}
+
+function isStateStorage(
   storage: Partial<StateStorage> | null | undefined,
 ): storage is StateStorage {
   return (

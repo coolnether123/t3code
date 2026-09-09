@@ -69,11 +69,10 @@ export interface RuntimeSubagent {
   readonly progress: string | null;
   readonly lastToolName: string | null;
   readonly result: string | null;
+  readonly lastTurn: RuntimeTaskLastTurn | null;
   readonly error: string | null;
   readonly outputFile: string | null;
   readonly parentAgentId: string | null;
-  readonly providerThreadId?: string;
-  readonly providerTurnId?: string;
   readonly agentIndex: number | null;
   readonly phaseIndex: number | null;
   readonly phaseTitle: string | null;
@@ -86,7 +85,6 @@ export interface RuntimeSubagent {
   readonly firstSeenAt: string;
   readonly startedAt: string | null;
   readonly completedAt: string | null;
-  readonly lastTurn?: RuntimeTaskLastTurn;
   readonly updatedAt: string;
 }
 
@@ -109,7 +107,6 @@ export function isActiveSubagentStatus(status: RuntimeSubagentStatus): boolean {
 
 const RECENT_ACTIVITY_LIMIT = 6;
 const SUMMARY_CHAR_LIMIT = 180;
-const DETAIL_CHAR_LIMIT = 16_000;
 const ROSTER_LIMIT = 100;
 
 /**
@@ -124,8 +121,8 @@ export function isBackgroundTaskActivity(payload: Record<string, unknown>): bool
   return payload.agentKind !== "agent";
 }
 
-function bounded(value: string, limit = SUMMARY_CHAR_LIMIT): string {
-  return value.length <= limit ? value : `${value.slice(0, limit - 1)}…`;
+function bounded(value: string): string {
+  return value.length <= SUMMARY_CHAR_LIMIT ? value : `${value.slice(0, SUMMARY_CHAR_LIMIT - 1)}…`;
 }
 
 /** Appends to the ring buffer, deduping consecutive identical summaries. */
@@ -242,11 +239,10 @@ interface MutableAgent {
   progress: string | null;
   lastToolName: string | null;
   result: string | null;
+  lastTurn: RuntimeTaskLastTurn | null;
   error: string | null;
   outputFile: string | null;
   parentAgentId: string | null;
-  providerThreadId?: string;
-  providerTurnId?: string;
   agentIndex: number | null;
   phaseIndex: number | null;
   phaseTitle: string | null;
@@ -258,7 +254,6 @@ interface MutableAgent {
   firstSeenAt: string;
   startedAt: string | null;
   completedAt: string | null;
-  lastTurn?: RuntimeTaskLastTurn;
   updatedAt: string;
 }
 
@@ -302,6 +297,7 @@ function getOrCreate(
     progress: null,
     lastToolName: null,
     result: null,
+    lastTurn: null,
     error: null,
     outputFile: null,
     parentAgentId: asString(payload.parentAgentId) ?? null,
@@ -325,13 +321,6 @@ function getOrCreate(
 /** Metadata fill from any payload: never downgrades known values to null. */
 function fillMetadata(agent: MutableAgent, payload: Record<string, unknown>): void {
   if (payload.taskType === "subagent_batch") agent.kind = "subagent_batch";
-  if (typeof payload.providerRefs === "object" && payload.providerRefs !== null) {
-    const refs = payload.providerRefs as Record<string, unknown>;
-    const providerThreadId = asString(refs.providerThreadId);
-    if (providerThreadId) agent.providerThreadId = providerThreadId;
-    const providerTurnId = asString(refs.providerTurnId);
-    if (providerTurnId) agent.providerTurnId = providerTurnId;
-  }
   const title = asString(payload.title);
   if (title) agent.title = title;
   const role = asString(payload.role);
@@ -463,29 +452,6 @@ function asRuntimeStatus(value: unknown): RuntimeSubagentStatus | undefined {
     : undefined;
 }
 
-/** Persisted legacy activities are untyped; accept only reported terminal-turn facts. */
-function asLastTurn(value: unknown): RuntimeTaskLastTurn | undefined {
-  if (typeof value !== "object" || value === null) return undefined;
-  const record = value as Record<string, unknown>;
-  const turnId = asString(record.turnId);
-  const outcome = record.outcome;
-  if (!turnId || (outcome !== "completed" && outcome !== "failed" && outcome !== "interrupted")) {
-    return undefined;
-  }
-  const completedAt = asString(record.completedAt);
-  const durationMs = asCount(record.durationMs);
-  const result = asString(record.result);
-  const error = asString(record.error);
-  return {
-    turnId,
-    outcome,
-    ...(completedAt && Number.isFinite(Date.parse(completedAt)) ? { completedAt } : {}),
-    ...(durationMs !== undefined && Number.isSafeInteger(durationMs) ? { durationMs } : {}),
-    ...(result ? { result: bounded(result, DETAIL_CHAR_LIMIT) } : {}),
-    ...(error ? { error: bounded(error, DETAIL_CHAR_LIMIT) } : {}),
-  };
-}
-
 /**
  * Folds a thread's persisted activities into subagent state. Tolerant by
  * construction: malformed rows are skipped individually; unknown kinds are
@@ -562,7 +528,7 @@ export function foldSubagentActivities(
         }
         const summary = asString(payload.summary);
         if (summary) {
-          agent.progress = bounded(summary, DETAIL_CHAR_LIMIT);
+          agent.progress = bounded(summary);
           agent.recentActivity = appendActivity(agent.recentActivity, at, summary);
         }
         const lastToolName = asString(payload.lastToolName);
@@ -573,7 +539,7 @@ export function foldSubagentActivities(
           }
         }
         const error = asString(payload.error);
-        if (error) agent.error = bounded(error, DETAIL_CHAR_LIMIT);
+        if (error) agent.error = bounded(error);
         agent.usage = mergeUsageMax(agent.usage, asUsage(payload.typedUsage));
         agent.updatedAt = at;
         break;
@@ -588,7 +554,7 @@ export function foldSubagentActivities(
         const agent = getOrCreate(agents, taskId, payload, at);
         fillMetadata(agent, payload);
         const detail = asString(payload.detail);
-        if (detail) agent.progress = bounded(detail, DETAIL_CHAR_LIMIT);
+        if (detail) agent.progress = bounded(detail);
         // A task first seen via task.updated (start row aged out) has run at
         // least once — zero activations would misreport "run 0" and let a
         // later start row treat it as never-started (review finding).
@@ -596,20 +562,8 @@ export function foldSubagentActivities(
         const wasTerminal = isTerminalSubagentStatus(agent.status);
         const status = asRuntimeStatus(payload.status);
         if (status) applyStatus(agent, status, at);
-        const lastTurn = asLastTurn(payload.lastTurn);
-        if (lastTurn) {
-          if (agent.lastTurn?.turnId === lastTurn.turnId) {
-            agent.lastTurn = { ...lastTurn, ...agent.lastTurn };
-          } else if (
-            !agent.lastTurn?.completedAt ||
-            !lastTurn.completedAt ||
-            Date.parse(lastTurn.completedAt) >= Date.parse(agent.lastTurn.completedAt)
-          ) {
-            agent.lastTurn = lastTurn;
-          }
-        }
         const error = asString(payload.error);
-        if (error) agent.error = bounded(error, DETAIL_CHAR_LIMIT);
+        if (error) agent.error = bounded(error);
         // Provider end time beats ingestion time for the transition that
         // actually settled the run (applyStatus fills completedAt with the
         // activity timestamp first, so check the transition, not null).
@@ -641,9 +595,9 @@ export function foldSubagentActivities(
         if (isTerminalSubagentStatus(agent.status)) {
           if (summary) {
             if (agent.status === "failed") {
-              agent.error = agent.error ?? bounded(summary, DETAIL_CHAR_LIMIT);
+              agent.error = agent.error ?? bounded(summary);
             } else {
-              agent.result = agent.result ?? bounded(summary, DETAIL_CHAR_LIMIT);
+              agent.result = agent.result ?? bounded(summary);
             }
           }
           agent.usage = mergeUsageMax(agent.usage, asUsage(payload.typedUsage));
@@ -653,9 +607,9 @@ export function foldSubagentActivities(
         applyStatus(agent, status, at);
         if (summary) {
           if (status === "failed") {
-            agent.error = agent.error ?? bounded(summary, DETAIL_CHAR_LIMIT);
+            agent.error = agent.error ?? bounded(summary);
           } else {
-            agent.result = bounded(summary, DETAIL_CHAR_LIMIT);
+            agent.result = bounded(summary);
           }
         }
         agent.usage = mergeUsageMax(agent.usage, asUsage(payload.typedUsage));
@@ -746,7 +700,7 @@ export interface AgentPanelWorkflowGroup {
 
 export interface AgentPanelModel {
   readonly workflows: ReadonlyArray<AgentPanelWorkflowGroup>;
-  readonly directAgents: ReadonlyArray<RuntimeSubagent & { readonly parentTitle?: string }>;
+  readonly directAgents: ReadonlyArray<RuntimeSubagent>;
   readonly runningCount: number;
   readonly waitingCount: number;
   readonly idleCount: number;
@@ -899,13 +853,7 @@ export function deriveAgentPanelModel({
     // that remain visible.
     directAgents: direct
       .slice()
-      .sort((a, b) => a.firstSeenAt.localeCompare(b.firstSeenAt) || a.id.localeCompare(b.id))
-      .map((agent) => {
-        const parent = agent.parentAgentId
-          ? source.find((candidate) => candidate.id === agent.parentAgentId)
-          : undefined;
-        return parent && parent.id !== agent.id ? { ...agent, parentTitle: parent.title } : agent;
-      }),
+      .sort((a, b) => a.firstSeenAt.localeCompare(b.firstSeenAt) || a.id.localeCompare(b.id)),
     runningCount,
     waitingCount,
     idleCount,
@@ -914,61 +862,6 @@ export function deriveAgentPanelModel({
     hasAgents: true,
     liveCount: runningCount + waitingCount,
   };
-}
-
-/**
- * Members ordered by urgency for the capped inline workflow card: running and
- * failed first, then waiting, then most recently updated.
- */
-export function workflowCardMembers(
-  group: AgentPanelWorkflowGroup,
-  limit: number,
-): { readonly visible: ReadonlyArray<RuntimeSubagent>; readonly overflow: number } {
-  const all = [...group.phases.flatMap((phase) => phase.members), ...group.unphasedMembers];
-  const urgency = (agent: RuntimeSubagent): number => {
-    if (agent.status === "failed") return 0;
-    if (agent.status === "running") return 1;
-    if (agent.status === "waiting") return 2;
-    return 3;
-  };
-  const ordered = all
-    .slice()
-    .sort((a, b) => urgency(a) - urgency(b) || b.updatedAt.localeCompare(a.updatedAt));
-  return {
-    visible: ordered.slice(0, limit),
-    overflow: Math.max(0, ordered.length - limit),
-  };
-}
-
-/** Kinds the timeline should not render as generic rows (fold input only). */
-export function isSubagentActivityKind(kind: string): boolean {
-  return (
-    kind === "task.started" ||
-    kind === "task.progress" ||
-    kind === "task.updated" ||
-    kind === "task.completed" ||
-    kind === "tool.progress"
-  );
-}
-
-/**
- * Quiet-timeline guarantee: tool rows attributed to an owning agent belong in
- * the Agents surface, not the parent chat. Unattributed rows must stay.
- */
-export function isAgentAttributedToolActivity(activity: OrchestrationThreadActivity): boolean {
-  if (typeof activity.payload !== "object" || activity.payload === null) {
-    return false;
-  }
-  const payload = activity.payload as Record<string, unknown>;
-  return typeof payload.agentId === "string" && payload.agentId.trim().length > 0;
-}
-
-/** Timeline-bypassing synthesized rows (Codex children, workflow members). */
-export function isTimelineBypassActivity(activity: OrchestrationThreadActivity): boolean {
-  if (typeof activity.payload !== "object" || activity.payload === null) {
-    return false;
-  }
-  return (activity.payload as Record<string, unknown>).timelineBypass === true;
 }
 
 /**

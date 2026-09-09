@@ -81,6 +81,13 @@ export function UsagePaceChart({
           current.
         </Text>
       ) : null}
+      {f.historicalPace ? (
+        <Text className="border-l-2 border-sky-500 pl-3 text-sm text-foreground">
+          Provisional pace uses the completed cycle from {date(f.historicalPace.since)} through{" "}
+          {date(f.historicalPace.until)} while this cycle warms. Fresh current-cycle readings
+          replace it automatically.
+        </Text>
+      ) : null}
       <View className="gap-1 border-y border-subtle py-4">
         <Text className="text-base font-t3-medium text-foreground">
           {f.usesAnnouncement ? "Announced reset" : "Weekly reset"} · {quotaDuration(f.resetInMs)}{" "}
@@ -252,7 +259,8 @@ export function UsagePaceChart({
         {f.remainingAtReset.toFixed(0)}% projected left at reset.
       </Text>
       <Text className="text-sm text-foreground">
-        Blended burn: {(f.expectedPercentPerDay / 24).toFixed(2)}% / hour.
+        {f.historicalPace ? "Provisional blended burn" : "Blended burn"}:{" "}
+        {(f.expectedPercentPerDay / 24).toFixed(2)}% / hour.
       </Text>
       <Text className="text-sm text-foreground">
         Pace to reset:{" "}

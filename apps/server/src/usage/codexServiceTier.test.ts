@@ -132,41 +132,22 @@ describe("Codex service tier attribution", () => {
         new Map([
           [
             "test.jsonl",
-            {
-              size: 500,
-              mtimeMs: 1,
-              provider: "codex",
-              records: [parsed],
-              tailRecords: [],
-              position: { resumeOffset: 0, guardLength: 0, guardHash: 0, codexState: state },
-            },
+            { size: 500, mtimeMs: 1, provider: "codex", records: [parsed], codexState: state },
           ],
         ]),
       ),
     ).get("test.jsonl")!;
     expect(cached.records[0]).toEqual(parsed);
-    expect(cached.position.codexState).toEqual(state);
+    expect(cached.codexState).toEqual(state);
     parseCodexLine(
       JSON.stringify({ type: "turn_context", payload: { model: record.model, turn_id: "next" } }),
-      cached.position.codexState!,
+      cached.codexState!,
     );
-    expect(cached.position.codexState?.serviceTier).toBeUndefined();
+    expect(cached.codexState?.serviceTier).toBeUndefined();
   });
   it("retains old cached tokens without a global rescan or invented tier", () => {
     const encoded = encodeScanCache(
-      new Map([
-        [
-          "old.jsonl",
-          {
-            size: 500,
-            mtimeMs: 1,
-            provider: "codex",
-            records: [record],
-            tailRecords: [],
-            position: { resumeOffset: 0, guardLength: 0, guardHash: 0, codexState: null },
-          },
-        ],
-      ]),
+      new Map([["old.jsonl", { size: 500, mtimeMs: 1, provider: "codex", records: [record] }]]),
     );
     const legacy = {
       ...encoded,

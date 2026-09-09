@@ -12,7 +12,6 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import * as Predicate from "effect/Predicate";
 
 import { toProjectorDecodeError, type OrchestrationProjectorDecodeError } from "./Errors.ts";
 import {
@@ -47,31 +46,9 @@ type ThreadPatch = Partial<Omit<OrchestrationThread, "id" | "projectId">>;
 const MAX_THREAD_MESSAGES = 2_000;
 const MAX_THREAD_CHECKPOINTS = 500;
 
-// Async questions can stay open while the agent produces more activity.
-// Match the database snapshot's pending-question retention.
-function retainThreadActivities(activities: OrchestrationThread["activities"]) {
-  const recentStart = activities.length - 500;
-  if (recentStart <= 0) return activities;
-  const pending = new Map<string, OrchestrationThread["activities"][number]>();
-  for (const activity of activities) {
-    if (!Predicate.isObject(activity.payload)) continue;
-    const requestId = activity.payload.requestId;
-    if (typeof requestId !== "string") continue;
-    if (activity.kind === "user-input.requested" && activity.payload.responseMode === "message") {
-      pending.set(requestId, activity);
-    } else if (activity.kind === "user-input.resolved") {
-      pending.delete(requestId);
-    }
-  }
-  const pendingActivities = new Set(pending.values());
-  return activities.filter(
-    (activity, index) => index >= recentStart || pendingActivities.has(activity),
-  );
-}
-
 function checkpointStatusToLatestTurnState(status: "ready" | "missing" | "error") {
   if (status === "error") return "error" as const;
-  // Match SQL and client projections: a missing git ref is not an interruption.
+  if (status === "missing") return "interrupted" as const;
   return "completed" as const;
 }
 
@@ -261,9 +238,7 @@ export function projectEvent(
             workspaceRoot: payload.workspaceRoot,
             defaultModelSelection: payload.defaultModelSelection,
             defaultThreadEnvMode: null,
-            autoPull: false,
             faviconPath: payload.faviconPath ?? null,
-            projectIcon: payload.projectIcon ?? null,
             scripts: payload.scripts,
             createdAt: payload.createdAt,
             updatedAt: payload.updatedAt,
@@ -300,12 +275,8 @@ export function projectEvent(
                   ...(payload.defaultThreadEnvMode !== undefined
                     ? { defaultThreadEnvMode: payload.defaultThreadEnvMode }
                     : {}),
-                  ...(payload.autoPull !== undefined ? { autoPull: payload.autoPull } : {}),
                   ...(payload.faviconPath !== undefined
                     ? { faviconPath: payload.faviconPath }
-                    : {}),
-                  ...(payload.projectIcon !== undefined
-                    ? { projectIcon: payload.projectIcon }
                     : {}),
                   ...(payload.scripts !== undefined ? { scripts: payload.scripts } : {}),
                   updatedAt: payload.updatedAt,
@@ -356,7 +327,6 @@ export function projectEvent(
             archivedAt: null,
             settledOverride: null,
             settledAt: null,
-            unsettledAt: null,
             snoozedUntil: null,
             snoozedAt: null,
             deletedAt: null,
@@ -418,7 +388,7 @@ export function projectEvent(
           threads: updateThread(nextBase.threads, payload.threadId, {
             settledOverride: "settled",
             settledAt: payload.settledAt,
-            unsettledAt: null,
+            activeOrderKey: null,
             updatedAt: payload.updatedAt,
           }),
         })),
@@ -426,24 +396,14 @@ export function projectEvent(
 
     case "thread.unsettled":
       return decodeForEvent(ThreadUnsettledPayload, event.payload, event.type, "payload").pipe(
-        Effect.map((payload) => {
-          const existing = nextBase.threads.find((thread) => thread.id === payload.threadId);
-          return {
-            ...nextBase,
-            threads: updateThread(nextBase.threads, payload.threadId, {
-              settledOverride: payload.reason === "user" ? "active" : null,
-              settledAt: null,
-              // Re-entry stamp for active-list ordering. A thread already
-              // pinned active keeps its stamp: the activity reset that clears
-              // the pin is not a re-entry and must not reorder the list.
-              unsettledAt:
-                existing?.settledOverride === "active"
-                  ? (existing.unsettledAt ?? null)
-                  : payload.updatedAt,
-              updatedAt: payload.updatedAt,
-            }),
-          };
-        }),
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            settledOverride: payload.reason === "user" ? "active" : null,
+            settledAt: null,
+            updatedAt: payload.updatedAt,
+          }),
+        })),
       );
 
     case "thread.snoozed":
@@ -521,8 +481,8 @@ export function projectEvent(
               : {}),
             ...(payload.branch !== undefined ? { branch: payload.branch } : {}),
             ...(payload.worktreePath !== undefined ? { worktreePath: payload.worktreePath } : {}),
-            ...(payload.linkedPullRequest !== undefined
-              ? { linkedPullRequest: payload.linkedPullRequest }
+            ...(payload.activeOrderKey !== undefined
+              ? { activeOrderKey: payload.activeOrderKey }
               : {}),
             updatedAt: payload.updatedAt,
           }),
@@ -770,11 +730,7 @@ export function projectEvent(
               ? thread.latestTurn
               : {
                   turnId: payload.turnId,
-                  state:
-                    thread.latestTurn?.turnId === payload.turnId &&
-                    thread.latestTurn.state === "interrupted"
-                      ? "interrupted"
-                      : checkpointStatusToLatestTurnState(payload.status),
+                  state: checkpointStatusToLatestTurnState(payload.status),
                   requestedAt:
                     thread.latestTurn?.turnId === payload.turnId
                       ? thread.latestTurn.requestedAt
@@ -810,12 +766,24 @@ export function projectEvent(
             .toSorted((left, right) => left.checkpointTurnCount - right.checkpointTurnCount)
             .slice(-MAX_THREAD_CHECKPOINTS);
           const retainedTurnIds = new Set(checkpoints.map((checkpoint) => checkpoint.turnId));
-          const messages = retainThreadMessagesAfterRevert(
+          const revertedMessages = retainThreadMessagesAfterRevert(
             thread.messages,
             retainedTurnIds,
             payload.turnCount,
             payload.sourceMessageId,
-          ).slice(-MAX_THREAD_MESSAGES);
+          );
+          // Imported history is immutable context and has no turn id, so a
+          // revert to turn zero must not erase it along with live turns.
+          const importedMessages = thread.messages.filter((message) =>
+            message.id.startsWith("import:"),
+          );
+          const retainedMessageIds = new Set([
+            ...revertedMessages.map((message) => message.id),
+            ...importedMessages.map((message) => message.id),
+          ]);
+          const messages = thread.messages
+            .filter((message) => retainedMessageIds.has(message.id))
+            .slice(-MAX_THREAD_MESSAGES);
           const proposedPlans = retainThreadProposedPlansAfterRevert(
             thread.proposedPlans,
             retainedTurnIds,
@@ -911,12 +879,12 @@ export function projectEvent(
             return nextBase;
           }
 
-          const activities = retainThreadActivities(
-            [
-              ...thread.activities.filter((entry) => entry.id !== payload.activity.id),
-              payload.activity,
-            ].toSorted(compareThreadActivities),
-          );
+          const activities = [
+            ...thread.activities.filter((entry) => entry.id !== payload.activity.id),
+            payload.activity,
+          ]
+            .toSorted(compareThreadActivities)
+            .slice(-500);
 
           return {
             ...nextBase,

@@ -49,7 +49,6 @@ source alone does not explain. Most code changes do not need an internal documen
 
 ### Runbooks
 
-- [Operate T3 without desktop automation](./operations/agent-control.md)
 - [Development and local builds](./operations/development.md)
 - [T3 Connect setup](./operations/connect-setup.md)
 - [Release](./operations/release.md)

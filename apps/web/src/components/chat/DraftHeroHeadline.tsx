@@ -28,13 +28,13 @@ import {
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
 interface DraftHeroHeadlineProps {
-  readonly draftId: DraftId | null;
+  readonly draftId?: DraftId | null;
   readonly activeProjectRef: ScopedProjectRef | null;
   readonly activeProjectTitle: string | null;
 }
 
 export function DraftHeroHeadline({
-  draftId,
+  draftId = null,
   activeProjectRef,
   activeProjectTitle,
 }: DraftHeroHeadlineProps) {
@@ -149,8 +149,13 @@ export function DraftHeroHeadline({
             );
             if (!hasExplicitComposerModelSelection(currentDraft)) {
               applyStickyState(draftId);
-              if (project.defaultModelSelection) {
-                setModelSelection(draftId, project.defaultModelSelection, {
+              const defaultModelSelection =
+                project.defaultModelSelection ??
+                environments.find(
+                  (environment) => environment.environmentId === project.environmentId,
+                )?.serverConfig?.settings.defaultModelSelection;
+              if (defaultModelSelection) {
+                setModelSelection(draftId, defaultModelSelection, {
                   replaceOptions: true,
                 });
               }

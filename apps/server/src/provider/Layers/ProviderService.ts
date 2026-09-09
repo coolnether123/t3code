@@ -14,29 +14,26 @@ import {
   MessageId,
   ModelSelection,
   NonNegativeInt,
+  ThreadId,
+  TurnId,
   ProviderInterruptTurnInput,
   ProviderRespondToRequestInput,
   ProviderRespondToUserInputInput,
-  RuntimeRequestId,
   ProviderSendTurnInput,
   ProviderSessionStartInput,
   ProviderStopSessionInput,
   ProviderUploadFeedbackInput,
-  ThreadId,
-  TurnId,
+  RuntimeRequestId,
   type ProviderInstanceId,
   type ProviderDriverKind,
   type ProviderRuntimeEvent,
   type ProviderSession,
   type RuntimeMode,
 } from "@t3tools/contracts";
-import { expandAssistantCitationsForProvider } from "@t3tools/shared/assistantCitations";
 import { causeErrorTag } from "@t3tools/shared/observability";
-import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
-import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
@@ -61,7 +58,6 @@ import {
   ProviderAdapterRequestError,
   type ProviderAdapterError,
   ProviderValidationError,
-  ProviderWorkspaceMissingError,
 } from "../Errors.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
@@ -75,6 +71,8 @@ import * as McpInvocationContext from "../../mcp/McpInvocationContext.ts";
 import * as McpSessionRegistry from "../../mcp/McpSessionRegistry.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 const isModelSelection = Schema.is(ModelSelection);
+
+const COMPACTION_COMPLETION_TIMEOUT = "10 minutes";
 
 interface PendingCompaction {
   readonly completion: Deferred.Deferred<string>;
@@ -95,82 +93,12 @@ export interface ProviderServiceLiveOptions {
   readonly canonicalEventLogger?: EventNdjsonLogger;
   /**
    * Overrides MCP credential issuance. The real issuer reads a module-global
-   * registry that only a running MCP server installs, which makes the
-   * agent-browser-access gate unobservable from a unit test; this seam lets a
-   * test see whether a credential was requested at all.
+   * registry that only a running MCP server installs, which makes capability
+   * gating unobservable from a unit test. This seam exposes credential requests.
    */
   readonly issueMcpCredential?: typeof McpSessionRegistry.issueActiveMcpCredential;
   /** Same seam as `issueMcpCredential`, for observing the deny path's revoke. */
   readonly revokeMcpCredential?: typeof McpSessionRegistry.revokeActiveMcpThread;
-}
-
-interface TurnAnalyticsMetadata {
-  readonly requestId: number;
-  readonly provider: ProviderDriverKind;
-  readonly startedAtMs: number;
-  readonly mixedModels: boolean;
-  readonly model?: string;
-  readonly effort?: string;
-  readonly interactionMode?: string;
-  readonly runtimeMode?: string;
-}
-
-interface ActiveTurnAnalytics {
-  readonly metadata: TurnAnalyticsMetadata;
-  readonly requestAssociated: boolean;
-}
-
-interface DeferredTurnAnalyticsCompletion {
-  readonly completionKey: string;
-  readonly completedAtMs: number;
-  readonly terminalProperties: Readonly<Record<string, unknown>>;
-}
-
-interface TurnAnalyticsSessionState {
-  readonly pendingByRequestId: Map<number, TurnAnalyticsMetadata>;
-  readonly activeByTurnId: Map<string, ActiveTurnAnalytics>;
-  readonly deferredCompletionsByTurnId: Map<string, DeferredTurnAnalyticsCompletion>;
-}
-
-interface TurnAnalyticsState {
-  readonly sessions: Map<string, TurnAnalyticsSessionState>;
-  readonly completedKeys: Set<string>;
-  readonly completedOrder: Array<string>;
-}
-
-const MAX_COMPLETED_TURN_ANALYTICS_KEYS = 512;
-const MAX_ACTIVE_TURN_ANALYTICS_PER_SESSION = 8;
-
-function setActiveTurnAnalytics(
-  session: TurnAnalyticsSessionState,
-  turnId: string,
-  active: ActiveTurnAnalytics,
-): void {
-  session.activeByTurnId.set(turnId, active);
-  while (session.activeByTurnId.size > MAX_ACTIVE_TURN_ANALYTICS_PER_SESSION) {
-    const oldestTurnId = session.activeByTurnId.keys().next().value;
-    if (oldestTurnId === undefined) return;
-    session.activeByTurnId.delete(oldestTurnId);
-  }
-}
-
-function turnAnalyticsSessionKey(instanceId: ProviderInstanceId, threadId: ThreadId): string {
-  return `${String(instanceId)}\u0000${String(threadId)}`;
-}
-
-function turnAnalyticsCompletionKey(
-  instanceId: ProviderInstanceId,
-  threadId: ThreadId,
-  turnId: string,
-): string {
-  return `${turnAnalyticsSessionKey(instanceId, threadId)}\u0000${turnId}`;
-}
-
-function turnEffort(modelSelection: ProviderSendTurnInput["modelSelection"]): string | undefined {
-  return (
-    getModelSelectionStringOptionValue(modelSelection, "reasoningEffort") ??
-    getModelSelectionStringOptionValue(modelSelection, "effort")
-  );
 }
 
 type ProviderServiceMethod<Name extends keyof ProviderService.ProviderService["Service"]> =
@@ -237,7 +165,6 @@ function toRuntimePayloadFromSession(
   session: ProviderSession,
   extra?: {
     readonly modelSelection?: unknown;
-    readonly continueAfterServerUpdate?: TurnId;
     readonly lastRuntimeEvent?: string;
     readonly lastRuntimeEventAt?: string;
   },
@@ -247,9 +174,6 @@ function toRuntimePayloadFromSession(
     model: session.model ?? null,
     activeTurnId: session.activeTurnId ?? null,
     lastError: session.lastError ?? null,
-    ...(extra?.continueAfterServerUpdate !== undefined
-      ? { continueAfterServerUpdate: extra.continueAfterServerUpdate }
-      : {}),
     ...(extra?.modelSelection !== undefined ? { modelSelection: extra.modelSelection } : {}),
     ...(extra?.lastRuntimeEvent !== undefined ? { lastRuntimeEvent: extra.lastRuntimeEvent } : {}),
     ...(extra?.lastRuntimeEventAt !== undefined
@@ -336,7 +260,6 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     options?.issueMcpCredential ?? McpSessionRegistry.issueActiveMcpCredential;
   const revokeMcpCredential =
     options?.revokeMcpCredential ?? McpSessionRegistry.revokeActiveMcpThread;
-  const fileSystem = yield* FileSystem.FileSystem;
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const pendingCompactions = new Map<ThreadId, PendingCompaction>();
   const timedOutNativeCompactions = new Set<ThreadId>();
@@ -347,366 +270,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       yield* Deferred.succeed(pending.completion, terminal);
       return true;
     });
-  const turnAnalytics = yield* Ref.make<TurnAnalyticsState>({
-    sessions: new Map(),
-    completedKeys: new Set(),
-    completedOrder: [],
-  });
-  let turnAnalyticsRequestId = 0;
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
-
-  const finishTurnAnalytics = (
-    state: TurnAnalyticsState,
-    input: {
-      readonly sessionKey: string;
-      readonly turnId: string;
-      readonly completion: DeferredTurnAnalyticsCompletion;
-    },
-  ): Readonly<Record<string, unknown>> | undefined => {
-    if (state.completedKeys.has(input.completion.completionKey)) return undefined;
-    state.completedKeys.add(input.completion.completionKey);
-    state.completedOrder.push(input.completion.completionKey);
-    while (state.completedOrder.length > MAX_COMPLETED_TURN_ANALYTICS_KEYS) {
-      const expired = state.completedOrder.shift();
-      if (expired) state.completedKeys.delete(expired);
-    }
-
-    const session = state.sessions.get(input.sessionKey);
-    const metadata = session?.activeByTurnId.get(input.turnId)?.metadata;
-    session?.activeByTurnId.delete(input.turnId);
-    session?.deferredCompletionsByTurnId.delete(input.turnId);
-    if (
-      session &&
-      session.activeByTurnId.size === 0 &&
-      session.pendingByRequestId.size === 0 &&
-      session.deferredCompletionsByTurnId.size === 0
-    ) {
-      state.sessions.delete(input.sessionKey);
-    }
-
-    return {
-      ...input.completion.terminalProperties,
-      ...(metadata?.model ? { model: metadata.model } : {}),
-      ...(metadata?.effort ? { effort: metadata.effort } : {}),
-      ...(metadata?.interactionMode ? { interactionMode: metadata.interactionMode } : {}),
-      ...(metadata?.runtimeMode ? { runtimeMode: metadata.runtimeMode } : {}),
-      ...(metadata ? { mixedModels: metadata.mixedModels } : {}),
-      ...(metadata
-        ? { durationMs: Math.max(0, input.completion.completedAtMs - metadata.startedAtMs) }
-        : {}),
-    };
-  };
-
-  const recordCompletedTurnProperties = (
-    properties: ReadonlyArray<Readonly<Record<string, unknown>>>,
-  ) =>
-    Effect.forEach(properties, (entry) => analytics.record("provider.turn.completed", entry), {
-      discard: true,
-    });
-
-  const clearTurnAnalyticsSession = (providerInstanceId: ProviderInstanceId, threadId: ThreadId) =>
-    Effect.gen(function* () {
-      const properties = yield* Ref.modify(turnAnalytics, (state) => {
-        const sessionKey = turnAnalyticsSessionKey(providerInstanceId, threadId);
-        const session = state.sessions.get(sessionKey);
-        const completed: Array<Readonly<Record<string, unknown>>> = [];
-        if (session) {
-          for (const [turnId, completion] of session.deferredCompletionsByTurnId) {
-            const entry = finishTurnAnalytics(state, { sessionKey, turnId, completion });
-            if (entry) completed.push(entry);
-          }
-        }
-        state.sessions.delete(sessionKey);
-        return [completed, state] as const;
-      });
-      yield* recordCompletedTurnProperties(properties);
-    });
-
-  const beginTurnAnalytics = Effect.fn("beginTurnAnalytics")(function* (input: {
-    readonly providerInstanceId: ProviderInstanceId;
-    readonly provider: ProviderDriverKind;
-    readonly threadId: ThreadId;
-    readonly modelSelection: ProviderSendTurnInput["modelSelection"];
-    readonly interactionMode: ProviderSendTurnInput["interactionMode"];
-    readonly runtimeMode: string | undefined;
-  }) {
-    const startedAtMs = DateTime.toEpochMillis(yield* DateTime.now);
-    turnAnalyticsRequestId += 1;
-    const requestId = turnAnalyticsRequestId;
-    const effort = turnEffort(input.modelSelection);
-    return yield* Ref.modify(turnAnalytics, (state) => {
-      const key = turnAnalyticsSessionKey(input.providerInstanceId, input.threadId);
-      const session = state.sessions.get(key) ?? {
-        pendingByRequestId: new Map(),
-        activeByTurnId: new Map(),
-        deferredCompletionsByTurnId: new Map(),
-      };
-      const metadata: TurnAnalyticsMetadata = {
-        provider: input.provider,
-        startedAtMs,
-        mixedModels: false,
-        requestId,
-        ...(input.modelSelection?.model ? { model: input.modelSelection.model } : {}),
-        ...(effort ? { effort } : {}),
-        ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
-        ...(input.runtimeMode ? { runtimeMode: input.runtimeMode } : {}),
-      };
-      session.pendingByRequestId.set(requestId, metadata);
-      state.sessions.set(key, session);
-      return [metadata, state] as const;
-    });
-  });
-
-  const clearPendingTurnAnalytics = (input: {
-    readonly providerInstanceId: ProviderInstanceId;
-    readonly threadId: ThreadId;
-    readonly requestId: number;
-  }) =>
-    Effect.gen(function* () {
-      const properties = yield* Ref.modify(turnAnalytics, (state) => {
-        const sessionKey = turnAnalyticsSessionKey(input.providerInstanceId, input.threadId);
-        const session = state.sessions.get(sessionKey);
-        if (!session)
-          return [[] as ReadonlyArray<Readonly<Record<string, unknown>>>, state] as const;
-        session.pendingByRequestId.delete(input.requestId);
-        const completed: Array<Readonly<Record<string, unknown>>> = [];
-        if (session.pendingByRequestId.size === 0) {
-          for (const [turnId, completion] of session.deferredCompletionsByTurnId) {
-            const entry = finishTurnAnalytics(state, { sessionKey, turnId, completion });
-            if (entry) completed.push(entry);
-          }
-        }
-        if (
-          session.activeByTurnId.size === 0 &&
-          session.pendingByRequestId.size === 0 &&
-          session.deferredCompletionsByTurnId.size === 0
-        ) {
-          state.sessions.delete(sessionKey);
-        }
-        return [completed, state] as const;
-      });
-      yield* recordCompletedTurnProperties(properties);
-    });
-
-  const associateTurnAnalytics = (input: {
-    readonly providerInstanceId: ProviderInstanceId;
-    readonly threadId: ThreadId;
-    readonly turnId: string;
-    readonly metadata: TurnAnalyticsMetadata;
-  }) =>
-    Effect.gen(function* () {
-      const properties = yield* Ref.modify(turnAnalytics, (state) => {
-        const completionKey = turnAnalyticsCompletionKey(
-          input.providerInstanceId,
-          input.threadId,
-          input.turnId,
-        );
-        const sessionKey = turnAnalyticsSessionKey(input.providerInstanceId, input.threadId);
-        const session = state.sessions.get(sessionKey);
-        if (!session || state.completedKeys.has(completionKey)) {
-          if (session) {
-            session.pendingByRequestId.delete(input.metadata.requestId);
-            if (
-              session.activeByTurnId.size === 0 &&
-              session.pendingByRequestId.size === 0 &&
-              session.deferredCompletionsByTurnId.size === 0
-            ) {
-              state.sessions.delete(sessionKey);
-            }
-          }
-          return [[] as ReadonlyArray<Readonly<Record<string, unknown>>>, state] as const;
-        }
-        const existing = session.activeByTurnId.get(input.turnId);
-        const existingMetadata = existing?.metadata;
-        const base = existing?.requestAssociated ? existing.metadata : input.metadata;
-        setActiveTurnAnalytics(session, input.turnId, {
-          requestAssociated: true,
-          metadata: {
-            ...base,
-            ...(existingMetadata?.model
-              ? { model: existingMetadata.model }
-              : input.metadata.model
-                ? { model: input.metadata.model }
-                : {}),
-            ...(existingMetadata?.effort
-              ? { effort: existingMetadata.effort }
-              : input.metadata.effort
-                ? { effort: input.metadata.effort }
-                : {}),
-            ...(base?.interactionMode
-              ? {}
-              : input.metadata.interactionMode
-                ? { interactionMode: input.metadata.interactionMode }
-                : {}),
-            ...(base?.runtimeMode
-              ? {}
-              : input.metadata.runtimeMode
-                ? { runtimeMode: input.metadata.runtimeMode }
-                : {}),
-            mixedModels: existingMetadata?.mixedModels ?? input.metadata.mixedModels,
-          },
-        });
-        session.pendingByRequestId.delete(input.metadata.requestId);
-        const completion = session.deferredCompletionsByTurnId.get(input.turnId);
-        const completed = completion
-          ? finishTurnAnalytics(state, {
-              sessionKey,
-              turnId: input.turnId,
-              completion,
-            })
-          : undefined;
-        return [completed ? [completed] : [], state] as const;
-      });
-      yield* recordCompletedTurnProperties(properties);
-    });
-
-  const observeTurnStartedForAnalytics = Effect.fn("observeTurnStartedForAnalytics")(function* (
-    source: { readonly instanceId: ProviderInstanceId; readonly provider: ProviderDriverKind },
-    event: Extract<ProviderRuntimeEvent, { readonly type: "turn.started" }>,
-  ) {
-    if (!event.turnId) return;
-    const observedAtMs = DateTime.toEpochMillis(yield* DateTime.now);
-    yield* Ref.update(turnAnalytics, (state) => {
-      const completionKey = turnAnalyticsCompletionKey(
-        source.instanceId,
-        event.threadId,
-        String(event.turnId),
-      );
-      if (state.completedKeys.has(completionKey)) return state;
-      const sessionKey = turnAnalyticsSessionKey(source.instanceId, event.threadId);
-      const session = state.sessions.get(sessionKey) ?? {
-        pendingByRequestId: new Map(),
-        activeByTurnId: new Map(),
-        deferredCompletionsByTurnId: new Map(),
-      };
-      // A start never binds send metadata on its own. Claude can start a
-      // synthetic turn for leftover agent output while sendTurn is still
-      // preparing the real turn, so only the adapter's sendTurn response
-      // links a request to its turn. Completions that land before that
-      // response wait in deferredCompletionsByTurnId.
-      const current = session.activeByTurnId.get(String(event.turnId));
-      const metadata: TurnAnalyticsMetadata = {
-        ...(current?.metadata ?? {
-          requestId: ++turnAnalyticsRequestId,
-          provider: source.provider,
-          startedAtMs: observedAtMs,
-          mixedModels: false,
-        }),
-        ...(event.payload.model ? { model: event.payload.model } : {}),
-        ...(event.payload.effort ? { effort: event.payload.effort } : {}),
-      };
-      setActiveTurnAnalytics(session, String(event.turnId), {
-        metadata,
-        requestAssociated: current?.requestAssociated ?? false,
-      });
-      state.sessions.set(sessionKey, session);
-      return state;
-    });
-  });
-
-  const observeModelReroutedForAnalytics = (
-    source: { readonly instanceId: ProviderInstanceId },
-    event: Extract<ProviderRuntimeEvent, { readonly type: "model.rerouted" }>,
-  ) =>
-    Ref.update(turnAnalytics, (state) => {
-      const session = state.sessions.get(
-        turnAnalyticsSessionKey(source.instanceId, event.threadId),
-      );
-      if (!session) return state;
-      if (event.turnId) {
-        const current = session.activeByTurnId.get(String(event.turnId));
-        if (current) {
-          session.activeByTurnId.set(String(event.turnId), {
-            ...current,
-            metadata: { ...current.metadata, mixedModels: true },
-          });
-        }
-      } else {
-        for (const [turnId, current] of session.activeByTurnId) {
-          session.activeByTurnId.set(turnId, {
-            ...current,
-            metadata: { ...current.metadata, mixedModels: true },
-          });
-        }
-      }
-      return state;
-    });
-
-  const recordTurnCompletedAnalytics = Effect.fn("recordTurnCompletedAnalytics")(function* (
-    source: { readonly instanceId: ProviderInstanceId; readonly provider: ProviderDriverKind },
-    event: Extract<ProviderRuntimeEvent, { readonly type: "turn.completed" | "turn.aborted" }>,
-  ) {
-    if (!event.turnId) return;
-    const completedAtMs = DateTime.toEpochMillis(yield* DateTime.now);
-    const tokenUsage = event.payload.tokenUsage;
-    const completion: DeferredTurnAnalyticsCompletion = {
-      completionKey: turnAnalyticsCompletionKey(
-        source.instanceId,
-        event.threadId,
-        String(event.turnId),
-      ),
-      completedAtMs,
-      terminalProperties: {
-        provider: source.provider,
-        terminalStatus:
-          event.type === "turn.completed"
-            ? event.payload.state
-            : event.payload.reason.toLowerCase().includes("interrupt")
-              ? "interrupted"
-              : "cancelled",
-        usageStatus: tokenUsage?.usageStatus ?? "unavailable",
-        usageScope: tokenUsage?.usageScope ?? "main_agent",
-        ...(tokenUsage ? { hasSubagents: tokenUsage.hasSubagents } : {}),
-        ...(tokenUsage?.inputTokens !== undefined ? { inputTokens: tokenUsage.inputTokens } : {}),
-        ...(tokenUsage?.cachedInputTokens !== undefined
-          ? { cachedInputTokens: tokenUsage.cachedInputTokens }
-          : {}),
-        ...(tokenUsage?.cacheCreationTokens !== undefined
-          ? { cacheCreationTokens: tokenUsage.cacheCreationTokens }
-          : {}),
-        ...(tokenUsage?.outputTokens !== undefined
-          ? { outputTokens: tokenUsage.outputTokens }
-          : {}),
-        ...(tokenUsage?.reasoningTokens !== undefined
-          ? { reasoningTokens: tokenUsage.reasoningTokens }
-          : {}),
-      },
-    };
-    const properties = yield* Ref.modify(turnAnalytics, (state) => {
-      if (state.completedKeys.has(completion.completionKey)) {
-        return [[] as ReadonlyArray<Readonly<Record<string, unknown>>>, state] as const;
-      }
-      const turnId = String(event.turnId);
-      const sessionKey = turnAnalyticsSessionKey(source.instanceId, event.threadId);
-      const session = state.sessions.get(sessionKey);
-      if (session?.deferredCompletionsByTurnId.has(turnId)) {
-        return [[] as ReadonlyArray<Readonly<Record<string, unknown>>>, state] as const;
-      }
-      const active = session?.activeByTurnId.get(turnId);
-      const needsAssociation =
-        (session?.pendingByRequestId.size ?? 0) > 0 && active?.requestAssociated !== true;
-      if (!session || !needsAssociation) {
-        const completed = finishTurnAnalytics(state, { sessionKey, turnId, completion });
-        return [completed ? [completed] : [], state] as const;
-      }
-
-      session.deferredCompletionsByTurnId.set(turnId, completion);
-      const completed: Array<Readonly<Record<string, unknown>>> = [];
-      while (session.deferredCompletionsByTurnId.size > MAX_ACTIVE_TURN_ANALYTICS_PER_SESSION) {
-        const oldest = session.deferredCompletionsByTurnId.entries().next().value;
-        if (!oldest) break;
-        const [oldestTurnId, oldestCompletion] = oldest;
-        const entry = finishTurnAnalytics(state, {
-          sessionKey,
-          turnId: oldestTurnId,
-          completion: oldestCompletion,
-        });
-        if (entry) completed.push(entry);
-      }
-      return [completed, state] as const;
-    });
-    yield* recordCompletedTurnProperties(properties);
-  });
   const mcpCapabilitiesFor = (
     threadId: ThreadId,
     providerInstanceId: ProviderInstanceId,
@@ -714,23 +278,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     modelSelection?: ModelSelection,
   ) =>
     serverSettings.getSettings.pipe(
-      Effect.map((settings) => {
-        const capabilities = McpSessionRegistry.resolveMcpCapabilities(
+      Effect.map((settings) =>
+        McpSessionRegistry.resolveMcpCapabilities(
           settings,
           threadId,
           modelSelection,
           providerDriverKind,
           providerInstanceId,
-        );
-        // Browser/computer MCP access is governed by its explicit setting.
-        // Workers remain independently available when enabled because their
-        // server-side lifecycle is not browser access.
-        return settings.enableAgentBrowserAccess
-          ? capabilities
-          : new Set<McpInvocationContext.McpCapability>(
-              capabilities.has("workers") ? ["workers"] : [],
-            );
-      }),
+        ),
+      ),
       Effect.catch((cause) =>
         Effect.logWarning(
           "Could not read server settings; withholding T3 MCP capabilities for this session.",
@@ -739,6 +295,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       ),
     );
 
+  const clearMcpSession = (threadId: ThreadId) =>
+    revokeMcpCredential(threadId).pipe(
+      Effect.tap(() => Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
+    );
   const prepareMcpSession = (
     threadId: ThreadId,
     providerInstanceId: ProviderInstanceId,
@@ -771,10 +331,6 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       }
       return credential;
     });
-  const clearMcpSession = (threadId: ThreadId) =>
-    revokeMcpCredential(threadId).pipe(
-      Effect.tap(() => Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
-    );
 
   const publishRuntimeEvent = (event: ProviderRuntimeEvent): Effect.Effect<void> =>
     Effect.succeed(event).pipe(
@@ -797,10 +353,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   ): ProviderRuntimeEvent =>
     pending.requestId === undefined
       ? event
-      : {
-          ...event,
-          requestId: RuntimeRequestId.make(String(pending.requestId)),
-        };
+      : { ...event, requestId: RuntimeRequestId.make(String(pending.requestId)) };
   const compactionTerminal = (event: ProviderRuntimeEvent): string | null =>
     event.type === "turn.completed"
       ? event.payload.state
@@ -831,10 +384,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         ...event,
         eventId: EventId.make(`${event.eventId}:context-compaction`),
         type: "thread.state.changed",
-        payload: {
-          state: "compacted",
-          detail: { source: "provider-native-command" },
-        },
+        payload: { state: "compacted", detail: { source: "provider-native-command" } },
         ...(pending.requestId !== undefined
           ? { requestId: RuntimeRequestId.make(String(pending.requestId)) }
           : {}),
@@ -869,7 +419,6 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     threadId: ThreadId,
     extra?: {
       readonly modelSelection?: unknown;
-      readonly continueAfterServerUpdate?: TurnId;
       readonly lastRuntimeEvent?: string;
       readonly lastRuntimeEventAt?: string;
     },
@@ -905,18 +454,6 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         provider: canonicalEvent.provider,
         eventType: canonicalEvent.type,
       });
-      if (canonicalEvent.type === "turn.started") {
-        yield* observeTurnStartedForAnalytics(source, canonicalEvent);
-      } else if (canonicalEvent.type === "model.rerouted") {
-        yield* observeModelReroutedForAnalytics(source, canonicalEvent);
-      } else if (
-        canonicalEvent.type === "turn.completed" ||
-        canonicalEvent.type === "turn.aborted"
-      ) {
-        yield* recordTurnCompletedAnalytics(source, canonicalEvent);
-      } else if (canonicalEvent.type === "session.exited") {
-        yield* clearTurnAnalyticsSession(source.instanceId, canonicalEvent.threadId);
-      }
       if (
         isCompactedEvent(canonicalEvent) &&
         timedOutNativeCompactions.delete(canonicalEvent.threadId)
@@ -924,34 +461,29 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         yield* publishRuntimeEvent(canonicalEvent);
         return;
       }
-      const pendingCompaction = pendingCompactions.get(canonicalEvent.threadId);
-      if (!pendingCompaction) {
+      const pending = pendingCompactions.get(canonicalEvent.threadId);
+      if (!pending || pending.providerInstanceId !== source.instanceId) {
         yield* publishRuntimeEvent(canonicalEvent);
         return;
       }
-      if (pendingCompaction.providerInstanceId !== source.instanceId) {
-        yield* publishRuntimeEvent(canonicalEvent);
-        return;
-      }
-      if (pendingCompaction.native) {
+      if (pending.native) {
         const compacted = isCompactedEvent(canonicalEvent);
         const terminal = compacted ? "completed" : compactionTerminal(canonicalEvent);
         yield* publishRuntimeEvent(
-          compacted ? withCompactionRequestId(canonicalEvent, pendingCompaction) : canonicalEvent,
+          compacted ? withCompactionRequestId(canonicalEvent, pending) : canonicalEvent,
         );
-        if (terminal !== null)
-          yield* settleCompaction(canonicalEvent.threadId, pendingCompaction, terminal);
+        if (terminal !== null) yield* settleCompaction(canonicalEvent.threadId, pending, terminal);
         return;
       }
       if (
-        pendingCompaction.expectedTurnId === undefined &&
+        pending.expectedTurnId === undefined &&
         canonicalEvent.turnId !== undefined &&
         (isCompactedEvent(canonicalEvent) || compactionTerminal(canonicalEvent) !== null)
       ) {
-        pendingCompaction.earlyEvents.push(canonicalEvent);
+        pending.earlyEvents.push(canonicalEvent);
         return;
       }
-      yield* processFallbackCompactionEvent(pendingCompaction, canonicalEvent);
+      yield* processFallbackCompactionEvent(pending, canonicalEvent);
     });
 
   // `subscribedAdapters` is our source-of-truth for "which instance adapters
@@ -1116,6 +648,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     }
     const instanceId = yield* requireBindingInstanceId(input.operation, binding);
     const adapter = yield* registry.getByInstance(instanceId);
+    const modelSelection = readPersistedModelSelection(binding.runtimePayload);
 
     const hasRequestedSession = yield* adapter.hasSession(input.threadId);
     if (hasRequestedSession) {
@@ -1124,6 +657,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         instanceId,
         threadId: input.threadId,
         runtimeMode: binding.runtimeMode,
+        modelSelection,
         isActive: true,
       } as const;
     }
@@ -1134,6 +668,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         instanceId,
         threadId: input.threadId,
         runtimeMode: binding.runtimeMode,
+        modelSelection,
         isActive: false,
       } as const;
     }
@@ -1147,6 +682,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       instanceId,
       threadId: input.threadId,
       runtimeMode: recovered.session.runtimeMode,
+      modelSelection,
       isActive: true,
     } as const;
   });
@@ -1227,31 +763,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           );
         }
         const persistedBinding = Option.getOrUndefined(yield* directory.getBinding(threadId));
-        if (
-          persistedBinding?.provider === resolvedProvider &&
-          persistedBinding.providerInstanceId !== resolvedInstanceId &&
-          (input.resumeCursor != null || persistedBinding.resumeCursor != null)
-        ) {
-          const previousInstanceId = yield* requireBindingInstanceId(
-            "ProviderService.startSession",
-            persistedBinding,
-          );
-          const previousInfo = yield* registry.getInstanceInfo(previousInstanceId);
-          if (
-            previousInfo.continuationIdentity.continuationKey !==
-            instanceInfo.continuationIdentity.continuationKey
-          ) {
-            return yield* toValidationError(
-              "ProviderService.startSession",
-              `Thread '${threadId}' cannot switch from instance '${previousInstanceId}' to '${resolvedInstanceId}' because their provider resume state is incompatible.`,
-            );
-          }
-        }
+        // An explicit null is the server-authoritative "start a fresh
+        // conversation" sentinel. Undefined continues to mean "resume the
+        // persisted provider conversation when one exists".
         const effectiveResumeCursor =
-          input.resumeCursor ??
-          (persistedBinding?.providerInstanceId === resolvedInstanceId
-            ? persistedBinding.resumeCursor
-            : undefined);
+          input.resumeCursor !== undefined
+            ? (input.resumeCursor ?? undefined)
+            : persistedBinding?.providerInstanceId === resolvedInstanceId
+              ? persistedBinding.resumeCursor
+              : undefined;
         const effectiveCwd =
           input.cwd ??
           (persistedBinding?.providerInstanceId === resolvedInstanceId
@@ -1276,22 +796,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
                 : "none",
           "provider.cwd.effective": effectiveCwd ?? "",
         });
-        if (effectiveCwd !== undefined) {
-          // Fail fast with an actionable error when the workspace folder is
-          // gone (e.g. moved, deleted, or replaced by a plain file).
-          // Otherwise every adapter surfaces this as a misleading "failed to
-          // spawn <binary>" process error. Stat failures other than "missing"
-          // fall through to the adapter.
-          const workspaceIsDirectory = yield* fileSystem.stat(effectiveCwd).pipe(
-            Effect.map((workspaceStat) => workspaceStat.type === "Directory"),
-            Effect.catch((statError) => Effect.succeed(statError.reason._tag !== "NotFound")),
-          );
-          if (!workspaceIsDirectory) {
-            return yield* new ProviderWorkspaceMissingError({ threadId, cwd: effectiveCwd });
-          }
-        }
         const adapter = yield* registry.getByInstance(resolvedInstanceId);
-        yield* clearTurnAnalyticsSession(resolvedInstanceId, threadId);
         yield* prepareMcpSession(
           threadId,
           resolvedInstanceId,
@@ -1300,9 +805,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           effectiveCwd,
           input.modelSelection,
         );
+        const { resumeCursor: _requestedResumeCursor, ...sessionInput } = input;
         const session = yield* adapter
           .startSession({
-            ...input,
+            ...sessionInput,
             providerInstanceId: resolvedInstanceId,
             ...(effectiveCwd !== undefined ? { cwd: effectiveCwd } : {}),
             ...(effectiveResumeCursor !== undefined ? { resumeCursor: effectiveResumeCursor } : {}),
@@ -1337,7 +843,6 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             typeof input.modelSelection?.model === "string" &&
             input.modelSelection.model.trim().length > 0,
         });
-        timedOutNativeCompactions.delete(threadId);
 
         // Changing runtime mode restarts the session, so the transition is only
         // observable here, by diffing against the mode the previous session for
@@ -1380,22 +885,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       );
     }
 
-    const inputTextWithCitations =
-      parsed.input === undefined ? undefined : expandAssistantCitationsForProvider(parsed.input);
-    if (inputTextWithCitations !== parsed.input) {
-      yield* decodeInputOrValidationError({
-        operation: "ProviderService.sendTurn",
-        schema: ProviderSendTurnInput.fields.input,
-        payload: inputTextWithCitations,
-      });
-    }
-
-    // Every attachment gets an on-disk path in the prompt so the model's tools
-    // can dereference the actual file. All attachments then go to the adapter,
-    // and each adapter decides what its provider ingests natively: OpenCode
-    // sends generic files as file parts, the others send images only and rely
-    // on the path line for everything else. Unresolvable ids are skipped here
-    // and surface as adapter errors when the file is read.
+    // Adapters inline attachment pixels into the model prompt, but the model's
+    // tools cannot dereference pixels. Appending the on-disk path is what lets
+    // a turn like "include this screenshot in the PR" copy the actual file.
+    // This runs after schema decode, so the appended lines are exempt from the
+    // PROVIDER_SEND_TURN_MAX_INPUT_CHARS check; attachment count is capped, so
+    // the overhead is bounded. Unresolvable ids are skipped here and surface
+    // as adapter errors when the file is read for inlining.
     const attachmentPathLines = attachments.flatMap((attachment) => {
       const attachmentPath = resolveAttachmentPath({
         attachmentsDir: serverConfig.attachmentsDir,
@@ -1407,8 +903,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     });
     const inputTextWithAttachmentPaths =
       attachmentPathLines.length === 0
-        ? inputTextWithCitations
-        : [inputTextWithCitations, attachmentPathLines.join("\n")]
+        ? parsed.input
+        : [parsed.input, attachmentPathLines.join("\n")]
             .filter((part): part is string => typeof part === "string" && part.length > 0)
             .join("\n\n");
 
@@ -1417,79 +913,61 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       ...(inputTextWithAttachmentPaths !== undefined
         ? { input: inputTextWithAttachmentPaths }
         : {}),
+      attachments,
     };
     yield* Effect.annotateCurrentSpan({
       "provider.operation": "send-turn",
       "provider.thread_id": input.threadId,
       "provider.interaction_mode": input.interactionMode,
-      "provider.attachment_count": attachments.length,
+      "provider.attachment_count": input.attachments.length,
     });
     let metricProvider = "unknown";
     let metricModel = input.modelSelection?.model;
     return yield* Effect.gen(function* () {
-      let routed = yield* resolveRoutableSession({
+      const routed = yield* resolveRoutableSession({
         threadId: input.threadId,
         operation: "ProviderService.sendTurn",
-        allowRecovery: false,
+        allowRecovery: input.expectedTurnId === undefined,
       });
+      metricProvider = routed.adapter.provider;
       if (
         input.continuation === true &&
-        !input.input &&
-        attachments.length === 0 &&
         routed.adapter.capabilities.promptlessTurnContinuation !== true
       ) {
         return yield* toValidationError(
           "ProviderService.sendTurn",
-          `Provider '${routed.adapter.provider}' requires an explicit continuation prompt`,
+          `Provider '${routed.adapter.provider}' does not support promptless continuation.`,
         );
       }
-      if (!routed.isActive) {
-        routed = yield* resolveRoutableSession({
-          threadId: input.threadId,
-          operation: "ProviderService.sendTurn",
-          allowRecovery: true,
-        });
+      if (
+        input.expectedTurnId !== undefined &&
+        (routed.adapter.provider !== "codex" || !routed.isActive)
+      ) {
+        return yield* toValidationError(
+          "ProviderService.sendTurn",
+          "Steering requires an active Codex session.",
+        );
       }
-      metricProvider = routed.adapter.provider;
-      metricModel = input.modelSelection?.model;
+      const activeModelSelection =
+        input.expectedTurnId !== undefined
+          ? routed.modelSelection
+          : (input.modelSelection ?? routed.modelSelection);
+      metricModel = activeModelSelection?.model;
       yield* Effect.annotateCurrentSpan({
         "provider.kind": routed.adapter.provider,
-        ...(input.modelSelection?.model ? { "provider.model": input.modelSelection.model } : {}),
+        ...(activeModelSelection?.model ? { "provider.model": activeModelSelection.model } : {}),
       });
       // A turn is the clearest sign a session is still alive. The MCP
       // credential is minted once at session start and cannot be rotated into
       // an already-spawned agent process, so we keep the existing token valid
       // rather than issuing a new one: sessions that go a long time between
       // browser tool calls used to lose the toolkit outright.
-      yield* McpSessionRegistry.touchActiveMcpThread(input.threadId);
-      const analyticsModelSelection =
-        input.modelSelection?.instanceId === routed.instanceId ? input.modelSelection : undefined;
-      const turn = yield* Effect.acquireUseRelease(
-        beginTurnAnalytics({
-          providerInstanceId: routed.instanceId,
-          provider: routed.adapter.provider,
-          threadId: input.threadId,
-          modelSelection: analyticsModelSelection,
-          interactionMode: input.interactionMode,
-          runtimeMode: routed.runtimeMode,
-        }),
-        (turnMetadata) =>
-          Effect.gen(function* () {
-            const turn = yield* routed.adapter.sendTurn(input);
-            yield* associateTurnAnalytics({
-              providerInstanceId: routed.instanceId,
-              threadId: input.threadId,
-              turnId: String(turn.turnId),
-              metadata: turnMetadata,
-            });
-            return turn;
-          }),
-        (turnMetadata) =>
-          clearPendingTurnAnalytics({
-            providerInstanceId: routed.instanceId,
-            threadId: input.threadId,
-            requestId: turnMetadata.requestId,
-          }),
+      yield* McpSessionRegistry.touchActiveMcpThread(input.threadId, activeModelSelection);
+      const turn = yield* routed.adapter.sendTurn(input);
+      yield* McpSessionRegistry.touchActiveMcpThread(
+        input.threadId,
+        activeModelSelection,
+        turn.turnId,
       );
       yield* directory.upsert({
         threadId: input.threadId,
@@ -1498,24 +976,21 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         status: "running",
         ...(turn.resumeCursor !== undefined ? { resumeCursor: turn.resumeCursor } : {}),
         runtimePayload: {
-          ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+          ...(activeModelSelection !== undefined ? { modelSelection: activeModelSelection } : {}),
           activeTurnId: turn.turnId,
-          // Admission and marker consumption must survive the same restart.
-          continueAfterServerUpdate: null,
-          continueAfterServerUpdatePrepared: null,
           lastRuntimeEvent: "provider.sendTurn",
           lastRuntimeEventAt: yield* nowIso,
         },
       });
       yield* analytics.record("provider.turn.sent", {
         provider: routed.adapter.provider,
-        model: input.modelSelection?.model,
+        model: activeModelSelection?.model,
         interactionMode: input.interactionMode,
         // Session-start events alone skew runtime mode toward users who toggle
         // often, since every toggle restarts the session. Recording it per turn
         // gives a usage-weighted view and lets it cross with interactionMode.
         runtimeMode: routed.runtimeMode,
-        attachmentCount: attachments.length,
+        attachmentCount: input.attachments.length,
         hasInput: typeof input.input === "string" && input.input.trim().length > 0,
       });
       return turn;
@@ -1548,18 +1023,24 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         "provider.thread_id": threadId,
       });
       yield* McpSessionRegistry.touchActiveMcpThread(threadId);
-      const nativeCompaction = routed.adapter.compactThread;
+      const compaction = routed.adapter.compaction;
+      if (compaction === undefined) {
+        return yield* toValidationError(
+          "ProviderService.compactThread",
+          `Provider '${routed.adapter.provider}' does not support context compaction.`,
+        );
+      }
       const completion = yield* Deferred.make<string>();
       const pending: PendingCompaction = {
         completion,
-        native: nativeCompaction !== undefined,
+        native: compaction.type === "native",
         providerInstanceId: routed.instanceId,
         requestId,
         earlyEvents: [],
         compactedEventObserved: false,
         expectedTurnId: undefined,
       };
-      if (nativeCompaction !== undefined && timedOutNativeCompactions.has(threadId)) {
+      if (compaction.type === "native" && timedOutNativeCompactions.has(threadId)) {
         return yield* new ProviderAdapterRequestError({
           provider: routed.adapter.provider,
           method: "thread/compact",
@@ -1580,18 +1061,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         });
       }
       const clearPending = Effect.sync(() => {
-        if (pendingCompactions.get(threadId) === pending) {
-          pendingCompactions.delete(threadId);
-        }
+        if (pendingCompactions.get(threadId) === pending) pendingCompactions.delete(threadId);
       });
-      const nativeCompletionTimeout =
-        routed.adapter.provider === "codex" || routed.adapter.provider === "opencode"
-          ? "10 minutes"
-          : "30 seconds";
       const awaitNativeCompaction = (start: Effect.Effect<void, ProviderAdapterError>) =>
         start.pipe(
           Effect.andThen(Deferred.await(completion)),
-          Effect.timeout(nativeCompletionTimeout),
+          Effect.timeout(COMPACTION_COMPLETION_TIMEOUT),
           Effect.catchTag("TimeoutError", (cause) =>
             Effect.sync(() => {
               timedOutNativeCompactions.add(threadId);
@@ -1601,7 +1076,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
                   new ProviderAdapterRequestError({
                     provider: routed.adapter.provider,
                     method: "thread/compact",
-                    detail: `Provider did not report completed context compaction within ${nativeCompletionTimeout}.`,
+                    detail: `Provider did not report completed context compaction within ${COMPACTION_COMPLETION_TIMEOUT}.`,
                     cause,
                   }),
                 ),
@@ -1610,24 +1085,24 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           ),
         );
       const awaitFallbackCompaction = Deferred.await(completion).pipe(
-        Effect.timeout("10 minutes"),
+        Effect.timeout(COMPACTION_COMPLETION_TIMEOUT),
         Effect.mapError(
           (cause) =>
             new ProviderAdapterRequestError({
               provider: routed.adapter.provider,
               method: "turn/start",
-              detail: "Provider did not finish context compaction within 10 minutes.",
+              detail: `Provider did not finish context compaction within ${COMPACTION_COMPLETION_TIMEOUT}.`,
               cause,
             }),
         ),
       );
       const terminal = yield* (
-        nativeCompaction
-          ? awaitNativeCompaction(nativeCompaction(routed.threadId, modelSelection))
+        compaction.type === "native"
+          ? awaitNativeCompaction(compaction.start(routed.threadId, modelSelection))
           : Effect.gen(function* () {
               const turn = yield* sendTurn({
                 threadId,
-                input: routed.adapter.provider === "cursor" ? "/compress" : "/compact",
+                input: compaction.command,
                 ...(modelSelection !== undefined ? { modelSelection } : {}),
               }).pipe(
                 Effect.onError(() =>
@@ -1647,7 +1122,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       if (terminal !== "completed") {
         return yield* new ProviderAdapterRequestError({
           provider: routed.adapter.provider,
-          method: nativeCompaction ? "thread/compact" : "turn/start",
+          method: compaction.type === "native" ? "thread/compact" : "turn/start",
           detail: `Context compaction ended with ${terminal}.`,
         });
       }
@@ -1794,7 +1269,6 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           yield* settleCompaction(input.threadId, pendingCompaction, "turn.aborted");
         }
         timedOutNativeCompactions.delete(input.threadId);
-        yield* clearTurnAnalyticsSession(routed.instanceId, input.threadId);
         yield* clearMcpSession(input.threadId);
         yield* directory.upsert({
           threadId: input.threadId,
@@ -1803,8 +1277,6 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           status: "stopped",
           runtimePayload: {
             activeTurnId: null,
-            continueAfterServerUpdate: null,
-            continueAfterServerUpdatePrepared: null,
           },
         });
         yield* analytics.record("provider.session.stopped", {
@@ -1836,21 +1308,21 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         ),
       );
       const activeSessions = sessionsByProvider.flatMap((sessions) => sessions);
-      // Only live adapter sessions appear in this response. Resolving every
-      // historical binding here makes each call scale with the full thread
-      // history instead of the active session set.
-      const persistedBindings = yield* Effect.forEach(
-        [...new Set(activeSessions.map((session) => session.threadId))],
-        (threadId) =>
-          directory
-            .getBinding(threadId)
-            .pipe(
-              Effect.orElseSucceed(() =>
-                Option.none<ProviderSessionDirectory.ProviderRuntimeBinding>(),
-              ),
-            ),
-        { concurrency: "unbounded" },
-      ).pipe(
+      const persistedBindings = yield* directory.listThreadIds().pipe(
+        Effect.flatMap((threadIds) =>
+          Effect.forEach(
+            threadIds,
+            (threadId) =>
+              directory
+                .getBinding(threadId)
+                .pipe(
+                  Effect.orElseSucceed(() =>
+                    Option.none<ProviderSessionDirectory.ProviderRuntimeBinding>(),
+                  ),
+                ),
+            { concurrency: "unbounded" },
+          ),
+        ),
         Effect.orElseSucceed(
           () => [] as Array<Option.Option<ProviderSessionDirectory.ProviderRuntimeBinding>>,
         ),
@@ -1915,21 +1387,6 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const getInstanceInfo: ProviderServiceMethod<"getInstanceInfo"> = (instanceId) =>
     registry.getInstanceInfo(instanceId);
 
-  const assertConversationRollbackSupported: ProviderServiceMethod<"assertConversationRollbackSupported"> =
-    Effect.fn("assertConversationRollbackSupported")(function* (threadId) {
-      const routed = yield* resolveRoutableSession({
-        threadId,
-        operation: "ProviderService.assertConversationRollbackSupported",
-        allowRecovery: false,
-      });
-      if (routed.adapter.capabilities.supportsConversationRollback === false) {
-        return yield* toValidationError(
-          "ProviderService.assertConversationRollbackSupported",
-          `Provider '${routed.adapter.provider}' does not support conversation rewind.`,
-        );
-      }
-    });
-
   const rollbackConversation: ProviderServiceMethod<"rollbackConversation"> = Effect.fn(
     "rollbackConversation",
   )(function* (rawInput) {
@@ -1943,7 +1400,6 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     }
     let metricProvider = "unknown";
     return yield* Effect.gen(function* () {
-      yield* assertConversationRollbackSupported(input.threadId);
       const routed = yield* resolveRoutableSession({
         threadId: input.threadId,
         operation: "ProviderService.rollbackConversation",
@@ -2050,22 +1506,6 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   );
 
   const runStopAll = Effect.fn("runStopAll")(function* () {
-    const continueAfterRestart = yield* serverSettings.getSettings.pipe(
-      Effect.map((settings) => settings.continueThreadsAfterServerUpdate),
-      Effect.orElseSucceed(() => false),
-    );
-    const properties = yield* Ref.modify(turnAnalytics, (state) => {
-      const completed: Array<Readonly<Record<string, unknown>>> = [];
-      for (const [sessionKey, session] of state.sessions) {
-        for (const [turnId, completion] of session.deferredCompletionsByTurnId) {
-          const entry = finishTurnAnalytics(state, { sessionKey, turnId, completion });
-          if (entry) completed.push(entry);
-        }
-      }
-      state.sessions.clear();
-      return [completed, state] as const;
-    });
-    yield* recordCompletedTurnProperties(properties);
     const threadIds = yield* directory.listThreadIds();
     const currentAdapters = yield* getAdapterEntries;
     const activeSessions = yield* Effect.forEach(currentAdapters, ([instanceId, adapter]) =>
@@ -2081,9 +1521,6 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     yield* Effect.forEach(activeSessions, (session) =>
       Effect.flatMap(nowIso, (lastRuntimeEventAt) =>
         upsertSessionBinding(session, session.threadId, {
-          ...(continueAfterRestart && session.status === "running" && session.activeTurnId
-            ? { continueAfterServerUpdate: session.activeTurnId }
-            : {}),
           lastRuntimeEvent: "provider.stopAll",
           lastRuntimeEventAt,
         }),
@@ -2139,10 +1576,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     listSessions,
     getCapabilities,
     getInstanceInfo,
-    assertConversationRollbackSupported,
     rollbackConversation,
-    forkConversation,
     uploadFeedback,
+    forkConversation,
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (ProviderRuntimeIngestion, CheckpointReactor, etc.) each
     // independently receive all runtime events.

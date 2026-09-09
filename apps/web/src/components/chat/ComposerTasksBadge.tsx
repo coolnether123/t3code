@@ -19,6 +19,12 @@ export interface ComposerTaskStep {
 
 const MAX_TASK_SEGMENTS = 10;
 
+const taskStatusLabels = {
+  pending: "Pending",
+  inProgress: "Running",
+  completed: "Completed",
+} satisfies Record<ComposerTaskStep["status"], string>;
+
 function keyedTaskSteps(steps: readonly ComposerTaskStep[]) {
   const occurrences = new Map<string, number>();
   return steps.map((step) => {
@@ -84,7 +90,7 @@ function TaskSummary({
           className={progress.completedSteps >= progress.totalSteps ? "text-success" : undefined}
           data-composer-task-progress="true"
         >
-          {progress.completedSteps}/{progress.totalSteps}
+          {progress.completedSteps}/{progress.totalSteps} complete
         </ComposerBanner.Count>
         <TaskSegments className="hidden w-20 sm:flex" steps={steps} />
         <ComposerBanner.ToggleIcon expanded={expanded} />
@@ -95,12 +101,16 @@ function TaskSummary({
 
 export const ComposerTasksBadge = memo(function ComposerTasksBadge({
   expanded,
+  hasTrailingShoulder = false,
+  onDismiss,
   onToggle,
   placement = "tab",
   progress,
   steps,
 }: {
   readonly expanded: boolean;
+  readonly hasTrailingShoulder?: boolean;
+  readonly onDismiss?: () => void;
   readonly onToggle: () => void;
   readonly placement?: "inline" | "tab";
   readonly progress: ComposerTasksProgress;
@@ -110,14 +120,25 @@ export const ComposerTasksBadge = memo(function ComposerTasksBadge({
 
   const row = (
     <ComposerBanner.Row
-      render={<button type="button" />}
+      render={onDismiss ? <div /> : <button type="button" />}
       aria-expanded={expanded}
       aria-label={`${expanded ? "Collapse tasks" : "Tasks"}: ${progress.completedSteps} of ${progress.totalSteps} complete. Current task: ${progress.step}`}
       data-composer-tasks-badge="true"
       onClick={onToggle}
       onPointerDown={(event) => event.preventDefault()}
+      className={hasTrailingShoulder ? "pe-1" : undefined}
     >
       <TaskSummary expanded={expanded} progress={progress} steps={steps} />
+      {onDismiss ? (
+        <ComposerBanner.Dismiss
+          aria-label="Dismiss tasks"
+          title="Dismiss tasks"
+          onClick={(event) => {
+            event.stopPropagation();
+            onDismiss();
+          }}
+        />
+      ) : null}
     </ComposerBanner.Row>
   );
   return placement === "inline" ? (
@@ -131,11 +152,13 @@ export const ComposerTasksBadge = memo(function ComposerTasksBadge({
 
 export const ComposerTasksContent = memo(function ComposerTasksContent({
   expanded,
+  onDismiss,
   onToggle,
   progress,
   steps,
 }: {
   readonly expanded: boolean;
+  readonly onDismiss?: () => void;
   readonly onToggle: () => void;
   readonly progress: ComposerTasksProgress;
   readonly steps: readonly ComposerTaskStep[];
@@ -147,6 +170,7 @@ export const ComposerTasksContent = memo(function ComposerTasksContent({
     >
       <ComposerTasksBadge
         expanded={expanded}
+        {...(onDismiss ? { onDismiss } : {})}
         onToggle={onToggle}
         placement="inline"
         progress={progress}
@@ -185,6 +209,9 @@ export const ComposerTasksContent = memo(function ComposerTasksContent({
                   {step.step}
                 </ComposerBanner.Content>
                 <ComposerBanner.Actions>
+                  <span className="text-[10px] text-muted-foreground">
+                    {taskStatusLabels[step.status]}
+                  </span>
                   <span
                     className="w-10 text-right text-[10px] text-muted-foreground/45 tabular-nums"
                     data-composer-task-duration="true"

@@ -4,8 +4,6 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 import type { ChatAttachment } from "@t3tools/contracts";
-import { toSafeThreadAttachmentSegment } from "@t3tools/shared/attachmentIds";
-export { toSafeThreadAttachmentSegment } from "@t3tools/shared/attachmentIds";
 
 import {
   normalizeAttachmentRelativePath,
@@ -14,7 +12,7 @@ import {
 import { inferImageExtension, SAFE_IMAGE_FILE_EXTENSIONS } from "./imageMime.ts";
 
 const ATTACHMENT_FILENAME_EXTENSIONS = [...SAFE_IMAGE_FILE_EXTENSIONS, ".bin"];
-
+const ATTACHMENT_ID_THREAD_SEGMENT_MAX_CHARS = 80;
 const ATTACHMENT_ID_THREAD_SEGMENT_PATTERN = "[a-z0-9_]+(?:-[a-z0-9_]+)*";
 const ATTACHMENT_ID_UUID_PATTERN = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const ATTACHMENT_ID_FILE_EXTENSION_PATTERN = "[a-z0-9]{1,10}";
@@ -26,6 +24,21 @@ const ATTACHMENT_ID_PATTERN = new RegExp(
 export const PENDING_ATTACHMENT_THREAD_SEGMENT = "pending";
 export const PENDING_ATTACHMENT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const PARTIAL_UPLOAD_MAX_AGE_MS = 60 * 60 * 1000;
+
+export function toSafeThreadAttachmentSegment(threadId: string): string | null {
+  const segment = threadId
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/gi, "-")
+    .replace(/-+/g, "-")
+    .replace(/^[-_]+|[-_]+$/g, "")
+    .slice(0, ATTACHMENT_ID_THREAD_SEGMENT_MAX_CHARS)
+    .replace(/[-_]+$/g, "");
+  if (segment.length === 0) {
+    return null;
+  }
+  return segment === PENDING_ATTACHMENT_THREAD_SEGMENT ? "_pending" : segment;
+}
 
 export function attachmentFileExtension(fileName: string): string {
   const extension = NodePath.extname(fileName).toLowerCase();

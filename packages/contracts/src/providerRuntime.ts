@@ -45,7 +45,6 @@ const ProviderRequestId = TrimmedNonEmptyStringSchema;
 export type ProviderRequestId = typeof ProviderRequestId.Type;
 
 const ProviderRefs = Schema.Struct({
-  /** Native thread id when a provider exposes one separately from the T3 thread. */
   providerThreadId: Schema.optional(TrimmedNonEmptyStringSchema),
   providerTurnId: Schema.optional(TrimmedNonEmptyStringSchema),
   providerItemId: Schema.optional(ProviderItemId),
@@ -143,8 +142,8 @@ export const CanonicalRequestType = Schema.Literals([
   "apply_patch_approval",
   "exec_command_approval",
   "mcp_elicitation_approval",
-  "tool_approval",
   "permissions_approval",
+  "tool_approval",
   "tool_user_input",
   "dynamic_tool_call",
   "auth_tokens_refresh",
@@ -324,7 +323,6 @@ export const ThreadTokenUsageSnapshot = Schema.Struct({
   cachedInputTokens: Schema.optional(NonNegativeInt),
   outputTokens: Schema.optional(NonNegativeInt),
   reasoningOutputTokens: Schema.optional(NonNegativeInt),
-  /** Cumulative dimensions when the provider exposes a separate total snapshot. */
   cumulativeInputTokens: Schema.optional(NonNegativeInt),
   cumulativeCachedInputTokens: Schema.optional(NonNegativeInt),
   cumulativeOutputTokens: Schema.optional(NonNegativeInt),
@@ -700,6 +698,16 @@ export const RuntimeTaskStatus = Schema.Literals([
 ]);
 export type RuntimeTaskStatus = typeof RuntimeTaskStatus.Type;
 
+export const RuntimeTaskLastTurn = Schema.Struct({
+  turnId: TurnId,
+  outcome: Schema.Literals(["completed", "failed", "interrupted"]),
+  completedAt: Schema.optional(IsoDateTime),
+  durationMs: Schema.optional(NonNegativeInt),
+  result: Schema.optional(TrimmedNonEmptyStringSchema),
+  error: Schema.optional(TrimmedNonEmptyStringSchema),
+});
+export type RuntimeTaskLastTurn = typeof RuntimeTaskLastTurn.Type;
+
 const TaskProgressPayload = Schema.Struct({
   taskId: RuntimeTaskId,
   description: TrimmedNonEmptyStringSchema,
@@ -710,20 +718,10 @@ const TaskProgressPayload = Schema.Struct({
   /** Present on synthesized member/child progress rows that carry state. */
   status: Schema.optional(RuntimeTaskStatus),
   error: Schema.optional(TrimmedNonEmptyStringSchema),
+  lastTurn: Schema.optional(RuntimeTaskLastTurn),
   ...taskAgentLinkageFields,
 });
 export type TaskProgressPayload = typeof TaskProgressPayload.Type;
-
-/** Last terminal turn of a reusable provider task, independent of thread status. */
-export const RuntimeTaskLastTurn = Schema.Struct({
-  turnId: TrimmedNonEmptyStringSchema,
-  outcome: Schema.Literals(["completed", "failed", "interrupted"]),
-  completedAt: Schema.optional(IsoDateTime),
-  durationMs: Schema.optional(NonNegativeInt),
-  result: Schema.optional(TrimmedNonEmptyStringSchema),
-  error: Schema.optional(TrimmedNonEmptyStringSchema),
-});
-export type RuntimeTaskLastTurn = typeof RuntimeTaskLastTurn.Type;
 
 /**
  * Non-terminal status patch (from the Claude SDK's task_updated, which main
@@ -736,7 +734,6 @@ const TaskUpdatedPayload = Schema.Struct({
   description: Schema.optional(TrimmedNonEmptyStringSchema),
   error: Schema.optional(TrimmedNonEmptyStringSchema),
   endedAt: Schema.optional(IsoDateTime),
-  lastTurn: Schema.optional(RuntimeTaskLastTurn),
   isBackgrounded: Schema.optional(Schema.Boolean),
   ...taskAgentLinkageFields,
 });
@@ -812,8 +809,6 @@ export type AccountUpdatedPayload = typeof AccountUpdatedPayload.Type;
  */
 const AccountRateLimitsUpdatedPayload = Schema.Struct({
   limits: ProviderUsageLimitsUpdate,
-  /** Legacy provider payload field retained while adapters migrate. */
-  rateLimits: Schema.optional(Schema.Unknown),
 });
 export type AccountRateLimitsUpdatedPayload = typeof AccountRateLimitsUpdatedPayload.Type;
 
@@ -1304,23 +1299,6 @@ export type ProviderRuntimeEventV2 = typeof ProviderRuntimeEventV2.Type;
 
 export const ProviderRuntimeEvent = ProviderRuntimeEventV2;
 export type ProviderRuntimeEvent = ProviderRuntimeEventV2;
-
-// Legacy helper aliases retained for provider adapters and tests.
-const ProviderRuntimeMessageDeltaEvent = ProviderRuntimeContentDeltaEvent;
-export type ProviderRuntimeMessageDeltaEvent = ProviderRuntimeContentDeltaEvent;
-const ProviderRuntimeMessageCompletedEvent = ProviderRuntimeItemCompletedEvent;
-export type ProviderRuntimeMessageCompletedEvent = ProviderRuntimeItemCompletedEvent;
-const ProviderRuntimeToolStartedEvent = ProviderRuntimeItemStartedEvent;
-export type ProviderRuntimeToolStartedEvent = ProviderRuntimeItemStartedEvent;
-const ProviderRuntimeToolCompletedEvent = ProviderRuntimeItemCompletedEvent;
-export type ProviderRuntimeToolCompletedEvent = ProviderRuntimeItemCompletedEvent;
-const ProviderRuntimeApprovalRequestedEvent = ProviderRuntimeRequestOpenedEvent;
-export type ProviderRuntimeApprovalRequestedEvent = ProviderRuntimeRequestOpenedEvent;
-const ProviderRuntimeApprovalResolvedEvent = ProviderRuntimeRequestResolvedEvent;
-export type ProviderRuntimeApprovalResolvedEvent = ProviderRuntimeRequestResolvedEvent;
-
-const ProviderRuntimeToolKind = Schema.Literals(["command", "file-read", "file-change", "other"]);
-export type ProviderRuntimeToolKind = typeof ProviderRuntimeToolKind.Type;
 
 export const ProviderRuntimeTurnStatus = RuntimeTurnState;
 export type ProviderRuntimeTurnStatus = RuntimeTurnState;

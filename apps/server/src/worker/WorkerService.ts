@@ -57,6 +57,7 @@ import { buildWorkerEfficiencyOverview } from "./WorkerMetrics.ts";
 import { projectWorkerSummaryUsage, projectWorkerUsageSnapshot } from "./WorkerUsage.ts";
 
 const modelFallback = TrimmedNonEmptyString.make("gpt-5.6-luna");
+const supportedWorkerBackends = new Set(["codex", "codex-desktop"]);
 const zeroUsage = (): WorkerTokenUsage => ({
   inputTokens: 0,
   outputTokens: 0,
@@ -159,6 +160,8 @@ export interface WorkerServiceShape {
   }) => Effect.Effect<ReadonlyArray<WorkerId>, WorkerOperationError>;
   readonly handleProviderEvent: (event: ProviderRuntimeEvent) => Effect.Effect<void, never>;
   readonly recover: Effect.Effect<void, never>;
+  /** Reconcile durable Codex Desktop receipts into ordinary Worker events. */
+  readonly reconcileDesktop?: Effect.Effect<void, never>;
   readonly stream: Stream.Stream<WorkerEvent>;
 }
 
@@ -370,8 +373,18 @@ const makeWorkerService = Effect.gen(function* () {
   const start: WorkerServiceShape["start"] = (request) =>
     Effect.gen(function* () {
       const input = request.input;
+      if (
+        input.backendPreference !== undefined &&
+        !supportedWorkerBackends.has(input.backendPreference)
+      ) {
+        return yield* fail(
+          "worker.start",
+          `Worker backend '${input.backendPreference}' is not supported by this server`,
+        );
+      }
       const workerId = WorkerId.make(yield* randomUuid);
       const providerThreadId = ThreadId.make(`${WORKER_PROVIDER_THREAD_PREFIX}${workerId}`);
+      const backendPreference = input.backendPreference ?? "codex";
       const activationId = WorkerActivationId.make(yield* randomUuid);
       const now = yield* nowIso;
       const runtimeMode =
@@ -381,7 +394,7 @@ const makeWorkerService = Effect.gen(function* () {
         displayName: workerDisplayNameFor(workerId, input.displayName),
         title: input.title,
         status: "starting",
-        backend: "codex",
+        backend: backendPreference,
         parentThreadId: request.parentThreadId,
         providerInstanceId: request.providerInstanceId,
         model: input.modelSelection?.model ?? modelFallback,
@@ -442,6 +455,13 @@ const makeWorkerService = Effect.gen(function* () {
           runtimeMode,
           ...(input.approvalPolicy === undefined ? {} : { approvalPolicy: input.approvalPolicy }),
           ...(input.sandboxMode === undefined ? {} : { sandboxMode: input.sandboxMode }),
+          backendPreference,
+          jobId: activationId,
+          requestId: activationId,
+          workerId,
+          activationId,
+          parentThreadId: request.parentThreadId,
+          ...(request.parentTurnId === undefined ? {} : { parentTurnId: request.parentTurnId }),
         })
         .pipe(
           Effect.catch((error) =>
@@ -460,9 +480,20 @@ const makeWorkerService = Effect.gen(function* () {
             return yield* read(workerId);
           }
           const runningAt = yield* nowIso;
-          const runningActivation = updateActivation(latestActivation, "running", runningAt, {
-            providerTurnId: started.providerTurnId,
-          });
+          const runningActivation = updateActivation(
+            latestActivation,
+            started.pending ? "starting" : "running",
+            runningAt,
+            {
+              ...(started.providerTurnId === undefined
+                ? {}
+                : { providerTurnId: started.providerTurnId }),
+              ...(started.nativeThreadId === undefined
+                ? {}
+                : { nativeThreadId: ThreadId.make(started.nativeThreadId) }),
+              ...(started.nativeCursor === undefined ? {} : { nativeCursor: started.nativeCursor }),
+            },
+          );
           yield* store.saveActivation(runningActivation);
           const latestStored = Option.getOrUndefined(yield* store.getWorker(workerId)) ?? stored;
           if (latestStored.summary.activeActivationId !== activationId) {
@@ -470,7 +501,7 @@ const makeWorkerService = Effect.gen(function* () {
           }
           const running = yield* saveSummary(latestStored, {
             ...latestStored.summary,
-            status: "running",
+            status: started.pending ? "starting" : "running",
             updatedAt: runningAt,
             lastActivityAt: runningAt,
           });
@@ -549,12 +580,32 @@ const makeWorkerService = Effect.gen(function* () {
         return yield* fail("worker.send", "Closed Workers cannot receive assignments");
       const now = yield* nowIso;
       const activationId = WorkerActivationId.make(yield* randomUuid);
+      const previousActivation =
+        current.summary.activeActivationId === undefined
+          ? undefined
+          : Option.getOrUndefined(yield* store.getActivation(current.summary.activeActivationId));
+      const recoveredNativeThreadId =
+        previousActivation?.nativeThreadId ??
+        (current.summary.backend === "codex-desktop" &&
+        previousActivation !== undefined &&
+        backend.resolveNativeThread !== undefined
+          ? yield* backend
+              .resolveNativeThread(previousActivation.id, current.summary.backend)
+              .pipe(
+                Effect.map((threadId) =>
+                  threadId === undefined ? undefined : ThreadId.make(threadId),
+                ),
+              )
+          : undefined);
       const activation: WorkerActivation = {
         id: activationId,
         workerId: input.workerId,
         status: "starting",
         providerInstanceId: current.summary.providerInstanceId,
         providerThreadId: ThreadId.make(`${WORKER_PROVIDER_THREAD_PREFIX}${input.workerId}`),
+        ...(recoveredNativeThreadId === undefined
+          ? {}
+          : { nativeThreadId: recoveredNativeThreadId }),
         runtimeMode: current.summary.runtimeMode,
         startedAt: now,
         lastActivityAt: now,
@@ -585,6 +636,17 @@ const makeWorkerService = Effect.gen(function* () {
             model: current.summary.model,
           },
           runtimeMode: current.summary.runtimeMode,
+          backendPreference: current.summary.backend,
+          jobId: activationId,
+          requestId: activationId,
+          workerId: input.workerId,
+          activationId,
+          ...(activation.nativeThreadId === undefined
+            ? {}
+            : { nativeThreadId: activation.nativeThreadId }),
+          ...(previousActivation?.nativeCursor === undefined
+            ? {}
+            : { nativeCursor: previousActivation.nativeCursor }),
         })
         .pipe(
           Effect.catch((error) =>
@@ -603,21 +665,66 @@ const makeWorkerService = Effect.gen(function* () {
             return yield* read(input.workerId);
           }
           const runningAt = yield* nowIso;
-          yield* store.saveActivation(
-            updateActivation(latestActivation, "running", runningAt, {
-              providerTurnId: sent.providerTurnId,
-            }),
+          const nextActivation = updateActivation(
+            latestActivation,
+            sent.pending ? "starting" : "running",
+            runningAt,
+            {
+              ...(sent.providerTurnId === undefined ? {} : { providerTurnId: sent.providerTurnId }),
+              ...(sent.nativeThreadId === undefined
+                ? {}
+                : { nativeThreadId: ThreadId.make(sent.nativeThreadId) }),
+              ...(sent.nativeCursor === undefined ? {} : { nativeCursor: sent.nativeCursor }),
+            },
           );
+          yield* store.saveActivation(nextActivation);
           const latestStored = Option.getOrUndefined(yield* store.getWorker(input.workerId));
           if (latestStored === undefined) return yield* read(input.workerId);
-          yield* saveSummary(latestStored, {
+          const nextSummary = {
             ...latestStored.summary,
-            status: "running",
+            status: sent.pending ? "starting" : "running",
             activeActivationId: activationId,
             activationCount: latestStored.summary.activationCount + 1,
             updatedAt: runningAt,
             lastActivityAt: runningAt,
-          });
+          } satisfies WorkerSummary;
+          const updated = yield* saveSummary(latestStored, nextSummary);
+          if (sent.completionStatus === "completed") {
+            const completedAt = yield* nowIso;
+            const completed = updateActivation(nextActivation, "completed", completedAt, {
+              finishedAt: completedAt,
+              ...(sent.handoff === undefined ? {} : { handoff: sent.handoff }),
+            });
+            yield* store.saveActivation(completed);
+            const cleared = yield* saveSummary(
+              updated,
+              clearActiveActivation(updated.summary, {
+                status: "completed",
+                updatedAt: completedAt,
+                lastActivityAt: completedAt,
+              }),
+            );
+            if (sent.handoff !== undefined) {
+              yield* addMessage(cleared, {
+                id: WorkerMessageId.make(yield* randomUuid),
+                workerId: input.workerId,
+                activationId,
+                author: "worker",
+                kind: "handoff",
+                body: sent.handoff,
+                createdAt: completedAt,
+              });
+            } else {
+              yield* publish(cleared, { type: "updated" });
+            }
+            yield* wake({
+              workerId: input.workerId,
+              activationId,
+              reason: "completed",
+              status: "completed",
+              occurredAt: completedAt,
+            });
+          }
           return yield* read(input.workerId);
         }),
       );
@@ -775,6 +882,7 @@ const makeWorkerService = Effect.gen(function* () {
         );
       yield* backend.interrupt({
         providerThreadId: activation.providerThreadId,
+        backendPreference: detail.summary.backend,
         ...(activation.providerTurnId === undefined
           ? {}
           : { providerTurnId: activation.providerTurnId }),
@@ -815,7 +923,8 @@ const makeWorkerService = Effect.gen(function* () {
         current.summary.activeActivationId === undefined
           ? undefined
           : Option.getOrUndefined(yield* store.getActivation(current.summary.activeActivationId));
-      if (activation !== undefined) yield* backend.stop(activation.providerThreadId);
+      if (activation !== undefined)
+        yield* backend.stop(activation.providerThreadId, current.summary.backend);
       const closedAt = yield* nowIso;
       if (activation !== undefined) {
         yield* store.saveActivation(
@@ -855,6 +964,7 @@ const makeWorkerService = Effect.gen(function* () {
         providerThreadId: activation.providerThreadId,
         requestId: input.requestId,
         decision: input.decision,
+        backendPreference: detail.summary.backend,
       });
       const resolvedAt = yield* nowIso;
       yield* store.resolveApproval({
@@ -957,7 +1067,7 @@ const makeWorkerService = Effect.gen(function* () {
               );
             }
             if (activeActivation !== undefined) {
-              yield* backend.stop(activeActivation.providerThreadId);
+              yield* backend.stop(activeActivation.providerThreadId, stored.summary.backend);
               yield* store.saveActivation(
                 updateActivation(activeActivation, "interrupted", discardedAt, {
                   finishedAt: discardedAt,
@@ -1337,7 +1447,28 @@ const makeWorkerService = Effect.gen(function* () {
           ["completed", "failed", "interrupted", "lost"].includes(activation.status)
         )
           return;
-        if (yield* backend.hasLiveSession(activation.providerThreadId)) return;
+        if (
+          worker.summary.backend === "codex-desktop" &&
+          backend.resolveNativeThread !== undefined
+        ) {
+          const nativeThreadId = yield* backend.resolveNativeThread(
+            activation.id,
+            worker.summary.backend,
+          );
+          if (nativeThreadId !== undefined) {
+            yield* store.saveActivation({
+              ...activation,
+              nativeThreadId: ThreadId.make(nativeThreadId),
+            });
+            return;
+          }
+          // A queued desktop request is durable and must remain starting while
+          // the native coordinator is offline; an uncertain start is never
+          // duplicated by recovery.
+          if (activation.status === "starting") return;
+        }
+        if (yield* backend.hasLiveSession(activation.providerThreadId, worker.summary.backend))
+          return;
         const lostAt = yield* nowIso;
         const lost = updateActivation(activation, "lost", lostAt, {
           finishedAt: lostAt,
@@ -1364,6 +1495,133 @@ const makeWorkerService = Effect.gen(function* () {
     );
   }).pipe(Effect.catch(() => Effect.void));
 
+  const reconcileDesktop = transitions.withPermits(1)(
+    Effect.gen(function* () {
+      if (backend.observe === undefined) return;
+      const workers = yield* store.listWorkers({ includeClosed: false, limit: 500 });
+      yield* Effect.forEach(
+        workers.filter((worker) => worker.summary.backend === "codex-desktop"),
+        (worker) =>
+          Effect.gen(function* () {
+            const activationId = worker.summary.activeActivationId;
+            if (activationId === undefined) return;
+            const activation = Option.getOrUndefined(yield* store.getActivation(activationId));
+            if (activation === undefined || terminalActivationStatuses.has(activation.status))
+              return;
+            let effectiveActivation = activation;
+            if (backend.resolveNativeThread !== undefined) {
+              const nativeThreadId = yield* backend.resolveNativeThread(
+                activation.id,
+                worker.summary.backend,
+              );
+              if (
+                nativeThreadId !== undefined &&
+                (activation.nativeThreadId !== nativeThreadId || activation.status === "starting")
+              ) {
+                effectiveActivation = updateActivation(activation, "running", yield* nowIso, {
+                  nativeThreadId: ThreadId.make(nativeThreadId),
+                });
+                yield* store.saveActivation(effectiveActivation);
+                const latest = Option.getOrUndefined(yield* store.getWorker(worker.summary.id));
+                if (latest?.summary.activeActivationId === activation.id) {
+                  const promoted = yield* saveSummary(latest, {
+                    ...latest.summary,
+                    status: "running",
+                    updatedAt: effectiveActivation.lastActivityAt,
+                    lastActivityAt: effectiveActivation.lastActivityAt,
+                  });
+                  yield* publish(promoted, { type: "updated" });
+                }
+              }
+            }
+            const observed = yield* backend.observe!({
+              jobId: activation.id,
+              backendPreference: worker.summary.backend,
+            });
+            if (observed === undefined) return;
+            const finishedAt = yield* nowIso;
+            const latest = Option.getOrUndefined(yield* store.getWorker(worker.summary.id));
+            if (latest?.summary.activeActivationId !== activation.id) return;
+            if (observed.status === "approval_required") {
+              const approval = {
+                requestId: ApprovalRequestId.make(activation.id),
+                workerId: worker.summary.id,
+                activationId: activation.id,
+                kind: "native-desktop-needs-attention",
+                summary: observed.error ?? "Codex Desktop needs attention",
+                requestedAt: finishedAt,
+                status: "pending",
+              } satisfies import("@t3tools/contracts").WorkerApprovalRequest;
+              yield* store.saveApproval(approval);
+              yield* store.saveActivation(
+                updateActivation(effectiveActivation, "waitingApproval", finishedAt),
+              );
+              const waiting = yield* saveSummary(latest, {
+                ...latest.summary,
+                status: "waitingApproval",
+                updatedAt: finishedAt,
+                lastActivityAt: finishedAt,
+              });
+              yield* publish(waiting, { type: "approvalRequested", approval });
+              yield* wake({
+                workerId: worker.summary.id,
+                activationId: activation.id,
+                reason: "approvalRequested",
+                status: "waitingApproval",
+                occurredAt: finishedAt,
+              });
+              return;
+            }
+            const status = observed.status;
+            yield* store.saveActivation(
+              updateActivation(effectiveActivation, status, finishedAt, {
+                finishedAt,
+                ...(observed.handoff === undefined ? {} : { handoff: observed.handoff }),
+                ...(observed.error === undefined ? {} : { error: observed.error }),
+              }),
+            );
+            const current = Option.getOrUndefined(yield* store.getWorker(worker.summary.id));
+            if (current === undefined || current.summary.activeActivationId !== activation.id)
+              return;
+            const next = yield* saveSummary(
+              current,
+              clearActiveActivation(current.summary, {
+                status,
+                updatedAt: finishedAt,
+                lastActivityAt: finishedAt,
+              }),
+            );
+            if (observed.handoff !== undefined) {
+              yield* addMessage(next, {
+                id: WorkerMessageId.make(yield* randomUuid),
+                workerId: worker.summary.id,
+                activationId: activation.id,
+                author: "worker",
+                kind: "handoff",
+                body: observed.handoff,
+                createdAt: finishedAt,
+              });
+            } else {
+              yield* publish(next, { type: "updated" });
+            }
+            yield* wake({
+              workerId: worker.summary.id,
+              activationId: activation.id,
+              reason:
+                status === "completed"
+                  ? "completed"
+                  : status === "interrupted"
+                    ? "interrupted"
+                    : "failed",
+              status,
+              occurredAt: finishedAt,
+            });
+          }),
+        { concurrency: 1 },
+      );
+    }).pipe(Effect.catch(() => Effect.void)),
+  );
+
   return {
     isLinkedProviderThread,
     start,
@@ -1378,6 +1636,7 @@ const makeWorkerService = Effect.gen(function* () {
     reconcileParentAfterRewind,
     handleProviderEvent,
     recover,
+    reconcileDesktop,
     stream: Stream.fromPubSub(changes),
   } satisfies WorkerServiceShape;
 });

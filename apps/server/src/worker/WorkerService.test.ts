@@ -41,6 +41,7 @@ function makeMemoryWorkerStore() {
   const workers = new Map<WorkerId, StoredWorker>();
   const activations = new Map<WorkerActivationId, WorkerActivation>();
   const messages = new Map<WorkerId, Array<WorkerMessage>>();
+  const approvals = new Map<WorkerId, WorkerApprovalRequest>();
   const providerEvents = new Map<WorkerId, Array<ProviderRuntimeEvent>>();
   const store = WorkerStore.of({
     saveWorker: (worker) => Effect.sync(() => void workers.set(worker.summary.id, worker)),
@@ -75,9 +76,21 @@ function makeMemoryWorkerStore() {
         messages.set(message.workerId, [...(messages.get(message.workerId) ?? []), message]);
       }),
     listMessages: (id) => Effect.succeed(messages.get(id) ?? []),
-    saveApproval: () => Effect.void,
-    getPendingApproval: () => Effect.succeed(Option.none()),
-    resolveApproval: () => Effect.void,
+    saveApproval: (approval) => Effect.sync(() => void approvals.set(approval.workerId, approval)),
+    getPendingApproval: (id) =>
+      Effect.succeed(
+        Option.fromNullishOr(
+          approvals.get(id)?.status === "pending" ? approvals.get(id) : undefined,
+        ),
+      ),
+    resolveApproval: (input) =>
+      Effect.sync(() => {
+        for (const [id, approval] of approvals) {
+          if (approval.requestId === input.requestId) {
+            approvals.set(id, { ...approval, status: "resolved", ...input });
+          }
+        }
+      }),
     saveObserverReport: () => Effect.void,
     listObserverReports: () => Effect.succeed([]),
     saveWaitLease: () => Effect.void,
@@ -242,6 +255,125 @@ it.effect("persists Worker identity and exact model options across follow-up act
       ),
     ),
   );
+});
+
+it.effect("rejects an unsupported backend before persisting a Worker", () => {
+  const memory = makeMemoryWorkerStore();
+  let backendStarts = 0;
+  const backend = WorkerBackend.of({
+    start: () =>
+      Effect.sync(() => {
+        backendStarts += 1;
+        return { providerThreadId, providerTurnId: TurnId.make("unused") };
+      }),
+    send: () => Effect.die("unused"),
+    interrupt: () => Effect.die("unused"),
+    stop: () => Effect.die("unused"),
+    respondToApproval: () => Effect.die("unused"),
+    hasLiveSession: () => Effect.succeed(false),
+  });
+
+  return Effect.gen(function* () {
+    const service = yield* WorkerServiceTesting.make;
+    const result = yield* service
+      .start({
+        parentThreadId,
+        providerInstanceId,
+        input: {
+          title: "Unsupported backend",
+          assignment: "Do not run.",
+          context: { references: [], snippets: [] },
+          backendPreference: "unsupported-backend",
+        },
+      })
+      .pipe(Effect.result);
+
+    expect(result._tag).toBe("Failure");
+    if (result._tag === "Failure") {
+      expect(result.failure).toMatchObject({
+        _tag: "WorkerOperationError",
+        operation: "worker.start",
+        message: "Worker backend 'unsupported-backend' is not supported by this server",
+      });
+    }
+    expect(backendStarts).toBe(0);
+    expect(memory.workers.size).toBe(0);
+    expect(memory.activations.size).toBe(0);
+  }).pipe(Effect.provide(workerLayer(memory.store, backend)));
+});
+
+it.effect("reconciles a delayed Desktop receipt into one canonical handoff", () => {
+  const memory = makeMemoryWorkerStore();
+  let completed = false;
+  const backend = WorkerBackend.of({
+    start: (input) => Effect.succeed({ providerThreadId: input.providerThreadId, pending: true }),
+    send: () => Effect.die("unused"),
+    interrupt: () => Effect.die("unused"),
+    stop: () => Effect.die("unused"),
+    respondToApproval: () => Effect.die("unused"),
+    hasLiveSession: () => Effect.succeed(false),
+    observe: () =>
+      Effect.succeed(
+        completed
+          ? { status: "completed" as const, handoff: "Native Desktop completed." }
+          : undefined,
+      ),
+  });
+
+  return Effect.gen(function* () {
+    const service = yield* WorkerServiceTesting.make;
+    const started = yield* service.start({
+      parentThreadId,
+      providerInstanceId,
+      input: {
+        title: "Desktop assignment",
+        assignment: "Use the native app.",
+        context: { references: [], snippets: [] },
+        backendPreference: "codex-desktop",
+      },
+    });
+    expect(started.summary.status).toBe("starting");
+    completed = true;
+    yield* service.reconcileDesktop!;
+    yield* service.reconcileDesktop!;
+    const detail = yield* service.get(started.summary.id);
+    expect(detail.summary.status).toBe("completed");
+    expect(detail.messages.filter((message) => message.kind === "handoff")).toHaveLength(1);
+    expect(detail.messages.find((message) => message.kind === "handoff")?.body).toBe(
+      "Native Desktop completed.",
+    );
+  }).pipe(Effect.provide(workerLayer(memory.store, backend)));
+});
+
+it.effect("surfaces a native Desktop attention receipt as pending approval", () => {
+  const memory = makeMemoryWorkerStore();
+  const backend = WorkerBackend.of({
+    start: (input) => Effect.succeed({ providerThreadId: input.providerThreadId, pending: true }),
+    send: () => Effect.die("unused"),
+    interrupt: () => Effect.die("unused"),
+    stop: () => Effect.die("unused"),
+    respondToApproval: () => Effect.die("unused"),
+    hasLiveSession: () => Effect.succeed(false),
+    observe: () =>
+      Effect.succeed({ status: "approval_required" as const, error: "Sign in to Desktop" }),
+  });
+  return Effect.gen(function* () {
+    const service = yield* WorkerServiceTesting.make;
+    const started = yield* service.start({
+      parentThreadId,
+      providerInstanceId,
+      input: {
+        title: "Desktop approval",
+        assignment: "Use the native app.",
+        context: { references: [], snippets: [] },
+        backendPreference: "codex-desktop",
+      },
+    });
+    yield* service.reconcileDesktop!;
+    const detail = yield* service.get(started.summary.id);
+    expect(detail.summary.status).toBe("waitingApproval");
+    expect(detail.pendingApproval?.summary).toBe("Sign in to Desktop");
+  }).pipe(Effect.provide(workerLayer(memory.store, backend)));
 });
 
 it.effect("settles a failed start durably and makes worker_wait return immediately", () => {

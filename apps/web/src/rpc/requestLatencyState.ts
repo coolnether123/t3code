@@ -32,7 +32,6 @@ const untrackedRpcAckMethods = new Set<string>([
   WS_METHODS.previewAutomationConnect,
   // A Worker wait is an expected event lease, not a slow acknowledgement.
   WS_METHODS.workersWait,
-  WS_METHODS.serverGetUsageSummary,
 ]);
 const longRunningRpcAckMethods = new Set<string>([
   WS_METHODS.serverUpdateProvider,

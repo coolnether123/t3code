@@ -1,64 +1,43 @@
-# Usage and limits
+# Review usage
 
-## Understand your usage
+For a birthday palette and tap effects on these screens, see [Celebrate your birthday](birthday-theme.md).
 
-**Usage** combines Codex, Claude Code, Grok Build, Gemini, OpenCode, and imported chat history from your connected
-environments. It shows token use, cache savings, model breakdowns, and estimated API-equivalent
-cost. These estimates are not your subscription bill.
+The Usage page combines Codex, Claude Code, Gemini, OpenCode, and configured chat archives from
+your connected environments. It reads local history and shows API-equivalent token cost, processed
+tokens, cache savings, provider shares, and model breakdowns. Subscription billing is separate from
+the raw token cost shown here.
 
-Totals depend on the history available on each server. Grok turns without a saved completed-turn
-record are missing from the totals.
+Use **Past 24h** for an hourly chart covering the exact rolling 24-hour period. The **7 days**,
+**30 days**, **90 days**, **120 days**, and **1 year** ranges use daily resolution. Cost and token
+toggles update both the headline and chart, and refreshing rescans every connected environment.
 
-On web and desktop, use the environment dropdown to filter costs, tokens, and limits. All
-environments are selected by default. The dropdown shows which environments are still scanning;
-results appear as each one responds.
+In **Hourly model usage**, each bar shows processed tokens for Astra, Sol, Luna, Terra, or another
+recorded model. Select an hour to see its token total and estimated dollar cost; token totals include
+cached input, and empty hours remain visible so the timeline stays accurate.
 
-If recent work is missing or a new model shows no cost, refresh to rescan session history and
-update model pricing.
+Parsed transcripts are cached individually on the environment that owns them. Expanding to a range
+that has not been viewed before may briefly warm older history; afterward, unchanged chats reuse
+their cached records and only new or edited transcript files are parsed again.
 
-## Set custom model prices
+Usage history is independent from the providers enabled for new T3 Code chats. Disabling Claude
+Code or leaving Gemini unavailable as a chat provider does not remove their locally stored history
+from Usage. Gemini totals include Gemini CLI sessions and locally recorded Antigravity token totals.
+OpenCode totals come from its local session database and remain available when OpenCode is disabled
+as a provider for new chats.
 
-On web or desktop, open the environment dropdown on **Usage**, then choose **Model prices** to add,
-edit, or reset a model's estimated price. **Apply to** starts with your current Usage filter;
-choose all environments or select individual destinations. Enter the exact model ID and USD
-rates per million input and output tokens. You can enter any model ID, including models
-without public pricing.
+## Understand API estimates
 
-Cache read and cache write rates are optional and use the input rate when blank. Enter `0` for
-tokens that are free. Saved prices replace automatic pricing for all of that environment's
-history and are shared with clients connected to it. When environments have different prices,
-cells show **Mixed**. Edit rates directly in the table, then choose **Save changes** to apply all
-edited rows. Untouched cells keep each environment's rate. Select one environment to inspect its
-prices. **Reset to automatic** marks a model's override for removal when you save; you can undo
-it before saving.
+Recorded dollar costs take precedence over token estimates. Otherwise, Usage applies the latest
+cached model prices at standard text-token rates, including each request's context-length tier.
+Provider namespaces are kept separate: a reseller's rate cannot replace a direct provider's rate.
+Unknown models and missing rates are marked unpriced, not treated as free usage. Reasoning tokens
+already included in output are not charged twice.
 
-Each destination reports whether the change saved. Offline or unavailable environments are
-marked **Not saved**. Reconnect them and choose **Retry failed saves** to finish the same change
-without writing again to environments that already saved. Changes are not queued after you close
-the dialog.
-
-## Track subscription limits
-
-**Usage → Limits** shows quota use and reset times for Codex and Claude subscriptions. It also
-compares quota consumed with time elapsed in each window, so you can judge your pace before the
-next reset.
-
-If a window looks stale, refresh Limits to re-check every provider and hub.
-
-API-key accounts may not report subscription limits. This also applies to Claude connections
-using a proxy through `ANTHROPIC_AUTH_TOKEN`.
-
-## Connect a CLIProxyAPI hub
-
-To see pooled accounts, open **Settings → Providers → Usage providers → Add hub**. Choose the
-environment that will connect to the hub and enter its URL and management key.
-
-The accounts appear under **Usage → Limits**. This connection supplies usage information; configure
-the provider separately to send agent requests through the hub. Remove the hub from the same
-settings section when you no longer need it.
-
-For birthday colors and tap effects, see [Celebrate your birthday](birthday-theme.md).
-For Fast Mode and service-tier estimates, see [Codex Fast Mode usage](codex-fast-mode-usage.md).
+These are current-price equivalents, not historical invoices. They do not reconstruct fast,
+flex, batch, regional, or negotiated pricing. Cache-write estimates use the standard short-lived
+cache rate; storage duration, long-lived cache premiums, audio/image-specific rates, and tool fees
+are not reconstructed from token totals. Provider-reported costs may themselves be estimates from
+the local harness. A subscription's quota percentage is not a dollar balance.
 
 ### Import product chat archives
 
@@ -85,6 +64,10 @@ Open **Codex usage & resets** from Usage. You can also tap or hold the **Codex i
 or tap **Usage & resets →** below its row. **Usage** in the header takes you back.
 Scrolling cancels the hold gesture. Enter and Space activate the focused Codex button.
 
+On macOS, T3 reads the signed-in Codex allowance through the configured Codex provider when
+reset history is requested, at most once every five minutes. It stores only the timestamp,
+remaining percentage, and reset time in the local T3 data directory.
+
 The monitor leads with remaining usage and the total used in the current account cycle.
 For example, 81% remaining means 19% used. If tracking began at 83%, the monitor observed
 a two-percentage-point drop. Those two points are not the cycle total.
@@ -93,20 +76,32 @@ a two-percentage-point drop. Those two points are not the cycle total.
 that leaves 3% unused. The forecast blends the observed pace with the current weekly average.
 Earlier cycles do not influence it. Gaps over an hour are not joined.
 
-Turn **Recent pace** on or off beneath the chart to compare a second, cyan projection.
-It uses the time between the last two observed percentage drops, expressed as time per 1%.
-If fresh readings show the next drop is taking longer, that longer wait sets the pace instead.
-For example, a last interval of 10 minutes becomes 25 minutes per 1% after 25 minutes with no
-further drop. Another drop starts the timing again. A drop of several points uses the interval's
-average time per point; the tracker cannot see the individual drop times between readings.
+Turn **API cost pace** on or off beneath the chart to compare the blue projection.
+It divides API-equivalent spending from the last six hours by elapsed hours, including idle
+time. If monitoring began more recently, it uses that shorter interval, with at least one hour
+required. Only the current cycle and selected computers contribute. The server measures costs
+after the interval start through the latest account reading, using the same pricing and
+source deduplication as the remaining-value estimate.
 
-The caption shows the completed interval, the wait through the latest reading, and the timing
-used for the projection. Before two drops are observed, a confirmed wait after the first drop
-can provide a provisional pace. An unchanged initial balance alone cannot establish the time
-of a drop. Resets and observation gaps over 15 minutes restart timing, and stale readings stop
-the projection. Clock time without a fresh account reading does not count as confirmed waiting.
-Neither line changes measured usage or predicts future workload. Rounded readings make drop
-times approximate, and an unchanged percentage does not mean zero usage.
+Estimated time to empty is remaining API value divided by average dollars per hour. For
+example, $50 remaining at $10/hour gives five hours. The caption shows the measured window,
+hourly cost, and outcome; **API value runs out** gives its projected timestamp. The blue line
+maps the declining dollar balance onto the chart's remaining-percentage scale and stops at
+zero. A complete zero-cost interval produces a flat line with no exhaustion timestamp.
+
+The **Runway plan** turns that projection into downtime. It shows how long usage would be
+unavailable before the account's scheduled reset if the measured dollar burn continues. Choose
+the **maximum time without usage** you can tolerate; 12 hours is the default. The planner also
+calculates the maximum average dollars per hour that would reach zero at that deadline. A lower
+burn keeps usage available longer, while a higher burn exceeds the selected downtime limit.
+Elapsed time since the last reading is charged at the measured rate, so the estimate advances
+without waiting for another chart sample. If the rate is zero, the planner says usage lasts to
+the reset rather than inventing an exhaustion time.
+
+Stale readings, incomplete or unpriced costs, and a missing remaining-value estimate withhold
+the blue projection. Elapsed clock time does not count as newly measured spending. The orange
+line retains its percentage-based estimate for comparison. Model changes can affect Codex
+allowance differently, so neither line guarantees future capacity or changes measured usage.
 
 An earlier public reset announcement changes the planning deadline, not your account balance.
 The original weekly timer stays under **Source and weekly timer**. Announcements come from
@@ -115,11 +110,11 @@ interpretation remain visible. A missing or expired announcement falls back to t
 A countdown reaching zero never creates a reset observation or changes usage to 100%.
 
 The page checks readings every minute and public news every five minutes while open.
-On Windows, the separate Codex Limits collector records every five minutes while its computer is
-awake and signed in, even with T3 closed. On macOS, T3 asks the signed-in Codex desktop daemon for
-a reading when reset history is requested and throttles that request to once every five minutes.
-Direct CLI mode reads quota through its configured Codex app-server transport. Readings older than 15
-minutes are labeled stale. News requests send no account credentials, usage totals, or chat data.
+The separate Codex Limits collector records every five minutes while its computer is awake
+and signed in, even with T3 closed. Readings older than 15 minutes are labeled stale.
+News requests send no account credentials, usage totals, or chat data.
+Saved quota history and completed cost snapshots survive page navigation and server restarts,
+with bounded retention. Chart readings support hover, tap, and keyboard inspection.
 
 Press **Refresh** to reload saved readings, refresh public reset news, and check API costs for
 the newly read interval. The button shows progress and ignores repeated taps until it finishes.
@@ -127,11 +122,26 @@ Unchanged transcripts keep their cached records. On the mobile app, pulling down
 Growing chats read only their appended text when the saved cursor is valid. Public reset news
 updates independently and does not hold the usage refresh open.
 Refresh does not force a new collector sample or run Luna. Use **Check X with Luna** separately.
+Long windows such as **90 days** and **120 days** warm in bounded transcript batches while the
+page remains open. If every selected computer fails to return a result, the window is shown as
+**Unavailable** rather than as zero usage.
 
-The view starts with the latest continuous monitoring run. A gap over 24 hours begins another
-run. Older samples remain saved, but do not appear here or enter its dollar comparisons.
-**Resets while monitored** fills as new account readings show usage returning. The observation
-interval is not an exact reset timestamp. A banked reset or account change can look similar.
+The view uses the latest continuous monitoring run for current measurements. A gap over 24 hours
+begins another run. Older samples remain saved and appear in **Reset history**. When a new cycle
+has too little current data to calibrate a pace or dollar value, the monitor may show a provisional
+estimate based on the immediately preceding completed cycle. It includes that cycle's local date
+range and is replaced automatically when current-cycle calibration is valid. Percentages are never
+combined across reset boundaries. The observation interval is not an exact reset timestamp. A banked
+reset or account change can look similar.
+
+The runway baseline uses the account timer. **Banked manual resets** are shown separately and
+never get added to the current balance or treated as an extension of the current timer. A full
+manual reset refreshes both the short and weekly windows and starts a new approximately seven-day
+window. The planner can show each credit's expiry and whether it remains available at the
+estimated empty time when the connected account snapshot supplies expiry dates. Current saved
+snapshots may provide only the verified count and check time, in which case expiry eligibility
+is left unknown. If you redeem one, wait for the next account reading before planning the new
+window; the planner never redeems credits for you.
 
 ### Check reset announcements with Luna
 
@@ -169,16 +179,51 @@ is shown as unavailable, not as evidence that nobody is discussing the reset.
 
 ### Understand the dollar estimate
 
+The web monitor puts the chart first. Use the header links to jump to API value,
+the token planner, Reset history, or Luna research. Expand **Inspect recorded readings** to scrub
+through the saved observations with a pointer or arrow keys.
+
+**How far could the rest go?** compares alternative uses of the estimated remaining
+API value on Astra, Sol, Terra, and Luna. Its default input/cache/output mix comes
+from the exact monitored interval. The model breakdown below it uses that same
+interval, excludes Spark, and counts reasoning inside output once. Older servers
+without model totals show a pending state; example mixes remain available.
+
+Choose an example mix, output only, or uncached input only to explore other work.
+**Custom mix** lets you set the output share and the cache hit rate for input.
+Long-context and Fast mode controls apply their respective token-price multipliers.
+Each row spends the entire estimate, so rows cannot be added together. M means
+million and B means billion. Prices have a verification date and a source link.
+Tool charges and regional surcharges are excluded. These are API-price comparisons;
+changing models can change Codex consumption, so they do not guarantee a number of
+Codex tokens. Incomplete cost data withholds the comparison.
+
+Luna starts with dated public search results and retains useful indexed posts when
+X blocks direct access. Indexed discussion is labeled partial and cannot confirm
+a firsthand reset. Third-party probabilities and banked-credit announcements cannot
+supply a broad-reset time window.
+
+On your configured birthday, the celebration keeps your selected T3 theme. Make a
+wish to put out the candle, run it again to relight it, or open **birthday.log** for
+another note. Confetti is brief and respects the tap-effects and reduced-motion settings.
+
 **Used while monitored** prices Codex transcripts from the same observed interval.
 **Value of usage remaining** uses that cost per observed percentage point. It shows **Learning**
-until at least five points have been observed. The full cycle total cannot calibrate a shorter
-transcript interval. Spark is excluded because it has a separate quota.
+until at least five points have been observed. A qualified earlier reset cycle can calibrate a
+shorter interval provisionally until current measured costs are ready. Bounded zero-use timer
+changes totaling up to 60 minutes can bridge the interval without counting as resets. Spark is
+excluded because it has a separate quota.
 
 Dollar values are API-equivalent estimates, not subscription bills, cash balances, or credits.
-Model mix and missing history affect them. Incomplete scans, missing prices, and unavailable
-computers withhold the estimate. A previous complete calculation is labeled with its time.
+Model mix and missing history affect them. Incomplete scans and missing prices withhold a new
+current estimate while a refresh is pending; previously saved exact costs remain labeled with
+their calculation time. A qualified earlier reset cycle can provide a labeled provisional model
+and value estimate until current costs are ready. Within the same cycle, the last complete cost
+remains visible through its recorded date while the scan warms, using that saved percentage
+denominator until a newer complete reading replaces it.
 
-Expand **Tracking and computers** to choose the quota source and computers for cost comparison.
-Select computers using the same Codex account. Percentages are never added across machines.
+The monitor defaults to the quota-source computer. Use **Tracking and computers** to opt in to
+other computers for cost comparison. Selecting an unavailable computer withholds the combined
+estimate. Select computers using the same Codex account. Percentages are never added across machines.
 The tracker does not verify account identity or identify chats copied between distinct sources.
 The power monitor is separate and does not contribute to Codex quota totals.

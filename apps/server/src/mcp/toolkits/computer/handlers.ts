@@ -80,7 +80,7 @@ export const computerHandlers = {
   computer_open_url: Effect.fn("ComputerToolkit.computer_open_url")(function* ({ url }) {
     yield* McpInvocationContext.requireMcpCapability("computer");
     const launcher = yield* ExternalLauncher.ExternalLauncher;
-    yield* launcher.launchBrowser(url, { application: "chrome" }).pipe(
+    yield* launcher.launchBrowser(url).pipe(
       Effect.tapError((cause) =>
         Effect.logError("failed to open an agent-requested URL in Chrome", {
           errorTag: cause._tag,

@@ -99,3 +99,7 @@ export function resetPrimaryEnvironmentDescriptorForTests(): void {
   primaryEnvironmentDescriptorPromise = null;
   primaryEnvironmentDescriptor = null;
 }
+
+export const __resetPrimaryEnvironmentBootstrapForTests = resetPrimaryEnvironmentDescriptorForTests;
+export const __resetPrimaryEnvironmentDescriptorBootstrapForTests =
+  resetPrimaryEnvironmentDescriptorForTests;

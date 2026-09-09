@@ -31,16 +31,6 @@ function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
   };
 }
 
-function position(overrides: Partial<CachedFile["position"]> = {}): CachedFile["position"] {
-  return {
-    resumeOffset: 120,
-    guardLength: 64,
-    guardHash: 0xdeadbeef,
-    codexState: null,
-    ...overrides,
-  };
-}
-
 function cacheWith(entries: readonly [string, number, readonly UsageRecord[]][]): ScanCache {
   const cache: ScanCache = new Map();
   for (const [path, mtimeMs, records] of entries) {
@@ -49,14 +39,29 @@ function cacheWith(entries: readonly [string, number, readonly UsageRecord[]][])
       mtimeMs,
       provider: "claude",
       records,
-      tailRecords: [],
-      position: position(),
     });
   }
   return cache;
 }
 
 describe("scan cache round trip", () => {
+  it("invalidates pre-cross-home-dedup caches", () => {
+    const encoded = encodeScanCache(
+      new Map([
+        [
+          "/codex.jsonl",
+          {
+            size: 10,
+            mtimeMs: 100,
+            provider: "codex" as const,
+            records: [record({ provider: "codex" })],
+          },
+        ],
+      ]),
+    );
+    expect(decodeScanCache({ ...JSON.parse(JSON.stringify(encoded)), version: 5 }).size).toBe(0);
+  });
+
   it("restores records unchanged", () => {
     const original = cacheWith([
       ["/a.jsonl", 100, [record(), record({ dedupeKey: "msg_2:", model: "claude-opus-5" })]],
@@ -65,29 +70,24 @@ describe("scan cache round trip", () => {
     original.set("/grok.jsonl", {
       size: 40,
       mtimeMs: 300,
-      provider: "grok",
+      provider: "opencode",
       records: [
-        record({ provider: "grok", model: "grok-4.5-build", dedupeKey: "s:p:grok-4.5-build" }),
+        record({ provider: "opencode", model: "opencode-build", dedupeKey: "s:p:opencode-build" }),
       ],
-      tailRecords: [record({ provider: "grok", model: "grok-4.5-build", dedupeKey: null })],
-      position: position({ resumeOffset: 30, guardLength: 30, guardHash: 123 }),
     });
     original.set("/codex.jsonl", {
       size: 80,
       mtimeMs: 400,
       provider: "codex",
       records: [record({ provider: "codex", model: "gpt-5.2-codex", dedupeKey: null })],
-      tailRecords: [],
-      position: position({
-        codexState: {
-          model: "gpt-5.2-codex",
-          sessionId: "session-c",
-          lastUsageSignature: '{"input_tokens":1}',
-          sawSessionMeta: true,
-          suppressingForkCopies: false,
-          forkCopyAnchorMs: 0,
-        },
-      }),
+      codexState: {
+        model: "gpt-5.2-codex",
+        sessionId: "session-c",
+        lastUsageSignature: '{"input_tokens":1}',
+        sawSessionMeta: true,
+        suppressingForkCopies: false,
+        forkCopyAnchorMs: 0,
+      },
     });
 
     const restored = decodeScanCache(JSON.parse(JSON.stringify(encodeScanCache(original))));
@@ -99,37 +99,66 @@ describe("scan cache round trip", () => {
     expect(restored.get("/codex.jsonl")).toEqual(original.get("/codex.jsonl"));
   });
 
-  it("drops an entry whose persisted parse state is corrupt", () => {
-    // Resuming with a bad reducer state would attach appended usage to the
-    // wrong model or replay fork-copied history; that entry must cold parse.
+  it("drops an entry whose persisted record row is corrupt", () => {
+    // A malformed compact row must cold parse rather than silently dropping
+    // or fabricating usage.
     const encoded = encodeScanCache(cacheWith([["/a.jsonl", 100, [record()]]]));
     const poisoned = {
       ...encoded,
       files: {
-        "/a.jsonl": { ...encoded.files["/a.jsonl"]!, cs: { model: 42 } },
+        "/a.jsonl": { ...encoded.files["/a.jsonl"]!, r: [[1, 42]] },
       },
     };
 
     expect(decodeScanCache(JSON.parse(JSON.stringify(poisoned))).has("/a.jsonl")).toBe(false);
   });
 
-  it("drops an entry whose guard length is outside the supported range", () => {
-    // The guard length sizes a Buffer in the reader; a bogus value would make
-    // every parse of that file fail and silently drop its usage.
+  it("drops an entry whose persisted Codex state is corrupt", () => {
+    const encoded = encodeScanCache(
+      new Map([
+        [
+          "/codex.jsonl",
+          {
+            size: 10,
+            mtimeMs: 100,
+            provider: "codex",
+            records: [record({ provider: "codex" })],
+            codexState: {
+              model: "gpt-5.2-codex",
+              sessionId: "session-c",
+              lastUsageSignature: null,
+              sawSessionMeta: true,
+              suppressingForkCopies: false,
+              forkCopyAnchorMs: 0,
+            },
+          },
+        ],
+      ]),
+    );
+    const poisoned = {
+      ...encoded,
+      files: { "/codex.jsonl": { ...encoded.files["/codex.jsonl"]!, c: [42] } },
+    };
+    expect(decodeScanCache(JSON.parse(JSON.stringify(poisoned))).has("/codex.jsonl")).toBe(false);
+  });
+
+  it("drops an entry whose compact row contains invalid intern indexes", () => {
     const encoded = encodeScanCache(cacheWith([["/a.jsonl", 100, [record()]]]));
     const poisoned = {
       ...encoded,
-      files: { "/a.jsonl": { ...encoded.files["/a.jsonl"]!, gl: 1e20 } },
+      files: {
+        "/a.jsonl": { ...encoded.files["/a.jsonl"]!, r: [[1, 99, 0, 1, 1, 1, 1, 0, null, null]] },
+      },
     };
 
     expect(decodeScanCache(JSON.parse(JSON.stringify(poisoned))).has("/a.jsonl")).toBe(false);
   });
 
-  it("rejects a document from the previous cache version", () => {
+  it("accepts a document from a supported previous cache version", () => {
     const encoded = encodeScanCache(cacheWith([["/a.jsonl", 100, [record()]]]));
-    const previous = { ...encoded, version: 1 };
+    const previous = { ...encoded, version: 2 };
 
-    expect(decodeScanCache(JSON.parse(JSON.stringify(previous))).size).toBe(0);
+    expect(decodeScanCache(JSON.parse(JSON.stringify(previous))).size).toBe(1);
   });
 
   it("interns repeated model and session strings", () => {
@@ -161,22 +190,20 @@ describe("scan cache round trip", () => {
     const cached = original.get("/codex.jsonl")!;
     original.set("/codex.jsonl", {
       ...cached,
-      position: position({
-        codexState: {
-          model: "gpt-5.6-sol",
-          sessionId: "session-codex",
-          lastUsageSignature: '{"input_tokens":10}',
-          sawSessionMeta: true,
-          suppressingForkCopies: false,
-          forkCopyAnchorMs: 123,
-        },
-      }),
+      codexState: {
+        model: "gpt-5.6-sol",
+        sessionId: "session-codex",
+        lastUsageSignature: '{"input_tokens":10}',
+        sawSessionMeta: true,
+        suppressingForkCopies: false,
+        forkCopyAnchorMs: 123,
+      },
     });
 
     const restored = decodeScanCache(JSON.parse(JSON.stringify(encodeScanCache(original))));
 
-    expect(restored.get("/codex.jsonl")?.position.codexState).toEqual(
-      original.get("/codex.jsonl")?.position.codexState,
+    expect(restored.get("/codex.jsonl")?.codexState).toEqual(
+      original.get("/codex.jsonl")?.codexState,
     );
   });
 
@@ -195,21 +222,20 @@ describe("scan cache round trip", () => {
     const encoded = encodeScanCache(cacheWith([["/a.jsonl", 100, [record()]]]), coverage);
     const v3 = { ...encoded, version: 3 };
 
-    expect(
-      decodeScanCache(JSON.parse(JSON.stringify(v3))).get("/a.jsonl")?.position.codexState,
-    ).toBe(null);
+    expect(decodeScanCache(JSON.parse(JSON.stringify(v3))).get("/a.jsonl")?.codexState).toBe(
+      undefined,
+    );
     expect(decodeScanCoverage(JSON.parse(JSON.stringify(v3)))).toEqual(coverage);
   });
 
-  it("keeps v4 provider caches but invalidates old AI Studio parsing and coverage", () => {
+  it("invalidates old Codex parsing while retaining its coverage", () => {
     const cache = cacheWith([["/codex.jsonl", 100, [record({ provider: "codex" })]]]);
+    cache.set("/codex.jsonl", { ...cache.get("/codex.jsonl")!, provider: "codex" });
     cache.set("/ai-studio.json", {
       size: 10,
       mtimeMs: 100,
       provider: "aistudio",
       records: [record({ provider: "aistudio" })],
-      tailRecords: [],
-      position: position(),
     });
     const encoded = encodeScanCache(cache, [
       { provider: "codex", rootPath: "/sessions", sinceMs: 100, scannedAtMs: 200 },
@@ -217,36 +243,12 @@ describe("scan cache round trip", () => {
     ]);
     const v4 = { ...encoded, version: 4 };
 
-    expect([...decodeScanCache(JSON.parse(JSON.stringify(v4))).keys()]).toEqual(["/codex.jsonl"]);
+    expect([...decodeScanCache(JSON.parse(JSON.stringify(v4))).keys()]).toEqual([
+      "/ai-studio.json",
+    ]);
     expect(decodeScanCoverage(JSON.parse(JSON.stringify(v4)))).toEqual([
       { provider: "codex", rootPath: "/sessions", sinceMs: 100, scannedAtMs: 200 },
     ]);
-  });
-
-  it("keeps fork v5 warm records but discards its unguarded append cursor", () => {
-    const cachedRecord = record({ provider: "codex", serviceTier: "priority", turnId: "turn-a" });
-    const encoded = encodeScanCache(cacheWith([["/fork.jsonl", 100, [cachedRecord]]]));
-    const entry = encoded.files["/fork.jsonl"]!;
-    const restored = decodeScanCache({
-      ...encoded,
-      version: 5,
-      files: {
-        "/fork.jsonl": {
-          s: entry.s,
-          m: entry.m,
-          p: "codex",
-          r: entry.r.map((row) => row.slice(0, 12)),
-          c: ["gpt-5.6-sol", "session-a", null, true, false, 0, "priority", "turn-a"],
-        },
-      },
-    }).get("/fork.jsonl")!;
-    expect(restored.records[0]).toMatchObject({
-      serviceTier: "priority",
-      serviceTierSource: "transcript",
-      turnId: "turn-a",
-    });
-    expect(restored.position.resumeOffset).toBe(0);
-    expect(restored.tailRecords).toEqual([]);
   });
 
   it("treats a corrupt or foreign document as an empty cache", () => {

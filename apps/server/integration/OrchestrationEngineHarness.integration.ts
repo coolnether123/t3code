@@ -67,6 +67,7 @@ import {
 } from "../src/orchestration/Services/OrchestrationEngine.ts";
 import { ThreadDeletionReactor } from "../src/orchestration/Services/ThreadDeletionReactor.ts";
 import * as ThreadSettlementReactor from "../src/orchestration/ThreadSettlementReactor.ts";
+import * as ThreadPullRequestReactor from "../src/orchestration/ThreadPullRequestReactor.ts";
 import { OrchestrationReactor } from "../src/orchestration/Services/OrchestrationReactor.ts";
 import { ProjectionSnapshotQuery } from "../src/orchestration/Services/ProjectionSnapshotQuery.ts";
 import {
@@ -86,10 +87,8 @@ import { VcsStatusBroadcaster } from "../src/vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../src/git/GitWorkflowService.ts";
 import * as VcsProcess from "../src/vcs/VcsProcess.ts";
 import * as AgentAwarenessRelay from "../src/relay/AgentAwarenessRelay.ts";
-import * as WorkerService from "../src/worker/WorkerService.ts";
 import * as PullRequestService from "../src/pullRequest/PullRequestService.ts";
-
-const decodeCodexSettings = Schema.decodeEffect(CodexSettings);
+import * as WorkerService from "../src/worker/WorkerService.ts";
 
 const testWorkerService = WorkerService.WorkerService.of({
   start: () => Effect.die("Worker service is not used in this test"),
@@ -101,11 +100,15 @@ const testWorkerService = WorkerService.WorkerService.of({
   interrupt: () => Effect.die("Worker service is not used in this test"),
   close: () => Effect.die("Worker service is not used in this test"),
   respondToApproval: () => Effect.die("Worker service is not used in this test"),
-  reconcileParentAfterRewind: () => Effect.die("Worker service is not used in this test"),
+  // Rewind reconciles worker parent timelines in the normal path. This
+  // fixture has no workers, so that reconciliation is a valid no-op.
+  reconcileParentAfterRewind: () => Effect.succeed([]),
   handleProviderEvent: () => Effect.void,
   recover: Effect.void,
   stream: Stream.empty,
 });
+
+const decodeCodexSettings = Schema.decodeEffect(CodexSettings);
 
 function runGit(cwd: string, args: ReadonlyArray<string>) {
   return NodeChildProcess.execFileSync("git", args, {
@@ -410,6 +413,12 @@ export const makeOrchestrationIntegrationHarness = (
         Layer.succeed(ThreadDeletionReactor, {
           start: () => Effect.void,
           drainThrough: () => Effect.void,
+        }),
+      ),
+      Layer.provideMerge(
+        Layer.succeed(ThreadPullRequestReactor.ThreadPullRequestReactor, {
+          start: () => Effect.void,
+          drain: Effect.void,
         }),
       ),
       Layer.provideMerge(

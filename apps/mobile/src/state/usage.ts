@@ -10,18 +10,18 @@
  * @module state/usage
  */
 import { useAtomValue } from "@effect/atom-react";
+import { executeAtomQuery } from "@t3tools/client-runtime/state/runtime";
+import { usageQueryInput } from "@t3tools/client-runtime/usageRefresh";
 import {
   USAGE_CONTRACT_VERSION,
   type EnvironmentId,
   type UsageSummary,
   type UsageSummaryInput,
 } from "@t3tools/contracts";
-import { executeAtomQuery, runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 import { mergeUsage, type EnvironmentUsage, type MergedUsage } from "@t3tools/shared/usageMerge";
-import { usageQueryInput } from "@t3tools/client-runtime/usageRefresh";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/unstable/reactivity";
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 
 import { appAtomRegistry } from "./atom-registry";
 import { environmentPresentations } from "./presentation";
@@ -73,10 +73,7 @@ export interface UsageView {
    * improve by waiting on them, so they must not read as "still reporting".
    */
   readonly isPartial: boolean;
-  readonly refresh: (
-    input?: UsageSummaryInput,
-    refreshRates?: boolean,
-  ) => Promise<readonly EnvironmentUsageStatus[]>;
+  readonly refresh: (input?: UsageSummaryInput) => Promise<readonly EnvironmentUsageStatus[]>;
 }
 
 export function useUsage(input: UsageSummaryInput): UsageView {
@@ -96,44 +93,21 @@ export function useUsage(input: UsageSummaryInput): UsageView {
   );
   const atom = usageByWindowAtom(windowKey);
   const environments = useAtomValue(atom);
-  const retriedFailures = useRef(new Set<string>());
 
   // Refreshing only the derived atom would re-read the per-environment SWR
   // queries within their stale window and change nothing. Refresh each
   // environment's query so pull-to-refresh always rescans.
-  //
-  // Each environment refetches model pricing first, so a model released since
-  // its last daily fetch gets priced by the rescan. The rescan runs whether or
-  // not the refetch succeeds: an offline environment still recounts tokens.
   const refresh = useCallback(
-    async (nextInput?: UsageSummaryInput, refreshRates = true) => {
+    async (nextInput?: UsageSummaryInput) => {
       const input = nextInput
         ? usageQueryInput(nextInput, USAGE_CONTRACT_VERSION)
         : (JSON.parse(windowKey) as UsageSummaryInput);
-      const requestInput = { ...input, refresh: nextInput?.refresh ?? true };
       return Promise.all(
         environments.map(async (environment) => {
-          const { environmentId } = environment;
-          if (refreshRates && !input.quotaHistoryOnly) {
-            await runAtomCommand(
-              appAtomRegistry,
-              serverEnvironment.refreshUsageRates,
-              { environmentId, input: {} },
-              { reportFailure: false },
-            );
-          }
           const result = await executeAtomQuery(
             appAtomRegistry,
-            serverEnvironment.usageSummary({ environmentId, input: requestInput }),
+            serverEnvironment.usageSummary({ environmentId: environment.environmentId, input }),
             { refresh: true, timeoutMs: 30_000, reportFailure: false, reportDefect: false },
-          );
-          // A forced scan has a distinct request key. Invalidate the query
-          // observed by this view so it reads the freshly computed server cache.
-          appAtomRegistry.refresh(
-            serverEnvironment.usageSummary({
-              environmentId,
-              input: JSON.parse(windowKey) as UsageSummaryInput,
-            }),
           );
           return {
             ...environment,
@@ -146,20 +120,6 @@ export function useUsage(input: UsageSummaryInput): UsageView {
     },
     [environments, windowKey],
   );
-
-  // A retained connection failure should recover when this route is reopened.
-  // Retry each failed set once per window, without refetching public prices.
-  useEffect(() => {
-    const failedIds = environments
-      .filter((environment) => environment.error !== null)
-      .map((environment) => environment.environmentId)
-      .sort();
-    if (failedIds.length === 0) return;
-    const retryKey = `${windowKey}:${failedIds.join(",")}`;
-    if (retriedFailures.current.has(retryKey)) return;
-    retriedFailures.current.add(retryKey);
-    void refresh(undefined, false);
-  }, [environments, refresh, windowKey]);
 
   const merged = useMemo(() => {
     const answered: EnvironmentUsage[] = environments.flatMap((environment) =>
@@ -182,14 +142,9 @@ export function useUsage(input: UsageSummaryInput): UsageView {
   useEffect(() => {
     if (!hasDeferredTranscripts || environments.some((environment) => environment.isPending))
       return;
-    // Continue bounded scans without re-fetching public prices for every batch.
-    const timer = setTimeout(
-      () =>
-        void refresh({ ...(JSON.parse(windowKey) as UsageSummaryInput), refresh: false }, false),
-      750,
-    );
+    const timer = setTimeout(() => void refresh(), 750);
     return () => clearTimeout(timer);
-  }, [environments, hasDeferredTranscripts, refresh, windowKey]);
+  }, [environments, hasDeferredTranscripts, refresh]);
 
   const answeredCount = environments.filter((environment) => environment.summary !== null).length;
   const stillReporting = environments.filter(
