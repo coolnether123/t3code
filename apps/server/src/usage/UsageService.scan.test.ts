@@ -15,7 +15,11 @@ import * as ServerSettings from "../serverSettings.ts";
 import { make } from "./UsageService.ts";
 import { encodeScanCache } from "./usageScanCache.ts";
 import { initialCodexScanState } from "./usageTranscripts.ts";
-import { readTranscriptRecords, transcriptCursorIsLineBoundary } from "./usageTranscriptReader.ts";
+import {
+  readRepeatedInputRecords,
+  readTranscriptRecords,
+  transcriptCursorIsLineBoundary,
+} from "./usageTranscriptReader.ts";
 
 const files = [
   { path: "/fixture/large.jsonl", size: 200_000_040, mtimeMs: Date.parse("2026-08-30T23:00:00Z") },
@@ -31,6 +35,7 @@ vi.mock("./usageTranscriptReader.ts", async (importOriginal) => ({
   readDirectoryVolumeId: vi.fn(async () => "fixture"),
   transcriptCursorIsLineBoundary: vi.fn(async () => true),
   readTranscriptRecords: vi.fn(async () => ({ records: [], codexState: initialCodexScanState() })),
+  readRepeatedInputRecords: vi.fn(async () => null),
 }));
 
 const testLayer = Layer.mergeAll(
@@ -335,6 +340,60 @@ describe("incremental scan integration", () => {
       expect(transcriptCursorIsLineBoundary).toHaveBeenCalledTimes(2);
       expect(writes.some((path) => path.endsWith("contents.tmp"))).toBe(true);
       expect(writes.some((path) => path.endsWith("usage-scan-cache.json"))).toBe(false);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("defers old warm entries until repeated-input metadata is rebuilt", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const encodedCache = encodeScanCache(
+        new Map(
+          files.map((file) => [
+            file.path,
+            {
+              ...file,
+              provider: "codex" as const,
+              records: [],
+              codexState: initialCodexScanState(),
+            },
+          ]),
+        ),
+      );
+      const oldCache = encodeJson({ ...encodedCache, version: 6 });
+      vi.mocked(readTranscriptRecords).mockClear();
+      vi.mocked(readRepeatedInputRecords).mockClear();
+      const service = yield* make.pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          exists: () => Effect.succeed(true),
+          readFileString: (path, ...args) =>
+            path.endsWith("usage-scan-cache.json")
+              ? Effect.succeed(oldCache)
+              : fs.readFileString(path, ...args),
+        }),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("Offline fixture")),
+        ),
+      );
+      const result = yield* service.readSummary({
+        sinceDay: UsageDay.make("2026-08-29"),
+        untilDay: UsageDay.make("2026-09-02"),
+        timeZone: "UTC",
+        providers: ["codex"],
+        includeRepeatedInput: true,
+        refresh: true,
+      });
+
+      const codexSource = result.sources.find((source) => source.fingerprint.provider === "codex");
+      expect(codexSource?.status).toBe("partial");
+      expect(readTranscriptRecords).not.toHaveBeenCalled();
+      expect(readRepeatedInputRecords).toHaveBeenCalledTimes(1);
+      expect(readRepeatedInputRecords).toHaveBeenCalledWith(
+        files[1]!.path,
+        expect.objectContaining({ startByte: 0 }),
+      );
+      expect(readRepeatedInputRecords).not.toHaveBeenCalledWith(files[0]!.path, expect.anything());
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 

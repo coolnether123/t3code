@@ -1028,13 +1028,51 @@ export const make = Effect.gen(function* () {
             file.size > cached.size &&
             (provider === "claude" || (provider === "codex" && cached.codexState !== undefined)) &&
             (yield* Effect.promise(() => transcriptCursorIsLineBoundary(file.path, cached.size)));
-          return { ...file, startByte: warm ? file.size : appendable ? cached.size : 0 };
+          const startByte = warm ? file.size : appendable ? cached.size : 0;
+          const parserMatches = cached?.repeatedInputVersion === REPEATED_INPUT_CACHE_VERSION;
+          const repeatedInputWarm =
+            repeatedInputEnabled &&
+            provider === "codex" &&
+            warm &&
+            parserMatches &&
+            cached?.repeatedInputObservations !== undefined;
+          const repeatedInputAppendable =
+            repeatedInputEnabled &&
+            provider === "codex" &&
+            !warm &&
+            parserMatches &&
+            cached !== undefined &&
+            cached.provider === provider &&
+            cached.repeatedInputObservations !== undefined &&
+            file.size > cached.size &&
+            cached.prefixFingerprint !== undefined &&
+            (yield* Effect.promise(() =>
+              transcriptAppendIsSafe(file.path, {
+                offset: cached.size,
+                prefixFingerprint: cached.prefixFingerprint!,
+              }),
+            ));
+          const repeatedInputStartByte =
+            !repeatedInputEnabled || provider !== "codex"
+              ? file.size
+              : repeatedInputWarm
+                ? file.size
+                : repeatedInputAppendable
+                  ? cached!.size
+                  : 0;
+          return {
+            ...file,
+            startByte,
+            repeatedInputStartByte,
+            repeatedInputWarm,
+            repeatedInputAppendable,
+          };
         }),
         { concurrency: 16 },
       );
       const selection = selectTranscriptFilesForScan(
         plannedFiles,
-        (file) => file.size - file.startByte,
+        (file) => Math.max(file.size - file.startByte, file.size - file.repeatedInputStartByte),
         MAX_COLD_SCAN_BYTES_PER_SOURCE,
       );
       if (repeatedInputEnabled && provider === "codex" && selection.deferredFiles > 0) {
@@ -1080,32 +1118,12 @@ export const make = Effect.gen(function* () {
           file.startByte,
         );
         if (repeatedInputEnabled && provider === "codex") {
-          const warm =
-            cachedBefore !== undefined &&
-            cachedBefore.size === file.size &&
-            cachedBefore.mtimeMs === file.mtimeMs &&
-            cachedBefore.provider === provider;
-          const parserMatches = cachedBefore?.repeatedInputVersion === REPEATED_INPUT_CACHE_VERSION;
-          const repeatedWarm =
-            warm && parserMatches && cachedBefore?.repeatedInputObservations !== undefined;
-          const appendable =
-            !warm &&
-            parserMatches &&
-            cachedBefore !== undefined &&
-            cachedBefore.provider === provider &&
-            cachedBefore.repeatedInputObservations !== undefined &&
-            file.size > cachedBefore.size &&
-            cachedBefore.prefixFingerprint !== undefined &&
-            (yield* Effect.promise(() =>
-              transcriptAppendIsSafe(file.path, {
-                offset: cachedBefore.size,
-                prefixFingerprint: cachedBefore.prefixFingerprint!,
-              }),
-            ));
+          const repeatedWarm = file.repeatedInputWarm;
+          const appendable = file.repeatedInputAppendable;
           let nextObservations = repeatedWarm ? cachedBefore?.repeatedInputObservations : undefined;
           let nextGaps = repeatedWarm ? cachedBefore?.repeatedInputGaps : undefined;
           if (!repeatedWarm) {
-            const repeatedStartByte = appendable ? cachedBefore!.size : 0;
+            const repeatedStartByte = file.repeatedInputStartByte;
             const parserState = appendable
               ? repeatedInputParserStateForCached(cachedBefore!, null, hostId)
               : undefined;
