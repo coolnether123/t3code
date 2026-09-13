@@ -908,8 +908,8 @@ export function RepeatedInputSection({
               </Text>
               {view.coverage.unknown !== null ? (
                 <Text className="text-xs text-foreground-muted">
-                  {formatCount(view.coverage.unknown)} observations could not be attributed to one
-                  repeated payload.
+                  {formatCount(view.coverage.unknown)} unresolved attribution units could not be
+                  assigned to one repeated payload.
                 </Text>
               ) : null}
               {view.coverage.gaps.map((gap) => (

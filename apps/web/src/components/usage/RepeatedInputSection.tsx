@@ -958,13 +958,14 @@ export function RepeatedInputSection({
           <summary className="cursor-pointer font-medium focus-visible:outline-2 focus-visible:outline-ring">
             Coverage and unknown-attribution gaps{" "}
             <span className="ml-1 font-normal text-muted-foreground">
-              {integer(data.coverageGaps.reduce((sum, gap) => sum + gap.count, 0))} observations
+              {integer(data.coverageGaps.length)} gap categories
             </span>
           </summary>
           <div className="mt-2 space-y-1 text-muted-foreground">
             {unknown > 0 ? (
               <p>
-                {integer(unknown)} observations could not be attributed to one repeated payload.
+                {integer(unknown)} unresolved attribution units could not be assigned to one
+                repeated payload.
               </p>
             ) : null}
             {data.coverageGaps.map((gap) => (

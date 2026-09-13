@@ -528,7 +528,7 @@ describe("RepeatedInputSection", () => {
     );
 
     expect(markup).toContain("Coverage and unknown-attribution gaps");
-    expect(markup).toContain("4 observations could not be attributed");
+    expect(markup).toContain("4 unresolved attribution units");
     expect(markup).toContain("Transcript too large to inspect safely.");
     expect(markup).toContain("No repeated payload was confirmed");
   });
