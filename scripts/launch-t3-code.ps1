@@ -199,7 +199,7 @@ function Get-FileSha256 {
 }
 
 function Get-TextSha256 {
-    param([Parameter(Mandatory)][string]$Text)
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
     $algorithm = [System.Security.Cryptography.SHA256]::Create()
     try {
         $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
