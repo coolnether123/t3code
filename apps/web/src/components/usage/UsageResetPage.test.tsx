@@ -200,6 +200,21 @@ describe("Codex monitor page", () => {
               firstRemainingPercent: 80,
               lastRemainingPercent: 60,
               resetsAt: "2026-08-28T00:00:00Z",
+              models: [
+                {
+                  model: "gpt-6-astra",
+                  costUsd: 30,
+                  records: 4,
+                  unpricedRecords: 0,
+                  totals: {
+                    uncachedInputTokens: 1_000_000,
+                    cachedInputTokens: 200_000,
+                    cacheCreationTokens: 50_000,
+                    outputTokens: 40_000,
+                    reasoningTokens: 20_000,
+                  },
+                },
+              ],
             },
           ],
           quotaHistory: {
@@ -235,6 +250,11 @@ describe("Codex monitor page", () => {
     const markup = renderToStaticMarkup(<UsageResetPage />);
     expect(markup).toContain("$30 observed cost");
     expect(markup).toContain("Dollar estimate not established");
+    expect(markup).toContain("Per-model usage");
+    expect(markup).toContain("1.25M input");
+    expect(markup).toContain("40K output");
+    expect(markup).toContain("gpt-6-astra");
+    expect(markup).toContain("$30.00");
   });
 
   it.each(["failed", "empty"] as const)(
@@ -397,7 +417,7 @@ describe("Codex monitor page", () => {
     },
   );
 
-  it("labels an ambiguous zero-use window without inventing a dollar value", () => {
+  it("does not list a clock-only change with an unchanged balance as a reset", () => {
     const fingerprint = {
       hostId: "desktop",
       provider: "codex",
@@ -439,7 +459,8 @@ describe("Codex monitor page", () => {
       },
     ];
     const markup = renderToStaticMarkup(<UsageResetPage />);
-    expect(markup).toContain("No quota use observed in this interval");
+    expect(markup).toContain("No reset observed since");
+    expect(markup).not.toContain("Usage window changed");
     expect(markup).not.toContain("$0.00 unused");
   });
 
@@ -467,8 +488,8 @@ describe("Codex monitor page", () => {
           },
         }),
       );
-      const currentStart = bridge === "short" ? "2026-08-30T19:20:00Z" : "2026-08-30T20:10:00Z";
-      const currentEnd = bridge === "short" ? "2026-08-30T19:25:00Z" : "2026-08-30T20:15:00Z";
+      const currentStart = bridge === "short" ? "2026-08-30T19:20:00Z" : "2026-08-30T20:20:00Z";
+      const currentEnd = bridge === "short" ? "2026-08-30T19:25:00Z" : "2026-08-30T20:25:00Z";
       const currentSamples = [
         {
           observedAt: "2026-08-30T18:00:00Z",

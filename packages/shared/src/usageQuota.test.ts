@@ -172,7 +172,7 @@ describe("quota value estimates", () => {
     });
   });
 
-  it("crosses zero-use ambiguous timer-adjustment periods to the last completed calibration", () => {
+  it("coalesces zero-use timer adjustments and keeps the last completed calibration", () => {
     const periods = quotaPeriods([
       sample("2026-07-21T16:00:00Z", 80, "2026-07-21T17:20:00Z"),
       sample("2026-07-21T17:00:00Z", 60, "2026-07-21T17:20:00Z"),
@@ -181,12 +181,7 @@ describe("quota value estimates", () => {
       sample("2026-07-21T17:30:00Z", 100, "2026-07-21T17:40:00Z"),
       sample("2026-07-21T17:40:00Z", 98, "2026-07-21T17:40:00Z"),
     ]);
-    expect(periods.map((candidate) => candidate.resetKind)).toEqual([
-      "unexpected",
-      "ambiguous",
-      "ambiguous",
-      "unobserved",
-    ]);
+    expect(periods.map((candidate) => candidate.resetKind)).toEqual(["unexpected", "unobserved"]);
     const source = {
       period: periods[0]!,
       value: {
@@ -199,20 +194,8 @@ describe("quota value estimates", () => {
       key: "source",
       calculatedAt: "2026-07-21T17:00:00Z",
     };
-    const bridge = (period: (typeof periods)[number], key: string) => ({
-      period,
-      value: {
-        costUsd: null,
-        usdPerPercentagePoint: null,
-        remainingValueUsd: null,
-        unusedValueUsd: null,
-        reason: "waiting",
-      },
-      key,
-      calculatedAt: "2026-07-21T17:30:00Z",
-    });
     const current = {
-      period: periods[3]!,
+      period: periods[1]!,
       value: {
         costUsd: 4,
         usdPerPercentagePoint: null,
@@ -223,10 +206,7 @@ describe("quota value estimates", () => {
       key: "current",
       calculatedAt: "2026-07-21T17:30:00Z",
     };
-    const bridged = quotaValueWithHistoricalCalibration(current, bridge(periods[2]!, "bridge-2"), [
-      source,
-      bridge(periods[1]!, "bridge-1"),
-    ]);
+    const bridged = quotaValueWithHistoricalCalibration(current, source);
     expect(bridged).toMatchObject({
       costUsd: 4,
       usdPerPercentagePoint: 2,
@@ -236,6 +216,26 @@ describe("quota value estimates", () => {
         until: periods[0]!.last.observedAt,
       },
     });
+  });
+
+  it("ignores a short-lived switch that returns to the original quota window", () => {
+    const periods = quotaPeriods([
+      sample("2026-09-08T01:25:00Z", 100, "2026-09-15T01:25:00Z"),
+      sample("2026-09-09T17:10:00Z", 1, "2026-09-15T01:25:00Z"),
+      sample("2026-09-09T17:15:00Z", 47, "2026-09-14T14:52:00Z"),
+      sample("2026-09-09T17:35:00Z", 47, "2026-09-14T14:52:00Z"),
+      sample("2026-09-09T17:40:00Z", 1, "2026-09-15T01:25:00Z"),
+      sample("2026-09-12T08:05:00Z", 0, "2026-09-15T01:25:00Z"),
+      sample("2026-09-12T08:10:00Z", 100, "2026-09-19T08:10:00Z"),
+    ]);
+    expect(periods).toHaveLength(2);
+    expect(periods[0]).toMatchObject({
+      resetKind: "unexpected",
+      usedPercentagePoints: 100,
+      sampleCount: 4,
+    });
+    expect(periods[0]?.last.observedAt).toBe("2026-09-12T08:05:00Z");
+    expect(periods[1]).toMatchObject({ resetKind: "unobserved", usedPercentagePoints: 0 });
   });
 
   it("rejects a timer bridge when usage begins across its boundary", () => {
@@ -272,7 +272,7 @@ describe("quota value estimates", () => {
       calculatedAt: "2026-07-21T17:30:00Z",
     });
     const current = {
-      period: periods[3]!,
+      period: periods[2]!,
       value: {
         costUsd: 4,
         usdPerPercentagePoint: null,
@@ -284,10 +284,7 @@ describe("quota value estimates", () => {
       calculatedAt: "2026-07-21T17:40:00Z",
     };
     expect(
-      quotaValueWithHistoricalCalibration(current, bridge(periods[2]!, "bridge"), [
-        source,
-        bridge(periods[1]!, "bridge-1"),
-      ]),
+      quotaValueWithHistoricalCalibration(current, bridge(periods[1]!, "bridge"), [source]),
     ).toMatchObject({ costUsd: 4, usdPerPercentagePoint: null, remainingValueUsd: null });
   });
 
@@ -312,20 +309,8 @@ describe("quota value estimates", () => {
       key: "source",
       calculatedAt: "2026-07-21T17:00:00Z",
     };
-    const bridge = (period: (typeof periods)[number], key: string) => ({
-      period,
-      value: {
-        costUsd: null,
-        usdPerPercentagePoint: null,
-        remainingValueUsd: null,
-        unusedValueUsd: null,
-        reason: "waiting",
-      },
-      key,
-      calculatedAt: "2026-07-21T17:20:00Z",
-    });
     const current = {
-      period: periods[3]!,
+      period: periods[1]!,
       value: {
         costUsd: 4,
         usdPerPercentagePoint: null,
@@ -336,13 +321,8 @@ describe("quota value estimates", () => {
       key: "current",
       calculatedAt: "2026-07-21T17:20:00Z",
     };
-    const broken = { ...periods[1]!, next: periods[0]!.first };
-    expect(
-      quotaValueWithHistoricalCalibration(current, bridge(periods[2]!, "bridge"), [
-        source,
-        bridge(broken, "broken"),
-      ]),
-    ).toMatchObject({
+    const broken = { ...source, period: { ...periods[0]!, next: periods[0]!.first } };
+    expect(quotaValueWithHistoricalCalibration(current, broken)).toMatchObject({
       costUsd: 4,
       usdPerPercentagePoint: null,
     });
@@ -357,8 +337,8 @@ describe("quota value estimates", () => {
       sample("2026-07-21T18:30:00Z", 100, "2026-07-21T18:40:00Z"),
       sample("2026-07-21T18:40:00Z", 98, "2026-07-21T18:40:00Z"),
     ]);
-    expect(periods).toHaveLength(4);
-    expect(periods[2]!.next?.observedAt).toBe(periods[3]!.first.observedAt);
+    expect(periods).toHaveLength(3);
+    expect(periods[1]!.next?.observedAt).toBe(periods[2]!.first.observedAt);
     const source = {
       period: periods[0]!,
       value: {
@@ -396,10 +376,7 @@ describe("quota value estimates", () => {
       calculatedAt: "2026-07-21T18:40:00Z",
     };
     expect(
-      quotaValueWithHistoricalCalibration(current, bridge(periods[2]!, "bridge"), [
-        source,
-        bridge(periods[1]!, "bridge-1"),
-      ]),
+      quotaValueWithHistoricalCalibration(current, bridge(periods[1]!, "bridge"), [source]),
     ).toMatchObject({
       costUsd: 4,
       usdPerPercentagePoint: null,

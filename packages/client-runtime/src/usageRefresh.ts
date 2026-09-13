@@ -52,6 +52,7 @@ export function usageQueryInput(
     resolution: input.resolution,
     sinceTime: input.sinceTime,
     untilTime: input.untilTime,
+    includeRepeatedInput: input.includeRepeatedInput,
     includeQuotaHistory: input.includeQuotaHistory,
     quotaHistoryOnly: input.quotaHistoryOnly,
     quotaIntervals: input.quotaIntervals,

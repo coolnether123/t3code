@@ -6,12 +6,16 @@ import * as NodePath from "node:path";
 import { describe, expect, it } from "@effect/vitest";
 
 import {
+  readRepeatedInputRecords,
   readTranscriptRecords,
+  readTranscriptPrefixFingerprint,
   listTranscriptFiles,
   selectTranscriptFilesForScan,
+  transcriptAppendIsSafe,
   transcriptCursorIsLineBoundary,
   type TranscriptFile,
 } from "./usageTranscriptReader.ts";
+import { createRepeatedInputCatalog } from "./usageRepeatedInput.ts";
 
 const file = (path: string, size: number, mtimeMs: number): TranscriptFile => ({
   path,
@@ -213,6 +217,78 @@ describe("incremental transcript reads", () => {
       expect(appended?.records[0]?.model).toBe("gpt-5.6-sol");
       expect(appended?.records[0]?.sessionId).toBe("session-a");
       expect(appended?.records[0]?.totals.outputTokens).toBe(4);
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("validates an append cursor against the unchanged prefix", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-prefix-"));
+    const path = NodePath.join(directory, "rollout.jsonl");
+    const prefix = '{"type":"session_meta","payload":{"id":"s"}}\n';
+    try {
+      await NodeFSP.writeFile(path, prefix);
+      const fingerprint = await readTranscriptPrefixFingerprint(path, Buffer.byteLength(prefix));
+      expect(fingerprint).not.toBeNull();
+      expect(
+        await transcriptAppendIsSafe(path, {
+          offset: Buffer.byteLength(prefix),
+          prefixFingerprint: fingerprint!,
+        }),
+      ).toBe(true);
+      await NodeFSP.writeFile(path, `{"changed":true}\n${prefix}`);
+      expect(
+        await transcriptAppendIsSafe(path, {
+          offset: Buffer.byteLength(prefix),
+          prefixFingerprint: fingerprint!,
+        }),
+      ).toBe(false);
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("imports only appended Codex evidence and keeps raw source text local", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-repeat-"));
+    const path = NodePath.join(directory, "rollout.jsonl");
+    const skill = "private skill contents";
+    const catalog = createRepeatedInputCatalog([
+      { path: NodePath.join(directory, "SKILL.md"), content: skill, tokenCount: 3 },
+    ]);
+    const first =
+      [
+        JSON.stringify({
+          timestamp: "2026-09-13T00:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "session-a" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-09-13T00:00:01.000Z",
+          type: "turn_context",
+          payload: { turn_id: "turn-a", model: "gpt-5.6-sol" },
+        }),
+      ].join("\n") + "\n";
+    const appended =
+      JSON.stringify({
+        timestamp: "2026-09-13T00:00:02.000Z",
+        type: "response_item",
+        payload: { type: "custom_tool_call_output", id: "output-a", output: skill },
+      }) + "\n";
+    try {
+      await NodeFSP.writeFile(path, first);
+      const initial = await readRepeatedInputRecords(path, {
+        endByte: Buffer.byteLength(first) - 1,
+        catalog,
+      });
+      expect(initial?.observations).toEqual([]);
+      await NodeFSP.appendFile(path, appended);
+      const next = await readRepeatedInputRecords(path, {
+        startByte: Buffer.byteLength(first),
+        catalog,
+        ...(initial?.parserState === undefined ? {} : { parserState: initial.parserState }),
+      });
+      expect(next?.observations).toHaveLength(1);
+      expect(JSON.stringify(next?.observations)).not.toContain(skill);
     } finally {
       await NodeFSP.rm(directory, { recursive: true, force: true });
     }

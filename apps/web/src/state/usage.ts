@@ -96,6 +96,7 @@ export function useUsage(
       input.sinceTime,
       input.untilTime,
       input.includeQuotaHistory,
+      input.includeRepeatedInput,
       input.quotaHistoryOnly,
       input.quotaIntervals,
     ],

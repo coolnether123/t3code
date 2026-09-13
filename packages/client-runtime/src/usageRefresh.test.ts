@@ -122,4 +122,18 @@ describe("Codex monitor refresh", () => {
     };
     expect(JSON.stringify(usageQueryInput(a, 6))).toBe(JSON.stringify(usageQueryInput(b, 6)));
   });
+
+  it("preserves the repeated-input opt-in on the ordinary Usage request", () => {
+    expect(
+      usageQueryInput(
+        {
+          timeZone: "UTC",
+          sinceDay: summary.sinceDay,
+          untilDay: summary.untilDay,
+          includeRepeatedInput: true,
+        },
+        6,
+      ).includeRepeatedInput,
+    ).toBe(true);
+  });
 });

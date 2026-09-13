@@ -33,6 +33,15 @@ import {
   type UsageRecord,
 } from "./usageTranscripts.ts";
 import { parseAiStudioExport, parseChatGptExport } from "./usageImportedChats.ts";
+import {
+  initialRepeatedInputParserState,
+  parseCodexRepeatedInputLineDetailed,
+  type ParseCodexRepeatedInputOptions,
+  type RepeatedInputCatalog,
+  type RepeatedInputObservation,
+  type RepeatedInputParserState,
+  type RepeatedInputTokenizer,
+} from "./usageRepeatedInput.ts";
 
 export interface TranscriptFile {
   readonly path: string;
@@ -124,7 +133,7 @@ export async function listTranscriptFiles(
   // directory at a time made a warm refresh spend tens of seconds on metadata.
   // Breadth-first batches keep I/O bounded while allowing independent folders
   // to resolve together.
-  for (let offset = 0; offset < directories.length; ) {
+  for (let offset = 0; offset < directories.length;) {
     const batch = directories.slice(offset, offset + 64);
     offset += batch.length;
     const listings = await Promise.all(
@@ -248,6 +257,23 @@ export interface TranscriptReadResult {
   readonly codexState?: CodexScanState;
 }
 
+export interface RepeatedInputReadOptions extends Omit<
+  ParseCodexRepeatedInputOptions,
+  "project" | "environment"
+> {
+  readonly startByte?: number | undefined;
+  readonly endByte?: number | undefined;
+  readonly parserState?: RepeatedInputParserState | undefined;
+  readonly project?: string | null | undefined;
+  readonly environment?: string | null | undefined;
+}
+
+export interface RepeatedInputReadResult {
+  readonly observations: readonly RepeatedInputObservation[];
+  readonly gaps: readonly import("@t3tools/contracts").UsageRepeatedInputCoverageGap[];
+  readonly parserState: RepeatedInputParserState;
+}
+
 /** Whether an append cursor follows a complete JSONL record. */
 export async function transcriptCursorIsLineBoundary(
   filePath: string,
@@ -326,6 +352,102 @@ export async function readTranscriptRecords(
   }
 
   return provider === "codex" ? { records, codexState } : { records };
+}
+
+/**
+ * Streams Codex input evidence without returning transcript text. The cursor
+ * arguments mirror `readTranscriptRecords`, so the caller can feed only an
+ * append after validating the cached prefix fingerprint.
+ */
+export async function readRepeatedInputRecords(
+  filePath: string,
+  options: RepeatedInputReadOptions = {},
+): Promise<RepeatedInputReadResult | null> {
+  const parserState = options.parserState
+    ? { ...options.parserState }
+    : initialRepeatedInputParserState({
+        ...(options.project === undefined ? {} : { project: options.project }),
+        ...(options.environment === undefined ? {} : { environment: options.environment }),
+      });
+  const observations: RepeatedInputObservation[] = [];
+  const gaps: import("@t3tools/contracts").UsageRepeatedInputCoverageGap[] = [];
+  const start = options.startByte ?? 0;
+  const end = options.endByte;
+  if (end !== undefined && end < start) return { observations, gaps, parserState };
+
+  try {
+    const lines = NodeReadline.createInterface({
+      input: NodeFS.createReadStream(filePath, {
+        encoding: "utf8",
+        ...(start === 0 ? {} : { start }),
+        ...(end === undefined ? {} : { end }),
+      }),
+      crlfDelay: Infinity,
+    });
+    const parseOptions: ParseCodexRepeatedInputOptions = {
+      ...(options.catalog === undefined ? {} : { catalog: options.catalog }),
+      ...(options.tokenizer === undefined ? {} : { tokenizer: options.tokenizer }),
+      ...(options.maxPayloadBytes === undefined
+        ? {}
+        : { maxPayloadBytes: options.maxPayloadBytes }),
+      ...(options.project === undefined ? {} : { project: options.project }),
+      ...(options.environment === undefined ? {} : { environment: options.environment }),
+    };
+    for await (const line of lines) {
+      const parsed = parseCodexRepeatedInputLineDetailed(line, parserState, parseOptions);
+      observations.push(...parsed.observations);
+      gaps.push(...parsed.gaps);
+    }
+  } catch {
+    gaps.push({
+      reason: "unavailable",
+      count: 1,
+      message: "The Codex transcript could not be read.",
+    });
+    return { observations, gaps, parserState };
+  }
+  return { observations, gaps, parserState };
+}
+
+export const readCodexRepeatedInputRecords = readRepeatedInputRecords;
+
+/** SHA-256 of the exact UTF-8 prefix used to validate append-only reads. */
+export async function readTranscriptPrefixFingerprint(
+  filePath: string,
+  prefixLength: number,
+): Promise<string | null> {
+  if (!Number.isSafeInteger(prefixLength) || prefixLength < 0) return null;
+  if (prefixLength === 0) return createHash("sha256").digest("hex");
+  try {
+    const hash = createHash("sha256");
+    const stream = NodeFS.createReadStream(filePath, { start: 0, end: prefixLength - 1 });
+    let bytes = 0;
+    for await (const chunk of stream) {
+      const buffer = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
+      bytes += buffer.byteLength;
+      hash.update(buffer);
+    }
+    return bytes === prefixLength ? hash.digest("hex") : null;
+  } catch {
+    return null;
+  }
+}
+
+export interface TranscriptAppendCursor {
+  readonly offset: number;
+  readonly prefixFingerprint: string;
+}
+
+/** Checks both JSONL boundary and byte-prefix identity before an append read. */
+export async function transcriptAppendIsSafe(
+  filePath: string,
+  cursor: TranscriptAppendCursor,
+): Promise<boolean> {
+  if (cursor.offset <= 0 || !(await transcriptCursorIsLineBoundary(filePath, cursor.offset))) {
+    return cursor.offset === 0;
+  }
+  const fingerprint = await readTranscriptPrefixFingerprint(filePath, cursor.offset);
+  return fingerprint !== null && fingerprint === cursor.prefixFingerprint;
 }
 
 /** Reads one already-local product export; raw chat text never leaves the server. */

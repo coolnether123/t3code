@@ -10,7 +10,8 @@ import {
   type CachedFile,
   type ScanCache,
 } from "./usageScanCache.ts";
-import type { UsageRecord } from "./usageTranscripts.ts";
+import { initialCodexScanState, type UsageRecord } from "./usageTranscripts.ts";
+import type { RepeatedInputObservation } from "./usageRepeatedInput.ts";
 
 function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
   return {
@@ -45,6 +46,49 @@ function cacheWith(entries: readonly [string, number, readonly UsageRecord[]][])
 }
 
 describe("scan cache round trip", () => {
+  it("persists prefix fingerprints and sanitized repeated-input observations", () => {
+    const repeated: RepeatedInputObservation = {
+      sourceKind: "skill",
+      displayName: "example",
+      contentHash: "a".repeat(64),
+      fileRevisionHash: "b".repeat(64),
+      confidence: "confirmedPayload",
+      observedAtMs: 100,
+      sessionId: "session-a",
+      turnId: "turn-a",
+      model: "gpt-5.6-sol",
+      project: "project-a",
+      environment: "environment-a",
+      directTokens: { exact: 5, estimated: 0, cached: 0, cacheWrite: 0, unknown: 0 },
+      fullSessionInputTokens: { exact: 10, estimated: 0, cached: 2, cacheWrite: 0, unknown: 0 },
+      providerReportedCostUsd: null,
+      dedupeKey: "stable-observation",
+    };
+    const original: ScanCache = new Map([
+      [
+        "/codex.jsonl",
+        {
+          size: 100,
+          mtimeMs: 100,
+          provider: "codex" as const,
+          prefixFingerprint: "prefix-a",
+          records: [],
+          repeatedInputObservations: [repeated],
+          repeatedInputVersion: 1,
+          repeatedInputGaps: [
+            { reason: "missingTokenizer" as const, count: 1, message: "tokenizer unavailable" },
+          ],
+        },
+      ],
+    ]);
+    const encoded = encodeScanCache(original);
+    const raw = JSON.stringify(encoded);
+    expect(raw).not.toContain("private source text");
+    expect(decodeScanCache(JSON.parse(raw)).get("/codex.jsonl")).toEqual(
+      original.get("/codex.jsonl"),
+    );
+  });
+
   it("invalidates pre-cross-home-dedup caches", () => {
     const encoded = encodeScanCache(
       new Map([
@@ -60,6 +104,28 @@ describe("scan cache round trip", () => {
       ]),
     );
     expect(decodeScanCache({ ...JSON.parse(JSON.stringify(encoded)), version: 5 }).size).toBe(0);
+  });
+
+  it("keeps v6 Codex usage records while repeated-input metadata warms", () => {
+    const original: ScanCache = new Map([
+      [
+        "/codex.jsonl",
+        {
+          size: 10,
+          mtimeMs: 100,
+          provider: "codex" as const,
+          records: [record({ provider: "codex", dedupeKey: "stable-codex-key" })],
+          codexState: initialCodexScanState(),
+        },
+      ],
+    ]);
+    const encoded = encodeScanCache(original);
+    const decoded = decodeScanCache({ ...JSON.parse(JSON.stringify(encoded)), version: 6 });
+
+    expect(decoded.get("/codex.jsonl")?.records).toEqual(original.get("/codex.jsonl")?.records);
+    expect(decoded.get("/codex.jsonl")?.repeatedInputObservations).toBeUndefined();
+    expect(decoded.get("/codex.jsonl")?.prefixFingerprint).toBeUndefined();
+    expect(decoded.get("/codex.jsonl")?.repeatedInputVersion).toBeUndefined();
   });
 
   it("restores records unchanged", () => {

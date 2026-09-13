@@ -15,11 +15,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import { make } from "./UsageService.ts";
 import { encodeScanCache } from "./usageScanCache.ts";
 import { initialCodexScanState } from "./usageTranscripts.ts";
-import {
-  listTranscriptFiles,
-  readTranscriptRecords,
-  transcriptCursorIsLineBoundary,
-} from "./usageTranscriptReader.ts";
+import { readTranscriptRecords, transcriptCursorIsLineBoundary } from "./usageTranscriptReader.ts";
 
 const files = [
   { path: "/fixture/large.jsonl", size: 200_000_040, mtimeMs: Date.parse("2026-08-30T23:00:00Z") },
@@ -222,6 +218,50 @@ describe("incremental scan integration", () => {
       expect(cacheReads).toBe(2);
       yield* service.readSummary(input);
       expect(cacheReads).toBe(2);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("flushes a queued cache revision when the service scope closes", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const firstCacheWrite = yield* Deferred.make<void>();
+      let cacheTempWrites = 0;
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const service = yield* make.pipe(
+            Effect.provideService(FileSystem.FileSystem, {
+              ...fs,
+              exists: () => Effect.succeed(true),
+              writeFileString: (path, contents, ...args) => {
+                if (path.endsWith("contents.tmp")) {
+                  cacheTempWrites += 1;
+                  if (cacheTempWrites === 1) {
+                    return Effect.gen(function* () {
+                      yield* Deferred.succeed(firstCacheWrite, undefined);
+                      return yield* Effect.die("defer first cache publish");
+                    });
+                  }
+                }
+                return fs.writeFileString(path, contents, ...args);
+              },
+            }),
+            Effect.provideService(
+              HttpClient.HttpClient,
+              HttpClient.make(() => Effect.die("Offline fixture")),
+            ),
+          );
+          yield* service.readSummary({
+            sinceDay: UsageDay.make("2026-08-29"),
+            untilDay: UsageDay.make("2026-09-02"),
+            timeZone: "UTC",
+            quotaIntervals: [],
+            refresh: true,
+          });
+          yield* Deferred.await(firstCacheWrite);
+        }),
+      );
+
+      expect(cacheTempWrites).toBe(2);
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 

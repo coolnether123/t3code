@@ -258,4 +258,10 @@ describe("UsagePage mobile range controls", () => {
     expect(usagePageSource).toContain('aria-label="Usage period"');
     expect(usagePageSource).toContain("WINDOW_OPTIONS.map((option)");
   });
+
+  it("opts into repeated-input data through the ordinary Usage request", () => {
+    expect(usagePageSource).toContain("includeRepeatedInput: true");
+    expect(usagePageSource).toContain("<RepeatedInputSection data={repeatedInput ?? null} />");
+    expect(usagePageSource).toContain('to="/usage-resets"');
+  });
 });

@@ -4,6 +4,7 @@ import { CheckIcon, RefreshCwIcon, SlidersHorizontalIcon, XIcon } from "lucide-r
 import { useMemo, useState } from "react";
 
 import type { DailyTotals, HourlyTotals } from "@t3tools/shared/usageMerge";
+import { mergeRepeatedInputSummaries } from "@t3tools/shared/usageRepeatedInput";
 
 import { isElectron } from "../../env";
 import { cn } from "../../lib/utils";
@@ -46,6 +47,7 @@ import { UsageModelHourlyChart } from "./UsageModelHourlyChart";
 import { CodexUsageButton } from "./CodexUsageButton";
 import { UsageLimitsSection } from "./UsageLimits";
 import { UsagePriceOverrides } from "./UsagePriceOverrides";
+import { RepeatedInputSection } from "./RepeatedInputSection";
 import { PROVIDER_ORDER, PROVIDER_PRESENTATION, providersWithUsage } from "./usageProviders";
 
 const WINDOW_OPTIONS = [
@@ -69,7 +71,11 @@ export function UsagePage() {
     useState<ReadonlySet<EnvironmentId> | null>(null);
   const { days: windowDays, window } = windowSelection;
   const isPast24Hours = windowDays === 1;
-  const { merged, environments, isPending, refresh } = useUsage(window);
+  const { merged, environments, isPending, refresh } = useUsage({
+    ...window,
+    includeRepeatedInput: true,
+  });
+  const repeatedInput = useMemo(() => mergeRepeatedInputSummaries(environments), [environments]);
 
   // An offline or slow device must not hide totals already reported by the
   // other environments. The coverage notice identifies pending devices.
@@ -264,6 +270,8 @@ export function UsagePage() {
                 />
 
                 <UsageLimitsSection selectedEnvironmentIds={selectedEnvironmentIds} />
+
+                <RepeatedInputSection data={repeatedInput ?? null} />
 
                 <section className="grid gap-6 lg:grid-cols-[minmax(0,16rem)_minmax(0,1fr)]">
                   <div className="flex min-w-0 flex-col gap-5">

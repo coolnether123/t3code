@@ -7,7 +7,7 @@ import * as NodePath from "node:path";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
-import { UsageDay, type UsageSummaryInput } from "@t3tools/contracts";
+import { UsageDay, type UsageSummary, type UsageSummaryInput } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -37,7 +37,7 @@ function claudeLine(id: number, outputTokens: number, model = "claude-fable-5"):
   })}\n`;
 }
 
-function codexTranscript(sessionId: string, outputTokens: number): string {
+function codexTranscript(sessionId: string, outputTokens: number, turnId?: string): string {
   return [
     JSON.stringify({
       type: "session_meta",
@@ -47,7 +47,11 @@ function codexTranscript(sessionId: string, outputTokens: number): string {
     JSON.stringify({
       type: "turn_context",
       timestamp: "2026-08-01T10:00:01Z",
-      payload: { type: "turn_context", model: "gpt-5.6-sol" },
+      payload: {
+        type: "turn_context",
+        model: "gpt-5.6-sol",
+        ...(turnId === undefined ? {} : { turn_id: turnId }),
+      },
     }),
     JSON.stringify({
       type: "event_msg",
@@ -169,6 +173,199 @@ describe("UsageService", () => {
         Effect.provide(
           serviceLayers({ prefix: "usage-service-codex-isolation-test", home, settings }),
         ),
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("returns an idempotent native session and turn attribution", () =>
+    Effect.gen(function* () {
+      const { settings, home } = yield* setup;
+      const sessions = NodePath.join(home, "codex", "sessions", "2026", "08");
+      yield* Effect.promise(() => NodeFSP.mkdir(sessions, { recursive: true }));
+      yield* Effect.promise(() =>
+        NodeFSP.writeFile(
+          NodePath.join(
+            sessions,
+            "rollout-2026-08-01T10-00-00-019e487f-1234-7abc-8def-000000000001.jsonl",
+          ),
+          codexTranscript("parent-session", 30, "parent-turn"),
+        ),
+      );
+      yield* Effect.promise(() =>
+        NodeFSP.writeFile(
+          NodePath.join(
+            sessions,
+            "rollout-2026-08-01T10-01-00-019e487f-1234-7abc-8def-000000000002.jsonl",
+          ),
+          codexTranscript("child-session", 20, "child-turn"),
+        ),
+      );
+
+      const service = yield* UsageService.make.pipe(
+        Effect.provide(
+          serviceLayers({
+            prefix: "usage-service-attribution-test",
+            home,
+            settings,
+            ratesDocument: {
+              "gpt-5.6-sol": { input_cost_per_token: 1e-6, output_cost_per_token: 2e-6 },
+            },
+          }),
+        ),
+      );
+      const input: UsageSummaryInput = {
+        ...WINDOW,
+        providers: ["codex"],
+        sessionIds: ["child-session"],
+        turnIds: ["child-turn"],
+        groupBy: "turn",
+      };
+      const first = yield* service.readSummary(input);
+      const replay = yield* service.readSummary(input);
+
+      assert.deepStrictEqual(replay.buckets, first.buckets);
+      assert.lengthOf(first.buckets, 1);
+      assert.deepInclude(first.buckets[0], {
+        day: UsageDay.make("2026-08-01"),
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        sessionId: "child-session",
+        turnId: "child-turn",
+        serviceTier: "unknown",
+        serviceTierSource: "unknown",
+        totals: {
+          uncachedInputTokens: 10,
+          cachedInputTokens: 0,
+          cacheCreationTokens: 0,
+          outputTokens: 20,
+          reasoningTokens: 0,
+        },
+        cacheSavingsUsd: 0,
+        costSource: "modelPriced",
+        records: 1,
+        unpricedRecords: 0,
+        sessions: 1,
+      });
+      assert.closeTo(first.buckets[0]?.costUsd ?? -1, 0.00005, 1e-12);
+      assert.strictEqual(
+        first.sources.every((source) => source.fingerprint.provider === "codex"),
+        true,
+      );
+      assert.match(first.pricing.revision ?? "", /^[a-f0-9]{64}$/);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("projects repeated Codex input separately from the full session total", () =>
+    Effect.gen(function* () {
+      const { settings, home } = yield* setup;
+      const codexHome = NodePath.join(home, "codex");
+      const skillPath = NodePath.join(codexHome, "skills", "unslop", "SKILL.md");
+      const sessions = NodePath.join(codexHome, "sessions", "2026", "08");
+      const skillText = "# Unslop\nUse plain language.\n";
+      yield* Effect.promise(() => NodeFSP.mkdir(NodePath.dirname(skillPath), { recursive: true }));
+      yield* Effect.promise(() => NodeFSP.mkdir(sessions, { recursive: true }));
+      yield* Effect.promise(() => NodeFSP.writeFile(skillPath, skillText));
+      const transcript = [
+        // @effect-diagnostics-next-line preferSchemaOverJson:off - Transcript fixture is JSONL.
+        JSON.stringify({
+          type: "session_meta",
+          timestamp: "2026-08-01T10:00:00Z",
+          payload: { type: "session_meta", id: "repeated-session", cwd: "C:/project" },
+        }),
+        // @effect-diagnostics-next-line preferSchemaOverJson:off - Transcript fixture is JSONL.
+        JSON.stringify({
+          type: "turn_context",
+          timestamp: "2026-08-01T10:00:01Z",
+          payload: { type: "turn_context", model: "gpt-5.6-sol", turn_id: "repeated-turn" },
+        }),
+        // @effect-diagnostics-next-line preferSchemaOverJson:off - Transcript fixture is JSONL.
+        JSON.stringify({
+          type: "event_msg",
+          timestamp: "2026-08-01T10:00:02Z",
+          payload: {
+            type: "token_count",
+            info: {
+              last_token_usage: {
+                input_tokens: 10,
+                cached_input_tokens: 0,
+                cache_write_input_tokens: 0,
+                output_tokens: 2,
+                reasoning_output_tokens: 0,
+              },
+            },
+          },
+        }),
+        // @effect-diagnostics-next-line preferSchemaOverJson:off - Transcript fixture is JSONL.
+        JSON.stringify({
+          type: "response_item",
+          timestamp: "2026-08-01T10:00:03Z",
+          payload: {
+            type: "function_call_output",
+            id: "skill-read-1",
+            costUSD: 0.25,
+            output: skillText,
+          },
+        }),
+      ].join("\n");
+      yield* Effect.promise(() =>
+        NodeFSP.writeFile(
+          NodePath.join(sessions, "rollout-2026-08-01T10-00-00-repeated-session.jsonl"),
+          transcript,
+        ),
+      );
+
+      const service = yield* UsageService.make.pipe(
+        Effect.provide(
+          serviceLayers({
+            prefix: "usage-service-repeated-input-test",
+            home,
+            settings,
+            ratesDocument: {
+              "gpt-5.6-sol": { input_cost_per_token: 1e-6, output_cost_per_token: 2e-6 },
+            },
+          }),
+        ),
+      );
+      const summary = yield* service.readSummary({
+        ...WINDOW,
+        providers: ["codex"],
+        includeRepeatedInput: true,
+      } as UsageSummaryInput);
+      const repeated = summary.repeatedInput;
+      assert.ok(repeated);
+      assert.lengthOf(repeated.items, 1);
+      assert.strictEqual(repeated.items[0]?.sourceKind, "skill");
+      assert.strictEqual(repeated.items[0]?.displayName, "unslop");
+      assert.strictEqual(repeated.items[0]?.occurrences, 1);
+      assert.strictEqual(repeated.items[0]?.fullSessionInputTokens.exact, 10);
+      assert.isAtLeast(
+        (repeated.items[0]?.directTokens.exact ?? 0) +
+          (repeated.items[0]?.directTokens.estimated ?? 0),
+        0,
+      );
+      assert.isNotNull(repeated.items[0]?.modelCosts[0]?.estimatedApiCostUsd);
+      assert.strictEqual(repeated.items[0]?.modelCosts[0]?.estimatedApiCostUsd, 0.25);
+      assert.strictEqual(repeated.items[0]?.modelCosts[0]?.priceStatus, "providerReported");
+
+      // Quota history is the reset-monitor projection, not ordinary Usage.
+      // An opt-in repeated-input flag must not route data through that path.
+      const historyOnly = yield* service.readSummary({
+        ...WINDOW,
+        providers: ["codex"],
+        includeRepeatedInput: true,
+        quotaHistoryOnly: true,
+      } as UsageSummaryInput);
+      assert.isUndefined(
+        (historyOnly as UsageSummary & { readonly repeatedInput?: unknown }).repeatedInput,
+      );
+      const quotaProjection = yield* service.readSummary({
+        ...WINDOW,
+        providers: ["codex"],
+        includeRepeatedInput: true,
+        quotaIntervals: [],
+      } as UsageSummaryInput);
+      assert.isUndefined(
+        (quotaProjection as UsageSummary & { readonly repeatedInput?: unknown }).repeatedInput,
       );
     }).pipe(Effect.scoped),
   );

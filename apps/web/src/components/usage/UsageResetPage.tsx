@@ -7,7 +7,7 @@ import { Link } from "@tanstack/react-router";
 import { RefreshCwIcon } from "lucide-react";
 import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { refreshCodexMonitor } from "@t3tools/client-runtime/usageRefresh";
-import { formatUsd, makeWindow } from "@t3tools/shared/usageFormat";
+import { formatTokens, formatUsd, makeWindow } from "@t3tools/shared/usageFormat";
 import {
   quotaMonitoringSamples,
   quotaCostWindow,
@@ -18,6 +18,9 @@ import {
   quotaValueWithHistoricalCalibration,
   quotaValueWithSnapshot,
   retainQuotaValueSnapshots,
+  type QuotaEnvironment,
+  type QuotaPeriod,
+  type QuotaValue,
   type QuotaValueSnapshot,
 } from "@t3tools/shared/usageQuota";
 
@@ -48,6 +51,40 @@ const estimate = (value: number) =>
     currency: "USD",
     maximumFractionDigits: 0,
   }).format(value);
+
+function monitoredPeriodModels(
+  period: QuotaPeriod,
+  value: QuotaValue,
+  environments: readonly QuotaEnvironment[],
+) {
+  const savedPrefix = quotaSavedCostPrefix(period, environments);
+  const interval = value.costObservedUntil
+    ? (savedPrefix?.interval ?? null)
+    : {
+        id: period.id,
+        sinceTime: period.first.observedAt,
+        untilTime: period.last.observedAt,
+      };
+  if (!interval) return null;
+  const modelEnvironments =
+    value.costObservedUntil && savedPrefix
+      ? environments.map((environment) => ({
+          ...environment,
+          summary: environment.summary
+            ? {
+                ...environment.summary,
+                quotaCosts: undefined,
+                quotaCostSnapshots: savedPrefix.rows,
+              }
+            : environment.summary,
+        }))
+      : environments;
+  const models = monitoredModels(interval, modelEnvironments);
+  return models !== null &&
+    models.some((row) => Object.values(row.totals).some((tokens) => tokens > 0))
+    ? models
+    : null;
+}
 
 export function UsageResetPage() {
   const [historyInput] = useState(() => ({ ...makeWindow(1), quotaHistoryOnly: true }));
@@ -260,44 +297,11 @@ export function UsageResetPage() {
         : {}),
     };
   }, [calibrationPeriod, calibrationInterval, selectedWithSavedCosts, current, historical]);
-  const completed = values.slice(0, -1);
-  const currentModels = useMemo(() => {
-    if (!current) return null;
-    const savedPrefix = quotaSavedCostPrefix(current.period, selectedWithSavedCosts);
-    const modelInterval = current.value.costObservedUntil
-      ? (savedPrefix?.interval ?? null)
-      : {
-          id: current.period.id,
-          sinceTime: current.period.first.observedAt,
-          untilTime: current.period.last.observedAt,
-        };
-    const modelEnvironments =
-      current.value.costObservedUntil && savedPrefix
-        ? selectedWithSavedCosts.map((environment) => ({
-            ...environment,
-            summary: environment.summary
-              ? {
-                  ...environment.summary,
-                  quotaCosts: undefined,
-                  quotaCostSnapshots: savedPrefix.rows,
-                }
-              : environment.summary,
-          }))
-        : selectedWithSavedCosts;
-    if (!modelInterval) return null;
-    const models = monitoredModels(modelInterval, modelEnvironments);
-    return models !== null &&
-      models.length > 0 &&
-      models.some((row) => Object.values(row.totals).some((tokens) => tokens > 0))
-      ? models
-      : null;
-  }, [
-    current?.period.id,
-    current?.period.first.observedAt,
-    current?.period.last.observedAt,
-    current?.value.costObservedUntil,
-    selectedWithSavedCosts,
-  ]);
+  const currentModels = useMemo(
+    () =>
+      current ? monitoredPeriodModels(current.period, current.value, selectedWithSavedCosts) : null,
+    [current, selectedWithSavedCosts],
+  );
   const models =
     currentModels ??
     (current?.value.historicalCalibration !== undefined ? (priorApiPace?.models ?? null) : null);
@@ -510,6 +514,23 @@ export function UsageResetPage() {
                       .toReversed()
                       .map((period) => {
                         const value = values.find((entry) => entry.period.id === period.id)?.value;
+                        const periodModels = value
+                          ? monitoredPeriodModels(period, value, selectedWithSavedCosts)
+                          : null;
+                        const inputTokens =
+                          periodModels?.reduce(
+                            (total, model) =>
+                              total +
+                              model.totals.uncachedInputTokens +
+                              model.totals.cachedInputTokens +
+                              model.totals.cacheCreationTokens,
+                            0,
+                          ) ?? 0;
+                        const outputTokens =
+                          periodModels?.reduce(
+                            (total, model) => total + model.totals.outputTokens,
+                            0,
+                          ) ?? 0;
                         const unusedLabel =
                           period.usedPercentagePoints === 0 && period.resetKind === "ambiguous"
                             ? "No quota use observed in this interval"
@@ -552,6 +573,55 @@ export function UsageResetPage() {
                                 {unusedLabel}
                               </p>
                             </div>
+                            {periodModels ? (
+                              <details className="w-full rounded-md border border-border/70 px-3 py-2">
+                                <summary className="cursor-pointer text-xs text-muted-foreground">
+                                  Per-model usage · {formatTokens(inputTokens)} input ·{" "}
+                                  {formatTokens(outputTokens)} output
+                                </summary>
+                                <div className="mt-2 overflow-x-auto">
+                                  <table
+                                    className="w-full min-w-[30rem] text-left text-xs"
+                                    aria-label={`Model usage ending ${dateTime(period.last.observedAt)}`}
+                                  >
+                                    <thead className="text-muted-foreground">
+                                      <tr>
+                                        <th className="py-1 pr-3 font-normal">Model</th>
+                                        <th className="px-3 py-1 text-right font-normal">Input</th>
+                                        <th className="px-3 py-1 text-right font-normal">Output</th>
+                                        <th className="py-1 pl-3 text-right font-normal">
+                                          API value
+                                        </th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {periodModels.map((model) => (
+                                        <tr key={model.model} className="border-t border-border/70">
+                                          <td className="py-1.5 pr-3">{model.model}</td>
+                                          <td className="px-3 py-1.5 text-right tabular-nums">
+                                            {formatTokens(
+                                              model.totals.uncachedInputTokens +
+                                                model.totals.cachedInputTokens +
+                                                model.totals.cacheCreationTokens,
+                                            )}
+                                          </td>
+                                          <td className="px-3 py-1.5 text-right tabular-nums">
+                                            {formatTokens(model.totals.outputTokens)}
+                                          </td>
+                                          <td className="py-1.5 pl-3 text-right tabular-nums">
+                                            {formatUsd(model.costUsd)}
+                                          </td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                                <p className="mt-2 text-[11px] text-muted-foreground">
+                                  Input includes cached and cache-creation tokens. Reasoning tokens
+                                  are included in output.
+                                </p>
+                              </details>
+                            ) : null}
                           </div>
                         );
                       })}

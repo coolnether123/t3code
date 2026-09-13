@@ -52,6 +52,12 @@ export type UsageDay = typeof UsageDay.Type;
 export const UsageResolution = Schema.Literals(["day", "hour"]);
 export type UsageResolution = typeof UsageResolution.Type;
 
+export const UsageAttributionGroup = Schema.Literals(["model", "session", "turn"]);
+export type UsageAttributionGroup = typeof UsageAttributionGroup.Type;
+
+const UsageNativeId = TrimmedNonEmptyString.check(Schema.isMaxLength(512));
+const UsageNativeIdList = Schema.Array(UsageNativeId).check(Schema.isMaxLength(128));
+
 /**
  * Why a bucket's cost is what it is.
  *
@@ -95,6 +101,10 @@ export const UsageBucket = Schema.Struct({
   hourStart: Schema.optional(TrimmedNonEmptyString),
   provider: UsageProviderKind,
   model: TrimmedNonEmptyString,
+  /** Present when the request groups by native session or turn identity. */
+  sessionId: Schema.optional(UsageNativeId),
+  /** Present when the request groups by native turn identity. */
+  turnId: Schema.optional(UsageNativeId),
   /** Omitted by older servers. Unknown metadata uses the standard estimate. */
   serviceTier: Schema.optional(Schema.String),
   serviceTierSource: Schema.optional(
@@ -171,6 +181,8 @@ export type UsagePricingStatus = typeof UsagePricingStatus.Type;
 export const UsagePricing = Schema.Struct({
   status: UsagePricingStatus,
   source: TrimmedNonEmptyString,
+  /** SHA-256 of the exact rate document used for model-priced records. */
+  revision: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   fetchedAt: Schema.NullOr(Schema.String),
   knownModels: NonNegativeInt,
 });
@@ -264,12 +276,145 @@ export const UsageSummaryInput = Schema.Struct({
   sinceTime: Schema.optional(TrimmedNonEmptyString),
   /** Exclusive UTC instant for an hourly rolling window. */
   untilTime: Schema.optional(TrimmedNonEmptyString),
+  /** Opt into the local repeated-input attribution subsection. */
+  includeRepeatedInput: Schema.optional(Schema.Boolean),
+  /** Restrict the scan result to these provider kinds. */
+  providers: Schema.optional(
+    Schema.Array(UsageProviderKind).check(Schema.isMinLength(1), Schema.isMaxLength(8)),
+  ),
+  /** Restrict the result to exact provider-native session IDs. */
+  sessionIds: Schema.optional(UsageNativeIdList),
+  /** Restrict the result to exact provider-native turn IDs. */
+  turnIds: Schema.optional(UsageNativeIdList),
+  /** Retain native IDs in bucket keys. Defaults to model-level aggregation. */
+  groupBy: Schema.optional(UsageAttributionGroup),
   includeQuotaHistory: Schema.optional(Schema.Boolean),
   /** Read saved observations without scanning transcripts or fetching prices. */
   quotaHistoryOnly: Schema.optional(Schema.Boolean),
   quotaIntervals: Schema.optional(Schema.Array(UsageQuotaInterval).check(Schema.isMaxLength(64))),
 });
 export type UsageSummaryInput = typeof UsageSummaryInput.Type;
+
+/**
+ * A source that can be attributed as repeated input. This is intentionally a
+ * closed first slice. Ordinary user or assistant messages are not a source
+ * kind, even when their text happens to repeat.
+ */
+export const UsageRepeatedInputSourceKind = Schema.Literals([
+  "skill",
+  "instruction",
+  "developerBlock",
+  "toolOperation",
+]);
+export type UsageRepeatedInputSourceKind = typeof UsageRepeatedInputSourceKind.Type;
+
+/** Evidence strength for one repeated-input observation. */
+export const UsageRepeatedInputConfidence = Schema.Literals([
+  "reference",
+  "likelyRead",
+  "confirmedPayload",
+]);
+export type UsageRepeatedInputConfidence = typeof UsageRepeatedInputConfidence.Type;
+
+/**
+ * Token attribution for a repeated payload. The five fields are disjoint:
+ * exact and estimated are non-cache input, cached and cacheWrite retain a
+ * provider-reported cache class, and unknown is attributable input with no
+ * safer classification. They stay separate from the full session input total.
+ */
+export const UsageRepeatedInputTokenAttribution = Schema.Struct({
+  exact: NonNegativeInt,
+  estimated: NonNegativeInt,
+  cached: NonNegativeInt,
+  cacheWrite: NonNegativeInt,
+  unknown: NonNegativeInt,
+});
+export type UsageRepeatedInputTokenAttribution = typeof UsageRepeatedInputTokenAttribution.Type;
+
+export const UsageRepeatedInputPriceStatus = Schema.Literals([
+  "providerReported",
+  "estimated",
+  "unpriced",
+]);
+export type UsageRepeatedInputPriceStatus = typeof UsageRepeatedInputPriceStatus.Type;
+
+/** One model's API-equivalent value for an item or total. */
+export const UsageRepeatedInputModelCost = Schema.Struct({
+  model: TrimmedNonEmptyString,
+  directTokens: UsageRepeatedInputTokenAttribution,
+  /** Null means the model or one required rate is unknown. It is never zero. */
+  estimatedApiCostUsd: Schema.NullOr(Schema.Number),
+  priceStatus: UsageRepeatedInputPriceStatus,
+  occurrences: NonNegativeInt,
+});
+export type UsageRepeatedInputModelCost = typeof UsageRepeatedInputModelCost.Type;
+
+/** Compact date/project/model rollup used by the repeated-input projection. */
+export const UsageRepeatedInputBreakdown = Schema.Struct({
+  sourceKind: UsageRepeatedInputSourceKind,
+  model: Schema.NullOr(TrimmedNonEmptyString),
+  project: Schema.NullOr(TrimmedNonEmptyString),
+  environment: Schema.NullOr(TrimmedNonEmptyString),
+  sinceDay: UsageDay,
+  untilDay: UsageDay,
+  occurrences: NonNegativeInt,
+  sessions: NonNegativeInt,
+  turns: NonNegativeInt,
+  directTokens: UsageRepeatedInputTokenAttribution,
+  fullSessionInputTokens: UsageRepeatedInputTokenAttribution,
+  estimatedApiCostUsd: Schema.NullOr(Schema.Number),
+  priceStatus: UsageRepeatedInputPriceStatus,
+});
+export type UsageRepeatedInputBreakdown = typeof UsageRepeatedInputBreakdown.Type;
+
+/** A server-projected repeated-input item. Raw transcript/source text is absent. */
+export const UsageRepeatedInputItem = Schema.Struct({
+  displayName: TrimmedNonEmptyString,
+  sourceKind: UsageRepeatedInputSourceKind,
+  contentHash: TrimmedNonEmptyString,
+  fileRevisionHash: Schema.NullOr(TrimmedNonEmptyString),
+  firstObservedAt: Schema.String,
+  lastObservedAt: Schema.String,
+  occurrences: NonNegativeInt,
+  affectedSessions: NonNegativeInt,
+  affectedTurns: NonNegativeInt,
+  confidence: UsageRepeatedInputConfidence,
+  confidenceCounts: Schema.Struct({
+    reference: NonNegativeInt,
+    likelyRead: NonNegativeInt,
+    confirmedPayload: NonNegativeInt,
+  }),
+  directTokens: UsageRepeatedInputTokenAttribution,
+  /** Full session input is context only and must not be used as item cost. */
+  fullSessionInputTokens: UsageRepeatedInputTokenAttribution,
+  modelCosts: Schema.Array(UsageRepeatedInputModelCost),
+  breakdowns: Schema.Array(UsageRepeatedInputBreakdown),
+});
+export type UsageRepeatedInputItem = typeof UsageRepeatedInputItem.Type;
+
+export const UsageRepeatedInputCoverageGap = Schema.Struct({
+  reason: Schema.Literals([
+    "oversized",
+    "malformed",
+    "unavailable",
+    "missingModel",
+    "missingTokenizer",
+    "unattributed",
+  ]),
+  count: NonNegativeInt,
+  message: TrimmedNonEmptyString,
+});
+export type UsageRepeatedInputCoverageGap = typeof UsageRepeatedInputCoverageGap.Type;
+
+export const UsageRepeatedInputSummary = Schema.Struct({
+  items: Schema.Array(UsageRepeatedInputItem),
+  totals: Schema.Array(UsageRepeatedInputBreakdown),
+  coverageGaps: Schema.Array(UsageRepeatedInputCoverageGap),
+  /** All API-equivalent values are estimates, never subscription usage. */
+  estimatedApiCostUsd: Schema.NullOr(Schema.Number),
+  priceStatus: UsageRepeatedInputPriceStatus,
+});
+export type UsageRepeatedInputSummary = typeof UsageRepeatedInputSummary.Type;
 
 export const UsageSummary = Schema.Struct({
   contractVersion: Schema.Number,
@@ -285,6 +430,7 @@ export const UsageSummary = Schema.Struct({
   quotaHistory: Schema.optional(UsageQuotaHistory),
   quotaCosts: Schema.optional(Schema.Array(UsageQuotaCost)),
   quotaCostSnapshots: Schema.optional(Schema.Array(UsageQuotaCostSnapshot)),
+  repeatedInput: Schema.optional(UsageRepeatedInputSummary),
 });
 export type UsageSummary = typeof UsageSummary.Type;
 

@@ -179,11 +179,11 @@ export class QuotaCostAccumulator {
     let high = this.rows.length;
     while (low < high) {
       const mid = (low + high) >>> 1;
-      if (this.rows[mid]!.end < record.timestampMs) low = mid + 1;
+      if (this.rows[mid]!.end <= record.timestampMs) low = mid + 1;
       else high = mid;
     }
     const row = this.rows[low];
-    if (!row || record.timestampMs <= row.start) return;
+    if (!row || record.timestampMs < row.start) return;
     const priced = priceUsage(
       this.rates,
       record.model,

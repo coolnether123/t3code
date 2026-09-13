@@ -39,6 +39,57 @@ cache rate; storage duration, long-lived cache premiums, audio/image-specific ra
 are not reconstructed from token totals. Provider-reported costs may themselves be estimates from
 the local harness. A subscription's quota percentage is not a dollar balance.
 
+## Review repeated input
+
+The **Repeated input** subsection is part of the normal Usage page. It is separate from
+**Codex usage & resets**, which monitors an account window and reset observations. Repeated input
+does not change reset readings, consume reset credits, or route through the reset monitor.
+
+The first source is local Codex session transcripts. Skills are checked first, including
+`SKILL.md` files such as `unslop`. Other typed sources can include AGENTS or instruction files,
+named reusable developer blocks, and repeatable tool-operation payloads. Ordinary repeated chat
+text is not treated as a reusable operation.
+
+Each item shows its display name, source kind, stable content hash, file revision or hash when one
+exists, first and last observation, occurrence count, affected sessions and turns, and confidence.
+The page keeps these confidence levels separate:
+
+- **Reference** means a transcript names the file or source.
+- **Likely read** means the record supports a read but does not contain the complete payload.
+- **Confirmed read** means the complete repeated payload was observed and can be attributed.
+
+Direct payload input is separate from the full input reported for an affected session or turn. A
+session that loaded a skill can contain other instructions, history, tool output, and user input.
+The page never labels that full session total as the skill's cost.
+
+Token attribution shows exact, estimated, cached, cache-write, and unknown values when the source
+provides them. The model rows use the same current pricing table and pricing revision as the rest
+of Usage. Provider-reported cost wins. An unknown model, missing price, malformed record, or
+missing tokenizer remains **Unpriced**, not `$0.00`.
+
+When a range mixes priced and unpriced models, the combined number is the priced subtotal and is
+marked incomplete. It does not assign a zero-dollar value to the remaining input.
+
+Every dollar value in this subsection is labeled **Estimated API-equivalent value**. It is an
+estimate of what the recorded tokens would represent at the selected API rates. It is not a
+charge, subscription balance, or reset consumption. The page can group totals by item, source
+kind, model, project or environment, and date when those aggregates are covered by the scan.
+
+Raw transcript text stays on the environment that read it. Only fingerprints, aggregate token and
+value data, provenance, and coverage gaps cross the connection. The importer reuses the transcript
+cache and cursor. Unchanged files are not reparsed, and an appended transcript reads only its new
+records when the saved cursor is safe. File edits, forks, and retries invalidate the affected
+cache entry and use stable record identities so the same occurrence is not counted twice.
+
+If several historical file revisions share one display name, an exact path identifies the matching
+revision. Name-only evidence stays unattributed rather than being multiplied across every revision.
+
+The coverage notice names records that are too large, malformed, unavailable, missing a model or
+tokenizer, or impossible to assign to one repeated payload. Those records stay visible as unknown
+or uncovered data. Usage does not invent a token count or a price to fill the gap. Long ranges
+render aggregate rows first; expanding an item loads only its saved metadata, never raw transcript
+text.
+
 ### Import product chat archives
 
 Configured ChatGPT and Google AI Studio exports appear as **ChatGPT archive** and **AI Studio
@@ -129,6 +180,22 @@ estimate based on the immediately preceding completed cycle. It includes that cy
 range and is replaced automatically when current-cycle calibration is valid. Percentages are never
 combined across reset boundaries. The observation interval is not an exact reset timestamp. A banked
 reset or account change can look similar.
+
+Each completed reset can be expanded to show input tokens, output tokens, and API-equivalent value
+for every recorded model. Input includes cached and cache-creation tokens; reasoning tokens are
+already included in output. Short-lived account-window switches that return to the original timer
+are ignored so they do not split one real cycle into several resets.
+
+The authenticated `server.getUsageSummary` query can narrow results to exact providers, native
+session IDs, or native turn IDs. Callers may group returned buckets by model, session, or turn.
+Environment identity remains the connection target, and every response retains each physical
+source fingerprint and coverage status. Filters are bounded to 128 native IDs and never return raw
+transcript text.
+
+`costUsd` is API-equivalent value. `providerReported` means the provider supplied that request's
+cost, `modelPriced` means T3 calculated it from the rate document identified by
+`pricing.revision`, and `unpriced` keeps tokens while adding no dollars. None of these fields claims
+the amount charged for a subscription. Account allowance remains in the separate quota history.
 
 The runway baseline uses the account timer. **Banked manual resets** are shown separately and
 never get added to the current balance or treated as an extension of the current timer. A full

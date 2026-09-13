@@ -14,15 +14,23 @@
  *
  * @module usageScanCache
  */
-import type { UsageProviderKind } from "@t3tools/contracts";
+import type {
+  UsageProviderKind,
+  UsageRepeatedInputConfidence,
+  UsageRepeatedInputCoverageGap,
+  UsageRepeatedInputSourceKind,
+} from "@t3tools/contracts";
 
 import type { CodexScanState, UsageRecord } from "./usageTranscripts.ts";
+import type { RepeatedInputObservation } from "./usageRepeatedInput.ts";
 
 // v2 changed fork-copy suppression. v3 added root coverage. v4 persists the
 // Codex parser cursor. v5 reparses AI Studio files for source dates and branch
-// de-duplication. v6 adds stable Codex cross-file keys; old Codex entries are
-// cold-rebuilt so migrated shared/private rollouts cannot be double counted.
-export const USAGE_SCAN_CACHE_VERSION = 6 as const;
+// de-duplication. v6 adds stable Codex cross-file keys. v7 adds append-prefix
+// validation and compact repeated-input observations. v6 Codex entries keep
+// their ordinary usage records; repeated-input data is cold-built until a v7
+// prefix fingerprint exists, so the established usage cache is not discarded.
+export const USAGE_SCAN_CACHE_VERSION = 7 as const;
 
 export interface CachedFile {
   readonly size: number;
@@ -30,6 +38,13 @@ export interface CachedFile {
   readonly provider: UsageProviderKind;
   readonly records: readonly UsageRecord[];
   readonly codexState?: CodexScanState;
+  /** SHA-256 of the first `size` bytes, used before any append read. */
+  readonly prefixFingerprint?: string;
+  /** Sanitized repeated-input observations. Never contains source text. */
+  readonly repeatedInputObservations?: readonly RepeatedInputObservation[];
+  readonly repeatedInputGaps?: readonly UsageRepeatedInputCoverageGap[];
+  /** Parser semantics used to produce the repeated-input observations. */
+  readonly repeatedInputVersion?: number;
 }
 
 export type ScanCache = Map<string, CachedFile>;
@@ -97,11 +112,39 @@ type SerializedRecord = readonly [
   turnId?: string | null,
 ];
 
+type SerializedRepeatedInput = readonly [
+  UsageRepeatedInputSourceKind,
+  string,
+  string,
+  string | null,
+  UsageRepeatedInputConfidence,
+  number,
+  string,
+  string | null,
+  string | null,
+  string | null,
+  string | null,
+  readonly [number, number, number, number, number],
+  readonly [number, number, number, number, number],
+  number | null,
+  string,
+];
+
+type SerializedRepeatedInputGap = readonly [
+  UsageRepeatedInputCoverageGap["reason"],
+  number,
+  string,
+];
+
 interface SerializedFile {
   readonly s: number;
   readonly m: number;
   readonly p: UsageProviderKind;
   readonly r: readonly SerializedRecord[];
+  readonly h?: string;
+  readonly i?: readonly SerializedRepeatedInput[];
+  readonly g?: readonly SerializedRepeatedInputGap[];
+  readonly j?: number;
   readonly c?: readonly [
     string,
     string,
@@ -143,10 +186,55 @@ export function encodeScanCache(
 
   const files: Record<string, SerializedFile> = {};
   for (const [path, entry] of cache) {
+    const repeatedInputObservations = entry.repeatedInputObservations;
+    const repeatedInputGaps = entry.repeatedInputGaps;
     files[path] = {
       s: entry.size,
       m: entry.mtimeMs,
       p: entry.provider,
+      ...(entry.prefixFingerprint === undefined ? {} : { h: entry.prefixFingerprint }),
+      ...(repeatedInputObservations === undefined
+        ? {}
+        : {
+            i: repeatedInputObservations.map(
+              (observation) =>
+                [
+                  observation.sourceKind,
+                  observation.displayName,
+                  observation.contentHash,
+                  observation.fileRevisionHash,
+                  observation.confidence,
+                  observation.observedAtMs,
+                  observation.sessionId,
+                  observation.turnId,
+                  observation.model,
+                  observation.project,
+                  observation.environment,
+                  [
+                    observation.directTokens.exact,
+                    observation.directTokens.estimated,
+                    observation.directTokens.cached,
+                    observation.directTokens.cacheWrite,
+                    observation.directTokens.unknown,
+                  ],
+                  [
+                    observation.fullSessionInputTokens.exact,
+                    observation.fullSessionInputTokens.estimated,
+                    observation.fullSessionInputTokens.cached,
+                    observation.fullSessionInputTokens.cacheWrite,
+                    observation.fullSessionInputTokens.unknown,
+                  ],
+                  observation.providerReportedCostUsd,
+                  observation.dedupeKey,
+                ] as const,
+            ),
+          }),
+      ...(repeatedInputGaps === undefined
+        ? {}
+        : {
+            g: repeatedInputGaps.map((gap) => [gap.reason, gap.count, gap.message] as const),
+          }),
+      ...(entry.repeatedInputVersion === undefined ? {} : { j: entry.repeatedInputVersion }),
       ...(entry.codexState === undefined
         ? {}
         : {
@@ -196,6 +284,77 @@ function isRecordArray(value: unknown): value is readonly unknown[] {
   return Array.isArray(value);
 }
 
+function isRepeatedInputSourceKind(value: unknown): value is UsageRepeatedInputSourceKind {
+  return (
+    value === "skill" ||
+    value === "instruction" ||
+    value === "developerBlock" ||
+    value === "toolOperation"
+  );
+}
+
+function isRepeatedInputConfidence(value: unknown): value is UsageRepeatedInputConfidence {
+  return value === "reference" || value === "likelyRead" || value === "confirmedPayload";
+}
+
+function decodeRepeatedInputTokens(
+  value: unknown,
+): RepeatedInputObservation["directTokens"] | null {
+  if (!isRecordArray(value) || value.length !== 5) return null;
+  if (!value.every((entry) => typeof entry === "number" && Number.isFinite(entry) && entry >= 0)) {
+    return null;
+  }
+  const [exact, estimated, cached, cacheWrite, unknown] = value as readonly number[];
+  if (
+    exact === undefined ||
+    estimated === undefined ||
+    cached === undefined ||
+    cacheWrite === undefined ||
+    unknown === undefined
+  ) {
+    return null;
+  }
+  return {
+    exact,
+    estimated,
+    cached,
+    cacheWrite,
+    unknown,
+  };
+}
+
+function decodeRepeatedInputGaps(
+  value: readonly SerializedRepeatedInputGap[] | undefined,
+): readonly UsageRepeatedInputCoverageGap[] | null {
+  if (value === undefined) return [];
+  if (!isRecordArray(value)) return null;
+  const gaps: UsageRepeatedInputCoverageGap[] = [];
+  for (const row of value) {
+    if (!isRecordArray(row) || row.length !== 3) return null;
+    const [reason, count, message] = row;
+    if (
+      reason !== "oversized" &&
+      reason !== "malformed" &&
+      reason !== "unavailable" &&
+      reason !== "missingModel" &&
+      reason !== "missingTokenizer" &&
+      reason !== "unattributed"
+    ) {
+      return null;
+    }
+    if (
+      typeof count !== "number" ||
+      !Number.isFinite(count) ||
+      count < 0 ||
+      typeof message !== "string"
+    ) {
+      return null;
+    }
+    gaps.push({ reason, count: Math.trunc(count), message });
+  }
+  return gaps;
+}
+
 /**
  * Rebuilds the cache from a parsed document.
  *
@@ -212,6 +371,7 @@ export function decodeScanCache(document: unknown): ScanCache {
     root.version !== 3 &&
     root.version !== 4 &&
     root.version !== 5 &&
+    root.version !== 6 &&
     root.version !== USAGE_SCAN_CACHE_VERSION
   ) {
     return cache;
@@ -244,7 +404,11 @@ export function decodeScanCache(document: unknown): ScanCache {
     if (!isRecordArray(entry.r)) continue;
 
     const provider: UsageProviderKind = entry.p;
-    if (root.version < USAGE_SCAN_CACHE_VERSION && provider === "codex") continue;
+    // v6 introduced the stable Codex keys required by the current global
+    // de-duplication pass. Preserve those records during the v7 migration.
+    // They have no repeated-input cursor, so UsageService performs one full
+    // repeated-input read before enabling append-only attribution.
+    if (root.version < 6 && provider === "codex") continue;
     const records: UsageRecord[] = [];
     // Any corrupt row disqualifies the whole entry. Keeping the survivors
     // under the original (size, mtime) would read as a valid warm hit and the
@@ -307,6 +471,86 @@ export function decodeScanCache(document: unknown): ScanCache {
     }
 
     if (corrupt) continue;
+    const prefixFingerprint = typeof entry.h === "string" ? entry.h : undefined;
+    const repeatedInputVersion =
+      typeof entry.j === "number" && Number.isSafeInteger(entry.j) && entry.j >= 0
+        ? entry.j
+        : undefined;
+    const repeatedInputObservations: RepeatedInputObservation[] = [];
+    let repeatedInputCorrupt = false;
+    if (entry.i !== undefined) {
+      if (!isRecordArray(entry.i)) repeatedInputCorrupt = true;
+      else {
+        for (const row of entry.i) {
+          if (!isRecordArray(row) || row.length !== 15) {
+            repeatedInputCorrupt = true;
+            break;
+          }
+          const [
+            sourceKind,
+            displayName,
+            contentHash,
+            fileRevisionHash,
+            confidence,
+            observedAtMs,
+            sessionId,
+            turnId,
+            model,
+            project,
+            environment,
+            direct,
+            fullSession,
+            providerReportedCostUsd,
+            dedupeKey,
+          ] = row as SerializedRepeatedInput;
+          const directTokens = decodeRepeatedInputTokens(direct);
+          const fullSessionInputTokens = decodeRepeatedInputTokens(fullSession);
+          if (
+            !isRepeatedInputSourceKind(sourceKind) ||
+            typeof displayName !== "string" ||
+            typeof contentHash !== "string" ||
+            (fileRevisionHash !== null && typeof fileRevisionHash !== "string") ||
+            !isRepeatedInputConfidence(confidence) ||
+            typeof observedAtMs !== "number" ||
+            !Number.isFinite(observedAtMs) ||
+            typeof sessionId !== "string" ||
+            (turnId !== null && typeof turnId !== "string") ||
+            (model !== null && typeof model !== "string") ||
+            (project !== null && typeof project !== "string") ||
+            (environment !== null && typeof environment !== "string") ||
+            directTokens === null ||
+            fullSessionInputTokens === null ||
+            (providerReportedCostUsd !== null &&
+              (typeof providerReportedCostUsd !== "number" ||
+                !Number.isFinite(providerReportedCostUsd))) ||
+            typeof dedupeKey !== "string"
+          ) {
+            repeatedInputCorrupt = true;
+            break;
+          }
+          repeatedInputObservations.push({
+            sourceKind,
+            displayName,
+            contentHash,
+            fileRevisionHash,
+            confidence,
+            observedAtMs,
+            sessionId,
+            turnId,
+            model,
+            project,
+            environment,
+            directTokens,
+            fullSessionInputTokens,
+            providerReportedCostUsd,
+            dedupeKey,
+          });
+        }
+      }
+    }
+    if (repeatedInputCorrupt) continue;
+    const repeatedInputGaps = decodeRepeatedInputGaps(entry.g);
+    if (entry.g !== undefined && repeatedInputGaps === null) continue;
     let codexState: CodexScanState | undefined;
     if (root.version >= 4 && entry.c !== undefined) {
       const [
@@ -347,6 +591,10 @@ export function decodeScanCache(document: unknown): ScanCache {
       provider,
       records,
       ...(codexState === undefined ? {} : { codexState }),
+      ...(prefixFingerprint === undefined ? {} : { prefixFingerprint }),
+      ...(entry.i === undefined ? {} : { repeatedInputObservations }),
+      ...(repeatedInputGaps === null || entry.g === undefined ? {} : { repeatedInputGaps }),
+      ...(repeatedInputVersion === undefined ? {} : { repeatedInputVersion }),
     });
   }
 
@@ -358,7 +606,10 @@ export function decodeScanCoverage(document: unknown): readonly ScanCoverage[] {
   if (typeof document !== "object" || document === null) return [];
   const root = document as Partial<SerializedCache>;
   if (
-    (root.version !== 3 && root.version !== 4 && root.version !== USAGE_SCAN_CACHE_VERSION) ||
+    (root.version !== 3 &&
+      root.version !== 4 &&
+      root.version !== 6 &&
+      root.version !== USAGE_SCAN_CACHE_VERSION) ||
     !Array.isArray(root.coverage)
   ) {
     return [];

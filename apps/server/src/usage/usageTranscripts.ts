@@ -409,12 +409,21 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
   }
 
   if (record["type"] === "turn_context") {
-    if (typeof payloadRecord["model"] === "string") state.model = payloadRecord["model"];
+    const nextModel =
+      typeof payloadRecord["model"] === "string" ? payloadRecord["model"] : state.model;
+    const nextTurnId =
+      typeof payloadRecord["turn_id"] === "string" ? payloadRecord["turn_id"] : undefined;
+    // The same token_count payload can occur in two distinct turns. Keep the
+    // consecutive-event guard, but start a new sequence when the turn context
+    // actually changes so equal-sized turns are not silently dropped.
+    if (nextModel !== state.model || nextTurnId !== state.turnId) {
+      state.lastUsageSignature = null;
+    }
+    state.model = nextModel;
     state.serviceTier = normalizeServiceTier(
       payloadRecord["service_tier"] ?? payloadRecord["serviceTier"],
     );
-    state.turnId =
-      typeof payloadRecord["turn_id"] === "string" ? payloadRecord["turn_id"] : undefined;
+    state.turnId = nextTurnId;
     return null;
   }
 
