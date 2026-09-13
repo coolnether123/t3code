@@ -41,9 +41,22 @@ the local harness. A subscription's quota percentage is not a dollar balance.
 
 ## Review repeated input
 
-The **Repeated input** subsection is part of the normal Usage page. It is separate from
-**Codex usage & resets**, which monitors an account window and reset observations. Repeated input
-does not change reset readings, consume reset credits, or route through the reset monitor.
+Open **Skills & repeated input** beside Usage in the sidebar to inspect attribution on its own
+page. On mobile, open it from Settings. Use **Usage** in the header to return to your usage totals.
+The attribution page has its own period and computer selectors. Its refresh reads transcript
+metadata for the selected period.
+
+Compare direct tokens, occurrences, or estimated value by source kind, model, computer and project,
+or time. Select a bar to inspect its breakdown. Search the tracked payloads or filter by **Skills**
+and evidence level, then expand a row for its model costs and observation details. Payload filters
+affect the list; the overview and comparison retain the full selected period and computer scope.
+
+The **Current skills** catalog lists every `SKILL.md` revision discoverable on the selected
+computers, including skills with no transcript evidence in the selected period. Use its search,
+observation filter, sorting, and paging controls to distinguish **Observed** from **Never observed**
+skills. A never-observed skill keeps its current file hash, size, and tokenizer count when available,
+but has no invented dates, confidence, tokens, or dollar value. Historical observed revisions remain
+available in the separate payload history even after the current file changes.
 
 The first source is local Codex session transcripts. Skills are checked first, including
 `SKILL.md` files such as `unslop`. Other typed sources can include AGENTS or instruction files,
@@ -67,10 +80,16 @@ provides them. The model rows use the same current pricing table and pricing rev
 of Usage. Provider-reported cost wins. An unknown model, missing price, malformed record, or
 missing tokenizer remains **Unpriced**, not `$0.00`.
 
+After a transcript contains a confirmed complete skill payload, later model turns in the same
+carried context attribute that skill again. T3 labels the skill tokens **Cached** or **Cache write**
+only when the provider's complete request partition proves that placement. If a request mixes
+cached and uncached input, the skill remains **Unknown** because request-level totals cannot prove
+where that payload landed. Context resets, compaction, and forks end the carried attribution.
+
 When a range mixes priced and unpriced models, the combined number is the priced subtotal and is
 marked incomplete. It does not assign a zero-dollar value to the remaining input.
 
-Every dollar value in this subsection is labeled **Estimated API-equivalent value**. It is an
+Every dollar value on this page is labeled as an API-equivalent estimate. It is an
 estimate of what the recorded tokens would represent at the selected API rates. It is not a
 charge, subscription balance, or reset consumption. The page can group totals by item, source
 kind, model, project or environment, and date when those aggregates are covered by the scan.
@@ -89,6 +108,9 @@ tokenizer, or impossible to assign to one repeated payload. Those records stay v
 or uncovered data. Usage does not invent a token count or a price to fill the gap. Long ranges
 render aggregate rows first; expanding an item loads only its saved metadata, never raw transcript
 text.
+
+Repeated-input attribution is additive. Enabling it does not change the normal Usage token buckets,
+model pricing, API-equivalent totals, or the separate Codex usage-and-reset calculations.
 
 ### Import product chat archives
 
@@ -156,6 +178,19 @@ Tibo's public posts through the independent Reset Beacon feed. The source link a
 interpretation remain visible. A missing or expired announcement falls back to the account timer.
 A countdown reaching zero never creates a reset observation or changes usage to 100%.
 
+**Estimated use between public resets** uses the historical announcements published by
+[Codex Resets](https://codex-resets.com/). T3 treats consecutive regular announcements as
+approximate boundaries and totals the Codex transcript records stored on the selected computers
+between those times. Each completed period shows its current-price API-equivalent value and a
+per-model token and cost breakdown when the scan is complete.
+
+This backfills estimates for periods before local percentage monitoring began, but it does not
+backfill account usage percentages. Announcement time can precede account propagation, public
+announcements are global rather than account-specific, and missing local transcripts are not zero
+usage. Banked reset grants remain visible as context but never split a period because the user
+chooses when to redeem them. T3 sends Codex Resets no account credentials, usage totals, chat data,
+or transcript content.
+
 The page checks readings every minute and public news every five minutes while open.
 The separate Codex Limits collector records every five minutes while its computer is awake
 and signed in, even with T3 closed. Readings older than 15 minutes are labeled stale.
@@ -163,8 +198,9 @@ News requests send no account credentials, usage totals, or chat data.
 Saved quota history and completed cost snapshots survive page navigation and server restarts,
 with bounded retention. Chart readings support hover, tap, and keyboard inspection.
 
-Press **Refresh** to reload saved readings, refresh public reset news, and check API costs for
-the newly read interval. The button shows progress and ignores repeated taps until it finishes.
+Press **Refresh** to reload saved readings and public reset sources, then check API costs for the
+newly read and backdated intervals. The button shows progress and ignores repeated taps until it
+finishes.
 Unchanged transcripts keep their cached records. On the mobile app, pulling down does the same.
 Growing chats read only their appended text when the saved cursor is valid. Public reset news
 updates independently and does not hold the usage refresh open.

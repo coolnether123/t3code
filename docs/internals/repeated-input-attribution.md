@@ -16,6 +16,12 @@ revision or content hash. It also records display name, source kind, first and l
 occurrence count, affected session and turn counts, project or environment, model breakdown, and
 confidence counts. The raw payload is never projected to a client.
 
+The current skill catalog is a separate projection from observed history. It includes every
+discoverable `SKILL.md` revision, including zero-observation rows with nullable observation fields.
+Catalog discovery follows supported directory aliases while deduplicating the same physical file.
+Historical observations remain keyed by content and file revision when a current file changes or
+disappears.
+
 Historical file revisions remain distinct items. An exact path can identify its revision; a
 name-only reference that matches several revisions is retained as an attribution gap instead of
 crediting every version.
@@ -31,6 +37,13 @@ Direct payload tokens are reported separately from the full input totals for the
 and turn. Direct values have exact, estimated, cached, cache-write, and unknown buckets. Cached
 and cache-write values retain their provider meaning and are not silently folded into an uncached
 bucket.
+
+A confirmed complete skill load registers that revision in the transcript parser's carried-input
+state. Each later `token_count` turn emits one deduplicated carried observation until a context
+reset, compaction, fork, or session change clears the state. The importer assigns the skill-sized
+payload to **cached** or **cache-write** only when the complete request token partition proves that
+classification. Mixed partitions retain the payload tokens as **unknown** and add an attribution
+gap. A prior request's cache totals never classify a new skill load.
 
 Provider-reported cost wins. Otherwise the projection uses the same model-pricing table and
 revision used by the existing Usage page. Unknown models, absent prices, absent tokenizer support,
@@ -48,6 +61,10 @@ ambiguity invalidate or narrow the cache entry instead of adding a second copy o
 occurrence. Repeated-input parser versions invalidate only their sanitized attribution metadata;
 they do not throw away the ordinary Usage records already cached for the transcript.
 
+The repeated-input scan is an optional side projection. With or without
+`includeRepeatedInput`, the regular provider buckets, sources, pricing revision, and Codex session
+API-equivalent values are identical.
+
 The projection retains only aggregate counts, fingerprints, provenance, and coverage gaps. A gap
 is visible when a transcript is too large, malformed, unavailable, lacks model identity, lacks a
 matching tokenizer, or cannot be attributed to one payload. The importer does not guess through a
@@ -57,6 +74,8 @@ record.
 ## Client boundary
 
 The projection travels through the ordinary Usage request and is optional for older environments.
-Web and desktop render the same subsection. Mobile renders a compact native subsection in the
-normal Usage scroll. The reset page remains a separate destination and does not render repeated
-input data.
+Web and desktop render a dedicated `/repeated-input` page, reached beside Usage in the sidebar. Mobile has a
+separate Skills & repeated input destination. Only these attribution pages request
+`includeRepeatedInput`; the main Usage layout retains its provider totals and charts. Attribution
+has its own period selection, while the web page can narrow the displayed merge to one computer.
+The reset page remains a separate destination and does not render repeated input data.

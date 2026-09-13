@@ -392,6 +392,39 @@ export const UsageRepeatedInputItem = Schema.Struct({
 });
 export type UsageRepeatedInputItem = typeof UsageRepeatedInputItem.Type;
 
+/**
+ * A currently discoverable skill revision. Unlike UsageRepeatedInputItem,
+ * this projection also contains skills with no transcript observation in the
+ * requested window. Null observation fields mean "never observed", not zero.
+ */
+export const UsageRepeatedInputCatalogItem = Schema.Struct({
+  displayName: TrimmedNonEmptyString,
+  sourceKind: UsageRepeatedInputSourceKind,
+  contentHash: TrimmedNonEmptyString,
+  fileRevisionHash: Schema.NullOr(TrimmedNonEmptyString),
+  byteLength: Schema.NullOr(NonNegativeInt),
+  tokenCount: Schema.NullOr(NonNegativeInt),
+  observed: Schema.Boolean,
+  firstObservedAt: Schema.NullOr(Schema.String),
+  lastObservedAt: Schema.NullOr(Schema.String),
+  occurrences: NonNegativeInt,
+  affectedSessions: NonNegativeInt,
+  affectedTurns: NonNegativeInt,
+  confidence: Schema.NullOr(UsageRepeatedInputConfidence),
+  confidenceCounts: Schema.Struct({
+    reference: NonNegativeInt,
+    likelyRead: NonNegativeInt,
+    confirmedPayload: NonNegativeInt,
+  }),
+  directTokens: UsageRepeatedInputTokenAttribution,
+  fullSessionInputTokens: UsageRepeatedInputTokenAttribution,
+  modelCosts: Schema.Array(UsageRepeatedInputModelCost),
+  breakdowns: Schema.Array(UsageRepeatedInputBreakdown),
+  estimatedApiCostUsd: Schema.NullOr(Schema.Number),
+  priceStatus: UsageRepeatedInputPriceStatus,
+});
+export type UsageRepeatedInputCatalogItem = typeof UsageRepeatedInputCatalogItem.Type;
+
 export const UsageRepeatedInputCoverageGap = Schema.Struct({
   reason: Schema.Literals([
     "oversized",
@@ -408,6 +441,8 @@ export type UsageRepeatedInputCoverageGap = typeof UsageRepeatedInputCoverageGap
 
 export const UsageRepeatedInputSummary = Schema.Struct({
   items: Schema.Array(UsageRepeatedInputItem),
+  /** Current discoverable skill revisions, including zero-observation rows. */
+  catalog: Schema.optional(Schema.Array(UsageRepeatedInputCatalogItem)),
   totals: Schema.Array(UsageRepeatedInputBreakdown),
   coverageGaps: Schema.Array(UsageRepeatedInputCoverageGap),
   /** All API-equivalent values are estimates, never subscription usage. */

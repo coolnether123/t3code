@@ -1,12 +1,23 @@
 import { describe, expect, it, vi } from "vite-plus/test";
-import { UsageDay, type UsageRepeatedInputSummary } from "@t3tools/contracts";
+import {
+  UsageDay,
+  type UsageRepeatedInputCatalogItem,
+  type UsageRepeatedInputSummary,
+} from "@t3tools/contracts";
 
 vi.mock("react-native", () => ({ Pressable: "Pressable", View: "View" }));
-vi.mock("../../components/AppText", () => ({ AppText: "Text" }));
+vi.mock("../../components/AppText", () => ({ AppText: "Text", AppTextInput: "TextInput" }));
 vi.mock("../settings/components/SettingsSection", () => ({ SettingsSection: "Section" }));
-import { normalizeRepeatedInput } from "./RepeatedInputSection";
 
-const directTokens = { exact: 12, estimated: 2, cached: 4, cacheWrite: 0, unknown: 0 };
+import {
+  filterRepeatedInputRows,
+  normalizeRepeatedInput,
+  paginateRepeatedInputRows,
+  priceText,
+} from "./RepeatedInputSection";
+
+const directTokens = { exact: 12, estimated: 2, cached: 4, cacheWrite: 3, unknown: 1 };
+const emptyTokens = { exact: 0, estimated: 0, cached: 0, cacheWrite: 0, unknown: 0 };
 const fullSessionInputTokens = { exact: 700, estimated: 0, cached: 0, cacheWrite: 0, unknown: 0 };
 const breakdown = {
   sourceKind: "skill" as const,
@@ -23,15 +34,52 @@ const breakdown = {
   estimatedApiCostUsd: 0.2,
   priceStatus: "estimated" as const,
 };
+
+function catalogItem(
+  overrides: Partial<UsageRepeatedInputCatalogItem> = {},
+): UsageRepeatedInputCatalogItem {
+  return {
+    displayName: "unslop",
+    sourceKind: "skill",
+    contentHash: "hash-current",
+    fileRevisionHash: "revision-current",
+    byteLength: 1024,
+    tokenCount: 64,
+    observed: true,
+    firstObservedAt: "2026-09-01T00:00:00Z",
+    lastObservedAt: "2026-09-02T00:00:00Z",
+    occurrences: 2,
+    affectedSessions: 1,
+    affectedTurns: 2,
+    confidence: "confirmedPayload",
+    confidenceCounts: { reference: 0, likelyRead: 0, confirmedPayload: 2 },
+    directTokens,
+    fullSessionInputTokens,
+    modelCosts: [
+      {
+        model: "luna",
+        directTokens,
+        estimatedApiCostUsd: 0.2,
+        priceStatus: "estimated",
+        occurrences: 2,
+      },
+    ],
+    breakdowns: [breakdown],
+    estimatedApiCostUsd: 0.2,
+    priceStatus: "estimated",
+    ...overrides,
+  };
+}
+
 const summary: UsageRepeatedInputSummary = {
   items: [
     {
       displayName: "unslop",
       sourceKind: "skill",
-      contentHash: "hash-one",
-      fileRevisionHash: null,
-      firstObservedAt: "2026-09-01T00:00:00Z",
-      lastObservedAt: "2026-09-02T00:00:00Z",
+      contentHash: "hash-old",
+      fileRevisionHash: "revision-old",
+      firstObservedAt: "2026-08-31T00:00:00Z",
+      lastObservedAt: "2026-09-01T00:00:00Z",
       occurrences: 2,
       affectedSessions: 1,
       affectedTurns: 2,
@@ -51,6 +99,30 @@ const summary: UsageRepeatedInputSummary = {
       breakdowns: [breakdown],
     },
   ],
+  catalog: [
+    catalogItem(),
+    catalogItem({
+      displayName: "unused-skill",
+      contentHash: "hash-never",
+      fileRevisionHash: null,
+      byteLength: 2048,
+      tokenCount: null,
+      observed: false,
+      firstObservedAt: null,
+      lastObservedAt: null,
+      occurrences: 0,
+      affectedSessions: 0,
+      affectedTurns: 0,
+      confidence: null,
+      confidenceCounts: { reference: 0, likelyRead: 0, confirmedPayload: 0 },
+      directTokens: emptyTokens,
+      fullSessionInputTokens: emptyTokens,
+      modelCosts: [],
+      breakdowns: [],
+      estimatedApiCostUsd: null,
+      priceStatus: "unpriced",
+    }),
+  ],
   totals: [breakdown],
   coverageGaps: [],
   estimatedApiCostUsd: 0.2,
@@ -58,43 +130,72 @@ const summary: UsageRepeatedInputSummary = {
 };
 
 describe("mobile repeated input presentation", () => {
-  it("reads the contract and keeps overlapping session input only on each payload", () => {
-    const view = normalizeRepeatedInput({
-      ...summary,
-      items: [summary.items[0]!, { ...summary.items[0]!, contentHash: "hash-two" }],
+  it("keeps current catalog revisions separate from historical observations", () => {
+    const view = normalizeRepeatedInput(summary);
+    expect(view).toMatchObject({
+      catalogAvailable: true,
+      catalogCount: 2,
+      itemCount: 1,
+      occurrences: 2,
+      direct: { exact: 12, estimated: 2, cached: 4, cacheWrite: 3, unknown: 1 },
     });
-    expect(view).toMatchObject({ itemCount: 2, occurrences: 4, direct: { exact: 24, cached: 8 } });
-    expect(view).not.toHaveProperty("fullSession");
-    expect(view?.items[0]).toMatchObject({
-      fullSession: 700,
-      project: "project / Desktop",
-      models: [{ model: "luna", valueUsd: 0.2, priced: true }],
+    expect(view?.catalog[0]).toMatchObject({
+      name: "unslop",
+      observed: true,
+      byteLength: 1024,
+      tokenCount: 64,
+      first: "2026-09-01T00:00:00Z",
+      confidenceLevel: "Confirmed payload",
     });
-    expect(view?.models[0]).toMatchObject({ count: 2, tokens: 18, valueUsd: 0.2 });
-  });
-  it("retains a mixed priced subtotal and marks it incomplete", () => {
-    const view = normalizeRepeatedInput({
-      ...summary,
-      priceStatus: "unpriced",
-      totals: [{ ...breakdown, priceStatus: "unpriced" }],
-    });
-    expect(view).toMatchObject({ valueUsd: 0.2, valuePriced: false });
-    expect(view?.models[0]).toMatchObject({ valueUsd: 0.2, priced: false });
-  });
-  it("keeps unknown-only pricing null and tolerates older environments without data", () => {
-    const view = normalizeRepeatedInput({
-      ...summary,
-      items: [],
-      totals: [{ ...breakdown, model: null, estimatedApiCostUsd: null, priceStatus: "unpriced" }],
+    expect(view?.catalog[1]).toMatchObject({
+      name: "unused-skill",
+      observed: false,
+      first: null,
+      last: null,
+      confidenceLevel: null,
+      tokenCount: null,
       estimatedApiCostUsd: null,
       priceStatus: "unpriced",
     });
-    expect(view?.models[0]).toMatchObject({
-      label: "Unknown model",
-      valueUsd: null,
-      priced: false,
+    expect(view?.items[0]).toMatchObject({
+      contentHash: "hash-old",
+      revisionHash: "revision-old",
+      observed: true,
+      fullSessionTokens: fullSessionInputTokens,
     });
-    expect(view?.valueUsd).toBeNull();
+  });
+
+  it("searches, filters never-observed skills, and sorts by installed size", () => {
+    const view = normalizeRepeatedInput(summary)!;
+    const rows = filterRepeatedInputRows(view.catalog, {
+      status: "never",
+      sort: "size",
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ name: "unused-skill", observed: false });
+    expect(filterRepeatedInputRows(view.catalog, { query: "revision-current" })[0]?.name).toBe(
+      "unslop",
+    );
+    expect(filterRepeatedInputRows(view.catalog, { query: "not-present" })).toHaveLength(0);
+  });
+
+  it("bounds catalog and history rendering with deterministic pages", () => {
+    const rows = Array.from({ length: 25 }, (_, index) => index);
+    expect(paginateRepeatedInputRows(rows, 0, 12)).toMatchObject({
+      page: 0,
+      pageCount: 3,
+      items: rows.slice(0, 12),
+    });
+    expect(paginateRepeatedInputRows(rows, 4, 12)).toMatchObject({
+      page: 2,
+      items: rows.slice(24),
+    });
+  });
+
+  it("shows unknown prices explicitly instead of implying a free value", () => {
+    expect(priceText(null, "unpriced")).toBe("Unpriced (price unavailable)");
+    expect(priceText(0.2, "unpriced")).toContain("priced subtotal");
+    expect(priceText(null, "unpriced")).not.toContain("$0.00");
     expect(normalizeRepeatedInput(undefined)).toBeNull();
   });
 });

@@ -1,5 +1,6 @@
 import type {
   UsageRepeatedInputBreakdown,
+  UsageRepeatedInputCatalogItem,
   UsageRepeatedInputConfidence,
   UsageRepeatedInputCoverageGap,
   UsageRepeatedInputItem,
@@ -149,7 +150,7 @@ function mergeModelCosts(
 function mergeItems(values: readonly UsageRepeatedInputItem[]): UsageRepeatedInputItem[] {
   const merged = new Map<string, UsageRepeatedInputItem>();
   for (const value of values) {
-    const key = `${value.sourceKind}\u0000${value.contentHash}`;
+    const key = `${value.sourceKind}\u0000${value.contentHash}\u0000${value.fileRevisionHash ?? ""}`;
     const previous = merged.get(key);
     if (previous === undefined) {
       merged.set(key, value);
@@ -193,6 +194,74 @@ function mergeItems(values: readonly UsageRepeatedInputItem[]): UsageRepeatedInp
   );
 }
 
+function mergeCatalogItems(
+  values: readonly UsageRepeatedInputCatalogItem[],
+): UsageRepeatedInputCatalogItem[] {
+  const merged = new Map<string, UsageRepeatedInputCatalogItem>();
+  for (const value of values) {
+    const key = `${value.sourceKind}\u0000${value.contentHash}\u0000${value.fileRevisionHash ?? ""}`;
+    const previous = merged.get(key);
+    if (previous === undefined || !previous.observed) {
+      merged.set(key, value);
+      continue;
+    }
+    if (!value.observed) continue;
+    const cost = mergeCost(
+      previous.estimatedApiCostUsd,
+      previous.priceStatus,
+      value.estimatedApiCostUsd,
+      value.priceStatus,
+    );
+    const firstObservedAt =
+      previous.firstObservedAt === null ||
+      (value.firstObservedAt !== null &&
+        Date.parse(value.firstObservedAt) < Date.parse(previous.firstObservedAt))
+        ? value.firstObservedAt
+        : previous.firstObservedAt;
+    const lastObservedAt =
+      previous.lastObservedAt === null ||
+      (value.lastObservedAt !== null &&
+        Date.parse(value.lastObservedAt) > Date.parse(previous.lastObservedAt))
+        ? value.lastObservedAt
+        : previous.lastObservedAt;
+    merged.set(key, {
+      ...previous,
+      firstObservedAt,
+      lastObservedAt,
+      occurrences: previous.occurrences + value.occurrences,
+      affectedSessions: previous.affectedSessions + value.affectedSessions,
+      affectedTurns: previous.affectedTurns + value.affectedTurns,
+      confidence:
+        previous.confidence === null ||
+        (value.confidence !== null &&
+          confidenceRank(value.confidence) > confidenceRank(previous.confidence))
+          ? value.confidence
+          : previous.confidence,
+      confidenceCounts: {
+        reference: previous.confidenceCounts.reference + value.confidenceCounts.reference,
+        likelyRead: previous.confidenceCounts.likelyRead + value.confidenceCounts.likelyRead,
+        confirmedPayload:
+          previous.confidenceCounts.confirmedPayload + value.confidenceCounts.confirmedPayload,
+      },
+      directTokens: addTokens(previous.directTokens, value.directTokens),
+      fullSessionInputTokens: addTokens(
+        previous.fullSessionInputTokens,
+        value.fullSessionInputTokens,
+      ),
+      modelCosts: mergeModelCosts([...previous.modelCosts, ...value.modelCosts]),
+      breakdowns: mergeBreakdowns([...previous.breakdowns, ...value.breakdowns]),
+      estimatedApiCostUsd: cost.cost,
+      priceStatus: cost.status,
+    });
+  }
+  return [...merged.values()].sort((left, right) => {
+    if (left.observed !== right.observed) return left.observed ? -1 : 1;
+    if (left.lastObservedAt === null) return 1;
+    if (right.lastObservedAt === null) return -1;
+    return right.lastObservedAt.localeCompare(left.lastObservedAt);
+  });
+}
+
 function mergeGaps(
   values: readonly UsageRepeatedInputCoverageGap[],
 ): UsageRepeatedInputCoverageGap[] {
@@ -227,8 +296,11 @@ export function mergeRepeatedInputSummaries(
     cost = next.cost;
     status = next.status;
   }
+  const catalogPresent = summaries.some((summary) => summary.catalog !== undefined);
+  const catalog = mergeCatalogItems(summaries.flatMap((summary) => summary.catalog ?? []));
   return {
     items: mergeItems(summaries.flatMap((summary) => summary.items)),
+    ...(catalogPresent ? { catalog } : {}),
     totals: mergeBreakdowns(summaries.flatMap((summary) => summary.totals)),
     coverageGaps: mergeGaps(summaries.flatMap((summary) => summary.coverageGaps)),
     estimatedApiCostUsd: cost,

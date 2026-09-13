@@ -7,11 +7,10 @@ import {
   encodeScanCache,
   planTranscriptScan,
   pruneScanCache,
-  type CachedFile,
   type ScanCache,
 } from "./usageScanCache.ts";
 import { initialCodexScanState, type UsageRecord } from "./usageTranscripts.ts";
-import type { RepeatedInputObservation } from "./usageRepeatedInput.ts";
+import type { RepeatedInputActiveSource, RepeatedInputObservation } from "./usageRepeatedInput.ts";
 
 function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
   return {
@@ -87,6 +86,36 @@ describe("scan cache round trip", () => {
     expect(decodeScanCache(JSON.parse(raw)).get("/codex.jsonl")).toEqual(
       original.get("/codex.jsonl"),
     );
+  });
+
+  it("persists active skill revisions for append-only carried attribution", () => {
+    const active: RepeatedInputActiveSource = {
+      descriptor: {
+        sourceKind: "skill",
+        displayName: "example",
+        contentHash: "a".repeat(64),
+        fileRevisionHash: "b".repeat(64),
+        byteLength: 42,
+        tokenCount: 17,
+      },
+      loadedAtMs: 100,
+      loadedTurnId: "turn-a",
+    };
+    const original: ScanCache = new Map([
+      [
+        "/codex.jsonl",
+        {
+          size: 100,
+          mtimeMs: 100,
+          provider: "codex" as const,
+          records: [],
+          repeatedInputActiveSources: [active],
+          repeatedInputVersion: 3,
+        },
+      ],
+    ]);
+    const restored = decodeScanCache(JSON.parse(JSON.stringify(encodeScanCache(original))));
+    expect(restored.get("/codex.jsonl")?.repeatedInputActiveSources).toEqual([active]);
   });
 
   it("invalidates pre-cross-home-dedup caches", () => {

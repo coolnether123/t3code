@@ -1,6 +1,5 @@
 import { useNavigation } from "@react-navigation/native";
 import type { DailyTotals, MergedUsage } from "@t3tools/shared/usageMerge";
-import { mergeRepeatedInputSummaries } from "@t3tools/shared/usageRepeatedInput";
 import {
   enumerateDays,
   enumerateHourStarts,
@@ -23,7 +22,6 @@ import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { useUsage, type EnvironmentUsageStatus } from "../../state/usage";
 import { SettingsSection } from "../settings/components/SettingsSection";
 import { UsageDailyChart } from "./UsageDailyChart";
-import { RepeatedInputSection } from "./RepeatedInputSection";
 import type { UsageChartMetric } from "./usageChartData";
 import { PROVIDER_LABEL, useProviderColors } from "./usageProviders";
 import { UsageResetScreen } from "./UsageResetScreen";
@@ -56,11 +54,7 @@ function UsageTotalsScreen({ onShowResets }: { readonly onShowResets: () => void
   const [metric, setMetric] = useState<UsageChartMetric>("cost");
   const { days: windowDays, window } = windowSelection;
   const isPast24Hours = windowDays === 1;
-  const { merged, environments, isPending, isPartial, refresh } = useUsage({
-    ...window,
-    includeRepeatedInput: true,
-  });
-  const repeatedInput = useMemo(() => mergeRepeatedInputSummaries(environments), [environments]);
+  const { merged, environments, isPending, isPartial, refresh } = useUsage(window);
 
   const days = useMemo(
     () => enumerateDays(window.sinceDay, window.untilDay),
@@ -153,7 +147,6 @@ function UsageTotalsScreen({ onShowResets }: { readonly onShowResets: () => void
           </Text>
         ) : (
           <>
-            <RepeatedInputSection data={repeatedInput ?? null} />
             <ChartCard
               merged={merged}
               days={chartDays}

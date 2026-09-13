@@ -19,6 +19,7 @@ import {
   CodexSettings,
   type UsageProviderKind,
   type UsageRepeatedInputCoverageGap,
+  type UsageRepeatedInputCatalogItem,
   type UsageRepeatedInputSummary,
   type UsageRepeatedInputBreakdown,
   type UsageRepeatedInputItem,
@@ -188,6 +189,18 @@ function mapRepeatedInputSummary(
   aggregate: RepeatedInputAggregateResult,
   additionalGaps: readonly UsageRepeatedInputCoverageGap[] = [],
 ): UsageRepeatedInputSummary {
+  const mapModelCosts = (
+    modelCosts: readonly RepeatedInputAggregateResult["items"][number]["modelCosts"][number][],
+  ): UsageRepeatedInputModelCost[] =>
+    modelCosts.map((modelCost): UsageRepeatedInputModelCost => ({
+      // Unknown model identity is retained under a stable display key. Its
+      // nullable price status remains unpriced and is never treated as free.
+      model: modelCost.model ?? "unknown",
+      directTokens: modelCost.directTokens,
+      estimatedApiCostUsd: repeatedInputPrice(modelCost.estimatedApiCostUsd, modelCost.priceStatus),
+      priceStatus: modelCost.priceStatus,
+      occurrences: modelCost.occurrences,
+    }));
   const items: UsageRepeatedInputItem[] = aggregate.items.map((item) => ({
     displayName: item.displayName,
     sourceKind: item.sourceKind,
@@ -202,16 +215,36 @@ function mapRepeatedInputSummary(
     confidenceCounts: item.confidenceCounts,
     directTokens: item.directTokens,
     fullSessionInputTokens: item.fullSessionInputTokens,
-    modelCosts: item.modelCosts.map((modelCost): UsageRepeatedInputModelCost => ({
-      // Unknown model identity is retained under a stable display key. Its
-      // nullable price status remains unpriced and is never treated as free.
-      model: modelCost.model ?? "unknown",
-      directTokens: modelCost.directTokens,
-      estimatedApiCostUsd: repeatedInputPrice(modelCost.estimatedApiCostUsd, modelCost.priceStatus),
-      priceStatus: modelCost.priceStatus,
-      occurrences: modelCost.occurrences,
-    })),
+    modelCosts: mapModelCosts(item.modelCosts),
     breakdowns: item.breakdowns.map(mapRepeatedInputBreakdown),
+  }));
+  const catalog: UsageRepeatedInputCatalogItem[] = aggregate.catalog.map((item) => ({
+    displayName: item.displayName,
+    sourceKind: item.sourceKind,
+    contentHash: item.contentHash,
+    fileRevisionHash: item.fileRevisionHash,
+    byteLength: item.byteLength,
+    tokenCount: item.tokenCount,
+    observed: item.observed,
+    firstObservedAt:
+      item.firstObservedAtMs === null
+        ? null
+        : DateTime.formatIso(DateTime.makeUnsafe(item.firstObservedAtMs)),
+    lastObservedAt:
+      item.lastObservedAtMs === null
+        ? null
+        : DateTime.formatIso(DateTime.makeUnsafe(item.lastObservedAtMs)),
+    occurrences: item.occurrences,
+    affectedSessions: item.affectedSessions,
+    affectedTurns: item.affectedTurns,
+    confidence: item.confidence,
+    confidenceCounts: item.confidenceCounts,
+    directTokens: item.directTokens,
+    fullSessionInputTokens: item.fullSessionInputTokens,
+    modelCosts: mapModelCosts(item.modelCosts),
+    breakdowns: item.breakdowns.map(mapRepeatedInputBreakdown),
+    estimatedApiCostUsd: repeatedInputPrice(item.estimatedApiCostUsd, item.priceStatus),
+    priceStatus: item.priceStatus,
   }));
 
   const gaps = new Map<string, UsageRepeatedInputCoverageGap>();
@@ -226,6 +259,7 @@ function mapRepeatedInputSummary(
 
   return {
     items,
+    catalog,
     totals: aggregate.totals.map(mapRepeatedInputBreakdown),
     coverageGaps: [...gaps.values()],
     estimatedApiCostUsd: repeatedInputPrice(aggregate.estimatedApiCostUsd, aggregate.priceStatus),
@@ -247,6 +281,7 @@ function repeatedInputParserStateForCached(
     state.suppressingForkCopies = codexState.suppressingForkCopies;
     state.forkCopyAnchorMs = codexState.forkCopyAnchorMs;
   }
+  state.activeSources = cached.repeatedInputActiveSources ?? [];
   let latest = cached.records[0];
   for (const record of cached.records) {
     if (latest === undefined || record.timestampMs >= latest.timestampMs) latest = record;
@@ -1122,6 +1157,9 @@ export const make = Effect.gen(function* () {
           const appendable = file.repeatedInputAppendable;
           let nextObservations = repeatedWarm ? cachedBefore?.repeatedInputObservations : undefined;
           let nextGaps = repeatedWarm ? cachedBefore?.repeatedInputGaps : undefined;
+          let nextActiveSources = repeatedWarm
+            ? cachedBefore?.repeatedInputActiveSources
+            : undefined;
           if (!repeatedWarm) {
             const repeatedStartByte = file.repeatedInputStartByte;
             const parserState = appendable
@@ -1154,6 +1192,7 @@ export const make = Effect.gen(function* () {
                 message: "The Codex transcript could not be read for repeated-input attribution.",
               },
             ];
+            nextActiveSources = parsed?.parserState.activeSources ?? [];
           }
           nextObservations = attachRepeatedInputUsage(nextObservations ?? [], records);
           repeatedInputObservations.push(...(nextObservations ?? []));
@@ -1168,6 +1207,7 @@ export const make = Effect.gen(function* () {
               ...(prefixFingerprint === null ? {} : { prefixFingerprint }),
               repeatedInputObservations: nextObservations ?? [],
               repeatedInputGaps: nextGaps ?? [],
+              repeatedInputActiveSources: nextActiveSources ?? [],
               repeatedInputVersion: REPEATED_INPUT_CACHE_VERSION,
             });
             markCacheDirty();
@@ -1315,6 +1355,7 @@ export const make = Effect.gen(function* () {
               priceOverrides: createOverrideRateTable(settings.usagePriceOverrides),
               dayAt: repeatedDayAt,
               coverageGaps: repeatedInputGaps,
+              catalog: repeatedInputCatalogForScan?.sources ?? [],
             },
           ),
         )

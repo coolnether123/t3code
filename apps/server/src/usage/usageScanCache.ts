@@ -22,7 +22,11 @@ import type {
 } from "@t3tools/contracts";
 
 import type { CodexScanState, UsageRecord } from "./usageTranscripts.ts";
-import type { RepeatedInputObservation } from "./usageRepeatedInput.ts";
+import {
+  REPEATED_INPUT_CACHE_VERSION,
+  type RepeatedInputActiveSource,
+  type RepeatedInputObservation,
+} from "./usageRepeatedInput.ts";
 
 // v2 changed fork-copy suppression. v3 added root coverage. v4 persists the
 // Codex parser cursor. v5 reparses AI Studio files for source dates and branch
@@ -43,6 +47,8 @@ export interface CachedFile {
   /** Sanitized repeated-input observations. Never contains source text. */
   readonly repeatedInputObservations?: readonly RepeatedInputObservation[];
   readonly repeatedInputGaps?: readonly UsageRepeatedInputCoverageGap[];
+  /** Active skill revisions needed to attribute later carried token_count records. */
+  readonly repeatedInputActiveSources?: readonly RepeatedInputActiveSource[];
   /** Parser semantics used to produce the repeated-input observations. */
   readonly repeatedInputVersion?: number;
 }
@@ -136,6 +142,17 @@ type SerializedRepeatedInputGap = readonly [
   string,
 ];
 
+type SerializedRepeatedInputActiveSource = readonly [
+  UsageRepeatedInputSourceKind,
+  string,
+  string,
+  string | null,
+  number | null,
+  number | null,
+  number,
+  string | null,
+];
+
 interface SerializedFile {
   readonly s: number;
   readonly m: number;
@@ -144,6 +161,7 @@ interface SerializedFile {
   readonly h?: string;
   readonly i?: readonly SerializedRepeatedInput[];
   readonly g?: readonly SerializedRepeatedInputGap[];
+  readonly a?: readonly SerializedRepeatedInputActiveSource[];
   readonly j?: number;
   readonly c?: readonly [
     string,
@@ -188,6 +206,7 @@ export function encodeScanCache(
   for (const [path, entry] of cache) {
     const repeatedInputObservations = entry.repeatedInputObservations;
     const repeatedInputGaps = entry.repeatedInputGaps;
+    const repeatedInputActiveSources = entry.repeatedInputActiveSources;
     files[path] = {
       s: entry.size,
       m: entry.mtimeMs,
@@ -233,6 +252,23 @@ export function encodeScanCache(
         ? {}
         : {
             g: repeatedInputGaps.map((gap) => [gap.reason, gap.count, gap.message] as const),
+          }),
+      ...(repeatedInputActiveSources === undefined
+        ? {}
+        : {
+            a: repeatedInputActiveSources.map(
+              (source) =>
+                [
+                  source.descriptor.sourceKind,
+                  source.descriptor.displayName,
+                  source.descriptor.contentHash,
+                  source.descriptor.fileRevisionHash,
+                  source.descriptor.byteLength,
+                  source.descriptor.tokenCount,
+                  source.loadedAtMs,
+                  source.loadedTurnId,
+                ] as const,
+            ),
           }),
       ...(entry.repeatedInputVersion === undefined ? {} : { j: entry.repeatedInputVersion }),
       ...(entry.codexState === undefined
@@ -353,6 +389,55 @@ function decodeRepeatedInputGaps(
     gaps.push({ reason, count: Math.trunc(count), message });
   }
   return gaps;
+}
+
+function decodeRepeatedInputActiveSources(
+  value: readonly SerializedRepeatedInputActiveSource[] | undefined,
+): readonly RepeatedInputActiveSource[] | null {
+  if (value === undefined) return [];
+  if (!isRecordArray(value)) return null;
+  const sources: RepeatedInputActiveSource[] = [];
+  for (const row of value) {
+    if (!isRecordArray(row) || row.length !== 8) return null;
+    const [
+      sourceKind,
+      displayName,
+      contentHash,
+      fileRevisionHash,
+      byteLength,
+      tokenCount,
+      loadedAtMs,
+      loadedTurnId,
+    ] = row;
+    if (
+      !isRepeatedInputSourceKind(sourceKind) ||
+      typeof displayName !== "string" ||
+      typeof contentHash !== "string" ||
+      (fileRevisionHash !== null && typeof fileRevisionHash !== "string") ||
+      (byteLength !== null &&
+        (typeof byteLength !== "number" || !Number.isSafeInteger(byteLength) || byteLength < 0)) ||
+      (tokenCount !== null &&
+        (typeof tokenCount !== "number" || !Number.isSafeInteger(tokenCount) || tokenCount < 0)) ||
+      typeof loadedAtMs !== "number" ||
+      !Number.isFinite(loadedAtMs) ||
+      (loadedTurnId !== null && typeof loadedTurnId !== "string")
+    ) {
+      return null;
+    }
+    sources.push({
+      descriptor: {
+        sourceKind,
+        displayName,
+        contentHash,
+        fileRevisionHash,
+        byteLength,
+        tokenCount,
+      },
+      loadedAtMs,
+      loadedTurnId,
+    });
+  }
+  return sources;
 }
 
 /**
@@ -551,6 +636,16 @@ export function decodeScanCache(document: unknown): ScanCache {
     if (repeatedInputCorrupt) continue;
     const repeatedInputGaps = decodeRepeatedInputGaps(entry.g);
     if (entry.g !== undefined && repeatedInputGaps === null) continue;
+    const repeatedInputActiveSources = decodeRepeatedInputActiveSources(entry.a);
+    // An invalid active-source cursor must force a repeated-input cold read,
+    // but it must not discard the ordinary usage rows in an otherwise valid
+    // cache entry.
+    const activeSourcesValid = repeatedInputActiveSources !== null;
+    const repeatedInputVersionForEntry =
+      activeSourcesValid &&
+      (repeatedInputVersion !== REPEATED_INPUT_CACHE_VERSION || entry.a !== undefined)
+        ? repeatedInputVersion
+        : undefined;
     let codexState: CodexScanState | undefined;
     if (root.version >= 4 && entry.c !== undefined) {
       const [
@@ -594,7 +689,12 @@ export function decodeScanCache(document: unknown): ScanCache {
       ...(prefixFingerprint === undefined ? {} : { prefixFingerprint }),
       ...(entry.i === undefined ? {} : { repeatedInputObservations }),
       ...(repeatedInputGaps === null || entry.g === undefined ? {} : { repeatedInputGaps }),
-      ...(repeatedInputVersion === undefined ? {} : { repeatedInputVersion }),
+      ...(activeSourcesValid && entry.a !== undefined && repeatedInputActiveSources !== undefined
+        ? { repeatedInputActiveSources }
+        : {}),
+      ...(repeatedInputVersionForEntry === undefined
+        ? {}
+        : { repeatedInputVersion: repeatedInputVersionForEntry }),
     });
   }
 

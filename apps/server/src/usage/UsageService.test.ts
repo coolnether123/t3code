@@ -260,11 +260,16 @@ describe("UsageService", () => {
       const { settings, home } = yield* setup;
       const codexHome = NodePath.join(home, "codex");
       const skillPath = NodePath.join(codexHome, "skills", "unslop", "SKILL.md");
+      const unusedSkillPath = NodePath.join(codexHome, "skills", "never-used", "SKILL.md");
       const sessions = NodePath.join(codexHome, "sessions", "2026", "08");
       const skillText = "# Unslop\nUse plain language.\n";
       yield* Effect.promise(() => NodeFSP.mkdir(NodePath.dirname(skillPath), { recursive: true }));
+      yield* Effect.promise(() =>
+        NodeFSP.mkdir(NodePath.dirname(unusedSkillPath), { recursive: true }),
+      );
       yield* Effect.promise(() => NodeFSP.mkdir(sessions, { recursive: true }));
       yield* Effect.promise(() => NodeFSP.writeFile(skillPath, skillText));
+      yield* Effect.promise(() => NodeFSP.writeFile(unusedSkillPath, "# Never used\n"));
       const transcript = [
         // @effect-diagnostics-next-line preferSchemaOverJson:off - Transcript fixture is JSONL.
         JSON.stringify({
@@ -286,9 +291,9 @@ describe("UsageService", () => {
             type: "token_count",
             info: {
               last_token_usage: {
-                input_tokens: 10,
-                cached_input_tokens: 0,
-                cache_write_input_tokens: 0,
+                input_tokens: 100,
+                cached_input_tokens: 40,
+                cache_write_input_tokens: 10,
                 output_tokens: 2,
                 reasoning_output_tokens: 0,
               },
@@ -326,18 +331,57 @@ describe("UsageService", () => {
           }),
         ),
       );
+      const ordinary = yield* service.readSummary({
+        ...WINDOW,
+        providers: ["codex"],
+        groupBy: "turn",
+      } as UsageSummaryInput);
       const summary = yield* service.readSummary({
         ...WINDOW,
         providers: ["codex"],
+        groupBy: "turn",
         includeRepeatedInput: true,
       } as UsageSummaryInput);
+      assert.deepStrictEqual(summary.buckets, ordinary.buckets);
+      assert.deepStrictEqual(summary.sources, ordinary.sources);
+      assert.deepStrictEqual(summary.pricing, ordinary.pricing);
+      assert.deepInclude(summary.buckets[0], {
+        totals: {
+          uncachedInputTokens: 50,
+          cachedInputTokens: 40,
+          cacheCreationTokens: 10,
+          outputTokens: 2,
+          reasoningTokens: 0,
+        },
+      });
       const repeated = summary.repeatedInput;
       assert.ok(repeated);
       assert.lengthOf(repeated.items, 1);
+      assert.lengthOf(repeated.catalog ?? [], 2);
+      assert.deepInclude(repeated.catalog?.[0], {
+        displayName: "unslop",
+        observed: true,
+        confidence: "confirmedPayload",
+      });
+      assert.isString(repeated.catalog?.[0]?.firstObservedAt);
+      assert.isString(repeated.catalog?.[0]?.lastObservedAt);
+      assert.deepInclude(
+        repeated.catalog?.find((item) => item.displayName === "never-used"),
+        {
+          observed: false,
+          firstObservedAt: null,
+          lastObservedAt: null,
+          confidence: null,
+          occurrences: 0,
+          estimatedApiCostUsd: null,
+        },
+      );
       assert.strictEqual(repeated.items[0]?.sourceKind, "skill");
       assert.strictEqual(repeated.items[0]?.displayName, "unslop");
       assert.strictEqual(repeated.items[0]?.occurrences, 1);
-      assert.strictEqual(repeated.items[0]?.fullSessionInputTokens.exact, 10);
+      assert.strictEqual(repeated.items[0]?.fullSessionInputTokens.exact, 50);
+      assert.strictEqual(repeated.items[0]?.fullSessionInputTokens.cached, 40);
+      assert.strictEqual(repeated.items[0]?.fullSessionInputTokens.cacheWrite, 10);
       assert.isAtLeast(
         (repeated.items[0]?.directTokens.exact ?? 0) +
           (repeated.items[0]?.directTokens.estimated ?? 0),

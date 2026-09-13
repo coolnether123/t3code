@@ -73,6 +73,7 @@ vi.mock("./usageProviders", async (importOriginal) => {
 
 import { UsagePage } from "./UsagePage";
 import usagePageSource from "./UsagePage.tsx?raw";
+import usageResetPageSource from "./UsageResetPage.tsx?raw";
 
 const providerTotals = (codex: number, claude: number) =>
   new Map([
@@ -259,9 +260,19 @@ describe("UsagePage mobile range controls", () => {
     expect(usagePageSource).toContain("WINDOW_OPTIONS.map((option)");
   });
 
-  it("opts into repeated-input data through the ordinary Usage request", () => {
-    expect(usagePageSource).toContain("includeRepeatedInput: true");
-    expect(usagePageSource).toContain("<RepeatedInputSection data={repeatedInput ?? null} />");
-    expect(usagePageSource).toContain('to="/usage-resets"');
+  it("preserves the original Usage content and request without attribution", () => {
+    testState.useUsage.mockClear();
+    const markup = renderToStaticMarkup(<UsagePage />);
+    expect(markup).not.toContain('to="/repeated-input"');
+    expect(markup).not.toContain("Skills &amp; repeated input");
+    expect(markup).not.toContain("Attribution overview");
+    expect(markup).toContain('to="/usage-resets"');
+    expect(testState.useUsage.mock.calls[0]?.[0]).not.toHaveProperty("includeRepeatedInput");
+  });
+
+  it("keeps repeated input out of the Codex reset monitor", () => {
+    expect(usageResetPageSource).not.toContain("includeRepeatedInput");
+    expect(usageResetPageSource).not.toContain("RepeatedInputSection");
+    expect(usageResetPageSource).not.toContain("Skills & repeated input");
   });
 });

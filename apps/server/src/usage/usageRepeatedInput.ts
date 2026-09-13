@@ -7,18 +7,17 @@
  * safe to put in the transcript cache or a Usage response.
  */
 import * as NodeChildProcess from "node:child_process";
-import type { Dirent } from "node:fs";
-import * as NodeFS from "node:fs/promises";
+import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
+import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import { createHash } from "node:crypto";
 
 import type {
   UsageRepeatedInputConfidence,
   UsageRepeatedInputCoverageGap,
   UsageRepeatedInputPriceStatus,
   UsageRepeatedInputSourceKind,
-  UsageRepeatedInputTokenAttribution,
   UsageTokenTotals,
 } from "@t3tools/contracts";
 
@@ -27,7 +26,7 @@ import { priceUsage, type RateTable } from "./usagePricing.ts";
 const DEFAULT_MAX_SOURCE_BYTES = 4 * 1024 * 1024;
 const FORK_COPY_MAX_GAP_MS = 1000;
 /** Bump when cached observation semantics change, without discarding ordinary Usage records. */
-export const REPEATED_INPUT_CACHE_VERSION = 1 as const;
+export const REPEATED_INPUT_CACHE_VERSION = 3 as const;
 
 export interface RepeatedInputTokenizer {
   readonly countTokens: (content: string) => number | null;
@@ -120,7 +119,7 @@ export interface RepeatedInputSourceDescriptor {
 }
 
 interface CatalogEntry extends RepeatedInputSourceDescriptor {
-  readonly normalizedPath: string | null;
+  readonly normalizedPaths: readonly string[];
   readonly content: string;
 }
 
@@ -135,6 +134,7 @@ export interface RepeatedInputCatalog {
 
 export interface RepeatedInputCatalogEntryInput {
   readonly path?: string;
+  readonly pathAliases?: readonly string[] | undefined;
   readonly content: string;
   readonly sourceKind?: UsageRepeatedInputSourceKind;
   readonly displayName?: string;
@@ -144,7 +144,7 @@ export interface RepeatedInputCatalogEntryInput {
 
 /** SHA-256 of exact UTF-8 content, used for stable item identity. */
 export function stableContentHash(content: string | Uint8Array): string {
-  return createHash("sha256").update(content).digest("hex");
+  return NodeCrypto.createHash("sha256").update(content).digest("hex");
 }
 
 /** Alias used by importers that do not need to distinguish content from a file. */
@@ -152,6 +152,10 @@ export const hashRepeatedInput = stableContentHash;
 
 function normalizePath(value: string): string {
   return value.replaceAll("\\", "/").replaceAll(/\/+/g, "/").toLowerCase();
+}
+
+function normalizeFilesystemPath(value: string): string {
+  return normalizePath(NodePath.resolve(value));
 }
 
 function basename(value: string): string {
@@ -167,7 +171,7 @@ function derivedDisplayName(
   if (path === undefined || path.length === 0) {
     return sourceKind === "skill" ? "Skill" : sourceKind;
   }
-  const normalized = normalizePath(path);
+  const normalized = normalizeFilesystemPath(path);
   const file = basename(normalized);
   if (sourceKind === "skill" && file === "skill.md") {
     const parent = normalized.slice(0, normalized.lastIndexOf("/"));
@@ -209,7 +213,7 @@ export function createRepeatedInputCatalog(
   for (const input of entries) {
     const path = input.path;
     const sourceKind = input.sourceKind ?? (path === undefined ? null : sourceKindForPath(path));
-    if (sourceKind === null || input.content.length === 0) continue;
+    if (sourceKind === null || (sourceKind !== "skill" && input.content.length === 0)) continue;
     const contentHash = stableContentHash(input.content);
     const tokenCount =
       sanitizeTokenCount(input.tokenCount) ?? options.tokenizer?.countTokens(input.content) ?? null;
@@ -219,6 +223,34 @@ export function createRepeatedInputCatalog(
           ? null
           : contentHash
         : input.fileRevisionHash;
+    const normalizedPaths = [
+      ...(path === undefined ? [] : [normalizeFilesystemPath(path)]),
+      ...(input.pathAliases ?? []).map(normalizeFilesystemPath),
+    ];
+    const identity = `${sourceKind}\u0000${contentHash}\u0000${fileRevisionHash ?? ""}`;
+    const existing = catalog.find(
+      (entry) =>
+        `${entry.sourceKind}\u0000${entry.contentHash}\u0000${entry.fileRevisionHash ?? ""}` ===
+        identity,
+    );
+    if (existing !== undefined) {
+      const mergedPaths = new Set([...existing.normalizedPaths, ...normalizedPaths]);
+      if (existing.tokenCount === null && tokenCount !== null) {
+        // Keep the first descriptor's metadata unless the duplicate supplied a
+        // tokenizer result that the first path did not have.
+        catalog[catalog.indexOf(existing)] = {
+          ...existing,
+          tokenCount,
+          normalizedPaths: [...mergedPaths],
+        };
+      } else {
+        catalog[catalog.indexOf(existing)] = {
+          ...existing,
+          normalizedPaths: [...mergedPaths],
+        };
+      }
+      continue;
+    }
     catalog.push({
       sourceKind,
       displayName: input.displayName ?? derivedDisplayName(path, sourceKind),
@@ -226,12 +258,12 @@ export function createRepeatedInputCatalog(
       fileRevisionHash,
       byteLength: Buffer.byteLength(input.content, "utf8"),
       tokenCount,
-      normalizedPath: path === undefined ? null : normalizePath(path),
+      normalizedPaths,
       content: input.content,
     });
   }
 
-  const descriptors = catalog.map(({ content: _content, normalizedPath: _path, ...descriptor }) =>
+  const descriptors = catalog.map(({ content: _content, normalizedPaths: _paths, ...descriptor }) =>
     Object.freeze(descriptor),
   );
   const uniqueMatches = (
@@ -240,10 +272,10 @@ export function createRepeatedInputCatalog(
     const seen = new Set<string>();
     const result: RepeatedInputSourceDescriptor[] = [];
     for (const entry of matches) {
-      const key = `${entry.sourceKind}\u0000${entry.contentHash}`;
+      const key = `${entry.sourceKind}\u0000${entry.contentHash}\u0000${entry.fileRevisionHash ?? ""}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      const { content: _content, normalizedPath: _path, ...descriptor } = entry;
+      const { content: _content, normalizedPaths: _paths, ...descriptor } = entry;
       result.push(descriptor);
     }
     return result;
@@ -251,8 +283,8 @@ export function createRepeatedInputCatalog(
 
   const pathEvidence = (text: string) => {
     const normalizedText = normalizePath(text);
-    const pathMatches = catalog.filter(
-      (entry) => entry.normalizedPath !== null && normalizedText.includes(entry.normalizedPath),
+    const pathMatches = catalog.filter((entry) =>
+      entry.normalizedPaths.some((path) => normalizedText.includes(path)),
     );
     if (pathMatches.length > 0) {
       return { matches: uniqueMatches(pathMatches), ambiguous: 0 };
@@ -287,7 +319,9 @@ export function createRepeatedInputCatalog(
   return {
     sources: descriptors,
     matchExactText: (text) =>
-      uniqueMatches(catalog.filter((entry) => text.includes(entry.content))),
+      uniqueMatches(
+        catalog.filter((entry) => entry.content.length > 0 && text.includes(entry.content)),
+      ),
     matchPathEvidence: (text) => pathEvidence(text).matches,
     ambiguousPathEvidence: (text) => pathEvidence(text).ambiguous,
   };
@@ -314,33 +348,102 @@ export interface RepeatedInputDiscoveryOptions {
 export function defaultCodexInputRoots(home = NodeOS.homedir()): readonly string[] {
   const codexHome = process.env.CODEX_HOME?.trim() || NodePath.join(home, ".codex");
   return [
-    NodePath.join(codexHome, "skills"),
-    NodePath.join(codexHome, "plugins"),
-    NodePath.join(home, ".codex", "skills"),
-    NodePath.join(home, ".codex", "plugins"),
+    ...new Set([
+      NodePath.join(codexHome, "skills"),
+      NodePath.join(codexHome, "plugins"),
+      NodePath.join(home, ".codex", "skills"),
+      NodePath.join(home, ".codex", "plugins"),
+    ]),
   ];
 }
 
-async function findInputFiles(root: string, result: string[], seen: Set<string>): Promise<void> {
-  let entries: readonly Dirent[];
+interface DiscoveredInputFile {
+  readonly path: string;
+  readonly aliases: readonly string[];
+}
+
+function addDiscoveryGap(gaps: RepeatedInputDiscoveryGap[], seen: Set<string>, path: string): void {
+  const normalized = normalizeFilesystemPath(path);
+  if (seen.has(normalized)) return;
+  seen.add(normalized);
+  gaps.push({ reason: "unavailable", path });
+}
+
+async function findInputFiles(
+  root: string,
+  result: DiscoveredInputFile[],
+  seenFiles: Map<string, number>,
+  activeDirectories: Set<string>,
+  gaps: RepeatedInputDiscoveryGap[],
+  gapPaths: Set<string>,
+): Promise<void> {
+  let canonicalRoot: string;
   try {
-    entries = await NodeFS.readdir(root, { withFileTypes: true });
+    canonicalRoot = await NodeFSP.realpath(root);
   } catch {
+    addDiscoveryGap(gaps, gapPaths, root);
     return;
   }
-  for (const entry of entries) {
-    const path = NodePath.join(root, entry.name);
-    if (entry.isDirectory()) {
-      await findInputFiles(path, result, seen);
-      continue;
+  const normalizedRoot = normalizeFilesystemPath(canonicalRoot);
+  // Keep only the current recursion stack here. A global visited set would
+  // suppress a second logical root that is a junction/symlink alias of an
+  // earlier root, losing that path evidence even though the file is valid.
+  if (activeDirectories.has(normalizedRoot)) return;
+  activeDirectories.add(normalizedRoot);
+
+  try {
+    let entries: readonly NodeFS.Dirent[];
+    try {
+      entries = await NodeFSP.readdir(canonicalRoot, { withFileTypes: true });
+    } catch {
+      addDiscoveryGap(gaps, gapPaths, root);
+      return;
     }
-    if (!entry.isFile()) continue;
-    const kind = sourceKindForPath(path);
-    if (kind === null) continue;
-    const normalized = normalizePath(path);
-    if (seen.has(normalized)) continue;
-    seen.add(normalized);
-    result.push(path);
+    for (const entry of entries) {
+      const path = NodePath.join(root, entry.name);
+      const canonicalPath = NodePath.join(canonicalRoot, entry.name);
+      let stat: Awaited<ReturnType<typeof NodeFSP.stat>>;
+      try {
+        // `stat`, rather than the Dirent type, follows Windows junctions and
+        // symlinked skill directories while the active-realpath set prevents
+        // cycles. Keep `path` as the logical alias for transcript evidence.
+        stat = await NodeFSP.stat(canonicalPath);
+      } catch {
+        addDiscoveryGap(gaps, gapPaths, path);
+        continue;
+      }
+      if (stat.isDirectory()) {
+        await findInputFiles(path, result, seenFiles, activeDirectories, gaps, gapPaths);
+        continue;
+      }
+      if (!stat.isFile()) continue;
+      const kind = sourceKindForPath(path);
+      if (kind === null) continue;
+      let realPath: string;
+      try {
+        realPath = await NodeFSP.realpath(canonicalPath);
+      } catch {
+        addDiscoveryGap(gaps, gapPaths, path);
+        continue;
+      }
+      const normalized = normalizeFilesystemPath(realPath);
+      // Device/inode catches hard links; realpath catches junction and symlink
+      // aliases. The fallback keeps discovery deterministic on filesystems that
+      // do not expose a useful inode.
+      const identity = stat.ino !== 0 ? `${stat.dev}:${stat.ino}` : `path:${normalized}`;
+      const existingIndex = seenFiles.get(identity);
+      if (existingIndex !== undefined) {
+        const existing = result[existingIndex];
+        if (existing !== undefined && !existing.aliases.includes(path)) {
+          result[existingIndex] = { ...existing, aliases: [...existing.aliases, path] };
+        }
+        continue;
+      }
+      seenFiles.set(identity, result.length);
+      result.push({ path: realPath, aliases: [path] });
+    }
+  } finally {
+    activeDirectories.delete(normalizedRoot);
   }
 }
 
@@ -349,39 +452,42 @@ export async function discoverCodexRepeatedInputSources(
   options: RepeatedInputDiscoveryOptions = {},
 ): Promise<RepeatedInputDiscoveryResult> {
   const maxSourceBytes = options.maxSourceBytes ?? DEFAULT_MAX_SOURCE_BYTES;
-  const paths: string[] = [];
-  const seen = new Set<string>();
+  const paths: DiscoveredInputFile[] = [];
+  const seenFiles = new Map<string, number>();
+  const activeDirectories = new Set<string>();
+  const gapPaths = new Set<string>();
   const gaps: RepeatedInputDiscoveryGap[] = [];
   for (const root of options.roots ?? defaultCodexInputRoots()) {
     try {
-      const stat = await NodeFS.stat(root);
+      const stat = await NodeFSP.stat(root);
       if (!stat.isDirectory()) {
-        gaps.push({ reason: "unavailable", path: root });
+        addDiscoveryGap(gaps, gapPaths, root);
         continue;
       }
     } catch {
-      gaps.push({ reason: "unavailable", path: root });
+      addDiscoveryGap(gaps, gapPaths, root);
       continue;
     }
-    await findInputFiles(root, paths, seen);
+    await findInputFiles(root, paths, seenFiles, activeDirectories, gaps, gapPaths);
   }
 
   const entries: RepeatedInputCatalogEntryInput[] = [];
-  for (const path of paths) {
+  for (const file of paths) {
     try {
-      const stat = await NodeFS.stat(path);
+      const stat = await NodeFSP.stat(file.path);
       if (stat.size > maxSourceBytes) {
-        gaps.push({ reason: "oversized", path });
+        gaps.push({ reason: "oversized", path: file.path });
         continue;
       }
-      const content = await NodeFS.readFile(path, "utf8");
+      const content = await NodeFSP.readFile(file.path, "utf8");
       entries.push({
-        path,
+        path: file.path,
+        pathAliases: file.aliases,
         content,
         fileRevisionHash: stableContentHash(content),
       });
     } catch {
-      gaps.push({ reason: "unavailable", path });
+      addDiscoveryGap(gaps, gapPaths, file.path);
     }
   }
   const tokenCounts =
@@ -390,7 +496,7 @@ export async function discoverCodexRepeatedInputSources(
       : (options.tokenizer.countTokensBatch?.(entries.map((entry) => entry.content)) ??
         entries.map((entry) => options.tokenizer?.countTokens(entry.content) ?? null));
   const entriesWithTokens = entries.map((entry, index) => {
-    const tokenCount = tokenCounts[index] ?? null;
+    const tokenCount = sanitizeTokenCount(tokenCounts[index] ?? null);
     if (options.tokenizer !== undefined && tokenCount === null) {
       gaps.push({ reason: "missingTokenizer", path: entry.path ?? "" });
     }
@@ -411,6 +517,16 @@ export interface RepeatedInputParserState {
   ordinal: number;
   suppressingForkCopies: boolean;
   forkCopyAnchorMs: number;
+  /** File-backed payloads known to remain in the carried conversation prefix. */
+  activeSources?: readonly RepeatedInputActiveSource[];
+  /** Consecutive token-count duplicate guard for carried observations. */
+  lastCarriedUsageSignature?: string | null;
+}
+
+export interface RepeatedInputActiveSource {
+  readonly descriptor: RepeatedInputSourceDescriptor;
+  readonly loadedAtMs: number;
+  readonly loadedTurnId: string | null;
 }
 
 export function initialRepeatedInputParserState(
@@ -427,6 +543,8 @@ export function initialRepeatedInputParserState(
     ordinal: 0,
     suppressingForkCopies: false,
     forkCopyAnchorMs: 0,
+    activeSources: [],
+    lastCarriedUsageSignature: null,
   };
 }
 
@@ -550,12 +668,23 @@ function directTokens(
   const tokenCount = descriptor.tokenCount ?? null;
   if (tokenCount === null) return EMPTY_REPEATED_INPUT_TOKENS;
   // Codex reports cache classes for the complete request, not for a specific
-  // payload inside it. Assigning those totals to this item would invent
-  // precision. The matched request's cache split is retained separately in
-  // fullSessionInputTokens.
-  return confidence === "confirmedPayload"
-    ? { exact: tokenCount, estimated: 0, cached: 0, cacheWrite: 0, unknown: 0 }
-    : { exact: 0, estimated: tokenCount, cached: 0, cacheWrite: 0, unknown: 0 };
+  // payload inside it. The direct load observation therefore stays exact;
+  // cache attribution is assigned only by a later token-count record whose
+  // partition proves that the carried payload is in the complete cached or
+  // cache-write region.
+  if (confidence === "confirmedPayload") {
+    return { exact: tokenCount, estimated: 0, cached: 0, cacheWrite: 0, unknown: 0 };
+  }
+  return { exact: 0, estimated: tokenCount, cached: 0, cacheWrite: 0, unknown: 0 };
+}
+
+function tokenAttributionRank(tokens: RepeatedInputTokenAttribution): number {
+  if (tokens.cacheWrite > 0) return 4;
+  if (tokens.cached > 0) return 3;
+  if (tokens.exact > 0) return 2;
+  if (tokens.estimated > 0) return 1;
+  if (tokens.unknown > 0) return 0;
+  return -1;
 }
 
 function confidenceRank(confidence: UsageRepeatedInputConfidence): number {
@@ -647,6 +776,7 @@ function observation(
   timestampMs: number,
   identity: string,
   providerReportedCostUsd: number | null = null,
+  tokens: RepeatedInputTokenAttribution | undefined = undefined,
 ): RepeatedInputObservation {
   const sessionId = state.sessionId;
   const turnId = state.turnId ?? null;
@@ -661,6 +791,7 @@ function observation(
     evidenceIdentity,
     descriptor.sourceKind,
     descriptor.contentHash,
+    descriptor.fileRevisionHash ?? "",
   ].join(":");
   return {
     sourceKind: descriptor.sourceKind,
@@ -674,7 +805,7 @@ function observation(
     model: state.model.length > 0 ? state.model : null,
     project: state.project,
     environment: state.environment,
-    directTokens: directTokens(descriptor, confidence),
+    directTokens: tokens ?? directTokens(descriptor, confidence),
     fullSessionInputTokens: fullSessionTokens(state.lastInputTokens),
     providerReportedCostUsd,
     dedupeKey,
@@ -688,10 +819,80 @@ function addBestObservation(
   const previous = byKey.get(next.dedupeKey);
   if (
     previous === undefined ||
-    confidenceRank(next.confidence) > confidenceRank(previous.confidence)
+    confidenceRank(next.confidence) > confidenceRank(previous.confidence) ||
+    (confidenceRank(next.confidence) === confidenceRank(previous.confidence) &&
+      tokenAttributionRank(next.directTokens) > tokenAttributionRank(previous.directTokens))
   ) {
     byKey.set(next.dedupeKey, next);
   }
+}
+
+function activeSourceKey(descriptor: RepeatedInputSourceDescriptor): string {
+  return `${descriptor.sourceKind}\u0000${descriptor.contentHash}\u0000${descriptor.fileRevisionHash ?? ""}`;
+}
+
+function registerActiveSource(
+  state: RepeatedInputParserState,
+  descriptor: RepeatedInputSourceDescriptor,
+  timestampMs: number,
+): void {
+  if (descriptor.sourceKind !== "skill") return;
+  const existing = state.activeSources ?? [];
+  const key = activeSourceKey(descriptor);
+  const next = existing.filter((source) => activeSourceKey(source.descriptor) !== key);
+  next.push({
+    descriptor,
+    loadedAtMs: timestampMs,
+    loadedTurnId: state.turnId ?? null,
+  });
+  state.activeSources = next;
+}
+
+function clearActiveSources(state: RepeatedInputParserState): void {
+  state.activeSources = [];
+  state.lastCarriedUsageSignature = null;
+}
+
+function carriedTokens(
+  source: RepeatedInputActiveSource,
+  usage: UsageTokenTotals | null,
+): {
+  readonly tokens: RepeatedInputTokenAttribution;
+  readonly confidence: UsageRepeatedInputConfidence;
+} {
+  const tokenCount = source.descriptor.tokenCount;
+  if (tokenCount === null) {
+    return {
+      tokens: { ...EMPTY_REPEATED_INPUT_TOKENS, unknown: 0 },
+      confidence: "likelyRead",
+    };
+  }
+  const completeCacheWrite =
+    usage !== null &&
+    usage.uncachedInputTokens === 0 &&
+    usage.cachedInputTokens === 0 &&
+    usage.cacheCreationTokens >= tokenCount;
+  if (completeCacheWrite) {
+    return {
+      tokens: { exact: 0, estimated: 0, cached: 0, cacheWrite: tokenCount, unknown: 0 },
+      confidence: "confirmedPayload",
+    };
+  }
+  const completeCacheHit =
+    usage !== null &&
+    usage.uncachedInputTokens === 0 &&
+    usage.cacheCreationTokens === 0 &&
+    usage.cachedInputTokens >= tokenCount;
+  if (completeCacheHit) {
+    return {
+      tokens: { exact: 0, estimated: 0, cached: tokenCount, cacheWrite: 0, unknown: 0 },
+      confidence: "confirmedPayload",
+    };
+  }
+  return {
+    tokens: { exact: 0, estimated: 0, cached: 0, cacheWrite: 0, unknown: tokenCount },
+    confidence: "likelyRead",
+  };
 }
 
 function updateState(record: Record<string, unknown>, state: RepeatedInputParserState): void {
@@ -699,9 +900,30 @@ function updateState(record: Record<string, unknown>, state: RepeatedInputParser
   if (timestampMs !== null) state.lastTimestampMs = timestampMs;
   const payload = recordObject(record["payload"]);
   if (payload === null) return;
+  const payloadType = typeof payload["type"] === "string" ? payload["type"] : "";
+  if (
+    payloadType === "compaction" ||
+    payloadType === "context_compaction" ||
+    payloadType === "context_reset" ||
+    payloadType === "conversation_reset"
+  ) {
+    clearActiveSources(state);
+  }
+  if (payloadType === "fork" || payloadType === "context_fork" || payloadType === "thread_spawn") {
+    clearActiveSources(state);
+    if (timestampMs !== null) {
+      state.suppressingForkCopies = true;
+      state.forkCopyAnchorMs = timestampMs;
+    }
+  }
   if (record["type"] === "session_meta") {
     const id = payload["session_id"] ?? payload["sessionId"] ?? payload["id"];
-    if (typeof id === "string") state.sessionId = id;
+    if (typeof id === "string") {
+      if (state.sessionId.length > 0 && state.sessionId !== id) clearActiveSources(state);
+      state.sessionId = id;
+    } else if (state.sessionId.length > 0) {
+      clearActiveSources(state);
+    }
     const cwd = payload["cwd"] ?? payload["project"];
     if (typeof cwd === "string" && state.project === null) state.project = cwd;
     const model = payload["model"];
@@ -714,6 +936,7 @@ function updateState(record: Record<string, unknown>, state: RepeatedInputParser
       typeof forkedFrom === "string" ||
       (spawn !== null && typeof spawn["parent_thread_id"] === "string");
     if (isForked && timestampMs !== null) {
+      clearActiveSources(state);
       state.suppressingForkCopies = true;
       state.forkCopyAnchorMs = timestampMs;
     }
@@ -722,14 +945,17 @@ function updateState(record: Record<string, unknown>, state: RepeatedInputParser
     if (typeof model === "string") state.model = model;
     const turnId = payload["turn_id"] ?? payload["turnId"];
     const nextTurnId = typeof turnId === "string" ? turnId : undefined;
-    if (nextTurnId !== state.turnId) state.lastInputTokens = null;
+    if (nextTurnId !== state.turnId) {
+      state.lastInputTokens = null;
+      state.lastCarriedUsageSignature = null;
+    }
     state.turnId = nextTurnId;
     const cwd = payload["cwd"] ?? payload["project"];
     if (typeof cwd === "string" && state.project === null) state.project = cwd;
-  } else if (payload["type"] === "token_count") {
+  } else if (payloadType === "token_count") {
     const info = recordObject(payload["info"]);
     const usage = info === null ? null : parseUsage(info["last_token_usage"]);
-    if (usage !== null) state.lastInputTokens = usage;
+    state.lastInputTokens = usage;
   }
 }
 
@@ -788,14 +1014,62 @@ function detailedParseCodexRepeatedInputLine(
   }
   state.suppressingForkCopies = false;
   const payload = recordObject(record["payload"]);
-  if (payload === null || record["type"] !== "response_item") {
+  if (payload === null) {
+    return { observations: [], gaps: [] };
+  }
+
+  const payloadType = typeof payload["type"] === "string" ? payload["type"] : "";
+  if (payloadType === "token_count") {
+    const activeSources = state.activeSources ?? [];
+    if (activeSources.length === 0 || state.lastInputTokens === null) {
+      return { observations: [], gaps: [] };
+    }
+    const usageSignature = `${state.sessionId}\u0000${state.turnId ?? ""}\u0000${canonicalJson(state.lastInputTokens)}`;
+    if (state.lastCarriedUsageSignature === usageSignature) {
+      return { observations: [], gaps: [] };
+    }
+    state.lastCarriedUsageSignature = usageSignature;
+    const byKey = new Map<string, RepeatedInputObservation>();
+    const gaps: UsageRepeatedInputCoverageGap[] = [];
+    for (const source of activeSources) {
+      const attribution = carriedTokens(source, state.lastInputTokens);
+      if (source.descriptor.tokenCount === null) {
+        gaps.push({
+          reason: "missingTokenizer",
+          count: 1,
+          message:
+            "A carried skill payload had no token count, so its token usage remains unknown.",
+        });
+      } else if (attribution.tokens.unknown > 0) {
+        gaps.push({
+          reason: "unattributed",
+          count: attribution.tokens.unknown,
+          message:
+            "A carried skill payload was present, but the transcript did not prove its cache-prefix placement.",
+        });
+      }
+      addBestObservation(
+        byKey,
+        observation(
+          source.descriptor,
+          attribution.confidence,
+          state,
+          timestampMs,
+          `carried:${state.sessionId}:${state.turnId ?? timestampMs}`,
+          null,
+          attribution.tokens,
+        ),
+      );
+    }
+    return { observations: [...byKey.values()], gaps };
+  }
+  if (record["type"] !== "response_item") {
     return { observations: [], gaps: [] };
   }
 
   const byKey = new Map<string, RepeatedInputObservation>();
   const gaps: UsageRepeatedInputCoverageGap[] = [];
   const catalog = options.catalog;
-  const payloadType = typeof payload["type"] === "string" ? payload["type"] : "";
   const rawReportedCost =
     payload["costUSD"] ??
     payload["costUsd"] ??
@@ -823,6 +1097,7 @@ function detailedParseCodexRepeatedInputLine(
     identitySuffix: string,
   ) => {
     for (const descriptor of matches) {
+      if (confidence === "confirmedPayload") registerActiveSource(state, descriptor, timestampMs);
       addBestObservation(
         byKey,
         observation(
@@ -1030,6 +1305,8 @@ export interface RepeatedInputAggregateOptions {
   readonly untilMs?: number;
   readonly dayAt?: (timestampMs: number) => string;
   readonly coverageGaps?: readonly UsageRepeatedInputCoverageGap[];
+  /** Current file-backed catalog. Entries without observations remain visible. */
+  readonly catalog?: readonly RepeatedInputSourceDescriptor[];
 }
 
 export interface RepeatedInputAggregateBreakdown {
@@ -1065,8 +1342,32 @@ export interface RepeatedInputAggregateItem {
   readonly breakdowns: readonly RepeatedInputAggregateBreakdown[];
 }
 
+export interface RepeatedInputCatalogAggregateItem {
+  readonly displayName: string;
+  readonly sourceKind: UsageRepeatedInputSourceKind;
+  readonly contentHash: string;
+  readonly fileRevisionHash: string | null;
+  readonly byteLength: number | null;
+  readonly tokenCount: number | null;
+  readonly observed: boolean;
+  readonly firstObservedAtMs: number | null;
+  readonly lastObservedAtMs: number | null;
+  readonly occurrences: number;
+  readonly affectedSessions: number;
+  readonly affectedTurns: number;
+  readonly confidence: UsageRepeatedInputConfidence | null;
+  readonly confidenceCounts: Readonly<Record<UsageRepeatedInputConfidence, number>>;
+  readonly directTokens: RepeatedInputTokenAttribution;
+  readonly fullSessionInputTokens: RepeatedInputTokenAttribution;
+  readonly modelCosts: readonly RepeatedInputModelCost[];
+  readonly breakdowns: readonly RepeatedInputAggregateBreakdown[];
+  readonly estimatedApiCostUsd: number | null;
+  readonly priceStatus: UsageRepeatedInputPriceStatus;
+}
+
 export interface RepeatedInputAggregateResult {
   readonly items: readonly RepeatedInputAggregateItem[];
+  readonly catalog: readonly RepeatedInputCatalogAggregateItem[];
   readonly totals: readonly RepeatedInputAggregateBreakdown[];
   readonly coverageGaps: readonly UsageRepeatedInputCoverageGap[];
   readonly estimatedApiCostUsd: number | null;
@@ -1162,6 +1463,28 @@ function mergeCost(
   return { cost, status };
 }
 
+function descriptorKey(value: {
+  readonly sourceKind: UsageRepeatedInputSourceKind;
+  readonly contentHash: string;
+  readonly fileRevisionHash: string | null;
+}): string {
+  return `${value.sourceKind}\u0000${value.contentHash}\u0000${value.fileRevisionHash ?? ""}`;
+}
+
+function aggregateItemCost(modelCosts: readonly RepeatedInputModelCost[]): {
+  readonly cost: number | null;
+  readonly status: UsageRepeatedInputPriceStatus;
+} {
+  let cost: number | null = null;
+  let status: UsageRepeatedInputPriceStatus = "estimated";
+  for (const modelCost of modelCosts) {
+    const merged = mergeCost(cost, status, modelCost);
+    cost = merged.cost;
+    status = merged.status;
+  }
+  return { cost, status: modelCosts.length === 0 ? "unpriced" : status };
+}
+
 /** Aggregates observations without ever treating full-session input as item cost. */
 export function aggregateRepeatedInputObservations(
   observations: readonly RepeatedInputObservation[],
@@ -1172,7 +1495,10 @@ export function aggregateRepeatedInputObservations(
     const previous = bestEvidence.get(observation.dedupeKey);
     if (
       previous === undefined ||
-      confidenceRank(observation.confidence) > confidenceRank(previous.confidence)
+      confidenceRank(observation.confidence) > confidenceRank(previous.confidence) ||
+      (confidenceRank(observation.confidence) === confidenceRank(previous.confidence) &&
+        tokenAttributionRank(observation.directTokens) >
+          tokenAttributionRank(previous.directTokens))
     ) {
       bestEvidence.set(observation.dedupeKey, observation);
     }
@@ -1181,7 +1507,7 @@ export function aggregateRepeatedInputObservations(
   const toolOperationOccurrences = new Map<string, number>();
   for (const observation of uniqueObservations) {
     if (observation.sourceKind !== "toolOperation") continue;
-    const key = `${observation.sourceKind}\u0000${observation.contentHash}`;
+    const key = descriptorKey(observation);
     toolOperationOccurrences.set(key, (toolOperationOccurrences.get(key) ?? 0) + 1);
   }
   const itemMaps = new Map<
@@ -1218,7 +1544,7 @@ export function aggregateRepeatedInputObservations(
     ) {
       continue;
     }
-    const itemKey = `${input.sourceKind}\u0000${input.contentHash}`;
+    const itemKey = descriptorKey(input);
     // A typed tool operation becomes repeated input only after the exact same
     // operation payload is observed more than once. This keeps one-off shell
     // commands and arbitrary tool use out of the report.
@@ -1375,6 +1701,65 @@ export function aggregateRepeatedInputObservations(
       ),
       breakdowns: [...item.breakdowns.values()].map(freezeBreakdown),
     }));
+  const observedByDescriptor = new Map(items.map((item) => [descriptorKey(item), item] as const));
+  const catalog = [...(options.catalog ?? [])]
+    .filter((descriptor) => descriptor.sourceKind === "skill")
+    .map((descriptor): RepeatedInputCatalogAggregateItem => {
+      const item = observedByDescriptor.get(descriptorKey(descriptor));
+      if (item === undefined) {
+        return {
+          displayName: descriptor.displayName,
+          sourceKind: descriptor.sourceKind,
+          contentHash: descriptor.contentHash,
+          fileRevisionHash: descriptor.fileRevisionHash,
+          byteLength: descriptor.byteLength,
+          tokenCount: descriptor.tokenCount,
+          observed: false,
+          firstObservedAtMs: null,
+          lastObservedAtMs: null,
+          occurrences: 0,
+          affectedSessions: 0,
+          affectedTurns: 0,
+          confidence: null,
+          confidenceCounts: { reference: 0, likelyRead: 0, confirmedPayload: 0 },
+          directTokens: EMPTY_REPEATED_INPUT_TOKENS,
+          fullSessionInputTokens: EMPTY_REPEATED_INPUT_TOKENS,
+          modelCosts: [],
+          breakdowns: [],
+          estimatedApiCostUsd: null,
+          priceStatus: "unpriced",
+        };
+      }
+      const itemCost = aggregateItemCost(item.modelCosts);
+      return {
+        displayName: item.displayName,
+        sourceKind: item.sourceKind,
+        contentHash: item.contentHash,
+        fileRevisionHash: item.fileRevisionHash,
+        byteLength: descriptor.byteLength,
+        tokenCount: descriptor.tokenCount,
+        observed: true,
+        firstObservedAtMs: item.firstObservedAtMs,
+        lastObservedAtMs: item.lastObservedAtMs,
+        occurrences: item.occurrences,
+        affectedSessions: item.affectedSessions,
+        affectedTurns: item.affectedTurns,
+        confidence: item.confidence,
+        confidenceCounts: item.confidenceCounts,
+        directTokens: item.directTokens,
+        fullSessionInputTokens: item.fullSessionInputTokens,
+        modelCosts: item.modelCosts,
+        breakdowns: item.breakdowns,
+        estimatedApiCostUsd: itemCost.cost,
+        priceStatus: itemCost.status,
+      };
+    })
+    .sort((left, right) => {
+      if (left.observed !== right.observed) return left.observed ? -1 : 1;
+      if (left.lastObservedAtMs === null) return 1;
+      if (right.lastObservedAtMs === null) return -1;
+      return right.lastObservedAtMs - left.lastObservedAtMs;
+    });
   const coverageGaps = [...(options.coverageGaps ?? [])];
   if (missingModels > 0) {
     coverageGaps.push({
@@ -1392,6 +1777,7 @@ export function aggregateRepeatedInputObservations(
   }
   return {
     items,
+    catalog,
     totals: [...totals.values()].map(freezeBreakdown),
     coverageGaps,
     estimatedApiCostUsd: combinedCost,
