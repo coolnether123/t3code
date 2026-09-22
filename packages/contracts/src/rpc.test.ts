@@ -2,7 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 
-import { WsSubscribeServerConfigRpc } from "./rpc.ts";
+import { WsServerGetUsageReportRpc, WsSubscribeServerConfigRpc } from "./rpc.ts";
 
 /**
  * The client always sends `environmentThemes`, including to servers built
@@ -27,5 +27,27 @@ describe("subscribeServerConfig payload compatibility", () => {
   it("stays optional, so a client that never sends it still subscribes", () => {
     const decoded = Schema.decodeUnknownSync(WsSubscribeServerConfigRpc.payloadSchema)({});
     expect(decoded).toEqual({});
+  });
+});
+
+describe("usage report RPC", () => {
+  it("keeps the report query bounded and mode-discriminated", () => {
+    const payload = Schema.decodeUnknownSync(WsServerGetUsageReportRpc.payloadSchema)({
+      mode: "models",
+      timeZone: "UTC",
+      sinceDay: "2026-08-01",
+      untilDay: "2026-08-02",
+      limit: 32,
+    });
+    expect(payload).toMatchObject({ mode: "models", limit: 32 });
+    expect(() =>
+      Schema.decodeUnknownSync(WsServerGetUsageReportRpc.payloadSchema)({
+        mode: "models",
+        timeZone: "UTC",
+        sinceDay: "2026-08-01",
+        untilDay: "2026-08-02",
+        limit: 513,
+      }),
+    ).toThrow();
   });
 });

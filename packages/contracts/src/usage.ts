@@ -16,7 +16,8 @@
  */
 import * as Schema from "effect/Schema";
 
-import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { NonNegativeInt, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { UsageModelPriceOverride } from "./settings.ts";
 
 /**
  * Bumped whenever the shape of {@link UsageSummary} changes incompatibly. The
@@ -468,6 +469,225 @@ export const UsageSummary = Schema.Struct({
   repeatedInput: Schema.optional(UsageRepeatedInputSummary),
 });
 export type UsageSummary = typeof UsageSummary.Type;
+
+/**
+ * The compact, agent-facing usage read API. This is deliberately separate
+ * from {@link UsageSummary}: existing clients need transcript-shaped buckets,
+ * while agents generally need one bounded rollup and its calculation
+ * assumptions.
+ */
+export const USAGE_REPORT_CONTRACT_VERSION = 1 as const;
+
+export const UsageReportMode = Schema.Literals([
+  "overview",
+  "providers",
+  "models",
+  "series",
+  "quota",
+  "pricing",
+]);
+export type UsageReportMode = typeof UsageReportMode.Type;
+
+/** Maximum number of rows an agent query can request from one projection. */
+export const UsageReportRowLimit = PositiveInt.check(Schema.isLessThanOrEqualTo(512));
+export type UsageReportRowLimit = typeof UsageReportRowLimit.Type;
+
+export const UsageReportInput = Schema.Struct({
+  mode: UsageReportMode,
+  sinceDay: UsageDay,
+  untilDay: UsageDay,
+  timeZone: TrimmedNonEmptyString,
+  refresh: Schema.optional(Schema.Boolean),
+  /** Required with `mode: "series"` only when hourly data is requested. */
+  resolution: Schema.optional(UsageResolution),
+  sinceTime: Schema.optional(TrimmedNonEmptyString),
+  untilTime: Schema.optional(TrimmedNonEmptyString),
+  providers: Schema.optional(
+    Schema.Array(UsageProviderKind).check(Schema.isMinLength(1), Schema.isMaxLength(8)),
+  ),
+  /** Output row cap. The server applies a mode-specific default when omitted. */
+  limit: Schema.optional(UsageReportRowLimit),
+  /** Optional live quota interval reads; saved snapshots are returned by default. */
+  quotaIntervals: Schema.optional(Schema.Array(UsageQuotaInterval).check(Schema.isMaxLength(64))),
+});
+export type UsageReportInput = typeof UsageReportInput.Type;
+
+export const UsageReportCoverageStatus = Schema.Literals([
+  "complete",
+  "partial",
+  "missing",
+  "notRequested",
+]);
+export type UsageReportCoverageStatus = typeof UsageReportCoverageStatus.Type;
+
+/** Bounded coverage facts; no transcript paths or raw records cross this API. */
+export const UsageReportCoverage = Schema.Struct({
+  status: UsageReportCoverageStatus,
+  sourceCount: NonNegativeInt,
+  completeSources: NonNegativeInt,
+  partialSources: NonNegativeInt,
+  missingSources: NonNegativeInt,
+  failedSources: NonNegativeInt,
+  scannedFiles: NonNegativeInt,
+  skippedFiles: NonNegativeInt,
+  malformedRecords: NonNegativeInt,
+  distinctSessions: NonNegativeInt,
+  records: NonNegativeInt,
+  pricedRecords: NonNegativeInt,
+  unpricedRecords: NonNegativeInt,
+});
+export type UsageReportCoverage = typeof UsageReportCoverage.Type;
+
+/** One compact token/cost rollup used by every report mode. */
+export const UsageReportTotals = Schema.Struct({
+  totals: UsageTokenTotals,
+  costUsd: Schema.Number,
+  cacheSavingsUsd: Schema.Number,
+  records: NonNegativeInt,
+  pricedRecords: NonNegativeInt,
+  unpricedRecords: NonNegativeInt,
+  sessions: NonNegativeInt,
+});
+export type UsageReportTotals = typeof UsageReportTotals.Type;
+
+export const UsageReportProviderRow = Schema.Struct({
+  provider: UsageProviderKind,
+  ...UsageReportTotals.fields,
+});
+export type UsageReportProviderRow = typeof UsageReportProviderRow.Type;
+
+export const UsageReportModelRow = Schema.Struct({
+  provider: UsageProviderKind,
+  model: TrimmedNonEmptyString,
+  ...UsageReportTotals.fields,
+});
+export type UsageReportModelRow = typeof UsageReportModelRow.Type;
+
+export const UsageReportSeriesPoint = Schema.Struct({
+  day: UsageDay,
+  /** UTC bucket start, present only for hourly series. */
+  hourStart: Schema.optional(TrimmedNonEmptyString),
+  ...UsageReportTotals.fields,
+});
+export type UsageReportSeriesPoint = typeof UsageReportSeriesPoint.Type;
+
+/** A safe, explicit projection of configured model price overrides. */
+export const UsageReportPriceOverride = Schema.Struct({
+  model: TrimmedNonEmptyString,
+  ...UsageModelPriceOverride.fields,
+});
+export type UsageReportPriceOverride = typeof UsageReportPriceOverride.Type;
+
+/**
+ * Metadata needed to reproduce or qualify API-equivalent cost calculations.
+ * Subscription charges are intentionally not implied by these values.
+ */
+export const UsageReportCalculation = Schema.Struct({
+  formulaVersion: Schema.Literal(1),
+  costBasis: Schema.Literal("apiEquivalent"),
+  costSemantics: TrimmedNonEmptyString,
+  cacheSavingsSemantics: TrimmedNonEmptyString,
+  serviceTierPolicy: TrimmedNonEmptyString,
+  pricing: UsagePricing,
+  priceOverrides: Schema.Array(UsageReportPriceOverride),
+  priceOverrideCount: NonNegativeInt,
+  priceOverridesTruncated: Schema.Boolean,
+});
+export type UsageReportCalculation = typeof UsageReportCalculation.Type;
+
+const UsageReportEnvelope = {
+  contractVersion: Schema.Literal(USAGE_REPORT_CONTRACT_VERSION),
+  mode: UsageReportMode,
+  readAt: Schema.String,
+  timeZone: TrimmedNonEmptyString,
+  sinceDay: UsageDay,
+  untilDay: UsageDay,
+  scanDurationMs: NonNegativeInt,
+  calculation: UsageReportCalculation,
+  coverage: UsageReportCoverage,
+} as const;
+
+export const UsageReportOverview = Schema.Struct({
+  ...UsageReportEnvelope,
+  mode: Schema.Literal("overview"),
+  totals: UsageReportTotals,
+});
+export type UsageReportOverview = typeof UsageReportOverview.Type;
+
+export const UsageReportProviders = Schema.Struct({
+  ...UsageReportEnvelope,
+  mode: Schema.Literal("providers"),
+  rows: Schema.Array(UsageReportProviderRow),
+  totalRows: NonNegativeInt,
+  truncated: Schema.Boolean,
+});
+export type UsageReportProviders = typeof UsageReportProviders.Type;
+
+export const UsageReportModels = Schema.Struct({
+  ...UsageReportEnvelope,
+  mode: Schema.Literal("models"),
+  rows: Schema.Array(UsageReportModelRow),
+  totalRows: NonNegativeInt,
+  truncated: Schema.Boolean,
+});
+export type UsageReportModels = typeof UsageReportModels.Type;
+
+export const UsageReportSeries = Schema.Struct({
+  ...UsageReportEnvelope,
+  mode: Schema.Literal("series"),
+  resolution: UsageResolution,
+  points: Schema.Array(UsageReportSeriesPoint),
+  totalPoints: NonNegativeInt,
+  truncated: Schema.Boolean,
+});
+export type UsageReportSeries = typeof UsageReportSeries.Type;
+
+export const UsageReportQuotaCost = Schema.Struct({
+  intervalId: TrimmedNonEmptyString,
+  fingerprint: UsageSourceFingerprint,
+  sinceTime: TrimmedNonEmptyString,
+  untilTime: TrimmedNonEmptyString,
+  costUsd: Schema.Number,
+  records: NonNegativeInt,
+  pricedRecords: NonNegativeInt,
+  unpricedRecords: NonNegativeInt,
+  complete: Schema.Boolean,
+  firstRemainingPercent: Schema.NullOr(Schema.Number),
+  lastRemainingPercent: Schema.NullOr(Schema.Number),
+  resetsAt: Schema.NullOr(TrimmedNonEmptyString),
+  models: Schema.Array(UsageReportModelRow),
+  totalModels: NonNegativeInt,
+  modelsTruncated: Schema.Boolean,
+});
+export type UsageReportQuotaCost = typeof UsageReportQuotaCost.Type;
+
+export const UsageReportQuota = Schema.Struct({
+  ...UsageReportEnvelope,
+  mode: Schema.Literal("quota"),
+  quotaHistory: UsageQuotaHistory,
+  samplesTruncated: Schema.Boolean,
+  totalSamples: NonNegativeInt,
+  costs: Schema.Array(UsageReportQuotaCost),
+  totalCosts: NonNegativeInt,
+  costsTruncated: Schema.Boolean,
+});
+export type UsageReportQuota = typeof UsageReportQuota.Type;
+
+export const UsageReportPricing = Schema.Struct({
+  ...UsageReportEnvelope,
+  mode: Schema.Literal("pricing"),
+});
+export type UsageReportPricing = typeof UsageReportPricing.Type;
+
+export const UsageReport = Schema.Union([
+  UsageReportOverview,
+  UsageReportProviders,
+  UsageReportModels,
+  UsageReportSeries,
+  UsageReportQuota,
+  UsageReportPricing,
+]);
+export type UsageReport = typeof UsageReport.Type;
 
 export class UsageReadError extends Schema.TaggedErrorClass<UsageReadError>()("UsageReadError", {
   reason: Schema.Literals(["scanFailed", "invalidWindow"]),

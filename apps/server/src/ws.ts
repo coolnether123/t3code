@@ -1854,6 +1854,10 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.serverGetUsageSummary, usage.readSummary(input), {
             "rpc.aggregate": "server",
           }),
+        [WS_METHODS.serverGetUsageReport]: (input) =>
+          observeRpcEffect(WS_METHODS.serverGetUsageReport, usage.readReport(input), {
+            "rpc.aggregate": "server",
+          }),
         [WS_METHODS.agentSessionsScan]: () =>
           observeRpcEffect(WS_METHODS.agentSessionsScan, agentSessionScanner.scan, {
             "rpc.aggregate": "workspace",

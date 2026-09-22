@@ -28,6 +28,8 @@ import {
   type UsageQuotaCost,
   type ServerSettings as ServerSettingsValue,
   type UsagePricing,
+  type UsageReport,
+  type UsageReportInput,
   type UsageSource,
   type UsageSummary,
   type UsageSummaryInput,
@@ -62,6 +64,7 @@ import {
 import { makeDayFormatter, UsageAggregator } from "./usageAggregation.ts";
 import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
 import { UsageSummaryCache, usageSummaryCacheKey } from "./usageSummaryCache.ts";
+import { makeUsageReportCalculation, projectUsageReport } from "./usageReport.ts";
 import {
   listTranscriptFilesBounded,
   readDirectoryVolumeId,
@@ -411,6 +414,7 @@ export class UsageService extends Context.Service<
   UsageService,
   {
     readonly readSummary: (input: UsageSummaryInput) => Effect.Effect<UsageSummary, UsageReadError>;
+    readonly readReport: (input: UsageReportInput) => Effect.Effect<UsageReport, UsageReadError>;
     /** Refetches the rate table ahead of its TTL. */
     readonly refreshRates: Effect.Effect<UsagePricing>;
   }
@@ -424,28 +428,35 @@ const EMPTY_PRICING: UsagePricing = {
   knownModels: 0,
 };
 
+const emptyUsageSummary = (input: {
+  readonly timeZone: string;
+  readonly sinceDay: UsageDay;
+  readonly untilDay: UsageDay;
+}): UsageSummary => ({
+  contractVersion: USAGE_CONTRACT_VERSION,
+  readAt: "1970-01-01T00:00:00.000Z",
+  timeZone: input.timeZone,
+  sinceDay: input.sinceDay,
+  untilDay: input.untilDay,
+  buckets: [],
+  sources: [],
+  pricing: EMPTY_PRICING,
+  scanDurationMs: 0,
+});
+
 /** Empty summary, for suites that only need the RPC surface to resolve. */
 export const layerTest = Layer.succeed(
   UsageService,
   UsageService.of({
-    readSummary: (input) =>
-      Effect.succeed({
-        contractVersion: USAGE_CONTRACT_VERSION,
-        readAt: "1970-01-01T00:00:00.000Z",
-        timeZone: input.timeZone,
-        sinceDay: input.sinceDay,
-        untilDay: input.untilDay,
-        buckets: [],
-        sources: [],
-        pricing: {
-          status: "unavailable",
-          source: LITELLM_RATES_URL,
-          revision: null,
-          fetchedAt: null,
-          knownModels: 0,
-        },
-        scanDurationMs: 0,
-      }),
+    readSummary: (input) => Effect.succeed(emptyUsageSummary(input)),
+    readReport: (input) =>
+      Effect.succeed(
+        projectUsageReport(
+          emptyUsageSummary(input),
+          input,
+          makeUsageReportCalculation(EMPTY_PRICING, {}),
+        ),
+      ),
     refreshRates: Effect.succeed(EMPTY_PRICING),
   }),
 );
@@ -1623,7 +1634,57 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  return { readSummary, refreshRates } as const;
+  const readReport: UsageService["Service"]["readReport"] = Effect.fn("UsageService.readReport")(
+    function* (input: UsageReportInput) {
+      if (input.sinceDay > input.untilDay) {
+        return yield* new UsageReadError({
+          reason: "invalidWindow",
+          detail: `sinceDay '${input.sinceDay}' is after untilDay '${input.untilDay}'`,
+        });
+      }
+
+      const settings = yield* readSettings;
+      if (input.mode === "pricing") {
+        yield* ensureRates(input.refresh === true);
+        const now = yield* DateTime.now;
+        const summary: UsageSummary = {
+          ...emptyUsageSummary(input),
+          readAt: DateTime.formatIso(now),
+          pricing: pricing(),
+        };
+        return projectUsageReport(
+          summary,
+          input,
+          makeUsageReportCalculation(summary.pricing, settings.usagePriceOverrides),
+        );
+      }
+
+      const summaryInput: UsageSummaryInput = {
+        clientContractVersion: USAGE_CONTRACT_VERSION,
+        sinceDay: input.sinceDay,
+        untilDay: input.untilDay,
+        timeZone: input.timeZone,
+        ...(input.refresh === undefined ? {} : { refresh: input.refresh }),
+        ...(input.resolution === undefined ? {} : { resolution: input.resolution }),
+        ...(input.sinceTime === undefined ? {} : { sinceTime: input.sinceTime }),
+        ...(input.untilTime === undefined ? {} : { untilTime: input.untilTime }),
+        ...(input.providers === undefined ? {} : { providers: input.providers }),
+        ...(input.mode !== "quota"
+          ? {}
+          : input.quotaIntervals === undefined
+            ? { quotaHistoryOnly: true }
+            : { includeQuotaHistory: true, quotaIntervals: input.quotaIntervals }),
+      };
+      const summary = yield* readSummary(summaryInput);
+      return projectUsageReport(
+        summary,
+        input,
+        makeUsageReportCalculation(summary.pricing, settings.usagePriceOverrides),
+      );
+    },
+  );
+
+  return { readSummary, readReport, refreshRates } as const;
 });
 
 export const layer = Layer.effect(UsageService, make);
