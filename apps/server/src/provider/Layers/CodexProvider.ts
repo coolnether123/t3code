@@ -44,6 +44,7 @@ import { expandHomePath } from "../../pathExpansion.ts";
 import {
   codexAppServerCommandArgs,
   codexAppServerTransport,
+  makeCodexDesktopDaemonStdio,
   type CodexAppServerTransport,
 } from "../CodexAppServerTransport.ts";
 import { withCodexSandboxStartupRecovery } from "./CodexSandboxRecovery.ts";
@@ -480,7 +481,11 @@ const probeCodexAppServerProviderOnce = Effect.fn("probeCodexAppServerProviderOn
             }),
         ),
       );
-    const clientContext = yield* Layer.build(CodexClient.layerChildProcess(child));
+    const clientLayer =
+      input.appServerTransport === "desktop-daemon"
+        ? CodexClient.layerChildProcessStdio(child, yield* makeCodexDesktopDaemonStdio(child))
+        : CodexClient.layerChildProcess(child);
+    const clientContext = yield* Layer.build(clientLayer);
     const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
       Effect.provide(clientContext),
     );

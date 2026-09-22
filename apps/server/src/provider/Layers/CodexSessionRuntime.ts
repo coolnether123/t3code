@@ -40,9 +40,14 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { buildCodexInitializeParams } from "./CodexProvider.ts";
 import { hasT3ManagedChromeTools, hasT3PreviewBrowserTools } from "../CodexBrowserCapabilities.ts";
-import { codexLaunchArgv } from "./codexLaunchArgs.ts";
+import {
+  codexLaunchArgv,
+  parseCodexConfigOverrides,
+  type CodexConfigJsonValue,
+} from "./codexLaunchArgs.ts";
 import {
   codexAppServerCommandArgs,
+  makeCodexDesktopDaemonStdio,
   type CodexAppServerTransport,
 } from "../CodexAppServerTransport.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
@@ -210,7 +215,19 @@ export function buildCodexAppServerCommandArgs(
     | "workerSession"
   >,
 ): ReadonlyArray<string> {
-  return codexAppServerCommandArgs(options.appServerTransport ?? "stdio", [
+  return codexAppServerCommandArgs(
+    options.appServerTransport ?? "stdio",
+    buildCodexAppServerConfigArgs(options),
+  );
+}
+
+function buildCodexAppServerConfigArgs(
+  options: Pick<
+    CodexSessionRuntimeOptions,
+    "appServerArgs" | "enableT3Workers" | "launchArgs" | "subagentBackend" | "workerSession"
+  >,
+): ReadonlyArray<string> {
+  return [
     ...codexLaunchArgv(options.launchArgs),
     ...(options.appServerArgs ?? []),
     ...codexSubagentBackendAppServerArgs({
@@ -220,7 +237,57 @@ export function buildCodexAppServerCommandArgs(
       enableT3Workers: options.enableT3Workers === true,
       ...(options.workerSession === true ? { workerSession: true } : {}),
     }),
-  ]);
+  ];
+}
+
+export function parseCodexDaemonThreadConfig(
+  args: ReadonlyArray<string>,
+): Effect.Effect<
+  Readonly<Record<string, CodexConfigJsonValue>>,
+  CodexErrors.CodexAppServerRequestError
+> {
+  const parsed = parseCodexConfigOverrides(args);
+  if (parsed._tag === "failure") {
+    return Effect.fail(
+      CodexErrors.CodexAppServerRequestError.invalidParams(
+        `Codex desktop daemon cannot apply '${parsed.argument}': ${parsed.reason}.`,
+        { argument: parsed.argument },
+        { method: "thread/start", operation: "handle-request" },
+      ),
+    );
+  }
+
+  const nativeCatalogKeys = [
+    "agents.enabled",
+    "features.multi_agent",
+    "features.multi_agent_v2",
+  ] as const;
+  for (const key of nativeCatalogKeys) {
+    if (parsed.config[key] === true) {
+      return Effect.fail(
+        CodexErrors.CodexAppServerRequestError.invalidParams(
+          `Codex desktop daemon cannot enable the native multi-agent catalog '${key}' per thread.`,
+          { argument: key },
+          { method: "thread/start", operation: "handle-request" },
+        ),
+      );
+    }
+  }
+
+  const t3BearerTokenKey = /^mcp_servers\.(?:t3-code|"t3-code")\.bearer_token_env_var$/u;
+  for (const key of Object.keys(parsed.config)) {
+    if (t3BearerTokenKey.test(key)) {
+      return Effect.fail(
+        CodexErrors.CodexAppServerRequestError.invalidParams(
+          "Codex desktop daemon cannot apply the T3 MCP bearer_token_env_var override because the daemon cannot read the proxy session token.",
+          { argument: key },
+          { method: "thread/start", operation: "handle-request" },
+        ),
+      );
+    }
+  }
+
+  return Effect.succeed(parsed.config);
 }
 
 export const CodexResumeCursorSchema = Schema.Struct({
@@ -541,6 +608,7 @@ function buildThreadStartParams(input: {
   readonly runtimeMode: RuntimeMode;
   readonly model: string | undefined;
   readonly serviceTier: CodexServiceTier | undefined;
+  readonly config?: Readonly<Record<string, CodexConfigJsonValue>>;
 }): EffectCodexSchema.V2ThreadStartParams {
   const config = runtimeModeToThreadConfig(input.runtimeMode);
   return {
@@ -550,6 +618,7 @@ function buildThreadStartParams(input: {
     approvalsReviewer: config.approvalsReviewer,
     ...(input.model ? { model: input.model } : {}),
     ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
+    ...(input.config !== undefined ? { config: input.config } : {}),
   };
 }
 
@@ -772,6 +841,7 @@ export const openCodexThread = (input: {
   readonly serviceTier: CodexServiceTier | undefined;
   readonly resumeThreadId: string | undefined;
   readonly forkLastTurnId?: string;
+  readonly config?: Readonly<Record<string, CodexConfigJsonValue>>;
 }): Effect.Effect<CodexThreadOpenResponse, CodexErrors.CodexAppServerError> => {
   const resumeThreadId = input.resumeThreadId;
   const startParams = buildThreadStartParams({
@@ -779,6 +849,7 @@ export const openCodexThread = (input: {
     runtimeMode: input.runtimeMode,
     model: input.requestedModel,
     serviceTier: input.serviceTier,
+    ...(input.config !== undefined ? { config: input.config } : {}),
   });
 
   if (resumeThreadId === undefined) {
@@ -796,6 +867,7 @@ export const openCodexThread = (input: {
       sandbox: forkRuntime.sandbox,
       ...(input.requestedModel ? { model: input.requestedModel } : {}),
       ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
+      ...(input.config !== undefined ? { config: input.config } : {}),
     };
     return input.client.request("thread/fork", forkParams);
   }
@@ -1223,6 +1295,10 @@ export const makeCodexSessionRuntime = (
     yield* recoverCodexDenyReadAclState();
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const runtimeScope = yield* Scope.Scope;
+    const daemonThreadConfig =
+      options.appServerTransport === "desktop-daemon"
+        ? yield* parseCodexDaemonThreadConfig(buildCodexAppServerConfigArgs(options))
+        : undefined;
     const crypto = yield* Crypto.Crypto;
     const events = yield* Queue.unbounded<ProviderEvent>();
     const stderrChunks = yield* Queue.unbounded<string>();
@@ -1274,9 +1350,20 @@ export const makeCodexSessionRuntime = (
         ),
       );
 
-    const clientContext = yield* CodexClient.layerChildProcess(child, {
-      onStderr: (chunk) => Queue.offer(stderrChunks, chunk).pipe(Effect.asVoid),
-    }).pipe(Layer.build, Effect.provideService(Scope.Scope, runtimeScope));
+    const clientOptions = {
+      onStderr: (chunk: string) => Queue.offer(stderrChunks, chunk).pipe(Effect.asVoid),
+    };
+    let clientLayer: Layer.Layer<CodexClient.CodexAppServerClient>;
+    if (options.appServerTransport === "desktop-daemon") {
+      const daemonStdio = yield* makeCodexDesktopDaemonStdio(child);
+      clientLayer = CodexClient.layerChildProcessStdio(child, daemonStdio, clientOptions);
+    } else {
+      clientLayer = CodexClient.layerChildProcess(child, clientOptions);
+    }
+    const clientContext = yield* clientLayer.pipe(
+      Layer.build,
+      Effect.provideService(Scope.Scope, runtimeScope),
+    );
     const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
       Effect.provide(clientContext),
     );
@@ -2308,6 +2395,7 @@ export const makeCodexSessionRuntime = (
         ...(options.resumeCursor?.forkLastTurnId !== undefined
           ? { forkLastTurnId: options.resumeCursor.forkLastTurnId }
           : {}),
+        ...(daemonThreadConfig !== undefined ? { config: daemonThreadConfig } : {}),
       });
 
       const providerThreadId = opened.thread.id;
