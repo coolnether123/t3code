@@ -3,6 +3,12 @@ import {
   watchResetAnnouncements,
   type ResetNews,
 } from "@t3tools/client-runtime/resetAnnouncements";
+import {
+  publicResetCostEstimates,
+  publicResetIntervals,
+  watchPublicResetHistory,
+  type PublicResetHistory,
+} from "@t3tools/client-runtime/publicResetHistory";
 import { Link } from "@tanstack/react-router";
 import { RefreshCwIcon } from "lucide-react";
 import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
@@ -94,12 +100,26 @@ export function UsageResetPage() {
     status: "loading",
   });
   const newsWatcher = useRef<ReturnType<typeof watchResetAnnouncements> | null>(null);
+  const [publicHistory, setPublicHistory] = useState<PublicResetHistory>({
+    announcements: [],
+    checkedAt: null,
+    status: "loading",
+  });
+  const publicHistoryWatcher = useRef<ReturnType<typeof watchPublicResetHistory> | null>(null);
   useEffect(() => {
     const watcher = watchResetAnnouncements(setNews);
     newsWatcher.current = watcher;
     return () => {
       watcher.stop();
       newsWatcher.current = null;
+    };
+  }, []);
+  useEffect(() => {
+    const watcher = watchPublicResetHistory(setPublicHistory);
+    publicHistoryWatcher.current = watcher;
+    return () => {
+      watcher.stop();
+      publicHistoryWatcher.current = null;
     };
   }, []);
   const refreshActive = useRef(false);
@@ -144,6 +164,15 @@ export function UsageResetPage() {
     [historyInput, intervals],
   );
   const costs = useUsage(costInput);
+  const publicIntervals = useMemo(
+    () => publicResetIntervals(publicHistory.announcements),
+    [publicHistory.announcements],
+  );
+  const publicCostInput = useMemo(
+    () => quotaCostWindow(publicIntervals) ?? historyInput,
+    [historyInput, publicIntervals],
+  );
+  const publicCosts = useUsage(publicCostInput);
   const paceInput = useMemo(
     () => (paceInterval ? quotaCostWindow([paceInterval])! : historyInput),
     [paceInterval, historyInput],
@@ -185,6 +214,34 @@ export function UsageResetPage() {
           effectiveSelectedIds === null || effectiveSelectedIds.includes(environment.environmentId),
       ),
     [costEnvironments, effectiveSelectedIds],
+  );
+  const effectivePublicSelectedIds = useMemo(
+    () =>
+      selectedIds ??
+      (tracker
+        ? [tracker.environmentId]
+        : publicCosts.environments[0]
+          ? [publicCosts.environments[0].environmentId]
+          : []),
+    [publicCosts.environments, selectedIds, tracker?.environmentId],
+  );
+  const selectedPublicCosts = useMemo(
+    () =>
+      publicCosts.environments.filter((environment) =>
+        effectivePublicSelectedIds.includes(environment.environmentId),
+      ),
+    [effectivePublicSelectedIds, publicCosts.environments],
+  );
+  const publicEstimates = useMemo(
+    () => publicResetCostEstimates(publicHistory.announcements, selectedPublicCosts),
+    [publicHistory.announcements, selectedPublicCosts],
+  );
+  const publicCostScope =
+    selectedPublicCosts.length === 0
+      ? "No computers selected"
+      : selectedPublicCosts.map((environment) => environment.label).join(", ");
+  const bankedAnnouncements = publicHistory.announcements.filter(
+    (announcement) => announcement.resetType === "banked",
   );
   const selectedWithSavedCosts = useMemo(
     () =>
@@ -258,7 +315,7 @@ export function UsageResetPage() {
     if (refreshActive.current) return;
     refreshActive.current = true;
     setRefreshing(true);
-    setRefreshMessage("Refreshing readings, API costs and reset news…");
+    setRefreshMessage("Refreshing readings, API costs and public resets…");
     try {
       setRefreshMessage(
         await refreshCodexMonitor({
@@ -270,10 +327,17 @@ export function UsageResetPage() {
             const replies = await Promise.all([
               costs.refresh(input),
               recentInput ? paceCosts.refresh(recentInput) : Promise.resolve([]),
+              publicCosts.refresh(publicCostInput),
             ]);
             return replies.flat();
           },
-          refreshNews: () => newsWatcher.current?.refresh() ?? Promise.resolve(false),
+          refreshNews: async () => {
+            const results = await Promise.all([
+              newsWatcher.current?.refresh() ?? Promise.resolve(false),
+              publicHistoryWatcher.current?.refresh() ?? Promise.resolve(false),
+            ]);
+            return results.some(Boolean);
+          },
           onProgress: setRefreshMessage,
         }),
       );
@@ -329,6 +393,9 @@ export function UsageResetPage() {
             <a className="hover:text-foreground" href="#reset-history">
               Reset history
             </a>
+            <a className="hover:text-foreground" href="#public-reset-estimates">
+              Public reset estimates
+            </a>
             <a className="hover:text-foreground" href="#token-budget">
               Token planner
             </a>
@@ -355,7 +422,7 @@ export function UsageResetPage() {
           className="pb-[calc(env(safe-area-inset-bottom)+3rem)]"
         >
           <p role="status" aria-live="polite" className="text-xs text-muted-foreground">
-            {refreshMessage || "Weekly usage, model value and reset research"}
+            {refreshMessage || "Weekly usage, model value and public reset estimates"}
           </p>
           {history.isPending && !last ? <p role="status">Reading Codex usage…</p> : null}
           {history.environments.map((environment) => {
@@ -714,6 +781,183 @@ export function UsageResetPage() {
               </details>
             </>
           ) : null}
+          <section
+            id="public-reset-estimates"
+            className="border-t border-border pt-5"
+            aria-label="Estimated use between public resets"
+          >
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <h2 className="text-sm font-medium">Estimated use between public resets</h2>
+              <a
+                className="text-xs text-muted-foreground hover:text-foreground"
+                href="https://codex-resets.com/"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Codex Resets
+              </a>
+            </div>
+            <p className="mt-2 max-w-4xl text-xs leading-relaxed text-muted-foreground">
+              T3 backdates regular public reset announcements, then totals recorded Codex transcript
+              usage between them at current API rates. The source does not track your account, and
+              T3 sends it no account or transcript data. Announcement time can differ from
+              propagation time, so every amount below is an API-equivalent estimate.
+            </p>
+            {bankedAnnouncements.length > 0 ? (
+              <p className="mt-2 text-xs text-muted-foreground">
+                {bankedAnnouncements.length} banked reset grant
+                {bankedAnnouncements.length === 1 ? " is" : "s are"} listed by the source but do not
+                split periods because redemption is account-specific.
+              </p>
+            ) : null}
+            {publicCosts.environments.length > 0 ? (
+              <details className="mt-3 rounded-md border border-border/70 px-3 py-2">
+                <summary className="cursor-pointer text-xs text-muted-foreground">
+                  Computers included: {publicCostScope}
+                </summary>
+                <div className="mt-2 flex flex-wrap gap-x-4 gap-y-2">
+                  {publicCosts.environments.map((environment) => {
+                    const checked = effectivePublicSelectedIds.includes(environment.environmentId);
+                    return (
+                      <label
+                        key={environment.environmentId}
+                        className="flex items-center gap-2 text-xs"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(event) => {
+                            const ids = selectedIds ?? effectivePublicSelectedIds;
+                            setSelectedIds(
+                              event.currentTarget.checked
+                                ? [...new Set([...ids, environment.environmentId])]
+                                : ids.filter((id) => id !== environment.environmentId),
+                            );
+                          }}
+                        />
+                        <span>{environment.label}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </details>
+            ) : null}
+            {publicHistory.status === "loading" ? (
+              <p role="status" className="mt-3 text-sm text-muted-foreground">
+                Reading public reset history…
+              </p>
+            ) : publicHistory.status === "unavailable" ? (
+              <p role="status" className="mt-3 text-sm text-muted-foreground">
+                Codex Resets is unavailable. Saved quota observations still work normally.
+              </p>
+            ) : publicEstimates.length === 0 ? (
+              <p className="mt-3 text-sm text-muted-foreground">
+                The public history does not contain two regular resets yet.
+              </p>
+            ) : (
+              <div className="mt-3 divide-y divide-border">
+                {publicEstimates.toReversed().map((row) => {
+                  const inputTokens = row.models.reduce(
+                    (total, model) =>
+                      total +
+                      model.totals.uncachedInputTokens +
+                      model.totals.cachedInputTokens +
+                      model.totals.cacheCreationTokens,
+                    0,
+                  );
+                  const outputTokens = row.models.reduce(
+                    (total, model) => total + model.totals.outputTokens,
+                    0,
+                  );
+                  return (
+                    <div
+                      key={row.interval.id}
+                      className="flex flex-wrap justify-between gap-3 py-3"
+                    >
+                      <div>
+                        <p className="text-sm">
+                          {row.endedBy.sourceUrl ? (
+                            <a
+                              className="hover:underline"
+                              href={row.endedBy.sourceUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              Public reset announced {dateTime(row.endedBy.announcedAt)}
+                            </a>
+                          ) : (
+                            <>Public reset observed {dateTime(row.endedBy.announcedAt)}</>
+                          )}
+                        </p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          From {dateTime(row.startedBy.announcedAt)}
+                          {row.endedBy.sourceType === "observed" ? " · observed report" : ""}
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-sm tabular-nums">
+                          {row.costUsd === null ? "Estimate unavailable" : formatUsd(row.costUsd)}
+                        </p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {row.records > 0
+                            ? `${row.records.toLocaleString()} recorded usage rows`
+                            : row.reason}
+                        </p>
+                      </div>
+                      {row.reason && row.records > 0 ? (
+                        <p className="w-full text-xs text-muted-foreground">{row.reason}</p>
+                      ) : null}
+                      {row.models.length > 0 ? (
+                        <details className="w-full rounded-md border border-border/70 px-3 py-2">
+                          <summary className="cursor-pointer text-xs text-muted-foreground">
+                            Model estimates · {formatTokens(inputTokens)} input ·{" "}
+                            {formatTokens(outputTokens)} output
+                          </summary>
+                          <div className="mt-2 overflow-x-auto">
+                            <table
+                              className="w-full min-w-[30rem] text-left text-xs"
+                              aria-label={`Estimated model use before reset ${dateTime(row.endedBy.announcedAt)}`}
+                            >
+                              <thead className="text-muted-foreground">
+                                <tr>
+                                  <th className="py-1 pr-3 font-normal">Model</th>
+                                  <th className="px-3 py-1 text-right font-normal">Input</th>
+                                  <th className="px-3 py-1 text-right font-normal">Output</th>
+                                  <th className="py-1 pl-3 text-right font-normal">API value</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {row.models.map((model) => (
+                                  <tr key={model.model} className="border-t border-border/70">
+                                    <td className="py-1.5 pr-3">{model.model}</td>
+                                    <td className="px-3 py-1.5 text-right tabular-nums">
+                                      {formatTokens(
+                                        model.totals.uncachedInputTokens +
+                                          model.totals.cachedInputTokens +
+                                          model.totals.cacheCreationTokens,
+                                      )}
+                                    </td>
+                                    <td className="px-3 py-1.5 text-right tabular-nums">
+                                      {formatTokens(model.totals.outputTokens)}
+                                    </td>
+                                    <td className="py-1.5 pl-3 text-right tabular-nums">
+                                      {model.unpricedRecords > 0
+                                        ? "Unpriced"
+                                        : formatUsd(model.costUsd)}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </details>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
         </WorkspacePageContainer>
       </ScrollArea>
     </SidebarInset>

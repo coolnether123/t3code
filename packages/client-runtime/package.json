@@ -15,6 +15,10 @@
       "types": "./src/resetAnnouncements.ts",
       "default": "./src/resetAnnouncements.ts"
     },
+    "./publicResetHistory": {
+      "types": "./src/publicResetHistory.ts",
+      "default": "./src/publicResetHistory.ts"
+    },
     "./connection": {
       "types": "./src/connection/index.ts",
       "default": "./src/connection/index.ts"

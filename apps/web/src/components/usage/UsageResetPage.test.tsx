@@ -6,6 +6,12 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
   environments: [] as unknown[],
+  publicHistory: {
+    announcements: [],
+    checkedAt: null,
+    status: "loading",
+  } as unknown,
+  publicRefresh: vi.fn(),
   refresh: vi.fn(),
   news: vi.fn(),
   useUsage: vi.fn(),
@@ -16,6 +22,13 @@ vi.mock("../../state/usage", () => ({
 vi.mock("@t3tools/client-runtime/resetAnnouncements", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@t3tools/client-runtime/resetAnnouncements")>()),
   watchResetAnnouncements: () => ({ refresh: state.news, stop: vi.fn() }),
+}));
+vi.mock("@t3tools/client-runtime/publicResetHistory", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@t3tools/client-runtime/publicResetHistory")>()),
+  watchPublicResetHistory: (receive: (history: unknown) => void) => {
+    receive(state.publicHistory);
+    return { refresh: state.publicRefresh, stop: vi.fn() };
+  },
 }));
 vi.mock("@tanstack/react-router", () => ({ Link: "a" }));
 vi.mock("../../env", () => ({ isElectron: false }));
@@ -33,6 +46,8 @@ import { UsageResetPage } from "./UsageResetPage";
 
 beforeEach(() => {
   state.environments = [];
+  state.publicHistory = { announcements: [], checkedAt: null, status: "loading" };
+  state.publicRefresh.mockReset().mockResolvedValue(undefined);
   state.refresh.mockReset().mockResolvedValue([]);
   state.news.mockReset().mockResolvedValue(undefined);
   state.useUsage.mockReset().mockImplementation(() => ({
@@ -46,7 +61,7 @@ beforeEach(() => {
 describe("Codex monitor page", () => {
   it("uses separate full-cycle and recent cost reads", () => {
     renderToStaticMarkup(<UsageResetPage />);
-    expect(state.useUsage).toHaveBeenCalledTimes(3);
+    expect(state.useUsage).toHaveBeenCalledTimes(4);
   });
 
   it("shows progress, ignores repeated taps, then enables retry after failure", async () => {
@@ -73,6 +88,7 @@ describe("Codex monitor page", () => {
       expect(container.textContent).toContain("Refreshing readings");
       expect(state.refresh).toHaveBeenCalledTimes(1);
       expect(state.news).toHaveBeenCalledTimes(1);
+      expect(state.publicRefresh).toHaveBeenCalledTimes(1);
       await act(async () => reject(new Error("disconnected")));
       expect(button.disabled).toBe(false);
       expect(button.getAttribute("aria-busy")).toBe("false");
@@ -88,6 +104,95 @@ describe("Codex monitor page", () => {
     expect(markup).toContain('to="/usage"');
     expect(markup).toContain('aria-label="Refresh Codex usage"');
     expect(markup).not.toContain("$0.00");
+  });
+
+  it("backdates public reset estimates without local quota observations", async () => {
+    const fingerprint = {
+      hostId: "desktop",
+      provider: "codex",
+      resolvedHomePath: "/sessions",
+      volumeId: "1",
+    };
+    state.publicHistory = {
+      checkedAt: Date.parse("2026-09-13T22:00:00Z"),
+      status: "ready",
+      announcements: [
+        {
+          id: "2094251180121854309",
+          resetType: "regular",
+          announcedAt: "2026-08-31T02:29:25Z",
+          text: "Reset",
+          sourceType: "x_post",
+          sourceUrl: "https://x.com/thsottiaux/status/2094251180121854309",
+        },
+        {
+          id: "2095651088502591861",
+          resetType: "banked",
+          announcedAt: "2026-09-03T23:12:30Z",
+          text: "Banked reset",
+          sourceType: "x_post",
+          sourceUrl: "https://x.com/thsottiaux/status/2095651088502591861",
+        },
+        {
+          id: "2098685367058612394",
+          resetType: "regular",
+          announcedAt: "2026-09-12T08:09:17Z",
+          text: "Reset",
+          sourceType: "x_post",
+          sourceUrl: "https://x.com/thsottiaux/status/2098685367058612394",
+        },
+      ],
+    };
+    state.environments = [
+      {
+        environmentId: "desktop",
+        label: "Desktop",
+        isPending: false,
+        error: null,
+        summary: {
+          sources: [{ fingerprint, status: "ok" }],
+          quotaCosts: [
+            {
+              intervalId: "codex-resets:2094251180121854309",
+              fingerprint,
+              costUsd: 12.5,
+              records: 4,
+              unpricedRecords: 0,
+              complete: true,
+              models: [
+                {
+                  model: "gpt-5.6-sol",
+                  totals: {
+                    uncachedInputTokens: 100,
+                    cachedInputTokens: 50,
+                    cacheCreationTokens: 25,
+                    outputTokens: 20,
+                    reasoningTokens: 10,
+                  },
+                  costUsd: 12.5,
+                  records: 4,
+                  unpricedRecords: 0,
+                },
+              ],
+            },
+          ],
+        },
+      },
+    ];
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<UsageResetPage />));
+      expect(container.textContent).toContain("Estimated use between public resets");
+      expect(container.textContent).toContain("1 banked reset grant is listed");
+      expect(container.textContent).toContain("$12.50");
+      expect(container.textContent).toContain("gpt-5.6-sol");
+      expect(container.textContent).toContain("4 recorded usage rows");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
   });
   it("shows total usage separately from monitored usage and excludes archived runs", () => {
     const fingerprint = {

@@ -97,6 +97,25 @@ deadlines fall back to the weekly timer. A new observed account cycle retires th
 The feed is not an authoritative account-reset detector. Actual reset records still require
 account observations, and their cause can remain ambiguous.
 
+`packages/client-runtime/src/publicResetHistory.ts` reads Codex Resets' documented, unauthenticated
+`/api/v1/resets` endpoint. It strictly decodes the v1 response, accepts only the documented Tibo X
+links or observed records, bounds response and text size, omits credentials, referrers, and tracing,
+and asks the browser cache to revalidate with the API's ETag. The watcher refreshes every four hours
+while a reset page is mounted and stops its request and schedule on unmount.
+
+Only consecutive `regular` announcements form cost intervals. Up to 65 announcements produce the
+64 intervals already accepted by `UsageSummaryInput.quotaIntervals`; the existing server-side
+Codex transcript scanner and `QuotaCostAccumulator` price those intervals without a new RPC or a
+second costing model. `banked` grants remain presentation metadata because a grant is not applied
+until the account owner redeems it. The client keeps public periods separate from locally observed
+quota periods, so it never fabricates `UsageQuotaSample` percentages or writes public events into
+the local tracker history.
+
+Public timestamps use `announced_at`, not an execution timestamp. The web and native-mobile views
+therefore label every period as an API-equivalent estimate, disclose propagation uncertainty, and
+withhold incomplete, unpriced, or empty transcript totals. Physical source fingerprints are
+deduplicated before aggregation. No account or transcript data is sent to Codex Resets.
+
 ## On-demand Luna research
 
 `UsageResetCheck` owns one bounded research job per environment. Authenticated read scopes can

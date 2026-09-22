@@ -2,11 +2,25 @@ import {
   watchResetAnnouncements,
   type ResetNews,
 } from "@t3tools/client-runtime/resetAnnouncements";
+import {
+  publicResetCostEstimates,
+  publicResetIntervals,
+  watchPublicResetHistory,
+  type PublicResetHistory,
+} from "@t3tools/client-runtime/publicResetHistory";
 import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { refreshCodexMonitor } from "@t3tools/client-runtime/usageRefresh";
-import { AppState, Pressable, RefreshControl, ScrollView, Switch, View } from "react-native";
+import {
+  AppState,
+  Linking,
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  Switch,
+  View,
+} from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { formatUsd, makeWindow } from "@t3tools/shared/usageFormat";
+import { formatTokens, formatUsd, makeWindow } from "@t3tools/shared/usageFormat";
 import {
   quotaMonitoringSamples,
   quotaCostWindow,
@@ -35,12 +49,26 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
     status: "loading",
   });
   const newsWatcher = useRef<ReturnType<typeof watchResetAnnouncements> | null>(null);
+  const [publicHistory, setPublicHistory] = useState<PublicResetHistory>({
+    announcements: [],
+    checkedAt: null,
+    status: "loading",
+  });
+  const publicHistoryWatcher = useRef<ReturnType<typeof watchPublicResetHistory> | null>(null);
   useEffect(() => {
     const watcher = watchResetAnnouncements(setNews);
     newsWatcher.current = watcher;
     return () => {
       watcher.stop();
       newsWatcher.current = null;
+    };
+  }, []);
+  useEffect(() => {
+    const watcher = watchPublicResetHistory(setPublicHistory);
+    publicHistoryWatcher.current = watcher;
+    return () => {
+      watcher.stop();
+      publicHistoryWatcher.current = null;
     };
   }, []);
   const refreshActive = useRef(false);
@@ -77,6 +105,39 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
     [historyInput, intervals],
   );
   const costs = useUsage(input);
+  const publicIntervals = useMemo(
+    () => publicResetIntervals(publicHistory.announcements),
+    [publicHistory.announcements],
+  );
+  const publicCostInput = useMemo(
+    () => quotaCostWindow(publicIntervals) ?? historyInput,
+    [historyInput, publicIntervals],
+  );
+  const publicCosts = useUsage(publicCostInput);
+  const effectivePublicSelectedIds = useMemo(
+    () =>
+      selectedIds ??
+      (tracker
+        ? [tracker.environmentId]
+        : publicCosts.environments[0]
+          ? [publicCosts.environments[0].environmentId]
+          : []),
+    [publicCosts.environments, selectedIds, tracker?.environmentId],
+  );
+  const selectedPublicCosts = useMemo(
+    () =>
+      publicCosts.environments.filter((environment) =>
+        effectivePublicSelectedIds.includes(environment.environmentId),
+      ),
+    [effectivePublicSelectedIds, publicCosts.environments],
+  );
+  const publicEstimates = useMemo(
+    () => publicResetCostEstimates(publicHistory.announcements, selectedPublicCosts),
+    [publicHistory.announcements, selectedPublicCosts],
+  );
+  const bankedAnnouncements = publicHistory.announcements.filter(
+    (announcement) => announcement.resetType === "banked",
+  );
   const selected = useMemo(
     () =>
       costs.environments.filter(
@@ -138,14 +199,26 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
     if (refreshActive.current) return;
     refreshActive.current = true;
     setRefreshing(true);
-    setRefreshMessage("Refreshing readings, API costs and reset news…");
+    setRefreshMessage("Refreshing readings, API costs and public resets…");
     try {
       setRefreshMessage(
         await refreshCodexMonitor({
           trackerId: tracker?.environmentId,
           refreshHistory: history.refresh,
-          refreshCosts: costs.refresh,
-          refreshNews: () => newsWatcher.current?.refresh() ?? Promise.resolve(false),
+          refreshCosts: async (costInput) => {
+            const replies = await Promise.all([
+              costs.refresh(costInput),
+              publicCosts.refresh(publicCostInput),
+            ]);
+            return replies.flat();
+          },
+          refreshNews: async () => {
+            const results = await Promise.all([
+              newsWatcher.current?.refresh() ?? Promise.resolve(false),
+              publicHistoryWatcher.current?.refresh() ?? Promise.resolve(false),
+            ]);
+            return results.some(Boolean);
+          },
           onProgress: setRefreshMessage,
         }),
       );
@@ -319,7 +392,7 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
                           {value?.costUsd !== null && value !== undefined
                             ? `${formatUsd(value.costUsd)} observed cost${
                                 value.costObservedUntil
-                                  ? ` through ${dateTime(value.costObservedUntil)}`
+                                  ? ` through ${new Date(value.costObservedUntil).toLocaleString()}`
                                   : ""
                               } · `
                             : ""}
@@ -398,6 +471,105 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
             ) : null}
           </>
         ) : null}
+        <View className="gap-3 border-t border-subtle pt-5">
+          <View className="flex-row items-center justify-between gap-3">
+            <Text className="flex-1 text-base font-t3-medium text-foreground">
+              Estimated use between public resets
+            </Text>
+            <Pressable
+              accessibilityRole="link"
+              className="min-h-11 justify-center"
+              onPress={() => void Linking.openURL("https://codex-resets.com/")}
+            >
+              <Text className="text-xs text-foreground-muted">Codex Resets</Text>
+            </Pressable>
+          </View>
+          <Text className="text-xs leading-relaxed text-foreground-muted">
+            T3 backdates regular public reset announcements, then totals recorded Codex transcript
+            usage between them at current API rates. No account or transcript data is sent to the
+            source. Announcement and propagation times may differ, so these are API-equivalent
+            estimates.
+          </Text>
+          {bankedAnnouncements.length > 0 ? (
+            <Text className="text-xs text-foreground-muted">
+              {bankedAnnouncements.length} banked reset grant
+              {bankedAnnouncements.length === 1 ? " is" : "s are"} excluded from period boundaries
+              because redemption is account-specific.
+            </Text>
+          ) : null}
+          {publicCosts.environments.map((environment) => {
+            const checked = effectivePublicSelectedIds.includes(environment.environmentId);
+            return (
+              <View
+                key={environment.environmentId}
+                className="flex-row items-center justify-between gap-3"
+              >
+                <Text className="flex-1 text-sm text-foreground">{environment.label}</Text>
+                <Switch
+                  accessibilityLabel={`Include ${environment.label} in public reset estimates`}
+                  value={checked}
+                  onValueChange={(enabled) => {
+                    const ids = selectedIds ?? effectivePublicSelectedIds;
+                    setSelectedIds(
+                      enabled
+                        ? [...new Set([...ids, environment.environmentId])]
+                        : ids.filter((id) => id !== environment.environmentId),
+                    );
+                  }}
+                />
+              </View>
+            );
+          })}
+          {publicHistory.status === "loading" ? (
+            <Text className="text-sm text-foreground-muted">Reading public reset history…</Text>
+          ) : publicHistory.status === "unavailable" ? (
+            <Text className="text-sm text-foreground-muted">
+              Codex Resets is unavailable. Saved quota observations still work normally.
+            </Text>
+          ) : publicEstimates.length === 0 ? (
+            <Text className="text-sm text-foreground-muted">
+              The public history does not contain two regular resets yet.
+            </Text>
+          ) : (
+            publicEstimates.toReversed().map((row) => {
+              const tokens = row.models.reduce(
+                (total, model) =>
+                  total +
+                  model.totals.uncachedInputTokens +
+                  model.totals.cachedInputTokens +
+                  model.totals.cacheCreationTokens +
+                  model.totals.outputTokens,
+                0,
+              );
+              return (
+                <View key={row.interval.id} className="gap-1 border-t border-subtle pt-3">
+                  <View className="flex-row justify-between gap-3">
+                    <Text className="flex-1 text-sm text-foreground">
+                      Reset {new Date(row.endedBy.announcedAt).toLocaleString()}
+                    </Text>
+                    <Text className="text-sm text-foreground">
+                      {row.costUsd === null ? "Unavailable" : formatUsd(row.costUsd)}
+                    </Text>
+                  </View>
+                  <Text className="text-xs text-foreground-muted">
+                    From {new Date(row.startedBy.announcedAt).toLocaleString()}
+                    {row.records > 0 ? ` · ${row.records.toLocaleString()} usage rows` : ""}
+                    {tokens > 0 ? ` · ${formatTokens(tokens)} tokens` : ""}
+                  </Text>
+                  {row.reason ? (
+                    <Text className="text-xs text-foreground-muted">{row.reason}</Text>
+                  ) : null}
+                  {row.models.map((model) => (
+                    <Text key={model.model} className="text-xs text-foreground-muted">
+                      {model.model}:{" "}
+                      {model.unpricedRecords > 0 ? "Unpriced" : formatUsd(model.costUsd)}
+                    </Text>
+                  ))}
+                </View>
+              );
+            })
+          )}
+        </View>
       </ScrollView>
     </View>
   );
