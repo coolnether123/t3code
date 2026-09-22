@@ -34,7 +34,8 @@ import {
 // validation and compact repeated-input observations. v6 Codex entries keep
 // their ordinary usage records; repeated-input data is cold-built until a v7
 // prefix fingerprint exists, so the established usage cache is not discarded.
-export const USAGE_SCAN_CACHE_VERSION = 7 as const;
+// v8 adds a complete-line ordinary-usage cursor for bounded JSONL scans.
+export const USAGE_SCAN_CACHE_VERSION = 8 as const;
 
 export interface CachedFile {
   readonly size: number;
@@ -42,6 +43,12 @@ export interface CachedFile {
   readonly provider: UsageProviderKind;
   readonly records: readonly UsageRecord[];
   readonly codexState?: CodexScanState;
+  /** Complete JSONL prefix already folded into `records`; absent only when complete. */
+  readonly scanCursor?: number;
+  /** Oversized JSONL records deliberately omitted under the bounded-memory policy. */
+  readonly scanSkippedLines?: number;
+  /** `scanCursor` is inside an oversized record and must only search for its newline. */
+  readonly scanDiscardingLine?: boolean;
   /** SHA-256 of the first `size` bytes, used before any append read. */
   readonly prefixFingerprint?: string;
   /** Sanitized repeated-input observations. Never contains source text. */
@@ -158,6 +165,8 @@ interface SerializedFile {
   readonly m: number;
   readonly p: UsageProviderKind;
   readonly r: readonly SerializedRecord[];
+  readonly q?: number;
+  readonly x?: readonly [number, boolean];
   readonly h?: string;
   readonly i?: readonly SerializedRepeatedInput[];
   readonly g?: readonly SerializedRepeatedInputGap[];
@@ -285,6 +294,10 @@ export function encodeScanCache(
               entry.codexState.turnId ?? null,
             ] as const,
           }),
+      ...(entry.scanCursor === undefined ? {} : { q: entry.scanCursor }),
+      ...(entry.scanSkippedLines === undefined && entry.scanDiscardingLine === undefined
+        ? {}
+        : { x: [entry.scanSkippedLines ?? 0, entry.scanDiscardingLine ?? false] as const }),
       r: entry.records.map((record) => [
         record.timestampMs,
         intern(models, modelIndex, record.model),
@@ -457,6 +470,7 @@ export function decodeScanCache(document: unknown): ScanCache {
     root.version !== 4 &&
     root.version !== 5 &&
     root.version !== 6 &&
+    root.version !== 7 &&
     root.version !== USAGE_SCAN_CACHE_VERSION
   ) {
     return cache;
@@ -556,6 +570,34 @@ export function decodeScanCache(document: unknown): ScanCache {
     }
 
     if (corrupt) continue;
+    const scanCursor =
+      typeof entry.q === "number" &&
+      Number.isSafeInteger(entry.q) &&
+      entry.q >= 0 &&
+      entry.q < entry.s
+        ? entry.q
+        : undefined;
+    if (root.version >= 8 && entry.q !== undefined && scanCursor === undefined) continue;
+    const scanIssue = entry.x;
+    const scanSkippedLines =
+      isRecordArray(scanIssue) &&
+      scanIssue.length === 2 &&
+      typeof scanIssue[0] === "number" &&
+      Number.isSafeInteger(scanIssue[0]) &&
+      scanIssue[0] > 0
+        ? scanIssue[0]
+        : undefined;
+    const scanDiscardingLine =
+      isRecordArray(scanIssue) && scanIssue.length === 2 && scanIssue[1] === true;
+    if (
+      root.version >= 8 &&
+      scanIssue !== undefined &&
+      scanSkippedLines === undefined &&
+      !scanDiscardingLine
+    ) {
+      continue;
+    }
+    if (scanDiscardingLine && scanCursor === undefined) continue;
     const prefixFingerprint = typeof entry.h === "string" ? entry.h : undefined;
     const repeatedInputVersion =
       typeof entry.j === "number" && Number.isSafeInteger(entry.j) && entry.j >= 0
@@ -686,6 +728,9 @@ export function decodeScanCache(document: unknown): ScanCache {
       provider,
       records,
       ...(codexState === undefined ? {} : { codexState }),
+      ...(scanCursor === undefined ? {} : { scanCursor }),
+      ...(scanSkippedLines === undefined ? {} : { scanSkippedLines }),
+      ...(scanDiscardingLine ? { scanDiscardingLine: true } : {}),
       ...(prefixFingerprint === undefined ? {} : { prefixFingerprint }),
       ...(entry.i === undefined ? {} : { repeatedInputObservations }),
       ...(repeatedInputGaps === null || entry.g === undefined ? {} : { repeatedInputGaps }),
@@ -709,6 +754,7 @@ export function decodeScanCoverage(document: unknown): readonly ScanCoverage[] {
     (root.version !== 3 &&
       root.version !== 4 &&
       root.version !== 6 &&
+      root.version !== 7 &&
       root.version !== USAGE_SCAN_CACHE_VERSION) ||
     !Array.isArray(root.coverage)
   ) {
@@ -767,12 +813,14 @@ export interface PruneOptions {
  */
 export function pruneScanCache(cache: ScanCache, options: PruneOptions): number {
   let removed = 0;
+  const walkedRoots = options.walkedRoots.map((root) => root.replace(/\\/g, "/"));
   for (const [path, entry] of cache) {
     const agedOut = entry.mtimeMs < options.retentionCutoffMs;
-    const underWalkedRoot = options.walkedRoots.some(
+    const normalizedPath = path.replace(/\\/g, "/");
+    const underWalkedRoot = walkedRoots.some(
       (root) =>
-        path === root ||
-        path.startsWith(root.endsWith("/") || root.endsWith("\\") ? root : `${root}/`),
+        normalizedPath === root ||
+        normalizedPath.startsWith(root.endsWith("/") ? root : `${root}/`),
     );
     const deleted =
       underWalkedRoot && entry.mtimeMs >= options.windowStartMs && !options.livePaths.has(path);

@@ -9,6 +9,7 @@ import {
   readRepeatedInputRecords,
   readTranscriptRecords,
   readTranscriptPrefixFingerprint,
+  listTranscriptFilesBounded,
   listTranscriptFiles,
   selectTranscriptFilesForScan,
   transcriptAppendIsSafe,
@@ -136,6 +137,18 @@ describe("selectTranscriptFilesForScan", () => {
 });
 
 describe("incremental transcript reads", () => {
+  it("marks an inventory incomplete when its deadline has already elapsed", async () => {
+    const directory = await NodeFSP.mkdtemp(
+      NodePath.join(NodeOS.tmpdir(), "t3-usage-list-deadline-"),
+    );
+    try {
+      const listing = await listTranscriptFilesBounded(directory, 0, "codex", -1);
+      expect(listing).toEqual({ files: [], complete: false });
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("lists nested recent transcripts with bounded metadata batches and excludes other files", async () => {
     const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-list-"));
     const nested = NodePath.join(directory, "nested");
@@ -160,6 +173,51 @@ describe("incremental transcript reads", () => {
       await NodeFSP.rm(directory, { recursive: true, force: true });
     }
   });
+
+  it("resumes an expired inventory from discovered files instead of restarting its walk", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-inventory-"));
+    try {
+      await Promise.all(
+        Array.from({ length: 129 }, (_, index) =>
+          NodeFSP.writeFile(NodePath.join(directory, `${index}.jsonl`), "{}\n"),
+        ),
+      );
+      const expiresAfterOneBatch = () => {
+        let calls = 0;
+        return () => (calls++ < 2 ? 0 : 2);
+      };
+      const first = await listTranscriptFilesBounded(
+        directory,
+        0,
+        "codex",
+        1,
+        expiresAfterOneBatch(),
+      );
+      expect(first).toEqual({ files: [], complete: false });
+
+      const second = await listTranscriptFilesBounded(
+        directory,
+        1,
+        "codex",
+        1,
+        expiresAfterOneBatch(),
+      );
+      expect(second.complete).toBe(false);
+      expect(second.files).toHaveLength(128);
+
+      const complete = await listTranscriptFilesBounded(
+        directory,
+        0,
+        "codex",
+        Number.POSITIVE_INFINITY,
+      );
+      expect(complete).toMatchObject({ complete: true });
+      expect(complete.files).toHaveLength(129);
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("resumes a growing Codex JSONL file without rereading its prefix", async () => {
     const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-append-"));
     const path = NodePath.join(directory, "rollout.jsonl");
@@ -217,6 +275,133 @@ describe("incremental transcript reads", () => {
       expect(appended?.records[0]?.model).toBe("gpt-5.6-sol");
       expect(appended?.records[0]?.sessionId).toBe("session-a");
       expect(appended?.records[0]?.totals.outputTokens).toBe(4);
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("returns a complete-line cursor when a bounded JSONL read ends mid-record", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-cursor-"));
+    const path = NodePath.join(directory, "rollout.jsonl");
+    const prefix =
+      [
+        JSON.stringify({
+          timestamp: "2026-08-29T10:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "session-a" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-08-29T10:00:01.000Z",
+          type: "turn_context",
+          payload: { model: "gpt-5.6-sol" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-08-29T10:00:02.000Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              last_token_usage: { input_tokens: 10, cached_input_tokens: 3, output_tokens: 2 },
+            },
+          },
+        }),
+      ].join("\n") + "\n";
+    const finalRecord =
+      JSON.stringify({
+        timestamp: "2026-08-29T10:00:03.000Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            last_token_usage: { input_tokens: 20, cached_input_tokens: 5, output_tokens: 4 },
+          },
+        },
+      }) + "\n";
+    const contents = `${prefix}${finalRecord}`;
+    try {
+      await NodeFSP.writeFile(path, contents);
+      const prefixBytes = Buffer.byteLength(prefix);
+      const partial = await readTranscriptRecords(path, "codex", {
+        endByte: prefixBytes + 2,
+        sourceSize: Buffer.byteLength(contents),
+      });
+      expect(partial?.nextByte).toBe(prefixBytes);
+      expect(partial?.records).toHaveLength(1);
+      expect(await transcriptCursorIsLineBoundary(path, partial!.nextByte)).toBe(true);
+
+      const resumed = await readTranscriptRecords(path, "codex", {
+        startByte: partial!.nextByte,
+        endByte: Buffer.byteLength(contents) - 1,
+        sourceSize: Buffer.byteLength(contents),
+        ...(partial!.codexState === undefined ? {} : { codexState: partial!.codexState }),
+      });
+      expect(resumed?.nextByte).toBe(Buffer.byteLength(contents));
+      expect(resumed?.records).toHaveLength(1);
+      expect(resumed?.records[0]).toMatchObject({
+        sessionId: "session-a",
+        model: "gpt-5.6-sol",
+        totals: { outputTokens: 4 },
+      });
+      const complete = await readTranscriptRecords(path, "codex", {
+        sourceSize: Buffer.byteLength(contents),
+      });
+      expect([...(partial?.records ?? []), ...(resumed?.records ?? [])]).toEqual(complete?.records);
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("advances past an oversized JSONL record without treating its usage as complete", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-oversized-"));
+    const path = NodePath.join(directory, "rollout.jsonl");
+    const prefix =
+      [
+        JSON.stringify({
+          timestamp: "2026-08-29T10:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "session-a" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-08-29T10:00:01.000Z",
+          type: "turn_context",
+          payload: { model: "gpt-5.6-sol" },
+        }),
+      ].join("\n") + "\n";
+    const oversized = `${JSON.stringify({ type: "event_msg", payload: { text: "x".repeat(4 * 1024 * 1024 + 1) } })}\n`;
+    const usage =
+      JSON.stringify({
+        timestamp: "2026-08-29T10:00:02.000Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            last_token_usage: { input_tokens: 10, cached_input_tokens: 3, output_tokens: 2 },
+          },
+        },
+      }) + "\n";
+    const contents = `${prefix}${oversized}${usage}`;
+    try {
+      await NodeFSP.writeFile(path, contents);
+      const first = await readTranscriptRecords(path, "codex", {
+        endByte: Buffer.byteLength(prefix) + 4 * 1024 * 1024,
+        sourceSize: Buffer.byteLength(contents),
+      });
+      expect(first?.discardingLine).toBe(true);
+      expect(first?.discardedLines).toBe(0);
+      expect(first?.nextByte).toBeGreaterThan(Buffer.byteLength(prefix));
+      expect(first?.records).toEqual([]);
+
+      const second = await readTranscriptRecords(path, "codex", {
+        startByte: first!.nextByte,
+        endByte: Buffer.byteLength(contents) - 1,
+        sourceSize: Buffer.byteLength(contents),
+        discardPartialLine: first!.discardingLine,
+        ...(first!.codexState === undefined ? {} : { codexState: first!.codexState }),
+      });
+      expect(second?.nextByte).toBe(Buffer.byteLength(contents));
+      expect(second?.discardingLine).toBe(false);
+      expect(second?.discardedLines).toBe(1);
+      expect(second?.records).toMatchObject([{ totals: { outputTokens: 2 } }]);
     } finally {
       await NodeFSP.rm(directory, { recursive: true, force: true });
     }

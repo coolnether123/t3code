@@ -63,7 +63,7 @@ import { makeDayFormatter, UsageAggregator } from "./usageAggregation.ts";
 import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
 import { UsageSummaryCache, usageSummaryCacheKey } from "./usageSummaryCache.ts";
 import {
-  listTranscriptFiles,
+  listTranscriptFilesBounded,
   readDirectoryVolumeId,
   readTranscriptRecords,
   readRepeatedInputRecords,
@@ -138,6 +138,15 @@ const CACHE_RETENTION_DAYS = 365;
 
 /** Keeps a first-time usage read responsive even with very large transcripts. */
 const MAX_COLD_SCAN_BYTES_PER_SOURCE = 128 * 1024 * 1024;
+
+/** One complete-line JSONL chunk persisted before the next bounded request resumes it. */
+const MAX_TRANSCRIPT_READ_BYTES_PER_FILE = 32 * 1024 * 1024;
+
+/** Leaves enough room in a bounded RPC to scan selected files and serialize its response. */
+const MAX_TRANSCRIPT_INVENTORY_DURATION_MS = 2_000;
+
+/** Keep a margin for WebSocket serialization before the consumer's 15-second deadline. */
+const MAX_USAGE_READ_DURATION_MS = 12_000;
 
 /** Files changed in this span are checked between complete directory audits. */
 const RECENT_TRANSCRIPT_WINDOW_MS = 48 * 60 * 60 * 1000;
@@ -642,6 +651,24 @@ export const make = Effect.gen(function* () {
     ];
   });
 
+  type UsageReadContext = {
+    readonly settings: ServerSettingsValue;
+    readonly dirs: readonly { readonly provider: UsageProviderKind; readonly dir: string }[];
+  };
+
+  type UsageReadProgress = {
+    readonly sources: UsageSource[];
+    aggregator: UsageAggregator | undefined;
+  };
+
+  const resolveReadContext = Effect.fn("UsageService.resolveReadContext")(function* () {
+    const settings = yield* readSettings;
+    const dirs = yield* resolveTranscriptDirs(settings).pipe(
+      Effect.provideService(Path.Path, path),
+    );
+    return { settings, dirs } satisfies UsageReadContext;
+  });
+
   /**
    * Loads once under the scan semaphore, marking completion only after the read.
    * A cancelled first reader leaves the next request free to load the cache.
@@ -766,7 +793,7 @@ export const make = Effect.gen(function* () {
     mtimeMs: number,
     provider: UsageProviderKind,
     startByte: number,
-  ): Effect.Effect<readonly UsageRecord[]> =>
+  ): Effect.Effect<{ readonly records: readonly UsageRecord[]; readonly complete: boolean }> =>
     Effect.gen(function* () {
       const cached = fileCache.get(filePath);
       // Provider is part of the identity: if both providers were ever pointed
@@ -775,16 +802,22 @@ export const make = Effect.gen(function* () {
         cached &&
         cached.size === size &&
         cached.mtimeMs === mtimeMs &&
-        cached.provider === provider
+        cached.provider === provider &&
+        cached.scanCursor === undefined
       ) {
-        return cached.records;
+        return {
+          records: cached.records,
+          complete: cached.scanSkippedLines === undefined && cached.scanDiscardingLine !== true,
+        };
       }
 
       const appendable = cached !== undefined && startByte > 0;
       const parsed = yield* Effect.promise(() =>
         readTranscriptRecords(filePath, provider, {
           startByte,
-          endByte: size - 1,
+          endByte: Math.min(size - 1, startByte + MAX_TRANSCRIPT_READ_BYTES_PER_FILE - 1),
+          sourceSize: size,
+          ...(cached?.scanDiscardingLine === true ? { discardPartialLine: true } : {}),
           ...(appendable && provider === "codex" && cached?.codexState !== undefined
             ? { codexState: cached.codexState }
             : {}),
@@ -792,27 +825,41 @@ export const make = Effect.gen(function* () {
       );
       // A read failure is not an empty transcript: caching it under this
       // (size, mtime) would silently drop the file's usage until it changes.
-      if (parsed === null) return [];
+      if (parsed === null) return { records: [], complete: false };
       // Stored already de-duplicated within the file, which is 99% of all
       // duplicates. The aggregator still runs the cross-file dedupe pass.
       const records = dedupeWithinFile([
         ...(appendable && cached !== undefined ? cached.records : []),
         ...parsed.records,
       ]);
+      const nextByte = Math.min(size, Math.max(startByte, parsed.nextByte));
+      const scanSkippedLines =
+        (appendable ? (cached?.scanSkippedLines ?? 0) : 0) + parsed.discardedLines;
+      const reachedEnd = nextByte >= size && !parsed.discardingLine;
+      const complete = reachedEnd && scanSkippedLines === 0;
 
       fileCache.set(filePath, {
         size,
         mtimeMs,
         provider,
         records,
+        ...(reachedEnd ? {} : { scanCursor: nextByte }),
+        ...(scanSkippedLines === 0 ? {} : { scanSkippedLines }),
+        ...(parsed.discardingLine ? { scanDiscardingLine: true } : {}),
         ...(parsed.codexState === undefined ? {} : { codexState: parsed.codexState }),
       });
       markCacheDirty();
-      return records;
+      // A later source can exhaust the response budget. Publish this completed
+      // chunk independently so the next request, including after a restart,
+      // resumes from its complete-line cursor instead of parsing it again.
+      yield* Queue.offer(persistQueue, undefined);
+      return { records, complete };
     });
 
   const readSummaryUnlocked = Effect.fn("UsageService.readSummaryUnlocked")(function* (
     input: UsageSummaryInput,
+    context: UsageReadContext | undefined,
+    progress?: UsageReadProgress,
   ) {
     if (input.sinceDay > input.untilDay) {
       return yield* new UsageReadError({
@@ -910,10 +957,10 @@ export const make = Effect.gen(function* () {
     const hostId = NodeOS.hostname();
     // The home resolvers ask for `Path` themselves; satisfy them from the
     // instance we already hold so `readSummary` stays context-free.
-    const settings = yield* readSettings;
-    const dirs = yield* resolveTranscriptDirs(settings).pipe(
-      Effect.provideService(Path.Path, path),
-    );
+    if (context === undefined) {
+      return yield* Effect.die("A transcript usage read requires its resolved source context.");
+    }
+    const { settings, dirs } = context;
     const repeatedInputEnabled = includeRepeatedInput(input);
     const repeatedInputObservations: RepeatedInputObservation[] = [];
     const repeatedInputGaps: UsageRepeatedInputCoverageGap[] = [];
@@ -956,8 +1003,9 @@ export const make = Effect.gen(function* () {
       ...(input.turnIds === undefined ? {} : { turnIds: input.turnIds }),
       ...(input.groupBy === undefined ? {} : { groupBy: input.groupBy }),
     });
+    if (progress !== undefined) progress.aggregator = aggregator;
 
-    const sources: UsageSource[] = [];
+    const sources = progress?.sources ?? [];
     const selectedProviders = input.providers === undefined ? null : new Set(input.providers);
     const selectedSessionIds = input.sessionIds === undefined ? null : new Set(input.sessionIds);
     const selectedTurnIds = input.turnIds === undefined ? null : new Set(input.turnIds);
@@ -989,16 +1037,24 @@ export const make = Effect.gen(function* () {
           recentTranscriptWindowMs: RECENT_TRANSCRIPT_WINDOW_MS,
           fullScanIntervalMs: FULL_SCAN_INTERVAL_MS,
         });
-        const discoveredFiles = plan.shouldRefresh
-          ? yield* Effect.promise(() => listTranscriptFiles(dir, plan.scanStartMs, provider))
-          : [];
+        const listing = plan.shouldRefresh
+          ? yield* Effect.promise(() =>
+              listTranscriptFilesBounded(
+                dir,
+                plan.scanStartMs,
+                provider,
+                MAX_TRANSCRIPT_INVENTORY_DURATION_MS,
+              ),
+            )
+          : { files: [], complete: true };
         return {
           provider,
           dir,
           volumeId,
           exists: true as const,
           coverageKey,
-          discoveredFiles,
+          discoveredFiles: listing.files,
+          listingComplete: listing.complete,
           ...plan,
         };
       }),
@@ -1023,8 +1079,23 @@ export const make = Effect.gen(function* () {
         continue;
       }
 
-      const { coverageKey, discoveredFiles, hasCurrentCoverage, shouldRefresh, scanStartMs } =
-        source;
+      const {
+        coverageKey,
+        discoveredFiles,
+        hasCurrentCoverage,
+        listingComplete,
+        shouldRefresh,
+        scanStartMs,
+      } = source;
+      if (shouldRefresh && listingComplete) {
+        const pruned = pruneScanCache(fileCache, {
+          livePaths: new Set(discoveredFiles.map((file) => file.path)),
+          walkedRoots: [dir],
+          windowStartMs: scanStartMs,
+          retentionCutoffMs: startedAtMs - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+        });
+        if (pruned > 0) markCacheDirty();
+      }
       const filesByPath = new Map<string, TranscriptFile>();
 
       if (hasCurrentCoverage) {
@@ -1055,15 +1126,28 @@ export const make = Effect.gen(function* () {
             cached !== undefined &&
             cached.size === file.size &&
             cached.mtimeMs === file.mtimeMs &&
-            cached.provider === provider;
+            cached.provider === provider &&
+            cached.scanCursor === undefined;
+          const resumePartial =
+            cached !== undefined &&
+            cached.size === file.size &&
+            cached.mtimeMs === file.mtimeMs &&
+            cached.provider === provider &&
+            cached.scanCursor !== undefined;
+          const resumeByte = resumePartial ? cached!.scanCursor! : cached?.size;
+          const cursorIsUsable =
+            resumeByte !== undefined &&
+            resumeByte > 0 &&
+            (cached?.scanDiscardingLine === true ||
+              (yield* Effect.promise(() => transcriptCursorIsLineBoundary(file.path, resumeByte))));
           const appendable =
             !warm &&
             cached !== undefined &&
-            cached.provider === provider &&
-            file.size > cached.size &&
-            (provider === "claude" || (provider === "codex" && cached.codexState !== undefined)) &&
-            (yield* Effect.promise(() => transcriptCursorIsLineBoundary(file.path, cached.size)));
-          const startByte = warm ? file.size : appendable ? cached.size : 0;
+            cursorIsUsable &&
+            (resumePartial || (cached.scanCursor === undefined && file.size > cached.size)) &&
+            (resumePartial || cached.provider === provider) &&
+            (provider === "claude" || (provider === "codex" && cached.codexState !== undefined));
+          const startByte = warm ? file.size : appendable ? resumeByte : 0;
           const parserMatches = cached?.repeatedInputVersion === REPEATED_INPUT_CACHE_VERSION;
           const repeatedInputWarm =
             repeatedInputEnabled &&
@@ -1123,17 +1207,9 @@ export const make = Effect.gen(function* () {
         });
       }
 
-      if (shouldRefresh) {
-        const pruned = pruneScanCache(fileCache, {
-          livePaths: new Set(discoveredFiles.map((file) => file.path)),
-          walkedRoots: [dir],
-          windowStartMs: scanStartMs,
-          retentionCutoffMs: startedAtMs - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000,
-        });
-        if (pruned > 0) markCacheDirty();
-      }
       let scannedFiles = 0;
       let skippedFiles = selection.deferredFiles;
+      let incompleteFiles = 0;
       // Distinct per directory. Buckets carry per-cell session counts, but a
       // session spans days and models, so clients total this figure instead.
       const sessionIds = new Set<string>();
@@ -1145,13 +1221,15 @@ export const make = Effect.gen(function* () {
 
       for (const file of selection.files) {
         const cachedBefore = fileCache.get(file.path);
-        const records = yield* readFileRecords(
+        const fileRead = yield* readFileRecords(
           file.path,
           file.size,
           file.mtimeMs,
           provider,
           file.startByte,
         );
+        const { records } = fileRead;
+        if (!fileRead.complete) incompleteFiles += 1;
         if (repeatedInputEnabled && provider === "codex") {
           const repeatedWarm = file.repeatedInputWarm;
           const appendable = file.repeatedInputAppendable;
@@ -1235,6 +1313,7 @@ export const make = Effect.gen(function* () {
       }
 
       const scanCompleted =
+        listingComplete &&
         selection.deferredFiles === 0 &&
         selection.files.every((file) => {
           const cached = fileCache.get(file.path);
@@ -1242,7 +1321,10 @@ export const make = Effect.gen(function* () {
             cached !== undefined &&
             cached.size === file.size &&
             cached.mtimeMs === file.mtimeMs &&
-            cached.provider === provider
+            cached.provider === provider &&
+            cached.scanCursor === undefined &&
+            cached.scanSkippedLines === undefined &&
+            cached.scanDiscardingLine === undefined
           );
         });
       if (shouldRefresh && scanCompleted) {
@@ -1267,21 +1349,24 @@ export const make = Effect.gen(function* () {
       }
       sources.push({
         fingerprint: { hostId, provider, resolvedHomePath: dir, volumeId },
-        status: selection.deferredFiles > 0 ? "partial" : "ok",
+        status: !scanCompleted ? "partial" : "ok",
         scannedFiles,
         skippedFiles,
         malformedRecords: 0,
         distinctSessions: sessionIds.size,
-        message:
-          selection.deferredFiles > 0
-            ? `Usage is partial while the transcript cache warms; ${selection.deferredFiles} older or oversized transcript files were deferred.`
-            : provider === "aistudio"
-              ? "AI Studio exports use exact chunk counts and source message dates when present. Older exports without createTime remain on their downloaded-file date; per-turn input context is reconstructed and copied branch prefixes are counted once."
-              : provider === "chatgpt"
-                ? scannedFiles === 0
-                  ? "ChatGPT import is ready; no conversations.json export has been downloaded yet."
-                  : "ChatGPT exports contain message dates but no token ledger; token counts and API-equivalent cost are estimated from chat text."
-                : null,
+        message: !listingComplete
+          ? "Usage is partial because the transcript inventory exceeded its response budget."
+          : incompleteFiles > 0
+            ? `Usage is partial while ${incompleteFiles} large transcript ${incompleteFiles === 1 ? "is" : "files are"} scanned in complete-line chunks.`
+            : selection.deferredFiles > 0
+              ? `Usage is partial while the transcript cache warms; ${selection.deferredFiles} older or oversized transcript files were deferred.`
+              : provider === "aistudio"
+                ? "AI Studio exports use exact chunk counts and source message dates when present. Older exports without createTime remain on their downloaded-file date; per-turn input context is reconstructed and copied branch prefixes are counted once."
+                : provider === "chatgpt"
+                  ? scannedFiles === 0
+                    ? "ChatGPT import is ready; no conversations.json export has been downloaded yet."
+                    : "ChatGPT exports contain message dates but no token ledger; token counts and API-equivalent cost are estimated from chat text."
+                  : null,
       });
     }
 
@@ -1409,78 +1494,134 @@ export const make = Effect.gen(function* () {
     const base = usageSummaryCacheKey(input, priceOverrides);
     return includeRepeatedInput(input) ? `${base}\u0000repeatedInput=1` : base;
   };
-  const readSummary: UsageService["Service"]["readSummary"] = (input) =>
-    input.quotaHistoryOnly
-      ? readSummaryUnlocked(input)
-      : input.includeQuotaHistory
-        ? Effect.gen(function* () {
-            const settings = yield* readSettings;
-            const key = repeatedAwareSummaryCacheKey(input, settings.usagePriceOverrides);
-            if (!input.refresh) {
-              const cached = summaryCache.get(key, yield* Clock.currentTimeMillis);
-              if (cached !== undefined) return cached;
-            }
-            return yield* scanSemaphore.withPermits(1)(
-              Effect.gen(function* () {
-                if (!input.refresh) {
-                  const cached = summaryCache.get(key, yield* Clock.currentTimeMillis);
-                  if (cached !== undefined) return cached;
-                }
-                const summary = yield* readSummaryUnlocked(input);
-                // A provider-backed result must be rebuilt so changed transcript
-                // metadata can invalidate it. Empty-source history fixtures are
-                // safe to reuse and keep history-only navigation inexpensive.
-                if (summary.sources.every((source) => source.status === "missing")) {
-                  summaryCache.set(key, yield* Clock.currentTimeMillis, summary);
-                }
-                return summary;
-              }),
-            );
-          })
-        : // Reject an inverted calendar window before joining the single-flight
-          // map. Invalid input has no scan to share and must remain immediate.
-          input.sinceDay > input.untilDay
-          ? readSummaryUnlocked(input)
-          : Effect.gen(function* () {
-              const settings = yield* readSettings;
-              const key = repeatedAwareSummaryCacheKey(input, settings.usagePriceOverrides);
-              if (!input.refresh) {
-                const cached = summaryCache.get(key, yield* Clock.currentTimeMillis);
-                if (cached !== undefined) return cached;
-              }
 
-              const registration = yield* Effect.sync(() => {
-                const existing = inFlightSummaries.get(key);
-                if (existing !== undefined) return { existing } as const;
-                const result = Deferred.makeUnsafe<Exit.Exit<UsageSummary, UsageReadError>>();
-                inFlightSummaries.set(key, result);
-                return { result } as const;
-              });
-              if ("existing" in registration) {
-                const exit = yield* Deferred.await(registration.existing);
-                if (Exit.isFailure(exit)) return yield* Effect.failCause(exit.cause);
-                return exit.value;
-              }
+  const partialSummaryAtDeadline = Effect.fn("UsageService.partialSummaryAtDeadline")(function* (
+    input: UsageSummaryInput,
+    startedAtMs: number,
+    dirs: readonly { readonly provider: UsageProviderKind; readonly dir: string }[],
+    progress: UsageReadProgress,
+  ) {
+    const finishedAtMs = yield* Clock.currentTimeMillis;
+    const selectedProviders = input.providers === undefined ? null : new Set(input.providers);
+    const completedSources = progress.sources;
+    const completedPaths = new Set(
+      completedSources.map(
+        (source) => `${source.fingerprint.provider}\u0000${source.fingerprint.resolvedHomePath}`,
+      ),
+    );
+    const unfinishedSources = dirs
+      .filter(
+        ({ provider }) =>
+          (input.quotaIntervals === undefined || provider === "codex") &&
+          (selectedProviders === null || selectedProviders.has(provider)),
+      )
+      .filter(({ provider, dir }) => !completedPaths.has(`${provider}\u0000${dir}`))
+      .map(
+        ({ provider, dir }) =>
+          ({
+            fingerprint: {
+              hostId: NodeOS.hostname(),
+              provider,
+              resolvedHomePath: dir,
+              volumeId: "",
+            },
+            status: "partial" as const,
+            scannedFiles: 0,
+            skippedFiles: 0,
+            malformedRecords: 0,
+            distinctSessions: 0,
+            message:
+              "Usage is partial because its response budget expired before this source finished.",
+          }) satisfies UsageSource,
+      );
+    const clientContractVersion = input.clientContractVersion ?? 5;
+    const supportsOpenCode = clientContractVersion >= 6;
+    const supportsImports = clientContractVersion >= 7;
+    const supportsProvider = (provider: UsageProviderKind) =>
+      (provider !== "opencode" || supportsOpenCode) &&
+      ((provider !== "chatgpt" && provider !== "aistudio") || supportsImports);
+    const buckets = progress.aggregator?.finish().buckets ?? [];
+    return {
+      contractVersion: supportsImports ? USAGE_CONTRACT_VERSION : supportsOpenCode ? 6 : 5,
+      readAt: DateTime.formatIso(DateTime.makeUnsafe(finishedAtMs)),
+      timeZone: input.timeZone,
+      sinceDay: input.sinceDay,
+      untilDay: input.untilDay,
+      buckets: buckets.filter((bucket) => supportsProvider(bucket.provider)),
+      sources: [...completedSources, ...unfinishedSources].filter((source) =>
+        supportsProvider(source.fingerprint.provider),
+      ),
+      pricing: EMPTY_PRICING,
+      scanDurationMs: Math.max(0, finishedAtMs - startedAtMs),
+    } satisfies UsageSummary;
+  });
 
-              const result = registration.result;
-              // Registration is synchronous, so concurrent callers cannot both
-              // observe an empty map before the owner is installed.
-              const exit = yield* scanSemaphore
-                .withPermits(1)(readSummaryUnlocked(input))
-                .pipe(
-                  Effect.onExit((completed) =>
-                    Effect.sync(() => inFlightSummaries.delete(key)).pipe(
-                      Effect.andThen(Deferred.succeed(result, completed)),
-                    ),
-                  ),
-                  Effect.exit,
-                );
-              if (Exit.isFailure(exit)) return yield* Effect.failCause(exit.cause);
-              if (exit.value.sources.every((source) => source.status === "missing")) {
-                summaryCache.set(key, yield* Clock.currentTimeMillis, exit.value);
-              }
-              return exit.value;
+  const readSummary: UsageService["Service"]["readSummary"] = Effect.fn("UsageService.readSummary")(
+    function* (input: UsageSummaryInput) {
+      const startedAtMs = yield* Clock.currentTimeMillis;
+      let resolvedDirs: readonly { readonly provider: UsageProviderKind; readonly dir: string }[] =
+        [];
+      const progress: UsageReadProgress = { sources: [], aggregator: undefined };
+      let ownedResult:
+        | { key: string; result: Deferred.Deferred<Exit.Exit<UsageSummary, UsageReadError>, never> }
+        | undefined;
+      return yield* Effect.gen(function* () {
+        const result = yield* Effect.gen(function* () {
+          if (input.sinceDay > input.untilDay) {
+            return yield* new UsageReadError({
+              reason: "invalidWindow",
+              detail: `sinceDay '${input.sinceDay}' is after untilDay '${input.untilDay}'`,
             });
+          }
+          if (input.quotaHistoryOnly) return yield* readSummaryUnlocked(input, undefined, progress);
+          const context = yield* resolveReadContext();
+          resolvedDirs = context.dirs;
+          const key = repeatedAwareSummaryCacheKey(input, context.settings.usagePriceOverrides);
+          if (!input.refresh) {
+            const cached = summaryCache.get(key, yield* Clock.currentTimeMillis);
+            if (cached !== undefined) return cached;
+          }
+          if (!input.includeQuotaHistory) {
+            const existing = inFlightSummaries.get(key);
+            if (existing !== undefined) {
+              const exit = yield* Deferred.await(existing);
+              if (Exit.isFailure(exit)) return yield* Effect.failCause(exit.cause);
+              return exit.value;
+            }
+            const shared = Deferred.makeUnsafe<Exit.Exit<UsageSummary, UsageReadError>>();
+            inFlightSummaries.set(key, shared);
+            ownedResult = { key, result: shared };
+          }
+          const summary = yield* scanSemaphore.withPermits(1)(
+            readSummaryUnlocked(input, context, progress),
+          );
+          if (
+            summary.sources.length > 0 &&
+            summary.sources.every((source) => source.status === "missing")
+          ) {
+            summaryCache.set(key, yield* Clock.currentTimeMillis, summary);
+          }
+          return summary;
+        }).pipe(Effect.timeoutOption(MAX_USAGE_READ_DURATION_MS));
+        if (Option.isSome(result)) return result.value;
+        if (resolvedDirs.length === 0) {
+          return yield* new UsageReadError({
+            reason: "scanFailed",
+            detail: "Usage response budget expired before source coverage could be established.",
+          });
+        }
+        return yield* partialSummaryAtDeadline(input, startedAtMs, resolvedDirs, progress);
+      }).pipe(
+        Effect.onExit((completed) => {
+          if (ownedResult === undefined) return Effect.void;
+          const { key, result } = ownedResult;
+          return Effect.sync(() => inFlightSummaries.delete(key)).pipe(
+            Effect.andThen(Deferred.succeed(result, completed)),
+          );
+        }),
+      );
+    },
+  );
 
   return { readSummary, refreshRates } as const;
 });

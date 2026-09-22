@@ -71,6 +71,7 @@ describe("scan cache round trip", () => {
           mtimeMs: 100,
           provider: "codex" as const,
           prefixFingerprint: "prefix-a",
+          scanCursor: 64,
           records: [],
           repeatedInputObservations: [repeated],
           repeatedInputVersion: 1,
@@ -85,6 +86,27 @@ describe("scan cache round trip", () => {
     expect(raw).not.toContain("private source text");
     expect(decodeScanCache(JSON.parse(raw)).get("/codex.jsonl")).toEqual(
       original.get("/codex.jsonl"),
+    );
+  });
+
+  it("persists partial scan records and their explicit omission coverage", () => {
+    const original: ScanCache = new Map([
+      [
+        "/codex.jsonl",
+        {
+          size: 100,
+          mtimeMs: 100,
+          provider: "codex",
+          scanCursor: 64,
+          scanSkippedLines: 1,
+          records: [record({ provider: "codex", dedupeKey: "chunk-one" })],
+          codexState: initialCodexScanState(),
+        },
+      ],
+    ]);
+
+    expect(decodeScanCache(JSON.parse(JSON.stringify(encodeScanCache(original))))).toEqual(
+      original,
     );
   });
 
@@ -483,6 +505,27 @@ describe("planTranscriptScan", () => {
 
 describe("pruneScanCache", () => {
   const retentionCutoffMs = 1000;
+
+  for (const root of ["C:\\codex\\sessions", "C:/codex/sessions"]) {
+    it(`prunes Windows paths under ${root} without touching siblings or live entries`, () => {
+      const live = "C:\\codex\\sessions\\live.jsonl";
+      const sibling = "C:\\codex\\sessions-copy\\keep.jsonl";
+      const cache = cacheWith([
+        ["C:\\codex\\sessions\\gone.jsonl", 5000, [record()]],
+        [live, 5000, [record()]],
+        [sibling, 5000, [record()]],
+      ]);
+      expect(
+        pruneScanCache(cache, {
+          livePaths: new Set([live]),
+          walkedRoots: [root],
+          windowStartMs: 4000,
+          retentionCutoffMs,
+        }),
+      ).toBe(1);
+      expect([...cache.keys()]).toEqual([live, sibling]);
+    });
+  }
 
   it("drops entries older than retention", () => {
     const cache = cacheWith([["/old.jsonl", 500, [record()]]]);
