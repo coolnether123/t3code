@@ -278,11 +278,23 @@ import {
 } from "../state/entities";
 import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
+import {
+  nextAutoQueuedFollowUp,
+  useQueuedFollowUps,
+  useQueuedFollowUpStore,
+  type QueuedFollowUp,
+} from "../queuedFollowUps";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { EditFromHereDialog, type EditFromHereMode } from "./chat/EditFromHereDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
+import {
+  isPaintOnlyThreadTimeline,
+  peekHeldThreadTimeline,
+  rememberReadyThreadTimeline,
+  resolveThreadSwitchTimeline,
+} from "./heldThreadTimeline";
 import { resolveTimelineIsAtEnd } from "./chat/MessagesTimeline.logic";
 import { ChatHeader } from "./chat/ChatHeader";
 import { serializeTaskTranscript } from "../chatTranscript";
@@ -338,6 +350,7 @@ import {
   hasServerAcknowledgedLocalDispatch,
   isBranchMismatchDismissedForSession,
   shouldDockDraftHeroForSubmission,
+  shouldQueueFollowUp,
   shouldReleaseTimelineAnchorForToolActivity,
   shouldShowBranchMismatchBanner,
   getStartedThreadModelChangeBlockReason,
@@ -1289,6 +1302,7 @@ function ChatViewContent(props: ChatViewProps) {
     reportFailure: false,
   });
   const startThreadTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
+  const steerThreadTurn = useAtomCommand(threadEnvironment.steerTurn, { reportFailure: false });
   const uploadThreadFeedback = useAtomCommand(threadEnvironment.uploadFeedback, {
     reportFailure: false,
   });
@@ -1696,6 +1710,7 @@ function ChatViewContent(props: ChatViewProps) {
     [activeThreadEnvironmentId, activeThreadId],
   );
   const activeThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
+  const queuedFollowUps = useQueuedFollowUps(activeThreadKey);
   const changeRequestSnapshotByKey = useAtomValue(threadChangeRequestSnapshotsAtom);
   const [timelineAnchor, setTimelineAnchor] = useState<{
     readonly threadKey: string | null;
@@ -2723,6 +2738,17 @@ function ChatViewContent(props: ChatViewProps) {
       ),
     [activeThread?.proposedPlans, timelineMessages, turnPlans, workLogEntries],
   );
+  const displayedTimeline = resolveThreadSwitchTimeline({
+    loading: timelineEntries.length === 0 && threadSyncPhase !== null,
+    activeThreadKey,
+    nextEntries: timelineEntries,
+  });
+  const displayedTimelineKey = displayedTimeline.displayThreadKey ?? routeThreadKey;
+  const paintOnlyDisplayedTimeline = isPaintOnlyThreadTimeline(
+    displayedTimeline.displayThreadKey,
+    activeThreadKey,
+  );
+  const displayedThreadRef = parseScopedThreadKey(displayedTimelineKey);
   const [dockedDraftHeroThreadKey, setDockedDraftHeroThreadKey] = useState<string | null>(null);
   const draftHeroDockRequested =
     activeThreadKey !== null && dockedDraftHeroThreadKey === activeThreadKey;
@@ -2817,6 +2843,33 @@ function ChatViewContent(props: ChatViewProps) {
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
   const activeThreadWorktreePath = activeThread?.worktreePath ?? null;
   const activeWorkspaceRoot = activeThreadWorktreePath ?? activeProjectCwd ?? undefined;
+  useLayoutEffect(() => {
+    if (
+      threadDetailLoading ||
+      activeThreadKey === null ||
+      timelineEntries.length === 0 ||
+      optimisticUserMessages.some(
+        (message) => collectUserMessageBlobPreviewUrls(message).length > 0,
+      )
+    )
+      return;
+    rememberReadyThreadTimeline({
+      threadKey: activeThreadKey,
+      entries: timelineEntries,
+      markdownCwd: gitCwd,
+      workspaceRoot: activeWorkspaceRoot ?? null,
+    });
+  }, [
+    activeThreadKey,
+    activeWorkspaceRoot,
+    gitCwd,
+    optimisticUserMessages,
+    threadDetailLoading,
+    timelineEntries,
+  ]);
+  const heldPaintContext = paintOnlyDisplayedTimeline
+    ? peekHeldThreadTimeline<typeof timelineEntries>()
+    : null;
   const activeTerminalLaunchContext =
     terminalUiLaunchContext?.threadId === activeThreadId ? terminalUiLaunchContext : null;
   // Default true while loading to avoid toolbar flicker.
@@ -5100,8 +5153,122 @@ function ChatViewContent(props: ChatViewProps) {
       annotation: PreviewAnnotationPayload;
       image: ComposerImageAttachment | null;
     },
+    queuedFollowUp?: QueuedFollowUp,
   ) => {
     e?.preventDefault();
+    const queuedCount = activeThreadKey
+      ? (useQueuedFollowUpStore.getState().byThread[activeThreadKey]?.length ?? 0)
+      : 0;
+    const currentSendContext = composerRef.current?.getSendContext();
+    const currentSendContextHasContent = Boolean(
+      currentSendContext &&
+      (currentSendContext.prompt.trim().length > 0 ||
+        currentSendContext.images.length > 0 ||
+        currentSendContext.terminalContexts.length > 0 ||
+        currentSendContext.elementContexts.length > 0 ||
+        currentSendContext.previewAnnotations.length > 0 ||
+        currentSendContext.reviewComments.length > 0),
+    );
+    if (
+      !queuedFollowUp &&
+      !directAnnotation &&
+      settings.followUpBehavior === "steer" &&
+      queuedCount === 0 &&
+      phase === "running" &&
+      activeThread?.session?.activeTurnId &&
+      currentSendContextHasContent &&
+      !sendInFlightRef.current
+    ) {
+      const context = currentSendContext;
+      const text = context?.prompt.trim() ?? "";
+      if (
+        !context?.providerAvailable ||
+        context.selectedProvider !== "codex" ||
+        !text ||
+        context.images.length > 0 ||
+        context.terminalContexts.length > 0 ||
+        context.elementContexts.length > 0 ||
+        context.previewAnnotations.length > 0 ||
+        context.reviewComments.length > 0 ||
+        activePendingProgress ||
+        activeEnvironmentUnavailable
+      ) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "info",
+            title: "Cannot steer with this draft",
+            description: "Steering supports text-only Codex messages. Your draft is still here.",
+          }),
+        );
+        return;
+      }
+      sendInFlightRef.current = true;
+      try {
+        const result = await steerThreadTurn({
+          environmentId,
+          input: {
+            threadId: activeThread.id,
+            expectedTurnId: activeThread.session.activeTurnId,
+            text,
+          },
+        });
+        if (result._tag === "Failure") {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Could not steer the active turn",
+              description: chatActionErrorMessage(squashAtomCommandFailure(result)),
+            }),
+          );
+        } else if (promptRef.current === context.prompt) {
+          promptRef.current = "";
+          clearComposerDraftContent(composerDraftTarget);
+          composerRef.current?.resetCursorState();
+        }
+      } finally {
+        sendInFlightRef.current = false;
+      }
+      return;
+    }
+    if (
+      activeThreadKey &&
+      !queuedFollowUp &&
+      !sendInFlightRef.current &&
+      (shouldQueueFollowUp({
+        phase,
+        followUpBehavior: settings.followUpBehavior,
+        hasThread: activeThread !== null && activeThread !== undefined,
+        hasContent: currentSendContextHasContent,
+        hasPendingRequest: Boolean(
+          activePendingProgress || activePendingApproval || pendingUserInputs.length > 0,
+        ),
+        hasDirectAnnotation: directAnnotation !== undefined,
+      }) ||
+        (queuedCount > 0 &&
+          currentSendContextHasContent &&
+          !activePendingProgress &&
+          !activePendingApproval &&
+          pendingUserInputs.length === 0 &&
+          (phase === "running" || (!isSendBusy && !isConnecting)) &&
+          !threadDetailLoading &&
+          !activeEnvironmentUnavailable &&
+          !directAnnotation))
+    ) {
+      if (currentSendContext) {
+        const item: QueuedFollowUp = {
+          id: newMessageId(),
+          context: { ...currentSendContext, prompt: promptRef.current },
+        };
+        useQueuedFollowUpStore.getState().enqueue(activeThreadKey, item);
+        promptRef.current = "";
+        composerImagesRef.current = [];
+        composerTerminalContextsRef.current = [];
+        composerElementContextsRef.current = [];
+        clearComposerDraftContent(composerDraftTarget);
+        composerRef.current?.resetCursorState();
+        return;
+      }
+    }
     const notifyDirectAnnotationAttached = () => {
       if (!directAnnotation) return;
       toastManager.add(
@@ -5141,7 +5308,7 @@ function ChatViewContent(props: ChatViewProps) {
       onAdvanceActivePendingUserInput();
       return;
     }
-    const sendCtx = composerRef.current?.getSendContext();
+    const sendCtx = queuedFollowUp?.context ?? composerRef.current?.getSendContext();
     if (!sendCtx?.providerAvailable) {
       notifyDirectAnnotationAttached();
       return;
@@ -5196,7 +5363,7 @@ function ChatViewContent(props: ChatViewProps) {
             },
           ]
         : sendContextPreviewAnnotations;
-    const promptForSend = promptRef.current;
+    const promptForSend = queuedFollowUp?.context.prompt ?? promptRef.current;
     const {
       trimmedPrompt: trimmed,
       sendableTerminalContexts: sendableComposerTerminalContexts,
@@ -5212,6 +5379,7 @@ function ChatViewContent(props: ChatViewProps) {
         composerReviewComments.length,
     });
     const feedbackCommand =
+      !queuedFollowUp &&
       ctxSelectedProvider === "codex" &&
       composerImages.length === 0 &&
       sendableComposerTerminalContexts.length === 0 &&
@@ -5306,7 +5474,7 @@ function ChatViewContent(props: ChatViewProps) {
       );
       return;
     }
-    if (!directAnnotation && showPlanFollowUpPrompt && activeProposedPlan) {
+    if (!queuedFollowUp && !directAnnotation && showPlanFollowUpPrompt && activeProposedPlan) {
       const followUp = resolvePlanFollowUpSubmission({
         draftText: trimmed,
         planMarkdown: activeProposedPlan.planMarkdown,
@@ -5333,6 +5501,7 @@ function ChatViewContent(props: ChatViewProps) {
     // Legacy plan mode: /plan and /default only act when the beta flag is on;
     // otherwise they send as plain text like any other message.
     const standaloneSlashCommand =
+      !queuedFollowUp &&
       settings.planModeEnabled &&
       composerImages.length === 0 &&
       sendableComposerTerminalContexts.length === 0 &&
@@ -5513,9 +5682,11 @@ function ChatViewContent(props: ChatViewProps) {
         }),
       );
     }
-    promptRef.current = "";
-    clearComposerDraftContent(composerDraftTarget);
-    composerRef.current?.resetCursorState();
+    if (!queuedFollowUp) {
+      promptRef.current = "";
+      clearComposerDraftContent(composerDraftTarget);
+      composerRef.current?.resetCursorState();
+    }
 
     let firstComposerImageName: string | null = null;
     if (composerImagesSnapshot.length > 0) {
@@ -5580,7 +5751,12 @@ function ChatViewContent(props: ChatViewProps) {
     }
 
     let turnStartSucceeded = false;
-    if (failure === null && turnAttachmentsResult._tag === "Success") {
+    const queuedFollowUpRemoved = Boolean(
+      queuedFollowUp &&
+      activeThreadKey &&
+      !useQueuedFollowUpStore.getState().contains(activeThreadKey, queuedFollowUp.id),
+    );
+    if (failure === null && turnAttachmentsResult._tag === "Success" && !queuedFollowUpRemoved) {
       const bootstrap =
         isLocalDraftThread || baseBranchForWorktree
           ? {
@@ -5697,7 +5873,13 @@ function ChatViewContent(props: ChatViewProps) {
     }
 
     if (failure !== null) {
+      if (queuedFollowUp) {
+        setOptimisticUserMessages((existing) =>
+          existing.filter((message) => message.id !== messageIdForSend),
+        );
+      }
       if (
+        !queuedFollowUp &&
         promptRef.current.length === 0 &&
         composerImagesRef.current.length === 0 &&
         composerTerminalContextsRef.current.length === 0 &&
@@ -5754,7 +5936,17 @@ function ChatViewContent(props: ChatViewProps) {
         );
       }
     }
+    if (queuedFollowUpRemoved) {
+      setOptimisticUserMessages((existing) => {
+        const removed = existing.filter((message) => message.id === messageIdForSend);
+        for (const message of removed) revokeUserMessagePreviewUrls(message);
+        return existing.filter((message) => message.id !== messageIdForSend);
+      });
+    }
     sendInFlightRef.current = false;
+    if (queuedFollowUp && turnStartSucceeded && activeThreadKey) {
+      useQueuedFollowUpStore.getState().remove(activeThreadKey, queuedFollowUp.id);
+    }
     if (!turnStartSucceeded) {
       setDockedDraftHeroThreadKey((currentThreadKey) =>
         currentThreadKey === activeThreadKey ? null : currentThreadKey,
@@ -5765,6 +5957,7 @@ function ChatViewContent(props: ChatViewProps) {
 
   const onInterrupt = async () => {
     if (!activeThread) return;
+    if (activeThreadKey) useQueuedFollowUpStore.getState().holdThread(activeThreadKey);
     const result = await interruptThreadTurn({
       environmentId,
       input: buildThreadTurnInterruptInput(activeThread),
@@ -5777,6 +5970,18 @@ function ChatViewContent(props: ChatViewProps) {
       );
     }
   };
+
+  useEffect(() => {
+    if (!activeThreadKey || isSendBusy || isConnecting) return;
+    const next = nextAutoQueuedFollowUp(queuedFollowUps, phase);
+    if (!next) return;
+    const queue = useQueuedFollowUpStore.getState();
+    if (!queue.claim(activeThreadKey, next.id)) return;
+    queue.hold(activeThreadKey, next.id);
+    void onSend(undefined, "foreground", undefined, next).finally(() => {
+      queue.release(activeThreadKey, next.id);
+    });
+  }, [phase, activeThreadKey, queuedFollowUps, isSendBusy, isConnecting]);
 
   const onRespondToApproval = useCallback(
     async (requestId: ApprovalRequestId, decision: ProviderApprovalDecision) => {
@@ -6751,7 +6956,7 @@ function ChatViewContent(props: ChatViewProps) {
               />
             </div>
             {/* Messages Wrapper */}
-            <div className="relative flex min-h-0 flex-1 flex-col">
+            <div className="relative flex min-h-0 flex-1 flex-col bg-background">
               {pendingEditFromHereMode !== null && (
                 <div
                   className="border-b border-border/60 px-4 py-1.5 text-secondary-label text-xs"
@@ -6765,43 +6970,56 @@ function ChatViewContent(props: ChatViewProps) {
               )}
               {/* Messages — LegendList handles virtualization and scrolling internally */}
               <MessagesTimeline
-                agentPanelModel={agentPanelModel}
-                onOpenAgents={addAgentsSurface}
-                key={activeThread.id}
-                isWorking={isWorking}
-                workingStepLabel={workingStepLabel}
-                activeWorkerWait={activeWorkerWait}
-                activeTurnStartedAt={activeWorkStartedAt}
+                {...(!paintOnlyDisplayedTimeline
+                  ? { agentPanelModel, onOpenAgents: addAgentsSurface }
+                  : {})}
+                isWorking={!paintOnlyDisplayedTimeline && isWorking}
+                workingStepLabel={paintOnlyDisplayedTimeline ? null : workingStepLabel}
+                activeWorkerWait={paintOnlyDisplayedTimeline ? null : activeWorkerWait}
+                activeTurnStartedAt={paintOnlyDisplayedTimeline ? null : activeWorkStartedAt}
                 listRef={legendListRef}
-                timelineEntries={timelineEntries}
-                latestTurn={activeLatestTurn}
-                runningTurnId={activeRunningTurnId}
-                turnDiffSummaryByAssistantMessageId={turnDiffSummaryByAssistantMessageId}
-                activeThreadEnvironmentId={activeThread.environmentId}
-                routeThreadKey={routeThreadKey}
-                onOpenTurnDiff={onOpenTurnDiff}
+                timelineEntries={displayedTimeline.entries}
+                latestTurn={paintOnlyDisplayedTimeline ? null : activeLatestTurn}
+                runningTurnId={paintOnlyDisplayedTimeline ? null : activeRunningTurnId}
+                turnDiffSummaryByAssistantMessageId={
+                  paintOnlyDisplayedTimeline ? new Map() : turnDiffSummaryByAssistantMessageId
+                }
+                activeThreadEnvironmentId={
+                  displayedThreadRef?.environmentId ?? activeThread.environmentId
+                }
+                routeThreadKey={displayedTimelineKey}
+                displayThreadKey={displayedTimelineKey}
+                onOpenTurnDiff={paintOnlyDisplayedTimeline ? () => {} : onOpenTurnDiff}
                 canonicalEditMessageIdByTimelineMessageId={
                   canonicalEditMessageIdByTimelineMessageId
                 }
-                onEditUserMessage={onEditUserMessage}
+                onEditUserMessage={paintOnlyDisplayedTimeline ? () => {} : onEditUserMessage}
                 isRevertingCheckpoint={
                   isEditingFromHere || activeServerThread?.editFromHere != null
                 }
-                onImageExpand={onExpandTimelineImage}
-                markdownCwd={gitCwd ?? undefined}
+                onImageExpand={paintOnlyDisplayedTimeline ? () => {} : onExpandTimelineImage}
+                markdownCwd={
+                  paintOnlyDisplayedTimeline
+                    ? (heldPaintContext?.markdownCwd ?? undefined)
+                    : (gitCwd ?? undefined)
+                }
                 resolvedTheme={resolvedTheme}
                 timestampFormat={timestampFormat}
-                workspaceRoot={activeWorkspaceRoot}
+                workspaceRoot={
+                  paintOnlyDisplayedTimeline
+                    ? (heldPaintContext?.workspaceRoot ?? undefined)
+                    : activeWorkspaceRoot
+                }
                 skills={activeProviderStatus?.skills ?? EMPTY_PROVIDER_SKILLS}
-                anchorMessageId={timelineAnchorMessageId}
+                anchorMessageId={paintOnlyDisplayedTimeline ? null : timelineAnchorMessageId}
                 onAnchorReady={onTimelineAnchorReady}
                 contentInsetEndAdjustment={composerOverlayHeight}
-                liveFollowEnabled={timelineLiveFollowEnabled}
+                liveFollowEnabled={!paintOnlyDisplayedTimeline && timelineLiveFollowEnabled}
                 onIsAtEndChange={onIsAtEndChange}
                 onManualNavigation={cancelTimelineLiveFollowForUserNavigation}
                 hideEmptyPlaceholder={isDraftHeroState || threadDetailLoading}
                 topFadeEnabled={!hasTimelineTopBanner}
-                loadEarlier={loadEarlierTurns}
+                loadEarlier={paintOnlyDisplayedTimeline ? null : loadEarlierTurns}
               />
               <EditFromHereDialog
                 open={editFromHereDialog !== null}
@@ -6872,6 +7090,57 @@ function ChatViewContent(props: ChatViewProps) {
                   )}
                   {threadSyncPhase && !activeEnvironmentUnavailable ? (
                     <ThreadSyncStatusPill phase={threadSyncPhase} />
+                  ) : null}
+                  {queuedFollowUps.length > 0 ? (
+                    <div className="mx-auto mb-1 w-full max-w-3xl space-y-1" aria-live="polite">
+                      {queuedFollowUps.map((entry, index) => (
+                        <div
+                          key={entry.id}
+                          className="flex items-center gap-2 rounded-xl border bg-background/90 px-3 py-2 text-sm"
+                          data-testid="queued-follow-up"
+                        >
+                          <span className="min-w-0 flex-1 truncate">
+                            {phase === "running"
+                              ? "Waiting for the current turn"
+                              : "Queued follow-up"}
+                            {entry.context.prompt.trim()
+                              ? `: ${entry.context.prompt.trim()}`
+                              : " with attachments or context"}
+                            {queuedFollowUps.length > 1
+                              ? ` (${index + 1}/${queuedFollowUps.length})`
+                              : ""}
+                          </span>
+                          {phase !== "running" && index === 0 ? (
+                            <button
+                              type="button"
+                              className="shrink-0 rounded px-2 py-1 text-xs hover:bg-muted"
+                              disabled={isSendBusy || sendInFlightRef.current}
+                              onClick={() => {
+                                if (!activeThreadKey) return;
+                                const queue = useQueuedFollowUpStore.getState();
+                                if (!queue.claim(activeThreadKey, entry.id)) return;
+                                void onSend(undefined, "foreground", undefined, entry).finally(() =>
+                                  queue.release(activeThreadKey, entry.id),
+                                );
+                              }}
+                            >
+                              Send now
+                            </button>
+                          ) : null}
+                          <button
+                            type="button"
+                            className="shrink-0 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground"
+                            aria-label="Remove queued follow-up"
+                            onClick={() => {
+                              if (!activeThreadKey) return;
+                              useQueuedFollowUpStore.getState().remove(activeThreadKey, entry.id);
+                            }}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      ))}
+                    </div>
                   ) : null}
                   {selectedProvider === "codex" && isServerThread && activeThread ? (
                     <SteerTurnDialog

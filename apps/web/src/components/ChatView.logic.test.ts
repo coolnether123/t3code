@@ -58,6 +58,7 @@ import {
   startNewThreadForProject,
   codexArtifactTemplatePromptToAppend,
   shouldDockDraftHeroForSubmission,
+  shouldQueueFollowUp,
   shouldReleaseTimelineAnchorForToolActivity,
   shouldOpenProactivePullRequest,
   shouldRetargetThreadPullRequestPanel,
@@ -553,6 +554,32 @@ describe("draft hero submission transition", () => {
         backgroundSubmissionPending: true,
       }),
     ).toBeNull();
+  });
+});
+
+describe("queued follow-up eligibility", () => {
+  const base = {
+    phase: "running" as const,
+    followUpBehavior: "queue" as const,
+    hasThread: true,
+    hasContent: true,
+    hasPendingRequest: false,
+    hasDirectAnnotation: false,
+  };
+
+  it("queues a non-empty follow-up for the active running thread", () => {
+    expect(shouldQueueFollowUp(base)).toBe(true);
+  });
+
+  it.each([
+    { phase: "ready" as const },
+    { followUpBehavior: "steer" as const },
+    { hasThread: false },
+    { hasContent: false },
+    { hasPendingRequest: true },
+    { hasDirectAnnotation: true },
+  ])("does not queue when the submission is unsafe: %j", (override) => {
+    expect(shouldQueueFollowUp({ ...base, ...override })).toBe(false);
   });
 });
 

@@ -232,6 +232,7 @@ interface MessagesTimelineProps {
   runningTurnId: TurnId | null;
   turnDiffSummaryByAssistantMessageId: Map<MessageId, TurnDiffSummary>;
   routeThreadKey: string;
+  displayThreadKey?: string;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   canonicalEditMessageIdByTimelineMessageId: ReadonlyMap<MessageId, MessageId>;
   onEditUserMessage: (messageId: MessageId, text: string) => void;
@@ -278,6 +279,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   runningTurnId,
   turnDiffSummaryByAssistantMessageId,
   routeThreadKey,
+  displayThreadKey,
   onOpenTurnDiff,
   canonicalEditMessageIdByTimelineMessageId,
   onEditUserMessage,
@@ -301,6 +303,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 }: MessagesTimelineProps) {
   const [expandedTurnIds, setExpandedTurnIds] = useState<ReadonlySet<TurnId>>(new Set());
   const [expandedWorkGroupIds, setExpandedWorkGroupIds] = useState<ReadonlySet<string>>(new Set());
+  const listIdentityKey = displayThreadKey ?? routeThreadKey;
+  useEffect(() => {
+    setExpandedTurnIds(new Set());
+    setExpandedWorkGroupIds(new Set());
+  }, [listIdentityKey]);
   const [disclosureToggleSettling, setDisclosureToggleSettling] = useState(false);
   const [minimapStripMap] = useState(() => new Map<string, HTMLSpanElement>());
   const disclosureAnchorKeyRef = useRef<string | null>(null);
@@ -447,7 +454,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       canonicalEditMessageIdByTimelineMessageId,
     ],
   );
-  const rows = useStableRows(rawRows);
+  const rows = useStableRows(rawRows, listIdentityKey);
   const minimapItems = useMemo(() => deriveTimelineMinimapItems(rows), [rows]);
   const [timelineViewportElement, setTimelineViewportElement] = useState<HTMLDivElement | null>(
     null,
@@ -588,7 +595,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
   if (rows.length === 0 && !isWorking) {
     if (hideEmptyPlaceholder) {
-      return null;
+      return <div className="h-full min-h-0 bg-background" data-timeline-loading="true" />;
     }
     return (
       <div className="flex h-full items-center justify-center">
@@ -604,6 +611,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
           <LegendList<MessagesTimelineRow>
             ref={listRef}
             data={rows}
+            extraData={listIdentityKey}
             keyExtractor={keyExtractor}
             getItemType={getItemType}
             renderItem={renderItem}
@@ -2303,17 +2311,23 @@ function UserMessageReviewCommentCard({ comment }: { comment: ReviewCommentConte
 
 /** Returns a structurally-shared copy of `rows`: for each row whose content
  *  hasn't changed since last call, the previous object reference is reused. */
-function useStableRows(rows: MessagesTimelineRow[]): MessagesTimelineRow[] {
+function useStableRows(rows: MessagesTimelineRow[], identity: string): MessagesTimelineRow[] {
   const prevState = useRef<StableMessagesTimelineRowsState>({
     byId: new Map<string, MessagesTimelineRow>(),
     result: [],
   });
+  const prevIdentity = useRef(identity);
 
   return useMemo(() => {
-    const nextState = computeStableMessagesTimelineRows(rows, prevState.current);
+    const previous =
+      prevIdentity.current === identity
+        ? prevState.current
+        : { byId: new Map<string, MessagesTimelineRow>(), result: [] };
+    prevIdentity.current = identity;
+    const nextState = computeStableMessagesTimelineRows(rows, previous);
     prevState.current = nextState;
     return nextState.result;
-  }, [rows]);
+  }, [identity, rows]);
 }
 
 // ---------------------------------------------------------------------------
