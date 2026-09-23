@@ -530,7 +530,7 @@ export const makeCodexLinkedWorkerBackend = Effect.fn("makeCodexLinkedWorkerBack
     backendPreference,
   ) =>
     backendPreference === "codex-desktop"
-      ? desktop.hasLiveSession(providerThreadId)
+      ? desktop.hasLiveSession()
       : provider.listSessions().pipe(
           Effect.map((sessions) =>
             sessions.some((session) => session.threadId === providerThreadId),
