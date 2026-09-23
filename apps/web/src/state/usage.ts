@@ -30,7 +30,9 @@ const DEFERRED_TRANSCRIPT_REFRESH_MAX_MS = 8_000;
 
 const isDeferredTranscriptSource = (
   source: NonNullable<EnvironmentUsageStatus["summary"]>["sources"][number],
-) => source.status === "partial" && /\bdeferred\b/i.test(source.message ?? "");
+) =>
+  source.status === "partial" &&
+  /\bdeferred\b|response budget|complete-line chunks/i.test(source.message ?? "");
 
 export interface EnvironmentUsageStatus {
   readonly environmentId: EnvironmentId;
@@ -96,18 +98,13 @@ export function useUsage(
       input.sinceTime,
       input.untilTime,
       input.includeQuotaHistory,
+      input.includeRepeatedInput,
       input.quotaHistoryOnly,
       input.quotaIntervals,
     ],
   );
   const atom = usageByWindowAtom(windowKey);
   const observedEnvironments = useAtomValue(atom);
-  const selectedObservedEnvironments =
-    selectedEnvironmentIds === null
-      ? observedEnvironments
-      : observedEnvironments.filter((environment) =>
-          selectedEnvironmentIds.has(environment.environmentId),
-        );
   const [refreshed, setRefreshed] = useState<{
     readonly windowKey: string;
     readonly generation: number;
@@ -115,9 +112,9 @@ export function useUsage(
     readonly baselineReadAt: ReadonlyMap<string, string | undefined>;
   } | null>(null);
   const environments = useMemo(() => {
-    if (refreshed?.windowKey !== windowKey) return selectedObservedEnvironments;
+    if (refreshed?.windowKey !== windowKey) return observedEnvironments;
     const byId = new Map(refreshed.statuses.map((status) => [status.environmentId, status]));
-    return selectedObservedEnvironments.map((environment) => {
+    return observedEnvironments.map((environment) => {
       const refreshedEnvironment = byId.get(environment.environmentId);
       if (refreshedEnvironment === undefined) return environment;
       const observedAt = environment.summary?.readAt;
@@ -135,15 +132,24 @@ export function useUsage(
       }
       return refreshedEnvironment;
     });
-  }, [selectedObservedEnvironments, refreshed, windowKey]);
+  }, [observedEnvironments, refreshed, windowKey]);
+  const selectedEnvironments = useMemo(
+    () =>
+      selectedEnvironmentIds === null
+        ? environments
+        : environments.filter((environment) =>
+            selectedEnvironmentIds.has(environment.environmentId),
+          ),
+    [environments, selectedEnvironmentIds],
+  );
   const retriedFailures = useRef(new Set<string>());
   const delayedRetries = useRef(new Set<string>());
-  const delayedRetryTimers = useRef(new Map<string, number>());
+  const delayedRetryTimers = useRef(new Map<string, ReturnType<typeof globalThis.setTimeout>>());
   const deferredTranscriptRetry = useRef({
     windowKey,
     signature: "",
     stalledAttempts: 0,
-    timer: null as number | null,
+    timer: null as ReturnType<typeof globalThis.setTimeout> | null,
   });
   const refreshInFlight = useRef<{
     readonly requestWindowKey: string;
@@ -259,7 +265,7 @@ export function useUsage(
       // disconnect must be eligible for its own recovery retry.
       retriedFailures.current.clear();
       delayedRetries.current.clear();
-      for (const timer of delayedRetryTimers.current.values()) window.clearTimeout(timer);
+      for (const timer of delayedRetryTimers.current.values()) globalThis.clearTimeout(timer);
       delayedRetryTimers.current.clear();
       return;
     }
@@ -278,7 +284,7 @@ export function useUsage(
     void refreshRef.current();
     // A first read can be interrupted while a remote WebSocket is reconnecting.
     // Keep one delayed retry alive across the transient pending/error renders.
-    const timer = window.setTimeout(() => {
+    const timer = globalThis.setTimeout(() => {
       delayedRetryTimers.current.delete(retryKey);
       if (windowKeyRef.current !== windowKey) return;
       if (refreshInFlight.current?.requestWindowKey === windowKey) {
@@ -296,17 +302,17 @@ export function useUsage(
   useEffect(() => {
     const timers = delayedRetryTimers.current;
     return () => {
-      for (const timer of timers.values()) window.clearTimeout(timer);
+      for (const timer of timers.values()) globalThis.clearTimeout(timer);
       timers.clear();
       delayedRetries.current.clear();
       const deferred = deferredTranscriptRetry.current;
-      if (deferred.timer !== null) window.clearTimeout(deferred.timer);
+      if (deferred.timer !== null) globalThis.clearTimeout(deferred.timer);
       deferred.timer = null;
     };
   }, [windowKey]);
 
   const merged = useMemo(() => {
-    const answered: EnvironmentUsage[] = environments.flatMap((environment) =>
+    const answered: EnvironmentUsage[] = selectedEnvironments.flatMap((environment) =>
       environment.summary === null
         ? []
         : [
@@ -318,9 +324,9 @@ export function useUsage(
           ],
     );
     return mergeUsage(answered, USAGE_CONTRACT_VERSION);
-  }, [environments]);
+  }, [selectedEnvironments]);
 
-  const hasDeferredTranscripts = environments.some((environment) =>
+  const hasDeferredTranscripts = selectedEnvironments.some((environment) =>
     environment.summary?.sources.some(isDeferredTranscriptSource),
   );
 
@@ -330,20 +336,20 @@ export function useUsage(
   useEffect(() => {
     const retry = deferredTranscriptRetry.current;
     if (retry.windowKey !== windowKey) {
-      if (retry.timer !== null) window.clearTimeout(retry.timer);
+      if (retry.timer !== null) globalThis.clearTimeout(retry.timer);
       retry.windowKey = windowKey;
       retry.signature = "";
       retry.stalledAttempts = 0;
       retry.timer = null;
     }
     if (!hasDeferredTranscripts) {
-      if (retry.timer !== null) window.clearTimeout(retry.timer);
+      if (retry.timer !== null) globalThis.clearTimeout(retry.timer);
       retry.signature = "";
       retry.stalledAttempts = 0;
       retry.timer = null;
       return;
     }
-    const deferredSignature = environments
+    const deferredSignature = selectedEnvironments
       .flatMap((environment) =>
         (environment.summary?.sources ?? [])
           .filter(isDeferredTranscriptSource)
@@ -358,11 +364,11 @@ export function useUsage(
       retry.signature = deferredSignature;
       retry.stalledAttempts = 0;
     }
-    const waitingOrFailed = environments.some(
+    const waitingOrFailed = selectedEnvironments.some(
       (environment) => environment.isPending || environment.error !== null,
     );
     if (waitingOrFailed) {
-      if (retry.timer !== null) window.clearTimeout(retry.timer);
+      if (retry.timer !== null) globalThis.clearTimeout(retry.timer);
       retry.timer = null;
       return;
     }
@@ -373,7 +379,7 @@ export function useUsage(
       DEFERRED_TRANSCRIPT_REFRESH_MAX_MS,
       DEFERRED_TRANSCRIPT_REFRESH_BASE_MS * 2 ** Math.min(retry.stalledAttempts, 4),
     );
-    retry.timer = window.setTimeout(() => {
+    retry.timer = globalThis.setTimeout(() => {
       retry.timer = null;
       if (windowKeyRef.current !== windowKey) return;
       retry.stalledAttempts += 1;
@@ -382,17 +388,19 @@ export function useUsage(
         refresh: false,
       });
     }, delay);
-  }, [environments, hasDeferredTranscripts, refresh, windowKey]);
+  }, [selectedEnvironments, hasDeferredTranscripts, refresh, windowKey]);
 
-  const answeredCount = environments.filter((environment) => environment.summary !== null).length;
-  const stillReporting = environments.filter(
+  const answeredCount = selectedEnvironments.filter(
+    (environment) => environment.summary !== null,
+  ).length;
+  const stillReporting = selectedEnvironments.filter(
     (environment) => environment.summary === null && environment.error === null,
   ).length;
 
   return {
     merged,
     environments,
-    selectedEnvironments: environments,
+    selectedEnvironments,
     isPending: answeredCount === 0 && stillReporting > 0,
     isPartial: answeredCount > 0 && stillReporting > 0,
     refresh,

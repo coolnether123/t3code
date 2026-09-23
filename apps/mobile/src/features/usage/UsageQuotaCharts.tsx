@@ -39,8 +39,8 @@ export function UsageQuotaCharts({
         Codex usage remaining over time
       </Text>
       <Text className="text-xs text-foreground-muted">
-        Saved weekly quota, 0–100%. Gaps over an hour and reset changes are not joined. Tap the
-        chart to inspect a reading.
+        Saved weekly quota, 0–100%. Tracking gaps are joined by straight lines. Reset changes stay
+        separate. Tap the chart to inspect a reading.
       </Text>
       <View className="flex-row gap-2">
         <View className="h-[200px] w-10 justify-between">

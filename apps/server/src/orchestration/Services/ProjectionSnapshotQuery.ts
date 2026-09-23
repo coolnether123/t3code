@@ -20,6 +20,7 @@ import type {
   OrchestrationSearchThreadsResult,
   OrchestrationShellSnapshot,
   OrchestrationThread,
+  ThreadContextCompaction,
   OrchestrationThreadActivity,
   OrchestrationThreadDetailSnapshot,
   OrchestrationThreadDetailWindow,
@@ -225,6 +226,12 @@ export interface ProjectionSnapshotQueryShape {
       readonly message: OrchestrationMessage;
       readonly hasOtherUserMessages: boolean;
     }>,
+    ProjectionRepositoryError
+  >;
+
+  /** Read active compactions and every queue record still needing recovery. */
+  readonly getActiveContextCompactions: () => Effect.Effect<
+    ReadonlyArray<ThreadContextCompaction>,
     ProjectionRepositoryError
   >;
 

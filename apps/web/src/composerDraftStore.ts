@@ -1087,25 +1087,30 @@ export function deriveEffectiveComposerModelState(input: {
   projectModelSelection: ModelSelection | null | undefined;
   settings: UnifiedSettings;
 }): EffectiveComposerModelState {
-  const baseModelCandidate =
-    input.threadModelSelection?.model ?? input.projectModelSelection?.model ?? null;
-  const baseModel =
-    (input.selectedInstanceId
-      ? resolveAppModelSelectionForInstance(
-          input.selectedInstanceId,
-          input.settings,
-          input.providers,
-          baseModelCandidate,
-        )
-      : null) ??
-    resolveAppModelSelection(
-      input.selectedProvider,
-      input.settings,
-      input.providers,
-      baseModelCandidate,
-    ) ??
-    normalizeModelSlug(baseModelCandidate, input.selectedProvider) ??
-    getDefaultServerModel(input.providers, input.selectedProvider);
+  const baseModelCandidate = input.selectedInstanceId
+    ? ((input.threadModelSelection?.instanceId === input.selectedInstanceId
+        ? input.threadModelSelection.model
+        : null) ??
+      (input.projectModelSelection?.instanceId === input.selectedInstanceId
+        ? input.projectModelSelection.model
+        : null))
+    : (input.threadModelSelection?.model ?? input.projectModelSelection?.model ?? null);
+  const baseModel = input.selectedInstanceId
+    ? (resolveAppModelSelectionForInstance(
+        input.selectedInstanceId,
+        input.settings,
+        input.providers,
+        baseModelCandidate,
+        { preserveUnavailableSelection: true },
+      ) ?? "")
+    : (resolveAppModelSelection(
+        input.selectedProvider,
+        input.settings,
+        input.providers,
+        baseModelCandidate,
+      ) ??
+      normalizeModelSlug(baseModelCandidate, input.selectedProvider) ??
+      getDefaultServerModel(input.providers, input.selectedProvider));
   // Look up the instance's saved selection first; fall back to the
   // driver-kind bucket so legacy kind-keyed drafts still resolve. Every
   // `ProviderDriverKind` literal is a valid `ProviderInstanceId` slug, so the
@@ -1114,7 +1119,10 @@ export function deriveEffectiveComposerModelState(input: {
     ? input.draft?.modelSelectionByProvider?.[input.selectedInstanceId]
     : undefined;
   const legacySelection =
-    input.draft?.modelSelectionByProvider?.[ProviderInstanceId.make(input.selectedProvider)];
+    input.selectedInstanceId &&
+    input.selectedInstanceId !== defaultInstanceIdForDriver(input.selectedProvider)
+      ? undefined
+      : input.draft?.modelSelectionByProvider?.[ProviderInstanceId.make(input.selectedProvider)];
   const activeSelection = instanceSelection ?? legacySelection;
   const activeSelectionInstanceId = instanceSelection
     ? (input.selectedInstanceId ?? ProviderInstanceId.make(input.selectedProvider))
@@ -1125,13 +1133,16 @@ export function deriveEffectiveComposerModelState(input: {
         input.settings,
         input.providers,
         activeSelection.model,
+        { preserveUnavailableSelection: true },
       ) ??
-      resolveAppModelSelection(
-        input.selectedProvider,
-        input.settings,
-        input.providers,
-        activeSelection.model,
-      ))
+      (input.selectedInstanceId
+        ? ""
+        : resolveAppModelSelection(
+            input.selectedProvider,
+            input.settings,
+            input.providers,
+            activeSelection.model,
+          )))
     : baseModel;
   const modelOptions =
     modelSelectionByProviderToOptions(input.draft?.modelSelectionByProvider) ??
@@ -3183,13 +3194,29 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
           if (threadKey.length === 0 || files.length === 0) return;
           set((state) => {
             const existing = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
-            const ids = new Set(existing.files.map((file) => file.id));
-            const accepted = files.filter((file) => !ids.has(file.id));
-            if (accepted.length === 0) return state;
+            const nextFiles = [...existing.files];
+            let changed = false;
+            for (const file of files) {
+              if (nextFiles.some((existingFile) => existingFile.id === file.id)) continue;
+              const markerIndex = nextFiles.findIndex(
+                (existingFile) =>
+                  composerFileNeedsReattach(existingFile) &&
+                  existingFile.name === file.name &&
+                  existingFile.mimeType === file.mimeType &&
+                  existingFile.sizeBytes === file.sizeBytes,
+              );
+              if (markerIndex === -1) {
+                nextFiles.push(file);
+              } else {
+                nextFiles[markerIndex] = file;
+              }
+              changed = true;
+            }
+            if (!changed) return state;
             return {
               draftsByThreadKey: {
                 ...state.draftsByThreadKey,
-                [threadKey]: { ...existing, files: [...existing.files, ...accepted] },
+                [threadKey]: { ...existing, files: nextFiles },
               },
             };
           });

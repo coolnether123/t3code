@@ -203,6 +203,24 @@ export function shouldDockDraftHeroForSubmission(input: {
   );
 }
 
+export function shouldQueueFollowUp(input: {
+  phase: SessionPhase;
+  followUpBehavior: "queue" | "steer";
+  hasThread: boolean;
+  hasContent: boolean;
+  hasPendingRequest: boolean;
+  hasDirectAnnotation: boolean;
+}): boolean {
+  return (
+    input.phase === "running" &&
+    input.followUpBehavior === "queue" &&
+    input.hasThread &&
+    input.hasContent &&
+    !input.hasPendingRequest &&
+    !input.hasDirectAnnotation
+  );
+}
+
 export function shouldReleaseTimelineAnchorForToolActivity(input: {
   anchorMessageId: MessageId | null;
   liveFollowEnabled: boolean;

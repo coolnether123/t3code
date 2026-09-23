@@ -13,6 +13,7 @@ import { Route as WelcomeRouteImport } from './routes/welcome'
 import { Route as UsageResetsRouteImport } from './routes/usage-resets'
 import { Route as UsageRouteImport } from './routes/usage'
 import { Route as SettingsRouteImport } from './routes/settings'
+import { Route as RepeatedInputRouteImport } from './routes/repeated-input'
 import { Route as PairRouteImport } from './routes/pair'
 import { Route as ConnectRouteImport } from './routes/connect'
 import { Route as CodexRouteImport } from './routes/codex'
@@ -52,6 +53,11 @@ const UsageRoute = UsageRouteImport.update({
 const SettingsRoute = SettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RepeatedInputRoute = RepeatedInputRouteImport.update({
+  id: '/repeated-input',
+  path: '/repeated-input',
   getParentRoute: () => rootRouteImport,
 } as any)
 const PairRoute = PairRouteImport.update({
@@ -160,6 +166,7 @@ export interface FileRoutesByFullPath {
   '/codex': typeof CodexRoute
   '/connect': typeof ConnectRoute
   '/pair': typeof PairRoute
+  '/repeated-input': typeof RepeatedInputRoute
   '/settings': typeof SettingsRouteWithChildren
   '/usage': typeof UsageRoute
   '/usage-resets': typeof UsageResetsRoute
@@ -184,6 +191,7 @@ export interface FileRoutesByTo {
   '/codex': typeof CodexRoute
   '/connect': typeof ConnectRoute
   '/pair': typeof PairRoute
+  '/repeated-input': typeof RepeatedInputRoute
   '/settings': typeof SettingsRouteWithChildren
   '/usage': typeof UsageRoute
   '/usage-resets': typeof UsageResetsRoute
@@ -211,6 +219,7 @@ export interface FileRoutesById {
   '/codex': typeof CodexRoute
   '/connect': typeof ConnectRoute
   '/pair': typeof PairRoute
+  '/repeated-input': typeof RepeatedInputRoute
   '/settings': typeof SettingsRouteWithChildren
   '/usage': typeof UsageRoute
   '/usage-resets': typeof UsageResetsRoute
@@ -239,6 +248,7 @@ export interface FileRouteTypes {
     | '/codex'
     | '/connect'
     | '/pair'
+    | '/repeated-input'
     | '/settings'
     | '/usage'
     | '/usage-resets'
@@ -263,6 +273,7 @@ export interface FileRouteTypes {
     | '/codex'
     | '/connect'
     | '/pair'
+    | '/repeated-input'
     | '/settings'
     | '/usage'
     | '/usage-resets'
@@ -289,6 +300,7 @@ export interface FileRouteTypes {
     | '/codex'
     | '/connect'
     | '/pair'
+    | '/repeated-input'
     | '/settings'
     | '/usage'
     | '/usage-resets'
@@ -316,6 +328,7 @@ export interface RootRouteChildren {
   CodexRoute: typeof CodexRoute
   ConnectRoute: typeof ConnectRoute
   PairRoute: typeof PairRoute
+  RepeatedInputRoute: typeof RepeatedInputRoute
   SettingsRoute: typeof SettingsRouteWithChildren
   UsageRoute: typeof UsageRoute
   UsageResetsRoute: typeof UsageResetsRoute
@@ -352,6 +365,13 @@ declare module '@tanstack/react-router' {
       path: '/settings'
       fullPath: '/settings'
       preLoaderRoute: typeof SettingsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/repeated-input': {
+      id: '/repeated-input'
+      path: '/repeated-input'
+      fullPath: '/repeated-input'
+      preLoaderRoute: typeof RepeatedInputRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/pair': {
@@ -548,6 +568,7 @@ const rootRouteChildren: RootRouteChildren = {
   CodexRoute: CodexRoute,
   ConnectRoute: ConnectRoute,
   PairRoute: PairRoute,
+  RepeatedInputRoute: RepeatedInputRoute,
   SettingsRoute: SettingsRouteWithChildren,
   UsageRoute: UsageRoute,
   UsageResetsRoute: UsageResetsRoute,

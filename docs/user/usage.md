@@ -39,6 +39,79 @@ cache rate; storage duration, long-lived cache premiums, audio/image-specific ra
 are not reconstructed from token totals. Provider-reported costs may themselves be estimates from
 the local harness. A subscription's quota percentage is not a dollar balance.
 
+## Review repeated input
+
+Open **Skills & repeated input** beside Usage in the sidebar to inspect attribution on its own
+page. On mobile, open it from Settings. Use **Usage** in the header to return to your usage totals.
+The attribution page has its own period and computer selectors. Its refresh reads transcript
+metadata for the selected period.
+
+Compare direct tokens, occurrences, or estimated value by source kind, model, computer and project,
+or time. Select a bar to inspect its breakdown. Search the tracked payloads or filter by **Skills**
+and evidence level, then expand a row for its model costs and observation details. Payload filters
+affect the list; the overview and comparison retain the full selected period and computer scope.
+
+The **Current skills** catalog lists every `SKILL.md` revision discoverable on the selected
+computers, including skills with no transcript evidence in the selected period. Use its search,
+observation filter, sorting, and paging controls to distinguish **Observed** from **Never observed**
+skills. A never-observed skill keeps its current file hash, size, and tokenizer count when available,
+but has no invented dates, confidence, tokens, or dollar value. Historical observed revisions remain
+available in the separate payload history even after the current file changes.
+
+The first source is local Codex session transcripts. Skills are checked first, including
+`SKILL.md` files such as `unslop`. Other typed sources can include AGENTS or instruction files,
+named reusable developer blocks, and repeatable tool-operation payloads. Ordinary repeated chat
+text is not treated as a reusable operation.
+
+Each item shows its display name, source kind, stable content hash, file revision or hash when one
+exists, first and last observation, occurrence count, affected sessions and turns, and confidence.
+The page keeps these confidence levels separate:
+
+- **Reference** means a transcript names the file or source.
+- **Likely read** means the record supports a read but does not contain the complete payload.
+- **Confirmed read** means the complete repeated payload was observed and can be attributed.
+
+Direct payload input is separate from the full input reported for an affected session or turn. A
+session that loaded a skill can contain other instructions, history, tool output, and user input.
+The page never labels that full session total as the skill's cost.
+
+Token attribution shows exact, estimated, cached, cache-write, and unknown values when the source
+provides them. The model rows use the same current pricing table and pricing revision as the rest
+of Usage. Provider-reported cost wins. An unknown model, missing price, malformed record, or
+missing tokenizer remains **Unpriced**, not `$0.00`.
+
+After a transcript contains a confirmed complete skill payload, later model turns in the same
+carried context attribute that skill again. T3 labels the skill tokens **Cached** or **Cache write**
+only when the provider's complete request partition proves that placement. If a request mixes
+cached and uncached input, the skill remains **Unknown** because request-level totals cannot prove
+where that payload landed. Context resets, compaction, and forks end the carried attribution.
+
+When a range mixes priced and unpriced models, the combined number is the priced subtotal and is
+marked incomplete. It does not assign a zero-dollar value to the remaining input.
+
+Every dollar value on this page is labeled as an API-equivalent estimate. It is an
+estimate of what the recorded tokens would represent at the selected API rates. It is not a
+charge, subscription balance, or reset consumption. The page can group totals by item, source
+kind, model, project or environment, and date when those aggregates are covered by the scan.
+
+Raw transcript text stays on the environment that read it. Only fingerprints, aggregate token and
+value data, provenance, and coverage gaps cross the connection. The importer reuses the transcript
+cache and cursor. Unchanged files are not reparsed, and an appended transcript reads only its new
+records when the saved cursor is safe. File edits, forks, and retries invalidate the affected
+cache entry and use stable record identities so the same occurrence is not counted twice.
+
+If several historical file revisions share one display name, an exact path identifies the matching
+revision. Name-only evidence stays unattributed rather than being multiplied across every revision.
+
+The coverage notice names records that are too large, malformed, unavailable, missing a model or
+tokenizer, or impossible to assign to one repeated payload. Those records stay visible as unknown
+or uncovered data. Usage does not invent a token count or a price to fill the gap. Long ranges
+render aggregate rows first; expanding an item loads only its saved metadata, never raw transcript
+text.
+
+Repeated-input attribution is additive. Enabling it does not change the normal Usage token buckets,
+model pricing, API-equivalent totals, or the separate Codex usage-and-reset calculations.
+
 ### Import product chat archives
 
 Configured ChatGPT and Google AI Studio exports appear as **ChatGPT archive** and **AI Studio
@@ -72,11 +145,23 @@ The monitor leads with remaining usage and the total used in the current account
 For example, 81% remaining means 19% used. If tracking began at 83%, the monitor observed
 a two-percentage-point drop. Those two points are not the cycle total.
 
-**Recorded** shows saved readings. **To reset** adds the current-pace projection and a target
-that leaves 3% unused. The forecast blends the observed pace with the current weekly average.
-Earlier cycles do not influence it. Gaps over an hour are not joined.
+**Recorded** shows saved readings. **To reset** adds the current-pace projection through the
+planning deadline. The daily budget leaves 3% unused. The forecast blends the observed pace
+with the current weekly average.
+The chart colors saved readings and the filled area green ahead of weekly pace and red behind it. A dashed line shows
+even weekly spending. Tracking gaps use API-weighted estimates when complete priced activity is available. Otherwise,
+straight lines join saved readings, including
+earlier monitoring runs in the same cycle. These lines show the change between readings without
+claiming when it happened. Reset changes remain separate, and gaps do not become measured activity.
 
-Turn **API cost pace** on or off beneath the chart to compare the blue projection.
+Use the previous and next arrows above the chart to browse saved reset cycles one at a time.
+**Current** returns to the live cycle. Completed charts end at the first reading confirming the
+next reset, and their pace line reaches zero at that boundary. The active cycle keeps the scheduled
+planning deadline until a reset is observed. Past cycles show recorded balances, dates and the interval
+in which the next reset was observed. Current forecasts and banked reset counts stay with the live
+cycle. Only cycles retained in the saved account history are available.
+
+Expand **Forecast details & readings** to inspect readings or turn **API cost pace** on or off to compare the blue projection.
 It divides API-equivalent spending from the last six hours by elapsed hours, including idle
 time. If monitoring began more recently, it uses that shorter interval, with at least one hour
 required. Only the current cycle and selected computers contribute. The server measures costs
@@ -89,7 +174,7 @@ hourly cost, and outcome; **API value runs out** gives its projected timestamp. 
 maps the declining dollar balance onto the chart's remaining-percentage scale and stops at
 zero. A complete zero-cost interval produces a flat line with no exhaustion timestamp.
 
-The **Runway plan** turns that projection into downtime. It shows how long usage would be
+Expand **Runway plan** for downtime planning. It turns that projection into downtime. It shows how long usage would be
 unavailable before the account's scheduled reset if the measured dollar burn continues. Choose
 the **maximum time without usage** you can tolerate; 12 hours is the default. The planner also
 calculates the maximum average dollars per hour that would reach zero at that deadline. A lower
@@ -109,6 +194,19 @@ Tibo's public posts through the independent Reset Beacon feed. The source link a
 interpretation remain visible. A missing or expired announcement falls back to the account timer.
 A countdown reaching zero never creates a reset observation or changes usage to 100%.
 
+**Estimated use between public resets** uses the historical announcements published by
+[Codex Resets](https://codex-resets.com/). T3 treats consecutive regular announcements as
+approximate boundaries and totals the Codex transcript records stored on the selected computers
+between those times. Each completed period shows its current-price API-equivalent value and a
+per-model token and cost breakdown when the scan is complete.
+
+This backfills estimates for periods before local percentage monitoring began, but it does not
+backfill account usage percentages. Announcement time can precede account propagation, public
+announcements are global rather than account-specific, and missing local transcripts are not zero
+usage. Banked reset grants remain visible as context but never split a period because the user
+chooses when to redeem them. T3 sends Codex Resets no account credentials, usage totals, chat data,
+or transcript content.
+
 The page checks readings every minute and public news every five minutes while open.
 The separate Codex Limits collector records every five minutes while its computer is awake
 and signed in, even with T3 closed. Readings older than 15 minutes are labeled stale.
@@ -116,8 +214,9 @@ News requests send no account credentials, usage totals, or chat data.
 Saved quota history and completed cost snapshots survive page navigation and server restarts,
 with bounded retention. Chart readings support hover, tap, and keyboard inspection.
 
-Press **Refresh** to reload saved readings, refresh public reset news, and check API costs for
-the newly read interval. The button shows progress and ignores repeated taps until it finishes.
+Press **Refresh** to reload saved readings and public reset sources, then check API costs for the
+newly read and backdated intervals. The button shows progress and ignores repeated taps until it
+finishes.
 Unchanged transcripts keep their cached records. On the mobile app, pulling down does the same.
 Growing chats read only their appended text when the saved cursor is valid. Public reset news
 updates independently and does not hold the usage refresh open.
@@ -133,6 +232,22 @@ estimate based on the immediately preceding completed cycle. It includes that cy
 range and is replaced automatically when current-cycle calibration is valid. Percentages are never
 combined across reset boundaries. The observation interval is not an exact reset timestamp. A banked
 reset or account change can look similar.
+
+Each completed reset can be expanded to show input tokens, output tokens, and API-equivalent value
+for every recorded model. Input includes cached and cache-creation tokens; reasoning tokens are
+already included in output. Short-lived account-window switches that return to the original timer
+are ignored so they do not split one real cycle into several resets.
+
+The authenticated `server.getUsageSummary` query can narrow results to exact providers, native
+session IDs, or native turn IDs. Callers may group returned buckets by model, session, or turn.
+Environment identity remains the connection target, and every response retains each physical
+source fingerprint and coverage status. Filters are bounded to 128 native IDs and never return raw
+transcript text.
+
+`costUsd` is API-equivalent value. `providerReported` means the provider supplied that request's
+cost, `modelPriced` means T3 calculated it from the rate document identified by
+`pricing.revision`, and `unpriced` keeps tokens while adding no dollars. None of these fields claims
+the amount charged for a subscription. Account allowance remains in the separate quota history.
 
 The runway baseline uses the account timer. **Banked manual resets** are shown separately and
 never get added to the current balance or treated as an extension of the current timer. A full
@@ -183,16 +298,60 @@ The web monitor puts the chart first. Use the header links to jump to API value,
 the token planner, Reset history, or Luna research. Expand **Inspect recorded readings** to scrub
 through the saved observations with a pointer or arrow keys.
 
-**How far could the rest go?** compares alternative uses of the estimated remaining
-API value on Astra, Sol, Terra, and Luna. Its default input/cache/output mix comes
-from the exact monitored interval. The model breakdown below it uses that same
+Drag across the quota graph to zoom into a period, or choose **24h**, **6h**, or
+**1h**. The plus and minus buttons change the zoom; the arrows move through time.
+**Full cycle**, Escape, or a double-click restores the whole chart. These controls
+work on past reset cycles too. The percentage axis expands when zoomed.
+
+**Where usage went** offers Intensity, Models, and Spikes views. Models splits bars
+by model and shows cost shares; Spikes ranks intervals by hourly spending. Tap a bar,
+use the slider, or choose a spike to inspect costs, models, and estimated quota use.
+**Zoom here** opens the selected interval. All controls work without hovering.
+The summary compares peak and average spending, including idle time, and shows
+what fraction of cost came from the busiest 25% of the selected time.
+
+The compact tracking layout keeps quota, API spending per hour, and the top model
+hourly rates together. Model rates use the same visible interval, including idle
+time. Expand **Inspect interval** for the selected interval or **All models** for
+the remaining models. Forecast explanations and planning stay collapsed until needed.
+
+**Compare cycles** shows how the selected cycle differs from an earlier saved cycle.
+Expand it and choose any older cycle to overlay quota used and compare API value per
+hour, total API value, input cache hit rate, and output tokens per hour. The comparison
+uses equal durations from each cycle's first saved reading, limited by the shorter
+recorded cycle. These starts may be later than the actual resets. Quota endpoints
+between readings are interpolated; gaps do not prove when usage occurred.
+
+The takeaways identify changes in spending pace, caching, and the model with the
+largest hourly cost change. Expand **Model changes** for every model, including ones
+only used in one window. Transcript comparisons load when opened and use the same
+selected computers on both sides. Incomplete or unpriced costs withhold cost insights
+while the saved quota comparison remains available. API equivalents and output token
+counts do not measure task quality or productivity.
+
+Zooming requests finer cost intervals from recorded transcripts. The curve spreads
+each confirmed percentage drop across API spending since the previous drop. Repeated
+whole-percent readings do not pin the fractional curve. Dotted horizontal guides
+use exact whole percentages when zoomed, with markers at estimated crossings.
+Original readings remain available in the saved-readings inspector. After the last drop, the unfinished fraction uses the previous drop's cost
+provisionally and stays within one percentage point of the last reading. API-derived
+decimals are estimates, not additional account measurements. Partial-bin totals are
+prorated; missing or unpriced costs keep the straight-line connection.
+Different models can consume quota differently, so API activity is a guide to
+where to investigate, not an exact account of subscription allowance.
+
+**Model comparisons at API prices** applies the same estimated API-price equivalent
+of the remaining quota to GPT-6 Astra, GPT-6 Sol, GPT-5.6 Terra, and GPT-6 Luna.
+Its default input/cache/output mix comes from the exact monitored interval.
+The model breakdown below it uses that same
 interval, excludes Spark, and counts reasoning inside output once. Older servers
 without model totals show a pending state; example mixes remain available.
 
 Choose an example mix, output only, or uncached input only to explore other work.
 **Custom mix** lets you set the output share and the cache hit rate for input.
-Long-context and Fast mode controls apply their respective token-price multipliers.
-Each row spends the entire estimate, so rows cannot be added together. M means
+Cache writes use each model's published write price. Long-context and Fast mode
+controls apply their respective token-price multipliers.
+Each row applies the whole estimate to one model, so rows cannot be added together. M means
 million and B means billion. Prices have a verification date and a source link.
 Tool charges and regional surcharges are excluded. These are API-price comparisons;
 changing models can change Codex consumption, so they do not guarantee a number of
@@ -208,7 +367,7 @@ wish to put out the candle, run it again to relight it, or open **birthday.log**
 another note. Confetti is brief and respects the tap-effects and reduced-motion settings.
 
 **Used while monitored** prices Codex transcripts from the same observed interval.
-**Value of usage remaining** uses that cost per observed percentage point. It shows **Learning**
+**Remaining quota at API prices** uses that cost per observed percentage point. It shows **Learning**
 until at least five points have been observed. A qualified earlier reset cycle can calibrate a
 shorter interval provisionally until current measured costs are ready. Bounded zero-use timer
 changes totaling up to 60 minutes can bridge the interval without counting as resets. Spark is
@@ -227,3 +386,5 @@ other computers for cost comparison. Selecting an unavailable computer withholds
 estimate. Select computers using the same Codex account. Percentages are never added across machines.
 The tracker does not verify account identity or identify chats copied between distinct sources.
 The power monitor is separate and does not contribute to Codex quota totals.
+
+The reset-cycle arrows update the chart, API-equivalent value, and token planner together. Older cycles are calculated from their recorded transcript interval. Local Qwen sessions do not count toward the OpenAI subscription conversion. Refresh keeps the selected cycle. Incomplete transcript reads retry automatically with a bounded backoff; complete saved calculations remain available while newer data is being read.

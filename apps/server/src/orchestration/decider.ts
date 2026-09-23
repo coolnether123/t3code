@@ -1064,6 +1064,45 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           createdAt: command.createdAt,
         },
       };
+      const threadCompactions = (readModel.activeContextCompactions ?? []).filter(
+        (entry) => entry.threadId === command.threadId,
+      );
+      const activeCompaction = threadCompactions.find((entry) => entry.status === "active");
+      const queuedContextCompaction = threadCompactions.find((entry) =>
+        entry.queuedMessages.some((message) => message.messageId === command.message.messageId),
+      );
+      const queuedMessage = queuedContextCompaction?.queuedMessages.find(
+        (entry) => entry.messageId === command.message.messageId,
+      );
+      const unresolvedQueue = threadCompactions.find(
+        (entry) =>
+          entry.status !== "active" &&
+          entry.status === "completed" &&
+          entry.queuedMessages.some(
+            (message) => message.status === "queued" || message.status === "attempted",
+          ),
+      );
+      const queueingCompaction = activeCompaction ?? unresolvedQueue;
+      const hasUnresolvedQueue = unresolvedQueue !== undefined;
+      const isCompactionMessage = command.message.text.trim().toLowerCase() === "/compact";
+      const canStartCompaction =
+        isCompactionMessage &&
+        activeCompaction === undefined &&
+        !hasUnresolvedQueue &&
+        targetThread.session?.status !== "starting" &&
+        targetThread.session?.status !== "running" &&
+        targetThread.messages.some(
+          (message) => message.role === "user" && message.id !== command.message.messageId,
+        );
+
+      if (queuedMessage !== undefined) {
+        if (queuedContextCompaction?.status !== "completed" || queuedMessage.status !== "queued") {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `Queued context-compaction message '${command.message.messageId}' is not safe to replay.`,
+          });
+        }
+      }
       // Real activity resets ANY override: it wakes an explicitly settled
       // thread, and it clears a keep-active pin back to neutral so the
       // thread can auto-settle again after this burst of work goes stale.
@@ -1102,7 +1141,74 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           },
         });
       }
-      return [...lifecycleResetEvents, userMessageEvent, turnStartRequestedEvent];
+      const contextCompactionEvents: Array<Omit<OrchestrationEvent, "sequence">> = [];
+      if (queuedMessage !== undefined) {
+        contextCompactionEvents.push({
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          })),
+          type: "thread.context-compaction-message-status-changed",
+          payload: {
+            threadId: command.threadId,
+            compactMessageId: queuedContextCompaction!.compactMessageId,
+            messageId: command.message.messageId,
+            status: "attempted",
+            updatedAt: command.createdAt,
+          },
+        });
+      } else if (queueingCompaction !== undefined && !isCompactionMessage) {
+        contextCompactionEvents.push({
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          })),
+          type: "thread.context-compaction-message-queued",
+          payload: {
+            threadId: command.threadId,
+            compactMessageId: queueingCompaction.compactMessageId,
+            messageId: command.message.messageId,
+            turnStart: {
+              ...(command.modelSelection !== undefined
+                ? { modelSelection: command.modelSelection }
+                : {}),
+              ...(command.titleSeed !== undefined ? { titleSeed: command.titleSeed } : {}),
+              runtimeMode: targetThread.runtimeMode,
+              interactionMode: targetThread.interactionMode,
+              ...(command.subagentBackend !== undefined
+                ? { subagentBackend: command.subagentBackend }
+                : {}),
+              ...(sourceProposedPlan !== undefined ? { sourceProposedPlan } : {}),
+              createdAt: command.createdAt,
+            },
+          },
+        });
+      } else if (canStartCompaction) {
+        contextCompactionEvents.push({
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          })),
+          type: "thread.context-compaction-started",
+          payload: {
+            threadId: command.threadId,
+            compactMessageId: command.message.messageId,
+            startedAt: command.createdAt,
+          },
+        });
+      }
+      return [
+        ...lifecycleResetEvents,
+        ...(queuedMessage === undefined ? [userMessageEvent] : []),
+        turnStartRequestedEvent,
+        ...contextCompactionEvents,
+      ];
     }
 
     case "thread.turn.steer": {
@@ -1457,6 +1563,110 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         },
       };
       return [unsettledEvent, sessionSetEvent];
+    }
+
+    case "thread.context-compaction.status.set": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const compaction = readModel.activeContextCompactions?.find(
+        (entry) =>
+          entry.threadId === command.threadId &&
+          entry.compactMessageId === command.compactMessageId,
+      );
+      if (!compaction) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Context compaction '${command.compactMessageId}' is not the current generation for thread '${command.threadId}'.`,
+        });
+      }
+      const validTransition =
+        compaction.status === command.status ||
+        (compaction.status === "active" && command.status !== "delivery-uncertain") ||
+        (compaction.status === "active" && command.status === "delivery-uncertain") ||
+        (compaction.status === "delivery-uncertain" && command.status === "interrupted");
+      if (!validTransition) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Context compaction '${command.compactMessageId}' cannot transition from '${compaction.status}' to '${command.status}'.`,
+        });
+      }
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.updatedAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.context-compaction-status-changed",
+        payload: {
+          threadId: thread.id,
+          compactMessageId: command.compactMessageId,
+          status: command.status,
+          ...(command.detail !== undefined ? { detail: command.detail } : {}),
+          updatedAt: command.updatedAt,
+        },
+      };
+    }
+
+    case "thread.context-compaction.message.status.set": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const compaction = readModel.activeContextCompactions?.find(
+        (entry) =>
+          entry.threadId === command.threadId &&
+          entry.compactMessageId === command.compactMessageId,
+      );
+      const queuedMessage = compaction?.queuedMessages.find(
+        (entry) => entry.messageId === command.messageId,
+      );
+      if (!compaction || !queuedMessage) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Queued message '${command.messageId}' does not belong to context-compaction generation '${command.compactMessageId}'.`,
+        });
+      }
+      const validTransition =
+        queuedMessage.status === command.status ||
+        (queuedMessage.status === "queued" &&
+          (command.status === "delivery-uncertain" ||
+            command.status === "failed" ||
+            command.status === "cancelled")) ||
+        (queuedMessage.status === "attempted" &&
+          (command.status === "delivery-uncertain" ||
+            command.status === "dispatched" ||
+            command.status === "failed" ||
+            command.status === "cancelled")) ||
+        (queuedMessage.status === "delivery-uncertain" &&
+          (command.status === "failed" || command.status === "cancelled"));
+      if (!validTransition) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Queued message '${command.messageId}' cannot transition from '${queuedMessage.status}' to '${command.status}' through a status command.`,
+        });
+      }
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.updatedAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.context-compaction-message-status-changed",
+        payload: {
+          threadId: thread.id,
+          compactMessageId: command.compactMessageId,
+          messageId: command.messageId,
+          status: command.status,
+          ...(command.detail !== undefined ? { detail: command.detail } : {}),
+          updatedAt: command.updatedAt,
+        },
+      };
     }
 
     case "thread.message.assistant.delta": {

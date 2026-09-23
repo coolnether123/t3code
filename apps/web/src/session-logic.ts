@@ -1041,7 +1041,14 @@ function toDerivedWorkLogEntry(
   const requestKind = extractWorkLogRequestKind(payload);
   if (diagnostic) {
     const rawDiagnostic = asTrimmedString(payload?.detail ?? payload?.message);
-    if (rawDiagnostic && rawDiagnostic !== entry.label) entry.detail = rawDiagnostic;
+    const diagnosticDetail =
+      (activity.kind === "runtime.warning" || activity.kind === "runtime.error") &&
+      rawDiagnostic &&
+      !/^[{[]/.test(rawDiagnostic) &&
+      diagnostic.key === diagnostic.preview.toLowerCase()
+        ? rawDiagnostic
+        : diagnostic.preview;
+    if (diagnosticDetail !== entry.label) entry.detail = diagnosticDetail;
     entry.diagnosticKey = diagnostic.key;
     if (diagnostic.technicalDetail) entry.technicalDetail = diagnostic.technicalDetail;
   } else if (detail) {
@@ -1805,32 +1812,32 @@ function extractToolDetail(
   const command = commandPreview.command;
   const normalizedCommand = normalizePreviewForComparison(command);
   const normalizedRawCommand = normalizePreviewForComparison(commandPreview.rawCommand);
+  const data = asRecord(payload?.data);
+  const toolName = asTrimmedString(data?.toolName);
+  const namedCommand =
+    toolName && command ? normalizeInlinePreview(`${toolName}: ${command}`) : null;
+  const echoedPrefix = detail?.replace(/(?:\.\.\.|…)\s*$/u, "") ?? "";
+  const namedCommandEcho =
+    namedCommand !== null &&
+    (normalizeInlinePreview(detail ?? "") === namedCommand ||
+      (echoedPrefix !== detail && namedCommand.startsWith(normalizeInlinePreview(echoedPrefix))));
+
+  if (commandTool && command) {
+    const output = extractToolOutput(payload);
+    if (output) return output;
+  }
 
   if (
     detail &&
     normalizedHeading !== normalizedDetail &&
     (!commandTool ||
-      (normalizedCommand !== normalizedDetail && normalizedRawCommand !== normalizedDetail))
+      (!namedCommandEcho &&
+        (asTrimmedString(payload?.title)?.toLowerCase() === "bash" ||
+          (normalizedCommand !== normalizedDetail && normalizedRawCommand !== normalizedDetail))))
   ) {
     return detail;
   }
-
-  if (commandTool) {
-    if (!command) {
-      return null;
-    }
-
-    const output = extractToolOutput(payload);
-    const normalizedOutput = normalizePreviewForComparison(output);
-    if (
-      output &&
-      normalizedOutput !== normalizedHeading &&
-      normalizedOutput !== normalizedCommand
-    ) {
-      return output;
-    }
-    return null;
-  }
+  if (commandTool) return null;
 
   const rawOutputSummary = summarizeToolRawOutput(payload);
   if (rawOutputSummary) {

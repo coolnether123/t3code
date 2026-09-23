@@ -1,10 +1,5 @@
 import type { UsageSummary, UsageSummaryInput } from "@t3tools/contracts";
-import {
-  quotaCostWindow,
-  quotaIntervals,
-  quotaMonitoringSamples,
-  quotaPeriods,
-} from "@t3tools/shared/usageQuota";
+import { quotaCostWindow, quotaIntervals, quotaPeriods } from "@t3tools/shared/usageQuota";
 
 interface UsageReply {
   readonly environmentId: string;
@@ -17,6 +12,7 @@ type UsageRefreshResult = readonly UsageReply[] | void | Promise<readonly UsageR
 /** Refresh costs for the newly read interval, not the interval on the old screen. */
 export async function refreshCodexMonitor(options: {
   readonly trackerId: string | undefined;
+  readonly selectedCycleId?: string | null;
   readonly refreshHistory: () => UsageRefreshResult;
   readonly refreshCosts: (input: UsageSummaryInput) => UsageRefreshResult;
   readonly refreshNews: () => Promise<boolean>;
@@ -35,8 +31,10 @@ export async function refreshCodexMonitor(options: {
   const trackers = history.filter((entry) => entry.summary?.quotaHistory?.status === "ready");
   const tracker =
     trackers.find((entry) => entry.environmentId === options.trackerId) ?? trackers[0];
-  const samples = quotaMonitoringSamples(tracker?.summary?.quotaHistory?.samples ?? []);
-  const input = quotaCostWindow(quotaIntervals(quotaPeriods(samples)));
+  const periods = quotaPeriods(tracker?.summary?.quotaHistory?.samples ?? []);
+  const selectedIndex = periods.findIndex((period) => period.id === options.selectedCycleId);
+  const index = selectedIndex < 0 ? periods.length - 1 : selectedIndex;
+  const input = quotaCostWindow(quotaIntervals(periods.slice(Math.max(0, index - 1), index + 1)));
   if (input) options.onProgress?.("Saved readings refreshed. Updating API costs…");
   const costsResult = input ? await options.refreshCosts(input) : [];
   const costs = Array.isArray(costsResult) ? costsResult : [];
@@ -68,6 +66,7 @@ export function usageQueryInput(
     resolution: input.resolution,
     sinceTime: input.sinceTime,
     untilTime: input.untilTime,
+    includeRepeatedInput: input.includeRepeatedInput,
     includeQuotaHistory: input.includeQuotaHistory,
     quotaHistoryOnly: input.quotaHistoryOnly,
     quotaIntervals: input.quotaIntervals,

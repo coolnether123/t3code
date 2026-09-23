@@ -14,15 +14,28 @@
  *
  * @module usageScanCache
  */
-import type { UsageProviderKind } from "@t3tools/contracts";
+import type {
+  UsageProviderKind,
+  UsageRepeatedInputConfidence,
+  UsageRepeatedInputCoverageGap,
+  UsageRepeatedInputSourceKind,
+} from "@t3tools/contracts";
 
 import type { CodexScanState, UsageRecord } from "./usageTranscripts.ts";
+import {
+  REPEATED_INPUT_CACHE_VERSION,
+  type RepeatedInputActiveSource,
+  type RepeatedInputObservation,
+} from "./usageRepeatedInput.ts";
 
 // v2 changed fork-copy suppression. v3 added root coverage. v4 persists the
 // Codex parser cursor. v5 reparses AI Studio files for source dates and branch
-// de-duplication. v6 adds stable Codex cross-file keys; old Codex entries are
-// cold-rebuilt so migrated shared/private rollouts cannot be double counted.
-export const USAGE_SCAN_CACHE_VERSION = 6 as const;
+// de-duplication. v6 adds stable Codex cross-file keys. v7 adds append-prefix
+// validation and compact repeated-input observations. v6 Codex entries keep
+// their ordinary usage records; repeated-input data is cold-built until a v7
+// prefix fingerprint exists, so the established usage cache is not discarded.
+// v8 adds a complete-line ordinary-usage cursor for bounded JSONL scans.
+export const USAGE_SCAN_CACHE_VERSION = 8 as const;
 
 export interface CachedFile {
   readonly size: number;
@@ -30,6 +43,21 @@ export interface CachedFile {
   readonly provider: UsageProviderKind;
   readonly records: readonly UsageRecord[];
   readonly codexState?: CodexScanState;
+  /** Complete JSONL prefix already folded into `records`; absent only when complete. */
+  readonly scanCursor?: number;
+  /** Oversized JSONL records deliberately omitted under the bounded-memory policy. */
+  readonly scanSkippedLines?: number;
+  /** `scanCursor` is inside an oversized record and must only search for its newline. */
+  readonly scanDiscardingLine?: boolean;
+  /** SHA-256 of the first `size` bytes, used before any append read. */
+  readonly prefixFingerprint?: string;
+  /** Sanitized repeated-input observations. Never contains source text. */
+  readonly repeatedInputObservations?: readonly RepeatedInputObservation[];
+  readonly repeatedInputGaps?: readonly UsageRepeatedInputCoverageGap[];
+  /** Active skill revisions needed to attribute later carried token_count records. */
+  readonly repeatedInputActiveSources?: readonly RepeatedInputActiveSource[];
+  /** Parser semantics used to produce the repeated-input observations. */
+  readonly repeatedInputVersion?: number;
 }
 
 export type ScanCache = Map<string, CachedFile>;
@@ -39,6 +67,7 @@ export interface ScanCoverage {
   readonly rootPath: string;
   readonly sinceMs: number;
   readonly scannedAtMs: number;
+  readonly volumeId?: string;
 }
 
 export interface TranscriptScanPlanOptions {
@@ -97,11 +126,53 @@ type SerializedRecord = readonly [
   turnId?: string | null,
 ];
 
+type SerializedRepeatedInput = readonly [
+  UsageRepeatedInputSourceKind,
+  string,
+  string,
+  string | null,
+  UsageRepeatedInputConfidence,
+  number,
+  string,
+  string | null,
+  string | null,
+  string | null,
+  string | null,
+  readonly [number, number, number, number, number],
+  readonly [number, number, number, number, number],
+  number | null,
+  string,
+];
+
+type SerializedRepeatedInputGap = readonly [
+  UsageRepeatedInputCoverageGap["reason"],
+  number,
+  string,
+];
+
+type SerializedRepeatedInputActiveSource = readonly [
+  UsageRepeatedInputSourceKind,
+  string,
+  string,
+  string | null,
+  number | null,
+  number | null,
+  number,
+  string | null,
+];
+
 interface SerializedFile {
   readonly s: number;
   readonly m: number;
   readonly p: UsageProviderKind;
   readonly r: readonly SerializedRecord[];
+  readonly q?: number;
+  readonly x?: readonly [number, boolean];
+  readonly h?: string;
+  readonly i?: readonly SerializedRepeatedInput[];
+  readonly g?: readonly SerializedRepeatedInputGap[];
+  readonly a?: readonly SerializedRepeatedInputActiveSource[];
+  readonly j?: number;
   readonly c?: readonly [
     string,
     string,
@@ -119,7 +190,7 @@ interface SerializedCache {
   readonly models: readonly string[];
   readonly sessions: readonly string[];
   readonly files: Readonly<Record<string, SerializedFile>>;
-  readonly coverage?: readonly [UsageProviderKind, string, number, number][];
+  readonly coverage?: readonly [UsageProviderKind, string, number, number, string?][];
 }
 
 /** Serialises the cache, interning the repeated model and session strings. */
@@ -143,10 +214,73 @@ export function encodeScanCache(
 
   const files: Record<string, SerializedFile> = {};
   for (const [path, entry] of cache) {
+    const repeatedInputObservations = entry.repeatedInputObservations;
+    const repeatedInputGaps = entry.repeatedInputGaps;
+    const repeatedInputActiveSources = entry.repeatedInputActiveSources;
     files[path] = {
       s: entry.size,
       m: entry.mtimeMs,
       p: entry.provider,
+      ...(entry.prefixFingerprint === undefined ? {} : { h: entry.prefixFingerprint }),
+      ...(repeatedInputObservations === undefined
+        ? {}
+        : {
+            i: repeatedInputObservations.map(
+              (observation) =>
+                [
+                  observation.sourceKind,
+                  observation.displayName,
+                  observation.contentHash,
+                  observation.fileRevisionHash,
+                  observation.confidence,
+                  observation.observedAtMs,
+                  observation.sessionId,
+                  observation.turnId,
+                  observation.model,
+                  observation.project,
+                  observation.environment,
+                  [
+                    observation.directTokens.exact,
+                    observation.directTokens.estimated,
+                    observation.directTokens.cached,
+                    observation.directTokens.cacheWrite,
+                    observation.directTokens.unknown,
+                  ],
+                  [
+                    observation.fullSessionInputTokens.exact,
+                    observation.fullSessionInputTokens.estimated,
+                    observation.fullSessionInputTokens.cached,
+                    observation.fullSessionInputTokens.cacheWrite,
+                    observation.fullSessionInputTokens.unknown,
+                  ],
+                  observation.providerReportedCostUsd,
+                  observation.dedupeKey,
+                ] as const,
+            ),
+          }),
+      ...(repeatedInputGaps === undefined
+        ? {}
+        : {
+            g: repeatedInputGaps.map((gap) => [gap.reason, gap.count, gap.message] as const),
+          }),
+      ...(repeatedInputActiveSources === undefined
+        ? {}
+        : {
+            a: repeatedInputActiveSources.map(
+              (source) =>
+                [
+                  source.descriptor.sourceKind,
+                  source.descriptor.displayName,
+                  source.descriptor.contentHash,
+                  source.descriptor.fileRevisionHash,
+                  source.descriptor.byteLength,
+                  source.descriptor.tokenCount,
+                  source.loadedAtMs,
+                  source.loadedTurnId,
+                ] as const,
+            ),
+          }),
+      ...(entry.repeatedInputVersion === undefined ? {} : { j: entry.repeatedInputVersion }),
       ...(entry.codexState === undefined
         ? {}
         : {
@@ -161,6 +295,10 @@ export function encodeScanCache(
               entry.codexState.turnId ?? null,
             ] as const,
           }),
+      ...(entry.scanCursor === undefined ? {} : { q: entry.scanCursor }),
+      ...(entry.scanSkippedLines === undefined && entry.scanDiscardingLine === undefined
+        ? {}
+        : { x: [entry.scanSkippedLines ?? 0, entry.scanDiscardingLine ?? false] as const }),
       r: entry.records.map((record) => [
         record.timestampMs,
         intern(models, modelIndex, record.model),
@@ -183,17 +321,142 @@ export function encodeScanCache(
     models,
     sessions,
     files,
-    coverage: coverage.map((entry) => [
-      entry.provider,
-      entry.rootPath,
-      entry.sinceMs,
-      entry.scannedAtMs,
-    ]),
+    coverage: coverage.map((entry) =>
+      entry.volumeId === undefined
+        ? ([entry.provider, entry.rootPath, entry.sinceMs, entry.scannedAtMs] as const)
+        : ([
+            entry.provider,
+            entry.rootPath,
+            entry.sinceMs,
+            entry.scannedAtMs,
+            entry.volumeId,
+          ] as const),
+    ),
   };
 }
 
 function isRecordArray(value: unknown): value is readonly unknown[] {
   return Array.isArray(value);
+}
+
+function isRepeatedInputSourceKind(value: unknown): value is UsageRepeatedInputSourceKind {
+  return (
+    value === "skill" ||
+    value === "instruction" ||
+    value === "developerBlock" ||
+    value === "toolOperation"
+  );
+}
+
+function isRepeatedInputConfidence(value: unknown): value is UsageRepeatedInputConfidence {
+  return value === "reference" || value === "likelyRead" || value === "confirmedPayload";
+}
+
+function decodeRepeatedInputTokens(
+  value: unknown,
+): RepeatedInputObservation["directTokens"] | null {
+  if (!isRecordArray(value) || value.length !== 5) return null;
+  if (!value.every((entry) => typeof entry === "number" && Number.isFinite(entry) && entry >= 0)) {
+    return null;
+  }
+  const [exact, estimated, cached, cacheWrite, unknown] = value as readonly number[];
+  if (
+    exact === undefined ||
+    estimated === undefined ||
+    cached === undefined ||
+    cacheWrite === undefined ||
+    unknown === undefined
+  ) {
+    return null;
+  }
+  return {
+    exact,
+    estimated,
+    cached,
+    cacheWrite,
+    unknown,
+  };
+}
+
+function decodeRepeatedInputGaps(
+  value: readonly SerializedRepeatedInputGap[] | undefined,
+): readonly UsageRepeatedInputCoverageGap[] | null {
+  if (value === undefined) return [];
+  if (!isRecordArray(value)) return null;
+  const gaps: UsageRepeatedInputCoverageGap[] = [];
+  for (const row of value) {
+    if (!isRecordArray(row) || row.length !== 3) return null;
+    const [reason, count, message] = row;
+    if (
+      reason !== "oversized" &&
+      reason !== "malformed" &&
+      reason !== "unavailable" &&
+      reason !== "missingModel" &&
+      reason !== "missingTokenizer" &&
+      reason !== "unattributed"
+    ) {
+      return null;
+    }
+    if (
+      typeof count !== "number" ||
+      !Number.isFinite(count) ||
+      count < 0 ||
+      typeof message !== "string"
+    ) {
+      return null;
+    }
+    gaps.push({ reason, count: Math.trunc(count), message });
+  }
+  return gaps;
+}
+
+function decodeRepeatedInputActiveSources(
+  value: readonly SerializedRepeatedInputActiveSource[] | undefined,
+): readonly RepeatedInputActiveSource[] | null {
+  if (value === undefined) return [];
+  if (!isRecordArray(value)) return null;
+  const sources: RepeatedInputActiveSource[] = [];
+  for (const row of value) {
+    if (!isRecordArray(row) || row.length !== 8) return null;
+    const [
+      sourceKind,
+      displayName,
+      contentHash,
+      fileRevisionHash,
+      byteLength,
+      tokenCount,
+      loadedAtMs,
+      loadedTurnId,
+    ] = row;
+    if (
+      !isRepeatedInputSourceKind(sourceKind) ||
+      typeof displayName !== "string" ||
+      typeof contentHash !== "string" ||
+      (fileRevisionHash !== null && typeof fileRevisionHash !== "string") ||
+      (byteLength !== null &&
+        (typeof byteLength !== "number" || !Number.isSafeInteger(byteLength) || byteLength < 0)) ||
+      (tokenCount !== null &&
+        (typeof tokenCount !== "number" || !Number.isSafeInteger(tokenCount) || tokenCount < 0)) ||
+      typeof loadedAtMs !== "number" ||
+      !Number.isFinite(loadedAtMs) ||
+      (loadedTurnId !== null && typeof loadedTurnId !== "string")
+    ) {
+      return null;
+    }
+    sources.push({
+      descriptor: {
+        sourceKind,
+        displayName,
+        contentHash,
+        fileRevisionHash,
+        byteLength,
+        tokenCount,
+      },
+      loadedAtMs,
+      loadedTurnId,
+    });
+  }
+  return sources;
 }
 
 /**
@@ -212,6 +475,8 @@ export function decodeScanCache(document: unknown): ScanCache {
     root.version !== 3 &&
     root.version !== 4 &&
     root.version !== 5 &&
+    root.version !== 6 &&
+    root.version !== 7 &&
     root.version !== USAGE_SCAN_CACHE_VERSION
   ) {
     return cache;
@@ -244,7 +509,11 @@ export function decodeScanCache(document: unknown): ScanCache {
     if (!isRecordArray(entry.r)) continue;
 
     const provider: UsageProviderKind = entry.p;
-    if (root.version < USAGE_SCAN_CACHE_VERSION && provider === "codex") continue;
+    // v6 introduced the stable Codex keys required by the current global
+    // de-duplication pass. Preserve those records during the v7 migration.
+    // They have no repeated-input cursor, so UsageService performs one full
+    // repeated-input read before enabling append-only attribution.
+    if (root.version < 6 && provider === "codex") continue;
     const records: UsageRecord[] = [];
     // Any corrupt row disqualifies the whole entry. Keeping the survivors
     // under the original (size, mtime) would read as a valid warm hit and the
@@ -307,6 +576,124 @@ export function decodeScanCache(document: unknown): ScanCache {
     }
 
     if (corrupt) continue;
+    const scanCursor =
+      typeof entry.q === "number" &&
+      Number.isSafeInteger(entry.q) &&
+      entry.q >= 0 &&
+      entry.q < entry.s
+        ? entry.q
+        : undefined;
+    if (root.version >= 8 && entry.q !== undefined && scanCursor === undefined) continue;
+    const scanIssue = entry.x;
+    const scanSkippedLines =
+      isRecordArray(scanIssue) &&
+      scanIssue.length === 2 &&
+      typeof scanIssue[0] === "number" &&
+      Number.isSafeInteger(scanIssue[0]) &&
+      scanIssue[0] > 0
+        ? scanIssue[0]
+        : undefined;
+    const scanDiscardingLine =
+      isRecordArray(scanIssue) && scanIssue.length === 2 && scanIssue[1] === true;
+    if (
+      root.version >= 8 &&
+      scanIssue !== undefined &&
+      scanSkippedLines === undefined &&
+      !scanDiscardingLine
+    ) {
+      continue;
+    }
+    if (scanDiscardingLine && scanCursor === undefined) continue;
+    const prefixFingerprint = typeof entry.h === "string" ? entry.h : undefined;
+    const repeatedInputVersion =
+      typeof entry.j === "number" && Number.isSafeInteger(entry.j) && entry.j >= 0
+        ? entry.j
+        : undefined;
+    const repeatedInputObservations: RepeatedInputObservation[] = [];
+    let repeatedInputCorrupt = false;
+    if (entry.i !== undefined) {
+      if (!isRecordArray(entry.i)) repeatedInputCorrupt = true;
+      else {
+        for (const row of entry.i) {
+          if (!isRecordArray(row) || row.length !== 15) {
+            repeatedInputCorrupt = true;
+            break;
+          }
+          const [
+            sourceKind,
+            displayName,
+            contentHash,
+            fileRevisionHash,
+            confidence,
+            observedAtMs,
+            sessionId,
+            turnId,
+            model,
+            project,
+            environment,
+            direct,
+            fullSession,
+            providerReportedCostUsd,
+            dedupeKey,
+          ] = row as SerializedRepeatedInput;
+          const directTokens = decodeRepeatedInputTokens(direct);
+          const fullSessionInputTokens = decodeRepeatedInputTokens(fullSession);
+          if (
+            !isRepeatedInputSourceKind(sourceKind) ||
+            typeof displayName !== "string" ||
+            typeof contentHash !== "string" ||
+            (fileRevisionHash !== null && typeof fileRevisionHash !== "string") ||
+            !isRepeatedInputConfidence(confidence) ||
+            typeof observedAtMs !== "number" ||
+            !Number.isFinite(observedAtMs) ||
+            typeof sessionId !== "string" ||
+            (turnId !== null && typeof turnId !== "string") ||
+            (model !== null && typeof model !== "string") ||
+            (project !== null && typeof project !== "string") ||
+            (environment !== null && typeof environment !== "string") ||
+            directTokens === null ||
+            fullSessionInputTokens === null ||
+            (providerReportedCostUsd !== null &&
+              (typeof providerReportedCostUsd !== "number" ||
+                !Number.isFinite(providerReportedCostUsd))) ||
+            typeof dedupeKey !== "string"
+          ) {
+            repeatedInputCorrupt = true;
+            break;
+          }
+          repeatedInputObservations.push({
+            sourceKind,
+            displayName,
+            contentHash,
+            fileRevisionHash,
+            confidence,
+            observedAtMs,
+            sessionId,
+            turnId,
+            model,
+            project,
+            environment,
+            directTokens,
+            fullSessionInputTokens,
+            providerReportedCostUsd,
+            dedupeKey,
+          });
+        }
+      }
+    }
+    if (repeatedInputCorrupt) continue;
+    const repeatedInputGaps = decodeRepeatedInputGaps(entry.g);
+    if (entry.g !== undefined && repeatedInputGaps === null) continue;
+    const repeatedInputActiveSources = decodeRepeatedInputActiveSources(entry.a);
+    // An invalid active-source cursor must force a repeated-input cold read,
+    // but it must not discard the ordinary usage rows in an otherwise valid
+    // cache entry.
+    const activeSourcesValid = repeatedInputActiveSources !== null;
+    const repeatedInputVersionForEntry =
+      activeSourcesValid &&
+      (repeatedInputVersion !== REPEATED_INPUT_CACHE_VERSION || entry.a !== undefined)
+        ? repeatedInputVersion
+        : undefined;
     let codexState: CodexScanState | undefined;
     if (root.version >= 4 && entry.c !== undefined) {
       const [
@@ -347,6 +734,18 @@ export function decodeScanCache(document: unknown): ScanCache {
       provider,
       records,
       ...(codexState === undefined ? {} : { codexState }),
+      ...(scanCursor === undefined ? {} : { scanCursor }),
+      ...(scanSkippedLines === undefined ? {} : { scanSkippedLines }),
+      ...(scanDiscardingLine ? { scanDiscardingLine: true } : {}),
+      ...(prefixFingerprint === undefined ? {} : { prefixFingerprint }),
+      ...(entry.i === undefined ? {} : { repeatedInputObservations }),
+      ...(repeatedInputGaps === null || entry.g === undefined ? {} : { repeatedInputGaps }),
+      ...(activeSourcesValid && entry.a !== undefined && repeatedInputActiveSources !== undefined
+        ? { repeatedInputActiveSources }
+        : {}),
+      ...(repeatedInputVersionForEntry === undefined
+        ? {}
+        : { repeatedInputVersion: repeatedInputVersionForEntry }),
     });
   }
 
@@ -358,7 +757,11 @@ export function decodeScanCoverage(document: unknown): readonly ScanCoverage[] {
   if (typeof document !== "object" || document === null) return [];
   const root = document as Partial<SerializedCache>;
   if (
-    (root.version !== 3 && root.version !== 4 && root.version !== USAGE_SCAN_CACHE_VERSION) ||
+    (root.version !== 3 &&
+      root.version !== 4 &&
+      root.version !== 6 &&
+      root.version !== 7 &&
+      root.version !== USAGE_SCAN_CACHE_VERSION) ||
     !Array.isArray(root.coverage)
   ) {
     return [];
@@ -366,8 +769,8 @@ export function decodeScanCoverage(document: unknown): readonly ScanCoverage[] {
 
   const coverage: ScanCoverage[] = [];
   for (const row of root.coverage) {
-    if (!Array.isArray(row) || row.length !== 4) continue;
-    const [provider, rootPath, sinceMs, scannedAtMs] = row;
+    if (!Array.isArray(row) || (row.length !== 4 && row.length !== 5)) continue;
+    const [provider, rootPath, sinceMs, scannedAtMs, volumeId] = row;
     if (root.version < USAGE_SCAN_CACHE_VERSION && provider === "aistudio") continue;
     if (
       (provider !== "claude" &&
@@ -380,52 +783,34 @@ export function decodeScanCoverage(document: unknown): readonly ScanCoverage[] {
       typeof sinceMs !== "number" ||
       !Number.isFinite(sinceMs) ||
       typeof scannedAtMs !== "number" ||
-      !Number.isFinite(scannedAtMs)
+      !Number.isFinite(scannedAtMs) ||
+      (volumeId !== undefined && typeof volumeId !== "string")
     ) {
       continue;
     }
-    coverage.push({ provider, rootPath, sinceMs, scannedAtMs });
+    coverage.push({
+      provider,
+      rootPath,
+      sinceMs,
+      scannedAtMs,
+      ...(volumeId === undefined ? {} : { volumeId }),
+    });
   }
   return coverage;
 }
 
-export interface PruneOptions {
-  /** Files the walk just saw. Only meaningful inside the walked window. */
-  readonly livePaths: ReadonlySet<string>;
-  /**
-   * Roots the walk actually completed. Absence from `livePaths` only proves a
-   * file is gone when its root was walked: a provider whose directory failed to
-   * resolve this pass must not have its warm entries purged.
-   */
-  readonly walkedRoots: readonly string[];
-  /** Start of the walked window; entries older than this were not looked for. */
-  readonly windowStartMs: number;
-  /** Entries older than this are dropped regardless. */
-  readonly retentionCutoffMs: number;
-}
-
-/**
- * Drops aged-out entries, and entries for files that have disappeared.
- *
- * The walk only covers the requested window, so absence from `livePaths` only
- * proves deletion for entries *inside* that window. Pruning everything the walk
- * missed would evict the 30-day entries every time someone looked at 7 days.
- *
- * Replaces an earlier record cap that cleared the whole cache once exceeded,
- * which meant a large enough window never warmed up at all.
- */
-export function pruneScanCache(cache: ScanCache, options: PruneOptions): number {
+/** Drops cached entries only after their usage retention period has expired. */
+export function pruneScanCache(cache: ScanCache, retentionCutoffMs: number): number {
   let removed = 0;
   for (const [path, entry] of cache) {
-    const agedOut = entry.mtimeMs < options.retentionCutoffMs;
-    const underWalkedRoot = options.walkedRoots.some(
-      (root) =>
-        path === root ||
-        path.startsWith(root.endsWith("/") || root.endsWith("\\") ? root : `${root}/`),
-    );
-    const deleted =
-      underWalkedRoot && entry.mtimeMs >= options.windowStartMs && !options.livePaths.has(path);
-    if (agedOut || deleted) {
+    let latestRetainedAtMs = entry.mtimeMs;
+    for (const record of entry.records) {
+      latestRetainedAtMs = Math.max(latestRetainedAtMs, record.timestampMs);
+    }
+    for (const observation of entry.repeatedInputObservations ?? []) {
+      latestRetainedAtMs = Math.max(latestRetainedAtMs, observation.observedAtMs);
+    }
+    if (latestRetainedAtMs < retentionCutoffMs) {
       cache.delete(path);
       removed += 1;
     }

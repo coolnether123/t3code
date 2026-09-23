@@ -67,18 +67,18 @@ export function TokenBudgetPanel({
             : { input: 0.2, cached: 0.7, writes: 0, output: 0.1 };
   return (
     <section
-      aria-label="Remaining token estimates"
+      aria-label="API-price token comparisons"
       className="min-w-0 rounded-xl border border-border bg-card/30"
     >
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border px-5 py-4">
         <div>
-          <h2 className="text-sm font-medium">How far could the rest go?</h2>
+          <h2 className="text-sm font-medium">Model comparisons at API prices</h2>
           <p className="mt-1 text-xs text-muted-foreground">
             {currentPrefixThrough
               ? `Provisional current-cycle value through ${new Date(currentPrefixThrough).toLocaleString()}.`
               : provisional
                 ? "Provisional value from the previous completed cycle."
-                : "Spend the same estimated API value on a different model."}
+                : "Apply the estimated API-equivalent value of your remaining quota to each model."}
           </p>
           {provisional && calibration ? (
             <p className="mt-1 text-xs text-muted-foreground">
@@ -87,9 +87,14 @@ export function TokenBudgetPanel({
             </p>
           ) : null}
         </div>
-        <span className="font-mono text-lg tabular-nums">
-          {budgetUsd === null ? "Learning" : `≈ ${formatUsd(budgetUsd)}`}
-        </span>
+        <div className="text-right">
+          <span className="block text-xs text-muted-foreground">
+            Estimated API-price equivalent
+          </span>
+          <span className="font-mono text-lg tabular-nums">
+            {budgetUsd === null ? "Learning" : `≈ ${formatUsd(budgetUsd)}`}
+          </span>
+        </div>
       </div>
       <div className="flex flex-wrap items-center gap-x-5 gap-y-3 px-5 py-4 text-xs">
         <label className="flex items-center gap-2">
@@ -229,9 +234,9 @@ export function TokenBudgetPanel({
           </p>
         ) : null}
         <p>
-          Each row is an alternative use of the whole estimate. Changing models can change Codex
-          usage consumption, so these are API-price comparisons, not guaranteed Codex tokens. Tool
-          fees and regional surcharges are excluded.
+          Each row applies the same estimate to one model; rows cannot be added together. These
+          API-price comparisons do not predict Codex quota consumption. Tool fees and regional
+          surcharges are excluded.
         </p>
         <a
           href={TOKEN_PRICE_SOURCE}
@@ -239,7 +244,7 @@ export function TokenBudgetPanel({
           rel="noreferrer"
           className="inline-flex min-h-8 items-center underline underline-offset-4"
         >
-          OpenAI rates · verified Sep 5, 2026
+          OpenAI rates · verified Sep 23, 2026
         </a>
       </div>
       {models && models.length > 0 ? (

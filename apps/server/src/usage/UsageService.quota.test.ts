@@ -51,6 +51,34 @@ describe("history-only usage requests", () => {
 
     expect(resolveCodexQuotaSettings(settings)?.useDesktopAppDaemon).toBe(true);
   });
+  it.effect("exposes bounded pricing and quota report modes", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const service = yield* make.pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          exists: () => Effect.succeed(false),
+        }),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("Offline fixture")),
+        ),
+      );
+      const window = {
+        sinceDay: UsageDay.make("2026-08-01"),
+        untilDay: UsageDay.make("2026-08-30"),
+        timeZone: "UTC",
+      };
+      const pricing = yield* service.readReport({ ...window, mode: "pricing" });
+      expect(pricing.mode).toBe("pricing");
+      expect(pricing.calculation.costBasis).toBe("apiEquivalent");
+      const quota = yield* service.readReport({ ...window, mode: "quota", limit: 1 });
+      if (quota.mode !== "quota") throw new Error("expected quota report");
+      expect(quota.mode).toBe("quota");
+      expect(quota.quotaHistory.status).toBe("ready");
+      expect(quota.samplesTruncated).toBe(false);
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
 
   it.effect("manual revalidation bypasses a warm summary and replaces that cache entry", () =>
     Effect.gen(function* () {

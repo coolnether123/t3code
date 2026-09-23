@@ -21,6 +21,7 @@ const summary: UsageSummary = {
   pricing: {
     status: "cached",
     source: "test",
+    revision: null,
     fetchedAt: null,
     knownModels: 0,
   },
@@ -46,6 +47,13 @@ describe("usageSummaryCacheKey", () => {
         quotaIntervals: [{ ...request.quotaIntervals[0]!, untilTime: "2026-07-21T00:01:00Z" }],
       }),
     ).not.toBe(usageSummaryCacheKey(request));
+  });
+  it("isolates provider, session, turn, and grouping selections", () => {
+    const plain = usageSummaryCacheKey(input);
+    expect(usageSummaryCacheKey({ ...input, providers: ["codex"] })).not.toBe(plain);
+    expect(usageSummaryCacheKey({ ...input, sessionIds: ["session-1"] })).not.toBe(plain);
+    expect(usageSummaryCacheKey({ ...input, turnIds: ["turn-1"] })).not.toBe(plain);
+    expect(usageSummaryCacheKey({ ...input, groupBy: "turn" })).not.toBe(plain);
   });
   it("separates different reporting windows", () => {
     expect(usageSummaryCacheKey(input)).not.toBe(

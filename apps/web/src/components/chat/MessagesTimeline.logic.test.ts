@@ -618,6 +618,81 @@ describe("deriveMessagesTimelineRows", () => {
     ]);
   });
 
+  it("keeps Worker start rows visible when their parent turn folds", () => {
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        {
+          id: "assistant-first",
+          kind: "message",
+          createdAt: "2026-01-01T00:00:01Z",
+          message: {
+            id: "assistant-first" as never,
+            role: "assistant",
+            text: "Starting a worker.",
+            turnId: "turn-1" as never,
+            createdAt: "2026-01-01T00:00:01Z",
+            updatedAt: "2026-01-01T00:00:01Z",
+            streaming: false,
+          },
+        },
+        {
+          id: "worker-start",
+          kind: "work",
+          createdAt: "2026-01-01T00:00:02Z",
+          entry: {
+            id: "worker-start",
+            createdAt: "2026-01-01T00:00:02Z",
+            turnId: "turn-1" as never,
+            label: "Started Scout",
+            tone: "tool",
+            workerToolCall: {
+              toolName: "worker_start",
+              action: "Started Worker",
+              state: "completed",
+              workerIds: ["worker-1"],
+              workers: [{ id: "worker-1", name: "Scout", status: "running" }],
+              startedAt: "2026-01-01T00:00:02Z",
+            },
+          },
+        },
+        {
+          id: "ordinary-tool",
+          kind: "work",
+          createdAt: "2026-01-01T00:00:03Z",
+          entry: {
+            id: "ordinary-tool",
+            createdAt: "2026-01-01T00:00:03Z",
+            turnId: "turn-1" as never,
+            label: "Checked files",
+            tone: "tool",
+          },
+        },
+        {
+          id: "assistant-final",
+          kind: "message",
+          createdAt: "2026-01-01T00:00:04Z",
+          message: {
+            id: "assistant-final" as never,
+            role: "assistant",
+            text: "Worker continues in the background.",
+            turnId: "turn-1" as never,
+            createdAt: "2026-01-01T00:00:04Z",
+            updatedAt: "2026-01-01T00:00:04Z",
+            streaming: false,
+          },
+        },
+      ],
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      canonicalEditMessageIdByTimelineMessageId: new Map(),
+    });
+
+    expect(rows.map((row) => row.id)).toContain("worker-start");
+    expect(rows.map((row) => row.id)).not.toContain("ordinary-tool");
+    expect(rows.some((row) => row.kind === "turn-fold")).toBe(true);
+  });
+
   it("derives a sane duration for a steer-superseded turn with one instant commentary message", () => {
     // A steer ends the previous turn early: its only message completes the
     // instant it is created, and trailing work entries land after it. The

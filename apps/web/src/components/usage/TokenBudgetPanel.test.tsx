@@ -10,10 +10,12 @@ it("lets a user compare output and Fast-mode budgets without inventing an observ
   try {
     await act(async () =>
       root.render(
-        <TokenBudgetPanel budgetUsd={1200} models={null} observedAt="2026-09-05T06:00:00Z" />,
+        <TokenBudgetPanel budgetUsd={500} models={null} observedAt="2026-09-23T06:00:00Z" />,
       ),
     );
     expect(container.textContent).toContain("Exact model totals are not available");
+    expect(container.textContent).toContain("Model comparisons at API prices");
+    expect(container.textContent).toContain("Estimated API-price equivalent");
     expect(container.textContent).not.toContain("1.00B");
     const select = container.querySelector("select")!;
     await act(async () => {
@@ -23,7 +25,10 @@ it("lets a user compare output and Fast-mode budgets without inventing an observ
     const luna = [...container.querySelectorAll("tbody tr")].find((row) =>
       row.textContent?.includes("Luna"),
     )!;
+    expect(luna.textContent).toContain("gpt-6-luna");
+    expect(luna.textContent).toContain("GPT-6 Luna");
     expect(luna.textContent).toContain("1.00B");
+    expect(container.textContent).toContain("gpt-6-sol");
     const fast = container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')[1]!;
     await act(async () => fast.click());
     expect(luna.textContent).toContain("500.00M");

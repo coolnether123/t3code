@@ -134,6 +134,7 @@ function withFakeCodexEnv<A, E, R>(
   input: FakeCodexInput & {
     launchArgs?: string;
     environment?: NodeJS.ProcessEnv;
+    models?: ReadonlyArray<string | { readonly slug: string; readonly isCustom?: boolean }>;
   },
   effectFn: (textGeneration: TextGeneration.TextGeneration["Service"]) => Effect.Effect<A, E, R>,
 ) {
@@ -142,7 +143,21 @@ function withFakeCodexEnv<A, E, R>(
     const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-codex-text-" });
     const codexPath = yield* makeFakeCodexBinary(tempDir, input);
     const config = decodeCodexSettings({ binaryPath: codexPath, launchArgs: input.launchArgs });
-    const textGeneration = yield* makeCodexTextGeneration(config, input.environment);
+    const textGeneration = yield* makeCodexTextGeneration(
+      config,
+      input.environment,
+      Effect.succeed(
+        (input.models ?? []).map((model) => {
+          const slug = typeof model === "string" ? model : model.slug;
+          return {
+            slug,
+            name: slug,
+            isCustom: typeof model === "string" ? false : (model.isCustom ?? false),
+            capabilities: null,
+          };
+        }),
+      ),
+    );
     return yield* effectFn(textGeneration);
   }).pipe(Effect.scoped);
 }
@@ -360,6 +375,47 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
           });
 
           expect(generated.title).toBe("Investigate websocket reconnect regressions aft...");
+        }),
+    ),
+  );
+
+  for (const selectedModel of ["gpt-5.6-luna", "openai.gpt-5.6-luna"]) {
+    it.effect(`dispatches the qualified live model for ${selectedModel}`, () =>
+      withFakeCodexEnv(
+        {
+          output: JSON.stringify({ title: "Bedrock title" }),
+          models: ["openai.gpt-5.6-luna"],
+          requireArg: "--model openai.gpt-5.6-luna",
+          forbidArg: "--model gpt-5.6-luna",
+        },
+        (textGeneration) =>
+          Effect.gen(function* () {
+            const result = yield* textGeneration.generateThreadTitle({
+              cwd: process.cwd(),
+              message: "Describe this change",
+              modelSelection: createModelSelection(ProviderInstanceId.make("codex"), selectedModel),
+            });
+            expect(result.title).toBe("Bedrock title");
+          }),
+      ),
+    );
+  }
+
+  it.effect("dispatches custom Codex model identifiers unchanged", () =>
+    withFakeCodexEnv(
+      {
+        output: JSON.stringify({ title: "Custom title" }),
+        models: [{ slug: "vendor/custom:model", isCustom: true }],
+        requireArg: "--model vendor/custom:model",
+      },
+      (textGeneration) =>
+        textGeneration.generateThreadTitle({
+          cwd: process.cwd(),
+          message: "Describe this change",
+          modelSelection: createModelSelection(
+            ProviderInstanceId.make("codex"),
+            "vendor/custom:model",
+          ),
         }),
     ),
   );

@@ -89,6 +89,19 @@ export function getComposerProviderState(input: ComposerProviderStateInput): Com
   }
   const caps = getProviderModelCapabilities(models, model, provider, planModeEnabled);
   const descriptors = getProviderOptionDescriptors({ caps, selections: modelOptions });
+  const dispatchSelections = !planModeEnabled
+    ? modelOptions?.map((selection) =>
+        selection.id === "agent" && selection.value === "plan"
+          ? {
+              ...selection,
+              value:
+                getProviderOptionCurrentValue(
+                  descriptors.find((descriptor) => descriptor.id === "agent"),
+                ) ?? selection.value,
+            }
+          : selection,
+      )
+    : modelOptions;
   const primarySelectDescriptor = descriptors.find(
     (descriptor): descriptor is Extract<(typeof descriptors)[number], { type: "select" }> =>
       descriptor.type === "select",
@@ -104,7 +117,7 @@ export function getComposerProviderState(input: ComposerProviderStateInput): Com
     promptEffort,
     modelOptionsForDispatch: buildExplicitProviderOptionSelectionsFromDescriptors(
       descriptors,
-      modelOptions,
+      dispatchSelections,
     ),
     ...(ultrathinkActive
       ? {

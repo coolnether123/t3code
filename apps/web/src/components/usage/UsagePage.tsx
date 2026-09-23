@@ -1,13 +1,18 @@
 import type { EnvironmentId, UsageProviderKind } from "@t3tools/contracts";
+import { useAtomValue } from "@effect/atom-react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { CheckIcon, RefreshCwIcon, SlidersHorizontalIcon, XIcon } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useEffectEvent, useMemo, useState } from "react";
 
 import type { DailyTotals, HourlyTotals } from "@t3tools/shared/usageMerge";
+import { refreshUsageLimits } from "@t3tools/client-runtime/state/usage";
 
 import { isElectron } from "../../env";
 import { cn } from "../../lib/utils";
 import { useUsage, type EnvironmentUsageStatus } from "../../state/usage";
+import { environmentPresentations } from "../../state/presentation";
+import { serverEnvironment } from "../../state/server";
+import { useAtomCommand } from "../../state/use-atom-command";
 import { BirthdayGreeting } from "../BirthdayCelebration";
 import {
   enumerateDays,
@@ -70,6 +75,11 @@ export function UsagePage() {
   const { days: windowDays, window } = windowSelection;
   const isPast24Hours = windowDays === 1;
   const { merged, environments, isPending, refresh } = useUsage(window);
+  const presentations = useAtomValue(environmentPresentations.presentationsAtom);
+  const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
+    reportFailure: false,
+  });
+  const [limitsNow, setLimitsNow] = useState(() => Date.now());
 
   // An offline or slow device must not hide totals already reported by the
   // other environments. The coverage notice identifies pending devices.
@@ -78,6 +88,26 @@ export function UsagePage() {
   const usageUnavailable =
     environments.length > 0 &&
     environments.every((environment) => environment.summary === null && environment.error !== null);
+
+  const refreshLimits = async (automatic = false) => {
+    try {
+      await Promise.all(
+        Array.from(presentations, ([environmentId, presentation]) => {
+          if (selectedEnvironmentIds !== null && !selectedEnvironmentIds.has(environmentId)) return;
+          if (presentation.connection.phase !== "connected" || presentation.serverConfig === null) {
+            return;
+          }
+          return refreshUsageLimits(
+            environmentId,
+            () => refreshProviders({ environmentId, input: {} }),
+            automatic,
+          ).catch(() => undefined);
+        }),
+      );
+    } finally {
+      setLimitsNow(Date.now());
+    }
+  };
 
   const days = useMemo(
     () => enumerateDays(window.sinceDay, window.untilDay),
@@ -107,6 +137,7 @@ export function UsagePage() {
   };
   const refreshWindow = () => {
     if (refreshing) return;
+    void refreshLimits();
     const nextWindow = makeWindow(windowDays, undefined, isPast24Hours ? "hour" : "day");
     if (
       nextWindow.sinceDay === window.sinceDay &&
@@ -119,6 +150,22 @@ export function UsagePage() {
       setWindowSelection({ days: windowDays, window: nextWindow });
     }
   };
+  const connectedLimitsEnvironments = [...presentations]
+    .filter(
+      ([environmentId, presentation]) =>
+        presentation.connection.phase === "connected" &&
+        presentation.serverConfig !== null &&
+        (selectedEnvironmentIds === null || selectedEnvironmentIds.has(environmentId)),
+    )
+    .map(([environmentId]) => environmentId)
+    .sort()
+    .join(",");
+  const autoRefreshLimits = useEffectEvent(() => {
+    void refreshLimits(true);
+  });
+  useEffect(() => {
+    if (!settling && connectedLimitsEnvironments) autoRefreshLimits();
+  }, [settling, connectedLimitsEnvironments]);
   const windowLabel =
     isPast24Hours && window.sinceTime !== undefined && window.untilTime !== undefined
       ? `${formatDateTimeShort(window.sinceTime, window.timeZone)} to ${formatDateTimeShort(window.untilTime, window.timeZone)}`
@@ -263,7 +310,10 @@ export function UsagePage() {
                   staleEnvironments={merged.staleEnvironments}
                 />
 
-                <UsageLimitsSection selectedEnvironmentIds={selectedEnvironmentIds} />
+                <UsageLimitsSection
+                  selectedEnvironmentIds={selectedEnvironmentIds}
+                  now={limitsNow}
+                />
 
                 <section className="grid gap-6 lg:grid-cols-[minmax(0,16rem)_minmax(0,1fr)]">
                   <div className="flex min-w-0 flex-col gap-5">

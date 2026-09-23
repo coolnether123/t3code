@@ -3,11 +3,17 @@ import {
   watchResetAnnouncements,
   type ResetNews,
 } from "@t3tools/client-runtime/resetAnnouncements";
+import {
+  publicResetCostEstimates,
+  publicResetIntervals,
+  watchPublicResetHistory,
+  type PublicResetHistory,
+} from "@t3tools/client-runtime/publicResetHistory";
 import { Link } from "@tanstack/react-router";
 import { RefreshCwIcon } from "lucide-react";
 import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { refreshCodexMonitor } from "@t3tools/client-runtime/usageRefresh";
-import { formatUsd, makeWindow } from "@t3tools/shared/usageFormat";
+import { formatTokens, formatUsd, makeWindow } from "@t3tools/shared/usageFormat";
 import {
   quotaMonitoringSamples,
   quotaCostWindow,
@@ -18,6 +24,9 @@ import {
   quotaValueWithHistoricalCalibration,
   quotaValueWithSnapshot,
   retainQuotaValueSnapshots,
+  type QuotaEnvironment,
+  type QuotaPeriod,
+  type QuotaValue,
   type QuotaValueSnapshot,
 } from "@t3tools/shared/usageQuota";
 
@@ -34,6 +43,8 @@ import { monitoredModels } from "./usageTokenBudget";
 import { apiPaceInterval } from "./usageApiPace";
 import type { PriorApiPaceInput } from "./usageApiPace";
 import { UsagePaceChart } from "./UsagePaceChart";
+import { UsageCycleComparison } from "./UsageCycleComparison";
+import { chartActivityIntervals } from "./usageChartActivity";
 import { ResetCheckPanel } from "./ResetCheckPanel";
 import { CommunityCheckPanel } from "./CommunityCheckPanel";
 
@@ -49,6 +60,40 @@ const estimate = (value: number) =>
     maximumFractionDigits: 0,
   }).format(value);
 
+function monitoredPeriodModels(
+  period: QuotaPeriod,
+  value: QuotaValue,
+  environments: readonly QuotaEnvironment[],
+) {
+  const savedPrefix = quotaSavedCostPrefix(period, environments);
+  const interval = value.costObservedUntil
+    ? (savedPrefix?.interval ?? null)
+    : {
+        id: period.id,
+        sinceTime: period.first.observedAt,
+        untilTime: period.last.observedAt,
+      };
+  if (!interval) return null;
+  const modelEnvironments =
+    value.costObservedUntil && savedPrefix
+      ? environments.map((environment) => ({
+          ...environment,
+          summary: environment.summary
+            ? {
+                ...environment.summary,
+                quotaCosts: undefined,
+                quotaCostSnapshots: savedPrefix.rows,
+              }
+            : environment.summary,
+        }))
+      : environments;
+  const models = monitoredModels(interval, modelEnvironments);
+  return models !== null &&
+    models.some((row) => Object.values(row.totals).some((tokens) => tokens > 0))
+    ? models
+    : null;
+}
+
 export function UsageResetPage() {
   const [historyInput] = useState(() => ({ ...makeWindow(1), quotaHistoryOnly: true }));
   const [news, setNews] = useState<ResetNews>({
@@ -57,12 +102,26 @@ export function UsageResetPage() {
     status: "loading",
   });
   const newsWatcher = useRef<ReturnType<typeof watchResetAnnouncements> | null>(null);
+  const [publicHistory, setPublicHistory] = useState<PublicResetHistory>({
+    announcements: [],
+    checkedAt: null,
+    status: "loading",
+  });
+  const publicHistoryWatcher = useRef<ReturnType<typeof watchPublicResetHistory> | null>(null);
   useEffect(() => {
     const watcher = watchResetAnnouncements(setNews);
     newsWatcher.current = watcher;
     return () => {
       watcher.stop();
       newsWatcher.current = null;
+    };
+  }, []);
+  useEffect(() => {
+    const watcher = watchPublicResetHistory(setPublicHistory);
+    publicHistoryWatcher.current = watcher;
+    return () => {
+      watcher.stop();
+      publicHistoryWatcher.current = null;
     };
   }, []);
   const refreshActive = useRef(false);
@@ -81,6 +140,7 @@ export function UsageResetPage() {
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, []);
+  const [selectedCycle, setSelectedCycle] = useState<string | null>(null);
   const [trackerId, setTrackerId] = useState("");
   const [selectedIds, setSelectedIds] = useState<readonly string[] | null>(null);
   const trackers = history.environments.filter(
@@ -96,10 +156,20 @@ export function UsageResetPage() {
   );
   const rawSamples = tracker?.summary?.quotaHistory?.samples;
   const samples = useMemo(() => quotaMonitoringSamples(rawSamples ?? []), [rawSamples]);
-  // Keep the complete saved stream for chart/fallback presentation. Cost queries
-  // below continue to use only the active monitoring run.
+  // Graphs and cost panels share the complete saved account cycles.
   const historicalPeriods = useMemo(() => quotaPeriods(rawSamples ?? []), [rawSamples]);
-  const periods = useMemo(() => quotaPeriods(samples), [samples]);
+  const selectedPeriod =
+    historicalPeriods.find((period) => period.id === selectedCycle) ?? historicalPeriods.at(-1);
+  const periods = useMemo(
+    () =>
+      selectedPeriod
+        ? historicalPeriods.slice(
+            Math.max(0, historicalPeriods.indexOf(selectedPeriod) - 1),
+            historicalPeriods.indexOf(selectedPeriod) + 1,
+          )
+        : [],
+    [historicalPeriods, selectedPeriod],
+  );
   const intervals = useMemo(() => quotaIntervals(periods), [periods]);
   const paceInterval = useMemo(() => apiPaceInterval(intervals.at(-1)), [intervals]);
   const costInput = useMemo(
@@ -107,12 +177,67 @@ export function UsageResetPage() {
     [historyInput, intervals],
   );
   const costs = useUsage(costInput);
+  const [chartRange, setChartRange] = useState<{
+    cycleId: string;
+    range: readonly [number, number] | null;
+  } | null>(null);
+  const activityIntervals = useMemo(() => {
+    if (!selectedPeriod) return [];
+    const cycleSamples = (rawSamples ?? []).filter(
+      (sample) =>
+        sample.observedAt >= selectedPeriod.first.observedAt &&
+        sample.observedAt <= selectedPeriod.last.observedAt,
+    );
+    return chartActivityIntervals(
+      cycleSamples,
+      chartRange?.cycleId === selectedPeriod.id ? chartRange.range : null,
+    );
+  }, [selectedPeriod, rawSamples, chartRange]);
+  const publicIntervals = useMemo(
+    () => publicResetIntervals(publicHistory.announcements),
+    [publicHistory.announcements],
+  );
+  const cycleCostsReady =
+    intervals.length === 0 ||
+    costs.environments.some(
+      (environment) =>
+        environment.summary?.quotaCosts !== undefined &&
+        environment.summary.sources.every((source) => source.status !== "partial"),
+    );
+  const publicCostInput = useMemo(
+    () => (cycleCostsReady ? (quotaCostWindow(publicIntervals) ?? historyInput) : historyInput),
+    [historyInput, publicIntervals, cycleCostsReady],
+  );
+  const publicCosts = useUsage(publicCostInput);
   const paceInput = useMemo(
-    () => (paceInterval ? quotaCostWindow([paceInterval])! : historyInput),
-    [paceInterval, historyInput],
+    () => (cycleCostsReady && paceInterval ? quotaCostWindow([paceInterval])! : historyInput),
+    [paceInterval, historyInput, cycleCostsReady],
   );
   const paceCosts = useUsage(paceInput);
-  const historical = historicalPeriods.at(-2);
+  const [requestedActivityIntervals, setRequestedActivityIntervals] = useState(activityIntervals);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setRequestedActivityIntervals(activityIntervals), 300);
+    return () => window.clearTimeout(timer);
+  }, [activityIntervals]);
+  const activityInput = useMemo(
+    () =>
+      cycleCostsReady
+        ? (quotaCostWindow(requestedActivityIntervals) ?? historyInput)
+        : historyInput,
+    [requestedActivityIntervals, cycleCostsReady, historyInput],
+  );
+  const activityCosts = useUsage(activityInput);
+  const chartActivity = useMemo(() => {
+    const environments = activityCosts.environments.filter(
+      (environment) =>
+        effectiveSelectedIds === null || effectiveSelectedIds.includes(environment.environmentId),
+    );
+    return activityIntervals.map((interval) => ({
+      interval,
+      models: monitoredModels(interval, environments),
+    }));
+  }, [activityIntervals, activityCosts.environments, effectiveSelectedIds]);
+  const historical = periods.at(-2);
   const paceModels = useMemo(
     () =>
       paceInterval
@@ -148,6 +273,34 @@ export function UsageResetPage() {
           effectiveSelectedIds === null || effectiveSelectedIds.includes(environment.environmentId),
       ),
     [costEnvironments, effectiveSelectedIds],
+  );
+  const effectivePublicSelectedIds = useMemo(
+    () =>
+      selectedIds ??
+      (tracker
+        ? [tracker.environmentId]
+        : publicCosts.environments[0]
+          ? [publicCosts.environments[0].environmentId]
+          : []),
+    [publicCosts.environments, selectedIds, tracker?.environmentId],
+  );
+  const selectedPublicCosts = useMemo(
+    () =>
+      publicCosts.environments.filter((environment) =>
+        effectivePublicSelectedIds.includes(environment.environmentId),
+      ),
+    [effectivePublicSelectedIds, publicCosts.environments],
+  );
+  const publicEstimates = useMemo(
+    () => publicResetCostEstimates(publicHistory.announcements, selectedPublicCosts),
+    [publicHistory.announcements, selectedPublicCosts],
+  );
+  const publicCostScope =
+    selectedPublicCosts.length === 0
+      ? "No computers selected"
+      : selectedPublicCosts.map((environment) => environment.label).join(", ");
+  const bankedAnnouncements = publicHistory.announcements.filter(
+    (announcement) => announcement.resetType === "banked",
   );
   const selectedWithSavedCosts = useMemo(
     () =>
@@ -201,7 +354,7 @@ export function UsageResetPage() {
     };
   });
   const last = samples.at(-1);
-  const current = values.at(-1);
+  const current = values.find(({ period }) => period.id === selectedPeriod?.id);
   const calibrationPeriod = useMemo(() => {
     const calibration = current?.value.historicalCalibration;
     if (!calibration) return historical;
@@ -221,11 +374,12 @@ export function UsageResetPage() {
     if (refreshActive.current) return;
     refreshActive.current = true;
     setRefreshing(true);
-    setRefreshMessage("Refreshing readings, API costs and reset news…");
+    setRefreshMessage("Refreshing readings, API costs and public resets…");
     try {
       setRefreshMessage(
         await refreshCodexMonitor({
           trackerId: tracker?.environmentId,
+          selectedCycleId: selectedCycle,
           refreshHistory: history.refresh,
           refreshCosts: async (input) => {
             const recentInterval = apiPaceInterval(input.quotaIntervals?.at(-1));
@@ -233,10 +387,18 @@ export function UsageResetPage() {
             const replies = await Promise.all([
               costs.refresh(input),
               recentInput ? paceCosts.refresh(recentInput) : Promise.resolve([]),
+              publicCosts.refresh(publicCostInput),
+              activityCosts.refresh(activityInput),
             ]);
             return replies.flat();
           },
-          refreshNews: () => newsWatcher.current?.refresh() ?? Promise.resolve(false),
+          refreshNews: async () => {
+            const results = await Promise.all([
+              newsWatcher.current?.refresh() ?? Promise.resolve(false),
+              publicHistoryWatcher.current?.refresh() ?? Promise.resolve(false),
+            ]);
+            return results.some(Boolean);
+          },
           onProgress: setRefreshMessage,
         }),
       );
@@ -260,44 +422,11 @@ export function UsageResetPage() {
         : {}),
     };
   }, [calibrationPeriod, calibrationInterval, selectedWithSavedCosts, current, historical]);
-  const completed = values.slice(0, -1);
-  const currentModels = useMemo(() => {
-    if (!current) return null;
-    const savedPrefix = quotaSavedCostPrefix(current.period, selectedWithSavedCosts);
-    const modelInterval = current.value.costObservedUntil
-      ? (savedPrefix?.interval ?? null)
-      : {
-          id: current.period.id,
-          sinceTime: current.period.first.observedAt,
-          untilTime: current.period.last.observedAt,
-        };
-    const modelEnvironments =
-      current.value.costObservedUntil && savedPrefix
-        ? selectedWithSavedCosts.map((environment) => ({
-            ...environment,
-            summary: environment.summary
-              ? {
-                  ...environment.summary,
-                  quotaCosts: undefined,
-                  quotaCostSnapshots: savedPrefix.rows,
-                }
-              : environment.summary,
-          }))
-        : selectedWithSavedCosts;
-    if (!modelInterval) return null;
-    const models = monitoredModels(modelInterval, modelEnvironments);
-    return models !== null &&
-      models.length > 0 &&
-      models.some((row) => Object.values(row.totals).some((tokens) => tokens > 0))
-      ? models
-      : null;
-  }, [
-    current?.period.id,
-    current?.period.first.observedAt,
-    current?.period.last.observedAt,
-    current?.value.costObservedUntil,
-    selectedWithSavedCosts,
-  ]);
+  const currentModels = useMemo(
+    () =>
+      current ? monitoredPeriodModels(current.period, current.value, selectedWithSavedCosts) : null,
+    [current, selectedWithSavedCosts],
+  );
   const models =
     currentModels ??
     (current?.value.historicalCalibration !== undefined ? (priorApiPace?.models ?? null) : null);
@@ -325,6 +454,12 @@ export function UsageResetPage() {
             <a className="hover:text-foreground" href="#reset-history">
               Reset history
             </a>
+            <a className="hover:text-foreground" href="#cycle-comparison">
+              Compare cycles
+            </a>
+            <a className="hover:text-foreground" href="#public-reset-estimates">
+              Public reset estimates
+            </a>
             <a className="hover:text-foreground" href="#token-budget">
               Token planner
             </a>
@@ -348,11 +483,13 @@ export function UsageResetPage() {
       <ScrollArea className="min-h-0 flex-1">
         <WorkspacePageContainer
           width="expanded"
-          className="pb-[calc(env(safe-area-inset-bottom)+3rem)]"
+          className="max-w-none gap-3 px-3 pt-3 sm:px-5 pb-[calc(env(safe-area-inset-bottom)+3rem)]"
         >
-          <p role="status" aria-live="polite" className="text-xs text-muted-foreground">
-            {refreshMessage || "Weekly usage, model value and reset research"}
-          </p>
+          {refreshMessage ? (
+            <p role="status" aria-live="polite" className="text-xs text-muted-foreground">
+              {refreshMessage}
+            </p>
+          ) : null}
           {history.isPending && !last ? <p role="status">Reading Codex usage…</p> : null}
           {history.environments.map((environment) => {
             const saved = environment.summary?.quotaHistory;
@@ -362,7 +499,7 @@ export function UsageResetPage() {
               (environment.summary && saved === undefined
                 ? "Update this server to read quota history."
                 : null);
-            return message ? (
+            return message && (!tracker || environment.environmentId === tracker.environmentId) ? (
               <p
                 key={environment.environmentId}
                 role="status"
@@ -381,7 +518,14 @@ export function UsageResetPage() {
           {tracker && last && current ? (
             <>
               <UsagePaceChart
+                key={tracker.environmentId}
                 samples={rawSamples ?? samples}
+                activity={chartActivity}
+                onRangeChange={(range) => {
+                  if (selectedPeriod) setChartRange({ cycleId: selectedPeriod.id, range });
+                }}
+                selectedCycle={selectedCycle}
+                onCycleChange={setSelectedCycle}
                 news={news}
                 manualResets={
                   trackedManualResetCount === undefined
@@ -407,6 +551,13 @@ export function UsageResetPage() {
                 }
                 priorApiPace={priorApiPace}
               />
+              <UsageCycleComparison
+                key={tracker.environmentId}
+                period={current.period}
+                periods={historicalPeriods}
+                samples={rawSamples ?? []}
+                selectedIds={effectiveSelectedIds}
+              />
               <section
                 id="api-value"
                 className="rounded-xl border border-border bg-card/20 p-5"
@@ -428,7 +579,7 @@ export function UsageResetPage() {
                     </dd>
                   </div>
                   <div>
-                    <dt className="text-xs text-muted-foreground">Value of usage remaining</dt>
+                    <dt className="text-xs text-muted-foreground">Remaining quota at API prices</dt>
                     <dd className="mt-1 text-2xl tabular-nums">
                       {current.value.remainingValueUsd === null
                         ? "Learning"
@@ -454,15 +605,12 @@ export function UsageResetPage() {
                 current.value.remainingValueUsd === null ? (
                   <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
                     {current.period.usedPercentagePoints} of 5 percentage points observed. More
-                    readings are needed to estimate dollars left. The {100 - last.remainingPercent}%
-                    cycle total includes usage from before monitoring and cannot price this shorter
-                    interval.
+                    readings are needed to estimate dollars left. The{" "}
+                    {100 - current.period.last.remainingPercent}% cycle total includes usage from
+                    before monitoring and cannot price this shorter interval.
                   </p>
-                ) : current.value.reason ? (
+                ) : current.value.reason && !current.value.costObservedUntil ? (
                   <p className="mt-3 text-xs text-muted-foreground">{current.value.reason}</p>
-                ) : null}
-                {current.value.costUsd === null ? (
-                  <p className="mt-2 text-xs text-muted-foreground">{current.value.reason}</p>
                 ) : null}
                 {current.value.cachedAt ? (
                   <p className="mt-2 text-xs text-muted-foreground">
@@ -510,6 +658,23 @@ export function UsageResetPage() {
                       .toReversed()
                       .map((period) => {
                         const value = values.find((entry) => entry.period.id === period.id)?.value;
+                        const periodModels = value
+                          ? monitoredPeriodModels(period, value, selectedWithSavedCosts)
+                          : null;
+                        const inputTokens =
+                          periodModels?.reduce(
+                            (total, model) =>
+                              total +
+                              model.totals.uncachedInputTokens +
+                              model.totals.cachedInputTokens +
+                              model.totals.cacheCreationTokens,
+                            0,
+                          ) ?? 0;
+                        const outputTokens =
+                          periodModels?.reduce(
+                            (total, model) => total + model.totals.outputTokens,
+                            0,
+                          ) ?? 0;
                         const unusedLabel =
                           period.usedPercentagePoints === 0 && period.resetKind === "ambiguous"
                             ? "No quota use observed in this interval"
@@ -552,6 +717,55 @@ export function UsageResetPage() {
                                 {unusedLabel}
                               </p>
                             </div>
+                            {periodModels ? (
+                              <details className="w-full rounded-md border border-border/70 px-3 py-2">
+                                <summary className="cursor-pointer text-xs text-muted-foreground">
+                                  Per-model usage · {formatTokens(inputTokens)} input ·{" "}
+                                  {formatTokens(outputTokens)} output
+                                </summary>
+                                <div className="mt-2 overflow-x-auto">
+                                  <table
+                                    className="w-full min-w-[30rem] text-left text-xs"
+                                    aria-label={`Model usage ending ${dateTime(period.last.observedAt)}`}
+                                  >
+                                    <thead className="text-muted-foreground">
+                                      <tr>
+                                        <th className="py-1 pr-3 font-normal">Model</th>
+                                        <th className="px-3 py-1 text-right font-normal">Input</th>
+                                        <th className="px-3 py-1 text-right font-normal">Output</th>
+                                        <th className="py-1 pl-3 text-right font-normal">
+                                          API value
+                                        </th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {periodModels.map((model) => (
+                                        <tr key={model.model} className="border-t border-border/70">
+                                          <td className="py-1.5 pr-3">{model.model}</td>
+                                          <td className="px-3 py-1.5 text-right tabular-nums">
+                                            {formatTokens(
+                                              model.totals.uncachedInputTokens +
+                                                model.totals.cachedInputTokens +
+                                                model.totals.cacheCreationTokens,
+                                            )}
+                                          </td>
+                                          <td className="px-3 py-1.5 text-right tabular-nums">
+                                            {formatTokens(model.totals.outputTokens)}
+                                          </td>
+                                          <td className="py-1.5 pl-3 text-right tabular-nums">
+                                            {formatUsd(model.costUsd)}
+                                          </td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                                <p className="mt-2 text-[11px] text-muted-foreground">
+                                  Input includes cached and cache-creation tokens. Reasoning tokens
+                                  are included in output.
+                                </p>
+                              </details>
+                            ) : null}
                           </div>
                         );
                       })}
@@ -644,6 +858,183 @@ export function UsageResetPage() {
               </details>
             </>
           ) : null}
+          <section
+            id="public-reset-estimates"
+            className="border-t border-border pt-5"
+            aria-label="Estimated use between public resets"
+          >
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <h2 className="text-sm font-medium">Estimated use between public resets</h2>
+              <a
+                className="text-xs text-muted-foreground hover:text-foreground"
+                href="https://codex-resets.com/"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Codex Resets
+              </a>
+            </div>
+            <p className="mt-2 max-w-4xl text-xs leading-relaxed text-muted-foreground">
+              T3 backdates regular public reset announcements, then totals recorded Codex transcript
+              usage between them at current API rates. The source does not track your account, and
+              T3 sends it no account or transcript data. Announcement time can differ from
+              propagation time, so every amount below is an API-equivalent estimate.
+            </p>
+            {bankedAnnouncements.length > 0 ? (
+              <p className="mt-2 text-xs text-muted-foreground">
+                {bankedAnnouncements.length} banked reset grant
+                {bankedAnnouncements.length === 1 ? " is" : "s are"} listed by the source but do not
+                split periods because redemption is account-specific.
+              </p>
+            ) : null}
+            {publicCosts.environments.length > 0 ? (
+              <details className="mt-3 rounded-md border border-border/70 px-3 py-2">
+                <summary className="cursor-pointer text-xs text-muted-foreground">
+                  Computers included: {publicCostScope}
+                </summary>
+                <div className="mt-2 flex flex-wrap gap-x-4 gap-y-2">
+                  {publicCosts.environments.map((environment) => {
+                    const checked = effectivePublicSelectedIds.includes(environment.environmentId);
+                    return (
+                      <label
+                        key={environment.environmentId}
+                        className="flex items-center gap-2 text-xs"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(event) => {
+                            const ids = selectedIds ?? effectivePublicSelectedIds;
+                            setSelectedIds(
+                              event.currentTarget.checked
+                                ? [...new Set([...ids, environment.environmentId])]
+                                : ids.filter((id) => id !== environment.environmentId),
+                            );
+                          }}
+                        />
+                        <span>{environment.label}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </details>
+            ) : null}
+            {publicHistory.status === "loading" ? (
+              <p role="status" className="mt-3 text-sm text-muted-foreground">
+                Reading public reset history…
+              </p>
+            ) : publicHistory.status === "unavailable" ? (
+              <p role="status" className="mt-3 text-sm text-muted-foreground">
+                Codex Resets is unavailable. Saved quota observations still work normally.
+              </p>
+            ) : publicEstimates.length === 0 ? (
+              <p className="mt-3 text-sm text-muted-foreground">
+                The public history does not contain two regular resets yet.
+              </p>
+            ) : (
+              <div className="mt-3 divide-y divide-border">
+                {publicEstimates.toReversed().map((row) => {
+                  const inputTokens = row.models.reduce(
+                    (total, model) =>
+                      total +
+                      model.totals.uncachedInputTokens +
+                      model.totals.cachedInputTokens +
+                      model.totals.cacheCreationTokens,
+                    0,
+                  );
+                  const outputTokens = row.models.reduce(
+                    (total, model) => total + model.totals.outputTokens,
+                    0,
+                  );
+                  return (
+                    <div
+                      key={row.interval.id}
+                      className="flex flex-wrap justify-between gap-3 py-3"
+                    >
+                      <div>
+                        <p className="text-sm">
+                          {row.endedBy.sourceUrl ? (
+                            <a
+                              className="hover:underline"
+                              href={row.endedBy.sourceUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              Public reset announced {dateTime(row.endedBy.announcedAt)}
+                            </a>
+                          ) : (
+                            <>Public reset observed {dateTime(row.endedBy.announcedAt)}</>
+                          )}
+                        </p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          From {dateTime(row.startedBy.announcedAt)}
+                          {row.endedBy.sourceType === "observed" ? " · observed report" : ""}
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-sm tabular-nums">
+                          {row.costUsd === null ? "Estimate unavailable" : formatUsd(row.costUsd)}
+                        </p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {row.records > 0
+                            ? `${row.records.toLocaleString()} recorded usage rows`
+                            : row.reason}
+                        </p>
+                      </div>
+                      {row.reason && row.records > 0 ? (
+                        <p className="w-full text-xs text-muted-foreground">{row.reason}</p>
+                      ) : null}
+                      {row.models.length > 0 ? (
+                        <details className="w-full rounded-md border border-border/70 px-3 py-2">
+                          <summary className="cursor-pointer text-xs text-muted-foreground">
+                            Model estimates · {formatTokens(inputTokens)} input ·{" "}
+                            {formatTokens(outputTokens)} output
+                          </summary>
+                          <div className="mt-2 overflow-x-auto">
+                            <table
+                              className="w-full min-w-[30rem] text-left text-xs"
+                              aria-label={`Estimated model use before reset ${dateTime(row.endedBy.announcedAt)}`}
+                            >
+                              <thead className="text-muted-foreground">
+                                <tr>
+                                  <th className="py-1 pr-3 font-normal">Model</th>
+                                  <th className="px-3 py-1 text-right font-normal">Input</th>
+                                  <th className="px-3 py-1 text-right font-normal">Output</th>
+                                  <th className="py-1 pl-3 text-right font-normal">API value</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {row.models.map((model) => (
+                                  <tr key={model.model} className="border-t border-border/70">
+                                    <td className="py-1.5 pr-3">{model.model}</td>
+                                    <td className="px-3 py-1.5 text-right tabular-nums">
+                                      {formatTokens(
+                                        model.totals.uncachedInputTokens +
+                                          model.totals.cachedInputTokens +
+                                          model.totals.cacheCreationTokens,
+                                      )}
+                                    </td>
+                                    <td className="px-3 py-1.5 text-right tabular-nums">
+                                      {formatTokens(model.totals.outputTokens)}
+                                    </td>
+                                    <td className="py-1.5 pl-3 text-right tabular-nums">
+                                      {model.unpricedRecords > 0
+                                        ? "Unpriced"
+                                        : formatUsd(model.costUsd)}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </details>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
         </WorkspacePageContainer>
       </ScrollArea>
     </SidebarInset>

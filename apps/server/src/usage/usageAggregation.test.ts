@@ -233,6 +233,87 @@ describe("UsageAggregator", () => {
     expect(result.buckets).toHaveLength(0);
   });
 
+  it("does not let an out-of-window duplicate suppress an in-window copy", () => {
+    const result = aggregate([
+      record({
+        timestampMs: Date.parse("2026-07-01T12:00:00Z"),
+        dedupeKey: "shared-record",
+      }),
+      record({ dedupeKey: "shared-record" }),
+    ]);
+
+    expect(result.outOfWindow).toBe(1);
+    expect(result.duplicatesDropped).toBe(0);
+    expect(result.buckets[0]?.records).toBe(1);
+  });
+
+  it("filters and groups by native provider, session, and turn identity", () => {
+    const aggregator = new UsageAggregator({
+      timeZone: "UTC",
+      sinceDay: "2026-08-01",
+      untilDay: "2026-08-31",
+      rates,
+      providers: ["codex"],
+      sessionIds: ["child-session"],
+      turnIds: ["turn-2"],
+      groupBy: "turn",
+    });
+    const selected = record({
+      provider: "codex",
+      sessionId: "child-session",
+      turnId: "turn-2",
+      dedupeKey: "child-turn-2",
+    });
+    aggregator.add(record({ sessionId: "child-session", turnId: "turn-2" }));
+    aggregator.add({ ...selected, sessionId: "parent-session", dedupeKey: "parent-turn-2" });
+    aggregator.add({ ...selected, turnId: "turn-1", dedupeKey: "child-turn-1" });
+    aggregator.add(selected);
+    aggregator.add(selected);
+
+    const result = aggregator.finish();
+    expect(result.duplicatesDropped).toBe(1);
+    expect(result.buckets).toMatchObject([
+      {
+        provider: "codex",
+        sessionId: "child-session",
+        turnId: "turn-2",
+        records: 1,
+        totals: { outputTokens: 50 },
+      },
+    ]);
+  });
+
+  it("reconciles completed, resumed, forked, parent, and child records without replay inflation", () => {
+    const completed = record({
+      provider: "codex",
+      sessionId: "parent",
+      turnId: "turn-complete",
+      dedupeKey: "native-response-complete",
+      totals: { ...record().totals, outputTokens: 30, reasoningTokens: 10 },
+    });
+    const child = record({
+      provider: "codex",
+      sessionId: "child",
+      turnId: "turn-child",
+      dedupeKey: "native-response-child",
+      totals: { ...record().totals, outputTokens: 20, reasoningTokens: 5 },
+    });
+    const result = aggregate([
+      completed,
+      { ...completed, sessionId: "resumed-parent" },
+      { ...completed, sessionId: "fork-copy" },
+      child,
+      child,
+    ]);
+
+    expect(result.duplicatesDropped).toBe(3);
+    expect(result.buckets[0]).toMatchObject({
+      records: 2,
+      sessions: 2,
+      totals: { outputTokens: 50, reasoningTokens: 15 },
+    });
+  });
+
   it("reports whether a record contributed", () => {
     const aggregator = new UsageAggregator({
       timeZone: "UTC",

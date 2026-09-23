@@ -16,7 +16,8 @@
  */
 import * as Schema from "effect/Schema";
 
-import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { NonNegativeInt, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { UsageModelPriceOverride } from "./settings.ts";
 
 /**
  * Bumped whenever the shape of {@link UsageSummary} changes incompatibly. The
@@ -51,6 +52,12 @@ export type UsageDay = typeof UsageDay.Type;
 
 export const UsageResolution = Schema.Literals(["day", "hour"]);
 export type UsageResolution = typeof UsageResolution.Type;
+
+export const UsageAttributionGroup = Schema.Literals(["model", "session", "turn"]);
+export type UsageAttributionGroup = typeof UsageAttributionGroup.Type;
+
+const UsageNativeId = TrimmedNonEmptyString.check(Schema.isMaxLength(512));
+const UsageNativeIdList = Schema.Array(UsageNativeId).check(Schema.isMaxLength(128));
 
 /**
  * Why a bucket's cost is what it is.
@@ -95,6 +102,10 @@ export const UsageBucket = Schema.Struct({
   hourStart: Schema.optional(TrimmedNonEmptyString),
   provider: UsageProviderKind,
   model: TrimmedNonEmptyString,
+  /** Present when the request groups by native session or turn identity. */
+  sessionId: Schema.optional(UsageNativeId),
+  /** Present when the request groups by native turn identity. */
+  turnId: Schema.optional(UsageNativeId),
   /** Omitted by older servers. Unknown metadata uses the standard estimate. */
   serviceTier: Schema.optional(Schema.String),
   serviceTierSource: Schema.optional(
@@ -171,6 +182,8 @@ export type UsagePricingStatus = typeof UsagePricingStatus.Type;
 export const UsagePricing = Schema.Struct({
   status: UsagePricingStatus,
   source: TrimmedNonEmptyString,
+  /** SHA-256 of the exact rate document used for model-priced records. */
+  revision: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   fetchedAt: Schema.NullOr(Schema.String),
   knownModels: NonNegativeInt,
 });
@@ -264,12 +277,180 @@ export const UsageSummaryInput = Schema.Struct({
   sinceTime: Schema.optional(TrimmedNonEmptyString),
   /** Exclusive UTC instant for an hourly rolling window. */
   untilTime: Schema.optional(TrimmedNonEmptyString),
+  /** Opt into the local repeated-input attribution subsection. */
+  includeRepeatedInput: Schema.optional(Schema.Boolean),
+  /** Restrict the scan result to these provider kinds. */
+  providers: Schema.optional(
+    Schema.Array(UsageProviderKind).check(Schema.isMinLength(1), Schema.isMaxLength(8)),
+  ),
+  /** Restrict the result to exact provider-native session IDs. */
+  sessionIds: Schema.optional(UsageNativeIdList),
+  /** Restrict the result to exact provider-native turn IDs. */
+  turnIds: Schema.optional(UsageNativeIdList),
+  /** Retain native IDs in bucket keys. Defaults to model-level aggregation. */
+  groupBy: Schema.optional(UsageAttributionGroup),
   includeQuotaHistory: Schema.optional(Schema.Boolean),
   /** Read saved observations without scanning transcripts or fetching prices. */
   quotaHistoryOnly: Schema.optional(Schema.Boolean),
   quotaIntervals: Schema.optional(Schema.Array(UsageQuotaInterval).check(Schema.isMaxLength(64))),
 });
 export type UsageSummaryInput = typeof UsageSummaryInput.Type;
+
+/**
+ * A source that can be attributed as repeated input. This is intentionally a
+ * closed first slice. Ordinary user or assistant messages are not a source
+ * kind, even when their text happens to repeat.
+ */
+export const UsageRepeatedInputSourceKind = Schema.Literals([
+  "skill",
+  "instruction",
+  "developerBlock",
+  "toolOperation",
+]);
+export type UsageRepeatedInputSourceKind = typeof UsageRepeatedInputSourceKind.Type;
+
+/** Evidence strength for one repeated-input observation. */
+export const UsageRepeatedInputConfidence = Schema.Literals([
+  "reference",
+  "likelyRead",
+  "confirmedPayload",
+]);
+export type UsageRepeatedInputConfidence = typeof UsageRepeatedInputConfidence.Type;
+
+/**
+ * Token attribution for a repeated payload. The five fields are disjoint:
+ * exact and estimated are non-cache input, cached and cacheWrite retain a
+ * provider-reported cache class, and unknown is attributable input with no
+ * safer classification. They stay separate from the full session input total.
+ */
+export const UsageRepeatedInputTokenAttribution = Schema.Struct({
+  exact: NonNegativeInt,
+  estimated: NonNegativeInt,
+  cached: NonNegativeInt,
+  cacheWrite: NonNegativeInt,
+  unknown: NonNegativeInt,
+});
+export type UsageRepeatedInputTokenAttribution = typeof UsageRepeatedInputTokenAttribution.Type;
+
+export const UsageRepeatedInputPriceStatus = Schema.Literals([
+  "providerReported",
+  "estimated",
+  "unpriced",
+]);
+export type UsageRepeatedInputPriceStatus = typeof UsageRepeatedInputPriceStatus.Type;
+
+/** One model's API-equivalent value for an item or total. */
+export const UsageRepeatedInputModelCost = Schema.Struct({
+  model: TrimmedNonEmptyString,
+  directTokens: UsageRepeatedInputTokenAttribution,
+  /** Null means the model or one required rate is unknown. It is never zero. */
+  estimatedApiCostUsd: Schema.NullOr(Schema.Number),
+  priceStatus: UsageRepeatedInputPriceStatus,
+  occurrences: NonNegativeInt,
+});
+export type UsageRepeatedInputModelCost = typeof UsageRepeatedInputModelCost.Type;
+
+/** Compact date/project/model rollup used by the repeated-input projection. */
+export const UsageRepeatedInputBreakdown = Schema.Struct({
+  sourceKind: UsageRepeatedInputSourceKind,
+  model: Schema.NullOr(TrimmedNonEmptyString),
+  project: Schema.NullOr(TrimmedNonEmptyString),
+  environment: Schema.NullOr(TrimmedNonEmptyString),
+  sinceDay: UsageDay,
+  untilDay: UsageDay,
+  occurrences: NonNegativeInt,
+  sessions: NonNegativeInt,
+  turns: NonNegativeInt,
+  directTokens: UsageRepeatedInputTokenAttribution,
+  fullSessionInputTokens: UsageRepeatedInputTokenAttribution,
+  estimatedApiCostUsd: Schema.NullOr(Schema.Number),
+  priceStatus: UsageRepeatedInputPriceStatus,
+});
+export type UsageRepeatedInputBreakdown = typeof UsageRepeatedInputBreakdown.Type;
+
+/** A server-projected repeated-input item. Raw transcript/source text is absent. */
+export const UsageRepeatedInputItem = Schema.Struct({
+  displayName: TrimmedNonEmptyString,
+  sourceKind: UsageRepeatedInputSourceKind,
+  contentHash: TrimmedNonEmptyString,
+  fileRevisionHash: Schema.NullOr(TrimmedNonEmptyString),
+  firstObservedAt: Schema.String,
+  lastObservedAt: Schema.String,
+  occurrences: NonNegativeInt,
+  affectedSessions: NonNegativeInt,
+  affectedTurns: NonNegativeInt,
+  confidence: UsageRepeatedInputConfidence,
+  confidenceCounts: Schema.Struct({
+    reference: NonNegativeInt,
+    likelyRead: NonNegativeInt,
+    confirmedPayload: NonNegativeInt,
+  }),
+  directTokens: UsageRepeatedInputTokenAttribution,
+  /** Full session input is context only and must not be used as item cost. */
+  fullSessionInputTokens: UsageRepeatedInputTokenAttribution,
+  modelCosts: Schema.Array(UsageRepeatedInputModelCost),
+  breakdowns: Schema.Array(UsageRepeatedInputBreakdown),
+});
+export type UsageRepeatedInputItem = typeof UsageRepeatedInputItem.Type;
+
+/**
+ * A currently discoverable skill revision. Unlike UsageRepeatedInputItem,
+ * this projection also contains skills with no transcript observation in the
+ * requested window. Null observation fields mean "never observed", not zero.
+ */
+export const UsageRepeatedInputCatalogItem = Schema.Struct({
+  displayName: TrimmedNonEmptyString,
+  sourceKind: UsageRepeatedInputSourceKind,
+  contentHash: TrimmedNonEmptyString,
+  fileRevisionHash: Schema.NullOr(TrimmedNonEmptyString),
+  byteLength: Schema.NullOr(NonNegativeInt),
+  tokenCount: Schema.NullOr(NonNegativeInt),
+  observed: Schema.Boolean,
+  firstObservedAt: Schema.NullOr(Schema.String),
+  lastObservedAt: Schema.NullOr(Schema.String),
+  occurrences: NonNegativeInt,
+  affectedSessions: NonNegativeInt,
+  affectedTurns: NonNegativeInt,
+  confidence: Schema.NullOr(UsageRepeatedInputConfidence),
+  confidenceCounts: Schema.Struct({
+    reference: NonNegativeInt,
+    likelyRead: NonNegativeInt,
+    confirmedPayload: NonNegativeInt,
+  }),
+  directTokens: UsageRepeatedInputTokenAttribution,
+  fullSessionInputTokens: UsageRepeatedInputTokenAttribution,
+  modelCosts: Schema.Array(UsageRepeatedInputModelCost),
+  breakdowns: Schema.Array(UsageRepeatedInputBreakdown),
+  estimatedApiCostUsd: Schema.NullOr(Schema.Number),
+  priceStatus: UsageRepeatedInputPriceStatus,
+});
+export type UsageRepeatedInputCatalogItem = typeof UsageRepeatedInputCatalogItem.Type;
+
+export const UsageRepeatedInputCoverageGap = Schema.Struct({
+  reason: Schema.Literals([
+    "oversized",
+    "malformed",
+    "unavailable",
+    "missingModel",
+    "missingTokenizer",
+    "unattributed",
+  ]),
+  count: NonNegativeInt,
+  message: TrimmedNonEmptyString,
+});
+export type UsageRepeatedInputCoverageGap = typeof UsageRepeatedInputCoverageGap.Type;
+
+export const UsageRepeatedInputSummary = Schema.Struct({
+  items: Schema.Array(UsageRepeatedInputItem),
+  /** Current discoverable skill revisions, including zero-observation rows. */
+  catalog: Schema.optional(Schema.Array(UsageRepeatedInputCatalogItem)),
+  totals: Schema.Array(UsageRepeatedInputBreakdown),
+  coverageGaps: Schema.Array(UsageRepeatedInputCoverageGap),
+  /** All API-equivalent values are estimates, never subscription usage. */
+  estimatedApiCostUsd: Schema.NullOr(Schema.Number),
+  priceStatus: UsageRepeatedInputPriceStatus,
+});
+export type UsageRepeatedInputSummary = typeof UsageRepeatedInputSummary.Type;
 
 export const UsageSummary = Schema.Struct({
   contractVersion: Schema.Number,
@@ -285,8 +466,228 @@ export const UsageSummary = Schema.Struct({
   quotaHistory: Schema.optional(UsageQuotaHistory),
   quotaCosts: Schema.optional(Schema.Array(UsageQuotaCost)),
   quotaCostSnapshots: Schema.optional(Schema.Array(UsageQuotaCostSnapshot)),
+  repeatedInput: Schema.optional(UsageRepeatedInputSummary),
 });
 export type UsageSummary = typeof UsageSummary.Type;
+
+/**
+ * The compact, agent-facing usage read API. This is deliberately separate
+ * from {@link UsageSummary}: existing clients need transcript-shaped buckets,
+ * while agents generally need one bounded rollup and its calculation
+ * assumptions.
+ */
+export const USAGE_REPORT_CONTRACT_VERSION = 1 as const;
+
+export const UsageReportMode = Schema.Literals([
+  "overview",
+  "providers",
+  "models",
+  "series",
+  "quota",
+  "pricing",
+]);
+export type UsageReportMode = typeof UsageReportMode.Type;
+
+/** Maximum number of rows an agent query can request from one projection. */
+export const UsageReportRowLimit = PositiveInt.check(Schema.isLessThanOrEqualTo(512));
+export type UsageReportRowLimit = typeof UsageReportRowLimit.Type;
+
+export const UsageReportInput = Schema.Struct({
+  mode: UsageReportMode,
+  sinceDay: UsageDay,
+  untilDay: UsageDay,
+  timeZone: TrimmedNonEmptyString,
+  refresh: Schema.optional(Schema.Boolean),
+  /** Required with `mode: "series"` only when hourly data is requested. */
+  resolution: Schema.optional(UsageResolution),
+  sinceTime: Schema.optional(TrimmedNonEmptyString),
+  untilTime: Schema.optional(TrimmedNonEmptyString),
+  providers: Schema.optional(
+    Schema.Array(UsageProviderKind).check(Schema.isMinLength(1), Schema.isMaxLength(8)),
+  ),
+  /** Output row cap. The server applies a mode-specific default when omitted. */
+  limit: Schema.optional(UsageReportRowLimit),
+  /** Optional live quota interval reads; saved snapshots are returned by default. */
+  quotaIntervals: Schema.optional(Schema.Array(UsageQuotaInterval).check(Schema.isMaxLength(64))),
+});
+export type UsageReportInput = typeof UsageReportInput.Type;
+
+export const UsageReportCoverageStatus = Schema.Literals([
+  "complete",
+  "partial",
+  "missing",
+  "notRequested",
+]);
+export type UsageReportCoverageStatus = typeof UsageReportCoverageStatus.Type;
+
+/** Bounded coverage facts; no transcript paths or raw records cross this API. */
+export const UsageReportCoverage = Schema.Struct({
+  status: UsageReportCoverageStatus,
+  sourceCount: NonNegativeInt,
+  completeSources: NonNegativeInt,
+  partialSources: NonNegativeInt,
+  missingSources: NonNegativeInt,
+  failedSources: NonNegativeInt,
+  scannedFiles: NonNegativeInt,
+  skippedFiles: NonNegativeInt,
+  malformedRecords: NonNegativeInt,
+  distinctSessions: NonNegativeInt,
+  records: NonNegativeInt,
+  pricedRecords: NonNegativeInt,
+  unpricedRecords: NonNegativeInt,
+});
+export type UsageReportCoverage = typeof UsageReportCoverage.Type;
+
+/** One compact token/cost rollup used by every report mode. */
+export const UsageReportTotals = Schema.Struct({
+  totals: UsageTokenTotals,
+  costUsd: Schema.Number,
+  cacheSavingsUsd: Schema.Number,
+  records: NonNegativeInt,
+  pricedRecords: NonNegativeInt,
+  unpricedRecords: NonNegativeInt,
+  sessions: NonNegativeInt,
+});
+export type UsageReportTotals = typeof UsageReportTotals.Type;
+
+export const UsageReportProviderRow = Schema.Struct({
+  provider: UsageProviderKind,
+  ...UsageReportTotals.fields,
+});
+export type UsageReportProviderRow = typeof UsageReportProviderRow.Type;
+
+export const UsageReportModelRow = Schema.Struct({
+  provider: UsageProviderKind,
+  model: TrimmedNonEmptyString,
+  ...UsageReportTotals.fields,
+});
+export type UsageReportModelRow = typeof UsageReportModelRow.Type;
+
+export const UsageReportSeriesPoint = Schema.Struct({
+  day: UsageDay,
+  /** UTC bucket start, present only for hourly series. */
+  hourStart: Schema.optional(TrimmedNonEmptyString),
+  ...UsageReportTotals.fields,
+});
+export type UsageReportSeriesPoint = typeof UsageReportSeriesPoint.Type;
+
+/** A safe, explicit projection of configured model price overrides. */
+export const UsageReportPriceOverride = Schema.Struct({
+  model: TrimmedNonEmptyString,
+  ...UsageModelPriceOverride.fields,
+});
+export type UsageReportPriceOverride = typeof UsageReportPriceOverride.Type;
+
+/**
+ * Metadata needed to reproduce or qualify API-equivalent cost calculations.
+ * Subscription charges are intentionally not implied by these values.
+ */
+export const UsageReportCalculation = Schema.Struct({
+  formulaVersion: Schema.Literal(1),
+  costBasis: Schema.Literal("apiEquivalent"),
+  costSemantics: TrimmedNonEmptyString,
+  cacheSavingsSemantics: TrimmedNonEmptyString,
+  serviceTierPolicy: TrimmedNonEmptyString,
+  pricing: UsagePricing,
+  priceOverrides: Schema.Array(UsageReportPriceOverride),
+  priceOverrideCount: NonNegativeInt,
+  priceOverridesTruncated: Schema.Boolean,
+});
+export type UsageReportCalculation = typeof UsageReportCalculation.Type;
+
+const UsageReportEnvelope = {
+  contractVersion: Schema.Literal(USAGE_REPORT_CONTRACT_VERSION),
+  mode: UsageReportMode,
+  readAt: Schema.String,
+  timeZone: TrimmedNonEmptyString,
+  sinceDay: UsageDay,
+  untilDay: UsageDay,
+  scanDurationMs: NonNegativeInt,
+  calculation: UsageReportCalculation,
+  coverage: UsageReportCoverage,
+} as const;
+
+export const UsageReportOverview = Schema.Struct({
+  ...UsageReportEnvelope,
+  mode: Schema.Literal("overview"),
+  totals: UsageReportTotals,
+});
+export type UsageReportOverview = typeof UsageReportOverview.Type;
+
+export const UsageReportProviders = Schema.Struct({
+  ...UsageReportEnvelope,
+  mode: Schema.Literal("providers"),
+  rows: Schema.Array(UsageReportProviderRow),
+  totalRows: NonNegativeInt,
+  truncated: Schema.Boolean,
+});
+export type UsageReportProviders = typeof UsageReportProviders.Type;
+
+export const UsageReportModels = Schema.Struct({
+  ...UsageReportEnvelope,
+  mode: Schema.Literal("models"),
+  rows: Schema.Array(UsageReportModelRow),
+  totalRows: NonNegativeInt,
+  truncated: Schema.Boolean,
+});
+export type UsageReportModels = typeof UsageReportModels.Type;
+
+export const UsageReportSeries = Schema.Struct({
+  ...UsageReportEnvelope,
+  mode: Schema.Literal("series"),
+  resolution: UsageResolution,
+  points: Schema.Array(UsageReportSeriesPoint),
+  totalPoints: NonNegativeInt,
+  truncated: Schema.Boolean,
+});
+export type UsageReportSeries = typeof UsageReportSeries.Type;
+
+export const UsageReportQuotaCost = Schema.Struct({
+  intervalId: TrimmedNonEmptyString,
+  fingerprint: UsageSourceFingerprint,
+  sinceTime: TrimmedNonEmptyString,
+  untilTime: TrimmedNonEmptyString,
+  costUsd: Schema.Number,
+  records: NonNegativeInt,
+  pricedRecords: NonNegativeInt,
+  unpricedRecords: NonNegativeInt,
+  complete: Schema.Boolean,
+  firstRemainingPercent: Schema.NullOr(Schema.Number),
+  lastRemainingPercent: Schema.NullOr(Schema.Number),
+  resetsAt: Schema.NullOr(TrimmedNonEmptyString),
+  models: Schema.Array(UsageReportModelRow),
+  totalModels: NonNegativeInt,
+  modelsTruncated: Schema.Boolean,
+});
+export type UsageReportQuotaCost = typeof UsageReportQuotaCost.Type;
+
+export const UsageReportQuota = Schema.Struct({
+  ...UsageReportEnvelope,
+  mode: Schema.Literal("quota"),
+  quotaHistory: UsageQuotaHistory,
+  samplesTruncated: Schema.Boolean,
+  totalSamples: NonNegativeInt,
+  costs: Schema.Array(UsageReportQuotaCost),
+  totalCosts: NonNegativeInt,
+  costsTruncated: Schema.Boolean,
+});
+export type UsageReportQuota = typeof UsageReportQuota.Type;
+
+export const UsageReportPricing = Schema.Struct({
+  ...UsageReportEnvelope,
+  mode: Schema.Literal("pricing"),
+});
+export type UsageReportPricing = typeof UsageReportPricing.Type;
+
+export const UsageReport = Schema.Union([
+  UsageReportOverview,
+  UsageReportProviders,
+  UsageReportModels,
+  UsageReportSeries,
+  UsageReportQuota,
+  UsageReportPricing,
+]);
+export type UsageReport = typeof UsageReport.Type;
 
 export class UsageReadError extends Schema.TaggedErrorClass<UsageReadError>()("UsageReadError", {
   reason: Schema.Literals(["scanFailed", "invalidWindow"]),

@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   ApprovalRequestId,
   EventId,
+  GitCommandError,
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
@@ -25,6 +26,8 @@ import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
 import { WorkerBackend, type WorkerBackendShape } from "./WorkerBackend.ts";
+import * as GitWorkflowService from "../git/GitWorkflowService.ts";
+import * as ServerConfig from "../config.ts";
 import { WorkerObserver } from "./WorkerObserver.ts";
 import { __testing as WorkerServiceTesting } from "./WorkerService.ts";
 import { WorkerStore, type StoredWorker, type WorkerStoreShape } from "./WorkerStore.ts";
@@ -87,7 +90,13 @@ function makeMemoryWorkerStore() {
       Effect.sync(() => {
         for (const [id, approval] of approvals) {
           if (approval.requestId === input.requestId) {
-            approvals.set(id, { ...approval, status: "resolved", ...input });
+            const { decision, ...resolved } = input;
+            approvals.set(id, {
+              ...approval,
+              ...resolved,
+              status: "resolved",
+              ...(decision === undefined ? {} : { decision }),
+            });
           }
         }
       }),
@@ -114,6 +123,19 @@ const workerLayer = (store: WorkerStoreShape, backend: WorkerBackendShape) =>
     Layer.succeed(WorkerBackend, backend),
     Layer.succeed(WorkerObserver, WorkerObserver.of({ observe: () => Effect.die("unused") })),
     NodeServices.layer,
+  );
+
+const workerWorktreeLayer = (
+  store: WorkerStoreShape,
+  backend: WorkerBackendShape,
+  git: Partial<GitWorkflowService.GitWorkflowService["Service"]>,
+) =>
+  Layer.mergeAll(
+    workerLayer(store, backend),
+    Layer.mock(GitWorkflowService.GitWorkflowService)(git),
+    ServerConfig.layerTest(process.cwd(), { prefix: "t3-worker-worktree-test-" }).pipe(
+      Layer.provide(NodeServices.layer),
+    ),
   );
 
 it("preserves provider input, output, and cached-input usage dimensions", () => {
@@ -152,6 +174,8 @@ it.effect("persists Worker identity and exact model options across follow-up act
   let stored: StoredWorker | undefined;
   let activation: WorkerActivation | undefined;
   const followUpModelSelections: Array<ModelSelection | undefined> = [];
+  const startCwds: Array<string | undefined> = [];
+  const followUpCwds: Array<string | undefined> = [];
   const messages: Array<WorkerMessage> = [];
   const providerThread = ThreadId.make("t3-worker-name-test");
   const store = WorkerStore.of({
@@ -175,14 +199,18 @@ it.effect("persists Worker identity and exact model options across follow-up act
     listProviderEvents: () => Effect.succeed([]),
   } satisfies WorkerStoreShape);
   const backend = WorkerBackend.of({
-    start: () =>
-      Effect.succeed({
-        providerThreadId: providerThread,
-        providerTurnId: TurnId.make("name-turn"),
+    start: (input) =>
+      Effect.sync(() => {
+        startCwds.push(input.cwd);
+        return {
+          providerThreadId: providerThread,
+          providerTurnId: TurnId.make("name-turn"),
+        };
       }),
     send: (input) =>
       Effect.sync(() => {
         followUpModelSelections.push(input.modelSelection);
+        followUpCwds.push(input.cwd);
         return {
           providerThreadId: providerThread,
           providerTurnId: TurnId.make("follow-up-turn"),
@@ -204,6 +232,7 @@ it.effect("persists Worker identity and exact model options across follow-up act
         title: "Historical assignment title",
         assignment: "Inspect naming.",
         context: { references: [], snippets: [] },
+        cwd: "A:/Dev/Worktrees/worker-checkout",
         modelSelection: {
           instanceId: providerInstanceId,
           model: "gpt-5.6-sol",
@@ -213,6 +242,7 @@ it.effect("persists Worker identity and exact model options across follow-up act
     });
     expect(started.summary.displayName).toBe("Review Bot 1");
     expect(stored?.summary.displayName).toBe("Review Bot 1");
+    expect(startCwds).toEqual(["A:/Dev/Worktrees/worker-checkout"]);
     const reloadedService = yield* WorkerServiceTesting.make;
     yield* reloadedService.send({
       workerId: started.summary.id,
@@ -223,6 +253,7 @@ it.effect("persists Worker identity and exact model options across follow-up act
       model: "gpt-5.6-sol",
       options: [{ id: "computerControl", value: "chrome" }],
     });
+    expect(followUpCwds[0]).toBe("A:/Dev/Worktrees/worker-checkout");
 
     const { modelSelection: _modelSelection, ...legacyWithoutModelSelection } = stored!;
     stored = legacyWithoutModelSelection;
@@ -300,6 +331,490 @@ it.effect("rejects an unsupported backend before persisting a Worker", () => {
     expect(memory.workers.size).toBe(0);
     expect(memory.activations.size).toBe(0);
   }).pipe(Effect.provide(workerLayer(memory.store, backend)));
+});
+
+it.effect("creates isolated Worker checkouts and reuses each checkout after service reload", () => {
+  const memory = makeMemoryWorkerStore();
+  const worktrees: Array<import("@t3tools/contracts").VcsCreateWorktreeInput> = [];
+  const backendCwds: Array<string | undefined> = [];
+  const backend = WorkerBackend.of({
+    start: (input) =>
+      Effect.sync(() => {
+        backendCwds.push(input.cwd);
+        return {
+          providerThreadId: input.providerThreadId,
+          providerTurnId: TurnId.make("worktree-start"),
+        };
+      }),
+    send: (input) =>
+      Effect.sync(() => {
+        backendCwds.push(input.cwd);
+        return {
+          providerThreadId: input.providerThreadId,
+          providerTurnId: TurnId.make("worktree-followup"),
+        };
+      }),
+    interrupt: () => Effect.void,
+    stop: () => Effect.void,
+    respondToApproval: () => Effect.void,
+    hasLiveSession: () => Effect.succeed(true),
+  });
+  const git = {
+    createWorktree: (input: import("@t3tools/contracts").VcsCreateWorktreeInput) =>
+      Effect.sync(() => {
+        worktrees.push(input);
+        return { worktree: { path: input.path!, refName: input.newRefName ?? input.refName } };
+      }),
+    removeWorktree: () => Effect.void,
+    deleteWorkerBranch: () => Effect.void,
+  };
+  return Effect.gen(function* () {
+    const service = yield* WorkerServiceTesting.make;
+    const firstReadyFiber = yield* Effect.forkChild(
+      Stream.runHead(
+        service.stream.pipe(Stream.filter((event) => event.worktree?.status === "ready")),
+      ),
+      { startImmediately: true },
+    );
+    const first = yield* service.start({
+      parentThreadId,
+      providerInstanceId,
+      input: {
+        title: "Isolated worker one",
+        assignment: "Use a private checkout.",
+        context: { references: [], snippets: [] },
+        cwd: "A:/Dev/Projects/example",
+        createWorktree: true,
+      },
+    });
+    yield* Fiber.join(firstReadyFiber);
+    const secondReadyFiber = yield* Effect.forkChild(
+      Stream.runHead(
+        service.stream.pipe(
+          Stream.filter(
+            (event) => event.workerId !== first.summary.id && event.worktree?.status === "ready",
+          ),
+        ),
+      ),
+      { startImmediately: true },
+    );
+    const second = yield* service.start({
+      parentThreadId,
+      providerInstanceId,
+      input: {
+        title: "Isolated worker two",
+        assignment: "Use another private checkout.",
+        context: { references: [], snippets: [] },
+        cwd: "A:/Dev/Projects/example",
+        createWorktree: true,
+      },
+    });
+    yield* Fiber.join(secondReadyFiber);
+    yield* Effect.yieldNow;
+    expect(worktrees).toHaveLength(2);
+    expect(worktrees[0]?.cwd).toBe("A:/Dev/Projects/example");
+    expect(worktrees[0]?.refName).toBe("HEAD");
+    expect(worktrees[0]?.newRefName).not.toBe(worktrees[1]?.newRefName);
+    expect(worktrees[0]?.path).not.toBe(worktrees[1]?.path);
+    expect((yield* service.get(first.summary.id)).worktree).toMatchObject({
+      projectRoot: "A:/Dev/Projects/example",
+      checkoutPath: worktrees[0]?.path,
+      status: "ready",
+    });
+    expect(backendCwds).toContain(worktrees[0]?.path);
+    expect(backendCwds).toContain(worktrees[1]?.path);
+
+    const reloaded = yield* WorkerServiceTesting.make;
+    yield* reloaded.send({ workerId: first.summary.id, message: "Continue in that checkout." });
+    expect(backendCwds.at(-1)).toBe(worktrees[0]?.path);
+    expect((yield* reloaded.get(first.summary.id)).worktree?.status).toBe("ready");
+    expect(memory.workers.get(first.summary.id)?.cwd).toBe(worktrees[0]?.path);
+  }).pipe(Effect.provide(workerWorktreeLayer(memory.store, backend, git)));
+});
+
+it.effect("cancels setup without deleting an unverified checkout", () => {
+  const memory = makeMemoryWorkerStore();
+  const removed: Array<{ cwd: string; path: string }> = [];
+  const backend = WorkerBackend.of({
+    start: () => Effect.die("backend must not start before setup completes"),
+    send: () => Effect.die("unused"),
+    interrupt: () => Effect.void,
+    stop: () => Effect.void,
+    respondToApproval: () => Effect.void,
+    hasLiveSession: () => Effect.succeed(false),
+  });
+  const deletedBranches: Array<{ cwd: string; workerId: WorkerId }> = [];
+  let generatedRef = "";
+  const git = {
+    createWorktree: (input: import("@t3tools/contracts").VcsCreateWorktreeInput) => {
+      generatedRef = input.newRefName ?? input.refName;
+      return Effect.never;
+    },
+    localStatus: () =>
+      Effect.succeed({
+        isRepo: true,
+        hasPrimaryRemote: false,
+        isDefaultRef: false,
+        refName: generatedRef,
+        hasWorkingTreeChanges: true,
+        workingTree: { files: [], insertions: 0, deletions: 0 },
+      }),
+    removeWorktree: (input: { cwd: string; path: string }) =>
+      Effect.sync(() => void removed.push(input)),
+    deleteWorkerBranch: (input: { cwd: string; workerId: WorkerId }) =>
+      Effect.sync(() => void deletedBranches.push(input)),
+  };
+  return Effect.gen(function* () {
+    const service = yield* WorkerServiceTesting.make;
+    const eventFiber = yield* Effect.forkChild(Stream.runHead(service.stream), {
+      startImmediately: true,
+    });
+    yield* Effect.yieldNow;
+    const started = yield* service.start({
+      parentThreadId,
+      providerInstanceId,
+      input: {
+        title: "Cancelable setup",
+        assignment: "Wait until canceled.",
+        context: { references: [], snippets: [] },
+        cwd: "A:/Dev/Projects/cancel-me",
+        createWorktree: true,
+      },
+    });
+    const event = Option.getOrThrow(yield* Fiber.join(eventFiber));
+    expect(started.summary.id).toBe(event.workerId);
+    expect(event.type).toBe("created");
+    expect(event.worktree?.status).toBe("creating");
+    expect(memory.workers.get(event.workerId)?.worktree?.status).toBe("creating");
+
+    const interrupted = yield* service.interrupt({ workerId: event.workerId, force: true });
+    expect(interrupted.summary.status).toBe("interrupted");
+    expect(interrupted.worktree?.status).toBe("failed");
+    expect(interrupted.worktree?.error).toContain("ownership or cleanliness was not verified");
+    expect(removed).toEqual([]);
+    expect(memory.activations.get(interrupted.activations[0]!.id)?.status).toBe("interrupted");
+    expect(deletedBranches).toEqual([]);
+  }).pipe(Effect.provide(workerWorktreeLayer(memory.store, backend, git)));
+});
+
+it.effect("keeps a completed checkout and its branch when a Worker closes", () => {
+  const memory = makeMemoryWorkerStore();
+  const removed: Array<string> = [];
+  const deleted: Array<string> = [];
+  let generatedRef = "";
+  const backend = WorkerBackend.of({
+    start: (input) => Effect.succeed({ providerThreadId: input.providerThreadId, pending: true }),
+    send: () => Effect.die("unused"),
+    interrupt: () => Effect.void,
+    stop: () => Effect.void,
+    respondToApproval: () => Effect.void,
+    hasLiveSession: () => Effect.succeed(false),
+  });
+  const git = {
+    createWorktree: (input: import("@t3tools/contracts").VcsCreateWorktreeInput) =>
+      Effect.sync(() => {
+        generatedRef = input.newRefName ?? input.refName;
+        return { worktree: { path: input.path!, refName: generatedRef } };
+      }),
+    removeWorktree: (input: { path: string }) => Effect.sync(() => void removed.push(input.path)),
+    deleteWorkerBranch: (input: { workerId: WorkerId }) =>
+      Effect.sync(() => void deleted.push(`t3-worker-${input.workerId}`)),
+    localStatus: () =>
+      Effect.succeed({
+        isRepo: true,
+        hasPrimaryRemote: false,
+        isDefaultRef: false,
+        refName: generatedRef,
+        hasWorkingTreeChanges: true,
+        workingTree: { files: [], insertions: 0, deletions: 0 },
+      }),
+    isBranchMerged: () => Effect.succeed(false),
+  };
+  return Effect.gen(function* () {
+    const service = yield* WorkerServiceTesting.make;
+    const readyFiber = yield* Effect.forkChild(
+      Stream.runHead(
+        service.stream.pipe(Stream.filter((event) => event.worktree?.status === "ready")),
+      ),
+      { startImmediately: true },
+    );
+    const started = yield* service.start({
+      parentThreadId,
+      providerInstanceId,
+      input: {
+        title: "Retain checkout",
+        assignment: "The work may need review after close.",
+        context: { references: [], snippets: [] },
+        cwd: "A:/Dev/Projects/retain",
+        createWorktree: true,
+      },
+    });
+    yield* Fiber.join(readyFiber);
+    const closed = yield* service.close(started.summary.id);
+    expect(closed.summary.status).toBe("closed");
+    expect(closed.worktree?.status).toBe("preserved");
+    expect(closed.worktree?.checkoutPath).toBeTruthy();
+    expect(removed).toEqual([]);
+    expect(deleted).toEqual([]);
+  }).pipe(Effect.provide(workerWorktreeLayer(memory.store, backend, git)));
+});
+
+it.effect("removes a proven-clean Worker checkout and its generated branch on close", () => {
+  const memory = makeMemoryWorkerStore();
+  const removed: Array<string> = [];
+  const deleted: Array<string> = [];
+  let generatedRef = "";
+  const backend = WorkerBackend.of({
+    start: (input) => Effect.succeed({ providerThreadId: input.providerThreadId, pending: true }),
+    send: () => Effect.die("unused"),
+    interrupt: () => Effect.void,
+    stop: () => Effect.void,
+    respondToApproval: () => Effect.void,
+    hasLiveSession: () => Effect.succeed(false),
+  });
+  const git = {
+    createWorktree: (input: import("@t3tools/contracts").VcsCreateWorktreeInput) =>
+      Effect.sync(() => {
+        generatedRef = input.newRefName ?? input.refName;
+        return { worktree: { path: input.path!, refName: generatedRef } };
+      }),
+    localStatus: () =>
+      Effect.succeed({
+        isRepo: true,
+        hasPrimaryRemote: false,
+        isDefaultRef: false,
+        refName: generatedRef,
+        hasWorkingTreeChanges: false,
+        workingTree: { files: [], insertions: 0, deletions: 0 },
+      }),
+    isBranchMerged: () => Effect.succeed(true),
+    removeWorktree: (input: { path: string }) => Effect.sync(() => void removed.push(input.path)),
+    deleteWorkerBranch: (input: { workerId: WorkerId }) =>
+      Effect.sync(() => void deleted.push(`t3-worker-${input.workerId}`)),
+  };
+  return Effect.gen(function* () {
+    const service = yield* WorkerServiceTesting.make;
+    const readyFiber = yield* Effect.forkChild(
+      Stream.runHead(
+        service.stream.pipe(Stream.filter((event) => event.worktree?.status === "ready")),
+      ),
+      { startImmediately: true },
+    );
+    const started = yield* service.start({
+      parentThreadId,
+      providerInstanceId,
+      input: {
+        title: "Clean checkout",
+        assignment: "No edits.",
+        context: { references: [], snippets: [] },
+        cwd: "A:/Dev/Projects/clean",
+        createWorktree: true,
+      },
+    });
+    yield* Fiber.join(readyFiber);
+    const closed = yield* service.close(started.summary.id);
+    expect(closed.worktree?.status).toBe("removed");
+    expect(removed).toEqual([closed.worktree?.checkoutPath]);
+    expect(deleted).toEqual([closed.worktree?.refName]);
+  }).pipe(Effect.provide(workerWorktreeLayer(memory.store, backend, git)));
+});
+
+it.effect("preserves clean Worker branches that contain commits absent from project HEAD", () => {
+  const memory = makeMemoryWorkerStore();
+  const removed: Array<string> = [];
+  const deleted: Array<string> = [];
+  let generatedRef = "";
+  const backend = WorkerBackend.of({
+    start: (input) => Effect.succeed({ providerThreadId: input.providerThreadId, pending: true }),
+    send: () => Effect.die("unused"),
+    interrupt: () => Effect.void,
+    stop: () => Effect.void,
+    respondToApproval: () => Effect.void,
+    hasLiveSession: () => Effect.succeed(false),
+  });
+  const git = {
+    createWorktree: (input: import("@t3tools/contracts").VcsCreateWorktreeInput) =>
+      Effect.sync(() => {
+        generatedRef = input.newRefName ?? input.refName;
+        return { worktree: { path: input.path!, refName: generatedRef } };
+      }),
+    localStatus: () =>
+      Effect.succeed({
+        isRepo: true,
+        hasPrimaryRemote: false,
+        isDefaultRef: false,
+        refName: generatedRef,
+        hasWorkingTreeChanges: false,
+        workingTree: { files: [], insertions: 0, deletions: 0 },
+      }),
+    isBranchMerged: () => Effect.succeed(false),
+    removeWorktree: (input: { path: string }) => Effect.sync(() => void removed.push(input.path)),
+    deleteWorkerBranch: (input: { workerId: WorkerId }) =>
+      Effect.sync(() => void deleted.push(`t3-worker-${input.workerId}`)),
+  };
+  return Effect.gen(function* () {
+    const service = yield* WorkerServiceTesting.make;
+    const readyFiber = yield* Effect.forkChild(
+      Stream.runHead(
+        service.stream.pipe(Stream.filter((event) => event.worktree?.status === "ready")),
+      ),
+      { startImmediately: true },
+    );
+    const started = yield* service.start({
+      parentThreadId,
+      providerInstanceId,
+      input: {
+        title: "Unmerged commits",
+        assignment: "Keep commits for review.",
+        context: { references: [], snippets: [] },
+        cwd: "A:/Dev/Projects/unmerged",
+        createWorktree: true,
+      },
+    });
+    yield* Fiber.join(readyFiber);
+    const closed = yield* service.close(started.summary.id);
+    expect(closed.worktree?.status).toBe("preserved");
+    expect(closed.worktree?.error).toContain("commits not reachable from project HEAD");
+    expect(removed).toEqual([]);
+    expect(deleted).toEqual([]);
+  }).pipe(Effect.provide(workerWorktreeLayer(memory.store, backend, git)));
+});
+
+it.effect(
+  "does not delete a checkout during restart recovery without durable creation proof",
+  () => {
+    const memory = makeMemoryWorkerStore();
+    const removed: Array<string> = [];
+    const deleted: Array<string> = [];
+    let generatedRef = "";
+    const backend = WorkerBackend.of({
+      start: (input) => Effect.succeed({ providerThreadId: input.providerThreadId, pending: true }),
+      send: () => Effect.die("unused"),
+      interrupt: () => Effect.void,
+      stop: () => Effect.void,
+      respondToApproval: () => Effect.void,
+      hasLiveSession: () => Effect.succeed(false),
+    });
+    const git = {
+      createWorktree: (input: import("@t3tools/contracts").VcsCreateWorktreeInput) =>
+        Effect.sync(() => {
+          generatedRef = input.newRefName ?? input.refName;
+          return { worktree: { path: input.path!, refName: generatedRef } };
+        }),
+      localStatus: () =>
+        Effect.succeed({
+          isRepo: true,
+          hasPrimaryRemote: false,
+          isDefaultRef: false,
+          refName: generatedRef,
+          hasWorkingTreeChanges: false,
+          workingTree: { files: [], insertions: 0, deletions: 0 },
+        }),
+      isBranchMerged: () => Effect.succeed(true),
+      removeWorktree: (input: { path: string }) => Effect.sync(() => void removed.push(input.path)),
+      deleteWorkerBranch: (input: { workerId: WorkerId }) =>
+        Effect.sync(() => void deleted.push(`t3-worker-${input.workerId}`)),
+    };
+    return Effect.gen(function* () {
+      const service = yield* WorkerServiceTesting.make;
+      const readyFiber = yield* Effect.forkChild(
+        Stream.runHead(
+          service.stream.pipe(Stream.filter((event) => event.worktree?.status === "ready")),
+        ),
+        { startImmediately: true },
+      );
+      const started = yield* service.start({
+        parentThreadId,
+        providerInstanceId,
+        input: {
+          title: "Recovery",
+          assignment: "Keep any uncertain checkout.",
+          context: { references: [], snippets: [] },
+          cwd: "A:/Dev/Projects/recovery",
+          createWorktree: true,
+        },
+      });
+      yield* Fiber.join(readyFiber);
+      const stored = memory.workers.get(started.summary.id)!;
+      memory.workers.set(started.summary.id, {
+        ...stored,
+        worktree: { ...stored.worktree!, status: "creating" },
+      });
+      const restarted = yield* WorkerServiceTesting.make;
+      yield* restarted.recover;
+      const recovered = memory.workers.get(started.summary.id)!;
+      expect(recovered.summary.status).toBe("failed");
+      expect(recovered.worktree?.status).toBe("failed");
+      expect(recovered.worktree?.error).toContain("ownership or cleanliness was not verified");
+      expect(removed).toEqual([]);
+      expect(deleted).toEqual([]);
+    }).pipe(Effect.provide(workerWorktreeLayer(memory.store, backend, git)));
+  },
+);
+
+it.effect("marks failed worktree setup without deleting an unverified target", () => {
+  const memory = makeMemoryWorkerStore();
+  let removed = 0;
+  let backendStarts = 0;
+  const backend = WorkerBackend.of({
+    start: () =>
+      Effect.sync(() => {
+        backendStarts += 1;
+        return { providerThreadId, providerTurnId: TurnId.make("should-not-start") };
+      }),
+    send: () => Effect.die("unused"),
+    interrupt: () => Effect.void,
+    stop: () => Effect.void,
+    respondToApproval: () => Effect.void,
+    hasLiveSession: () => Effect.succeed(false),
+  });
+  const deletedBranches: Array<{ cwd: string; workerId: WorkerId }> = [];
+  const git = {
+    createWorktree: (input: import("@t3tools/contracts").VcsCreateWorktreeInput) =>
+      Effect.fail(
+        new GitCommandError({
+          operation: "createWorktree",
+          command: "git worktree add",
+          cwd: input.cwd,
+          detail: `checkout failed at ${input.path}`,
+        }),
+      ),
+    removeWorktree: () => Effect.sync(() => void removed++),
+    deleteWorkerBranch: (input: { cwd: string; workerId: WorkerId }) =>
+      Effect.sync(() => void deletedBranches.push(input)),
+  };
+  return Effect.gen(function* () {
+    const service = yield* WorkerServiceTesting.make;
+    const failedEventFiber = yield* Effect.forkChild(
+      Stream.runHead(
+        service.stream.pipe(Stream.filter((event) => event.worktree?.status === "failed")),
+      ),
+      { startImmediately: true },
+    );
+    const started = yield* service.start({
+      parentThreadId,
+      providerInstanceId,
+      input: {
+        title: "Failed setup",
+        assignment: "Must not start.",
+        context: { references: [], snippets: [] },
+        cwd: "A:/Dev/Projects/failure",
+        createWorktree: true,
+      },
+    });
+    expect(started.worktree?.status).toBe("creating");
+    yield* Fiber.join(failedEventFiber);
+    const worker = [...memory.workers.values()][0]!;
+    expect(worker.summary.status).toBe("failed");
+    expect(worker.worktree).toMatchObject({
+      status: "failed",
+      error: expect.stringContaining("checkout failed"),
+    });
+    expect(removed).toBe(0);
+    expect(deletedBranches).toHaveLength(0);
+    expect(worker.worktree?.error).toContain("ownership or cleanliness was not verified");
+    expect(backendStarts).toBe(0);
+  }).pipe(Effect.provide(workerWorktreeLayer(memory.store, backend, git)));
 });
 
 it.effect("reconciles a delayed Desktop receipt into one canonical handoff", () => {

@@ -6,6 +6,12 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
   environments: [] as unknown[],
+  publicHistory: {
+    announcements: [],
+    checkedAt: null,
+    status: "loading",
+  } as unknown,
+  publicRefresh: vi.fn(),
   refresh: vi.fn(),
   news: vi.fn(),
   useUsage: vi.fn(),
@@ -16,6 +22,13 @@ vi.mock("../../state/usage", () => ({
 vi.mock("@t3tools/client-runtime/resetAnnouncements", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@t3tools/client-runtime/resetAnnouncements")>()),
   watchResetAnnouncements: () => ({ refresh: state.news, stop: vi.fn() }),
+}));
+vi.mock("@t3tools/client-runtime/publicResetHistory", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@t3tools/client-runtime/publicResetHistory")>()),
+  watchPublicResetHistory: (receive: (history: unknown) => void) => {
+    receive(state.publicHistory);
+    return { refresh: state.publicRefresh, stop: vi.fn() };
+  },
 }));
 vi.mock("@tanstack/react-router", () => ({ Link: "a" }));
 vi.mock("../../env", () => ({ isElectron: false }));
@@ -33,6 +46,8 @@ import { UsageResetPage } from "./UsageResetPage";
 
 beforeEach(() => {
   state.environments = [];
+  state.publicHistory = { announcements: [], checkedAt: null, status: "loading" };
+  state.publicRefresh.mockReset().mockResolvedValue(undefined);
   state.refresh.mockReset().mockResolvedValue([]);
   state.news.mockReset().mockResolvedValue(undefined);
   state.useUsage.mockReset().mockImplementation(() => ({
@@ -44,9 +59,9 @@ beforeEach(() => {
 });
 
 describe("Codex monitor page", () => {
-  it("uses separate full-cycle and recent cost reads", () => {
+  it("uses separate history, cycle, public, pace, and chart activity reads", () => {
     renderToStaticMarkup(<UsageResetPage />);
-    expect(state.useUsage).toHaveBeenCalledTimes(3);
+    expect(state.useUsage).toHaveBeenCalledTimes(5);
   });
 
   it("shows progress, ignores repeated taps, then enables retry after failure", async () => {
@@ -73,6 +88,7 @@ describe("Codex monitor page", () => {
       expect(container.textContent).toContain("Refreshing readings");
       expect(state.refresh).toHaveBeenCalledTimes(1);
       expect(state.news).toHaveBeenCalledTimes(1);
+      expect(state.publicRefresh).toHaveBeenCalledTimes(1);
       await act(async () => reject(new Error("disconnected")));
       expect(button.disabled).toBe(false);
       expect(button.getAttribute("aria-busy")).toBe("false");
@@ -88,6 +104,95 @@ describe("Codex monitor page", () => {
     expect(markup).toContain('to="/usage"');
     expect(markup).toContain('aria-label="Refresh Codex usage"');
     expect(markup).not.toContain("$0.00");
+  });
+
+  it("backdates public reset estimates without local quota observations", async () => {
+    const fingerprint = {
+      hostId: "desktop",
+      provider: "codex",
+      resolvedHomePath: "/sessions",
+      volumeId: "1",
+    };
+    state.publicHistory = {
+      checkedAt: Date.parse("2026-09-13T22:00:00Z"),
+      status: "ready",
+      announcements: [
+        {
+          id: "2094251180121854309",
+          resetType: "regular",
+          announcedAt: "2026-08-31T02:29:25Z",
+          text: "Reset",
+          sourceType: "x_post",
+          sourceUrl: "https://x.com/thsottiaux/status/2094251180121854309",
+        },
+        {
+          id: "2095651088502591861",
+          resetType: "banked",
+          announcedAt: "2026-09-03T23:12:30Z",
+          text: "Banked reset",
+          sourceType: "x_post",
+          sourceUrl: "https://x.com/thsottiaux/status/2095651088502591861",
+        },
+        {
+          id: "2098685367058612394",
+          resetType: "regular",
+          announcedAt: "2026-09-12T08:09:17Z",
+          text: "Reset",
+          sourceType: "x_post",
+          sourceUrl: "https://x.com/thsottiaux/status/2098685367058612394",
+        },
+      ],
+    };
+    state.environments = [
+      {
+        environmentId: "desktop",
+        label: "Desktop",
+        isPending: false,
+        error: null,
+        summary: {
+          sources: [{ fingerprint, status: "ok" }],
+          quotaCosts: [
+            {
+              intervalId: "codex-resets:2094251180121854309",
+              fingerprint,
+              costUsd: 12.5,
+              records: 4,
+              unpricedRecords: 0,
+              complete: true,
+              models: [
+                {
+                  model: "gpt-5.6-sol",
+                  totals: {
+                    uncachedInputTokens: 100,
+                    cachedInputTokens: 50,
+                    cacheCreationTokens: 25,
+                    outputTokens: 20,
+                    reasoningTokens: 10,
+                  },
+                  costUsd: 12.5,
+                  records: 4,
+                  unpricedRecords: 0,
+                },
+              ],
+            },
+          ],
+        },
+      },
+    ];
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<UsageResetPage />));
+      expect(container.textContent).toContain("Estimated use between public resets");
+      expect(container.textContent).toContain("1 banked reset grant is listed");
+      expect(container.textContent).toContain("$12.50");
+      expect(container.textContent).toContain("gpt-5.6-sol");
+      expect(container.textContent).toContain("4 recorded usage rows");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
   });
   it("shows total usage separately from monitored usage and excludes archived runs", () => {
     const fingerprint = {
@@ -161,7 +266,7 @@ describe("Codex monitor page", () => {
     expect(markup.indexOf("Reset history")).toBeLessThan(
       markup.indexOf("Check community with Luna"),
     );
-    expect(markup).toContain("How far could the rest go?");
+    expect(markup).toContain("Model comparisons at API prices");
   });
   it("shows a saved dollar cost for an older cycle after a monitoring gap", () => {
     const fingerprint = {
@@ -200,6 +305,21 @@ describe("Codex monitor page", () => {
               firstRemainingPercent: 80,
               lastRemainingPercent: 60,
               resetsAt: "2026-08-28T00:00:00Z",
+              models: [
+                {
+                  model: "gpt-6-astra",
+                  costUsd: 30,
+                  records: 4,
+                  unpricedRecords: 0,
+                  totals: {
+                    uncachedInputTokens: 1_000_000,
+                    cachedInputTokens: 200_000,
+                    cacheCreationTokens: 50_000,
+                    outputTokens: 40_000,
+                    reasoningTokens: 20_000,
+                  },
+                },
+              ],
             },
           ],
           quotaHistory: {
@@ -235,6 +355,125 @@ describe("Codex monitor page", () => {
     const markup = renderToStaticMarkup(<UsageResetPage />);
     expect(markup).toContain("$30 observed cost");
     expect(markup).toContain("Dollar estimate not established");
+    expect(markup).toContain("Per-model usage");
+    expect(markup).toContain("1.25M input");
+    expect(markup).toContain("40K output");
+    expect(markup).toContain("gpt-6-astra");
+    expect(markup).toContain("$30.00");
+  });
+
+  it("switches API values and token budgets with reset-cycle navigation", async () => {
+    const fingerprint = {
+      hostId: "desktop",
+      provider: "codex",
+      resolvedHomePath: "/sessions",
+      volumeId: "1",
+    };
+    state.environments = [
+      {
+        environmentId: "desktop",
+        label: "Desktop",
+        isPending: false,
+        error: null,
+        summary: {
+          sources: [{ fingerprint, status: "ok" }],
+          quotaCosts: [
+            {
+              intervalId: "2026-08-30T20:00:00Z",
+              fingerprint,
+              costUsd: 5,
+              records: 1,
+              unpricedRecords: 0,
+              complete: true,
+            },
+          ],
+          quotaCostSnapshots: [
+            {
+              intervalId: "2026-08-27T20:00:00Z",
+              fingerprint,
+              sinceTime: "2026-08-27T20:00:00Z",
+              untilTime: "2026-08-27T21:00:00Z",
+              costUsd: 30,
+              records: 4,
+              recordedAt: "2026-08-27T22:00:00Z",
+              firstRemainingPercent: 80,
+              lastRemainingPercent: 60,
+              resetsAt: "2026-08-28T00:00:00Z",
+              models: [
+                {
+                  model: "gpt-6-astra",
+                  costUsd: 30,
+                  records: 4,
+                  unpricedRecords: 0,
+                  totals: {
+                    uncachedInputTokens: 1_000_000,
+                    cachedInputTokens: 200_000,
+                    cacheCreationTokens: 50_000,
+                    outputTokens: 40_000,
+                    reasoningTokens: 20_000,
+                  },
+                },
+              ],
+            },
+          ],
+          quotaHistory: {
+            status: "ready",
+            source: "fixture",
+            message: null,
+            samples: [
+              {
+                observedAt: "2026-08-27T20:00:00Z",
+                remainingPercent: 80,
+                resetsAt: "2026-08-28T00:00:00Z",
+              },
+              {
+                observedAt: "2026-08-27T21:00:00Z",
+                remainingPercent: 60,
+                resetsAt: "2026-08-28T00:00:00Z",
+              },
+              {
+                observedAt: "2026-08-30T20:00:00Z",
+                remainingPercent: 100,
+                resetsAt: "2026-09-06T00:00:00Z",
+              },
+              {
+                observedAt: "2026-08-30T22:00:00Z",
+                remainingPercent: 99,
+                resetsAt: "2026-09-06T00:00:00Z",
+              },
+            ],
+          },
+        },
+      },
+    ];
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<UsageResetPage />));
+      expect(container.querySelector("#api-value")?.textContent).toContain("$5.00");
+      await act(async () =>
+        container.querySelector<HTMLButtonElement>('[aria-label="Previous reset cycle"]')!.click(),
+      );
+      expect(container.querySelector("#api-value")?.textContent).toContain("$30.00");
+      expect(container.querySelector("#api-value")?.textContent).toContain("≈ $90");
+      expect(container.querySelector("#token-budget")?.textContent).not.toContain("Pending");
+      expect(
+        state.useUsage.mock.calls.some(([input]) =>
+          input.quotaIntervals?.some(
+            (interval: { id: string }) => interval.id === "2026-08-27T20:00:00Z",
+          ),
+        ),
+      ).toBe(true);
+      await act(async () =>
+        container.querySelector<HTMLButtonElement>('[aria-label="Next reset cycle"]')!.click(),
+      );
+      expect(container.querySelector("#api-value")?.textContent).toContain("$5.00");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
   });
 
   it.each(["failed", "empty"] as const)(
@@ -383,8 +622,8 @@ describe("Codex monitor page", () => {
       expect(markup).toContain("Terra");
       expect(markup).toContain("Luna");
       const tokenPlanner = markup.slice(
-        markup.indexOf('aria-label="Remaining token estimates"'),
-        markup.indexOf('aria-label="Remaining token estimates"') + 5000,
+        markup.indexOf('aria-label="API-price token comparisons"'),
+        markup.indexOf('aria-label="API-price token comparisons"') + 5000,
       );
       expect(tokenPlanner).toMatch(/≈ [0-9.,]+[KMB]/);
       if (scenario === "failed") expect(tokenPlanner).toContain("$540.00");
@@ -397,7 +636,7 @@ describe("Codex monitor page", () => {
     },
   );
 
-  it("labels an ambiguous zero-use window without inventing a dollar value", () => {
+  it("does not list a clock-only change with an unchanged balance as a reset", () => {
     const fingerprint = {
       hostId: "desktop",
       provider: "codex",
@@ -439,7 +678,8 @@ describe("Codex monitor page", () => {
       },
     ];
     const markup = renderToStaticMarkup(<UsageResetPage />);
-    expect(markup).toContain("No quota use observed in this interval");
+    expect(markup).toContain("No reset observed since");
+    expect(markup).not.toContain("Usage window changed");
     expect(markup).not.toContain("$0.00 unused");
   });
 
@@ -467,8 +707,8 @@ describe("Codex monitor page", () => {
           },
         }),
       );
-      const currentStart = bridge === "short" ? "2026-08-30T19:20:00Z" : "2026-08-30T20:10:00Z";
-      const currentEnd = bridge === "short" ? "2026-08-30T19:25:00Z" : "2026-08-30T20:15:00Z";
+      const currentStart = bridge === "short" ? "2026-08-30T19:20:00Z" : "2026-08-30T20:20:00Z";
+      const currentEnd = bridge === "short" ? "2026-08-30T19:25:00Z" : "2026-08-30T20:25:00Z";
       const currentSamples = [
         {
           observedAt: "2026-08-30T18:00:00Z",
@@ -542,11 +782,11 @@ describe("Codex monitor page", () => {
       );
       const markup = renderToStaticMarkup(<UsageResetPage />);
       const tokenPlanner = markup.slice(
-        markup.indexOf('aria-label="Remaining token estimates"'),
-        markup.indexOf('aria-label="Remaining token estimates"') + 5000,
+        markup.indexOf('aria-label="API-price token comparisons"'),
+        markup.indexOf('aria-label="API-price token comparisons"') + 5000,
       );
       if (bridge === "short") {
-        for (const label of ["Astra", "Sol", "Terra", "Luna"]) {
+        for (const label of ["GPT-6 Astra", "GPT-6 Sol", "GPT-5.6 Terra", "GPT-6 Luna"]) {
           const rowStart = tokenPlanner.indexOf(`<span>${label}</span>`);
           const row = tokenPlanner.slice(rowStart, tokenPlanner.indexOf("</tr>", rowStart));
           expect(row).toMatch(/≈ [0-9.,]+[KMB]/);
@@ -635,8 +875,8 @@ describe("Codex monitor page", () => {
     expect(markup).toContain("Transcript costs from Healthy computer");
     expect(markup).not.toContain("Pending computer is still reading Codex transcripts");
     const tokenPlanner = markup.slice(
-      markup.indexOf('aria-label="Remaining token estimates"'),
-      markup.indexOf('aria-label="Remaining token estimates"') + 5000,
+      markup.indexOf('aria-label="API-price token comparisons"'),
+      markup.indexOf('aria-label="API-price token comparisons"') + 5000,
     );
     expect(tokenPlanner).toMatch(/≈ [0-9.,]+[KMB]/);
     expect(tokenPlanner).not.toContain("Pending");

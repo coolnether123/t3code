@@ -1112,6 +1112,12 @@ export function WorkerDetailView({
                 </span>
               ) : null}
             </div>
+            {detail.worktree ? (
+              <p className="mt-1 text-[.7rem] text-muted-foreground" aria-live="polite">
+                Checkout {detail.worktree.status}
+                {detail.worktree.error ? `: ${detail.worktree.error}` : ""}
+              </p>
+            ) : null}
           </div>
           <span className="shrink-0 font-mono text-[.65rem] text-muted-foreground">
             {formatTokens(summary.usage.totalTokens)} tok

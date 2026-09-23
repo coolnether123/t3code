@@ -4,6 +4,7 @@ param(
     [switch]$Fast,
     [switch]$Full,
     [switch]$SkipBuild,
+    [switch]$SkipTypecheck,
     # Sync and build for an existing service owner without restarting it or changing Serve.
     [switch]$PrepareOnly,
     [ValidateRange(15, 600)]
@@ -19,6 +20,10 @@ if ($Fast -and $Full) {
 
 if ($Full -and $SkipBuild) {
     throw "-Full and -SkipBuild cannot be used together."
+}
+
+if ($SkipTypecheck -and ($Fast -or $SkipBuild)) {
+    throw "-SkipTypecheck cannot be combined with a mode that already skips the build."
 }
 
 $sourceRoot = "A:\Dev\Worktrees\t3code-workers-prototype"
@@ -191,6 +196,63 @@ function Get-IncludedFiles {
 function Get-FileSha256 {
     param([Parameter(Mandatory)][string]$Path)
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+}
+
+function Get-TextSha256 {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
+        return ([System.BitConverter]::ToString($algorithm.ComputeHash($bytes))).Replace("-", "")
+    }
+    finally {
+        $algorithm.Dispose()
+    }
+}
+
+function Get-ProjectionIdentity {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][object[]]$Files,
+        [Parameter(Mandatory)][hashtable]$FingerprintMap
+    )
+    $entries = @($Files | Sort-Object Relative | ForEach-Object {
+        $key = $_.Relative.ToLowerInvariant()
+        [ordered]@{
+            path = $_.Relative.Replace('\', '/')
+            bytes = [int64](Get-Item -LiteralPath $_.FullName).Length
+            sha256 = $FingerprintMap[$key]
+        }
+    })
+    $identityText = (($entries | ForEach-Object {
+        "$($_.path)`0$($_.bytes)`0$($_.sha256)"
+    }) -join "`n")
+    return [ordered]@{
+        root = $Root
+        fileCount = $entries.Count
+        sha256 = Get-TextSha256 $identityText
+        files = $entries
+    }
+}
+
+function Get-BuildArtifactIdentity {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string[]]$RelativePaths
+    )
+    return @($RelativePaths | ForEach-Object {
+        $fullPath = Assert-ContainedPath $Root (Join-Path $Root $_) "build artifact"
+        if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+            return [ordered]@{ path = $_.Replace('\', '/'); present = $false }
+        }
+        $item = Get-Item -LiteralPath $fullPath
+        return [ordered]@{
+            path = $_.Replace('\', '/')
+            present = $true
+            bytes = [int64]$item.Length
+            sha256 = Get-FileSha256 $fullPath
+        }
+    })
 }
 
 function Get-FingerprintMap {
@@ -461,9 +523,21 @@ function Invoke-ProjectCommand {
             $oldCodexEnvironment[$entry.Name] = $entry.Value
             Remove-Item -LiteralPath "Env:$($entry.Name)" -ErrorAction SilentlyContinue
         }
-        & $vpPath @Arguments 1>> $LogPath 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            throw "$Label failed with exit code $LASTEXITCODE. See $LogPath"
+        $projectCommandErrorAction = $ErrorActionPreference
+        try {
+            # Vite+ writes an informational built-in-command note to stderr.
+            # Windows PowerShell 5 turns native stderr into ErrorRecord objects;
+            # use the native exit code for this one boundary, then restore the
+            # launcher's fail-closed preference.
+            $ErrorActionPreference = "Continue"
+            & $nodePath $vpCliPath @Arguments 1>> $LogPath 2>&1
+            $projectCommandExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $projectCommandErrorAction
+        }
+        if ($projectCommandExitCode -ne 0) {
+            throw "$Label failed with exit code $projectCommandExitCode. See $LogPath"
         }
     }
     finally {
@@ -715,14 +789,14 @@ try {
     if ($nodeVersion -ne "v24.19.0") {
         throw "Official Node path reports '$nodeVersion', expected v24.19.0."
     }
-    $vpPath = Join-Path $deployRoot "node_modules\.bin\vp.ps1"
-    if (-not (Test-Path -LiteralPath $vpPath -PathType Leaf)) {
-        throw "Deploy-local vp shim is missing: $vpPath"
+    $vpCliPath = Join-Path $deployRoot "node_modules\vite-plus\bin\vp"
+    if (-not (Test-Path -LiteralPath $vpCliPath -PathType Leaf)) {
+        throw "Deploy-local Vite+ CLI is missing: $vpCliPath"
     }
     $oldPathForVersion = $env:Path
     try {
         $env:Path = "$([System.IO.Path]::GetDirectoryName($nodePath));$oldPathForVersion"
-        $vpVersion = (& $vpPath --version 2>$null | Select-Object -First 1).Trim()
+        $vpVersion = (& $nodePath $vpCliPath --version 2>$null | Select-Object -First 1).Trim()
     }
     finally {
         $env:Path = $oldPathForVersion
@@ -824,10 +898,15 @@ try {
         Write-Plan "Fast readiness mode selected. Skipping full contract/server/web/desktop checks and builds."
     }
     else {
-        Invoke-ProjectCommand "contracts typecheck" @("run", "--filter", "@t3tools/contracts", "typecheck") $commandLogPath
-        Invoke-ProjectCommand "server typecheck" @("run", "--filter", "t3", "typecheck") $commandLogPath
-        Invoke-ProjectCommand "web typecheck" @("run", "--filter", "@t3tools/web", "typecheck") $commandLogPath
-        Invoke-ProjectCommand "desktop typecheck" @("run", "--filter", "@t3tools/desktop", "typecheck") $commandLogPath
+        if ($SkipTypecheck) {
+            Write-Plan "Explicitly skipping package typechecks; build commands still run."
+        }
+        else {
+            Invoke-ProjectCommand "contracts typecheck" @("run", "--filter", "@t3tools/contracts", "typecheck") $commandLogPath
+            Invoke-ProjectCommand "server typecheck" @("run", "--filter", "t3", "typecheck") $commandLogPath
+            Invoke-ProjectCommand "web typecheck" @("run", "--filter", "@t3tools/web", "typecheck") $commandLogPath
+            Invoke-ProjectCommand "desktop typecheck" @("run", "--filter", "@t3tools/desktop", "typecheck") $commandLogPath
+        }
         Invoke-ProjectCommand "web build" @("build", "--logLevel", "error") $commandLogPath (Join-Path $deployRoot "apps\web")
         Invoke-ProjectCommand "server bundle" @("pack", "--logLevel", "error") $commandLogPath (Join-Path $deployRoot "apps\server")
         Invoke-ProjectCommand "server service-launcher bundle" @("pack", "src/service-launcher.ts", "--out-dir", "dist", "--no-clean", "--logLevel", "error") $commandLogPath (Join-Path $deployRoot "apps\server")
@@ -958,11 +1037,62 @@ try {
         if ($finalParity -ne 0) {
             throw "Source/deploy parity check found $finalParity mismatched files after sync."
         }
+        $sourceStatusText = Invoke-GitText $sourceRoot @("status", "--short", "--untracked-files=all")
+        $sourceStatus = @($sourceStatusText -split "`r?`n" | Where-Object { $_.Length -gt 0 })
+        $projection = Get-ProjectionIdentity $sourceRoot $finalSourceFiles $finalSourceMap
+        $artifacts = Get-BuildArtifactIdentity $deployRoot @(
+            "apps\server\dist\bin.mjs",
+            "apps\server\dist\service-launcher.mjs",
+            "apps\web\dist\index.html",
+            "apps\desktop\dist-electron\main.cjs",
+            "apps\desktop\dist-electron\preload.cjs"
+        )
+        $deploymentManifestPath = Join-Path $verificationDir "t3-deployment-$stamp.json"
+        $deploymentManifest = [ordered]@{
+            schemaVersion = 1
+            recordedAt = [DateTime]::UtcNow.ToString("o")
+            mode = if ($Fast) { "fast" } elseif ($SkipBuild) { "skip-build" } elseif ($SkipTypecheck) { "build-without-typecheck" } else { "full" }
+            preparedOnly = [bool]$PrepareOnly
+            source = [ordered]@{
+                root = $sourceRoot
+                branch = $sourceBranch
+                commit = $sourceCommit
+                dirty = $sourceStatus.Count -gt 0
+                dirtyEntryCount = $sourceStatus.Count
+                statusSha256 = Get-TextSha256 ($sourceStatus -join "`n")
+                projection = $projection
+            }
+            deploy = [ordered]@{
+                root = $deployRoot
+                detachedCommit = $deployCommitAfter
+                projectionMatchesSource = $true
+                artifacts = $artifacts
+            }
+            runtime = [ordered]@{
+                node = [ordered]@{ path = $nodePath; version = $nodeVersion }
+                vitePlus = $vpVersion
+                dataRoot = $t3Home
+                serverUrl = "http://127.0.0.1:$serverPort/"
+                webUrl = "http://127.0.0.1:$webPort/"
+                tailnetUrl = $tailnetUrl
+            }
+            protectedExclusions = [ordered]@{
+                files = $excludedRelativeFiles
+                directories = $excludedDirectoryNames
+            }
+        }
+        $manifestJson = $deploymentManifest | ConvertTo-Json -Depth 10
+        [System.IO.File]::WriteAllText(
+            $deploymentManifestPath,
+            $manifestJson,
+            (New-Object System.Text.UTF8Encoding($false))
+        )
         if ($PrepareOnly) { Write-Phase "prepared" }
         else { Write-Phase "ready" }
         Write-Host "  source commit $sourceCommit"
         Write-Host "  deploy detached commit $deployCommitAfter"
         Write-Host "  projection parity exact, excluded state preserved"
+        Write-Host "  deployment manifest $deploymentManifestPath"
         if ($PrepareOnly) {
             Write-Host "  code and bundles prepared; running processes and Tailscale settings unchanged"
             Write-Host "  restart and verify the existing service owner separately"

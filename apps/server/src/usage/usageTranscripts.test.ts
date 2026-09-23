@@ -178,10 +178,16 @@ describe("parseCodexLine", () => {
     timestamp: "2026-08-01T05:17:42.694Z",
     payload: { type: "turn_context", model: "gpt-5.6-sol" },
   });
-  const tokenCount = (inputTokens: number, cached: number, output: number, reasoning: number) =>
+  const tokenCount = (
+    inputTokens: number,
+    cached: number,
+    output: number,
+    reasoning: number,
+    timestamp = "2026-08-01T05:17:49.919Z",
+  ) =>
     JSON.stringify({
       type: "event_msg",
-      timestamp: "2026-08-01T05:17:49.919Z",
+      timestamp,
       payload: {
         type: "token_count",
         info: {
@@ -219,6 +225,25 @@ describe("parseCodexLine", () => {
 
     expect(first).not.toBeNull();
     expect(repeat).toBeNull();
+  });
+
+  it("counts equal token payloads in distinct turn contexts", () => {
+    const state = initialCodexScanState();
+    const firstTurn = JSON.stringify({
+      type: "turn_context",
+      payload: { model: "gpt-5.6-sol", turn_id: "turn-1" },
+    });
+    const secondTurn = JSON.stringify({
+      type: "turn_context",
+      payload: { model: "gpt-5.6-sol", turn_id: "turn-2" },
+    });
+
+    parseCodexLine(firstTurn, state);
+    expect(parseCodexLine(tokenCount(100, 0, 10, 0), state)).not.toBeNull();
+    parseCodexLine(secondTurn, state);
+    expect(
+      parseCodexLine(tokenCount(100, 0, 10, 0, "2026-08-01T05:18:49.919Z"), state),
+    ).not.toBeNull();
   });
 
   it("drops usage that arrives before any model is known", () => {

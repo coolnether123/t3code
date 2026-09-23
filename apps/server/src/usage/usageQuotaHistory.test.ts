@@ -145,7 +145,7 @@ describe("quota cost matching", () => {
     dedupeKey: null,
     reportedCostUsd: 2,
   });
-  it("matches exact snapshot boundaries without adding the first observation's already-used tokens", () => {
+  it("uses inclusive starts and exclusive ends for quota intervals", () => {
     const accumulator = new QuotaCostAccumulator(intervals, new Map());
     accumulator.add(record(intervals[0]!.sinceTime));
     accumulator.add(record("2026-07-21T16:30:00Z"));
@@ -156,11 +156,37 @@ describe("quota cost matching", () => {
       { model: "unknown", costUsd: 4, records: 2, totals: { uncachedInputTokens: 200 } },
     ]);
   });
+  it("assigns a shared boundary to the next adjacent interval exactly once", () => {
+    const adjacent = [
+      ...intervals,
+      {
+        id: "two",
+        sinceTime: intervals[0]!.untilTime,
+        untilTime: "2026-07-21T18:00:00Z",
+      },
+    ];
+    const accumulator = new QuotaCostAccumulator(adjacent, new Map());
+    accumulator.add(record(intervals[0]!.untilTime));
+    expect(accumulator.rows.map((row) => row.records)).toEqual([0, 1]);
+  });
   it("excludes other providers and Spark's independent quota", () => {
     const accumulator = new QuotaCostAccumulator(intervals, new Map());
     accumulator.add({ ...record("2026-07-21T16:30:00Z"), provider: "claude" });
     accumulator.add(record("2026-07-21T16:30:00Z", "gpt-5.3-codex-spark"));
     expect(accumulator.rows[0]?.records).toBe(0);
+  });
+  it("excludes Qwen CLI runs from the OpenAI subscription conversion", () => {
+    const accumulator = new QuotaCostAccumulator(intervals, new Map());
+    accumulator.add(record("2026-07-21T16:30:00Z", "gpt-6-astra"));
+    for (const model of [
+      "qwen36-35b-a3b-256k-iq4xs-mec128-thinking",
+      "qwen38-27b-96k-q3",
+      "local/qwen38-27b",
+    ]) {
+      accumulator.add({ ...record("2026-07-21T16:30:00Z", model), reportedCostUsd: null });
+    }
+    expect(accumulator.rows[0]).toMatchObject({ records: 1, costUsd: 2, unpricedRecords: 0 });
+    expect(accumulator.rows[0]?.models.map((row) => row.model)).toEqual(["gpt-6-astra"]);
   });
   it("keeps unknown prices visible as missing, not free usage", () => {
     const accumulator = new QuotaCostAccumulator(intervals, new Map());

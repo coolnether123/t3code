@@ -273,6 +273,11 @@ export function normalizeCustomModelSlug(model: string | null | undefined): stri
   return model.trim() || null;
 }
 
+/** Compare Codex model families without changing provider-owned dispatch IDs. */
+export function codexModelFamily(slug: string): string {
+  return slug.startsWith("openai.gpt-") ? slug.slice("openai.".length) : slug;
+}
+
 export interface CustomModelDefinition {
   readonly slug: string;
   readonly name: string;
@@ -443,6 +448,9 @@ export function applyClaudePromptEffortPrefix(
     return trimmed;
   }
   if (effort !== "ultrathink") {
+    return trimmed;
+  }
+  if (/^\/[a-z][a-z0-9:.-]*(?:\s|$)/i.test(trimmed)) {
     return trimmed;
   }
   if (trimmed.startsWith("Ultrathink:")) {
