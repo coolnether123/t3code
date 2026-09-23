@@ -2170,3 +2170,181 @@ it.effect("flushes managed native logs when the adapter layer shuts down", () =>
     }
   }),
 );
+
+const usageLimitRuntimeFactory = makeRuntimeFactory();
+const usageLimitLayer = it.layer(
+  Layer.effect(
+    CodexAdapter,
+    Effect.gen(function* () {
+      return yield* makeCodexAdapter(decodeCodexSettings({}), {
+        makeRuntime: usageLimitRuntimeFactory.factory,
+      });
+    }),
+  ).pipe(
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(ServerSettingsService.layerTest()),
+    Layer.provideMerge(providerSessionDirectoryTestLayer),
+    Layer.provideMerge(NodeServices.layer),
+  ),
+);
+
+const usageLimitAt = "2026-01-01T00:00:00.000Z";
+const usageLimitAtSeconds = Date.parse(usageLimitAt) / 1000;
+
+function usageLimitNotification(input: {
+  readonly id: string;
+  readonly method: string;
+  readonly payload: unknown;
+}): ProviderEvent {
+  return {
+    id: asEventId(input.id),
+    kind: "notification",
+    provider: ProviderDriverKind.make("codex"),
+    threadId: asThreadId("thread-usage-limit"),
+    turnId: asTurnId("turn-usage-limit"),
+    createdAt: usageLimitAt,
+    method: input.method,
+    payload: input.payload,
+  };
+}
+
+function usageLimitTurnCompleted(id: string): ProviderEvent {
+  return usageLimitNotification({
+    id,
+    method: "turn/completed",
+    payload: {
+      threadId: "thread-usage-limit",
+      turn: {
+        id: "turn-usage-limit",
+        items: [],
+        status: "failed",
+        error: {
+          message: "Your workspace is out of credits.",
+          codexErrorInfo: "usageLimitExceeded",
+        },
+      },
+    },
+  });
+}
+
+usageLimitLayer("CodexAdapter usage-limit errors", (it) => {
+  it.effect("uses the session snapshot and replaces the duplicate provider error", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-usage-limit"),
+        runtimeMode: "full-access",
+      });
+      const runtime = usageLimitRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.take(3),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      yield* runtime.emit(
+        usageLimitNotification({
+          id: "evt-usage-limits",
+          method: "account/rateLimits/updated",
+          payload: {
+            rateLimits: {
+              limitId: "codex",
+              primary: {
+                usedPercent: 100,
+                resetsAt: usageLimitAtSeconds + 3600,
+                windowDurationMins: 300,
+              },
+              secondary: {
+                usedPercent: 100,
+                resetsAt: usageLimitAtSeconds + 5 * 86_400 + 5 * 3600,
+                windowDurationMins: 10_080,
+              },
+            },
+          },
+        }),
+      );
+      yield* runtime.emit(
+        usageLimitNotification({
+          id: "evt-usage-limit-reached",
+          method: "account/rateLimits/updated",
+          payload: {
+            rateLimits: { rateLimitReachedType: "workspace_owner_credits_depleted" },
+          },
+        }),
+      );
+      yield* runtime.emit(
+        usageLimitNotification({
+          id: "evt-usage-limit-error",
+          method: "error",
+          payload: {
+            threadId: "thread-usage-limit",
+            turnId: "turn-usage-limit",
+            willRetry: false,
+            error: {
+              message: "Your workspace is out of credits.",
+              codexErrorInfo: "usageLimitExceeded",
+            },
+          },
+        }),
+      );
+      yield* runtime.emit(usageLimitTurnCompleted("evt-usage-limit-turn"));
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      NodeAssert.deepStrictEqual(
+        events.map((event) => event.type),
+        ["account.rate-limits.updated", "runtime.error", "turn.completed"],
+      );
+      const message =
+        "Codex usage limit reached. The weekly limit resets in 5d 5h. The workspace has no credits to continue sooner: ask your workspace owner to add credits, or send the message again once the limit resets.";
+      const runtimeError = events.find((event) => event.type === "runtime.error");
+      NodeAssert.equal(runtimeError?.payload.message, message);
+      NodeAssert.equal(runtimeError?.payload.detail, "Your workspace is out of credits.");
+      const completed = events.find((event) => event.type === "turn.completed");
+      NodeAssert.equal(completed?.payload.errorMessage, message);
+    }),
+  );
+
+  it.effect("uses the most recent session window and falls back without one", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-usage-limit"),
+        runtimeMode: "full-access",
+      });
+      const runtime = usageLimitRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.take(3),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* runtime.emit(
+        usageLimitNotification({
+          id: "evt-session-limit",
+          method: "account/rateLimits/updated",
+          payload: {
+            rateLimits: {
+              rateLimitReachedType: "rate_limit_reached",
+              primary: {
+                usedPercent: 100,
+                resetsAt: usageLimitAtSeconds + 3 * 3600 + 20 * 60,
+                windowDurationMins: 300,
+              },
+            },
+          },
+        }),
+      );
+      yield* runtime.emit(usageLimitTurnCompleted("evt-session-limit-turn"));
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      const completed = events.find((event) => event.type === "turn.completed");
+      NodeAssert.equal(
+        completed?.payload.errorMessage,
+        "Codex usage limit reached. The session limit resets in 3h 20m. Send the message again once the limit resets.",
+      );
+    }),
+  );
+});

@@ -6,6 +6,8 @@ import {
   codexRateLimitsToLimits,
   codexRateLimitsToUpdate,
   codexResetCreditsToContract,
+  codexUsageLimitMessage,
+  mergeCodexRateLimits,
 } from "./codexUsageLimits.ts";
 
 const checkedAt = "2026-07-18T10:00:00.000Z";
@@ -199,5 +201,82 @@ describe("codexResetCreditsToContract", () => {
         resetCredits: { availableCount: 1 },
       }).resetCredits,
     ).toEqual({ availableCount: 1 });
+  });
+});
+
+describe("Codex usage-limit messages", () => {
+  const at = "2026-01-01T00:00:00.000Z";
+  const atSeconds = Date.parse(at) / 1000;
+
+  it("names the furthest exhausted window and a workspace credit stop", () => {
+    expect(
+      codexUsageLimitMessage(
+        {
+          limitId: "codex",
+          rateLimitReachedType: "workspace_owner_credits_depleted",
+          primary: { usedPercent: 100, resetsAt: atSeconds + 3600, windowDurationMins: 300 },
+          secondary: {
+            usedPercent: 100,
+            resetsAt: atSeconds + 5 * 86_400 + 5 * 3600,
+            windowDurationMins: 10_080,
+          },
+        },
+        at,
+      ),
+    ).toBe(
+      "Codex usage limit reached. The weekly limit resets in 5d 5h. The workspace has no credits to continue sooner: ask your workspace owner to add credits, or send the message again once the limit resets.",
+    );
+  });
+
+  it("names a session reset and workspace spend cap", () => {
+    expect(
+      codexUsageLimitMessage(
+        {
+          rateLimitReachedType: "workspace_member_usage_limit_reached",
+          primary: {
+            usedPercent: 100,
+            resetsAt: atSeconds + 3 * 3600 + 20 * 60,
+            windowDurationMins: 300,
+          },
+        },
+        at,
+      ),
+    ).toBe(
+      "Codex usage limit reached. The session limit resets in 3h 20m. The workspace spend limit is reached: ask your workspace owner to raise it, or send the message again once the limit resets.",
+    );
+  });
+
+  it("falls back without a snapshot", () => {
+    expect(codexUsageLimitMessage(undefined, at)).toBe(
+      "Codex usage limit reached. Send the message again once the limit resets.",
+    );
+  });
+});
+
+describe("mergeCodexRateLimits", () => {
+  it("keeps earlier windows when a later update only names the reached limit", () => {
+    const previous = {
+      limitId: "codex",
+      primary: { usedPercent: 100, resetsAt: 1_800_000_000, windowDurationMins: 300 },
+      secondary: { usedPercent: 100, resetsAt: 1_800_400_000, windowDurationMins: 10_080 },
+    };
+    expect(
+      mergeCodexRateLimits(previous, {
+        rateLimitReachedType: "rate_limit_reached",
+      }),
+    ).toEqual({
+      ...previous,
+      rateLimitReachedType: "rate_limit_reached",
+    });
+  });
+
+  it("does not replace the main allowance with model-specific limits", () => {
+    const previous = { limitId: "codex", primary: { usedPercent: 100 } };
+    expect(
+      mergeCodexRateLimits(previous, {
+        limitId: "codex_bengalfox",
+        primary: { usedPercent: 3 },
+      }),
+    ).toBe(previous);
   });
 });

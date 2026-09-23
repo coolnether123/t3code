@@ -51,7 +51,12 @@ import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { codexAppServerTransport } from "../CodexAppServerTransport.ts";
-import { codexRateLimitsToUpdate } from "./codexUsageLimits.ts";
+import {
+  type CodexRateLimitSnapshot,
+  codexRateLimitsToUpdate,
+  codexUsageLimitMessage,
+  mergeCodexRateLimits,
+} from "./codexUsageLimits.ts";
 import {
   CODEX_COMPUTER_CONTROL_OPTION_ID,
   DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
@@ -914,7 +919,6 @@ function mapCollabAgentEvent(
           : undefined;
       const metadata = {
         taskId,
-        description: title,
         ...statusLinkage,
         ...(typeof settings?.model === "string" ? { model: settings.model } : {}),
         ...(typeof settings?.effort === "string" ? { effort: settings.effort } : {}),
@@ -928,6 +932,7 @@ function mapCollabAgentEvent(
           type: "task.progress",
           payload: {
             ...metadata,
+            description: title,
             summary,
           },
         },
@@ -1994,10 +1999,67 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         // this a child of `startSession`, and Effect interrupts a fiber's
         // children when it completes, so the consumer died on return and every
         // runtime event the session emitted afterwards was dropped.
+        let rateLimits: CodexRateLimitSnapshot | undefined;
         const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>
           Effect.gen(function* () {
             yield* writeNativeEvent(event);
-            const runtimeEvents = mapToRuntimeEvents(event, event.threadId);
+            if (event.method === "account/rateLimits/updated") {
+              const limitsPayload = readPayload(
+                EffectCodexSchema.V2AccountRateLimitsUpdatedNotification,
+                event.payload,
+              );
+              if (limitsPayload) {
+                rateLimits = mergeCodexRateLimits(rateLimits, limitsPayload.rateLimits);
+              }
+            } else if (event.method === "error") {
+              const errorPayload = readPayload(
+                EffectCodexSchema.V2ErrorNotification,
+                event.payload,
+              );
+              // The failed turn repeats this message, which is replaced below.
+              if (errorPayload?.error.codexErrorInfo === "usageLimitExceeded") return;
+            }
+
+            let usageLimitError: ProviderRuntimeEvent | undefined;
+            let usageLimitMessage: string | undefined;
+            if (event.method === "turn/completed") {
+              const completedPayload = readPayload(
+                EffectCodexSchema.V2TurnCompletedNotification,
+                event.payload,
+              );
+              const turnError =
+                completedPayload?.turn.status === "failed"
+                  ? completedPayload.turn.error
+                  : undefined;
+              if (turnError?.codexErrorInfo === "usageLimitExceeded") {
+                usageLimitMessage = codexUsageLimitMessage(rateLimits, event.createdAt);
+                usageLimitError = {
+                  ...runtimeEventBase(event, event.threadId),
+                  type: "runtime.error",
+                  payload: {
+                    message: usageLimitMessage,
+                    class: "provider_error",
+                    ...(turnError.message ? { detail: turnError.message } : {}),
+                  },
+                };
+              }
+            }
+
+            const mappedEvents = mapToRuntimeEvents(event, event.threadId).map((runtimeEvent) => {
+              if (runtimeEvent.type === "turn.completed" && runtimeEvent.turnId) {
+                return {
+                  ...runtimeEvent,
+                  payload: {
+                    ...runtimeEvent.payload,
+                    ...(usageLimitMessage ? { errorMessage: usageLimitMessage } : {}),
+                  },
+                };
+              }
+              return runtimeEvent;
+            });
+            const runtimeEvents = usageLimitError
+              ? [usageLimitError, ...mappedEvents]
+              : mappedEvents;
             if (runtimeEvents.length === 0) {
               yield* Effect.logDebug("ignoring unhandled Codex provider event", {
                 method: event.method,
