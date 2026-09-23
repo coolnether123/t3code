@@ -378,7 +378,7 @@ export async function transcriptCursorIsLineBoundary(
  * unread byte. A bounded read never feeds a torn final line to a reducer, so
  * its returned cursor can safely carry parser state into the next request.
  */
-const MAX_JSONL_LINE_BYTES = 4 * 1024 * 1024;
+const MAX_JSONL_LINE_BYTES = 8 * 1024 * 1024;
 
 interface JsonlReadProgress {
   readonly nextByte: number;
