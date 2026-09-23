@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
-import { UsageReportInput, UsageSummaryInput } from "./usage.ts";
+import { UsageReportInput, UsageSourceFingerprint, UsageSummaryInput } from "./usage.ts";
 
 const decode = Schema.decodeUnknownSync(UsageSummaryInput);
 const base = {
@@ -9,6 +9,17 @@ const base = {
   sinceDay: "2026-08-01",
   untilDay: "2026-08-02",
 };
+
+it("accepts missing Grok source fingerprints reported by older Mac servers", () => {
+  expect(
+    Schema.decodeUnknownSync(UsageSourceFingerprint)({
+      hostId: "millie",
+      provider: "grok",
+      resolvedHomePath: "/Users/millie/.grok",
+      volumeId: "",
+    }).provider,
+  ).toBe("grok");
+});
 
 describe("UsageSummaryInput", () => {
   it("accepts bounded provider, native session, and native turn selection", () => {

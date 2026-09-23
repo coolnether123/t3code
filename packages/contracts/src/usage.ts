@@ -34,6 +34,7 @@ export const UsageProviderKind = Schema.Literals([
   "opencode",
   "chatgpt",
   "aistudio",
+  "grok",
 ]);
 export type UsageProviderKind = typeof UsageProviderKind.Type;
 
