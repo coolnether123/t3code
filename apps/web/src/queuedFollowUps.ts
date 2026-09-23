@@ -35,7 +35,7 @@ export const useQueuedFollowUpStore = create<QueuedFollowUpStore>()((set, get) =
       },
     })),
   remove: (threadKey, id) => {
-    const wasSending = sendClaims.delete(claimKey(threadKey, id));
+    const wasSending = sendClaims.has(claimKey(threadKey, id));
     const removed = get().byThread[threadKey]?.find((entry) => entry.id === id);
     if (!wasSending && removed && typeof URL !== "undefined") {
       for (const image of removed.context.images) {
@@ -92,7 +92,17 @@ export function useQueuedFollowUps(threadKey: string | null): ReadonlyArray<Queu
 export function nextAutoQueuedFollowUp(
   entries: ReadonlyArray<QueuedFollowUp>,
   phase: "connecting" | "running" | "ready" | "disconnected",
+  hasPendingRequest = false,
 ): QueuedFollowUp | null {
   const first = entries[0];
-  return phase === "ready" && first && !first.holdUntilUserAction ? first : null;
+  return phase === "ready" && !hasPendingRequest && first && !first.holdUntilUserAction
+    ? first
+    : null;
+}
+
+export function shouldDispatchQueuedFollowUp(input: {
+  readonly isStillQueued: boolean;
+  readonly hasPendingRequest: boolean;
+}): boolean {
+  return input.isStillQueued && !input.hasPendingRequest;
 }
