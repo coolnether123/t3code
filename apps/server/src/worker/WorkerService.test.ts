@@ -337,10 +337,12 @@ it.effect("creates isolated Worker checkouts and reuses each checkout after serv
   const memory = makeMemoryWorkerStore();
   const worktrees: Array<import("@t3tools/contracts").VcsCreateWorktreeInput> = [];
   const backendCwds: Array<string | undefined> = [];
+  const backendModels: Array<ModelSelection | undefined> = [];
   const backend = WorkerBackend.of({
     start: (input) =>
       Effect.sync(() => {
         backendCwds.push(input.cwd);
+        backendModels.push(input.modelSelection);
         return {
           providerThreadId: input.providerThreadId,
           providerTurnId: TurnId.make("worktree-start"),
@@ -349,6 +351,7 @@ it.effect("creates isolated Worker checkouts and reuses each checkout after serv
     send: (input) =>
       Effect.sync(() => {
         backendCwds.push(input.cwd);
+        backendModels.push(input.modelSelection);
         return {
           providerThreadId: input.providerThreadId,
           providerTurnId: TurnId.make("worktree-followup"),
@@ -385,6 +388,7 @@ it.effect("creates isolated Worker checkouts and reuses each checkout after serv
         context: { references: [], snippets: [] },
         cwd: "A:/Dev/Projects/example",
         createWorktree: true,
+        modelSelection: { instanceId: providerInstanceId, model: "gpt-6-luna" },
       },
     });
     yield* Fiber.join(firstReadyFiber);
@@ -407,6 +411,7 @@ it.effect("creates isolated Worker checkouts and reuses each checkout after serv
         context: { references: [], snippets: [] },
         cwd: "A:/Dev/Projects/example",
         createWorktree: true,
+        modelSelection: { instanceId: providerInstanceId, model: "gpt-6-astra" },
       },
     });
     yield* Fiber.join(secondReadyFiber);
@@ -423,10 +428,17 @@ it.effect("creates isolated Worker checkouts and reuses each checkout after serv
     });
     expect(backendCwds).toContain(worktrees[0]?.path);
     expect(backendCwds).toContain(worktrees[1]?.path);
+    expect(backendModels).toEqual([
+      { instanceId: providerInstanceId, model: "gpt-6-luna" },
+      { instanceId: providerInstanceId, model: "gpt-6-astra" },
+    ]);
+    expect((yield* service.get(first.summary.id)).summary.model).toBe("gpt-6-luna");
+    expect((yield* service.get(second.summary.id)).summary.model).toBe("gpt-6-astra");
 
     const reloaded = yield* WorkerServiceTesting.make;
     yield* reloaded.send({ workerId: first.summary.id, message: "Continue in that checkout." });
     expect(backendCwds.at(-1)).toBe(worktrees[0]?.path);
+    expect(backendModels.at(-1)?.model).toBe("gpt-6-luna");
     expect((yield* reloaded.get(first.summary.id)).worktree?.status).toBe("ready");
     expect(memory.workers.get(first.summary.id)?.cwd).toBe(worktrees[0]?.path);
   }).pipe(Effect.provide(workerWorktreeLayer(memory.store, backend, git)));
