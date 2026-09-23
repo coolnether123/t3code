@@ -544,7 +544,11 @@ export function UsagePage() {
                                 </span>
                               </td>
                               <td className="py-2 text-right text-foreground tabular-nums">
-                                {formatUsd(model.costUsd)}
+                                {model.unpricedRecords > 0
+                                  ? model.costUsd > 0
+                                    ? `${formatUsd(model.costUsd)} + unpriced`
+                                    : "Unpriced"
+                                  : formatUsd(model.costUsd)}
                               </td>
                               <td className="py-2 text-right text-muted-foreground tabular-nums">
                                 {formatPercent(model.costShare)}
