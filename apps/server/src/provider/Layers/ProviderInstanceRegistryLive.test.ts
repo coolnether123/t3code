@@ -245,10 +245,12 @@ describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
   // `NodeServices.layer` through `Layer.provideMerge` to satisfy that
   // dependency while still surfacing NodeServices to the test body (the
   // codex driver's `create` yields `ChildProcessSpawner` directly).
-  const testLayer = ServerConfig.layerTest(process.cwd(), {
-    prefix: "provider-instance-registry-test",
-  }).pipe(
-    Layer.provideMerge(NodeServices.layer),
+  const infraLayer = OpenCodeRuntimeLive.pipe(Layer.provideMerge(NodeServices.layer));
+  const testLayer = AntigravityInstallation.layer.pipe(
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "provider-instance-registry-test" }),
+    ),
+    Layer.provideMerge(infraLayer),
     Layer.provideMerge(BackgroundPolicyAlwaysRunLayer),
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(TestHttpClientLive),

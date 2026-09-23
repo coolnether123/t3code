@@ -3,7 +3,7 @@
 // @effect-diagnostics unsafeEffectTypeAssertion:off
 /** Read-only access to the native Codex desktop history store. */
 import * as NodeSqlite from "node:sqlite";
-import * as NodeFS from "node:fs/promises";
+import * as NodeFSP from "node:fs/promises";
 
 import {
   type CodexDesktopMessage,
@@ -454,7 +454,7 @@ export const make = (options?: { readonly homePath?: string }) =>
           );
           const rawAndStart = yield* Effect.tryPromise({
             try: async () => {
-              const handle = await NodeFS.open(rollout, "r");
+              const handle = await NodeFSP.open(rollout, "r");
               try {
                 const size = Number(info.size);
                 const cursor = input?.beforeCursor?.match(/^byte:(\d+)(?::(\d+))?$/);

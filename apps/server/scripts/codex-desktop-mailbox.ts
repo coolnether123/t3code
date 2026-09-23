@@ -1,8 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off
 // @effect-diagnostics globalDate:off
 // @effect-diagnostics globalTimers:off
-import * as NodeFS from "node:fs/promises";
-import * as NodeWatch from "node:fs";
+import * as NodeFSP from "node:fs/promises";
+import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 import {
@@ -33,15 +33,15 @@ const output = (value: unknown): void => {
 };
 
 const readPayload = async (filePath: string): Promise<unknown> =>
-  JSON.parse(await NodeFS.readFile(NodePath.resolve(filePath), "utf8"));
+  JSON.parse(await NodeFSP.readFile(NodePath.resolve(filePath), "utf8"));
 
 const nextJob = async (timeoutMs: number): Promise<void> => {
   if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
     throw new Error("next timeout must be a finite non-negative number");
   }
-  await NodeFS.mkdir(layout.requestDirectory, { recursive: true });
+  await NodeFSP.mkdir(layout.requestDirectory, { recursive: true });
   const claimNext = async (): Promise<boolean> => {
-    const names = (await NodeFS.readdir(layout.requestDirectory))
+    const names = (await NodeFSP.readdir(layout.requestDirectory))
       .filter((name) => name.endsWith(".json"))
       .sort();
     for (const name of names) {
@@ -73,7 +73,7 @@ const nextJob = async (timeoutMs: number): Promise<void> => {
       if (timer !== undefined) clearTimeout(timer);
       resolve();
     };
-    const watcher = NodeWatch.watch(layout.requestDirectory, () => {
+    const watcher = NodeFS.watch(layout.requestDirectory, () => {
       void drain()
         .then(finish)
         .catch(() => undefined);
@@ -115,12 +115,12 @@ const nextJob = async (timeoutMs: number): Promise<void> => {
 switch (command) {
   case "init":
     await Promise.all([
-      NodeFS.mkdir(layout.requestDirectory, { recursive: true }),
-      NodeFS.mkdir(layout.processingDirectory, { recursive: true }),
-      NodeFS.mkdir(layout.bindingDirectory, { recursive: true }),
-      NodeFS.mkdir(layout.resultDirectory, { recursive: true }),
-      NodeFS.mkdir(layout.statusDirectory, { recursive: true }),
-      NodeFS.mkdir(layout.leaseDirectory, { recursive: true }),
+      NodeFSP.mkdir(layout.requestDirectory, { recursive: true }),
+      NodeFSP.mkdir(layout.processingDirectory, { recursive: true }),
+      NodeFSP.mkdir(layout.bindingDirectory, { recursive: true }),
+      NodeFSP.mkdir(layout.resultDirectory, { recursive: true }),
+      NodeFSP.mkdir(layout.statusDirectory, { recursive: true }),
+      NodeFSP.mkdir(layout.leaseDirectory, { recursive: true }),
     ]);
     output(layout);
     break;

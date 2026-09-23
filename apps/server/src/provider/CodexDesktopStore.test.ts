@@ -6,7 +6,7 @@ import { expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import { DatabaseSync } from "node:sqlite";
+import * as NodeSqlite from "node:sqlite";
 
 import * as CodexDesktopStore from "./CodexDesktopStore.ts";
 
@@ -14,7 +14,7 @@ const threadId = "019e487f-4854-7902-8efb-61feec0364bf";
 
 const makeFixture = (): string => {
   const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-codex-desktop-"));
-  const state = new DatabaseSync(NodePath.join(home, "state_1.sqlite"));
+  const state = new NodeSqlite.DatabaseSync(NodePath.join(home, "state_1.sqlite"));
   state.exec(`
     CREATE TABLE threads (
       id TEXT PRIMARY KEY, title TEXT, updated_at INTEGER, updated_at_ms INTEGER,
@@ -23,7 +23,7 @@ const makeFixture = (): string => {
     INSERT INTO threads VALUES ('${threadId}', 'Native fixture', 1, 1000, 'latest', 'A:/Dev', 0, '', 'paginated');
   `);
   state.close();
-  const history = new DatabaseSync(NodePath.join(home, "thread_history_1.sqlite"));
+  const history = new NodeSqlite.DatabaseSync(NodePath.join(home, "thread_history_1.sqlite"));
   history.exec(`
     CREATE TABLE thread_items (
       thread_id TEXT, item_id TEXT, item_type TEXT, item_json TEXT,
@@ -53,7 +53,7 @@ const makeLargeLegacyFixture = (): { readonly home: string; readonly threadId: s
       event("response_item", "x".repeat(160)).repeat(70_000) +
       event("response_item", "new marker"),
   );
-  const state = new DatabaseSync(NodePath.join(home, "state_1.sqlite"));
+  const state = new NodeSqlite.DatabaseSync(NodePath.join(home, "state_1.sqlite"));
   state.exec(
     `CREATE TABLE threads (id TEXT PRIMARY KEY,title TEXT,updated_at INTEGER,updated_at_ms INTEGER,preview TEXT,cwd TEXT,archived INTEGER,rollout_path TEXT,history_mode TEXT);`,
   );

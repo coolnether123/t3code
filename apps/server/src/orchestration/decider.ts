@@ -3,6 +3,7 @@ import {
   type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationReadModel,
+  type OrchestrationThreadActivity,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
@@ -220,9 +221,11 @@ const decideCommandSequence = Effect.fn("decideCommandSequence")(function* ({
 export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand")(function* ({
   command,
   readModel,
+  userInputActivity,
 }: {
   readonly command: OrchestrationCommand;
   readonly readModel: OrchestrationReadModel;
+  readonly userInputActivity?: OrchestrationThreadActivity;
 }): Effect.fn.Return<
   DecideOrchestrationCommandResult,
   OrchestrationCommandInvariantError | PlatformError.PlatformError,
@@ -1340,22 +1343,21 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
 
     case "thread.user-input.dismiss": {
       const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
-      let request: (typeof thread.activities)[number] | undefined;
-      for (const activity of [...thread.activities].reverse()) {
-        const payload = activity.payload;
-        if (
-          typeof payload !== "object" ||
-          payload === null ||
-          (payload as { requestId?: unknown }).requestId !== command.requestId
-        )
-          continue;
-        if (activity.kind === "user-input.resolved") break;
-        if (activity.kind === "user-input.requested") {
+      let request = userInputActivity;
+      if (request === undefined) {
+        for (const activity of [...thread.activities].reverse()) {
+          const payload = activity.payload;
+          if (
+            typeof payload !== "object" ||
+            payload === null ||
+            (payload as { requestId?: unknown }).requestId !== command.requestId
+          )
+            continue;
           request = activity;
           break;
         }
       }
-      if (request === undefined) {
+      if (request?.kind !== "user-input.requested") {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
           detail: "This question has already been answered.",

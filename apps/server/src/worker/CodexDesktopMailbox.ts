@@ -1,8 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off
 // @effect-diagnostics globalDate:off
 // @effect-diagnostics globalTimers:off
-import * as NodeFS from "node:fs/promises";
-import * as NodeWatch from "node:fs";
+import * as NodeFSP from "node:fs/promises";
+import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 export const CODEX_DESKTOP_COORDINATOR_PROTOCOL_VERSION = 1 as const;
@@ -312,27 +312,27 @@ const writeJsonAtomically = async (
   overwrite = true,
 ): Promise<void> => {
   const directory = NodePath.dirname(filePath);
-  await NodeFS.mkdir(directory, { recursive: true });
-  const temporaryDirectory = await NodeFS.mkdtemp(
+  await NodeFSP.mkdir(directory, { recursive: true });
+  const temporaryDirectory = await NodeFSP.mkdtemp(
     NodePath.join(directory, `.${NodePath.basename(filePath)}.`),
   );
   const temporaryPath = NodePath.join(temporaryDirectory, "contents.json");
   try {
-    await NodeFS.writeFile(temporaryPath, `${JSON.stringify(value)}\n`, "utf8");
+    await NodeFSP.writeFile(temporaryPath, `${JSON.stringify(value)}\n`, "utf8");
     if (overwrite) {
-      await NodeFS.rename(temporaryPath, filePath);
+      await NodeFSP.rename(temporaryPath, filePath);
     } else {
       // A hard-link publish fails atomically when the target already exists.
-      await NodeFS.link(temporaryPath, filePath);
+      await NodeFSP.link(temporaryPath, filePath);
     }
   } finally {
-    await NodeFS.rm(temporaryDirectory, { recursive: true, force: true });
+    await NodeFSP.rm(temporaryDirectory, { recursive: true, force: true });
   }
 };
 
 const readJson = async <T>(filePath: string): Promise<T | undefined> => {
   try {
-    const contents = await NodeFS.readFile(filePath, "utf8");
+    const contents = await NodeFSP.readFile(filePath, "utf8");
     if (Buffer.byteLength(contents, "utf8") > CODEX_DESKTOP_MAILBOX_MAX_JSON_BYTES) {
       throw new RangeError("Codex Desktop mailbox JSON exceeds the size limit");
     }
@@ -398,12 +398,12 @@ export const claimCodexDesktopRequest = async (
   jobId: string,
 ): Promise<CodexDesktopClaimedRequest | undefined> => {
   assertMailboxJobId(jobId);
-  await NodeFS.mkdir(layout.processingDirectory, { recursive: true });
+  await NodeFSP.mkdir(layout.processingDirectory, { recursive: true });
   const destination = layout.processingPath(jobId);
   const request = await readCodexDesktopRequest(layout, jobId);
   if (request === undefined) return undefined;
   try {
-    await NodeFS.writeFile(
+    await NodeFSP.writeFile(
       destination,
       `${JSON.stringify({ jobId, claimedAt: new Date().toISOString() })}\n`,
       { encoding: "utf8", flag: "wx" },
@@ -532,12 +532,12 @@ export const waitForCodexDesktopMailboxChange = async (
   timeoutMs: number,
 ): Promise<"changed" | "timeout"> => {
   const directories = [layout.bindingDirectory, layout.statusDirectory, layout.resultDirectory];
-  await Promise.all(directories.map((directory) => NodeFS.mkdir(directory, { recursive: true })));
+  await Promise.all(directories.map((directory) => NodeFSP.mkdir(directory, { recursive: true })));
   return await new Promise((resolve) => {
     let settled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const watchers = directories.map((directory) =>
-      NodeWatch.watch(directory, () => {
+      NodeFS.watch(directory, () => {
         if (settled) return;
         settled = true;
         for (const watcher of watchers) watcher.close();
@@ -575,13 +575,13 @@ export const inspectCodexDesktopRecovery = async (
   const binding = await readCodexDesktopBinding(layout, jobId);
   if (binding !== undefined) return { kind: "bound", binding };
   try {
-    await NodeFS.access(layout.processingPath(jobId));
+    await NodeFSP.access(layout.processingPath(jobId));
     return { kind: "uncertain_start", processingPath: layout.processingPath(jobId) };
   } catch (cause) {
     if (!isMissingFile(cause)) throw cause;
   }
   try {
-    await NodeFS.access(layout.requestPath(jobId));
+    await NodeFSP.access(layout.requestPath(jobId));
     return { kind: "pending" };
   } catch (cause) {
     if (!isMissingFile(cause)) throw cause;
