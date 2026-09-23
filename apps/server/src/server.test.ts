@@ -10547,12 +10547,17 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           ),
         );
 
-        assert.equal(response.sequence, 5);
+        assert.equal(response.sequence, 10);
         assert.deepEqual(
           dispatchedCommands.map((command) => command.type),
           [
             "thread.create",
+            "thread.activity.append",
+            "thread.activity.append",
             "thread.meta.update",
+            "thread.activity.append",
+            "thread.activity.append",
+            "thread.activity.append",
             "thread.activity.append",
             "thread.activity.append",
             "thread.turn.start",
@@ -10596,13 +10601,40 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
         const setupActivities = dispatchedCommands.filter(
           (command): command is Extract<OrchestrationCommand, { type: "thread.activity.append" }> =>
-            command.type === "thread.activity.append",
+            command.type === "thread.activity.append" &&
+            command.activity.kind.startsWith("setup-script."),
         );
         assert.deepEqual(
           setupActivities.map((command) => command.activity.kind),
           ["setup-script.requested", "setup-script.started"],
         );
-        const finalCommand = dispatchedCommands[4];
+        const worktreeSetupActivities = dispatchedCommands.filter(
+          (command): command is Extract<OrchestrationCommand, { type: "thread.activity.append" }> =>
+            command.type === "thread.activity.append" && command.activity.kind === "worktree-setup",
+        );
+        assert.deepEqual(
+          worktreeSetupActivities.map((activity) =>
+            typeof activity.activity.payload === "object" &&
+            activity.activity.payload !== null &&
+            "phase" in activity.activity.payload &&
+            "stage" in activity.activity.payload
+              ? [activity.activity.payload.phase, activity.activity.payload.stage]
+              : null,
+          ),
+          [
+            ["running", "fetch"],
+            ["running", "checkout"],
+            ["running", "setup-script"],
+            ["running", "agent"],
+            ["done", "agent"],
+          ],
+        );
+        assert.equal(
+          new Set(worktreeSetupActivities.map((activity) => activity.activity.id)).size,
+          1,
+          "setup progress is upserted under one durable activity id",
+        );
+        const finalCommand = dispatchedCommands[9];
         assertTrue(finalCommand?.type === "thread.turn.start");
         if (finalCommand?.type === "thread.turn.start") {
           assert.equal(finalCommand.bootstrap, undefined);
