@@ -5,15 +5,15 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { runMigrations } from "../Migrations.ts";
-import bootstrapThreadContextCompactions from "./052_BootstrapThreadContextCompactions.ts";
+import bootstrapThreadContextCompactions from "./054_BootstrapThreadContextCompactions.ts";
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
 
-layer("052_BootstrapThreadContextCompactions", (it) => {
+layer("054_BootstrapThreadContextCompactions", (it) => {
   it.effect("fast-forwards only when no compaction events need replay", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 51 });
+      yield* runMigrations({ toMigrationInclusive: 53 });
       yield* sql`
         INSERT INTO orchestration_events (
           event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
