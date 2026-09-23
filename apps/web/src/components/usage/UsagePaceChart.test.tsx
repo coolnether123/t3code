@@ -14,6 +14,95 @@ describe("weekly pace chart", () => {
       resetsAt: "2026-09-06T00:00:00.000Z",
     },
   ];
+  it("zooms, pans and restores the complete cycle with keyboard and buttons", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const onRangeChange = vi.fn();
+    const rows = [
+      samples[0]!,
+      { ...samples[0]!, observedAt: "2026-09-02T00:00:00.000Z", remainingPercent: 40 },
+    ];
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse(rows[1]!.observedAt));
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(<UsagePaceChart samples={rows} onRangeChange={onRangeChange} />),
+      );
+      const button = (label: string) =>
+        Array.from(container.querySelectorAll("button")).find((b) => b.textContent === label)!;
+      await act(async () => button("6h").click());
+      const range = onRangeChange.mock.lastCall![0] as [number, number];
+      expect(range[1] - range[0]).toBe(6 * 3_600_000);
+      expect(container.querySelector('[aria-label="Visible chart range"]')).not.toBeNull();
+      await act(async () =>
+        container.querySelector<HTMLButtonElement>('[aria-label="Pan earlier"]')!.click(),
+      );
+      expect(onRangeChange.mock.lastCall![0][0]).toBeLessThan(range[0]);
+      const plot = container.querySelector('svg[role="img"]')!;
+      await act(async () =>
+        plot.dispatchEvent(new KeyboardEvent("keydown", { key: "+", bubbles: true })),
+      );
+      expect(onRangeChange.mock.lastCall![0][1] - onRangeChange.mock.lastCall![0][0]).toBe(
+        3 * 3_600_000,
+      );
+      await act(async () =>
+        plot.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })),
+      );
+      expect(onRangeChange.mock.lastCall![0]).toBeNull();
+      expect(container.querySelector('[aria-label="Visible chart range"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+  it("zooms a dragged range and clears it when moving to another reset cycle", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const onRangeChange = vi.fn();
+    const rows = [
+      samples[0]!,
+      { ...samples[0]!, observedAt: "2026-09-02T00:00:00.000Z", remainingPercent: 40 },
+      {
+        observedAt: "2026-09-03T00:00:00.000Z",
+        remainingPercent: 100,
+        resetsAt: "2026-09-10T00:00:00.000Z",
+      },
+    ];
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(<UsagePaceChart samples={rows} onRangeChange={onRangeChange} />),
+      );
+      await act(async () =>
+        container.querySelector<HTMLButtonElement>('[aria-label="Previous reset cycle"]')!.click(),
+      );
+      const plot = container.querySelector<SVGSVGElement>('svg[role="img"]')!;
+      plot.setPointerCapture = vi.fn();
+      vi.spyOn(plot, "getBoundingClientRect").mockReturnValue({ left: 0, width: 100 } as DOMRect);
+      await act(async () =>
+        plot.dispatchEvent(
+          new PointerEvent("pointerdown", { clientX: 25, button: 0, bubbles: true }),
+        ),
+      );
+      await act(async () =>
+        plot.dispatchEvent(new PointerEvent("pointermove", { clientX: 75, bubbles: true })),
+      );
+      await act(async () =>
+        plot.dispatchEvent(new PointerEvent("pointerup", { clientX: 75, bubbles: true })),
+      );
+      expect(onRangeChange.mock.lastCall![0][1] - onRangeChange.mock.lastCall![0][0]).toBe(
+        36 * 3_600_000,
+      );
+      expect(container.querySelector('[aria-label="Visible chart range"]')).not.toBeNull();
+      await act(async () =>
+        container.querySelector<HTMLButtonElement>('[aria-label="Next reset cycle"]')!.click(),
+      );
+      expect(container.querySelector('[aria-label="Visible chart range"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
   it("renders quota, target, projection and time without transcript costs", () => {
     vi.spyOn(Date, "now").mockReturnValue(Date.parse(samples[0]!.observedAt));
     const markup = renderToStaticMarkup(<UsagePaceChart samples={samples} />);
@@ -32,6 +121,25 @@ describe("weekly pace chart", () => {
     expect(markup).toContain("Reading is stale");
     expect(markup).toContain("Last run-out estimate");
     expect(markup).not.toContain("4d 0h at this pace");
+  });
+  it("connects earlier monitoring runs in the same cycle without changing measured use", () => {
+    const rows = [
+      { ...samples[0]!, observedAt: "2026-08-31T00:00:00.000Z", remainingPercent: 90 },
+      { ...samples[0]!, observedAt: "2026-09-02T00:00:00.000Z", remainingPercent: 50 },
+      { ...samples[0]!, observedAt: "2026-09-02T01:00:00.000Z", remainingPercent: 49 },
+    ];
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse(rows[2]!.observedAt));
+    const markup = renderToStaticMarkup(<UsagePaceChart samples={rows} />);
+    const container = document.createElement("div");
+    container.innerHTML = markup;
+    const path = container.querySelector('[aria-label="Recorded usage ahead of pace"]')!;
+    expect(path.getAttribute("d")?.match(/M/g)).toHaveLength(1);
+    expect(path.getAttribute("d")?.match(/L/g)).toHaveLength(2);
+    expect(container.textContent).toContain("captured a 1-point drop");
+    expect(
+      container.querySelector('input[aria-label="Inspect recorded usage"]')?.getAttribute("max"),
+    ).toBe("2");
+    expect(container.querySelector("details")?.open).toBe(false);
   });
   it("accepts a new reading between clock ticks without a stale warning", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -182,7 +290,7 @@ describe("weekly pace chart", () => {
     const root = createRoot(container);
     try {
       await act(async () => root.render(<UsagePaceChart samples={rows} />));
-      const plot = container.querySelector("svg")!;
+      const plot = container.querySelector('svg[role="img"]')!;
       vi.spyOn(plot, "getBoundingClientRect").mockReturnValue({
         left: 0,
         top: 0,
@@ -195,7 +303,7 @@ describe("weekly pace chart", () => {
         toJSON: () => ({}),
       });
       await act(async () =>
-        plot.dispatchEvent(new MouseEvent("mousemove", { clientX: 95, bubbles: true })),
+        plot.dispatchEvent(new PointerEvent("pointermove", { clientX: 95, bubbles: true })),
       );
       const tooltip = container.querySelector('[role="status"].pointer-events-none')!;
       expect(tooltip.textContent).toContain("Projection");
@@ -205,6 +313,86 @@ describe("weekly pace chart", () => {
       );
       expect(tooltip.textContent).toContain("Recorded");
       expect(tooltip.textContent).not.toContain("Projection");
+    } finally {
+      await act(async () => root.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+  it("browses saved cycles one at a time and returns to the live cycle", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const rows = [
+      { ...samples[0]!, observedAt: "2026-08-30T00:00:00.000Z", remainingPercent: 70 },
+      { ...samples[0]!, observedAt: "2026-08-30T02:00:00.000Z", remainingPercent: 50 },
+      {
+        observedAt: "2026-08-30T03:00:00.000Z",
+        remainingPercent: 100,
+        resetsAt: "2026-09-06T03:00:00.000Z",
+      },
+      {
+        observedAt: "2026-08-30T05:00:00.000Z",
+        remainingPercent: 90,
+        resetsAt: "2026-09-06T03:00:00.000Z",
+      },
+      {
+        observedAt: "2026-08-30T06:00:00.000Z",
+        remainingPercent: 100,
+        resetsAt: "2026-09-06T06:00:00.000Z",
+      },
+      {
+        observedAt: "2026-08-30T08:00:00.000Z",
+        remainingPercent: 80,
+        resetsAt: "2026-09-06T06:00:00.000Z",
+      },
+    ];
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse(rows.at(-1)!.observedAt));
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <UsagePaceChart samples={rows} manualResets={{ availableCount: 3, verified: true }} />,
+        ),
+      );
+      const previous = container.querySelector<HTMLButtonElement>(
+        '[aria-label="Previous reset cycle"]',
+      )!;
+      const next = container.querySelector<HTMLButtonElement>('[aria-label="Next reset cycle"]')!;
+      expect(next.disabled).toBe(true);
+      expect(
+        container.querySelector('[aria-label="Ahead of pace area"]')?.getAttribute("d"),
+      ).toContain("Z");
+      expect(
+        container.querySelector('[aria-label="Behind pace area"]')?.getAttribute("d"),
+      ).toContain("Z");
+      await act(async () => previous.click());
+      expect(container.textContent).toContain("Cycle 2 of 3");
+      expect(container.textContent).toContain("90%");
+      const historicalPace = container.querySelector('[aria-label="Pace to observed reset"]')!;
+      expect(historicalPace.getAttribute("x2")).toBe("960");
+      expect(historicalPace.getAttribute("y2")).toBe("196");
+      expect(container.querySelector('[aria-label="Observed reset boundary"]')).not.toBeNull();
+      const recordedPath = container
+        .querySelector('[aria-label="Recorded usage ahead of pace"]')!
+        .getAttribute("d")!;
+      expect(recordedPath).toContain("L640,");
+      expect(container.textContent).not.toContain("Daily budget");
+      expect(container.textContent).not.toContain("Banked resets");
+      expect(container.textContent).not.toContain("Weekly reset");
+      await act(async () => previous.click());
+      expect(container.textContent).toContain("Cycle 1 of 3");
+      expect(previous.disabled).toBe(true);
+      expect(container.textContent).toContain("50%");
+      await act(async () => next.click());
+      expect(container.textContent).toContain("Cycle 2 of 3");
+      const current = Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent === "Current",
+      )!;
+      await act(async () => current.click());
+      expect(container.textContent).toContain("Current cycle");
+      expect(container.querySelector('[aria-label="Pace to observed reset"]')).toBeNull();
+      expect(container.querySelector('[aria-label="Weekly pace"]')).not.toBeNull();
+      expect(container.textContent).toContain("80%");
+      expect(next.disabled).toBe(true);
     } finally {
       await act(async () => root.unmount());
       vi.unstubAllGlobals();

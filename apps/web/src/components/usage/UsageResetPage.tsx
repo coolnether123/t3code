@@ -43,6 +43,8 @@ import { monitoredModels } from "./usageTokenBudget";
 import { apiPaceInterval } from "./usageApiPace";
 import type { PriorApiPaceInput } from "./usageApiPace";
 import { UsagePaceChart } from "./UsagePaceChart";
+import { UsageCycleComparison } from "./UsageCycleComparison";
+import { chartActivityIntervals } from "./usageChartActivity";
 import { ResetCheckPanel } from "./ResetCheckPanel";
 import { CommunityCheckPanel } from "./CommunityCheckPanel";
 
@@ -138,6 +140,7 @@ export function UsageResetPage() {
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, []);
+  const [selectedCycle, setSelectedCycle] = useState<string | null>(null);
   const [trackerId, setTrackerId] = useState("");
   const [selectedIds, setSelectedIds] = useState<readonly string[] | null>(null);
   const trackers = history.environments.filter(
@@ -153,10 +156,20 @@ export function UsageResetPage() {
   );
   const rawSamples = tracker?.summary?.quotaHistory?.samples;
   const samples = useMemo(() => quotaMonitoringSamples(rawSamples ?? []), [rawSamples]);
-  // Keep the complete saved stream for chart/fallback presentation. Cost queries
-  // below continue to use only the active monitoring run.
+  // Graphs and cost panels share the complete saved account cycles.
   const historicalPeriods = useMemo(() => quotaPeriods(rawSamples ?? []), [rawSamples]);
-  const periods = useMemo(() => quotaPeriods(samples), [samples]);
+  const selectedPeriod =
+    historicalPeriods.find((period) => period.id === selectedCycle) ?? historicalPeriods.at(-1);
+  const periods = useMemo(
+    () =>
+      selectedPeriod
+        ? historicalPeriods.slice(
+            Math.max(0, historicalPeriods.indexOf(selectedPeriod) - 1),
+            historicalPeriods.indexOf(selectedPeriod) + 1,
+          )
+        : [],
+    [historicalPeriods, selectedPeriod],
+  );
   const intervals = useMemo(() => quotaIntervals(periods), [periods]);
   const paceInterval = useMemo(() => apiPaceInterval(intervals.at(-1)), [intervals]);
   const costInput = useMemo(
@@ -164,21 +177,67 @@ export function UsageResetPage() {
     [historyInput, intervals],
   );
   const costs = useUsage(costInput);
+  const [chartRange, setChartRange] = useState<{
+    cycleId: string;
+    range: readonly [number, number] | null;
+  } | null>(null);
+  const activityIntervals = useMemo(() => {
+    if (!selectedPeriod) return [];
+    const cycleSamples = (rawSamples ?? []).filter(
+      (sample) =>
+        sample.observedAt >= selectedPeriod.first.observedAt &&
+        sample.observedAt <= selectedPeriod.last.observedAt,
+    );
+    return chartActivityIntervals(
+      cycleSamples,
+      chartRange?.cycleId === selectedPeriod.id ? chartRange.range : null,
+    );
+  }, [selectedPeriod, rawSamples, chartRange]);
   const publicIntervals = useMemo(
     () => publicResetIntervals(publicHistory.announcements),
     [publicHistory.announcements],
   );
+  const cycleCostsReady =
+    intervals.length === 0 ||
+    costs.environments.some(
+      (environment) =>
+        environment.summary?.quotaCosts !== undefined &&
+        environment.summary.sources.every((source) => source.status !== "partial"),
+    );
   const publicCostInput = useMemo(
-    () => quotaCostWindow(publicIntervals) ?? historyInput,
-    [historyInput, publicIntervals],
+    () => (cycleCostsReady ? (quotaCostWindow(publicIntervals) ?? historyInput) : historyInput),
+    [historyInput, publicIntervals, cycleCostsReady],
   );
   const publicCosts = useUsage(publicCostInput);
   const paceInput = useMemo(
-    () => (paceInterval ? quotaCostWindow([paceInterval])! : historyInput),
-    [paceInterval, historyInput],
+    () => (cycleCostsReady && paceInterval ? quotaCostWindow([paceInterval])! : historyInput),
+    [paceInterval, historyInput, cycleCostsReady],
   );
   const paceCosts = useUsage(paceInput);
-  const historical = historicalPeriods.at(-2);
+  const [requestedActivityIntervals, setRequestedActivityIntervals] = useState(activityIntervals);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setRequestedActivityIntervals(activityIntervals), 300);
+    return () => window.clearTimeout(timer);
+  }, [activityIntervals]);
+  const activityInput = useMemo(
+    () =>
+      cycleCostsReady
+        ? (quotaCostWindow(requestedActivityIntervals) ?? historyInput)
+        : historyInput,
+    [requestedActivityIntervals, cycleCostsReady, historyInput],
+  );
+  const activityCosts = useUsage(activityInput);
+  const chartActivity = useMemo(() => {
+    const environments = activityCosts.environments.filter(
+      (environment) =>
+        effectiveSelectedIds === null || effectiveSelectedIds.includes(environment.environmentId),
+    );
+    return activityIntervals.map((interval) => ({
+      interval,
+      models: monitoredModels(interval, environments),
+    }));
+  }, [activityIntervals, activityCosts.environments, effectiveSelectedIds]);
+  const historical = periods.at(-2);
   const paceModels = useMemo(
     () =>
       paceInterval
@@ -295,7 +354,7 @@ export function UsageResetPage() {
     };
   });
   const last = samples.at(-1);
-  const current = values.at(-1);
+  const current = values.find(({ period }) => period.id === selectedPeriod?.id);
   const calibrationPeriod = useMemo(() => {
     const calibration = current?.value.historicalCalibration;
     if (!calibration) return historical;
@@ -320,6 +379,7 @@ export function UsageResetPage() {
       setRefreshMessage(
         await refreshCodexMonitor({
           trackerId: tracker?.environmentId,
+          selectedCycleId: selectedCycle,
           refreshHistory: history.refresh,
           refreshCosts: async (input) => {
             const recentInterval = apiPaceInterval(input.quotaIntervals?.at(-1));
@@ -328,6 +388,7 @@ export function UsageResetPage() {
               costs.refresh(input),
               recentInput ? paceCosts.refresh(recentInput) : Promise.resolve([]),
               publicCosts.refresh(publicCostInput),
+              activityCosts.refresh(activityInput),
             ]);
             return replies.flat();
           },
@@ -393,6 +454,9 @@ export function UsageResetPage() {
             <a className="hover:text-foreground" href="#reset-history">
               Reset history
             </a>
+            <a className="hover:text-foreground" href="#cycle-comparison">
+              Compare cycles
+            </a>
             <a className="hover:text-foreground" href="#public-reset-estimates">
               Public reset estimates
             </a>
@@ -419,11 +483,13 @@ export function UsageResetPage() {
       <ScrollArea className="min-h-0 flex-1">
         <WorkspacePageContainer
           width="expanded"
-          className="pb-[calc(env(safe-area-inset-bottom)+3rem)]"
+          className="max-w-none gap-3 px-3 pt-3 sm:px-5 pb-[calc(env(safe-area-inset-bottom)+3rem)]"
         >
-          <p role="status" aria-live="polite" className="text-xs text-muted-foreground">
-            {refreshMessage || "Weekly usage, model value and public reset estimates"}
-          </p>
+          {refreshMessage ? (
+            <p role="status" aria-live="polite" className="text-xs text-muted-foreground">
+              {refreshMessage}
+            </p>
+          ) : null}
           {history.isPending && !last ? <p role="status">Reading Codex usage…</p> : null}
           {history.environments.map((environment) => {
             const saved = environment.summary?.quotaHistory;
@@ -433,7 +499,7 @@ export function UsageResetPage() {
               (environment.summary && saved === undefined
                 ? "Update this server to read quota history."
                 : null);
-            return message ? (
+            return message && (!tracker || environment.environmentId === tracker.environmentId) ? (
               <p
                 key={environment.environmentId}
                 role="status"
@@ -452,7 +518,14 @@ export function UsageResetPage() {
           {tracker && last && current ? (
             <>
               <UsagePaceChart
+                key={tracker.environmentId}
                 samples={rawSamples ?? samples}
+                activity={chartActivity}
+                onRangeChange={(range) => {
+                  if (selectedPeriod) setChartRange({ cycleId: selectedPeriod.id, range });
+                }}
+                selectedCycle={selectedCycle}
+                onCycleChange={setSelectedCycle}
                 news={news}
                 manualResets={
                   trackedManualResetCount === undefined
@@ -478,6 +551,13 @@ export function UsageResetPage() {
                 }
                 priorApiPace={priorApiPace}
               />
+              <UsageCycleComparison
+                key={tracker.environmentId}
+                period={current.period}
+                periods={historicalPeriods}
+                samples={rawSamples ?? []}
+                selectedIds={effectiveSelectedIds}
+              />
               <section
                 id="api-value"
                 className="rounded-xl border border-border bg-card/20 p-5"
@@ -499,7 +579,7 @@ export function UsageResetPage() {
                     </dd>
                   </div>
                   <div>
-                    <dt className="text-xs text-muted-foreground">Value of usage remaining</dt>
+                    <dt className="text-xs text-muted-foreground">Remaining quota at API prices</dt>
                     <dd className="mt-1 text-2xl tabular-nums">
                       {current.value.remainingValueUsd === null
                         ? "Learning"
@@ -525,15 +605,12 @@ export function UsageResetPage() {
                 current.value.remainingValueUsd === null ? (
                   <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
                     {current.period.usedPercentagePoints} of 5 percentage points observed. More
-                    readings are needed to estimate dollars left. The {100 - last.remainingPercent}%
-                    cycle total includes usage from before monitoring and cannot price this shorter
-                    interval.
+                    readings are needed to estimate dollars left. The{" "}
+                    {100 - current.period.last.remainingPercent}% cycle total includes usage from
+                    before monitoring and cannot price this shorter interval.
                   </p>
-                ) : current.value.reason ? (
+                ) : current.value.reason && !current.value.costObservedUntil ? (
                   <p className="mt-3 text-xs text-muted-foreground">{current.value.reason}</p>
-                ) : null}
-                {current.value.costUsd === null ? (
-                  <p className="mt-2 text-xs text-muted-foreground">{current.value.reason}</p>
                 ) : null}
                 {current.value.cachedAt ? (
                   <p className="mt-2 text-xs text-muted-foreground">

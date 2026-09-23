@@ -1,13 +1,34 @@
 import type { UsageQuotaInterval, UsageTokenTotals } from "@t3tools/contracts";
 import type { QuotaEnvironment } from "@t3tools/shared/usageQuota";
 
-// USD per million tokens, standard processing. Verified against OpenAI on 2026-09-05.
+// USD per million tokens, standard processing. Verified against OpenAI on 2026-09-23.
 export const TOKEN_PRICE_SOURCE = "https://developers.openai.com/api/docs/pricing";
 export const TOKEN_PRICES = [
-  { model: "gpt-6-astra", label: "Astra", input: 10, cached: 1, output: 50 },
-  { model: "gpt-5.6-sol", label: "Sol", input: 4, cached: 0.4, output: 20 },
-  { model: "gpt-5.6-terra", label: "Terra", input: 2, cached: 0.2, output: 12 },
-  { model: "gpt-5.6-luna", label: "Luna", input: 0.2, cached: 0.02, output: 1.2 },
+  {
+    model: "gpt-6-astra",
+    label: "GPT-6 Astra",
+    input: 10,
+    cached: 1,
+    cacheWrite: 12.5,
+    output: 50,
+  },
+  { model: "gpt-6-sol", label: "GPT-6 Sol", input: 2, cached: 0.2, cacheWrite: 2.5, output: 10 },
+  {
+    model: "gpt-5.6-terra",
+    label: "GPT-5.6 Terra",
+    input: 2,
+    cached: 0.2,
+    cacheWrite: 2.5,
+    output: 12,
+  },
+  {
+    model: "gpt-6-luna",
+    label: "GPT-6 Luna",
+    input: 0.1,
+    cached: 0.01,
+    cacheWrite: 0.125,
+    output: 0.5,
+  },
 ] as const;
 
 export const tokenCount = (totals: UsageTokenTotals) =>
@@ -145,7 +166,7 @@ export function tokenBudget(
   const perMillion =
     (mix.input * price.input * inputMultiplier +
       mix.cached * price.cached * inputMultiplier +
-      mix.writes * price.input * 1.25 * inputMultiplier +
+      mix.writes * price.cacheWrite * inputMultiplier +
       mix.output * price.output * outputMultiplier) *
     (fast ? 2 : 1);
   if (perMillion <= 0) return null;

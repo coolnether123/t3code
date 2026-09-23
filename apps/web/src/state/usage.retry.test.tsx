@@ -377,6 +377,36 @@ describe("usage route recovery", () => {
     }
   });
 
+  it.each([
+    "Usage is partial because its response budget expired before this source finished.",
+    "Usage is partial because the transcript inventory exceeded its response budget.",
+    "Usage is partial while 1 large transcript is scanned in complete-line chunks.",
+  ])("resumes an incomplete scan: %s", async (message) => {
+    vi.useFakeTimers();
+    state.environments = [
+      {
+        environmentId: "desktop",
+        label: "Desktop",
+        isPending: false,
+        error: null,
+        summary: { ...deferredSummary, sources: [{ ...deferredSummary.sources[0]!, message }] },
+      },
+    ];
+    state.execute.mockResolvedValue(AsyncResult.success(refreshedSummary));
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<UsageProbe />));
+      await act(async () => vi.advanceTimersByTimeAsync(750));
+      expect(state.execute).toHaveBeenCalledTimes(1);
+      await act(async () => vi.advanceTimersByTimeAsync(30_000));
+      expect(state.execute).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      vi.useRealTimers();
+    }
+  });
+
   it("backs off and stops after five deferred scans make no progress", async () => {
     vi.useFakeTimers();
     state.environments = [
