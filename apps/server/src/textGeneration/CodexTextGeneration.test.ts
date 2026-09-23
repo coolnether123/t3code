@@ -379,26 +379,31 @@ it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
     ),
   );
 
-  for (const selectedModel of ["gpt-5.6-luna", "openai.gpt-5.6-luna"]) {
-    it.effect(`dispatches the qualified live model for ${selectedModel}`, () =>
-      withFakeCodexEnv(
-        {
-          output: JSON.stringify({ title: "Bedrock title" }),
-          models: ["openai.gpt-5.6-luna"],
-          requireArg: "--model openai.gpt-5.6-luna",
-          forbidArg: "--model gpt-5.6-luna",
-        },
-        (textGeneration) =>
-          Effect.gen(function* () {
-            const result = yield* textGeneration.generateThreadTitle({
-              cwd: process.cwd(),
-              message: "Describe this change",
-              modelSelection: createModelSelection(ProviderInstanceId.make("codex"), selectedModel),
-            });
-            expect(result.title).toBe("Bedrock title");
-          }),
-      ),
-    );
+  for (const family of ["gpt-5.6-luna", "gpt-6-luna"]) {
+    for (const selectedModel of [family, `openai.${family}`]) {
+      it.effect(`dispatches the qualified live model for ${selectedModel}`, () =>
+        withFakeCodexEnv(
+          {
+            output: JSON.stringify({ title: "Bedrock title" }),
+            models: [`openai.${family}`],
+            requireArg: `--model openai.${family}`,
+            forbidArg: `--model ${family}`,
+          },
+          (textGeneration) =>
+            Effect.gen(function* () {
+              const result = yield* textGeneration.generateThreadTitle({
+                cwd: process.cwd(),
+                message: "Describe this change",
+                modelSelection: createModelSelection(
+                  ProviderInstanceId.make("codex"),
+                  selectedModel,
+                ),
+              });
+              expect(result.title).toBe("Bedrock title");
+            }),
+        ),
+      );
+    }
   }
 
   it.effect("dispatches custom Codex model identifiers unchanged", () =>
