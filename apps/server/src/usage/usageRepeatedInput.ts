@@ -155,6 +155,7 @@ function normalizePath(value: string): string {
 }
 
 function normalizeFilesystemPath(value: string): string {
+  if (/^[a-z]:[\\/]/i.test(value)) return normalizePath(value);
   return normalizePath(NodePath.resolve(value));
 }
 

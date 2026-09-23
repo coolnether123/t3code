@@ -49,17 +49,17 @@ describe("selectTranscriptFilesForScan", () => {
     expect(selection.deferredFiles).toBe(0);
   });
 
-  it("selects one oversized transcript so it cannot be deferred forever", () => {
+  it("defers an oversized transcript while a small cold file can yield the first result", () => {
     const selection = selectTranscriptFilesForScan(
       [file("oversized", 1_000, 3), file("small", 50, 2)],
       ({ size }) => size,
       100,
     );
 
-    expect(selection.files.map(({ path }) => path)).toEqual(["oversized"]);
+    expect(selection.files.map(({ path }) => path)).toEqual(["small"]);
     expect(selection.deferredFiles).toBe(1);
-    expect(selection.deferredBytes).toBe(50);
-    expect(selection.coldBytes).toBe(1_000);
+    expect(selection.deferredBytes).toBe(1_000);
+    expect(selection.coldBytes).toBe(50);
   });
 
   it("selects a formerly oversized transcript after newer files become warm", () => {
