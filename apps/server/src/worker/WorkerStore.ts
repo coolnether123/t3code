@@ -29,6 +29,8 @@ export interface StoredWorker {
   readonly context: WorkerDetail["context"];
   /** Exact inherited provider selection, including control mode and reasoning options. */
   readonly modelSelection?: ModelSelection | undefined;
+  /** Existing checkout selected at start; follow-ups must use the same workspace. */
+  readonly cwd?: string | undefined;
   readonly instructions?: string | undefined;
   readonly parentTurnId?: TurnId | undefined;
   readonly discardedAt?: string | undefined;

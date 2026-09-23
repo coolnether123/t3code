@@ -413,6 +413,7 @@ const makeWorkerService = Effect.gen(function* () {
         assignment: input.assignment,
         context: input.context,
         ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
+        ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
         ...(request.parentTurnId === undefined ? {} : { parentTurnId: request.parentTurnId }),
         ...(input.instructions === undefined ? {} : { instructions: input.instructions }),
       };
@@ -635,6 +636,7 @@ const makeWorkerService = Effect.gen(function* () {
             instanceId: current.summary.providerInstanceId,
             model: current.summary.model,
           },
+          ...(current.cwd === undefined ? {} : { cwd: current.cwd }),
           runtimeMode: current.summary.runtimeMode,
           backendPreference: current.summary.backend,
           jobId: activationId,

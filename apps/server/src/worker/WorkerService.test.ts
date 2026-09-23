@@ -152,6 +152,8 @@ it.effect("persists Worker identity and exact model options across follow-up act
   let stored: StoredWorker | undefined;
   let activation: WorkerActivation | undefined;
   const followUpModelSelections: Array<ModelSelection | undefined> = [];
+  const startCwds: Array<string | undefined> = [];
+  const followUpCwds: Array<string | undefined> = [];
   const messages: Array<WorkerMessage> = [];
   const providerThread = ThreadId.make("t3-worker-name-test");
   const store = WorkerStore.of({
@@ -175,14 +177,18 @@ it.effect("persists Worker identity and exact model options across follow-up act
     listProviderEvents: () => Effect.succeed([]),
   } satisfies WorkerStoreShape);
   const backend = WorkerBackend.of({
-    start: () =>
-      Effect.succeed({
-        providerThreadId: providerThread,
-        providerTurnId: TurnId.make("name-turn"),
+    start: (input) =>
+      Effect.sync(() => {
+        startCwds.push(input.cwd);
+        return {
+          providerThreadId: providerThread,
+          providerTurnId: TurnId.make("name-turn"),
+        };
       }),
     send: (input) =>
       Effect.sync(() => {
         followUpModelSelections.push(input.modelSelection);
+        followUpCwds.push(input.cwd);
         return {
           providerThreadId: providerThread,
           providerTurnId: TurnId.make("follow-up-turn"),
@@ -204,6 +210,7 @@ it.effect("persists Worker identity and exact model options across follow-up act
         title: "Historical assignment title",
         assignment: "Inspect naming.",
         context: { references: [], snippets: [] },
+        cwd: "A:/Dev/Worktrees/worker-checkout",
         modelSelection: {
           instanceId: providerInstanceId,
           model: "gpt-5.6-sol",
@@ -213,6 +220,7 @@ it.effect("persists Worker identity and exact model options across follow-up act
     });
     expect(started.summary.displayName).toBe("Review Bot 1");
     expect(stored?.summary.displayName).toBe("Review Bot 1");
+    expect(startCwds).toEqual(["A:/Dev/Worktrees/worker-checkout"]);
     const reloadedService = yield* WorkerServiceTesting.make;
     yield* reloadedService.send({
       workerId: started.summary.id,
@@ -223,6 +231,7 @@ it.effect("persists Worker identity and exact model options across follow-up act
       model: "gpt-5.6-sol",
       options: [{ id: "computerControl", value: "chrome" }],
     });
+    expect(followUpCwds[0]).toBe("A:/Dev/Worktrees/worker-checkout");
 
     const { modelSelection: _modelSelection, ...legacyWithoutModelSelection } = stored!;
     stored = legacyWithoutModelSelection;
