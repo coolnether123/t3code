@@ -1,6 +1,7 @@
 import {
   ApprovalRequestId,
   EnvironmentId,
+  ProviderDriverKind,
   type ModelSelection,
   ProviderInstanceId,
   ThreadId,
@@ -41,11 +42,13 @@ const invocation = (
   threadId: ThreadId = parentThreadId,
   runtimeMode: RuntimeMode = "full-access",
   modelSelection: ModelSelection | undefined = parentModelSelection,
+  providerDriverKind: ProviderDriverKind | undefined = ProviderDriverKind.make("codex"),
 ): McpInvocationContext.McpInvocationScope => ({
   environmentId: EnvironmentId.make("environment-1"),
   threadId,
   providerSessionId: "provider-session-1",
   providerInstanceId,
+  ...(providerDriverKind === undefined ? {} : { providerDriverKind }),
   ...(modelSelection === undefined ? {} : { parentModelSelection: modelSelection }),
   parentTurnId,
   runtimeMode,
@@ -221,7 +224,59 @@ it.effect("inherits the full parent model selection when modelSelection is omitt
   });
 });
 
-it.effect("rejects an explicit unsupported model before Worker creation", () => {
+it.effect("allows Codex Workers to use alternate models in separate worker-owned worktrees", () => {
+  const started: Array<WorkerService.WorkerStartRequest> = [];
+  const service = makeWorkerService({
+    start: (request) => {
+      started.push(request);
+      return Effect.succeed(detail());
+    },
+  });
+  return Effect.gen(function* () {
+    for (const model of ["gpt-6-luna", "gpt-6-astra"]) {
+      yield* provideHandler(
+        workerHandlers.worker_start({
+          title: `${model} review`,
+          assignment: `Review the change with ${model}.`,
+          context: { references: [], snippets: [] },
+          cwd: "A:/Dev/Projects/example",
+          createWorktree: true,
+          modelSelection: { model },
+        }),
+        invocation(),
+        service,
+      );
+    }
+
+    expect(started.map((request) => request.input.modelSelection)).toEqual([
+      {
+        instanceId: providerInstanceId,
+        model: "gpt-6-luna",
+        options: parentModelSelection.options,
+      },
+      {
+        instanceId: providerInstanceId,
+        model: "gpt-6-astra",
+        options: parentModelSelection.options,
+      },
+    ]);
+    expect(started.map((request) => request.parentThreadId)).toEqual([
+      parentThreadId,
+      parentThreadId,
+    ]);
+    expect(started.map((request) => request.providerInstanceId)).toEqual([
+      providerInstanceId,
+      providerInstanceId,
+    ]);
+    expect(started.map((request) => request.input.createWorktree)).toEqual([true, true]);
+    expect(started.map((request) => request.input.cwd)).toEqual([
+      "A:/Dev/Projects/example",
+      "A:/Dev/Projects/example",
+    ]);
+  });
+});
+
+it.effect("rejects alternate models for non-Codex Worker backends", () => {
   let startCalled = false;
   const service = makeWorkerService({
     start: () => {
@@ -232,19 +287,24 @@ it.effect("rejects an explicit unsupported model before Worker creation", () => 
   return Effect.gen(function* () {
     const error = yield* provideHandler(
       workerHandlers.worker_start({
-        title: "Alias must fail",
+        title: "Unsupported Worker model",
         assignment: "Must not start.",
         context: { references: [], snippets: [] },
-        modelSelection: { model: "luna" },
+        modelSelection: { model: "claude-opus-4-8" },
       }),
-      invocation(),
+      invocation(
+        new Set(["workers"]),
+        parentThreadId,
+        "full-access",
+        parentModelSelection,
+        ProviderDriverKind.make("claudeAgent"),
+      ),
       service,
     ).pipe(Effect.flip);
 
     expect(error).toBeInstanceOf(WorkerOperationError);
-    expect(error.message).toContain("active supported model 'gpt-5.6-luna'");
-    expect(error.message).toContain("Omit model");
-    expect(error.message).toContain("display aliases are not accepted");
+    expect(error.message).toContain("requires a Codex parent session");
+    expect(error.message).toContain("parent provider instance");
     expect(startCalled).toBe(false);
   });
 });
