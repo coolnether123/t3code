@@ -128,18 +128,6 @@ export function UsageResetPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [refreshMessage, setRefreshMessage] = useState("");
   const history = useUsage(historyInput);
-  const refreshHistory = useEffectEvent(() => history.refresh());
-  useEffect(() => {
-    const timer = window.setInterval(refreshHistory, 60_000);
-    const onVisible = () => {
-      if (document.visibilityState === "visible") refreshHistory();
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, []);
   const [selectedCycle, setSelectedCycle] = useState<string | null>(null);
   const [trackerId, setTrackerId] = useState("");
   const [selectedIds, setSelectedIds] = useState<readonly string[] | null>(null);
@@ -177,6 +165,42 @@ export function UsageResetPage() {
     [historyInput, intervals],
   );
   const costs = useUsage(costInput);
+  const backgroundRefreshActive = useRef(false);
+  const refreshVisibleMonitor = useEffectEvent(async () => {
+    if (
+      document.visibilityState !== "visible" ||
+      refreshActive.current ||
+      backgroundRefreshActive.current
+    )
+      return;
+    backgroundRefreshActive.current = true;
+    try {
+      const refreshed = await history.refresh();
+      const latestTracker =
+        refreshed.find((entry) => entry.environmentId === tracker?.environmentId) ??
+        refreshed.find((entry) => entry.summary?.quotaHistory?.status === "ready");
+      const latestPeriods = quotaPeriods(latestTracker?.summary?.quotaHistory?.samples ?? []);
+      const selectedIndex = latestPeriods.findIndex((period) => period.id === selectedCycle);
+      const index = selectedIndex < 0 ? latestPeriods.length - 1 : selectedIndex;
+      const currentWindow = quotaCostWindow(
+        quotaIntervals(latestPeriods.slice(Math.max(0, index - 1), index + 1)),
+      );
+      if (currentWindow) await costs.refresh(currentWindow);
+    } catch {
+      // The next visible tick retries a transiently unavailable environment.
+    } finally {
+      backgroundRefreshActive.current = false;
+    }
+  });
+  useEffect(() => {
+    const timer = window.setInterval(() => void refreshVisibleMonitor(), 60_000);
+    const onVisible = () => void refreshVisibleMonitor();
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, []);
   const [chartRange, setChartRange] = useState<{
     cycleId: string;
     range: readonly [number, number] | null;

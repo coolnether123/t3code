@@ -64,6 +64,64 @@ describe("Codex monitor page", () => {
     expect(state.useUsage).toHaveBeenCalledTimes(5);
   });
 
+  it("refreshes current-cycle costs after each visible history reading", async () => {
+    vi.useFakeTimers();
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    const historyRefresh = vi.fn().mockResolvedValue([
+      {
+        environmentId: "local",
+        summary: {
+          quotaHistory: {
+            status: "ready",
+            samples: [
+              {
+                observedAt: "2026-08-30T20:00:00Z",
+                remainingPercent: 90,
+                resetsAt: "2026-09-06T00:00:00Z",
+              },
+              {
+                observedAt: "2026-08-30T21:55:00Z",
+                remainingPercent: 80,
+                resetsAt: "2026-09-06T00:00:00Z",
+              },
+            ],
+          },
+        },
+      },
+    ]);
+    const costRefresh = vi.fn().mockResolvedValue([]);
+    let hookCalls = 0;
+    state.useUsage.mockImplementation(() => ({
+      environments: [],
+      isPending: false,
+      refresh: ++hookCalls % 5 === 1 ? historyRefresh : costRefresh,
+    }));
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<UsageResetPage />));
+      await act(async () => vi.advanceTimersByTimeAsync(60_000));
+      expect(historyRefresh).toHaveBeenCalledTimes(1);
+      expect(costRefresh).toHaveBeenCalledTimes(1);
+      expect(costRefresh.mock.lastCall?.[0].quotaIntervals).toEqual([
+        {
+          id: "2026-08-30T20:00:00Z",
+          sinceTime: "2026-08-30T20:00:00Z",
+          untilTime: "2026-08-30T21:55:00Z",
+        },
+      ]);
+      await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+      expect(historyRefresh).toHaveBeenCalledTimes(2);
+      expect(costRefresh).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      visibility.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("shows progress, ignores repeated taps, then enables retry after failure", async () => {
     let reject!: (reason: Error) => void;
     state.refresh.mockReturnValue(
