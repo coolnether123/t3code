@@ -22,6 +22,10 @@ import {
   ThreadActivityAppendedPayload,
   ThreadArchivedPayload,
   ThreadCreatedPayload,
+  ThreadContextCompactionStartedPayload,
+  ThreadContextCompactionMessageQueuedPayload,
+  ThreadContextCompactionStatusChangedPayload,
+  ThreadContextCompactionMessageStatusChangedPayload,
   ThreadDeletedPayload,
   ThreadEditFromHereFinishedPayload,
   ThreadEditFromHereRequestedPayload,
@@ -213,6 +217,7 @@ export function createEmptyReadModel(nowIso: string): OrchestrationReadModel {
     snapshotSequence: 0,
     projects: [],
     threads: [],
+    activeContextCompactions: [],
     updatedAt: nowIso,
   };
 }
@@ -576,6 +581,145 @@ export function projectEvent(
           }),
         };
       });
+
+    case "thread.context-compaction-started":
+      return decodeForEvent(
+        ThreadContextCompactionStartedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => {
+          const compactions = nextBase.activeContextCompactions ?? [];
+          const retainedCompactions = compactions.filter(
+            (entry) =>
+              entry.threadId !== payload.threadId ||
+              entry.status === "active" ||
+              entry.queuedMessages.length > 0,
+          );
+          const nextCompaction = {
+            threadId: payload.threadId,
+            compactMessageId: payload.compactMessageId,
+            status: "active" as const,
+            startedAt: payload.startedAt,
+            updatedAt: payload.startedAt,
+            queuedMessages: [],
+          };
+          return {
+            ...nextBase,
+            activeContextCompactions: [...retainedCompactions, nextCompaction],
+          };
+        }),
+      );
+
+    case "thread.context-compaction-message-queued":
+      return decodeForEvent(
+        ThreadContextCompactionMessageQueuedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => {
+          const compactions = nextBase.activeContextCompactions ?? [];
+          return {
+            ...nextBase,
+            activeContextCompactions: compactions.map((compaction) => {
+              if (
+                compaction.threadId !== payload.threadId ||
+                compaction.compactMessageId !== payload.compactMessageId
+              ) {
+                return compaction;
+              }
+              const existingMessage = compaction.queuedMessages.find(
+                (entry) => entry.messageId === payload.messageId,
+              );
+              const queuedMessage = {
+                messageId: payload.messageId,
+                requestOrder: event.sequence,
+                turnStart: payload.turnStart,
+                status: "queued" as const,
+                updatedAt: event.occurredAt,
+              };
+              return {
+                ...compaction,
+                queuedMessages: [
+                  ...compaction.queuedMessages.filter((entry) => entry !== existingMessage),
+                  queuedMessage,
+                ].sort((left, right) => left.requestOrder - right.requestOrder),
+                updatedAt: event.occurredAt,
+              };
+            }),
+          };
+        }),
+      );
+
+    case "thread.context-compaction-status-changed":
+      return decodeForEvent(
+        ThreadContextCompactionStatusChangedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => {
+          const activeContextCompactions = (nextBase.activeContextCompactions ?? []).map(
+            (compaction) =>
+              compaction.threadId === payload.threadId &&
+              compaction.compactMessageId === payload.compactMessageId
+                ? {
+                    ...compaction,
+                    status: payload.status,
+                    detail: payload.detail,
+                    updatedAt: payload.updatedAt,
+                  }
+                : compaction,
+          );
+          return { ...nextBase, activeContextCompactions };
+        }),
+      );
+
+    case "thread.context-compaction-message-status-changed":
+      return decodeForEvent(
+        ThreadContextCompactionMessageStatusChangedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => {
+          const terminal =
+            payload.status === "dispatched" ||
+            payload.status === "failed" ||
+            payload.status === "cancelled";
+          const activeContextCompactions = (nextBase.activeContextCompactions ?? []).map(
+            (compaction) => {
+              if (
+                compaction.threadId !== payload.threadId ||
+                compaction.compactMessageId !== payload.compactMessageId
+              ) {
+                return compaction;
+              }
+              return {
+                ...compaction,
+                queuedMessages: terminal
+                  ? compaction.queuedMessages.filter(
+                      (message) => message.messageId !== payload.messageId,
+                    )
+                  : compaction.queuedMessages.map((message) =>
+                      message.messageId === payload.messageId
+                        ? {
+                            ...message,
+                            status: payload.status,
+                            detail: payload.detail,
+                            updatedAt: payload.updatedAt,
+                          }
+                        : message,
+                    ),
+                updatedAt: payload.updatedAt,
+              };
+            },
+          );
+          return { ...nextBase, activeContextCompactions };
+        }),
+      );
 
     case "thread.session-set":
       return Effect.gen(function* () {
