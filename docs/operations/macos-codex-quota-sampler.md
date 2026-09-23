@@ -30,6 +30,17 @@ observations. A 100% sample is stored only when Codex reports 0% used. If a comp
 off during a reset, the sampler leaves that gap in the history rather than filling it with an
 assumed full balance.
 
+## Retain older observations
+
+When the active `state.json` reaches 5,000 samples, the collector writes the oldest 1,000 rows to
+`state.json.archive/<sha256>.json` before replacing the active file. Keep the archive directory
+with `state.json` when copying or backing up quota history. If an archive write fails, the
+collector leaves `state.json` unchanged and exits with an error. Repeating a run after a crash
+reuses the identical archive chunk.
+
+T3 currently reads the active file only. Older archived rows remain on disk but do not appear in
+the reset-history page until archive import is added.
+
 ## LaunchAgent installation plan
 
 The collector is designed to run once at login and every five minutes through a per-user

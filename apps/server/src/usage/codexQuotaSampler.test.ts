@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off globalDate:off - Exercises the standalone host-side collector against temporary files.
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 import { collectCodexQuotaSample, readCodexRateLimits } from "../../scripts/codex-quota-sampler.ts";
 import {
@@ -19,6 +19,27 @@ const response = (usedPercent: number): CodexRateLimitsResponse => ({
     secondary: { usedPercent, resetsAt: 1_790_604_800, windowDurationMins: 10_080 },
   },
 });
+
+const fullHistory = () => {
+  const start = Date.parse("2026-09-01T00:00:00Z");
+  return JSON.stringify({
+    Snapshot: {
+      MainLimit: { LimitId: "codex", Window: { DurationMinutes: 10_080 } },
+      EmergencyResetCount: 3,
+    },
+    Samples: Array.from({ length: 5_000 }, (_, index) => ({
+      ObservedAt: new Date(start + index * 300_000).toISOString(),
+      RemainingPercent: 80 - (index % 80),
+      ResetsAt: "2026-10-01T00:00:00Z",
+    })),
+  });
+};
+
+const sampleAfterFullHistory = {
+  observedAt: new Date(Date.parse("2026-09-01T00:00:00Z") + 5_000 * 300_000).toISOString(),
+  remainingPercent: 75,
+  resetsAt: "2026-10-01T00:00:00Z",
+};
 
 describe("Codex quota sampler", () => {
   it("selects the explicit weekly window rather than the short window", () => {
@@ -97,7 +118,7 @@ describe("Codex quota sampler", () => {
 describe("quota sample file persistence", () => {
   let directory: string | undefined;
   afterEach(async () => {
-    if (directory) await rm(directory, { recursive: true, force: true });
+    if (directory) await NodeFSP.rm(directory, { recursive: true, force: true });
     directory = undefined;
   });
 
@@ -106,11 +127,11 @@ describe("quota sample file persistence", () => {
   });
 
   it("writes atomically in the existing read-only import format", async () => {
-    directory = await mkdtemp(join(tmpdir(), "t3-quota-sampler-"));
-    const filePath = join(directory, "CodexLimits", "state.json");
+    directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-quota-sampler-"));
+    const filePath = NodePath.join(directory, "CodexLimits", "state.json");
     const sample = codexWeeklyQuotaSample(response(45), observedAt)!;
     await appendCodexQuotaSampleFile(filePath, sample);
-    const saved = JSON.parse(await readFile(filePath, "utf8")) as {
+    const saved = JSON.parse(await NodeFSP.readFile(filePath, "utf8")) as {
       Samples: { RemainingPercent: number }[];
     };
     expect(saved.Samples).toEqual(
@@ -122,9 +143,61 @@ describe("quota sample file persistence", () => {
     );
   });
 
+  it("archives old observations before rollover and keeps the active history readable", async () => {
+    directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-quota-sampler-"));
+    const filePath = NodePath.join(directory, "state.json");
+    const initial = fullHistory();
+    await NodeFSP.writeFile(filePath, initial);
+    await appendCodexQuotaSampleFile(filePath, sampleAfterFullHistory);
+
+    const active = JSON.parse(await NodeFSP.readFile(filePath, "utf8"));
+    const archives = await NodeFSP.readdir(`${filePath}.archive`);
+    expect(archives).toHaveLength(1);
+    const archived = JSON.parse(
+      await NodeFSP.readFile(NodePath.join(`${filePath}.archive`, archives[0]!), "utf8"),
+    );
+    expect(archived.Samples).toEqual(JSON.parse(initial).Samples.slice(0, 1_000));
+    expect(active.Samples).toEqual([
+      ...JSON.parse(initial).Samples.slice(1_000),
+      {
+        ObservedAt: sampleAfterFullHistory.observedAt,
+        RemainingPercent: sampleAfterFullHistory.remainingPercent,
+        ResetsAt: new Date(sampleAfterFullHistory.resetsAt).toISOString(),
+      },
+    ]);
+    expect(active.Snapshot.EmergencyResetCount).toBe(3);
+
+    // A crash after archiving but before replacing state.json must not duplicate archives.
+    await NodeFSP.writeFile(filePath, initial);
+    await appendCodexQuotaSampleFile(filePath, sampleAfterFullHistory);
+    expect(await NodeFSP.readdir(`${filePath}.archive`)).toEqual(archives);
+  });
+
+  it("does not replace a full history when its archive cannot be written", async () => {
+    directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-quota-sampler-"));
+    const filePath = NodePath.join(directory, "state.json");
+    const initial = fullHistory();
+    await NodeFSP.writeFile(filePath, initial);
+    await NodeFSP.writeFile(`${filePath}.archive`, "occupied");
+    await expect(appendCodexQuotaSampleFile(filePath, sampleAfterFullHistory)).rejects.toThrow();
+    expect(await NodeFSP.readFile(filePath, "utf8")).toBe(initial);
+  });
+
+  it("does not archive a full history for an invalid new reading", async () => {
+    directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-quota-sampler-"));
+    const filePath = NodePath.join(directory, "state.json");
+    const initial = fullHistory();
+    await NodeFSP.writeFile(filePath, initial);
+    await expect(
+      appendCodexQuotaSampleFile(filePath, { ...sampleAfterFullHistory, remainingPercent: 101 }),
+    ).rejects.toThrow("Quota sample is invalid");
+    expect(await NodeFSP.readFile(filePath, "utf8")).toBe(initial);
+    await expect(NodeFSP.readdir(`${filePath}.archive`)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("samples the configured account source and leaves storage untouched on missing weekly data", async () => {
-    directory = await mkdtemp(join(tmpdir(), "t3-quota-sampler-"));
-    const filePath = join(directory, "state.json");
+    directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-quota-sampler-"));
+    const filePath = NodePath.join(directory, "state.json");
     await expect(
       collectCodexQuotaSample({
         statePath: filePath,
@@ -132,13 +205,13 @@ describe("quota sample file persistence", () => {
         readRateLimits: async () => ({}),
       }),
     ).rejects.toThrow("history was left unchanged");
-    await expect(readFile(filePath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(NodeFSP.readFile(filePath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     await collectCodexQuotaSample({
       statePath: filePath,
       now: () => new Date(observedAt),
       readRateLimits: async () => response(45),
     });
-    expect(JSON.parse(await readFile(filePath, "utf8")).Samples[0]).toMatchObject({
+    expect(JSON.parse(await NodeFSP.readFile(filePath, "utf8")).Samples[0]).toMatchObject({
       RemainingPercent: 55,
     });
   });

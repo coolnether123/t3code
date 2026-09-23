@@ -1,10 +1,11 @@
 // @effect-diagnostics nodeBuiltinImport:off globalDate:off - This standalone host-side collector writes a JSON history file consumed by the server.
-import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
-import { randomUUID } from "node:crypto";
-import { dirname } from "node:path";
+import * as NodeFSP from "node:fs/promises";
+import * as NodeCrypto from "node:crypto";
+import * as NodePath from "node:path";
 
 const WEEK_MINUTES = 7 * 24 * 60;
 const MAX_SAMPLES = 5_000;
+const ARCHIVE_SAMPLES = 1_000;
 
 export interface CodexQuotaSample {
   readonly observedAt: string;
@@ -203,41 +204,93 @@ export async function appendCodexQuotaSampleFile(
   sample: CodexQuotaSample,
   fetchedAt = sample.observedAt,
 ): Promise<void> {
-  await mkdir(dirname(filePath), { recursive: true });
+  await NodeFSP.mkdir(NodePath.dirname(filePath), { recursive: true });
   const lockPath = `${filePath}.lock`;
   const lock = await openSamplerLock(lockPath);
-  const tempPath = `${filePath}.${randomUUID()}.tmp`;
+  const tempPath = `${filePath}.${NodeCrypto.randomUUID()}.tmp`;
   try {
     await lock.writeFile(String(process.pid), "utf8");
-    const priorText = await readFile(filePath, "utf8").catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return null;
-      throw error;
-    });
-    await open(tempPath, "wx", 0o600).then(async (file) => {
+    const priorText = await NodeFSP.readFile(filePath, "utf8").catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      },
+    );
+    let nextPriorText = priorText;
+    if (priorText !== null) {
+      const prior = decodePrior(priorText);
+      const observedAtMs = validIso(sample.observedAt);
+      if (
+        prior.rows.length === MAX_SAMPLES &&
+        observedAtMs !== null &&
+        !prior.samples.some((entry) => Date.parse(entry.observedAt) === observedAtMs)
+      ) {
+        const orderedRows = [...prior.rows].sort(
+          (a, b) => Date.parse(String(a.ObservedAt)) - Date.parse(String(b.ObservedAt)),
+        );
+        const archiveText = `${JSON.stringify({ Samples: orderedRows.slice(0, ARCHIVE_SAMPLES) })}\n`;
+        const retainedText = JSON.stringify({
+          ...prior.root,
+          Samples: orderedRows.slice(ARCHIVE_SAMPLES),
+        });
+        // Validate the next active file before writing anything to the archive.
+        appendCodexQuotaSample(retainedText, sample, fetchedAt);
+        const archiveHash = NodeCrypto.createHash("sha256").update(archiveText).digest("hex");
+        const archiveDir = `${filePath}.archive`;
+        const archivePath = NodePath.join(archiveDir, `${archiveHash}.json`);
+        await NodeFSP.mkdir(archiveDir, { recursive: true, mode: 0o700 });
+        const archived = await NodeFSP.readFile(archivePath, "utf8").catch(
+          (error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT") return null;
+            throw error;
+          },
+        );
+        if (archived !== null && archived !== archiveText) {
+          throw new Error("Existing quota archive differs from the observations being moved.");
+        }
+        if (archived === null) {
+          const archiveTempPath = `${archivePath}.${NodeCrypto.randomUUID()}.tmp`;
+          try {
+            const archiveFile = await NodeFSP.open(archiveTempPath, "wx", 0o600);
+            try {
+              await archiveFile.writeFile(archiveText, "utf8");
+              await archiveFile.sync();
+            } finally {
+              await archiveFile.close();
+            }
+            await NodeFSP.rename(archiveTempPath, archivePath);
+          } finally {
+            await NodeFSP.rm(archiveTempPath, { force: true });
+          }
+        }
+        nextPriorText = retainedText;
+      }
+    }
+    await NodeFSP.open(tempPath, "wx", 0o600).then(async (file) => {
       try {
-        await file.writeFile(appendCodexQuotaSample(priorText, sample, fetchedAt), "utf8");
+        await file.writeFile(appendCodexQuotaSample(nextPriorText, sample, fetchedAt), "utf8");
         await file.sync();
       } finally {
         await file.close();
       }
     });
-    await rename(tempPath, filePath);
+    await NodeFSP.rename(tempPath, filePath);
   } finally {
-    await rm(tempPath, { force: true });
+    await NodeFSP.rm(tempPath, { force: true });
     await lock.close();
-    await rm(lockPath, { force: true });
+    await NodeFSP.rm(lockPath, { force: true });
   }
 }
 
 async function openSamplerLock(lockPath: string) {
   try {
-    return await open(lockPath, "wx", 0o600);
+    return await NodeFSP.open(lockPath, "wx", 0o600);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   }
 
-  const before = await stat(lockPath).catch(() => null);
-  const owner = await readFile(lockPath, "utf8").catch(() => "");
+  const before = await NodeFSP.stat(lockPath).catch(() => null);
+  const owner = await NodeFSP.readFile(lockPath, "utf8").catch(() => "");
   const pid = Number(owner);
   let running = Number.isSafeInteger(pid) && pid > 0;
   if (running) {
@@ -247,10 +300,10 @@ async function openSamplerLock(lockPath: string) {
       running = (error as NodeJS.ErrnoException).code !== "ESRCH";
     }
   }
-  const after = await stat(lockPath).catch(() => null);
+  const after = await NodeFSP.stat(lockPath).catch(() => null);
   if (running || before === null || after === null || before.ino !== after.ino) {
     throw new Error("Quota sampler is already running.");
   }
-  await rm(lockPath);
+  await NodeFSP.rm(lockPath);
   return openSamplerLock(lockPath);
 }
