@@ -2878,6 +2878,7 @@ export function FriendlyWorkerToolCallRow({ call }: { call: WorkerToolCallPresen
   const details = workerToolAdvancedDetails(call);
   const status = workerCallStatusLabel(call);
   const isWait = call.toolName === "worker_wait";
+  const isSpawn = call.toolName === "worker_start";
   const summary = isWait
     ? workerWaitFacts(call).join(" · ") || "Waiting for a relevant Worker event"
     : (call.resultSummary ?? call.assignment ?? status);
@@ -2918,23 +2919,63 @@ export function FriendlyWorkerToolCallRow({ call }: { call: WorkerToolCallPresen
         <button
           type="button"
           aria-expanded={expanded}
-          aria-label={`${expanded ? "Hide" : "Show"} advanced details for ${call.toolName}`}
+          aria-label={`${expanded ? "Hide" : "Show"} ${isSpawn ? "Worker activity" : "advanced details"} for ${call.toolName}`}
           onClick={() => setExpanded((value) => !value)}
           className="min-h-11 shrink-0 rounded px-1.5 text-[.68rem] text-muted-foreground underline decoration-border underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:min-h-7"
         >
-          {expanded ? "Hide details" : "Advanced"}
+          {expanded ? "Hide details" : isSpawn ? "Show work" : "Advanced"}
         </button>
       </div>
       {expanded ? (
         <div className="ms-5 mt-1 border-s border-border/45 ps-3">
-          <pre className={toolCallExpandedBodyClassName}>{details}</pre>
-          <button
-            type="button"
-            onClick={() => copyToClipboard(details)}
-            className="mt-1 min-h-11 rounded px-1.5 text-[.68rem] text-muted-foreground underline underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:min-h-7"
-          >
-            {isCopied ? "Copied" : "Copy details"}
-          </button>
+          {isSpawn && call.workers.length > 0 ? (
+            <ul className="space-y-2 py-1 text-xs" aria-label="Workers started">
+              {call.workers.map((worker) => (
+                <li key={worker.id} className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="min-w-0 truncate font-medium">{worker.name}</span>
+                    {worker.model ? (
+                      <span className="truncate font-mono text-muted-foreground">
+                        {worker.model}
+                      </span>
+                    ) : null}
+                    <span className="ml-auto shrink-0 text-muted-foreground">
+                      {worker.status ?? status}
+                    </span>
+                  </div>
+                  {worker.assignment ? (
+                    <p className="mt-0.5 break-words text-muted-foreground">{worker.assignment}</p>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          ) : isSpawn && call.assignment ? (
+            <p className="py-1 text-xs text-muted-foreground">{call.assignment}</p>
+          ) : null}
+          {isSpawn ? (
+            <details className="text-[.68rem] text-muted-foreground">
+              <summary className="cursor-pointer py-1">Advanced details</summary>
+              <pre className={toolCallExpandedBodyClassName}>{details}</pre>
+              <button
+                type="button"
+                onClick={() => copyToClipboard(details)}
+                className="mt-1 min-h-11 rounded px-1.5 underline underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:min-h-7"
+              >
+                {isCopied ? "Copied" : "Copy details"}
+              </button>
+            </details>
+          ) : (
+            <>
+              <pre className={toolCallExpandedBodyClassName}>{details}</pre>
+              <button
+                type="button"
+                onClick={() => copyToClipboard(details)}
+                className="mt-1 min-h-11 rounded px-1.5 text-[.68rem] text-muted-foreground underline underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:min-h-7"
+              >
+                {isCopied ? "Copied" : "Copy details"}
+              </button>
+            </>
+          )}
         </div>
       ) : null}
     </div>
