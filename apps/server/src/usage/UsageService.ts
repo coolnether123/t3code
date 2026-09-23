@@ -821,11 +821,13 @@ export const make = Effect.gen(function* () {
         cached.size === size &&
         cached.mtimeMs === mtimeMs &&
         cached.provider === provider &&
-        cached.scanCursor === undefined
+        cached.scanCursor === undefined &&
+        cached.scanSkippedLines === undefined &&
+        cached.scanDiscardingLine !== true
       ) {
         return {
           records: cached.records,
-          complete: cached.scanSkippedLines === undefined && cached.scanDiscardingLine !== true,
+          complete: true,
         };
       }
 
@@ -1215,7 +1217,9 @@ export const make = Effect.gen(function* () {
             cached.size === file.size &&
             cached.mtimeMs === file.mtimeMs &&
             cached.provider === provider &&
-            cached.scanCursor === undefined;
+            cached.scanCursor === undefined &&
+            cached.scanSkippedLines === undefined &&
+            cached.scanDiscardingLine !== true;
           const resumePartial =
             cached !== undefined &&
             cached.size === file.size &&

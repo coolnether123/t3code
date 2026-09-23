@@ -908,6 +908,57 @@ describe("incremental scan integration", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  it.effect("rechecks a warm-looking file when an earlier scan skipped a line", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const cache = encodeScanCache(
+        new Map(
+          files.map((file, index) => [
+            file.path,
+            {
+              size: file.size,
+              mtimeMs: file.mtimeMs,
+              provider: "codex" as const,
+              records: [],
+              codexState: initialCodexScanState(),
+              ...(index === 0 ? { scanSkippedLines: 1 } : {}),
+            },
+          ]),
+        ),
+      );
+      vi.mocked(readTranscriptRecords).mockClear();
+      const service = yield* make.pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          exists: () => Effect.succeed(true),
+          readFileString: (path, ...args) =>
+            path.endsWith("usage-scan-cache.json")
+              ? Effect.succeed(JSON.stringify(cache))
+              : fs.readFileString(path, ...args),
+        }),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("Offline fixture")),
+        ),
+      );
+      const result = yield* service.readSummary({
+        sinceDay: UsageDay.make("2026-08-29"),
+        untilDay: UsageDay.make("2026-09-02"),
+        timeZone: "UTC",
+        providers: ["codex"],
+        quotaIntervals: [],
+        refresh: true,
+      });
+      expect(readTranscriptRecords).toHaveBeenCalledTimes(1);
+      expect(readTranscriptRecords).toHaveBeenCalledWith(
+        files[0]!.path,
+        "codex",
+        expect.objectContaining({ startByte: 0 }),
+      );
+      expect(result.sources.every((source) => source.status === "ok")).toBe(true);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("defers old warm entries until repeated-input metadata is rebuilt", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

@@ -351,6 +351,35 @@ describe("incremental transcript reads", () => {
     }
   });
 
+  it("reads a large compaction record without making usage permanently incomplete", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-compacted-"));
+    const path = NodePath.join(directory, "rollout.jsonl");
+    const contents =
+      [
+        { type: "session_meta", payload: { id: "session-a" } },
+        { type: "turn_context", payload: { model: "gpt-5.6-sol" } },
+        { type: "compacted", payload: { message: "x".repeat(5 * 1024 * 1024) } },
+        {
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: { last_token_usage: { input_tokens: 10, output_tokens: 2 } },
+          },
+        },
+      ]
+        .map((record) => JSON.stringify({ timestamp: "2026-08-29T10:00:02.000Z", ...record }))
+        .join("\n") + "\n";
+    try {
+      await NodeFSP.writeFile(path, contents);
+      const result = await readTranscriptRecords(path, "codex");
+      expect(result?.discardedLines).toBe(0);
+      expect(result?.discardingLine).toBe(false);
+      expect(result?.records).toMatchObject([{ totals: { outputTokens: 2 } }]);
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("advances past an oversized JSONL record without treating its usage as complete", async () => {
     const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-oversized-"));
     const path = NodePath.join(directory, "rollout.jsonl");
@@ -367,7 +396,7 @@ describe("incremental transcript reads", () => {
           payload: { model: "gpt-5.6-sol" },
         }),
       ].join("\n") + "\n";
-    const oversized = `${JSON.stringify({ type: "event_msg", payload: { text: "x".repeat(4 * 1024 * 1024 + 1) } })}\n`;
+    const oversized = `${JSON.stringify({ type: "event_msg", payload: { text: "x".repeat(8 * 1024 * 1024 + 1) } })}\n`;
     const usage =
       JSON.stringify({
         timestamp: "2026-08-29T10:00:02.000Z",
@@ -383,7 +412,7 @@ describe("incremental transcript reads", () => {
     try {
       await NodeFSP.writeFile(path, contents);
       const first = await readTranscriptRecords(path, "codex", {
-        endByte: Buffer.byteLength(prefix) + 4 * 1024 * 1024,
+        endByte: Buffer.byteLength(prefix) + 8 * 1024 * 1024,
         sourceSize: Buffer.byteLength(contents),
       });
       expect(first?.discardingLine).toBe(true);
