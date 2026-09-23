@@ -262,7 +262,12 @@ import {
   serverEnvironment,
 } from "../state/server";
 import { terminalEnvironment } from "../state/terminal";
-import { threadEnvironment, useEnvironmentThread } from "../state/threads";
+import {
+  environmentThreadDetails,
+  threadEnvironment,
+  useEnvironmentThread,
+} from "../state/threads";
+import { appAtomRegistry } from "../rpc/atomRegistry";
 import {
   requestOlderThreadTurns,
   threadHasOlderTurns,
@@ -281,6 +286,7 @@ import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import {
   canSteerQueuedFollowUp,
   nextAutoQueuedFollowUp,
+  shouldDispatchQueuedFollowUp,
   useQueuedFollowUps,
   useQueuedFollowUpStore,
   type QueuedFollowUp,
@@ -5290,6 +5296,12 @@ function ChatViewContent(props: ChatViewProps) {
       );
       return;
     }
+    if (
+      queuedFollowUp &&
+      (activePendingProgress || activePendingApproval || pendingUserInputs.length > 0)
+    ) {
+      return;
+    }
     if (activePendingProgress) {
       if (directAnnotation) {
         notifyDirectAnnotationAttached();
@@ -5741,12 +5753,29 @@ function ChatViewContent(props: ChatViewProps) {
     }
 
     let turnStartSucceeded = false;
-    const queuedFollowUpRemoved = Boolean(
+    const queuedFollowUpIsStillQueued = Boolean(
       queuedFollowUp &&
       activeThreadKey &&
-      !useQueuedFollowUpStore.getState().contains(activeThreadKey, queuedFollowUp.id),
+      useQueuedFollowUpStore.getState().contains(activeThreadKey, queuedFollowUp.id),
     );
-    if (failure === null && turnAttachmentsResult._tag === "Success" && !queuedFollowUpRemoved) {
+    const liveThread =
+      queuedFollowUp && activeThreadRef
+        ? appAtomRegistry.get(environmentThreadDetails.detailAtom(activeThreadRef))
+        : null;
+    const hasLivePendingRequest =
+      (liveThread !== null && derivePendingApprovals(liveThread.activities).length > 0) ||
+      (liveThread !== null && derivePendingUserInputs(liveThread.activities).length > 0);
+    const queuedFollowUpCanDispatch =
+      queuedFollowUp === undefined ||
+      shouldDispatchQueuedFollowUp({
+        isStillQueued: queuedFollowUpIsStillQueued,
+        hasPendingRequest: hasLivePendingRequest,
+      });
+    const queuedFollowUpRemoved = Boolean(queuedFollowUp && !queuedFollowUpIsStillQueued);
+    const queuedFollowUpBlockedByPendingRequest = Boolean(
+      queuedFollowUp && queuedFollowUpIsStillQueued && hasLivePendingRequest,
+    );
+    if (failure === null && turnAttachmentsResult._tag === "Success" && queuedFollowUpCanDispatch) {
       const bootstrap =
         isLocalDraftThread || baseBranchForWorktree
           ? {
@@ -5926,7 +5955,7 @@ function ChatViewContent(props: ChatViewProps) {
         );
       }
     }
-    if (queuedFollowUpRemoved) {
+    if (queuedFollowUpRemoved || queuedFollowUpBlockedByPendingRequest) {
       setOptimisticUserMessages((existing) => {
         const removed = existing.filter((message) => message.id === messageIdForSend);
         for (const message of removed) revokeUserMessagePreviewUrls(message);
@@ -6005,7 +6034,11 @@ function ChatViewContent(props: ChatViewProps) {
 
   useEffect(() => {
     if (!activeThreadKey || isSendBusy || isConnecting) return;
-    const next = nextAutoQueuedFollowUp(queuedFollowUps, phase);
+    const next = nextAutoQueuedFollowUp(
+      queuedFollowUps,
+      phase,
+      Boolean(activePendingProgress || activePendingApproval || pendingUserInputs.length > 0),
+    );
     if (!next) return;
     const queue = useQueuedFollowUpStore.getState();
     if (!queue.claim(activeThreadKey, next.id)) return;
@@ -6013,7 +6046,16 @@ function ChatViewContent(props: ChatViewProps) {
     void onSend(undefined, "foreground", undefined, next).finally(() => {
       queue.release(activeThreadKey, next.id);
     });
-  }, [phase, activeThreadKey, queuedFollowUps, isSendBusy, isConnecting]);
+  }, [
+    phase,
+    activeThreadKey,
+    queuedFollowUps,
+    isSendBusy,
+    isConnecting,
+    activePendingProgress,
+    activePendingApproval,
+    pendingUserInputs,
+  ]);
 
   const onRespondToApproval = useCallback(
     async (requestId: ApprovalRequestId, decision: ProviderApprovalDecision) => {
@@ -7146,7 +7188,15 @@ function ChatViewContent(props: ChatViewProps) {
                             <button
                               type="button"
                               className="shrink-0 rounded px-2 py-1 text-xs hover:bg-muted"
-                              disabled={isSendBusy || sendInFlightRef.current}
+                              disabled={
+                                isSendBusy ||
+                                sendInFlightRef.current ||
+                                Boolean(
+                                  activePendingProgress ||
+                                  activePendingApproval ||
+                                  pendingUserInputs.length > 0,
+                                )
+                              }
                               onClick={() => {
                                 if (!activeThreadKey) return;
                                 const queue = useQueuedFollowUpStore.getState();
