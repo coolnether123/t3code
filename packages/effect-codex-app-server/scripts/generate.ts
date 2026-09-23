@@ -960,6 +960,7 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
   yield* Effect.log(`Generated Codex App Server schemas from ${UPSTREAM_REF}`);
 
   const platform = yield* HostProcessPlatform;
+  const path = yield* Path.Path;
   yield* Effect.service(ChildProcessSpawner.ChildProcessSpawner).pipe(
     Effect.flatMap((spawner) =>
       // Windows' command shim is unreliable from uv_spawn. Invoke the local
