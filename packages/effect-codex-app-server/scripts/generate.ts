@@ -9,7 +9,6 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
-import * as NodePath from "node:path";
 import * as Schema from "effect/Schema";
 import {
   FetchHttpClient,
@@ -959,6 +958,7 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
   yield* Effect.log(`Generated Codex App Server schemas from ${UPSTREAM_REF}`);
 
   const platform = yield* HostProcessPlatform;
+  const path = yield* Path.Path;
   yield* Effect.service(ChildProcessSpawner.ChildProcessSpawner).pipe(
     Effect.flatMap((spawner) =>
       // Windows' command shim is unreliable from uv_spawn. Invoke the local
@@ -968,7 +968,7 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
       platform === "win32"
         ? spawner.spawn(
             ChildProcess.make("node", [
-              NodePath.join(
+              path.join(
                 generatedDir,
                 "..",
                 "..",

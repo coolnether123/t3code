@@ -73,6 +73,8 @@ it.layer(NodeServices.layer)("snoozed thread decider", (it) => {
         command: {
           type: "thread.turn.start",
           commandId: CommandId.make("cmd-queued-turn"),
+          runtimeMode: "full-access",
+          interactionMode: "default",
           threadId: ThreadId.make("thread-1"),
           message: {
             messageId: MessageId.make("message-queued"),
@@ -111,6 +113,8 @@ it.layer(NodeServices.layer)("snoozed thread decider", (it) => {
         command: {
           type: "thread.turn.start",
           commandId: CommandId.make("cmd-queued-replay"),
+          runtimeMode: "full-access",
+          interactionMode: "default",
           threadId: ThreadId.make("thread-1"),
           message: {
             messageId: queuedMessageId,

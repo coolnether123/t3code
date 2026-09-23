@@ -869,7 +869,11 @@ export const BirthdayCelebrationPreference = Schema.Struct({
       ),
     ),
   ),
-}).check(Schema.makeFilter((value) => value.day <= new Date(2000, value.month, 0).getDate()));
+}).check(
+  Schema.makeFilter(
+    ({ month, day }) => (month !== 2 || day <= 29) && (![4, 6, 9, 11].includes(month) || day <= 30),
+  ),
+);
 export type BirthdayCelebrationPreference = typeof BirthdayCelebrationPreference.Type;
 
 export const ServerSettings = Schema.Struct({
