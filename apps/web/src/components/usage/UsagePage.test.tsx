@@ -35,6 +35,12 @@ vi.mock("react", async (importOriginal) => {
 vi.mock("../../env", () => ({ isElectron: false }));
 vi.mock("@tanstack/react-router", () => ({ Link: "a", useNavigate: () => vi.fn() }));
 vi.mock("../../state/usage", () => ({ useUsage: testState.useUsage }));
+vi.mock("@effect/atom-react", () => ({ useAtomValue: () => new Map() }));
+vi.mock("../../state/presentation", () => ({
+  environmentPresentations: { presentationsAtom: null },
+}));
+vi.mock("../../state/server", () => ({ serverEnvironment: { refreshProviders: null } }));
+vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => vi.fn() }));
 vi.mock("../ui/button", () => ({ Button: "button" }));
 vi.mock("../ui/scroll-area", () => ({ ScrollArea: "div" }));
 vi.mock("../ui/select", () => ({

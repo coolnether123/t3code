@@ -6,11 +6,11 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { AsyncResult, Atom, AtomRegistry } from "effect/unstable/reactivity";
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type { EnvironmentPresentation } from "../connection/presentation.ts";
 import { EnvironmentRpcUnavailableError } from "../rpc/client.ts";
-import { refreshUsage } from "./usage.ts";
+import { refreshUsage, refreshUsageLimits } from "./usage.ts";
 
 const input = {
   sinceDay: UsageDay.make("2026-09-05"),
@@ -30,6 +30,37 @@ const summary: UsageSummary = {
 const registries: AtomRegistry.AtomRegistry[] = [];
 afterEach(() => {
   for (const registry of registries.splice(0)) registry.dispose();
+  vi.restoreAllMocks();
+});
+
+describe("usage limit refresh", () => {
+  it("throttles automatic refreshes per environment but allows manual refresh", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(10_000);
+    const refresh = vi.fn().mockResolvedValue("updated");
+
+    expect(await refreshUsageLimits(EnvironmentId.make("limit-throttle"), refresh, true)).toBe(
+      "updated",
+    );
+    expect(await refreshUsageLimits(EnvironmentId.make("limit-throttle"), refresh, true)).toBe(
+      undefined,
+    );
+    expect(await refreshUsageLimits(EnvironmentId.make("limit-throttle"), refresh)).toBe("updated");
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it("coalesces an automatic refresh with a pending manual refresh", async () => {
+    const result = Promise.withResolvers<string>();
+    const refresh = vi.fn(() => result.promise);
+    const environmentId = EnvironmentId.make("limit-pending");
+    const automatic = refreshUsageLimits(environmentId, refresh, true);
+    await Promise.resolve();
+    expect(await refreshUsageLimits(environmentId, refresh, true)).toBeUndefined();
+    const manual = refreshUsageLimits(environmentId, refresh);
+    result.resolve("updated");
+    expect(await automatic).toBe("updated");
+    expect(await manual).toBe("updated");
+    expect(refresh).toHaveBeenCalledTimes(1);
+  });
 });
 
 function harness(ids = ["a"]) {
