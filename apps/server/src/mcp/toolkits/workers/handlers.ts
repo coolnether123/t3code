@@ -68,12 +68,21 @@ const resolveWorkerModelSelection = (
     });
   }
   if (requestedModel !== undefined && requestedModel !== inherited.model) {
-    return Effect.fail(
-      new WorkerOperationError({
-        operation: "worker.start",
-        message: `Worker model '${requestedModel}' is not the parent session's active supported model '${inherited.model}'. Omit model to inherit '${inherited.model}'. Exact provider model slugs are required; display aliases are not accepted.`,
-      }),
-    );
+    if (scope.providerDriverKind !== "codex") {
+      return Effect.fail(
+        new WorkerOperationError({
+          operation: "worker.start",
+          message:
+            "An alternate Worker model requires a Codex parent session or the codex-desktop backend. The Worker must use the parent provider instance.",
+        }),
+      );
+    }
+    const options = mergeModelOptions(inherited.options, input.modelSelection?.options);
+    return Effect.succeed({
+      instanceId: inherited.instanceId,
+      model: requestedModel,
+      ...(options.length === 0 ? {} : { options }),
+    });
   }
   const options = mergeModelOptions(inherited.options, input.modelSelection?.options);
   return Effect.succeed({

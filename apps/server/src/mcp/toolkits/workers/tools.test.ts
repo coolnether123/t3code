@@ -99,7 +99,7 @@ it("makes Worker provider identity optional and explains deterministic inheritan
     "Omit modelSelection to inherit the parent's exact provider instance, model, and options",
   );
   expect(WorkerToolkit.tools.worker_start.description).toContain(
-    "send only modelSelection.options",
+    "select another exact model slug from that provider instance with modelSelection.model",
   );
   expect(WorkerToolkit.tools.worker_wait.description).toContain("identity, lifecycle, and usage");
   expect(WorkerToolkit.tools.worker_wait.description).toContain(
