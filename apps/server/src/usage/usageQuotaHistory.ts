@@ -8,6 +8,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import type { UsageQuotaHistory, UsageQuotaInterval, UsageQuotaSample } from "@t3tools/contracts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import { priceUsage, type RateTable } from "./usagePricing.ts";
 import type { UsageRecord } from "./usageTranscripts.ts";
@@ -20,6 +21,7 @@ const SOURCE = "Codex Limits saved history";
 const decodeHistoryJson = Schema.decodeUnknownEffect(
   Schema.fromJsonString(Schema.Unknown as unknown as Schema.Codec<unknown>),
 );
+const encodeHistoryJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 function object(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -93,16 +95,29 @@ export function decodeQuotaHistory(document: unknown): UsageQuotaHistory {
   };
 }
 
+/** Encode native samples in the Codex Limits tracker's PascalCase schema. */
+export function encodeQuotaHistory(samples: readonly UsageQuotaSample[]): string {
+  return encodeHistoryJson({
+    Snapshot: { MainLimit: { LimitId: "codex", Window: { DurationMinutes: 10080 } } },
+    Samples: samples.map((sample) => ({
+      ObservedAt: sample.observedAt,
+      RemainingPercent: sample.remainingPercent,
+      ResetsAt: sample.resetsAt,
+    })),
+  });
+}
+
 export const readQuotaHistory = Effect.fn("UsageQuotaHistory.read")(
   function* (override: string | null | undefined) {
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
+    const platform = yield* HostProcessPlatform;
     const filePath =
       override === undefined
         ? process.env.T3CODE_QUOTA_HISTORY_PATH ||
           (process.env.LOCALAPPDATA
             ? path.join(process.env.LOCALAPPDATA, "CodexLimits", "state.json")
-            : process.platform === "darwin"
+            : platform === "darwin"
               ? path.join(
                   NodeOS.homedir(),
                   "Library",

@@ -133,6 +133,27 @@ describe("saved quota history", () => {
       expect((yield* readQuotaHistory(file)).status).toBe("invalid");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
+  it.effect("reads content-addressed archives without duplicating active observations", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-quota-archive-test-" });
+      const file = path.join(directory, "state.json");
+      yield* fs.writeFileString(file, encodeJson(document([sample])));
+      const archiveDir = `${file}.archive`;
+      yield* fs.makeDirectory(archiveDir);
+      const older = { ...sample, ObservedAt: "2026-07-20T12:00:00-05:00" };
+      const archiveText = `${encodeJson({ Samples: [older, sample] })}\n`;
+      const name = `${NodeCrypto.createHash("sha256").update(archiveText).digest("hex")}.json`;
+      yield* fs.writeFileString(path.join(archiveDir, name), archiveText);
+      expect((yield* readQuotaHistory(file)).samples.map((row) => row.observedAt)).toEqual([
+        "2026-07-20T17:00:00.000Z",
+        "2026-07-21T17:00:00.000Z",
+      ]);
+      yield* fs.writeFileString(path.join(archiveDir, name), `${archiveText} `);
+      expect((yield* readQuotaHistory(file)).status).toBe("invalid");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
   it("bounds and validates cost intervals independently of client schemas", () => {
     expect(validQuotaIntervals(intervals, "2026-07-19", "2026-07-23")).toBe(true);
     expect(validQuotaIntervals([...intervals, ...intervals], "2026-07-19", "2026-07-23")).toBe(
