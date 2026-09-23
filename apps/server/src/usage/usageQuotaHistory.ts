@@ -1,3 +1,5 @@
+import * as NodeOS from "node:os";
+
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -96,7 +98,15 @@ export const readQuotaHistory = Effect.fn("UsageQuotaHistory.read")(
         ? process.env.T3CODE_QUOTA_HISTORY_PATH ||
           (process.env.LOCALAPPDATA
             ? path.join(process.env.LOCALAPPDATA, "CodexLimits", "state.json")
-            : null)
+            : process.platform === "darwin"
+              ? path.join(
+                  NodeOS.homedir(),
+                  "Library",
+                  "Application Support",
+                  "CodexLimits",
+                  "state.json",
+                )
+              : null)
         : override;
     const missing: UsageQuotaHistory = {
       status: "missing",

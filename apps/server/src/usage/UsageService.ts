@@ -524,6 +524,7 @@ export const make = Effect.gen(function* () {
   let ratesFetchedAtMs: number | null = null;
   let ratesStatus: UsageSummary["pricing"]["status"] = "unavailable";
   const ratesLock = yield* Semaphore.make(1);
+  let cachedRatesLoaded = false;
 
   /**
    * Loads the LiteLLM rate table, preferring a fresh copy and falling back to
@@ -539,60 +540,68 @@ export const make = Effect.gen(function* () {
     knownModels: rates.size,
   });
 
+  const loadCachedRates = Effect.gen(function* () {
+    const fromDisk = yield* fileSystem.readFileString(ratesCachePath).pipe(
+      Effect.flatMap((raw) => decodeRatesCache(raw)),
+      Effect.catchCause(() => Effect.succeed(null)),
+    );
+    if (fromDisk === null) return;
+    const parsed = parseRateTable(fromDisk.document);
+    if (parsed.size === 0) return;
+    rates = parsed;
+    const revisionDocument = encodeRateDocument(fromDisk.document);
+    ratesRevision = NodeCrypto.createHash("sha256").update(revisionDocument).digest("hex");
+    ratesFetchedAtMs = fromDisk.fetchedAtMs;
+    ratesStatus = "cached";
+  });
+  const ensureCachedRates = ratesLock.withPermits(1)(
+    Effect.gen(function* () {
+      if (cachedRatesLoaded) return;
+      yield* loadCachedRates;
+      cachedRatesLoaded = true;
+    }),
+  );
+
   const ensureRates = (force = false) =>
-    ratesLock.withPermits(1)(
-      Effect.gen(function* () {
-        const now = yield* Clock.currentTimeMillis;
-        const maxAgeMs = force ? RATES_REFRESH_FLOOR_MS : RATES_TTL_MS;
-        if (ratesFetchedAtMs !== null && now - ratesFetchedAtMs < maxAgeMs) return;
+    ensureCachedRates.pipe(
+      Effect.andThen(
+        ratesLock.withPermits(1)(
+          Effect.gen(function* () {
+            const now = yield* Clock.currentTimeMillis;
+            const maxAgeMs = force ? RATES_REFRESH_FLOOR_MS : RATES_TTL_MS;
+            if (ratesFetchedAtMs !== null && now - ratesFetchedAtMs < maxAgeMs) return;
 
-        if (ratesFetchedAtMs === null) {
-          const fromDisk = yield* fileSystem.readFileString(ratesCachePath).pipe(
-            Effect.flatMap((raw) => decodeRatesCache(raw)),
-            Effect.catchCause(() => Effect.succeed(null)),
-          );
-          if (fromDisk !== null) {
-            const parsed = parseRateTable(fromDisk.document);
-            if (parsed.size > 0) {
-              rates = parsed;
-              const revisionDocument = encodeRateDocument(fromDisk.document);
-              ratesRevision = NodeCrypto.createHash("sha256")
-                .update(revisionDocument)
-                .digest("hex");
-              ratesFetchedAtMs = fromDisk.fetchedAtMs;
-              ratesStatus = "cached";
-              if (now - fromDisk.fetchedAtMs < maxAgeMs) return;
+            const fetched = yield* httpClient.get(LITELLM_RATES_URL).pipe(
+              Effect.flatMap(HttpClientResponse.filterStatusOk),
+              Effect.flatMap((response) => response.json),
+              Effect.timeout(10_000),
+              Effect.catchCause(() => Effect.succeed(null)),
+            );
+            if (fetched === null) {
+              // The refresh failed; whatever we are serving is now past its TTL and
+              // must not keep claiming to be fresh.
+              if (rates.size > 0) ratesStatus = "cached";
+              return;
             }
-          }
-        }
 
-        const fetched = yield* httpClient.get(LITELLM_RATES_URL).pipe(
-          Effect.flatMap(HttpClientResponse.filterStatusOk),
-          Effect.flatMap((response) => response.json),
-          Effect.timeout(10_000),
-          Effect.catchCause(() => Effect.succeed(null)),
-        );
-        if (fetched === null) {
-          // The refresh failed; whatever we are serving is now past its TTL and
-          // must not keep claiming to be fresh.
-          if (rates.size > 0) ratesStatus = "cached";
-          return;
-        }
+            const parsed = parseRateTable(fetched);
+            if (parsed.size === 0) return;
 
-        const parsed = parseRateTable(fetched);
-        if (parsed.size === 0) return;
+            rates = parsed;
+            const revisionDocument = encodeRateDocument(fetched);
+            ratesRevision = NodeCrypto.createHash("sha256").update(revisionDocument).digest("hex");
+            ratesFetchedAtMs = now;
+            ratesStatus = "fresh";
 
-        rates = parsed;
-        const revisionDocument = encodeRateDocument(fetched);
-        ratesRevision = NodeCrypto.createHash("sha256").update(revisionDocument).digest("hex");
-        ratesFetchedAtMs = now;
-        ratesStatus = "fresh";
-
-        yield* encodeRatesCache({ fetchedAtMs: now, document: fetched }).pipe(
-          Effect.flatMap((serialized) => fileSystem.writeFileString(ratesCachePath, serialized)),
-          Effect.catchCause(() => Effect.void),
-        );
-      }),
+            yield* encodeRatesCache({ fetchedAtMs: now, document: fetched }).pipe(
+              Effect.flatMap((serialized) =>
+                fileSystem.writeFileString(ratesCachePath, serialized),
+              ),
+              Effect.catchCause(() => Effect.void),
+            );
+          }),
+        ),
+      ),
     );
 
   const refreshRates = ensureRates(true).pipe(
@@ -957,7 +966,13 @@ export const make = Effect.gen(function* () {
       } satisfies UsageSummary;
     }
     const quotaCosts = progress?.quotaCosts ?? [];
-    yield* ensureRates().pipe(Effect.withSpan("UsageService.ensureRates"));
+    // A usage read has a hard response budget. Use the rates already available
+    // at its start and let the regular refresh populate the next read; never let
+    // the pricing endpoint consume this scan's budget or change its prices
+    // partway through aggregation.
+    const scanRates = new Map(rates);
+    const scanPricing = pricing();
+    yield* Effect.forkDetach(ensureRates().pipe(Effect.withSpan("UsageService.ensureRates")));
     yield* ensureScanCacheLoaded.pipe(Effect.withSpan("UsageService.loadScanCache"));
     const tierJournal = yield* fileSystem
       .readFileString(path.join(config.stateDir, CODEX_TIER_JOURNAL))
@@ -1048,7 +1063,7 @@ export const make = Effect.gen(function* () {
       untilDay: input.untilDay,
       resolution: input.resolution ?? "day",
       ...hourlyWindow,
-      rates,
+      rates: scanRates,
       priceOverrides: createOverrideRateTable(settings.usagePriceOverrides),
       ...(input.providers === undefined ? {} : { providers: input.providers }),
       ...(input.sessionIds === undefined ? {} : { sessionIds: input.sessionIds }),
@@ -1129,7 +1144,7 @@ export const make = Effect.gen(function* () {
         const retainedVolumeId = coverage?.volumeId ?? volumeId;
         const quota = new QuotaCostAccumulator(
           provider === "codex" ? quotaIntervals : [],
-          rates,
+          scanRates,
           createOverrideRateTable(settings.usagePriceOverrides),
         );
         for (const [, entry] of retainedFiles) {
@@ -1308,7 +1323,7 @@ export const make = Effect.gen(function* () {
       const sessionIds = new Set<string>();
       const quota = new QuotaCostAccumulator(
         provider === "codex" ? quotaIntervals : [],
-        rates,
+        scanRates,
         createOverrideRateTable(settings.usagePriceOverrides),
       );
 
@@ -1534,7 +1549,7 @@ export const make = Effect.gen(function* () {
               return day >= input.sinceDay && day <= input.untilDay;
             }),
             {
-              rates,
+              rates: scanRates,
               priceOverrides: createOverrideRateTable(settings.usagePriceOverrides),
               dayAt: repeatedDayAt,
               coverageGaps: repeatedInputGaps,
@@ -1558,16 +1573,7 @@ export const make = Effect.gen(function* () {
       untilDay: input.untilDay,
       buckets: aggregated.buckets.filter((bucket) => supportsProvider(bucket.provider)),
       sources: sources.filter((source) => supportsProvider(source.fingerprint.provider)),
-      pricing: {
-        status: ratesStatus,
-        source: LITELLM_RATES_URL,
-        revision: ratesRevision,
-        fetchedAt:
-          ratesFetchedAtMs === null
-            ? null
-            : DateTime.formatIso(DateTime.makeUnsafe(ratesFetchedAtMs)),
-        knownModels: rates.size,
-      },
+      pricing: scanPricing,
       scanDurationMs: Math.max(0, finishedAtMs - startedAtMs),
       ...(repeatedInput === undefined ? {} : { repeatedInput }),
       ...(quotaHistory === undefined ? {} : { quotaHistory }),
@@ -1590,7 +1596,7 @@ export const make = Effect.gen(function* () {
     priceOverrides: Readonly<Record<string, unknown>> | undefined,
   ): string => {
     const base = usageSummaryCacheKey(input, priceOverrides);
-    return includeRepeatedInput(input) ? `${base}\u0000repeatedInput=1` : base;
+    return JSON.stringify([base, ratesRevision, includeRepeatedInput(input)]);
   };
 
   const partialSummaryAtDeadline = Effect.fn("UsageService.partialSummaryAtDeadline")(function* (
@@ -1691,6 +1697,7 @@ export const make = Effect.gen(function* () {
             });
           }
           if (input.quotaHistoryOnly) return yield* readSummaryUnlocked(input, undefined, progress);
+          yield* ensureCachedRates;
           const context = yield* resolveReadContext();
           resolvedDirs = context.dirs;
           // Establish source identities before waiting for a scan so saved interval
