@@ -208,6 +208,11 @@ export function apiCostPace(
     const priorUntil = Date.parse(priorCycle.interval.untilTime);
     const currentStart = Date.parse(forecast.first.observedAt);
     const observed = Date.parse(forecast.latest.observedAt);
+    // Zero-use clock adjustments can share a period; the final clock anchor is its calibration target.
+    const finalClockAnchor =
+      forecast.points.findLast(
+        (point) => point.resetChange && point.resetsAt === forecast.latest.resetsAt,
+      )?.observedAt ?? forecast.first.observedAt;
     if (
       !Number.isFinite(priorSince) ||
       !Number.isFinite(priorUntil) ||
@@ -218,8 +223,10 @@ export function apiCostPace(
       priorUntil >= observed ||
       (priorCycle.period.resetKind !== "scheduled" &&
         priorCycle.period.resetKind !== "unexpected") ||
-      (priorCycle.period.next?.observedAt !== forecast.first.observedAt &&
-        priorCycle.calibrationTargetSince !== forecast.first.observedAt) ||
+      (priorCycle.calibrationTargetSince === undefined
+        ? priorCycle.period.next?.observedAt !== forecast.first.observedAt
+        : priorCycle.calibrationTargetSince !== forecast.first.observedAt &&
+          priorCycle.calibrationTargetSince !== finalClockAnchor) ||
       priorCycle.period.first.observedAt !== priorCycle.interval.sinceTime ||
       priorCycle.period.last.observedAt !== priorCycle.interval.untilTime ||
       (priorCycle.period.observationGapMs ?? Infinity) > 60 * 60_000 ||

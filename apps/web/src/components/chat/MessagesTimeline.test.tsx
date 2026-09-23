@@ -469,7 +469,7 @@ describe("MessagesTimeline", () => {
                 checkpointTurnCount: 1,
                 checkpointRef: CheckpointRef.make("checkpoint-with-files"),
                 status: "ready",
-                files: [{ path: "README.md", kind: "modified", additions: 2, deletions: 1 }],
+                files: [{ path: "src/README.md", kind: "modified", additions: 2, deletions: 1 }],
                 assistantMessageId,
                 completedAt: MESSAGE_CREATED_AT,
               },

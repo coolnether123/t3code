@@ -78,6 +78,7 @@ export const ChangedFilesCard = memo(function ChangedFilesCard(props: {
                     type="button"
                     size="icon-xs"
                     variant="ghost-muted"
+                    className="!size-[22px]"
                     aria-label={
                       allDirectoriesExpanded ? "Collapse all folders" : "Expand all folders"
                     }
