@@ -450,6 +450,9 @@ export function applyClaudePromptEffortPrefix(
   if (effort !== "ultrathink") {
     return trimmed;
   }
+  if (/^\/[a-z][a-z0-9:.-]*(?:\s|$)/i.test(trimmed)) {
+    return trimmed;
+  }
   if (trimmed.startsWith("Ultrathink:")) {
     return trimmed;
   }
