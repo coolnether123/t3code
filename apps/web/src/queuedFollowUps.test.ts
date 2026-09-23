@@ -6,7 +6,8 @@ import {
   type QueuedFollowUp,
 } from "./queuedFollowUps";
 
-const sample = (id: string) => ({ id, context: { prompt: id, images: [] } }) as QueuedFollowUp;
+const sample = (id: string) =>
+  ({ id, context: { prompt: id, images: [] } }) as unknown as QueuedFollowUp;
 afterEach(() => {
   const store = useQueuedFollowUpStore.getState();
   for (const [key, entries] of Object.entries(store.byThread)) {
