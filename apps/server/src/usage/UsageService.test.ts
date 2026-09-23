@@ -102,12 +102,14 @@ const setup = Effect.gen(function* () {
 const serviceLayers = (input: {
   readonly prefix: string;
   readonly home: string;
+  readonly configBaseDir?: string;
   readonly settings: Parameters<typeof ServerSettings.layerTest>[0];
   readonly onRatesFetch?: () => void;
+  readonly neverRates?: boolean;
   /** Defaults to an unparsable document so every scan retries the fetch. */
   readonly ratesDocument?: unknown;
 }) =>
-  ServerConfig.layerTest(process.cwd(), { prefix: input.prefix }).pipe(
+  ServerConfig.layerTest(process.cwd(), input.configBaseDir ?? { prefix: input.prefix }).pipe(
     Layer.provideMerge(NodeServices.layer),
     Layer.provideMerge(ServerSettings.layerTest(input.settings)),
     Layer.provideMerge(
@@ -119,7 +121,11 @@ const serviceLayers = (input: {
             // Unparsable rates: every scan retries the fetch, which makes the
             // fetch count a boundary-level observation of how many scans ran.
             return HttpClientResponse.fromWeb(request, Response.json(input.ratesDocument ?? {}));
-          }),
+          }).pipe(
+            Effect.flatMap((response) =>
+              input.neverRates === true ? Effect.never : Effect.succeed(response),
+            ),
+          ),
         ),
       ),
     ),
@@ -133,6 +139,70 @@ function totalOutputTokens(summary: { buckets: readonly { totals: { outputTokens
 }
 
 describe("UsageService", () => {
+  it.live("prices the first summary from disk while the rate endpoint is stalled", () =>
+    Effect.gen(function* () {
+      const { transcript, settings, home } = yield* setup;
+      yield* Effect.promise(() => NodeFSP.writeFile(transcript, claudeLine(1, 5)));
+      const configBaseDir = NodePath.join(home, "cached-rates-state");
+      const stateDir = NodePath.join(configBaseDir, "userdata");
+      yield* Effect.promise(() => NodeFSP.mkdir(stateDir, { recursive: true }));
+      yield* Effect.promise(() =>
+        NodeFSP.writeFile(
+          NodePath.join(stateDir, "usage-model-rates.json"),
+          '{"fetchedAtMs":1700000000000,"document":{"claude-fable-5":{"input_cost_per_token":0.00001,"output_cost_per_token":0.00005}}}',
+        ),
+      );
+      let ratesFetches = 0;
+      const service = yield* UsageService.make.pipe(
+        Effect.provide(
+          serviceLayers({
+            prefix: "cached-rates-test",
+            home,
+            settings,
+            configBaseDir,
+            neverRates: true,
+            onRatesFetch: () => {
+              ratesFetches += 1;
+            },
+          }),
+        ),
+      );
+      const summary = yield* service.readSummary(WINDOW);
+      assert.strictEqual(summary.pricing.status, "cached");
+      assert.strictEqual(summary.pricing.knownModels, 1);
+      assert.closeTo(summary.buckets[0]?.costUsd ?? -1, 0.00035, 1e-12);
+      assert.strictEqual(summary.buckets[0]?.unpricedRecords, 0);
+      assert.strictEqual(ratesFetches, 1);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("returns an unpriced summary without waiting for a stalled rate endpoint", () =>
+    Effect.gen(function* () {
+      const { transcript, settings, home } = yield* setup;
+      yield* Effect.promise(() => NodeFSP.writeFile(transcript, claudeLine(1, 5)));
+      let ratesFetches = 0;
+      const service = yield* UsageService.make.pipe(
+        Effect.provide(
+          serviceLayers({
+            prefix: "no-rates-test",
+            home,
+            settings,
+            neverRates: true,
+            onRatesFetch: () => {
+              ratesFetches += 1;
+            },
+          }),
+        ),
+      );
+      const result = yield* service.readSummary(WINDOW).pipe(Effect.timeoutOption(2_000));
+      assert.isTrue(result._tag === "Some", "usage read should finish while rates are stalled");
+      if (result._tag === "Some") {
+        assert.strictEqual(result.value.buckets[0]?.unpricedRecords, 1);
+        assert.strictEqual(result.value.pricing.knownModels, 0);
+      }
+      assert.strictEqual(ratesFetches, 1);
+    }).pipe(Effect.scoped),
+  );
   it.live("counts a migrated rollout once across shared and isolated homes", () =>
     Effect.gen(function* () {
       const { settings, home } = yield* setup;
@@ -220,6 +290,8 @@ describe("UsageService", () => {
         turnIds: ["child-turn"],
         groupBy: "turn",
       };
+      // Explicit refresh establishes the rate table before asserting priced totals.
+      yield* service.refreshRates;
       const first = yield* service.readSummary(input);
       const replay = yield* service.readSummary(input);
 
@@ -331,6 +403,7 @@ describe("UsageService", () => {
           }),
         ),
       );
+      yield* service.refreshRates;
       const ordinary = yield* service.readSummary({
         ...WINDOW,
         providers: ["codex"],
@@ -590,6 +663,7 @@ describe("UsageService", () => {
         ),
       );
 
+      yield* service.refreshRates;
       const first = yield* service.readSummary(WINDOW);
       assert.strictEqual(ratesFetches, 1);
       assert.strictEqual(first.pricing.status, "fresh");
