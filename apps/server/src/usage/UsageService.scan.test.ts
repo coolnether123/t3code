@@ -17,7 +17,7 @@ import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { make } from "./UsageService.ts";
 import { quotaCostLedgerKey } from "./usageQuotaCostLedger.ts";
-import { encodeScanCache } from "./usageScanCache.ts";
+import { encodeScanCache, type ScanCache } from "./usageScanCache.ts";
 import { initialCodexScanState, type UsageRecord } from "./usageTranscripts.ts";
 import {
   listTranscriptFilesBounded,
@@ -176,113 +176,156 @@ describe("incremental scan integration", () => {
     }).pipe(Effect.scoped, Effect.provide(Layer.merge(testLayer, TestClock.layer()))),
   );
 
-  it.effect(
-    "keeps warm totals through partial inventory and prunes only after completed deletion",
-    () =>
-      Effect.gen(function* () {
-        const fs = yield* FileSystem.FileSystem;
-        const nowMs = Date.parse("2026-09-20T12:00:00Z");
-        const path = yield* Path.Path;
-        yield* TestClock.setTime(nowMs);
+  it.effect("keeps warm totals through partial inventory and complete transcript deletion", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const nowMs = Date.parse("2026-09-20T12:00:00Z");
+      const path = yield* Path.Path;
+      yield* TestClock.setTime(nowMs);
 
-        const usage: UsageRecord = {
-          provider: "codex",
-          model: "gpt-5.6-sol",
-          sessionId: "warm-session",
-          timestampMs: nowMs - 60_000,
-          totals: {
-            uncachedInputTokens: 10,
-            cachedInputTokens: 2,
-            cacheCreationTokens: 0,
-            outputTokens: 3,
-            reasoningTokens: 0,
-          },
-          reportedCostUsd: null,
-          dedupeKey: "warm-record",
+      const usage: UsageRecord = {
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        sessionId: "warm-session",
+        timestampMs: nowMs - 60_000,
+        totals: {
+          uncachedInputTokens: 10,
+          cachedInputTokens: 2,
+          cacheCreationTokens: 0,
+          outputTokens: 3,
+          reasoningTokens: 0,
+        },
+        reportedCostUsd: null,
+        dedupeKey: "warm-record",
+      };
+      const warm = { path: "", size: 1_000, mtimeMs: nowMs - 30_000 };
+      let root = "";
+      let phase: "present" | "partial" | "deleted" = "present";
+
+      vi.mocked(readTranscriptRecords).mockClear();
+      const originalListing = vi.mocked(listTranscriptFilesBounded).getMockImplementation()!;
+      const originalRead = vi.mocked(readTranscriptRecords).getMockImplementation()!;
+      try {
+        vi.mocked(listTranscriptFilesBounded).mockImplementation(async (candidate) => {
+          const primary =
+            /[\\/]sessions$/.test(candidate) && !/[\\/]codex-home[\\/]/.test(candidate);
+          if (!primary) return { files: [], complete: true };
+          root = candidate;
+          warm.path = path.join(candidate, "warm.jsonl");
+          if (phase === "partial") return { files: [], complete: false };
+          if (phase === "deleted") return { files: [], complete: true };
+          return { files: [{ ...warm }], complete: true };
+        });
+        vi.mocked(readTranscriptRecords).mockImplementation(
+          async (filePath, _provider, options) => ({
+            records: filePath === warm.path && (options?.startByte ?? 0) === 0 ? [usage] : [],
+            nextByte: warm.size,
+            discardedLines: 0,
+            discardingLine: false,
+            codexState: initialCodexScanState(),
+          }),
+        );
+
+        const service = yield* make.pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            exists: () => Effect.succeed(true),
+            readFileString: (path, ...args) =>
+              path.endsWith("usage-scan-cache.json")
+                ? Effect.succeed(emptyScanCache)
+                : fs.readFileString(path, ...args),
+          }),
+          Effect.provideService(
+            HttpClient.HttpClient,
+            HttpClient.make(() => Effect.die("Offline fixture")),
+          ),
+        );
+        const input = {
+          sinceDay: UsageDay.make("2026-09-19"),
+          untilDay: UsageDay.make("2026-09-21"),
+          timeZone: "UTC",
+          providers: ["codex"] as const,
+          refresh: true,
         };
-        const warm = { path: "", size: 1_000, mtimeMs: nowMs - 30_000 };
-        let root = "";
-        let phase: "present" | "partial" | "deleted" = "present";
+        const total = (summary: UsageSummary) =>
+          summary.buckets.reduce((sum, bucket) => sum + bucket.totals.uncachedInputTokens, 0);
+        const rootSource = (summary: UsageSummary) =>
+          summary.sources.find((source) => source.fingerprint.resolvedHomePath === root);
 
+        const first = yield* service.readSummary(input);
+        expect(total(first)).toBe(10);
+        expect(rootSource(first)?.status).toBe("ok");
+        expect(readTranscriptRecords).toHaveBeenCalledTimes(1);
+
+        vi.mocked(transcriptCursorIsLineBoundary).mockClear();
+        phase = "partial";
+        const partial = yield* service.readSummary(input);
+        expect(total(partial)).toBe(10);
+        expect(rootSource(partial)?.status).toBe("partial");
+        expect(readTranscriptRecords).toHaveBeenCalledTimes(1);
+
+        phase = "present";
+        const complete = yield* service.readSummary(input);
+        expect(total(complete)).toBe(10);
+        expect(rootSource(complete)?.status).toBe("ok");
+        expect(readTranscriptRecords).toHaveBeenCalledTimes(1);
+
+        expect(transcriptCursorIsLineBoundary).not.toHaveBeenCalled();
+        phase = "deleted";
+        const deleted = yield* service.readSummary(input);
+        expect(total(deleted)).toBe(10);
+        expect(rootSource(deleted)?.status).toBe("ok");
+        expect(readTranscriptRecords).toHaveBeenCalledTimes(1);
+
+        const persistedCache = encodeJson(
+          encodeScanCache(
+            new Map([
+              [
+                warm.path,
+                {
+                  size: warm.size,
+                  mtimeMs: nowMs - 200 * 24 * 60 * 60 * 1000,
+                  provider: "codex",
+                  records: [usage],
+                },
+              ],
+            ]) satisfies ScanCache,
+            [
+              {
+                provider: "codex",
+                rootPath: root,
+                sinceMs: nowMs - 90 * 24 * 60 * 60 * 1000,
+                scannedAtMs: nowMs,
+                volumeId: "fixture",
+              },
+            ],
+          ),
+        );
         vi.mocked(readTranscriptRecords).mockClear();
-        const originalListing = vi.mocked(listTranscriptFilesBounded).getMockImplementation()!;
-        const originalRead = vi.mocked(readTranscriptRecords).getMockImplementation()!;
-        try {
-          vi.mocked(listTranscriptFilesBounded).mockImplementation(async (candidate) => {
-            const primary =
-              /[\\/]sessions$/.test(candidate) && !/[\\/]codex-home[\\/]/.test(candidate);
-            if (!primary) return { files: [], complete: true };
-            root = candidate;
-            warm.path = path.join(candidate, "warm.jsonl");
-            if (phase === "partial") return { files: [], complete: false };
-            if (phase === "deleted") return { files: [], complete: true };
-            return { files: [{ ...warm }], complete: true };
-          });
-          vi.mocked(readTranscriptRecords).mockImplementation(
-            async (filePath, _provider, options) => ({
-              records: filePath === warm.path && (options?.startByte ?? 0) === 0 ? [usage] : [],
-              nextByte: warm.size,
-              discardedLines: 0,
-              discardingLine: false,
-              codexState: initialCodexScanState(),
-            }),
-          );
-
-          const service = yield* make.pipe(
-            Effect.provideService(FileSystem.FileSystem, {
-              ...fs,
-              exists: () => Effect.succeed(true),
-              readFileString: (path, ...args) =>
-                path.endsWith("usage-scan-cache.json")
-                  ? Effect.succeed(emptyScanCache)
-                  : fs.readFileString(path, ...args),
-            }),
-            Effect.provideService(
-              HttpClient.HttpClient,
-              HttpClient.make(() => Effect.die("Offline fixture")),
-            ),
-          );
-          const input = {
-            sinceDay: UsageDay.make("2026-09-19"),
-            untilDay: UsageDay.make("2026-09-21"),
-            timeZone: "UTC",
-            providers: ["codex"] as const,
-            refresh: true,
-          };
-          const total = (summary: UsageSummary) =>
-            summary.buckets.reduce((sum, bucket) => sum + bucket.totals.uncachedInputTokens, 0);
-          const rootSource = (summary: UsageSummary) =>
-            summary.sources.find((source) => source.fingerprint.resolvedHomePath === root);
-
-          const first = yield* service.readSummary(input);
-          expect(total(first)).toBe(10);
-          expect(rootSource(first)?.status).toBe("ok");
-          expect(readTranscriptRecords).toHaveBeenCalledTimes(1);
-
-          vi.mocked(transcriptCursorIsLineBoundary).mockClear();
-          phase = "partial";
-          const partial = yield* service.readSummary(input);
-          expect(total(partial)).toBe(10);
-          expect(rootSource(partial)?.status).toBe("partial");
-          expect(readTranscriptRecords).toHaveBeenCalledTimes(1);
-
-          phase = "present";
-          const complete = yield* service.readSummary(input);
-          expect(total(complete)).toBe(10);
-          expect(rootSource(complete)?.status).toBe("ok");
-          expect(readTranscriptRecords).toHaveBeenCalledTimes(1);
-
-          expect(transcriptCursorIsLineBoundary).not.toHaveBeenCalled();
-          phase = "deleted";
-          const deleted = yield* service.readSummary(input);
-          expect(total(deleted)).toBe(0);
-          expect(rootSource(deleted)?.status).toBe("ok");
-          expect(readTranscriptRecords).toHaveBeenCalledTimes(1);
-        } finally {
-          vi.mocked(listTranscriptFilesBounded).mockImplementation(originalListing);
-          vi.mocked(readTranscriptRecords).mockImplementation(originalRead);
-        }
-      }).pipe(Effect.scoped, Effect.provide(Layer.merge(testLayer, TestClock.layer()))),
+        const restartedService = yield* make.pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            exists: (candidate) => Effect.succeed(candidate !== root),
+            readFileString: (candidate, ...args) =>
+              candidate.endsWith("usage-scan-cache.json")
+                ? Effect.succeed(persistedCache)
+                : fs.readFileString(candidate, ...args),
+          }),
+          Effect.provideService(
+            HttpClient.HttpClient,
+            HttpClient.make(() => Effect.die("Offline fixture")),
+          ),
+        );
+        const afterRestart = yield* restartedService.readSummary(input);
+        expect(total(afterRestart)).toBe(10);
+        expect(rootSource(afterRestart)?.status).toBe("partial");
+        expect(rootSource(afterRestart)?.fingerprint.volumeId).toBe("fixture");
+        expect(readTranscriptRecords).not.toHaveBeenCalled();
+      } finally {
+        vi.mocked(listTranscriptFilesBounded).mockImplementation(originalListing);
+        vi.mocked(readTranscriptRecords).mockImplementation(originalRead);
+      }
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(testLayer, TestClock.layer()))),
   );
 
   it.effect("resumes persisted chunks with exact token totals and no duplicate records", () =>

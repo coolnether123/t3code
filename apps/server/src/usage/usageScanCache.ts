@@ -67,6 +67,7 @@ export interface ScanCoverage {
   readonly rootPath: string;
   readonly sinceMs: number;
   readonly scannedAtMs: number;
+  readonly volumeId?: string;
 }
 
 export interface TranscriptScanPlanOptions {
@@ -189,7 +190,7 @@ interface SerializedCache {
   readonly models: readonly string[];
   readonly sessions: readonly string[];
   readonly files: Readonly<Record<string, SerializedFile>>;
-  readonly coverage?: readonly [UsageProviderKind, string, number, number][];
+  readonly coverage?: readonly [UsageProviderKind, string, number, number, string?][];
 }
 
 /** Serialises the cache, interning the repeated model and session strings. */
@@ -320,12 +321,17 @@ export function encodeScanCache(
     models,
     sessions,
     files,
-    coverage: coverage.map((entry) => [
-      entry.provider,
-      entry.rootPath,
-      entry.sinceMs,
-      entry.scannedAtMs,
-    ]),
+    coverage: coverage.map((entry) =>
+      entry.volumeId === undefined
+        ? ([entry.provider, entry.rootPath, entry.sinceMs, entry.scannedAtMs] as const)
+        : ([
+            entry.provider,
+            entry.rootPath,
+            entry.sinceMs,
+            entry.scannedAtMs,
+            entry.volumeId,
+          ] as const),
+    ),
   };
 }
 
@@ -763,8 +769,8 @@ export function decodeScanCoverage(document: unknown): readonly ScanCoverage[] {
 
   const coverage: ScanCoverage[] = [];
   for (const row of root.coverage) {
-    if (!Array.isArray(row) || row.length !== 4) continue;
-    const [provider, rootPath, sinceMs, scannedAtMs] = row;
+    if (!Array.isArray(row) || (row.length !== 4 && row.length !== 5)) continue;
+    const [provider, rootPath, sinceMs, scannedAtMs, volumeId] = row;
     if (root.version < USAGE_SCAN_CACHE_VERSION && provider === "aistudio") continue;
     if (
       (provider !== "claude" &&
@@ -777,54 +783,34 @@ export function decodeScanCoverage(document: unknown): readonly ScanCoverage[] {
       typeof sinceMs !== "number" ||
       !Number.isFinite(sinceMs) ||
       typeof scannedAtMs !== "number" ||
-      !Number.isFinite(scannedAtMs)
+      !Number.isFinite(scannedAtMs) ||
+      (volumeId !== undefined && typeof volumeId !== "string")
     ) {
       continue;
     }
-    coverage.push({ provider, rootPath, sinceMs, scannedAtMs });
+    coverage.push({
+      provider,
+      rootPath,
+      sinceMs,
+      scannedAtMs,
+      ...(volumeId === undefined ? {} : { volumeId }),
+    });
   }
   return coverage;
 }
 
-export interface PruneOptions {
-  /** Files the walk just saw. Only meaningful inside the walked window. */
-  readonly livePaths: ReadonlySet<string>;
-  /**
-   * Roots the walk actually completed. Absence from `livePaths` only proves a
-   * file is gone when its root was walked: a provider whose directory failed to
-   * resolve this pass must not have its warm entries purged.
-   */
-  readonly walkedRoots: readonly string[];
-  /** Start of the walked window; entries older than this were not looked for. */
-  readonly windowStartMs: number;
-  /** Entries older than this are dropped regardless. */
-  readonly retentionCutoffMs: number;
-}
-
-/**
- * Drops aged-out entries, and entries for files that have disappeared.
- *
- * The walk only covers the requested window, so absence from `livePaths` only
- * proves deletion for entries *inside* that window. Pruning everything the walk
- * missed would evict the 30-day entries every time someone looked at 7 days.
- *
- * Replaces an earlier record cap that cleared the whole cache once exceeded,
- * which meant a large enough window never warmed up at all.
- */
-export function pruneScanCache(cache: ScanCache, options: PruneOptions): number {
+/** Drops cached entries only after their usage retention period has expired. */
+export function pruneScanCache(cache: ScanCache, retentionCutoffMs: number): number {
   let removed = 0;
-  const walkedRoots = options.walkedRoots.map((root) => root.replace(/\\/g, "/"));
   for (const [path, entry] of cache) {
-    const agedOut = entry.mtimeMs < options.retentionCutoffMs;
-    const normalizedPath = path.replace(/\\/g, "/");
-    const underWalkedRoot = walkedRoots.some(
-      (root) =>
-        normalizedPath === root ||
-        normalizedPath.startsWith(root.endsWith("/") ? root : `${root}/`),
-    );
-    const deleted =
-      underWalkedRoot && entry.mtimeMs >= options.windowStartMs && !options.livePaths.has(path);
-    if (agedOut || deleted) {
+    let latestRetainedAtMs = entry.mtimeMs;
+    for (const record of entry.records) {
+      latestRetainedAtMs = Math.max(latestRetainedAtMs, record.timestampMs);
+    }
+    for (const observation of entry.repeatedInputObservations ?? []) {
+      latestRetainedAtMs = Math.max(latestRetainedAtMs, observation.observedAtMs);
+    }
+    if (latestRetainedAtMs < retentionCutoffMs) {
       cache.delete(path);
       removed += 1;
     }

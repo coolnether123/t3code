@@ -302,6 +302,33 @@ describe("scan cache round trip", () => {
     expect(decodeScanCoverage(JSON.parse(JSON.stringify(encoded)))).toEqual(coverage);
   });
 
+  it("persists volume identity while reading older coverage rows", () => {
+    const coverage = [
+      {
+        provider: "claude" as const,
+        rootPath: "/home/me/.claude/projects",
+        sinceMs: 100,
+        scannedAtMs: 200,
+        volumeId: "volume-a",
+      },
+    ];
+    const encoded = encodeScanCache(new Map(), coverage);
+    expect(decodeScanCoverage(JSON.parse(JSON.stringify(encoded)))).toEqual(coverage);
+    expect(
+      decodeScanCoverage({
+        ...encoded,
+        coverage: [["claude", "/home/me/.claude/projects", 100, 200]],
+      }),
+    ).toEqual([
+      {
+        provider: "claude",
+        rootPath: "/home/me/.claude/projects",
+        sinceMs: 100,
+        scannedAtMs: 200,
+      },
+    ]);
+  });
+
   it("restores the Codex append parser state", () => {
     const original = cacheWith([["/codex.jsonl", 100, [record({ provider: "codex" })]]]);
     const cached = original.get("/codex.jsonl")!;
@@ -506,112 +533,30 @@ describe("planTranscriptScan", () => {
 describe("pruneScanCache", () => {
   const retentionCutoffMs = 1000;
 
-  for (const root of ["C:\\codex\\sessions", "C:/codex/sessions"]) {
-    it(`prunes Windows paths under ${root} without touching siblings or live entries`, () => {
-      const live = "C:\\codex\\sessions\\live.jsonl";
-      const sibling = "C:\\codex\\sessions-copy\\keep.jsonl";
-      const cache = cacheWith([
-        ["C:\\codex\\sessions\\gone.jsonl", 5000, [record()]],
-        [live, 5000, [record()]],
-        [sibling, 5000, [record()]],
-      ]);
-      expect(
-        pruneScanCache(cache, {
-          livePaths: new Set([live]),
-          walkedRoots: [root],
-          windowStartMs: 4000,
-          retentionCutoffMs,
-        }),
-      ).toBe(1);
-      expect([...cache.keys()]).toEqual([live, sibling]);
-    });
-  }
+  it("retains deleted entries until their usage retention expires", () => {
+    const cache = cacheWith([["C:\\codex\\sessions\\gone.jsonl", 5000, [record()]]]);
+    expect(pruneScanCache(cache, retentionCutoffMs)).toBe(0);
+    expect(cache.size).toBe(1);
+  });
 
   it("drops entries older than retention", () => {
-    const cache = cacheWith([["/old.jsonl", 500, [record()]]]);
-
-    const removed = pruneScanCache(cache, {
-      livePaths: new Set(),
-      walkedRoots: ["/"],
-      windowStartMs: 400,
-      retentionCutoffMs,
-    });
-
+    const cache = cacheWith([["/old.jsonl", 500, [record({ timestampMs: 500 })]]]);
+    const removed = pruneScanCache(cache, retentionCutoffMs);
     expect(removed).toBe(1);
     expect(cache.size).toBe(0);
   });
 
-  it("drops in-window entries whose file has disappeared", () => {
-    const cache = cacheWith([["/gone.jsonl", 5000, [record()]]]);
-
-    pruneScanCache(cache, {
-      livePaths: new Set(),
-      walkedRoots: ["/"],
-      windowStartMs: 4000,
-      retentionCutoffMs,
-    });
-
-    expect(cache.size).toBe(0);
-  });
-
   it("keeps entries outside the walked window that are still within retention", () => {
-    // Viewing 7 days must not evict the 30-day entries, which that walk never
-    // looked for and so cannot prove are gone.
+    // A narrower view must not evict usage that is still inside retention.
     const cache = cacheWith([["/older-but-valid.jsonl", 2000, [record()]]]);
-
-    const removed = pruneScanCache(cache, {
-      livePaths: new Set(),
-      walkedRoots: ["/"],
-      windowStartMs: 4000,
-      retentionCutoffMs,
-    });
-
+    const removed = pruneScanCache(cache, retentionCutoffMs);
     expect(removed).toBe(0);
     expect(cache.size).toBe(1);
   });
 
-  it("keeps entries the walk saw", () => {
-    const cache = cacheWith([["/live.jsonl", 5000, [record()]]]);
-
-    pruneScanCache(cache, {
-      livePaths: new Set(["/live.jsonl"]),
-      walkedRoots: ["/"],
-      windowStartMs: 4000,
-      retentionCutoffMs,
-    });
-
-    expect(cache.size).toBe(1);
-  });
-});
-
-describe("pruneScanCache with an unwalked root", () => {
-  it("keeps in-window entries for a provider whose directory was not walked", () => {
-    // A missing provider root or failed settings read leaves livePaths without
-    // that provider's files. Its warm entries must survive the pass.
-    const cache = cacheWith([["/codex/sessions/a.jsonl", 5000, [record()]]]);
-
-    const removed = pruneScanCache(cache, {
-      livePaths: new Set(),
-      walkedRoots: ["/claude/projects"],
-      windowStartMs: 4000,
-      retentionCutoffMs: 1000,
-    });
-
-    expect(removed).toBe(0);
-    expect(cache.size).toBe(1);
-  });
-
-  it("keeps entries under a sibling path that only shares the walked root prefix", () => {
-    const cache = cacheWith([["/claude/projects-copy/a.jsonl", 5000, [record()]]]);
-
-    const removed = pruneScanCache(cache, {
-      livePaths: new Set(),
-      walkedRoots: ["/claude/projects"],
-      windowStartMs: 4000,
-      retentionCutoffMs: 1000,
-    });
-
-    expect(removed).toBe(0);
+  it("retains old files whose records are still inside usage retention", () => {
+    const cache = cacheWith([["/copied.jsonl", 500, [record({ timestampMs: 1500 })]]]);
+    expect(pruneScanCache(cache, retentionCutoffMs)).toBe(0);
     expect(cache.size).toBe(1);
   });
 });

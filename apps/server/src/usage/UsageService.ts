@@ -610,7 +610,11 @@ export const make = Effect.gen(function* () {
       const nestedExists = yield* fileSystem
         .exists(nested)
         .pipe(Effect.catchCause(() => Effect.succeed(false)));
-      return nestedExists ? nested : path.join(homePath, "projects");
+      const fallback = path.join(homePath, "projects");
+      const fallbackExists = yield* fileSystem
+        .exists(fallback)
+        .pipe(Effect.catchCause(() => Effect.succeed(false)));
+      return nestedExists ? nested : fallbackExists ? fallback : nested;
     });
 
   /** Resolves the transcript directory for each provider. */
@@ -975,7 +979,32 @@ export const make = Effect.gen(function* () {
     if (context === undefined) {
       return yield* Effect.die("A transcript usage read requires its resolved source context.");
     }
-    const { settings, dirs } = context;
+    const { settings } = context;
+    let dirs = context.dirs;
+    const claudeDir = dirs.find((source) => source.provider === "claude")?.dir;
+    if (claudeDir !== undefined) {
+      const claudeHome =
+        path.basename(path.dirname(claudeDir)) === ".claude"
+          ? path.dirname(path.dirname(claudeDir))
+          : path.dirname(claudeDir);
+      const claudeCandidates = [
+        path.join(claudeHome, ".claude", "projects"),
+        path.join(claudeHome, "projects"),
+      ];
+      const existingClaudeRoot = yield* Effect.filter(claudeCandidates, (candidate) =>
+        fileSystem.exists(candidate).pipe(Effect.orElseSucceed(() => false)),
+      );
+      if (existingClaudeRoot.length === 0) {
+        const retainedRoot = [...scanCoverage.values()].find(
+          (entry) => entry.provider === "claude" && claudeCandidates.includes(entry.rootPath),
+        )?.rootPath;
+        if (retainedRoot !== undefined) {
+          dirs = dirs.map((source) =>
+            source.provider === "claude" ? { ...source, dir: retainedRoot } : source,
+          );
+        }
+      }
+    }
     const repeatedInputEnabled = includeRepeatedInput(input);
     const repeatedInputObservations: RepeatedInputObservation[] = [];
     const repeatedInputGaps: UsageRepeatedInputCoverageGap[] = [];
@@ -1004,6 +1033,12 @@ export const make = Effect.gen(function* () {
     }
     const windowStartMs =
       (hourlyWindow?.sinceTimeMs ?? DateTime.toEpochMillis(windowStart.value)) - MTIME_SLACK_MS;
+    const cacheEntryTouchesWindow = (entry: CachedFile) =>
+      entry.mtimeMs >= windowStartMs ||
+      entry.records.some((record) => record.timestampMs >= windowStartMs) ||
+      (entry.repeatedInputObservations ?? []).some(
+        (observation) => observation.observedAtMs >= windowStartMs,
+      );
 
     const aggregator = new UsageAggregator({
       timeZone: input.timeZone,
@@ -1079,17 +1114,66 @@ export const make = Effect.gen(function* () {
     for (const source of plannedSources) {
       const { provider, dir, volumeId } = source;
       if (!source.exists) {
+        const coverage = scanCoverage.get(`${provider}\u0000${dir}`);
+        const retainedFiles = [...fileCache].filter(([filePath, entry]) => {
+          if (entry.provider !== provider || !cacheEntryTouchesWindow(entry)) return false;
+          const relative = path.relative(dir, filePath);
+          return (
+            relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
+          );
+        });
+        const sessionIds = new Set<string>();
+        let scannedFiles = 0;
+        const retainedVolumeId = coverage?.volumeId ?? volumeId;
+        const quota = new QuotaCostAccumulator(
+          provider === "codex" ? quotaIntervals : [],
+          rates,
+          createOverrideRateTable(settings.usagePriceOverrides),
+        );
+        for (const [, entry] of retainedFiles) {
+          if (entry.records.length > 0) scannedFiles += 1;
+          if (repeatedInputEnabled && entry.repeatedInputObservations !== undefined) {
+            repeatedInputObservations.push(...entry.repeatedInputObservations);
+            repeatedInputGaps.push(...(entry.repeatedInputGaps ?? []));
+          }
+          for (const rawRecord of entry.records) {
+            const record = applyCodexServiceTier(rawRecord, tiers, fastWindows);
+            if (aggregator.add(record)) {
+              if (record.sessionId.length > 0) sessionIds.add(record.sessionId);
+              if (quotaIntervals.length > 0) quota.add(record);
+            }
+          }
+        }
+        for (const { start: _start, end: _end, ...cost } of quota.rows) {
+          quotaCosts.push({
+            ...cost,
+            complete: false,
+            fingerprint: {
+              hostId,
+              provider,
+              resolvedHomePath: dir,
+              volumeId: retainedVolumeId,
+            },
+          });
+        }
         sources.push({
-          fingerprint: { hostId, provider, resolvedHomePath: dir, volumeId },
-          status: "missing",
-          scannedFiles: 0,
+          fingerprint: {
+            hostId,
+            provider,
+            resolvedHomePath: dir,
+            volumeId: retainedVolumeId,
+          },
+          status: retainedFiles.length > 0 ? "partial" : "missing",
+          scannedFiles,
           skippedFiles: 0,
           malformedRecords: 0,
-          distinctSessions: 0,
+          distinctSessions: sessionIds.size,
           message:
-            provider === "chatgpt" || provider === "aistudio"
-              ? "Configured chat archive directory was not found on this environment."
-              : "No transcript directory on this environment.",
+            retainedFiles.length > 0
+              ? "Usage is partial because the transcript directory is unavailable; retained cached transcripts are included."
+              : provider === "chatgpt" || provider === "aistudio"
+                ? "Configured chat archive directory was not found on this environment."
+                : "No transcript directory on this environment.",
         });
         continue;
       }
@@ -1102,34 +1186,23 @@ export const make = Effect.gen(function* () {
         shouldRefresh,
         scanStartMs,
       } = source;
-      if (shouldRefresh && listingComplete) {
-        const pruned = pruneScanCache(fileCache, {
-          livePaths: new Set(discoveredFiles.map((file) => file.path)),
-          walkedRoots: [dir],
-          windowStartMs: scanStartMs,
-          retentionCutoffMs: startedAtMs - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000,
-        });
-        if (pruned > 0) markCacheDirty();
-      }
       const filesByPath = new Map<string, TranscriptFile>();
 
-      if (hasCurrentCoverage) {
-        for (const [filePath, entry] of fileCache) {
-          if (entry.provider !== provider || entry.mtimeMs < windowStartMs) continue;
-          const relative = path.relative(dir, filePath);
-          if (
-            relative === ".." ||
-            relative.startsWith(`..${path.sep}`) ||
-            path.isAbsolute(relative)
-          ) {
-            continue;
-          }
-          filesByPath.set(filePath, {
-            path: filePath,
-            size: entry.size,
-            mtimeMs: entry.mtimeMs,
-          });
+      for (const [filePath, entry] of fileCache) {
+        if (entry.provider !== provider || !cacheEntryTouchesWindow(entry)) continue;
+        const relative = path.relative(dir, filePath);
+        if (
+          relative === ".." ||
+          relative.startsWith(`..${path.sep}`) ||
+          path.isAbsolute(relative)
+        ) {
+          continue;
         }
+        filesByPath.set(filePath, {
+          path: filePath,
+          size: entry.size,
+          mtimeMs: entry.mtimeMs,
+        });
       }
       for (const file of discoveredFiles) filesByPath.set(file.path, file);
       const files = [...filesByPath.values()];
@@ -1351,8 +1424,15 @@ export const make = Effect.gen(function* () {
             rootPath: dir,
             sinceMs: scanStartMs,
             scannedAtMs: startedAtMs,
+            volumeId,
           });
           markCacheDirty();
+        } else if (scanCoverage.get(coverageKey)?.volumeId !== volumeId) {
+          const existingCoverage = scanCoverage.get(coverageKey);
+          if (existingCoverage !== undefined) {
+            scanCoverage.set(coverageKey, { ...existingCoverage, volumeId });
+            markCacheDirty();
+          }
         }
       }
 
@@ -1386,12 +1466,10 @@ export const make = Effect.gen(function* () {
       });
     }
 
-    const pruned = pruneScanCache(fileCache, {
-      livePaths: new Set(),
-      walkedRoots: [],
-      windowStartMs,
-      retentionCutoffMs: startedAtMs - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000,
-    });
+    const pruned = pruneScanCache(
+      fileCache,
+      startedAtMs - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+    );
     const recordedAt = DateTime.formatIso(DateTime.makeUnsafe(startedAtMs));
     for (const cost of quotaCosts) {
       const interval = quotaIntervals.find((candidate) => candidate.id === cost.intervalId);
