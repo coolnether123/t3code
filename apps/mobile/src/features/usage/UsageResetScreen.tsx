@@ -318,7 +318,9 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
                   </Text>
                 </View>
                 <View className="flex-1 gap-1">
-                  <Text className="text-xs text-foreground-muted">Value of usage remaining</Text>
+                  <Text className="text-xs text-foreground-muted">
+                    Remaining quota at API prices
+                  </Text>
                   <Text className="text-2xl text-foreground">
                     {current.value.remainingValueUsd === null
                       ? "Learning"
