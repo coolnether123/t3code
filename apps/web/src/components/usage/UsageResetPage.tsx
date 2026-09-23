@@ -166,6 +166,25 @@ export function UsageResetPage() {
   );
   const costs = useUsage(costInput);
   const backgroundRefreshActive = useRef(false);
+  const backgroundCostRefreshActive = useRef(false);
+  const pendingBackgroundCostWindow = useRef<ReturnType<typeof quotaCostWindow>>(null);
+  const refreshBackgroundCosts = useEffectEvent(async () => {
+    if (backgroundCostRefreshActive.current) return;
+    backgroundCostRefreshActive.current = true;
+    try {
+      while (pendingBackgroundCostWindow.current) {
+        const input = pendingBackgroundCostWindow.current;
+        pendingBackgroundCostWindow.current = null;
+        try {
+          await costs.refresh(input);
+        } catch {
+          // The next visible reading retries a transiently unavailable environment.
+        }
+      }
+    } finally {
+      backgroundCostRefreshActive.current = false;
+    }
+  });
   const refreshVisibleMonitor = useEffectEvent(async () => {
     if (
       document.visibilityState !== "visible" ||
@@ -185,7 +204,10 @@ export function UsageResetPage() {
       const currentWindow = quotaCostWindow(
         quotaIntervals(latestPeriods.slice(Math.max(0, index - 1), index + 1)),
       );
-      if (currentWindow) await costs.refresh(currentWindow);
+      if (currentWindow) {
+        pendingBackgroundCostWindow.current = currentWindow;
+        void refreshBackgroundCosts();
+      }
     } catch {
       // The next visible tick retries a transiently unavailable environment.
     } finally {

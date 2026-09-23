@@ -122,6 +122,71 @@ describe("Codex monitor page", () => {
     }
   });
 
+  it("keeps fetching new readings while a cost scan is slow, then prices the latest interval", async () => {
+    vi.useFakeTimers();
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    let finishFirstCostScan!: (result: readonly unknown[]) => void;
+    const firstCostScan = new Promise<readonly unknown[]>((resolve) => {
+      finishFirstCostScan = resolve;
+    });
+    const samples = [
+      {
+        observedAt: "2026-08-30T20:00:00Z",
+        remainingPercent: 90,
+        resetsAt: "2026-09-06T00:00:00Z",
+      },
+      {
+        observedAt: "2026-08-30T21:55:00Z",
+        remainingPercent: 80,
+        resetsAt: "2026-09-06T00:00:00Z",
+      },
+    ];
+    const historyRefresh = vi.fn().mockImplementation(async () => [
+      {
+        environmentId: "local",
+        summary: {
+          quotaHistory: {
+            status: "ready",
+            samples:
+              historyRefresh.mock.calls.length === 1
+                ? samples
+                : [...samples, { ...samples[1]!, observedAt: "2026-08-30T22:00:00Z" }],
+          },
+        },
+      },
+    ]);
+    const costRefresh = vi.fn().mockReturnValueOnce(firstCostScan).mockResolvedValue([]);
+    let hookCalls = 0;
+    state.useUsage.mockImplementation(() => ({
+      environments: [],
+      isPending: false,
+      refresh: ++hookCalls % 5 === 1 ? historyRefresh : costRefresh,
+    }));
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<UsageResetPage />));
+      await act(async () => vi.advanceTimersByTimeAsync(60_000));
+      expect(historyRefresh).toHaveBeenCalledTimes(1);
+      expect(costRefresh).toHaveBeenCalledTimes(1);
+      await act(async () => vi.advanceTimersByTimeAsync(60_000));
+      expect(historyRefresh).toHaveBeenCalledTimes(2);
+      expect(costRefresh).toHaveBeenCalledTimes(1);
+      await act(async () => finishFirstCostScan([]));
+      expect(costRefresh).toHaveBeenCalledTimes(2);
+      expect(costRefresh.mock.lastCall?.[0].quotaIntervals[0].untilTime).toBe(
+        "2026-08-30T22:00:00Z",
+      );
+    } finally {
+      finishFirstCostScan([]);
+      await act(async () => root.unmount());
+      container.remove();
+      visibility.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("shows progress, ignores repeated taps, then enables retry after failure", async () => {
     let reject!: (reason: Error) => void;
     state.refresh.mockReturnValue(
