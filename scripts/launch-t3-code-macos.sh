@@ -205,9 +205,15 @@ record_environment_identity() {
   plan "Recorded environment identity before restart."
 }
 sqlite_query() {
-  local db="$1" statement="$2" result
+  local db="$1" statement="$2" result uri
   if ! result="$(sqlite3 -readonly -batch -noheader -separator '|' "$db" "$statement" 2>>"$LOG_PATH")"; then
-    fail "read-only SQLite idle check query failed; refusing to restart"
+    # A stopped WAL-mode database may have no sidecars, which SQLite refuses
+    # to reopen with -readonly. Never ignore a WAL that could hold newer work.
+    [[ ! -e "$db-wal" && ! -e "$db-shm" ]] || fail "read-only SQLite idle check query failed with WAL sidecars present; refusing to restart"
+    uri="${db//%/%25}"; uri="${uri//\?/%3F}"; uri="${uri//\#/%23}"
+    if ! result="$(sqlite3 -readonly -batch -noheader -separator '|' "file:$uri?immutable=1" "$statement" 2>>"$LOG_PATH")"; then
+      fail "immutable SQLite idle check query failed; refusing to restart"
+    fi
   fi
   printf '%s' "$result"
 }

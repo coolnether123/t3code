@@ -56,6 +56,8 @@ describe("launch-t3-code-macos", () => {
     assert.include(source, "projection_thread_sessions");
     assert.include(source, "projection_pending_approvals");
     assert.include(source, "pending_user_input_count");
+    assert.include(source, '[[ ! -e "$db-wal" && ! -e "$db-shm" ]]');
+    assert.include(source, '"file:$uri?immutable=1"');
     assert.include(source, "EXPECTED_ENVIRONMENT_ID");
     assert.include(source, "dry run complete: no files, processes, app/data");
     assert.include(source, '[[ -f "$STATE_PATH" ]] || return 0');
