@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const testState = vi.hoisted(() => ({
   useUsage: vi.fn(),
+  breakdown: "time" as "model" | "time",
 }));
 
 vi.mock("react", async (importOriginal) => {
@@ -25,7 +26,7 @@ vi.mock("react", async (importOriginal) => {
             },
           }
         : initial === "model"
-          ? "time"
+          ? testState.breakdown
           : initial,
       vi.fn(),
     ]),
@@ -88,6 +89,7 @@ const providerTotals = (codex: number, claude: number) =>
   ] as const);
 
 beforeEach(() => {
+  testState.breakdown = "time";
   testState.useUsage.mockReturnValue({
     merged: {
       ...mergeUsage([], USAGE_CONTRACT_VERSION),
@@ -247,6 +249,43 @@ describe("UsagePage hourly breakdown", () => {
     const markup = renderToStaticMarkup(<UsagePage />);
     expect(markup).toContain("Some usage is unpriced and excluded from dollar totals");
     expect(markup).toContain("not mean that usage was free");
+  });
+  it("does not show a zero dollar model cost when its records are unpriced", () => {
+    testState.breakdown = "model";
+    const view = testState.useUsage();
+    testState.useUsage.mockReturnValue({
+      ...view,
+      merged: {
+        ...view.merged,
+        costUsd: 4,
+        models: [
+          {
+            model: "unpriced-model",
+            provider: "codex",
+            costUsd: 0,
+            totalTokens: 1_000,
+            records: 2,
+            unpricedRecords: 2,
+            costShare: 0,
+          },
+          {
+            model: "partly-priced-model",
+            provider: "claude",
+            costUsd: 4,
+            totalTokens: 2_000,
+            records: 3,
+            unpricedRecords: 1,
+            costShare: 1,
+          },
+        ],
+      },
+    });
+
+    const markup = renderToStaticMarkup(<UsagePage />);
+    expect(markup).toContain("unpriced-model");
+    expect(markup).toContain("Unpriced</td>");
+    expect(markup).toContain("$4.00 + unpriced</td>");
+    expect(markup).not.toContain("$0.00</td>");
   });
   it("keeps recent activity visible first without empty hourly rows", () => {
     const markup = renderToStaticMarkup(<UsagePage />);
