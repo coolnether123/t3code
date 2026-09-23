@@ -477,6 +477,7 @@ const WorkerServiceLayerLive = WorkerServiceLive.pipe(
   Layer.provide(WorkerStoreLive),
   Layer.provide(CodexLinkedWorkerBackendLive),
   Layer.provide(WorkerObserverLayerLive),
+  Layer.provideMerge(GitWorkflowLayerLive),
   // The linked backend and the read-only observer runner both use the same
   // ProviderService instance as the normal runtime. Providing it here keeps
   // the Worker layer self-contained and prevents the requirement leaking into

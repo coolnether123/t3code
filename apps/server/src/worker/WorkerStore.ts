@@ -13,6 +13,7 @@ import type {
   WorkerWaitLeaseId,
   WorkerWaitLeaseStatus,
   WorkerWakeReason,
+  WorkerWorktree,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -31,6 +32,7 @@ export interface StoredWorker {
   readonly modelSelection?: ModelSelection | undefined;
   /** Existing checkout selected at start; follow-ups must use the same workspace. */
   readonly cwd?: string | undefined;
+  readonly worktree?: WorkerWorktree | undefined;
   readonly instructions?: string | undefined;
   readonly parentTurnId?: TurnId | undefined;
   readonly discardedAt?: string | undefined;

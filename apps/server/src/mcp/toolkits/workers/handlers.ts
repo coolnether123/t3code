@@ -105,6 +105,7 @@ export const mapWorkerStartRequest = (
         runtimeMode: scope.runtimeMode ?? DEFAULT_RUNTIME_MODE,
         parentThreadId: scope.threadId,
         ...(cwd === undefined ? {} : { cwd }),
+        ...(input.createWorktree === undefined ? {} : { createWorktree: input.createWorktree }),
         modelSelection,
       },
     })),

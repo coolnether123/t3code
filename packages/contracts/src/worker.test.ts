@@ -56,6 +56,15 @@ describe("Worker contracts", () => {
     expect(WorkerMcpGetResult).toBeDefined();
     expect(decodeList({})).toEqual({});
     expect(() => decodeGet({ workerId: "worker-1" })).not.toThrow();
+    expect(
+      decodeMcpStart({
+        title: "isolated worker",
+        assignment: "Inspect in a private checkout.",
+        context: {},
+        cwd: "A:/Dev/Projects/example",
+        createWorktree: true,
+      }),
+    ).toMatchObject({ cwd: "A:/Dev/Projects/example", createWorktree: true });
   });
 
   it("accepts a Worker model option patch without an opaque instance id or model slug", () => {

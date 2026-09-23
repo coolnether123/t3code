@@ -39,11 +39,15 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
+import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
+import * as Deferred from "effect/Deferred";
 
 import {
   WORKER_PROVIDER_THREAD_PREFIX,
@@ -55,6 +59,8 @@ import { WorkerStore, type StoredWorker } from "./WorkerStore.ts";
 import { projectWorkerActivities } from "./WorkerActivityProjection.ts";
 import { buildWorkerEfficiencyOverview } from "./WorkerMetrics.ts";
 import { projectWorkerSummaryUsage, projectWorkerUsageSnapshot } from "./WorkerUsage.ts";
+import { GitWorkflowService } from "../git/GitWorkflowService.ts";
+import * as ServerConfig from "../config.ts";
 
 const modelFallback = TrimmedNonEmptyString.make("gpt-5.6-luna");
 const supportedWorkerBackends = new Set(["codex", "codex-desktop"]);
@@ -169,6 +175,11 @@ const makeWorkerService = Effect.gen(function* () {
   const store = yield* WorkerStore;
   const backend = yield* WorkerBackend;
   const observer = yield* WorkerObserver;
+  const appContext = yield* Effect.context<never>();
+  const gitWorkflowOption = Context.getOption(appContext, GitWorkflowService);
+  const serverConfigOption = Context.getOption(appContext, ServerConfig.ServerConfig);
+  const path = yield* Path.Path;
+  const fileSystem = yield* FileSystem.FileSystem;
   const crypto = yield* Crypto.Crypto;
   const changes = yield* PubSub.unbounded<WorkerEvent>();
   const wakes = yield* PubSub.unbounded<WorkerWakeEvent>();
@@ -176,6 +187,11 @@ const makeWorkerService = Effect.gen(function* () {
   const contentBuffers = yield* Ref.make(new Map<string, string>());
   const linkedProviderThreadIds = yield* Ref.make<ReadonlySet<string> | undefined>(undefined);
   const transitions = yield* Semaphore.make(1);
+  const setupFibers = yield* Ref.make(new Map<WorkerId, Fiber.Fiber<unknown, unknown>>());
+  const createdWorkerWorktrees = yield* Ref.make<ReadonlySet<WorkerId>>(new Set());
+  yield* Effect.addFinalizer(() =>
+    Ref.get(setupFibers).pipe(Effect.flatMap((fibers) => Fiber.interruptAll([...fibers.values()]))),
+  );
 
   const fail = (operation: string, message: string, cause?: unknown) =>
     new WorkerOperationError({ operation, message, ...(cause === undefined ? {} : { cause }) });
@@ -245,6 +261,7 @@ const makeWorkerService = Effect.gen(function* () {
         ...(pendingApproval === undefined ? {} : { pendingApproval }),
         observerReports: reports,
         activities: projectWorkerActivities(providerEvents),
+        ...(stored.worktree === undefined ? {} : { worktree: stored.worktree }),
       } satisfies WorkerDetail;
     }).pipe(Effect.mapError(mapWorkerError("worker.read", "Worker read failed")));
 
@@ -255,6 +272,7 @@ const makeWorkerService = Effect.gen(function* () {
       readonly message?: WorkerMessage;
       readonly approval?: WorkerDetail["pendingApproval"];
       readonly observerReport?: WorkerObserverReport;
+      readonly worktree?: WorkerDetail["worktree"];
     },
   ) =>
     Effect.gen(function* () {
@@ -268,6 +286,7 @@ const makeWorkerService = Effect.gen(function* () {
         ...(input?.message === undefined ? {} : { message: input.message }),
         ...(input?.approval === undefined ? {} : { approval: input.approval }),
         ...(input?.observerReport === undefined ? {} : { observerReport: input.observerReport }),
+        ...(input?.worktree === undefined ? {} : { worktree: input.worktree }),
       } satisfies WorkerEvent;
       yield* PubSub.publish(changes, event).pipe(Effect.asVoid);
     });
@@ -278,6 +297,41 @@ const makeWorkerService = Effect.gen(function* () {
     const next = { ...stored, summary };
     return store.saveWorker(next).pipe(Effect.as(next));
   };
+
+  const cleanupWorktree = (
+    workerId: WorkerId,
+    worktree: NonNullable<StoredWorker["worktree"]>,
+    creationProven: boolean,
+  ) =>
+    Effect.gen(function* () {
+      const generatedRef = `t3-worker-${workerId}`;
+      if (
+        !creationProven ||
+        worktree.refName !== generatedRef ||
+        Option.isNone(gitWorkflowOption)
+      ) {
+        return "failed" as const;
+      }
+      const workflow = gitWorkflowOption.value;
+      const status = yield* workflow
+        .localStatus({ cwd: worktree.checkoutPath })
+        .pipe(Effect.option);
+      if (Option.isNone(status)) return "failed" as const;
+      if (!status.value.isRepo || status.value.refName !== generatedRef) return "failed" as const;
+      if (status.value.hasWorkingTreeChanges) return "preserved" as const;
+      const merged = yield* workflow
+        .isBranchMerged({ cwd: worktree.projectRoot, branch: generatedRef })
+        .pipe(Effect.option);
+      if (Option.isNone(merged) || !merged.value) return "preserved" as const;
+      const removed = yield* workflow
+        .removeWorktree({ cwd: worktree.projectRoot, path: worktree.checkoutPath })
+        .pipe(Effect.match({ onFailure: () => false, onSuccess: () => true }));
+      if (!removed) return "failed" as const;
+      yield* workflow
+        .deleteWorkerBranch({ cwd: worktree.projectRoot, workerId })
+        .pipe(Effect.ignore);
+      return "removed" as const;
+    });
 
   // Legacy Worker payloads predate displayName. Repair them on the first
   // server read and write the repaired summary back so reconnects, projection
@@ -382,11 +436,37 @@ const makeWorkerService = Effect.gen(function* () {
           `Worker backend '${input.backendPreference}' is not supported by this server`,
         );
       }
+      if (input.createWorktree === true && input.cwd === undefined) {
+        return yield* fail("worker.start", "A project cwd is required to create a Worker worktree");
+      }
+      if (
+        input.createWorktree === true &&
+        (Option.isNone(gitWorkflowOption) || Option.isNone(serverConfigOption))
+      ) {
+        return yield* fail(
+          "worker.start",
+          "Worker worktree creation is unavailable on this server",
+        );
+      }
       const workerId = WorkerId.make(yield* randomUuid);
       const providerThreadId = ThreadId.make(`${WORKER_PROVIDER_THREAD_PREFIX}${workerId}`);
       const backendPreference = input.backendPreference ?? "codex";
       const activationId = WorkerActivationId.make(yield* randomUuid);
       const now = yield* nowIso;
+      const workerBranch = `t3-worker-${workerId}`;
+      const worktree =
+        input.createWorktree === true
+          ? {
+              projectRoot: input.cwd!,
+              checkoutPath: path.join(
+                Option.getOrThrow(serverConfigOption).worktreesDir,
+                "workers",
+                workerId,
+              ),
+              refName: workerBranch,
+              status: "creating" as const,
+            }
+          : undefined;
       const runtimeMode =
         input.runtimeMode ?? runtimeModeFromPermission(input.permissionMode) ?? "full-access";
       const summary: WorkerSummary = {
@@ -399,6 +479,7 @@ const makeWorkerService = Effect.gen(function* () {
         providerInstanceId: request.providerInstanceId,
         model: input.modelSelection?.model ?? modelFallback,
         runtimeMode,
+        ...(worktree === undefined ? {} : { workingDirectory: worktree.checkoutPath }),
         createdAt: now,
         updatedAt: now,
         activeActivationId: activationId,
@@ -413,7 +494,12 @@ const makeWorkerService = Effect.gen(function* () {
         assignment: input.assignment,
         context: input.context,
         ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
-        ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+        ...(worktree === undefined
+          ? input.cwd === undefined
+            ? {}
+            : { cwd: input.cwd }
+          : { cwd: worktree.checkoutPath }),
+        ...(worktree === undefined ? {} : { worktree }),
         ...(request.parentTurnId === undefined ? {} : { parentTurnId: request.parentTurnId }),
         ...(input.instructions === undefined ? {} : { instructions: input.instructions }),
       };
@@ -443,73 +529,246 @@ const makeWorkerService = Effect.gen(function* () {
         createdAt: now,
       };
       yield* store.saveMessage(assignmentMessage);
-      const started = yield* backend
-        .start({
-          providerThreadId,
-          providerInstanceId: request.providerInstanceId,
-          title: input.title,
-          assignment: input.assignment,
-          context: input.context,
-          ...(input.instructions === undefined ? {} : { instructions: input.instructions }),
-          ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
-          ...(input.modelSelection === undefined ? {} : { modelSelection: input.modelSelection }),
-          runtimeMode,
-          ...(input.approvalPolicy === undefined ? {} : { approvalPolicy: input.approvalPolicy }),
-          ...(input.sandboxMode === undefined ? {} : { sandboxMode: input.sandboxMode }),
-          backendPreference,
-          jobId: activationId,
-          requestId: activationId,
-          workerId,
-          activationId,
-          parentThreadId: request.parentThreadId,
-          ...(request.parentTurnId === undefined ? {} : { parentTurnId: request.parentTurnId }),
-        })
-        .pipe(
-          Effect.catch((error) =>
-            failPendingActivation({
-              stored,
-              activation,
-              error,
-              failWorkerSummary: true,
-            }).pipe(Effect.andThen(Effect.fail(error))),
+      const activate = (providerWorker: StoredWorker, createdAlreadyPublished: boolean) =>
+        Effect.gen(function* () {
+          const started = yield* backend
+            .start({
+              providerThreadId,
+              providerInstanceId: request.providerInstanceId,
+              title: input.title,
+              assignment: input.assignment,
+              context: input.context,
+              ...(input.instructions === undefined ? {} : { instructions: input.instructions }),
+              ...(providerWorker.cwd === undefined ? {} : { cwd: providerWorker.cwd }),
+              ...(input.modelSelection === undefined
+                ? {}
+                : { modelSelection: input.modelSelection }),
+              runtimeMode,
+              ...(input.approvalPolicy === undefined
+                ? {}
+                : { approvalPolicy: input.approvalPolicy }),
+              ...(input.sandboxMode === undefined ? {} : { sandboxMode: input.sandboxMode }),
+              backendPreference,
+              jobId: activationId,
+              requestId: activationId,
+              workerId,
+              activationId,
+              parentThreadId: request.parentThreadId,
+              ...(request.parentTurnId === undefined ? {} : { parentTurnId: request.parentTurnId }),
+            })
+            .pipe(
+              Effect.catch((error) =>
+                failPendingActivation({
+                  stored: providerWorker,
+                  activation,
+                  error,
+                  failWorkerSummary: true,
+                }).pipe(Effect.andThen(Effect.fail(error))),
+              ),
+            );
+          return yield* transitions.withPermits(1)(
+            Effect.gen(function* () {
+              const latestActivation = Option.getOrUndefined(
+                yield* store.getActivation(activationId),
+              );
+              if (latestActivation === undefined || latestActivation.status !== "starting") {
+                return yield* read(workerId);
+              }
+              const runningAt = yield* nowIso;
+              const runningActivation = updateActivation(
+                latestActivation,
+                started.pending ? "starting" : "running",
+                runningAt,
+                {
+                  ...(started.providerTurnId === undefined
+                    ? {}
+                    : { providerTurnId: started.providerTurnId }),
+                  ...(started.nativeThreadId === undefined
+                    ? {}
+                    : { nativeThreadId: ThreadId.make(started.nativeThreadId) }),
+                  ...(started.nativeCursor === undefined
+                    ? {}
+                    : { nativeCursor: started.nativeCursor }),
+                },
+              );
+              yield* store.saveActivation(runningActivation);
+              const latestStored =
+                Option.getOrUndefined(yield* store.getWorker(workerId)) ?? providerWorker;
+              if (latestStored.summary.activeActivationId !== activationId) {
+                return yield* read(workerId);
+              }
+              const running = yield* saveSummary(latestStored, {
+                ...latestStored.summary,
+                status: started.pending ? "starting" : "running",
+                updatedAt: runningAt,
+                lastActivityAt: runningAt,
+              });
+              yield* publish(running, {
+                ...(createdAlreadyPublished
+                  ? {}
+                  : { type: "created" as const, message: assignmentMessage }),
+                ...(providerWorker.worktree === undefined
+                  ? {}
+                  : { worktree: providerWorker.worktree }),
+              });
+              return yield* read(workerId);
+            }),
+          );
+        });
+      if (worktree !== undefined) {
+        const workflow = Option.getOrThrow(gitWorkflowOption);
+        const markCancelled = Effect.gen(function* () {
+          const latest = Option.getOrUndefined(yield* store.getWorker(workerId));
+          if (latest === undefined || latest.worktree?.status !== "creating") return;
+          const created = yield* Ref.get(createdWorkerWorktrees);
+          const cleanup = yield* cleanupWorktree(workerId, latest.worktree, created.has(workerId));
+          const cancelledAt = yield* nowIso;
+          const active = Option.getOrUndefined(yield* store.getActivation(activationId));
+          if (active !== undefined && active.status === "starting") {
+            yield* store.saveActivation(
+              updateActivation(active, "interrupted", cancelledAt, { finishedAt: cancelledAt }),
+            );
+          }
+          const cancelledWorktree = {
+            ...latest.worktree,
+            status:
+              cleanup === "removed"
+                ? ("cancelled" as const)
+                : cleanup === "preserved"
+                  ? ("preserved" as const)
+                  : ("failed" as const),
+            ...(cleanup === "preserved"
+              ? {
+                  error:
+                    "Checkout retained because it is dirty or has commits not reachable from project HEAD.",
+                }
+              : cleanup === "failed"
+                ? {
+                    error:
+                      "Checkout cleanup was skipped because ownership or cleanliness was not verified.",
+                  }
+                : {}),
+          };
+          const cancelled = yield* saveSummary(
+            { ...latest, worktree: cancelledWorktree },
+            clearActiveActivation(latest.summary, {
+              status: "interrupted",
+              updatedAt: cancelledAt,
+              lastActivityAt: cancelledAt,
+            }),
+          );
+          yield* publish(cancelled, { worktree: cancelledWorktree });
+          yield* wake({
+            workerId,
+            activationId,
+            reason: "interrupted",
+            status: "interrupted",
+            occurredAt: cancelledAt,
+          });
+        });
+        const setup = fileSystem
+          .makeDirectory(path.dirname(worktree.checkoutPath), { recursive: true })
+          .pipe(
+            Effect.andThen(
+              workflow.createWorktree({
+                cwd: worktree.projectRoot,
+                refName: "HEAD",
+                newRefName: worktree.refName,
+                path: worktree.checkoutPath,
+              }),
+            ),
+            Effect.tap(() =>
+              Ref.update(createdWorkerWorktrees, (current) => new Set(current).add(workerId)),
+            ),
+            Effect.andThen(
+              Effect.gen(function* () {
+                const latest = Option.getOrUndefined(yield* store.getWorker(workerId));
+                if (latest === undefined || latest.worktree?.status !== "creating") return;
+                const readyWorktree = { ...latest.worktree, status: "ready" as const };
+                const ready = yield* saveSummary(
+                  { ...latest, cwd: worktree.checkoutPath, worktree: readyWorktree },
+                  { ...latest.summary, workingDirectory: worktree.checkoutPath },
+                );
+                yield* publish(ready, { worktree: readyWorktree });
+                yield* activate(ready, true);
+              }),
+            ),
+          );
+        const failSetup = (error: unknown) =>
+          Effect.gen(function* () {
+            const latest = Option.getOrUndefined(yield* store.getWorker(workerId));
+            if (latest?.worktree?.status !== "creating") return;
+            const created = yield* Ref.get(createdWorkerWorktrees);
+            const cleanup = yield* cleanupWorktree(
+              workerId,
+              latest.worktree,
+              created.has(workerId),
+            );
+            const failedAt = yield* nowIso;
+            const setupError =
+              error instanceof Error ? error.message : "Worker worktree setup failed";
+            const errorMessage =
+              cleanup === "preserved"
+                ? `${setupError}. Checkout retained because it is dirty or has commits not reachable from project HEAD.`
+                : cleanup === "failed"
+                  ? `${setupError}. Checkout cleanup was skipped because ownership or cleanliness was not verified.`
+                  : setupError;
+            const failedWorktree = {
+              ...latest.worktree,
+              status: cleanup === "preserved" ? ("preserved" as const) : ("failed" as const),
+              error: errorMessage,
+            };
+            const failed = yield* saveSummary(
+              { ...latest, worktree: failedWorktree },
+              clearActiveActivation(latest.summary, {
+                status: "failed",
+                updatedAt: failedAt,
+                lastActivityAt: failedAt,
+              }),
+            );
+            yield* store.saveActivation(
+              updateActivation(activation, "failed", failedAt, {
+                finishedAt: failedAt,
+                error: errorMessage,
+              }),
+            );
+            yield* publish(failed, { worktree: failedWorktree });
+            yield* wake({
+              workerId,
+              activationId,
+              reason: "failed",
+              status: "failed",
+              occurredAt: failedAt,
+            });
+          });
+        const runSetup = setup.pipe(
+          Effect.catch(failSetup),
+          Effect.onInterrupt(() =>
+            Effect.gen(function* () {
+              const latest = yield* store.getWorker(workerId);
+              if (Option.isSome(latest) && latest.value.worktree?.status === "creating") {
+                yield* markCancelled;
+              }
+            }),
+          ),
+          Effect.ensuring(
+            Ref.update(setupFibers, (current) => {
+              const next = new Map(current);
+              next.delete(workerId);
+              return next;
+            }),
           ),
         );
-      return yield* transitions.withPermits(1)(
-        Effect.gen(function* () {
-          const latestActivation = Option.getOrUndefined(yield* store.getActivation(activationId));
-          if (latestActivation === undefined || latestActivation.status !== "starting") {
-            return yield* read(workerId);
-          }
-          const runningAt = yield* nowIso;
-          const runningActivation = updateActivation(
-            latestActivation,
-            started.pending ? "starting" : "running",
-            runningAt,
-            {
-              ...(started.providerTurnId === undefined
-                ? {}
-                : { providerTurnId: started.providerTurnId }),
-              ...(started.nativeThreadId === undefined
-                ? {}
-                : { nativeThreadId: ThreadId.make(started.nativeThreadId) }),
-              ...(started.nativeCursor === undefined ? {} : { nativeCursor: started.nativeCursor }),
-            },
-          );
-          yield* store.saveActivation(runningActivation);
-          const latestStored = Option.getOrUndefined(yield* store.getWorker(workerId)) ?? stored;
-          if (latestStored.summary.activeActivationId !== activationId) {
-            return yield* read(workerId);
-          }
-          const running = yield* saveSummary(latestStored, {
-            ...latestStored.summary,
-            status: started.pending ? "starting" : "running",
-            updatedAt: runningAt,
-            lastActivityAt: runningAt,
-          });
-          yield* publish(running, { type: "created", message: assignmentMessage });
-          return yield* read(workerId);
-        }),
-      );
+        const gate = yield* Deferred.make<void>();
+        const setupFiber = yield* Effect.forkDetach(
+          Deferred.await(gate).pipe(Effect.andThen(runSetup)),
+        );
+        yield* Ref.update(setupFibers, (current) => new Map(current).set(workerId, setupFiber));
+        yield* publish(stored, { type: "created", message: assignmentMessage, worktree });
+        yield* Deferred.succeed(gate, undefined);
+        return yield* read(workerId);
+      }
+      return yield* activate(stored, false);
     }).pipe(Effect.mapError(mapWorkerError("worker.start", "Worker start failed")));
 
   const list: WorkerServiceShape["list"] = (input) =>
@@ -579,6 +838,12 @@ const makeWorkerService = Effect.gen(function* () {
         return yield* fail("worker.send", `Worker '${input.workerId}' was not found`);
       if (current.summary.status === "closed")
         return yield* fail("worker.send", "Closed Workers cannot receive assignments");
+      if (current.worktree !== undefined && current.worktree.status !== "ready") {
+        return yield* fail(
+          "worker.send",
+          "Worker checkout is not available for another assignment",
+        );
+      }
       const now = yield* nowIso;
       const activationId = WorkerActivationId.make(yield* randomUuid);
       const previousActivation =
@@ -869,8 +1134,81 @@ const makeWorkerService = Effect.gen(function* () {
       return report;
     }).pipe(Effect.mapError(mapWorkerError("worker.observe", "Worker observation failed")));
 
+  const cancelSetup = (workerId: WorkerId) =>
+    Ref.get(setupFibers).pipe(
+      Effect.flatMap((fibers) => {
+        const fiber = fibers.get(workerId);
+        return fiber === undefined
+          ? Effect.succeed(false)
+          : Fiber.interrupt(fiber).pipe(
+              Effect.andThen(
+                Effect.gen(function* () {
+                  const current = Option.getOrUndefined(yield* store.getWorker(workerId));
+                  if (current?.worktree?.status === "creating") {
+                    const created = yield* Ref.get(createdWorkerWorktrees);
+                    const cleanup = yield* cleanupWorktree(
+                      workerId,
+                      current.worktree,
+                      created.has(workerId),
+                    );
+                    const cancelledAt = yield* nowIso;
+                    const active = Option.getOrUndefined(
+                      yield* store.getActivation(current.summary.activeActivationId!),
+                    );
+                    if (active?.status === "starting") {
+                      yield* store.saveActivation(
+                        updateActivation(active, "interrupted", cancelledAt, {
+                          finishedAt: cancelledAt,
+                        }),
+                      );
+                    }
+                    const cancelledWorktree = {
+                      ...current.worktree,
+                      status:
+                        cleanup === "removed"
+                          ? ("cancelled" as const)
+                          : cleanup === "preserved"
+                            ? ("preserved" as const)
+                            : ("failed" as const),
+                      ...(cleanup === "preserved"
+                        ? {
+                            error:
+                              "Checkout retained because it is dirty or has commits not reachable from project HEAD.",
+                          }
+                        : cleanup === "failed"
+                          ? {
+                              error:
+                                "Checkout cleanup was skipped because ownership or cleanliness was not verified.",
+                            }
+                          : {}),
+                    };
+                    const cancelled = yield* saveSummary(
+                      { ...current, worktree: cancelledWorktree },
+                      clearActiveActivation(current.summary, {
+                        status: "interrupted",
+                        updatedAt: cancelledAt,
+                        lastActivityAt: cancelledAt,
+                      }),
+                    );
+                    yield* publish(cancelled, { worktree: cancelledWorktree });
+                    yield* wake({
+                      workerId,
+                      activationId: current.summary.activeActivationId!,
+                      reason: "interrupted",
+                      status: "interrupted",
+                      occurredAt: cancelledAt,
+                    });
+                  }
+                  return true;
+                }),
+              ),
+            );
+      }),
+    );
+
   const interrupt: WorkerServiceShape["interrupt"] = (input) =>
     Effect.gen(function* () {
+      if (yield* cancelSetup(input.workerId)) return yield* read(input.workerId);
       const detail = yield* read(input.workerId);
       const activation = detail.activations.find(
         (item) => item.id === detail.summary.activeActivationId,
@@ -918,6 +1256,7 @@ const makeWorkerService = Effect.gen(function* () {
 
   const close: WorkerServiceShape["close"] = (workerId) =>
     Effect.gen(function* () {
+      yield* cancelSetup(workerId);
       const current = Option.getOrUndefined(yield* store.getWorker(workerId));
       if (current === undefined)
         return yield* fail("worker.close", `Worker '${workerId}' was not found`);
@@ -927,6 +1266,25 @@ const makeWorkerService = Effect.gen(function* () {
           : Option.getOrUndefined(yield* store.getActivation(current.summary.activeActivationId));
       if (activation !== undefined)
         yield* backend.stop(activation.providerThreadId, current.summary.backend);
+      let worktree = current.worktree;
+      if (current.worktree?.status === "ready") {
+        const cleanup = yield* cleanupWorktree(workerId, current.worktree, true);
+        worktree = {
+          ...current.worktree,
+          status: cleanup === "removed" ? "removed" : "preserved",
+          ...(cleanup === "preserved"
+            ? {
+                error:
+                  "Checkout retained because it is dirty or has commits not reachable from project HEAD.",
+              }
+            : cleanup === "failed"
+              ? {
+                  error:
+                    "Checkout cleanup was skipped because ownership or cleanliness was not verified.",
+                }
+              : {}),
+        };
+      }
       const closedAt = yield* nowIso;
       if (activation !== undefined) {
         yield* store.saveActivation(
@@ -934,7 +1292,7 @@ const makeWorkerService = Effect.gen(function* () {
         );
       }
       const next = yield* saveSummary(
-        current,
+        { ...current, ...(worktree === undefined ? {} : { worktree }) },
         clearActiveActivation(current.summary, {
           status: "closed",
           resumable: false,
@@ -942,7 +1300,7 @@ const makeWorkerService = Effect.gen(function* () {
           lastActivityAt: closedAt,
         }),
       );
-      yield* publish(next, { type: "updated" });
+      yield* publish(next, { type: "updated", ...(worktree === undefined ? {} : { worktree }) });
       yield* wake({
         workerId,
         ...(activation === undefined ? {} : { activationId: activation.id }),
@@ -1441,6 +1799,50 @@ const makeWorkerService = Effect.gen(function* () {
     const workers = yield* store.listWorkers({ includeClosed: false, limit: 500 });
     yield* Effect.forEach(workers, (worker) =>
       Effect.gen(function* () {
+        if (worker.worktree?.status === "creating") {
+          const cleanup = yield* cleanupWorktree(worker.summary.id, worker.worktree, false);
+          const failedAt = yield* nowIso;
+          const setupError = "Worker worktree setup was interrupted by a server restart";
+          const error =
+            cleanup === "preserved"
+              ? `${setupError}. Checkout retained because it is dirty or has commits not reachable from project HEAD.`
+              : cleanup === "failed"
+                ? `${setupError}. Checkout cleanup was skipped because ownership or cleanliness was not verified.`
+                : setupError;
+          const failedWorktree = {
+            ...worker.worktree,
+            status: cleanup === "preserved" ? ("preserved" as const) : ("failed" as const),
+            error,
+          };
+          const activationId = worker.summary.activeActivationId;
+          if (activationId !== undefined) {
+            const activation = Option.getOrUndefined(yield* store.getActivation(activationId));
+            if (activation?.status === "starting") {
+              yield* store.saveActivation(
+                updateActivation(activation, "failed", failedAt, { finishedAt: failedAt, error }),
+              );
+            }
+          }
+          const failed = yield* saveSummary(
+            { ...worker, worktree: failedWorktree },
+            clearActiveActivation(worker.summary, {
+              status: "failed",
+              updatedAt: failedAt,
+              lastActivityAt: failedAt,
+            }),
+          );
+          yield* publish(failed, { worktree: failedWorktree });
+          if (activationId !== undefined) {
+            yield* wake({
+              workerId: worker.summary.id,
+              activationId,
+              reason: "failed",
+              status: "failed",
+              occurredAt: failedAt,
+            });
+          }
+          return;
+        }
         const activationId = worker.summary.activeActivationId;
         if (activationId === undefined) return;
         const activation = Option.getOrUndefined(yield* store.getActivation(activationId));
