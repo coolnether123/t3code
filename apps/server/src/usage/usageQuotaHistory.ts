@@ -1,4 +1,5 @@
 import * as NodeOS from "node:os";
+import * as NodeCrypto from "node:crypto";
 
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -12,6 +13,9 @@ import { priceUsage, type RateTable } from "./usagePricing.ts";
 import type { UsageRecord } from "./usageTranscripts.ts";
 
 const MAX_HISTORY_BYTES = 2 * 1024 * 1024;
+const MAX_ARCHIVE_BYTES = 256 * 1024;
+const MAX_ARCHIVE_FILES = 64;
+const MAX_ARCHIVE_ROWS = 1_000;
 const SOURCE = "Codex Limits saved history";
 const decodeHistoryJson = Schema.decodeUnknownEffect(
   Schema.fromJsonString(Schema.Unknown as unknown as Schema.Codec<unknown>),
@@ -121,7 +125,46 @@ export const readQuotaHistory = Effect.fn("UsageQuotaHistory.read")(
     const text = yield* fileSystem.readFileString(filePath);
     if (Buffer.byteLength(text, "utf8") > MAX_HISTORY_BYTES) return decodeQuotaHistory(null);
     const json = yield* decodeHistoryJson(text);
-    return decodeQuotaHistory(json);
+    const current = decodeQuotaHistory(json);
+    if (current.status !== "ready") return current;
+    const archiveDir = `${filePath}.archive`;
+    if (!(yield* fileSystem.exists(archiveDir))) return current;
+    const names = yield* fileSystem.readDirectory(archiveDir);
+    if (
+      names.length > MAX_ARCHIVE_FILES ||
+      names.some((name) => !/^[a-f0-9]{64}\.json$/.test(name))
+    )
+      return decodeQuotaHistory(null);
+    const samples = new Map(current.samples.map((sample) => [sample.observedAt, sample]));
+    for (const name of names) {
+      const archivePath = path.join(archiveDir, name);
+      const archiveStat = yield* fileSystem.stat(archivePath);
+      if (Number(archiveStat.size) > MAX_ARCHIVE_BYTES) return decodeQuotaHistory(null);
+      const archiveText = yield* fileSystem.readFileString(archivePath);
+      if (Buffer.byteLength(archiveText, "utf8") > MAX_ARCHIVE_BYTES)
+        return decodeQuotaHistory(null);
+      if (`${NodeCrypto.createHash("sha256").update(archiveText).digest("hex")}.json` !== name) {
+        return decodeQuotaHistory(null);
+      }
+      const archive = yield* decodeHistoryJson(archiveText);
+      const rows = object(archive)?.Samples;
+      if (!Array.isArray(rows) || rows.length > MAX_ARCHIVE_ROWS) return decodeQuotaHistory(null);
+      const decoded = decodeQuotaHistory({ Snapshot: object(json)?.Snapshot, Samples: rows });
+      if (decoded.status !== "ready") return decoded;
+      for (const sample of decoded.samples) {
+        const prior = samples.get(sample.observedAt);
+        if (
+          prior !== undefined &&
+          (prior.remainingPercent !== sample.remainingPercent || prior.resetsAt !== sample.resetsAt)
+        )
+          return decodeQuotaHistory(null);
+        samples.set(sample.observedAt, sample);
+      }
+    }
+    return {
+      ...current,
+      samples: [...samples.values()].sort((a, b) => a.observedAt.localeCompare(b.observedAt)),
+    };
   },
   Effect.catchCause(() => Effect.succeed(decodeQuotaHistory(null))),
 );

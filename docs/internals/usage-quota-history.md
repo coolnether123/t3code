@@ -10,9 +10,12 @@ fields and show an unsupported-server state rather than treating missing values 
 The server reads Codex Limits' Windows `LOCALAPPDATA/CodexLimits/state.json`. Operators can set
 `T3CODE_QUOTA_HISTORY_PATH` to a compatible saved file on another platform. Clients cannot supply
 filesystem paths. The import is read-only, bounded to 2 MiB and 5,000 samples, and accepts only
-the main `codex` limit with a 10,080-minute window. It returns sanitized observation time,
+the main `codex` limit with a 10,080-minute window. On hosts with the companion sampler, it also
+reads at most 64 content-addressed archive chunks of 1,000 observations and 256 KiB each. A
+damaged or oversized archive makes the import invalid without touching the files. It returns sanitized observation time,
 remaining percentage, and scheduled reset time. It never reads credentials, starts the tracker,
-or queries an account. Codex Limits owns collection and retention. T3 does not archive its file.
+or queries an account. Codex Limits owns the Windows collection and retention. The separate macOS
+sampler archives its own file; the T3 server only reads it.
 
 `packages/shared/src/usageQuota.ts` groups consecutive observations. Reset-clock changes within
 one minute are treated as timestamp jitter. A percentage increase or a larger clock change

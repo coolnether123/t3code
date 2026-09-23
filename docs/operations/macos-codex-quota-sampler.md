@@ -38,8 +38,11 @@ with `state.json` when copying or backing up quota history. If an archive write 
 collector leaves `state.json` unchanged and exits with an error. Repeating a run after a crash
 reuses the identical archive chunk.
 
-T3 currently reads the active file only. Older archived rows remain on disk but do not appear in
-the reset-history page until archive import is added.
+T3 reads the active file and up to 64 archive chunks. It verifies the archive filename against
+the chunk's SHA-256 content, validates the observations, and deduplicates overlap after a crash.
+Each chunk is limited to 1,000 rows and 256 KiB. If a chunk is damaged or the archive exceeds
+these limits, the importer reports invalid history without deleting any source files. Collecting
+continues independently of the T3 importer.
 
 ## LaunchAgent installation plan
 

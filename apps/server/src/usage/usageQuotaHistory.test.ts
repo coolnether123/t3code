@@ -1,4 +1,6 @@
 import { describe, expect, it } from "@effect/vitest";
+import * as NodeCrypto from "node:crypto";
+import * as Schema from "effect/Schema";
 import {
   decodeQuotaHistory,
   QuotaCostAccumulator,
@@ -17,6 +19,7 @@ const sample = {
   RemainingPercent: 12,
   ResetsAt: "2026-07-24T22:24:49-05:00",
 };
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const document = (Samples: unknown[]) => ({
   Snapshot: { MainLimit: { LimitId: "codex", Window: { DurationMinutes: 10080 } } },
   Samples,
@@ -89,6 +92,44 @@ describe("saved quota history", () => {
       yield* fs.writeFileString(file, '{"Samples":[');
       expect((yield* readQuotaHistory(file)).status).toBe("invalid");
       yield* fs.writeFileString(file, " ".repeat(2 * 1024 * 1024 + 1));
+      expect((yield* readQuotaHistory(file)).status).toBe("invalid");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+  it.effect("loads archived observations without replacing the active snapshot", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-quota-archive-test-" });
+      const file = path.join(directory, "state.json");
+      const archived = { ...sample, ObservedAt: "2026-07-20T12:00:00-05:00" };
+      yield* fs.writeFileString(file, encodeJson(document([sample])));
+      const archiveDir = `${file}.archive`;
+      yield* fs.makeDirectory(archiveDir);
+      const archiveText = `${encodeJson({ Samples: [archived, sample] })}\n`;
+      const name = `${NodeCrypto.createHash("sha256").update(archiveText).digest("hex")}.json`;
+      yield* fs.writeFileString(path.join(archiveDir, name), archiveText);
+      expect((yield* readQuotaHistory(file)).samples.map((row) => row.observedAt)).toEqual([
+        "2026-07-20T17:00:00.000Z",
+        "2026-07-21T17:00:00.000Z",
+      ]);
+      yield* fs.writeFileString(path.join(archiveDir, name), `${archiveText} `);
+      expect((yield* readQuotaHistory(file)).status).toBe("invalid");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+  it.effect("rejects conflicting archived readings and oversized archive collections", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-quota-archive-test-" });
+      const file = path.join(directory, "state.json");
+      yield* fs.writeFileString(file, encodeJson(document([sample])));
+      const archiveDir = `${file}.archive`;
+      yield* fs.makeDirectory(archiveDir);
+      const archiveText = encodeJson({ Samples: [{ ...sample, RemainingPercent: 11 }] });
+      const name = `${NodeCrypto.createHash("sha256").update(archiveText).digest("hex")}.json`;
+      yield* fs.writeFileString(path.join(archiveDir, name), archiveText);
+      expect((yield* readQuotaHistory(file)).status).toBe("invalid");
+      yield* fs.writeFileString(path.join(archiveDir, name), " ".repeat(256 * 1024 + 1));
       expect((yield* readQuotaHistory(file)).status).toBe("invalid");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
