@@ -939,7 +939,25 @@ describe("deriveWorkLogEntries", () => {
     const [entry] = deriveWorkLogEntries([activity]);
     expect(entry?.id).toBe(activity.id);
     expect(entry?.label).toBe("Setting up checkout");
+    expect(entry?.tone).toBe("thinking");
     expect(entry?.turnId).toBeNull();
+  });
+
+  it("settles the worktree setup row when bootstrap reports a terminal phase", () => {
+    const activity = makeActivity({
+      id: "worktree-setup:thread-1",
+      kind: "worktree-setup",
+      summary: "Worktree setup cancelled",
+      tone: "info",
+      payload: { phase: "cancelled", stage: "checkout" },
+    });
+
+    const [entry] = deriveWorkLogEntries([activity]);
+    expect(entry).toMatchObject({
+      id: activity.id,
+      label: "Worktree setup cancelled",
+      tone: "info",
+    });
   });
 
   it("groups consecutive waits for one Worker into one logical session", () => {
