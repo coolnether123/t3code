@@ -353,6 +353,27 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
       ),
     );
 
+  const offerThreadPersistence = Effect.fn("EnvironmentThreadState.offerThreadPersistence")(
+    function* (thread: OrchestrationThread, snapshotSequence: number) {
+      const currentPage = yield* SubscriptionRef.get(state).pipe(Effect.map((value) => value.page));
+      yield* Queue.offer(persistence, {
+        snapshotSequence,
+        thread,
+        ...Option.match(currentPage, {
+          onNone: () => ({}),
+          onSome: (value) =>
+            ({
+              page: {
+                beforeCursor: value.beforeCursor,
+                hasMore: value.hasMore,
+                snapshotSequence,
+              },
+            }) as const,
+        }),
+      });
+    },
+  );
+
   const setThread = Effect.fn("EnvironmentThreadState.setThread")(function* (
     thread: OrchestrationThread,
     // "keep" preserves the current page state (live events touch only loaded
@@ -376,24 +397,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     // persist once it settles so cache encoding stays off the streaming path.
     if (shouldPersistThread(thread)) {
       const snapshotSequence = yield* SubscriptionRef.get(lastSequence);
-      const currentPage = yield* SubscriptionRef.get(state).pipe(Effect.map((value) => value.page));
-      yield* Queue.offer(persistence, {
-        snapshotSequence,
-        thread,
-        // Persist the window boundary with the window's content so a cache
-        // restore can keep paging from where the loaded history ends.
-        ...Option.match(currentPage, {
-          onNone: () => ({}),
-          onSome: (value) =>
-            ({
-              page: {
-                beforeCursor: value.beforeCursor,
-                hasMore: value.hasMore,
-                snapshotSequence,
-              },
-            }) as const,
-        }),
-      });
+      yield* offerThreadPersistence(thread, snapshotSequence);
     }
   });
 
@@ -515,6 +519,58 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     item: OrchestrationThreadStreamItem,
   ) {
     yield* applyLock.withPermits(1)(applyItemLocked(item).pipe(Effect.andThen(remember)));
+  });
+
+  const applyItems = Effect.fn("EnvironmentThreadState.applyItems")(function* (
+    items: ReadonlyArray<OrchestrationThreadStreamItem>,
+  ) {
+    yield* applyLock.withPermits(1)(
+      Effect.gen(function* () {
+        const current = yield* SubscriptionRef.get(state);
+        if (
+          Option.isNone(current.data) ||
+          (yield* Ref.get(pendingOlderPage)) !== null ||
+          items.some(
+            (item) =>
+              item.kind === "snapshot" ||
+              (item.kind === "event" &&
+                (item.event.type === "thread.reverted" || item.event.type === "thread.deleted")),
+          )
+        ) {
+          for (const item of items) {
+            yield* applyItemLocked(item);
+            yield* remember;
+          }
+          return;
+        }
+
+        let thread = current.data.value;
+        let sequence = yield* SubscriptionRef.get(lastSequence);
+        let synchronized = false;
+        // A settled turn in the middle of a batch must still reach the cache
+        // when a later event starts the next turn before the batch publishes.
+        let persistable: { thread: OrchestrationThread; sequence: number } | undefined;
+        for (const item of items) {
+          if (item.kind === "synchronized") {
+            synchronized = true;
+          } else if (item.kind === "event" && item.event.sequence > sequence) {
+            sequence = item.event.sequence;
+            const result = applyThreadDetailEvent(thread, item.event);
+            if (result.kind === "updated") {
+              thread = result.thread;
+              if (shouldPersistThread(thread)) persistable = { thread, sequence };
+            }
+          }
+        }
+        yield* SubscriptionRef.set(lastSequence, sequence);
+        if (thread !== current.data.value) yield* setThread(thread, "keep");
+        if (persistable !== undefined && !shouldPersistThread(thread)) {
+          yield* offerThreadPersistence(persistable.thread, persistable.sequence);
+        }
+        if (synchronized) yield* applyItemLocked({ kind: "synchronized" });
+        yield* remember;
+      }),
+    );
   });
 
   // Merges an older disjoint page below the currently loaded window. All four
@@ -780,7 +836,11 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
         retryExpectedFailureAfter: "250 millis",
         resubscribe: foregroundResubscriptions,
       },
-    ).pipe(Stream.runForEach(applyItem)),
+    ).pipe(
+      Stream.runForEachArray((items) =>
+        items.length === 1 ? applyItem(items[0]!) : applyItems(items),
+      ),
+    ),
   );
 
   // Expose loadOlderTurns to UI actions through the request registry.
@@ -853,12 +913,10 @@ export function createEnvironmentThreadStateAtoms<R, E>(
   // Cache definitions must outlive collectible live-atom definitions. The
   // registry retains these nodes without retaining environment or RPC scopes.
   const resumeFamily = Atom.family((key: string) =>
-    Atom.make(
-      (): ThreadResumeCache => ({
-        snapshot: undefined,
-        owner: undefined,
-      }),
-    ).pipe(
+    Atom.make((): ThreadResumeCache => ({
+      snapshot: undefined,
+      owner: undefined,
+    })).pipe(
       Atom.setIdleTTL(THREAD_SNAPSHOT_IDLE_TTL_MS),
       Atom.withLabel(`environment-thread-resume:${key}`),
     ),
