@@ -3194,13 +3194,29 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
           if (threadKey.length === 0 || files.length === 0) return;
           set((state) => {
             const existing = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
-            const ids = new Set(existing.files.map((file) => file.id));
-            const accepted = files.filter((file) => !ids.has(file.id));
-            if (accepted.length === 0) return state;
+            const nextFiles = [...existing.files];
+            let changed = false;
+            for (const file of files) {
+              if (nextFiles.some((existingFile) => existingFile.id === file.id)) continue;
+              const markerIndex = nextFiles.findIndex(
+                (existingFile) =>
+                  composerFileNeedsReattach(existingFile) &&
+                  existingFile.name === file.name &&
+                  existingFile.mimeType === file.mimeType &&
+                  existingFile.sizeBytes === file.sizeBytes,
+              );
+              if (markerIndex === -1) {
+                nextFiles.push(file);
+              } else {
+                nextFiles[markerIndex] = file;
+              }
+              changed = true;
+            }
+            if (!changed) return state;
             return {
               draftsByThreadKey: {
                 ...state.draftsByThreadKey,
-                [threadKey]: { ...existing, files: [...existing.files, ...accepted] },
+                [threadKey]: { ...existing, files: nextFiles },
               },
             };
           });

@@ -17,7 +17,11 @@
  * folding (completion can create an agent; a late start only fills
  * metadata).
  */
-import type { OrchestrationThreadActivity, RuntimeTaskLastTurn } from "@t3tools/contracts";
+import {
+  TurnId,
+  type OrchestrationThreadActivity,
+  type RuntimeTaskLastTurn,
+} from "@t3tools/contracts";
 
 export type RuntimeSubagentStatus =
   | "pending"
@@ -145,6 +149,33 @@ function asString(value: unknown): string | undefined {
 
 function asCount(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function asLastTurn(value: unknown): RuntimeTaskLastTurn | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const record = value as Record<string, unknown>;
+  const turnId = asString(record.turnId);
+  const outcome = record.outcome;
+  if (!turnId || (outcome !== "completed" && outcome !== "failed" && outcome !== "interrupted")) {
+    return undefined;
+  }
+  const lastTurn: {
+    turnId: RuntimeTaskLastTurn["turnId"];
+    outcome: RuntimeTaskLastTurn["outcome"];
+    completedAt?: string;
+    durationMs?: number;
+    result?: string;
+    error?: string;
+  } = { turnId: TurnId.make(turnId), outcome };
+  const completedAt = asString(record.completedAt);
+  if (completedAt) lastTurn.completedAt = completedAt;
+  const durationMs = asCount(record.durationMs);
+  if (durationMs !== undefined) lastTurn.durationMs = durationMs;
+  const result = asString(record.result);
+  if (result) lastTurn.result = result;
+  const error = asString(record.error);
+  if (error) lastTurn.error = error;
+  return lastTurn;
 }
 
 function asUsage(value: unknown): SubagentUsage | undefined {
@@ -329,6 +360,8 @@ function fillMetadata(agent: MutableAgent, payload: Record<string, unknown>): vo
   if (model) agent.model = model;
   const effort = asString(payload.effort);
   if (effort) agent.effort = effort;
+  const lastTurn = asLastTurn(payload.lastTurn);
+  if (lastTurn) agent.lastTurn = lastTurn;
   const parentAgentId = asString(payload.parentAgentId);
   if (parentAgentId) {
     agent.parentAgentId = parentAgentId;

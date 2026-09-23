@@ -29,6 +29,7 @@ import { cn } from "~/lib/utils";
 import { orchestrationEnvironment } from "~/state/orchestration";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { Button } from "~/components/ui/button";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "~/components/ui/dialog";
 
 /**
  * In-flight states all present as Working (one steady state, per the
@@ -138,11 +139,21 @@ function agentActivityText(agent: RuntimeSubagent): string | null {
 }
 
 /** Flat, non-interactive agent status line. No unfold. */
-function AgentRow({ agent }: { agent: RuntimeSubagent }) {
+function AgentRow({
+  agent,
+  parentName,
+}: {
+  agent: RuntimeSubagent;
+  parentName: string | undefined;
+}) {
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const visuals = STATUS_VISUALS[agent.status];
   const statusLabel =
     agent.kind === "subagent_batch" && agent.status === "idle" ? "Idle" : visuals.label;
-  const activity = agentActivityText(agent);
+  const activity =
+    agent.status === "idle" && agent.lastTurn
+      ? `last turn ${agent.lastTurn.outcome}`
+      : agentActivityText(agent);
   const modelLabel = formatSubagentModelLabel(agent.model, agent.effort);
   const role =
     agent.role?.trim().toLocaleLowerCase() === agent.title.trim().toLocaleLowerCase()
@@ -153,42 +164,104 @@ function AgentRow({ agent }: { agent: RuntimeSubagent }) {
     agent.usage ? `${formatSubagentTokenCount(agent.usage.totalTokens)} tok` : "— tok",
     agent.usage?.toolUses !== undefined ? `${agent.usage.toolUses} tools` : null,
     agent.activationCount > 1 ? `run ${agent.activationCount}` : null,
+    agent.lastTurn?.durationMs !== undefined
+      ? formatElapsedSeconds(agent.lastTurn.durationMs / 1000)
+      : null,
+    parentName ? `via ${parentName}` : null,
   ].filter((value): value is string => value !== null);
 
   return (
-    <div className="grid h-[3.875rem] grid-cols-[0.375rem_minmax(0,1fr)_auto] grid-rows-[1.25rem_1.125rem_1rem] items-center gap-x-2 rounded-md px-1.5 py-1">
-      <span className="col-start-1 row-start-1 flex items-center">
-        <StatusDot status={agent.status} />
-      </span>
-      <span className="col-start-2 row-start-1 flex min-w-0 items-baseline gap-2">
-        <span className="min-w-0 truncate text-sm font-medium">{agent.title}</span>
-        {role ? (
-          <span className="max-w-28 shrink-0 truncate rounded-sm border border-border/60 px-1 font-mono text-[.65rem] text-muted-foreground">
-            {role}
-          </span>
-        ) : null}
-      </span>
-      <span className="col-start-3 row-start-1 min-w-14 text-right font-mono text-[.7rem] text-muted-foreground/80">
-        <span className="inline-flex items-center gap-1">
-          <AgentElapsed agent={agent} />
-          {agent.status === "completed" ? (
-            <Check aria-hidden className="size-3 text-success" />
+    <>
+      <div className="grid h-[3.875rem] grid-cols-[0.375rem_minmax(0,1fr)_auto] grid-rows-[1.25rem_1.125rem_1rem] items-center gap-x-2 rounded-md px-1.5 py-1">
+        <span className="col-start-1 row-start-1 flex items-center">
+          <StatusDot status={agent.status} />
+        </span>
+        <span className="col-start-2 row-start-1 flex min-w-0 items-baseline gap-2">
+          {agent.lastTurn ? (
+            <button
+              type="button"
+              className="min-w-0 truncate text-left text-sm font-medium hover:underline"
+              aria-label={`View details for ${agent.title}`}
+              onClick={() => setDetailsOpen(true)}
+            >
+              {agent.title}
+            </button>
+          ) : (
+            <span className="min-w-0 truncate text-sm font-medium">{agent.title}</span>
+          )}
+          {role ? (
+            <span className="max-w-28 shrink-0 truncate rounded-sm border border-border/60 px-1 font-mono text-[.65rem] text-muted-foreground">
+              {role}
+            </span>
           ) : null}
         </span>
-      </span>
-      <span
-        className={cn(
-          "col-start-2 col-end-4 row-start-2 block truncate text-xs",
-          agent.status === "failed" ? "text-destructive-foreground" : "text-muted-foreground",
-        )}
-      >
-        {activity ?? statusLabel}
-      </span>
-      <span className="col-start-2 col-end-4 row-start-3 truncate font-mono text-[.7rem] tabular-nums text-muted-foreground/70">
-        {metadata.join(" · ")}
-      </span>
-      <span className="sr-only">{statusLabel}</span>
-    </div>
+        <span className="col-start-3 row-start-1 min-w-14 text-right font-mono text-[.7rem] text-muted-foreground/80">
+          <span className="inline-flex items-center gap-1">
+            <AgentElapsed agent={agent} />
+            {agent.status === "completed" ? (
+              <Check aria-hidden className="size-3 text-success" />
+            ) : null}
+          </span>
+        </span>
+        <span
+          className={cn(
+            "col-start-2 col-end-4 row-start-2 block truncate text-xs",
+            agent.status === "failed" ? "text-destructive-foreground" : "text-muted-foreground",
+          )}
+        >
+          {activity ?? statusLabel}
+        </span>
+        <span className="col-start-2 col-end-4 row-start-3 truncate font-mono text-[.7rem] tabular-nums text-muted-foreground/70">
+          {metadata.join(" · ")}
+        </span>
+        <span className="sr-only">{statusLabel}</span>
+      </div>
+      {agent.lastTurn ? (
+        <Dialog open={detailsOpen} onOpenChange={setDetailsOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>{agent.title}</DialogTitle>
+            </DialogHeader>
+            <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 px-6 pb-6 text-sm">
+              <dt className="text-muted-foreground">Status</dt>
+              <dd>{statusLabel}</dd>
+              <dt className="text-muted-foreground">Parent</dt>
+              <dd>{parentName ?? "Unavailable"}</dd>
+              <dt className="text-muted-foreground">Parent agent ID</dt>
+              <dd className="min-w-0 break-all font-mono text-xs">
+                {agent.parentAgentId ?? "Unavailable"}
+              </dd>
+              <dt className="text-muted-foreground">Last turn</dt>
+              <dd>{agent.lastTurn.outcome}</dd>
+              {agent.lastTurn.completedAt ? (
+                <>
+                  <dt className="text-muted-foreground">Completed</dt>
+                  <dd>{agent.lastTurn.completedAt}</dd>
+                </>
+              ) : null}
+              {agent.lastTurn.durationMs !== undefined ? (
+                <>
+                  <dt className="text-muted-foreground">Duration</dt>
+                  <dd>{formatElapsedSeconds(agent.lastTurn.durationMs / 1000)}</dd>
+                </>
+              ) : null}
+              {agent.lastTurn.result ? (
+                <>
+                  <dt className="text-muted-foreground">Result</dt>
+                  <dd className="min-w-0 break-words">{agent.lastTurn.result}</dd>
+                </>
+              ) : null}
+              {agent.lastTurn.error ? (
+                <>
+                  <dt className="text-muted-foreground">Error</dt>
+                  <dd className="min-w-0 break-words">{agent.lastTurn.error}</dd>
+                </>
+              ) : null}
+            </dl>
+          </DialogContent>
+        </Dialog>
+      ) : null}
+    </>
   );
 }
 
@@ -204,6 +277,14 @@ function workflowIsLive(group: AgentPanelWorkflowGroup): boolean {
 
 function workflowMembers(group: AgentPanelWorkflowGroup): ReadonlyArray<RuntimeSubagent> {
   return [...group.phases.flatMap((phase) => phase.members), ...group.unphasedMembers];
+}
+
+function agentNamesById(model: AgentPanelModel): ReadonlyMap<string, string> {
+  const agents = [
+    ...model.directAgents,
+    ...model.workflows.flatMap((group) => [group.workflow, ...workflowMembers(group)]),
+  ];
+  return new Map(agents.map((agent) => [agent.id, agent.title]));
 }
 
 /**
@@ -319,9 +400,11 @@ function WorkflowScriptView({
 function PhaseSection({
   phase,
   defaultOpen = false,
+  parentNameFor,
 }: {
   phase: AgentPanelWorkflowGroup["phases"][number];
   defaultOpen?: boolean;
+  parentNameFor: (agent: RuntimeSubagent) => string | undefined;
 }) {
   const [open, setOpen] = useState(defaultOpen || phase.state === "running");
   const previousState = useRef(phase.state);
@@ -370,7 +453,11 @@ function PhaseSection({
           </span>
         ) : null}
       </button>
-      {open ? phase.members.map((member) => <AgentRow key={member.id} agent={member} />) : null}
+      {open
+        ? phase.members.map((member) => (
+            <AgentRow key={member.id} agent={member} parentName={parentNameFor(member)} />
+          ))
+        : null}
     </div>
   );
 }
@@ -381,11 +468,13 @@ function ExpandedWorkflowSection({
   environmentId,
   threadId,
   onCollapse,
+  parentNameFor,
 }: {
   group: AgentPanelWorkflowGroup;
   environmentId: EnvironmentId | null;
   threadId: ThreadId | null;
   onCollapse: () => void;
+  parentNameFor: (agent: RuntimeSubagent) => string | undefined;
 }) {
   const [scriptOpen, setScriptOpen] = useState(false);
   const members = workflowMembers(group);
@@ -440,13 +529,18 @@ function ExpandedWorkflowSection({
         />
       ) : null}
       {group.phases.map((phase) => (
-        <PhaseSection key={phase.index} phase={phase} defaultOpen={!workflowIsLive(group)} />
+        <PhaseSection
+          key={phase.index}
+          phase={phase}
+          defaultOpen={!workflowIsLive(group)}
+          parentNameFor={parentNameFor}
+        />
       ))}
       {group.unphasedMembers.map((member) => (
-        <AgentRow key={member.id} agent={member} />
+        <AgentRow key={member.id} agent={member} parentName={parentNameFor(member)} />
       ))}
       {group.phases.length === 0 && group.unphasedMembers.length === 0 ? (
-        <AgentRow agent={group.workflow} />
+        <AgentRow agent={group.workflow} parentName={parentNameFor(group.workflow)} />
       ) : null}
     </section>
   );
@@ -504,10 +598,12 @@ function WorkflowSection({
   group,
   environmentId,
   threadId,
+  parentNameFor,
 }: {
   group: AgentPanelWorkflowGroup;
   environmentId: EnvironmentId | null;
   threadId: ThreadId | null;
+  parentNameFor: (agent: RuntimeSubagent) => string | undefined;
 }) {
   const [open, setOpen] = useState(() => workflowIsLive(group));
   return open ? (
@@ -515,6 +611,7 @@ function WorkflowSection({
       group={group}
       environmentId={environmentId}
       threadId={threadId}
+      parentNameFor={parentNameFor}
       onCollapse={() => setOpen(false)}
     />
   ) : (
@@ -531,6 +628,10 @@ export function AgentsPanel({
   environmentId?: EnvironmentId | null;
   threadId?: ThreadId | null;
 }) {
+  const agentNames = agentNamesById(model);
+  const parentNameFor = (agent: RuntimeSubagent) =>
+    agent.parentAgentId ? agentNames.get(agent.parentAgentId) : undefined;
+
   if (!model.hasAgents) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
@@ -554,15 +655,16 @@ export function AgentsPanel({
               group={group}
               environmentId={environmentId}
               threadId={threadId}
+              parentNameFor={parentNameFor}
             />
           ))}
           {model.directAgents.length > 0 ? (
             <section>
               <div className="px-1.5 pt-1 text-[.65rem] font-medium uppercase tracking-wider text-muted-foreground">
-                Direct spawns
+                Agents
               </div>
               {model.directAgents.map((agent) => (
-                <AgentRow key={agent.id} agent={agent} />
+                <AgentRow key={agent.id} agent={agent} parentName={parentNameFor(agent)} />
               ))}
             </section>
           ) : null}

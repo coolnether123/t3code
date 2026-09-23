@@ -71,12 +71,12 @@ describe("AgentsPanel child details", () => {
 
     const dialog = document.querySelector('[role="dialog"]');
     expect(dialog?.textContent).toContain("Idle · resumable");
-    expect(dialog?.textContent).toContain("Last turn outcomecompleted");
+    expect(dialog?.querySelector("dl")?.textContent).toContain("Last turncompleted");
     expect(dialog?.textContent).toContain("2026-08-31T00:50:10.000Z");
-    expect(dialog?.textContent).toContain("7283 ms");
-    expect(dialog?.textContent).toContain("Last turn resultGRANDCHILD_COMPLETE");
-    expect(dialog?.textContent).toContain("Parent nameChild");
-    expect(dialog?.textContent).toContain("Parent agentchild");
+    expect(dialog?.textContent).toContain("Duration7s");
+    expect(dialog?.textContent).toContain("ResultGRANDCHILD_COMPLETE");
+    expect(dialog?.textContent).toContain("ParentChild");
+    expect(dialog?.textContent).toContain("Parent agent IDchild");
     expect(dialog?.textContent).not.toContain("gpt-");
   });
 });
