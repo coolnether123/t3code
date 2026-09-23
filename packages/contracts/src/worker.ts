@@ -638,7 +638,9 @@ export type WorkerEvent = typeof WorkerEvent.Type;
  * The parent invocation scope is the routing authority, so callers normally
  * omit `instanceId`. An explicit value is accepted for diagnostics and is
  * validated against the calling parent before the canonical `ModelSelection`
- * reaches Worker storage or the provider runtime.
+ * reaches Worker storage or the provider runtime. Standard Codex Workers may
+ * use another model slug under that same instance; other worker backends
+ * inherit the parent model unless their backend owns model validation.
  */
 export const WorkerMcpModelSelection = Schema.Struct({
   instanceId: Schema.optionalKey(ProviderInstanceId),
