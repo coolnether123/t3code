@@ -1030,6 +1030,7 @@ function toDerivedWorkLogEntry(
     turnId: activity.turnId,
     label: taskLabel || activity.summary,
     tone:
+      (activity.kind === "worktree-setup" && payload?.phase === "running") ||
       activity.kind === "task.progress"
         ? "thinking"
         : activity.tone === "approval"
