@@ -2,6 +2,7 @@
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { make as makeJsonSchemaGenerator } from "@effect/openapi-generator/JsonSchemaGenerator";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -957,13 +958,14 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
 
   yield* Effect.log(`Generated Codex App Server schemas from ${UPSTREAM_REF}`);
 
+  const platform = yield* HostProcessPlatform;
   yield* Effect.service(ChildProcessSpawner.ChildProcessSpawner).pipe(
     Effect.flatMap((spawner) =>
       // Windows' command shim is unreliable from uv_spawn. Invoke the local
       // Vite+ entrypoint through Node resolved from PATH. The generator is
       // run under Bun, while the formatter uses the repository's Node 24
       // toolchain.
-      process.platform === "win32"
+      platform === "win32"
         ? spawner.spawn(
             ChildProcess.make("node", [
               NodePath.join(

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -69,17 +69,17 @@ describe("quota cost ledger", () => {
     expect(changed).toHaveLength(1);
     expect(changed[0]?.costUsd).toBe(14);
   });
-  it("round trips through an atomic temporary disk file", async () => {
-    const rows = upsertQuotaCostLedger([], cost, fingerprint, interval, "2026-09-07T02:00:00Z");
-    const loaded = await Effect.runPromise(
-      Effect.gen(function* () {
+  it.effect("round trips through an atomic temporary disk file", () =>
+    Effect.gen(function* () {
+      const rows = upsertQuotaCostLedger([], cost, fingerprint, interval, "2026-09-07T02:00:00Z");
+      const loaded = yield* Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const dir = yield* fs.makeTempDirectory({ prefix: "t3-quota-ledger-" });
         const path = `${dir}/ledger.json`;
         yield* writeQuotaCostLedger(path, rows);
         return yield* readQuotaCostLedger(path);
-      }).pipe(Effect.provide(NodeServices.layer)),
-    );
-    expect(loaded).toEqual(rows);
-  });
+      }).pipe(Effect.provide(NodeServices.layer));
+      expect(loaded).toEqual(rows);
+    }),
+  );
 });

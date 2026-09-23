@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
-import * as NodeFS from "node:fs/promises";
+import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
@@ -42,11 +42,11 @@ const makeRequest = (): CodexDesktopCoordinatorRequest => ({
 });
 
 const withMailbox = async <A>(run: (root: string) => Promise<A>): Promise<A> => {
-  const root = await NodeFS.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-codex-desktop-mailbox-"));
+  const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-codex-desktop-mailbox-"));
   try {
     return await run(root);
   } finally {
-    await NodeFS.rm(root, { recursive: true, force: true });
+    await NodeFSP.rm(root, { recursive: true, force: true });
   }
 };
 
@@ -148,11 +148,11 @@ describe("CodexDesktopMailbox", () => {
   it("rejects malformed and oversized canonical requests before claiming", async () => {
     await withMailbox(async (root) => {
       const layout = createCodexDesktopMailboxLayout(root);
-      await NodeFS.mkdir(layout.requestDirectory, { recursive: true });
-      await NodeFS.writeFile(layout.requestPath(jobId), "{bad", "utf8");
+      await NodeFSP.mkdir(layout.requestDirectory, { recursive: true });
+      await NodeFSP.writeFile(layout.requestPath(jobId), "{bad", "utf8");
       await expect(claimCodexDesktopRequest(layout, jobId)).rejects.toThrow();
 
-      await NodeFS.writeFile(
+      await NodeFSP.writeFile(
         layout.requestPath(jobId),
         `{"schemaVersion":1,"jobId":"${jobId}","requestId":"r","operation":"list","requestedAt":"x","padding":"${"x".repeat(CODEX_DESKTOP_MAILBOX_MAX_JSON_BYTES)}"}`,
         "utf8",

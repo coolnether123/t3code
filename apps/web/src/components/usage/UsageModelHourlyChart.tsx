@@ -1,6 +1,7 @@
 import type { HourlyModelTotals, HourlyTotals } from "@t3tools/shared/usageMerge";
 import { formatHourShort, formatTokens, formatUsd } from "@t3tools/shared/usageFormat";
 import { useMemo, useState } from "react";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
 const WIDTH = 960;
 const HEIGHT = 190;
@@ -96,9 +97,12 @@ export function UsageModelHourlyChart({
                 className="size-2 shrink-0 rounded-full"
                 style={{ backgroundColor: colorFor(key, value) }}
               />
-              <span className="truncate" title={key}>
-                {modelDisplayName(key, value)}
-              </span>
+              <Tooltip>
+                <TooltipTrigger render={<span className="truncate" tabIndex={0} />}>
+                  {modelDisplayName(key, value)}
+                </TooltipTrigger>
+                <TooltipPopup>{key}</TooltipPopup>
+              </Tooltip>
             </span>
           );
         })}
@@ -256,9 +260,12 @@ export function UsageModelHourlyChart({
                 key={key}
                 className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5"
               >
-                <span className="truncate" title={key}>
-                  {modelDisplayName(key, value)}
-                </span>
+                <Tooltip>
+                  <TooltipTrigger render={<span className="truncate" tabIndex={0} />}>
+                    {modelDisplayName(key, value)}
+                  </TooltipTrigger>
+                  <TooltipPopup>{key}</TooltipPopup>
+                </Tooltip>
                 <span className="shrink-0 tabular-nums">
                   {formatTokens(value.totalTokens)} tokens · {formatUsd(value.costUsd)}
                 </span>

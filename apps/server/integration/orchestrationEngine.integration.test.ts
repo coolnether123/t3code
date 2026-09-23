@@ -36,6 +36,7 @@ import type {
   TurnProcessingQuiescedReceipt,
 } from "../src/orchestration/Services/RuntimeReceiptBus.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 const asMessageId = (value: string): MessageId => MessageId.make(value);
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
@@ -871,7 +872,7 @@ it.live("reverts to an earlier checkpoint and trims checkpoint projections + git
       );
       assert.equal(
         NodeFS.readFileSync(NodePath.join(harness.workspaceDir, "README.md"), "utf8"),
-        `v2${process.platform === "win32" ? "\r\n" : "\n"}`,
+        `v2${(yield* HostProcessPlatform) === "win32" ? "\r\n" : "\n"}`,
       );
       assert.equal(
         gitRefExists(harness.workspaceDir, checkpointRefForThreadTurn(THREAD_ID, 2)),
