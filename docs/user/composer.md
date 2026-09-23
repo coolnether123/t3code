@@ -127,6 +127,11 @@ Provider commands must start the message to run. T3 Code commands such as
 
 Send `/compact` in an existing conversation to reduce context usage when the
 provider supports it. Web and desktop also offer compaction from the context meter.
+Messages submitted while compaction runs wait on the server and are sent in order
+after compaction finishes. If compaction fails or the session stops, messages
+still waiting remain visible but are not sent. After a server restart, T3 Code marks
+unconfirmed delivery as uncertain instead of sending the messages again. Check
+the provider conversation before retrying.
 
 ## Images and videos in messages
 
