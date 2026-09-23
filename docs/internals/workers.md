@@ -61,6 +61,15 @@ reference uses `path:start-end#symbol`; the line range and symbol are optional.
 Each nonempty snippet line becomes one entry in the context package. The form
 does not create a transcript or history field.
 
+`worker_start` accepts `createWorktree: true` with a project `cwd`. The Worker
+owns a generated branch and checkout under the configured worktrees directory.
+The store persists the checkout path and setup state so follow-up assignments
+reuse the same directory. Creation runs off the request path; `worker_interrupt`
+cancels setup. Recovery retains checkouts when it cannot prove ownership after
+a restart. Closing a Worker removes its checkout only when Git confirms the
+generated branch, a clean working tree, and that the branch is reachable from
+the project's `HEAD`. Otherwise the Worker detail reports a preserved checkout.
+
 At 390 by 844 pixels, the list and detail panes use one column. The controls
 remain at least 44 pixels high, and the panel clips horizontal overflow. The
 extra context fields stay collapsed until the user opens them.
