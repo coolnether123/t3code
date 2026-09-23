@@ -30,7 +30,9 @@ const DEFERRED_TRANSCRIPT_REFRESH_MAX_MS = 8_000;
 
 const isDeferredTranscriptSource = (
   source: NonNullable<EnvironmentUsageStatus["summary"]>["sources"][number],
-) => source.status === "partial" && /\bdeferred\b/i.test(source.message ?? "");
+) =>
+  source.status === "partial" &&
+  /\bdeferred\b|response budget|complete-line chunks/i.test(source.message ?? "");
 
 export interface EnvironmentUsageStatus {
   readonly environmentId: EnvironmentId;
@@ -96,6 +98,7 @@ export function useUsage(
       input.sinceTime,
       input.untilTime,
       input.includeQuotaHistory,
+      input.includeRepeatedInput,
       input.quotaHistoryOnly,
       input.quotaIntervals,
     ],

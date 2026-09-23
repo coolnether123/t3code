@@ -7,6 +7,7 @@ import {
   ThreadId,
   type OrchestrationReadModel,
   type OrchestrationThread,
+  type ThreadContextCompaction,
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
@@ -27,6 +28,7 @@ function makeReadModel(input: {
   readonly archivedAt?: string | null;
   readonly activities?: OrchestrationThread["activities"];
   readonly messages?: OrchestrationThread["messages"];
+  readonly activeContextCompactions?: ReadonlyArray<ThreadContextCompaction>;
 }): OrchestrationReadModel {
   return {
     snapshotSequence: 0,
@@ -57,11 +59,112 @@ function makeReadModel(input: {
         session: null,
       },
     ],
+    ...(input.activeContextCompactions !== undefined
+      ? { activeContextCompactions: input.activeContextCompactions }
+      : {}),
     updatedAt: NOW,
   };
 }
 
 it.layer(NodeServices.layer)("snoozed thread decider", (it) => {
+  it.effect("atomically queues a turn start while context compaction is active", () =>
+    Effect.gen(function* () {
+      const queued = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-queued-turn"),
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: MessageId.make("message-queued"),
+            role: "user",
+            text: "follow-up",
+            attachments: [],
+          },
+          createdAt: NOW,
+        },
+        readModel: makeReadModel({
+          activeContextCompactions: [
+            {
+              threadId: ThreadId.make("thread-1"),
+              compactMessageId: MessageId.make("message-compact"),
+              status: "active",
+              startedAt: NOW,
+              updatedAt: NOW,
+              queuedMessages: [],
+            },
+          ],
+        }),
+      });
+      const events = Array.isArray(queued) ? queued : [queued];
+      expect(events.map((event) => event.type)).toEqual([
+        "thread.message-sent",
+        "thread.turn-start-requested",
+        "thread.context-compaction-message-queued",
+      ]);
+    }),
+  );
+
+  it.effect("replays a queued start without duplicating its user-message event", () =>
+    Effect.gen(function* () {
+      const queuedMessageId = MessageId.make("message-queued-replay");
+      const replay = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-queued-replay"),
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: queuedMessageId,
+            role: "user",
+            text: "follow-up",
+            attachments: [],
+          },
+          createdAt: NOW,
+        },
+        readModel: makeReadModel({
+          activeContextCompactions: [
+            {
+              threadId: ThreadId.make("thread-1"),
+              compactMessageId: MessageId.make("message-compact"),
+              status: "completed",
+              startedAt: NOW,
+              updatedAt: NOW,
+              queuedMessages: [
+                {
+                  messageId: queuedMessageId,
+                  requestOrder: 2,
+                  turnStart: {
+                    runtimeMode: "full-access",
+                    interactionMode: "default",
+                    createdAt: NOW,
+                  },
+                  status: "queued",
+                  updatedAt: NOW,
+                },
+              ],
+            },
+          ],
+        }),
+      });
+      const events = Array.isArray(replay) ? replay : [replay];
+      expect(events.map((event) => event.type)).toEqual([
+        "thread.turn-start-requested",
+        "thread.context-compaction-message-status-changed",
+      ]);
+      const marker = events.find(
+        (event) => event.type === "thread.context-compaction-message-status-changed",
+      );
+      expect(
+        marker?.type === "thread.context-compaction-message-status-changed"
+          ? marker.payload.status
+          : null,
+      ).toBe("attempted");
+    }),
+  );
+
   it.effect("snoozes a thread to a future wake time", () =>
     Effect.gen(function* () {
       const event = yield* decideOrchestrationCommand({

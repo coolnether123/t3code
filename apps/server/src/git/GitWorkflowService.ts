@@ -26,6 +26,7 @@ import {
   type VcsStatusLocalResult,
   type VcsStatusRemoteResult,
   type VcsStatusResult,
+  type WorkerId,
 } from "@t3tools/contracts";
 
 import * as GitManager from "./GitManager.ts";
@@ -89,6 +90,16 @@ export class GitWorkflowService extends Context.Service<
     readonly removeWorktree: (
       input: VcsRemoveWorktreeInput,
     ) => Effect.Effect<void, GitCommandError>;
+    /** Removes only the branch derived from a Worker ID. */
+    readonly deleteWorkerBranch: (input: {
+      readonly cwd: string;
+      readonly workerId: WorkerId;
+    }) => Effect.Effect<void, GitCommandError>;
+    /** True only when every commit on the branch is already reachable from the project's HEAD. */
+    readonly isBranchMerged: (input: {
+      readonly cwd: string;
+      readonly branch: string;
+    }) => Effect.Effect<boolean, GitCommandError>;
     readonly pruneWorktrees: (input: {
       readonly cwd: string;
     }) => Effect.Effect<void, GitCommandError>;
@@ -330,6 +341,29 @@ export const make = Effect.gen(function* () {
     removeWorktree: (input) =>
       ensureGitCommand("GitWorkflowService.removeWorktree", input.cwd).pipe(
         Effect.andThen(git.removeWorktree(input)),
+      ),
+    deleteWorkerBranch: (input) =>
+      ensureGitCommand("GitWorkflowService.deleteWorkerBranch", input.cwd).pipe(
+        Effect.andThen(
+          git.execute({
+            operation: "GitWorkflowService.deleteWorkerBranch",
+            cwd: input.cwd,
+            args: ["branch", "-D", `t3-worker-${input.workerId}`],
+          }),
+        ),
+        Effect.asVoid,
+      ),
+    isBranchMerged: (input) =>
+      ensureGitCommand("GitWorkflowService.isBranchMerged", input.cwd).pipe(
+        Effect.andThen(
+          git.execute({
+            operation: "GitWorkflowService.isBranchMerged",
+            cwd: input.cwd,
+            args: ["merge-base", "--is-ancestor", input.branch, "HEAD"],
+            allowNonZeroExit: true,
+          }),
+        ),
+        Effect.map((result) => result.exitCode === 0),
       ),
     pruneWorktrees: (input) =>
       ensureGitCommand("GitWorkflowService.pruneWorktrees", input.cwd).pipe(

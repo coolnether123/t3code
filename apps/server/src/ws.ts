@@ -697,6 +697,55 @@ const makeWsRpcLayer = (
           ),
         );
 
+      // Keep the latest setup snapshot on the thread itself. Thread activity is
+      // already persisted, projected, and replayed to reconnecting clients; a
+      // stable id makes each progress update replace the previous one.
+      const appendWorktreeSetupActivity = (input: {
+        readonly threadId: ThreadId;
+        readonly phase: "running" | "done" | "failed" | "cancelled";
+        readonly stage: "fetch" | "checkout" | "setup-script" | "agent";
+        readonly branch: string | null;
+        readonly worktreePath: string | null;
+        readonly detail?: string;
+      }) =>
+        Effect.all({
+          commandId: serverCommandId("worktree-setup-activity"),
+          createdAt: nowIso,
+        }).pipe(
+          Effect.flatMap(({ commandId, createdAt }) =>
+            dispatchFromClient({
+              type: "thread.activity.append",
+              commandId,
+              threadId: input.threadId,
+              activity: {
+                id: EventId.make(`worktree-setup:${input.threadId}`),
+                tone: input.phase === "failed" ? "error" : "info",
+                kind: "worktree-setup",
+                summary:
+                  input.phase === "running"
+                    ? `Setting up ${input.stage}`
+                    : input.phase === "done"
+                      ? "Worktree setup complete"
+                      : input.phase === "cancelled"
+                        ? "Worktree setup cancelled"
+                        : "Worktree setup failed",
+                payload: {
+                  phase: input.phase,
+                  stage: input.stage,
+                  branch: input.branch,
+                  worktreePath: input.worktreePath,
+                  ...(input.detail ? { detail: input.detail.slice(0, 1000) } : {}),
+                },
+                turnId: null,
+                createdAt,
+              },
+              createdAt,
+            }),
+          ),
+        );
+      const trackWorktreeSetup = (input: Parameters<typeof appendWorktreeSetupActivity>[0]) =>
+        appendWorktreeSetupActivity(input).pipe(Effect.ignoreCause({ log: true }));
+
       const toBootstrapDispatchCommandCauseError = (cause: Cause.Cause<unknown>) => {
         const error = Cause.squash(cause);
         return isOrchestrationDispatchCommandError(error)
@@ -926,9 +975,15 @@ const makeWsRpcLayer = (
           const bootstrap = command.bootstrap;
           const { bootstrap: _bootstrap, ...finalTurnStartCommand } = command;
           let createdThread = false;
+          let worktreeSetupStarted = false;
           let targetProjectId = bootstrap?.createThread?.projectId;
           let targetProjectCwd = bootstrap?.prepareWorktree?.projectCwd;
           let targetWorktreePath = bootstrap?.createThread?.worktreePath ?? null;
+          const setupBranch = bootstrap?.prepareWorktree?.branch ?? null;
+          let worktreeSetupStage: "fetch" | "checkout" | "setup-script" | "agent" = bootstrap
+            ?.prepareWorktree?.startFromOrigin
+            ? "fetch"
+            : "checkout";
 
           const cleanupCreatedThread = () =>
             createdThread
@@ -1078,6 +1133,14 @@ const makeWsRpcLayer = (
             }
 
             if (bootstrap?.prepareWorktree) {
+              worktreeSetupStarted = true;
+              yield* trackWorktreeSetup({
+                threadId: command.threadId,
+                phase: "running",
+                stage: bootstrap.prepareWorktree.startFromOrigin ? "fetch" : "checkout",
+                branch: setupBranch,
+                worktreePath: null,
+              });
               let worktreeBaseRef = bootstrap.prepareWorktree.baseBranch;
               // "Start from origin" is a stored default; repos without an
               // origin remote fall back to the local base branch instead of
@@ -1100,6 +1163,14 @@ const makeWsRpcLayer = (
                 });
                 worktreeBaseRef = resolvedRemoteBase.commitSha;
               }
+              worktreeSetupStage = "checkout";
+              yield* trackWorktreeSetup({
+                threadId: command.threadId,
+                phase: "running",
+                stage: "checkout",
+                branch: setupBranch,
+                worktreePath: null,
+              });
               const worktree = yield* gitWorkflow.createWorktree({
                 cwd: bootstrap.prepareWorktree.projectCwd,
                 refName: worktreeBaseRef,
@@ -1108,6 +1179,7 @@ const makeWsRpcLayer = (
                 path: null,
               });
               targetWorktreePath = worktree.worktree.path;
+              worktreeSetupStage = bootstrap.runSetupScript ? "setup-script" : "agent";
               yield* dispatchFromClient({
                 type: "thread.meta.update",
                 commandId: yield* serverCommandId("bootstrap-thread-meta-update"),
@@ -1115,21 +1187,70 @@ const makeWsRpcLayer = (
                 branch: worktree.worktree.refName,
                 worktreePath: targetWorktreePath,
               });
+              yield* trackWorktreeSetup({
+                threadId: command.threadId,
+                phase: "running",
+                stage: worktreeSetupStage,
+                branch: worktree.worktree.refName,
+                worktreePath: targetWorktreePath,
+              });
               yield* refreshGitStatus(targetWorktreePath);
             }
 
             yield* runSetupProgram();
-
-            return yield* dispatchFromClient(finalTurnStartCommand);
+            if (worktreeSetupStarted) {
+              worktreeSetupStage = "agent";
+              yield* trackWorktreeSetup({
+                threadId: command.threadId,
+                phase: "running",
+                stage: worktreeSetupStage,
+                branch: setupBranch,
+                worktreePath: targetWorktreePath,
+              });
+            }
+            const started = yield* dispatchFromClient(finalTurnStartCommand);
+            if (worktreeSetupStarted) {
+              yield* trackWorktreeSetup({
+                threadId: command.threadId,
+                phase: "done",
+                stage: "agent",
+                branch: setupBranch,
+                worktreePath: targetWorktreePath,
+              });
+            }
+            return started;
           });
 
           return yield* bootstrapProgram.pipe(
             Effect.catchCause((cause) => {
               const dispatchError = toBootstrapDispatchCommandCauseError(cause);
               if (Cause.hasInterruptsOnly(cause)) {
-                return Effect.fail(dispatchError);
+                const cancelled = worktreeSetupStarted
+                  ? Effect.uninterruptible(
+                      trackWorktreeSetup({
+                        threadId: command.threadId,
+                        phase: "cancelled",
+                        stage: worktreeSetupStage,
+                        branch: setupBranch,
+                        worktreePath: targetWorktreePath,
+                      }),
+                    )
+                  : Effect.void;
+                return cancelled.pipe(Effect.andThen(Effect.fail(dispatchError)));
               }
-              return Effect.uninterruptible(cleanupCreatedThread()).pipe(
+              const failed = worktreeSetupStarted
+                ? trackWorktreeSetup({
+                    threadId: command.threadId,
+                    phase: "failed",
+                    stage: worktreeSetupStage,
+                    branch: setupBranch,
+                    worktreePath: targetWorktreePath,
+                    detail: dispatchError.message,
+                  })
+                : Effect.void;
+              return Effect.uninterruptible(
+                failed.pipe(Effect.andThen(cleanupCreatedThread())),
+              ).pipe(
                 Effect.matchCauseEffect({
                   onFailure: (cleanupCause) =>
                     Effect.logWarning("bootstrap thread cleanup failed", {
@@ -1852,6 +1973,10 @@ const makeWsRpcLayer = (
           ),
         [WS_METHODS.serverGetUsageSummary]: (input) =>
           observeRpcEffect(WS_METHODS.serverGetUsageSummary, usage.readSummary(input), {
+            "rpc.aggregate": "server",
+          }),
+        [WS_METHODS.serverGetUsageReport]: (input) =>
+          observeRpcEffect(WS_METHODS.serverGetUsageReport, usage.readReport(input), {
             "rpc.aggregate": "server",
           }),
         [WS_METHODS.agentSessionsScan]: () =>

@@ -547,6 +547,7 @@ function GeneralSettingsSection() {
       <SettingsRow icon="folder" label="Project Grouping" target="SettingsProjectGrouping" />
       <AutoSettleSettingsRows />
       <SettingsRow icon="chart.bar.xaxis" label="Usage" target="SettingsUsage" />
+      <SettingsRow icon="doc.text" label="Skills & repeated input" target="SettingsRepeatedInput" />
     </SettingsSection>
   );
 }

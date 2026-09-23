@@ -119,6 +119,10 @@ export interface AggregateOptions {
   readonly resolution?: UsageResolution;
   readonly sinceTimeMs?: number;
   readonly untilTimeMs?: number;
+  readonly providers?: readonly UsageRecord["provider"][];
+  readonly sessionIds?: readonly string[];
+  readonly turnIds?: readonly string[];
+  readonly groupBy?: "model" | "session" | "turn";
 }
 
 export interface AggregateResult {
@@ -143,11 +147,17 @@ export class UsageAggregator {
   readonly #hourlyWindow: { readonly sinceTimeMs: number; readonly untilTimeMs: number } | null;
   readonly #dailyWindow: DailyWindowIndex | null;
   readonly #options: AggregateOptions;
+  readonly #providers: ReadonlySet<UsageRecord["provider"]> | null;
+  readonly #sessionIds: ReadonlySet<string> | null;
+  readonly #turnIds: ReadonlySet<string> | null;
   #duplicatesDropped = 0;
   #outOfWindow = 0;
 
   constructor(options: AggregateOptions) {
     this.#options = options;
+    this.#providers = options.providers === undefined ? null : new Set(options.providers);
+    this.#sessionIds = options.sessionIds === undefined ? null : new Set(options.sessionIds);
+    this.#turnIds = options.turnIds === undefined ? null : new Set(options.turnIds);
     this.#toDay = makeDayFormatter(options.timeZone);
     if (options.resolution === "hour") {
       if (options.sinceTimeMs === undefined || options.untilTimeMs === undefined) {
@@ -170,12 +180,12 @@ export class UsageAggregator {
    * that landed rather than everything the mtime prefilter happened to admit.
    */
   add(record: UsageRecord): boolean {
-    if (record.dedupeKey !== null) {
-      if (this.#seen.has(record.dedupeKey)) {
-        this.#duplicatesDropped += 1;
-        return false;
-      }
-      this.#seen.add(record.dedupeKey);
+    if (
+      (this.#providers !== null && !this.#providers.has(record.provider)) ||
+      (this.#sessionIds !== null && !this.#sessionIds.has(record.sessionId)) ||
+      (this.#turnIds !== null && (record.turnId === undefined || !this.#turnIds.has(record.turnId)))
+    ) {
+      return false;
     }
 
     if (
@@ -195,6 +205,17 @@ export class UsageAggregator {
       return false;
     }
 
+    // A duplicate outside the requested window must not poison an in-window
+    // copy from another transcript. The scan admits boundary files by mtime,
+    // so this ordering is observable for resumed and forked sessions.
+    if (record.dedupeKey !== null) {
+      if (this.#seen.has(record.dedupeKey)) {
+        this.#duplicatesDropped += 1;
+        return false;
+      }
+      this.#seen.add(record.dedupeKey);
+    }
+
     const hourStart =
       this.#hourlyWindow === null
         ? ""
@@ -202,7 +223,12 @@ export class UsageAggregator {
             this.#hourlyWindow.sinceTimeMs +
               Math.floor((record.timestampMs - this.#hourlyWindow.sinceTimeMs) / HOUR_MS) * HOUR_MS,
           ).toISOString();
-    const key = `${day}\u0000${hourStart}\u0000${record.provider}\u0000${record.model}\u0000${record.serviceTier ?? "unknown"}\u0000${record.serviceTierSource ?? "unknown"}`;
+    const sessionId =
+      this.#options.groupBy === "session" || this.#options.groupBy === "turn"
+        ? record.sessionId
+        : "";
+    const turnId = this.#options.groupBy === "turn" ? (record.turnId ?? "") : "";
+    const key = `${day}\u0000${hourStart}\u0000${record.provider}\u0000${record.model}\u0000${record.serviceTier ?? "unknown"}\u0000${record.serviceTierSource ?? "unknown"}\u0000${sessionId}\u0000${turnId}`;
     let bucket = this.#buckets.get(key);
     if (bucket === undefined) {
       bucket = {
@@ -252,12 +278,16 @@ export class UsageAggregator {
         model = "",
         serviceTier = "unknown",
         serviceTierSource = "unknown",
+        sessionId = "",
+        turnId = "",
       ] = key.split("\u0000");
       buckets.push({
         day: day as UsageDay,
         ...(hourStart === "" ? {} : { hourStart }),
         provider: provider as UsageBucket["provider"],
         model,
+        ...(sessionId === "" ? {} : { sessionId }),
+        ...(turnId === "" ? {} : { turnId }),
         ...(provider === "codex"
           ? {
               serviceTier,

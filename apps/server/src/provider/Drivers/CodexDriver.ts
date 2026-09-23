@@ -198,7 +198,6 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         preflightMcpServers: (input) => Effect.promise(() => preflightCodexMcpServers(input)),
         ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
       });
-      const textGeneration = yield* makeCodexTextGeneration(effectiveConfig, processEnv);
 
       // These are routes T3 can provision when selected, not a claim that a
       // running Codex thread has attached them. Each turn checks its own catalog.
@@ -272,6 +271,11 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
               cause,
             }),
         ),
+      );
+      const textGeneration = yield* makeCodexTextGeneration(
+        effectiveConfig,
+        processEnv,
+        snapshot.getSnapshot.pipe(Effect.map((value) => value.models)),
       );
 
       return {

@@ -3,6 +3,7 @@ import {
   type ChatAttachment,
   type OrchestrationEvent,
   type OrchestrationSessionStatus,
+  ThreadContextCompactionTurnStart,
   ThreadId,
 } from "@t3tools/contracts";
 import { toolScreenshotFromItem } from "@t3tools/shared/toolScreenshot";
@@ -11,10 +12,15 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
-import { toPersistenceSqlError, type ProjectionRepositoryError } from "../../persistence/Errors.ts";
+import {
+  toPersistenceDecodeError,
+  toPersistenceSqlError,
+  type ProjectionRepositoryError,
+} from "../../persistence/Errors.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";
 import { ProjectionProjectRepository } from "../../persistence/Services/ProjectionProjects.ts";
@@ -56,6 +62,10 @@ import {
   toSafeThreadAttachmentSegment,
 } from "../../attachmentStore.ts";
 
+const encodeContextCompactionTurnStart = Schema.encodeEffect(
+  Schema.fromJsonString(ThreadContextCompactionTurnStart),
+);
+
 export const ORCHESTRATION_PROJECTOR_NAMES = {
   projects: "projection.projects",
   threads: "projection.threads",
@@ -64,6 +74,7 @@ export const ORCHESTRATION_PROJECTOR_NAMES = {
   threadActivities: "projection.thread-activities",
   threadSessions: "projection.thread-sessions",
   threadTurns: "projection.thread-turns",
+  threadContextCompactions: "projection.thread-context-compactions",
   checkpoints: "projection.checkpoints",
   pendingApprovals: "projection.pending-approvals",
 } as const;
@@ -1540,6 +1551,158 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       }
     });
 
+    const applyThreadContextCompactionsProjectionInner = Effect.fn(
+      "applyThreadContextCompactionsProjection",
+    )(function* (event: OrchestrationEvent, _attachmentSideEffects: AttachmentSideEffects) {
+      switch (event.type) {
+        case "thread.context-compaction-started": {
+          yield* sql`
+            DELETE FROM projection_thread_context_compactions
+            WHERE thread_id = ${event.payload.threadId}
+              AND compact_message_id <> ${event.payload.compactMessageId}
+              AND NOT EXISTS (
+                SELECT 1
+                FROM projection_thread_context_compaction_messages AS queued
+                WHERE queued.thread_id = projection_thread_context_compactions.thread_id
+                  AND queued.compact_message_id = projection_thread_context_compactions.compact_message_id
+                  AND queued.status IN ('queued', 'attempted', 'delivery-uncertain')
+              )
+          `;
+          yield* sql`
+            INSERT INTO projection_thread_context_compactions (
+              thread_id, compact_message_id, status, detail, started_at, updated_at
+            ) VALUES (
+              ${event.payload.threadId},
+              ${event.payload.compactMessageId},
+              'active',
+              NULL,
+              ${event.payload.startedAt},
+              ${event.payload.startedAt}
+            )
+            ON CONFLICT (thread_id, compact_message_id)
+            DO UPDATE SET
+              status = 'active',
+              detail = NULL,
+              updated_at = excluded.updated_at
+          `;
+          return;
+        }
+
+        case "thread.context-compaction-message-queued": {
+          const turnStartJson = yield* encodeContextCompactionTurnStart(
+            event.payload.turnStart,
+          ).pipe(
+            Effect.mapError(
+              toPersistenceDecodeError(
+                "ProjectionPipeline.threadContextCompactions:encodeTurnStart",
+              ),
+            ),
+          );
+          yield* sql`
+            INSERT INTO projection_thread_context_compaction_messages (
+              thread_id,
+              compact_message_id,
+              message_id,
+              request_order,
+              status,
+              detail,
+              turn_start_json,
+              queued_at,
+              updated_at
+            ) VALUES (
+              ${event.payload.threadId},
+              ${event.payload.compactMessageId},
+              ${event.payload.messageId},
+              ${event.sequence},
+              'queued',
+              NULL,
+              ${turnStartJson},
+              ${event.occurredAt},
+              ${event.occurredAt}
+            )
+            ON CONFLICT (thread_id, message_id) DO NOTHING
+          `;
+          yield* sql`
+            UPDATE projection_thread_context_compactions
+            SET updated_at = ${event.occurredAt}
+            WHERE thread_id = ${event.payload.threadId}
+              AND compact_message_id = ${event.payload.compactMessageId}
+          `;
+          return;
+        }
+
+        case "thread.context-compaction-status-changed": {
+          yield* sql`
+            UPDATE projection_thread_context_compactions
+            SET status = ${event.payload.status},
+                detail = ${event.payload.detail ?? null},
+                updated_at = ${event.payload.updatedAt}
+            WHERE thread_id = ${event.payload.threadId}
+              AND compact_message_id = ${event.payload.compactMessageId}
+          `;
+          return;
+        }
+
+        case "thread.context-compaction-message-status-changed": {
+          const terminal =
+            event.payload.status === "dispatched" ||
+            event.payload.status === "failed" ||
+            event.payload.status === "cancelled";
+          if (terminal) {
+            yield* sql`
+              DELETE FROM projection_thread_context_compaction_messages
+              WHERE thread_id = ${event.payload.threadId}
+                AND compact_message_id = ${event.payload.compactMessageId}
+                AND message_id = ${event.payload.messageId}
+            `;
+          } else {
+            yield* sql`
+              UPDATE projection_thread_context_compaction_messages
+              SET status = ${event.payload.status},
+                  detail = ${event.payload.detail ?? null},
+                  updated_at = ${event.payload.updatedAt}
+              WHERE thread_id = ${event.payload.threadId}
+                AND compact_message_id = ${event.payload.compactMessageId}
+                AND message_id = ${event.payload.messageId}
+            `;
+          }
+          yield* sql`
+            UPDATE projection_thread_context_compactions
+            SET updated_at = ${event.payload.updatedAt}
+            WHERE thread_id = ${event.payload.threadId}
+              AND compact_message_id = ${event.payload.compactMessageId}
+          `;
+          return;
+        }
+
+        case "thread.deleted": {
+          yield* sql`
+            DELETE FROM projection_thread_context_compaction_messages
+            WHERE thread_id = ${event.payload.threadId}
+          `;
+          yield* sql`
+            DELETE FROM projection_thread_context_compactions
+            WHERE thread_id = ${event.payload.threadId}
+          `;
+          return;
+        }
+
+        default:
+          return;
+      }
+    });
+    const applyThreadContextCompactionsProjection: ProjectorDefinition["apply"] = (
+      event,
+      attachmentSideEffects,
+    ) =>
+      applyThreadContextCompactionsProjectionInner(event, attachmentSideEffects).pipe(
+        Effect.catchTag("SqlError", (sqlError) =>
+          Effect.fail(
+            toPersistenceSqlError("ProjectionPipeline.threadContextCompactions:query")(sqlError),
+          ),
+        ),
+      );
+
     const applyCheckpointsProjection: ProjectorDefinition["apply"] = () => Effect.void;
 
     const applyPendingApprovalsProjection: ProjectorDefinition["apply"] = Effect.fn(
@@ -1692,6 +1855,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         apply: applyThreadTurnsProjection,
       },
       {
+        name: ORCHESTRATION_PROJECTOR_NAMES.threadContextCompactions,
+        apply: applyThreadContextCompactionsProjection,
+      },
+      {
         name: ORCHESTRATION_PROJECTOR_NAMES.checkpoints,
         apply: applyCheckpointsProjection,
       },
@@ -1748,6 +1915,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             Stream.runForEach(
               eventStore.readFromSequence(
                 Option.isSome(stateRow) ? stateRow.value.lastAppliedSequence : 0,
+                Number.MAX_SAFE_INTEGER,
               ),
               (event) => runProjectorForEvent(projector, event),
             ),

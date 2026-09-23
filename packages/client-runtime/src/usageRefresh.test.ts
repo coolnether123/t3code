@@ -80,6 +80,50 @@ describe("Codex monitor refresh", () => {
     expect(onProgress).toHaveBeenCalledWith("Saved readings refreshed. Updating API costs…");
     news.resolve(true);
   });
+  it("refreshes the selected historical cycle after an observation gap", async () => {
+    const refreshCosts = vi.fn().mockResolvedValue([reply]);
+    await refreshCodexMonitor({
+      trackerId: "desktop",
+      selectedCycleId: "2026-08-30T22:00:00Z",
+      refreshHistory: async () => [
+        {
+          ...reply,
+          summary: {
+            ...summary,
+            quotaHistory: {
+              ...summary.quotaHistory!,
+              samples: [
+                ...summary.quotaHistory!.samples,
+                {
+                  observedAt: "2026-09-10T00:00:00Z",
+                  remainingPercent: 100,
+                  resetsAt: "2026-09-17T00:00:00Z",
+                },
+                {
+                  observedAt: "2026-09-10T02:00:00Z",
+                  remainingPercent: 90,
+                  resetsAt: "2026-09-17T00:00:00Z",
+                },
+              ],
+            },
+          },
+        },
+      ],
+      refreshCosts,
+      refreshNews: async () => false,
+    });
+    expect(refreshCosts).toHaveBeenCalledWith(
+      expect.objectContaining({
+        quotaIntervals: [
+          {
+            id: "2026-08-30T22:00:00Z",
+            sinceTime: "2026-08-30T22:00:00Z",
+            untilTime: "2026-08-30T23:00:00Z",
+          },
+        ],
+      }),
+    );
+  });
   it("reports disconnected computers without claiming success", async () => {
     const refreshCosts = vi.fn();
     expect(
@@ -121,5 +165,19 @@ describe("Codex monitor refresh", () => {
       timeZone: "UTC",
     };
     expect(JSON.stringify(usageQueryInput(a, 6))).toBe(JSON.stringify(usageQueryInput(b, 6)));
+  });
+
+  it("preserves the repeated-input opt-in on the ordinary Usage request", () => {
+    expect(
+      usageQueryInput(
+        {
+          timeZone: "UTC",
+          sinceDay: summary.sinceDay,
+          untilDay: summary.untilDay,
+          includeRepeatedInput: true,
+        },
+        6,
+      ).includeRepeatedInput,
+    ).toBe(true);
   });
 });

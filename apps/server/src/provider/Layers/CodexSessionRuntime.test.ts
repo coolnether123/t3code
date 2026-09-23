@@ -30,6 +30,7 @@ import {
   makeMemoryConsolidationNotificationFilter,
   mcpApprovalRequestKind,
   openCodexThread,
+  parseCodexDaemonThreadConfig,
 } from "./CodexSessionRuntime.ts";
 import { isWorkerLifecycleToolName } from "../../worker/WorkerThreadBoundary.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
@@ -1021,6 +1022,113 @@ describe("codexSessionAppServerArgs", () => {
 });
 
 describe("openCodexThread", () => {
+  it.effect("propagates daemon thread config through start, resume, and fork", () =>
+    Effect.gen(function* () {
+      const calls: Array<{
+        method: "thread/start" | "thread/resume" | "thread/fork";
+        payload: unknown;
+      }> = [];
+      const config = {
+        "agents.enabled": false,
+        "features.multi_agent": false,
+        "features.multi_agent_v2": false,
+        "mcp_servers.t3-code.url": "http://127.0.0.1:3774/mcp",
+      } as const;
+      const client = {
+        request: <M extends "thread/start" | "thread/resume" | "thread/fork">(
+          method: M,
+          payload: CodexRpc.ClientRequestParamsByMethod[M],
+        ) => {
+          calls.push({ method, payload });
+          return Effect.succeed(
+            makeThreadOpenResponse("opened-thread") as CodexRpc.ClientRequestResponsesByMethod[M],
+          );
+        },
+      };
+
+      yield* openCodexThread({
+        client,
+        threadId: ThreadId.make("thread-start"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: undefined,
+        config,
+      });
+      yield* openCodexThread({
+        client,
+        threadId: ThreadId.make("thread-resume"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: "resume-thread",
+        config,
+      });
+      yield* openCodexThread({
+        client,
+        threadId: ThreadId.make("thread-fork"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: "resume-thread",
+        forkLastTurnId: "turn-1",
+        config,
+      });
+
+      NodeAssert.deepStrictEqual(
+        calls.map(({ method, payload }) => ({
+          method,
+          config: (payload as { config?: unknown }).config,
+        })),
+        [
+          { method: "thread/start", config },
+          { method: "thread/resume", config },
+          { method: "thread/fork", config },
+        ],
+      );
+    }),
+  );
+
+  it.effect(
+    "keeps Worker isolation config while rejecting daemon-native catalogs and T3 env tokens",
+    () =>
+      Effect.gen(function* () {
+        const workerConfig = yield* parseCodexDaemonThreadConfig([
+          "-c",
+          "agents.enabled=false",
+          "-c",
+          "features.multi_agent=false",
+          "-c",
+          "features.multi_agent_v2=false",
+          "-c",
+          "mcp_servers.t3-code.url=http://127.0.0.1:3774/mcp",
+        ]);
+        NodeAssert.deepStrictEqual(workerConfig, {
+          "agents.enabled": false,
+          "features.multi_agent": false,
+          "features.multi_agent_v2": false,
+          "mcp_servers.t3-code.url": "http://127.0.0.1:3774/mcp",
+        });
+
+        const nativeError = yield* parseCodexDaemonThreadConfig([
+          "-c",
+          "features.multi_agent=true",
+        ]).pipe(Effect.flip);
+        NodeAssert.ok(isCodexAppServerRequestError(nativeError));
+        NodeAssert.match(nativeError.errorMessage, /cannot enable the native multi-agent catalog/);
+
+        const t3Error = yield* parseCodexDaemonThreadConfig([
+          "-c",
+          'mcp_servers.t3-code.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
+        ]).pipe(Effect.flip);
+        NodeAssert.ok(isCodexAppServerRequestError(t3Error));
+        NodeAssert.match(t3Error.errorMessage, /T3 MCP bearer_token_env_var/);
+      }),
+  );
+
   it.effect("preserves a missing thread's identity instead of starting a replacement", () =>
     Effect.gen(function* () {
       const calls: Array<{

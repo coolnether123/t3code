@@ -86,6 +86,7 @@ export function useUsage(input: UsageSummaryInput): UsageView {
       input.resolution,
       input.sinceTime,
       input.untilTime,
+      input.includeRepeatedInput,
       input.includeQuotaHistory,
       input.quotaHistoryOnly,
       input.quotaIntervals,

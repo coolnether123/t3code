@@ -411,6 +411,24 @@ it("prefers sol over terra when both are available", () => {
   assert.deepStrictEqual(models.find((model) => model.isDefault)?.slug, "gpt-5.6-sol");
 });
 
+it("ranks qualified Codex models while preserving their wire ids", () => {
+  const models = applyPreferredCodexDefaultModel([
+    {
+      slug: "openai.gpt-5.6-luna",
+      name: "Luna",
+      isCustom: false,
+      isDefault: true,
+      capabilities: null,
+    },
+    { slug: "openai.gpt-5.6-sol", name: "Sol", isCustom: false, capabilities: null },
+  ]);
+
+  assert.deepStrictEqual(
+    models.filter((entry) => entry.isDefault).map((entry) => entry.slug),
+    ["openai.gpt-5.6-sol"],
+  );
+});
+
 it("keeps Codex's own default when no preferred model is available", () => {
   const models = applyPreferredCodexDefaultModel([
     { slug: "gpt-5.5", name: "GPT-5.5", isCustom: false, capabilities: null },

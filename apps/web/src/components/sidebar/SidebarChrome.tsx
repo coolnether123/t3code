@@ -3,6 +3,7 @@ import {
   BotIcon,
   ChartNoAxesColumnIcon,
   GitPullRequestIcon,
+  LayersIcon,
   SettingsIcon,
 } from "lucide-react";
 import type { ReactNode } from "react";
@@ -142,7 +143,7 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
         ? "settings"
         : /^\/projects\/[^/]+\/?$/.test(location.pathname)
           ? "project-settings"
-          : location.pathname === "/usage"
+          : location.pathname === "/usage" || location.pathname === "/repeated-input"
             ? "usage"
             : location.pathname === "/pull-requests"
               ? "pull-requests"
@@ -183,6 +184,11 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
     void navigate({ to: "/codex", search: { thread: undefined } });
   }, [closeMobileSidebar, navigate]);
 
+  const handleRepeatedInputClick = useCallback(() => {
+    closeMobileSidebar();
+    void navigate({ to: "/repeated-input" });
+  }, [closeMobileSidebar, navigate]);
+
   const handleBackClick = useCallback(() => {
     closeMobileSidebar();
     if (canGoBack) {
@@ -219,6 +225,11 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
             icon={<ChartNoAxesColumnIcon />}
             label="Usage"
             onClick={handleUsageClick}
+          />
+          <SidebarUtilityItem
+            icon={<LayersIcon />}
+            label="Skills & repeated input"
+            onClick={handleRepeatedInputClick}
           />
           <SidebarUtilityItem icon={<BotIcon />} label="Codex chats" onClick={handleCodexClick} />
         </>

@@ -61,6 +61,21 @@ describe("classifyModels", () => {
       ],
     );
   });
+
+  it("classifies qualified Codex families without changing their wire ids", () => {
+    const manifest: ModelManifestData = { version: 1, currentModels: { codex: ["gpt-test"] } };
+    const models = [
+      model({ slug: "openai.gpt-test", isLegacy: true }),
+      model({ slug: "openai.gpt-old" }),
+    ];
+    assert.deepStrictEqual(
+      classifyModels(models, manifest, CODEX).map((entry) => [entry.slug, entry.isLegacy ?? false]),
+      [
+        ["openai.gpt-test", false],
+        ["openai.gpt-old", true],
+      ],
+    );
+  });
 });
 
 describe("applyManifestDefault", () => {
@@ -90,6 +105,35 @@ describe("applyManifestDefault", () => {
       applyManifestDefault(models.slice(0, 1), manifest, driver),
       models.slice(0, 1),
     );
+  });
+
+  it("resolves a family default to the qualified live Codex model", () => {
+    const manifest: ModelManifestData = {
+      version: 1,
+      currentModels: {},
+      providers: { codex: { models: [], profiles: {}, defaults: { chat: "gpt-test" } } },
+    };
+    const models = [
+      model({ slug: "openai.gpt-old", isDefault: true }),
+      model({ slug: "openai.gpt-test" }),
+    ];
+    assert.strictEqual(
+      applyManifestDefault(models, manifest, CODEX).find((entry) => entry.isDefault)?.slug,
+      "openai.gpt-test",
+    );
+  });
+
+  it("does not resolve a Codex family default to a custom model", () => {
+    const manifest: ModelManifestData = {
+      version: 1,
+      currentModels: {},
+      providers: { codex: { models: [], profiles: {}, defaults: { chat: "gpt-test" } } },
+    };
+    const models = [
+      model({ slug: "gpt-old", isDefault: true }),
+      model({ slug: "openai.gpt-test", isCustom: true }),
+    ];
+    assert.deepStrictEqual(applyManifestDefault(models, manifest, CODEX), models);
   });
 });
 

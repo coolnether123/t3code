@@ -41,7 +41,8 @@ export function UsageQuotaCharts({
           Codex usage remaining over time
         </h3>
         <p className="mt-1 text-xs text-muted-foreground">
-          Saved weekly quota, 0–100%. Gaps over an hour and reset changes are not joined.
+          Saved weekly quota, 0–100%. Tracking gaps are joined by straight lines. Reset changes stay
+          separate.
         </p>
         <div className="mt-5 flex gap-2">
           <div

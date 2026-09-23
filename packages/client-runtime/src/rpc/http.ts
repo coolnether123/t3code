@@ -99,6 +99,21 @@ export const makeEnvironmentHttpApiClient = (httpBaseUrl: string) =>
     baseUrl: remoteApiBaseUrl(httpBaseUrl),
   });
 
+/** Decode only the endpoints needed by this request, not the entire API. */
+export const makeEnvironmentHttpApiGroupClient = <
+  Group extends keyof typeof EnvironmentHttpApi.groups,
+>(
+  httpBaseUrl: string,
+  group: Group,
+) =>
+  Effect.flatMap(HttpClient.HttpClient, (httpClient) =>
+    HttpApiClient.group(EnvironmentHttpApi, {
+      httpClient,
+      group,
+      baseUrl: remoteApiBaseUrl(httpBaseUrl),
+    }),
+  );
+
 /** Contract-derived request URLs for authentication proofs, tracing, and structured errors. */
 export const makeEnvironmentHttpApiUrlBuilder = (httpBaseUrl: string) =>
   HttpApiClient.urlBuilder(EnvironmentHttpApi, {

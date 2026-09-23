@@ -928,6 +928,20 @@ describe("workEntryIndicatesToolFailure", () => {
 });
 
 describe("deriveWorkLogEntries", () => {
+  it("keeps persisted worktree setup visible before the first agent turn", () => {
+    const activity = makeActivity({
+      id: "worktree-setup:thread-1",
+      kind: "worktree-setup",
+      summary: "Setting up checkout",
+      tone: "info",
+      payload: { phase: "running", stage: "checkout" },
+    });
+    const [entry] = deriveWorkLogEntries([activity]);
+    expect(entry?.id).toBe(activity.id);
+    expect(entry?.label).toBe("Setting up checkout");
+    expect(entry?.turnId).toBeNull();
+  });
+
   it("groups consecutive waits for one Worker into one logical session", () => {
     const firstWait = makeActivity({
       id: "worker-wait-first",

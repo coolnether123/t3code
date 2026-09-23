@@ -70,6 +70,18 @@ messages, review titles, and descriptions from your changes.
 Choose the writing style and model in **Settings → Source Control**. **Repository conventions**
 uses the project's instructions and recent commit subjects.
 
+## Worker checkouts
+
+An agent can start a T3 Worker in its own Git worktree with `worker_start` and
+`createWorktree: true`. The Worker uses that checkout for later assignments.
+Open its detail view to see the checkout path and setup status. Interrupt the
+Worker to cancel checkout creation.
+
+Closing a Worker removes its checkout only when Git confirms it is clean, on
+that Worker's generated branch, and has no commits missing from the project's
+current `HEAD`. Otherwise T3 Code preserves the checkout. Check the path in
+the Worker detail view before cleaning up preserved work yourself.
+
 ## Review and merge
 
 Open **Pull requests** to review changes and comments, request reviewers, check out a branch,

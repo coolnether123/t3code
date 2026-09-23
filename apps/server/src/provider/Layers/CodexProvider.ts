@@ -26,7 +26,7 @@ import type {
 } from "@t3tools/contracts";
 import { PREFERRED_DEFAULT_CODEX_MODELS, ServerSettingsError } from "@t3tools/contracts";
 
-import { createModelCapabilities } from "@t3tools/shared/model";
+import { codexModelFamily, createModelCapabilities } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { codexLaunchArgv, resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
 import { CODEX_COMPUTER_CONTROL_OPTION_ID } from "../CodexComputerControl.ts";
@@ -44,6 +44,7 @@ import { expandHomePath } from "../../pathExpansion.ts";
 import {
   codexAppServerCommandArgs,
   codexAppServerTransport,
+  makeCodexDesktopDaemonStdio,
   type CodexAppServerTransport,
 } from "../CodexAppServerTransport.ts";
 import { withCodexSandboxStartupRecovery } from "./CodexSandboxRecovery.ts";
@@ -298,9 +299,9 @@ function parseCodexModelListResponse(
 export function applyPreferredCodexDefaultModel(
   models: ReadonlyArray<ServerProviderModel>,
 ): ReadonlyArray<ServerProviderModel> {
-  const preferredSlug = PREFERRED_DEFAULT_CODEX_MODELS.find((slug) =>
-    models.some((model) => model.slug === slug && !model.isCustom),
-  );
+  const preferredSlug = PREFERRED_DEFAULT_CODEX_MODELS.flatMap((slug) =>
+    models.filter((model) => !model.isCustom && codexModelFamily(model.slug) === slug),
+  )[0]?.slug;
   if (!preferredSlug) {
     return models;
   }
@@ -480,7 +481,11 @@ const probeCodexAppServerProviderOnce = Effect.fn("probeCodexAppServerProviderOn
             }),
         ),
       );
-    const clientContext = yield* Layer.build(CodexClient.layerChildProcess(child));
+    const clientLayer =
+      input.appServerTransport === "desktop-daemon"
+        ? CodexClient.layerChildProcessStdio(child, yield* makeCodexDesktopDaemonStdio(child))
+        : CodexClient.layerChildProcess(child);
+    const clientContext = yield* Layer.build(clientLayer);
     const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
       Effect.provide(clientContext),
     );

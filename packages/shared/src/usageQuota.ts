@@ -10,6 +10,7 @@ import * as DateTime from "effect/DateTime";
 
 const MINUTE_MS = 60_000;
 const DAY_MS = 86_400_000;
+const CLOCK_EXCURSION_MS = 60 * MINUTE_MS;
 
 /** Start a new monitoring run after a day without readings; retain the source history. */
 export function quotaMonitoringSamples(samples: readonly UsageQuotaSample[]) {
@@ -40,17 +41,53 @@ export interface QuotaPeriod {
 /** A changed reset clock alone is not proof that a reset was used. */
 export function quotaPeriods(samples: readonly UsageQuotaSample[]): readonly QuotaPeriod[] {
   const sorted = [...samples].sort((a, b) => a.observedAt.localeCompare(b.observedAt));
+  const stable: UsageQuotaSample[] = [];
+  for (let index = 0; index < sorted.length; index++) {
+    const sample = sorted[index]!;
+    const previous = stable.at(-1);
+    let returnsToPreviousWindow = false;
+    if (
+      previous &&
+      sample.resetsAt !== previous.resetsAt &&
+      sample.remainingPercent > previous.remainingPercent + 2 &&
+      Date.parse(sample.observedAt) < Date.parse(previous.resetsAt)
+    ) {
+      for (let candidateIndex = index + 1; candidateIndex < sorted.length; candidateIndex++) {
+        const candidate = sorted[candidateIndex]!;
+        if (Date.parse(candidate.observedAt) - Date.parse(sample.observedAt) > CLOCK_EXCURSION_MS)
+          break;
+        if (
+          candidate.resetsAt === previous.resetsAt &&
+          candidate.remainingPercent <= previous.remainingPercent + 2
+        ) {
+          index = candidateIndex - 1;
+          returnsToPreviousWindow = true;
+          break;
+        }
+      }
+    }
+    if (!returnsToPreviousWindow) stable.push(sample);
+  }
   const groups: UsageQuotaSample[][] = [];
-  for (const sample of sorted) {
+  for (const sample of stable) {
     const group = groups.at(-1);
     const previous = group?.at(-1);
     // A clock-only adjustment may be ambiguous, but it is safe to cross only
     // when the period used nothing and its balance is unchanged at both edges.
+    const clockChanged =
+      previous !== undefined &&
+      Math.abs(Date.parse(sample.resetsAt) - Date.parse(previous.resetsAt)) > MINUTE_MS;
+    const unchangedUnusedBalance =
+      group !== undefined &&
+      previous !== undefined &&
+      Date.parse(sample.observedAt) - Date.parse(previous.observedAt) <= CLOCK_EXCURSION_MS &&
+      group[0]!.remainingPercent === previous.remainingPercent &&
+      previous.remainingPercent === sample.remainingPercent;
     if (
       !group ||
       !previous ||
       sample.remainingPercent > previous.remainingPercent ||
-      Math.abs(Date.parse(sample.resetsAt) - Date.parse(previous.resetsAt)) > MINUTE_MS
+      (clockChanged && !unchangedUnusedBalance)
     ) {
       groups.push([sample]);
     } else if (sample.observedAt !== previous.observedAt) group.push(sample);
@@ -211,7 +248,7 @@ export function quotaValueWithHistoricalCalibration(
   earlier: readonly QuotaValueSnapshot[] = [],
 ): QuotaValue {
   if (current.value.usdPerPercentagePoint !== null || previous === undefined) return current.value;
-  const candidates = [previous, ...[...earlier].reverse()];
+  const candidates = [previous, ...earlier.toReversed()];
   let source: QuotaValueSnapshot | undefined;
   for (const [index, candidate] of candidates.entries()) {
     const next = index === 0 ? current : candidates[index - 1];
@@ -442,7 +479,12 @@ function quotaValueExact(
       return unavailable(`${label} could not report usage. Refresh to retry.`);
     }
     if (summary.quotaCosts === undefined)
-      return unavailable(`${label} needs a server with reset-history support.`);
+      return unavailable(
+        summary.quotaHistory !== undefined ||
+          summary.sources.some((source) => source.status === "partial")
+          ? `${label} is still reading Codex transcripts.`
+          : `${label} needs a server with reset-history support.`,
+      );
     const sources = summary.sources.filter(
       (source) => source.fingerprint.provider === "codex" && source.status !== "missing",
     );
@@ -573,7 +615,7 @@ export function quotaValue(
   };
 }
 
-/** Lines stop across missing hours and reset changes; every point is a saved observation. */
+/** Join saved readings across tracking gaps; reset changes start a separate line. */
 export function quotaHistoryPoints(samples: readonly UsageQuotaSample[]) {
   const sorted = [...samples].sort((a, b) => a.observedAt.localeCompare(b.observedAt));
   const firstTime = sorted[0] ? Date.parse(sorted[0].observedAt) : 0;
@@ -591,10 +633,7 @@ export function quotaHistoryPoints(samples: readonly UsageQuotaSample[]) {
           ? 0.5
           : (Date.parse(sample.observedAt) - firstTime) / (lastTime - firstTime),
       resetChange,
-      breakBefore:
-        previous === undefined ||
-        resetChange ||
-        Date.parse(sample.observedAt) - Date.parse(previous.observedAt) > 60 * MINUTE_MS,
+      breakBefore: previous === undefined || resetChange,
     };
   });
 }

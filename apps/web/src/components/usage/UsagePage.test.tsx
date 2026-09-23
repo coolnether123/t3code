@@ -35,6 +35,12 @@ vi.mock("react", async (importOriginal) => {
 vi.mock("../../env", () => ({ isElectron: false }));
 vi.mock("@tanstack/react-router", () => ({ Link: "a", useNavigate: () => vi.fn() }));
 vi.mock("../../state/usage", () => ({ useUsage: testState.useUsage }));
+vi.mock("@effect/atom-react", () => ({ useAtomValue: () => new Map() }));
+vi.mock("../../state/presentation", () => ({
+  environmentPresentations: { presentationsAtom: null },
+}));
+vi.mock("../../state/server", () => ({ serverEnvironment: { refreshProviders: null } }));
+vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => vi.fn() }));
 vi.mock("../ui/button", () => ({ Button: "button" }));
 vi.mock("../ui/scroll-area", () => ({ ScrollArea: "div" }));
 vi.mock("../ui/select", () => ({
@@ -73,6 +79,7 @@ vi.mock("./usageProviders", async (importOriginal) => {
 
 import { UsagePage } from "./UsagePage";
 import usagePageSource from "./UsagePage.tsx?raw";
+import usageResetPageSource from "./UsageResetPage.tsx?raw";
 
 const providerTotals = (codex: number, claude: number) =>
   new Map([
@@ -257,5 +264,21 @@ describe("UsagePage mobile range controls", () => {
     expect(usagePageSource).toContain('{ days: 365, label: "1 year" }');
     expect(usagePageSource).toContain('aria-label="Usage period"');
     expect(usagePageSource).toContain("WINDOW_OPTIONS.map((option)");
+  });
+
+  it("preserves the original Usage content and request without attribution", () => {
+    testState.useUsage.mockClear();
+    const markup = renderToStaticMarkup(<UsagePage />);
+    expect(markup).not.toContain('to="/repeated-input"');
+    expect(markup).not.toContain("Skills &amp; repeated input");
+    expect(markup).not.toContain("Attribution overview");
+    expect(markup).toContain('to="/usage-resets"');
+    expect(testState.useUsage.mock.calls[0]?.[0]).not.toHaveProperty("includeRepeatedInput");
+  });
+
+  it("keeps repeated input out of the Codex reset monitor", () => {
+    expect(usageResetPageSource).not.toContain("includeRepeatedInput");
+    expect(usageResetPageSource).not.toContain("RepeatedInputSection");
+    expect(usageResetPageSource).not.toContain("Skills & repeated input");
   });
 });

@@ -570,10 +570,64 @@ export const OrchestrationThread = Schema.Struct({
 });
 export type OrchestrationThread = typeof OrchestrationThread.Type;
 
+export const ThreadContextCompactionStatus = Schema.Literals([
+  "active",
+  "delivery-uncertain",
+  "completed",
+  "failed",
+  "interrupted",
+]);
+export type ThreadContextCompactionStatus = typeof ThreadContextCompactionStatus.Type;
+
+export const ThreadContextCompactionMessageStatus = Schema.Literals([
+  "queued",
+  "attempted",
+  "delivery-uncertain",
+  "dispatched",
+  "failed",
+  "cancelled",
+]);
+export type ThreadContextCompactionMessageStatus = typeof ThreadContextCompactionMessageStatus.Type;
+
+export const ThreadContextCompactionTurnStart = Schema.Struct({
+  modelSelection: Schema.optional(ModelSelection),
+  titleSeed: Schema.optional(TrimmedNonEmptyString),
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+  subagentBackend: Schema.optionalKey(SubagentBackend),
+  sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  createdAt: IsoDateTime,
+});
+export type ThreadContextCompactionTurnStart = typeof ThreadContextCompactionTurnStart.Type;
+
+export const ThreadContextCompactionQueuedMessage = Schema.Struct({
+  messageId: MessageId,
+  requestOrder: NonNegativeInt,
+  turnStart: ThreadContextCompactionTurnStart,
+  status: ThreadContextCompactionMessageStatus,
+  detail: Schema.optional(TrimmedString),
+  updatedAt: IsoDateTime,
+});
+export type ThreadContextCompactionQueuedMessage = typeof ThreadContextCompactionQueuedMessage.Type;
+
+export const ThreadContextCompaction = Schema.Struct({
+  threadId: ThreadId,
+  compactMessageId: MessageId,
+  status: ThreadContextCompactionStatus,
+  detail: Schema.optional(TrimmedString),
+  startedAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+  queuedMessages: Schema.Array(ThreadContextCompactionQueuedMessage),
+});
+export type ThreadContextCompaction = typeof ThreadContextCompaction.Type;
+
 export const OrchestrationReadModel = Schema.Struct({
   snapshotSequence: NonNegativeInt,
   projects: Schema.Array(OrchestrationProject),
   threads: Schema.Array(OrchestrationThread),
+  // Kept on the command-side read model only. This state is uncapped because
+  // it gates turn dispatch and is not safe to derive from retained activities.
+  activeContextCompactions: Schema.optional(Schema.Array(ThreadContextCompaction)),
   updatedAt: IsoDateTime,
 });
 export type OrchestrationReadModel = typeof OrchestrationReadModel.Type;
@@ -1320,6 +1374,27 @@ const ThreadPullRequestSyncCommand = Schema.Struct({
   linkedPullRequest: Schema.optional(ThreadLinkedPullRequest),
 });
 
+const ThreadContextCompactionStatusSetCommand = Schema.Struct({
+  type: Schema.Literal("thread.context-compaction.status.set"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  compactMessageId: MessageId,
+  status: Schema.Literals(["delivery-uncertain", "completed", "failed", "interrupted"]),
+  detail: Schema.optional(TrimmedString),
+  updatedAt: IsoDateTime,
+});
+
+const ThreadContextCompactionMessageStatusSetCommand = Schema.Struct({
+  type: Schema.Literal("thread.context-compaction.message.status.set"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  compactMessageId: MessageId,
+  messageId: MessageId,
+  status: Schema.Literals(["delivery-uncertain", "dispatched", "failed", "cancelled"]),
+  detail: Schema.optional(TrimmedString),
+  updatedAt: IsoDateTime,
+});
+
 const InternalOrchestrationCommand = Schema.Union([
   ThreadAutoSettleCommand,
   ThreadSessionSetCommand,
@@ -1333,6 +1408,8 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadEditFromHereFinishCommand,
   ThreadTitleRegenerationCompleteCommand,
   ThreadPullRequestSyncCommand,
+  ThreadContextCompactionStatusSetCommand,
+  ThreadContextCompactionMessageStatusSetCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
@@ -1362,6 +1439,10 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.interaction-mode-set",
   "thread.message-sent",
   "thread.turn-start-requested",
+  "thread.context-compaction-started",
+  "thread.context-compaction-message-queued",
+  "thread.context-compaction-status-changed",
+  "thread.context-compaction-message-status-changed",
   "thread.turn-steer-requested",
   "thread.turn-interrupt-requested",
   "thread.approval-response-requested",
@@ -1536,7 +1617,8 @@ export const ThreadMessageSentPayload = Schema.Struct({
   role: OrchestrationMessageRole,
   text: Schema.String,
   attachments: Schema.optional(Schema.Array(ChatAttachment)),
-  turnId: Schema.NullOr(TurnId),
+  // Events persisted before the field existed carry no key at all.
+  turnId: Schema.NullOr(TurnId).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   streaming: Schema.Boolean,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -1554,6 +1636,36 @@ export const ThreadTurnStartRequestedPayload = Schema.Struct({
   subagentBackend: Schema.optionalKey(SubagentBackend),
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
   createdAt: IsoDateTime,
+});
+
+export const ThreadContextCompactionStartedPayload = Schema.Struct({
+  threadId: ThreadId,
+  compactMessageId: MessageId,
+  startedAt: IsoDateTime,
+});
+
+export const ThreadContextCompactionMessageQueuedPayload = Schema.Struct({
+  threadId: ThreadId,
+  compactMessageId: MessageId,
+  messageId: MessageId,
+  turnStart: ThreadContextCompactionTurnStart,
+});
+
+export const ThreadContextCompactionStatusChangedPayload = Schema.Struct({
+  threadId: ThreadId,
+  compactMessageId: MessageId,
+  status: ThreadContextCompactionStatus,
+  detail: Schema.optional(TrimmedString),
+  updatedAt: IsoDateTime,
+});
+
+export const ThreadContextCompactionMessageStatusChangedPayload = Schema.Struct({
+  threadId: ThreadId,
+  compactMessageId: MessageId,
+  messageId: MessageId,
+  status: ThreadContextCompactionMessageStatus,
+  detail: Schema.optional(TrimmedString),
+  updatedAt: IsoDateTime,
 });
 
 export const ThreadTurnInterruptRequestedPayload = Schema.Struct({
@@ -1771,6 +1883,26 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.turn-start-requested"),
     payload: ThreadTurnStartRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.context-compaction-started"),
+    payload: ThreadContextCompactionStartedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.context-compaction-message-queued"),
+    payload: ThreadContextCompactionMessageQueuedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.context-compaction-status-changed"),
+    payload: ThreadContextCompactionStatusChangedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.context-compaction-message-status-changed"),
+    payload: ThreadContextCompactionMessageStatusChangedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

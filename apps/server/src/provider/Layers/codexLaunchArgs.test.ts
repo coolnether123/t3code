@@ -5,6 +5,7 @@ import { describe, it } from "vite-plus/test";
 import {
   codexAppServerArgs,
   codexExecLaunchArgs,
+  parseCodexConfigOverrides,
   resolveCodexLaunchArgs,
 } from "./codexLaunchArgs.ts";
 
@@ -55,5 +56,53 @@ describe("codexExecLaunchArgs", () => {
     NodeAssert.deepStrictEqual(codexExecLaunchArgs("--config --strict-config --enable --disable"), [
       "--strict-config",
     ]);
+  });
+});
+
+describe("parseCodexConfigOverrides", () => {
+  it("converts supported config and feature flags into a thread config map", () => {
+    NodeAssert.deepStrictEqual(
+      parseCodexConfigOverrides([
+        "-c",
+        "model=gpt-5.3-codex",
+        "--config=temperature=0.2",
+        "--enable",
+        "web_search",
+        "--disable=multi_agent",
+        "-c",
+        'servers=["one", "two"]',
+        "-c",
+        "use_legacy_landlock=true",
+      ]),
+      {
+        _tag: "success",
+        config: {
+          model: "gpt-5.3-codex",
+          temperature: 0.2,
+          "features.web_search": true,
+          "features.multi_agent": false,
+          servers: ["one", "two"],
+          "features.use_legacy_landlock": true,
+        },
+      },
+    );
+  });
+
+  it("reports unsupported proxy flags and malformed overrides", () => {
+    NodeAssert.deepStrictEqual(parseCodexConfigOverrides(["--strict-config"]), {
+      _tag: "failure",
+      argument: "--strict-config",
+      reason: "the daemon proxy has no per-thread equivalent for this flag",
+    });
+    NodeAssert.deepStrictEqual(parseCodexConfigOverrides(["-c", "missing-value"]), {
+      _tag: "failure",
+      argument: "missing-value",
+      reason: "it must use key=value syntax",
+    });
+    NodeAssert.deepStrictEqual(parseCodexConfigOverrides(["--config", "-c"]), {
+      _tag: "failure",
+      argument: "--config",
+      reason: "it requires a following key=value argument",
+    });
   });
 });

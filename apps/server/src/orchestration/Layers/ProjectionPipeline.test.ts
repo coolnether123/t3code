@@ -246,6 +246,51 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
       assert.deepEqual(unsettledRows, [{ settledOverride: "active", settledAt: null }]);
     }),
   );
+  it.effect("replays beyond one event-store page when bootstrapping a new projector", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`
+        WITH RECURSIVE events(n) AS (
+          SELECT 1 UNION ALL SELECT n + 1 FROM events WHERE n < 1001
+        )
+        INSERT INTO orchestration_events (
+          event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+          command_id, causation_event_id, correlation_id, actor_kind, payload_json, metadata_json
+        )
+        SELECT
+          'bootstrap-compaction-event-' || n, 'thread', 'bootstrap-compaction-thread', n,
+          'thread.context-compaction-started', '2026-09-23T00:00:00.000Z',
+          'bootstrap-compaction-command-' || n, NULL, NULL, 'client',
+          json_object(
+            'threadId', 'bootstrap-compaction-thread', 'compactMessageId', 'compact-' || n,
+            'startedAt', '2026-09-23T00:00:00.000Z'
+          ),
+          '{}'
+        FROM events
+      `;
+
+      yield* projectionPipeline.bootstrap;
+      const state = yield* sql<{ readonly lastAppliedSequence: number }>`
+        SELECT last_applied_sequence AS "lastAppliedSequence"
+        FROM projection_state
+        WHERE projector = 'projection.thread-context-compactions'
+      `;
+      const tip = yield* sql<{ readonly sequence: number }>`
+        SELECT MAX(sequence) AS sequence FROM orchestration_events
+      `;
+      const compactions = yield* sql<{ readonly compactMessageId: string }>`
+        SELECT compact_message_id AS "compactMessageId" FROM projection_thread_context_compactions
+        WHERE thread_id = 'bootstrap-compaction-thread'
+      `;
+      assert.ok((tip[0]?.sequence ?? 0) > 1000);
+      assert.strictEqual(state[0]?.lastAppliedSequence, tip[0]?.sequence);
+      assert.deepEqual(
+        compactions.map((row) => row.compactMessageId),
+        ["compact-1001"],
+      );
+    }),
+  );
 });
 
 it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-base-")))(

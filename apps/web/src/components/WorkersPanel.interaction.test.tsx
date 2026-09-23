@@ -159,6 +159,32 @@ afterEach(async () => {
 });
 
 describe("Workers Overview drill-down", () => {
+  it("shows the Worker checkout state and explains a retained checkout", async () => {
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () =>
+      root?.render(
+        <WorkerDetailView
+          detail={{
+            ...detail,
+            worktree: {
+              projectRoot: "A:/Dev/project",
+              checkoutPath: "A:/Dev/worktrees/worker",
+              refName: "t3-worker-overview-worker",
+              status: "preserved",
+              error: "Checkout retained because it contains unmerged commits.",
+            },
+          }}
+          showBack={false}
+          onBack={() => {}}
+        />,
+      ),
+    );
+    expect(container.textContent).toContain("Checkout preserved");
+    expect(container.textContent).toContain("unmerged commits");
+  });
+
   it("opens the read-only Worker conversation and expands sanitized tool output at mobile width", async () => {
     container = document.createElement("div");
     container.style.width = "390px";

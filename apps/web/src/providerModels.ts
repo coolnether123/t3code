@@ -9,7 +9,11 @@ import {
   type ServerProvider,
   type ServerProviderModel,
 } from "@t3tools/contracts";
-import { createModelCapabilities, normalizeModelSlug } from "@t3tools/shared/model";
+import {
+  createModelCapabilities,
+  normalizeModelSlug,
+  resolveSelectableModel,
+} from "@t3tools/shared/model";
 
 const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],
@@ -118,7 +122,8 @@ export function getProviderModelCapabilities(
   provider: ProviderDriverKind,
   planModeEnabled = true,
 ): ModelCapabilities {
-  const slug = normalizeModelSlug(model, provider);
+  const slug =
+    resolveSelectableModel(provider, model, models) ?? normalizeModelSlug(model, provider);
   const caps =
     models.find((candidate) => candidate.slug === slug)?.capabilities ?? EMPTY_CAPABILITIES;
   if (planModeEnabled) {

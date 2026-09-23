@@ -150,6 +150,9 @@ describe("ProviderCommandReactor", () => {
     readonly requiresNewThreadForModelChange?: boolean;
     readonly titleRegenerationCompletionDispatchFailures?: number;
     readonly titleRegenerationBeforeStart?: "one" | "two";
+    readonly seedInterruptedCompaction?: "active" | "attempted";
+    readonly compactThreadEffect?: NonNullable<ProviderServiceShape["compactThread"]>;
+    readonly sendTurnEffect?: ProviderServiceShape["sendTurn"];
     readonly startSessionEffect?: (
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderAdapterRequestError>;
@@ -229,11 +232,17 @@ describe("ProviderCommandReactor", () => {
         ),
       );
     });
-    const sendTurn = vi.fn((_: unknown) =>
-      Effect.succeed({
-        threadId: ThreadId.make("thread-1"),
-        turnId: asTurnId("turn-1"),
-      }),
+    const sendTurn = vi.fn<ProviderServiceShape["sendTurn"]>(
+      (turnInput) =>
+        input?.sendTurnEffect?.(turnInput) ??
+        Effect.succeed({
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId("turn-1"),
+        }),
+    );
+    const compactThread = vi.fn<NonNullable<ProviderServiceShape["compactThread"]>>(
+      (threadId, modelSelection, requestId) =>
+        input?.compactThreadEffect?.(threadId, modelSelection, requestId) ?? Effect.void,
     );
     const interruptTurn = vi.fn((_: unknown) => Effect.void);
     const respondToRequest = vi.fn<ProviderServiceShape["respondToRequest"]>(() => Effect.void);
@@ -311,6 +320,7 @@ describe("ProviderCommandReactor", () => {
     const service: ProviderServiceShape = {
       startSession: startSession as ProviderServiceShape["startSession"],
       sendTurn: sendTurn as ProviderServiceShape["sendTurn"],
+      compactThread,
       interruptTurn: interruptTurn as ProviderServiceShape["interruptTurn"],
       respondToRequest: respondToRequest as ProviderServiceShape["respondToRequest"],
       respondToUserInput: respondToUserInput as ProviderServiceShape["respondToUserInput"],
@@ -487,6 +497,88 @@ describe("ProviderCommandReactor", () => {
       );
     }
 
+    if (input?.seedInterruptedCompaction) {
+      const threadId = ThreadId.make("thread-1");
+      await Effect.runPromise(
+        engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-pre-restart-existing-message"),
+          threadId,
+          message: {
+            messageId: asMessageId("pre-restart-existing-message"),
+            role: "user",
+            text: "Existing conversation",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        }),
+      );
+      await Effect.runPromise(
+        engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-pre-restart-session"),
+          threadId,
+          session: {
+            threadId,
+            status: "ready",
+            providerName: "codex",
+            providerInstanceId: modelSelection.instanceId,
+            runtimeMode: "approval-required",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        }),
+      );
+      for (const [messageId, text] of [
+        ["pre-restart-compact", "/compact"],
+        ["pre-restart-queued", "Send after compact"],
+      ] as const) {
+        await Effect.runPromise(
+          engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make(`cmd-${messageId}`),
+            threadId,
+            message: { messageId: asMessageId(messageId), role: "user", text, attachments: [] },
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "approval-required",
+            createdAt: now,
+          }),
+        );
+      }
+      if (input.seedInterruptedCompaction === "attempted") {
+        await Effect.runPromise(
+          engine.dispatch({
+            type: "thread.context-compaction.status.set",
+            commandId: CommandId.make("cmd-pre-restart-compact-completed"),
+            threadId,
+            compactMessageId: asMessageId("pre-restart-compact"),
+            status: "completed",
+            updatedAt: now,
+          }),
+        );
+        await Effect.runPromise(
+          engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make("cmd-pre-restart-replay-attempt"),
+            threadId,
+            message: {
+              messageId: asMessageId("pre-restart-queued"),
+              role: "user",
+              text: "Send after compact",
+              attachments: [],
+            },
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "approval-required",
+            createdAt: now,
+          }),
+        );
+      }
+    }
+
     scope = await Effect.runPromise(Scope.make("sequential"));
     await Effect.runPromise(reactor.start().pipe(Scope.provide(scope)));
     const drain = () => Effect.runPromise(reactor.drain);
@@ -494,8 +586,10 @@ describe("ProviderCommandReactor", () => {
     return {
       engine,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
+      readCompactions: () => Effect.runPromise(snapshotQuery.getActiveContextCompactions()),
       startSession,
       sendTurn,
+      compactThread,
       interruptTurn,
       respondToRequest,
       respondToUserInput,
@@ -513,6 +607,371 @@ describe("ProviderCommandReactor", () => {
       },
     };
   }
+
+  async function seedExistingReadyConversation(harness: Awaited<ReturnType<typeof createHarness>>) {
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = ThreadId.make("thread-1");
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-existing-conversation-start"),
+        threadId,
+        message: {
+          messageId: asMessageId("existing-user-message"),
+          role: "user",
+          text: "Existing conversation",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === threadId);
+    if (!thread?.session) throw new Error("Expected the initial turn to create a session.");
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-existing-conversation-ready"),
+        threadId,
+        session: {
+          ...thread.session,
+          status: "ready",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+    await harness.drain();
+    return { threadId, now };
+  }
+
+  const dispatchTurnStart = (
+    harness: Awaited<ReturnType<typeof createHarness>>,
+    input: { messageId: string; text: string; createdAt: string },
+  ) =>
+    harness.engine.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make(`cmd-${input.messageId}`),
+      threadId: ThreadId.make("thread-1"),
+      message: {
+        messageId: asMessageId(input.messageId),
+        role: "user",
+        text: input.text,
+        attachments: [],
+      },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: input.createdAt,
+    });
+
+  it.each(["active", "attempted"] as const)(
+    "marks a pre-restart %s compaction queue uncertain without replaying it",
+    async (status) => {
+      const harness = await createHarness({ seedInterruptedCompaction: status });
+      const generations = await harness.readCompactions();
+      const generation = generations.find(
+        (entry) => entry.compactMessageId === asMessageId("pre-restart-compact"),
+      );
+      expect(generation?.status).toBe(status === "active" ? "interrupted" : "completed");
+      expect(generation?.queuedMessages).toEqual([
+        expect.objectContaining({
+          messageId: asMessageId("pre-restart-queued"),
+          status: "delivery-uncertain",
+        }),
+      ]);
+      expect(harness.compactThread).not.toHaveBeenCalled();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+
+      const thread = (await harness.readModel()).threads.find(
+        (entry) => entry.id === ThreadId.make("thread-1"),
+      );
+      expect(thread?.messages.filter((entry) => entry.id === "pre-restart-queued")).toHaveLength(1);
+      expect(
+        thread?.activities.some(
+          (entry) =>
+            entry.summary === "Queued message delivery is uncertain" &&
+            typeof entry.payload === "object" &&
+            entry.payload !== null &&
+            "requestId" in entry.payload &&
+            entry.payload.requestId === "pre-restart-queued",
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it("queues turn starts during compaction and replays them in order", async () => {
+    const compactGate = await Effect.runPromise(Deferred.make<void, ProviderAdapterRequestError>());
+    let sendTurnCount = 0;
+    const harness = await createHarness({
+      compactThreadEffect: () => Deferred.await(compactGate),
+      sendTurnEffect: () => {
+        sendTurnCount += 1;
+        return Effect.succeed({
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId(`turn-${sendTurnCount}`),
+        });
+      },
+    });
+    const { threadId, now } = await seedExistingReadyConversation(harness);
+
+    await Effect.runPromise(
+      dispatchTurnStart(harness, {
+        messageId: "compact-request",
+        text: "/compact",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.compactThread.mock.calls.length === 1);
+    expect(harness.compactThread.mock.calls[0]).toEqual([
+      threadId,
+      undefined,
+      asMessageId("compact-request"),
+    ]);
+
+    await Effect.runPromise(
+      dispatchTurnStart(harness, {
+        messageId: "queued-message-1",
+        text: "First queued message",
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      dispatchTurnStart(harness, {
+        messageId: "queued-message-2",
+        text: "Second queued message",
+        createdAt: now,
+      }),
+    );
+    await harness.drain();
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+
+    await Effect.runPromise(Deferred.succeed(compactGate, undefined));
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+    expect(harness.sendTurn.mock.calls[1]?.[0].input).toBe("First queued message");
+    expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+
+    const setSessionStatus = async (status: "running" | "ready") => {
+      const readModel = await harness.readModel();
+      const session = readModel.threads.find((entry) => entry.id === threadId)?.session;
+      if (!session) throw new Error("Expected a session while replaying queued turns.");
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`cmd-queued-turn-${status}`),
+          threadId,
+          session: {
+            ...session,
+            status,
+            activeTurnId: status === "running" ? asTurnId("turn-queued-1") : null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        }),
+      );
+      await harness.drain();
+    };
+
+    // sendTurn has returned from its RPC, but the provider turn is still active.
+    await harness.drain();
+    expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+    await setSessionStatus("running");
+    expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+    await setSessionStatus("ready");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 3);
+    expect(harness.sendTurn.mock.calls[2]?.[0].input).toBe("Second queued message");
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === threadId);
+    expect(thread?.messages.filter((entry) => entry.id === "queued-message-1")).toHaveLength(1);
+    expect(thread?.messages.filter((entry) => entry.id === "queued-message-2")).toHaveLength(1);
+  });
+
+  it("reports queued turn starts when compaction fails", async () => {
+    const compactGate = await Effect.runPromise(Deferred.make<void, ProviderAdapterRequestError>());
+    const harness = await createHarness({ compactThreadEffect: () => Deferred.await(compactGate) });
+    const { threadId, now } = await seedExistingReadyConversation(harness);
+
+    await Effect.runPromise(
+      dispatchTurnStart(harness, {
+        messageId: "compact-failure-request",
+        text: "/compact",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.compactThread.mock.calls.length === 1);
+    for (const [messageId, text] of [
+      ["queued-failure-1", "Queued before compaction failure"],
+      ["queued-failure-2", "Also queued before compaction failure"],
+    ] as const) {
+      await Effect.runPromise(dispatchTurnStart(harness, { messageId, text, createdAt: now }));
+    }
+    await harness.drain();
+
+    await Effect.runPromise(
+      Deferred.fail(
+        compactGate,
+        new ProviderAdapterRequestError({
+          provider: "codex",
+          method: "compactThread",
+          detail: "Injected compaction failure",
+        }),
+      ),
+    );
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === threadId);
+      return (
+        thread?.activities.filter((activity) => activity.summary === "Queued message was not sent")
+          .length === 2
+      );
+    });
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === threadId);
+    const canceled = thread?.activities.filter(
+      (activity) => activity.summary === "Queued message was not sent",
+    );
+    expect(
+      canceled
+        ?.map((activity) => {
+          const payload = activity.payload;
+          return typeof payload === "object" && payload !== null && "requestId" in payload
+            ? String(payload.requestId)
+            : null;
+        })
+        .sort(),
+    ).toEqual(["queued-failure-1", "queued-failure-2"]);
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels later queued messages when the first replayed turn fails", async () => {
+    const compactGate = await Effect.runPromise(Deferred.make<void, ProviderAdapterRequestError>());
+    let sendTurnCount = 0;
+    const harness = await createHarness({
+      compactThreadEffect: () => Deferred.await(compactGate),
+      sendTurnEffect: () => {
+        sendTurnCount += 1;
+        if (sendTurnCount === 2) {
+          return Effect.fail(
+            new ProviderAdapterRequestError({
+              provider: "codex",
+              method: "sendTurn",
+              detail: "Injected queued turn start failure",
+            }),
+          );
+        }
+        return Effect.succeed({
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId(`turn-${sendTurnCount}`),
+        });
+      },
+    });
+    const { threadId, now } = await seedExistingReadyConversation(harness);
+
+    await Effect.runPromise(
+      dispatchTurnStart(harness, {
+        messageId: "compact-before-send-failure",
+        text: "/compact",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.compactThread.mock.calls.length === 1);
+    await Effect.runPromise(
+      dispatchTurnStart(harness, {
+        messageId: "queued-send-failure-1",
+        text: "This queued send fails",
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      dispatchTurnStart(harness, {
+        messageId: "queued-send-failure-2",
+        text: "This message must not overtake the failure",
+        createdAt: now,
+      }),
+    );
+    await harness.drain();
+
+    await Effect.runPromise(Deferred.succeed(compactGate, undefined));
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === threadId);
+      return (
+        thread?.activities.some(
+          (activity) =>
+            activity.summary === "Queued message was not sent" &&
+            typeof activity.payload === "object" &&
+            activity.payload !== null &&
+            "requestId" in activity.payload &&
+            activity.payload.requestId === "queued-send-failure-2",
+        ) ?? false
+      );
+    });
+    expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["interrupt", "stop"] as const)(
+    "cancels queued turn starts when compaction is %s",
+    async (action) => {
+      const compactGate = await Effect.runPromise(
+        Deferred.make<void, ProviderAdapterRequestError>(),
+      );
+      const harness = await createHarness({
+        compactThreadEffect: () => Deferred.await(compactGate),
+      });
+      const { threadId, now } = await seedExistingReadyConversation(harness);
+
+      await Effect.runPromise(
+        dispatchTurnStart(harness, {
+          messageId: `compact-${action}-request`,
+          text: "/compact",
+          createdAt: now,
+        }),
+      );
+      await waitFor(() => harness.compactThread.mock.calls.length === 1);
+      await Effect.runPromise(
+        dispatchTurnStart(harness, {
+          messageId: `queued-${action}-message`,
+          text: "Do not send after cancellation",
+          createdAt: now,
+        }),
+      );
+      await harness.drain();
+      await Effect.runPromise(
+        harness.engine.dispatch(
+          action === "interrupt"
+            ? {
+                type: "thread.turn.interrupt",
+                commandId: CommandId.make("cmd-compaction-interrupt"),
+                threadId,
+                createdAt: now,
+              }
+            : {
+                type: "thread.session.stop",
+                commandId: CommandId.make("cmd-compaction-stop"),
+                threadId,
+                createdAt: now,
+              },
+        ),
+      );
+      await harness.drain();
+      await Effect.runPromise(Deferred.succeed(compactGate, undefined));
+      await waitFor(async () => {
+        const readModel = await harness.readModel();
+        const thread = readModel.threads.find((entry) => entry.id === threadId);
+        return (
+          thread?.activities.some(
+            (activity) => activity.summary === "Queued message was not sent",
+          ) ?? false
+        );
+      });
+      expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("reacts to thread.turn.start by ensuring session and sending provider turn", async () => {
     const harness = await createHarness();
@@ -2050,7 +2509,7 @@ describe("ProviderCommandReactor", () => {
     });
     const now = "2026-01-01T00:00:00.000Z";
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.turn.start",
         commandId: CommandId.make("cmd-turn-start-workspace-1"),
@@ -2073,7 +2532,7 @@ describe("ProviderCommandReactor", () => {
       cwd: "/tmp/provider-project",
     });
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.meta.update",
         commandId: CommandId.make("cmd-thread-worktree-change"),
@@ -2082,7 +2541,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.turn.start",
         commandId: CommandId.make("cmd-turn-start-workspace-2"),
@@ -2123,7 +2582,7 @@ describe("ProviderCommandReactor", () => {
     });
     const now = "2026-01-01T00:00:00.000Z";
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.turn.start",
         commandId: CommandId.make("cmd-turn-start-claude-effort-1"),
@@ -2148,7 +2607,7 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.turn.start",
         commandId: CommandId.make("cmd-turn-start-claude-effort-2"),
@@ -2186,7 +2645,7 @@ describe("ProviderCommandReactor", () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.runtime-mode.set",
         commandId: CommandId.make("cmd-runtime-mode-set-initial-full-access"),
@@ -2196,7 +2655,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.turn.start",
         commandId: CommandId.make("cmd-turn-start-runtime-mode-1"),
@@ -2216,7 +2675,7 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.runtime-mode.set",
         commandId: CommandId.make("cmd-runtime-mode-set-1"),
@@ -2232,7 +2691,7 @@ describe("ProviderCommandReactor", () => {
       return thread?.runtimeMode === "approval-required";
     });
     await waitFor(() => harness.startSession.mock.calls.length === 2);
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.turn.start",
         commandId: CommandId.make("cmd-turn-start-runtime-mode-2"),
@@ -2276,7 +2735,7 @@ describe("ProviderCommandReactor", () => {
     });
     const now = "2026-01-01T00:00:00.000Z";
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.session.set",
         commandId: CommandId.make("cmd-session-set-runtime-mode-claude"),
@@ -2294,7 +2753,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.runtime-mode.set",
         commandId: CommandId.make("cmd-runtime-mode-set-claude-no-options"),
@@ -2319,7 +2778,7 @@ describe("ProviderCommandReactor", () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.runtime-mode.set",
         commandId: CommandId.make("cmd-runtime-mode-set-initial-full-access-2"),
@@ -2329,7 +2788,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.turn.start",
         commandId: CommandId.make("cmd-turn-start-restart-failure-1"),
@@ -2353,7 +2812,7 @@ describe("ProviderCommandReactor", () => {
       (_: unknown, __: unknown) => Effect.fail("simulated restart failure") as never,
     );
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.runtime-mode.set",
         commandId: CommandId.make("cmd-runtime-mode-set-restart-failure"),
@@ -2384,7 +2843,7 @@ describe("ProviderCommandReactor", () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.turn.start",
         commandId: CommandId.make("cmd-turn-start-provider-switch-1"),
@@ -2404,7 +2863,7 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.turn.start",
         commandId: CommandId.make("cmd-turn-start-provider-switch-2"),
@@ -2456,7 +2915,7 @@ describe("ProviderCommandReactor", () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.session.set",
         commandId: CommandId.make("cmd-session-set-stopped-provider-switch"),
@@ -2475,7 +2934,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.turn.start",
         commandId: CommandId.make("cmd-turn-start-stopped-provider-switch"),
@@ -2522,7 +2981,7 @@ describe("ProviderCommandReactor", () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.session.set",
         commandId: CommandId.make("cmd-session-set"),
@@ -2540,7 +2999,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.turn.interrupt",
         commandId: CommandId.make("cmd-turn-interrupt"),
@@ -2560,7 +3019,7 @@ describe("ProviderCommandReactor", () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.session.set",
         commandId: CommandId.make("cmd-session-set-stale"),
@@ -2578,7 +3037,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.turn.start",
         commandId: CommandId.make("cmd-turn-start-stale"),
@@ -2615,7 +3074,7 @@ describe("ProviderCommandReactor", () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.session.set",
         commandId: CommandId.make("cmd-session-set-missing-instance"),
@@ -2643,7 +3102,7 @@ describe("ProviderCommandReactor", () => {
       updatedAt: now,
     });
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.turn.start",
         commandId: CommandId.make("cmd-turn-start-missing-instance"),
@@ -2686,7 +3145,7 @@ describe("ProviderCommandReactor", () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.session.set",
         commandId: CommandId.make("cmd-session-set-for-approval"),
@@ -2704,7 +3163,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.approval.respond",
         commandId: CommandId.make("cmd-approval-respond"),
@@ -2727,7 +3186,7 @@ describe("ProviderCommandReactor", () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.session.set",
         commandId: CommandId.make("cmd-session-set-for-user-input"),
@@ -2745,7 +3204,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.user-input.respond",
         commandId: CommandId.make("cmd-user-input-respond"),
@@ -2781,7 +3240,7 @@ describe("ProviderCommandReactor", () => {
       ),
     );
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.session.set",
         commandId: CommandId.make("cmd-session-set-for-approval-error"),
@@ -2799,7 +3258,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.activity.append",
         commandId: CommandId.make("cmd-approval-requested"),
@@ -2820,7 +3279,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.approval.respond",
         commandId: CommandId.make("cmd-approval-respond-stale"),
@@ -2876,7 +3335,7 @@ describe("ProviderCommandReactor", () => {
       ),
     );
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.session.set",
         commandId: CommandId.make("cmd-session-set-for-user-input-error"),
@@ -2894,7 +3353,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.activity.append",
         commandId: CommandId.make("cmd-user-input-requested"),
@@ -2927,7 +3386,7 @@ describe("ProviderCommandReactor", () => {
       }),
     );
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.user-input.respond",
         commandId: CommandId.make("cmd-user-input-respond-stale"),

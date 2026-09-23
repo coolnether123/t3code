@@ -27,6 +27,10 @@ import {
   ModelSelection,
   ProjectId,
   ThreadId,
+  ThreadContextCompaction,
+  ThreadContextCompactionMessageStatus,
+  ThreadContextCompactionStatus,
+  ThreadContextCompactionTurnStart,
 } from "@t3tools/contracts";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
@@ -179,6 +183,25 @@ const ProjectionThreadSearchRow = Schema.Struct({
   source: OrchestrationThreadSearchSource,
   matchText: Schema.String,
   messageCreatedAt: Schema.NullOr(IsoDateTime),
+});
+const ProjectionThreadContextCompactionRowSchema = Schema.Struct({
+  threadId: ThreadId,
+  compactMessageId: MessageId,
+  status: ThreadContextCompactionStatus,
+  detail: Schema.NullOr(Schema.String),
+  startedAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+const ProjectionThreadContextCompactionMessageRowSchema = Schema.Struct({
+  threadId: ThreadId,
+  compactMessageId: MessageId,
+  messageId: MessageId,
+  requestOrder: NonNegativeInt,
+  status: ThreadContextCompactionMessageStatus,
+  detail: Schema.NullOr(Schema.String),
+  turnStart: Schema.fromJsonString(ThreadContextCompactionTurnStart),
+  queuedAt: IsoDateTime,
+  updatedAt: IsoDateTime,
 });
 const WorkspaceRootLookupInput = Schema.Struct({
   workspaceRoot: Schema.String,
@@ -850,6 +873,90 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           updated_at AS "updatedAt"
         FROM projection_state
       `,
+  });
+
+  const listThreadContextCompactionRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: ProjectionThreadContextCompactionRowSchema,
+    execute: () => sql`
+      SELECT
+        thread_id AS "threadId",
+        compact_message_id AS "compactMessageId",
+        status,
+        detail,
+        started_at AS "startedAt",
+        updated_at AS "updatedAt"
+      FROM projection_thread_context_compactions
+      ORDER BY thread_id ASC, started_at ASC, compact_message_id ASC
+    `,
+  });
+
+  const listThreadContextCompactionMessageRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: ProjectionThreadContextCompactionMessageRowSchema,
+    execute: () => sql`
+      SELECT
+        thread_id AS "threadId",
+        compact_message_id AS "compactMessageId",
+        message_id AS "messageId",
+        request_order AS "requestOrder",
+        status,
+        detail,
+        turn_start_json AS "turnStart",
+        queued_at AS "queuedAt",
+        updated_at AS "updatedAt"
+      FROM projection_thread_context_compaction_messages
+      ORDER BY thread_id ASC, compact_message_id ASC, request_order ASC
+    `,
+  });
+
+  const loadThreadContextCompactions = Effect.fn(
+    "ProjectionSnapshotQuery.loadThreadContextCompactions",
+  )(function* () {
+    const [compactionRows, queuedRows] = yield* Effect.all([
+      listThreadContextCompactionRows(undefined).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionSnapshotQuery.loadThreadContextCompactions:compactions:query",
+            "ProjectionSnapshotQuery.loadThreadContextCompactions:compactions:decodeRows",
+          ),
+        ),
+      ),
+      listThreadContextCompactionMessageRows(undefined).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionSnapshotQuery.loadThreadContextCompactions:messages:query",
+            "ProjectionSnapshotQuery.loadThreadContextCompactions:messages:decodeRows",
+          ),
+        ),
+      ),
+    ]);
+    const queuedByCompaction = new Map<
+      string,
+      Array<ThreadContextCompaction["queuedMessages"][number]>
+    >();
+    for (const row of queuedRows) {
+      const key = `${row.threadId}\u0000${row.compactMessageId}`;
+      const messages = queuedByCompaction.get(key) ?? [];
+      messages.push({
+        messageId: row.messageId,
+        requestOrder: row.requestOrder,
+        turnStart: row.turnStart,
+        status: row.status,
+        ...(row.detail !== null ? { detail: row.detail } : {}),
+        updatedAt: row.updatedAt,
+      });
+      queuedByCompaction.set(key, messages);
+    }
+    return compactionRows.map((row): ThreadContextCompaction => ({
+      threadId: row.threadId,
+      compactMessageId: row.compactMessageId,
+      status: row.status,
+      ...(row.detail !== null ? { detail: row.detail } : {}),
+      startedAt: row.startedAt,
+      updatedAt: row.updatedAt,
+      queuedMessages: queuedByCompaction.get(`${row.threadId}\u0000${row.compactMessageId}`) ?? [],
+    }));
   });
 
   const readProjectionCounts = SqlSchema.findOne({
@@ -1955,6 +2062,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               ),
             ),
           ),
+          loadThreadContextCompactions(),
         ]),
       )
       .pipe(
@@ -1967,6 +2075,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             sessionRows,
             latestTurnRows,
             stateRows,
+            activeContextCompactions,
           ]) =>
             Effect.sync(() => {
               let updatedAt: string | null = null;
@@ -2120,6 +2229,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 snapshotSequence: computeSnapshotSequence(stateRows),
                 projects,
                 threads,
+                activeContextCompactions,
                 updatedAt: updatedAt ?? "1970-01-01T00:00:00.000Z",
               } satisfies OrchestrationReadModel;
             }),
@@ -2549,6 +2659,16 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         ),
       ),
     );
+
+  const getActiveContextCompactions: ProjectionSnapshotQueryShape["getActiveContextCompactions"] =
+    () =>
+      loadThreadContextCompactions().pipe(
+        Effect.map((compactions) =>
+          compactions.filter(
+            (compaction) => compaction.status === "active" || compaction.queuedMessages.length > 0,
+          ),
+        ),
+      );
 
   const searchThreads: ProjectionSnapshotQueryShape["searchThreads"] = Effect.fn(
     "ProjectionSnapshotQuery.searchThreads",
@@ -3123,6 +3243,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getThreadShellById,
     getThreadRuntimeContext,
     getTurnStartMessage,
+    getActiveContextCompactions,
     getThreadDetailById,
     getThreadDetailSnapshot,
   } satisfies ProjectionSnapshotQueryShape;

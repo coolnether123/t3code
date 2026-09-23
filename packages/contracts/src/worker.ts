@@ -361,6 +361,26 @@ export const WorkerSummary = Schema.Struct({
 });
 export type WorkerSummary = typeof WorkerSummary.Type;
 
+export const WorkerWorktreeStatus = Schema.Literals([
+  "creating",
+  "ready",
+  "failed",
+  "cancelled",
+  "preserved",
+  "removed",
+]);
+export type WorkerWorktreeStatus = typeof WorkerWorktreeStatus.Type;
+
+/** Worker-owned checkout state, distinct from the caller's original cwd. */
+export const WorkerWorktree = Schema.Struct({
+  projectRoot: TrimmedNonEmptyString,
+  checkoutPath: TrimmedNonEmptyString,
+  refName: TrimmedNonEmptyString,
+  status: WorkerWorktreeStatus,
+  error: Schema.optionalKey(Schema.String),
+});
+export type WorkerWorktree = typeof WorkerWorktree.Type;
+
 export const WorkerDetail = Schema.Struct({
   summary: WorkerSummary,
   assignment: Schema.String,
@@ -371,6 +391,7 @@ export const WorkerDetail = Schema.Struct({
   pendingApproval: Schema.optionalKey(WorkerApprovalRequest),
   observerReports: Schema.Array(WorkerObserverReport),
   activities: Schema.Array(WorkerActivity).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  worktree: Schema.optionalKey(WorkerWorktree),
 });
 export type WorkerDetail = typeof WorkerDetail.Type;
 
@@ -388,6 +409,8 @@ export const WorkerStartInput = Schema.Struct({
   approvalPolicy: Schema.optionalKey(ProviderApprovalPolicy),
   sandboxMode: Schema.optionalKey(ProviderSandboxMode),
   cwd: Schema.optionalKey(TrimmedNonEmptyString),
+  /** Create an isolated Git checkout rooted at cwd for this Worker only. */
+  createWorktree: Schema.optionalKey(Schema.Boolean),
   parentThreadId: Schema.optionalKey(ThreadId),
 });
 export type WorkerStartInput = typeof WorkerStartInput.Type;
@@ -597,6 +620,7 @@ export const WorkerEvent = Schema.Struct({
   message: Schema.optionalKey(WorkerMessage),
   approval: Schema.optionalKey(WorkerApprovalRequest),
   observerReport: Schema.optionalKey(WorkerObserverReport),
+  worktree: Schema.optionalKey(WorkerWorktree),
 });
 export type WorkerEvent = typeof WorkerEvent.Type;
 
@@ -633,6 +657,7 @@ export const WorkerMcpStartInput = Schema.Struct({
   modelSelection: Schema.optionalKey(WorkerMcpModelSelection),
   backendPreference: Schema.optionalKey(WorkerBackendKind),
   cwd: Schema.optionalKey(TrimmedNonEmptyString),
+  createWorktree: Schema.optionalKey(Schema.Boolean),
 });
 export type WorkerMcpStartInput = typeof WorkerMcpStartInput.Type;
 export const WorkerMcpListInput = WorkerListInput;

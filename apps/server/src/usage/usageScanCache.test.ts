@@ -7,10 +7,10 @@ import {
   encodeScanCache,
   planTranscriptScan,
   pruneScanCache,
-  type CachedFile,
   type ScanCache,
 } from "./usageScanCache.ts";
-import type { UsageRecord } from "./usageTranscripts.ts";
+import { initialCodexScanState, type UsageRecord } from "./usageTranscripts.ts";
+import type { RepeatedInputActiveSource, RepeatedInputObservation } from "./usageRepeatedInput.ts";
 
 function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
   return {
@@ -45,6 +45,101 @@ function cacheWith(entries: readonly [string, number, readonly UsageRecord[]][])
 }
 
 describe("scan cache round trip", () => {
+  it("persists prefix fingerprints and sanitized repeated-input observations", () => {
+    const repeated: RepeatedInputObservation = {
+      sourceKind: "skill",
+      displayName: "example",
+      contentHash: "a".repeat(64),
+      fileRevisionHash: "b".repeat(64),
+      confidence: "confirmedPayload",
+      observedAtMs: 100,
+      sessionId: "session-a",
+      turnId: "turn-a",
+      model: "gpt-5.6-sol",
+      project: "project-a",
+      environment: "environment-a",
+      directTokens: { exact: 5, estimated: 0, cached: 0, cacheWrite: 0, unknown: 0 },
+      fullSessionInputTokens: { exact: 10, estimated: 0, cached: 2, cacheWrite: 0, unknown: 0 },
+      providerReportedCostUsd: null,
+      dedupeKey: "stable-observation",
+    };
+    const original: ScanCache = new Map([
+      [
+        "/codex.jsonl",
+        {
+          size: 100,
+          mtimeMs: 100,
+          provider: "codex" as const,
+          prefixFingerprint: "prefix-a",
+          scanCursor: 64,
+          records: [],
+          repeatedInputObservations: [repeated],
+          repeatedInputVersion: 1,
+          repeatedInputGaps: [
+            { reason: "missingTokenizer" as const, count: 1, message: "tokenizer unavailable" },
+          ],
+        },
+      ],
+    ]);
+    const encoded = encodeScanCache(original);
+    const raw = JSON.stringify(encoded);
+    expect(raw).not.toContain("private source text");
+    expect(decodeScanCache(JSON.parse(raw)).get("/codex.jsonl")).toEqual(
+      original.get("/codex.jsonl"),
+    );
+  });
+
+  it("persists partial scan records and their explicit omission coverage", () => {
+    const original: ScanCache = new Map([
+      [
+        "/codex.jsonl",
+        {
+          size: 100,
+          mtimeMs: 100,
+          provider: "codex",
+          scanCursor: 64,
+          scanSkippedLines: 1,
+          records: [record({ provider: "codex", dedupeKey: "chunk-one" })],
+          codexState: initialCodexScanState(),
+        },
+      ],
+    ]);
+
+    expect(decodeScanCache(JSON.parse(JSON.stringify(encodeScanCache(original))))).toEqual(
+      original,
+    );
+  });
+
+  it("persists active skill revisions for append-only carried attribution", () => {
+    const active: RepeatedInputActiveSource = {
+      descriptor: {
+        sourceKind: "skill",
+        displayName: "example",
+        contentHash: "a".repeat(64),
+        fileRevisionHash: "b".repeat(64),
+        byteLength: 42,
+        tokenCount: 17,
+      },
+      loadedAtMs: 100,
+      loadedTurnId: "turn-a",
+    };
+    const original: ScanCache = new Map([
+      [
+        "/codex.jsonl",
+        {
+          size: 100,
+          mtimeMs: 100,
+          provider: "codex" as const,
+          records: [],
+          repeatedInputActiveSources: [active],
+          repeatedInputVersion: 3,
+        },
+      ],
+    ]);
+    const restored = decodeScanCache(JSON.parse(JSON.stringify(encodeScanCache(original))));
+    expect(restored.get("/codex.jsonl")?.repeatedInputActiveSources).toEqual([active]);
+  });
+
   it("invalidates pre-cross-home-dedup caches", () => {
     const encoded = encodeScanCache(
       new Map([
@@ -60,6 +155,28 @@ describe("scan cache round trip", () => {
       ]),
     );
     expect(decodeScanCache({ ...JSON.parse(JSON.stringify(encoded)), version: 5 }).size).toBe(0);
+  });
+
+  it("keeps v6 Codex usage records while repeated-input metadata warms", () => {
+    const original: ScanCache = new Map([
+      [
+        "/codex.jsonl",
+        {
+          size: 10,
+          mtimeMs: 100,
+          provider: "codex" as const,
+          records: [record({ provider: "codex", dedupeKey: "stable-codex-key" })],
+          codexState: initialCodexScanState(),
+        },
+      ],
+    ]);
+    const encoded = encodeScanCache(original);
+    const decoded = decodeScanCache({ ...JSON.parse(JSON.stringify(encoded)), version: 6 });
+
+    expect(decoded.get("/codex.jsonl")?.records).toEqual(original.get("/codex.jsonl")?.records);
+    expect(decoded.get("/codex.jsonl")?.repeatedInputObservations).toBeUndefined();
+    expect(decoded.get("/codex.jsonl")?.prefixFingerprint).toBeUndefined();
+    expect(decoded.get("/codex.jsonl")?.repeatedInputVersion).toBeUndefined();
   });
 
   it("restores records unchanged", () => {
@@ -183,6 +300,33 @@ describe("scan cache round trip", () => {
     const encoded = encodeScanCache(new Map(), coverage);
 
     expect(decodeScanCoverage(JSON.parse(JSON.stringify(encoded)))).toEqual(coverage);
+  });
+
+  it("persists volume identity while reading older coverage rows", () => {
+    const coverage = [
+      {
+        provider: "claude" as const,
+        rootPath: "/home/me/.claude/projects",
+        sinceMs: 100,
+        scannedAtMs: 200,
+        volumeId: "volume-a",
+      },
+    ];
+    const encoded = encodeScanCache(new Map(), coverage);
+    expect(decodeScanCoverage(JSON.parse(JSON.stringify(encoded)))).toEqual(coverage);
+    expect(
+      decodeScanCoverage({
+        ...encoded,
+        coverage: [["claude", "/home/me/.claude/projects", 100, 200]],
+      }),
+    ).toEqual([
+      {
+        provider: "claude",
+        rootPath: "/home/me/.claude/projects",
+        sinceMs: 100,
+        scannedAtMs: 200,
+      },
+    ]);
   });
 
   it("restores the Codex append parser state", () => {
@@ -389,91 +533,30 @@ describe("planTranscriptScan", () => {
 describe("pruneScanCache", () => {
   const retentionCutoffMs = 1000;
 
+  it("retains deleted entries until their usage retention expires", () => {
+    const cache = cacheWith([["C:\\codex\\sessions\\gone.jsonl", 5000, [record()]]]);
+    expect(pruneScanCache(cache, retentionCutoffMs)).toBe(0);
+    expect(cache.size).toBe(1);
+  });
+
   it("drops entries older than retention", () => {
-    const cache = cacheWith([["/old.jsonl", 500, [record()]]]);
-
-    const removed = pruneScanCache(cache, {
-      livePaths: new Set(),
-      walkedRoots: ["/"],
-      windowStartMs: 400,
-      retentionCutoffMs,
-    });
-
+    const cache = cacheWith([["/old.jsonl", 500, [record({ timestampMs: 500 })]]]);
+    const removed = pruneScanCache(cache, retentionCutoffMs);
     expect(removed).toBe(1);
     expect(cache.size).toBe(0);
   });
 
-  it("drops in-window entries whose file has disappeared", () => {
-    const cache = cacheWith([["/gone.jsonl", 5000, [record()]]]);
-
-    pruneScanCache(cache, {
-      livePaths: new Set(),
-      walkedRoots: ["/"],
-      windowStartMs: 4000,
-      retentionCutoffMs,
-    });
-
-    expect(cache.size).toBe(0);
-  });
-
   it("keeps entries outside the walked window that are still within retention", () => {
-    // Viewing 7 days must not evict the 30-day entries, which that walk never
-    // looked for and so cannot prove are gone.
+    // A narrower view must not evict usage that is still inside retention.
     const cache = cacheWith([["/older-but-valid.jsonl", 2000, [record()]]]);
-
-    const removed = pruneScanCache(cache, {
-      livePaths: new Set(),
-      walkedRoots: ["/"],
-      windowStartMs: 4000,
-      retentionCutoffMs,
-    });
-
+    const removed = pruneScanCache(cache, retentionCutoffMs);
     expect(removed).toBe(0);
     expect(cache.size).toBe(1);
   });
 
-  it("keeps entries the walk saw", () => {
-    const cache = cacheWith([["/live.jsonl", 5000, [record()]]]);
-
-    pruneScanCache(cache, {
-      livePaths: new Set(["/live.jsonl"]),
-      walkedRoots: ["/"],
-      windowStartMs: 4000,
-      retentionCutoffMs,
-    });
-
-    expect(cache.size).toBe(1);
-  });
-});
-
-describe("pruneScanCache with an unwalked root", () => {
-  it("keeps in-window entries for a provider whose directory was not walked", () => {
-    // A missing provider root or failed settings read leaves livePaths without
-    // that provider's files. Its warm entries must survive the pass.
-    const cache = cacheWith([["/codex/sessions/a.jsonl", 5000, [record()]]]);
-
-    const removed = pruneScanCache(cache, {
-      livePaths: new Set(),
-      walkedRoots: ["/claude/projects"],
-      windowStartMs: 4000,
-      retentionCutoffMs: 1000,
-    });
-
-    expect(removed).toBe(0);
-    expect(cache.size).toBe(1);
-  });
-
-  it("keeps entries under a sibling path that only shares the walked root prefix", () => {
-    const cache = cacheWith([["/claude/projects-copy/a.jsonl", 5000, [record()]]]);
-
-    const removed = pruneScanCache(cache, {
-      livePaths: new Set(),
-      walkedRoots: ["/claude/projects"],
-      windowStartMs: 4000,
-      retentionCutoffMs: 1000,
-    });
-
-    expect(removed).toBe(0);
+  it("retains old files whose records are still inside usage retention", () => {
+    const cache = cacheWith([["/copied.jsonl", 500, [record({ timestampMs: 1500 })]]]);
+    expect(pruneScanCache(cache, retentionCutoffMs)).toBe(0);
     expect(cache.size).toBe(1);
   });
 });

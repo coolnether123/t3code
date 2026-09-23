@@ -350,7 +350,7 @@ describe("MessagesTimeline", () => {
     );
     expect(markup).toContain("Started Worker Scout");
     expect(markup).toContain("Scan the provider boundary");
-    expect(markup).toContain("Advanced");
+    expect(markup).toContain("Show work");
     expect(markup).not.toContain("do-not-show-by-default");
   });
 

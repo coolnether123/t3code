@@ -282,8 +282,30 @@ export const layerChildProcess = (
 const makeChildProcessClient = Effect.fn(
   "effect-codex-app-server/CodexAppServerClient.makeChildProcessClient",
 )(function* (handle: ChildProcessSpawner.ChildProcessHandle, options: CodexAppServerClientOptions) {
+  return yield* makeChildProcessStdioClient(handle, makeChildStdio(handle), options);
+});
+
+const makeChildProcessStdioClient = Effect.fn(
+  "effect-codex-app-server/CodexAppServerClient.makeChildProcessStdioClient",
+)(function* (
+  handle: ChildProcessSpawner.ChildProcessHandle,
+  stdio: Stdio.Stdio,
+  options: CodexAppServerClientOptions,
+) {
   const stderr = yield* captureChildStderr(handle.stderr, options.onStderr);
-  return yield* make(makeChildStdio(handle), options, (context) =>
+  return yield* make(stdio, options, (context) =>
     makeTerminationError(handle, context, readFinalChildStderr(stderr)),
   );
 });
+
+/**
+ * Builds a client over a caller-provided stdio-shaped transport while retaining
+ * child-process exit and stderr diagnostics. This is used by transports whose
+ * wire bytes are not line-oriented until after an adapter has decoded them.
+ */
+export const layerChildProcessStdio = (
+  handle: ChildProcessSpawner.ChildProcessHandle,
+  stdio: Stdio.Stdio,
+  options: CodexAppServerClientOptions = {},
+): Layer.Layer<CodexAppServerClient> =>
+  Layer.effect(CodexAppServerClient, makeChildProcessStdioClient(handle, stdio, options));

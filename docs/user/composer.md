@@ -30,6 +30,25 @@ messages while disconnected. Uploads resume when you reconnect. Drafts and queue
 messages survive app restarts. Signing out of T3 Connect keeps that work on your
 device until you sign back into the same account.
 
+## Follow up while an agent runs
+
+On web and desktop, **Settings → General → Follow-up behavior** controls what
+Send does during an active turn. **Queue** holds your message until the turn
+finishes. The queue appears above the composer; you can remove a message or
+send the first one when the thread is ready. Sending a new draft does not skip
+messages already in the queue. Stop holds queued messages until you choose
+**Send now**.
+
+**Steer** sends a text-only Codex prompt into the active turn. If the draft has
+an attachment or other context, T3 Code leaves it in the composer and asks you
+to send it after the turn. A steer request that fails also leaves the draft
+intact.
+
+The web and desktop follow-up queue survives thread switches and reconnects in
+the same page. It is held in memory because drafts may include local files. A
+full page reload loses unsent queued follow-ups; send or save important text
+before reloading. Mobile's offline queue has separate persistence.
+
 ## Custom models
 
 On web and desktop, use Settings → Providers → **Models** to add an unlisted model with a custom
@@ -108,6 +127,11 @@ Provider commands must start the message to run. T3 Code commands such as
 
 Send `/compact` in an existing conversation to reduce context usage when the
 provider supports it. Web and desktop also offer compaction from the context meter.
+Messages submitted while compaction runs wait on the server and are sent in order
+after compaction finishes. If compaction fails or the session stops, messages
+still waiting remain visible but are not sent. After a server restart, T3 Code marks
+unconfirmed delivery as uncertain instead of sending the messages again. Check
+the provider conversation before retrying.
 
 ## Images and videos in messages
 
