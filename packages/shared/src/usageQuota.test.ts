@@ -81,14 +81,14 @@ describe("quota observations", () => {
     expect(value.costUsd).toBeNull();
     expect(value.reason).toBe("Waiting for the next tracker reading to measure usage.");
   });
-  it("plots observations by elapsed time and breaks lines at gaps and resets", () => {
+  it("plots observations by elapsed time, joins tracking gaps and separates resets", () => {
     const points = quotaHistoryPoints([
       sample("2026-07-19T17:00:00Z", 35),
       sample("2026-07-19T17:10:00Z", 34),
       sample("2026-07-19T19:00:00Z", 30),
       sample("2026-07-19T19:10:00Z", 100, "2026-07-26T19:00:00Z"),
     ]);
-    expect(points.map((p) => p.breakBefore)).toEqual([true, false, true, true]);
+    expect(points.map((p) => p.breakBefore)).toEqual([true, false, false, true]);
     expect(points.map((p) => p.resetChange)).toEqual([false, false, false, true]);
     expect(points[1]!.x).toBeCloseTo(10 / 130);
     expect(points.at(-1)!.x).toBe(1);

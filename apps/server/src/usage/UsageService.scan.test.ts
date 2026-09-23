@@ -16,6 +16,7 @@ import { UsageDay, type UsageSummary } from "@t3tools/contracts";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { make } from "./UsageService.ts";
+import { quotaCostLedgerKey } from "./usageQuotaCostLedger.ts";
 import { encodeScanCache } from "./usageScanCache.ts";
 import { initialCodexScanState, type UsageRecord } from "./usageTranscripts.ts";
 import {
@@ -120,7 +121,7 @@ describe("incremental scan integration", () => {
         }),
         Effect.provideService(FileSystem.FileSystem, {
           ...fs,
-          exists: () => Effect.succeed(false),
+          exists: () => Effect.succeed(true),
           readFileString: (path, ...args) =>
             path.endsWith("usage-scan-cache.json")
               ? Deferred.succeed(cacheStarted, undefined).pipe(Effect.andThen(Effect.never))
@@ -258,6 +259,7 @@ describe("incremental scan integration", () => {
           expect(rootSource(first)?.status).toBe("ok");
           expect(readTranscriptRecords).toHaveBeenCalledTimes(1);
 
+          vi.mocked(transcriptCursorIsLineBoundary).mockClear();
           phase = "partial";
           const partial = yield* service.readSummary(input);
           expect(total(partial)).toBe(10);
@@ -270,6 +272,7 @@ describe("incremental scan integration", () => {
           expect(rootSource(complete)?.status).toBe("ok");
           expect(readTranscriptRecords).toHaveBeenCalledTimes(1);
 
+          expect(transcriptCursorIsLineBoundary).not.toHaveBeenCalled();
           phase = "deleted";
           const deleted = yield* service.readSummary(input);
           expect(total(deleted)).toBe(0);
@@ -440,13 +443,39 @@ describe("incremental scan integration", () => {
     () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
+        const config = yield* ServerConfig.ServerConfig;
+        const path = yield* Path.Path;
+        const fingerprint = {
+          hostId: "fixture",
+          provider: "codex" as const,
+          resolvedHomePath: "/sessions",
+          volumeId: "fixture",
+        };
+        const saved = {
+          key: quotaCostLedgerKey(fingerprint, "cycle"),
+          fingerprint,
+          intervalId: "cycle",
+          sinceTime: "2026-08-31T00:00:00Z",
+          untilTime: "2026-08-31T01:00:00Z",
+          costUsd: 125,
+          records: 4,
+          unpricedRecords: 0,
+          recordedAt: "2026-08-31T02:00:00Z",
+          firstRemainingPercent: 100,
+          lastRemainingPercent: 80,
+          resetsAt: "2026-09-07T00:00:00Z",
+        };
+        yield* fs.writeFileString(
+          path.join(config.stateDir, "usage-quota-cost-ledger.json"),
+          encodeJson({ version: 1, rows: [saved] }),
+        );
         const firstCacheRead = yield* Deferred.make<void>();
         let stallCacheLoad = true;
         let cacheReads = 0;
         const service = yield* make.pipe(
           Effect.provideService(FileSystem.FileSystem, {
             ...fs,
-            exists: () => Effect.succeed(false),
+            exists: () => Effect.succeed(stallCacheLoad),
             readFileString: (path, ...args) =>
               path.endsWith("usage-scan-cache.json")
                 ? Effect.gen(function* () {
@@ -469,12 +498,21 @@ describe("incremental scan integration", () => {
           untilDay: UsageDay.make("2026-09-02"),
           timeZone: "UTC",
           providers: ["codex"] as const,
+          quotaIntervals: [
+            { id: "cycle", sinceTime: "2026-08-31T00:00:00Z", untilTime: "2026-08-31T01:00:00Z" },
+          ],
         };
         const first = yield* service.readSummary(input).pipe(Effect.forkChild);
         yield* Deferred.await(firstCacheRead);
         yield* TestClock.adjust("12 seconds");
         const partial = yield* Fiber.join(first);
         expect(partial.buckets).toEqual([]);
+        expect(partial.quotaCosts).toEqual([]);
+        expect(partial.quotaCostSnapshots).toEqual([saved]);
+        expect(partial.quotaHistory).toBeDefined();
+        expect(partial.sources.every((source) => source.fingerprint.volumeId === "fixture")).toBe(
+          true,
+        );
         expect(partial.pricing.status).toBe("unavailable");
         expect(partial.sources).not.toHaveLength(0);
         expect(partial.sources.every((source) => source.status === "partial")).toBe(true);

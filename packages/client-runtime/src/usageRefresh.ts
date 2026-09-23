@@ -1,10 +1,5 @@
 import type { UsageSummary, UsageSummaryInput } from "@t3tools/contracts";
-import {
-  quotaCostWindow,
-  quotaIntervals,
-  quotaMonitoringSamples,
-  quotaPeriods,
-} from "@t3tools/shared/usageQuota";
+import { quotaCostWindow, quotaIntervals, quotaPeriods } from "@t3tools/shared/usageQuota";
 
 interface UsageReply {
   readonly environmentId: string;
@@ -15,6 +10,7 @@ interface UsageReply {
 /** Refresh costs for the newly read interval, not the interval on the old screen. */
 export async function refreshCodexMonitor(options: {
   readonly trackerId: string | undefined;
+  readonly selectedCycleId?: string | null;
   readonly refreshHistory: () => Promise<readonly UsageReply[]>;
   readonly refreshCosts: (input: UsageSummaryInput) => Promise<readonly UsageReply[]>;
   readonly refreshNews: () => Promise<boolean>;
@@ -26,8 +22,10 @@ export async function refreshCodexMonitor(options: {
   const trackers = history.filter((entry) => entry.summary?.quotaHistory?.status === "ready");
   const tracker =
     trackers.find((entry) => entry.environmentId === options.trackerId) ?? trackers[0];
-  const samples = quotaMonitoringSamples(tracker?.summary?.quotaHistory?.samples ?? []);
-  const input = quotaCostWindow(quotaIntervals(quotaPeriods(samples)));
+  const periods = quotaPeriods(tracker?.summary?.quotaHistory?.samples ?? []);
+  const selectedIndex = periods.findIndex((period) => period.id === options.selectedCycleId);
+  const index = selectedIndex < 0 ? periods.length - 1 : selectedIndex;
+  const input = quotaCostWindow(quotaIntervals(periods.slice(Math.max(0, index - 1), index + 1)));
   if (input) options.onProgress?.("Saved readings refreshed. Updating API costs…");
   const costs = input ? await options.refreshCosts(input) : [];
   if (history.length === 0 || [...history, ...costs].some((entry) => entry.error)) {

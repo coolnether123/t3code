@@ -479,7 +479,12 @@ function quotaValueExact(
       return unavailable(`${label} could not report usage. Refresh to retry.`);
     }
     if (summary.quotaCosts === undefined)
-      return unavailable(`${label} needs a server with reset-history support.`);
+      return unavailable(
+        summary.quotaHistory !== undefined ||
+          summary.sources.some((source) => source.status === "partial")
+          ? `${label} is still reading Codex transcripts.`
+          : `${label} needs a server with reset-history support.`,
+      );
     const sources = summary.sources.filter(
       (source) => source.fingerprint.provider === "codex" && source.status !== "missing",
     );
@@ -610,7 +615,7 @@ export function quotaValue(
   };
 }
 
-/** Lines stop across missing hours and reset changes; every point is a saved observation. */
+/** Join saved readings across tracking gaps; reset changes start a separate line. */
 export function quotaHistoryPoints(samples: readonly UsageQuotaSample[]) {
   const sorted = [...samples].sort((a, b) => a.observedAt.localeCompare(b.observedAt));
   const firstTime = sorted[0] ? Date.parse(sorted[0].observedAt) : 0;
@@ -628,10 +633,7 @@ export function quotaHistoryPoints(samples: readonly UsageQuotaSample[]) {
           ? 0.5
           : (Date.parse(sample.observedAt) - firstTime) / (lastTime - firstTime),
       resetChange,
-      breakBefore:
-        previous === undefined ||
-        resetChange ||
-        Date.parse(sample.observedAt) - Date.parse(previous.observedAt) > 60 * MINUTE_MS,
+      breakBefore: previous === undefined || resetChange,
     };
   });
 }

@@ -172,8 +172,14 @@ export class QuotaCostAccumulator {
   }
 
   add(record: UsageRecord): void {
-    // Spark has its own quota and is not part of the main weekly percentage.
-    if (record.provider !== "codex" || /spark|bengalfox/i.test(record.model)) return;
+    // Spark has a separate quota; Qwen runs through the CLI without consuming
+    // the OpenAI subscription. Neither belongs in its weekly conversion.
+    if (
+      record.provider !== "codex" ||
+      /spark|bengalfox/i.test(record.model) ||
+      /^(?:[^/]+\/)?qwen/i.test(record.model)
+    )
+      return;
     // Binary search keeps a 90-day scan independent of the number of reset periods.
     let low = 0;
     let high = this.rows.length;

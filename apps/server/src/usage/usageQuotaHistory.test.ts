@@ -144,6 +144,19 @@ describe("quota cost matching", () => {
     accumulator.add(record("2026-07-21T16:30:00Z", "gpt-5.3-codex-spark"));
     expect(accumulator.rows[0]?.records).toBe(0);
   });
+  it("excludes Qwen CLI runs from the OpenAI subscription conversion", () => {
+    const accumulator = new QuotaCostAccumulator(intervals, new Map());
+    accumulator.add(record("2026-07-21T16:30:00Z", "gpt-6-astra"));
+    for (const model of [
+      "qwen36-35b-a3b-256k-iq4xs-mec128-thinking",
+      "qwen38-27b-96k-q3",
+      "local/qwen38-27b",
+    ]) {
+      accumulator.add({ ...record("2026-07-21T16:30:00Z", model), reportedCostUsd: null });
+    }
+    expect(accumulator.rows[0]).toMatchObject({ records: 1, costUsd: 2, unpricedRecords: 0 });
+    expect(accumulator.rows[0]?.models.map((row) => row.model)).toEqual(["gpt-6-astra"]);
+  });
   it("keeps unknown prices visible as missing, not free usage", () => {
     const accumulator = new QuotaCostAccumulator(intervals, new Map());
     accumulator.add({ ...record("2026-07-21T16:30:00Z"), reportedCostUsd: null });

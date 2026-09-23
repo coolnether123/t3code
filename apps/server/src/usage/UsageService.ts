@@ -669,6 +669,9 @@ export const make = Effect.gen(function* () {
 
   type UsageReadProgress = {
     readonly sources: UsageSource[];
+    readonly pendingSources: UsageSource[];
+    readonly quotaCosts: UsageQuotaCost[];
+    quotaHistory: UsageSummary["quotaHistory"];
     aggregator: UsageAggregator | undefined;
   };
 
@@ -919,6 +922,7 @@ export const make = Effect.gen(function* () {
             Effect.provideService(Path.Path, path),
           )
         : undefined;
+    if (progress !== undefined) progress.quotaHistory = quotaHistory;
     if (input.quotaHistoryOnly) {
       const finishedAtMs = yield* Clock.currentTimeMillis;
       return {
@@ -946,9 +950,9 @@ export const make = Effect.gen(function* () {
               ),
       } satisfies UsageSummary;
     }
-    const quotaCosts: UsageQuotaCost[] = [];
-    yield* ensureRates();
-    yield* ensureScanCacheLoaded;
+    const quotaCosts = progress?.quotaCosts ?? [];
+    yield* ensureRates().pipe(Effect.withSpan("UsageService.ensureRates"));
+    yield* ensureScanCacheLoaded.pipe(Effect.withSpan("UsageService.loadScanCache"));
     const tierJournal = yield* fileSystem
       .readFileString(path.join(config.stateDir, CODEX_TIER_JOURNAL))
       .pipe(Effect.catchCause(() => Effect.succeed("")));
@@ -1070,7 +1074,7 @@ export const make = Effect.gen(function* () {
         };
       }),
       { concurrency: 8 },
-    );
+    ).pipe(Effect.withSpan("UsageService.planTranscriptSources"));
 
     for (const source of plannedSources) {
       const { provider, dir, volumeId } = source;
@@ -1147,6 +1151,7 @@ export const make = Effect.gen(function* () {
             cached.scanCursor !== undefined;
           const resumeByte = resumePartial ? cached!.scanCursor! : cached?.size;
           const cursorIsUsable =
+            !warm &&
             resumeByte !== undefined &&
             resumeByte > 0 &&
             (cached?.scanDiscardingLine === true ||
@@ -1199,7 +1204,7 @@ export const make = Effect.gen(function* () {
           };
         }),
         { concurrency: 16 },
-      );
+      ).pipe(Effect.withSpan("UsageService.planTranscriptFiles"));
       const selection = selectTranscriptFilesForScan(
         plannedFiles,
         (file) => Math.max(file.size - file.startByte, file.size - file.repeatedInputStartByte),
@@ -1529,7 +1534,11 @@ export const make = Effect.gen(function* () {
       .filter(({ provider, dir }) => !completedPaths.has(`${provider}\u0000${dir}`))
       .map(
         ({ provider, dir }) =>
-          ({
+          (progress.pendingSources.find(
+            (source) =>
+              source.fingerprint.provider === provider &&
+              source.fingerprint.resolvedHomePath === dir,
+          ) ?? {
             fingerprint: {
               hostId: NodeOS.hostname(),
               provider,
@@ -1562,7 +1571,16 @@ export const make = Effect.gen(function* () {
       sources: [...completedSources, ...unfinishedSources].filter((source) =>
         supportsProvider(source.fingerprint.provider),
       ),
-      pricing: EMPTY_PRICING,
+      pricing: pricing(),
+      ...(progress.quotaHistory === undefined ? {} : { quotaHistory: progress.quotaHistory }),
+      ...(input.quotaIntervals === undefined
+        ? {}
+        : {
+            quotaCosts: progress.quotaCosts,
+            quotaCostSnapshots: quotaCostLedger.filter((row) =>
+              input.quotaIntervals!.some((interval) => interval.id === row.intervalId),
+            ),
+          }),
       scanDurationMs: Math.max(0, finishedAtMs - startedAtMs),
     } satisfies UsageSummary;
   });
@@ -1572,7 +1590,13 @@ export const make = Effect.gen(function* () {
       const startedAtMs = yield* Clock.currentTimeMillis;
       let resolvedDirs: readonly { readonly provider: UsageProviderKind; readonly dir: string }[] =
         [];
-      const progress: UsageReadProgress = { sources: [], aggregator: undefined };
+      const progress: UsageReadProgress = {
+        sources: [],
+        pendingSources: [],
+        quotaCosts: [],
+        quotaHistory: undefined,
+        aggregator: undefined,
+      };
       let ownedResult:
         | { key: string; result: Deferred.Deferred<Exit.Exit<UsageSummary, UsageReadError>, never> }
         | undefined;
@@ -1587,6 +1611,37 @@ export const make = Effect.gen(function* () {
           if (input.quotaHistoryOnly) return yield* readSummaryUnlocked(input, undefined, progress);
           const context = yield* resolveReadContext();
           resolvedDirs = context.dirs;
+          // Establish source identities before waiting for a scan so saved interval
+          // calculations remain usable when this request reaches its deadline.
+          const sources = yield* Effect.forEach(
+            context.dirs.filter(
+              ({ provider }) =>
+                (input.quotaIntervals === undefined || provider === "codex") &&
+                (input.providers === undefined || input.providers.includes(provider)),
+            ),
+            Effect.fnUntraced(function* ({ provider, dir }) {
+              const volumeId = yield* Effect.promise(() => readDirectoryVolumeId(dir));
+              const exists = yield* fileSystem.exists(dir).pipe(Effect.orElseSucceed(() => false));
+              return {
+                fingerprint: {
+                  hostId: NodeOS.hostname(),
+                  provider,
+                  resolvedHomePath: dir,
+                  volumeId,
+                },
+                status: exists ? ("partial" as const) : ("missing" as const),
+                scannedFiles: 0,
+                skippedFiles: 0,
+                malformedRecords: 0,
+                distinctSessions: 0,
+                message: exists
+                  ? "Usage is partial because its response budget expired before this source finished."
+                  : "No transcript directory on this environment.",
+              };
+            }),
+            { concurrency: 8 },
+          );
+          progress.pendingSources.push(...sources);
           const key = repeatedAwareSummaryCacheKey(input, context.settings.usagePriceOverrides);
           if (!input.refresh) {
             const cached = summaryCache.get(key, yield* Clock.currentTimeMillis);
