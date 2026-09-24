@@ -85,6 +85,18 @@ export interface ProjectionSnapshotQueryShape {
   }) => Effect.Effect<Option.Option<OrchestrationThreadActivity>, ProjectionRepositoryError>;
 
   /**
+   * Read activities of one kind across active threads without hydrating thread
+   * histories. Startup uses this to settle durable in-flight activity records.
+   */
+  readonly listActivitiesByKind: (kind: string) => Effect.Effect<
+    ReadonlyArray<{
+      readonly threadId: ThreadId;
+      readonly activity: OrchestrationThreadActivity;
+    }>,
+    ProjectionRepositoryError
+  >;
+
+  /**
    * Read the lightweight command snapshot used to bootstrap the in-memory
    * orchestration engine without hydrating message/activity/checkpoint bodies.
    */

@@ -1,6 +1,8 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   type OrchestrationCommand,
+  EventId,
+  type OrchestrationThreadActivity,
   type OrchestrationSessionStatus,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -114,6 +116,103 @@ const runReconciliation = (input: {
       ),
     ),
   );
+
+const runWorktreeSetupReconciliation = (
+  activities: ReadonlyArray<{
+    readonly threadId: ThreadId;
+    readonly activity: OrchestrationThreadActivity;
+  }>,
+  dispatch: OrchestrationEngine.OrchestrationEngineService["Service"]["dispatch"],
+) =>
+  ServerRuntimeStartup.reconcileWorktreeSetups.pipe(
+    Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+      listActivitiesByKind: (kind: string) =>
+        Effect.sync(() => {
+          assert.equal(kind, "worktree-setup");
+          return activities;
+        }),
+    } as unknown as ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"]),
+    Effect.provideService(OrchestrationEngine.OrchestrationEngineService, {
+      readEvents: () => Stream.empty,
+      readThreadEvents: () => Stream.empty,
+      getThreadReplayStats: () => Effect.die("unused thread replay stats"),
+      dispatch,
+      streamDomainEvents: Stream.empty,
+      subscribeDomainEvents: Effect.succeed(Stream.empty),
+      latestSequence: Effect.succeed(0),
+    }),
+    Effect.provide(NodeServices.layer),
+  );
+
+it.effect("settles only stable running worktree setup activities after restart", () => {
+  const threadId = ThreadId.make("thread-worktree-restart");
+  const createdAt = "2026-08-20T12:00:00.000Z";
+  const running: OrchestrationThreadActivity = {
+    id: EventId.make(`worktree-setup:${threadId}`),
+    tone: "info",
+    kind: "worktree-setup",
+    summary: "Setting up checkout",
+    payload: {
+      phase: "running",
+      stage: "checkout",
+      branch: "feature/recovery",
+      worktreePath: "A:/worktrees/recovery",
+    },
+    turnId: null,
+    createdAt,
+  };
+  const complete: OrchestrationThreadActivity = {
+    ...running,
+    payload: { ...(running.payload as Record<string, unknown>), phase: "done" },
+  };
+  const unstableId: OrchestrationThreadActivity = {
+    ...running,
+    id: EventId.make("unrelated-activity-id"),
+  };
+  const malformed: OrchestrationThreadActivity = {
+    ...running,
+    payload: { ...(running.payload as Record<string, unknown>), stage: "unknown" },
+  };
+  const dispatched: OrchestrationCommand[] = [];
+
+  return runWorktreeSetupReconciliation(
+    [
+      { threadId, activity: running },
+      { threadId, activity: complete },
+      { threadId, activity: unstableId },
+      { threadId, activity: malformed },
+    ],
+    (command) =>
+      Effect.sync(() => dispatched.push(command)).pipe(Effect.as({ sequence: dispatched.length })),
+  ).pipe(
+    Effect.tap(() =>
+      Effect.sync(() => {
+        assert.equal(dispatched.length, 1);
+        const replacement = dispatched[0];
+        if (!replacement || replacement.type !== "thread.activity.append") {
+          throw new Error("expected a worktree setup activity replacement");
+        }
+        assert.equal(replacement.threadId, threadId);
+        assert.equal(replacement.createdAt, createdAt);
+        assert.deepEqual(replacement.activity, {
+          id: EventId.make(`worktree-setup:${threadId}`),
+          tone: "error",
+          kind: "worktree-setup",
+          summary: "Worktree setup failed",
+          payload: {
+            phase: "failed",
+            stage: "checkout",
+            branch: "feature/recovery",
+            worktreePath: "A:/worktrees/recovery",
+            detail: "Worktree setup was interrupted by a server restart.",
+          },
+          turnId: null,
+          createdAt,
+        });
+      }),
+    ),
+  );
+});
 
 it.effect("marks active running sessions that have persisted resume state", () => {
   const active = makeThread("thread-mark-active", "running", TurnId.make("turn-mark-active"));

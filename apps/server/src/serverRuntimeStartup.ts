@@ -3,8 +3,10 @@ import {
   DEFAULT_MODEL,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_SERVER_SETTINGS,
+  EventId,
   type ModelSelection,
   type OrchestrationProjectShell,
+  type OrchestrationThreadActivity,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -380,6 +382,86 @@ function readRuntimePayload(runtimePayload: unknown): Record<string, unknown> {
     ? (runtimePayload as Record<string, unknown>)
     : {};
 }
+
+type RunningWorktreeSetupPayload = Record<string, unknown> & {
+  readonly phase: "running";
+  readonly stage: "fetch" | "checkout" | "setup-script" | "agent";
+  readonly branch: string | null;
+  readonly worktreePath: string | null;
+};
+
+const isRunningWorktreeSetupPayload = (
+  payload: Record<string, unknown>,
+): payload is RunningWorktreeSetupPayload =>
+  payload.phase === "running" &&
+  (payload.stage === "fetch" ||
+    payload.stage === "checkout" ||
+    payload.stage === "setup-script" ||
+    payload.stage === "agent") &&
+  (payload.branch === null || typeof payload.branch === "string") &&
+  (payload.worktreePath === null || typeof payload.worktreePath === "string");
+
+const WORKTREE_SETUP_RESTART_DETAIL = "Worktree setup was interrupted by a server restart.";
+
+export const reconcileWorktreeSetups = Effect.gen(function* () {
+  const crypto = yield* Crypto.Crypto;
+  const query = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+  const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
+  const activities = yield* query.listActivitiesByKind("worktree-setup");
+
+  for (const { threadId, activity } of activities) {
+    const payload = readRuntimePayload(activity.payload);
+    if (
+      activity.kind !== "worktree-setup" ||
+      activity.id !== `worktree-setup:${threadId}` ||
+      !isRunningWorktreeSetupPayload(payload)
+    ) {
+      continue;
+    }
+
+    const failedActivity: OrchestrationThreadActivity = {
+      id: EventId.make(`worktree-setup:${threadId}`),
+      tone: "error",
+      kind: "worktree-setup",
+      summary: "Worktree setup failed",
+      payload: {
+        phase: "failed",
+        stage: payload.stage,
+        branch: payload.branch,
+        worktreePath: payload.worktreePath,
+        detail: WORKTREE_SETUP_RESTART_DETAIL,
+      },
+      turnId: null,
+      createdAt: activity.createdAt,
+    };
+
+    yield* orchestrationEngine
+      .dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make(yield* crypto.randomUUIDv4),
+        threadId,
+        activity: failedActivity,
+        createdAt: activity.createdAt,
+      })
+      .pipe(
+        Effect.retry({ times: 1 }),
+        Effect.catchCause((cause) =>
+          Cause.hasInterrupts(cause)
+            ? Effect.failCause(cause)
+            : Effect.logWarning("failed to reconcile interrupted worktree setup", {
+                threadId,
+                cause,
+              }),
+        ),
+      );
+  }
+}).pipe(
+  Effect.catchCause((cause) =>
+    Cause.hasInterrupts(cause)
+      ? Effect.failCause(cause)
+      : Effect.logWarning("worktree setup startup reconciliation failed", { cause }),
+  ),
+);
 
 const isServerUpdateThreadContinuationError = Schema.is(ServerUpdateThreadContinuationError);
 
@@ -874,6 +956,7 @@ export const make = (options?: StartupOptions) =>
         }),
       );
 
+      yield* runStartupPhase("worktree-setups.reconcile", reconcileWorktreeSetups);
       yield* runStartupPhase("provider-sessions.reconcile", reconcileProviderSessions);
 
       yield* Effect.logDebug("startup phase: syncing clean projects");

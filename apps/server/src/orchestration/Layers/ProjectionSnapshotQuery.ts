@@ -1302,6 +1302,34 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     `,
   });
 
+  const listActivityRowsByKind = SqlSchema.findAll({
+    Request: Schema.Struct({ kind: Schema.String }),
+    Result: ProjectionThreadActivityDbRowSchema,
+    execute: ({ kind }) => sql`
+      SELECT
+        activity.activity_id AS "activityId",
+        activity.thread_id AS "threadId",
+        activity.turn_id AS "turnId",
+        activity.tone,
+        activity.kind,
+        activity.summary,
+        activity.payload_json AS "payload",
+        activity.sequence,
+        activity.created_at AS "createdAt"
+      FROM projection_thread_activities AS activity
+      INNER JOIN projection_threads AS thread
+        ON thread.thread_id = activity.thread_id
+        AND thread.archived_at IS NULL
+        AND thread.deleted_at IS NULL
+      WHERE activity.kind = ${kind}
+      ORDER BY
+        activity.thread_id ASC,
+        activity.sequence ASC,
+        activity.created_at ASC,
+        activity.activity_id ASC
+    `,
+  });
+
   const getThreadRuntimeContextRow = SqlSchema.findOneOption({
     Request: ThreadIdLookupInput,
     Result: ProjectionThreadRuntimeContextRawDbRowSchema,
@@ -2572,6 +2600,22 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       ),
     );
 
+  const listActivitiesByKind: ProjectionSnapshotQueryShape["listActivitiesByKind"] = (kind) =>
+    listActivityRowsByKind({ kind }).pipe(
+      Effect.map((rows) =>
+        rows.map((row) => ({
+          threadId: row.threadId,
+          activity: mapThreadActivityRow(row),
+        })),
+      ),
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.listActivitiesByKind:query",
+          "ProjectionSnapshotQuery.listActivitiesByKind:decodeRows",
+        ),
+      ),
+    );
+
   const getEventReplayStats: ProjectionSnapshotQueryShape["getEventReplayStats"] = (input) =>
     readEventReplayStats(input).pipe(
       Effect.mapError(
@@ -3227,6 +3271,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   return {
     getCommandReadModel,
     getUserInputActivity,
+    listActivitiesByKind,
     getSnapshot,
     getShellSnapshot,
     getArchivedShellSnapshot,
