@@ -1199,7 +1199,10 @@ const makeWorkerService = Effect.gen(function* () {
                       occurredAt: cancelledAt,
                     });
                   }
-                  return true;
+                  // A setup fiber remains registered through provider activation. If
+                  // its checkout is already ready, let interrupt() reconcile the
+                  // active activation instead of treating setup as fully canceled.
+                  return current?.worktree?.status !== "ready";
                 }),
               ),
             );
