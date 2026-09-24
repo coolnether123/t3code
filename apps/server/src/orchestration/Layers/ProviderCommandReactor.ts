@@ -1957,6 +1957,22 @@ const make = Effect.gen(function* () {
           "The server restarted during context compaction.",
         );
       }
+      const canResumeQueuedMessages =
+        generation.status === "completed" &&
+        generation.queuedMessages.length > 0 &&
+        generation.queuedMessages.every((message) => message.status === "queued");
+      if (canResumeQueuedMessages) {
+        yield* resumeTurnsAfterCompaction(generation.threadId, generation.compactMessageId).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("failed to replay queued turns after context compaction restart", {
+              threadId: generation.threadId,
+              cause: Cause.pretty(cause),
+            }),
+          ),
+          Effect.forkScoped,
+        );
+        continue;
+      }
       for (const message of generation.queuedMessages) {
         if (message.status !== "queued" && message.status !== "attempted") continue;
         const detail =
