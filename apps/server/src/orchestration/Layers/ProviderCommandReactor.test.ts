@@ -29,7 +29,7 @@ import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import { it as effectIt } from "@effect/vitest";
+import { makeMethods } from "@effect/vitest";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { deriveServerPaths, ServerConfig } from "../../config.ts";
@@ -63,6 +63,8 @@ import * as Clock from "effect/Clock";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
+
+const effectIt = makeMethods(it);
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asApprovalRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.make(value);
@@ -150,7 +152,7 @@ describe("ProviderCommandReactor", () => {
     readonly requiresNewThreadForModelChange?: boolean;
     readonly titleRegenerationCompletionDispatchFailures?: number;
     readonly titleRegenerationBeforeStart?: "one" | "two";
-    readonly seedInterruptedCompaction?: "active" | "attempted";
+    readonly seedInterruptedCompaction?: "active" | "attempted" | "completed-queued";
     readonly compactThreadEffect?: NonNullable<ProviderServiceShape["compactThread"]>;
     readonly sendTurnEffect?: ProviderServiceShape["sendTurn"];
     readonly startSessionEffect?: (
@@ -554,7 +556,10 @@ describe("ProviderCommandReactor", () => {
           }),
         );
       }
-      if (input.seedInterruptedCompaction === "attempted") {
+      if (
+        input.seedInterruptedCompaction === "attempted" ||
+        input.seedInterruptedCompaction === "completed-queued"
+      ) {
         await Effect.runPromise(
           engine.dispatch({
             type: "thread.context-compaction.status.set",
@@ -565,6 +570,8 @@ describe("ProviderCommandReactor", () => {
             updatedAt: now,
           }),
         );
+      }
+      if (input.seedInterruptedCompaction === "attempted") {
         await Effect.runPromise(
           engine.dispatch({
             type: "thread.turn.start",
@@ -708,6 +715,53 @@ describe("ProviderCommandReactor", () => {
       ).toBe(true);
     },
   );
+
+  it("replays queued messages after restart when completed compaction had not attempted delivery", async () => {
+    const harness = await createHarness({ seedInterruptedCompaction: "completed-queued" });
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+
+    expect(harness.compactThread).not.toHaveBeenCalled();
+    expect(harness.sendTurn.mock.calls[0]?.[0].input).toBe("Send after compact");
+    const generation = (await harness.readCompactions()).find(
+      (entry) => entry.compactMessageId === asMessageId("pre-restart-compact"),
+    );
+    expect(generation?.status).toBe("completed");
+    expect(generation?.queuedMessages).toEqual([
+      expect.objectContaining({
+        messageId: asMessageId("pre-restart-queued"),
+        status: "attempted",
+      }),
+    ]);
+    const thread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === ThreadId.make("thread-1"),
+    );
+    expect(thread?.messages.filter((entry) => entry.id === "pre-restart-queued")).toHaveLength(1);
+    if (!thread?.session) throw new Error("Expected a session while replaying the recovered turn.");
+
+    for (const status of ["running", "ready"] as const) {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`cmd-recovered-turn-${status}`),
+          threadId: thread.id,
+          session: {
+            ...thread.session,
+            status,
+            activeTurnId: status === "running" ? asTurnId("turn-recovered") : null,
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+          createdAt: "2026-01-01T00:00:00.000Z",
+        }),
+      );
+      await harness.drain();
+    }
+    await waitFor(
+      async () =>
+        !(await harness.readCompactions()).some(
+          (entry) => entry.compactMessageId === asMessageId("pre-restart-compact"),
+        ),
+    );
+  });
 
   it("queues turn starts during compaction and replays them in order", async () => {
     const compactGate = await Effect.runPromise(Deferred.make<void, ProviderAdapterRequestError>());
