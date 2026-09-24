@@ -59,6 +59,7 @@ import {
   codexArtifactTemplatePromptToAppend,
   shouldDockDraftHeroForSubmission,
   shouldQueueFollowUp,
+  resolveFollowUpSubmission,
   shouldReleaseTimelineAnchorForToolActivity,
   shouldOpenProactivePullRequest,
   shouldRetargetThreadPullRequestPanel,
@@ -580,6 +581,47 @@ describe("queued follow-up eligibility", () => {
     { hasDirectAnnotation: true },
   ])("does not queue when the submission is unsafe: %j", (override) => {
     expect(shouldQueueFollowUp({ ...base, ...override })).toBe(false);
+  });
+});
+
+describe("follow-up submission choice", () => {
+  const base = {
+    phase: "running" as const,
+    followUpBehavior: "queue" as "queue" | "steer",
+    hasThread: true,
+    hasContent: true,
+    hasPendingRequest: false,
+    hasDirectAnnotation: false,
+    hasQueuedFollowUps: true,
+    isSendBusy: false,
+    isConnecting: false,
+    isThreadLoading: false,
+    isEnvironmentUnavailable: false,
+  };
+
+  it("steers an active turn even when follow-ups are queued", () => {
+    expect(resolveFollowUpSubmission({ ...base, followUpBehavior: "steer" })).toBe("steer");
+  });
+
+  it("keeps queued follow-ups ahead of new turns when the thread is ready", () => {
+    expect(resolveFollowUpSubmission({ ...base, phase: "ready", followUpBehavior: "steer" })).toBe(
+      "queue",
+    );
+  });
+
+  it("queues in queue mode and keeps pending requests out of the queue", () => {
+    expect(resolveFollowUpSubmission(base)).toBe("queue");
+    expect(resolveFollowUpSubmission({ ...base, hasPendingRequest: true })).toBe("send");
+  });
+
+  it("does not convert a direct annotation into a steer", () => {
+    expect(
+      resolveFollowUpSubmission({
+        ...base,
+        followUpBehavior: "steer",
+        hasDirectAnnotation: true,
+      }),
+    ).toBe("send");
   });
 });
 

@@ -221,6 +221,43 @@ export function shouldQueueFollowUp(input: {
   );
 }
 
+export function resolveFollowUpSubmission(input: {
+  phase: SessionPhase;
+  followUpBehavior: "queue" | "steer";
+  hasThread: boolean;
+  hasContent: boolean;
+  hasPendingRequest: boolean;
+  hasDirectAnnotation: boolean;
+  hasQueuedFollowUps: boolean;
+  isSendBusy: boolean;
+  isConnecting: boolean;
+  isThreadLoading: boolean;
+  isEnvironmentUnavailable: boolean;
+}): "steer" | "queue" | "send" {
+  if (
+    input.phase === "running" &&
+    input.followUpBehavior === "steer" &&
+    input.hasThread &&
+    input.hasContent &&
+    !input.hasDirectAnnotation
+  ) {
+    return "steer";
+  }
+  if (shouldQueueFollowUp(input)) return "queue";
+  if (
+    input.hasQueuedFollowUps &&
+    input.hasContent &&
+    !input.hasPendingRequest &&
+    !input.hasDirectAnnotation &&
+    (input.phase === "running" || (!input.isSendBusy && !input.isConnecting)) &&
+    !input.isThreadLoading &&
+    !input.isEnvironmentUnavailable
+  ) {
+    return "queue";
+  }
+  return "send";
+}
+
 export function shouldReleaseTimelineAnchorForToolActivity(input: {
   anchorMessageId: MessageId | null;
   liveFollowEnabled: boolean;
