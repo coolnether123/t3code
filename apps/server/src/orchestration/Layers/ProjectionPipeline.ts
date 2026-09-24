@@ -887,7 +887,30 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           return;
         }
 
-        case "thread.message-sent":
+        // Message events only change the latest-user timestamp in the thread
+        // summary. Fold that monotonic value in directly instead of re-reading
+        // every persisted message body for each streaming delta.
+        case "thread.message-sent": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          const previousLatestUserMessageAt = existingRow.value.latestUserMessageAt;
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            updatedAt: event.occurredAt,
+            latestUserMessageAt:
+              event.payload.role === "user" &&
+              (previousLatestUserMessageAt === null ||
+                event.payload.createdAt > previousLatestUserMessageAt)
+                ? event.payload.createdAt
+                : previousLatestUserMessageAt,
+          });
+          return;
+        }
+
         case "thread.proposed-plan-upserted":
         case "thread.activity-appended":
         case "thread.approval-response-requested":
