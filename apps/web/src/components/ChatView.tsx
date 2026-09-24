@@ -5152,6 +5152,95 @@ function ChatViewContent(props: ChatViewProps) {
     composerRef,
   ]);
 
+  const onCompactContext = async () => {
+    if (
+      !activeThread ||
+      !isServerThread ||
+      !activeThread.session ||
+      !clientSettingsHydrated ||
+      phase !== "ready" ||
+      isSendBusy ||
+      isConnecting ||
+      activeEnvironmentUnavailable ||
+      activePendingApproval ||
+      pendingUserInputs.length > 0 ||
+      sendInFlightRef.current
+    ) {
+      return;
+    }
+    const context = composerRef.current?.getSendContext();
+    if (
+      !context?.providerAvailable ||
+      (context.selectedProvider !== "claude" && context.selectedProvider !== "opencode")
+    ) {
+      return;
+    }
+
+    // The command has its own message. The composer draft and attachments stay untouched.
+    const threadId = activeThread.id;
+    const messageId = newMessageId();
+    const createdAt = new Date().toISOString();
+    sendInFlightRef.current = true;
+    beginLocalDispatch({ preparingWorktree: false });
+    setThreadError(threadId, null);
+    setOptimisticUserMessages((messages) => [
+      ...messages,
+      {
+        id: messageId,
+        role: "user",
+        text: "/compact",
+        turnId: null,
+        createdAt,
+        updatedAt: createdAt,
+        streaming: false,
+      },
+    ]);
+    scrollToEnd();
+    try {
+      const settingsResult = await persistThreadSettingsForNextTurn({
+        threadId,
+        createdAt,
+        modelSelection: context.selectedModelSelection,
+        ...(localCheckoutBranchMismatch
+          ? { branch: localCheckoutBranchMismatch.currentBranch }
+          : {}),
+        runtimeMode,
+        interactionMode,
+      });
+      const result =
+        settingsResult._tag === "Failure"
+          ? settingsResult
+          : await startThreadTurn({
+              environmentId,
+              input: {
+                threadId,
+                message: { messageId, role: "user", text: "/compact", attachments: [] },
+                modelSelection: context.selectedModelSelection,
+                runtimeMode,
+                interactionMode,
+                createdAt,
+              },
+            });
+      if (result._tag === "Failure") {
+        setOptimisticUserMessages((messages) =>
+          messages.filter((message) => message.id !== messageId),
+        );
+        resetLocalDispatch();
+        if (!isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          setThreadError(
+            threadId,
+            error instanceof Error ? error.message : "Failed to compact context.",
+          );
+        }
+      } else {
+        acknowledgeActiveThreadWoke();
+      }
+    } finally {
+      sendInFlightRef.current = false;
+    }
+  };
+
   const onSend = async (
     e?: { preventDefault: () => void },
     submissionIntent: ComposerSubmissionIntent = "foreground",
@@ -7281,6 +7370,7 @@ function ChatViewContent(props: ChatViewProps) {
                             composerImagesRef={composerImagesRef}
                             composerTerminalContextsRef={composerTerminalContextsRef}
                             composerElementContextsRef={composerElementContextsRef}
+                            onCompactContext={onCompactContext}
                             onSend={onSend}
                             onInterrupt={onInterrupt}
                             onImplementPlanInNewThread={onImplementPlanInNewThread}

@@ -490,6 +490,9 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   compact: boolean;
   activeContextWindow: ReturnType<typeof deriveLatestContextWindowSnapshot>;
   activeThreadModelDisplayName: string | null;
+  onCompactContext: (() => void) | null;
+  compactDisabled: boolean;
+  compactDisabledReason: string | null;
   isPreparingWorktree: boolean;
   pendingAction: {
     questionIndex: number;
@@ -518,6 +521,9 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
         <ContextWindowMeter
           usage={props.activeContextWindow}
           modelDisplayName={props.activeThreadModelDisplayName}
+          onCompact={props.onCompactContext ?? undefined}
+          compactDisabled={props.compactDisabled}
+          compactDisabledReason={props.compactDisabledReason}
         />
       ) : null}
       {props.isPreparingWorktree ? (
@@ -676,6 +682,7 @@ export interface ChatComposerProps {
   composerRef: React.RefObject<ChatComposerHandle | null>;
 
   // Callbacks
+  onCompactContext: () => void;
   onSend: (e?: { preventDefault: () => void }, intent?: ComposerSubmissionIntent) => void;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
@@ -762,6 +769,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     composerImagesRef,
     composerTerminalContextsRef,
     composerElementContextsRef,
+    onCompactContext,
     onSend,
     onInterrupt,
     onImplementPlanInNewThread,
@@ -3513,6 +3521,22 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     compact={isComposerPrimaryActionsCompact}
                     activeContextWindow={activeContextWindow}
                     activeThreadModelDisplayName={activeThreadModelDisplayName}
+                    onCompactContext={
+                      selectedProvider === "claude" || selectedProvider === "opencode"
+                        ? onCompactContext
+                        : null
+                    }
+                    compactDisabled={
+                      !activeThread?.session ||
+                      phase !== "ready" ||
+                      isSendBusy ||
+                      isConnecting ||
+                      noProviderAvailable ||
+                      environmentUnavailable !== null ||
+                      pendingApprovals.length > 0 ||
+                      pendingUserInputs.length > 0
+                    }
+                    compactDisabledReason="Finish the current action before compacting"
                     pendingAction={pendingPrimaryAction}
                     isRunning={phase === "running"}
                     followUpBehavior={settings.followUpBehavior}
