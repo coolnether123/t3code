@@ -35,6 +35,7 @@ export interface ChatThreadActionContext {
   readonly activeThread: ThreadContextLike | undefined;
   readonly defaultProjectRef: ScopedProjectRef | null;
   readonly handleNewThread: NewThreadHandler;
+  readonly selectedEnvironmentId?: EnvironmentId | null;
 }
 
 export function resolveNewDraftStartFromOrigin(input: {
@@ -71,16 +72,20 @@ export function hasExplicitComposerModelSelection(
 export function resolveThreadActionProjectRef(
   context: ChatThreadActionContext,
 ): ScopedProjectRef | null {
-  if (context.activeThread) {
+  const matchesScope = (environmentId: EnvironmentId) =>
+    context.selectedEnvironmentId == null || environmentId === context.selectedEnvironmentId;
+  if (context.activeThread && matchesScope(context.activeThread.environmentId)) {
     return scopeProjectRef(context.activeThread.environmentId, context.activeThread.projectId);
   }
-  if (context.activeDraftThread) {
+  if (context.activeDraftThread && matchesScope(context.activeDraftThread.environmentId)) {
     return scopeProjectRef(
       context.activeDraftThread.environmentId,
       context.activeDraftThread.projectId,
     );
   }
-  return context.defaultProjectRef;
+  return context.defaultProjectRef && matchesScope(context.defaultProjectRef.environmentId)
+    ? context.defaultProjectRef
+    : null;
 }
 
 // New threads inherit only the *project* from the current context. Branch,

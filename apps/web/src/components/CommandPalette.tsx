@@ -596,8 +596,13 @@ function OpenCommandPaletteDialog(props: {
   const desktopLocalBootstraps = useDesktopLocalBootstraps();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const availableSettingsSearchItems = useAvailableSettingsSearchItems();
-  const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread } =
-    useHandleNewThread();
+  const {
+    activeDraftThread,
+    activeThread,
+    defaultProjectRef,
+    handleNewThread,
+    selectedEnvironmentId,
+  } = useHandleNewThread();
   const projects = useProjects();
   const openPanelPullRequestUrl = useOpenPanelPullRequestUrl(
     activeThread ? scopeThreadRef(activeThread.environmentId, activeThread.id) : null,
@@ -737,7 +742,13 @@ function OpenCommandPaletteDialog(props: {
   const unsortedProjectGroups = useMemo(
     () =>
       buildSidebarProjectSnapshots({
-        projects: clientSettings.sidebarProjectSortOrder === "manual" ? orderedProjects : projects,
+        projects: (clientSettings.sidebarProjectSortOrder === "manual"
+          ? orderedProjects
+          : projects
+        ).filter(
+          (project) =>
+            selectedEnvironmentId === null || project.environmentId === selectedEnvironmentId,
+        ),
         settings: projectGroupingSettings,
         primaryEnvironmentId,
         resolveEnvironmentLabel: (environmentId) => environmentLabelById.get(environmentId) ?? null,
@@ -749,6 +760,7 @@ function OpenCommandPaletteDialog(props: {
       primaryEnvironmentId,
       projectGroupingSettings,
       projects,
+      selectedEnvironmentId,
     ],
   );
   const projectGroups = useMemo(
@@ -767,8 +779,9 @@ function OpenCommandPaletteDialog(props: {
         activeThread: activeThread ?? undefined,
         defaultProjectRef,
         handleNewThread,
+        selectedEnvironmentId,
       }),
-    [activeDraftThread, activeThread, defaultProjectRef, handleNewThread],
+    [activeDraftThread, activeThread, defaultProjectRef, handleNewThread, selectedEnvironmentId],
   );
   const projectPickerEntries = useMemo(
     () =>
@@ -824,7 +837,11 @@ function OpenCommandPaletteDialog(props: {
     return options;
   }, [environments]);
   const defaultAddProjectEnvironmentId =
-    addProjectEnvironmentOptions.find((option) => option.isConnected)?.environmentId ?? null;
+    addProjectEnvironmentOptions.find(
+      (option) => option.isConnected && option.environmentId === selectedEnvironmentId,
+    )?.environmentId ??
+    addProjectEnvironmentOptions.find((option) => option.isConnected)?.environmentId ??
+    null;
   const wslAddProjectEnvironmentOption = useMemo(
     () =>
       addProjectEnvironmentOptions.find((option) => {
@@ -1575,6 +1592,7 @@ function OpenCommandPaletteDialog(props: {
             activeThread: activeThread ?? undefined,
             defaultProjectRef,
             handleNewThread,
+            selectedEnvironmentId,
           });
         },
       });
