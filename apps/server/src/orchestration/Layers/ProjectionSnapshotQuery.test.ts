@@ -41,6 +41,64 @@ const projectionSnapshotLayer = it.layer(
 );
 
 projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
+  it.effect("lists one activity kind only for active threads", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      const createdAt = "2026-08-22T21:51:00.000Z";
+
+      yield* sql`DELETE FROM projection_thread_activities`;
+      yield* sql`DELETE FROM projection_threads`;
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id, project_id, title, model_selection_json, runtime_mode,
+          interaction_mode, created_at, updated_at, archived_at, deleted_at
+        ) VALUES
+          ('thread-activity-live', 'project-activity', 'Live activity thread',
+            '{"instanceId":"codex","model":"gpt-5.4"}', 'full-access', 'default',
+            ${createdAt}, ${createdAt}, NULL, NULL),
+          ('thread-activity-archived', 'project-activity', 'Archived activity thread',
+            '{"instanceId":"codex","model":"gpt-5.4"}', 'full-access', 'default',
+            ${createdAt}, ${createdAt}, ${createdAt}, NULL),
+          ('thread-activity-deleted', 'project-activity', 'Deleted activity thread',
+            '{"instanceId":"codex","model":"gpt-5.4"}', 'full-access', 'default',
+            ${createdAt}, ${createdAt}, NULL, ${createdAt})
+      `;
+      yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at
+        ) VALUES
+          ('activity-live', 'thread-activity-live', NULL, 'info', 'worktree-setup',
+            'Setting up checkout', '{"phase":"running"}', ${createdAt}),
+          ('activity-archived', 'thread-activity-archived', NULL, 'info', 'worktree-setup',
+            'Setting up checkout', '{"phase":"running"}', ${createdAt}),
+          ('activity-deleted', 'thread-activity-deleted', NULL, 'info', 'worktree-setup',
+            'Setting up checkout', '{"phase":"running"}', ${createdAt}),
+          ('activity-other-kind', 'thread-activity-live', NULL, 'info', 'other',
+            'Other activity', '{}', ${createdAt})
+      `;
+
+      const rows = yield* snapshotQuery.listActivitiesByKind("worktree-setup");
+      assert.deepEqual(rows, [
+        {
+          threadId: ThreadId.make("thread-activity-live"),
+          activity: {
+            id: asEventId("activity-live"),
+            tone: "info",
+            kind: "worktree-setup",
+            summary: "Setting up checkout",
+            payload: { phase: "running" },
+            turnId: null,
+            createdAt,
+          },
+        },
+      ]);
+
+      yield* sql`DELETE FROM projection_thread_activities`;
+      yield* sql`DELETE FROM projection_threads`;
+    }),
+  );
+
   it.effect("rehydrates canonical user-message boundaries for branch and rewind commands", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

@@ -245,6 +245,7 @@ describe("ProviderSessionReaper", () => {
           getThreadCheckpointContext: () => Effect.die("unused"),
           getFullThreadDiffContext: () => Effect.die("unused"),
           getUserInputActivity: () => Effect.die("unused"),
+          listActivitiesByKind: () => Effect.die("unused"),
           getEventReplayStats: () => Effect.die("unused"),
           getImportedAgentSessionSources: () => Effect.die("unused"),
           getThreadRuntimeContext: () => Effect.die("unused"),
