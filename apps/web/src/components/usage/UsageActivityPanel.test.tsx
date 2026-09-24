@@ -57,7 +57,6 @@ describe("usage activity explorer", () => {
         points={points}
         start={start}
         end={end}
-        plotEnd={end}
         onZoom={() => {}}
       />,
     );
@@ -67,12 +66,15 @@ describe("usage activity explorer", () => {
     expect(markup).toContain("1.8×");
     expect(markup).toContain("45% of API value");
     expect(markup).toContain("9.00 quota points");
+    expect(markup).toContain('viewBox="0 0 960 120"');
+    expect(markup).toContain('width="479"');
   });
   it("switches model and spike views, inspects by touch and zooms the chosen interval", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const container = document.createElement("div");
     const root = createRoot(container);
     const zoom = vi.fn();
+    const reset = vi.fn();
     const button = (label: string) =>
       Array.from(container.querySelectorAll("button")).find((b) => b.textContent === label)!;
     try {
@@ -83,8 +85,8 @@ describe("usage activity explorer", () => {
             points={points}
             start={start}
             end={end}
-            plotEnd={end}
             onZoom={zoom}
+            onResetZoom={reset}
           />,
         ),
       );
@@ -93,7 +95,9 @@ describe("usage activity explorer", () => {
         "90%",
       );
       const plot = container.querySelector("svg")!;
+      plot.setPointerCapture = vi.fn();
       vi.spyOn(plot, "getBoundingClientRect").mockReturnValue({ left: 0, width: 100 } as DOMRect);
+      expect(container.querySelector('input[aria-label="Inspect API activity"]')).toBeNull();
       await act(async () =>
         plot.dispatchEvent(
           new PointerEvent("pointerdown", { clientX: 75, pointerType: "touch", bubbles: true }),
@@ -104,6 +108,18 @@ describe("usage activity explorer", () => {
       ).toContain("1.00 quota points");
       await act(async () => button("Zoom here").click());
       expect(zoom).toHaveBeenLastCalledWith(start + 3_600_000, end);
+      await act(async () =>
+        plot.dispatchEvent(new PointerEvent("pointermove", { clientX: 95, bubbles: true })),
+      );
+      await act(async () =>
+        plot.dispatchEvent(new PointerEvent("pointerup", { clientX: 95, bubbles: true })),
+      );
+      expect(zoom).toHaveBeenLastCalledWith(
+        start + 0.75 * (end - start),
+        start + 0.95 * (end - start),
+      );
+      await act(async () => plot.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
+      expect(reset).toHaveBeenCalledOnce();
       await act(async () => button("Spikes").click());
       const spikes = container.querySelector('[aria-label="Highest spending intervals"]')!;
       expect(spikes.querySelector("button")?.textContent).toContain("gpt-6-astra");
@@ -124,7 +140,6 @@ describe("usage activity explorer", () => {
         points={points}
         start={start}
         end={end}
-        plotEnd={end}
         onZoom={() => {}}
       />,
     );

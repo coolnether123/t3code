@@ -4,6 +4,7 @@ import {
   type ChartActivity,
 } from "./usageChartActivity";
 import { UsageActivityPanel } from "./UsageActivityPanel";
+import { compareUsageBurn } from "./usageBurnComparison";
 import type { UsageQuotaSample } from "@t3tools/contracts";
 import {
   currentResetAnnouncement,
@@ -109,6 +110,10 @@ export function UsagePaceChart({
   );
   const activityPoints = useMemo(
     () => quotaActivityPoints(cycleSamples, activity),
+    [cycleSamples, activity],
+  );
+  const burnComparison = useMemo(
+    () => compareUsageBurn(cycleSamples, activity),
     [cycleSamples, activity],
   );
   const crossings = useMemo(() => quotaPercentCrossings(activityPoints), [activityPoints]);
@@ -866,11 +871,42 @@ export function UsagePaceChart({
             points={activityPoints}
             start={viewStart}
             end={Math.min(viewEnd, Date.parse(f.latest.observedAt))}
-            plotEnd={viewEnd}
-            onZoom={(start, end) => zoomTo(Math.max(60_000, (end - start) * 3), (start + end) / 2)}
+            onZoom={(start, end) => zoomTo(Math.max(60_000, end - start), (start + end) / 2)}
+            onResetZoom={() => setRange(null)}
           />
         </div>
       </div>
+      {!activeZoom ? (
+        <section
+          className="mt-3 border-t border-border/60 pt-3 text-xs"
+          aria-label="Burn comparison"
+        >
+          <h3 className="font-medium">Which burn did the readings follow?</h3>
+          {burnComparison.checks ? (
+            <>
+              <p className="mt-1 text-muted-foreground">
+                Across {burnComparison.checks} non-overlapping six-hour checks: API closer{" "}
+                {burnComparison.apiWins}, forecast closer {burnComparison.forecastWins}, too close
+                to call {burnComparison.ties}.
+              </p>
+              <p className="mt-1 tabular-nums">
+                Average miss: API {burnComparison.apiMeanError!.toFixed(1)} points · forecast{" "}
+                {burnComparison.forecastMeanError!.toFixed(1)} points
+              </p>
+            </>
+          ) : (
+            <p className="mt-1 text-muted-foreground">
+              Need completed, priced API activity and at least five recorded quota points before
+              six-hour checks can compare the two.
+            </p>
+          )}
+          <p className="mt-1 text-[10px] text-muted-foreground">
+            Each check uses the forecast and API spending known at its start, then compares both
+            with the next recorded reading. Differences under half a quota point are ties; gaps and
+            resets are skipped. API dollars are a proxy for quota use, not a bill.
+          </p>
+        </section>
+      ) : null}
       {!historical && f.stale ? (
         <p role="alert" className="mt-3 text-xs text-amber-600 dark:text-amber-400">
           No fresh reading. Forecasts use the last saved balance.

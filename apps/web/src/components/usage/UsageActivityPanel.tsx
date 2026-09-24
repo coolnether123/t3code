@@ -1,5 +1,4 @@
 import { useMemo, useState } from "react";
-import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
 import { formatUsd } from "@t3tools/shared/usageFormat";
 import {
   estimatedQuotaDrop,
@@ -33,27 +32,30 @@ export function UsageActivityPanel({
   points,
   start,
   end,
-  plotEnd,
   onZoom,
+  onResetZoom,
 }: {
   readonly activity: readonly ChartActivity[];
   readonly points: ReturnType<typeof quotaActivityPoints>;
   readonly start: number;
   readonly end: number;
-  readonly plotEnd: number;
   readonly onZoom: (start: number, end: number) => void;
+  readonly onResetZoom?: () => void;
 }) {
   const [view, setView] = useState<"intensity" | "models" | "spikes">("intensity");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [drag, setDrag] = useState<readonly [number, number] | null>(null);
   const data = useMemo(() => visibleChartActivity(activity, start, end), [activity, start, end]);
   const selected = data.bins.find((bin) => bin.id === selectedId) ?? data.ranked[0];
   const selectedIndex = selected ? data.bins.indexOf(selected) : -1;
   const quotaDrop = selected ? estimatedQuotaDrop(points, selected.start, selected.end) : null;
   const peakRate = Math.max(1, data.peak?.perHour ?? 0);
-  const x = (at: number) => ((at - start) / Math.max(1, plotEnd - start)) * 960;
+  const activityEnd = Math.max(start + 1, data.bins.at(-1)?.end ?? end);
+  const fractionAt = (clientX: number, rect: DOMRect) =>
+    Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(rect.width, 1)));
+  const x = (at: number) => ((at - start) / (activityEnd - start)) * 960;
   const inspectAt = (clientX: number, rect: DOMRect) => {
-    const at =
-      start + Math.max(0, Math.min(1, (clientX - rect.left) / rect.width)) * (plotEnd - start);
+    const at = start + fractionAt(clientX, rect) * (activityEnd - start);
     const bin = data.bins.find((bin) => at >= bin.start && at <= bin.end);
     if (bin) setSelectedId(bin.id);
   };
@@ -107,7 +109,7 @@ export function UsageActivityPanel({
           </dd>
         </div>
       </dl>
-      <div className="mt-2 grid grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)] gap-3 sm:grid-cols-[minmax(0,2fr)_minmax(12rem,1fr)]">
+      <div className="mt-2 grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,2fr)_minmax(12rem,1fr)]">
         <div className="min-w-0">
           {view === "spikes" ? (
             <div className="divide-y divide-border/60" aria-label="Highest spending intervals">
@@ -149,35 +151,73 @@ export function UsageActivityPanel({
             <>
               <div className="mt-1">
                 <svg
-                  viewBox="0 0 960 90"
+                  viewBox="0 0 960 120"
                   preserveAspectRatio="none"
-                  className="h-16 w-full touch-pan-y"
+                  className="h-28 w-full touch-pan-y select-none outline-offset-4 focus-visible:outline-2 focus-visible:outline-ring"
                   role="img"
+                  tabIndex={0}
                   aria-label={
                     view === "models" ? "API spending by model over time" : "API spending intensity"
                   }
-                  onPointerDown={(event) =>
-                    inspectAt(event.clientX, event.currentTarget.getBoundingClientRect())
-                  }
+                  onPointerDown={(event) => {
+                    if (event.button !== 0) return;
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    event.currentTarget.setPointerCapture(event.pointerId);
+                    inspectAt(event.clientX, rect);
+                    const fraction = fractionAt(event.clientX, rect);
+                    setDrag([fraction, fraction]);
+                  }}
                   onPointerMove={(event) => {
-                    if (event.buttons === 1)
-                      inspectAt(event.clientX, event.currentTarget.getBoundingClientRect());
+                    if (!drag) return;
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    inspectAt(event.clientX, rect);
+                    setDrag([drag[0], fractionAt(event.clientX, rect)]);
+                  }}
+                  onPointerUp={(event) => {
+                    if (drag) {
+                      const last = fractionAt(
+                        event.clientX,
+                        event.currentTarget.getBoundingClientRect(),
+                      );
+                      if (Math.abs(last - drag[0]) > 0.015) {
+                        onZoom(
+                          start + Math.min(drag[0], last) * (activityEnd - start),
+                          start + Math.max(drag[0], last) * (activityEnd - start),
+                        );
+                      }
+                    }
+                    setDrag(null);
+                  }}
+                  onPointerCancel={() => setDrag(null)}
+                  onDoubleClick={onResetZoom}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") onResetZoom?.();
+                    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+                    event.preventDefault();
+                    const next = Math.max(
+                      0,
+                      Math.min(
+                        data.bins.length - 1,
+                        selectedIndex + (event.key === "ArrowLeft" ? -1 : 1),
+                      ),
+                    );
+                    if (data.bins[next]) setSelectedId(data.bins[next].id);
                   }}
                 >
                   {data.bins.map((bin) => {
-                    const width = Math.max(0.5, x(bin.end) - x(bin.start) - 1);
+                    const width = Math.max(2, x(bin.end) - x(bin.start) - 1);
                     if (bin.cost === null)
                       return (
                         <rect
                           key={bin.id}
                           x={x(bin.start)}
                           width={width}
-                          y={84}
+                          y={114}
                           height={6}
                           className="fill-muted-foreground/25"
                         />
                       );
-                    const height = ((bin.perHour ?? 0) / peakRate) * 82;
+                    const height = ((bin.perHour ?? 0) / peakRate) * 110;
                     let used = 0;
                     return (
                       <g key={bin.id} opacity={selected?.id === bin.id ? 1 : 0.65}>
@@ -190,7 +230,7 @@ export function UsageActivityPanel({
                                 key={model}
                                 x={x(bin.start)}
                                 width={width}
-                                y={90 - used}
+                                y={120 - used}
                                 height={h}
                                 fill={modelColor(model)}
                               />
@@ -200,7 +240,7 @@ export function UsageActivityPanel({
                           <rect
                             x={x(bin.start)}
                             width={width}
-                            y={90 - height}
+                            y={120 - height}
                             height={height}
                             className="fill-cyan-600 dark:fill-cyan-400"
                           />
@@ -210,7 +250,7 @@ export function UsageActivityPanel({
                             x={x(bin.start)}
                             width={width}
                             y={0}
-                            height={90}
+                            height={120}
                             fill="none"
                             stroke="currentColor"
                             strokeWidth={1}
@@ -220,47 +260,28 @@ export function UsageActivityPanel({
                       </g>
                     );
                   })}
+                  {drag && Math.abs(drag[1] - drag[0]) > 0.005 ? (
+                    <rect
+                      x={Math.min(...drag) * 960}
+                      y={0}
+                      width={Math.abs(drag[1] - drag[0]) * 960}
+                      height={120}
+                      className="fill-cyan-400/20 stroke-cyan-400"
+                      strokeWidth={1}
+                      vectorEffect="non-scaling-stroke"
+                      pointerEvents="none"
+                    />
+                  ) : null}
                 </svg>
                 <div className="mt-1 flex justify-between text-[10px] text-muted-foreground">
                   <span>{time(start)}</span>
-                  <span>{time(plotEnd)}</span>
+                  <span>{time(activityEnd)}</span>
                 </div>
               </div>
               <p className="sr-only">
-                Tap a bar or move the slider to inspect. Bars use the same time range as the quota
-                graph.
+                Tap a bar or use the arrow keys to inspect. Drag across bars to zoom; double-click
+                or press Escape to reset. Bars fill the recorded part of the visible quota range.
               </p>
-              {data.bins.length > 0 ? (
-                <div className="mt-1 flex items-center gap-2">
-                  <button
-                    type="button"
-                    aria-label="Previous activity interval"
-                    disabled={selectedIndex <= 0}
-                    onClick={() => setSelectedId(data.bins[selectedIndex - 1]!.id)}
-                    className="inline-flex size-11 shrink-0 items-center justify-center rounded hover:bg-muted disabled:opacity-30"
-                  >
-                    <ChevronLeftIcon className="size-4" />
-                  </button>
-                  <input
-                    type="range"
-                    aria-label="Inspect API activity"
-                    min={0}
-                    max={data.bins.length - 1}
-                    value={Math.max(0, selectedIndex)}
-                    onChange={(event) => setSelectedId(data.bins[Number(event.target.value)]!.id)}
-                    className="h-11 min-w-0 flex-1 accent-current"
-                  />
-                  <button
-                    type="button"
-                    aria-label="Next activity interval"
-                    disabled={selectedIndex >= data.bins.length - 1}
-                    onClick={() => setSelectedId(data.bins[selectedIndex + 1]!.id)}
-                    className="inline-flex size-11 shrink-0 items-center justify-center rounded hover:bg-muted disabled:opacity-30"
-                  >
-                    <ChevronRightIcon className="size-4" />
-                  </button>
-                </div>
-              ) : null}
             </>
           )}
         </div>

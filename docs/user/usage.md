@@ -301,10 +301,19 @@ work on past reset cycles too. The percentage axis expands when zoomed.
 
 **Where usage went** offers Intensity, Models, and Spikes views. Models splits bars
 by model and shows cost shares; Spikes ranks intervals by hourly spending. Tap a bar,
-use the slider, or choose a spike to inspect costs, models, and estimated quota use.
-**Zoom here** opens the selected interval. All controls work without hovering.
+use the arrow keys, or choose a spike to inspect costs, models, and estimated quota use.
+Drag across the bars to zoom the quota chart to the selected time. Double-click or press Escape
+to reset, or use **Zoom here** to open one interval. The bars fill the recorded time rather
+than leaving room for the future projection. All controls work without hovering.
 The summary compares peak and average spending, including idle time, and shows
 what fraction of cost came from the busiest 25% of the selected time.
+
+**Which burn did the readings follow?** checks non-overlapping six-hour windows in the full
+cycle. It compares the orange blended forecast and the API spending pace available at the start
+of each window with the next recorded quota reading. The API pace converts priced spending to
+quota points using at least five points of earlier measured use. The tracker counts wins, ties
+within half a quota point, and average misses. It skips resets, missing costs, and stale or
+missing readings. It is a historical comparison, not a guarantee that API dollars measure quota.
 
 The compact tracking layout keeps quota, API spending per hour, and the top model
 hourly rates together. Model rates use the same visible interval, including idle
