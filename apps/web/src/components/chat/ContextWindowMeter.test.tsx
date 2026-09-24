@@ -51,12 +51,12 @@ describe("ContextWindowMeter", () => {
         usage={usage}
         onCompact={() => {}}
         compactDisabled
-        compactDisabledReason="Send or clear your draft before compacting"
+        compactDisabledReason="Finish the current action before compacting"
       />,
     );
 
     expect(markup).toContain('disabled=""');
-    expect(markup).toContain(">Send or clear your draft before compacting<");
-    expect(markup).not.toContain('aria-label="Send or clear your draft before compacting"');
+    expect(markup).toContain(">Finish the current action before compacting<");
+    expect(markup).not.toContain('aria-label="Finish the current action before compacting"');
   });
 });
