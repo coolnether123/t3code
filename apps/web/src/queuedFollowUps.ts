@@ -8,6 +8,19 @@ export type QueuedFollowUp = {
   readonly holdUntilUserAction?: boolean;
 };
 
+export function canSteerQueuedFollowUp(entry: QueuedFollowUp): boolean {
+  const { prompt, images, terminalContexts, elementContexts, previewAnnotations, reviewComments } =
+    entry.context;
+  return (
+    prompt.trim().length > 0 &&
+    images.length === 0 &&
+    terminalContexts.length === 0 &&
+    elementContexts.length === 0 &&
+    previewAnnotations.length === 0 &&
+    reviewComments.length === 0
+  );
+}
+
 type QueuedFollowUpStore = {
   readonly byThread: Record<string, ReadonlyArray<QueuedFollowUp>>;
   enqueue: (threadKey: string, entry: QueuedFollowUp) => void;

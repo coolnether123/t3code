@@ -284,6 +284,7 @@ import {
 import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import {
+  canSteerQueuedFollowUp,
   nextAutoQueuedFollowUp,
   shouldDispatchQueuedFollowUp,
   useQueuedFollowUps,
@@ -356,7 +357,7 @@ import {
   hasServerAcknowledgedLocalDispatch,
   isBranchMismatchDismissedForSession,
   shouldDockDraftHeroForSubmission,
-  shouldQueueFollowUp,
+  resolveFollowUpSubmission,
   shouldReleaseTimelineAnchorForToolActivity,
   shouldShowBranchMismatchBanner,
   getStartedThreadModelChangeBlockReason,
@@ -5264,19 +5265,26 @@ function ChatViewContent(props: ChatViewProps) {
         currentSendContext.previewAnnotations.length > 0 ||
         currentSendContext.reviewComments.length > 0),
     );
-    if (
-      !queuedFollowUp &&
-      !directAnnotation &&
-      settings.followUpBehavior === "steer" &&
-      queuedCount === 0 &&
-      phase === "running" &&
-      activeThread?.session?.activeTurnId &&
-      currentSendContextHasContent &&
-      !sendInFlightRef.current
-    ) {
+    const followUpSubmission = resolveFollowUpSubmission({
+      phase,
+      followUpBehavior: settings.followUpBehavior,
+      hasThread: activeThread != null,
+      hasContent: currentSendContextHasContent,
+      hasPendingRequest: Boolean(
+        activePendingProgress || activePendingApproval || pendingUserInputs.length > 0,
+      ),
+      hasDirectAnnotation: directAnnotation !== undefined,
+      hasQueuedFollowUps: queuedCount > 0,
+      isSendBusy,
+      isConnecting,
+      isThreadLoading: threadDetailLoading,
+      isEnvironmentUnavailable: activeEnvironmentUnavailable,
+    });
+    if (!queuedFollowUp && followUpSubmission === "steer" && !sendInFlightRef.current) {
       const context = currentSendContext;
       const text = context?.prompt.trim() ?? "";
       if (
+        !activeThread?.session?.activeTurnId ||
         !context?.providerAvailable ||
         context.selectedProvider !== "codex" ||
         !text ||
@@ -5286,13 +5294,16 @@ function ChatViewContent(props: ChatViewProps) {
         context.previewAnnotations.length > 0 ||
         context.reviewComments.length > 0 ||
         activePendingProgress ||
+        activePendingApproval ||
+        pendingUserInputs.length > 0 ||
         activeEnvironmentUnavailable
       ) {
         toastManager.add(
           stackedThreadToast({
             type: "info",
             title: "Cannot steer with this draft",
-            description: "Steering supports text-only Codex messages. Your draft is still here.",
+            description:
+              "Steering needs an active Codex turn and a text-only draft with no pending request. Your draft is still here.",
           }),
         );
         return;
@@ -5329,25 +5340,7 @@ function ChatViewContent(props: ChatViewProps) {
       activeThreadKey &&
       !queuedFollowUp &&
       !sendInFlightRef.current &&
-      (shouldQueueFollowUp({
-        phase,
-        followUpBehavior: settings.followUpBehavior,
-        hasThread: activeThread !== null && activeThread !== undefined,
-        hasContent: currentSendContextHasContent,
-        hasPendingRequest: Boolean(
-          activePendingProgress || activePendingApproval || pendingUserInputs.length > 0,
-        ),
-        hasDirectAnnotation: directAnnotation !== undefined,
-      }) ||
-        (queuedCount > 0 &&
-          currentSendContextHasContent &&
-          !activePendingProgress &&
-          !activePendingApproval &&
-          pendingUserInputs.length === 0 &&
-          (phase === "running" || (!isSendBusy && !isConnecting)) &&
-          !threadDetailLoading &&
-          !activeEnvironmentUnavailable &&
-          !directAnnotation))
+      followUpSubmission === "queue"
     ) {
       if (currentSendContext) {
         const item: QueuedFollowUp = {
@@ -6086,6 +6079,51 @@ function ChatViewContent(props: ChatViewProps) {
         activeThread.id,
         error instanceof Error ? error.message : "Failed to interrupt the current turn.",
       );
+    }
+  };
+
+  const onSteerQueuedFollowUp = async (entry: QueuedFollowUp) => {
+    const turnId = activeThread?.session?.activeTurnId;
+    if (
+      !activeThreadKey ||
+      !activeThread ||
+      phase !== "running" ||
+      !turnId ||
+      !canSteerQueuedFollowUp(entry) ||
+      sendInFlightRef.current ||
+      isSendBusy ||
+      activeEnvironmentUnavailable ||
+      activePendingProgress ||
+      activePendingApproval ||
+      pendingUserInputs.length > 0
+    )
+      return;
+    const queue = useQueuedFollowUpStore.getState();
+    if (!queue.claim(activeThreadKey, entry.id)) return;
+    sendInFlightRef.current = true;
+    try {
+      const result = await steerThreadTurn({
+        environmentId,
+        input: {
+          threadId: activeThread.id,
+          expectedTurnId: turnId,
+          text: entry.context.prompt.trim(),
+        },
+      });
+      if (result._tag === "Failure") {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not steer the active turn",
+            description: chatActionErrorMessage(squashAtomCommandFailure(result)),
+          }),
+        );
+      } else {
+        queue.remove(activeThreadKey, entry.id);
+      }
+    } finally {
+      sendInFlightRef.current = false;
+      queue.release(activeThreadKey, entry.id);
     }
   };
 
@@ -7264,6 +7302,29 @@ function ChatViewContent(props: ChatViewProps) {
                               }}
                             >
                               Send now
+                            </button>
+                          ) : null}
+                          {phase === "running" &&
+                          selectedProvider === "codex" &&
+                          isServerThread &&
+                          activeThread?.session?.activeTurnId &&
+                          canSteerQueuedFollowUp(entry) ? (
+                            <button
+                              type="button"
+                              className="shrink-0 rounded px-2 py-1 text-xs hover:bg-muted"
+                              disabled={
+                                isSendBusy ||
+                                sendInFlightRef.current ||
+                                activeEnvironmentUnavailable ||
+                                Boolean(
+                                  activePendingProgress ||
+                                  activePendingApproval ||
+                                  pendingUserInputs.length > 0,
+                                )
+                              }
+                              onClick={() => void onSteerQueuedFollowUp(entry)}
+                            >
+                              Steer now
                             </button>
                           ) : null}
                           <button

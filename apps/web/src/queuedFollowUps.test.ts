@@ -1,11 +1,45 @@
 import { afterEach, expect, it } from "vite-plus/test";
 
 import {
+  canSteerQueuedFollowUp,
   nextAutoQueuedFollowUp,
   shouldDispatchQueuedFollowUp,
   useQueuedFollowUpStore,
   type QueuedFollowUp,
 } from "./queuedFollowUps";
+
+it("steers only queued text without attachments or extra context", () => {
+  const entry = {
+    id: "message",
+    context: {
+      prompt: "  change course  ",
+      images: [],
+      terminalContexts: [],
+      elementContexts: [],
+      previewAnnotations: [],
+      reviewComments: [],
+    },
+  } as unknown as QueuedFollowUp;
+  expect(canSteerQueuedFollowUp(entry)).toBe(true);
+  expect(
+    canSteerQueuedFollowUp({
+      ...entry,
+      context: { ...entry.context, images: [{ id: "image" }] },
+    } as QueuedFollowUp),
+  ).toBe(false);
+  expect(
+    canSteerQueuedFollowUp({
+      ...entry,
+      context: { ...entry.context, terminalContexts: [{ id: "terminal" }] },
+    } as QueuedFollowUp),
+  ).toBe(false);
+  expect(
+    canSteerQueuedFollowUp({
+      ...entry,
+      context: { ...entry.context, prompt: "  " },
+    }),
+  ).toBe(false);
+});
 
 const sample = (id: string) =>
   ({ id, context: { prompt: id, images: [] } }) as unknown as QueuedFollowUp;
@@ -51,6 +85,24 @@ it("keeps a removed item's claim until its in-flight send releases it", () => {
 
   store.release("env:one", "one");
   expect(store.claim("env:one", "one")).toBe(true);
+});
+
+it("removes a steered item without changing the remaining follow-up order", () => {
+  const store = useQueuedFollowUpStore.getState();
+  store.enqueue("env:one", sample("first"));
+  store.enqueue("env:one", sample("second"));
+  store.enqueue("env:one", sample("third"));
+  expect(store.claim("env:one", "second")).toBe(true);
+  store.remove("env:one", "second");
+  store.release("env:one", "second");
+
+  expect(useQueuedFollowUpStore.getState().byThread["env:one"]?.map((entry) => entry.id)).toEqual([
+    "first",
+    "third",
+  ]);
+  expect(
+    nextAutoQueuedFollowUp(useQueuedFollowUpStore.getState().byThread["env:one"]!, "ready")?.id,
+  ).toBe("first");
 });
 
 it("holds queued follow-ups after interruption without losing their content", () => {
