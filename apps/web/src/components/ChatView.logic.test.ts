@@ -603,6 +603,16 @@ describe("follow-up submission choice", () => {
     expect(resolveFollowUpSubmission({ ...base, followUpBehavior: "steer" })).toBe("steer");
   });
 
+  it("keeps steering available while a provider request awaits a decision", () => {
+    expect(
+      resolveFollowUpSubmission({
+        ...base,
+        followUpBehavior: "steer",
+        hasPendingRequest: true,
+      }),
+    ).toBe("steer");
+  });
+
   it("keeps queued follow-ups ahead of new turns when the thread is ready", () => {
     expect(resolveFollowUpSubmission({ ...base, phase: "ready", followUpBehavior: "steer" })).toBe(
       "queue",

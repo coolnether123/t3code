@@ -5198,9 +5198,6 @@ function ChatViewContent(props: ChatViewProps) {
         context.elementContexts.length > 0 ||
         context.previewAnnotations.length > 0 ||
         context.reviewComments.length > 0 ||
-        activePendingProgress ||
-        activePendingApproval ||
-        pendingUserInputs.length > 0 ||
         activeEnvironmentUnavailable
       ) {
         toastManager.add(
@@ -5208,7 +5205,7 @@ function ChatViewContent(props: ChatViewProps) {
             type: "info",
             title: "Cannot steer with this draft",
             description:
-              "Steering needs an active Codex turn and a text-only draft with no pending request. Your draft is still here.",
+              "Steering needs an active Codex turn and a text-only draft. Your draft is still here.",
           }),
         );
         return;
@@ -5974,10 +5971,7 @@ function ChatViewContent(props: ChatViewProps) {
       !canSteerQueuedFollowUp(entry) ||
       sendInFlightRef.current ||
       isSendBusy ||
-      activeEnvironmentUnavailable ||
-      activePendingProgress ||
-      activePendingApproval ||
-      pendingUserInputs.length > 0
+      activeEnvironmentUnavailable
     )
       return;
     const queue = useQueuedFollowUpStore.getState();
@@ -7176,12 +7170,7 @@ function ChatViewContent(props: ChatViewProps) {
                               disabled={
                                 isSendBusy ||
                                 sendInFlightRef.current ||
-                                activeEnvironmentUnavailable ||
-                                Boolean(
-                                  activePendingProgress ||
-                                  activePendingApproval ||
-                                  pendingUserInputs.length > 0,
-                                )
+                                activeEnvironmentUnavailable
                               }
                               onClick={() => void onSteerQueuedFollowUp(entry)}
                             >
