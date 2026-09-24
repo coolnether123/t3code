@@ -25,6 +25,7 @@ import {
   SqlitePersistenceMemory,
 } from "../../persistence/Layers/Sqlite.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
+import { ProjectionThreadMessageRepository } from "../../persistence/Services/ProjectionThreadMessages.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import {
@@ -2501,6 +2502,314 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         WHERE thread_id = 'thread-nonstale-approval'
       `;
       assert.deepEqual(threadRows, [{ pendingApprovalCount: 1 }]);
+    }),
+  );
+
+  it.effect("folds streamed message timestamps without rereading a long thread", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const messageRepository = yield* ProjectionThreadMessageRepository;
+      const threadId = ThreadId.make("thread-stream-summary-performance");
+      const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+        eventStore
+          .append(event)
+          .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+
+      yield* appendAndProject({
+        type: "project.created",
+        eventId: EventId.make("evt-stream-summary-project"),
+        aggregateKind: "project",
+        aggregateId: ProjectId.make("project-stream-summary-performance"),
+        occurredAt: "2026-03-01T08:00:00.000Z",
+        commandId: CommandId.make("cmd-stream-summary-project"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-stream-summary-project"),
+        metadata: {},
+        payload: {
+          projectId: ProjectId.make("project-stream-summary-performance"),
+          title: "Streaming Summary Performance",
+          workspaceRoot: "/tmp/stream-summary-performance",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: "2026-03-01T08:00:00.000Z",
+          updatedAt: "2026-03-01T08:00:00.000Z",
+        },
+      });
+
+      yield* appendAndProject({
+        type: "thread.created",
+        eventId: EventId.make("evt-stream-summary-thread"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-03-01T08:00:01.000Z",
+        commandId: CommandId.make("cmd-stream-summary-thread"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-stream-summary-thread"),
+        metadata: {},
+        payload: {
+          threadId,
+          projectId: ProjectId.make("project-stream-summary-performance"),
+          title: "Streaming Summary Performance",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: "2026-03-01T08:00:01.000Z",
+          updatedAt: "2026-03-01T08:00:01.000Z",
+        },
+      });
+
+      yield* appendAndProject({
+        type: "thread.message-sent",
+        eventId: EventId.make("evt-stream-summary-user"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-03-01T08:00:02.000Z",
+        commandId: CommandId.make("cmd-stream-summary-user"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-stream-summary-user"),
+        metadata: {},
+        payload: {
+          threadId,
+          messageId: MessageId.make("message-stream-summary-user"),
+          role: "user",
+          text: "Please continue",
+          turnId: null,
+          streaming: false,
+          createdAt: "2026-03-01T08:00:02.000Z",
+          updatedAt: "2026-03-01T08:00:02.000Z",
+        },
+      });
+
+      yield* appendAndProject({
+        type: "thread.activity-appended",
+        eventId: EventId.make("evt-stream-summary-approval"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-03-01T08:00:03.000Z",
+        commandId: CommandId.make("cmd-stream-summary-approval"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-stream-summary-approval"),
+        metadata: {},
+        payload: {
+          threadId,
+          activity: {
+            id: EventId.make("activity-stream-summary-approval"),
+            tone: "approval",
+            kind: "approval.requested",
+            summary: "Command approval requested",
+            payload: { requestId: "approval-stream-summary", requestKind: "command" },
+            turnId: null,
+            createdAt: "2026-03-01T08:00:03.000Z",
+          },
+        },
+      });
+
+      yield* appendAndProject({
+        type: "thread.activity-appended",
+        eventId: EventId.make("evt-stream-summary-user-input"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-03-01T08:00:04.000Z",
+        commandId: CommandId.make("cmd-stream-summary-user-input"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-stream-summary-user-input"),
+        metadata: {},
+        payload: {
+          threadId,
+          activity: {
+            id: EventId.make("activity-stream-summary-user-input"),
+            tone: "info",
+            kind: "user-input.requested",
+            summary: "User input requested",
+            payload: { requestId: "user-input-stream-summary" },
+            turnId: null,
+            createdAt: "2026-03-01T08:00:04.000Z",
+          },
+        },
+      });
+
+      yield* appendAndProject({
+        type: "thread.proposed-plan-upserted",
+        eventId: EventId.make("evt-stream-summary-plan"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-03-01T08:00:05.000Z",
+        commandId: CommandId.make("cmd-stream-summary-plan"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-stream-summary-plan"),
+        metadata: {},
+        payload: {
+          threadId,
+          proposedPlan: {
+            id: "plan-stream-summary",
+            turnId: null,
+            planMarkdown: "1. Finish the task",
+            implementedAt: null,
+            implementationThreadId: null,
+            createdAt: "2026-03-01T08:00:05.000Z",
+            updatedAt: "2026-03-01T08:00:05.000Z",
+          },
+        },
+      });
+
+      // Populate a long historical message list without making setup itself
+      // part of the repository-read assertion below.
+      yield* sql`
+        WITH RECURSIVE historical_messages(n) AS (
+          SELECT 1
+          UNION ALL
+          SELECT n + 1 FROM historical_messages WHERE n < 2000
+        )
+        INSERT INTO projection_thread_messages (
+          message_id, thread_id, turn_id, role, text, attachments_json,
+          is_streaming, created_at, updated_at
+        )
+        SELECT
+          'message-stream-summary-history-' || n,
+          ${threadId}, NULL, 'assistant', 'historical message body', NULL,
+          0, '2026-03-01T07:00:00.000Z', '2026-03-01T07:00:00.000Z'
+        FROM historical_messages
+      `;
+      const historyRows = yield* sql<{ readonly count: number }>`
+        SELECT COUNT(*) AS count
+        FROM projection_thread_messages
+        WHERE thread_id = ${threadId} AND message_id LIKE 'message-stream-summary-history-%'
+      `;
+      assert.deepEqual(historyRows, [{ count: 2000 }]);
+
+      const originalListByThreadId = messageRepository.listByThreadId;
+      let listByThreadIdReads = 0;
+      Object.defineProperty(messageRepository, "listByThreadId", {
+        configurable: true,
+        value: (input: Parameters<typeof originalListByThreadId>[0]) => {
+          listByThreadIdReads += 1;
+          return originalListByThreadId(input);
+        },
+      });
+
+      try {
+        for (let index = 0; index < 20; index += 1) {
+          const seconds = String(index + 6).padStart(2, "0");
+          const updatedAt = `2026-03-01T08:00:${seconds}.000Z`;
+          yield* appendAndProject({
+            type: "thread.message-sent",
+            eventId: EventId.make(`evt-stream-summary-delta-${index}`),
+            aggregateKind: "thread",
+            aggregateId: threadId,
+            occurredAt: updatedAt,
+            commandId: CommandId.make(`cmd-stream-summary-delta-${index}`),
+            causationEventId: null,
+            correlationId: CorrelationId.make(`cmd-stream-summary-delta-${index}`),
+            metadata: {},
+            payload: {
+              threadId,
+              messageId: MessageId.make("message-stream-summary-assistant"),
+              role: "assistant",
+              text: "chunk",
+              turnId: null,
+              streaming: true,
+              createdAt: "2026-03-01T08:00:06.000Z",
+              updatedAt,
+            },
+          });
+        }
+
+        // A late-arriving older user message must not move the unread timestamp
+        // backwards; a newer user message must move it forwards.
+        yield* appendAndProject({
+          type: "thread.message-sent",
+          eventId: EventId.make("evt-stream-summary-user-old"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-03-01T08:00:27.000Z",
+          commandId: CommandId.make("cmd-stream-summary-user-old"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-stream-summary-user-old"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId: MessageId.make("message-stream-summary-user-old"),
+            role: "user",
+            text: "Delayed earlier message",
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-03-01T07:59:00.000Z",
+            updatedAt: "2026-03-01T08:00:27.000Z",
+          },
+        });
+        const delayedUserMessageRows = yield* sql<{
+          readonly latestUserMessageAt: string | null;
+        }>`
+          SELECT latest_user_message_at AS "latestUserMessageAt"
+          FROM projection_threads
+          WHERE thread_id = ${threadId}
+        `;
+        assert.deepEqual(delayedUserMessageRows, [
+          { latestUserMessageAt: "2026-03-01T08:00:02.000Z" },
+        ]);
+
+        yield* appendAndProject({
+          type: "thread.message-sent",
+          eventId: EventId.make("evt-stream-summary-user-new"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: "2026-03-01T08:01:00.000Z",
+          commandId: CommandId.make("cmd-stream-summary-user-new"),
+          causationEventId: null,
+          correlationId: CorrelationId.make("cmd-stream-summary-user-new"),
+          metadata: {},
+          payload: {
+            threadId,
+            messageId: MessageId.make("message-stream-summary-user-new"),
+            role: "user",
+            text: "A new message",
+            turnId: null,
+            streaming: false,
+            createdAt: "2026-03-01T08:01:00.000Z",
+            updatedAt: "2026-03-01T08:01:00.000Z",
+          },
+        });
+
+        const summaryRows = yield* sql<{
+          readonly latestUserMessageAt: string | null;
+          readonly pendingApprovalCount: number;
+          readonly pendingUserInputCount: number;
+          readonly hasActionableProposedPlan: number;
+          readonly updatedAt: string;
+        }>`
+          SELECT
+            latest_user_message_at AS "latestUserMessageAt",
+            pending_approval_count AS "pendingApprovalCount",
+            pending_user_input_count AS "pendingUserInputCount",
+            has_actionable_proposed_plan AS "hasActionableProposedPlan",
+            updated_at AS "updatedAt"
+          FROM projection_threads
+          WHERE thread_id = ${threadId}
+        `;
+
+        assert.deepEqual(summaryRows, [
+          {
+            latestUserMessageAt: "2026-03-01T08:01:00.000Z",
+            pendingApprovalCount: 1,
+            pendingUserInputCount: 1,
+            hasActionableProposedPlan: 1,
+            updatedAt: "2026-03-01T08:01:00.000Z",
+          },
+        ]);
+        assert.equal(listByThreadIdReads, 0);
+      } finally {
+        Object.defineProperty(messageRepository, "listByThreadId", {
+          configurable: true,
+          value: originalListByThreadId,
+        });
+      }
     }),
   );
 
