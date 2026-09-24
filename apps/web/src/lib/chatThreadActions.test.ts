@@ -138,6 +138,18 @@ describe("chatThreadActions", () => {
     expect(projectRef).toEqual(scopeProjectRef(ENVIRONMENT_ID, PROJECT_ID));
   });
 
+  it("does not inherit the open chat's project from another environment", () => {
+    const otherEnvironmentId = EnvironmentId.make("other-environment");
+    const projectRef = resolveThreadActionProjectRef(
+      createContext({
+        selectedEnvironmentId: ENVIRONMENT_ID,
+        activeThread: { environmentId: otherEnvironmentId, projectId: PROJECT_ID },
+        defaultProjectRef: scopeProjectRef(ENVIRONMENT_ID, PROJECT_ID),
+      }),
+    );
+    expect(projectRef).toEqual(scopeProjectRef(ENVIRONMENT_ID, PROJECT_ID));
+  });
+
   it("inherits only the project from context, never branch or worktree state", async () => {
     const handleNewThread = vi.fn<ChatThreadActionContext["handleNewThread"]>(async () => {});
 

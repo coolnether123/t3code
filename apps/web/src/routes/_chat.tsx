@@ -25,8 +25,14 @@ import { primaryServerKeybindingsAtom } from "~/state/server";
 function ChatRouteGlobalShortcuts() {
   const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
   const selectedThreadKeysSize = useThreadSelectionStore((state) => state.selectedThreadKeys.size);
-  const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread, routeThreadRef } =
-    useHandleNewThread();
+  const {
+    activeDraftThread,
+    activeThread,
+    defaultProjectRef,
+    handleNewThread,
+    routeThreadRef,
+    selectedEnvironmentId,
+  } = useHandleNewThread();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const legacySidebarEnabled = useLegacySidebarEnabled();
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
@@ -35,12 +41,15 @@ function ChatRouteGlobalShortcuts() {
   const projectGroupCount = useMemo(
     () =>
       buildSidebarProjectSnapshots({
-        projects,
+        projects: projects.filter(
+          (project) =>
+            selectedEnvironmentId === null || project.environmentId === selectedEnvironmentId,
+        ),
         settings: projectGroupingSettings,
         primaryEnvironmentId,
         resolveEnvironmentLabel: () => null,
       }).length,
-    [primaryEnvironmentId, projectGroupingSettings, projects],
+    [primaryEnvironmentId, projectGroupingSettings, projects, selectedEnvironmentId],
   );
   const terminalOpen = useTerminalUiStateStore((state) =>
     routeThreadRef
@@ -85,6 +94,7 @@ function ChatRouteGlobalShortcuts() {
           activeThread: activeThread ?? undefined,
           defaultProjectRef,
           handleNewThread,
+          selectedEnvironmentId,
         });
         return;
       }
@@ -104,6 +114,7 @@ function ChatRouteGlobalShortcuts() {
           activeThread: activeThread ?? undefined,
           defaultProjectRef,
           handleNewThread,
+          selectedEnvironmentId,
         });
         return;
       }
@@ -163,6 +174,7 @@ function ChatRouteGlobalShortcuts() {
     handleNewThread,
     keybindings,
     defaultProjectRef,
+    selectedEnvironmentId,
     previewOpen,
     projectGroupCount,
     routeThreadRef,

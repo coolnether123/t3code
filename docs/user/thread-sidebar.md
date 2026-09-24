@@ -5,6 +5,13 @@ need a separate branch and working directory.
 
 ## Start a thread
 
+When more than one environment is connected, choose the Mac at the top of the
+sidebar. Projects, drafts, threads, and sidebar search show only that environment.
+The new-thread button, its keyboard shortcut, and **New thread in...** use the
+same choice, even if a chat from the other Mac is still open. Choose **All
+environments** to browse both together. This choice does not move chats or
+change either Mac's project files.
+
 On web and desktop, a new thread keeps the current project and carries your model
 and mode selections, unless the destination project has its own model default.
 Its branch and workspace mode come from your configured defaults. To continue in
