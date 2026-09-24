@@ -19,6 +19,7 @@ import {
   type ProviderRuntimeEvent,
 } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -443,6 +444,68 @@ it.effect("creates isolated Worker checkouts and reuses each checkout after serv
     expect(memory.workers.get(first.summary.id)?.cwd).toBe(worktrees[0]?.path);
   }).pipe(Effect.provide(workerWorktreeLayer(memory.store, backend, git)));
 });
+
+it.effect("interrupts activation after the Worker worktree is ready", () =>
+  Effect.gen(function* () {
+    const memory = makeMemoryWorkerStore();
+    const backendStarted = yield* Deferred.make<void>();
+    const backendStartResult = yield* Deferred.make<{
+      providerThreadId: ThreadId;
+      pending: true;
+    }>();
+    const providerInterrupts: ThreadId[] = [];
+    const backend = WorkerBackend.of({
+      start: () =>
+        Deferred.succeed(backendStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(backendStartResult)),
+        ),
+      send: () => Effect.die("unused"),
+      interrupt: (input) =>
+        Effect.sync(() => void providerInterrupts.push(input.providerThreadId)).pipe(
+          Effect.andThen(
+            Deferred.succeed(backendStartResult, {
+              providerThreadId: input.providerThreadId,
+              pending: true as const,
+            }),
+          ),
+          Effect.asVoid,
+        ),
+      stop: () => Effect.void,
+      respondToApproval: () => Effect.void,
+      hasLiveSession: () => Effect.succeed(false),
+    });
+    const git = {
+      createWorktree: (input: import("@t3tools/contracts").VcsCreateWorktreeInput) =>
+        Effect.succeed({
+          worktree: { path: input.path!, refName: input.newRefName ?? input.refName },
+        }),
+    };
+    const service = yield* WorkerServiceTesting.make.pipe(
+      Effect.provide(workerWorktreeLayer(memory.store, backend, git)),
+    );
+    const started = yield* service.start({
+      parentThreadId,
+      providerInstanceId,
+      input: {
+        title: "Interrupt after setup",
+        assignment: "Wait until activation is interrupted.",
+        context: { references: [], snippets: [] },
+        cwd: "A:/Dev/Projects/interrupt-after-setup",
+        createWorktree: true,
+      },
+    });
+
+    yield* Deferred.await(backendStarted);
+    expect((yield* service.get(started.summary.id)).worktree?.status).toBe("ready");
+
+    const interrupted = yield* service.interrupt({ workerId: started.summary.id, force: true });
+    expect(interrupted.summary.status).toBe("interrupted");
+    expect(interrupted.summary.activeActivationId).toBeUndefined();
+    expect(interrupted.worktree?.status).toBe("ready");
+    expect(providerInterrupts).toHaveLength(1);
+    expect(memory.activations.get(interrupted.activations[0]!.id)?.status).toBe("interrupted");
+  }),
+);
 
 it.effect("cancels setup without deleting an unverified checkout", () => {
   const memory = makeMemoryWorkerStore();
