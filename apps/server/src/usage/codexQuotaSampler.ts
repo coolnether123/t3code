@@ -6,6 +6,15 @@ import * as NodePath from "node:path";
 const WEEK_MINUTES = 7 * 24 * 60;
 const MAX_SAMPLES = 5_000;
 const ARCHIVE_SAMPLES = 1_000;
+const DEFAULT_QUOTA_REQUEST_TIMEOUT_MS = 30_000;
+
+export function resolveCodexQuotaRequestTimeoutMs(value?: string): number {
+  if (value === undefined || value.trim().length === 0) return DEFAULT_QUOTA_REQUEST_TIMEOUT_MS;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 5_000 && parsed <= 120_000
+    ? parsed
+    : DEFAULT_QUOTA_REQUEST_TIMEOUT_MS;
+}
 
 export interface CodexQuotaSample {
   readonly observedAt: string;

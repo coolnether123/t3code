@@ -2,12 +2,20 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import { afterEach, describe, expect, it } from "vite-plus/test";
-import { collectCodexQuotaSample, readCodexRateLimits } from "../../scripts/codex-quota-sampler.ts";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import {
+  collectCodexQuotaSample,
+  readCodexRateLimits,
+  requestCodexRpc,
+} from "../../scripts/codex-quota-sampler.ts";
 import {
   appendCodexQuotaSample,
   appendCodexQuotaSampleFile,
   codexWeeklyQuotaSample,
+  resolveCodexQuotaRequestTimeoutMs,
   type CodexRateLimitsResponse,
 } from "./codexQuotaSampler.ts";
 
@@ -67,6 +75,50 @@ describe("Codex quota sampler", () => {
     ).toBeNull();
     expect(codexWeeklyQuotaSample(response(101), observedAt)).toBeNull();
     expect(codexWeeklyQuotaSample(response(0), "bad timestamp")).toBeNull();
+  });
+
+  it("allows slow Codex initialization and accepts a bounded timeout override", async () => {
+    expect(resolveCodexQuotaRequestTimeoutMs()).toBe(30_000);
+    expect(resolveCodexQuotaRequestTimeoutMs("45000")).toBe(45_000);
+    expect(resolveCodexQuotaRequestTimeoutMs("500")).toBe(30_000);
+    expect(resolveCodexQuotaRequestTimeoutMs("not-a-number")).toBe(30_000);
+
+    vi.useFakeTimers();
+    try {
+      const child = Object.assign(new EventEmitter(), {
+        stdin: new PassThrough(),
+        stdout: new PassThrough(),
+        exitCode: null,
+      });
+      let settled = false;
+      let rejection: unknown;
+      const request = requestCodexRpc(
+        child as unknown as ChildProcessWithoutNullStreams,
+        1,
+        "initialize",
+        {},
+        30_000,
+      ).then(
+        () => {
+          settled = true;
+        },
+        (error: unknown) => {
+          settled = true;
+          rejection = error;
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await request;
+      expect(settled).toBe(true);
+      expect(rejection).toMatchObject({
+        message: "Codex did not answer initialize within 30000 ms.",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("appends sanitized samples without overwriting prior account history", () => {

@@ -54,6 +54,10 @@ the logged-in account. The `ProgramArguments` should invoke a stable copy of the
 Keep `StandardOutPath` and `StandardErrorPath` in a user-owned logs directory. Do not put auth
 tokens in the plist. The sampler inherits the user's Codex home and login state.
 
+The app-server RPC timeout defaults to 30 seconds. If Codex initialization on a Mac needs longer,
+set `T3CODE_QUOTA_REQUEST_TIMEOUT_MS` to an integer from 5,000 to 120,000 in the LaunchAgent's
+`EnvironmentVariables`. Empty, invalid, and out-of-range values use the 30-second default.
+
 The code change alone does not install a LaunchAgent. Verify each Mac's actual runtime path, Codex binary,
 T3 history path, and login behavior before creating or loading its plist. `launchd` runs only for
 the logged-in user, and its timer cannot observe while the Mac is powered off. Sampling resumes

@@ -8,10 +8,13 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import {
   appendCodexQuotaSampleFile,
   codexWeeklyQuotaSample,
+  resolveCodexQuotaRequestTimeoutMs,
   type CodexRateLimitsResponse,
 } from "../src/usage/codexQuotaSampler.ts";
 
-const REQUEST_TIMEOUT_MS = 15_000;
+const REQUEST_TIMEOUT_MS = resolveCodexQuotaRequestTimeoutMs(
+  process.env.T3CODE_QUOTA_REQUEST_TIMEOUT_MS,
+);
 const CLIENT_INFO = {
   clientInfo: { name: "t3-quota-sampler", title: "T3 quota sampler", version: "1" },
   capabilities: { experimentalApi: true, optOutNotificationMethods: null },
@@ -23,17 +26,18 @@ interface RpcResponse {
   readonly error?: { readonly message?: string };
 }
 
-function rpcRequest(
+export function requestCodexRpc(
   child: ChildProcessWithoutNullStreams,
   id: number,
   method: string,
   params: unknown,
+  timeoutMs = REQUEST_TIMEOUT_MS,
 ) {
   return new Promise<unknown>((resolve, reject) => {
     const timeout = setTimeout(() => {
       cleanup();
-      reject(new Error(`Codex did not answer ${method} within ${REQUEST_TIMEOUT_MS} ms.`));
-    }, REQUEST_TIMEOUT_MS);
+      reject(new Error(`Codex did not answer ${method} within ${timeoutMs} ms.`));
+    }, timeoutMs);
     const lines = createInterface({ input: child.stdout });
     const onExit = (code: number | null) => {
       cleanup();
@@ -99,9 +103,14 @@ export async function readCodexRateLimits(binaryPath = process.env.CODEX_BINARY_
     stderr = `${stderr}${chunk}`.slice(-4_096);
   });
   try {
-    await rpcRequest(child, 1, "initialize", CLIENT_INFO);
+    await requestCodexRpc(child, 1, "initialize", CLIENT_INFO);
     rpcNotification(child, "initialized", {});
-    return (await rpcRequest(child, 2, "account/rateLimits/read", {})) as CodexRateLimitsResponse;
+    return (await requestCodexRpc(
+      child,
+      2,
+      "account/rateLimits/read",
+      {},
+    )) as CodexRateLimitsResponse;
   } catch (error) {
     if (child.exitCode === null) child.kill("SIGTERM");
     const detail = error instanceof Error ? error.message : "Codex quota read failed.";
