@@ -916,6 +916,10 @@ try {
 
     Write-Phase "tailscale"
     $tailscaleCommands = @(Get-Command tailscale.exe -All -ErrorAction SilentlyContinue)
+    if ($tailscaleCommands.Count -eq 0) {
+        # Scheduled and non-login shells often lack the installer's PATH entry.
+        $tailscaleCommands = @(Get-Command (Join-Path $env:ProgramFiles "Tailscale\tailscale.exe") -ErrorAction SilentlyContinue)
+    }
     if ($tailscaleCommands.Count -ne 1) {
         throw "Expected exactly one tailscale.exe command, found $($tailscaleCommands.Count)."
     }
