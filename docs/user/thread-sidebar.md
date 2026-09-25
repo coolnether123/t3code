@@ -9,8 +9,12 @@ When more than one environment is connected, choose the Mac at the top of the
 sidebar. Projects, drafts, threads, and sidebar search show only that environment.
 The new-thread button, its keyboard shortcut, and **New thread in...** use the
 same choice, even if a chat from the other Mac is still open. Choose **All
-environments** to browse both together. This choice does not move chats or
-change either Mac's project files.
+environments** to browse both together. Switching environments returns to the
+last thread or draft you had open there. If it is no longer available, T3 starts
+a draft in that environment's most recently active project, or shows the project
+setup screen when it has none. **All environments** keeps its own last chat
+location and stays a combined view. Switching only changes which environment
+the client shows. It does not change project files.
 
 On web and desktop, a new thread keeps the current project and carries your model
 and mode selections, unless the destination project has its own model default.

@@ -11,6 +11,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../components/
 import { SidebarInset } from "../components/ui/sidebar";
 import { WorkspacePageHeader } from "../components/WorkspacePageHeader";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
+import { useSidebarEnvironmentScope } from "../hooks/useSidebarEnvironmentScope";
 import {
   useAllEnvironmentShellsBootstrapped,
   useProjects,
@@ -42,15 +43,24 @@ function IndexDraftLanding() {
   const threads = useThreadShells();
   const bootstrapped = useAllEnvironmentShellsBootstrapped();
   const handleNewThread = useNewThreadHandler();
+  const { selectedEnvironmentId } = useSidebarEnvironmentScope();
   const startingRef = useRef(false);
   const [startState, setStartState] = useState({ failed: false, retryRequest: 0 });
 
   const mostRecentProject = useMemo(
     () =>
       bootstrapped
-        ? (sortScopedProjectsForSidebar(projects, threads, "updated_at")[0] ?? null)
+        ? (sortScopedProjectsForSidebar(
+            selectedEnvironmentId === null
+              ? projects
+              : projects.filter((project) => project.environmentId === selectedEnvironmentId),
+            selectedEnvironmentId === null
+              ? threads
+              : threads.filter((thread) => thread.environmentId === selectedEnvironmentId),
+            "updated_at",
+          )[0] ?? null)
         : null,
-    [bootstrapped, projects, threads],
+    [bootstrapped, projects, selectedEnvironmentId, threads],
   );
 
   useEffect(() => {

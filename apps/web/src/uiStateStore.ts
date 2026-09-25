@@ -28,8 +28,25 @@ export interface PersistedUiState {
   defaultAdvertisedEndpointKey?: string | null;
   sidebarProjectScopeKey?: string | null;
   sidebarEnvironmentScopeId?: string | null;
+  lastChatLocationByScope?: Record<string, RememberedChatLocation>;
   threadChangedFilesExpansionVersion?: number;
   threadChangedFilesExpandedById?: Record<string, Record<string, boolean>>;
+}
+
+export type RememberedChatLocation =
+  | { readonly kind: "thread"; readonly environmentId: string; readonly threadId: string }
+  | { readonly kind: "draft"; readonly environmentId: string; readonly draftId: string }
+  | { readonly kind: "index" };
+
+export const ALL_ENVIRONMENTS_CHAT_LOCATION_SCOPE = "all";
+const ENVIRONMENT_CHAT_LOCATION_SCOPE_PREFIX = "environment:";
+const MAX_REMEMBERED_CHAT_LOCATIONS = 32;
+const MAX_REMEMBERED_CHAT_LOCATION_ID_LENGTH = 256;
+
+export function environmentChatLocationScopeKey(environmentId: string | null): string {
+  return environmentId === null
+    ? ALL_ENVIRONMENTS_CHAT_LOCATION_SCOPE
+    : `${ENVIRONMENT_CHAT_LOCATION_SCOPE_PREFIX}${environmentId}`;
 }
 
 export interface UiProjectState {
@@ -52,13 +69,19 @@ export interface UiEndpointState {
   defaultAdvertisedEndpointKey: string | null;
 }
 
-export interface UiState extends UiProjectState, UiThreadState, UiEndpointState {}
+export interface UiNavigationState {
+  lastChatLocationByScope: Record<string, RememberedChatLocation>;
+}
+
+export interface UiState
+  extends UiProjectState, UiThreadState, UiEndpointState, UiNavigationState {}
 
 const initialState: UiState = {
   projectExpandedById: {},
   projectOrder: [],
   sidebarProjectScopeKey: null,
   sidebarEnvironmentScopeId: null,
+  lastChatLocationByScope: {},
   threadLastVisitedAtById: {},
   threadChangedFilesExpandedById: {},
   defaultAdvertisedEndpointKey: null,
@@ -96,6 +119,80 @@ function sanitizeBooleanRecord(value: unknown): Record<string, boolean> {
 
 function sanitizeOptionalKey(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function sanitizeRememberedChatLocationId(value: unknown): string | null {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_REMEMBERED_CHAT_LOCATION_ID_LENGTH
+    ? value
+    : null;
+}
+
+function sanitizeRememberedChatLocations(value: unknown): Record<string, RememberedChatLocation> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+
+  const validEntries: Array<[string, RememberedChatLocation]> = [];
+  for (const [scopeKey, candidate] of Object.entries(value)) {
+    const scopeEnvironmentId =
+      scopeKey === ALL_ENVIRONMENTS_CHAT_LOCATION_SCOPE
+        ? null
+        : scopeKey.startsWith(ENVIRONMENT_CHAT_LOCATION_SCOPE_PREFIX)
+          ? sanitizeRememberedChatLocationId(
+              scopeKey.slice(ENVIRONMENT_CHAT_LOCATION_SCOPE_PREFIX.length),
+            )
+          : null;
+    if (scopeEnvironmentId === null && scopeKey !== ALL_ENVIRONMENTS_CHAT_LOCATION_SCOPE) {
+      continue;
+    }
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+      continue;
+    }
+
+    const rawLocation = candidate as Record<string, unknown>;
+    if (rawLocation.kind === "index") {
+      validEntries.push([scopeKey, { kind: "index" }]);
+      continue;
+    }
+
+    const environmentId = sanitizeRememberedChatLocationId(rawLocation.environmentId);
+    if (
+      environmentId === null ||
+      (scopeEnvironmentId !== null && scopeEnvironmentId !== environmentId)
+    ) {
+      continue;
+    }
+    if (rawLocation.kind === "thread") {
+      const threadId = sanitizeRememberedChatLocationId(rawLocation.threadId);
+      if (threadId !== null) {
+        validEntries.push([scopeKey, { kind: "thread", environmentId, threadId }]);
+      }
+    } else if (rawLocation.kind === "draft") {
+      const draftId = sanitizeRememberedChatLocationId(rawLocation.draftId);
+      if (draftId !== null) {
+        validEntries.push([scopeKey, { kind: "draft", environmentId, draftId }]);
+      }
+    }
+  }
+
+  return Object.fromEntries(validEntries.slice(-MAX_REMEMBERED_CHAT_LOCATIONS));
+}
+
+function sameRememberedChatLocation(
+  left: RememberedChatLocation | undefined,
+  right: RememberedChatLocation,
+): boolean {
+  return (
+    left?.kind === right.kind &&
+    (right.kind === "index" ||
+      (left.kind !== "index" &&
+        left.environmentId === right.environmentId &&
+        (right.kind === "thread"
+          ? left.kind === "thread" && left.threadId === right.threadId
+          : left.kind === "draft" && left.draftId === right.draftId)))
+  );
 }
 
 function sanitizeTimestampRecord(value: unknown): Record<string, string> {
@@ -148,6 +245,7 @@ export function parsePersistedState(parsed: PersistedUiState): UiState {
     defaultAdvertisedEndpointKey: sanitizeOptionalKey(parsed.defaultAdvertisedEndpointKey),
     sidebarProjectScopeKey: sanitizeOptionalKey(parsed.sidebarProjectScopeKey),
     sidebarEnvironmentScopeId: sanitizeOptionalKey(parsed.sidebarEnvironmentScopeId),
+    lastChatLocationByScope: sanitizeRememberedChatLocations(parsed.lastChatLocationByScope),
   };
 }
 
@@ -220,6 +318,7 @@ export function persistState(state: UiState): void {
         defaultAdvertisedEndpointKey: state.defaultAdvertisedEndpointKey,
         sidebarProjectScopeKey: state.sidebarProjectScopeKey,
         sidebarEnvironmentScopeId: state.sidebarEnvironmentScopeId,
+        lastChatLocationByScope: sanitizeRememberedChatLocations(state.lastChatLocationByScope),
         threadChangedFilesExpansionVersion: THREAD_CHANGED_FILES_EXPANSION_VERSION,
         threadChangedFilesExpandedById: state.threadChangedFilesExpandedById,
       } satisfies PersistedUiState),
@@ -339,6 +438,38 @@ export function setSidebarEnvironmentScopeId(
   return { ...state, sidebarEnvironmentScopeId: nextId, sidebarProjectScopeKey: null };
 }
 
+export function setLastChatLocationForScope(
+  state: UiState,
+  scopeKey: string,
+  location: RememberedChatLocation | null,
+): UiState {
+  if (location === null) {
+    if (!(scopeKey in state.lastChatLocationByScope)) return state;
+    return {
+      ...state,
+      lastChatLocationByScope: Object.fromEntries(
+        Object.entries(state.lastChatLocationByScope).filter(([key]) => key !== scopeKey),
+      ),
+    };
+  }
+
+  const sanitizedLocation = sanitizeRememberedChatLocations({ [scopeKey]: location })[scopeKey];
+  if (!sanitizedLocation) return state;
+  if (
+    sameRememberedChatLocation(state.lastChatLocationByScope[scopeKey], sanitizedLocation) &&
+    Object.keys(state.lastChatLocationByScope).length <= MAX_REMEMBERED_CHAT_LOCATIONS
+  ) {
+    return state;
+  }
+
+  const entries = Object.entries(state.lastChatLocationByScope).filter(([key]) => key !== scopeKey);
+  entries.push([scopeKey, sanitizedLocation]);
+  return {
+    ...state,
+    lastChatLocationByScope: Object.fromEntries(entries.slice(-MAX_REMEMBERED_CHAT_LOCATIONS)),
+  };
+}
+
 export function resolveProjectExpanded(
   projectExpandedById: Readonly<Record<string, boolean>>,
   preferenceKeys: readonly string[],
@@ -423,6 +554,7 @@ interface UiStateStore extends UiState {
   setDefaultAdvertisedEndpointKey: (key: string | null) => void;
   setSidebarProjectScopeKey: (projectKey: string | null) => void;
   setSidebarEnvironmentScopeId: (environmentId: string | null) => void;
+  setLastChatLocationForScope: (scopeKey: string, location: RememberedChatLocation | null) => void;
   setProjectExpanded: (projectIds: string | readonly string[], expanded: boolean) => void;
   reorderProjects: (
     currentProjectOrder: readonly string[],
@@ -445,6 +577,8 @@ export const useUiStateStore = create<UiStateStore>((set) => ({
     set((state) => setSidebarProjectScopeKey(state, projectKey)),
   setSidebarEnvironmentScopeId: (environmentId) =>
     set((state) => setSidebarEnvironmentScopeId(state, environmentId)),
+  setLastChatLocationForScope: (scopeKey, location) =>
+    set((state) => setLastChatLocationForScope(state, scopeKey, location)),
   setProjectExpanded: (projectIds, expanded) =>
     set((state) => setProjectExpanded(state, projectIds, expanded)),
   reorderProjects: (currentProjectOrder, draggedProjectIds, targetProjectIds) =>
