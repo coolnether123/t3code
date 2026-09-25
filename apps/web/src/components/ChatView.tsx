@@ -1765,9 +1765,11 @@ function ChatViewContent(props: ChatViewProps) {
       if (restore) restoreSteerText(restore);
     }
 
-    const session = activeServerThread.session;
+    // A refused steer is reported after its turn stops running, but always
+    // before the next turn starts, so only a newer active turn settles it.
+    const nextTurnId = activeServerThread.session?.activeTurnId ?? null;
     for (const pending of steerRestores.getSteerRestores(activeThreadKey)) {
-      if (session?.status !== "running" || session.activeTurnId !== pending.targetTurnId) {
+      if (nextTurnId !== null && nextTurnId !== pending.targetTurnId) {
         steerRestores.clearSteerRestoresForTurn(activeThreadKey, pending.targetTurnId);
       }
     }
@@ -1775,7 +1777,6 @@ function ChatViewContent(props: ChatViewProps) {
     activeThreadKey,
     activeServerThread?.activities,
     activeServerThread?.session?.activeTurnId,
-    activeServerThread?.session?.status,
     isServerThread,
   ]);
   const changeRequestSnapshotByKey = useAtomValue(threadChangeRequestSnapshotsAtom);
