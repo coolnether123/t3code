@@ -377,6 +377,16 @@ ${envXml}
   <integer>30</integer>
   <key>ProcessType</key>
   <string>Interactive</string>
+  <key>SoftResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>8192</integer>
+  </dict>
+  <key>HardResourceLimits</key>
+  <dict>
+    <key>NumberOfFiles</key>
+    <integer>8192</integer>
+  </dict>
   <key>StandardOutPath</key>
   <string>${xml(NodePath.join(input.baseDir, "userdata/logs/t3-fork-backend.log"))}</string>
   <key>StandardErrorPath</key>

@@ -180,6 +180,9 @@ describe("deploy-macos-backend guards", () => {
     expect(plist).toContain("<string>3773</string>");
     expect(plist).toContain("<true/>");
     expect(plist).toContain("<integer>30</integer>");
+    expect(plist).toMatch(
+      /<key>SoftResourceLimits<\/key>\s*<dict>\s*<key>NumberOfFiles<\/key>\s*<integer>8192<\/integer>/,
+    );
     expect(plist).toContain(DEPLOYMENT_MARKER);
     expect(isOwnedPlist(plist, "com.christinesmith.t3-fork.backend")).toBe(true);
     expect(plist).not.toContain("SECRET_SHOULD_NOT_BE_COPIED");
