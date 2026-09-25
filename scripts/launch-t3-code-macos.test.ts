@@ -63,6 +63,11 @@ describe("launch-t3-code-macos", () => {
     assert.include(source, '[[ -f "$STATE_PATH" ]] || return 0');
   });
 
+  it("launches through LaunchServices so saved connections stay readable", () => {
+    assert.include(source, 'open -n -a "$APP_PATH" --env "T3CODE_HOME=$T3_HOME"');
+    assert.notInclude(source, 'T3CODE_PORT="$SERVER_PORT" "$exe"');
+  });
+
   it("executes a real dry-run without creating output or deployment state", () => {
     // The launcher is intentionally macOS-only. Run this integration check on
     // the target platform; static tests above still protect the contract on CI.

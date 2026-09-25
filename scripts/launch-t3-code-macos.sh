@@ -368,8 +368,12 @@ environment_id_from_json() {
 }
 launch_verify() {
   local exe root_pid i log environment_body actual_environment_id session_body; exe="$(validate_app "$APP_PATH")"; log="$RUN_DIR/runtime-$(date -u +%Y%m%d-%H%M%S).log"; plan "Launching $exe with T3CODE_HOME=$T3_HOME and T3CODE_PORT=$SERVER_PORT."
-  [[ "$DRY_RUN" -eq 1 ]] && return; T3CODE_HOME="$T3_HOME" T3CODE_PORT="$SERVER_PORT" "$exe" >>"$log" 2>&1 & local started="$!"
-  for ((i=0; i<WAIT_SECONDS; i++)); do if ! alive "$started"; then printf 'app exited during startup; see %s\n' "$log" >&2; return 1; fi; root_pid="$(root "$exe")"
+  [[ "$DRY_RUN" -eq 1 ]] && return
+  # Launch through LaunchServices so the app runs in the user's GUI session. A child of an SSH
+  # shell cannot reach the login keychain, so Electron safeStorage fails to decrypt the saved
+  # connection catalog and remote environments silently disappear until a manual relaunch.
+  open -n -a "$APP_PATH" --env "T3CODE_HOME=$T3_HOME" --env "T3CODE_PORT=$SERVER_PORT" --stdout "$log" --stderr "$log" || { printf 'LaunchServices could not open %s\n' "$APP_PATH" >&2; return 1; }
+  for ((i=0; i<WAIT_SECONDS; i++)); do root_pid="$(root "$exe")"
     if [[ -n "$root_pid" ]]; then
       capture_tree "$root_pid"; check_listeners
       if environment_body="$(curl --fail --silent --show-error --max-time 5 "http://127.0.0.1:$SERVER_PORT/.well-known/t3/environment" 2>>"$log")" && actual_environment_id="$(environment_id_from_json "$environment_body")"; then
