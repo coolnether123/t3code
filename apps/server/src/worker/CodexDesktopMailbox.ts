@@ -526,31 +526,56 @@ export const isCodexDesktopCoordinatorLeaseFresh = (
   now = Date.now(),
 ): boolean => lease !== undefined && Date.parse(lease.expiresAt) > now;
 
-/** Wait for a receipt change without keeping the server in a tight poll loop. */
+export interface MailboxDirectoryWatcher {
+  close(): void;
+  on(event: "error", listener: (error: Error) => void): unknown;
+}
+
+export type WatchMailboxDirectory = (
+  directory: string,
+  onChange: () => void,
+) => MailboxDirectoryWatcher;
+
+const watchMailboxDirectory: WatchMailboxDirectory = (directory, onChange) =>
+  NodeFS.watch(directory, onChange);
+
+/**
+ * Wait for a receipt change without keeping the server in a tight poll loop.
+ * A watcher that cannot start or later fails (for example EMFILE) stops
+ * watching and waits out the timeout, so it can neither crash the server
+ * through an unhandled `error` event nor make the caller spin.
+ */
 export const waitForCodexDesktopMailboxChange = async (
   layout: CodexDesktopMailboxLayout,
   timeoutMs: number,
+  watch: WatchMailboxDirectory = watchMailboxDirectory,
 ): Promise<"changed" | "timeout"> => {
   const directories = [layout.bindingDirectory, layout.statusDirectory, layout.resultDirectory];
   await Promise.all(directories.map((directory) => NodeFSP.mkdir(directory, { recursive: true })));
   return await new Promise((resolve) => {
     let settled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const watchers = directories.map((directory) =>
-      NodeFS.watch(directory, () => {
-        if (settled) return;
-        settled = true;
-        for (const watcher of watchers) watcher.close();
-        if (timer !== undefined) clearTimeout(timer);
-        resolve("changed");
-      }),
-    );
-    timer = setTimeout(() => {
+    const watchers: MailboxDirectoryWatcher[] = [];
+    const stopWatching = () => {
+      for (const watcher of watchers.splice(0)) watcher.close();
+    };
+    const finish = (result: "changed" | "timeout") => {
       if (settled) return;
       settled = true;
-      for (const watcher of watchers) watcher.close();
-      resolve("timeout");
-    }, timeoutMs);
+      stopWatching();
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(() => finish("timeout"), timeoutMs);
+    for (const directory of directories) {
+      try {
+        const watcher = watch(directory, () => finish("changed"));
+        watcher.on("error", stopWatching);
+        watchers.push(watcher);
+      } catch {
+        stopWatching();
+        break;
+      }
+    }
   });
 };
 
