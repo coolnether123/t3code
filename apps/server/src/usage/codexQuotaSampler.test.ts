@@ -2,9 +2,9 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import { EventEmitter } from "node:events";
-import { PassThrough } from "node:stream";
-import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import type * as NodeChildProcess from "node:child_process";
+import * as NodeEvents from "node:events";
+import * as NodeStream from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   collectCodexQuotaSample,
@@ -85,15 +85,15 @@ describe("Codex quota sampler", () => {
 
     vi.useFakeTimers();
     try {
-      const child = Object.assign(new EventEmitter(), {
-        stdin: new PassThrough(),
-        stdout: new PassThrough(),
+      const child = Object.assign(new NodeEvents.EventEmitter(), {
+        stdin: new NodeStream.PassThrough(),
+        stdout: new NodeStream.PassThrough(),
         exitCode: null,
       });
       let settled = false;
       let rejection: unknown;
       const request = requestCodexRpc(
-        child as unknown as ChildProcessWithoutNullStreams,
+        child as unknown as NodeChildProcess.ChildProcessWithoutNullStreams,
         1,
         "initialize",
         {},

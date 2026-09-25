@@ -632,7 +632,7 @@ describe("ProviderCommandReactor", () => {
         );
       }
       if (input.seedInterruptedCompaction === "completed-dispatched") {
-        await Effect.runPromise(
+        await runEffect(
           engine.dispatch({
             type: "thread.turn.start",
             commandId: CommandId.make("cmd-pre-restart-queued-attempted"),
@@ -648,7 +648,7 @@ describe("ProviderCommandReactor", () => {
             createdAt: now,
           }),
         );
-        const queuedMessage = (await Effect.runPromise(snapshotQuery.getActiveContextCompactions()))
+        const queuedMessage = (await runEffect(snapshotQuery.getActiveContextCompactions()))
           .find((generation) => generation.compactMessageId === asMessageId("pre-restart-compact"))
           ?.queuedMessages.find(
             (message) => message.messageId === asMessageId("pre-restart-queued"),
@@ -658,7 +658,7 @@ describe("ProviderCommandReactor", () => {
         }
         // The SQL projection drops terminal deliveries; restore this one in the restart snapshot.
         dispatchedMessageAtRestart = { ...queuedMessage, status: "dispatched" };
-        await Effect.runPromise(
+        await runEffect(
           engine.dispatch({
             type: "thread.context-compaction.message.status.set",
             commandId: CommandId.make("cmd-pre-restart-queued-dispatched"),
@@ -820,7 +820,7 @@ describe("ProviderCommandReactor", () => {
     if (!thread?.session) throw new Error("Expected a session while replaying the recovered turn.");
 
     for (const status of ["running", "ready"] as const) {
-      await Effect.runPromise(
+      await harness.runEffect(
         harness.engine.dispatch({
           type: "thread.session.set",
           commandId: CommandId.make(`cmd-recovered-turn-${status}`),
@@ -845,7 +845,7 @@ describe("ProviderCommandReactor", () => {
   });
 
   it("resumes queued messages after restart when an earlier turn was already dispatched", async () => {
-    const sendTurnStarted = await Effect.runPromise(Deferred.make<void>());
+    const sendTurnStarted = Deferred.makeUnsafe<void>();
     const harness = await createHarness({
       seedInterruptedCompaction: "completed-dispatched",
       sendTurnEffect: () =>
@@ -854,7 +854,7 @@ describe("ProviderCommandReactor", () => {
           turnId: asTurnId("turn-1"),
         }),
     });
-    await Effect.runPromise(Deferred.await(sendTurnStarted));
+    await harness.runEffect(Deferred.await(sendTurnStarted));
     await harness.drain();
 
     expect(harness.sendTurn).toHaveBeenCalledTimes(1);
@@ -1276,7 +1276,7 @@ describe("ProviderCommandReactor", () => {
       updatedAt: now,
     });
 
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.session.set",
         commandId: CommandId.make("cmd-steer-session-rejected"),
@@ -1293,7 +1293,7 @@ describe("ProviderCommandReactor", () => {
         createdAt: now,
       }),
     );
-    await Effect.runPromise(
+    await harness.runEffect(
       harness.engine.dispatch({
         type: "thread.turn.steer",
         commandId: CommandId.make("cmd-steer-rejected"),

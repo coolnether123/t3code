@@ -1,10 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off globalTimers:off globalDate:off - The standalone launchd entrypoint owns a short-lived Codex subprocess outside the server runtime.
-import { spawn } from "node:child_process";
-import { createInterface } from "node:readline";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
-import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeReadline from "node:readline";
+import * as NodeURL from "node:url";
 import {
   appendCodexQuotaSampleFile,
   codexWeeklyQuotaSample,
@@ -27,7 +26,7 @@ interface RpcResponse {
 }
 
 export function requestCodexRpc(
-  child: ChildProcessWithoutNullStreams,
+  child: NodeChildProcess.ChildProcessWithoutNullStreams,
   id: number,
   method: string,
   params: unknown,
@@ -38,7 +37,7 @@ export function requestCodexRpc(
       cleanup();
       reject(new Error(`Codex did not answer ${method} within ${timeoutMs} ms.`));
     }, timeoutMs);
-    const lines = createInterface({ input: child.stdout });
+    const lines = NodeReadline.createInterface({ input: child.stdout });
     const onExit = (code: number | null) => {
       cleanup();
       reject(
@@ -82,7 +81,7 @@ export function requestCodexRpc(
 }
 
 function rpcNotification(
-  child: ChildProcessWithoutNullStreams,
+  child: NodeChildProcess.ChildProcessWithoutNullStreams,
   method: string,
   params: unknown,
 ): void {
@@ -94,10 +93,10 @@ export async function readCodexRateLimits(binaryPath = process.env.CODEX_BINARY_
   const environment = { ...process.env };
   delete environment.OPENAI_API_KEY;
   delete environment.CODEX_API_KEY;
-  const child = spawn(binaryPath, ["app-server"], {
+  const child = NodeChildProcess.spawn(binaryPath, ["app-server"], {
     env: environment,
     stdio: ["pipe", "pipe", "pipe"],
-  }) as ChildProcessWithoutNullStreams;
+  }) as NodeChildProcess.ChildProcessWithoutNullStreams;
   let stderr = "";
   child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
     stderr = `${stderr}${chunk}`.slice(-4_096);
@@ -139,13 +138,13 @@ export async function collectCodexQuotaSample(options: {
 
 function isDirectExecution(): boolean {
   const entry = process.argv[1];
-  return entry !== undefined && import.meta.url === pathToFileURL(entry).href;
+  return entry !== undefined && import.meta.url === NodeURL.pathToFileURL(entry).href;
 }
 
 if (isDirectExecution()) {
   const statePath =
     process.env.T3CODE_QUOTA_HISTORY_PATH ||
-    join(homedir(), "Library", "Application Support", "CodexLimits", "state.json");
+    NodePath.join(NodeOS.homedir(), "Library", "Application Support", "CodexLimits", "state.json");
   collectCodexQuotaSample({ statePath }).then(
     () => process.stdout.write("Codex weekly quota sample saved.\n"),
     (error: unknown) => {

@@ -265,7 +265,6 @@ const getGeneratedPaths = Effect.fn("getGeneratedPaths")(function* () {
 
 const ensureGeneratedDir = Effect.fn("ensureGeneratedDir")(function* () {
   const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
   const { generatedDir } = yield* getGeneratedPaths();
   yield* fs.makeDirectory(generatedDir, { recursive: true });
 });
@@ -950,7 +949,6 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
   ].join("\n");
 
   const fs = yield* FileSystem.FileSystem;
-  const path = yield* Path.Path;
   const { generatedDir, metaOutputPath, namespacesOutputPath, schemaOutputPath } =
     yield* getGeneratedPaths();
   yield* fs.writeFileString(schemaOutputPath, schemaOutput);

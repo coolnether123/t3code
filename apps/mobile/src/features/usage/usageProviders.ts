@@ -12,6 +12,7 @@ export const PROVIDER_ORDER: readonly UsageProviderKind[] = [
   "opencode",
   "chatgpt",
   "aistudio",
+  "grok",
 ];
 
 export const PROVIDER_LABEL: Record<UsageProviderKind, string> = {
@@ -21,6 +22,7 @@ export const PROVIDER_LABEL: Record<UsageProviderKind, string> = {
   opencode: "OpenCode",
   chatgpt: "ChatGPT archive",
   aistudio: "AI Studio archive",
+  grok: "Grok",
 };
 
 /**
@@ -36,5 +38,6 @@ export function useProviderColors(): Record<UsageProviderKind, string> {
     opencode: "#7c9cff",
     chatgpt: "#10a37f",
     aistudio: "#f9ab00",
+    grok: scheme === "dark" ? "#e5e5e5" : "#52525b",
   };
 }
