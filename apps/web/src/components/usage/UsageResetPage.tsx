@@ -60,6 +60,21 @@ const estimate = (value: number) =>
     maximumFractionDigits: 0,
   }).format(value);
 
+function PendingHistoryStatus() {
+  const [waitExceeded, setWaitExceeded] = useState(false);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setWaitExceeded(true), 15_000);
+    return () => window.clearTimeout(timer);
+  }, []);
+  return waitExceeded ? (
+    <p role="status">
+      Codex usage is taking longer than expected. Check the computer connection or reload this page.
+    </p>
+  ) : (
+    <p role="status">Reading Codex usage…</p>
+  );
+}
+
 function monitoredPeriodModels(
   period: QuotaPeriod,
   value: QuotaValue,
@@ -400,6 +415,12 @@ export function UsageResetPage() {
     };
   });
   const last = samples.at(-1);
+  const reconnectingHistory = history.environments.some(
+    (environment) =>
+      environment.summary === null &&
+      environment.isPending &&
+      environment.connection.phase === "reconnecting",
+  );
   const current = values.find(({ period }) => period.id === selectedPeriod?.id);
   const calibrationPeriod = useMemo(() => {
     const calibration = current?.value.historicalCalibration;
@@ -536,11 +557,16 @@ export function UsageResetPage() {
               {refreshMessage}
             </p>
           ) : null}
-          {history.isPending && !last ? <p role="status">Reading Codex usage…</p> : null}
+          {history.isPending && !last && !reconnectingHistory ? <PendingHistoryStatus /> : null}
           {history.environments.map((environment) => {
             const saved = environment.summary?.quotaHistory;
             const message =
               environment.error ??
+              (environment.summary === null &&
+              environment.isPending &&
+              environment.connection.phase === "reconnecting"
+                ? "Reconnecting. Codex usage will appear when this computer reconnects."
+                : null) ??
               saved?.message ??
               (environment.summary && saved === undefined
                 ? "Update this server to read quota history."
@@ -555,7 +581,7 @@ export function UsageResetPage() {
               </p>
             ) : null;
           })}
-          {!history.isPending && !last ? (
+          {!history.isPending && !last && history.environments.every((entry) => !entry.error) ? (
             <p role="status" className="py-6 text-sm text-muted-foreground">
               No saved quota observations yet. The background collector must be running on a
               connected computer.

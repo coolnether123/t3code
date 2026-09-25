@@ -141,6 +141,10 @@ On macOS, T3 reads the signed-in Codex allowance through the configured Codex pr
 reset history is requested, at most once every five minutes. It stores only the timestamp,
 remaining percentage, and reset time in the local T3 data directory.
 
+If a computer disconnects before its first quota reading, the page shows **Reconnecting**
+instead of continuing to say it is reading usage. A slow first reading also prompts you to
+check the computer connection or reload the page. Public reset news can still load separately.
+
 The monitor leads with remaining usage and the total used in the current account cycle.
 For example, 81% remaining means 19% used. If tracking began at 83%, the monitor observed
 a two-percentage-point drop. Those two points are not the cycle total.
