@@ -894,6 +894,20 @@ const launchctlPrint = async (uid: number, label: string): Promise<boolean> => {
   return result.code === 0;
 };
 
+/**
+ * `launchctl bootout` returns before launchd finishes removing the job, and a
+ * bootstrap issued in that window fails with an I/O error. Wait until the
+ * label is gone so the following bootstrap starts from a clean domain.
+ */
+const bootoutAndWait = async (uid: number, label: string, description: string): Promise<void> => {
+  await runCommand("launchctl", ["bootout", `gui/${uid}/${label}`]);
+  for (let wait = 0; wait < 30; wait += 1) {
+    if (!(await launchctlPrint(uid, label))) return;
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  fail(`${description} left ${label} loaded; refusing to bootstrap over it.`);
+};
+
 const runPlan = (options: BackendDeployOptions): void => {
   const destination = installPath(options.commit);
   const plist = launchAgentPath(options.label);
@@ -920,7 +934,7 @@ const rollbackDeployment = async (input: {
   readonly oldLaunchAgentWasLoaded: boolean;
   readonly environmentId: string;
 }): Promise<void> => {
-  await runCommand("launchctl", ["bootout", `gui/${input.uid}/${input.options.label}`]);
+  await bootoutAndWait(input.uid, input.options.label, "rollback bootout");
   await restoreDeploymentFiles(input.plist, input.wrapper, input.oldPlist, input.oldWrapper);
   if (input.oldLaunchAgentWasLoaded) {
     await requireCommandSuccess(
@@ -1072,13 +1086,8 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
       if (wait === 29)
         fail("old server did not release its exact listener; refusing to bootstrap the candidate.");
     }
-    const loaded = await launchctlPrint(uid, options.label);
-    if (loaded)
-      await requireCommandSuccess(
-        "launchctl",
-        ["bootout", `gui/${uid}/${options.label}`],
-        "owned LaunchAgent bootout",
-      );
+    if (await launchctlPrint(uid, options.label))
+      await bootoutAndWait(uid, options.label, "owned LaunchAgent bootout");
     await requireCommandSuccess(
       "launchctl",
       ["bootstrap", `gui/${uid}`, plist],
