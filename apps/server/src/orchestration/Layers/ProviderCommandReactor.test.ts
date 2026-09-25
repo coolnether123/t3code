@@ -9,6 +9,7 @@ import {
   ProviderSession,
   ProviderDriverKind,
   ProviderInstanceId,
+  type ThreadContextCompaction,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import {
@@ -152,7 +153,11 @@ describe("ProviderCommandReactor", () => {
     readonly requiresNewThreadForModelChange?: boolean;
     readonly titleRegenerationCompletionDispatchFailures?: number;
     readonly titleRegenerationBeforeStart?: "one" | "two";
-    readonly seedInterruptedCompaction?: "active" | "attempted" | "completed-queued";
+    readonly seedInterruptedCompaction?:
+      | "active"
+      | "attempted"
+      | "completed-queued"
+      | "completed-dispatched";
     readonly compactThreadEffect?: NonNullable<ProviderServiceShape["compactThread"]>;
     readonly sendTurnEffect?: ProviderServiceShape["sendTurn"];
     readonly startSessionEffect?: (
@@ -375,6 +380,34 @@ describe("ProviderCommandReactor", () => {
       Layer.provide(RepositoryIdentityResolver.layer),
       Layer.provide(SqlitePersistenceMemory),
     );
+    let dispatchedMessageAtRestart: ThreadContextCompaction["queuedMessages"][number] | undefined;
+    const reactorProjectionSnapshotLayer = Layer.effect(
+      ProjectionSnapshotQuery,
+      Effect.gen(function* () {
+        const query = yield* ProjectionSnapshotQuery;
+        return {
+          ...query,
+          getActiveContextCompactions: () =>
+            query.getActiveContextCompactions().pipe(
+              Effect.map((generations) => {
+                const dispatchedMessage = dispatchedMessageAtRestart;
+                if (dispatchedMessage === undefined) return generations;
+                return generations.map((generation) =>
+                  generation.threadId === ThreadId.make("thread-1") &&
+                  generation.compactMessageId === asMessageId("pre-restart-compact")
+                    ? {
+                        ...generation,
+                        queuedMessages: [...generation.queuedMessages, dispatchedMessage].sort(
+                          (left, right) => left.requestOrder - right.requestOrder,
+                        ),
+                      }
+                    : generation,
+                );
+              }),
+            ),
+        } satisfies ProjectionSnapshotQuery["Service"];
+      }),
+    ).pipe(Layer.provide(projectionSnapshotLayer));
     let titleRegenerationCompletionDispatchAttempts = 0;
     const reactorOrchestrationLayer = Layer.effect(
       OrchestrationEngineService,
@@ -406,7 +439,7 @@ describe("ProviderCommandReactor", () => {
     ).pipe(Layer.provide(orchestrationLayer));
     const layer = ProviderCommandReactorLive.pipe(
       Layer.provideMerge(reactorOrchestrationLayer),
-      Layer.provideMerge(projectionSnapshotLayer),
+      Layer.provideMerge(reactorProjectionSnapshotLayer),
       Layer.provideMerge(Layer.succeed(ProviderService, service)),
       Layer.provideMerge(makeProviderRegistryLayer(providerSnapshots as never)),
       Layer.provideMerge(
@@ -540,10 +573,18 @@ describe("ProviderCommandReactor", () => {
           createdAt: now,
         }),
       );
-      for (const [messageId, text] of [
-        ["pre-restart-compact", "/compact"],
-        ["pre-restart-queued", "Send after compact"],
-      ] as const) {
+      const seededMessages =
+        input.seedInterruptedCompaction === "completed-dispatched"
+          ? ([
+              ["pre-restart-compact", "/compact"],
+              ["pre-restart-queued", "Send after compact"],
+              ["pre-restart-queued-next", "Send after the dispatched turn"],
+            ] as const)
+          : ([
+              ["pre-restart-compact", "/compact"],
+              ["pre-restart-queued", "Send after compact"],
+            ] as const);
+      for (const [messageId, text] of seededMessages) {
         await Effect.runPromise(
           engine.dispatch({
             type: "thread.turn.start",
@@ -558,7 +599,8 @@ describe("ProviderCommandReactor", () => {
       }
       if (
         input.seedInterruptedCompaction === "attempted" ||
-        input.seedInterruptedCompaction === "completed-queued"
+        input.seedInterruptedCompaction === "completed-queued" ||
+        input.seedInterruptedCompaction === "completed-dispatched"
       ) {
         await Effect.runPromise(
           engine.dispatch({
@@ -586,6 +628,45 @@ describe("ProviderCommandReactor", () => {
             interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
             runtimeMode: "approval-required",
             createdAt: now,
+          }),
+        );
+      }
+      if (input.seedInterruptedCompaction === "completed-dispatched") {
+        await Effect.runPromise(
+          engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make("cmd-pre-restart-queued-attempted"),
+            threadId,
+            message: {
+              messageId: asMessageId("pre-restart-queued"),
+              role: "user",
+              text: "Send after compact",
+              attachments: [],
+            },
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "approval-required",
+            createdAt: now,
+          }),
+        );
+        const queuedMessage = (await Effect.runPromise(snapshotQuery.getActiveContextCompactions()))
+          .find((generation) => generation.compactMessageId === asMessageId("pre-restart-compact"))
+          ?.queuedMessages.find(
+            (message) => message.messageId === asMessageId("pre-restart-queued"),
+          );
+        if (!queuedMessage) {
+          throw new Error("Expected the first queued message before marking it dispatched.");
+        }
+        // The SQL projection drops terminal deliveries; restore this one in the restart snapshot.
+        dispatchedMessageAtRestart = { ...queuedMessage, status: "dispatched" };
+        await Effect.runPromise(
+          engine.dispatch({
+            type: "thread.context-compaction.message.status.set",
+            commandId: CommandId.make("cmd-pre-restart-queued-dispatched"),
+            threadId,
+            compactMessageId: asMessageId("pre-restart-compact"),
+            messageId: asMessageId("pre-restart-queued"),
+            status: "dispatched",
+            updatedAt: now,
           }),
         );
       }
@@ -761,6 +842,44 @@ describe("ProviderCommandReactor", () => {
           (entry) => entry.compactMessageId === asMessageId("pre-restart-compact"),
         ),
     );
+  });
+
+  it("resumes queued messages after restart when an earlier turn was already dispatched", async () => {
+    const sendTurnStarted = await Effect.runPromise(Deferred.make<void>());
+    const harness = await createHarness({
+      seedInterruptedCompaction: "completed-dispatched",
+      sendTurnEffect: () =>
+        Effect.as(Deferred.succeed(sendTurnStarted, undefined), {
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId("turn-1"),
+        }),
+    });
+    await Effect.runPromise(Deferred.await(sendTurnStarted));
+    await harness.drain();
+
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+    expect(harness.sendTurn.mock.calls[0]?.[0].input).toBe("Send after the dispatched turn");
+    expect(harness.compactThread).not.toHaveBeenCalled();
+    const generation = (await harness.readCompactions()).find(
+      (entry) => entry.compactMessageId === asMessageId("pre-restart-compact"),
+    );
+    expect(generation?.status).toBe("completed");
+    expect(generation?.queuedMessages).toEqual([
+      expect.objectContaining({
+        messageId: asMessageId("pre-restart-queued"),
+        status: "dispatched",
+      }),
+      expect.objectContaining({
+        messageId: asMessageId("pre-restart-queued-next"),
+        status: "attempted",
+      }),
+    ]);
+    const thread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === ThreadId.make("thread-1"),
+    );
+    expect(
+      thread?.activities.some((entry) => entry.summary === "Queued message delivery is uncertain"),
+    ).toBe(false);
   });
 
   it("queues turn starts during compaction and replays them in order", async () => {

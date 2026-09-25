@@ -1959,8 +1959,10 @@ const make = Effect.gen(function* () {
       }
       const canResumeQueuedMessages =
         generation.status === "completed" &&
-        generation.queuedMessages.length > 0 &&
-        generation.queuedMessages.every((message) => message.status === "queued");
+        generation.queuedMessages.some((message) => message.status === "queued") &&
+        generation.queuedMessages.every(
+          (message) => message.status === "queued" || message.status === "dispatched",
+        );
       if (canResumeQueuedMessages) {
         yield* resumeTurnsAfterCompaction(generation.threadId, generation.compactMessageId).pipe(
           Effect.catchCause((cause) =>
