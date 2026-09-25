@@ -42,9 +42,12 @@ messages already in the queue. Stop holds queued messages until you choose
 
 **Steer** sends a text-only Codex prompt into the active turn. If the draft has
 an attachment or other context, T3 Code leaves it in the composer and asks you
-to send it after the turn. A steer request that fails also leaves the draft
-intact. Queued follow-ups do not block a new steering instruction; they remain
-queued for later turns.
+to send it after the turn. If Codex refuses a steer after T3 Code accepts it,
+the text returns to the composer if it came from there and the draft is empty.
+Otherwise, it returns to the head of the follow-up queue. A steer request
+rejected immediately leaves the original draft or queued item in place. Queued
+follow-ups do not block a new steering instruction; they remain queued for
+later turns.
 
 The web and desktop follow-up queue survives thread switches and reconnects in
 the same page. It is held in memory because drafts may include local files. A

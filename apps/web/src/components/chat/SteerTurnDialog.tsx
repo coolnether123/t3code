@@ -1,7 +1,8 @@
-import type { EnvironmentId, ThreadId, TurnId } from "@t3tools/contracts";
+import type { EnvironmentId, MessageId, ThreadId, TurnId } from "@t3tools/contracts";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { useState } from "react";
 
+import { newMessageId } from "../../lib/utils";
 import { threadEnvironment } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
@@ -23,11 +24,17 @@ export function SteerTurnDialog({
   threadId,
   activeTurnId,
   disabled,
+  onSteerAttempt,
+  onSteerAccepted,
+  onSteerRejected,
 }: {
   environmentId: EnvironmentId;
   threadId: ThreadId;
   activeTurnId: TurnId | null;
   disabled: boolean;
+  onSteerAttempt: (messageId: MessageId, text: string, turnId: TurnId) => boolean;
+  onSteerAccepted: (messageId: MessageId) => void;
+  onSteerRejected: (messageId: MessageId) => void;
 }) {
   const steerTurn = useAtomCommand(threadEnvironment.steerTurn, { reportFailure: false });
   const [open, setOpen] = useState(false);
@@ -41,18 +48,27 @@ export function SteerTurnDialog({
     if (!targetIsRunning || !targetTurnId || !text.trim() || submitting || disabled) return;
     setSubmitting(true);
     setError(null);
+    const messageId = newMessageId();
+    const instruction = text.trim();
+    if (!onSteerAttempt(messageId, instruction, targetTurnId)) {
+      setSubmitting(false);
+      setError("Could not preserve this steering instruction. Try again.");
+      return;
+    }
     const result = await steerTurn({
       environmentId,
-      input: { threadId, expectedTurnId: targetTurnId, text: text.trim() },
+      input: { threadId, expectedTurnId: targetTurnId, messageId, text: instruction },
     });
     setSubmitting(false);
     if (result._tag === "Failure") {
+      onSteerRejected(messageId);
       const failure = squashAtomCommandFailure(result);
       setError(failure instanceof Error ? failure.message : "Could not submit steering.");
       return;
     }
     setText("");
     setOpen(false);
+    onSteerAccepted(messageId);
   };
 
   return (

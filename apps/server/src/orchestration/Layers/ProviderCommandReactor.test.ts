@@ -1246,11 +1246,10 @@ describe("ProviderCommandReactor", () => {
       } else {
         expect(harness.sendTurn).not.toHaveBeenCalled();
         const state = await harness.readModel();
-        expect(
-          state.threads[0]?.activities.some(
-            (activity) => activity.kind === "provider.turn.steer.failed",
-          ),
-        ).toBe(true);
+        const failure = state.threads[0]?.activities.find(
+          (activity) => activity.kind === "provider.turn.steer.failed",
+        );
+        expect(failure?.payload).toMatchObject({ requestId: "steering-message" });
       }
       const state = await harness.readModel();
       expect(
@@ -1258,6 +1257,76 @@ describe("ProviderCommandReactor", () => {
       ).toBe(expectedTurnId);
     },
   );
+
+  it("correlates a rejected provider steer with its message", async () => {
+    const harness = await createHarness({
+      sendTurnEffect: () => Effect.die(new Error("Codex rejected the steer")) as never,
+    });
+    const threadId = ThreadId.make("thread-1");
+    const turnId = asTurnId("codex-turn-1");
+    const messageId = asMessageId("steering-message");
+    const now = "2026-01-01T00:00:00.000Z";
+    harness.runtimeSessions.push({
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      status: "running",
+      runtimeMode: "approval-required",
+      activeTurnId: turnId,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-steer-session-rejected"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: turnId,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.steer",
+        commandId: CommandId.make("cmd-steer-rejected"),
+        threadId,
+        expectedTurnId: turnId,
+        messageId,
+        text: "Check the target tab.",
+        createdAt: now,
+      }),
+    );
+
+    await harness.drain();
+    await waitFor(async () => {
+      const state = await harness.readModel();
+      return (
+        state.threads[0]?.activities.some((activity) => {
+          const payload = activity.payload;
+          return (
+            activity.kind === "provider.turn.steer.failed" &&
+            typeof payload === "object" &&
+            payload !== null &&
+            "requestId" in payload &&
+            payload.requestId === messageId
+          );
+        }) ?? false
+      );
+    });
+    expect(harness.sendTurn).toHaveBeenCalledExactlyOnceWith({
+      threadId,
+      expectedTurnId: turnId,
+      input: "Check the target tab.",
+    });
+  });
 
   effectIt.effect("projects starting before a slow provider session finishes", () =>
     Effect.gen(function* () {

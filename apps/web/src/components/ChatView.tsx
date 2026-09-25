@@ -230,6 +230,7 @@ import { buildDraftThreadRouteParams, buildThreadRouteParams } from "../threadRo
 import {
   beginBackgroundDraftSubmissionByRef,
   clearBackgroundDraftSubmissionByRef,
+  composerDraftHasUserContent,
   type ComposerImageAttachment,
   type DraftThreadEnvMode,
   finalizePromotedDraftThreadByRef,
@@ -285,11 +286,15 @@ import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import {
   canSteerQueuedFollowUp,
+  createSteerFallbackFollowUp,
+  failedSteerMessageId,
   nextAutoQueuedFollowUp,
+  resolveSteerRestoreDestination,
   shouldDispatchQueuedFollowUp,
   useQueuedFollowUps,
   useQueuedFollowUpStore,
   type QueuedFollowUp,
+  type SteerRestoreRecord,
 } from "../queuedFollowUps";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
@@ -414,6 +419,21 @@ const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
 const EMPTY_PENDING_USER_INPUT_ANSWERS: Record<string, PendingUserInputDraftAnswer> = {};
+
+function restoreSteerText(record: SteerRestoreRecord): void {
+  const composerDrafts = useComposerDraftStore.getState();
+  const draft = composerDrafts.getComposerDraft(record.threadRef);
+  const destination = resolveSteerRestoreDestination(
+    record.origin,
+    composerDraftHasUserContent(draft) || (draft?.files.length ?? 0) > 0,
+  );
+  if (destination === "composer") {
+    composerDrafts.setPrompt(record.threadRef, record.text);
+    return;
+  }
+  useQueuedFollowUpStore.getState().restoreAtHead(record.threadKey, record.queuedFollowUp);
+}
+
 function useDraftHeroLayoutTransition(isDraftHeroState: boolean) {
   const transitionGroupRef = useRef<HTMLDivElement | null>(null);
   const composerAnchorRef = useRef<HTMLDivElement | null>(null);
@@ -1718,6 +1738,46 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const activeThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
   const queuedFollowUps = useQueuedFollowUps(activeThreadKey);
+  const lastSteerActivityCursorRef = useRef<{
+    readonly threadKey: string | null;
+    readonly activityId: string | null;
+  }>({ threadKey: null, activityId: null });
+  useEffect(() => {
+    if (!isServerThread || !activeServerThread || !activeThreadKey) return;
+    const activities = activeServerThread.activities;
+    const cursor = lastSteerActivityCursorRef.current;
+    const hasCursor = cursor.threadKey === activeThreadKey;
+    const cursorIndex =
+      hasCursor && cursor.activityId !== null
+        ? activities.findIndex((activity) => activity.id === cursor.activityId)
+        : -1;
+    const firstNewActivity = !hasCursor || cursorIndex < 0 ? 0 : cursorIndex + 1;
+    lastSteerActivityCursorRef.current = {
+      threadKey: activeThreadKey,
+      activityId: activities.at(-1)?.id ?? null,
+    };
+
+    const steerRestores = useQueuedFollowUpStore.getState();
+    for (const activity of activities.slice(firstNewActivity)) {
+      const messageId = failedSteerMessageId(activity);
+      if (!messageId) continue;
+      const restore = steerRestores.observeSteerFailure(activeThreadKey, messageId);
+      if (restore) restoreSteerText(restore);
+    }
+
+    const session = activeServerThread.session;
+    for (const pending of steerRestores.getSteerRestores(activeThreadKey)) {
+      if (session?.status !== "running" || session.activeTurnId !== pending.targetTurnId) {
+        steerRestores.clearSteerRestoresForTurn(activeThreadKey, pending.targetTurnId);
+      }
+    }
+  }, [
+    activeThreadKey,
+    activeServerThread?.activities,
+    activeServerThread?.session?.activeTurnId,
+    activeServerThread?.session?.status,
+    isServerThread,
+  ]);
   const changeRequestSnapshotByKey = useAtomValue(threadChangeRequestSnapshotsAtom);
   const [timelineAnchor, setTimelineAnchor] = useState<{
     readonly threadKey: string | null;
@@ -5285,6 +5345,8 @@ function ChatViewContent(props: ChatViewProps) {
       const text = context?.prompt.trim() ?? "";
       if (
         !activeThread?.session?.activeTurnId ||
+        !activeThreadRef ||
+        !activeThreadKey ||
         !context?.providerAvailable ||
         context.selectedProvider !== "codex" ||
         !text ||
@@ -5306,16 +5368,32 @@ function ChatViewContent(props: ChatViewProps) {
         return;
       }
       sendInFlightRef.current = true;
+      const messageId = newMessageId();
+      const restoreStore = useQueuedFollowUpStore.getState();
+      restoreStore.registerSteerRestore({
+        threadKey: activeThreadKey,
+        threadRef: activeThreadRef,
+        messageId,
+        text,
+        targetTurnId: activeThread.session.activeTurnId,
+        origin: "composer",
+        queuedFollowUp: createSteerFallbackFollowUp(messageId, text, {
+          ...context,
+          prompt: text,
+        }),
+      });
       try {
         const result = await steerThreadTurn({
           environmentId,
           input: {
             threadId: activeThread.id,
             expectedTurnId: activeThread.session.activeTurnId,
+            messageId,
             text,
           },
         });
         if (result._tag === "Failure") {
+          restoreStore.cancelSteerRestore(activeThreadKey, messageId);
           toastManager.add(
             stackedThreadToast({
               type: "error",
@@ -5328,6 +5406,8 @@ function ChatViewContent(props: ChatViewProps) {
           clearComposerDraftContent(composerDraftTarget);
           composerRef.current?.resetCursorState();
         }
+        const restore = restoreStore.acceptSteerRestore(activeThreadKey, messageId);
+        if (restore) restoreSteerText(restore);
       } finally {
         sendInFlightRef.current = false;
       }
@@ -6083,6 +6163,7 @@ function ChatViewContent(props: ChatViewProps) {
     const turnId = activeThread?.session?.activeTurnId;
     if (
       !activeThreadKey ||
+      !activeThreadRef ||
       !activeThread ||
       phase !== "running" ||
       !turnId ||
@@ -6095,16 +6176,28 @@ function ChatViewContent(props: ChatViewProps) {
     const queue = useQueuedFollowUpStore.getState();
     if (!queue.claim(activeThreadKey, entry.id)) return;
     sendInFlightRef.current = true;
+    const messageId = newMessageId();
+    queue.registerSteerRestore({
+      threadKey: activeThreadKey,
+      threadRef: activeThreadRef,
+      messageId,
+      text: entry.context.prompt.trim(),
+      targetTurnId: turnId,
+      origin: "queue",
+      queuedFollowUp: entry,
+    });
     try {
       const result = await steerThreadTurn({
         environmentId,
         input: {
           threadId: activeThread.id,
           expectedTurnId: turnId,
+          messageId,
           text: entry.context.prompt.trim(),
         },
       });
       if (result._tag === "Failure") {
+        queue.cancelSteerRestore(activeThreadKey, messageId);
         toastManager.add(
           stackedThreadToast({
             type: "error",
@@ -6114,11 +6207,42 @@ function ChatViewContent(props: ChatViewProps) {
         );
       } else {
         queue.remove(activeThreadKey, entry.id);
+        const restore = queue.acceptSteerRestore(activeThreadKey, messageId);
+        if (restore) restoreSteerText(restore);
       }
     } finally {
       sendInFlightRef.current = false;
       queue.release(activeThreadKey, entry.id);
     }
+  };
+
+  const onSteerDialogAttempt = (messageId: MessageId, text: string, turnId: TurnId): boolean => {
+    if (!activeThreadKey || !activeThreadRef) return false;
+    const context = composerRef.current?.getSendContext();
+    if (!context) return false;
+    useQueuedFollowUpStore.getState().registerSteerRestore({
+      threadKey: activeThreadKey,
+      threadRef: activeThreadRef,
+      messageId,
+      text,
+      targetTurnId: turnId,
+      origin: "composer",
+      queuedFollowUp: createSteerFallbackFollowUp(messageId, text, context),
+    });
+    return true;
+  };
+
+  const onSteerDialogRejected = (messageId: MessageId) => {
+    if (!activeThreadKey) return;
+    useQueuedFollowUpStore.getState().cancelSteerRestore(activeThreadKey, messageId);
+  };
+
+  const onSteerDialogAccepted = (messageId: MessageId) => {
+    if (!activeThreadKey) return;
+    const restore = useQueuedFollowUpStore
+      .getState()
+      .acceptSteerRestore(activeThreadKey, messageId);
+    if (restore) restoreSteerText(restore);
   };
 
   useEffect(() => {
@@ -7342,6 +7466,9 @@ function ChatViewContent(props: ChatViewProps) {
                           : null
                       }
                       disabled={activeEnvironmentUnavailable || isEditingFromHere}
+                      onSteerAttempt={onSteerDialogAttempt}
+                      onSteerAccepted={onSteerDialogAccepted}
+                      onSteerRejected={onSteerDialogRejected}
                     />
                   ) : null}
                   <div

@@ -1666,6 +1666,7 @@ const make = Effect.gen(function* () {
         detail,
         turnId: event.payload.expectedTurnId,
         createdAt: event.payload.createdAt,
+        requestId: event.payload.messageId,
       });
     const thread = yield* resolveThread(event.payload.threadId);
     if (
