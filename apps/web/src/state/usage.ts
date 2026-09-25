@@ -7,6 +7,7 @@
  * @module state/usage
  */
 import { useAtomValue } from "@effect/atom-react";
+import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import { executeAtomQuery } from "@t3tools/client-runtime/state/runtime";
 import { usageQueryInput } from "@t3tools/client-runtime/usageRefresh";
 import {
@@ -37,6 +38,7 @@ const isDeferredTranscriptSource = (
 export interface EnvironmentUsageStatus {
   readonly environmentId: EnvironmentId;
   readonly label: string;
+  readonly connection: EnvironmentConnectionPresentation;
   readonly isPending: boolean;
   readonly error: string | null;
   readonly summary: UsageSummary | null;
@@ -60,6 +62,7 @@ const usageByWindowAtom = Atom.family((windowKey: string) =>
       statuses.push({
         environmentId,
         label: presentation.entry.target.label,
+        connection: presentation.connection,
         isPending: result.waiting,
         error: result._tag === "Failure" ? "This environment could not report usage." : null,
         summary: Option.getOrNull(AsyncResult.value(result)),
@@ -130,7 +133,7 @@ export function useUsage(
       ) {
         return environment;
       }
-      return refreshedEnvironment;
+      return { ...refreshedEnvironment, connection: environment.connection };
     });
   }, [observedEnvironments, refreshed, windowKey]);
   const selectedEnvironments = useMemo(

@@ -2,6 +2,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { useState } from "react";
+import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import { USAGE_CONTRACT_VERSION, UsageDay, type UsageSummary } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/unstable/reactivity";
@@ -16,7 +17,14 @@ const state = vi.hoisted(() => ({
       error: "This environment could not report usage." as string | null,
       summary: null as UsageSummary | null,
     },
-  ],
+  ] as Array<{
+    environmentId: string;
+    label: string;
+    connection?: EnvironmentConnectionPresentation;
+    isPending: boolean;
+    error: string | null;
+    summary: UsageSummary | null;
+  }>,
   execute: vi.fn(),
 }));
 
@@ -84,6 +92,19 @@ function RefreshProbe() {
   return (
     <button type="button" onClick={() => void usage.refresh()}>
       {usage.environments[0]?.summary?.readAt ?? "missing"}
+    </button>
+  );
+}
+
+function RefreshConnectionProbe() {
+  const usage = useUsage({
+    sinceDay: UsageDay.make("2026-08-01"),
+    untilDay: UsageDay.make("2026-09-01"),
+    timeZone: "America/Chicago",
+  });
+  return (
+    <button type="button" onClick={() => void usage.refresh()}>
+      {usage.environments[0]?.connection.phase}
     </button>
   );
 }
@@ -220,6 +241,37 @@ describe("usage route recovery", () => {
       await act(async () => root.render(<RefreshProbe />));
       await act(async () => container.querySelector("button")?.click());
       expect(container.textContent).toBe(refreshedSummary.readAt);
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+
+  it("keeps the current connection state when a manual refresh has cached a result", async () => {
+    state.execute.mockResolvedValue(AsyncResult.success(refreshedSummary));
+    state.environments = [
+      {
+        environmentId: "desktop",
+        label: "Desktop",
+        connection: { phase: "connected", error: null, traceId: null },
+        isPending: false,
+        error: null,
+        summary: null,
+      },
+    ];
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<RefreshConnectionProbe />));
+      await act(async () => container.querySelector("button")?.click());
+      expect(container.textContent).toBe("connected");
+      state.environments = [
+        {
+          ...state.environments[0]!,
+          connection: { phase: "reconnecting", error: "Socket closed", traceId: null },
+        },
+      ];
+      await act(async () => root.render(<RefreshConnectionProbe />));
+      expect(container.textContent).toBe("reconnecting");
     } finally {
       await act(async () => root.unmount());
     }

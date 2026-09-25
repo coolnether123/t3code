@@ -229,6 +229,61 @@ describe("Codex monitor page", () => {
     expect(markup).not.toContain("$0.00");
   });
 
+  it("shows a reconnecting environment without pretending its usage query failed", () => {
+    state.environments = [
+      {
+        environmentId: "desktop",
+        label: "Desktop",
+        connection: { phase: "reconnecting", error: "Socket closed", traceId: null },
+        isPending: true,
+        error: null,
+        summary: null,
+      },
+    ];
+    state.useUsage.mockImplementation(() => ({
+      environments: state.environments,
+      isPending: true,
+      refresh: state.refresh,
+    }));
+    const markup = renderToStaticMarkup(<UsageResetPage />);
+    expect(markup).toContain("Desktop: Reconnecting. Codex usage will appear");
+    expect(markup).not.toContain("Reading Codex usage");
+    expect(markup).not.toContain("No saved quota observations");
+  });
+
+  it("replaces the initial spinner when the first reading does not progress", async () => {
+    vi.useFakeTimers();
+    state.environments = [
+      {
+        environmentId: "desktop",
+        label: "Desktop",
+        connection: { phase: "connecting", error: null, traceId: null },
+        isPending: true,
+        error: null,
+        summary: null,
+      },
+    ];
+    state.useUsage.mockImplementation(() => ({
+      environments: state.environments,
+      isPending: true,
+      refresh: state.refresh,
+    }));
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<UsageResetPage />));
+      expect(container.textContent).toContain("Reading Codex usage");
+      await act(async () => vi.advanceTimersByTimeAsync(15_000));
+      expect(container.textContent).toContain("Codex usage is taking longer than expected");
+      expect(container.textContent).not.toContain("Reading Codex usage");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      vi.useRealTimers();
+    }
+  });
+
   it("backdates public reset estimates without local quota observations", async () => {
     const fingerprint = {
       hostId: "desktop",
@@ -988,6 +1043,7 @@ describe("Codex monitor page", () => {
     const pending = {
       environmentId: "pending",
       label: "Pending computer",
+      connection: { phase: "connecting", error: null, traceId: null },
       isPending: true,
       error: null,
       summary: null,

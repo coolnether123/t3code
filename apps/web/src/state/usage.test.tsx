@@ -21,6 +21,7 @@ function environment(id: string, cost: number | null, hostId = id): EnvironmentU
   return {
     environmentId: EnvironmentId.make(id),
     label: id,
+    connection: { phase: "connected", error: null, traceId: null },
     isPending: cost === null,
     error: null,
     summary:
