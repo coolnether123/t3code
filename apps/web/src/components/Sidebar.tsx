@@ -28,7 +28,7 @@ import {
   scopeThreadRef,
   scopedThreadKey,
 } from "@t3tools/client-runtime/environment";
-import type { ScopedThreadRef, ThreadId } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, ThreadId, type ScopedThreadRef } from "@t3tools/contracts";
 import type { TimestampFormat } from "@t3tools/contracts/settings";
 import {
   AlarmClockIcon,
@@ -93,7 +93,12 @@ import {
   buildSidebarProjectSnapshots,
   type SidebarProjectSnapshot,
 } from "../sidebarProjectGrouping";
-import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
+import {
+  ALL_ENVIRONMENTS_CHAT_LOCATION_SCOPE,
+  environmentChatLocationScopeKey,
+  legacyProjectCwdPreferenceKey,
+  useUiStateStore,
+} from "../uiStateStore";
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import { useThreadActions } from "../hooks/useThreadActions";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
@@ -104,8 +109,13 @@ import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { useLocalStorage } from "../hooks/useLocalStorage";
 import { useNowMinute } from "../hooks/useNowMinute";
 import { useSidebarEnvironmentScope } from "../hooks/useSidebarEnvironmentScope";
+import { resolveEnvironmentSwitchTarget } from "../hooks/environmentSwitch.logic";
 import { usePrimaryEnvironmentId } from "../state/environments";
-import { useProjects, useThreadShells } from "../state/entities";
+import {
+  useAllEnvironmentShellsBootstrapped,
+  useProjects,
+  useThreadShells,
+} from "../state/entities";
 import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../state/server";
 import { vcsEnvironment } from "../state/vcs";
 import { threadEnvironment } from "../state/threads";
@@ -136,6 +146,7 @@ import {
   resolveSidebarThreadStatus,
   searchSidebarThreadsByTitle,
   shouldCreateNewThreadInCurrentProject,
+  sortScopedProjectsForSidebar,
   resolveWorkingStartedAt,
   sortLogicalProjectsForSidebar,
   sortPinnedThreadsForSidebar,
@@ -1719,6 +1730,7 @@ export default function Sidebar() {
     useSidebarEnvironmentScope();
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const threads = useThreadShells();
+  const environmentShellsBootstrapped = useAllEnvironmentShellsBootstrapped();
   const router = useRouter();
   const { isMobile, setOpenMobile } = useSidebar();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
@@ -1799,7 +1811,117 @@ export default function Sidebar() {
     },
   });
   const [projectScopeMenuOpen, setProjectScopeMenuOpen] = useState(false);
+  const [projectScopeKey, setProjectScopeKey] = useState<string | null>(null);
+  const [pendingEnvironmentSwitch, setPendingEnvironmentSwitch] = useState<string | null>(null);
   const newThreadContext = useHandleNewThread();
+  const handleNewThread = newThreadContext.handleNewThread;
+  const switchEnvironment = useCallback(
+    (value: string) => {
+      const targetEnvironmentId = value === ALL_ENVIRONMENTS_CHAT_LOCATION_SCOPE ? null : value;
+      if (targetEnvironmentId === selectedEnvironmentId) {
+        setPendingEnvironmentSwitch(null);
+        return;
+      }
+      const connectedEnvironmentIds = environments.map((environment) => environment.environmentId);
+      if (
+        targetEnvironmentId !== null &&
+        !connectedEnvironmentIds.includes(targetEnvironmentId as EnvironmentId)
+      ) {
+        setPendingEnvironmentSwitch(null);
+        return;
+      }
+      if (!environmentShellsBootstrapped) {
+        setPendingEnvironmentSwitch(value);
+        return;
+      }
+      setPendingEnvironmentSwitch(null);
+
+      const scopeKey = environmentChatLocationScopeKey(targetEnvironmentId);
+      const currentUiState = useUiStateStore.getState();
+      const draftRefs = Object.entries(useComposerDraftStore.getState().draftThreadsByThreadKey)
+        .filter(([, draft]) => draft.promotedTo == null)
+        .map(([draftId, draft]) => ({ draftId, environmentId: draft.environmentId }));
+      const recentProjects = sortScopedProjectsForSidebar(projects, threads, "updated_at").map(
+        (project) => ({ projectId: project.id, environmentId: project.environmentId }),
+      );
+      const target = resolveEnvironmentSwitchTarget({
+        environmentId: targetEnvironmentId,
+        rememberedLocation: currentUiState.lastChatLocationByScope[scopeKey] ?? null,
+        connectedEnvironmentIds,
+        threadRefs: threads.map((thread) => ({
+          environmentId: thread.environmentId,
+          threadId: thread.id,
+          archivedAt: thread.archivedAt,
+        })),
+        draftRefs,
+        recentProjects,
+      });
+
+      setSelectedEnvironmentId(value);
+      setProjectScopeKey(null);
+
+      if (target.kind === "none") {
+        currentUiState.setLastChatLocationForScope(scopeKey, null);
+        return;
+      }
+      if (target.kind === "thread") {
+        void router.navigate({
+          to: "/$environmentId/$threadId",
+          params: buildThreadRouteParams(
+            scopeThreadRef(
+              EnvironmentId.make(target.environmentId),
+              ThreadId.make(target.threadId),
+            ),
+          ),
+        });
+        return;
+      }
+      if (target.kind === "draft") {
+        void router.navigate({
+          to: "/draft/$draftId",
+          params: { draftId: DraftId.make(target.draftId) },
+        });
+        return;
+      }
+      if (target.kind === "index") {
+        void router.navigate({ to: "/" });
+        return;
+      }
+
+      const projectRef = scopeProjectRef(
+        EnvironmentId.make(target.environmentId),
+        ProjectId.make(target.projectId),
+      );
+      if (router.state.location.pathname === "/") {
+        // The index landing starts its draft when the selected scope changes.
+        return;
+      }
+      void startNewThreadFromContext({
+        activeDraftThread: null,
+        activeThread: undefined,
+        defaultProjectRef: projectRef,
+        handleNewThread,
+        selectedEnvironmentId: EnvironmentId.make(target.environmentId),
+      });
+    },
+    [
+      environments,
+      environmentShellsBootstrapped,
+      handleNewThread,
+      projects,
+      router,
+      selectedEnvironmentId,
+      setProjectScopeKey,
+      setPendingEnvironmentSwitch,
+      setSelectedEnvironmentId,
+      threads,
+    ],
+  );
+  useEffect(() => {
+    if (pendingEnvironmentSwitch === null || !environmentShellsBootstrapped) return;
+    setPendingEnvironmentSwitch(null);
+    switchEnvironment(pendingEnvironmentSwitch);
+  }, [environmentShellsBootstrapped, pendingEnvironmentSwitch, switchEnvironment]);
   const openAddProjectCommandPalette = useCallback(
     () => openCommandPalette({ open: "add-project" }),
     [],
@@ -1950,7 +2072,6 @@ export default function Sidebar() {
 
   // Project scope: one menu above the list. Scoping filters the list without
   // making the header width depend on the number or length of project names.
-  const [projectScopeKey, setProjectScopeKey] = useState<string | null>(null);
   const scopedProjectGroup = useMemo(
     () =>
       projectScopeKey === null
@@ -3439,10 +3560,9 @@ export default function Sidebar() {
                 </MenuTrigger>
                 <MenuPopup align="start" className="w-(--anchor-width)">
                   <MenuRadioGroup
-                    value={selectedEnvironmentId ?? "all"}
+                    value={selectedEnvironmentId ?? ALL_ENVIRONMENTS_CHAT_LOCATION_SCOPE}
                     onValueChange={(value) => {
-                      setSelectedEnvironmentId(value);
-                      setProjectScopeKey(null);
+                      switchEnvironment(value);
                     }}
                   >
                     {environments.map((environment) => (
@@ -3455,7 +3575,7 @@ export default function Sidebar() {
                         <span className="truncate">{environment.label}</span>
                       </MenuRadioItem>
                     ))}
-                    <MenuRadioItem value="all" closeOnClick>
+                    <MenuRadioItem value={ALL_ENVIRONMENTS_CHAT_LOCATION_SCOPE} closeOnClick>
                       <ServerIcon className="size-4 shrink-0" />
                       <span>All environments</span>
                     </MenuRadioItem>
