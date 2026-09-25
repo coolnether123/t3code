@@ -21,6 +21,7 @@ import {
   isContextMenuPointerDown,
   isSidebarNestedLinkClick,
   isTrailingDoubleClick,
+  listActiveWorkThreads,
   orderItemsByPreferredIds,
   resolveProjectStatusIndicator,
   resolveThreadRowClassName,
@@ -804,6 +805,65 @@ describe("resolveSidebarThreadStatus", () => {
 
   it("defaults to ready with no session", () => {
     expect(resolveSidebarThreadStatus({ ...idle, session: null })).toBe("ready");
+  });
+});
+
+describe("listActiveWorkThreads", () => {
+  const base = {
+    session: null,
+    hasPendingApprovals: false,
+    hasPendingUserInput: false,
+    updatedAt: "2026-09-25T20:00:00.000Z",
+  };
+
+  it("shows attention and live work across connected environments without stale offline work", () => {
+    const entries = listActiveWorkThreads(
+      [
+        { ...base, id: "idle", environmentId: "millie" },
+        {
+          ...base,
+          id: "monitor",
+          environmentId: "millie",
+          backgroundLiveness: "monitoring" as const,
+        },
+        { ...base, id: "offline", environmentId: "elora", backgroundLiveness: "working" as const },
+        { ...base, id: "working", environmentId: "millie", backgroundLiveness: "working" as const },
+        { ...base, id: "approval", environmentId: "millie", hasPendingApprovals: true },
+      ],
+      new Set(["millie"]),
+    );
+
+    expect(entries.map(({ thread, status }) => [thread.id, status])).toEqual([
+      ["approval", "approval"],
+      ["working", "working"],
+      ["monitor", "monitoring"],
+    ]);
+  });
+
+  it("does not confuse a failed session with live background work", () => {
+    const entries = listActiveWorkThreads(
+      [
+        {
+          ...base,
+          id: "failed",
+          environmentId: "millie",
+          session: {
+            threadId: ThreadId.make("failed"),
+            status: "error" as const,
+            providerName: "Codex",
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            runtimeMode: DEFAULT_RUNTIME_MODE,
+            activeTurnId: null,
+            lastError: "lost connection",
+            updatedAt: base.updatedAt,
+          },
+          backgroundLiveness: "working" as const,
+        },
+      ],
+      new Set(["millie"]),
+    );
+
+    expect(entries).toEqual([]);
   });
 });
 

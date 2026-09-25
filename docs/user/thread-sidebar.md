@@ -16,6 +16,12 @@ setup screen when it has none. **All environments** keeps its own last chat
 location and stays a combined view. Switching only changes which environment
 the client shows. It does not change project files.
 
+Open **Agent activity** above the project filter to see working threads and requests
+that need you across your connected environments, even when the sidebar is filtered
+to one Mac. Select a row to open its thread and see any subagents there. A disconnected
+Mac's cached status is not counted as live work; the menu tells you when activity
+from a disconnected Mac is unavailable.
+
 On web and desktop, a new thread keeps the current project and carries your model
 and mode selections, unless the destination project has its own model default.
 Its branch and workspace mode come from your configured defaults. To continue in

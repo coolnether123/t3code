@@ -875,6 +875,45 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
   return "ready";
 }
 
+export type ActiveWorkStatus = "approval" | "input" | "working" | "monitoring";
+
+/** The sidebar's cross-environment list must not present a disconnected Mac's
+ * last cached shell as work that is still running. */
+export function listActiveWorkThreads<
+  T extends SidebarThreadStatusInput & {
+    readonly id: string;
+    readonly environmentId: string;
+    readonly updatedAt: string;
+  },
+>(
+  threads: readonly T[],
+  connectedEnvironmentIds: ReadonlySet<string>,
+): Array<{
+  readonly thread: T;
+  readonly status: ActiveWorkStatus;
+}> {
+  const priority: Record<ActiveWorkStatus, number> = {
+    approval: 0,
+    input: 1,
+    working: 2,
+    monitoring: 3,
+  };
+  const entries: Array<{ readonly thread: T; readonly status: ActiveWorkStatus }> = [];
+  for (const thread of threads) {
+    if (!connectedEnvironmentIds.has(thread.environmentId)) continue;
+    const status = resolveSidebarThreadStatus(thread);
+    if (status === "ready" || status === "failed") continue;
+    entries.push({ thread, status });
+  }
+  return entries.sort(
+    (left, right) =>
+      priority[left.status] - priority[right.status] ||
+      firstValidTimestampMs(right.thread.updatedAt) -
+        firstValidTimestampMs(left.thread.updatedAt) ||
+      left.thread.id.localeCompare(right.thread.id),
+  );
+}
+
 /** First VALID timestamp wins: `a ?? b` falls through on null, but a present-
     yet-malformed string must also fall through to the next candidate rather
     than sink the row to the epoch. */

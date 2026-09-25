@@ -33,6 +33,7 @@ import type { TimestampFormat } from "@t3tools/contracts/settings";
 import {
   AlarmClockIcon,
   AlarmClockOffIcon,
+  BotIcon,
   CheckIcon,
   ChevronDownIcon,
   CircleAlertIcon,
@@ -138,6 +139,7 @@ import {
   hasUnseenCompletion,
   isSidebarNestedLinkClick,
   isTrailingDoubleClick,
+  listActiveWorkThreads,
   orderItemsByPreferredIds,
   planPinnedReorder,
   resolveSidebarThreadSection,
@@ -2017,6 +2019,25 @@ export default function Sidebar() {
     [sidebarProjectSortOrder, threads, unsortedProjectGroups],
   );
   const serverConfigs = useAtomValue(environmentServerConfigsAtom);
+  const [activeWorkOpen, setActiveWorkOpen] = useState(false);
+  const disconnectedEnvironmentCount = environments.filter(
+    (environment) => environment.connection.phase !== "connected",
+  ).length;
+  const activeWorkRows = useMemo(
+    () =>
+      listActiveWorkThreads(
+        threads,
+        new Set(
+          environments
+            .filter((environment) => environment.connection.phase === "connected")
+            .map((environment) => environment.environmentId),
+        ),
+      ),
+    [environments, threads],
+  );
+  const attentionCount = activeWorkRows.filter(
+    ({ status }) => status === "approval" || status === "input",
+  ).length;
   // Default provider instance ids are driver slugs and therefore collide
   // across local, remote, and hosted environments. Resolve row metadata only
   // from the environment that owns the thread.
@@ -3680,6 +3701,95 @@ export default function Sidebar() {
                 </Tooltip>
               </div>
             </div>
+            {environments.length > 0 ? (
+              <Popover open={activeWorkOpen} onOpenChange={setActiveWorkOpen}>
+                <PopoverTrigger
+                  render={
+                    <SidebarMenuButton
+                      type="button"
+                      aria-label="View agent activity across environments"
+                      className="w-full ps-[calc(var(--sidebar-row-content-inset)-1px)] focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar"
+                    />
+                  }
+                >
+                  <BotIcon className="size-4 shrink-0" />
+                  <span className="min-w-0 flex-1 truncate text-left">Agent activity</span>
+                  {attentionCount > 0 ? (
+                    <span className="text-xs text-amber-600 dark:text-amber-300">
+                      {attentionCount} need you
+                    </span>
+                  ) : null}
+                  <span className="font-mono text-xs tabular-nums text-sidebar-muted-foreground">
+                    {activeWorkRows.length}
+                  </span>
+                  <ChevronDownIcon className="size-3.5 shrink-0 text-sidebar-muted-foreground" />
+                </PopoverTrigger>
+                <PopoverPopup
+                  side="bottom"
+                  align="start"
+                  className="w-[min(22rem,calc(100vw-2rem))]"
+                  viewportClassName="max-h-80 overflow-y-auto p-1"
+                >
+                  <div className="px-2 py-1.5 text-xs font-medium text-muted-foreground">
+                    Live work across connected environments
+                  </div>
+                  {!environmentShellsBootstrapped ? (
+                    <p className="px-2 py-3 text-sm text-muted-foreground">
+                      Loading agent activity…
+                    </p>
+                  ) : activeWorkRows.length === 0 ? (
+                    <p className="px-2 py-3 text-sm text-muted-foreground">
+                      No active work on connected Macs.
+                    </p>
+                  ) : (
+                    activeWorkRows.map(({ thread, status }) => (
+                      <button
+                        key={scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))}
+                        type="button"
+                        className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-accent focus-visible:bg-accent focus-visible:outline-none"
+                        onClick={() => {
+                          setActiveWorkOpen(false);
+                          navigateToThread(scopeThreadRef(thread.environmentId, thread.id));
+                        }}
+                      >
+                        <span
+                          aria-hidden="true"
+                          className={cn(
+                            "size-1.5 shrink-0 rounded-full",
+                            status === "approval"
+                              ? "bg-amber-500"
+                              : status === "input"
+                                ? "bg-indigo-500"
+                                : "bg-sky-500",
+                          )}
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-sm font-medium">{thread.title}</span>
+                          <span className="block truncate text-xs text-muted-foreground">
+                            {environmentLabelById.get(thread.environmentId) ?? "Environment"}
+                          </span>
+                        </span>
+                        <span className="shrink-0 text-xs text-muted-foreground">
+                          {status === "approval"
+                            ? "Approval"
+                            : status === "input"
+                              ? "Input"
+                              : status === "monitoring"
+                                ? "Monitoring"
+                                : "Working"}
+                        </span>
+                      </button>
+                    ))
+                  )}
+                  {disconnectedEnvironmentCount > 0 ? (
+                    <p className="border-t border-border px-2 py-2 text-xs text-muted-foreground">
+                      {disconnectedEnvironmentCount} disconnected{" "}
+                      {disconnectedEnvironmentCount === 1 ? "Mac" : "Macs"}; activity unavailable.
+                    </p>
+                  ) : null}
+                </PopoverPopup>
+              </Popover>
+            ) : null}
             {environments.length > 0 ? (
               <div className="flex items-center gap-1">
                 {projectGroups.length > 0 ? (
