@@ -553,6 +553,11 @@ describe("shouldCreateNewThreadInCurrentProject", () => {
     expect(shouldCreateNewThreadInCurrentProject(false, 1)).toBe(true);
     expect(shouldCreateNewThreadInCurrentProject(true, 1)).toBe(true);
   });
+
+  it("does not attempt to create a thread without a project", () => {
+    expect(shouldCreateNewThreadInCurrentProject(false, 0)).toBe(false);
+    expect(shouldCreateNewThreadInCurrentProject(true, 0)).toBe(false);
+  });
 });
 
 describe("orderItemsByPreferredIds", () => {

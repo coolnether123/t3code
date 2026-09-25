@@ -3364,6 +3364,11 @@ export default function Sidebar() {
   // for multi-project setups.
   const handleNewThreadClick = useCallback(
     (event?: ReactMouseEvent) => {
+      if (projectGroups.length === 0) {
+        if (isMobile) setOpenMobile(false);
+        openAddProjectCommandPalette();
+        return;
+      }
       // One project: nothing to pick, create immediately. Shift+click creates
       // directly in the current project even with several projects, skipping
       // the palette picker.
@@ -3381,7 +3386,14 @@ export default function Sidebar() {
       if (isMobile) setOpenMobile(false);
       openCommandPalette({ open: "new-thread-in" });
     },
-    [isMobile, newThreadContext, projectGroups.length, selectedEnvironmentId, setOpenMobile],
+    [
+      isMobile,
+      newThreadContext,
+      openAddProjectCommandPalette,
+      projectGroups.length,
+      selectedEnvironmentId,
+      setOpenMobile,
+    ],
   );
 
   // The button mirrors chat.new: in multi-project setups both route through
@@ -3507,8 +3519,12 @@ export default function Sidebar() {
                         type="button"
                         className="relative focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar"
                         onClick={handleNewThreadClick}
-                        disabled={projects.length === 0}
-                        aria-label="New thread"
+                        disabled={environments.length === 0}
+                        aria-label={
+                          projectGroups.length === 0
+                            ? "Add project to start a thread"
+                            : "New thread"
+                        }
                       />
                     }
                   >
@@ -3519,7 +3535,9 @@ export default function Sidebar() {
                     />
                   </TooltipTrigger>
                   <TooltipPopup side="right">
-                    {projectGroups.length > 1 ? (
+                    {projectGroups.length === 0 ? (
+                      "Add project to start a thread"
+                    ) : projectGroups.length > 1 ? (
                       <span className="flex flex-col gap-0.5">
                         <span>
                           {newThreadShortcutLabel
