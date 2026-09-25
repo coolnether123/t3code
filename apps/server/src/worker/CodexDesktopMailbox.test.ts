@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import * as NodeEvents from "node:events";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -23,6 +24,7 @@ import {
   readCodexDesktopStatus,
   renewCodexDesktopCoordinatorLease,
   readCodexDesktopResult,
+  waitForCodexDesktopMailboxChange,
   type CodexDesktopCoordinatorRequest,
 } from "./CodexDesktopMailbox.ts";
 
@@ -197,6 +199,41 @@ describe("CodexDesktopMailbox", () => {
       expect(await readCodexDesktopStatus(layout, jobId)).toEqual(status);
       await publishCodexDesktopStatus(layout, { ...status, status: "running" });
       expect((await readCodexDesktopStatus(layout, jobId))?.status).toBe("running");
+    });
+  });
+
+  it("waits out the timeout instead of crashing when a mailbox watcher fails", async () => {
+    await withMailbox(async (root) => {
+      const layout = createCodexDesktopMailboxLayout(root);
+      const watchers: Array<NodeEvents.EventEmitter & { closed: boolean; close: () => void }> = [];
+      const failingWatch = () => {
+        const watcher = Object.assign(new NodeEvents.EventEmitter(), {
+          closed: false,
+          close() {
+            watcher.closed = true;
+          },
+        });
+        watchers.push(watcher);
+        return watcher;
+      };
+      const waiting = waitForCodexDesktopMailboxChange(layout, 20, failingWatch);
+      await new Promise((resolve) => setImmediate(resolve));
+      watchers[0]?.emit(
+        "error",
+        Object.assign(new Error("too many open files"), { code: "EMFILE" }),
+      );
+      expect(await waiting).toBe("timeout");
+      expect(watchers.every((watcher) => watcher.closed)).toBe(true);
+    });
+  });
+
+  it("waits out the timeout when a mailbox watcher cannot start", async () => {
+    await withMailbox(async (root) => {
+      const layout = createCodexDesktopMailboxLayout(root);
+      const result = await waitForCodexDesktopMailboxChange(layout, 20, () => {
+        throw Object.assign(new Error("too many open files"), { code: "EMFILE" });
+      });
+      expect(result).toBe("timeout");
     });
   });
 });
