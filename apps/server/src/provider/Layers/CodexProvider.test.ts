@@ -113,9 +113,12 @@ it("decodes an unknown future multi-agent version and fails closed with an expli
   );
 });
 
-it("keeps only the GPT-5.6 Codex family out of legacy models", () => {
+it("keeps current discovered Codex model families out of legacy models", () => {
   assert.deepStrictEqual(
     [
+      "gpt-6-astra",
+      "gpt-6-sol",
+      "gpt-6-luna",
       "gpt-5.6-luna",
       "gpt-5.6-terra",
       "gpt-5.6-sol",
@@ -124,6 +127,9 @@ it("keeps only the GPT-5.6 Codex family out of legacy models", () => {
       "gpt-5.4",
     ].map((model) => [model, isLegacyCodexModel(model)]),
     [
+      ["gpt-6-astra", false],
+      ["gpt-6-sol", false],
+      ["gpt-6-luna", false],
       ["gpt-5.6-luna", false],
       ["gpt-5.6-terra", false],
       ["gpt-5.6-sol", false],
