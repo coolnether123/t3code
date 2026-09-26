@@ -2,12 +2,15 @@ import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3
 import { describe, expect, it } from "vite-plus/test";
 import {
   applyProviderInstanceSettings,
+  canKeepExplicitProviderInstanceSelection,
   deriveProviderEntriesByEnvironment,
   deriveProviderInstanceEntries,
   getDefaultProviderInstanceModel,
+  isDesktopBackedProviderInstanceReady,
   isProviderInstancePickerReady,
   isProviderInstancePickerVisible,
   resolveDefaultProviderModelSelection,
+  resolveSelectableProviderInstanceEntry,
   resolveSelectableProviderInstance,
   resolveProviderDriverKindForInstanceSelection,
 } from "./providerInstances";
@@ -84,6 +87,48 @@ describe("isProviderInstancePickerVisible", () => {
 
     expect(enabledEntry && isProviderInstancePickerVisible(enabledEntry)).toBe(true);
     expect(disabledEntry && isProviderInstancePickerVisible(disabledEntry)).toBe(false);
+  });
+});
+
+describe("desktop-backed provider selection", () => {
+  it("retains an explicitly selected unavailable desktop instance, but not as a default", () => {
+    const desktopEntry = {
+      ...deriveProviderInstanceEntries([
+        provider({
+          provider: ProviderDriverKind.make("codex"),
+          instanceId: "codex_elora",
+          status: "error",
+          availability: "unavailable",
+        }),
+      ])[0]!,
+      useDesktopAppDaemon: true,
+    };
+    const availableEntry = deriveProviderInstanceEntries([
+      provider({
+        provider: ProviderDriverKind.make("codex"),
+        instanceId: "codex_millie",
+      }),
+    ])[0]!;
+    const readyDesktopEntry = {
+      ...deriveProviderInstanceEntries([
+        provider({
+          provider: ProviderDriverKind.make("codex"),
+          instanceId: "codex_millie_desktop",
+        }),
+      ])[0]!,
+      useDesktopAppDaemon: true,
+    };
+
+    expect(canKeepExplicitProviderInstanceSelection(desktopEntry)).toBe(true);
+    expect(isDesktopBackedProviderInstanceReady(desktopEntry)).toBe(false);
+    expect(isDesktopBackedProviderInstanceReady(readyDesktopEntry)).toBe(true);
+    expect(
+      resolveSelectableProviderInstanceEntry(
+        [availableEntry, desktopEntry],
+        desktopEntry.instanceId,
+      ),
+    ).toBe(desktopEntry);
+    expect(resolveSelectableProviderInstanceEntry([desktopEntry], undefined)).toBeUndefined();
   });
 });
 
@@ -189,6 +234,24 @@ describe("applyProviderInstanceSettings", () => {
     });
 
     expect(entry?.enabled).toBe(false);
+  });
+
+  it("projects the desktop app flag from the environment's Codex instance settings", () => {
+    const instanceId = ProviderInstanceId.make("codex_personal");
+    const entries = deriveProviderInstanceEntries([
+      provider({ provider: ProviderDriverKind.make("codex"), instanceId }),
+    ]);
+    const [entry] = applyProviderInstanceSettings(entries, {
+      providerInstances: {
+        [instanceId]: {
+          driver: ProviderDriverKind.make("codex"),
+          config: { useDesktopAppDaemon: true },
+        },
+      },
+      providers: {} as never,
+    });
+
+    expect(entry?.useDesktopAppDaemon).toBe(true);
   });
 });
 
@@ -324,6 +387,45 @@ describe("resolveSelectableProviderInstance", () => {
     ];
 
     expect(resolveSelectableProviderInstance(providers, requested)).toBe(requested);
+  });
+
+  it("preserves an unavailable desktop-backed project selection without making it a default", () => {
+    const desktopInstanceId = ProviderInstanceId.make("codex_elora");
+    const regularInstanceId = ProviderInstanceId.make("codex_millie");
+    const desktopProvider = provider({
+      provider: ProviderDriverKind.make("codex"),
+      instanceId: desktopInstanceId,
+      status: "error",
+      availability: "unavailable",
+    });
+    const regularProvider = provider({
+      provider: ProviderDriverKind.make("codex"),
+      instanceId: regularInstanceId,
+      models: [model("millie-model")],
+    });
+    const providers = [desktopProvider, regularProvider];
+    const settings = {
+      providerInstances: {
+        [desktopInstanceId]: {
+          driver: ProviderDriverKind.make("codex"),
+          config: { useDesktopAppDaemon: true },
+        },
+        [regularInstanceId]: {
+          driver: ProviderDriverKind.make("codex"),
+          config: {},
+        },
+      },
+      providers: {} as never,
+    };
+    const storedSelection = { instanceId: desktopInstanceId, model: "saved-model" };
+
+    expect(resolveDefaultProviderModelSelection(providers, storedSelection, settings)).toBe(
+      storedSelection,
+    );
+    expect(resolveDefaultProviderModelSelection(providers, null, settings)).toEqual({
+      instanceId: regularInstanceId,
+      model: "millie-model",
+    });
   });
 
   it("does not invent an errored instance as a new-user default", () => {

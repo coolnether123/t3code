@@ -62,6 +62,7 @@ import type {
 } from "../../lib/composerImages";
 import {
   buildModelOptions,
+  getModelSelectionUnavailableMessage,
   groupByProvider,
   isModelSelectionUnavailable,
 } from "../../lib/modelOptions";
@@ -322,6 +323,10 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   const modelUnavailable =
     props.connectionState === "connected" &&
     isModelSelectionUnavailable(props.serverConfig, currentModelSelection);
+  const modelUnavailableMessage = getModelSelectionUnavailableMessage(
+    props.serverConfig,
+    currentModelSelection,
+  );
   const connectionStatus = composerConnectionStatus({
     connectionError: props.connectionError,
     connectionState: props.connectionState,
@@ -466,7 +471,10 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     () => buildModelOptions(props.serverConfig, currentModelSelection),
     [props.serverConfig, currentModelSelection],
   );
-  const providerGroups = useMemo(() => groupByProvider(modelOptions), [modelOptions]);
+  const providerGroups = useMemo(
+    () => groupByProvider(modelOptions, props.serverConfig),
+    [modelOptions, props.serverConfig],
+  );
   // An existing thread is bound to its harness: sessions can't move between
   // provider instances, so the picker only offers the thread's own group.
   const threadProviderGroups = useMemo(
@@ -594,7 +602,9 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
 
         {modelUnavailable ? (
           <Pressable accessibilityRole="button" className="px-3 py-2" onPress={openSettings}>
-            <Text className="text-xs text-foreground">Model unavailable. Open model settings.</Text>
+            <Text className="text-xs text-foreground">
+              {modelUnavailableMessage ?? "Model unavailable. Open model settings."}
+            </Text>
           </Pressable>
         ) : null}
 

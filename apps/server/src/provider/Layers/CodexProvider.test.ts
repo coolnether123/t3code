@@ -366,6 +366,25 @@ it("does not offer host-specific routes based only on JavaScript or plugin tool 
   );
 });
 
+it("omits the Codex Browser option for desktop-backed instances", () => {
+  const model = decodeModelListResponse(CODEX_0_148_MODEL_LIST_SANITIZED).data[0]!;
+  const capabilities = mapCodexModelCapabilities(
+    model,
+    [{ name: "t3-code", tools: { ...ComputerToolkit.tools, ...PreviewToolkit.tools } }],
+    true,
+  );
+
+  assert.equal(
+    capabilities.optionDescriptors?.some((option) => option.id === "computerControl"),
+    false,
+  );
+  assert.equal(
+    capabilities.optionDescriptors?.some((option) => option.id === "serviceTier"),
+    true,
+  );
+  assert.equal(capabilities.subagentBackends?.v2.supported, true);
+});
+
 it("retains saved desktop compatibility without offering it as a new provider", () => {
   const model = decodeModelListResponse(CODEX_0_148_MODEL_LIST_SANITIZED).data[0]!;
   const caps = mapCodexModelCapabilities(model, [

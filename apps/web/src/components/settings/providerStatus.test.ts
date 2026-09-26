@@ -38,6 +38,17 @@ describe("getProviderSummary", () => {
     });
   });
 
+  it("shows the desktop daemon failure as unavailable instead of ready", () => {
+    const message = "Codex desktop daemon is not running on this Mac.";
+    expect(
+      getProviderSummary({
+        ...provider,
+        status: "error",
+        message,
+      }),
+    ).toEqual({ headline: "Unavailable", detail: message });
+  });
+
   it("does not hide a provider warning behind an authenticated state", () => {
     expect(
       getProviderSummary({

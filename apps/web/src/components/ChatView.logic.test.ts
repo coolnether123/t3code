@@ -1183,6 +1183,35 @@ describe("resolveComposerProviderSelection", () => {
     ).toBe("Sign in to Antigravity in provider settings before sending.");
   });
 
+  it("keeps an explicitly selected unavailable desktop Codex instance bound", () => {
+    const desktopEntry = {
+      ...entry("codex", "codex_elora", {
+        availability: "unavailable",
+        status: "error",
+        message: "Codex desktop daemon is not running on this Mac.",
+      }),
+      useDesktopAppDaemon: true,
+    };
+    const availableEntry = entry("codex", "codex_millie");
+    const selection = resolveComposerProviderSelection({
+      entries: [availableEntry, desktopEntry],
+      candidateInstanceIds: [desktopEntry.instanceId],
+      lockedProvider: null,
+      lockedInstanceId: null,
+    });
+
+    expect(selection.selectedProviderEntry?.instanceId).toBe(desktopEntry.instanceId);
+    expect(selection.unavailableProviderInstanceId).toBeUndefined();
+    expect(
+      resolveComposerProviderSelection({
+        entries: [availableEntry, desktopEntry],
+        candidateInstanceIds: [],
+        lockedProvider: null,
+        lockedInstanceId: null,
+      }).selectedProviderEntry?.instanceId,
+    ).toBe(availableEntry.instanceId);
+  });
+
   it("blocks sends until the selected Antigravity profile is installed", () => {
     const provider = entry("antigravity", "google_work", {
       installed: false,

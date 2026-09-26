@@ -27,6 +27,29 @@ T3 managed Chrome does not attach to the user's regular browser profile. The
 observation, screenshot, or input-control channel afterward. Do not label this
 tool as a connected Codex Chrome provider.
 
+## Desktop-backed Codex instances
+
+A Codex provider instance can run its threads through the host Mac's Codex
+desktop app-server daemon. T3 connects through the app's supported proxy. The
+thread then uses the desktop installation's sign-in, plugins, connectors, MCP
+servers, browser extension, and approvals. This setting belongs to the provider
+instance on the environment running T3, so a remote web or mobile client sees
+the same choice and status.
+
+In the verified daemon flow, `cua_repl` exposed a JavaScript `agent` whose
+`browsers.list()` returned Chrome and Edge extension instances with extension
+instance metadata. `node_repl` did not define `agent`. These are observations
+from a live session, not APIs for T3 to recreate or a guarantee that a browser
+action will work. An installed extension, a running daemon, or an extension
+inventory does not prove that a site is permitted or that an action succeeds.
+Use the host tools' actual results and confirmations.
+
+Desktop-backed instances do not receive T3 managed Chrome and do not advertise
+the Codex `computerControl` model option, including its T3 Preview choice.
+`enableAgentBrowserAccess` still controls T3 Preview independently, and T3
+Workers remain unchanged. Preview is not a fallback for an unavailable host
+browser. Report the host failure instead of switching browsers or providers.
+
 ## Capability discovery
 
 `CodexDriver.ts` builds the Browser provider choices from routes T3 can provision.
@@ -126,13 +149,15 @@ the desktop app's browser or foreground-input host.
 
 ## Instructions and approvals
 
-The persisted `computerControl` option retains `preview`, `chrome`, and the legacy
-`desktop` value. `desktop` grants the T3 browser toolkit, not Windows access.
-Instructions describe its managed Chrome fallback explicitly. The mode selection
-does not grant permissions or authorize unrelated consequential actions.
-New choices omit `desktop`; the default is managed Chrome when provisionable,
-otherwise Preview. Existing selection normalization resolves a saved desktop
-value against the available choices without presenting it as Windows control.
+For non-desktop Codex instances, the persisted `computerControl` option retains
+`preview`, `chrome`, and the legacy `desktop` value. `desktop` grants the T3
+browser toolkit, not Windows access. Instructions describe managed Chrome for
+those instances. New choices omit `desktop`; the default is managed Chrome when
+provisionable, otherwise Preview. Existing selection normalization resolves a
+saved desktop value against the available choices without presenting it as
+Windows control. Desktop-backed instances expose no `computerControl` option;
+their host tools follow the desktop installation's own permissions and
+action-time confirmations.
 
 `computerControlAvailable` in the instruction builder means the thread inventory
 contains T3's managed Chrome toolkit. It defaults to false. The separate
@@ -148,6 +173,7 @@ that produced them; do not relabel an arbitrary MCP image as a desktop frame.
 Do not acknowledge permission requests automatically because a browser mode is
 selected.
 
-Sources and local protocol checked on 2026-08-30. This document describes T3's
-implemented integration boundary, not a claim that future OpenAI clients or
+The desktop-daemon browser observations above were verified on 2026-09-26. The
+remaining protocol references were checked on 2026-08-30. This document describes
+T3's implemented integration boundary, not a claim that future OpenAI clients or
 versions cannot expose additional host support.

@@ -13,11 +13,27 @@ describe("ProviderSettingsForm helpers", () => {
 
     expect(codex).toBeDefined();
     expect(deriveProviderSettingsFields(codex!).map((field) => field.key)).toEqual([
+      "useDesktopAppDaemon",
       "binaryPath",
       "homePath",
       "shadowHomePath",
       "launchArgs",
     ]);
+  });
+
+  it("exposes the desktop app toggle and hides shadow home while it is enabled", () => {
+    const codex = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("codex")];
+    expect(codex).toBeDefined();
+
+    const fields = deriveProviderSettingsFields(codex!);
+    expect(fields.find((field) => field.key === "useDesktopAppDaemon")).toMatchObject({
+      label: "Use Codex desktop app",
+      control: "switch",
+      description: expect.stringContaining("macOS host"),
+    });
+    expect(
+      deriveProviderSettingsFields(codex!, { useDesktopAppDaemon: true }).map((field) => field.key),
+    ).toEqual(["useDesktopAppDaemon", "binaryPath", "homePath", "launchArgs"]);
   });
 
   it("sources labels and descriptions from schema annotations", () => {

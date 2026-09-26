@@ -570,6 +570,7 @@ function ProjectDetail({
   const resolvedSelection = resolveDefaultProviderModelSelection(
     serverProviders,
     storedSelection ?? projectSettings.defaultModelSelection,
+    projectSettings,
   );
   const mixedModel = group.memberProjects.some((member) => {
     const config = environmentById.get(member.environmentId)?.serverConfig;
@@ -582,6 +583,7 @@ function ProjectDetail({
           resolveDefaultProviderModelSelection(
             config.providers,
             member.defaultModelSelection ?? config.settings.defaultModelSelection,
+            config.settings,
           ),
         ) !== JSON.stringify(resolvedSelection))
     );

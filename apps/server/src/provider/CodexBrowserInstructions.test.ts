@@ -20,6 +20,29 @@ describe("Codex browser provider instructions", () => {
     }
   });
 
+  it("describes the host Codex desktop tools without managed Chrome fallback guidance", () => {
+    const instructions = buildCodexDeveloperInstructions(
+      "default",
+      {
+        ...runtime,
+        useDesktopAppDaemon: true,
+        computerControlMode: "chrome",
+        computerControlAvailable: true,
+      },
+      true,
+    );
+
+    expect(instructions).toContain("host Mac's Codex desktop installation");
+    expect(instructions).toContain(
+      "browser-extension instances exposed by its computer-use runtime",
+    );
+    expect(instructions).toContain("site permissions and action-time confirmations");
+    expect(instructions).toContain("T3 managed Chrome is not attached");
+    expect(instructions).toContain("report that instead of substituting another browser");
+    expect(instructions).not.toContain("computer_start");
+    expect(instructions).not.toContain("Configured Windows Computer Use");
+  });
+
   it("describes only the discovered managed Chrome tools and their separate profile", () => {
     const instructions = buildCodexDeveloperInstructions(
       "default",

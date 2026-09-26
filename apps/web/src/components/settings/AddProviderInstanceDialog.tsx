@@ -150,16 +150,16 @@ export function AddProviderInstanceDialog({
 
   const driverOption = DRIVER_OPTION_BY_VALUE[driver] ?? DEFAULT_DRIVER_OPTION;
   const instanceId = instanceIdOverride ?? deriveInstanceId(driver, label);
+  const configDraft = configByDriver[driver] ?? EMPTY_CONFIG_DRAFT;
   const driverSettingsFields = useMemo(
-    () => deriveProviderSettingsFields(driverOption),
-    [driverOption],
+    () => deriveProviderSettingsFields(driverOption, configDraft),
+    [configDraft, driverOption],
   );
   const instanceIdError = validateInstanceId(instanceId, existingIds);
   const showInstanceIdError = hasAttemptedSubmit && instanceIdError !== null;
   const previewLabel = label.trim() || `${driverOption.label} Workspace`;
   const wizardStepSummaries = [driverOption.label, previewLabel, null] as const;
 
-  const configDraft = configByDriver[driver] ?? EMPTY_CONFIG_DRAFT;
   const setConfigDraft = (config: Record<string, unknown> | undefined) => {
     setConfigByDriver((existing) => {
       const next = { ...existing };

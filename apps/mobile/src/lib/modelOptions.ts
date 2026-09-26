@@ -1,7 +1,8 @@
-import type {
-  ModelCapabilities,
-  ModelSelection,
-  ServerConfig as T3ServerConfig,
+import {
+  ProviderInstanceId,
+  type ModelCapabilities,
+  type ModelSelection,
+  type ServerConfig as T3ServerConfig,
 } from "@t3tools/contracts";
 import {
   buildExplicitProviderOptionSelectionsFromDescriptors,
@@ -18,6 +19,7 @@ export type ModelOption = {
   readonly isDefault: boolean;
   readonly isLegacy: boolean;
   readonly isUnavailable?: boolean;
+  readonly providerStatusMessage?: string;
   readonly capabilities: ModelCapabilities | null;
   readonly selection: ModelSelection;
 };
@@ -25,6 +27,8 @@ export type ModelOption = {
 export type ProviderGroup = {
   readonly providerKey: string;
   readonly providerLabel: string;
+  readonly providerDriver?: string;
+  readonly statusMessage?: string;
   readonly models: ReadonlyArray<ModelOption>;
 };
 
@@ -37,6 +41,54 @@ function providerDisplayLabel(provider: {
   if (provider.driver === "codex") return "Codex";
   if (provider.driver === "claudeAgent") return "Claude";
   return provider.instanceId;
+}
+
+function isDesktopBackedCodexInstance(
+  config: T3ServerConfig | null | undefined,
+  instanceId: string,
+): boolean {
+  const configuredInstance =
+    config?.settings?.providerInstances[ProviderInstanceId.make(instanceId)];
+  if (configuredInstance) {
+    const instanceConfig = configuredInstance.config;
+    return (
+      configuredInstance.driver === "codex" &&
+      instanceConfig !== null &&
+      typeof instanceConfig === "object" &&
+      !Array.isArray(instanceConfig) &&
+      (instanceConfig as { readonly useDesktopAppDaemon?: unknown }).useDesktopAppDaemon === true
+    );
+  }
+  return instanceId === "codex" && config?.settings?.providers.codex.useDesktopAppDaemon === true;
+}
+
+export function getDesktopBackedProviderStatusMessage(
+  config: T3ServerConfig | null | undefined,
+  instanceId: string,
+  provider = config?.providers.find((candidate) => candidate.instanceId === instanceId),
+): string | null {
+  if (!isDesktopBackedCodexInstance(config, instanceId)) return null;
+  if (
+    provider?.enabled &&
+    provider.installed &&
+    provider.status === "ready" &&
+    provider.auth.status !== "unauthenticated" &&
+    provider.availability !== "unavailable"
+  ) {
+    return null;
+  }
+  return (
+    provider?.message?.trim() ||
+    `${provider ? providerDisplayLabel(provider) : "Codex desktop"} is unavailable on this environment.`
+  );
+}
+
+export function getModelSelectionUnavailableMessage(
+  config: T3ServerConfig | null | undefined,
+  selection: ModelSelection | null | undefined,
+): string | null {
+  if (!selection) return null;
+  return getDesktopBackedProviderStatusMessage(config, selection.instanceId);
 }
 
 function normalizeSelectionOptions(
@@ -72,6 +124,17 @@ export function isModelSelectionUnavailable(
   const provider = config.providers.find(
     (candidate) => candidate.instanceId === selection.instanceId,
   );
+  if (isDesktopBackedCodexInstance(config, selection.instanceId)) {
+    return (
+      !provider ||
+      !provider.enabled ||
+      !provider.installed ||
+      provider.status !== "ready" ||
+      provider.auth.status === "unauthenticated" ||
+      provider.availability === "unavailable" ||
+      !provider.models.some((model) => model.slug === selection.model)
+    );
+  }
   const driver =
     provider?.driver ?? config.settings?.providerInstances[selection.instanceId]?.driver;
   return (
@@ -86,9 +149,10 @@ export function isModelSelectionUnavailable(
 }
 
 /**
- * Keep Antigravity selections when setup or catalog changes make them
- * unavailable. Other providers fall through to the server default when they
- * are disabled, missing, or signed out. Without config, keep stored selections.
+ * Keep Antigravity and desktop-backed Codex selections when setup or catalog
+ * changes make them unavailable. Other providers fall through to the server
+ * default when disabled, missing, or signed out. Without config, keep stored
+ * selections.
  */
 export function resolveSelectableModelSelection(
   config: T3ServerConfig | null | undefined,
@@ -102,7 +166,7 @@ export function resolveSelectableModelSelection(
   );
   const driver =
     provider?.driver ?? config.settings?.providerInstances[selection.instanceId]?.driver;
-  if (driver === "antigravity") {
+  if (driver === "antigravity" || isDesktopBackedCodexInstance(config, selection.instanceId)) {
     return selection;
   }
   return provider &&
@@ -128,7 +192,11 @@ export function resolveDefaultableModelSelection(
   }
   const provider = config.providers.find((candidate) => candidate.instanceId === usable.instanceId);
   const model = provider?.models.find((candidate) => candidate.slug === usable.model);
-  return provider?.driver !== "antigravity" && model?.isLegacy === true ? null : usable;
+  return provider?.driver !== "antigravity" &&
+    !isDesktopBackedCodexInstance(config, usable.instanceId) &&
+    model?.isLegacy === true
+    ? null
+    : usable;
 }
 
 export function resolveNewTaskModelSelection(input: {
@@ -164,6 +232,11 @@ export function buildModelOptions(
     }
 
     const providerLabel = providerDisplayLabel(provider);
+    const providerStatusMessage = getDesktopBackedProviderStatusMessage(
+      config,
+      provider.instanceId,
+      provider,
+    );
     for (const model of provider.models) {
       const key = `${provider.instanceId}:${model.slug}`;
       options.set(key, {
@@ -175,6 +248,7 @@ export function buildModelOptions(
         providerDriver: provider.driver,
         isDefault: model.isDefault === true,
         isLegacy: model.isLegacy === true,
+        ...(providerStatusMessage !== null ? { isUnavailable: true, providerStatusMessage } : {}),
         capabilities: model.capabilities,
         selection: normalizeSelectionOptions(
           {
@@ -213,6 +287,11 @@ export function buildModelOptions(
         displayName: provider?.displayName ?? instanceConfig?.displayName,
         instanceId: fallbackModelSelection.instanceId,
       });
+      const providerStatusMessage = getDesktopBackedProviderStatusMessage(
+        config,
+        fallbackModelSelection.instanceId,
+        provider,
+      );
       options.set(key, {
         key,
         label: model?.name ?? fallbackModelSelection.model,
@@ -223,7 +302,10 @@ export function buildModelOptions(
         isDefault: false,
         isLegacy: model?.isLegacy === true,
         ...(isModelSelectionUnavailable(config, fallbackModelSelection)
-          ? { isUnavailable: true }
+          ? {
+              isUnavailable: true,
+              ...(providerStatusMessage !== null ? { providerStatusMessage } : {}),
+            }
           : {}),
         capabilities: model?.capabilities ?? null,
         selection: fallbackModelSelection,
@@ -234,8 +316,19 @@ export function buildModelOptions(
   return [...options.values()];
 }
 
-export function groupByProvider(options: ReadonlyArray<ModelOption>): ReadonlyArray<ProviderGroup> {
-  const groups = new Map<string, { providerLabel: string; models: ModelOption[] }>();
+export function groupByProvider(
+  options: ReadonlyArray<ModelOption>,
+  config?: T3ServerConfig | null,
+): ReadonlyArray<ProviderGroup> {
+  const groups = new Map<
+    string,
+    {
+      providerLabel: string;
+      providerDriver?: string;
+      statusMessage?: string;
+      models: ModelOption[];
+    }
+  >();
   for (const option of options) {
     const existing = groups.get(option.providerKey);
     if (existing) {
@@ -243,7 +336,28 @@ export function groupByProvider(options: ReadonlyArray<ModelOption>): ReadonlyAr
     } else {
       groups.set(option.providerKey, {
         providerLabel: option.providerLabel,
+        providerDriver: option.providerDriver,
         models: [option],
+      });
+    }
+  }
+
+  for (const provider of config?.providers ?? []) {
+    const statusMessage = getDesktopBackedProviderStatusMessage(
+      config,
+      provider.instanceId,
+      provider,
+    );
+    if (statusMessage === null) continue;
+    const existing = groups.get(provider.instanceId);
+    if (existing) {
+      existing.statusMessage = statusMessage;
+    } else {
+      groups.set(provider.instanceId, {
+        providerLabel: providerDisplayLabel(provider),
+        providerDriver: provider.driver,
+        statusMessage,
+        models: [],
       });
     }
   }
@@ -251,6 +365,10 @@ export function groupByProvider(options: ReadonlyArray<ModelOption>): ReadonlyAr
   return [...groups.entries()].map(([providerKey, group]) => ({
     providerKey,
     providerLabel: group.providerLabel,
+    ...(group.models.length === 0 && group.providerDriver
+      ? { providerDriver: group.providerDriver }
+      : {}),
+    ...(group.statusMessage ? { statusMessage: group.statusMessage } : {}),
     models: group.models,
   }));
 }

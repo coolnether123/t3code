@@ -554,7 +554,10 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     [selectedModel, selectedProjectDraftKey],
   );
 
-  const providerGroups = useMemo(() => groupByProvider(modelOptions), [modelOptions]);
+  const providerGroups = useMemo(
+    () => groupByProvider(modelOptions, selectedEnvironmentServerConfig),
+    [modelOptions, selectedEnvironmentServerConfig],
+  );
   const setPrompt = useCallback(
     (value: string) => {
       if (!selectedProjectDraftKey) {

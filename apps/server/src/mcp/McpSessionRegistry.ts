@@ -4,6 +4,7 @@ import {
   ThreadId,
   type ModelSelection,
   type RuntimeMode,
+  type ServerSettings as ServerSettingsContract,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -62,6 +63,7 @@ interface CredentialRecord {
   readonly tokenHash: string;
   readonly scope: McpInvocationContext.McpInvocationScope;
   readonly lastAliveAt: number;
+  readonly desktopBackedCodex: boolean;
 }
 
 interface RegistryState {
@@ -78,6 +80,27 @@ export interface McpCapabilitySettings {
   readonly enableT3Workers: boolean;
 }
 
+const isDesktopBackedCodexInstance = (
+  settings: Pick<ServerSettingsContract, "providerInstances" | "providers">,
+  providerInstanceId: ProviderInstanceId,
+): boolean => {
+  const instance = settings.providerInstances[providerInstanceId];
+  if (instance) {
+    const config = instance.config;
+    return (
+      instance.driver === "codex" &&
+      config !== null &&
+      typeof config === "object" &&
+      !Array.isArray(config) &&
+      (config as { readonly useDesktopAppDaemon?: unknown }).useDesktopAppDaemon === true
+    );
+  }
+  return (
+    providerInstanceId === ProviderInstanceId.make("codex") &&
+    settings.providers.codex.useDesktopAppDaemon
+  );
+};
+
 /** Single source of truth for which T3 MCP toolkits a provider session receives. */
 export const resolveMcpCapabilities = (
   settings: McpCapabilitySettings,
@@ -85,12 +108,14 @@ export const resolveMcpCapabilities = (
   modelSelection?: ModelSelection,
   providerDriverKind?: ProviderDriverKind,
   providerInstanceId?: ProviderInstanceId,
+  desktopBackedCodex = false,
 ): ReadonlySet<McpInvocationContext.McpCapability> =>
   new Set([
     ...(modelSelectionAllowsFullComputerControl(
       modelSelection,
       providerDriverKind,
       providerInstanceId,
+      desktopBackedCodex,
     )
       ? (["computer"] as const)
       : []),
@@ -165,17 +190,23 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
   const issue: McpSessionRegistryShape["issue"] = Effect.fn("McpSessionRegistry.issue")(
     function* (request) {
       const issuedAt = yield* currentTimeMillis;
-      const capabilitySettings = yield* serverSettings.getSettings.pipe(
-        Effect.map((settings) => ({
-          enableAgentBrowserAccess: settings.enableAgentBrowserAccess,
-          enableT3Workers: settings.enableT3Workers,
-        })),
+      const settings = yield* serverSettings.getSettings.pipe(
         Effect.catch((cause) =>
           Effect.logWarning("failed to read MCP capability settings while issuing credential", {
             cause,
-          }).pipe(Effect.as({ enableAgentBrowserAccess: false, enableT3Workers: false })),
+          }).pipe(Effect.as(null)),
         ),
       );
+      const capabilitySettings = settings
+        ? {
+            enableAgentBrowserAccess: settings.enableAgentBrowserAccess,
+            enableT3Workers: settings.enableT3Workers,
+          }
+        : { enableAgentBrowserAccess: false, enableT3Workers: false };
+      const desktopBackedCodex = settings
+        ? isDesktopBackedCodexInstance(settings, request.providerInstanceId)
+        : request.providerDriverKind === "codex" ||
+          request.providerInstanceId === ProviderInstanceId.make("codex");
       const providerSessionId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
       const rawToken = yield* crypto.randomBytes(32).pipe(Effect.map(tokenFromBytes), Effect.orDie);
       const tokenHash = yield* hashToken(rawToken);
@@ -200,12 +231,13 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
           request.modelSelection,
           request.providerDriverKind,
           request.providerInstanceId,
+          desktopBackedCodex,
         ),
         issuedAt,
       };
       yield* SynchronizedRef.update(state, ({ records }) => {
         const next = new Map(pruneDead(records, issuedAt));
-        next.set(tokenHash, { tokenHash, scope, lastAliveAt: issuedAt });
+        next.set(tokenHash, { tokenHash, scope, lastAliveAt: issuedAt, desktopBackedCodex });
         return { records: next };
       });
       return {
@@ -280,6 +312,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
                         modelSelection,
                         record.scope.providerDriverKind,
                         record.scope.providerInstanceId,
+                        record.desktopBackedCodex,
                       ),
                     }),
               },

@@ -76,6 +76,7 @@ function readFieldBooleanDefault(
 
 export function deriveProviderSettingsFields(
   definition: ProviderClientDefinition,
+  value?: unknown,
 ): ReadonlyArray<ProviderSettingsFieldModel> {
   const schemaAnnotation = readProviderSettingsFormSchemaAnnotation(definition);
   const orderedKeys = new Map(
@@ -93,10 +94,9 @@ export function deriveProviderSettingsFields(
     })
     .flatMap(({ key }) => {
       const fieldSchema = definition.settingsSchema.fields[key]!;
-      // The desktop daemon selector is an internal transport choice. It is
-      // persisted with provider config for desktop builds, but it is not a
-      // user-facing provider setting and must not leak into this form.
-      if (key === "useDesktopAppDaemon") return [];
+      if (key === "shadowHomePath" && readProviderConfigBoolean(value, "useDesktopAppDaemon")) {
+        return [];
+      }
       const formAnnotation = readProviderSettingsFormAnnotation(fieldSchema);
       if (formAnnotation.hidden) return [];
 
@@ -416,7 +416,10 @@ export function ProviderSettingsForm({
   variant,
   onChange,
 }: ProviderSettingsFormProps) {
-  const fields = useMemo(() => deriveProviderSettingsFields(definition), [definition]);
+  const fields = useMemo(
+    () => deriveProviderSettingsFields(definition, value),
+    [definition, value],
+  );
 
   if (fields.length === 0) {
     return null;
