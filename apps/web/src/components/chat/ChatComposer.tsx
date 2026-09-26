@@ -17,7 +17,6 @@ import {
   isProviderSendTurnSupportedImageMimeType,
   ProviderDriverKind,
   ProviderInstanceId,
-  PRIMARY_LOCAL_ENVIRONMENT_ID,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
 } from "@t3tools/contracts";
@@ -102,6 +101,7 @@ import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { ThreadVoiceControls, type ThreadVoiceHandle } from "./ThreadVoiceControls";
+import { usePrimaryEnvironment } from "../../state/environments";
 import { ComposerImagePicker } from "./ComposerImagePicker";
 import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
@@ -804,6 +804,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   } = props;
   const isSendDisabled = sendDisabledReason !== null;
   const voiceRef = useRef<ThreadVoiceHandle>(null);
+  const primaryEnvironment = usePrimaryEnvironment();
 
   // ------------------------------------------------------------------
   // Store subscriptions (prompt / images / terminal contexts)
@@ -3536,7 +3537,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   <ComposerFooterPrimaryActions
                     voiceControls={
                       activeThread &&
-                      environmentId === PRIMARY_LOCAL_ENVIRONMENT_ID &&
+                      environmentId === primaryEnvironment?.environmentId &&
                       !showPlanFollowUpPrompt ? (
                         <ThreadVoiceControls
                           key={`${environmentId}:${activeThread.id}`}
