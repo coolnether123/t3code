@@ -2209,6 +2209,28 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("requires authentication and validates voice request JSON", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest();
+      const url = yield* getHttpServerUrl("/api/voice");
+      const unauthorized = yield* fetchEffect(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{",
+      });
+      assert.equal(unauthorized.status, 401);
+      const { cookie } = yield* bootstrapBrowserSession();
+      for (const body of ["{", '{"action":"unknown"}']) {
+        const invalid = yield* fetchEffect(url, {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: cookie?.split(";")[0] ?? "" },
+          body,
+        });
+        assert.equal(invalid.status, 400);
+      }
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("bootstraps a browser session and authenticates the session endpoint via cookie", () =>
     Effect.gen(function* () {
       yield* buildAppUnderTest();

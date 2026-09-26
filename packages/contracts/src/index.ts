@@ -44,3 +44,4 @@ export * from "./agentSessions.ts";
 export * from "./assistantCitations.ts";
 export * from "./codexDesktop.ts";
 export * from "./rpc.ts";
+export * from "./speech.ts";

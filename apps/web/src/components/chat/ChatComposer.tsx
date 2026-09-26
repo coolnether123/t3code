@@ -17,6 +17,7 @@ import {
   isProviderSendTurnSupportedImageMimeType,
   ProviderDriverKind,
   ProviderInstanceId,
+  PRIMARY_LOCAL_ENVIRONMENT_ID,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
 } from "@t3tools/contracts";
@@ -100,6 +101,7 @@ import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommand
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
+import { ThreadVoiceControls, type ThreadVoiceHandle } from "./ThreadVoiceControls";
 import { ComposerImagePicker } from "./ComposerImagePicker";
 import { ComposerPendingApprovalPanel } from "./ComposerPendingApprovalPanel";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
@@ -487,6 +489,7 @@ const ComposerSubagentBackendControl = memo(function ComposerSubagentBackendCont
 });
 
 const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(props: {
+  voiceControls?: ReactNode;
   compact: boolean;
   activeContextWindow: ReturnType<typeof deriveLatestContextWindowSnapshot>;
   activeThreadModelDisplayName: string | null;
@@ -529,24 +532,33 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
       {props.isPreparingWorktree ? (
         <span className="text-secondary-label text-xs">Preparing worktree...</span>
       ) : null}
-      <ComposerPrimaryActions
-        compact={props.compact}
-        pendingAction={props.pendingAction}
-        isRunning={props.isRunning}
-        followUpBehavior={props.followUpBehavior}
-        showPlanFollowUpPrompt={props.showPlanFollowUpPrompt}
-        promptHasText={props.promptHasText}
-        isSendBusy={props.isSendBusy}
-        sendDisabledReason={props.sendDisabledReason}
-        isConnecting={props.isConnecting}
-        isEnvironmentUnavailable={props.isEnvironmentUnavailable}
-        isPreparingWorktree={props.isPreparingWorktree}
-        hasSendableContent={props.hasSendableContent}
-        preserveComposerFocusOnPointerDown={props.preserveComposerFocusOnPointerDown ?? false}
-        onPreviousPendingQuestion={props.onPreviousPendingQuestion}
-        onInterrupt={props.onInterrupt}
-        onImplementPlanInNewThread={props.onImplementPlanInNewThread}
-      />
+      {props.voiceControls}
+      {!(
+        props.voiceControls &&
+        !props.isRunning &&
+        !props.hasSendableContent &&
+        !props.pendingAction &&
+        !props.showPlanFollowUpPrompt
+      ) && (
+        <ComposerPrimaryActions
+          compact={props.compact}
+          pendingAction={props.pendingAction}
+          isRunning={props.isRunning}
+          followUpBehavior={props.followUpBehavior}
+          showPlanFollowUpPrompt={props.showPlanFollowUpPrompt}
+          promptHasText={props.promptHasText}
+          isSendBusy={props.isSendBusy}
+          sendDisabledReason={props.sendDisabledReason}
+          isConnecting={props.isConnecting}
+          isEnvironmentUnavailable={props.isEnvironmentUnavailable}
+          isPreparingWorktree={props.isPreparingWorktree}
+          hasSendableContent={props.hasSendableContent}
+          preserveComposerFocusOnPointerDown={props.preserveComposerFocusOnPointerDown ?? false}
+          onPreviousPendingQuestion={props.onPreviousPendingQuestion}
+          onInterrupt={props.onInterrupt}
+          onImplementPlanInNewThread={props.onImplementPlanInNewThread}
+        />
+      )}
     </>
   );
 });
@@ -556,6 +568,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
 // --------------------------------------------------------------------------
 
 export interface ChatComposerHandle {
+  stopVoice: () => void;
   focusAtEnd: () => void;
   focusAt: (cursor: number) => void;
   addDroppedFiles: (files: File[]) => void;
@@ -790,6 +803,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onExpandImage,
   } = props;
   const isSendDisabled = sendDisabledReason !== null;
+  const voiceRef = useRef<ThreadVoiceHandle>(null);
 
   // ------------------------------------------------------------------
   // Store subscriptions (prompt / images / terminal contexts)
@@ -2745,6 +2759,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     return () => window.removeEventListener("dragend", onWindowDragEnd);
   }, [isDragOverComposer]);
   const handleInterruptPrimaryAction = useCallback(() => {
+    voiceRef.current?.stop();
     void onInterrupt();
   }, [onInterrupt]);
   const handleImplementPlanInNewThreadPrimaryAction = useCallback(() => {
@@ -2802,6 +2817,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   useImperativeHandle(
     composerRef,
     () => ({
+      stopVoice: () => voiceRef.current?.stop(),
       focusAtEnd: () => {
         composerEditorRef.current?.focusAtEnd();
       },
@@ -3518,6 +3534,49 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   {showMobilePendingAnswerActions ? null : inlineTasksBadge}
                   {showMobilePendingAnswerActions ? null : inlineStashBadge}
                   <ComposerFooterPrimaryActions
+                    voiceControls={
+                      activeThread &&
+                      environmentId === PRIMARY_LOCAL_ENVIRONMENT_ID &&
+                      !showPlanFollowUpPrompt ? (
+                        <ThreadVoiceControls
+                          key={`${environmentId}:${activeThread.id}`}
+                          ref={voiceRef}
+                          thread={activeThread}
+                          running={phase === "running" || isSendBusy}
+                          enabled={
+                            phase !== "running" &&
+                            !isSendBusy &&
+                            !isSendDisabled &&
+                            !isConnecting &&
+                            !noProviderAvailable &&
+                            !projectSelectionRequired &&
+                            environmentUnavailable === null &&
+                            !composerSendState.hasSendableContent &&
+                            pendingApprovals.length === 0 &&
+                            pendingUserInputs.length === 0
+                          }
+                          cancel={
+                            composerSendState.hasSendableContent ||
+                            environmentUnavailable !== null ||
+                            pendingApprovals.length > 0 ||
+                            pendingUserInputs.length > 0
+                          }
+                          submit={(text) => {
+                            if (
+                              promptRef.current.trim() ||
+                              phase === "running" ||
+                              isSendBusy ||
+                              environmentUnavailable !== null
+                            )
+                              return false;
+                            promptRef.current = text;
+                            setComposerDraftPrompt(composerDraftTarget, text);
+                            submitComposer();
+                            return !providerInputRejectedRef.current;
+                          }}
+                        />
+                      ) : undefined
+                    }
                     compact={isComposerPrimaryActionsCompact}
                     activeContextWindow={activeContextWindow}
                     activeThreadModelDisplayName={activeThreadModelDisplayName}

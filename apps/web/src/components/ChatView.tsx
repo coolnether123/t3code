@@ -6145,6 +6145,7 @@ function ChatViewContent(props: ChatViewProps) {
   };
 
   const onInterrupt = async () => {
+    composerRef.current?.stopVoice();
     if (!activeThread) return;
     if (activeThreadKey) useQueuedFollowUpStore.getState().holdThread(activeThreadKey);
     const result = await interruptThreadTurn({

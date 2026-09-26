@@ -1,5 +1,35 @@
 # Voice input
 
+## Web and desktop voice sessions
+
+The chat composer owns a `ThreadVoiceSession` through `ThreadVoiceControls`, keyed
+by environment and thread. It submits transcripts through `submitComposer` and
+the existing `ChatView.onSend` path. The session observes that thread's assistant
+messages and activity summaries. Streaming text is spoken at sentence boundaries;
+already observed text and pre-session history are never replayed.
+
+`POST /api/voice` requires orchestration operate scope. It proxies only speech
+lease, PCM transcription, and PCM synthesis operations to the fixed loopback
+router at port 8085. Contracts live in `packages/contracts/src/speech.ts`.
+There is no conversation endpoint or separate provider thread in this transport.
+Speech responses are buffered per short utterance. The router must implement the
+Otis speech contract, including `X-Sample-Rate` on raw PCM synthesis responses.
+
+The browser uses primary-environment cookie or desktop bearer authentication.
+Saved secondary environments and relay authentication are not implemented, so
+the control is offered only for the primary environment. The native mobile
+dictation controller below retains its existing behavior.
+
+Stop invalidates an abort signal before releasing microphone/playback resources.
+Late acquisition releases its lease; late capture, transcription, and synthesis
+cannot submit or play. Thread changes unmount the controller. Typing, pending
+approval/input, interruption, and disconnection end the session. Leases renew
+every minute and expire after two minutes if a tab disappears. No raw audio is
+persisted by T3. The browser captures mono PCM with a temporary ScriptProcessor
+node; it does not animate continuously or use an external speech recognizer.
+
+## Mobile dictation
+
 Transcription edits a composer draft. It does not submit an agent turn. Audio is
 temporary client input, and only normal message submission sends the resulting
 text. The current implementation transcribes locally on supported iOS devices;
