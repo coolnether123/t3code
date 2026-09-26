@@ -14,7 +14,7 @@ import * as Sink from "effect/Sink";
 import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
 import * as Scope from "effect/Scope";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import * as CodexErrors from "effect-codex-app-server/errors";
 
@@ -34,6 +34,64 @@ export function codexDesktopDaemonEnvironment(
   return daemonEnvironment;
 }
 
+/** The managed CLI that owns the desktop daemon, from its package manifest. */
+export const codexManagedCliPath = Effect.fn("codexManagedCliPath")(function* (codexHome: string) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const packageRoot = path.join(codexHome, "packages", "standalone", "current");
+  const entrypoint = yield* fileSystem
+    .readFileString(path.join(packageRoot, "codex-package.json"))
+    .pipe(
+      Effect.map((text) => {
+        try {
+          const manifest = JSON.parse(text) as { readonly entrypoint?: unknown };
+          return typeof manifest.entrypoint === "string" && manifest.entrypoint.length > 0
+            ? manifest.entrypoint
+            : undefined;
+        } catch {
+          return undefined;
+        }
+      }),
+      Effect.orElseSucceed(() => undefined),
+    );
+  // Older packages had no manifest and kept the CLI at the package root.
+  return path.join(packageRoot, entrypoint ?? "codex");
+});
+
+/**
+ * Starts the host's managed Codex daemon when its control socket is missing,
+ * for example after a reboot. `daemon start` is idempotent and keeps the
+ * user's saved daemon settings. A failure is left to the connection attempt,
+ * which reports the actionable repair message.
+ */
+export const ensureCodexDesktopDaemonStarted = Effect.fn("ensureCodexDesktopDaemonStarted")(
+  function* (environment: NodeJS.ProcessEnv) {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const codexHome = environment.CODEX_HOME ?? path.join(NodeOS.homedir(), ".codex");
+    const socketPath = path.join(codexHome, "app-server-control", "app-server-control.sock");
+    if (yield* fileSystem.exists(socketPath).pipe(Effect.orElseSucceed(() => false))) return;
+    const managedCli = yield* codexManagedCliPath(codexHome);
+    const exitCode = yield* spawner
+      .spawn(
+        ChildProcess.make(managedCli, ["app-server", "daemon", "start"], {
+          env: environment,
+          extendEnv: false,
+          shell: false,
+        }),
+      )
+      .pipe(
+        Effect.flatMap((child) => child.exitCode),
+        Effect.scoped,
+        Effect.timeout("30 seconds"),
+        Effect.map(Number),
+        Effect.orElseSucceed(() => -1),
+      );
+    yield* Effect.logInfo("codex.desktop-daemon.start", { exitCode });
+  },
+);
+
 interface CodexAppServerProtocolLogEvent {
   readonly direction: "incoming" | "outgoing";
   readonly stage: "raw" | "decoded" | "decode_failed";
@@ -49,7 +107,7 @@ function redactLogValue(value: unknown, secrets: ReadonlyArray<string>, key?: st
     for (const secret of secrets) {
       if (secret.length > 0) safeValue = safeValue.replaceAll(secret, REDACTED);
     }
-    if (/^\s*[\[{]/u.test(safeValue)) {
+    if (/^\s*[[{]/u.test(safeValue)) {
       try {
         return JSON.stringify(redactLogValue(JSON.parse(safeValue), secrets));
       } catch {

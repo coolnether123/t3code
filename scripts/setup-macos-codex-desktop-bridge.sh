@@ -61,7 +61,14 @@ fi
 echo "Using managed Codex CLI at $managed_codex"
 
 echo "Bootstrapping the managed Codex app-server daemon..."
-"$managed_codex" app-server daemon bootstrap
+# Bootstrap rewrites the daemon settings, so carry the user's Remote Control choice forward.
+remote_control_flag=""
+daemon_settings="$codex_home/app-server-daemon/settings.json"
+if [ -f "$daemon_settings" ] && grep -Eq '"remoteControlEnabled"[[:space:]]*:[[:space:]]*true' "$daemon_settings"; then
+  remote_control_flag="--remote-control"
+fi
+# shellcheck disable=SC2086
+"$managed_codex" app-server daemon bootstrap $remote_control_flag
 
 echo "Checking the managed Codex app-server daemon..."
 if ! daemon_version_output=$("$managed_codex" app-server daemon version 2>&1); then

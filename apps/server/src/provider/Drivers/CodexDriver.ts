@@ -48,7 +48,11 @@ import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import type { ProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
-import { resolveCodexBinaryPath } from "../CodexAppServerTransport.ts";
+import {
+  codexDesktopDaemonEnvironment,
+  ensureCodexDesktopDaemonStarted,
+  resolveCodexBinaryPath,
+} from "../CodexAppServerTransport.ts";
 import { preflightCodexMcpServers } from "../Layers/CodexMcpPreflight.ts";
 import {
   enrichProviderSnapshotWithVersionAdvisory,
@@ -209,6 +213,11 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
         const previewAvailable =
           settings.enableAgentBrowserAccess &&
           (yield* previewBroker.isBrowserAvailable(environmentId));
+        if (effectiveConfig.useDesktopAppDaemon) {
+          yield* ensureCodexDesktopDaemonStarted(
+            codexDesktopDaemonEnvironment({ ...process.env, ...processEnv }),
+          );
+        }
         return yield* checkCodexProviderStatus(effectiveConfig, undefined, processEnv, [
           {
             name: "t3-code",

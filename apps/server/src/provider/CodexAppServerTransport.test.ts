@@ -4,6 +4,10 @@ import { describe, expect, it } from "@effect/vitest";
 import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
+import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 
 import {
@@ -11,6 +15,8 @@ import {
   codexAppServerTransport,
   codexDesktopDaemonEnvironment,
   codexDesktopDaemonRepairMessage,
+  codexManagedCliPath,
+  ensureCodexDesktopDaemonStarted,
   redactCodexProtocolLogEvent,
   makeCodexDesktopDaemonStdio,
   macDesktopCodexBinaryCandidates,
@@ -166,5 +172,97 @@ describe("CodexAppServerTransport", () => {
         '{"id":1,"result":{"ok":true}}\n',
       ]);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+});
+
+describe("ensureCodexDesktopDaemonStarted", () => {
+  const recordingSpawner = (commands: Array<ReadonlyArray<string>>) =>
+    ChildProcessSpawner.make((command) =>
+      Effect.sync(() => {
+        const input = command as unknown as {
+          readonly command: string;
+          readonly args: ReadonlyArray<string>;
+        };
+        commands.push([input.command, ...input.args]);
+        return ChildProcessSpawner.makeHandle({
+          pid: ChildProcessSpawner.ProcessId(1),
+          exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+          isRunning: Effect.succeed(false),
+          kill: () => Effect.void,
+          unref: Effect.succeed(Effect.void),
+          stdin: Sink.drain,
+          stdout: Stream.empty,
+          stderr: Stream.empty,
+          all: Stream.empty,
+          getInputFd: () => Sink.drain,
+          getOutputFd: () => Stream.empty,
+        });
+      }),
+    );
+  const withCodexHome = (
+    run: (
+      codexHome: string,
+      commands: Array<ReadonlyArray<string>>,
+    ) => Effect.Effect<
+      void,
+      unknown,
+      FileSystem.FileSystem | Path.Path | ChildProcessSpawner.ChildProcessSpawner
+    >,
+  ) => {
+    const commands: Array<ReadonlyArray<string>> = [];
+    return Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const codexHome = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-codex-home-" });
+      yield* run(codexHome, commands);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, recordingSpawner(commands)).pipe(
+          Layer.provideMerge(NodeServices.layer),
+        ),
+      ),
+    );
+  };
+
+  it.effect(
+    "starts the managed daemon from the package entrypoint when its socket is missing",
+    () =>
+      withCodexHome((codexHome, commands) =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const packageRoot = path.join(codexHome, "packages", "standalone", "current");
+          yield* fileSystem.makeDirectory(packageRoot, { recursive: true });
+          yield* fileSystem.writeFileString(
+            path.join(packageRoot, "codex-package.json"),
+            JSON.stringify({ entrypoint: "bin/codex" }),
+          );
+          yield* ensureCodexDesktopDaemonStarted({ CODEX_HOME: codexHome });
+          expect(commands).toEqual([
+            [path.join(packageRoot, "bin/codex"), "app-server", "daemon", "start"],
+          ]);
+          expect(yield* codexManagedCliPath(path.join(codexHome, "missing"))).toBe(
+            path.join(codexHome, "missing", "packages", "standalone", "current", "codex"),
+          );
+        }),
+      ),
+  );
+
+  it.effect("does nothing while the daemon control socket exists", () =>
+    withCodexHome((codexHome, commands) =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        yield* fileSystem.makeDirectory(path.join(codexHome, "app-server-control"), {
+          recursive: true,
+        });
+        yield* fileSystem.writeFileString(
+          path.join(codexHome, "app-server-control", "app-server-control.sock"),
+          "",
+        );
+        yield* ensureCodexDesktopDaemonStarted({ CODEX_HOME: codexHome });
+        expect(commands).toEqual([]);
+      }),
+    ),
   );
 });

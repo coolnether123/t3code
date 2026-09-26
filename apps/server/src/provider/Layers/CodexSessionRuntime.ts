@@ -50,6 +50,7 @@ import {
   codexAppServerCommandArgs,
   codexDesktopDaemonFailureMessage,
   codexDesktopDaemonEnvironment,
+  ensureCodexDesktopDaemonStarted,
   makeCodexAppServerProtocolLogger,
   makeCodexDesktopDaemonStdio,
   type CodexAppServerTransport,
@@ -1466,6 +1467,7 @@ export const makeCodexSessionRuntime = (
           ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
         };
     const extendEnv = !desktopDaemon && options.environment === undefined;
+    if (desktopDaemon) yield* ensureCodexDesktopDaemonStarted({ ...process.env, ...env });
     const commandArgs = buildCodexAppServerCommandArgs(options);
     const spawnCommand = yield* resolveSpawnCommand(options.binaryPath, commandArgs, {
       env,

@@ -23,10 +23,16 @@ describe("setup-macos-codex-desktop-bridge", () => {
   });
 
   it("requires the daemon version check to report running before setup succeeds", () => {
-    assert.include(source, '"$managed_codex" app-server daemon bootstrap');
+    assert.include(source, '"$managed_codex" app-server daemon bootstrap $remote_control_flag');
     assert.include(source, '"$managed_codex" app-server daemon version');
     assert.include(source, '"status"[[:space:]]*:[[:space:]]*"running"');
     assert.isBelow(source.indexOf("if ! printf"), source.indexOf("The host bridge is ready."));
+  });
+
+  it("keeps the saved Remote Control choice when bootstrapping", () => {
+    assert.include(source, 'daemon_settings="$codex_home/app-server-daemon/settings.json"');
+    assert.include(source, 'remote_control_flag="--remote-control"');
+    assert.isBelow(source.indexOf('remote_control_flag=""'), source.indexOf("daemon bootstrap"));
   });
 
   it("passes POSIX shell syntax validation", () => {
