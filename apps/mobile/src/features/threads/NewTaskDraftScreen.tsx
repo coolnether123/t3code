@@ -1337,7 +1337,10 @@ export function NewTaskDraftScreen(props: {
           disabled={isComposerInteractionLocked}
           onPress={settingsSheetPresentation.open}
         >
-          <Text className="text-xs text-foreground">Model unavailable. Open model settings.</Text>
+          <Text className="text-xs text-foreground">
+            {flow.selectedModelOption?.providerStatusMessage ??
+              "Model unavailable. Open model settings."}
+          </Text>
         </Pressable>
       ) : null}
 

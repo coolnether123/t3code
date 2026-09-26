@@ -20,8 +20,9 @@ export const modelSelectionAllowsFullComputerControl = (
   selection: ModelSelection | undefined,
   providerDriverKind: ProviderDriverKind | undefined,
   boundInstanceId: ProviderInstanceId | undefined,
+  desktopBacked = false,
 ): boolean => {
-  if (providerDriverKind !== "codex") return false;
+  if (providerDriverKind !== "codex" || desktopBacked) return false;
   const selectedMode =
     selection !== undefined && selection.instanceId === boundInstanceId
       ? selection.options?.find((option) => option.id === CODEX_COMPUTER_CONTROL_OPTION_ID)?.value

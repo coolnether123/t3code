@@ -203,7 +203,9 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       // running Codex thread has attached them. Each turn checks its own catalog.
       const checkProvider = Effect.gen(function* () {
         const settings = yield* serverSettings.getSettings;
-        const chromeExecutable = yield* findInstalledChrome();
+        const chromeExecutable = effectiveConfig.useDesktopAppDaemon
+          ? undefined
+          : yield* findInstalledChrome();
         const previewAvailable =
           settings.enableAgentBrowserAccess &&
           (yield* previewBroker.isBrowserAvailable(environmentId));

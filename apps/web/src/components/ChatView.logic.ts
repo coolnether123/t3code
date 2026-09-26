@@ -53,6 +53,7 @@ import type { DesktopPreviewOverlay } from "../previewStateStore";
 import type { RightPanelSurface } from "../rightPanelStore";
 import {
   NO_PROVIDER_MODEL_SELECTION,
+  canKeepExplicitProviderInstanceSelection,
   resolveSelectableProviderInstanceEntry,
   type ProviderInstanceEntry,
 } from "../providerInstances";
@@ -488,7 +489,8 @@ export function resolveComposerProviderSelection(input: {
     input.candidateInstanceIds
       .map((candidate) =>
         compatibleEntries.find(
-          (entry) => entry.instanceId === candidate && entry.enabled && entry.isAvailable,
+          (entry) =>
+            entry.instanceId === candidate && canKeepExplicitProviderInstanceSelection(entry),
         ),
       )
       .find((entry) => entry !== undefined) ??

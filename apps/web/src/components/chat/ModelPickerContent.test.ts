@@ -8,6 +8,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { deriveProviderInstanceEntries } from "../../providerInstances";
 import {
+  getDesktopBackedProviderStatusMessage,
   resolveModelPickerSelectedModel,
   shouldIncludeModelPickerOption,
   shouldOfferModelPickerSetup,
@@ -32,6 +33,34 @@ function entry(status: ServerProvider["status"], driver = "opencode") {
 }
 
 describe("shouldIncludeModelPickerOption", () => {
+  it("keeps the selected desktop-backed Codex model visible as unavailable", () => {
+    const providerEntry = {
+      ...entry("error", "codex"),
+      useDesktopAppDaemon: true,
+      snapshot: {
+        ...entry("error", "codex").snapshot,
+        message: "Codex desktop daemon is not running on this Mac.",
+      },
+    };
+    const option = {
+      slug: "gpt-5.6-sol",
+      name: "GPT-5.6 Sol",
+      isUnavailable: true,
+    };
+
+    expect(
+      shouldIncludeModelPickerOption({
+        entry: providerEntry,
+        option,
+        activeInstanceId: providerEntry.instanceId,
+        activeModel: option.slug,
+      }),
+    ).toBe(true);
+    expect(getDesktopBackedProviderStatusMessage(providerEntry)).toBe(
+      "Codex desktop daemon is not running on this Mac.",
+    );
+  });
+
   it.each(["ready", "error"] as const)(
     "never offers the internal Antigravity default marker as a model when %s",
     (status) => {

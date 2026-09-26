@@ -37,6 +37,13 @@ Tool availability is not an approval. Follow the task's sandbox, tool approvals,
 If \`computer_open_url\` is listed, it can open a URL in the user's Chrome browser. Opening a URL does not provide observation or input control over that browser. Do not claim that it does.
 `;
 
+const CODEX_DESKTOP_APP_INSTRUCTIONS = `
+
+## Codex desktop browser and computer tools
+
+This thread runs in the host Mac's Codex desktop installation. Browser and computer tools come from that installation, including browser-extension instances exposed by its computer-use runtime. They follow that installation's site permissions and action-time confirmations. T3 managed Chrome is not attached. T3 Preview, when attached, is a separate collaborative browser and is not a fallback for unavailable host browser tools. If the host's browser tools are unavailable, report that instead of substituting another browser.
+`;
+
 const CODEX_DESKTOP_CONTROL_LIMITATION = `
 
 ## Desktop control availability
@@ -254,6 +261,7 @@ export const CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS =
 export interface CodexRuntimeInfo {
   readonly model: string;
   readonly reasoningEffort: string;
+  readonly useDesktopAppDaemon?: boolean;
   readonly enableT3Workers?: boolean;
   readonly computerControlMode?: CodexComputerControlMode;
   /** The thread's MCP inventory contains the complete T3 managed Chrome toolkit. */
@@ -281,16 +289,21 @@ export function buildCodexDeveloperInstructions(
       ? codexPlanModeDeveloperInstructions(browserToolsAvailable)
       : codexDefaultModeDeveloperInstructions(browserToolsAvailable);
   const workerInstructions = runtime.enableT3Workers ? T3_CODE_WORKER_PARENT_INSTRUCTIONS : "";
-  const controlInstructions = computerControlInstructions(
-    runtime.computerControlMode ?? DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
-    browserToolsAvailable,
-    runtime.computerControlAvailable ?? false,
-  );
+  const controlInstructions = runtime.useDesktopAppDaemon
+    ? CODEX_DESKTOP_APP_INSTRUCTIONS
+    : computerControlInstructions(
+        runtime.computerControlMode ?? DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
+        browserToolsAvailable,
+        runtime.computerControlAvailable ?? false,
+      );
+  const configuredComputerUseInstructions = runtime.useDesktopAppDaemon
+    ? ""
+    : CONFIGURED_COMPUTER_USE_INSTRUCTIONS;
   const nativeSubagentInstructions =
     runtime.subagentBackend === "v1" || runtime.subagentBackend === "v2"
       ? CODEX_NATIVE_SUBAGENT_PARENT_INSTRUCTIONS
       : "";
-  return `${base}${controlInstructions}${CONFIGURED_COMPUTER_USE_INSTRUCTIONS}${workerInstructions}${nativeSubagentInstructions}
+  return `${base}${controlInstructions}${configuredComputerUseInstructions}${workerInstructions}${nativeSubagentInstructions}
 
 <runtime_info>In case you're asked: you are running in T3 Code through the Codex harness, as ${toSingleLine(runtime.model)} with ${toSingleLine(runtime.reasoningEffort)} reasoning effort. No need to mention this otherwise.</runtime_info>`;
 }

@@ -52,6 +52,8 @@ export interface ProviderInstanceEntry {
   readonly continuationGroupKey?: string | undefined;
   readonly enabled: boolean;
   readonly installed: boolean;
+  /** True when this Codex instance uses the environment's desktop app daemon. */
+  readonly useDesktopAppDaemon?: boolean | undefined;
   readonly status: ServerProviderState;
   /**
    * True when this entry is the default instance for its driver kind —
@@ -73,6 +75,18 @@ export interface ProviderInstanceEntry {
  */
 export function isProviderInstancePickerReady(entry: ProviderInstanceEntry): boolean {
   return entry.enabled && entry.isAvailable && entry.status === "ready";
+}
+
+/** Readiness for desktop-backed Codex includes the host installation and its login state. */
+export function isDesktopBackedProviderInstanceReady(entry: ProviderInstanceEntry): boolean {
+  return (
+    entry.useDesktopAppDaemon === true &&
+    entry.enabled &&
+    entry.installed &&
+    entry.isAvailable &&
+    entry.status === "ready" &&
+    entry.snapshot.auth.status !== "unauthenticated"
+  );
 }
 
 /** Picker rails contain configured, enabled instances only. */
@@ -243,7 +257,10 @@ export function applyProviderInstanceSettings(
   settings: Pick<ServerSettings, "providerInstances" | "providers">,
 ): ReadonlyArray<ProviderInstanceEntry> {
   const legacyProviders = settings.providers as Readonly<
-    Record<string, { readonly enabled?: boolean } | undefined>
+    Record<
+      string,
+      { readonly enabled?: boolean; readonly useDesktopAppDaemon?: boolean } | undefined
+    >
   >;
 
   return entries.map((entry) => {
@@ -258,7 +275,20 @@ export function applyProviderInstanceSettings(
       : entry.isDefault && legacyProvider
         ? (legacyProvider.enabled ?? entry.enabled)
         : false;
-    return enabled === entry.enabled ? entry : { ...entry, enabled };
+    const usesDesktopAppDaemon =
+      entry.driverKind === "codex" &&
+      (explicitInstance
+        ? explicitInstance.config !== null &&
+          typeof explicitInstance.config === "object" &&
+          !Array.isArray(explicitInstance.config) &&
+          (explicitInstance.config as { readonly useDesktopAppDaemon?: unknown })
+            .useDesktopAppDaemon === true
+        : entry.isDefault && legacyProvider?.useDesktopAppDaemon === true);
+    const useDesktopAppDaemon = usesDesktopAppDaemon ? true : undefined;
+    if (enabled === entry.enabled && useDesktopAppDaemon === entry.useDesktopAppDaemon) {
+      return entry;
+    }
+    return { ...entry, enabled, useDesktopAppDaemon };
   });
 }
 
@@ -329,12 +359,16 @@ export function getDefaultProviderInstanceModel(
 const isSelectableProviderInstanceEntry = (entry: ProviderInstanceEntry): boolean =>
   entry.enabled && entry.isAvailable;
 
+/** Keep an explicitly selected desktop-backed instance bound while it is unavailable. */
+export const canKeepExplicitProviderInstanceSelection = (entry: ProviderInstanceEntry): boolean =>
+  entry.enabled && (entry.isAvailable || entry.useDesktopAppDaemon === true);
+
 /**
  * Resolve an exact stored instance when it remains enabled and available.
  * Otherwise choose a deterministic fallback that can plausibly start now:
- * ready first, then a non-error probe result. An errored provider is retained
- * only when it was explicitly requested; it is never invented as a new-user
- * default.
+ * ready first, then a non-error probe result. An errored or unavailable
+ * desktop-backed provider is retained only when explicitly requested; it is
+ * never invented as a new-user default.
  */
 export function resolveSelectableProviderInstanceEntry(
   entries: ReadonlyArray<ProviderInstanceEntry>,
@@ -342,7 +376,7 @@ export function resolveSelectableProviderInstanceEntry(
 ): ProviderInstanceEntry | undefined {
   if (instanceId !== undefined) {
     const requested = entries.find((entry) => entry.instanceId === instanceId);
-    if (requested && isSelectableProviderInstanceEntry(requested)) {
+    if (requested && canKeepExplicitProviderInstanceSelection(requested)) {
       return requested;
     }
   }
@@ -361,8 +395,12 @@ export function resolveSelectableProviderInstanceEntry(
 export function resolveSelectableProviderInstance(
   providers: ReadonlyArray<ServerProvider>,
   instanceId: ProviderInstanceId | undefined,
+  settings?: Pick<ServerSettings, "providerInstances" | "providers">,
 ): ProviderInstanceId | undefined {
-  const entries = deriveProviderInstanceEntries(providers);
+  const derivedEntries = deriveProviderInstanceEntries(providers);
+  const entries = settings
+    ? applyProviderInstanceSettings(derivedEntries, settings)
+    : derivedEntries;
   return resolveSelectableProviderInstanceEntry(entries, instanceId)?.instanceId;
 }
 
@@ -375,8 +413,9 @@ export function resolveSelectableProviderInstance(
 export function resolveDefaultProviderModelSelection(
   providers: ReadonlyArray<ServerProvider>,
   selection: ModelSelection | null | undefined,
+  settings?: Pick<ServerSettings, "providerInstances" | "providers">,
 ): ModelSelection | null {
-  const instanceId = resolveSelectableProviderInstance(providers, selection?.instanceId);
+  const instanceId = resolveSelectableProviderInstance(providers, selection?.instanceId, settings);
   if (instanceId === undefined) return null;
   if (selection?.instanceId === instanceId) return selection;
   const model = getDefaultProviderInstanceModel(providers, instanceId);

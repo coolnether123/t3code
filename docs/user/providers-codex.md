@@ -4,6 +4,21 @@ For one account, use the default Codex provider with your normal Codex login.
 [Provider setup](./install.md#providers) covers installation, Settings > Providers,
 and custom binaries or environment variables.
 
+## Use the Codex desktop app
+
+In **Settings > Providers**, turn on **Use Codex desktop app** for a Codex
+instance to run its threads in the Codex desktop installation on the machine
+hosting that environment. The host app supplies its sign-in, plugins, connectors,
+browser extension, and approvals. The host bridge setup must be installed, and
+the server must run on macOS. The shadow-home setting is hidden while this option
+is on because the desktop installation owns the Codex home.
+
+The setting is saved with the provider instance on its environment. You can
+change it from a remote client; it does not switch the Mac or account used by
+another environment. If the host daemon is unavailable, the instance shows its
+connection error in provider settings, the model picker, and the thread. T3 does
+not switch that instance to managed Chrome or silently choose another provider.
+
 ## Open native Codex chats
 
 Choose **Codex chats** in the sidebar to view your existing native Codex sessions.
