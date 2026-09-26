@@ -1,8 +1,17 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
-import { OrchestrationShellSnapshot, OrchestrationThreadDetailSnapshot } from "@t3tools/contracts";
 import {
+  EnvironmentProviderStatus,
+  OrchestrationShellSnapshot,
+  OrchestrationThreadDetailSnapshot,
+  ProviderInstanceId,
+  type EnvironmentProviderSnapshotResult,
+} from "@t3tools/contracts";
+import {
+  AGENT_REQUEST_MAX_BYTES,
+  compactAgentProviders,
   decodeAgentAction,
+  decodeAgentRequest,
   validateAgentAction,
   compactAgentSnapshot,
   validateAgentOrigin,
@@ -11,6 +20,9 @@ import {
   AGENT_RECEIPT_METADATA_MAX_BYTES,
   AGENT_OUTPUT_MAX_BYTES,
 } from "./agentProtocol.ts";
+
+const decodeEnvironmentProviderStatus = Schema.decodeUnknownSync(EnvironmentProviderStatus);
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 const now = "2026-08-31T04:00:00.000Z";
 const runtime = { pid: 123, startedAt: now };
@@ -69,7 +81,7 @@ const shell = decodeShell({
   ],
   updatedAt: now,
 });
-const envelope = (command: unknown) => JSON.stringify({ ...identity, command });
+const envelope = (command: unknown) => encodeJson({ ...identity, command });
 const interrupt = {
   type: "thread.turn.interrupt",
   commandId: "command-a",
@@ -88,6 +100,57 @@ describe("agent action boundary", () => {
     expect(() =>
       decodeAgentAction(envelope({ type: "thread.delete", commandId: "x", threadId: "thread-a" })),
     ).toThrow();
+  });
+  it("strictly decodes one bounded request object and preserves action confirmation", () => {
+    expect(decodeAgentRequest('{"kind":"capabilities"}')).toEqual({ kind: "capabilities" });
+    expect(() => decodeAgentRequest("{invalid")).toThrow();
+    expect(() => decodeAgentRequest('{"kind":"snapshot"} {}')).toThrow();
+    expect(() => decodeAgentRequest('{"kind":"unknown"}')).toThrow();
+    expect(() => decodeAgentRequest(encodeJson({ kind: "capabilities", extra: true }))).toThrow();
+    expect(() =>
+      decodeAgentRequest(
+        encodeJson({ kind: "capabilities", padding: "x".repeat(AGENT_REQUEST_MAX_BYTES) }),
+      ),
+    ).toThrow();
+    expect(() =>
+      decodeAgentRequest(encodeJson({ kind: "act", ...identity, command: interrupt })),
+    ).toThrow();
+    expect(() =>
+      decodeAgentRequest(
+        encodeJson({
+          kind: "act",
+          confirm: true,
+          ...identity,
+          command: { ...interrupt, extra: true },
+        }),
+      ),
+    ).toThrow();
+
+    expect(
+      decodeAgentRequest(
+        encodeJson({ kind: "act", confirm: true, ...identity, command: interrupt }),
+      ),
+    ).toMatchObject({ kind: "act", action: { command: interrupt } });
+  });
+  it("validates request options against the CLI flag bounds", () => {
+    expect(
+      decodeAgentRequest(
+        encodeJson({
+          kind: "snapshot",
+          thread: "thread-a",
+          turnLimit: 5,
+          offset: 1_000_000,
+          beforeCursor: "cursor-a",
+        }),
+      ),
+    ).toMatchObject({ kind: "snapshot", threadId: "thread-a", turnLimit: 5, offset: 1_000_000 });
+    expect(() => decodeAgentRequest('{"kind":"snapshot","turnLimit":6}')).toThrow();
+    expect(() => decodeAgentRequest('{"kind":"snapshot","beforeCursor":"older"}')).toThrow();
+    expect(() => decodeAgentRequest('{"kind":"providers","instance":"bad id"}')).toThrow();
+    expect(decodeAgentRequest('{"kind":"providers","instance":"codex_work"}')).toEqual({
+      kind: "providers",
+      instanceId: ProviderInstanceId.make("codex_work"),
+    });
   });
   it("refuses missing or stale turn IDs and wrong environments before dispatch", () => {
     expect(() => decodeAgentAction(envelope({ ...interrupt, turnId: undefined }))).toThrow();
@@ -210,7 +273,7 @@ describe("agent snapshot", () => {
     expect(result.thread?.requests[0]?.requestId).toBe("approval-a");
     expect(result.thread?.page?.hasMore).toBe(true);
     expect(result.thread?.activities.length).toBeLessThanOrEqual(20);
-    expect(JSON.stringify(result).length).toBeLessThan(40000);
+    expect(Buffer.byteLength(encodeAgentOutput(result), "utf8")).toBeLessThan(40_000);
   });
   it("pages both lists without skipping entries and bounds error/output text", () => {
     const many = decodeShell({
@@ -297,5 +360,108 @@ describe("agent snapshot", () => {
     expect(
       compactAgentSnapshot(identity, shell, manyChoices).thread?.requests[0]?.questionsTruncated,
     ).toBe(true);
+  });
+  it("retains session identity and the newest generic session-info activities", () => {
+    const activities = [
+      {
+        id: "inventory-event",
+        tone: "info",
+        kind: "session.tool-inventory",
+        summary: "Tool inventory observed",
+        payload: {
+          inventory: ["node_repl", "cua_repl"],
+          accessToken: "fake-provider-session-token",
+        },
+        turnId: null,
+        sequence: 1,
+        createdAt: now,
+      },
+      ...Array.from({ length: 30 }, (_, index) => ({
+        id: `tool-${index}`,
+        tone: "tool",
+        kind: "tool.updated",
+        summary: `Tool ${index}`,
+        payload: { name: `tool-${index}` },
+        turnId: "turn-a",
+        sequence: index + 2,
+        createdAt: now,
+      })),
+    ];
+    const selected = decodeDetail({
+      ...detail,
+      thread: {
+        ...thread,
+        session: {
+          ...thread.session,
+          providerInstanceId: "codex_work",
+          lastError: "transport stopped",
+        },
+        activities,
+      },
+    });
+    const snapshot = compactAgentSnapshot(identity, shell, selected);
+    expect(snapshot.thread?.session).toMatchObject({
+      providerInstanceId: "codex_work",
+      status: "running",
+      lastError: "transport stopped",
+    });
+    expect(snapshot.thread?.latestTurn).toMatchObject({ state: "running", turnId: "turn-a" });
+    expect(snapshot.thread?.activities).toHaveLength(20);
+    expect(snapshot.thread?.recentSessionInfoActivities).toMatchObject([
+      {
+        kind: "session.tool-inventory",
+        payload: {
+          inventory: ["node_repl", "cua_repl"],
+          accessToken: "[redacted]",
+        },
+      },
+    ]);
+    expect(snapshot.thread?.sessionInfoActivitiesOmitted).toBe(0);
+  });
+});
+
+describe("agent provider snapshot", () => {
+  it("keeps provider output small and reports omitted instances", () => {
+    const provider = (index: number) =>
+      decodeEnvironmentProviderStatus({
+        instanceId: `codex_work_${index}`,
+        driver: "codex",
+        displayName: "Codex",
+        enabled: true,
+        status: "warning",
+        availability: "available",
+        message: "x".repeat(2000),
+        messageTruncated: true,
+        version: "1.0.0",
+        auth: { status: "authenticated", type: "oauth", label: "Signed in" },
+        modelCount: 12,
+        skillCount: 4,
+        desktopBacked: true,
+      });
+    const response = {
+      providers: Array.from({ length: 32 }, (_, index) => provider(index)),
+      providerCount: 32,
+      providersOmitted: 7,
+    } satisfies EnvironmentProviderSnapshotResult;
+    const result = compactAgentProviders(identity, response);
+    expect(result).toMatchObject({
+      environmentId: "env-a",
+      runtime,
+      providerCount: 32,
+      providersOmitted: 7,
+      providersTruncated: true,
+    });
+    expect(result.providers).toHaveLength(25);
+    expect(result.providers[0]).toMatchObject({
+      instanceId: "codex_work_0",
+      status: "warning",
+      availability: "available",
+      auth: { status: "authenticated" },
+      modelCount: 12,
+      skillCount: 4,
+      desktopBacked: true,
+    });
+    expect(result.providers[0]?.message).toBe("x".repeat(2000));
+    expect(Buffer.byteLength(encodeAgentOutput(result), "utf8")).toBeLessThan(192 * 1024);
   });
 });

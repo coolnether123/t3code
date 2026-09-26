@@ -15,7 +15,12 @@ import {
 } from "@t3tools/contracts";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import { resolveAgentTarget, withAgentSession, executeAgentRequest } from "./agent.ts";
-import { agentCommandSchema, decodeAgentAction, encodeAgentOutput } from "./agentProtocol.ts";
+import {
+  agentCommandSchema,
+  decodeAgentAction,
+  decodeAgentRequest,
+  encodeAgentOutput,
+} from "./agentProtocol.ts";
 
 const now = "2026-08-31T04:00:00.000Z";
 const runtime = {
@@ -313,6 +318,111 @@ describe("agent HTTP action receipt", () => {
         readbackError: "Receipt accepted; subsequent readback failed.",
       });
       expect(dispatches).toBe(1);
+      expect(state.revoked).toEqual(["session-a"]);
+    }),
+  );
+});
+
+describe("agent request mode", () => {
+  it.effect("reads bounded provider summaries with only orchestration-read scope", () =>
+    Effect.gen(function* () {
+      const state = fakeAuth();
+      const request = decodeAgentRequest('{"kind":"providers","instance":"codex_work"}');
+      const requestedUrls: string[] = [];
+      const result = yield* Effect.gen(function* () {
+        const target = yield* resolveAgentTarget("/sandbox");
+        return yield* executeAgentRequest(target, request, state.auth);
+      }).pipe(
+        Effect.provide(testLayer),
+        Effect.provideService(
+          FetchHttpClient.Fetch,
+          mockFetch(async (url) => {
+            const address = String(url);
+            requestedUrls.push(address);
+            if (address.includes("/.well-known/")) return Response.json(descriptor);
+            if (address.includes("/api/providers"))
+              return Response.json({
+                providers: [
+                  {
+                    instanceId: "codex_work",
+                    driver: "codex",
+                    displayName: "Work Codex",
+                    enabled: true,
+                    status: "ready",
+                    availability: "available",
+                    message: "Desktop daemon connected",
+                    messageTruncated: false,
+                    version: "1.0.0",
+                    auth: { status: "authenticated", type: "oauth", label: "Signed in" },
+                    modelCount: 4,
+                    skillCount: 2,
+                    desktopBacked: true,
+                  },
+                ],
+                providerCount: 1,
+                providersOmitted: 0,
+              });
+            throw new Error("Unexpected provider request path.");
+          }),
+        ),
+      );
+      expect(result).toMatchObject({
+        environmentId: "env-a",
+        runtime: { pid: 123, startedAt: now },
+        providers: [{ instanceId: "codex_work", desktopBacked: true, modelCount: 4 }],
+      });
+      expect(state.issued[0]?.scopes).toEqual([AuthOrchestrationReadScope]);
+      expect(requestedUrls.some((url) => url.includes("instanceId=codex_work"))).toBe(true);
+      expect(json(result)).not.toContain("private-test-token");
+    }),
+  );
+
+  it.effect("dispatches confirmed actions through the existing identity validator", () =>
+    Effect.gen(function* () {
+      const state = fakeAuth();
+      let dispatches = 0;
+      const request = decodeAgentRequest(
+        json({
+          kind: "act",
+          confirm: true,
+          environmentId: "another-environment",
+          runtime: { pid: 123, startedAt: now },
+          command: {
+            type: "project.create",
+            commandId: "command-a",
+            projectId: "project-a",
+            title: "Scratch",
+            workspaceRoot: "/scratch",
+            createdAt: now,
+          },
+        }),
+      );
+      const result = yield* Effect.result(
+        Effect.gen(function* () {
+          const target = yield* resolveAgentTarget("/sandbox");
+          return yield* executeAgentRequest(target, request, state.auth);
+        }).pipe(
+          Effect.provide(testLayer),
+          Effect.provideService(
+            FetchHttpClient.Fetch,
+            mockFetch(async (url) => {
+              const address = String(url);
+              if (address.includes("/.well-known/")) return Response.json(descriptor);
+              if (address.endsWith("/dispatch")) {
+                dispatches++;
+                return Response.json({ sequence: 13 });
+              }
+              return Response.json(shell);
+            }),
+          ),
+        ),
+      );
+      expect(result._tag).toBe("Failure");
+      expect(dispatches).toBe(0);
+      expect(state.issued[0]?.scopes).toEqual([
+        AuthOrchestrationReadScope,
+        AuthOrchestrationOperateScope,
+      ]);
       expect(state.revoked).toEqual(["session-a"]);
     }),
   );
