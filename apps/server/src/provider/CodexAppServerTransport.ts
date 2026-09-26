@@ -20,6 +20,104 @@ import * as CodexErrors from "effect-codex-app-server/errors";
 
 export type CodexAppServerTransport = "stdio" | "desktop-daemon";
 
+export function codexDesktopDaemonEnvironment(
+  environment: NodeJS.ProcessEnv = process.env,
+  hostEnvironment: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const daemonEnvironment = Object.fromEntries(
+    Object.entries(environment).filter(([name]) => name.toUpperCase() !== "CODEX_HOME"),
+  );
+  const hostCodexHome = Object.entries(hostEnvironment).find(
+    ([name]) => name.toUpperCase() === "CODEX_HOME",
+  )?.[1];
+  if (hostCodexHome !== undefined) daemonEnvironment.CODEX_HOME = hostCodexHome;
+  return daemonEnvironment;
+}
+
+interface CodexAppServerProtocolLogEvent {
+  readonly direction: "incoming" | "outgoing";
+  readonly stage: "raw" | "decoded" | "decode_failed";
+  readonly payload: unknown;
+}
+
+const REDACTED = "[REDACTED]";
+
+function redactLogValue(value: unknown, secrets: ReadonlyArray<string>, key?: string): unknown {
+  if (key && /http[_-]?headers$/iu.test(key)) return REDACTED;
+  if (typeof value === "string") {
+    let safeValue = value;
+    for (const secret of secrets) {
+      if (secret.length > 0) safeValue = safeValue.replaceAll(secret, REDACTED);
+    }
+    if (/^\s*[\[{]/u.test(safeValue)) {
+      try {
+        return JSON.stringify(redactLogValue(JSON.parse(safeValue), secrets));
+      } catch {
+        return safeValue;
+      }
+    }
+    return safeValue;
+  }
+  if (Array.isArray(value)) return value.map((entry) => redactLogValue(entry, secrets));
+  if (typeof value !== "object" || value === null) return value;
+
+  return Object.fromEntries(
+    Object.entries(value).map(([entryKey, entryValue]) => [
+      entryKey,
+      redactLogValue(entryValue, secrets, entryKey),
+    ]),
+  );
+}
+
+export function redactCodexProtocolLogEvent<T>(value: T, secrets: ReadonlyArray<string> = []): T {
+  return redactLogValue(value, secrets) as T;
+}
+
+export function redactCodexSensitiveText(
+  text: string,
+  secrets: ReadonlyArray<string> = [],
+): string {
+  return secrets.reduce(
+    (safeText, secret) => (secret.length > 0 ? safeText.replaceAll(secret, REDACTED) : safeText),
+    text,
+  );
+}
+
+export function makeCodexAppServerProtocolLogger(secrets: ReadonlyArray<string> = []) {
+  return (event: CodexAppServerProtocolLogEvent) =>
+    Effect.logDebug("Codex App Server protocol event").pipe(
+      Effect.annotateLogs({ event: redactCodexProtocolLogEvent(event, secrets) }),
+    );
+}
+
+export function codexDesktopDaemonRepairMessage(problem: string): string {
+  return `Codex desktop app daemon ${problem}. Run the standalone managed Codex CLI's \`app-server daemon bootstrap\` command, then its \`app-server daemon version\` command, and confirm it reports status "running".`;
+}
+
+export function codexDesktopDaemonFailureProblem(cause: unknown): string {
+  const message = cause instanceof Error ? cause.message : String(cause);
+  if (/not.?signed.?in|unauthenticated|authentication required|login required/iu.test(message)) {
+    return "could not authenticate because the desktop app is not signed in";
+  }
+  if (/protocol|version|handshake|initialize/iu.test(message)) {
+    return "could not complete the proxy handshake or app-server protocol check";
+  }
+  if (/timed? ?out|timeout/iu.test(message)) {
+    return "timed out while connecting to the daemon";
+  }
+  if (/ENOENT|ECONNREFUSED|socket|connect/iu.test(message)) {
+    return "could not reach the daemon control socket";
+  }
+  if (/exit|terminated|closed/iu.test(message)) {
+    return "the app-server proxy exited unexpectedly";
+  }
+  return "could not complete the app-server proxy connection";
+}
+
+export function codexDesktopDaemonFailureMessage(cause: unknown): string {
+  return codexDesktopDaemonRepairMessage(codexDesktopDaemonFailureProblem(cause));
+}
+
 const CODEX_DESKTOP_DAEMON_WS_URL = "ws://localhost/";
 const CODEX_DESKTOP_DAEMON_HANDSHAKE_TIMEOUT_MS = 10_000;
 

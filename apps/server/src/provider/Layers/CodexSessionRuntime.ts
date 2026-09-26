@@ -26,6 +26,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
@@ -47,6 +48,9 @@ import {
 } from "./codexLaunchArgs.ts";
 import {
   codexAppServerCommandArgs,
+  codexDesktopDaemonFailureMessage,
+  codexDesktopDaemonEnvironment,
+  makeCodexAppServerProtocolLogger,
   makeCodexDesktopDaemonStdio,
   type CodexAppServerTransport,
 } from "../CodexAppServerTransport.ts";
@@ -111,6 +115,97 @@ export const readCodexBrowserAvailability = Effect.fn("readCodexBrowserAvailabil
   } while (cursor);
   return { managedChrome, previewBrowser };
 });
+
+type CodexMcpServerStartupStatus = EffectCodexSchema.V2McpServerStatusUpdatedNotification["status"];
+
+export interface CodexThreadMcpInventory {
+  readonly servers: ReadonlyArray<{
+    readonly name: string;
+    readonly startupStatus: CodexMcpServerStartupStatus | "unknown";
+    readonly authStatus: EffectCodexSchema.V2ListMcpServerStatusResponse__McpAuthStatus;
+    readonly toolCount: number;
+  }>;
+  readonly hasCuaRepl: boolean;
+  readonly hasNodeRepl: boolean;
+  readonly omittedServers: boolean;
+}
+
+const CODEX_THREAD_MCP_INVENTORY_LIMIT = 40;
+
+export const readCodexThreadMcpInventory = Effect.fn("readCodexThreadMcpInventory")(function* (
+  client: {
+    readonly request: (
+      method: "mcpServerStatus/list",
+      params: EffectCodexSchema.V2ListMcpServerStatusParams,
+    ) => Effect.Effect<
+      EffectCodexSchema.V2ListMcpServerStatusResponse,
+      CodexErrors.CodexAppServerError
+    >;
+  },
+  threadId: string,
+  startupStatuses: ReadonlyMap<string, CodexMcpServerStartupStatus>,
+): Effect.fn.Return<CodexThreadMcpInventory, CodexErrors.CodexAppServerError> {
+  const servers: CodexThreadMcpInventory["servers"][number][] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  let hasCuaRepl = false;
+  let hasNodeRepl = false;
+  let omittedServers = false;
+
+  do {
+    const page = yield* client.request("mcpServerStatus/list", {
+      threadId,
+      detail: "toolsAndAuthOnly",
+      limit: CODEX_THREAD_MCP_INVENTORY_LIMIT,
+      ...(cursor ? { cursor } : {}),
+    });
+    for (const server of page.data) {
+      hasCuaRepl ||= server.name === "cua_repl";
+      hasNodeRepl ||= server.name === "node_repl";
+      if (servers.length >= CODEX_THREAD_MCP_INVENTORY_LIMIT) {
+        omittedServers = true;
+        continue;
+      }
+      servers.push({
+        name: server.name.replace(/[\u0000-\u001f\u007f]/gu, " ").slice(0, 80),
+        startupStatus: startupStatuses.get(server.name) ?? "unknown",
+        authStatus: server.authStatus,
+        toolCount: Object.keys(server.tools).length,
+      });
+    }
+
+    cursor = page.nextCursor ?? undefined;
+    if (cursor && seenCursors.has(cursor)) {
+      omittedServers = true;
+      break;
+    }
+    if (cursor) seenCursors.add(cursor);
+    if (servers.length === CODEX_THREAD_MCP_INVENTORY_LIMIT && cursor) {
+      omittedServers = true;
+    }
+  } while (cursor);
+
+  return {
+    servers,
+    hasCuaRepl,
+    hasNodeRepl,
+    omittedServers,
+  };
+});
+
+export function formatCodexThreadMcpInventory(inventory: CodexThreadMcpInventory): string {
+  const servers =
+    inventory.servers.length === 0
+      ? "none reported"
+      : inventory.servers
+          .map(
+            (server) =>
+              `${server.name} (startup ${server.startupStatus}, auth ${server.authStatus}, ${server.toolCount} tools)`,
+          )
+          .join("; ");
+  const omitted = inventory.omittedServers ? "; additional servers omitted" : "";
+  return `Tools attached to this thread: ${servers}${omitted}. cua_repl ${inventory.hasCuaRepl ? "present" : "absent"}; node_repl ${inventory.hasNodeRepl ? "present" : "absent"}.`;
+}
 
 /**
  * Codex app-server chooses its native collaboration tool catalog when the
@@ -290,6 +385,40 @@ export function parseCodexDaemonThreadConfig(
   return Effect.succeed(parsed.config);
 }
 
+export interface CodexDaemonMcpServerConfig {
+  readonly endpoint: string;
+  readonly authorizationHeader: string;
+}
+
+export function buildCodexDaemonThreadConfig(
+  args: ReadonlyArray<string>,
+  mcpServer: CodexDaemonMcpServerConfig | undefined,
+): Effect.Effect<
+  Readonly<Record<string, CodexConfigJsonValue>>,
+  CodexErrors.CodexAppServerRequestError
+> {
+  if (!mcpServer?.endpoint.trim() || !/^Bearer\s+\S+$/iu.test(mcpServer.authorizationHeader)) {
+    return Effect.fail(
+      CodexErrors.CodexAppServerRequestError.invalidParams(
+        "Codex desktop daemon cannot attach the T3 MCP server because this session has no usable authorization credential. Start a new T3 session to issue a fresh credential.",
+        {},
+        { method: "thread/start", operation: "handle-request" },
+      ),
+    );
+  }
+
+  return parseCodexDaemonThreadConfig(args).pipe(
+    Effect.map((config) => ({
+      ...config,
+      "mcp_servers.t3-code.enabled": true,
+      "mcp_servers.t3-code.url": mcpServer.endpoint,
+      "mcp_servers.t3-code.http_headers": {
+        Authorization: mcpServer.authorizationHeader,
+      },
+    })),
+  );
+}
+
 export const CodexResumeCursorSchema = Schema.Struct({
   threadId: Schema.String,
   forkLastTurnId: Schema.optional(Schema.String),
@@ -350,6 +479,7 @@ export interface CodexSessionRuntimeOptions {
   readonly enableT3Workers?: boolean;
   readonly workerSession?: boolean;
   readonly appServerTransport?: CodexAppServerTransport;
+  readonly daemonMcpServer?: CodexDaemonMcpServerConfig;
 }
 
 export interface CodexSessionRuntimeSendTurnInput {
@@ -1273,8 +1403,10 @@ export const makeCodexSessionRuntime = (
   | Scope.Scope
 > =>
   Effect.gen(function* () {
-    const resolvedHomePath = options.homePath ? expandHomePath(options.homePath) : undefined;
-    if (options.sharedHomePath && resolvedHomePath) {
+    const desktopDaemon = options.appServerTransport === "desktop-daemon";
+    const resolvedHomePath =
+      !desktopDaemon && options.homePath ? expandHomePath(options.homePath) : undefined;
+    if (!desktopDaemon && options.sharedHomePath && resolvedHomePath) {
       yield* migrateCodexResumeRollout({
         sharedHomePath: expandHomePath(options.sharedHomePath),
         effectiveHomePath: resolvedHomePath,
@@ -1295,10 +1427,12 @@ export const makeCodexSessionRuntime = (
     yield* recoverCodexDenyReadAclState();
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const runtimeScope = yield* Scope.Scope;
-    const daemonThreadConfig =
-      options.appServerTransport === "desktop-daemon"
-        ? yield* parseCodexDaemonThreadConfig(buildCodexAppServerConfigArgs(options))
-        : undefined;
+    const daemonThreadConfig = desktopDaemon
+      ? yield* buildCodexDaemonThreadConfig(
+          buildCodexAppServerConfigArgs(options),
+          options.daemonMcpServer,
+        )
+      : undefined;
     const crypto = yield* Crypto.Crypto;
     const events = yield* Queue.unbounded<ProviderEvent>();
     const stderrChunks = yield* Queue.unbounded<string>();
@@ -1307,6 +1441,7 @@ export const makeCodexSessionRuntime = (
     const fileChangeApprovalContext = makeCodexFileChangeApprovalContext();
     yield* Effect.addFinalizer(() => Effect.sync(() => fileChangeApprovalContext.clear()));
     const pendingUserInputsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingUserInput>());
+    const mcpStartupStatusesRef = yield* Ref.make(new Map<string, CodexMcpServerStartupStatus>());
     const collabReceiverTurnsRef = yield* Ref.make(new Map<string, TurnId>());
     const collabChildAgentsRef = yield* Ref.make(new Map<string, CollabChildAgentState>());
     const childDisplayText = new Map<string, { itemKey: string; text: string }>();
@@ -1319,11 +1454,13 @@ export const makeCodexSessionRuntime = (
     // `~` is not shell-expanded when env vars are set via
     // `child_process.spawn`; `expandHomePath` lets a configured
     // `CODEX_HOME=~/.codex_work` reach codex as an absolute path.
-    const env = {
-      ...options.environment,
-      ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
-    };
-    const extendEnv = options.environment === undefined;
+    const env = desktopDaemon
+      ? codexDesktopDaemonEnvironment(options.environment)
+      : {
+          ...options.environment,
+          ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
+        };
+    const extendEnv = !desktopDaemon && options.environment === undefined;
     const commandArgs = buildCodexAppServerCommandArgs(options);
     const spawnCommand = yield* resolveSpawnCommand(options.binaryPath, commandArgs, {
       env,
@@ -1350,8 +1487,15 @@ export const makeCodexSessionRuntime = (
         ),
       );
 
+    const daemonSecrets = options.daemonMcpServer
+      ? [
+          options.daemonMcpServer.authorizationHeader,
+          options.daemonMcpServer.authorizationHeader.replace(/^Bearer\s+/iu, ""),
+        ]
+      : [];
     const clientOptions = {
       onStderr: (chunk: string) => Queue.offer(stderrChunks, chunk).pipe(Effect.asVoid),
+      ...(desktopDaemon ? { logger: makeCodexAppServerProtocolLogger(daemonSecrets) } : {}),
     };
     let clientLayer: Layer.Layer<CodexClient.CodexAppServerClient>;
     if (options.appServerTransport === "desktop-daemon") {
@@ -2248,6 +2392,7 @@ export const makeCodexSessionRuntime = (
       client.handleServerNotification(method, (params) =>
         Effect.gen(function* () {
           const notification = makeCodexServerNotification(method, params);
+          let suppressProviderEvent = false;
           // Capture before enqueueing UI work. The protocol awaits this callback
           // before dispatching the following approval request.
           switch (notification.method) {
@@ -2274,8 +2419,27 @@ export const makeCodexSessionRuntime = (
             case "thread/closed":
               fileChangeApprovalContext.discard({ threadId: notification.params.threadId });
               break;
+            case "mcpServer/startupStatus/updated": {
+              if (desktopDaemon) {
+                const providerThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
+                if (
+                  notification.params.threadId === undefined ||
+                  notification.params.threadId === null ||
+                  providerThreadId === undefined ||
+                  notification.params.threadId === providerThreadId
+                ) {
+                  yield* Ref.update(mcpStartupStatusesRef, (current) => {
+                    const next = new Map(current);
+                    next.set(notification.params.name, notification.params.status);
+                    return next;
+                  });
+                }
+                suppressProviderEvent = true;
+              }
+              break;
+            }
           }
-          yield* Queue.offer(serverNotifications, notification);
+          if (!suppressProviderEvent) yield* Queue.offer(serverNotifications, notification);
         }),
       );
 
@@ -2345,7 +2509,7 @@ export const makeCodexSessionRuntime = (
             if (closed) {
               return Effect.void;
             }
-            const nextStatus = exitCode === 0 ? "closed" : "error";
+            const nextStatus = desktopDaemon ? "error" : exitCode === 0 ? "closed" : "error";
             return updateSession(sessionRef, {
               status: nextStatus,
               activeTurnId: undefined,
@@ -2353,9 +2517,13 @@ export const makeCodexSessionRuntime = (
               Effect.andThen(
                 emitSessionEvent(
                   "session/exited",
-                  exitCode === 0
-                    ? "Codex App Server exited."
-                    : `Codex App Server exited with code ${exitCode}.`,
+                  desktopDaemon
+                    ? codexDesktopDaemonFailureMessage(
+                        new Error(`app-server proxy exited with code ${exitCode}`),
+                      )
+                    : exitCode === 0
+                      ? "Codex App Server exited."
+                      : `Codex App Server exited with code ${exitCode}.`,
                 ),
               ),
             );
@@ -2410,6 +2578,23 @@ export const makeCodexSessionRuntime = (
       } satisfies ProviderSession;
       yield* Ref.set(sessionRef, session);
       yield* emitSessionEvent("session/ready", "Codex App Server session ready.");
+      if (daemonThreadConfig !== undefined) {
+        const inventory = yield* readCodexThreadMcpInventory(
+          client,
+          providerThreadId,
+          yield* Ref.get(mcpStartupStatusesRef),
+        ).pipe(
+          Effect.timeoutOption("2 seconds"),
+          Effect.map(Option.getOrUndefined),
+          Effect.orElseSucceed(() => undefined),
+        );
+        yield* emitSessionEvent(
+          "session/started",
+          inventory
+            ? formatCodexThreadMcpInventory(inventory)
+            : "Tools attached to this thread: inventory could not be read from the Codex desktop daemon.",
+        );
+      }
       return session;
     });
 

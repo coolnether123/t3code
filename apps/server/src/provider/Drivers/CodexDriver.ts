@@ -136,7 +136,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const environmentId = yield* (yield* ServerEnvironment).getEnvironmentId;
       const processEnv = mergeProviderInstanceEnvironment(environment);
       const desktopDaemonConfig = config.useDesktopAppDaemon
-        ? { ...config, shadowHomePath: "" }
+        ? { ...config, homePath: "", shadowHomePath: "" }
         : config;
       const isolatedHomePath =
         !config.useDesktopAppDaemon && config.shadowHomePath.trim().length === 0

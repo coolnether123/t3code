@@ -22,8 +22,11 @@ import {
   buildTurnStartParams,
   classifyCodexStderrLine,
   codexSubagentBackendAppServerArgs,
+  buildCodexDaemonThreadConfig,
   assertCodexSubagentIsolationConfig,
+  formatCodexThreadMcpInventory,
   hasConfiguredMcpServer,
+  readCodexThreadMcpInventory,
   readCodexBrowserAvailability,
   isComputerUseMcpApproval,
   isMcpToolApproval,
@@ -1021,6 +1024,20 @@ describe("codexSessionAppServerArgs", () => {
   });
 });
 
+describe("Codex desktop daemon command", () => {
+  it("starts the proxy instead of a stdio app-server process", () => {
+    NodeAssert.deepStrictEqual(
+      buildCodexAppServerCommandArgs({
+        appServerTransport: "desktop-daemon",
+        launchArgs: "--strict-config",
+        appServerArgs: ["-c", "model=gpt-test"],
+        enableT3Workers: true,
+      }),
+      ["app-server", "proxy"],
+    );
+  });
+});
+
 describe("openCodexThread", () => {
   it.effect("propagates daemon thread config through start, resume, and fork", () =>
     Effect.gen(function* () {
@@ -1032,7 +1049,11 @@ describe("openCodexThread", () => {
         "agents.enabled": false,
         "features.multi_agent": false,
         "features.multi_agent_v2": false,
+        "mcp_servers.t3-code.enabled": true,
         "mcp_servers.t3-code.url": "http://127.0.0.1:3774/mcp",
+        "mcp_servers.t3-code.http_headers": {
+          Authorization: "Bearer fake-session-token",
+        },
       } as const;
       const client = {
         request: <M extends "thread/start" | "thread/resume" | "thread/fork">(
@@ -1127,6 +1148,75 @@ describe("openCodexThread", () => {
         NodeAssert.ok(isCodexAppServerRequestError(t3Error));
         NodeAssert.match(t3Error.errorMessage, /T3 MCP bearer_token_env_var/);
       }),
+  );
+
+  it.effect("adds a per-session T3 MCP credential to daemon thread config", () =>
+    Effect.gen(function* () {
+      const config = yield* buildCodexDaemonThreadConfig([], {
+        endpoint: "http://127.0.0.1:3774/mcp",
+        authorizationHeader: "Bearer fake-session-token",
+      });
+      NodeAssert.deepStrictEqual(config, {
+        "mcp_servers.t3-code.enabled": true,
+        "mcp_servers.t3-code.url": "http://127.0.0.1:3774/mcp",
+        "mcp_servers.t3-code.http_headers": {
+          Authorization: "Bearer fake-session-token",
+        },
+      });
+
+      const missingCredential = yield* buildCodexDaemonThreadConfig([], undefined).pipe(
+        Effect.flip,
+      );
+      NodeAssert.match(missingCredential.message, /no usable authorization credential/);
+    }),
+  );
+
+  it.effect("bounds the daemon MCP inventory while following pagination", () =>
+    Effect.gen(function* () {
+      const makeServer = (name: string) => ({
+        name,
+        authStatus: "bearerToken" as const,
+        tools: { "private-tool-name": {} },
+      });
+      const firstPage = Array.from({ length: 25 }, (_, index) => makeServer(`server-${index}`));
+      const secondPage = Array.from({ length: 25 }, (_, index) => makeServer(`second-${index}`));
+      const thirdPage = [makeServer("cua_repl"), makeServer("node_repl")];
+      const pages = [
+        { data: firstPage, nextCursor: "page-2" },
+        { data: secondPage, nextCursor: "page-3" },
+        { data: thirdPage, nextCursor: undefined },
+      ] as unknown as ReadonlyArray<EffectCodexSchema.V2ListMcpServerStatusResponse>;
+      const calls: Array<EffectCodexSchema.V2ListMcpServerStatusParams> = [];
+      const client = {
+        request: (
+          _method: "mcpServerStatus/list",
+          params: EffectCodexSchema.V2ListMcpServerStatusParams,
+        ) => {
+          calls.push(params);
+          return Effect.succeed(pages[calls.length - 1]!);
+        },
+      };
+
+      const inventory = yield* readCodexThreadMcpInventory(
+        client,
+        "provider-thread",
+        new Map([["server-0", "ready"]]),
+      );
+      const summary = formatCodexThreadMcpInventory(inventory);
+
+      NodeAssert.equal(calls.length, 3);
+      NodeAssert.equal(calls[0]?.cursor, undefined);
+      NodeAssert.equal(calls[1]?.cursor, "page-2");
+      NodeAssert.equal(calls[2]?.cursor, "page-3");
+      NodeAssert.equal(inventory.servers.length, 40);
+      NodeAssert.equal(inventory.omittedServers, true);
+      NodeAssert.equal(inventory.hasCuaRepl, true);
+      NodeAssert.equal(inventory.hasNodeRepl, true);
+      NodeAssert.equal(inventory.servers[0]?.startupStatus, "ready");
+      NodeAssert.match(summary, /^Tools attached to this thread:/);
+      NodeAssert.match(summary, /cua_repl present; node_repl present/);
+      NodeAssert.doesNotMatch(summary, /private-tool-name|connector account/i);
+    }),
   );
 
   it.effect("preserves a missing thread's identity instead of starting a replacement", () =>
