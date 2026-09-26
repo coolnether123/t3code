@@ -782,6 +782,7 @@ function buildCodexCollaborationMode(input: {
   readonly computerControlMode?: CodexComputerControlMode;
   readonly computerControlAvailable?: boolean;
   readonly subagentBackend?: SubagentBackend;
+  readonly useDesktopAppDaemon?: boolean;
 }): EffectCodexSchema.V2TurnStartParams__CollaborationMode | undefined {
   if (input.interactionMode === undefined) {
     return undefined;
@@ -803,6 +804,7 @@ function buildCodexCollaborationMode(input: {
           reasoningEffort,
           ...(input.subagentBackend ? { subagentBackend: input.subagentBackend } : {}),
           ...(enableT3Workers ? { enableT3Workers: true } : {}),
+          ...(input.useDesktopAppDaemon ? { useDesktopAppDaemon: true } : {}),
           computerControlMode: input.computerControlMode ?? DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
           computerControlAvailable: input.computerControlAvailable ?? false,
         },
@@ -831,6 +833,8 @@ export function buildTurnStartParams(input: {
   readonly computerControlMode?: CodexComputerControlMode;
   /** Requires a discovered managed Chrome tool catalog. */
   readonly computerControlAvailable?: boolean;
+  /** The thread runs in the host Mac's Codex desktop installation. */
+  readonly useDesktopAppDaemon?: boolean;
 }): Effect.Effect<
   CodexTurnStartParamsWithCollaborationMode,
   CodexErrors.CodexAppServerProtocolParseError
@@ -858,6 +862,7 @@ export function buildTurnStartParams(input: {
       ? { computerControlAvailable: input.computerControlAvailable }
       : {}),
     browserToolsAvailable: input.browserToolsAvailable ?? true,
+    ...(input.useDesktopAppDaemon ? { useDesktopAppDaemon: true } : {}),
   });
 
   return decodeCodexTurnStartParamsWithCollaborationMode({
@@ -2687,6 +2692,9 @@ export const makeCodexSessionRuntime = (
             browserToolsAvailable: browserAvailability.previewBrowser,
             computerControlMode,
             computerControlAvailable: browserAvailability.managedChrome,
+            ...(options.appServerTransport === "desktop-daemon"
+              ? { useDesktopAppDaemon: true }
+              : {}),
           });
           const rawResponse = yield* client.raw.request("turn/start", params);
           const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(

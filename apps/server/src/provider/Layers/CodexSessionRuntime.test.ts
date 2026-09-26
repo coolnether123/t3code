@@ -232,6 +232,25 @@ describe("buildTurnStartParams", () => {
     }),
   );
 
+  it.effect("describes the host desktop app's browser tools for daemon threads", () =>
+    Effect.gen(function* () {
+      const params = yield* buildTurnStartParams({
+        threadId: "provider-thread-desktop-app",
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        computerControlMode: "chrome",
+        computerControlAvailable: false,
+        browserToolsAvailable: false,
+        useDesktopAppDaemon: true,
+      });
+      const instructions = params.collaborationMode?.settings.developer_instructions ?? "";
+
+      NodeAssert.match(instructions, /host Mac's Codex desktop installation/);
+      NodeAssert.match(instructions, /T3 managed Chrome is not attached/);
+      NodeAssert.doesNotMatch(instructions, /computer_open_url/);
+    }),
+  );
+
   it("keeps invalid turn values only in the schema cause", () => {
     const secret = "codex-turn-input-secret-sentinel";
     const error = Effect.runSync(

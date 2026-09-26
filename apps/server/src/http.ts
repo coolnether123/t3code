@@ -43,6 +43,7 @@ import {
 import * as BrowserTraceCollector from "./observability/BrowserTraceCollector.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
+import { ServerSettingsService } from "./serverSettings.ts";
 import { traceRelayRequest } from "./cloud/traceRelayRequest.ts";
 import {
   annotateEnvironmentRequest,
@@ -316,6 +317,7 @@ export const providerSnapshotsHttpApiLayer = HttpApiBuilder.group(
   "providers",
   Effect.fnUntraced(function* (handlers) {
     const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
+    const serverSettings = yield* ServerSettingsService;
 
     return handlers.handle(
       "snapshot",
@@ -323,6 +325,20 @@ export const providerSnapshotsHttpApiLayer = HttpApiBuilder.group(
         yield* annotateEnvironmentRequest(args.endpoint.name);
         yield* requireEnvironmentScope(AuthOrchestrationReadScope);
         const providers = yield* providerRegistry.getProviders;
+        // Only the boolean transport flag leaves settings; unreadable settings stay unknown.
+        const settings = yield* serverSettings.getSettings.pipe(
+          Effect.orElseSucceed(() => undefined),
+        );
+        const desktopBackedFor = (instanceId: string): boolean | null => {
+          if (settings === undefined) return null;
+          const instance =
+            settings.providerInstances[instanceId as keyof typeof settings.providerInstances];
+          if (instance !== undefined) {
+            const config = instance.config as { readonly useDesktopAppDaemon?: unknown } | null;
+            return config?.useDesktopAppDaemon === true;
+          }
+          return instanceId === "codex" ? settings.providers.codex.useDesktopAppDaemon : null;
+        };
         const instanceFilter = args.payload.instanceId;
         const result: Array<EnvironmentProviderStatus> = [];
         let providerCount = 0;
@@ -369,7 +385,9 @@ export const providerSnapshotsHttpApiLayer = HttpApiBuilder.group(
             },
             modelCount: provider.models.length,
             skillCount: provider.skills.length,
-            ...(provider.driver === "codex" ? { desktopBacked: null } : {}),
+            ...(provider.driver === "codex"
+              ? { desktopBacked: desktopBackedFor(provider.instanceId) }
+              : {}),
           });
         }
 

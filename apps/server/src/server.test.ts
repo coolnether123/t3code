@@ -2152,7 +2152,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(body.providers[0]?.messageTruncated, true);
       assert.equal(body.providers[0]?.modelCount, 0);
       assert.equal(body.providers[0]?.skillCount, 1);
-      assert.equal(body.providers[0]?.desktopBacked, null);
+      // The default Codex instance runs its own app-server unless the desktop app is selected.
+      assert.equal(body.providers[0]?.desktopBacked, false);
 
       const fullUrl = yield* getHttpServerUrl("/api/providers");
       const fullResponse = yield* fetchEffect(fullUrl, { headers: { cookie } });
