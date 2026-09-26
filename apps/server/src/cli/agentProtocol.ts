@@ -458,6 +458,8 @@ function compactValue(
           .filter(([key]) => !["data", "image", "base64", "dataUrl"].includes(key))
           .map(([key, entry]) => [
             clip(key, 80),
+            // Counts such as inputTokens are usage figures, not credentials.
+            typeof entry !== "number" &&
             /authorization|credential|password|secret|token|api[_-]?key/i.test(key)
               ? "[redacted]"
               : compactValue(entry, depth + 1, budget, maxDepth),

@@ -1159,6 +1159,17 @@ function mapToRuntimeEvents(
     ];
   }
 
+  // The desktop daemon's per-thread tool inventory is shown in the thread's work log.
+  if (event.method === "session/tools" && event.message) {
+    return [
+      {
+        ...runtimeEventBase(event, canonicalThreadId),
+        type: "runtime.warning",
+        payload: { message: event.message },
+      },
+    ];
+  }
+
   if (event.method === "session/started") {
     return [
       {

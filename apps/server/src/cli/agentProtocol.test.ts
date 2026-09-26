@@ -371,6 +371,7 @@ describe("agent snapshot", () => {
         payload: {
           inventory: ["node_repl", "cua_repl"],
           accessToken: "fake-provider-session-token",
+          inputTokens: 42,
         },
         turnId: null,
         sequence: 1,
@@ -413,6 +414,7 @@ describe("agent snapshot", () => {
         payload: {
           inventory: ["node_repl", "cua_repl"],
           accessToken: "[redacted]",
+          inputTokens: 42,
         },
       },
     ]);

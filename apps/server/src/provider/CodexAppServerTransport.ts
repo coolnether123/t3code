@@ -13,6 +13,7 @@ import * as Queue from "effect/Queue";
 import * as Sink from "effect/Sink";
 import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
+import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
@@ -177,6 +178,7 @@ export function codexDesktopDaemonFailureMessage(cause: unknown): string {
 }
 
 const CODEX_DESKTOP_DAEMON_WS_URL = "ws://localhost/";
+const CODEX_DESKTOP_DAEMON_KEEPALIVE_INTERVAL = "15 seconds";
 const CODEX_DESKTOP_DAEMON_HANDSHAKE_TIMEOUT_MS = 10_000;
 
 type DesktopDaemonChildProcess = Pick<
@@ -380,6 +382,31 @@ export const makeCodexDesktopDaemonStdio = Effect.fn("makeCodexDesktopDaemonStdi
   websocket.on("error", onError);
   websocket.on("close", onClose);
 
+  // The proxy stays silent when its daemon restarts and only fails on the next
+  // write, so a daemon restart would otherwise go unnoticed until the user's
+  // next turn is lost in the dead pipe. A ping makes that write; the proxy then
+  // exits and the session reports it. A missed pong tears the transport down.
+  let awaitingPong = false;
+  const onPong = () => {
+    awaitingPong = false;
+  };
+  websocket.on("pong", onPong);
+  yield* Effect.sync(() => {
+    if (websocket.readyState !== NodeSocket.NodeWS.WebSocket.OPEN) return;
+    if (awaitingPong) {
+      onError(new Error("Codex desktop daemon stopped answering keepalive pings"));
+      websocket.terminate();
+      return;
+    }
+    awaitingPong = true;
+    websocket.ping();
+  }).pipe(
+    Effect.delay(CODEX_DESKTOP_DAEMON_KEEPALIVE_INTERVAL),
+    Effect.repeat(Schedule.spaced(CODEX_DESKTOP_DAEMON_KEEPALIVE_INTERVAL)),
+    Effect.ignore,
+    Effect.forkScoped,
+  );
+
   const sendMessage = (message: string) =>
     Effect.callback<void, PlatformError.PlatformError>((resume) => {
       if (websocket.readyState !== NodeSocket.NodeWS.WebSocket.OPEN) {
@@ -444,6 +471,7 @@ export const makeCodexDesktopDaemonStdio = Effect.fn("makeCodexDesktopDaemonStdi
       websocket.off("message", onMessage);
       websocket.off("error", onError);
       websocket.off("close", onClose);
+      websocket.off("pong", onPong);
       shutdownIncoming();
       if (websocket.readyState !== NodeSocket.NodeWS.WebSocket.CLOSED) websocket.terminate();
       bridge?.destroy();

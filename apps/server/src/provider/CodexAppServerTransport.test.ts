@@ -7,6 +7,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 
@@ -205,7 +206,7 @@ describe("ensureCodexDesktopDaemonStarted", () => {
       commands: Array<ReadonlyArray<string>>,
     ) => Effect.Effect<
       void,
-      unknown,
+      PlatformError.PlatformError,
       FileSystem.FileSystem | Path.Path | ChildProcessSpawner.ChildProcessSpawner
     >,
   ) => {
@@ -216,6 +217,7 @@ describe("ensureCodexDesktopDaemonStarted", () => {
       yield* run(codexHome, commands);
     }).pipe(
       Effect.scoped,
+      Effect.orDie,
       Effect.provide(
         Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, recordingSpawner(commands)).pipe(
           Layer.provideMerge(NodeServices.layer),
@@ -235,7 +237,7 @@ describe("ensureCodexDesktopDaemonStarted", () => {
           yield* fileSystem.makeDirectory(packageRoot, { recursive: true });
           yield* fileSystem.writeFileString(
             path.join(packageRoot, "codex-package.json"),
-            JSON.stringify({ entrypoint: "bin/codex" }),
+            '{"entrypoint":"bin/codex"}',
           );
           yield* ensureCodexDesktopDaemonStarted({ CODEX_HOME: codexHome });
           expect(commands).toEqual([

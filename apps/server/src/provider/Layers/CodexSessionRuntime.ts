@@ -2596,7 +2596,7 @@ export const makeCodexSessionRuntime = (
           Effect.orElseSucceed(() => undefined),
         );
         yield* emitSessionEvent(
-          "session/started",
+          "session/tools",
           inventory
             ? formatCodexThreadMcpInventory(inventory)
             : "Tools attached to this thread: inventory could not be read from the Codex desktop daemon.",

@@ -1324,6 +1324,35 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       }),
   );
 
+  it.effect("shows the desktop daemon's tool inventory in the thread work log", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(
+        adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "runtime.warning"),
+          Stream.take(1),
+        ),
+      ).pipe(Effect.forkChild);
+      const message =
+        "Tools attached to this thread: cua_repl (ready, 3 tools). cua_repl present; node_repl absent.";
+      yield* runtime.emit({
+        id: asEventId("desktop-tool-inventory"),
+        kind: "session",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-09-26T23:41:40.000Z",
+        method: "session/tools",
+        threadId: asThreadId("thread-1"),
+        message,
+      });
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      const inventory = events.at(-1);
+      NodeAssert.equal(inventory?.type, "runtime.warning");
+      const [activity] = inventory ? runtimeEventToActivities(inventory) : [];
+      NodeAssert.equal(activity?.tone, "info");
+      NodeAssert.match(activity?.summary ?? "", /^Tools attached to this thread:/);
+    }),
+  );
+
   it.effect("preserves completed child turn facts through persisted activity reconstruction", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
