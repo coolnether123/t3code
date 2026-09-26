@@ -9,6 +9,9 @@ import * as Stream from "effect/Stream";
 import {
   codexAppServerCommandArgs,
   codexAppServerTransport,
+  codexDesktopDaemonEnvironment,
+  codexDesktopDaemonRepairMessage,
+  redactCodexProtocolLogEvent,
   makeCodexDesktopDaemonStdio,
   macDesktopCodexBinaryCandidates,
 } from "./CodexAppServerTransport.ts";
@@ -23,10 +26,48 @@ describe("CodexAppServerTransport", () => {
     expect(codexAppServerTransport({ useDesktopAppDaemon: true })).toBe("desktop-daemon");
   });
 
-  it("keeps overrides for stdio while the desktop proxy receives only its subcommand", () => {
+  it("keeps launch args for stdio and uses only the proxy command for desktop daemon", () => {
     const overrides = ["-c", 'mcp_servers.t3-code.url="http://127.0.0.1"'];
     expect(codexAppServerCommandArgs("stdio", overrides)).toEqual(["app-server", ...overrides]);
     expect(codexAppServerCommandArgs("desktop-daemon", overrides)).toEqual(["app-server", "proxy"]);
+  });
+
+  it("uses the host Codex home and ignores a provider-instance Codex home", () => {
+    expect(
+      codexDesktopDaemonEnvironment(
+        { CODEX_HOME: "/tmp/provider-home", PATH: "/tmp/provider-bin" },
+        { codex_home: "/Users/host/.codex", HOME: "/Users/host" },
+      ),
+    ).toEqual({ CODEX_HOME: "/Users/host/.codex", PATH: "/tmp/provider-bin" });
+  });
+
+  it("directs daemon repairs to the standalone managed Codex CLI", () => {
+    const message = codexDesktopDaemonRepairMessage("could not reach the daemon control socket");
+    expect(message).toContain("standalone managed Codex CLI");
+    expect(message).toContain("app-server daemon bootstrap");
+    expect(message).toContain("app-server daemon version");
+  });
+
+  it("redacts the T3 MCP authorization header from serialized protocol logs", () => {
+    const credential = "fake-desktop-session-token";
+    const event = {
+      direction: "outgoing",
+      stage: "decoded",
+      payload: JSON.stringify({
+        method: "thread/start",
+        params: {
+          config: {
+            "mcp_servers.t3-code.http_headers": {
+              Authorization: `Bearer ${credential}`,
+            },
+          },
+        },
+      }),
+    } as const;
+
+    const logged = JSON.stringify(redactCodexProtocolLogEvent(event, [credential]));
+    expect(logged).not.toContain(credential);
+    expect(logged).toContain("[REDACTED]");
   });
 
   it("prefers the Codex app bundle while retaining the ChatGPT compatibility paths", () => {

@@ -50,7 +50,12 @@ import * as EffectCodexSchema from "effect-codex-app-server/schema";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { getCodexServiceTierOptionValue } from "../../codexModelOptions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
-import { codexAppServerTransport } from "../CodexAppServerTransport.ts";
+import {
+  codexAppServerTransport,
+  codexDesktopDaemonFailureMessage,
+  redactCodexProtocolLogEvent,
+  redactCodexSensitiveText,
+} from "../CodexAppServerTransport.ts";
 import {
   type CodexRateLimitSnapshot,
   codexRateLimitsToUpdate,
@@ -94,6 +99,7 @@ import {
 } from "./CodexMcpPreflight.ts";
 const isCodexAppServerProcessExitedError = Schema.is(CodexErrors.CodexAppServerProcessExitedError);
 const isCodexAppServerTransportError = Schema.is(CodexErrors.CodexAppServerTransportError);
+const isCodexAppServerSpawnError = Schema.is(CodexErrors.CodexAppServerSpawnError);
 const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
   CodexSessionRuntimeThreadIdMissingError,
 );
@@ -135,12 +141,13 @@ function mapCodexRuntimeError(
   threadId: ThreadId,
   method: string,
   error: CodexSessionRuntimeError,
+  desktopDaemon = false,
 ): ProviderAdapterError {
   if (isCodexAppServerProcessExitedError(error) || isCodexAppServerTransportError(error)) {
     return new ProviderAdapterSessionClosedError({
       provider: PROVIDER,
       threadId,
-      cause: error,
+      cause: desktopDaemon ? new Error(codexDesktopDaemonFailureMessage(error)) : error,
     });
   }
 
@@ -152,12 +159,52 @@ function mapCodexRuntimeError(
     });
   }
 
+  const secrets = desktopDaemon
+    ? (() => {
+        const session = McpProviderSession.readMcpProviderSession(threadId);
+        return session
+          ? [session.authorizationHeader, session.authorizationHeader.replace(/^Bearer\s+/iu, "")]
+          : [];
+      })()
+    : [];
+  const detail =
+    desktopDaemon &&
+    /not.?signed.?in|unauthenticated|authentication required|login required|protocol|version|handshake|socket|proxy/iu.test(
+      error.message,
+    )
+      ? codexDesktopDaemonFailureMessage(error)
+      : redactCodexSensitiveText(error.message, secrets);
   return new ProviderAdapterRequestError({
     provider: PROVIDER,
     method,
-    detail: error.message,
-    cause: error,
+    detail,
+    cause: desktopDaemon ? new Error(detail) : error,
   });
+}
+
+function codexDesktopSessionStartFailureMessage(
+  error: Error,
+  secrets: ReadonlyArray<string>,
+): string {
+  const safeMessage = redactCodexSensitiveText(error.message, secrets);
+  if (
+    /authorization credential|sub-agent isolation|native multi-agent catalog|thread not found/iu.test(
+      safeMessage,
+    )
+  ) {
+    return safeMessage;
+  }
+  if (
+    isCodexAppServerProcessExitedError(error) ||
+    isCodexAppServerTransportError(error) ||
+    isCodexAppServerSpawnError(error) ||
+    /not.?signed.?in|unauthenticated|authentication required|login required|protocol|version|handshake|socket|proxy|timed? ?out|connect/iu.test(
+      safeMessage,
+    )
+  ) {
+    return codexDesktopDaemonFailureMessage(error);
+  }
+  return safeMessage;
 }
 
 type CodexLifecycleItem =
@@ -1887,6 +1934,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               )
             : DEFAULT_CODEX_COMPUTER_CONTROL_MODE;
         const workerSession = isWorkerLinkedProviderThreadId(input.threadId);
+        const desktopDaemon = appServerTransport === "desktop-daemon";
         const t3WorkersSettingEnabled =
           !workerSession && (yield* options?.enableT3Workers ?? Effect.succeed(false));
         if (input.subagentBackend === "native-v1-control" && !t3WorkersSettingEnabled) {
@@ -1896,29 +1944,57 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             issue: "Native V1 control requires T3 Workers to be enabled in settings.",
           });
         }
-        const mcpPreflight = options?.preflightMcpServers
-          ? yield* options.preflightMcpServers({
-              homePath: codexConfig.homePath,
-              cwd: input.cwd ?? process.cwd(),
-              ...(options.environment !== undefined ? { environment: options.environment } : {}),
-              appServerArgs: codexLaunchArgv(
-                resolveCodexLaunchArgs(codexConfig.launchArgs, options.environment),
-              ),
-            })
-          : ({ disabledServerNames: [], unavailable: [] } satisfies CodexMcpPreflightResult);
+        const mcpPreflight =
+          !desktopDaemon && options?.preflightMcpServers
+            ? yield* options.preflightMcpServers({
+                homePath: codexConfig.homePath,
+                cwd: input.cwd ?? process.cwd(),
+                ...(options.environment !== undefined ? { environment: options.environment } : {}),
+                appServerArgs: codexLaunchArgv(
+                  resolveCodexLaunchArgs(codexConfig.launchArgs, options.environment),
+                ),
+              })
+            : ({ disabledServerNames: [], unavailable: [] } satisfies CodexMcpPreflightResult);
         for (const diagnostic of mcpPreflight.unavailable) {
           yield* Effect.logWarning("codex.mcp.unavailable", diagnostic);
         }
         const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
-        const inheritedMcpOverrides = mcpPreflight.disabledServerNames.map(codexMcpDisableOverride);
-        const t3McpArgs = mcpSession
+        if (
+          desktopDaemon &&
+          (!mcpSession ||
+            mcpSession.endpoint.trim().length === 0 ||
+            !/^Bearer\s+\S+$/iu.test(mcpSession.authorizationHeader))
+        ) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue:
+              "Codex desktop app could not attach the T3 MCP server because this session has no usable authorization credential. Start a new T3 session to issue a fresh credential.",
+          });
+        }
+        const daemonMcpServer =
+          desktopDaemon && mcpSession
+            ? {
+                endpoint: mcpSession.endpoint,
+                authorizationHeader: mcpSession.authorizationHeader,
+              }
+            : undefined;
+        const daemonSecrets = mcpSession
           ? [
-              "-c",
-              `mcp_servers.t3-code.url=${mcpSession.endpoint}`,
-              "-c",
-              'mcp_servers.t3-code.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
+              mcpSession.authorizationHeader,
+              mcpSession.authorizationHeader.replace(/^Bearer\s+/iu, ""),
             ]
           : [];
+        const inheritedMcpOverrides = mcpPreflight.disabledServerNames.map(codexMcpDisableOverride);
+        const t3McpArgs =
+          mcpSession && !desktopDaemon
+            ? [
+                "-c",
+                `mcp_servers.t3-code.url=${mcpSession.endpoint}`,
+                "-c",
+                'mcp_servers.t3-code.bearer_token_env_var="T3_MCP_BEARER_TOKEN"',
+              ]
+            : [];
         const runtimeInput: CodexSessionRuntimeOptions = {
           threadId: input.threadId,
           onTurnServiceTier: (observation) =>
@@ -1944,6 +2020,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ...(isCodexResumeCursorSchema(input.resumeCursor)
             ? { resumeCursor: input.resumeCursor }
             : {}),
+          ...(daemonMcpServer ? { daemonMcpServer } : {}),
           runtimeMode: input.runtimeMode,
           ...(workerSession ? { workerSession: true } : {}),
           ...(input.modelSelection?.instanceId === boundInstanceId
@@ -1955,7 +2032,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ? { subagentBackend: input.subagentBackend }
             : {}),
           ...(t3WorkersSettingEnabled ? { enableT3Workers: true } : {}),
-          ...(mcpSession
+          ...(mcpSession && !desktopDaemon
             ? {
                 environment: {
                   ...(options?.environment ?? process.env),
@@ -1984,15 +2061,17 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           Effect.provideService(Crypto.Crypto, crypto),
           Effect.provideService(FileSystem.FileSystem, fileSystem),
           Effect.provideService(Path.Path, path),
-          Effect.mapError(
-            (cause) =>
-              new ProviderAdapterProcessError({
-                provider: PROVIDER,
-                threadId: input.threadId,
-                detail: cause.message,
-                cause,
-              }),
-          ),
+          Effect.mapError((cause) => {
+            const detail = desktopDaemon
+              ? codexDesktopSessionStartFailureMessage(cause, daemonSecrets)
+              : cause.message;
+            return new ProviderAdapterProcessError({
+              provider: PROVIDER,
+              threadId: input.threadId,
+              detail,
+              cause: desktopDaemon ? new Error(detail) : cause,
+            });
+          }),
         );
 
         // Fork into the session scope, not the calling fiber. `forkChild` makes
@@ -2002,19 +2081,22 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         let rateLimits: CodexRateLimitSnapshot | undefined;
         const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>
           Effect.gen(function* () {
-            yield* writeNativeEvent(event);
-            if (event.method === "account/rateLimits/updated") {
+            const visibleEvent = desktopDaemon
+              ? redactCodexProtocolLogEvent(event, daemonSecrets)
+              : event;
+            yield* writeNativeEvent(visibleEvent);
+            if (visibleEvent.method === "account/rateLimits/updated") {
               const limitsPayload = readPayload(
                 EffectCodexSchema.V2AccountRateLimitsUpdatedNotification,
-                event.payload,
+                visibleEvent.payload,
               );
               if (limitsPayload) {
                 rateLimits = mergeCodexRateLimits(rateLimits, limitsPayload.rateLimits);
               }
-            } else if (event.method === "error") {
+            } else if (visibleEvent.method === "error") {
               const errorPayload = readPayload(
                 EffectCodexSchema.V2ErrorNotification,
-                event.payload,
+                visibleEvent.payload,
               );
               // The failed turn repeats this message, which is replaced below.
               if (errorPayload?.error.codexErrorInfo === "usageLimitExceeded") return;
@@ -2022,19 +2104,19 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
 
             let usageLimitError: ProviderRuntimeEvent | undefined;
             let usageLimitMessage: string | undefined;
-            if (event.method === "turn/completed") {
+            if (visibleEvent.method === "turn/completed") {
               const completedPayload = readPayload(
                 EffectCodexSchema.V2TurnCompletedNotification,
-                event.payload,
+                visibleEvent.payload,
               );
               const turnError =
                 completedPayload?.turn.status === "failed"
                   ? completedPayload.turn.error
                   : undefined;
               if (turnError?.codexErrorInfo === "usageLimitExceeded") {
-                usageLimitMessage = codexUsageLimitMessage(rateLimits, event.createdAt);
+                usageLimitMessage = codexUsageLimitMessage(rateLimits, visibleEvent.createdAt);
                 usageLimitError = {
-                  ...runtimeEventBase(event, event.threadId),
+                  ...runtimeEventBase(visibleEvent, visibleEvent.threadId),
                   type: "runtime.error",
                   payload: {
                     message: usageLimitMessage,
@@ -2045,27 +2127,29 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               }
             }
 
-            const mappedEvents = mapToRuntimeEvents(event, event.threadId).map((runtimeEvent) => {
-              if (runtimeEvent.type === "turn.completed" && runtimeEvent.turnId) {
-                return {
-                  ...runtimeEvent,
-                  payload: {
-                    ...runtimeEvent.payload,
-                    ...(usageLimitMessage ? { errorMessage: usageLimitMessage } : {}),
-                  },
-                };
-              }
-              return runtimeEvent;
-            });
+            const mappedEvents = mapToRuntimeEvents(visibleEvent, visibleEvent.threadId).map(
+              (runtimeEvent) => {
+                if (runtimeEvent.type === "turn.completed" && runtimeEvent.turnId) {
+                  return {
+                    ...runtimeEvent,
+                    payload: {
+                      ...runtimeEvent.payload,
+                      ...(usageLimitMessage ? { errorMessage: usageLimitMessage } : {}),
+                    },
+                  };
+                }
+                return runtimeEvent;
+              },
+            );
             const runtimeEvents = usageLimitError
               ? [usageLimitError, ...mappedEvents]
               : mappedEvents;
             if (runtimeEvents.length === 0) {
               yield* Effect.logDebug("ignoring unhandled Codex provider event", {
-                method: event.method,
-                threadId: event.threadId,
-                turnId: event.turnId,
-                itemId: event.itemId,
+                method: visibleEvent.method,
+                threadId: visibleEvent.threadId,
+                turnId: visibleEvent.turnId,
+                itemId: visibleEvent.itemId,
               });
               return;
             }
@@ -2074,15 +2158,17 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         ).pipe(Effect.forkIn(sessionScope));
 
         const started = yield* runtime.start().pipe(
-          Effect.mapError(
-            (cause) =>
-              new ProviderAdapterProcessError({
-                provider: PROVIDER,
-                threadId: input.threadId,
-                detail: cause.message,
-                cause,
-              }),
-          ),
+          Effect.mapError((cause) => {
+            const detail = desktopDaemon
+              ? codexDesktopSessionStartFailureMessage(cause, daemonSecrets)
+              : cause.message;
+            return new ProviderAdapterProcessError({
+              provider: PROVIDER,
+              threadId: input.threadId,
+              detail,
+              cause: desktopDaemon ? new Error(detail) : cause,
+            });
+          }),
           Effect.onError(() =>
             runtime.close.pipe(
               Effect.andThen(Effect.ignore(Scope.close(sessionScope, Exit.void))),
@@ -2155,7 +2241,14 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
         })
         .pipe(
-          Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/steer", cause)),
+          Effect.mapError((cause) =>
+            mapCodexRuntimeError(
+              input.threadId,
+              "turn/steer",
+              cause,
+              appServerTransport === "desktop-daemon",
+            ),
+          ),
         );
     }
 
@@ -2172,7 +2265,14 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     let session = yield* requireSession(input.threadId);
     if (input.subagentBackend !== undefined && session.launchBackend !== input.subagentBackend) {
       const currentProviderSession = yield* session.runtime.getSession.pipe(
-        Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "session/read", cause)),
+        Effect.mapError((cause) =>
+          mapCodexRuntimeError(
+            input.threadId,
+            "session/read",
+            cause,
+            appServerTransport === "desktop-daemon",
+          ),
+        ),
       );
       if (!isCodexResumeCursorSchema(currentProviderSession.resumeCursor)) {
         return yield* new ProviderAdapterValidationError({
@@ -2229,7 +2329,16 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         ...(enableT3Workers ? { enableT3Workers: true } : {}),
         ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
       })
-      .pipe(Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/start", cause)));
+      .pipe(
+        Effect.mapError((cause) =>
+          mapCodexRuntimeError(
+            input.threadId,
+            "turn/start",
+            cause,
+            appServerTransport === "desktop-daemon",
+          ),
+        ),
+      );
   });
 
   const createForkResumeCursor: NonNullable<CodexAdapterShape["createForkResumeCursor"]> =
@@ -2266,7 +2375,12 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       Effect.mapError((cause) =>
         cause._tag === "ProviderAdapterSessionNotFoundError"
           ? cause
-          : mapCodexRuntimeError(threadId, "turn/interrupt", cause),
+          : mapCodexRuntimeError(
+              threadId,
+              "turn/interrupt",
+              cause,
+              appServerTransport === "desktop-daemon",
+            ),
       ),
     );
 
@@ -2276,7 +2390,12 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       Effect.mapError((cause) =>
         cause._tag === "ProviderAdapterSessionNotFoundError"
           ? cause
-          : mapCodexRuntimeError(threadId, "thread/read", cause),
+          : mapCodexRuntimeError(
+              threadId,
+              "thread/read",
+              cause,
+              appServerTransport === "desktop-daemon",
+            ),
       ),
       Effect.map((snapshot) => ({
         threadId,
@@ -2300,7 +2419,12 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       Effect.mapError((cause) =>
         cause._tag === "ProviderAdapterSessionNotFoundError"
           ? cause
-          : mapCodexRuntimeError(threadId, "thread/rollback", cause),
+          : mapCodexRuntimeError(
+              threadId,
+              "thread/rollback",
+              cause,
+              appServerTransport === "desktop-daemon",
+            ),
       ),
       Effect.map((snapshot) => ({
         threadId,
@@ -2316,7 +2440,12 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       Effect.mapError((cause) =>
         cause._tag === "ProviderAdapterSessionNotFoundError"
           ? cause
-          : mapCodexRuntimeError(input.threadId, "feedback/upload", cause),
+          : mapCodexRuntimeError(
+              input.threadId,
+              "feedback/upload",
+              cause,
+              appServerTransport === "desktop-daemon",
+            ),
       ),
     );
 
@@ -2326,7 +2455,12 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       Effect.mapError((cause) =>
         cause._tag === "ProviderAdapterSessionNotFoundError"
           ? cause
-          : mapCodexRuntimeError(threadId, "item/requestApproval/decision", cause),
+          : mapCodexRuntimeError(
+              threadId,
+              "item/requestApproval/decision",
+              cause,
+              appServerTransport === "desktop-daemon",
+            ),
       ),
     );
 
@@ -2340,7 +2474,12 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       Effect.mapError((cause) =>
         cause._tag === "ProviderAdapterSessionNotFoundError"
           ? cause
-          : mapCodexRuntimeError(threadId, "item/tool/requestUserInput", cause),
+          : mapCodexRuntimeError(
+              threadId,
+              "item/tool/requestUserInput",
+              cause,
+              appServerTransport === "desktop-daemon",
+            ),
       ),
     );
 

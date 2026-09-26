@@ -44,6 +44,10 @@ import { expandHomePath } from "../../pathExpansion.ts";
 import {
   codexAppServerCommandArgs,
   codexAppServerTransport,
+  codexDesktopDaemonEnvironment,
+  codexDesktopDaemonFailureMessage,
+  codexDesktopDaemonRepairMessage,
+  makeCodexAppServerProtocolLogger,
   makeCodexDesktopDaemonStdio,
   type CodexAppServerTransport,
 } from "../CodexAppServerTransport.ts";
@@ -442,12 +446,16 @@ const probeCodexAppServerProviderOnce = Effect.fn("probeCodexAppServerProviderOn
     // so `CODEX_HOME=~/.codex_work` would reach codex verbatim and trip
     // "CODEX_HOME points to '~/.codex_work', but that path does not exist".
     // Expand here for parity with `CodexTextGeneration`/`CodexSessionRuntime`.
-    const resolvedHomePath = input.homePath ? expandHomePath(input.homePath) : undefined;
+    const desktopDaemon = input.appServerTransport === "desktop-daemon";
+    const resolvedHomePath =
+      !desktopDaemon && input.homePath ? expandHomePath(input.homePath) : undefined;
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const environment = {
-      ...input.environment,
-      ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
-    };
+    const environment = desktopDaemon
+      ? codexDesktopDaemonEnvironment(input.environment)
+      : {
+          ...input.environment,
+          ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
+        };
     const launchArgs = codexLaunchArgv(input.launchArgs);
     const mcpPreflight = yield* Effect.promise(() =>
       preflightCodexMcpServers({
@@ -466,14 +474,14 @@ const probeCodexAppServerProviderOnce = Effect.fn("probeCodexAppServerProviderOn
     ]);
     const spawnCommand = yield* resolveSpawnCommand(input.binaryPath, commandArgs, {
       env: environment,
-      extendEnv: true,
+      extendEnv: !desktopDaemon,
     });
     const child = yield* spawner
       .spawn(
         ChildProcess.make(spawnCommand.command, spawnCommand.args, {
           cwd: input.cwd,
           env: environment,
-          extendEnv: true,
+          extendEnv: !desktopDaemon,
           forceKillAfter: CODEX_APP_SERVER_PROBE_FORCE_KILL_AFTER,
           shell: spawnCommand.shell,
         }),
@@ -489,7 +497,9 @@ const probeCodexAppServerProviderOnce = Effect.fn("probeCodexAppServerProviderOn
       );
     const clientLayer =
       input.appServerTransport === "desktop-daemon"
-        ? CodexClient.layerChildProcessStdio(child, yield* makeCodexDesktopDaemonStdio(child))
+        ? CodexClient.layerChildProcessStdio(child, yield* makeCodexDesktopDaemonStdio(child), {
+            logger: makeCodexAppServerProtocolLogger(),
+          })
         : CodexClient.layerChildProcess(child);
     const clientContext = yield* Layer.build(clientLayer);
     const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
@@ -607,7 +617,10 @@ const makePendingCodexProvider = (
     });
   });
 
-function accountProbeStatus(account: CodexAppServerProviderSnapshot["account"]): {
+function accountProbeStatus(
+  account: CodexAppServerProviderSnapshot["account"],
+  desktopDaemon: boolean,
+): {
   readonly status: Exclude<ServerProviderState, "disabled">;
   readonly auth: ServerProvider["auth"];
   readonly message?: string;
@@ -629,7 +642,11 @@ function accountProbeStatus(account: CodexAppServerProviderSnapshot["account"]):
     return {
       status: "error",
       auth: { status: "unauthenticated" },
-      message: "Codex CLI is not authenticated. Run `codex login` and try again.",
+      message: desktopDaemon
+        ? codexDesktopDaemonRepairMessage(
+            "could not authenticate because the Codex desktop app is not signed in. Sign in to the desktop app",
+          )
+        : "Codex CLI is not authenticated. Run `codex login` and try again.",
     };
   }
 
@@ -663,6 +680,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
   const resolvedEnvironment = environment ?? process.env;
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const emptyModels = emptyCodexModelsFromSettings(codexSettings);
+  const desktopDaemon = codexAppServerTransport(codexSettings) === "desktop-daemon";
 
   if (!codexSettings.enabled) {
     return buildServerProvider({
@@ -711,9 +729,11 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
         version: null,
         status: "error",
         auth: { status: "unknown" },
-        message: installed
-          ? `Codex app-server provider probe failed: ${error.message}.`
-          : "Codex CLI (`codex`) was not found on PATH.",
+        message: desktopDaemon
+          ? codexDesktopDaemonFailureMessage(error)
+          : installed
+            ? `Codex app-server provider probe failed: ${error.message}.`
+            : "Codex CLI (`codex`) was not found on PATH.",
       },
     });
   }
@@ -730,13 +750,17 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
         version: null,
         status: "error",
         auth: { status: "unknown" },
-        message: "Timed out while checking Codex app-server provider status.",
+        message: desktopDaemon
+          ? codexDesktopDaemonRepairMessage(
+              "timed out while connecting to the daemon or checking its app-server protocol",
+            )
+          : "Timed out while checking Codex app-server provider status.",
       },
     });
   }
 
   const snapshot = probeResult.success.value;
-  const accountStatus = accountProbeStatus(snapshot.account);
+  const accountStatus = accountProbeStatus(snapshot.account, desktopDaemon);
 
   return buildServerProvider({
     presentation: CODEX_PRESENTATION,
