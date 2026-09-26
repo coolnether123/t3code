@@ -27,10 +27,12 @@ import {
 import {
   DpopFailureReason,
   AuthSessionId,
+  NonNegativeInt,
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
+import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import {
   ClientOrchestrationCommand,
   DispatchResult,
@@ -38,6 +40,11 @@ import {
   OrchestrationShellSnapshot,
   OrchestrationThreadDetailSnapshot,
 } from "./orchestration.ts";
+import {
+  ServerProviderAvailability,
+  ServerProviderAuthStatus,
+  ServerProviderState,
+} from "./server.ts";
 import {
   PullRequestDiffInput,
   PullRequestDiffResult,
@@ -408,6 +415,52 @@ export const AuthOtherClientSessionsRevokeResult = Schema.Struct({
 });
 export type AuthOtherClientSessionsRevokeResult = typeof AuthOtherClientSessionsRevokeResult.Type;
 
+export const ENVIRONMENT_PROVIDER_SNAPSHOT_LIMIT = 25;
+export const ENVIRONMENT_PROVIDER_MESSAGE_MAX_LENGTH = 2000;
+export const ENVIRONMENT_PROVIDER_TEXT_MAX_LENGTH = 300;
+
+export const EnvironmentProviderStatus = Schema.Struct({
+  instanceId: ProviderInstanceId,
+  driver: ProviderDriverKind,
+  displayName: Schema.optional(
+    Schema.String.check(Schema.isMaxLength(ENVIRONMENT_PROVIDER_TEXT_MAX_LENGTH)),
+  ),
+  enabled: Schema.Boolean,
+  status: ServerProviderState,
+  availability: ServerProviderAvailability,
+  message: Schema.optional(
+    Schema.String.check(Schema.isMaxLength(ENVIRONMENT_PROVIDER_MESSAGE_MAX_LENGTH)),
+  ),
+  messageTruncated: Schema.Boolean,
+  version: Schema.NullOr(
+    Schema.String.check(Schema.isMaxLength(ENVIRONMENT_PROVIDER_TEXT_MAX_LENGTH)),
+  ),
+  auth: Schema.Struct({
+    status: ServerProviderAuthStatus,
+    type: Schema.optional(
+      Schema.String.check(Schema.isMaxLength(ENVIRONMENT_PROVIDER_TEXT_MAX_LENGTH)),
+    ),
+    label: Schema.optional(
+      Schema.String.check(Schema.isMaxLength(ENVIRONMENT_PROVIDER_TEXT_MAX_LENGTH)),
+    ),
+  }),
+  modelCount: NonNegativeInt,
+  skillCount: NonNegativeInt,
+  desktopBacked: Schema.optional(Schema.NullOr(Schema.Boolean)),
+});
+export type EnvironmentProviderStatus = typeof EnvironmentProviderStatus.Type;
+
+const EnvironmentProviderSnapshotQuery = {
+  instanceId: Schema.optional(ProviderInstanceId),
+};
+
+export const EnvironmentProviderSnapshotResult = Schema.Struct({
+  providers: Schema.Array(EnvironmentProviderStatus),
+  providerCount: NonNegativeInt,
+  providersOmitted: NonNegativeInt,
+});
+export type EnvironmentProviderSnapshotResult = typeof EnvironmentProviderSnapshotResult.Type;
+
 class EnvironmentMetadataHttpApi extends HttpApiGroup.make("metadata").add(
   HttpApiEndpoint.get("descriptor", "/.well-known/t3/environment", {
     success: ExecutionEnvironmentDescriptor,
@@ -489,6 +542,15 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
       error: EnvironmentScopedOperationErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
+
+class EnvironmentProvidersHttpApi extends HttpApiGroup.make("providers").add(
+  HttpApiEndpoint.get("snapshot", "/api/providers", {
+    headers: OptionalBearerHeaders,
+    payload: EnvironmentProviderSnapshotQuery,
+    success: EnvironmentProviderSnapshotResult,
+    error: EnvironmentOrchestrationSnapshotErrors,
+  }).middleware(EnvironmentAuthenticatedAuth),
+) {}
 
 const EnvironmentOrchestrationThreadSnapshotParams = Schema.Struct({
   threadId: ThreadId,
@@ -617,6 +679,7 @@ class EnvironmentConnectHttpApi extends HttpApiGroup.make("connect")
 export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentMetadataHttpApi)
   .add(EnvironmentAuthHttpApi)
+  .add(EnvironmentProvidersHttpApi)
   .add(EnvironmentOrchestrationHttpApi)
   .add(EnvironmentPullRequestsHttpApi)
   .add(EnvironmentConnectHttpApi) {}
