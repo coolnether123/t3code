@@ -66,6 +66,7 @@ import { recoverCodexDenyReadAclState } from "./CodexSandboxRecovery.ts";
 import { makeCodexFileChangeApprovalContext } from "./CodexFileChangeApprovalContext.ts";
 import { normalizeServiceTier, type CodexTierObservation } from "../../usage/codexServiceTier.ts";
 import { migrateCodexResumeRollout } from "../Drivers/CodexHomeLayout.ts";
+import { attachCodexDesktopPluginSkills } from "../CodexDesktopPluginSkills.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
 
 const PROVIDER = ProviderDriverKind.make("codex");
@@ -1015,6 +1016,16 @@ export const openCodexThread = (input: {
   });
 };
 
+export const initializeCodexSessionClient = Effect.fn("initializeCodexSessionClient")(function* (
+  client: Pick<CodexClient.CodexAppServerClient["Service"], "request" | "notify" | "raw">,
+  desktopDaemon: boolean,
+  environment: NodeJS.ProcessEnv,
+) {
+  yield* client.request("initialize", buildCodexInitializeParams());
+  yield* client.notify("initialized", undefined);
+  return desktopDaemon ? yield* attachCodexDesktopPluginSkills(client, environment) : undefined;
+});
+
 function readNotificationThreadId(notification: CodexServerNotification): string | undefined {
   switch (notification.method) {
     case "thread/started":
@@ -1409,6 +1420,8 @@ export const makeCodexSessionRuntime = (
   | Scope.Scope
 > =>
   Effect.gen(function* () {
+    const desktopPluginFileSystem = yield* FileSystem.FileSystem;
+    const desktopPluginPath = yield* Path.Path;
     const desktopDaemon = options.appServerTransport === "desktop-daemon";
     const resolvedHomePath =
       !desktopDaemon && options.homePath ? expandHomePath(options.homePath) : undefined;
@@ -2542,8 +2555,13 @@ export const makeCodexSessionRuntime = (
 
     const start = Effect.fn("CodexSessionRuntime.start")(function* () {
       yield* emitSessionEvent("session/connecting", "Starting Codex App Server session.");
-      yield* client.request("initialize", buildCodexInitializeParams());
-      yield* client.notify("initialized", undefined);
+      const desktopPluginSkillWarning = yield* initializeCodexSessionClient(client, desktopDaemon, {
+        ...process.env,
+        ...env,
+      }).pipe(
+        Effect.provideService(FileSystem.FileSystem, desktopPluginFileSystem),
+        Effect.provideService(Path.Path, desktopPluginPath),
+      );
 
       const requiresSubagentIsolation =
         options.workerSession === true ||
@@ -2597,9 +2615,11 @@ export const makeCodexSessionRuntime = (
         );
         yield* emitSessionEvent(
           "session/tools",
-          inventory
-            ? formatCodexThreadMcpInventory(inventory)
-            : "Tools attached to this thread: inventory could not be read from the Codex desktop daemon.",
+          `${
+            inventory
+              ? formatCodexThreadMcpInventory(inventory)
+              : "Tools attached to this thread: inventory could not be read from the Codex desktop daemon."
+          }${desktopPluginSkillWarning ? ` ${desktopPluginSkillWarning}` : ""}`,
         );
       }
       return session;

@@ -1,7 +1,10 @@
 import * as NodeAssert from "node:assert/strict";
 
 import { it } from "@effect/vitest";
+import { NodeServices } from "@effect/platform-node";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { describe } from "vite-plus/test";
 import { DEFAULT_MODEL, ThreadId } from "@t3tools/contracts";
@@ -33,6 +36,7 @@ import {
   makeMemoryConsolidationNotificationFilter,
   mcpApprovalRequestKind,
   openCodexThread,
+  initializeCodexSessionClient,
   parseCodexDaemonThreadConfig,
 } from "./CodexSessionRuntime.ts";
 import { isWorkerLifecycleToolName } from "../../worker/WorkerThreadBoundary.ts";
@@ -1058,6 +1062,69 @@ describe("Codex desktop daemon command", () => {
 });
 
 describe("openCodexThread", () => {
+  it.effect("attaches desktop plugin roots before thread/start and skips them for stdio", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      for (const desktopDaemon of [true, false]) {
+        const calls: string[] = [];
+        const client = {
+          request: (method: string) => {
+            calls.push(method);
+            return Effect.succeed(
+              method === "thread/start" ? makeThreadOpenResponse("opened-thread") : {},
+            );
+          },
+          notify: (method: string) => {
+            calls.push(method);
+            return Effect.void;
+          },
+          raw: {
+            request: (method: string, params: { extraRoots: ReadonlyArray<string> }) => {
+              NodeAssert.deepStrictEqual(params.extraRoots, [
+                path.join("A:/bundle", "plugins", "chrome", "skills"),
+              ]);
+              calls.push(method);
+              return Effect.succeed({});
+            },
+          },
+        };
+        yield* Effect.gen(function* () {
+          yield* initializeCodexSessionClient(
+            client as unknown as Parameters<typeof initializeCodexSessionClient>[0],
+            desktopDaemon,
+            { CODEX_HOME: "A:/fake-codex-home" },
+          );
+          yield* openCodexThread({
+            client: client as unknown as Parameters<typeof openCodexThread>[0]["client"],
+            threadId: ThreadId.make("thread-start"),
+            runtimeMode: "full-access",
+            cwd: "A:/project",
+            requestedModel: undefined,
+            serviceTier: undefined,
+            resumeThreadId: undefined,
+          });
+        }).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            readFileString: () =>
+              Effect.succeed(
+                '[marketplaces.openai-bundled]\nsource_type = "local"\nsource = \'A:/bundle\'\n[plugins."chrome@openai-bundled"]\nenabled = true',
+              ),
+            stat: () =>
+              Effect.succeed({ type: "Directory" }) as unknown as ReturnType<typeof fs.stat>,
+          }),
+        );
+        NodeAssert.deepStrictEqual(
+          calls,
+          desktopDaemon
+            ? ["initialize", "initialized", "skills/extraRoots/set", "thread/start"]
+            : ["initialize", "initialized", "thread/start"],
+        );
+      }
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("propagates daemon thread config through start, resume, and fork", () =>
     Effect.gen(function* () {
       const calls: Array<{

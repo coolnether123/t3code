@@ -36,6 +36,17 @@ servers, browser extension, and approvals. This setting belongs to the provider
 instance on the environment running T3, so a remote web or mobile client sees
 the same choice and status.
 
+After the daemon handshake, T3 reads the host's `CODEX_HOME/config.toml` (or
+`~/.codex/config.toml`) for the local `openai-bundled` marketplace source and
+enabled `plugins."<name>@openai-bundled"` entries. It attaches existing
+`<source>/plugins/<name>/skills` directories through `skills/extraRoots/set`
+before opening the thread. The provider probe does the same before refreshing
+`skills/list`, so the listed skills reflect the daemon's enabled bundled
+plugins. T3 does not copy plugin content or enable disabled plugins. Missing
+skill directories are skipped. A config read, parse, or attachment failure
+leaves the session usable and appears in its tool-inventory activity. Loading
+a skill does not prove that a browser or app is connected or approved.
+
 In the verified daemon flow, `cua_repl` exposed a JavaScript `agent` whose
 `browsers.list()` returned Chrome and Edge extension instances with extension
 instance metadata. `node_repl` did not define `agent`. These are observations
