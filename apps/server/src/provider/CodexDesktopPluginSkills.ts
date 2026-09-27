@@ -133,11 +133,11 @@ export const attachCodexDesktopPluginSkills = Effect.fn("attachCodexDesktopPlugi
           ),
         );
       }
-      return undefined as string | undefined;
+      return { extraRoots, warning: undefined as string | undefined };
     }).pipe(
       Effect.catch((error) => {
         const warning = `desktop plugin skills could not be attached: ${error instanceof DesktopPluginSkillError ? error.reason : "skill directory lookup failed"}`;
-        return Effect.logWarning(warning).pipe(Effect.as(warning));
+        return Effect.logWarning(warning).pipe(Effect.as({ extraRoots: [], warning }));
       }),
     );
   },
