@@ -73,7 +73,9 @@ export function ProjectDefaultsSettings({
   const storedSelection = serverSettings.defaultModelSelection;
   const selection = resolveDefaultProviderModelSelection(providers, storedSelection, settings);
   const entries = sortProviderInstanceEntries(
-    applyProviderInstanceSettings(deriveProviderInstanceEntries(providers), settings),
+    applyProviderInstanceSettings(deriveProviderInstanceEntries(providers), settings).filter(
+      (entry) => entry.showInNewChats,
+    ),
   );
   const modelOptions = getCustomModelOptionsByInstance(
     settings,
@@ -116,6 +118,7 @@ export function ProjectDefaultsSettings({
       ).get(instanceId);
       if (
         !entry?.enabled ||
+        !entry.showInNewChats ||
         !entry.isAvailable ||
         entry.driverKind !== sourceEntry?.driverKind ||
         !options?.some((option) => option.slug === model && !option.isUnavailable)

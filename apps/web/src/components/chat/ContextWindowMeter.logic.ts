@@ -38,7 +38,11 @@ export function hasAvailableCompactionProvider(input: {
     : driverProviders;
 
   return providerSupportsManualCompaction(
-    resolveSelectableProviderInstanceEntry(compatibleProviders, input.instanceId ?? undefined),
+    resolveSelectableProviderInstanceEntry(
+      compatibleProviders,
+      input.instanceId ?? undefined,
+      true,
+    ),
   );
 }
 

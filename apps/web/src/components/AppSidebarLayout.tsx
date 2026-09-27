@@ -7,8 +7,7 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
-import { Link, useLocation, useNavigate } from "@tanstack/react-router";
-import { MessageSquareIcon } from "lucide-react";
+import { useLocation, useNavigate } from "@tanstack/react-router";
 
 import { isElectron } from "../env";
 import { getLocalStorageItem, removeLocalStorageItem } from "../hooks/useLocalStorage";
@@ -24,7 +23,7 @@ import {
 import LegacyThreadSidebar from "./LegacySidebar";
 import ThreadSidebar from "./Sidebar";
 import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
-import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
+import { SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import {
   resolveSidebarStageFocusRingOffsetClass,
   useSidebarStageBackdropVariant,
@@ -39,9 +38,6 @@ import {
 } from "./threadSidebarWidth";
 import {
   Sidebar,
-  SidebarContent,
-  SidebarGroup,
-  SidebarMenuButton,
   SidebarProvider,
   SidebarRail,
   SidebarTrigger,
@@ -143,26 +139,6 @@ function SidebarControl() {
 function ProjectProjectionRetention() {
   useProjects();
   return null;
-}
-
-function CodexModeSidebar() {
-  return (
-    <>
-      <SidebarChromeHeader isElectron={isElectron} />
-      <SidebarContent className="gap-0">
-        <SidebarGroup className="p-[var(--sidebar-content-inset)]">
-          <SidebarMenuButton
-            render={<Link to="/" />}
-            className="h-9 w-full justify-start gap-2.5 px-2.5 text-sm"
-          >
-            <MessageSquareIcon />
-            <span>T3 chats</span>
-          </SidebarMenuButton>
-        </SidebarGroup>
-      </SidebarContent>
-      <SidebarChromeFooter />
-    </>
-  );
 }
 
 export function AppSidebarLayout({ children }: { children: ReactNode }) {
@@ -271,8 +247,6 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
               <SidebarChromeHeader isElectron={isElectron} />
               <SettingsSidebarNav pathname={pathname} />
             </>
-          ) : pathname === "/codex" ? (
-            <CodexModeSidebar />
           ) : legacySidebarEnabled ? (
             <LegacyThreadSidebar />
           ) : (

@@ -504,4 +504,63 @@ describe("mobile model options", () => {
       }),
     ).toBeNull();
   });
+
+  it("excludes hidden instances from new tasks while retaining an existing thread's models", () => {
+    const hiddenId = ProviderInstanceId.make("codex_cli");
+    const visibleId = ProviderInstanceId.make("codex_desktop");
+    const hiddenSelection = { instanceId: hiddenId, model: "cli" };
+    const config = {
+      providers: [hiddenId, visibleId].map((instanceId) => ({
+        instanceId,
+        driver: "codex",
+        enabled: true,
+        installed: true,
+        auth: { status: "authenticated" },
+        models: [
+          {
+            slug: instanceId === hiddenId ? "cli" : "desktop",
+            name: "Default",
+            isDefault: true,
+            capabilities: null,
+          },
+          { slug: "other", name: "Other", capabilities: null },
+        ],
+      })),
+      settings: { providerInstances: { [hiddenId]: { driver: "codex", showInNewChats: false } } },
+    } as unknown as ServerConfig;
+
+    expect(resolveDefaultableModelSelection(config, hiddenSelection)).toBeNull();
+    expect(resolveSelectableModelSelection(config, hiddenSelection)).toBe(hiddenSelection);
+    expect(buildModelOptions(config, null).map((option) => option.providerKey)).toEqual([
+      visibleId,
+      visibleId,
+    ]);
+    expect(
+      buildModelOptions(config, hiddenSelection).filter(
+        (option) => option.providerKey === hiddenId,
+      ),
+    ).toHaveLength(2);
+    expect(
+      resolveNewTaskModelSelection({
+        draftSelection: null,
+        projectDefaultSelection: null,
+        stickySelection: resolveDefaultableModelSelection(config, hiddenSelection),
+        modelOptions: buildModelOptions(config, null),
+      })?.instanceId,
+    ).toBe(visibleId);
+    const otherProvider = {
+      ...buildModelOptions(config, null)[0]!,
+      providerDriver: "claudeAgent",
+      isDefault: true,
+    };
+    expect(
+      resolveNewTaskModelSelection({
+        draftSelection: null,
+        projectDefaultSelection: null,
+        stickySelection: null,
+        preferredDriver: "codex",
+        modelOptions: [otherProvider, ...buildModelOptions(config, null)],
+      })?.instanceId,
+    ).toBe(visibleId);
+  });
 });

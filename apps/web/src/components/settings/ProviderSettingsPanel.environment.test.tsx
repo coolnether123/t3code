@@ -100,6 +100,7 @@ vi.mock("../../state/session", () => ({
 }));
 
 import { EnvironmentProviderSettings } from "./ProviderSettingsPanel";
+import { ProviderInstanceCard } from "./ProviderInstanceCard";
 
 const environmentId = EnvironmentId.make("remote-device");
 const codexId = ProviderInstanceId.make("codex");
@@ -228,6 +229,32 @@ describe("EnvironmentProviderSettings routing", () => {
     const panel = renderPanel({ targetInstanceId: customId });
     const editor = visitElements(panel, (element) => element.props.mode === "editor");
     expect(editor?.props.instanceId).toBe(customId);
+  });
+
+  it("offers each instance for new chats by default and saves the switch", () => {
+    atoms.providers = [provider()];
+    const panel = renderPanel({ targetInstanceId: codexId });
+    const editor = visitElements(panel, (element) => element.props.mode === "editor");
+    expect(editor).not.toBeNull();
+    hooks.reset();
+    hooks.beginRender();
+    const card = ProviderInstanceCard(
+      editor!.props as unknown as Parameters<typeof ProviderInstanceCard>[0],
+    );
+    const row = visitElements(card, (element) => element.props.title === "Offer for new chats");
+    expect(row?.props.description).toBe(
+      "Hide this instance from new chats without changing existing threads.",
+    );
+    const control = visitElements(row?.props.control, (element) => element.props.checked === true);
+    expect(control?.props["aria-label"]).toBe("Offer Codex for new chats");
+    (control?.props.onCheckedChange as ((value: boolean) => void) | undefined)?.(false);
+    expect(settingsState.updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerInstances: expect.objectContaining({
+          [codexId]: expect.objectContaining({ showInNewChats: false }),
+        }),
+      }),
+    );
   });
 
   it("does not substitute another account when the requested instance was removed", () => {
