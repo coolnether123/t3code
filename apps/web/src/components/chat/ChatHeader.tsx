@@ -55,6 +55,8 @@ interface ChatHeaderProps {
   activeThreadId: ThreadId;
   draftId?: DraftId;
   activeThreadTitle: string;
+  providerRuntimeLabel: string | null;
+  onStartDesktopDraft?: (() => void) | undefined;
   /** Drafts have no server thread yet, so the title carries no action menu. */
   isServerThread: boolean;
   /** PR feeding the settled classification, resolved by ChatView. */
@@ -176,6 +178,8 @@ export const ChatHeader = memo(function ChatHeader({
   activeThreadId,
   draftId,
   activeThreadTitle,
+  providerRuntimeLabel,
+  onStartDesktopDraft,
   isServerThread,
   changeRequest,
   activeProjectName,
@@ -491,6 +495,14 @@ export const ChatHeader = memo(function ChatHeader({
           )}
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
+      {providerRuntimeLabel ? (
+        <span
+          className="no-drag shrink-0 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground"
+          aria-label={`Chat runtime: ${providerRuntimeLabel}`}
+        >
+          {providerRuntimeLabel}
+        </span>
+      ) : null}
       <CompactTaskActions
         open={mobileActionsOpen}
         onOpenChange={setMobileActionsOpen}
@@ -526,6 +538,19 @@ export const ChatHeader = memo(function ChatHeader({
             >
               <PlusIcon aria-hidden className="size-4" />
               New task in {activeProjectName}
+            </Button>
+          ) : null}
+          {onStartDesktopDraft ? (
+            <Button
+              type="button"
+              variant="ghost"
+              className="min-h-11 w-full justify-start border-0 px-3"
+              onClick={() => {
+                setMobileActionsOpen(false);
+                onStartDesktopDraft();
+              }}
+            >
+              Start desktop draft with loaded transcript
             </Button>
           ) : null}
           {(activeProjectScripts || showOpenInPicker || activeProjectName) && (
@@ -611,6 +636,27 @@ export const ChatHeader = memo(function ChatHeader({
             {isCopied ? "Copied full chat" : "Copy full chat"}
           </TooltipPopup>
         </Tooltip>
+        {onStartDesktopDraft ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="no-drag min-h-9 shrink-0"
+                  onClick={onStartDesktopDraft}
+                />
+              }
+            >
+              Start desktop draft
+            </TooltipTrigger>
+            <TooltipPopup side="bottom">
+              Copies the loaded transcript into a new Codex desktop draft for review. Earlier turns
+              may be omitted. The original chat stays here.
+            </TooltipPopup>
+          </Tooltip>
+        ) : null}
         {activeProjectScripts && (
           <ProjectScriptsControl
             scripts={activeProjectScripts}

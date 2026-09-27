@@ -350,6 +350,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   readonly project: EnvironmentProject | null;
   readonly projectTitle?: string;
   readonly providerDriver: string | null;
+  readonly providerRuntimeLabel?: string | null;
   /** Which machine hosts the thread. Null when only one environment is
       connected — repeating the same label on every row is noise. Mirrors
       the web sidebar's remote-environment cloud icon, but as text since
@@ -826,6 +827,14 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
             <ProviderIcon provider={props.providerDriver} size={14} />
           </View>
         ) : null}
+        {props.providerRuntimeLabel ? (
+          <Text
+            className="text-[10px] text-muted-foreground"
+            accessibilityLabel={`Chat runtime: ${props.providerRuntimeLabel}`}
+          >
+            {props.providerRuntimeLabel === "Codex desktop" ? "Desktop" : "CLI"}
+          </Text>
+        ) : null}
       </View>
     </>
   );
@@ -834,9 +843,13 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     variant === "card" ? (
       <Pressable
         accessibilityHint={swipeAccessibilityHint}
-        accessibilityLabel={
-          props.hasQueuedMessages ? `${thread.title}, messages queued to send` : thread.title
-        }
+        accessibilityLabel={[
+          thread.title,
+          props.providerRuntimeLabel,
+          props.hasQueuedMessages ? "messages queued to send" : null,
+        ]
+          .filter(Boolean)
+          .join(", ")}
         accessibilityRole="button"
         accessibilityState={{ selected }}
         onPress={() => {
@@ -876,9 +889,13 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     ) : (
       <Pressable
         accessibilityHint={swipeAccessibilityHint}
-        accessibilityLabel={
-          props.hasQueuedMessages ? `${thread.title}, messages queued to send` : thread.title
-        }
+        accessibilityLabel={[
+          thread.title,
+          props.providerRuntimeLabel,
+          props.hasQueuedMessages ? "messages queued to send" : null,
+        ]
+          .filter(Boolean)
+          .join(", ")}
         accessibilityRole="button"
         accessibilityState={{ selected }}
         className={sidebarPane ? undefined : "bg-screen"}

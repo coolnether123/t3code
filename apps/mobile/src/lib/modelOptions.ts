@@ -62,6 +62,15 @@ function isDesktopBackedCodexInstance(
   return instanceId === "codex" && config?.settings?.providers.codex.useDesktopAppDaemon === true;
 }
 
+export function codexThreadRuntimeLabel(
+  config: T3ServerConfig | null | undefined,
+  instanceId: string,
+): string | null {
+  const provider = config?.providers.find((candidate) => candidate.instanceId === instanceId);
+  if (provider?.driver !== "codex") return null;
+  return isDesktopBackedCodexInstance(config, instanceId) ? "Codex desktop" : "Codex CLI";
+}
+
 function isOfferedForNewChats(
   config: T3ServerConfig | null | undefined,
   instanceId: ProviderInstanceId,

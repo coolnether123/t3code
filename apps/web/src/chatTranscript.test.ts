@@ -2,13 +2,41 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   EventId,
   MessageId,
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   ThreadId,
   TurnId,
   type OrchestrationMessage,
   type OrchestrationThreadActivity,
 } from "@t3tools/contracts";
 
-import { serializeTaskTranscript } from "./chatTranscript";
+import { prepareDesktopDraftPrompt, serializeTaskTranscript } from "./chatTranscript";
+
+describe("prepareDesktopDraftPrompt", () => {
+  it("labels copied context honestly without changing the original transcript", () => {
+    const transcript = "Earlier user and assistant messages";
+    const prompt = prepareDesktopDraftPrompt("Old chat", transcript);
+    expect(prompt).toContain("not a native provider continuation");
+    expect(prompt).toContain("Earlier turns may be omitted");
+    expect(prompt?.endsWith(transcript)).toBe(true);
+    expect(transcript).toBe("Earlier user and assistant messages");
+  });
+
+  it("refuses a transcript that cannot fit in one provider message", () => {
+    const emptyPrompt = prepareDesktopDraftPrompt("Old chat", "")!;
+    expect(
+      prepareDesktopDraftPrompt(
+        "Old chat",
+        "x".repeat(PROVIDER_SEND_TURN_MAX_INPUT_CHARS - emptyPrompt.length),
+      ),
+    ).toHaveLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
+    expect(
+      prepareDesktopDraftPrompt(
+        "Old chat",
+        "x".repeat(PROVIDER_SEND_TURN_MAX_INPUT_CHARS - emptyPrompt.length + 1),
+      ),
+    ).toBeNull();
+  });
+});
 
 describe("serializeTaskTranscript", () => {
   it("exports messages, tool invocations, complete command results, and errors chronologically", () => {

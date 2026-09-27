@@ -36,6 +36,7 @@ import {
   AppState,
   Keyboard,
   Platform,
+  Text,
   useWindowDimensions,
   View,
   type GestureResponderEvent,
@@ -57,6 +58,7 @@ import Animated, {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
+import { codexThreadRuntimeLabel } from "../../lib/modelOptions";
 import type { ComposerEditorHandle } from "../../components/ComposerEditor";
 import type { StatusTone } from "../../components/StatusPill";
 import type { DraftComposerAttachment } from "../../lib/composerImages";
@@ -275,7 +277,12 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
   }, []);
   const windowHeight = useWindowDimensions().height;
   const navigationHeaderHeight = useContext(HeaderHeightContext) || insets.top + IOS_NAV_BAR_HEIGHT;
-  const agentLabel = `${props.selectedThread.modelSelection.instanceId} agent`;
+  const runtimeLabel = codexThreadRuntimeLabel(
+    props.serverConfig,
+    props.selectedThread.session?.providerInstanceId ??
+      props.selectedThread.modelSelection.instanceId,
+  );
+  const agentLabel = `${runtimeLabel ?? props.selectedThread.modelSelection.instanceId} agent`;
   const selectedThreadKey = scopedThreadKey(props.environmentId, props.selectedThread.id);
   const composerEditorRef = useRef<ComposerEditorHandle>(null);
   const draftMessageRef = useRef(props.draftMessage);
@@ -746,6 +753,14 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
           onTouchEnd={handleFeedTouchEnd}
           onTouchCancel={handleFeedTouchCancel}
         >
+          {runtimeLabel ? (
+            <Text
+              accessibilityLabel={`Chat runtime: ${runtimeLabel}`}
+              className="px-4 py-1 text-xs text-muted-foreground"
+            >
+              {runtimeLabel}
+            </Text>
+          ) : null}
           <ThreadFeed
             key={selectedThreadKey}
             environmentId={props.environmentId}
