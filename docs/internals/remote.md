@@ -46,11 +46,19 @@ every route. See [environment authentication](./environment-auth.md) and the
 
 ## One server owns each data directory
 
-The server records its PID, port, and start time in `userdata/server-runtime.json`.
-Startup refuses to replace a record whose different PID is still alive. It may
-replace a record whose PID has exited. Shutdown removes the record only when
-both its PID and start time still match the server that is stopping. The file
-update remains atomic.
+Before opening the application database, the server holds a SQLite write
+transaction in `userdata/server-ownership.sqlite`. Only one process can hold it
+for a data directory. The operating system releases the transaction when the
+process exits, including after a crash. Keep the lock file in place; no stale
+PID cleanup is needed. A corrupt or unwritable lock stops startup.
+
+The server also records its PID, port, and start time in
+`userdata/server-runtime.json`. This record lets launchers find the owner while
+the lock prevents concurrent startup. Startup refuses to replace a record whose
+different PID is still alive. It may replace a record whose PID has exited.
+An unreadable or malformed record, or a failed record write, stops startup.
+Shutdown removes the record only when both its PID and start time still match
+the server that is stopping. The file update remains atomic.
 
 SSH can launch a server as well as forward a port. Desktop main owns that
 lifecycle because it can spawn SSH and handle authentication prompts. The
