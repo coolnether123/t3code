@@ -28,6 +28,7 @@ import {
   buildCodexDaemonThreadConfig,
   assertCodexSubagentIsolationConfig,
   formatCodexThreadMcpInventory,
+  formatCodexDesktopPluginSkills,
   hasConfiguredMcpServer,
   readCodexThreadMcpInventory,
   readCodexBrowserAvailability,
@@ -1057,6 +1058,53 @@ describe("Codex desktop daemon command", () => {
         enableT3Workers: true,
       }),
       ["app-server", "proxy"],
+    );
+  });
+});
+
+describe("Codex desktop plugin skill inventory", () => {
+  it("reports only skills the daemon loaded from accepted bundled roots", () => {
+    const response = {
+      data: [
+        {
+          cwd: "A:/project",
+          skills: [
+            {
+              name: "control-chrome",
+              enabled: true,
+              path: "A:\\bundle\\plugins\\chrome\\skills\\control-chrome\\SKILL.md",
+            },
+            {
+              name: "control-in-app-browser",
+              enabled: true,
+              path: "A:/bundle/plugins/browser/skills/control-in-app-browser/SKILL.md",
+            },
+            {
+              name: "computer-use",
+              enabled: true,
+              path: "A:/bundle/plugins/computer-use/skills/computer-use/SKILL.md",
+            },
+            {
+              name: "disabled",
+              enabled: false,
+              path: "A:/bundle/plugins/chrome/skills/disabled/SKILL.md",
+            },
+            { name: "unrelated", enabled: true, path: "A:/user/skills/unrelated/SKILL.md" },
+          ],
+        },
+      ],
+    } as unknown as EffectCodexSchema.V2SkillsListResponse;
+    NodeAssert.equal(
+      formatCodexDesktopPluginSkills(response, [
+        "A:/bundle/plugins/chrome/skills",
+        "A:/bundle/plugins/browser/skills",
+        "A:/bundle/plugins/computer-use/skills",
+      ]),
+      "Bundled desktop plugin skills: chrome:control-chrome, browser:control-in-app-browser, computer-use:computer-use.",
+    );
+    NodeAssert.equal(
+      formatCodexDesktopPluginSkills(response, ["A:/bundle/plugins/missing/skills"]),
+      "Bundled desktop plugin skills: none reported by the daemon.",
     );
   });
 });

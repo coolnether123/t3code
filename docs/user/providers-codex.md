@@ -18,6 +18,9 @@ change it from a remote client; it does not switch the Mac or account used by
 another environment. If the host daemon is unavailable, the instance shows its
 connection error in provider settings, the model picker, and the thread. T3 does
 not switch that instance to managed Chrome or silently choose another provider.
+When a desktop-backed thread opens, its work log lists the MCP servers and
+bundled plugin skills the daemon reports for that thread. If either inventory
+cannot be read, the log says so instead of treating it as an empty list.
 
 To keep one Codex instance out of new chats, turn off **Offer for new chats**
 on that instance in **Settings > Providers**. Existing threads still use it,

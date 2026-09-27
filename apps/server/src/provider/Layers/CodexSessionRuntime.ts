@@ -134,6 +134,7 @@ export interface CodexThreadMcpInventory {
 }
 
 const CODEX_THREAD_MCP_INVENTORY_LIMIT = 40;
+const CODEX_INVENTORY_CONTROL_CHARS = /\p{Cc}/gu;
 
 export const readCodexThreadMcpInventory = Effect.fn("readCodexThreadMcpInventory")(function* (
   client: {
@@ -170,7 +171,7 @@ export const readCodexThreadMcpInventory = Effect.fn("readCodexThreadMcpInventor
         continue;
       }
       servers.push({
-        name: server.name.replace(/[\u0000-\u001f\u007f]/gu, " ").slice(0, 80),
+        name: server.name.replace(CODEX_INVENTORY_CONTROL_CHARS, " ").slice(0, 80),
         startupStatus: startupStatuses.get(server.name) ?? "unknown",
         authStatus: server.authStatus,
         toolCount: Object.keys(server.tools).length,
@@ -208,6 +209,27 @@ export function formatCodexThreadMcpInventory(inventory: CodexThreadMcpInventory
           .join("; ");
   const omitted = inventory.omittedServers ? "; additional servers omitted" : "";
   return `Tools attached to this thread: ${servers}${omitted}. cua_repl ${inventory.hasCuaRepl ? "present" : "absent"}; node_repl ${inventory.hasNodeRepl ? "present" : "absent"}.`;
+}
+
+export function formatCodexDesktopPluginSkills(
+  response: EffectCodexSchema.V2SkillsListResponse,
+  extraRoots: ReadonlyArray<string>,
+): string {
+  const roots = extraRoots.map((root) => `${root.replace(/\\/gu, "/").toLowerCase()}/`);
+  const skills = response.data
+    .flatMap((entry) => entry.skills)
+    .filter(
+      (skill) =>
+        skill.enabled &&
+        roots.some((root) => skill.path.replace(/\\/gu, "/").toLowerCase().startsWith(root)),
+    )
+    .map((skill) => {
+      const path = skill.path.replace(/\\/gu, "/");
+      const root = roots.find((candidate) => path.toLowerCase().startsWith(candidate))!;
+      const plugin = root.slice(0, -1).split("/").at(-2);
+      return `${plugin}:${skill.name.replace(CODEX_INVENTORY_CONTROL_CHARS, " ").slice(0, 80)}`;
+    });
+  return `Bundled desktop plugin skills: ${skills.length ? [...new Set(skills)].join(", ") : "none reported by the daemon"}.`;
 }
 
 /**
@@ -2558,7 +2580,7 @@ export const makeCodexSessionRuntime = (
 
     const start = Effect.fn("CodexSessionRuntime.start")(function* () {
       yield* emitSessionEvent("session/connecting", "Starting Codex App Server session.");
-      const desktopPluginSkillWarning = yield* initializeCodexSessionClient(client, desktopDaemon, {
+      const desktopPluginSkills = yield* initializeCodexSessionClient(client, desktopDaemon, {
         ...process.env,
         ...env,
       }).pipe(
@@ -2607,22 +2629,41 @@ export const makeCodexSessionRuntime = (
       yield* Ref.set(sessionRef, session);
       yield* emitSessionEvent("session/ready", "Codex App Server session ready.");
       if (daemonThreadConfig !== undefined) {
-        const inventory = yield* readCodexThreadMcpInventory(
-          client,
-          providerThreadId,
-          yield* Ref.get(mcpStartupStatusesRef),
-        ).pipe(
-          Effect.timeoutOption("2 seconds"),
-          Effect.map(Option.getOrUndefined),
-          Effect.orElseSucceed(() => undefined),
+        const { inventory, pluginSkills } = yield* Effect.all(
+          {
+            inventory: readCodexThreadMcpInventory(
+              client,
+              providerThreadId,
+              yield* Ref.get(mcpStartupStatusesRef),
+            ).pipe(
+              Effect.timeoutOption("10 seconds"),
+              Effect.map(Option.getOrUndefined),
+              Effect.orElseSucceed(() => undefined),
+            ),
+            pluginSkills: desktopPluginSkills?.extraRoots.length
+              ? client.request("skills/list", { cwds: [opened.cwd], forceReload: true }).pipe(
+                  Effect.timeoutOption("10 seconds"),
+                  Effect.map(Option.getOrUndefined),
+                  Effect.orElseSucceed(() => undefined),
+                )
+              : Effect.succeed(undefined),
+          },
+          { concurrency: "unbounded" },
         );
+        const pluginSkillSummary = desktopPluginSkills?.warning
+          ? desktopPluginSkills.warning
+          : desktopPluginSkills?.extraRoots.length
+            ? pluginSkills
+              ? formatCodexDesktopPluginSkills(pluginSkills, desktopPluginSkills.extraRoots)
+              : "Bundled desktop plugin skills: inventory could not be read from the daemon."
+            : "Bundled desktop plugin skills: no skill roots configured.";
         yield* emitSessionEvent(
           "session/tools",
           `${
             inventory
               ? formatCodexThreadMcpInventory(inventory)
               : "Tools attached to this thread: inventory could not be read from the Codex desktop daemon."
-          }${desktopPluginSkillWarning ? ` ${desktopPluginSkillWarning}` : ""}`,
+          } ${pluginSkillSummary}`,
         );
       }
       return session;

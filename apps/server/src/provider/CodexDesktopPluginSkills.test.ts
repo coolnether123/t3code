@@ -110,8 +110,23 @@ enabled = true
           { CODEX_HOME: "A:\\fake-codex-home" },
         ),
       );
-      NodeAssert.equal(result, undefined);
+      NodeAssert.deepStrictEqual(result, { extraRoots: [], warning: undefined });
       NodeAssert.deepStrictEqual(calls, []);
+    }),
+  );
+
+  it.effect("returns roots only after the daemon accepts them", () =>
+    Effect.gen(function* () {
+      const root = "A:\\bundle\\plugins\\chrome\\skills";
+      const { result } = yield* withConfig(
+        config,
+        [root],
+        attachCodexDesktopPluginSkills(
+          { raw: { request: () => Effect.succeed({}) } },
+          { CODEX_HOME: "A:\\fake-codex-home" },
+        ),
+      );
+      NodeAssert.deepStrictEqual(result, { extraRoots: [root], warning: undefined });
     }),
   );
 
@@ -134,7 +149,7 @@ enabled = true
         ),
       );
       NodeAssert.match(
-        result!,
+        result.warning!,
         /desktop plugin skills could not be attached: invalid bundled plugin enabled value/,
       );
       NodeAssert.deepStrictEqual(calls, []);
@@ -163,9 +178,10 @@ enabled = true
         ),
       );
       NodeAssert.equal(
-        result,
+        result.warning,
         "desktop plugin skills could not be attached: skills/extraRoots/set was rejected by the daemon",
       );
+      NodeAssert.deepStrictEqual(result.extraRoots, []);
     }),
   );
 });
