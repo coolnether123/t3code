@@ -196,6 +196,33 @@ describe("agent action boundary", () => {
       ),
     ).toThrow();
   });
+  it("creates agent threads with approval-required or full access in the existing checkout", () => {
+    const create = (patch: Record<string, unknown>) =>
+      decodeAgentAction(
+        envelope({
+          type: "thread.create",
+          commandId: "create-a",
+          threadId: "thread-new",
+          projectId: "project-a",
+          title: "Agent thread",
+          modelSelection: { instanceId: "codex", model: "gpt-6-luna" },
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: now,
+          ...patch,
+        }),
+      );
+    for (const runtimeMode of ["approval-required", "full-access"]) {
+      expect(() =>
+        validateAgentAction(create({ runtimeMode }), identity, shell, detail),
+      ).not.toThrow("New agent CLI threads");
+    }
+    expect(() =>
+      validateAgentAction(create({ worktreePath: "/tmp/elsewhere" }), identity, shell, detail),
+    ).toThrow("New agent CLI threads");
+  });
   it("allows only bare loopback origins, never credential-bearing or redirected URLs", () => {
     expect(validateAgentOrigin("http://127.0.0.1:8282")).toBe("http://127.0.0.1:8282");
     for (const url of [

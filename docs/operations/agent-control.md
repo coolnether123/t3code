@@ -165,6 +165,10 @@ Run `capabilities` for the commands this adapter accepts. A supported command is
 not proof that every provider implements it or that its target is currently
 ready. Provider errors remain visible in thread state and activity.
 
+New threads created through this adapter run in `approval-required` or
+`full-access` mode in the project's existing checkout, and every send keeps the
+thread's mode.
+
 The HTTP dispatch path does not implement the client's combined thread and
 worktree bootstrap flow. Create a thread in an existing project before starting
 its turn. The adapter rejects bootstrap requests rather than silently omitting

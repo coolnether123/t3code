@@ -117,12 +117,14 @@ export function decodeAgentAction(json: string): AgentAction {
     reject("HTTP agent commands do not support bootstrap. Create a thread separately.");
   if (
     command.type === "thread.create" &&
-    (command.runtimeMode !== "approval-required" ||
+    // Agents may run with the same full access a person would give a chat;
+    // the mode is fixed per thread and every send must keep it.
+    ((command.runtimeMode !== "approval-required" && command.runtimeMode !== "full-access") ||
       command.branch !== null ||
       command.worktreePath !== null)
   ) {
     reject(
-      "New agent CLI threads require approval-required mode and the project's existing checkout.",
+      "New agent CLI threads require approval-required or full-access mode and the project's existing checkout.",
     );
   }
   if (command.type === "thread.approval.respond" && command.decision === "acceptForSession")
