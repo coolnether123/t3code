@@ -2302,6 +2302,33 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       });
       session = yield* requireSession(input.threadId);
     }
+    if (appServerTransport === "desktop-daemon") {
+      const providerSession = yield* session.runtime.getSession;
+      const probe = session.runtime.checkConnection;
+      const sessionFailed =
+        providerSession.status === "error" || providerSession.status === "closed";
+      let connectionFailed = false;
+      if (!sessionFailed && probe !== undefined) {
+        const probeResult = yield* Effect.result(probe);
+        connectionFailed = probeResult._tag === "Failure";
+      }
+      if (sessionFailed || connectionFailed) {
+        if (!isCodexResumeCursorSchema(providerSession.resumeCursor)) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "sendTurn",
+            issue:
+              "Cannot reconnect the Codex desktop daemon session without a resumable thread cursor.",
+          });
+        }
+        yield* startSession({
+          ...session.startInput,
+          resumeCursor: providerSession.resumeCursor,
+          ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+        });
+        session = yield* requireSession(input.threadId);
+      }
+    }
     const enableT3Workers =
       t3WorkersSettingEnabled &&
       (input.subagentBackend === undefined || input.subagentBackend === "native-v1-control");

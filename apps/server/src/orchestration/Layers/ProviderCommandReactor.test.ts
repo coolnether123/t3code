@@ -2820,6 +2820,60 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
+  for (const failedStatus of ["error", "stopped"] as const)
+    it(`resumes a ${failedStatus} session before sending the accepted next message`, async () => {
+      const harness = await createHarness();
+      const threadId = ThreadId.make("thread-1");
+      const now = "2026-01-01T00:00:00.000Z";
+      const dispatchMessage = (id: string, text: string) =>
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make(`cmd-${id}`),
+          threadId,
+          message: { messageId: asMessageId(id), role: "user", text, attachments: [] },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        });
+
+      await harness.runEffect(dispatchMessage("before-daemon-restart", "before"));
+      await harness.drain();
+      const before = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+      expect(before?.session).toBeDefined();
+      await harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cmd-daemon-proxy-exited"),
+          threadId,
+          session: {
+            ...before!.session!,
+            status: failedStatus,
+            activeTurnId: null,
+            lastError: "desktop proxy broken pipe",
+            updatedAt: now,
+          },
+          createdAt: now,
+        }),
+      );
+
+      await harness.runEffect(dispatchMessage("accepted-after-daemon-restart", "RESUME-OK"));
+      await harness.drain();
+
+      expect(harness.startSession).toHaveBeenCalledTimes(2);
+      expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+        resumeCursor: { opaque: "resume-1" },
+      });
+      expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+      expect(harness.sendTurn.mock.calls[1]?.[0].input).toBe("RESUME-OK");
+      const after = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+      expect(
+        after?.messages.filter((entry) => entry.id === "accepted-after-daemon-restart"),
+      ).toHaveLength(1);
+      expect(
+        after?.activities.some((activity) => activity.kind === "provider.turn.start.failed"),
+      ).toBe(false);
+    });
+
   it("restarts claude sessions when claude effort changes", async () => {
     const harness = await createHarness({
       threadModelSelection: {
