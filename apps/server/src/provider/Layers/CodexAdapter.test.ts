@@ -24,6 +24,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, vi } from "@effect/vitest";
 
 import * as Context from "effect/Context";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -131,6 +132,10 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   );
 
   public readonly closeImpl = vi.fn(() => Promise.resolve(undefined));
+  public readonly checkConnectionImpl = vi.fn<() => Effect.Effect<void, Cause.TimeoutError>>(
+    () => Effect.void,
+  );
+  readonly checkConnection = Effect.suspend(() => this.checkConnectionImpl());
 
   readonly options: CodexSessionRuntimeOptions;
 
@@ -558,6 +563,52 @@ it.effect("surfaces a desktop proxy exit during session start with repair steps"
       NodeAssert.match(result.failure.message, /daemon version/);
       NodeAssert.doesNotMatch(result.failure.message, new RegExp(credential));
     }
+  }).pipe(
+    Effect.provide(layer),
+    Effect.ensuring(Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
+  );
+});
+
+it.effect("reconnects a stale desktop proxy before sending the first turn", () => {
+  const threadId = asThreadId("daemon-restarted-before-turn");
+  McpProviderSession.setMcpProviderSession({
+    environmentId: EnvironmentId.make("daemon-test-environment"),
+    threadId,
+    providerSessionId: "daemon-restarted-provider-session",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    endpoint: "http://127.0.0.1:3774/mcp",
+    authorizationHeader: "Bearer fake-restarted-token",
+  });
+  const runtimeFactory = makeRuntimeFactory();
+  const layer = makeAdapterTestLayer(
+    decodeCodexSettings({ useDesktopAppDaemon: true }),
+    runtimeFactory.factory,
+  );
+
+  return Effect.gen(function* () {
+    const adapter = yield* CodexAdapter;
+    yield* adapter.startSession({
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      runtimeMode: "full-access",
+    });
+    const staleRuntime = runtimeFactory.runtimes[0]!;
+    staleRuntime.checkConnectionImpl.mockImplementationOnce(() =>
+      Effect.fail(new Cause.TimeoutError("proxy broken pipe")),
+    );
+
+    const result = yield* adapter.sendTurn({ threadId, input: "RESUME-OK", attachments: [] });
+
+    NodeAssert.equal(result.turnId, asTurnId("turn-1"));
+    NodeAssert.equal(runtimeFactory.runtimes.length, 2);
+    NodeAssert.equal(staleRuntime.sendTurnImpl.mock.calls.length, 0);
+    NodeAssert.equal(
+      runtimeFactory.runtimes[1]?.sendTurnImpl.mock.calls[0]?.[0].input,
+      "RESUME-OK",
+    );
+    NodeAssert.deepStrictEqual(runtimeFactory.runtimes[1]?.options.resumeCursor, {
+      threadId: `provider-${String(threadId)}`,
+    });
   }).pipe(
     Effect.provide(layer),
     Effect.ensuring(Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),

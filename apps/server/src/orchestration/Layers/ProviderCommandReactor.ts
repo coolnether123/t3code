@@ -854,7 +854,11 @@ const make = Effect.gen(function* () {
       });
 
     const existingSessionThreadId =
-      thread.session && thread.session.status !== "stopped" && activeSession ? thread.id : null;
+      thread.session &&
+      activeSession &&
+      (thread.session.status !== "stopped" || preferredProvider === "codex")
+        ? thread.id
+        : null;
     if (existingSessionThreadId) {
       const runtimeModeChanged = thread.runtimeMode !== thread.session?.runtimeMode;
       const cwdChanged = effectiveCwd !== activeSession?.cwd;
@@ -876,8 +880,15 @@ const make = Effect.gen(function* () {
       const shouldRestartForSubagentBackendChange =
         options?.subagentBackend !== undefined &&
         previousSubagentBackend !== options.subagentBackend;
+      const shouldRestartFailedSession =
+        preferredProvider === "codex" &&
+        (thread.session?.status === "error" ||
+          thread.session?.status === "stopped" ||
+          activeSession?.status === "error" ||
+          activeSession?.status === "closed");
 
       if (
+        !shouldRestartFailedSession &&
         !runtimeModeChanged &&
         !cwdChanged &&
         !instanceChanged &&
@@ -909,6 +920,7 @@ const make = Effect.gen(function* () {
         shouldRestartForModelChange,
         shouldRestartForModelSelectionChange,
         shouldRestartForSubagentBackendChange,
+        shouldRestartFailedSession,
         hasResumeCursor: resumeCursor !== undefined,
       });
       const restartedSession = yield* startProviderSession(

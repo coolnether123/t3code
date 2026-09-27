@@ -19,6 +19,7 @@ import {
 } from "@t3tools/contracts";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { normalizeModelSlug } from "@t3tools/shared/model";
+import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -513,6 +514,8 @@ export interface CodexThreadSnapshot {
 export interface CodexSessionRuntimeShape {
   readonly start: () => Effect.Effect<ProviderSession, CodexSessionRuntimeError>;
   readonly getSession: Effect.Effect<ProviderSession>;
+  /** A read-only probe before a desktop daemon turn; never starts a turn. */
+  readonly checkConnection?: Effect.Effect<void, CodexSessionRuntimeError | Cause.TimeoutError>;
   readonly sendTurn: (
     input: CodexSessionRuntimeSendTurnInput,
   ) => Effect.Effect<ProviderTurnStartResult, CodexSessionRuntimeError>;
@@ -2659,6 +2662,19 @@ export const makeCodexSessionRuntime = (
     return {
       start,
       getSession: Ref.get(sessionRef),
+      ...(desktopDaemon
+        ? {
+            checkConnection: Effect.gen(function* () {
+              const providerThreadId = yield* readProviderThreadId;
+              yield* client
+                .request("thread/read", {
+                  threadId: providerThreadId,
+                  includeTurns: false,
+                })
+                .pipe(Effect.timeout("5 seconds"));
+            }),
+          }
+        : {}),
       sendTurn: (input) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;
