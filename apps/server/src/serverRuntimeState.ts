@@ -34,7 +34,23 @@ export class ServerRuntimeStateError extends Schema.TaggedErrorClass<ServerRunti
   }
 }
 
+export class ServerRuntimeAlreadyRunningError extends Schema.TaggedErrorClass<ServerRuntimeAlreadyRunningError>()(
+  "ServerRuntimeAlreadyRunningError",
+  {
+    statePath: Schema.String,
+    pid: Schema.Int,
+    port: Schema.Int,
+  },
+) {
+  override get message(): string {
+    return `Cannot start another T3 server for this data directory: PID ${this.pid} is already running on port ${this.port}.`;
+  }
+}
+
 const decodePersistedServerRuntimeState = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(PersistedServerRuntimeState),
+);
+const encodePersistedServerRuntimeState = Schema.encodeUnknownEffect(
   Schema.fromJsonString(PersistedServerRuntimeState),
 );
 
@@ -65,29 +81,56 @@ export const persistServerRuntimeState = (input: {
   readonly path: string;
   readonly state: PersistedServerRuntimeState;
 }) =>
-  writeFileStringAtomically({
-    filePath: input.path,
-    contents: `${JSON.stringify(input.state)}\n`,
-  }).pipe(
-    Effect.mapError(
-      (cause) =>
-        new ServerRuntimeStateError({
-          operation: "persist",
-          statePath: input.path,
-          cause,
-        }),
-    ),
-  );
+  Effect.gen(function* () {
+    yield* ensureServerRuntimeStateAvailable(input.path, input.state.pid);
+    const encoded = yield* encodePersistedServerRuntimeState(input.state).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ServerRuntimeStateError({
+            operation: "persist",
+            statePath: input.path,
+            cause,
+          }),
+      ),
+    );
+    yield* writeFileStringAtomically({
+      filePath: input.path,
+      contents: `${encoded}\n`,
+    }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ServerRuntimeStateError({
+            operation: "persist",
+            statePath: input.path,
+            cause,
+          }),
+      ),
+    );
+  });
 
-export const clearPersistedServerRuntimeState = (path: string) =>
+export const clearPersistedServerRuntimeState = (input: {
+  readonly path: string;
+  readonly pid: number;
+  readonly startedAt: string;
+}) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
-    yield* fs.remove(path, { force: true }).pipe(
+    const current = yield* readPersistedServerRuntimeState(input.path);
+    if (
+      Option.isNone(current) ||
+      current.value.pid !== input.pid ||
+      current.value.startedAt !== input.startedAt ||
+      (current.value.pid !== process.pid && isProcessAlive(current.value.pid))
+    ) {
+      return;
+    }
+
+    yield* fs.remove(input.path, { force: true }).pipe(
       Effect.mapError(
         (cause) =>
           new ServerRuntimeStateError({
             operation: "clear",
-            statePath: path,
+            statePath: input.path,
             cause,
           }),
       ),
@@ -118,6 +161,27 @@ export const isProcessAlive = (pid: number): boolean => {
     return error instanceof Error && "code" in error && error.code === "EPERM";
   }
 };
+
+export const ensureServerRuntimeStateAvailable = (path: string, currentPid = process.pid) =>
+  readPersistedServerRuntimeState(path).pipe(
+    Effect.flatMap((existing) => {
+      if (
+        Option.isNone(existing) ||
+        existing.value.pid === currentPid ||
+        !isProcessAlive(existing.value.pid)
+      ) {
+        return Effect.void;
+      }
+
+      return Effect.fail(
+        new ServerRuntimeAlreadyRunningError({
+          statePath: path,
+          pid: existing.value.pid,
+          port: existing.value.port,
+        }),
+      );
+    }),
+  );
 
 export const readPersistedServerRuntimeState = (path: string) =>
   Effect.gen(function* () {

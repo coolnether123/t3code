@@ -187,7 +187,7 @@ describe("ssh tunnel scripts", () => {
 
     assert.include(
       buildRemoteLaunchScript({ nodeEngineRange: TEST_NODE_ENGINE_RANGE }),
-      '[ -n "$REMOTE_PID" ] && [ -n "$REMOTE_PORT" ] && kill -0 "$REMOTE_PID" 2>/dev/null',
+      'elif [ -n "$REMOTE_PID" ] && kill -0 "$REMOTE_PID" 2>/dev/null',
     );
     assert.include(buildRemoteLaunchScript(), "RUNNER_CHANGED=1");
     assert.include(buildRemoteLaunchScript(), "ensure_remote_node_path()");
@@ -207,6 +207,19 @@ describe("ssh tunnel scripts", () => {
     assert.notInclude(buildRemoteLaunchScript(), "server-home");
     assert.include(buildRemoteLaunchScript(), "Remote T3 server did not become ready");
     assert.include(buildRemoteLaunchScript(), 'wait_ready "60000"');
+    assert.include(buildRemoteLaunchScript(), 'wait_ready "20000"');
+    assert.include(buildRemoteLaunchScript(), 'if [ -n "$DEFAULT_RUNTIME_PID" ]; then');
+    assert.include(buildRemoteLaunchScript(), 'if ! wait_ready "20000"; then');
+    assert.include(buildRemoteLaunchScript(), "Refusing to start another server");
+    assert.include(buildRemoteLaunchScript(), '[ "$PID_TO_STOP" != "$DEFAULT_RUNTIME_PID" ]');
+    assert.isBelow(
+      buildRemoteLaunchScript().indexOf('if [ "$REMOTE_MANAGED" = "managed" ]'),
+      buildRemoteLaunchScript().indexOf('if ! wait_ready "20000"; then'),
+    );
+    assert.isBelow(
+      buildRemoteLaunchScript().indexOf('if [ -n "$DEFAULT_RUNTIME_PID" ]; then'),
+      buildRemoteLaunchScript().lastIndexOf('if [ -z "$REMOTE_PORT" ]; then'),
+    );
     assert.include(buildRemoteLaunchScript(), 'if [ -s "$LOG_FILE" ]; then');
     assert.include(buildRemoteLaunchScript(), "It wrote nothing to %s");
     assert.include(buildRemoteLaunchScript({ packageSpec: "t3@nightly" }), "t3@nightly");
@@ -234,7 +247,11 @@ describe("ssh tunnel scripts", () => {
     );
     assert.include(
       buildRemoteLaunchScript(),
-      "if (!Number.isInteger(pid) || pid <= 0 || !Number.isInteger(port))",
+      "if (!Number.isInteger(pid) || pid <= 0) process.exit(1);",
+    );
+    assert.include(
+      buildRemoteLaunchScript(),
+      "const validPort = Number.isInteger(port) && port > 0 && port <= 65535;",
     );
     assert.include(buildRemoteLaunchScript(), 'PID_TO_STOP="${REMOTE_PID:-$DEFAULT_RUNTIME_PID}"');
     assert.include(buildRemoteLaunchScript(), 'REMOTE_PORT="$DEFAULT_REMOTE_PORT"');
