@@ -132,6 +132,7 @@ import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import {
   clearPersistedServerRuntimeState,
+  ensureServerRuntimeStateAvailable,
   makePersistedServerRuntimeState,
   persistServerRuntimeState,
 } from "./serverRuntimeState.ts";
@@ -638,6 +639,7 @@ export const makeServerLayer = Layer.unwrap(
     const routesReady = yield* Deferred.make<void>();
     const launcherLayer = ServiceLauncherClient.layer;
 
+    yield* ensureServerRuntimeStateAvailable(config.serverRuntimeStatePath);
     yield* fixPath();
 
     const httpListeningLayer = Layer.effectDiscard(
@@ -655,7 +657,7 @@ export const makeServerLayer = Layer.unwrap(
           const server = yield* HttpServer.HttpServer;
           const address = server.address;
           if (typeof address === "string" || !("port" in address)) {
-            return;
+            return undefined;
           }
 
           const state = yield* makePersistedServerRuntimeState({
@@ -666,13 +668,23 @@ export const makeServerLayer = Layer.unwrap(
             path: config.serverRuntimeStatePath,
             state,
           }).pipe(
-            Effect.catchCause((cause) =>
-              Effect.logWarning("Failed to persist server runtime state", { cause }),
-            ),
+            Effect.catchTags({
+              ServerRuntimeAlreadyRunningError: (error) => Effect.fail(error),
+              ServerRuntimeStateError: (cause) =>
+                Effect.logWarning("Failed to persist server runtime state", { cause }),
+            }),
           );
+          return state;
         }),
-        () =>
-          clearPersistedServerRuntimeState(config.serverRuntimeStatePath).pipe(
+        (state) =>
+          (state
+            ? clearPersistedServerRuntimeState({
+                path: config.serverRuntimeStatePath,
+                pid: state.pid,
+                startedAt: state.startedAt,
+              })
+            : Effect.void
+          ).pipe(
             Effect.catchCause((cause) =>
               Effect.logWarning("Failed to clear server runtime state", { cause }),
             ),

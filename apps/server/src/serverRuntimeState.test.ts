@@ -183,4 +183,113 @@ describe("serverRuntimeState", () => {
       }
     }).pipe(Effect.provide(NodeServices.layer)),
   );
+
+  it.effect("does not overwrite state owned by another live server", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-server-runtime-state-test-",
+      });
+      const statePath = path.join(root, "server.json");
+      const current = {
+        version: 1,
+        pid: process.pid,
+        port: 4_971,
+        origin: "http://127.0.0.1:4971",
+        startedAt: "2026-06-20T00:00:00.000Z",
+      } satisfies ServerRuntimeState.PersistedServerRuntimeState;
+      yield* ServerRuntimeState.persistServerRuntimeState({ path: statePath, state: current });
+
+      const error = yield* ServerRuntimeState.persistServerRuntimeState({
+        path: statePath,
+        state: { ...current, pid: process.pid + 1, port: 4_972 },
+      }).pipe(Effect.flip);
+
+      assert.equal(error._tag, "ServerRuntimeAlreadyRunningError");
+      assert.equal(
+        error.message,
+        `Cannot start another T3 server for this data directory: PID ${process.pid} is already running on port 4971.`,
+      );
+      const restored = yield* ServerRuntimeState.readPersistedServerRuntimeState(statePath);
+      assert.deepEqual(Option.getOrThrow(restored), current);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("allows replacing state whose process is dead", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-server-runtime-state-test-",
+      });
+      const statePath = path.join(root, "server.json");
+      const stalePid = Number.MAX_SAFE_INTEGER;
+      assert.isFalse(ServerRuntimeState.isProcessAlive(stalePid));
+      const replacement = {
+        version: 1,
+        pid: process.pid,
+        port: 4_972,
+        origin: "http://127.0.0.1:4972",
+        startedAt: "2026-06-21T00:00:00.000Z",
+      } satisfies ServerRuntimeState.PersistedServerRuntimeState;
+
+      yield* ServerRuntimeState.persistServerRuntimeState({
+        path: statePath,
+        state: {
+          ...replacement,
+          pid: stalePid,
+          port: 4_971,
+          origin: "http://127.0.0.1:4971",
+        },
+      });
+      yield* ServerRuntimeState.persistServerRuntimeState({ path: statePath, state: replacement });
+
+      const restored = yield* ServerRuntimeState.readPersistedServerRuntimeState(statePath);
+      assert.deepEqual(Option.getOrThrow(restored), replacement);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("clears runtime state only when pid and startedAt still match", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-server-runtime-state-test-",
+      });
+      const statePath = path.join(root, "server.json");
+      const current = {
+        version: 1,
+        pid: process.pid,
+        port: 4_971,
+        origin: "http://127.0.0.1:4971",
+        startedAt: "2026-06-20T00:00:00.000Z",
+      } satisfies ServerRuntimeState.PersistedServerRuntimeState;
+      yield* ServerRuntimeState.persistServerRuntimeState({ path: statePath, state: current });
+
+      yield* ServerRuntimeState.clearPersistedServerRuntimeState({
+        path: statePath,
+        pid: current.pid,
+        startedAt: "2026-06-21T00:00:00.000Z",
+      });
+      let restored = yield* ServerRuntimeState.readPersistedServerRuntimeState(statePath);
+      assert.deepEqual(Option.getOrThrow(restored), current);
+
+      yield* ServerRuntimeState.clearPersistedServerRuntimeState({
+        path: statePath,
+        pid: current.pid + 1,
+        startedAt: current.startedAt,
+      });
+      restored = yield* ServerRuntimeState.readPersistedServerRuntimeState(statePath);
+      assert.deepEqual(Option.getOrThrow(restored), current);
+
+      yield* ServerRuntimeState.clearPersistedServerRuntimeState({
+        path: statePath,
+        pid: current.pid,
+        startedAt: current.startedAt,
+      });
+      restored = yield* ServerRuntimeState.readPersistedServerRuntimeState(statePath);
+      assert.isTrue(Option.isNone(restored));
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 });

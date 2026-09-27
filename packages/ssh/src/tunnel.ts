@@ -56,7 +56,7 @@ const SSH_READY_PROBE_TIMEOUT_MS = 1_000;
 const TUNNEL_SHUTDOWN_TIMEOUT_MS = 2_000;
 const REMOTE_READY_TIMEOUT_MS = 60_000;
 const REMOTE_LAUNCH_TIMEOUT_MS = 90_000;
-const REMOTE_REUSE_READY_TIMEOUT_MS = 2_000;
+const REMOTE_REUSE_READY_TIMEOUT_MS = 20_000;
 
 export interface RemoteT3RunnerOptions {
   readonly packageSpec?: string;
@@ -512,24 +512,24 @@ wait_for_pid_exit() {
     WAIT_COUNT=$((WAIT_COUNT + 1))
     sleep 0.1
   done
+  ! kill -0 "$PID_TO_WAIT" 2>/dev/null
 }
 resolve_default_runtime_port() {
   node - "$DEFAULT_RUNTIME_FILE" <<'NODE'
 const fs = require("node:fs");
 const runtimePath = process.argv[2] ?? "";
 try {
-	  const runtime = JSON.parse(fs.readFileSync(runtimePath, "utf8"));
-	  const pid = Number(runtime.pid);
-	  const port = Number(runtime.port);
-	  if (!Number.isInteger(pid) || pid <= 0 || !Number.isInteger(port)) {
-	    process.exit(1);
-	  }
-  const origin = new URL(String(runtime.origin ?? ""));
-  if (origin.protocol !== "http:" || !["127.0.0.1", "localhost"].includes(origin.hostname)) {
-    process.exit(1);
-  }
+const runtime = JSON.parse(fs.readFileSync(runtimePath, "utf8"));
+const pid = Number(runtime.pid);
+if (!Number.isInteger(pid) || pid <= 0) process.exit(1);
+try {
   process.kill(pid, 0);
-  process.stdout.write(\`\${pid} \${port}\`);
+} catch (error) {
+  if (error.code !== "EPERM") process.exit(1);
+}
+const port = Number(runtime.port);
+const validPort = Number.isInteger(port) && port > 0 && port <= 65535;
+process.stdout.write(\`\${pid} \${validPort ? port : ""}\`);
 } catch {
   process.exit(1);
 }
@@ -545,49 +545,65 @@ if [ -n "$DEFAULT_RUNTIME_INFO" ]; then
   DEFAULT_RUNTIME_PID="\${DEFAULT_RUNTIME_INFO%% *}"
   DEFAULT_REMOTE_PORT="\${DEFAULT_RUNTIME_INFO#* }"
 fi
-if [ -n "$DEFAULT_REMOTE_PORT" ]; then
-  REMOTE_PORT="$DEFAULT_REMOTE_PORT"
-  if wait_ready "@@T3_REUSE_READY_TIMEOUT_MS@@"; then
-    if [ "$REMOTE_MANAGED" = "managed" ]; then
-      PID_TO_STOP="\${REMOTE_PID:-$DEFAULT_RUNTIME_PID}"
-      if [ -n "$PID_TO_STOP" ] && kill -0 "$PID_TO_STOP" 2>/dev/null; then
-        kill "$PID_TO_STOP" 2>/dev/null || true
-        wait_for_pid_exit "$PID_TO_STOP"
-      fi
-      REMOTE_PID=""
-      REMOTE_PORT="$DEFAULT_REMOTE_PORT"
-      REMOTE_MANAGED="external"
-      rm -f "$PID_FILE"
-      printf '%s\\n' "$REMOTE_PORT" >"$PORT_FILE"
-      printf 'external\\n' >"$MANAGED_FILE"
-    else
-      printf '%s\\n' "$REMOTE_PORT" >"$PORT_FILE"
-      printf 'external\\n' >"$MANAGED_FILE"
-      REMOTE_PID=""
-      REMOTE_MANAGED="external"
-    fi
-  else
-    REMOTE_PID="$(cat "$PID_FILE" 2>/dev/null || true)"
-    REMOTE_PORT="$(cat "$PORT_FILE" 2>/dev/null || true)"
-    REMOTE_MANAGED="$(cat "$MANAGED_FILE" 2>/dev/null || true)"
+if [ -n "$DEFAULT_RUNTIME_PID" ]; then
+  if [ -z "$DEFAULT_REMOTE_PORT" ]; then
+    printf 'T3 server with PID %s has no valid port in %s. Refusing to start another server for %s.\\n' \\
+      "$DEFAULT_RUNTIME_PID" "$DEFAULT_RUNTIME_FILE" "$DEFAULT_SERVER_HOME" >&2
+    exit 1
   fi
+  REMOTE_PORT="$DEFAULT_REMOTE_PORT"
+  if [ "$REMOTE_MANAGED" = "managed" ]; then
+    PID_TO_STOP="\${REMOTE_PID:-$DEFAULT_RUNTIME_PID}"
+    if [ -n "$PID_TO_STOP" ] && [ "$PID_TO_STOP" != "$DEFAULT_RUNTIME_PID" ] && kill -0 "$PID_TO_STOP" 2>/dev/null; then
+      kill "$PID_TO_STOP" 2>/dev/null || true
+      if ! wait_for_pid_exit "$PID_TO_STOP"; then
+        printf 'Previously managed T3 server with PID %s did not stop. Refusing to attach to another server for %s.\\n' \\
+          "$PID_TO_STOP" "$DEFAULT_SERVER_HOME" >&2
+        exit 1
+      fi
+    fi
+  fi
+  if ! wait_ready "@@T3_REUSE_READY_TIMEOUT_MS@@"; then
+    printf 'T3 server with PID %s on port %s did not become ready within 20 seconds. Refusing to start another server for %s.\\n' \\
+      "$DEFAULT_RUNTIME_PID" "$DEFAULT_REMOTE_PORT" "$DEFAULT_SERVER_HOME" >&2
+    exit 1
+  fi
+  REMOTE_PID=""
+  REMOTE_PORT="$DEFAULT_REMOTE_PORT"
+  REMOTE_MANAGED="external"
+  rm -f "$PID_FILE"
+  printf '%s\\n' "$REMOTE_PORT" >"$PORT_FILE"
+  printf 'external\\n' >"$MANAGED_FILE"
 fi
 if [ "$REMOTE_MANAGED" = "external" ]; then
-  if [ -z "$REMOTE_PORT" ] || ! wait_ready "@@T3_REUSE_READY_TIMEOUT_MS@@"; then
+  if [ -z "$DEFAULT_RUNTIME_PID" ] && { [ -z "$REMOTE_PORT" ] || ! wait_ready "@@T3_REUSE_READY_TIMEOUT_MS@@"; }; then
     REMOTE_PID=""
     REMOTE_PORT=""
     REMOTE_MANAGED=""
   fi
-elif [ -n "$REMOTE_PID" ] && [ -n "$REMOTE_PORT" ] && kill -0 "$REMOTE_PID" 2>/dev/null; then
+elif [ -n "$REMOTE_PID" ] && kill -0 "$REMOTE_PID" 2>/dev/null; then
+  if [ -z "$REMOTE_PORT" ]; then
+    printf 'Previously managed T3 server with PID %s has no recorded port. Refusing to start another server for %s.\\n' \\
+      "$REMOTE_PID" "$DEFAULT_SERVER_HOME" >&2
+    exit 1
+  fi
   if [ "$RUNNER_CHANGED" -eq 1 ]; then
     kill "$REMOTE_PID" 2>/dev/null || true
-    wait_for_pid_exit "$REMOTE_PID"
+    if ! wait_for_pid_exit "$REMOTE_PID"; then
+      printf 'Previously managed T3 server with PID %s did not stop. Refusing to start another server for %s.\\n' \\
+        "$REMOTE_PID" "$DEFAULT_SERVER_HOME" >&2
+      exit 1
+    fi
     REMOTE_PID=""
     REMOTE_PORT=""
     REMOTE_MANAGED=""
   elif ! wait_ready "@@T3_REUSE_READY_TIMEOUT_MS@@"; then
     kill "$REMOTE_PID" 2>/dev/null || true
-    wait_for_pid_exit "$REMOTE_PID"
+    if ! wait_for_pid_exit "$REMOTE_PID"; then
+      printf 'Previously managed T3 server with PID %s did not stop. Refusing to start another server for %s.\\n' \\
+        "$REMOTE_PID" "$DEFAULT_SERVER_HOME" >&2
+      exit 1
+    fi
     REMOTE_PID=""
     REMOTE_PORT=""
     REMOTE_MANAGED=""

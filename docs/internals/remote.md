@@ -44,12 +44,25 @@ environment type. Authentication remains the environment's responsibility for
 every route. See [environment authentication](./environment-auth.md) and the
 [T3 Connect trust boundary](./t3-connect.md).
 
+## One server owns each data directory
+
+The server records its PID, port, and start time in `userdata/server-runtime.json`.
+Startup refuses to replace a record whose different PID is still alive. It may
+replace a record whose PID has exited. Shutdown removes the record only when
+both its PID and start time still match the server that is stopping. The file
+update remains atomic.
+
 SSH can launch a server as well as forward a port. Desktop main owns that
 lifecycle because it can spawn SSH and handle authentication prompts. The
 renderer uses the forwarded endpoint through the shared connection runtime.
 [SSH cleanup](../../packages/ssh/src/tunnel.ts) stops a remote server only if the
 launcher owns it; a server it discovered already running must survive a client
-disconnect. Reconnection restores the forward before opening the application
+disconnect. Before launching a managed server, SSH checks the default runtime
+record. If its PID is alive, SSH waits up to 20 seconds for the recorded port
+and attaches as `external` when it responds. If it does not respond, SSH exits
+without launching another server for that data directory. When a different
+managed server was already running, SSH stops it before attaching to the default
+server. Reconnection restores the forward before opening the application
 transport.
 
 Remote servers can outlive several client releases. Clients must use advertised

@@ -139,6 +139,10 @@ If SSH reconnecting fails after an app update, retry the launch once. Removing
 the connection stops a server that T3 Code launched; a server that was already
 running is left alone.
 
+If T3 Code reports that an existing server did not become ready, wait for its
+startup to finish before retrying. T3 Code will not start a second server
+against the same data directory.
+
 For Antigravity's Google callback on a remote host, see
 [remote sign-in](./providers-antigravity.md#sign-in-from-a-remote-device).
 
