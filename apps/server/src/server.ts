@@ -131,10 +131,13 @@ import * as UsageResetCheck from "./usage/UsageResetCheck.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import {
+  acquireServerRuntimeOwnership,
   clearPersistedServerRuntimeState,
   ensureServerRuntimeStateAvailable,
   makePersistedServerRuntimeState,
   persistServerRuntimeState,
+  releaseServerRuntimeOwnership,
+  ServerRuntimeStateError,
 } from "./serverRuntimeState.ts";
 import { orchestrationHttpApiLayer } from "./orchestration/http.ts";
 import * as NetService from "@t3tools/shared/Net";
@@ -639,6 +642,10 @@ export const makeServerLayer = Layer.unwrap(
     const routesReady = yield* Deferred.make<void>();
     const launcherLayer = ServiceLauncherClient.layer;
 
+    yield* Effect.acquireRelease(
+      acquireServerRuntimeOwnership(config.serverRuntimeStatePath),
+      releaseServerRuntimeOwnership,
+    );
     yield* ensureServerRuntimeStateAvailable(config.serverRuntimeStatePath);
     yield* fixPath();
 
@@ -657,7 +664,11 @@ export const makeServerLayer = Layer.unwrap(
           const server = yield* HttpServer.HttpServer;
           const address = server.address;
           if (typeof address === "string" || !("port" in address)) {
-            return undefined;
+            return yield* new ServerRuntimeStateError({
+              operation: "persist",
+              statePath: config.serverRuntimeStatePath,
+              cause: new Error("HTTP server has no TCP port to record"),
+            });
           }
 
           const state = yield* makePersistedServerRuntimeState({
@@ -667,13 +678,7 @@ export const makeServerLayer = Layer.unwrap(
           yield* persistServerRuntimeState({
             path: config.serverRuntimeStatePath,
             state,
-          }).pipe(
-            Effect.catchTags({
-              ServerRuntimeAlreadyRunningError: (error) => Effect.fail(error),
-              ServerRuntimeStateError: (cause) =>
-                Effect.logWarning("Failed to persist server runtime state", { cause }),
-            }),
-          );
+          });
           return state;
         }),
         (state) =>

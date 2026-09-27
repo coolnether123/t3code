@@ -1,7 +1,10 @@
 import * as DateTime from "effect/DateTime";
+import * as NodeCrypto from "node:crypto";
+import * as NodeSqlite from "node:sqlite";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import { writeFileStringAtomically } from "./atomicWrite.ts";
@@ -46,6 +49,85 @@ export class ServerRuntimeAlreadyRunningError extends Schema.TaggedErrorClass<Se
     return `Cannot start another T3 server for this data directory: PID ${this.pid} is already running on port ${this.port}.`;
   }
 }
+
+export class ServerRuntimeOwnershipError extends Schema.TaggedErrorClass<ServerRuntimeOwnershipError>()(
+  "ServerRuntimeOwnershipError",
+  {
+    lockPath: Schema.String,
+    cause: Schema.Defect(),
+  },
+) {
+  override get message(): string {
+    return `Cannot start T3 server: another server owns this data directory, or the ownership lock at ${this.lockPath} cannot be written. Check the existing server and the lock file permissions.`;
+  }
+}
+
+/** A SQLite write transaction is an OS-reclaimed, cross-process lock. */
+export const acquireServerRuntimeOwnership = (statePath: string) => {
+  return Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const lockPath = path.join(path.dirname(statePath), "server-ownership.sqlite");
+    yield* fs
+      .makeDirectory(path.dirname(lockPath), { recursive: true })
+      .pipe(Effect.mapError((cause) => new ServerRuntimeOwnershipError({ lockPath, cause })));
+    const startedAt = DateTime.formatIso(yield* DateTime.now);
+    return yield* Effect.try({
+      try: () => {
+        const database = new NodeSqlite.DatabaseSync(lockPath, { timeout: 0 });
+        try {
+          database.exec("BEGIN IMMEDIATE");
+          database.exec(
+            "CREATE TABLE IF NOT EXISTS owner (pid INTEGER NOT NULL, started_at TEXT NOT NULL, token TEXT NOT NULL)",
+          );
+          database.exec("DELETE FROM owner");
+          database
+            .prepare("INSERT INTO owner VALUES (?, ?, ?)")
+            .run(process.pid, startedAt, NodeCrypto.randomUUID());
+          return {
+            release: () => {
+              try {
+                database.exec("ROLLBACK");
+              } finally {
+                database.close();
+              }
+            },
+          };
+        } catch (error) {
+          database.close();
+          throw error;
+        }
+      },
+      catch: (cause) => new ServerRuntimeOwnershipError({ lockPath, cause }),
+    }).pipe(
+      Effect.catchTag("ServerRuntimeOwnershipError", (error) => {
+        const cause = error.cause;
+        if (
+          typeof cause !== "object" ||
+          cause === null ||
+          !("errcode" in cause) ||
+          cause.errcode !== 5
+        ) {
+          return Effect.fail(error);
+        }
+        return Effect.gen(function* () {
+          const state = yield* readPersistedServerRuntimeState(statePath);
+          if (Option.isSome(state) && isProcessAlive(state.value.pid)) {
+            return yield* new ServerRuntimeAlreadyRunningError({
+              statePath,
+              pid: state.value.pid,
+              port: state.value.port,
+            });
+          }
+          return yield* error;
+        });
+      }),
+    );
+  });
+};
+
+export const releaseServerRuntimeOwnership = (ownership: { readonly release: () => void }) =>
+  Effect.sync(() => ownership.release());
 
 const decodePersistedServerRuntimeState = Schema.decodeUnknownEffect(
   Schema.fromJsonString(PersistedServerRuntimeState),
@@ -206,10 +288,6 @@ export const readPersistedServerRuntimeState = (path: string) =>
     }
 
     const trimmed = raw.value.trim();
-    if (trimmed.length === 0) {
-      return Option.none<PersistedServerRuntimeState>();
-    }
-
     return yield* decodePersistedServerRuntimeState(trimmed).pipe(
       Effect.map(Option.some),
       Effect.mapError(
@@ -221,16 +299,4 @@ export const readPersistedServerRuntimeState = (path: string) =>
           }),
       ),
     );
-  }).pipe(
-    Effect.catchTags({
-      ServerRuntimeStateError: (error) =>
-        Effect.logWarning(error.message).pipe(
-          Effect.annotateLogs({
-            operation: error.operation,
-            statePath: error.statePath,
-            cause: error,
-          }),
-          Effect.as(Option.none<PersistedServerRuntimeState>()),
-        ),
-    }),
-  );
+  });
