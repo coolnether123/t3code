@@ -850,6 +850,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       ),
     [providerStatuses, settings],
   );
+  const existingThreadInstanceId = activeThread?.modelSelection.instanceId ?? null;
+  const newChatInstanceEntries = useMemo(
+    () =>
+      providerInstanceEntries.filter(
+        (entry) => entry.showInNewChats || entry.instanceId === existingThreadInstanceId,
+      ),
+    [providerInstanceEntries, existingThreadInstanceId],
+  );
   const selectedProviderByThreadId = composerDraft.activeProvider ?? null;
   const threadProvider =
     activeThread?.session?.providerInstanceId ??
@@ -890,8 +898,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   //      ignore picker selections).
   //   2. Thread's persisted instance id (server-side saved selection).
   //   3. Project default's instance id.
-  //   4. First enabled entry matching the current driver kind.
-  //   5. First enabled entry overall / default instance for the kind.
+  //   4. Server default's instance id.
+  //   5. First visible entry matching the current driver kind, then any visible entry.
   //
   const selectedInstanceId = useMemo<ProviderInstanceId>(() => {
     const candidates: Array<string | null | undefined> = [
@@ -899,12 +907,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       activeThread?.session?.providerInstanceId,
       activeThreadModelSelection?.instanceId,
       activeProjectDefaultModelSelection?.instanceId,
+      settings.defaultModelSelection?.instanceId,
     ];
     for (const candidate of candidates) {
       if (!candidate) continue;
       const match = providerInstanceEntries.find(
         (entry) =>
-          entry.instanceId === candidate && canKeepExplicitProviderInstanceSelection(entry),
+          entry.instanceId === candidate &&
+          (entry.showInNewChats ||
+            (activeThread !== undefined && entry.instanceId === existingThreadInstanceId)) &&
+          canKeepExplicitProviderInstanceSelection(entry),
       );
       if (match) {
         // When locked to a specific driver kind, ignore persisted instance
@@ -934,6 +946,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     );
   }, [
     activeProjectDefaultModelSelection?.instanceId,
+    settings.defaultModelSelection?.instanceId,
+    activeThread,
+    existingThreadInstanceId,
     activeThread?.session?.providerInstanceId,
     activeThreadModelSelection?.instanceId,
     composerDraft.activeProvider,
@@ -3446,7 +3461,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       model={selectedModelForPickerWithCustomFallback}
                       lockedProvider={lockedProvider}
                       lockedContinuationGroupKey={lockedContinuationGroupKey}
-                      instanceEntries={providerInstanceEntries}
+                      instanceEntries={newChatInstanceEntries}
                       keybindings={keybindings}
                       modelOptionsByInstance={modelOptionsByInstance}
                       triggerClassName="-ms-2.5"

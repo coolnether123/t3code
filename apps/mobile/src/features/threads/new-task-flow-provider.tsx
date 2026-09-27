@@ -450,16 +450,19 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   // Antigravity keeps unavailable selections so sign-out or a catalog change
   // cannot switch the user's model. Other providers retain their fallback
   // rules. Implicit defaults also exclude legacy models for those providers.
-  const draftModelSelection = resolveSelectableModelSelection(
+  const draftModelSelection = resolveDefaultableModelSelection(
     selectedEnvironmentServerConfig,
     selectedProjectDraft.modelSelection ?? null,
   );
-  const projectDefaultModelSelection = resolveDefaultableModelSelection(
-    selectedEnvironmentServerConfig,
-    selectedProject?.defaultModelSelection ??
-      selectedEnvironmentServerConfig?.settings.defaultModelSelection ??
-      null,
-  );
+  const projectDefaultModelSelection =
+    resolveDefaultableModelSelection(
+      selectedEnvironmentServerConfig,
+      selectedProject?.defaultModelSelection ?? null,
+    ) ??
+    resolveDefaultableModelSelection(
+      selectedEnvironmentServerConfig,
+      selectedEnvironmentServerConfig?.settings.defaultModelSelection ?? null,
+    );
   const storedStickyModelSelection = useStickyComposerModelSelection();
   const stickyModelSelection = resolveDefaultableModelSelection(
     selectedEnvironmentServerConfig,
@@ -486,6 +489,19 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
     projectDefaultSelection: projectDefaultModelSelection,
     stickySelection: stickyModelSelection,
     modelOptions,
+    preferredDriver: selectedEnvironmentServerConfig?.providers.find((provider) =>
+      [
+        selectedProjectDraft.modelSelection,
+        selectedProject?.defaultModelSelection,
+        selectedEnvironmentServerConfig.settings.defaultModelSelection,
+        storedStickyModelSelection,
+      ].some(
+        (selection) =>
+          selection?.instanceId === provider.instanceId &&
+          selectedEnvironmentServerConfig.settings.providerInstances[provider.instanceId]
+            ?.showInNewChats === false,
+      ),
+    )?.driver,
   });
   const selectedModelKey = selectedModel
     ? `${selectedModel.instanceId}:${selectedModel.model}`

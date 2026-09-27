@@ -596,7 +596,7 @@ function ProjectDetail({
         applyProviderInstanceSettings(
           deriveProviderInstanceEntries(serverProviders),
           projectSettings,
-        ),
+        ).filter((entry) => entry.showInNewChats),
       ),
     [serverProviders, projectSettings],
   );
@@ -630,6 +630,7 @@ function ProjectDetail({
           : undefined;
         if (
           !entry?.enabled ||
+          !entry.showInNewChats ||
           !entry.isAvailable ||
           !options?.some((model) => model.slug === selection.model && !model.isUnavailable)
         ) {

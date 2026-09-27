@@ -91,7 +91,17 @@ describe("ProviderInstanceConfig", () => {
     expect(decoded.driver).toBe("codex");
     expect(decoded.displayName).toBeUndefined();
     expect(decoded.enabled).toBeUndefined();
+    expect(decoded.showInNewChats).toBeUndefined();
     expect(decoded.config).toBeUndefined();
+  });
+
+  it("round-trips the optional new-chat visibility flag", () => {
+    expect(
+      decodeProviderInstanceConfig({ driver: "codex", showInNewChats: false }).showInNewChats,
+    ).toBe(false);
+    expect(
+      decodeProviderInstanceConfig({ driver: "codex", showInNewChats: true }).showInNewChats,
+    ).toBe(true);
   });
 
   it("preserves driver-opaque config payloads verbatim", () => {

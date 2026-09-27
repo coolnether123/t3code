@@ -8,6 +8,9 @@ Select an individual project to override a default. Reset its row to inherit aga
 default preserves explicit project overrides. Workspace preferences in `t3.json` take precedence
 over machine defaults when the project has no explicit workspace override.
 
+The default-model picker offers only provider instances with **Offer for new chats**
+turned on in **Settings > Providers**. Turning it off does not change existing threads.
+
 Select a machine to limit edits to it. **All machines** writes defaults to connected machines;
 offline machines keep their previous values. Mixed values are indicated when selected machines
 or checkouts disagree. Browser access changes apply when an agent session next starts.

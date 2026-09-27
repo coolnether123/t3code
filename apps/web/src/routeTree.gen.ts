@@ -16,7 +16,6 @@ import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as RepeatedInputRouteImport } from './routes/repeated-input'
 import { Route as PairRouteImport } from './routes/pair'
 import { Route as ConnectRouteImport } from './routes/connect'
-import { Route as CodexRouteImport } from './routes/codex'
 import { Route as ChatRouteImport } from './routes/_chat'
 import { Route as ChatIndexRouteImport } from './routes/_chat.index'
 import { Route as SettingsSourceControlRouteImport } from './routes/settings.source-control'
@@ -68,11 +67,6 @@ const PairRoute = PairRouteImport.update({
 const ConnectRoute = ConnectRouteImport.update({
   id: '/connect',
   path: '/connect',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const CodexRoute = CodexRouteImport.update({
-  id: '/codex',
-  path: '/codex',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ChatRoute = ChatRouteImport.update({
@@ -163,7 +157,6 @@ const ChatEnvironmentIdThreadIdRoute =
 
 export interface FileRoutesByFullPath {
   '/': typeof ChatIndexRoute
-  '/codex': typeof CodexRoute
   '/connect': typeof ConnectRoute
   '/pair': typeof PairRoute
   '/repeated-input': typeof RepeatedInputRoute
@@ -188,7 +181,6 @@ export interface FileRoutesByFullPath {
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
 }
 export interface FileRoutesByTo {
-  '/codex': typeof CodexRoute
   '/connect': typeof ConnectRoute
   '/pair': typeof PairRoute
   '/repeated-input': typeof RepeatedInputRoute
@@ -216,7 +208,6 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_chat': typeof ChatRouteWithChildren
-  '/codex': typeof CodexRoute
   '/connect': typeof ConnectRoute
   '/pair': typeof PairRoute
   '/repeated-input': typeof RepeatedInputRoute
@@ -245,7 +236,6 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
-    | '/codex'
     | '/connect'
     | '/pair'
     | '/repeated-input'
@@ -270,7 +260,6 @@ export interface FileRouteTypes {
     | '/draft/$draftId'
   fileRoutesByTo: FileRoutesByTo
   to:
-    | '/codex'
     | '/connect'
     | '/pair'
     | '/repeated-input'
@@ -297,7 +286,6 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/_chat'
-    | '/codex'
     | '/connect'
     | '/pair'
     | '/repeated-input'
@@ -325,7 +313,6 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   ChatRoute: typeof ChatRouteWithChildren
-  CodexRoute: typeof CodexRoute
   ConnectRoute: typeof ConnectRoute
   PairRoute: typeof PairRoute
   RepeatedInputRoute: typeof RepeatedInputRoute
@@ -386,13 +373,6 @@ declare module '@tanstack/react-router' {
       path: '/connect'
       fullPath: '/connect'
       preLoaderRoute: typeof ConnectRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/codex': {
-      id: '/codex'
-      path: '/codex'
-      fullPath: '/codex'
-      preLoaderRoute: typeof CodexRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_chat': {
@@ -565,7 +545,6 @@ const SettingsRouteWithChildren = SettingsRoute._addFileChildren(
 
 const rootRouteChildren: RootRouteChildren = {
   ChatRoute: ChatRouteWithChildren,
-  CodexRoute: CodexRoute,
   ConnectRoute: ConnectRoute,
   PairRoute: PairRoute,
   RepeatedInputRoute: RepeatedInputRoute,

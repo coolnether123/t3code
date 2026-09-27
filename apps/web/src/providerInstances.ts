@@ -51,6 +51,7 @@ export interface ProviderInstanceEntry {
   readonly accentColor?: string | undefined;
   readonly continuationGroupKey?: string | undefined;
   readonly enabled: boolean;
+  readonly showInNewChats: boolean;
   readonly installed: boolean;
   /** True when this Codex instance uses the environment's desktop app daemon. */
   readonly useDesktopAppDaemon?: boolean | undefined;
@@ -91,7 +92,7 @@ export function isDesktopBackedProviderInstanceReady(entry: ProviderInstanceEntr
 
 /** Picker rails contain configured, enabled instances only. */
 export function isProviderInstancePickerVisible(entry: ProviderInstanceEntry): boolean {
-  return entry.enabled;
+  return entry.enabled && entry.showInNewChats;
 }
 
 /**
@@ -204,6 +205,7 @@ export function deriveProviderInstanceEntries(
       accentColor: normalizeProviderAccentColor(snapshot.accentColor),
       continuationGroupKey: snapshot.continuation?.groupKey,
       enabled: snapshot.enabled,
+      showInNewChats: true,
       installed: snapshot.installed,
       status: snapshot.status,
       isDefault,
@@ -285,10 +287,15 @@ export function applyProviderInstanceSettings(
             .useDesktopAppDaemon === true
         : entry.isDefault && legacyProvider?.useDesktopAppDaemon === true);
     const useDesktopAppDaemon = usesDesktopAppDaemon ? true : undefined;
-    if (enabled === entry.enabled && useDesktopAppDaemon === entry.useDesktopAppDaemon) {
+    const showInNewChats = explicitInstance?.showInNewChats !== false;
+    if (
+      enabled === entry.enabled &&
+      useDesktopAppDaemon === entry.useDesktopAppDaemon &&
+      showInNewChats === entry.showInNewChats
+    ) {
       return entry;
     }
-    return { ...entry, enabled, useDesktopAppDaemon };
+    return { ...entry, enabled, useDesktopAppDaemon, showInNewChats };
   });
 }
 
@@ -357,7 +364,7 @@ export function getDefaultProviderInstanceModel(
 }
 
 const isSelectableProviderInstanceEntry = (entry: ProviderInstanceEntry): boolean =>
-  entry.enabled && entry.isAvailable;
+  entry.enabled && entry.isAvailable && entry.showInNewChats;
 
 /** Keep an explicitly selected desktop-backed instance bound while it is unavailable. */
 export const canKeepExplicitProviderInstanceSelection = (entry: ProviderInstanceEntry): boolean =>
@@ -373,15 +380,20 @@ export const canKeepExplicitProviderInstanceSelection = (entry: ProviderInstance
 export function resolveSelectableProviderInstanceEntry(
   entries: ReadonlyArray<ProviderInstanceEntry>,
   instanceId: ProviderInstanceId | undefined,
+  allowHiddenSelection = false,
 ): ProviderInstanceEntry | undefined {
   if (instanceId !== undefined) {
     const requested = entries.find((entry) => entry.instanceId === instanceId);
-    if (requested && canKeepExplicitProviderInstanceSelection(requested)) {
+    if (
+      requested &&
+      (allowHiddenSelection || requested.showInNewChats) &&
+      canKeepExplicitProviderInstanceSelection(requested)
+    ) {
       return requested;
     }
   }
   return (
-    entries.find(isProviderInstancePickerReady) ??
+    entries.find((entry) => entry.showInNewChats && isProviderInstancePickerReady(entry)) ??
     entries.find((entry) => isSelectableProviderInstanceEntry(entry) && entry.status !== "error")
   );
 }

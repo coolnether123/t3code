@@ -62,6 +62,13 @@ function isDesktopBackedCodexInstance(
   return instanceId === "codex" && config?.settings?.providers.codex.useDesktopAppDaemon === true;
 }
 
+function isOfferedForNewChats(
+  config: T3ServerConfig | null | undefined,
+  instanceId: ProviderInstanceId,
+): boolean {
+  return config?.settings?.providerInstances[instanceId]?.showInNewChats !== false;
+}
+
 export function getDesktopBackedProviderStatusMessage(
   config: T3ServerConfig | null | undefined,
   instanceId: string,
@@ -190,6 +197,7 @@ export function resolveDefaultableModelSelection(
   if (!usable || !config) {
     return usable;
   }
+  if (!isOfferedForNewChats(config, usable.instanceId)) return null;
   const provider = config.providers.find((candidate) => candidate.instanceId === usable.instanceId);
   const model = provider?.models.find((candidate) => candidate.slug === usable.model);
   return provider?.driver !== "antigravity" &&
@@ -204,11 +212,21 @@ export function resolveNewTaskModelSelection(input: {
   readonly projectDefaultSelection: ModelSelection | null;
   readonly stickySelection: ModelSelection | null;
   readonly modelOptions: ReadonlyArray<ModelOption>;
+  readonly preferredDriver?: string | undefined;
 }): ModelSelection | null {
   return (
     input.draftSelection ??
     input.projectDefaultSelection ??
     input.stickySelection ??
+    input.modelOptions.find(
+      (option) =>
+        option.providerDriver === input.preferredDriver &&
+        option.isDefault &&
+        !option.isUnavailable,
+    )?.selection ??
+    input.modelOptions.find(
+      (option) => option.providerDriver === input.preferredDriver && !option.isUnavailable,
+    )?.selection ??
     input.modelOptions.find((option) => option.isDefault && !option.isUnavailable)?.selection ??
     input.modelOptions.find((option) => !option.isUnavailable)?.selection ??
     null
@@ -223,6 +241,8 @@ export function buildModelOptions(
 
   for (const provider of config?.providers ?? []) {
     if (
+      (!isOfferedForNewChats(config, provider.instanceId) &&
+        fallbackModelSelection?.instanceId !== provider.instanceId) ||
       !provider.enabled ||
       !provider.installed ||
       provider.auth.status === "unauthenticated" ||

@@ -88,6 +88,48 @@ describe("isProviderInstancePickerVisible", () => {
     expect(enabledEntry && isProviderInstancePickerVisible(enabledEntry)).toBe(true);
     expect(disabledEntry && isProviderInstancePickerVisible(disabledEntry)).toBe(false);
   });
+
+  it("hides configured instances from new chats but keeps their existing selection", () => {
+    const hiddenId = ProviderInstanceId.make("codex_cli");
+    const visibleId = ProviderInstanceId.make("codex_desktop");
+    const providers = [
+      provider({
+        provider: ProviderDriverKind.make("codex"),
+        instanceId: hiddenId,
+        models: [model("cli")],
+      }),
+      provider({
+        provider: ProviderDriverKind.make("codex"),
+        instanceId: visibleId,
+        models: [model("desktop")],
+      }),
+    ];
+    const settings = {
+      providerInstances: {
+        [hiddenId]: { driver: ProviderDriverKind.make("codex"), showInNewChats: false },
+        [visibleId]: { driver: ProviderDriverKind.make("codex") },
+      },
+      providers: {} as never,
+    };
+    const entries = applyProviderInstanceSettings(
+      deriveProviderInstanceEntries(providers),
+      settings,
+    );
+    expect(
+      entries.filter(isProviderInstancePickerVisible).map((entry) => entry.instanceId),
+    ).toEqual([visibleId]);
+    expect(resolveSelectableProviderInstanceEntry(entries, hiddenId)?.instanceId).toBe(visibleId);
+    expect(resolveSelectableProviderInstanceEntry(entries, hiddenId, true)?.instanceId).toBe(
+      hiddenId,
+    );
+    expect(
+      resolveDefaultProviderModelSelection(
+        providers,
+        { instanceId: hiddenId, model: "cli" },
+        settings,
+      ),
+    ).toEqual({ instanceId: visibleId, model: "desktop" });
+  });
 });
 
 describe("desktop-backed provider selection", () => {

@@ -491,6 +491,10 @@ export function ProviderInstanceCard({
     onUpdate({ ...instance, enabled: value });
   };
 
+  const updateShowInNewChats = (value: boolean) => {
+    onUpdate({ ...instance, showInNewChats: value });
+  };
+
   const updateAccentColor = (value: string) => {
     const normalized = normalizeProviderAccentColor(value);
     const { accentColor: _omit, ...rest } = instance;
@@ -849,6 +853,17 @@ export function ProviderInstanceCard({
         aria-disabled={readOnly || undefined}
         className={readOnly ? "opacity-50 select-none" : undefined}
       >
+        <SettingsRow
+          title="Offer for new chats"
+          description="Hide this instance from new chats without changing existing threads."
+          control={
+            <Switch
+              checked={instance.showInNewChats !== false}
+              onCheckedChange={(checked) => updateShowInNewChats(Boolean(checked))}
+              aria-label={`Offer ${displayName} for new chats`}
+            />
+          }
+        />
         {driverOption ? (
           <ProviderSettingsForm
             definition={driverOption}

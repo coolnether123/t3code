@@ -1,6 +1,5 @@
 import {
   ArrowLeftIcon,
-  BotIcon,
   ChartNoAxesColumnIcon,
   GitPullRequestIcon,
   LayersIcon,
@@ -179,11 +178,6 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
     void navigate({ to: "/usage" });
   }, [isMobile, navigate, setOpenMobile]);
 
-  const handleCodexClick = useCallback(() => {
-    closeMobileSidebar();
-    void navigate({ to: "/codex", search: { thread: undefined } });
-  }, [closeMobileSidebar, navigate]);
-
   const handleRepeatedInputClick = useCallback(() => {
     closeMobileSidebar();
     void navigate({ to: "/repeated-input" });
@@ -231,7 +225,6 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
             label="Skills & repeated input"
             onClick={handleRepeatedInputClick}
           />
-          <SidebarUtilityItem icon={<BotIcon />} label="Codex chats" onClick={handleCodexClick} />
         </>
       )}
       <SidebarUpdatePill />
