@@ -24,6 +24,22 @@ on that instance in **Settings > Providers**. Existing threads still use it,
 and you can turn the switch back on at any time. The setting applies only to
 the environment where you change it.
 
+Existing chats show **Codex CLI** or **Codex desktop** in the chat header and
+sidebar. On mobile, the same label appears above the chat and beside its list
+entry. The label describes the chat's configured provider instance, not the app
+you use to view it. If you change that instance's runtime setting later, the
+label follows the setting; it is not a historical record of earlier turns.
+
+In the web or desktop client, **Start desktop draft** on a Codex CLI chat opens a separate chat draft in
+the same project and checkout when a desktop-backed Codex instance is ready.
+It copies the currently loaded transcript into the unsent message. Earlier
+turns may be omitted; load them first or add the missing context yourself.
+Review and edit the message before sending. A transcript above the message
+limit does not create a draft. This is text context, not a native
+continuation: the desktop app gets a new provider thread, while the original
+chat and its history stay unchanged. Files, attachments, approvals, and live
+tool state do not transfer as active state.
+
 ## Use multiple accounts
 
 A shared Codex home with a shadow home lets work and personal accounts continue

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   applyProviderInstanceSettings,
   canKeepExplicitProviderInstanceSelection,
+  codexThreadRuntimeLabel,
   deriveProviderEntriesByEnvironment,
   deriveProviderInstanceEntries,
   getDefaultProviderInstanceModel,
@@ -133,6 +134,16 @@ describe("isProviderInstancePickerVisible", () => {
 });
 
 describe("desktop-backed provider selection", () => {
+  it("names the runtime without treating other providers as Codex", () => {
+    const [cli, other] = deriveProviderInstanceEntries([
+      provider({ provider: ProviderDriverKind.make("codex"), instanceId: "codex" }),
+      provider({ provider: ProviderDriverKind.make("claudeAgent"), instanceId: "claudeAgent" }),
+    ]);
+    expect(codexThreadRuntimeLabel(cli!)).toBe("Codex CLI");
+    expect(codexThreadRuntimeLabel({ ...cli!, useDesktopAppDaemon: true })).toBe("Codex desktop");
+    expect(codexThreadRuntimeLabel(other!)).toBeNull();
+    expect(codexThreadRuntimeLabel(null)).toBeNull();
+  });
   it("retains an explicitly selected unavailable desktop instance, but not as a default", () => {
     const desktopEntry = {
       ...deriveProviderInstanceEntries([

@@ -90,6 +90,12 @@ export function isDesktopBackedProviderInstanceReady(entry: ProviderInstanceEntr
   );
 }
 
+/** Name the runtime, not just the Codex brand, on existing thread chrome. */
+export function codexThreadRuntimeLabel(entry: ProviderInstanceEntry | null): string | null {
+  if (entry?.driverKind !== "codex") return null;
+  return entry.useDesktopAppDaemon === true ? "Codex desktop" : "Codex CLI";
+}
+
 /** Picker rails contain configured, enabled instances only. */
 export function isProviderInstancePickerVisible(entry: ProviderInstanceEntry): boolean {
   return entry.enabled && entry.showInNewChats;

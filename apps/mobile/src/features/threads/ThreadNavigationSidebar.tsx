@@ -26,6 +26,7 @@ import { SymbolView } from "../../components/AppSymbol";
 import { NATIVE_LIQUID_GLASS_SUPPORTED } from "../../native/native-glass";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { scopedProjectKey, scopedThreadKey } from "../../lib/scopedEntities";
+import { codexThreadRuntimeLabel } from "../../lib/modelOptions";
 import { useProjects, useThreadShells } from "../../state/entities";
 import { useThreadSearch } from "../../state/queries";
 import { useThreadListV2Enabled } from "./use-thread-list-v2-enabled";
@@ -899,6 +900,10 @@ function ThreadNavigationSidebarPane(
               snoozeWakeLabelText={item.snoozeWakeLabelText}
               project={projectByKey.get(scopeKey) ?? null}
               projectTitle={projectTitleByProjectKey.get(scopeKey)}
+              providerRuntimeLabel={codexThreadRuntimeLabel(
+                serverConfigs.get(thread.environmentId),
+                thread.session?.providerInstanceId ?? thread.modelSelection.instanceId,
+              )}
               providerDriver={
                 serverConfigs
                   .get(thread.environmentId)

@@ -4,6 +4,7 @@ import { ProviderInstanceId, type ModelSelection, type ServerConfig } from "@t3t
 
 import {
   buildModelOptions,
+  codexThreadRuntimeLabel,
   getDesktopBackedProviderStatusMessage,
   getModelSelectionUnavailableMessage,
   groupByProvider,
@@ -15,6 +16,25 @@ import {
 } from "./modelOptions";
 
 describe("mobile model options", () => {
+  it("distinguishes legacy and desktop Codex thread instances", () => {
+    const config = {
+      providers: [
+        { instanceId: "codex", driver: "codex" },
+        { instanceId: "codex_desktop", driver: "codex" },
+        { instanceId: "claudeAgent", driver: "claudeAgent" },
+      ],
+      settings: {
+        providerInstances: {
+          codex_desktop: { driver: "codex", config: { useDesktopAppDaemon: true } },
+        },
+        providers: { codex: {} },
+      },
+    } as unknown as ServerConfig;
+    expect(codexThreadRuntimeLabel(config, "codex")).toBe("Codex CLI");
+    expect(codexThreadRuntimeLabel(config, "codex_desktop")).toBe("Codex desktop");
+    expect(codexThreadRuntimeLabel(config, "claudeAgent")).toBeNull();
+    expect(codexThreadRuntimeLabel(config, "missing")).toBeNull();
+  });
   it("shows an unavailable desktop Codex instance and preserves its environment message", () => {
     const selection = {
       instanceId: ProviderInstanceId.make("codex_personal"),
