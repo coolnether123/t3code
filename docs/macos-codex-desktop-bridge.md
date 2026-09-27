@@ -51,6 +51,16 @@ Use normal Codex plugin mentions in T3 prompts, such as `@Chrome`, and approve
 requests in T3 when they are surfaced. Computer Use still enforces the host
 Mac's app allowlist and system permissions.
 
+For desktop-backed threads, T3 attaches the enabled bundled plugins' skill
+directories from the local `openai-bundled` marketplace in the host's Codex
+config. Disabled plugins and missing skill directories are skipped. Provider
+status refresh lists the same daemon skills. If the config cannot be read or
+the daemon rejects the skill roots, the thread still opens; its **Tools
+attached to this thread** activity reports why the skills were not attached.
+Check the host's `CODEX_HOME/config.toml` (or `~/.codex/config.toml`) and the
+daemon when this warning appears. The skills do not bypass host approvals or
+prove that a browser connection is available.
+
 Each T3 provider session receives its own MCP credential. For desktop-daemon
 threads, T3 sends the server URL and authorization header in `thread/start` or
 `thread/resume`; it does not put the credential in the proxy environment. The

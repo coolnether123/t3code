@@ -1,3 +1,4 @@
+import { NodeServices } from "@effect/platform-node";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -52,6 +53,7 @@ import {
   type CodexAppServerTransport,
 } from "../CodexAppServerTransport.ts";
 import { withCodexSandboxStartupRecovery } from "./CodexSandboxRecovery.ts";
+import { attachCodexDesktopPluginSkills } from "../CodexDesktopPluginSkills.ts";
 import { codexMcpDisableOverride, preflightCodexMcpServers } from "./CodexMcpPreflight.ts";
 import packageJson from "../../../package.json" with { type: "json" };
 const isCodexAppServerSpawnError = Schema.is(CodexErrors.CodexAppServerSpawnError);
@@ -517,6 +519,11 @@ const probeCodexAppServerProviderOnce = Effect.fn("probeCodexAppServerProviderOn
       },
     });
     yield* client.notify("initialized", undefined);
+    if (desktopDaemon) {
+      yield* attachCodexDesktopPluginSkills(client, { ...process.env, ...environment }).pipe(
+        Effect.provide(NodeServices.layer),
+      );
+    }
 
     // Extract the version string after the first '/' in userAgent, up to the next space or the end
     const versionMatch = initialize.userAgent.match(/\/([^\s]+)/);
@@ -536,6 +543,7 @@ const probeCodexAppServerProviderOnce = Effect.fn("probeCodexAppServerProviderOn
       [
         client.request("skills/list", {
           cwds: [input.cwd],
+          ...(desktopDaemon ? { forceReload: true } : {}),
         }),
         requestAllCodexModels(client, input.browserTools, input.desktopBacked),
       ],
