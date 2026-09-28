@@ -59,9 +59,128 @@ beforeEach(() => {
 });
 
 describe("Codex monitor page", () => {
-  it("uses separate history, cycle, public, pace, and chart activity reads", () => {
+  it("uses separate history, cycle, public, pace, chart, and full-cycle model reads", () => {
     renderToStaticMarkup(<UsageResetPage />);
-    expect(state.useUsage).toHaveBeenCalledTimes(5);
+    expect(state.useUsage).toHaveBeenCalledTimes(6);
+  });
+
+  it("releases independent calculation reads when the cycle scan settles partially", async () => {
+    const fingerprint = {
+      hostId: "desktop",
+      provider: "codex",
+      resolvedHomePath: "/sessions",
+      volumeId: "1",
+    };
+    const samples = [
+      {
+        observedAt: "2026-08-30T20:00:00Z",
+        remainingPercent: 100,
+        resetsAt: "2026-09-06T00:00:00Z",
+      },
+      {
+        observedAt: "2026-08-30T22:00:00Z",
+        remainingPercent: 99,
+        resetsAt: "2026-09-06T00:00:00Z",
+      },
+    ];
+    const historyEnvironment = {
+      environmentId: "desktop",
+      label: "Desktop",
+      isPending: false,
+      error: null,
+      summary: {
+        sources: [{ fingerprint, status: "ok" }],
+        quotaHistory: {
+          status: "ready",
+          source: "fixture",
+          message: null,
+          samples,
+        },
+      },
+    };
+    const partialEnvironment = {
+      environmentId: "desktop",
+      label: "Desktop",
+      isPending: false,
+      error: null,
+      summary: {
+        sources: [
+          {
+            fingerprint,
+            status: "partial",
+            scannedFiles: 1,
+            skippedFiles: 0,
+            malformedRecords: 0,
+            distinctSessions: 0,
+            message:
+              "Usage is partial while a large transcript is scanned in complete-line chunks.",
+          },
+        ],
+        quotaCosts: [],
+      },
+    };
+    state.publicHistory = {
+      checkedAt: Date.parse("2026-08-30T22:00:00Z"),
+      status: "ready",
+      announcements: [
+        {
+          id: "2094251180121854309",
+          resetType: "regular",
+          announcedAt: "2026-08-27T02:29:25Z",
+          text: "Reset",
+          sourceType: "x_post",
+          sourceUrl: "https://x.com/thsottiaux/status/2094251180121854309",
+        },
+        {
+          id: "2095651088502591861",
+          resetType: "banked",
+          announcedAt: "2026-08-29T23:12:30Z",
+          text: "Banked reset",
+          sourceType: "x_post",
+          sourceUrl: "https://x.com/thsottiaux/status/2095651088502591861",
+        },
+        {
+          id: "2098685367058612394",
+          resetType: "regular",
+          announcedAt: "2026-08-30T08:09:17Z",
+          text: "Reset",
+          sourceType: "x_post",
+          sourceUrl: "https://x.com/thsottiaux/status/2098685367058612394",
+        },
+      ],
+    };
+    const requestedInputs: Array<{
+      quotaHistoryOnly?: boolean;
+      quotaIntervals?: readonly { id: string }[];
+    }> = [];
+    state.useUsage.mockImplementation(
+      (input: { quotaHistoryOnly?: boolean; quotaIntervals?: readonly { id: string }[] }) => {
+        requestedInputs.push(input);
+        return {
+          environments: [input.quotaHistoryOnly ? historyEnvironment : partialEnvironment],
+          isPending: false,
+          isPartial: false,
+          refresh: state.refresh,
+        };
+      },
+    );
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<UsageResetPage />));
+      const intervalIds = requestedInputs.flatMap(
+        (input) => input.quotaIntervals?.map((interval) => interval.id) ?? [],
+      );
+      expect(intervalIds).toContain("2026-08-30T20:00:00Z");
+      expect(intervalIds).toContain("api-pace:2026-08-30T20:00:00.000Z");
+      expect(intervalIds.some((id) => id.startsWith("codex-resets:"))).toBe(true);
+      expect(new Set(intervalIds).size).toBeGreaterThanOrEqual(4);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
   });
 
   it("refreshes current-cycle costs after each visible history reading", async () => {
@@ -94,7 +213,7 @@ describe("Codex monitor page", () => {
     state.useUsage.mockImplementation(() => ({
       environments: [],
       isPending: false,
-      refresh: ++hookCalls % 5 === 1 ? historyRefresh : costRefresh,
+      refresh: ++hookCalls % 6 === 1 ? historyRefresh : costRefresh,
     }));
     const container = document.createElement("div");
     document.body.append(container);
@@ -160,7 +279,7 @@ describe("Codex monitor page", () => {
     state.useUsage.mockImplementation(() => ({
       environments: [],
       isPending: false,
-      refresh: ++hookCalls % 5 === 1 ? historyRefresh : costRefresh,
+      refresh: ++hookCalls % 6 === 1 ? historyRefresh : costRefresh,
     }));
     const container = document.createElement("div");
     document.body.append(container);

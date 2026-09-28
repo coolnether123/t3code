@@ -145,6 +145,16 @@ The monitor leads with remaining usage and the total used in the current account
 For example, 81% remaining means 19% used. If tracking began at 83%, the monitor observed
 a two-percentage-point drop. Those two points are not the cycle total.
 
+**Model impact** uses the selected cycle's saved readings and Codex transcript costs for the
+selected computers. It shows recorded tokens and API-equivalent cost for each model. Its
+"quota-equivalent" points divide each change between saved readings in proportion to the
+models' API-equivalent costs in that stretch of time. A drop with no priced model activity stays
+unattributed. This is an estimate, not a provider-reported quota charge for Astra, Sol, or any
+other model. The dashed line in the chart is
+the saved pooled quota change; colored lines are cumulative model estimates. Inspect the slider
+for a time and its estimates. The timed curve waits for complete matching transcript coverage,
+and no share is inferred when model records are incomplete or no priced activity is available.
+
 **Recorded** shows saved readings. **To reset** adds the current-pace projection through the
 planning deadline. The daily budget leaves 3% unused. The forecast blends the observed pace
 with the current weekly average.

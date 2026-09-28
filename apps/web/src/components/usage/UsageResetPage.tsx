@@ -44,6 +44,7 @@ import { apiPaceInterval } from "./usageApiPace";
 import type { PriorApiPaceInput } from "./usageApiPace";
 import { UsagePaceChart } from "./UsagePaceChart";
 import { UsageCycleComparison } from "./UsageCycleComparison";
+import { UsageModelTracker } from "./UsageModelTracker";
 import { chartActivityIntervals } from "./usageChartActivity";
 import { ResetCheckPanel } from "./ResetCheckPanel";
 import { CommunityCheckPanel } from "./CommunityCheckPanel";
@@ -254,25 +255,33 @@ export function UsageResetPage() {
       chartRange?.cycleId === selectedPeriod.id ? chartRange.range : null,
     );
   }, [selectedPeriod, rawSamples, chartRange]);
+  const modelActivityIntervals = useMemo(() => {
+    if (!selectedPeriod) return [];
+    return chartActivityIntervals(
+      (rawSamples ?? []).filter(
+        (sample) =>
+          sample.observedAt >= selectedPeriod.first.observedAt &&
+          sample.observedAt <= selectedPeriod.last.observedAt,
+      ),
+      null,
+    );
+  }, [selectedPeriod, rawSamples]);
   const publicIntervals = useMemo(
     () => publicResetIntervals(publicHistory.announcements),
     [publicHistory.announcements],
   );
-  const cycleCostsReady =
-    intervals.length === 0 ||
-    costs.environments.some(
-      (environment) =>
-        environment.summary?.quotaCosts !== undefined &&
-        environment.summary.sources.every((source) => source.status !== "partial"),
-    );
+  // Let sibling calculations start once the cycle read settles. A bounded
+  // transcript scan may remain partial after its retries; that must not keep
+  // independent public-reset, pace, and chart reads on history-only forever.
+  const cycleCostsSettled = intervals.length === 0 || (!costs.isPending && !costs.isPartial);
   const publicCostInput = useMemo(
-    () => (cycleCostsReady ? (quotaCostWindow(publicIntervals) ?? historyInput) : historyInput),
-    [historyInput, publicIntervals, cycleCostsReady],
+    () => (cycleCostsSettled ? (quotaCostWindow(publicIntervals) ?? historyInput) : historyInput),
+    [historyInput, publicIntervals, cycleCostsSettled],
   );
   const publicCosts = useUsage(publicCostInput);
   const paceInput = useMemo(
-    () => (cycleCostsReady && paceInterval ? quotaCostWindow([paceInterval])! : historyInput),
-    [paceInterval, historyInput, cycleCostsReady],
+    () => (cycleCostsSettled && paceInterval ? quotaCostWindow([paceInterval])! : historyInput),
+    [paceInterval, historyInput, cycleCostsSettled],
   );
   const paceCosts = useUsage(paceInput);
   const [requestedActivityIntervals, setRequestedActivityIntervals] = useState(activityIntervals);
@@ -282,12 +291,18 @@ export function UsageResetPage() {
   }, [activityIntervals]);
   const activityInput = useMemo(
     () =>
-      cycleCostsReady
+      cycleCostsSettled
         ? (quotaCostWindow(requestedActivityIntervals) ?? historyInput)
         : historyInput,
-    [requestedActivityIntervals, cycleCostsReady, historyInput],
+    [requestedActivityIntervals, cycleCostsSettled, historyInput],
   );
   const activityCosts = useUsage(activityInput);
+  const modelActivityInput = useMemo(
+    () =>
+      cycleCostsSettled ? (quotaCostWindow(modelActivityIntervals) ?? historyInput) : historyInput,
+    [modelActivityIntervals, cycleCostsSettled, historyInput],
+  );
+  const modelActivityCosts = useUsage(modelActivityInput);
   const chartActivity = useMemo(() => {
     const environments = activityCosts.environments.filter(
       (environment) =>
@@ -298,6 +313,16 @@ export function UsageResetPage() {
       models: monitoredModels(interval, environments),
     }));
   }, [activityIntervals, activityCosts.environments, effectiveSelectedIds]);
+  const modelChartActivity = useMemo(() => {
+    const environments = modelActivityCosts.environments.filter(
+      (environment) =>
+        effectiveSelectedIds === null || effectiveSelectedIds.includes(environment.environmentId),
+    );
+    return modelActivityIntervals.map((interval) => ({
+      interval,
+      models: monitoredModels(interval, environments),
+    }));
+  }, [modelActivityIntervals, modelActivityCosts.environments, effectiveSelectedIds]);
   const historical = periods.at(-2);
   const paceModels = useMemo(
     () =>
@@ -456,6 +481,9 @@ export function UsageResetPage() {
               recentInput ? paceCosts.refresh(recentInput) : Promise.resolve([]),
               publicCosts.refresh(publicCostInput),
               activityCosts.refresh(activityInput),
+              JSON.stringify(modelActivityInput) === JSON.stringify(activityInput)
+                ? Promise.resolve([])
+                : modelActivityCosts.refresh(modelActivityInput),
             ]);
             return replies.flat();
           },
@@ -517,6 +545,9 @@ export function UsageResetPage() {
           >
             <a className="hover:text-foreground" href="#api-value">
               API value
+            </a>
+            <a className="hover:text-foreground" href="#model-impact">
+              Models
             </a>
             <a className="hover:text-foreground" href="#reset-history">
               Reset history
@@ -622,6 +653,14 @@ export function UsageResetPage() {
                     : null
                 }
                 priorApiPace={priorApiPace}
+              />
+              <UsageModelTracker
+                key={`${tracker.environmentId}:${current.period.id}`}
+                period={current.period}
+                samples={rawSamples ?? samples}
+                models={currentModels}
+                activity={modelChartActivity}
+                scope={costScope}
               />
               <UsageCycleComparison
                 key={tracker.environmentId}
