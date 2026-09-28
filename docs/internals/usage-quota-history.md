@@ -119,7 +119,48 @@ therefore label every period as an API-equivalent estimate, disclose propagation
 withhold incomplete, unpriced, or empty transcript totals. Physical source fingerprints are
 deduplicated before aggregation. No account or transcript data is sent to Codex Resets.
 
+## Claude subscription windows
+
+`ClaudeQuotaSampler` is the Claude counterpart of the Codex Limits collector, but it runs inside
+the T3 server. On the provider health-check interval it calls `readClaudeSubscriptionWindows`,
+which reuses the Claude capability probe: the Agent SDK starts the configured Claude CLI with a
+never-yielding prompt and issues its `get_usage` control request, so no model request is made.
+It runs whether or not Claude is enabled for chats and whether or not a client is connected; it
+pauses only for host constraints (suspend, thermal pressure, and the locked, low-power, and
+battery settings). A signed-out CLI or an account without subscription limits is saved as the
+reason and retried every 30 minutes.
+
+Readings are kept per window id (`five_hour`, `seven_day`, and model-scoped weeklies) in
+`usage-claude-quota-history.json` in the state directory, as `[observedAtMs, remainingPercent,
+resetsAtMs]` triples. Unchanged consecutive readings are coalesced but kept at least hourly;
+retention is 120 days and 12,000 readings per window. Summaries that include quota history return
+them as `providerQuotaHistories` using the `UsageQuotaSample` shape, so `quotaPeriods`, forecasts,
+and the pace chart apply unchanged. `quotaForecast` and the chart take the window length, so a
+session limit is paced over five hours. `quotaProvider: "claude"` makes `QuotaCostAccumulator`
+price Claude records for the requested intervals; it is part of the client query key and is
+omitted for Codex so existing Codex keys are unchanged. The cost ledger remains Codex-only.
+
+## Transcript scan cache
+
+Parsed records are stored in `usage-scan-cache.sqlite` (`UsageScanStore`), not in a single JSON
+document. Each transcript has a head row (size, mtime, parser cursor, Codex parser state,
+repeated-input data) and append-only record chunks in the positional per-file format the old cache
+used, so decoding keeps its corrupt-entry rules. Only a per-file index (size, mtime, cursors,
+record count, latest usage time) is resident; entries are decoded on demand behind a bounded
+decode cache. A transcript that grew appends its new records; a re-parsed one replaces its chunks.
+The database opens on first use and is released after each scan. Window filtering and scan
+planning read the index, and unchanged files whose latest usage predates a window are not decoded.
+The pre-SQLite `usage-scan-cache.json` is imported once on a detached fiber in small transactions,
+then kept as `usage-scan-cache.json.imported`.
+
+Transcript listings keep the last complete walk per root. Later reads stat known directories,
+re-read only directories whose mtime changed, and re-stat only transcripts written in the last
+48 hours; a full walk runs every five minutes to catch appends to older transcripts. Summaries
+that request the same root within ten seconds share one complete listing.
+
 ## On-demand Luna research
+
+The web Limits page no longer shows these jobs; the server methods remain for other clients.
 
 `UsageResetCheck` owns one bounded research job per environment. Authenticated read scopes can
 read status; orchestration-operate scopes are required to start or cancel. Concurrent starts share
@@ -157,9 +198,5 @@ a dated original for firsthand reset/waiting classifications. Both clients label
 Transcript scan budgeting uses the same validated append offset as the reader. A growing
 200 MB chat with 40 KB appended consumes 40 KB of the scan budget. A missing parser cursor,
 truncation, provider change, or incomplete JSONL boundary requires a full read instead.
-Cache replacement uses the existing atomic-write helper. Usage refresh awaits new observations
-and their matching cost interval; reset news updates through its independent watcher.
-The scan semaphore serializes the initial disk-cache load. Only a completed load is remembered,
-so cancelling the first request does not poison later reads with a cached interruption.
-Directory walks check file metadata in batches of at most 32, retaining the same timestamp
-filter and recursive discovery. Transcript parsing remains bounded separately by unread bytes.
+Usage refresh awaits new observations and their matching cost interval; reset news updates
+through its independent watcher. Transcript parsing remains bounded separately by unread bytes.
