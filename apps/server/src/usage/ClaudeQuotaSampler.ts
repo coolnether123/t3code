@@ -3,11 +3,12 @@
  * reset monitor, the way the Codex Limits collector does for Codex.
  *
  * Reads the account's session and weekly windows on the provider health-check
- * interval while background work is allowed, whether or not Claude is enabled
- * for chats, and appends them to `usage-claude-quota-history.json`. A reading
- * never sends a prompt. While readings are unavailable (for example, the CLI
- * is signed out) it retries on a slower cadence instead of spawning the CLI
- * every interval.
+ * interval, whether or not Claude is enabled for chats or any client is open,
+ * and appends them to `usage-claude-quota-history.json`. Like other background
+ * work it pauses while the host is suspended or constrained by the user's
+ * locked, low-power, or battery settings. A reading never sends a prompt.
+ * While readings are unavailable (for example, the CLI is signed out) it
+ * retries on a slower cadence instead of spawning the CLI every interval.
  *
  * @module usage/ClaudeQuotaSampler
  */
@@ -50,6 +51,25 @@ const HistoryJson = Schema.fromJsonString(Schema.Unknown as unknown as Schema.Co
 const decodeHistoryJson = Schema.decodeUnknownEffect(HistoryJson);
 const encodeHistoryJson = Schema.encodeEffect(HistoryJson);
 const decodeClaudeSettings = Schema.decodeUnknownEffect(ClaudeSettings);
+
+/**
+ * History needs readings while nobody has T3 open, so this checks only the
+ * host's constraints rather than the client-activity leases other polling uses.
+ */
+const hostAllowsSampling = (
+  backgroundPolicy: BackgroundPolicy.BackgroundPolicy["Service"],
+  settingsService: ServerSettingsService["Service"],
+) =>
+  Effect.gen(function* () {
+    const snapshot = yield* backgroundPolicy.snapshot;
+    const settings = yield* settingsService.getSettings.pipe(Effect.orElseSucceed(() => null));
+    return settings === null
+      ? true
+      : !BackgroundPolicy.isHostConstrained(
+          snapshot.hostPower,
+          resolveServerBackgroundActivitySettings(settings),
+        );
+  });
 
 export class ClaudeQuotaSampler extends Context.Service<
   ClaudeQuotaSampler,
@@ -118,7 +138,7 @@ export const make = Effect.gen(function* () {
     yield* Effect.sleep(FIRST_READING_DELAY);
     let available = true;
     while (true) {
-      const shouldRun = yield* backgroundPolicy.shouldRunScopeWork({ type: "provider-status" });
+      const shouldRun = yield* hostAllowsSampling(backgroundPolicy, settingsService);
       if (shouldRun) {
         available = yield* sampleNow.pipe(
           Effect.catchCause((cause) =>
