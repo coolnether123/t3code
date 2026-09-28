@@ -24,6 +24,7 @@ import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -105,11 +106,26 @@ const TASK_DESCRIPTION_BY_TASK_CACHE_CAPACITY = 10_000;
 const TASK_DESCRIPTION_BY_TASK_TTL = Duration.minutes(120);
 const MAX_BUFFERED_ASSISTANT_CHARS = 24_000;
 const STRICT_PROVIDER_LIFECYCLE_GUARD = process.env.T3CODE_STRICT_PROVIDER_LIFECYCLE_GUARD !== "0";
+const CAPACITY_RETRY_DELAY = Duration.seconds(5);
+const CAPACITY_MAX_ATTEMPTS = 5;
 
 type TurnStartRequestedDomainEvent = Extract<
   OrchestrationEvent,
   { type: "thread.turn-start-requested" }
 >;
+
+type RetrySettings = Partial<
+  Pick<
+    TurnStartRequestedDomainEvent["payload"],
+    "modelSelection" | "interactionMode" | "subagentBackend"
+  >
+>;
+
+type PendingCapacityRetry = {
+  readonly attempt: number;
+  readonly failedTurnId: TurnId;
+  readonly settings: RetrySettings;
+};
 
 type RuntimeIngestionInput =
   | {
@@ -118,7 +134,7 @@ type RuntimeIngestionInput =
     }
   | {
       source: "domain";
-      event: TurnStartRequestedDomainEvent;
+      event: OrchestrationEvent;
     };
 
 export const runNormalProviderRuntimeEvent = <A, E, R, E2, R2>(
@@ -985,6 +1001,119 @@ const make = Effect.gen(function* () {
     crypto.randomUUIDv4.pipe(
       Effect.map((uuid) => CommandId.make(`provider:${event.eventId}:${tag}:${uuid}`)),
     );
+
+  const retrySettings = new Map<ThreadId, RetrySettings>();
+  const pendingCapacityRetries = new Map<ThreadId, PendingCapacityRetry>();
+  const capacityAttempts = new Map<ThreadId, number>();
+  const lastCapacityFailure = new Map<ThreadId, TurnId>();
+
+  const appendCapacityActivity = Effect.fn("appendCapacityActivity")(function* (
+    threadId: ThreadId,
+    turnId: TurnId,
+    summary: string,
+    tone: "info" | "error",
+    waiting = false,
+  ) {
+    const eventId = EventId.make(yield* crypto.randomUUIDv4);
+    const createdAt = DateTime.formatIso(yield* DateTime.now);
+    yield* orchestrationEngine.dispatch({
+      type: "thread.activity.append",
+      commandId: CommandId.make(`capacity-retry:${eventId}`),
+      threadId,
+      activity: {
+        id: eventId,
+        kind: waiting ? "capacity.retry.waiting" : "capacity.retry.finished",
+        tone,
+        summary,
+        payload: {},
+        turnId,
+        createdAt,
+      },
+      createdAt,
+    });
+  });
+
+  const cancelCapacityRetry = (threadId: ThreadId) => {
+    pendingCapacityRetries.delete(threadId);
+    capacityAttempts.delete(threadId);
+  };
+
+  const scheduleCapacityRetry = Effect.fn("scheduleCapacityRetry")(function* (
+    threadId: ThreadId,
+    failedTurnId: TurnId,
+    attempt: number,
+  ) {
+    if (attempt >= CAPACITY_MAX_ATTEMPTS) {
+      cancelCapacityRetry(threadId);
+      yield* appendCapacityActivity(
+        threadId,
+        failedTurnId,
+        `Model still at capacity after ${CAPACITY_MAX_ATTEMPTS} attempts. Send again or pick another model.`,
+        "error",
+      );
+      return;
+    }
+    const pending: PendingCapacityRetry = {
+      attempt,
+      failedTurnId,
+      settings: retrySettings.get(threadId) ?? {},
+    };
+    pendingCapacityRetries.set(threadId, pending);
+    yield* appendCapacityActivity(
+      threadId,
+      failedTurnId,
+      `Model at capacity. Trying again in 5 seconds (attempt ${attempt + 1} of ${CAPACITY_MAX_ATTEMPTS}).`,
+      "info",
+      true,
+    );
+    yield* Effect.gen(function* () {
+      yield* Effect.sleep(CAPACITY_RETRY_DELAY);
+      if (pendingCapacityRetries.get(threadId) !== pending) return;
+      const thread = yield* resolveThreadShell(threadId);
+      if (
+        !thread ||
+        thread.archivedAt !== null ||
+        thread.session?.status !== "error" ||
+        thread.session.activeTurnId !== null
+      ) {
+        cancelCapacityRetry(threadId);
+        if (thread && thread.archivedAt === null) {
+          yield* appendCapacityActivity(
+            threadId,
+            failedTurnId,
+            "Automatic retry canceled.",
+            "info",
+          );
+        }
+        return;
+      }
+      pendingCapacityRetries.delete(threadId);
+      capacityAttempts.set(threadId, attempt + 1);
+      yield* appendCapacityActivity(threadId, failedTurnId, "Trying again now.", "info");
+      yield* providerService
+        .sendTurn({
+          threadId,
+          continuation: true,
+          ...pending.settings,
+        })
+        .pipe(
+          Effect.catchCause((cause) =>
+            Effect.gen(function* () {
+              cancelCapacityRetry(threadId);
+              yield* appendCapacityActivity(
+                threadId,
+                failedTurnId,
+                "Automatic retry could not start. Send again or pick another model.",
+                "error",
+              );
+              yield* Effect.logWarning("capacity retry failed to start", {
+                cause: Cause.pretty(cause),
+              });
+            }),
+          ),
+        );
+    }).pipe(Effect.forkScoped);
+  });
 
   const turnMessageIdsByTurnKey = yield* Cache.make<string, Set<MessageId>>({
     capacity: TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY,
@@ -2133,12 +2262,110 @@ const make = Effect.gen(function* () {
           ),
         ),
       ).pipe(Effect.asVoid);
+
+      if (event.type === "turn.completed" && shouldApplyThreadLifecycle && eventTurnId) {
+        const attempt = capacityAttempts.get(thread.id) ?? 1;
+        if (
+          event.payload.state === "failed" &&
+          event.payload.errorClass === "capacity" &&
+          thread.archivedAt === null &&
+          thread.session?.status !== "stopped" &&
+          lastCapacityFailure.get(thread.id) !== eventTurnId
+        ) {
+          lastCapacityFailure.set(thread.id, eventTurnId);
+          yield* scheduleCapacityRetry(thread.id, eventTurnId, attempt);
+        } else if (event.payload.errorClass !== "capacity") {
+          cancelCapacityRetry(thread.id);
+          lastCapacityFailure.delete(thread.id);
+        }
+      }
+      if (event.type === "turn.started") {
+        const pending = pendingCapacityRetries.get(thread.id);
+        if (pending) {
+          cancelCapacityRetry(thread.id);
+          yield* appendCapacityActivity(
+            thread.id,
+            pending.failedTurnId,
+            "Automatic retry canceled.",
+            "info",
+          );
+        }
+      }
+      if (event.type === "session.exited") {
+        const pending = pendingCapacityRetries.get(thread.id);
+        cancelCapacityRetry(thread.id);
+        retrySettings.delete(thread.id);
+        lastCapacityFailure.delete(thread.id);
+        if (pending) {
+          yield* appendCapacityActivity(
+            thread.id,
+            pending.failedTurnId,
+            "Automatic retry canceled.",
+            "info",
+          );
+        }
+      }
     });
 
   const processRuntimeEvent = (event: ProviderRuntimeEvent) =>
     runNormalProviderRuntimeEvent(isLinkedProviderThread, event, projectRuntimeEvent);
 
-  const processDomainEvent = (_event: TurnStartRequestedDomainEvent) => Effect.void;
+  const processDomainEvent = (event: OrchestrationEvent) =>
+    Effect.gen(function* () {
+      switch (event.type) {
+        case "thread.turn-start-requested":
+          cancelCapacityRetry(event.payload.threadId);
+          lastCapacityFailure.delete(event.payload.threadId);
+          retrySettings.set(event.payload.threadId, {
+            ...(event.payload.modelSelection !== undefined
+              ? { modelSelection: event.payload.modelSelection }
+              : {}),
+            interactionMode: event.payload.interactionMode,
+            ...(event.payload.subagentBackend !== undefined
+              ? { subagentBackend: event.payload.subagentBackend }
+              : {}),
+          });
+          break;
+        case "thread.turn-steer-requested":
+        case "thread.turn-interrupt-requested":
+        case "thread.session-stop-requested":
+        case "thread.archived":
+        case "thread.deleted": {
+          const pending = pendingCapacityRetries.get(event.payload.threadId);
+          cancelCapacityRetry(event.payload.threadId);
+          if (
+            event.type === "thread.deleted" ||
+            event.type === "thread.archived" ||
+            event.type === "thread.session-stop-requested"
+          ) {
+            retrySettings.delete(event.payload.threadId);
+            lastCapacityFailure.delete(event.payload.threadId);
+          }
+          if (pending && event.type !== "thread.deleted") {
+            yield* appendCapacityActivity(
+              event.payload.threadId,
+              pending.failedTurnId,
+              "Automatic retry canceled.",
+              "info",
+            );
+          }
+          break;
+        }
+        case "thread.message-sent": {
+          const pending = pendingCapacityRetries.get(event.payload.threadId);
+          cancelCapacityRetry(event.payload.threadId);
+          if (pending) {
+            yield* appendCapacityActivity(
+              event.payload.threadId,
+              pending.failedTurnId,
+              "Automatic retry canceled.",
+              "info",
+            );
+          }
+          break;
+        }
+      }
+    });
 
   const processInput = (input: RuntimeIngestionInput) =>
     input.source === "runtime" ? processRuntimeEvent(input.event) : processDomainEvent(input.event);
@@ -2169,13 +2396,47 @@ const make = Effect.gen(function* () {
       );
       yield* forkParked(
         Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) => {
-          if (event.type !== "thread.turn-start-requested") {
+          if (
+            event.type !== "thread.turn-start-requested" &&
+            event.type !== "thread.turn-steer-requested" &&
+            event.type !== "thread.message-sent" &&
+            event.type !== "thread.turn-interrupt-requested" &&
+            event.type !== "thread.session-stop-requested" &&
+            event.type !== "thread.archived" &&
+            event.type !== "thread.deleted"
+          ) {
             return Effect.void;
           }
           return worker.enqueue({ source: "domain", event });
         }),
       );
-    });
+      const interruptedWaits =
+        yield* projectionSnapshotQuery.listActivitiesByKind("capacity.retry.waiting");
+      for (const threadId of new Set(interruptedWaits.map((entry) => entry.threadId))) {
+        const detail = yield* resolveThreadDetail(threadId);
+        const closedTurns = new Set(
+          detail?.activities
+            .filter((activity) => activity.kind === "capacity.retry.finished")
+            .map((activity) => activity.turnId),
+        );
+        const waiting = detail?.activities.find(
+          (activity) =>
+            activity.kind === "capacity.retry.waiting" && !closedTurns.has(activity.turnId),
+        );
+        if (detail?.archivedAt === null && detail.session?.status === "error" && waiting?.turnId) {
+          yield* appendCapacityActivity(
+            threadId,
+            waiting.turnId,
+            "Automatic retry stopped when the server restarted. Send again to continue.",
+            "error",
+          );
+        }
+      }
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("capacity retry restart recovery failed", { cause: Cause.pretty(cause) }),
+      ),
+    );
 
   return {
     start,

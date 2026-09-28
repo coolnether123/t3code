@@ -1,4 +1,5 @@
 import { type EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
+import { isCapacityRetryWaiting } from "@t3tools/client-runtime/capacityRetry";
 import {
   appendCodexArtifactTemplateUsePrompt,
   type CodexArtifactTemplate,
@@ -896,6 +897,17 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                   }
                 />
                 <ThreadComposer
+                  capacityRetryWaiting={isCapacityRetryWaiting(
+                    props.selectedThread.session?.status,
+                    props.selectedThreadFeed.flatMap((entry) =>
+                      entry.type === "activity-group"
+                        ? entry.activities.map((activity) => ({
+                            kind: activity.workEntry.sourceActivityKind ?? "",
+                            turnId: activity.turnId,
+                          }))
+                        : [],
+                    ),
+                  )}
                   editorRef={composerEditorRef}
                   draftMessage={props.draftMessage}
                   draftAttachments={props.draftAttachments}

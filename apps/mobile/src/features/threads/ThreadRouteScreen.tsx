@@ -1,4 +1,5 @@
 import { NativeStackScreenOptions } from "../../native/StackHeader";
+import { isCapacityRetryWaiting } from "@t3tools/client-runtime/capacityRetry";
 import * as Cause from "effect/Cause";
 import {
   StackActions,
@@ -495,10 +496,22 @@ function ThreadRouteContent(
     void navigation.navigate("Connections");
   }, [navigation]);
   const handleStopThread = useCallback(() => {
+    const waiting = isCapacityRetryWaiting(
+      selectedThread?.session?.status,
+      composer.selectedThreadFeed.flatMap((entry) =>
+        entry.type === "activity-group"
+          ? entry.activities.map((activity) => ({
+              kind: activity.workEntry.sourceActivityKind ?? "",
+              turnId: activity.turnId,
+            }))
+          : [],
+      ),
+    );
     if (
       !selectedThread ||
       (selectedThread.session?.status !== "running" &&
-        selectedThread.session?.status !== "starting")
+        selectedThread.session?.status !== "starting" &&
+        !waiting)
     ) {
       return;
     }
@@ -506,12 +519,12 @@ function ThreadRouteContent(
       environmentId: selectedThread.environmentId,
       input: {
         threadId: selectedThread.id,
-        ...(selectedThread.session.activeTurnId
+        ...(selectedThread.session?.activeTurnId
           ? { turnId: selectedThread.session.activeTurnId }
           : {}),
       },
     });
-  }, [interruptThreadTurn, selectedThread]);
+  }, [interruptThreadTurn, selectedThread, composer.selectedThreadFeed]);
 
   const serverEditFromHerePending = selectedThreadDetail?.editFromHere != null;
   const isEditFromHerePending = isEditingFromHere || serverEditFromHerePending;

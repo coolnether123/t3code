@@ -5,6 +5,23 @@ protocols, account ownership, permissions, and capabilities belong at the
 [adapter boundary](../../apps/server/src/provider/Services/ProviderAdapter.ts). Normalize there
 instead of spreading provider checks through reactors and clients.
 
+## Capacity failures
+
+The Codex adapter marks a final `serverOverloaded` or known "at capacity" failure
+as `capacity` on `runtime.error` and the failed `turn.completed` event. A
+`willRetry` notification remains a warning owned by Codex. Other error codes,
+including usage limits, never gain the capacity class from their message.
+
+Runtime ingestion schedules four further attempts at five-second intervals, for
+five attempts total. It uses `ProviderService.sendTurn` with `continuation: true`
+and the original turn settings. Codex supports promptless continuation, so the
+failed input stays in its thread history without a second user prompt. No T3
+message command is dispatched for a retry. Activity rows report each wait and
+the final failure. A new message, steering, interrupt, archive, delete, or
+session stop cancels the pending wait. The timer lives only in server memory;
+restart drops it and appends a note asking the user to send again. Other
+provider adapters can opt in by emitting a capacity-classified failed turn.
+
 A driver kind identifies an integration; an instance identifies one configuration and account
 lifecycle. Route work by instance, so two accounts using the same driver do not share mutable
 session or catalog state.

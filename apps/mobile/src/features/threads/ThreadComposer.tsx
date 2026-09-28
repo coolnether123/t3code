@@ -124,6 +124,7 @@ export interface ThreadComposerProps {
   readonly onNativePasteImages: (uris: ReadonlyArray<string>) => Promise<void>;
   readonly onRemoveDraftImage: (imageId: string) => void;
   readonly onStopThread: () => void;
+  readonly capacityRetryWaiting?: boolean;
   readonly onSendMessage: () => Promise<MessageId | null>;
   readonly onUpdateModelSelection: (modelSelection: ModelSelection) => void;
   readonly onUpdateRuntimeMode: (runtimeMode: RuntimeMode) => void;
@@ -314,7 +315,8 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   const showStopAction =
     !hasContent &&
     (props.selectedThread.session?.status === "running" ||
-      props.selectedThread.session?.status === "starting");
+      props.selectedThread.session?.status === "starting" ||
+      props.capacityRetryWaiting === true);
 
   const sendLabel =
     props.connectionState !== "connected" || props.queueCount > 0 ? "Queue" : "Send";

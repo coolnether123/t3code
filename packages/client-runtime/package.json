@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./capacityRetry": {
+      "types": "./src/capacityRetry.ts",
+      "default": "./src/capacityRetry.ts"
+    },
     "./usageRefresh": {
       "types": "./src/usageRefresh.ts",
       "default": "./src/usageRefresh.ts"

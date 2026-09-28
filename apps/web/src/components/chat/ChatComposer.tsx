@@ -1,3 +1,4 @@
+import { isCapacityRetryWaiting } from "@t3tools/client-runtime/capacityRetry";
 import type {
   ApprovalRequestId,
   EnvironmentId,
@@ -3555,7 +3556,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     }
                     compactDisabledReason="Finish the current action before compacting"
                     pendingAction={pendingPrimaryAction}
-                    isRunning={phase === "running"}
+                    isRunning={
+                      phase === "running" ||
+                      isCapacityRetryWaiting(
+                        activeThread?.session?.status,
+                        activeThreadActivities ?? [],
+                      )
+                    }
                     followUpBehavior={settings.followUpBehavior}
                     showPlanFollowUpPrompt={
                       pendingUserInputs.length === 0 && showPlanFollowUpPrompt
