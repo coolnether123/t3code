@@ -41,9 +41,9 @@ vi.mock("./usageTranscriptReader.ts", async (importOriginal) => ({
   })),
   readDirectoryVolumeId: vi.fn(async () => "fixture"),
   transcriptCursorIsLineBoundary: vi.fn(async () => true),
-  readTranscriptRecords: vi.fn(async () => ({
+  readTranscriptRecords: vi.fn(async (filePath: string) => ({
     records: [],
-    nextByte: Number.MAX_SAFE_INTEGER,
+    nextByte: files.find((file) => file.path === filePath)?.size ?? Number.MAX_SAFE_INTEGER,
     discardedLines: 0,
     discardingLine: false,
     codexState: initialCodexScanState(),
