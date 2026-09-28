@@ -131,15 +131,32 @@ files are counted once by content; separate branches remain separate chats.
 Imported product chats are API-equivalent estimates, not proof of API charges. Unknown experimental
 models remain unpriced when no documented paid equivalent exists.
 
-## Monitor Codex usage
+## Monitor subscription limits
 
-Open **Codex usage & resets** from Usage. You can also tap or hold the **Codex icon/name**,
-or tap **Usage & resets →** below its row. **Usage** in the header takes you back.
-Scrolling cancels the hold gesture. Enter and Space activate the focused Codex button.
+Open **Limits & resets** from Usage, or **Limits & resets →** below the Codex or Claude row, which
+opens the page on that provider. You can also tap or hold the **Codex icon/name**. **Usage** in the
+header takes you back. Scrolling cancels the hold gesture. Enter and Space activate the focused
+Codex button.
 
-If a computer disconnects before its first quota reading, the page shows **Reconnecting**
-instead of continuing to say it is reading usage. A slow first reading also prompts you to
-check the computer connection or reload the page. Public reset news can still load separately.
+Use **Codex**, **Claude**, or **Both** in the header to choose whose limits appear. Each limit has a
+card: Codex's weekly limit, and Claude's session, weekly, and model-specific weekly limits. A card
+shows what is left, when it resets, and whether use is ahead of or behind an even pace. Select a
+card to chart that limit; everything below the chart follows it. Right-click a card to copy its
+numbers or to show only that provider. The page remembers your choice.
+
+If a computer disconnects before its first reading, the page says it is reconnecting instead of
+claiming a limit was never recorded. A slow first reading prompts you to check the connection or
+reload the page. Public reset news can still load separately.
+
+### Claude limits
+
+T3 reads Claude's session and weekly limits through the Claude CLI on the computer running the
+T3 server, every few minutes while background activity is allowed. It sends no prompt and uses
+no model tokens, and it works even when Claude is turned off for chats. It uses the CLI's own
+sign-in: if the CLI is signed out, the Claude cards say so, and running `claude auth login` once
+in a terminal starts the readings. While readings are unavailable, T3 retries every 30 minutes.
+Claude limits chart like Codex's. A session limit is paced over its five hours; API value prices
+Claude transcripts from the same computers. The planner and public reset estimates are Codex-only.
 
 The monitor leads with remaining usage and the total used in the current account cycle.
 For example, 81% remaining means 19% used. If tracking began at 83%, the monitor observed
@@ -204,7 +221,7 @@ Tibo's public posts through the independent Reset Beacon feed. The source link a
 interpretation remain visible. A missing or expired announcement falls back to the account timer.
 A countdown reaching zero never creates a reset observation or changes usage to 100%.
 
-**Estimated use between public resets** uses the historical announcements published by
+**Public resets** uses the historical announcements published by
 [Codex Resets](https://codex-resets.com/). T3 treats consecutive regular announcements as
 approximate boundaries and totals the Codex transcript records stored on the selected computers
 between those times. Each completed period shows its current-price API-equivalent value and a
@@ -230,7 +247,7 @@ finishes.
 Unchanged transcripts keep their cached records. On the mobile app, pulling down does the same.
 Growing chats read only their appended text when the saved cursor is valid. Public reset news
 updates independently and does not hold the usage refresh open.
-Refresh does not force a new collector sample or run Luna. Use **Check X with Luna** separately.
+Refresh does not force a new collector sample.
 Long windows such as **90 days** and **120 days** warm in bounded transcript batches while the
 page remains open. If every selected computer fails to return a result, the window is shown as
 **Unavailable** rather than as zero usage.
@@ -268,50 +285,20 @@ snapshots may provide only the verified count and check time, in which case expi
 is left unknown. If you redeem one, wait for the next account reading before planning the new
 window; the planner never redeems credits for you.
 
-### Check reset announcements with Luna
-
-Press **Check X with Luna** on **Codex usage & resets**. The selected quota-source computer
-runs a Codex Luna check with live web search. It uses that computer's Codex sign-in and allowance.
-The status changes while the check runs. **Cancel** stops it; checks stop after three minutes.
-Leaving the page does not cancel the job. Returning shows its latest status and saved result.
-
-Results include source links, a check time, confidence in the proposed timing, and a date/time
-range when the announcement is ambiguous. Times use your device's time zone. A saved result
-is not a live feed; press the button again for updates.
-
-X may block access to its current feed. In that case the result explicitly says **Latest X feed
-not verified**, even when search results or an archive contain an announcement. Indirect evidence
-cannot receive high confidence. Failed access is not evidence that no reset is coming.
-
-The check does not change your quota, account timer, or planning deadline. The existing public-news
-feed supplies the planning deadline, and account readings confirm actual resets. The button is
-Codex-only and requires a connected, updated T3 server with Codex installed and signed in.
-
-### Read community discussion with Luna
-
-Under **What people are saying**, press **Check community with Luna**. This is a separate job
-from the announcement check, with its own running status, cancel button, and saved result.
-It uses Codex allowance only when pressed and stops after three minutes. Leaving the page
-does not stop it. The controls and linked posts work on mobile too.
-
-Luna returns up to six X posts with summaries, authors, timestamps when verified, and labels
-for reset reports, people still waiting, questions, speculation, or other reactions. Individual
-reports do not confirm your reset and never change your quota or planning deadline.
-
-The result states whether it read live posts or only partial evidence. X can block current
-replies or require sign-in; a saved or indexed post is not a complete live feed. Failed access
-is shown as unavailable, not as evidence that nobody is discussing the reset.
-
 ### Understand the dollar estimate
 
-The web monitor puts the chart first. Use the header links to jump to API value,
-the token planner, Reset history, or Luna research. Expand **Inspect recorded readings** to scrub
-through the saved observations with a pointer or arrow keys.
+The page puts the limit cards and chart first. Below the chart, **Cycles** lists completed
+cycles and compares them, **Models** shows each model's share, **Planner** compares models at API
+prices, and **Public resets** estimates use between public announcements. Select a completed cycle
+to open it in the chart; right-click it to copy its summary. Expand **Inspect recorded readings** to
+scrub through the saved observations with a pointer or arrow keys.
 
 Drag across the quota graph to zoom into a period, or choose **24h**, **6h**, or
 **1h**. The plus and minus buttons change the zoom; the arrows move through time.
-**Full cycle**, Escape, or a double-click restores the whole chart. These controls
-work on past reset cycles too. The percentage axis expands when zoomed.
+**Full cycle**, Escape, or a double-click restores the whole chart. Right-click the chart to copy
+the reading under the pointer or a cycle summary, zoom to one, six, or 24 hours around the
+pointer, switch between recorded readings and the projection, or move between cycles. These
+controls work on past reset cycles too. The percentage axis expands when zoomed.
 
 **Where usage went** offers Intensity, Models, and Spikes views. Models splits bars
 by model and shows cost shares; Spikes ranks intervals by hourly spending. Tap a bar,
@@ -376,17 +363,12 @@ Tool charges and regional surcharges are excluded. These are API-price compariso
 changing models can change Codex consumption, so they do not guarantee a number of
 Codex tokens. Incomplete cost data withholds the comparison.
 
-Luna starts with dated public search results and retains useful indexed posts when
-X blocks direct access. Indexed discussion is labeled partial and cannot confirm
-a firsthand reset. Third-party probabilities and banked-credit announcements cannot
-supply a broad-reset time window.
-
 On your configured birthday, the celebration keeps your selected T3 theme. Make a
 wish to put out the candle, run it again to relight it, or open **birthday.log** for
 another note. Confetti is brief and respects the tap-effects and reduced-motion settings.
 
-**Used while monitored** prices Codex transcripts from the same observed interval.
-**Remaining quota at API prices** uses that cost per observed percentage point. It shows **Learning**
+**API value**, beside the chart, prices transcripts from the same observed interval.
+**Left at API prices** uses that cost per observed percentage point. It shows **Learning**
 until at least five points have been observed. A qualified earlier reset cycle can calibrate a
 shorter interval provisionally until current measured costs are ready. Bounded zero-use timer
 changes totaling up to 60 minutes can bridge the interval without counting as resets. Spark is
@@ -400,8 +382,9 @@ and value estimate until current costs are ready. Within the same cycle, the las
 remains visible through its recorded date while the scan warms, using that saved percentage
 denominator until a newer complete reading replaces it.
 
-The monitor defaults to the quota-source computer. Use **Tracking and computers** to opt in to
-other computers for cost comparison. Selecting an unavailable computer withholds the combined
+The monitor defaults to the quota-source computer. Use the settings button in the header to choose
+the computer whose readings are charted and to opt in to other computers for cost comparison. The
+line under the chart names the computers whose transcripts are priced. Selecting an unavailable computer withholds the combined
 estimate. Select computers using the same Codex account. Percentages are never added across machines.
 The tracker does not verify account identity or identify chats copied between distinct sources.
 The power monitor is separate and does not contribute to Codex quota totals.

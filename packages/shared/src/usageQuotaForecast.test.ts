@@ -301,4 +301,25 @@ describe("recent Codex burn projection", () => {
     expect(result.elapsedSinceDropMs).toBe(5 * 60_000);
     expect(result.percentPerHour).toBeCloseTo(60 / 11);
   });
+
+  it("paces a shorter limit window over its own length", () => {
+    const samples = [
+      {
+        observedAt: "2026-09-28T00:00:00.000Z",
+        remainingPercent: 100,
+        resetsAt: "2026-09-28T03:00:00.000Z",
+      },
+      {
+        observedAt: "2026-09-28T01:00:00.000Z",
+        remainingPercent: 70,
+        resetsAt: "2026-09-28T03:00:00.000Z",
+      },
+    ];
+    const now = Date.parse("2026-09-28T01:00:00.000Z");
+    const weekly = quotaForecast(samples, now);
+    const session = quotaForecast(samples, now, 3, undefined, 5 * 3_600_000);
+    expect(session?.linearUsedPercent).toBeCloseTo(60, 5);
+    expect(session?.paceDelta).toBeCloseTo(-30, 5);
+    expect(weekly?.paceDelta).not.toBeCloseTo(-30, 1);
+  });
 });

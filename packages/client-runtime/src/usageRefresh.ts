@@ -1,4 +1,4 @@
-import type { UsageSummary, UsageSummaryInput } from "@t3tools/contracts";
+import type { UsageQuotaSample, UsageSummary, UsageSummaryInput } from "@t3tools/contracts";
 import { quotaCostWindow, quotaIntervals, quotaPeriods } from "@t3tools/shared/usageQuota";
 
 interface UsageReply {
@@ -7,10 +7,21 @@ interface UsageReply {
   readonly error: string | null;
 }
 
-/** Refresh costs for the newly read interval, not the interval on the old screen. */
+const codexWeeklySamples = (summary: UsageSummary | null) =>
+  summary?.quotaHistory?.status === "ready" ? summary.quotaHistory.samples : undefined;
+
+/**
+ * Refresh costs for the newly read interval, not the interval on the old screen.
+ * `windowSamples` picks the limit being monitored (Codex's weekly limit by default);
+ * `quotaProvider` prices its intervals from that provider's transcripts.
+ */
 export async function refreshCodexMonitor(options: {
   readonly trackerId: string | undefined;
   readonly selectedCycleId?: string | null;
+  readonly windowSamples?: (
+    summary: UsageSummary | null,
+  ) => readonly UsageQuotaSample[] | undefined;
+  readonly quotaProvider?: UsageSummaryInput["quotaProvider"];
   readonly refreshHistory: () => Promise<readonly UsageReply[]>;
   readonly refreshCosts: (input: UsageSummaryInput) => Promise<readonly UsageReply[]>;
   readonly refreshNews: () => Promise<boolean>;
@@ -18,14 +29,21 @@ export async function refreshCodexMonitor(options: {
 }): Promise<string> {
   // The news watcher owns its status; public news must not hold usage refresh open.
   void options.refreshNews().catch(() => false);
+  const windowSamples = options.windowSamples ?? codexWeeklySamples;
   const history = await options.refreshHistory();
-  const trackers = history.filter((entry) => entry.summary?.quotaHistory?.status === "ready");
+  // A selected source that is ready but empty prices nothing; it never falls
+  // back to another computer's readings, whose percentages are not additive.
+  const trackers = history.filter((entry) => windowSamples(entry.summary) !== undefined);
   const tracker =
     trackers.find((entry) => entry.environmentId === options.trackerId) ?? trackers[0];
-  const periods = quotaPeriods(tracker?.summary?.quotaHistory?.samples ?? []);
+  const periods = quotaPeriods(windowSamples(tracker?.summary ?? null) ?? []);
   const selectedIndex = periods.findIndex((period) => period.id === options.selectedCycleId);
   const index = selectedIndex < 0 ? periods.length - 1 : selectedIndex;
-  const input = quotaCostWindow(quotaIntervals(periods.slice(Math.max(0, index - 1), index + 1)));
+  const window = quotaCostWindow(quotaIntervals(periods.slice(Math.max(0, index - 1), index + 1)));
+  const input =
+    window && options.quotaProvider !== undefined && options.quotaProvider !== "codex"
+      ? { ...window, quotaProvider: options.quotaProvider }
+      : window;
   if (input) options.onProgress?.("Saved readings refreshed. Updating API costs…");
   const costs = input ? await options.refreshCosts(input) : [];
   if (history.length === 0 || [...history, ...costs].some((entry) => entry.error)) {
@@ -54,5 +72,7 @@ export function usageQueryInput(
     includeQuotaHistory: input.includeQuotaHistory,
     quotaHistoryOnly: input.quotaHistoryOnly,
     quotaIntervals: input.quotaIntervals,
+    // Absent for Codex, so existing Codex windows keep their query keys.
+    quotaProvider: input.quotaProvider === "codex" ? undefined : input.quotaProvider,
   };
 }

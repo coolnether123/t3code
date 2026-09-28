@@ -9,51 +9,57 @@ import {
   watchPublicResetHistory,
   type PublicResetHistory,
 } from "@t3tools/client-runtime/publicResetHistory";
-import { Link } from "@tanstack/react-router";
-import { RefreshCwIcon } from "lucide-react";
-import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { refreshCodexMonitor } from "@t3tools/client-runtime/usageRefresh";
-import { formatTokens, formatUsd, makeWindow } from "@t3tools/shared/usageFormat";
+import type { UsageSummaryInput } from "@t3tools/contracts";
+import { formatUsd, makeWindow } from "@t3tools/shared/usageFormat";
 import {
   quotaMonitoringSamples,
   quotaCostWindow,
   quotaIntervals,
   quotaPeriods,
-  quotaSavedCostPrefix,
   quotaValueSnapshots,
   quotaValueWithHistoricalCalibration,
   quotaValueWithSnapshot,
   retainQuotaValueSnapshots,
-  type QuotaEnvironment,
-  type QuotaPeriod,
-  type QuotaValue,
   type QuotaValueSnapshot,
 } from "@t3tools/shared/usageQuota";
+import { Link } from "@tanstack/react-router";
+import { RefreshCwIcon } from "lucide-react";
+import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 
 import { isElectron } from "../../env";
+import { cn } from "~/lib/utils";
 import { useUsage } from "../../state/usage";
 import { Button } from "../ui/button";
 import { ScrollArea } from "../ui/scroll-area";
 import { SidebarInset } from "../ui/sidebar";
+import { Toggle, ToggleGroup } from "../ui/toggle-group";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { WorkspacePageContainer } from "../WorkspacePageContainer";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
 
-import { TokenBudgetPanel } from "./TokenBudgetPanel";
-import { monitoredModels } from "./usageTokenBudget";
-import { apiPaceInterval } from "./usageApiPace";
-import type { PriorApiPaceInput } from "./usageApiPace";
-import { UsagePaceChart } from "./UsagePaceChart";
-import { UsageCycleComparison } from "./UsageCycleComparison";
-import { UsageModelTracker } from "./UsageModelTracker";
 import { chartActivityIntervals } from "./usageChartActivity";
-import { ResetCheckPanel } from "./ResetCheckPanel";
-import { CommunityCheckPanel } from "./CommunityCheckPanel";
+import { apiPaceInterval, type PriorApiPaceInput } from "./usageApiPace";
+import {
+  hasReadings,
+  LIMIT_PROVIDER_NAMES,
+  limitWindows,
+  windowSamplesFor,
+  type LimitWindow,
+} from "./usageLimitWindows";
+import { readLimitsView, saveLimitsView, type LimitsView } from "./usagePagePreferences";
+import { monitoredModels } from "./usageTokenBudget";
+import { TokenBudgetPanel } from "./TokenBudgetPanel";
+import { UsageCycleComparison } from "./UsageCycleComparison";
+import { UsageLimitCards } from "./UsageLimitCards";
+import { UsageModelTracker } from "./UsageModelTracker";
+import { UsageMonitorSettings } from "./UsageMonitorSettings";
+import { UsagePaceChart } from "./UsagePaceChart";
+import { UsagePublicResets } from "./UsagePublicResets";
+import { monitoredPeriodModels, UsageResetHistory } from "./UsageResetHistory";
 
 const dateTime = (value: string) =>
-  new Date(value).toLocaleString(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
+  new Date(value).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 const estimate = (value: number) =>
   new Intl.NumberFormat(undefined, {
     style: "currency",
@@ -61,57 +67,65 @@ const estimate = (value: number) =>
     maximumFractionDigits: 0,
   }).format(value);
 
+type MonitorTab = LimitsView["tab"];
+const TABS: readonly {
+  readonly id: MonitorTab;
+  readonly label: string;
+  readonly codexOnly?: true;
+}[] = [
+  { id: "cycles", label: "Cycles" },
+  { id: "models", label: "Models" },
+  { id: "planner", label: "Planner", codexOnly: true },
+  { id: "public", label: "Public resets", codexOnly: true },
+];
+
 function PendingHistoryStatus() {
   const [waitExceeded, setWaitExceeded] = useState(false);
   useEffect(() => {
     const timer = window.setTimeout(() => setWaitExceeded(true), 15_000);
     return () => window.clearTimeout(timer);
   }, []);
-  return waitExceeded ? (
-    <p role="status">
-      Codex usage is taking longer than expected. Check the computer connection or reload this page.
+  return (
+    <p role="status" className="text-sm text-muted-foreground">
+      {waitExceeded
+        ? "Saved readings are taking longer than expected. Check this computer's connection or reload the page."
+        : "Reading saved limits…"}
     </p>
-  ) : (
-    <p role="status">Reading Codex usage…</p>
   );
 }
 
-function monitoredPeriodModels(
-  period: QuotaPeriod,
-  value: QuotaValue,
-  environments: readonly QuotaEnvironment[],
-) {
-  const savedPrefix = quotaSavedCostPrefix(period, environments);
-  const interval = value.costObservedUntil
-    ? (savedPrefix?.interval ?? null)
-    : {
-        id: period.id,
-        sinceTime: period.first.observedAt,
-        untilTime: period.last.observedAt,
-      };
-  if (!interval) return null;
-  const modelEnvironments =
-    value.costObservedUntil && savedPrefix
-      ? environments.map((environment) => ({
-          ...environment,
-          summary: environment.summary
-            ? {
-                ...environment.summary,
-                quotaCosts: undefined,
-                quotaCostSnapshots: savedPrefix.rows,
-              }
-            : environment.summary,
-        }))
-      : environments;
-  const models = monitoredModels(interval, modelEnvironments);
-  return models !== null &&
-    models.some((row) => Object.values(row.totals).some((tokens) => tokens > 0))
-    ? models
-    : null;
+/** Shown in place of the chart when the selected limit has no saved readings. */
+function LimitNotRecorded({ limit }: { readonly limit: LimitWindow }) {
+  const name = `${LIMIT_PROVIDER_NAMES[limit.provider]} ${limit.label.toLowerCase()} limit`;
+  return (
+    <section className="rounded-lg border border-dashed border-border p-5" aria-label={name}>
+      <h2 className="text-sm font-medium">No saved readings for the {name} yet</h2>
+      {limit.message ? <p className="mt-2 text-sm text-muted-foreground">{limit.message}</p> : null}
+      <p className="mt-2 max-w-2xl text-xs leading-relaxed text-muted-foreground">
+        {limit.provider === "claude" ? (
+          <>
+            T3 reads Claude's session and weekly limits through the Claude CLI on this computer
+            every few minutes, without sending a prompt. If the CLI is signed out, run{" "}
+            <code className="rounded bg-muted px-1 py-0.5">claude auth login</code> once in a
+            terminal; readings appear within a few minutes.
+          </>
+        ) : (
+          <>Codex readings come from the Codex Limits tracker running on this computer.</>
+        )}
+      </p>
+    </section>
+  );
 }
 
 export function UsageResetPage() {
   const [historyInput] = useState(() => ({ ...makeWindow(1), quotaHistoryOnly: true }));
+  const [view, setView] = useState(readLimitsView);
+  const updateView = (next: Partial<LimitsView>) =>
+    setView((previous) => {
+      const merged = { ...previous, ...next };
+      saveLimitsView(merged);
+      return merged;
+    });
   const [news, setNews] = useState<ResetNews>({
     announcement: null,
     checkedAt: null,
@@ -144,24 +158,67 @@ export function UsageResetPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [refreshMessage, setRefreshMessage] = useState("");
   const history = useUsage(historyInput);
-  const [selectedCycle, setSelectedCycle] = useState<string | null>(null);
-  const [trackerId, setTrackerId] = useState("");
+  const [sourceId, setSourceId] = useState("");
   const [selectedIds, setSelectedIds] = useState<readonly string[] | null>(null);
-  const trackers = history.environments.filter(
-    (environment) =>
-      environment.summary?.quotaHistory?.status === "ready" &&
-      environment.summary.quotaHistory.samples.length > 0,
+
+  // The computer whose saved readings are charted, and every limit it reports.
+  const sources = useMemo(
+    () =>
+      history.environments.filter((environment) =>
+        limitWindows(environment.summary).some(hasReadings),
+      ),
+    [history.environments],
   );
-  const tracker =
-    trackers.find((environment) => environment.environmentId === trackerId) ?? trackers[0];
+  const source =
+    sources.find((environment) => environment.environmentId === sourceId) ?? sources[0];
+  const allWindows = useMemo(
+    () =>
+      limitWindows(
+        source?.summary ??
+          history.environments.find((environment) => environment.summary !== null)?.summary,
+      ),
+    [source, history.environments],
+  );
+  const visibleWindows = useMemo(
+    () =>
+      allWindows.filter((limit) => view.provider === "both" || limit.provider === view.provider),
+    [allWindows, view.provider],
+  );
+  const selectedWindow = useMemo(
+    () =>
+      visibleWindows.find((limit) => limit.key === view.windowKey) ??
+      visibleWindows.find(hasReadings) ??
+      visibleWindows[0],
+    [visibleWindows, view.windowKey],
+  );
+  const windowKey = selectedWindow?.key ?? "";
+  const quotaProvider = selectedWindow?.provider ?? "codex";
+  /** Cost reads for a Claude limit price Claude transcripts instead of Codex's. */
+  const forProvider = useCallback(
+    (input: UsageSummaryInput): UsageSummaryInput =>
+      quotaProvider === "codex" ? input : { ...input, quotaProvider },
+    [quotaProvider],
+  );
+
+  const sourceEnvironmentId = source?.environmentId;
   const effectiveSelectedIds = useMemo<readonly string[] | null>(
-    () => selectedIds ?? (tracker ? [tracker.environmentId] : null),
-    [selectedIds, tracker?.environmentId],
+    () => selectedIds ?? (sourceEnvironmentId === undefined ? null : [sourceEnvironmentId]),
+    [selectedIds, sourceEnvironmentId],
   );
-  const rawSamples = tracker?.summary?.quotaHistory?.samples;
+  const rawSamples = useMemo(
+    () => (selectedWindow && hasReadings(selectedWindow) ? selectedWindow.samples : undefined),
+    [selectedWindow],
+  );
   const samples = useMemo(() => quotaMonitoringSamples(rawSamples ?? []), [rawSamples]);
-  // Graphs and cost panels share the complete saved account cycles.
+  // Graphs and cost panels share the complete saved cycles.
   const historicalPeriods = useMemo(() => quotaPeriods(rawSamples ?? []), [rawSamples]);
+  // A chosen cycle belongs to the limit it was chosen on.
+  const [cycleSelection, setCycleSelection] = useState<{
+    readonly key: string;
+    readonly cycle: string | null;
+  } | null>(null);
+  const selectedCycle = cycleSelection?.key === windowKey ? cycleSelection.cycle : null;
+  const setSelectedCycle = (cycle: string | null) => setCycleSelection({ key: windowKey, cycle });
   const selectedPeriod =
     historicalPeriods.find((period) => period.id === selectedCycle) ?? historicalPeriods.at(-1);
   const periods = useMemo(
@@ -176,14 +233,17 @@ export function UsageResetPage() {
   );
   const intervals = useMemo(() => quotaIntervals(periods), [periods]);
   const paceInterval = useMemo(() => apiPaceInterval(intervals.at(-1)), [intervals]);
-  const costInput = useMemo(
-    () => quotaCostWindow(intervals) ?? historyInput,
-    [historyInput, intervals],
-  );
+  const costInput = useMemo(() => {
+    const window = quotaCostWindow(intervals);
+    return window ? forProvider(window) : historyInput;
+  }, [historyInput, intervals, forProvider]);
   const costs = useUsage(costInput);
+
+  // Background refresh: saved readings every minute while visible, then costs
+  // for whatever interval the new readings imply. Uses the server's caches.
   const backgroundRefreshActive = useRef(false);
   const backgroundCostRefreshActive = useRef(false);
-  const pendingBackgroundCostWindow = useRef<ReturnType<typeof quotaCostWindow>>(null);
+  const pendingBackgroundCostWindow = useRef<UsageSummaryInput | null>(null);
   const refreshBackgroundCosts = useEffectEvent(async () => {
     if (backgroundCostRefreshActive.current) return;
     backgroundCostRefreshActive.current = true;
@@ -210,18 +270,19 @@ export function UsageResetPage() {
       return;
     backgroundRefreshActive.current = true;
     try {
-      const refreshed = await history.refresh();
-      const latestTracker =
-        refreshed.find((entry) => entry.environmentId === tracker?.environmentId) ??
-        refreshed.find((entry) => entry.summary?.quotaHistory?.status === "ready");
-      const latestPeriods = quotaPeriods(latestTracker?.summary?.quotaHistory?.samples ?? []);
+      const refreshed = await history.refresh({ ...historyInput, refresh: false });
+      const samplesOf = windowSamplesFor(windowKey);
+      const latest =
+        refreshed.find((entry) => entry.environmentId === source?.environmentId) ??
+        refreshed.find((entry) => samplesOf(entry.summary) !== undefined);
+      const latestPeriods = quotaPeriods(samplesOf(latest?.summary ?? null) ?? []);
       const selectedIndex = latestPeriods.findIndex((period) => period.id === selectedCycle);
       const index = selectedIndex < 0 ? latestPeriods.length - 1 : selectedIndex;
-      const currentWindow = quotaCostWindow(
+      const window = quotaCostWindow(
         quotaIntervals(latestPeriods.slice(Math.max(0, index - 1), index + 1)),
       );
-      if (currentWindow) {
-        pendingBackgroundCostWindow.current = currentWindow;
+      if (window) {
+        pendingBackgroundCostWindow.current = { ...forProvider(window), refresh: false };
         void refreshBackgroundCosts();
       }
     } catch {
@@ -239,49 +300,45 @@ export function UsageResetPage() {
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, []);
+
   const [chartRange, setChartRange] = useState<{
     cycleId: string;
     range: readonly [number, number] | null;
   } | null>(null);
-  const activityIntervals = useMemo(() => {
-    if (!selectedPeriod) return [];
-    const cycleSamples = (rawSamples ?? []).filter(
-      (sample) =>
-        sample.observedAt >= selectedPeriod.first.observedAt &&
-        sample.observedAt <= selectedPeriod.last.observedAt,
-    );
-    return chartActivityIntervals(
-      cycleSamples,
-      chartRange?.cycleId === selectedPeriod.id ? chartRange.range : null,
-    );
-  }, [selectedPeriod, rawSamples, chartRange]);
-  const modelActivityIntervals = useMemo(() => {
-    if (!selectedPeriod) return [];
-    return chartActivityIntervals(
-      (rawSamples ?? []).filter(
-        (sample) =>
-          sample.observedAt >= selectedPeriod.first.observedAt &&
-          sample.observedAt <= selectedPeriod.last.observedAt,
-      ),
-      null,
-    );
-  }, [selectedPeriod, rawSamples]);
-  const publicIntervals = useMemo(
-    () => publicResetIntervals(publicHistory.announcements),
-    [publicHistory.announcements],
+  const cycleSamples = useMemo(
+    () =>
+      selectedPeriod
+        ? (rawSamples ?? []).filter(
+            (sample) =>
+              sample.observedAt >= selectedPeriod.first.observedAt &&
+              sample.observedAt <= selectedPeriod.last.observedAt,
+          )
+        : [],
+    [selectedPeriod, rawSamples],
   );
-  // Let sibling calculations start once the cycle read settles. A bounded
-  // transcript scan may remain partial after its retries; that must not keep
-  // independent public-reset, pace, and chart reads on history-only forever.
+  const activityIntervals = useMemo(
+    () =>
+      selectedPeriod
+        ? chartActivityIntervals(
+            cycleSamples,
+            chartRange?.cycleId === selectedPeriod.id ? chartRange.range : null,
+          )
+        : [],
+    [selectedPeriod, cycleSamples, chartRange],
+  );
+  const modelActivityIntervals = useMemo(
+    () => (selectedPeriod ? chartActivityIntervals(cycleSamples, null) : []),
+    [selectedPeriod, cycleSamples],
+  );
+  // Let sibling reads start once the cycle read settles. A bounded transcript
+  // scan may stay partial after its retries; that must not keep them waiting.
   const cycleCostsSettled = intervals.length === 0 || (!costs.isPending && !costs.isPartial);
-  const publicCostInput = useMemo(
-    () => (cycleCostsSettled ? (quotaCostWindow(publicIntervals) ?? historyInput) : historyInput),
-    [historyInput, publicIntervals, cycleCostsSettled],
-  );
-  const publicCosts = useUsage(publicCostInput);
   const paceInput = useMemo(
-    () => (cycleCostsSettled && paceInterval ? quotaCostWindow([paceInterval])! : historyInput),
-    [paceInterval, historyInput, cycleCostsSettled],
+    () =>
+      cycleCostsSettled && paceInterval
+        ? forProvider(quotaCostWindow([paceInterval])!)
+        : historyInput,
+    [paceInterval, historyInput, cycleCostsSettled, forProvider],
   );
   const paceCosts = useUsage(paceInput);
   const [requestedActivityIntervals, setRequestedActivityIntervals] = useState(activityIntervals);
@@ -289,54 +346,49 @@ export function UsageResetPage() {
     const timer = window.setTimeout(() => setRequestedActivityIntervals(activityIntervals), 300);
     return () => window.clearTimeout(timer);
   }, [activityIntervals]);
-  const activityInput = useMemo(
-    () =>
-      cycleCostsSettled
-        ? (quotaCostWindow(requestedActivityIntervals) ?? historyInput)
-        : historyInput,
-    [requestedActivityIntervals, cycleCostsSettled, historyInput],
-  );
+  const activityInput = useMemo(() => {
+    const window = cycleCostsSettled ? quotaCostWindow(requestedActivityIntervals) : null;
+    return window ? forProvider(window) : historyInput;
+  }, [requestedActivityIntervals, cycleCostsSettled, historyInput, forProvider]);
   const activityCosts = useUsage(activityInput);
-  const modelActivityInput = useMemo(
-    () =>
-      cycleCostsSettled ? (quotaCostWindow(modelActivityIntervals) ?? historyInput) : historyInput,
-    [modelActivityIntervals, cycleCostsSettled, historyInput],
-  );
+  const modelActivityInput = useMemo(() => {
+    const window = cycleCostsSettled ? quotaCostWindow(modelActivityIntervals) : null;
+    return window ? forProvider(window) : historyInput;
+  }, [modelActivityIntervals, cycleCostsSettled, historyInput, forProvider]);
   const modelActivityCosts = useUsage(modelActivityInput);
+  const isSelected = useCallback(
+    (environmentId: string) =>
+      effectiveSelectedIds === null || effectiveSelectedIds.includes(environmentId),
+    [effectiveSelectedIds],
+  );
   const chartActivity = useMemo(() => {
-    const environments = activityCosts.environments.filter(
-      (environment) =>
-        effectiveSelectedIds === null || effectiveSelectedIds.includes(environment.environmentId),
+    const environments = activityCosts.environments.filter((environment) =>
+      isSelected(environment.environmentId),
     );
     return activityIntervals.map((interval) => ({
       interval,
       models: monitoredModels(interval, environments),
     }));
-  }, [activityIntervals, activityCosts.environments, effectiveSelectedIds]);
+  }, [activityIntervals, activityCosts.environments, isSelected]);
   const modelChartActivity = useMemo(() => {
-    const environments = modelActivityCosts.environments.filter(
-      (environment) =>
-        effectiveSelectedIds === null || effectiveSelectedIds.includes(environment.environmentId),
+    const environments = modelActivityCosts.environments.filter((environment) =>
+      isSelected(environment.environmentId),
     );
     return modelActivityIntervals.map((interval) => ({
       interval,
       models: monitoredModels(interval, environments),
     }));
-  }, [modelActivityIntervals, modelActivityCosts.environments, effectiveSelectedIds]);
+  }, [modelActivityIntervals, modelActivityCosts.environments, isSelected]);
   const historical = periods.at(-2);
   const paceModels = useMemo(
     () =>
       paceInterval
         ? monitoredModels(
             paceInterval.id,
-            paceCosts.environments.filter(
-              (environment) =>
-                effectiveSelectedIds === null ||
-                effectiveSelectedIds.includes(environment.environmentId),
-            ),
+            paceCosts.environments.filter((environment) => isSelected(environment.environmentId)),
           )
         : null,
-    [paceInterval, paceCosts.environments, effectiveSelectedIds],
+    [paceInterval, paceCosts.environments, isSelected],
   );
   // A new interval changes the cost query key. While that query is warming,
   // retain the history response for environments that have not answered yet;
@@ -353,40 +405,8 @@ export function UsageResetPage() {
     return current.length > 0 ? current : history.environments;
   }, [costs.environments, history.environments]);
   const selected = useMemo(
-    () =>
-      costEnvironments.filter(
-        (environment) =>
-          effectiveSelectedIds === null || effectiveSelectedIds.includes(environment.environmentId),
-      ),
-    [costEnvironments, effectiveSelectedIds],
-  );
-  const effectivePublicSelectedIds = useMemo(
-    () =>
-      selectedIds ??
-      (tracker
-        ? [tracker.environmentId]
-        : publicCosts.environments[0]
-          ? [publicCosts.environments[0].environmentId]
-          : []),
-    [publicCosts.environments, selectedIds, tracker?.environmentId],
-  );
-  const selectedPublicCosts = useMemo(
-    () =>
-      publicCosts.environments.filter((environment) =>
-        effectivePublicSelectedIds.includes(environment.environmentId),
-      ),
-    [effectivePublicSelectedIds, publicCosts.environments],
-  );
-  const publicEstimates = useMemo(
-    () => publicResetCostEstimates(publicHistory.announcements, selectedPublicCosts),
-    [publicHistory.announcements, selectedPublicCosts],
-  );
-  const publicCostScope =
-    selectedPublicCosts.length === 0
-      ? "No computers selected"
-      : selectedPublicCosts.map((environment) => environment.label).join(", ");
-  const bankedAnnouncements = publicHistory.announcements.filter(
-    (announcement) => announcement.resetType === "banked",
+    () => costEnvironments.filter((environment) => isSelected(environment.environmentId)),
+    [costEnvironments, isSelected],
   );
   const selectedWithSavedCosts = useMemo(
     () =>
@@ -413,10 +433,10 @@ export function UsageResetPage() {
     [history.environments, selected],
   );
   const costScope =
-    selected.length === 0 ? "No computers selected" : selected.map((e) => e.label).join(", ");
+    selected.length === 0 ? "no computers" : selected.map((entry) => entry.label).join(", ");
   const currentValues = useMemo(
-    () => quotaValueSnapshots(tracker?.environmentId, historicalPeriods, selectedWithSavedCosts),
-    [tracker?.environmentId, historicalPeriods, selectedWithSavedCosts],
+    () => quotaValueSnapshots(source?.environmentId, historicalPeriods, selectedWithSavedCosts),
+    [source?.environmentId, historicalPeriods, selectedWithSavedCosts],
   );
   const [snapshots, setSnapshots] = useState<ReadonlyMap<string, QuotaValueSnapshot>>(
     () => new Map(),
@@ -424,28 +444,32 @@ export function UsageResetPage() {
   useEffect(() => {
     setSnapshots((previous) => retainQuotaValueSnapshots(previous, currentValues));
   }, [currentValues]);
-  const values = currentValues.map((current, index) => {
-    const value = quotaValueWithSnapshot(current, snapshots);
-    const previous = index > 0 ? currentValues[index - 1] : undefined;
-    return {
-      period: current.period,
-      value: quotaValueWithHistoricalCalibration(
-        { ...current, value },
-        previous ? { ...previous, value: quotaValueWithSnapshot(previous, snapshots) } : undefined,
-        currentValues.slice(0, index - 1).map((candidate) => ({
-          ...candidate,
-          value: quotaValueWithSnapshot(candidate, snapshots),
-        })),
-      ),
-    };
-  });
-  const last = samples.at(-1);
-  const reconnectingHistory = history.environments.some(
-    (environment) =>
-      environment.summary === null &&
-      environment.isPending &&
-      environment.connection.phase === "reconnecting",
+  const values = useMemo(
+    () =>
+      currentValues.map((current, index) => {
+        const value = quotaValueWithSnapshot(current, snapshots);
+        const previous = index > 0 ? currentValues[index - 1] : undefined;
+        return {
+          period: current.period,
+          value: quotaValueWithHistoricalCalibration(
+            { ...current, value },
+            previous
+              ? { ...previous, value: quotaValueWithSnapshot(previous, snapshots) }
+              : undefined,
+            currentValues.slice(0, index - 1).map((candidate) => ({
+              ...candidate,
+              value: quotaValueWithSnapshot(candidate, snapshots),
+            })),
+          ),
+        };
+      }),
+    [currentValues, snapshots],
   );
+  const valueByPeriod = useMemo(
+    () => new Map(values.map(({ period, value }) => [period.id, value])),
+    [values],
+  );
+  const last = samples.at(-1);
   const current = values.find(({ period }) => period.id === selectedPeriod?.id);
   const calibrationPeriod = useMemo(() => {
     const calibration = current?.value.historicalCalibration;
@@ -460,26 +484,65 @@ export function UsageResetPage() {
     () => (calibrationPeriod ? (quotaIntervals([calibrationPeriod]).at(0) ?? null) : null),
     [calibrationPeriod],
   );
-  const trackedManualResetCount = tracker?.summary?.quotaHistory?.bankedResetCount;
-  const trackedManualResetCheckedAt = tracker?.summary?.quotaHistory?.bankedResetCheckedAt;
+  const codexHistory = quotaProvider === "codex" ? source?.summary?.quotaHistory : undefined;
+  const trackedManualResetCount = codexHistory?.bankedResetCount;
+  const trackedManualResetCheckedAt = codexHistory?.bankedResetCheckedAt;
+  // Nothing but Public resets can be shown before a limit has readings.
+  const hasCycle = Boolean(source && selectedWindow && rawSamples && last && current);
+  const tabs = TABS.filter(
+    (tab) => (!tab.codexOnly || quotaProvider === "codex") && (hasCycle || tab.id === "public"),
+  );
+  const activeTab = tabs.some((tab) => tab.id === view.tab) ? view.tab : tabs[0]?.id;
+  // Until some computer answers, a missing reading means "not read yet", not "not recorded".
+  const historyAnswered = history.environments.some(
+    (environment) => environment.summary !== null || environment.error !== null,
+  );
+  // Public-reset estimates are a Codex view, read only while their tab is open.
+  const showPublic = activeTab === "public";
+  const publicIntervals = useMemo(
+    () => publicResetIntervals(publicHistory.announcements),
+    [publicHistory.announcements],
+  );
+  const publicCostInput = useMemo(
+    () =>
+      showPublic && cycleCostsSettled
+        ? (quotaCostWindow(publicIntervals) ?? historyInput)
+        : historyInput,
+    [historyInput, publicIntervals, cycleCostsSettled, showPublic],
+  );
+  const publicCosts = useUsage(publicCostInput);
+  const selectedPublicCosts = useMemo(
+    () => publicCosts.environments.filter((environment) => isSelected(environment.environmentId)),
+    [isSelected, publicCosts.environments],
+  );
+  const publicEstimates = useMemo(
+    () => publicResetCostEstimates(publicHistory.announcements, selectedPublicCosts),
+    [publicHistory.announcements, selectedPublicCosts],
+  );
+  const publicCostsReady =
+    publicCostInput !== historyInput && !publicCosts.isPending && !publicCosts.isPartial;
   const refreshMonitor = async () => {
     if (refreshActive.current) return;
     refreshActive.current = true;
     setRefreshing(true);
-    setRefreshMessage("Refreshing readings, API costs and public resets…");
+    setRefreshMessage("Refreshing readings and API costs…");
     try {
       setRefreshMessage(
         await refreshCodexMonitor({
-          trackerId: tracker?.environmentId,
+          trackerId: source?.environmentId,
           selectedCycleId: selectedCycle,
+          windowSamples: windowSamplesFor(windowKey),
+          quotaProvider,
           refreshHistory: history.refresh,
           refreshCosts: async (input) => {
             const recentInterval = apiPaceInterval(input.quotaIntervals?.at(-1));
-            const recentInput = recentInterval ? quotaCostWindow([recentInterval]) : null;
+            const recentInput = recentInterval
+              ? forProvider(quotaCostWindow([recentInterval])!)
+              : null;
             const replies = await Promise.all([
               costs.refresh(input),
               recentInput ? paceCosts.refresh(recentInput) : Promise.resolve([]),
-              publicCosts.refresh(publicCostInput),
+              showPublic ? publicCosts.refresh(publicCostInput) : Promise.resolve([]),
               activityCosts.refresh(activityInput),
               JSON.stringify(modelActivityInput) === JSON.stringify(activityInput)
                 ? Promise.resolve([])
@@ -525,6 +588,31 @@ export function UsageResetPage() {
   const models =
     currentModels ??
     (current?.value.historicalCalibration !== undefined ? (priorApiPace?.models ?? null) : null);
+
+  const sourceMessage = (() => {
+    const environment = source ?? history.environments[0];
+    if (!environment) return null;
+    if (environment.error) return `${environment.label}: ${environment.error}`;
+    if (
+      environment.summary === null &&
+      environment.isPending &&
+      environment.connection.phase === "reconnecting"
+    ) {
+      return `${environment.label} is reconnecting. Limits appear when it is back.`;
+    }
+    return null;
+  })();
+  const chartRef = useRef<HTMLDivElement>(null);
+  const valueNote = current
+    ? current.value.costObservedUntil
+      ? `API value is complete through ${dateTime(current.value.costObservedUntil)}; newer transcript usage is still being read.`
+      : current.value.historicalCalibration
+        ? `Remaining value is provisional, calibrated from ${dateTime(current.value.historicalCalibration.since)} to ${dateTime(current.value.historicalCalibration.until)} until this cycle has enough measured use.`
+        : current.period.usedPercentagePoints < 5 && current.value.remainingValueUsd === null
+          ? `${current.period.usedPercentagePoints} of 5 percentage points observed; more readings are needed to price what is left.`
+          : current.value.reason
+    : null;
+
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden bg-background text-foreground">
       <WorkspacePageHeader electron={isElectron}>
@@ -538,98 +626,99 @@ export function UsageResetPage() {
           <span aria-hidden className="text-muted-foreground">
             /
           </span>
-          <h1 className="truncate text-sm font-medium">Codex monitor</h1>
-          <nav
-            aria-label="Monitor sections"
-            className="ms-4 hidden items-center gap-4 text-xs text-muted-foreground md:flex"
+          <h1 className="truncate text-sm font-medium">Limits</h1>
+          <ToggleGroup
+            aria-label="Providers"
+            className="ms-2"
+            variant="segmented"
+            value={[view.provider]}
+            onValueChange={(value) => {
+              const next = value[0];
+              if (next === "codex" || next === "claude" || next === "both") {
+                updateView({ provider: next });
+              }
+            }}
           >
-            <a className="hover:text-foreground" href="#api-value">
-              API value
-            </a>
-            <a className="hover:text-foreground" href="#model-impact">
-              Models
-            </a>
-            <a className="hover:text-foreground" href="#reset-history">
-              Reset history
-            </a>
-            <a className="hover:text-foreground" href="#cycle-comparison">
-              Compare cycles
-            </a>
-            <a className="hover:text-foreground" href="#public-reset-estimates">
-              Public reset estimates
-            </a>
-            <a className="hover:text-foreground" href="#token-budget">
-              Token planner
-            </a>
-            <a className="hover:text-foreground" href="#luna-research">
-              Luna research
-            </a>
-          </nav>
-          <Button
-            className="ms-auto size-11"
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Refresh Codex usage"
-            aria-busy={refreshing}
-            disabled={refreshing}
-            onClick={() => void refreshMonitor()}
-          >
-            <RefreshCwIcon className={`size-4 ${refreshing ? "motion-safe:animate-spin" : ""}`} />
-          </Button>
+            <Toggle value="codex">Codex</Toggle>
+            <Toggle value="claude">Claude</Toggle>
+            <Toggle value="both">Both</Toggle>
+          </ToggleGroup>
+          <div className="ms-auto flex items-center gap-1">
+            <UsageMonitorSettings
+              sources={sources.map((environment) => ({
+                id: environment.environmentId,
+                label: environment.label,
+              }))}
+              sourceId={source?.environmentId}
+              onSourceChange={setSourceId}
+              computers={costs.environments.map((environment) => ({
+                id: environment.environmentId,
+                label: environment.label,
+              }))}
+              includedIds={effectiveSelectedIds}
+              onIncludedChange={setSelectedIds}
+              monitoringSince={samples[0]?.observedAt ?? null}
+              readingCount={samples.length}
+            />
+            <Button
+              className="size-9"
+              variant="ghost"
+              size="icon-sm"
+              aria-label="Refresh limits"
+              title="Refresh limits"
+              aria-busy={refreshing}
+              disabled={refreshing}
+              onClick={() => void refreshMonitor()}
+            >
+              <RefreshCwIcon className={`size-4 ${refreshing ? "motion-safe:animate-spin" : ""}`} />
+            </Button>
+          </div>
         </div>
       </WorkspacePageHeader>
       <ScrollArea className="min-h-0 flex-1">
         <WorkspacePageContainer
           width="expanded"
-          className="max-w-none gap-3 px-3 pt-3 sm:px-5 pb-[calc(env(safe-area-inset-bottom)+3rem)]"
+          className="max-w-none gap-4 px-3 pt-3 sm:px-5 pb-[calc(env(safe-area-inset-bottom)+3rem)]"
         >
-          {refreshMessage ? (
+          {refreshMessage || sourceMessage ? (
             <p role="status" aria-live="polite" className="text-xs text-muted-foreground">
-              {refreshMessage}
+              {[refreshMessage, sourceMessage].filter(Boolean).join(" ")}
             </p>
           ) : null}
-          {history.isPending && !last && !reconnectingHistory ? <PendingHistoryStatus /> : null}
-          {history.environments.map((environment) => {
-            const saved = environment.summary?.quotaHistory;
-            const message =
-              environment.error ??
-              (environment.summary === null &&
-              environment.isPending &&
-              environment.connection.phase === "reconnecting"
-                ? "Reconnecting. Codex usage will appear when this computer reconnects."
-                : null) ??
-              saved?.message ??
-              (environment.summary && saved === undefined
-                ? "Update this server to read quota history."
-                : null);
-            return message && (!tracker || environment.environmentId === tracker.environmentId) ? (
-              <p
-                key={environment.environmentId}
-                role="status"
-                className="text-sm text-muted-foreground"
-              >
-                {environment.label}: {message}
-              </p>
-            ) : null;
-          })}
-          {!history.isPending && !last && history.environments.every((entry) => !entry.error) ? (
+          {!historyAnswered && history.environments.length > 0 && sourceMessage === null ? (
+            <PendingHistoryStatus />
+          ) : null}
+          {!history.isPending && history.environments.length === 0 ? (
             <p role="status" className="py-6 text-sm text-muted-foreground">
-              No saved quota observations yet. The background collector must be running on a
-              connected computer.
+              No saved limit readings yet. They appear once a connected computer records them.
             </p>
           ) : null}
-          {tracker && last && current ? (
-            <>
+          {historyAnswered && visibleWindows.length > 0 ? (
+            <UsageLimitCards
+              windows={visibleWindows}
+              selectedKey={windowKey}
+              onSelect={(key) => updateView({ windowKey: key })}
+              onShowOnly={(provider) => updateView({ provider })}
+            />
+          ) : null}
+          {historyAnswered && selectedWindow && !hasReadings(selectedWindow) ? (
+            <LimitNotRecorded limit={selectedWindow} />
+          ) : null}
+          {source && selectedWindow && rawSamples && last && current ? (
+            <div ref={chartRef} className="scroll-mt-3">
               <UsagePaceChart
-                key={tracker.environmentId}
-                samples={rawSamples ?? samples}
+                key={`${source.environmentId}:${windowKey}`}
+                samples={rawSamples}
                 activity={chartActivity}
                 onRangeChange={(range) => {
                   if (selectedPeriod) setChartRange({ cycleId: selectedPeriod.id, range });
                 }}
                 selectedCycle={selectedCycle}
                 onCycleChange={setSelectedCycle}
-                news={news}
+                windowMs={selectedWindow.windowMs}
+                title={`${selectedWindow.label} limit`}
+                providerName={LIMIT_PROVIDER_NAMES[quotaProvider]}
+                {...(quotaProvider === "codex" ? { news } : {})}
                 manualResets={
                   trackedManualResetCount === undefined
                     ? null
@@ -653,499 +742,149 @@ export function UsageResetPage() {
                     : null
                 }
                 priorApiPace={priorApiPace}
-              />
-              <UsageModelTracker
-                key={`${tracker.environmentId}:${current.period.id}`}
-                period={current.period}
-                samples={rawSamples ?? samples}
-                models={currentModels}
-                activity={modelChartActivity}
-                scope={costScope}
-              />
-              <UsageCycleComparison
-                key={tracker.environmentId}
-                period={current.period}
-                periods={historicalPeriods}
-                samples={rawSamples ?? []}
-                selectedIds={effectiveSelectedIds}
-              />
-              <section
-                id="api-value"
-                className="rounded-xl border border-border bg-card/20 p-5"
-                aria-label="Tracked API value"
-              >
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
-                  <h2 className="text-sm font-medium">API-equivalent value</h2>
-                  <span className="text-xs text-muted-foreground">
-                    Transcript costs from {costScope} · measured use this cycle
-                  </span>
-                </div>
-                <dl className="mt-4 grid grid-cols-2 gap-5 [&>div]:min-w-0">
-                  <div>
-                    <dt className="text-xs text-muted-foreground">Used while monitored</dt>
-                    <dd className="mt-1 text-2xl tabular-nums">
-                      {current.value.costUsd === null
-                        ? "Pending"
-                        : formatUsd(current.value.costUsd)}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt className="text-xs text-muted-foreground">Remaining quota at API prices</dt>
-                    <dd className="mt-1 text-2xl tabular-nums">
-                      {current.value.remainingValueUsd === null
-                        ? "Learning"
-                        : `≈ ${estimate(current.value.remainingValueUsd)}`}
-                    </dd>
-                  </div>
-                </dl>
-                {current.value.costObservedUntil ? (
-                  <p className="mt-3 text-xs text-muted-foreground">
-                    Observed cost is complete through {dateTime(current.value.costObservedUntil)};
-                    newer transcript usage is still being read.
-                  </p>
-                ) : null}
-                {current.value.historicalCalibration ? (
-                  <p className="mt-3 text-xs text-muted-foreground">
-                    Remaining value is provisional, calibrated from{" "}
-                    {dateTime(current.value.historicalCalibration.since)} to{" "}
-                    {dateTime(current.value.historicalCalibration.until)}. Current-cycle calibration
-                    replaces it after enough measured usage.
-                  </p>
-                ) : null}
-                {current.period.usedPercentagePoints < 5 &&
-                current.value.remainingValueUsd === null ? (
-                  <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
-                    {current.period.usedPercentagePoints} of 5 percentage points observed. More
-                    readings are needed to estimate dollars left. The{" "}
-                    {100 - current.period.last.remainingPercent}% cycle total includes usage from
-                    before monitoring and cannot price this shorter interval.
-                  </p>
-                ) : current.value.reason && !current.value.costObservedUntil ? (
-                  <p className="mt-3 text-xs text-muted-foreground">{current.value.reason}</p>
-                ) : null}
-                {current.value.cachedAt ? (
-                  <p className="mt-2 text-xs text-muted-foreground">
-                    Last complete calculation: {dateTime(current.value.cachedAt)}.
-                  </p>
-                ) : null}
-                <p className="mt-3 text-xs text-muted-foreground">
-                  Token-price estimate, not a bill or cash balance. Codex only.
-                </p>
-              </section>
-
-              <div id="token-budget">
-                <TokenBudgetPanel
-                  budgetUsd={current.value.remainingValueUsd}
-                  models={models}
-                  observedAt={current.period.last.observedAt}
-                  provisional={current.value.historicalCalibration !== undefined}
-                  {...(current.value.costObservedUntil && !current.value.historicalCalibration
-                    ? { currentPrefixThrough: current.value.costObservedUntil }
-                    : {})}
-                  priorModelMix={
-                    currentModels === null && current.value.historicalCalibration !== undefined
-                  }
-                  {...(current.value.historicalCalibration
-                    ? { calibration: current.value.historicalCalibration }
-                    : {})}
-                />
-              </div>
-              <BirthdayGreeting />
-              <section
-                id="reset-history"
-                className="border-t border-border pt-5"
-                aria-label="Reset history"
-              >
-                <h2 className="text-sm font-medium">Resets while monitored</h2>
-                {historicalPeriods.length < 2 ? (
-                  <p className="mt-3 text-sm text-muted-foreground">
-                    No reset observed since {dateTime(samples[0]!.observedAt)}. New resets will
-                    appear here with the usage left beforehand.
-                  </p>
-                ) : (
-                  <div className="mt-3 divide-y divide-border">
-                    {historicalPeriods
-                      .slice(0, -1)
-                      .toReversed()
-                      .map((period) => {
-                        const value = values.find((entry) => entry.period.id === period.id)?.value;
-                        const periodModels = value
-                          ? monitoredPeriodModels(period, value, selectedWithSavedCosts)
-                          : null;
-                        const inputTokens =
-                          periodModels?.reduce(
-                            (total, model) =>
-                              total +
-                              model.totals.uncachedInputTokens +
-                              model.totals.cachedInputTokens +
-                              model.totals.cacheCreationTokens,
-                            0,
-                          ) ?? 0;
-                        const outputTokens =
-                          periodModels?.reduce(
-                            (total, model) => total + model.totals.outputTokens,
-                            0,
-                          ) ?? 0;
-                        const unusedLabel =
-                          period.usedPercentagePoints === 0 && period.resetKind === "ambiguous"
-                            ? "No quota use observed in this interval"
-                            : (period.observationGapMs ?? Infinity) > 60 * 60_000 ||
-                                value?.unusedValueUsd === null ||
-                                value === undefined
-                              ? "Dollar estimate not established"
-                              : `≈ ${estimate(value.unusedValueUsd)} unused`;
-                        return (
+                stats={
+                  <>
+                    <Tooltip>
+                      <TooltipTrigger
+                        render={
+                          <div id="api-value" className="flex justify-between gap-2" tabIndex={0} />
+                        }
+                      >
+                        <dt className="text-muted-foreground">API value</dt>
+                        <dd className="tabular-nums">
+                          {current.value.costUsd === null
+                            ? "Pending"
+                            : formatUsd(current.value.costUsd)}
+                        </dd>
+                      </TooltipTrigger>
+                      <TooltipPopup>
+                        API-equivalent value of the recorded transcript usage this cycle. An
+                        estimate, not a bill.
+                      </TooltipPopup>
+                    </Tooltip>
+                    <Tooltip>
+                      <TooltipTrigger
+                        render={
                           <div
-                            key={period.id}
-                            className="flex flex-wrap justify-between gap-3 py-3"
-                          >
-                            <div>
-                              <p className="text-sm">
-                                {(period.observationGapMs ?? Infinity) > 60 * 60_000
-                                  ? "Window changed across an observation gap"
-                                  : period.resetKind === "ambiguous"
-                                    ? "Usage window changed"
-                                    : "Usage returned"}
-                              </p>
-                              <p className="mt-1 text-xs text-muted-foreground">
-                                {dateTime(period.last.observedAt)} to{" "}
-                                {dateTime(period.next!.observedAt)}
-                              </p>
-                            </div>
-                            <div className="text-right">
-                              <p className="text-sm tabular-nums">
-                                {period.last.remainingPercent}% left · {period.usedPercentagePoints}
-                                % used
-                              </p>
-                              <p className="mt-1 text-xs text-muted-foreground">
-                                {value?.costUsd !== null && value !== undefined
-                                  ? `${estimate(value.costUsd)} observed cost${
-                                      value.costObservedUntil
-                                        ? ` through ${dateTime(value.costObservedUntil)}`
-                                        : ""
-                                    } · `
-                                  : ""}
-                                {unusedLabel}
-                              </p>
-                            </div>
-                            {periodModels ? (
-                              <details className="w-full rounded-md border border-border/70 px-3 py-2">
-                                <summary className="cursor-pointer text-xs text-muted-foreground">
-                                  Per-model usage · {formatTokens(inputTokens)} input ·{" "}
-                                  {formatTokens(outputTokens)} output
-                                </summary>
-                                <div className="mt-2 overflow-x-auto">
-                                  <table
-                                    className="w-full min-w-[30rem] text-left text-xs"
-                                    aria-label={`Model usage ending ${dateTime(period.last.observedAt)}`}
-                                  >
-                                    <thead className="text-muted-foreground">
-                                      <tr>
-                                        <th className="py-1 pr-3 font-normal">Model</th>
-                                        <th className="px-3 py-1 text-right font-normal">Input</th>
-                                        <th className="px-3 py-1 text-right font-normal">Output</th>
-                                        <th className="py-1 pl-3 text-right font-normal">
-                                          API value
-                                        </th>
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      {periodModels.map((model) => (
-                                        <tr key={model.model} className="border-t border-border/70">
-                                          <td className="py-1.5 pr-3">{model.model}</td>
-                                          <td className="px-3 py-1.5 text-right tabular-nums">
-                                            {formatTokens(
-                                              model.totals.uncachedInputTokens +
-                                                model.totals.cachedInputTokens +
-                                                model.totals.cacheCreationTokens,
-                                            )}
-                                          </td>
-                                          <td className="px-3 py-1.5 text-right tabular-nums">
-                                            {formatTokens(model.totals.outputTokens)}
-                                          </td>
-                                          <td className="py-1.5 pl-3 text-right tabular-nums">
-                                            {formatUsd(model.costUsd)}
-                                          </td>
-                                        </tr>
-                                      ))}
-                                    </tbody>
-                                  </table>
-                                </div>
-                                <p className="mt-2 text-[11px] text-muted-foreground">
-                                  Input includes cached and cache-creation tokens. Reasoning tokens
-                                  are included in output.
-                                </p>
-                              </details>
-                            ) : null}
-                          </div>
-                        );
-                      })}
-                  </div>
-                )}
-              </section>
-              <section id="luna-research" aria-label="Reset research" className="min-w-0">
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
-                  <h2 className="text-sm font-medium">Reset research</h2>
-                  <span className="text-xs text-muted-foreground">
-                    Luna · public sources · on demand
-                  </span>
-                </div>
-                <div className="grid items-start gap-4 xl:grid-cols-2">
-                  <ResetCheckPanel
-                    key={tracker.environmentId}
-                    environmentId={tracker.environmentId}
-                    label={tracker.label}
-                  />
-                  <CommunityCheckPanel
-                    key={`community-${tracker.environmentId}`}
-                    environmentId={tracker.environmentId}
-                    label={tracker.label}
-                  />
-                </div>
-              </section>
-              <details className="border-t border-border">
-                <summary className="min-h-11 cursor-pointer content-center text-sm">
-                  Tracking and computers
-                </summary>
-                <div className="space-y-4 pt-3">
-                  <p className="text-xs leading-relaxed text-muted-foreground">
-                    Monitoring since {dateTime(samples[0]!.observedAt)}. {samples.length} readings.
-                    Readings update every minute; the collector records every five minutes while the
-                    computer is awake and signed in. Older history stays saved but is excluded after
-                    a day-long monitoring gap.
-                  </p>
-                  <label className="flex flex-col gap-2 text-sm">
-                    Quota source
-                    <select
-                      className="min-h-11 w-full rounded-md border border-border bg-background p-2 text-base"
-                      value={tracker.environmentId}
-                      onChange={(e) => setTrackerId(e.target.value)}
-                    >
-                      {trackers.map((environment) => (
-                        <option key={environment.environmentId} value={environment.environmentId}>
-                          {environment.label}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <fieldset>
-                    <legend className="text-sm">Computers included in dollar estimates</legend>
-                    {costs.environments.map((environment) => (
-                      <label
-                        key={environment.environmentId}
-                        className="flex min-h-11 items-center gap-3 text-sm"
+                            id="api-left"
+                            className="hidden justify-between gap-2 lg:flex"
+                            tabIndex={0}
+                          />
+                        }
                       >
-                        <input
-                          type="checkbox"
-                          className="size-5 shrink-0"
-                          checked={
-                            effectiveSelectedIds === null ||
-                            effectiveSelectedIds.includes(environment.environmentId)
-                          }
-                          onChange={(event) => {
-                            const ids = new Set(
-                              effectiveSelectedIds ??
-                                costs.environments.map((entry) => entry.environmentId),
-                            );
-                            if (event.target.checked) ids.add(environment.environmentId);
-                            else ids.delete(environment.environmentId);
-                            setSelectedIds([...ids]);
-                          }}
-                        />
-                        <span className="break-words">{environment.label}</span>
-                      </label>
-                    ))}
-                  </fieldset>
-                  <p className="text-xs text-muted-foreground">
-                    Choose computers using the same Codex account. Quota percentages are never added
-                    across machines. Account identity and copied chats cannot be verified here.
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    Public reset news is checked every five minutes while this page is open. Only
-                    the news service receives that request, without your usage, chat data or account
-                    credentials.
-                  </p>
-                </div>
-              </details>
-            </>
-          ) : null}
-          <section
-            id="public-reset-estimates"
-            className="border-t border-border pt-5"
-            aria-label="Estimated use between public resets"
-          >
-            <div className="flex flex-wrap items-baseline justify-between gap-2">
-              <h2 className="text-sm font-medium">Estimated use between public resets</h2>
-              <a
-                className="text-xs text-muted-foreground hover:text-foreground"
-                href="https://codex-resets.com/"
-                target="_blank"
-                rel="noreferrer"
-              >
-                Codex Resets
-              </a>
-            </div>
-            <p className="mt-2 max-w-4xl text-xs leading-relaxed text-muted-foreground">
-              T3 backdates regular public reset announcements, then totals recorded Codex transcript
-              usage between them at current API rates. The source does not track your account, and
-              T3 sends it no account or transcript data. Announcement time can differ from
-              propagation time, so every amount below is an API-equivalent estimate.
-            </p>
-            {bankedAnnouncements.length > 0 ? (
+                        <dt className="text-muted-foreground">Left at API prices</dt>
+                        <dd className="tabular-nums">
+                          {current.value.remainingValueUsd === null
+                            ? "Learning"
+                            : `≈ ${estimate(current.value.remainingValueUsd)}`}
+                        </dd>
+                      </TooltipTrigger>
+                      <TooltipPopup>
+                        What the remaining limit is worth at API prices, at this cycle's burn.
+                      </TooltipPopup>
+                    </Tooltip>
+                  </>
+                }
+              />
               <p className="mt-2 text-xs text-muted-foreground">
-                {bankedAnnouncements.length} banked reset grant
-                {bankedAnnouncements.length === 1 ? " is" : "s are"} listed by the source but do not
-                split periods because redemption is account-specific.
+                Transcript costs from {costScope}
+                {valueNote ? ` · ${valueNote}` : ""}
               </p>
-            ) : null}
-            {publicCosts.environments.length > 0 ? (
-              <details className="mt-3 rounded-md border border-border/70 px-3 py-2">
-                <summary className="cursor-pointer text-xs text-muted-foreground">
-                  Computers included: {publicCostScope}
-                </summary>
-                <div className="mt-2 flex flex-wrap gap-x-4 gap-y-2">
-                  {publicCosts.environments.map((environment) => {
-                    const checked = effectivePublicSelectedIds.includes(environment.environmentId);
-                    return (
-                      <label
-                        key={environment.environmentId}
-                        className="flex items-center gap-2 text-xs"
-                      >
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={(event) => {
-                            const ids = selectedIds ?? effectivePublicSelectedIds;
-                            setSelectedIds(
-                              event.currentTarget.checked
-                                ? [...new Set([...ids, environment.environmentId])]
-                                : ids.filter((id) => id !== environment.environmentId),
-                            );
-                          }}
-                        />
-                        <span>{environment.label}</span>
-                      </label>
-                    );
-                  })}
-                </div>
-              </details>
-            ) : null}
-            {publicHistory.status === "loading" ? (
-              <p role="status" className="mt-3 text-sm text-muted-foreground">
-                Reading public reset history…
-              </p>
-            ) : publicHistory.status === "unavailable" ? (
-              <p role="status" className="mt-3 text-sm text-muted-foreground">
-                Codex Resets is unavailable. Saved quota observations still work normally.
-              </p>
-            ) : publicEstimates.length === 0 ? (
-              <p className="mt-3 text-sm text-muted-foreground">
-                The public history does not contain two regular resets yet.
-              </p>
-            ) : (
-              <div className="mt-3 divide-y divide-border">
-                {publicEstimates.toReversed().map((row) => {
-                  const inputTokens = row.models.reduce(
-                    (total, model) =>
-                      total +
-                      model.totals.uncachedInputTokens +
-                      model.totals.cachedInputTokens +
-                      model.totals.cacheCreationTokens,
-                    0,
-                  );
-                  const outputTokens = row.models.reduce(
-                    (total, model) => total + model.totals.outputTokens,
-                    0,
-                  );
-                  return (
-                    <div
-                      key={row.interval.id}
-                      className="flex flex-wrap justify-between gap-3 py-3"
-                    >
-                      <div>
-                        <p className="text-sm">
-                          {row.endedBy.sourceUrl ? (
-                            <a
-                              className="hover:underline"
-                              href={row.endedBy.sourceUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                            >
-                              Public reset announced {dateTime(row.endedBy.announcedAt)}
-                            </a>
-                          ) : (
-                            <>Public reset observed {dateTime(row.endedBy.announcedAt)}</>
-                          )}
-                        </p>
-                        <p className="mt-1 text-xs text-muted-foreground">
-                          From {dateTime(row.startedBy.announcedAt)}
-                          {row.endedBy.sourceType === "observed" ? " · observed report" : ""}
-                        </p>
-                      </div>
-                      <div className="text-right">
-                        <p className="text-sm tabular-nums">
-                          {row.costUsd === null ? "Estimate unavailable" : formatUsd(row.costUsd)}
-                        </p>
-                        <p className="mt-1 text-xs text-muted-foreground">
-                          {row.records > 0
-                            ? `${row.records.toLocaleString()} recorded usage rows`
-                            : row.reason}
-                        </p>
-                      </div>
-                      {row.reason && row.records > 0 ? (
-                        <p className="w-full text-xs text-muted-foreground">{row.reason}</p>
-                      ) : null}
-                      {row.models.length > 0 ? (
-                        <details className="w-full rounded-md border border-border/70 px-3 py-2">
-                          <summary className="cursor-pointer text-xs text-muted-foreground">
-                            Model estimates · {formatTokens(inputTokens)} input ·{" "}
-                            {formatTokens(outputTokens)} output
-                          </summary>
-                          <div className="mt-2 overflow-x-auto">
-                            <table
-                              className="w-full min-w-[30rem] text-left text-xs"
-                              aria-label={`Estimated model use before reset ${dateTime(row.endedBy.announcedAt)}`}
-                            >
-                              <thead className="text-muted-foreground">
-                                <tr>
-                                  <th className="py-1 pr-3 font-normal">Model</th>
-                                  <th className="px-3 py-1 text-right font-normal">Input</th>
-                                  <th className="px-3 py-1 text-right font-normal">Output</th>
-                                  <th className="py-1 pl-3 text-right font-normal">API value</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {row.models.map((model) => (
-                                  <tr key={model.model} className="border-t border-border/70">
-                                    <td className="py-1.5 pr-3">{model.model}</td>
-                                    <td className="px-3 py-1.5 text-right tabular-nums">
-                                      {formatTokens(
-                                        model.totals.uncachedInputTokens +
-                                          model.totals.cachedInputTokens +
-                                          model.totals.cacheCreationTokens,
-                                      )}
-                                    </td>
-                                    <td className="px-3 py-1.5 text-right tabular-nums">
-                                      {formatTokens(model.totals.outputTokens)}
-                                    </td>
-                                    <td className="py-1.5 pl-3 text-right tabular-nums">
-                                      {model.unpricedRecords > 0
-                                        ? "Unpriced"
-                                        : formatUsd(model.costUsd)}
-                                    </td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        </details>
-                      ) : null}
-                    </div>
-                  );
-                })}
+            </div>
+          ) : null}
+          {historyAnswered && activeTab !== undefined ? (
+            <section aria-label="Limit details" className="min-w-0">
+              <div
+                role="tablist"
+                aria-label="Limit details"
+                className="flex gap-5 overflow-x-auto border-b border-border"
+              >
+                {tabs.map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    role="tab"
+                    id={`limits-tab-${tab.id}`}
+                    aria-selected={activeTab === tab.id}
+                    aria-controls={`limits-panel-${tab.id}`}
+                    onClick={() => updateView({ tab: tab.id })}
+                    className={cn(
+                      "-mb-px shrink-0 border-b-2 px-0.5 pb-2 text-sm focus-visible:outline-2 focus-visible:outline-ring",
+                      activeTab === tab.id
+                        ? "border-foreground text-foreground"
+                        : "border-transparent text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
               </div>
-            )}
-          </section>
+              <div
+                role="tabpanel"
+                id={`limits-panel-${activeTab}`}
+                aria-labelledby={`limits-tab-${activeTab}`}
+                className="space-y-5 pt-4"
+              >
+                {activeTab === "public" ? (
+                  <UsagePublicResets
+                    history={publicHistory}
+                    estimates={publicEstimates}
+                    costsReady={publicCostsReady}
+                    scope={costScope}
+                  />
+                ) : !source || !rawSamples || !current ? null : activeTab === "cycles" ? (
+                  <>
+                    <UsageResetHistory
+                      periods={historicalPeriods}
+                      values={valueByPeriod}
+                      environments={selectedWithSavedCosts}
+                      selectedCycle={selectedCycle}
+                      monitoringSince={samples[0]!.observedAt}
+                      onSelectCycle={(cycleId) => {
+                        setSelectedCycle(cycleId);
+                        chartRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+                      }}
+                    />
+                    <UsageCycleComparison
+                      key={`${source.environmentId}:${windowKey}`}
+                      period={current.period}
+                      periods={historicalPeriods}
+                      samples={rawSamples}
+                      selectedIds={effectiveSelectedIds}
+                    />
+                  </>
+                ) : activeTab === "models" ? (
+                  <>
+                    <UsageModelTracker
+                      key={`${source.environmentId}:${windowKey}:${current.period.id}`}
+                      period={current.period}
+                      samples={rawSamples}
+                      models={currentModels}
+                      activity={modelChartActivity}
+                      scope={costScope}
+                    />
+                  </>
+                ) : (
+                  <TokenBudgetPanel
+                    budgetUsd={current.value.remainingValueUsd}
+                    models={models}
+                    observedAt={current.period.last.observedAt}
+                    provisional={current.value.historicalCalibration !== undefined}
+                    {...(current.value.costObservedUntil && !current.value.historicalCalibration
+                      ? { currentPrefixThrough: current.value.costObservedUntil }
+                      : {})}
+                    priorModelMix={
+                      currentModels === null && current.value.historicalCalibration !== undefined
+                    }
+                    {...(current.value.historicalCalibration
+                      ? { calibration: current.value.historicalCalibration }
+                      : {})}
+                  />
+                )}
+              </div>
+            </section>
+          ) : null}
+          <BirthdayGreeting />
         </WorkspacePageContainer>
       </ScrollArea>
     </SidebarInset>

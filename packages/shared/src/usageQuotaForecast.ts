@@ -5,13 +5,19 @@ import { quotaHistoryPoints, quotaMonitoringSamples, quotaPeriods } from "./usag
 const DAY = 86_400_000;
 const WEEK = 7 * DAY;
 export const QUOTA_STALE_MS = 15 * 60_000;
+export const QUOTA_WEEK_MS = WEEK;
 
-/** Current-cycle pace. A public announcement changes planning, never the measured balance. */
+/**
+ * Current-cycle pace. A public announcement changes planning, never the measured balance.
+ * `windowMs` is the limit's length: a week for Codex and Claude weekly limits, five hours
+ * for a Claude session.
+ */
 export function quotaForecast(
   samples: readonly UsageQuotaSample[],
   now: number,
   reserve = 3,
   announcedResetAt?: string,
+  windowMs = WEEK,
 ) {
   const monitored = quotaMonitoringSamples(samples);
   const periods = quotaPeriods(monitored);
@@ -24,7 +30,7 @@ export function quotaForecast(
   const announcement = announcedResetAt === undefined ? NaN : Date.parse(announcedResetAt);
   const usesAnnouncement = announcement > now && announcement < weeklyReset;
   const reset = usesAnnouncement ? announcement : weeklyReset;
-  const windowStart = weeklyReset - WEEK;
+  const windowStart = weeklyReset - windowMs;
   const start = Date.parse(period.first.observedAt);
   const daysLeft = Math.max((reset - observed) / DAY, 0);
   const elapsedDays = Math.max((observed - windowStart) / DAY, 1 / 24);
@@ -138,8 +144,8 @@ export function quotaForecast(
     exhaustionAt,
     exhaustsBeforeReset: exhaustion !== null && exhaustion < reset,
     usedPercent: used,
-    linearUsedPercent: Math.max(0, Math.min(100, ((observed - windowStart) / WEEK) * 100)),
-    paceDelta: used - Math.max(0, Math.min(100, ((observed - windowStart) / WEEK) * 100)),
+    linearUsedPercent: Math.max(0, Math.min(100, ((observed - windowStart) / windowMs) * 100)),
+    paceDelta: used - Math.max(0, Math.min(100, ((observed - windowStart) / windowMs) * 100)),
     expectedPercentPerDay: expectedRate,
     recommendedPercentPerDay:
       daysLeft > 0 ? Math.max(latest.remainingPercent - reserve, 0) / daysLeft : 0,

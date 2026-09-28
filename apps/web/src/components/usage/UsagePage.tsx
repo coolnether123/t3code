@@ -52,6 +52,7 @@ import { CodexUsageButton } from "./CodexUsageButton";
 import { UsageLimitsSection } from "./UsageLimits";
 import { UsagePriceOverrides } from "./UsagePriceOverrides";
 import { PROVIDER_ORDER, PROVIDER_PRESENTATION, providersWithUsage } from "./usageProviders";
+import { readLimitsView, saveLimitsView } from "./usagePagePreferences";
 
 const WINDOW_OPTIONS = [
   { days: 1, label: "Past 24h" },
@@ -294,7 +295,7 @@ export function UsagePage() {
                 to="/usage-resets"
                 className="inline-flex min-h-11 w-full items-center justify-center rounded-md border border-border px-3 py-2 text-center text-sm text-foreground hover:bg-accent focus-visible:outline-2 focus-visible:outline-ring sm:w-auto"
               >
-                Codex usage &amp; resets
+                Limits &amp; resets
               </Link>
             </div>
             {settling ? (
@@ -421,12 +422,13 @@ export function UsagePage() {
                               ? `${formatPercent(share)} of cost · ${formatTokens(totals?.totalTokens ?? 0)} tokens`
                               : `${formatPercent(share)} of tokens · ${formatUsd(totals?.costUsd ?? 0)}`}
                           </span>
-                          {provider === "codex" ? (
+                          {provider === "codex" || provider === "claude" ? (
                             <Link
                               to="/usage-resets"
+                              onClick={() => saveLimitsView({ ...readLimitsView(), provider })}
                               className="inline-flex min-h-11 w-fit items-center gap-2 rounded-md text-sm underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-ring"
                             >
-                              Usage &amp; resets <span aria-hidden="true">→</span>
+                              Limits &amp; resets <span aria-hidden="true">→</span>
                             </Link>
                           ) : null}
                         </div>

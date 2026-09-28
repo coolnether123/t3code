@@ -5,12 +5,12 @@ import {
 } from "./usageChartActivity";
 import { UsageActivityPanel } from "./UsageActivityPanel";
 import { compareUsageBurn } from "./usageBurnComparison";
-import type { UsageQuotaSample } from "@t3tools/contracts";
+import type { ContextMenuItem, UsageQuotaSample } from "@t3tools/contracts";
 import {
   currentResetAnnouncement,
   type ResetNews,
 } from "@t3tools/client-runtime/resetAnnouncements";
-import { quotaDuration, quotaForecast } from "@t3tools/shared/usageQuotaForecast";
+import { QUOTA_WEEK_MS, quotaDuration, quotaForecast } from "@t3tools/shared/usageQuotaForecast";
 import { quotaHistoryPoints, quotaPeriods } from "@t3tools/shared/usageQuota";
 import {
   apiCostPace,
@@ -20,8 +20,19 @@ import {
 } from "./usageApiPace";
 import { UsageRunwayPlanner } from "./UsageRunwayPlanner";
 import { formatUsd } from "@t3tools/shared/usageFormat";
-import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from "react";
 import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
+
+import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
+import { readLocalApi } from "~/localApi";
+import { toastManager } from "../ui/toast";
 
 const date = (value: string) =>
   new Date(value).toLocaleString(undefined, {
@@ -49,8 +60,18 @@ export function UsagePaceChart({
   onCycleChange,
   activity = NO_ACTIVITY,
   onRangeChange,
+  windowMs = QUOTA_WEEK_MS,
+  title = "Weekly quota",
+  providerName = "Codex",
+  stats,
 }: {
   readonly activity?: readonly ChartActivity[];
+  /** Length of the limit window: a week for weekly limits, five hours for a Claude session. */
+  readonly windowMs?: number;
+  readonly title?: string;
+  readonly providerName?: string;
+  /** Extra rows for the summary column, such as API-equivalent value. */
+  readonly stats?: ReactNode;
   readonly onRangeChange?: (range: readonly [number, number] | null) => void;
   readonly selectedCycle?: string | null;
   readonly onCycleChange?: (cycleId: string | null) => void;
@@ -105,8 +126,9 @@ export function UsagePaceChart({
         historical && cycle ? Date.parse(cycle.last.observedAt) : now,
         3,
         announced?.targetAt,
+        windowMs,
       ),
-    [samples, cycleSamples, cycle, historical, now, announced],
+    [samples, cycleSamples, cycle, historical, now, announced, windowMs],
   );
   const activityPoints = useMemo(
     () => quotaActivityPoints(cycleSamples, activity),
@@ -252,13 +274,13 @@ export function UsagePaceChart({
     x: index / tickCount,
     at: new Date(viewStart + ((viewEnd - viewStart) * index) / tickCount),
   }));
-  const weeklyStart = Date.parse(f.latest.resetsAt) - 7 * 86_400_000;
+  const windowStart = Date.parse(f.latest.resetsAt) - windowMs;
   const paceAt = (at: number) =>
     historical
       ? clampPercent(
           f.first.remainingPercent * (1 - (at - chartStart) / Math.max(plotEnd - chartStart, 1)),
         )
-      : clampPercent(100 - ((at - weeklyStart) / (7 * 86_400_000)) * 100);
+      : clampPercent(100 - ((at - windowStart) / windowMs) * 100);
   const paceStartY = y(paceAt(viewStart));
   const paceEndY = y(paceAt(viewEnd));
   const paceDelta = historical
@@ -282,9 +304,125 @@ export function UsagePaceChart({
     setInspected(null);
     setPointerX(null);
   };
+  const nearestPointIndex = (at: number) =>
+    f.points.reduce(
+      (best, point, index) =>
+        Math.abs(Date.parse(point.observedAt) - at) <
+        Math.abs(Date.parse(f.points[best]!.observedAt) - at)
+          ? index
+          : best,
+      0,
+    );
+  const copy = (text: string, what: string) =>
+    writeTextToClipboard(text, what).then(
+      () => toastManager.add({ type: "success", title: `Copied ${what}` }),
+      () => toastManager.add({ type: "error", title: `Could not copy the ${what}` }),
+    );
+  /** Right-click works where the pointer is: zoom around it and copy the reading under it. */
+  const openChartMenu = async (event: ReactMouseEvent<SVGSVGElement>) => {
+    event.preventDefault();
+    const api = readLocalApi();
+    if (!api) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const fraction = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+    const at = viewStart + fraction * (viewEnd - viewStart);
+    const index = nearestPointIndex(at);
+    const point = f.points[index]!;
+    setInspected(index);
+    type Action =
+      | "copy-reading"
+      | "copy-summary"
+      | "zoom-1h"
+      | "zoom-6h"
+      | "zoom-24h"
+      | "zoom-out"
+      | "full"
+      | "toggle-view"
+      | "previous-cycle"
+      | "next-cycle"
+      | "current-cycle";
+    const items: ContextMenuItem<Action>[] = [
+      { id: "copy-reading", label: `Copy reading at ${time(point.observedAt)}`, icon: "copy" },
+      { id: "copy-summary", label: "Copy cycle summary", icon: "copy" },
+      { id: "zoom-1h", label: "Zoom to 1 hour here", separatorBefore: true },
+      { id: "zoom-6h", label: "Zoom to 6 hours here" },
+      { id: "zoom-24h", label: "Zoom to 24 hours here" },
+      { id: "zoom-out", label: "Zoom out", disabled: !activeZoom },
+      { id: "full", label: "Show full cycle", disabled: !activeZoom },
+      ...(historical
+        ? []
+        : [
+            {
+              id: "toggle-view" as const,
+              label: observed ? "Show projection to reset" : "Show recorded readings only",
+              separatorBefore: true,
+            },
+          ]),
+      {
+        id: "previous-cycle",
+        label: "Previous cycle",
+        disabled: cycleIndex <= 0,
+        separatorBefore: true,
+      },
+      { id: "next-cycle", label: "Next cycle", disabled: !historical },
+      { id: "current-cycle", label: "Back to current cycle", disabled: !historical },
+    ];
+    let action: Action | null = null;
+    try {
+      action = await api.contextMenu.show(items, { x: event.clientX, y: event.clientY });
+    } catch {
+      return;
+    }
+    switch (action) {
+      case "copy-reading":
+        await copy(
+          `${providerName} ${title}: ${point.estimated ? point.remainingPercent.toFixed(2) : point.remainingPercent}% remaining at ${date(point.observedAt)}`,
+          "reading",
+        );
+        break;
+      case "copy-summary":
+        await copy(
+          historical
+            ? `${providerName} ${title}, cycle ${cycleIndex + 1} of ${cycles.length}: ${f.latest.remainingPercent}% left when it reset at ${date(cycle!.next!.observedAt)}`
+            : `${providerName} ${title}: ${f.latest.remainingPercent}% remaining, ${Math.abs(paceDelta).toFixed(1)} points ${behind ? "behind" : "ahead of"} pace, resets in ${quotaDuration(f.resetInMs)} (${date(f.planningResetAt)})`,
+          "summary",
+        );
+        break;
+      case "zoom-1h":
+        zoomTo(3_600_000, at);
+        break;
+      case "zoom-6h":
+        zoomTo(21_600_000, at);
+        break;
+      case "zoom-24h":
+        zoomTo(86_400_000, at);
+        break;
+      case "zoom-out":
+        zoomTo((viewEnd - viewStart) * 2, at);
+        break;
+      case "full":
+        setRange(null);
+        break;
+      case "toggle-view":
+        setRange(null);
+        setView(observed ? "forecast" : "observed");
+        break;
+      case "previous-cycle":
+        selectCycle(cycleIndex - 1);
+        break;
+      case "next-cycle":
+        selectCycle(cycleIndex + 1);
+        break;
+      case "current-cycle":
+        selectCycle(cycles.length - 1);
+        break;
+      default:
+        break;
+    }
+  };
   return (
     <section
-      aria-label={historical ? "Past Codex usage" : "Current Codex usage"}
+      aria-label={`${historical ? "Past" : "Current"} ${providerName} ${title.toLowerCase()}`}
       className="min-w-0 rounded-lg border border-border/60 bg-card/20 p-2 sm:p-4"
     >
       <div className="mb-1 flex flex-wrap items-center justify-between gap-2 border-b border-border/60 pb-1 sm:mb-2 sm:pb-2">
@@ -332,7 +470,7 @@ export function UsagePaceChart({
       <div className="grid min-w-0 gap-3 lg:grid-cols-[9rem_minmax(0,1fr)]">
         <div>
           <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 lg:block">
-            <h2 className="hidden text-xs font-medium lg:block">Weekly quota</h2>
+            <h2 className="hidden text-xs font-medium lg:block">{title}</h2>
             <p className="text-2xl lg:mt-2 lg:text-3xl font-medium tracking-tight tabular-nums">
               {f.latest.remainingPercent}%
             </p>
@@ -387,14 +525,15 @@ export function UsagePaceChart({
                 <dd className="tabular-nums">{chartSamples.length}</dd>
               </div>
             )}
-            {!historical ? (
+            {!historical && manualResets ? (
               <div className="hidden justify-between gap-2 lg:flex">
                 <dt className="text-muted-foreground">Banked resets</dt>
                 <dd className="tabular-nums">
-                  {manualResets?.verified ? manualResets.availableCount : "Unknown"}
+                  {manualResets.verified ? manualResets.availableCount : "Unknown"}
                 </dd>
               </div>
             ) : null}
+            {stats}
           </dl>
         </div>
         <div className="min-w-0">
@@ -533,7 +672,7 @@ export function UsagePaceChart({
               </button>
             </div>
             <span className="hidden text-[10px] text-muted-foreground sm:inline">
-              Drag to zoom · double-click to reset
+              Drag to zoom · double-click to reset · right-click for more
             </span>
           </div>
           {activeZoom ? (
@@ -622,6 +761,7 @@ export function UsagePaceChart({
                 }}
                 onPointerCancel={() => setDrag(null)}
                 onDoubleClick={() => setRange(null)}
+                onContextMenu={(event) => void openChartMenu(event)}
                 onKeyDown={(event) => {
                   if (event.key === "Escape") {
                     setRange(null);
@@ -652,8 +792,8 @@ export function UsagePaceChart({
                 }}
                 aria-label={
                   observed
-                    ? "Recorded Codex remaining usage"
-                    : "Codex remaining usage and pace to next reset"
+                    ? `Recorded ${providerName} ${title.toLowerCase()} remaining`
+                    : `${providerName} ${title.toLowerCase()} remaining and pace to next reset`
                 }
               >
                 <desc>
@@ -662,7 +802,7 @@ export function UsagePaceChart({
                   whole percentages; markers show estimated crossings. Gray dashed diagonal:
                   {historical
                     ? " even pace to the observed reset."
-                    : " even weekly pace. Orange: blended projection."}
+                    : " even pace across the limit window. Orange: blended projection."}
                   {showApiPace && costPace && !observed ? " Cyan: API cost projection." : ""}
                   {
                     " Missing costs use straight lines across tracking gaps; reset changes remain separate."
@@ -713,7 +853,7 @@ export function UsagePaceChart({
                   />
                 ))}
                 <line
-                  aria-label={historical ? "Pace to observed reset" : "Weekly pace"}
+                  aria-label={historical ? "Pace to observed reset" : "Even pace"}
                   x1={0}
                   y1={paceStartY}
                   x2={960}
@@ -876,30 +1016,21 @@ export function UsagePaceChart({
           />
         </div>
       </div>
-      {!activeZoom ? (
+      {!activeZoom && burnComparison.checks ? (
         <section
           className="mt-3 border-t border-border/60 pt-3 text-xs"
           aria-label="Burn comparison"
         >
           <h3 className="font-medium">Which burn did the readings follow?</h3>
-          {burnComparison.checks ? (
-            <>
-              <p className="mt-1 text-muted-foreground">
-                Across {burnComparison.checks} non-overlapping six-hour checks: API closer{" "}
-                {burnComparison.apiWins}, forecast closer {burnComparison.forecastWins}, too close
-                to call {burnComparison.ties}.
-              </p>
-              <p className="mt-1 tabular-nums">
-                Average miss: API {burnComparison.apiMeanError!.toFixed(1)} points · forecast{" "}
-                {burnComparison.forecastMeanError!.toFixed(1)} points
-              </p>
-            </>
-          ) : (
-            <p className="mt-1 text-muted-foreground">
-              Need completed, priced API activity and at least five recorded quota points before
-              six-hour checks can compare the two.
-            </p>
-          )}
+          <p className="mt-1 text-muted-foreground">
+            Across {burnComparison.checks} non-overlapping six-hour checks: API closer{" "}
+            {burnComparison.apiWins}, forecast closer {burnComparison.forecastWins}, too close to
+            call {burnComparison.ties}.
+          </p>
+          <p className="mt-1 tabular-nums">
+            Average miss: API {burnComparison.apiMeanError!.toFixed(1)} points · forecast{" "}
+            {burnComparison.forecastMeanError!.toFixed(1)} points
+          </p>
           <p className="mt-1 text-[10px] text-muted-foreground">
             Each check uses the forecast and API spending known at its start, then compares both
             with the next recorded reading. Differences under half a quota point are ties; gaps and
@@ -1049,16 +1180,16 @@ export function UsagePaceChart({
                   : " It started at 100%."}
               </p>
               <p className="mt-4 text-xs leading-relaxed text-muted-foreground">
-                Orange blends monitored usage with the weekly average. Blue spends the estimated
+                Orange blends monitored usage with the window average. Blue spends the estimated
                 remaining API value at the average dollar rate from the last six hours, or since
                 monitoring began if newer. Its height uses the same remaining-percentage scale. It
-                includes idle time and stops at zero. Model changes can affect Codex allowance
+                includes idle time and stops at zero. Model changes can affect the allowance
                 differently, so this remains an estimate.
               </p>
               <div className="mt-6 border-y border-border py-4">
                 <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
                   <h2 className="text-sm font-medium">
-                    {f.usesAnnouncement ? "Announced reset" : "Weekly reset"}
+                    {f.usesAnnouncement ? "Announced reset" : "Next reset"}
                   </h2>
                   <span className="text-lg font-medium tabular-nums">
                     {quotaDuration(f.resetInMs)} left

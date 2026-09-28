@@ -37,14 +37,17 @@ vi.mock("../ui/scroll-area", () => ({ ScrollArea: "div" }));
 vi.mock("../ui/sidebar", () => ({ SidebarInset: "div" }));
 vi.mock("../WorkspacePageContainer", () => ({ WorkspacePageContainer: "main" }));
 vi.mock("../WorkspacePageHeader", () => ({ WorkspacePageHeader: "header" }));
-vi.mock("./ResetCheckPanel", () => ({ ResetCheckPanel: () => <button>Check X with Luna</button> }));
-vi.mock("./CommunityCheckPanel", () => ({
-  CommunityCheckPanel: () => <button>Check community with Luna</button>,
-}));
 
 import { UsageResetPage } from "./UsageResetPage";
 
+const LIMITS_VIEW_KEY = "t3code:usage-limits-view:v1";
+/** Opens the page on a tab, as a returning viewer's saved preference would. */
+function openTab(tab: "cycles" | "models" | "planner" | "public", provider = "codex") {
+  window.localStorage.setItem(LIMITS_VIEW_KEY, JSON.stringify({ provider, tab }));
+}
+
 beforeEach(() => {
+  window.localStorage.removeItem(LIMITS_VIEW_KEY);
   state.environments = [];
   state.publicHistory = { announcements: [], checkedAt: null, status: "loading" };
   state.publicRefresh.mockReset().mockResolvedValue(undefined);
@@ -58,7 +61,7 @@ beforeEach(() => {
   vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-08-30T22:00:00Z"));
 });
 
-describe("Codex monitor page", () => {
+describe("Limits page", () => {
   it("uses separate history, cycle, public, pace, chart, and full-cycle model reads", () => {
     renderToStaticMarkup(<UsageResetPage />);
     expect(state.useUsage).toHaveBeenCalledTimes(6);
@@ -165,6 +168,7 @@ describe("Codex monitor page", () => {
       },
     );
 
+    openTab("public");
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -318,9 +322,7 @@ describe("Codex monitor page", () => {
     const root = createRoot(container);
     try {
       await act(async () => root.render(<UsageResetPage />));
-      const button = container.querySelector<HTMLButtonElement>(
-        '[aria-label="Refresh Codex usage"]',
-      )!;
+      const button = container.querySelector<HTMLButtonElement>('[aria-label="Refresh limits"]')!;
       await act(async () => {
         button.click();
         button.click();
@@ -342,9 +344,9 @@ describe("Codex monitor page", () => {
   });
   it("does not show zero balance or dollars when no tracker data exists", () => {
     const markup = renderToStaticMarkup(<UsageResetPage />);
-    expect(markup).toContain("No saved quota observations");
+    expect(markup).toContain("No saved limit readings yet");
     expect(markup).toContain('to="/usage"');
-    expect(markup).toContain('aria-label="Refresh Codex usage"');
+    expect(markup).toContain('aria-label="Refresh limits"');
     expect(markup).not.toContain("$0.00");
   });
 
@@ -365,9 +367,10 @@ describe("Codex monitor page", () => {
       refresh: state.refresh,
     }));
     const markup = renderToStaticMarkup(<UsageResetPage />);
-    expect(markup).toContain("Desktop: Reconnecting. Codex usage will appear");
-    expect(markup).not.toContain("Reading Codex usage");
-    expect(markup).not.toContain("No saved quota observations");
+    expect(markup).toContain("Desktop is reconnecting. Limits appear when it is back.");
+    expect(markup).not.toContain("Reading saved limits");
+    expect(markup).not.toContain("No saved limit readings");
+    expect(markup).not.toContain("Not recorded");
   });
 
   it("replaces the initial spinner when the first reading does not progress", async () => {
@@ -392,10 +395,11 @@ describe("Codex monitor page", () => {
     const root = createRoot(container);
     try {
       await act(async () => root.render(<UsageResetPage />));
-      expect(container.textContent).toContain("Reading Codex usage");
+      expect(container.textContent).toContain("Reading saved limits");
+      expect(container.textContent).not.toContain("Not recorded");
       await act(async () => vi.advanceTimersByTimeAsync(15_000));
-      expect(container.textContent).toContain("Codex usage is taking longer than expected");
-      expect(container.textContent).not.toContain("Reading Codex usage");
+      expect(container.textContent).toContain("Saved readings are taking longer than expected");
+      expect(container.textContent).not.toContain("Reading saved limits");
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -481,11 +485,13 @@ describe("Codex monitor page", () => {
     const root = createRoot(container);
     try {
       await act(async () => root.render(<UsageResetPage />));
-      expect(container.textContent).toContain("Estimated use between public resets");
+      expect(container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe(
+        "Public resets",
+      );
       expect(container.textContent).toContain("1 banked reset grant is listed");
       expect(container.textContent).toContain("$12.50");
       expect(container.textContent).toContain("gpt-5.6-sol");
-      expect(container.textContent).toContain("4 recorded usage rows");
+      expect(container.textContent).toContain("4 usage records");
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -555,15 +561,11 @@ describe("Codex monitor page", () => {
     expect(markup).toContain("12% left");
     expect(markup).toContain("Window changed across an observation gap");
     expect(markup).not.toContain("Unexpected usage return");
-    expect(markup).toContain("Tracking and computers");
-    expect(markup).toContain("Check community with Luna");
-    expect(markup.indexOf("Usage over time")).toBeLessThan(
-      markup.indexOf("Check community with Luna"),
-    );
-    expect(markup.indexOf("Reset history")).toBeLessThan(
-      markup.indexOf("Check community with Luna"),
-    );
-    expect(markup).toContain("Model comparisons at API prices");
+    expect(markup).toContain('aria-label="Monitor settings"');
+    expect(markup).not.toContain("Luna");
+    for (const tab of ["Cycles", "Models", "Planner", "Public resets"]) {
+      expect(markup).toContain(`>${tab}</button>`);
+    }
   });
   it("shows a saved dollar cost for an older cycle after a monitoring gap", () => {
     const fingerprint = {
@@ -650,9 +652,8 @@ describe("Codex monitor page", () => {
       },
     ];
     const markup = renderToStaticMarkup(<UsageResetPage />);
-    expect(markup).toContain("$30 observed cost");
-    expect(markup).toContain("Dollar estimate not established");
-    expect(markup).toContain("Per-model usage");
+    expect(markup).toContain("$30 API value · Unused value not established");
+    expect(markup).toContain("Models ·");
     expect(markup).toContain("1.25M input");
     expect(markup).toContain("40K output");
     expect(markup).toContain("gpt-6-astra");
@@ -744,6 +745,7 @@ describe("Codex monitor page", () => {
       },
     ];
 
+    openTab("planner");
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -754,8 +756,8 @@ describe("Codex monitor page", () => {
         container.querySelector<HTMLButtonElement>('[aria-label="Previous reset cycle"]')!.click(),
       );
       expect(container.querySelector("#api-value")?.textContent).toContain("$30.00");
-      expect(container.querySelector("#api-value")?.textContent).toContain("≈ $90");
-      expect(container.querySelector("#token-budget")?.textContent).not.toContain("Pending");
+      expect(container.querySelector("#api-left")?.textContent).toContain("≈ $90");
+      expect(container.querySelector('[role="tabpanel"]')?.textContent).not.toContain("Pending");
       expect(
         state.useUsage.mock.calls.some(([input]) =>
           input.quotaIntervals?.some(
@@ -912,8 +914,9 @@ describe("Codex monitor page", () => {
               refresh: state.refresh,
             },
       );
+      expect(renderToStaticMarkup(<UsageResetPage />)).toContain("$30 API value");
+      openTab("planner");
       const markup = renderToStaticMarkup(<UsageResetPage />);
-      expect(markup).toContain("$30 observed cost");
       expect(markup).toContain("Astra");
       expect(markup).toContain("Sol");
       expect(markup).toContain("Terra");
@@ -927,7 +930,7 @@ describe("Codex monitor page", () => {
       expect(tokenPlanner).not.toContain("Pending");
       expect(tokenPlanner).not.toContain("Exact model totals are not available yet");
       if (scenario === "failed") {
-        expect(markup).toContain("Observed cost is complete through");
+        expect(markup).toContain("API value is complete through");
         expect(tokenPlanner).toContain("Provisional current-cycle value through");
       }
     },
@@ -1077,6 +1080,7 @@ describe("Codex monitor page", () => {
               refresh: state.refresh,
             },
       );
+      openTab("planner");
       const markup = renderToStaticMarkup(<UsageResetPage />);
       const tokenPlanner = markup.slice(
         markup.indexOf('aria-label="API-price token comparisons"'),
@@ -1168,6 +1172,7 @@ describe("Codex monitor page", () => {
       summary: null,
     };
     state.environments = [healthy, pending];
+    openTab("planner");
     const markup = renderToStaticMarkup(<UsageResetPage />);
     expect(markup).toContain("$40.00");
     expect(markup).toContain("Transcript costs from Healthy computer");
@@ -1184,7 +1189,10 @@ describe("Codex monitor page", () => {
     const root = createRoot(container);
     try {
       await act(async () => root.render(<UsageResetPage />));
-      const computers = container.querySelectorAll<HTMLInputElement>(
+      await act(async () =>
+        container.querySelector<HTMLButtonElement>('[aria-label="Monitor settings"]')!.click(),
+      );
+      const computers = document.querySelectorAll<HTMLInputElement>(
         'fieldset input[type="checkbox"]',
       );
       expect(computers).toHaveLength(2);
@@ -1200,5 +1208,64 @@ describe("Codex monitor page", () => {
       await act(async () => root.unmount());
       container.remove();
     }
+  });
+  it("charts a Claude limit and prices its intervals from Claude transcripts", () => {
+    state.environments = [
+      {
+        environmentId: "desktop",
+        label: "Desktop",
+        isPending: false,
+        error: null,
+        summary: {
+          sources: [],
+          quotaHistory: {
+            status: "ready",
+            source: "fixture",
+            message: null,
+            samples: [
+              {
+                observedAt: "2026-08-30T20:00:00Z",
+                remainingPercent: 90,
+                resetsAt: "2026-09-06T00:00:00Z",
+              },
+            ],
+          },
+          providerQuotaHistories: [
+            {
+              provider: "claude",
+              windowId: "five_hour",
+              label: "Session",
+              kind: "session",
+              windowDurationMins: 300,
+              status: "ready",
+              message: null,
+              samples: [
+                {
+                  observedAt: "2026-08-30T20:00:00Z",
+                  remainingPercent: 100,
+                  resetsAt: "2026-08-31T00:00:00Z",
+                },
+                {
+                  observedAt: "2026-08-30T21:00:00Z",
+                  remainingPercent: 80,
+                  resetsAt: "2026-08-31T00:00:00Z",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    ];
+    openTab("cycles", "claude");
+    const markup = renderToStaticMarkup(<UsageResetPage />);
+    expect(markup).toContain("Session limit");
+    expect(markup).toContain("80%");
+    expect(markup).not.toContain(">Planner</button>");
+    expect(markup).not.toContain(">Public resets</button>");
+    const costReads = state.useUsage.mock.calls
+      .map(([input]) => input as { quotaIntervals?: unknown[]; quotaProvider?: string })
+      .filter((input) => input.quotaIntervals !== undefined);
+    expect(costReads.length).toBeGreaterThan(0);
+    expect(costReads.every((input) => input.quotaProvider === "claude")).toBe(true);
   });
 });

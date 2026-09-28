@@ -180,4 +180,31 @@ describe("Codex monitor refresh", () => {
       ).includeRepeatedInput,
     ).toBe(true);
   });
+  it("prices a Claude window's interval from Claude transcripts", async () => {
+    const refreshCosts = vi.fn().mockResolvedValue([reply]);
+    const claudeSamples = summary.quotaHistory!.samples;
+    await refreshCodexMonitor({
+      trackerId: "desktop",
+      windowSamples: () => claudeSamples,
+      quotaProvider: "claude",
+      refreshHistory: async () => [reply],
+      refreshCosts,
+      refreshNews: async () => false,
+    });
+    expect(refreshCosts).toHaveBeenCalledWith(
+      expect.objectContaining({ quotaProvider: "claude", quotaIntervals: expect.any(Array) }),
+    );
+  });
+
+  it("keeps a non-Codex quota provider in the query key and omits the Codex default", () => {
+    const base = {
+      sinceDay: UsageDay.make("2026-08-30"),
+      untilDay: UsageDay.make("2026-08-31"),
+      timeZone: "UTC",
+    };
+    expect(usageQueryInput({ ...base, quotaProvider: "claude" }, 7).quotaProvider).toBe("claude");
+    expect(JSON.stringify(usageQueryInput({ ...base, quotaProvider: "codex" }, 7))).toBe(
+      JSON.stringify(usageQueryInput(base, 7)),
+    );
+  });
 });

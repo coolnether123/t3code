@@ -142,8 +142,8 @@ export function BirthdaySettings() {
         <p id="birthday-notes-help" className="text-xs leading-relaxed text-muted-foreground">
           One note per line, up to {MAX_BIRTHDAY_NOTES} notes of {MAX_BIRTHDAY_NOTE_LENGTH}{" "}
           characters. Saved privately with your birthday, not in Git. These replace the built-in
-          notes and appear in Usage and Codex monitor. Leave blank to use the built-in notes again.
-          Opening a note never reads your chats or calls a model.
+          notes and appear in Usage and Limits. Leave blank to use the built-in notes again. Opening
+          a note never reads your chats or calls a model.
         </p>
         {error ? (
           <p role="alert" className="text-sm text-destructive">

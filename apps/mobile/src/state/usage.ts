@@ -90,6 +90,7 @@ export function useUsage(input: UsageSummaryInput): UsageView {
       input.includeQuotaHistory,
       input.quotaHistoryOnly,
       input.quotaIntervals,
+      input.quotaProvider,
     ],
   );
   const atom = usageByWindowAtom(windowKey);

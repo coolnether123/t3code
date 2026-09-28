@@ -104,6 +104,7 @@ export function useUsage(
       input.includeRepeatedInput,
       input.quotaHistoryOnly,
       input.quotaIntervals,
+      input.quotaProvider,
     ],
   );
   const atom = usageByWindowAtom(windowKey);

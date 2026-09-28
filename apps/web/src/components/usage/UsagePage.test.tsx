@@ -163,7 +163,7 @@ describe("UsagePage hourly breakdown", () => {
     expect(markup).toContain("7 Codex responses have no speed metadata");
     expect(markup).toContain("2.5× Codex credits");
   });
-  it("makes only Codex's provider row open its usage and reset details", () => {
+  it("keeps the hold-to-open button on Codex's row and links limits from its row", () => {
     const view = testState.useUsage();
     testState.useUsage.mockReturnValue({
       ...view,
@@ -182,7 +182,7 @@ describe("UsagePage hourly breakdown", () => {
     });
     const markup = renderToStaticMarkup(<UsagePage />);
     expect(markup.match(/aria-label="Open Codex usage and resets"/g)).toHaveLength(1);
-    expect(markup).toContain("Usage &amp; resets");
+    expect(markup).toContain("Limits &amp; resets");
     expect(markup).toContain("Claude Code");
     expect(markup).not.toContain('aria-label="Open Claude');
   });
@@ -190,7 +190,7 @@ describe("UsagePage hourly breakdown", () => {
     testState.useUsage.mockReturnValue({ ...testState.useUsage(), isPending: true });
     const markup = renderToStaticMarkup(<UsagePage />);
     expect(markup).toContain('to="/usage-resets"');
-    expect(markup).toContain("Codex usage &amp; resets");
+    expect(markup).toContain("Limits &amp; resets");
   });
 
   it("shows completed totals while another environment is still scanning", () => {

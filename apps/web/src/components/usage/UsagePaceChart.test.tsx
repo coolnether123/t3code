@@ -112,7 +112,7 @@ describe("weekly pace chart", () => {
     expect(markup).toContain("Runs out before reset");
     expect(markup).toContain("Updated");
     expect(markup).toContain("4d 0h");
-    expect(markup).toContain("Codex remaining usage and pace to next reset");
+    expect(markup).toContain("Codex weekly quota remaining and pace to next reset");
     expect(markup).not.toContain("Unavailable");
   });
   it("does not show a stale reading as a live forecast", () => {
@@ -390,7 +390,7 @@ describe("weekly pace chart", () => {
       await act(async () => current.click());
       expect(container.textContent).toContain("Current cycle");
       expect(container.querySelector('[aria-label="Pace to observed reset"]')).toBeNull();
-      expect(container.querySelector('[aria-label="Weekly pace"]')).not.toBeNull();
+      expect(container.querySelector('[aria-label="Even pace"]')).not.toBeNull();
       expect(container.textContent).toContain("80%");
       expect(next.disabled).toBe(true);
     } finally {
