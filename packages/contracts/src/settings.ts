@@ -500,7 +500,12 @@ export const CodexSettings = makeProviderSettingsSchema(
     ),
     useDesktopAppDaemon: Schema.Boolean.pipe(
       Schema.withDecodingDefault(Effect.succeed(false)),
-      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+      Schema.annotateKey({
+        title: "Use Codex desktop app",
+        description:
+          "Run this instance's threads in the host Mac's Codex desktop installation, with its sign-in, plugins, connectors, browser extension, and approvals. Requires the host bridge setup and a macOS host.",
+        providerSettingsForm: { control: "switch" },
+      }),
     ),
     customModels: Schema.Array(CustomModelSetting).pipe(
       Schema.withDecodingDefault(Effect.succeed([])),

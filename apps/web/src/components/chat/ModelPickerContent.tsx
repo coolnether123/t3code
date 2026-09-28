@@ -41,6 +41,7 @@ import { getVirtualizedScrollFadeClassName } from "../ui/scroll-area";
 import { TooltipProvider } from "../ui/tooltip";
 import { Button } from "../ui/button";
 import {
+  isDesktopBackedProviderInstanceReady,
   isProviderInstancePickerReady,
   isProviderInstancePickerVisible,
   type ProviderInstanceEntry,
@@ -91,11 +92,27 @@ export function shouldIncludeModelPickerOption(input: {
   if (isProviderInstancePickerReady(input.entry)) return true;
   return (
     input.entry.enabled &&
-    (input.entry.driverKind === "opencode" || input.entry.driverKind === "antigravity") &&
+    (input.entry.driverKind === "opencode" ||
+      input.entry.driverKind === "antigravity" ||
+      input.entry.useDesktopAppDaemon === true) &&
     input.entry.instanceId === input.activeInstanceId &&
     input.option.slug === input.activeModel &&
     input.option.isUnavailable === true
   );
+}
+
+export function getDesktopBackedProviderStatusMessage(
+  entry: ProviderInstanceEntry | undefined,
+): string | null {
+  if (
+    !entry?.useDesktopAppDaemon ||
+    !entry.enabled ||
+    entry.status === "disabled" ||
+    isDesktopBackedProviderInstanceReady(entry)
+  ) {
+    return null;
+  }
+  return entry.snapshot.message?.trim() || getProviderStatusMessage(entry.snapshot);
 }
 
 export function shouldOfferModelPickerSetup(
@@ -197,12 +214,15 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       activeEntry,
       modelOptionsByInstance.get(props.activeInstanceId) ?? [],
     );
+  const activeInstanceNeedsDesktopStatus =
+    getDesktopBackedProviderStatusMessage(activeEntry) !== null;
   const [selectedInstanceId, setSelectedInstanceId] = useState<ProviderInstanceId | "favorites">(
     () => {
       if (
         props.lockedProvider !== null ||
         activeInstanceHasSelectableUnavailableModel ||
-        activeInstanceNeedsSetup
+        activeInstanceNeedsSetup ||
+        activeInstanceNeedsDesktopStatus
       ) {
         // Keep the active instance visible when it is locked or needs setup.
         return props.activeInstanceId;
@@ -285,13 +305,13 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     if (activeInstanceHasSelectableUnavailableModel) {
       instanceIds.add(props.activeInstanceId);
     }
-    if (props.onOpenProviderSetup) {
-      for (const entry of instanceEntries) {
-        if (
-          shouldOfferModelPickerSetup(entry, modelOptionsByInstance.get(entry.instanceId) ?? [])
-        ) {
-          instanceIds.add(entry.instanceId);
-        }
+    for (const entry of instanceEntries) {
+      if (
+        getDesktopBackedProviderStatusMessage(entry) !== null ||
+        (props.onOpenProviderSetup &&
+          shouldOfferModelPickerSetup(entry, modelOptionsByInstance.get(entry.instanceId) ?? []))
+      ) {
+        instanceIds.add(entry.instanceId);
       }
     }
     return instanceIds.size > 0 ? instanceIds : undefined;
@@ -519,20 +539,21 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
 
   const selectedEntry =
     selectedInstanceId === "favorites" ? undefined : entryByInstanceId.get(selectedInstanceId);
-  const providerSetupEntries =
-    !isSearching && props.onOpenProviderSetup
-      ? instanceEntries.filter(
-          (entry) =>
-            matchesLockedProvider(entry) &&
-            shouldOfferModelPickerSetup(
-              entry,
-              modelOptionsByInstance.get(entry.instanceId) ?? [],
-            ) &&
-            (selectedEntry
-              ? entry.instanceId === selectedEntry.instanceId
-              : filteredModels.length === 0),
-        )
-      : [];
+  const providerStatusEntries = !isSearching
+    ? instanceEntries.filter(
+        (entry) =>
+          matchesLockedProvider(entry) &&
+          (getDesktopBackedProviderStatusMessage(entry) !== null ||
+            (props.onOpenProviderSetup !== undefined &&
+              shouldOfferModelPickerSetup(
+                entry,
+                modelOptionsByInstance.get(entry.instanceId) ?? [],
+              ))) &&
+          (selectedEntry
+            ? entry.instanceId === selectedEntry.instanceId
+            : filteredModels.length === 0),
+      )
+    : [];
 
   const toggleLegacySection = useCallback((instanceId: ProviderInstanceId) => {
     setExpandedLegacyInstances((expanded) => {
@@ -921,26 +942,29 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                 />
               </ComboboxListVirtualized>
             </div>
-            {providerSetupEntries.length > 0 ? (
+            {providerStatusEntries.length > 0 ? (
               <div className="max-h-44 shrink-0 overflow-y-auto border-t border-border/70 p-2">
-                {providerSetupEntries.map((entry) => (
+                {providerStatusEntries.map((entry) => (
                   <div key={entry.instanceId} className="px-1 py-1.5 text-xs leading-snug">
                     <p className="line-clamp-3 text-muted-foreground">
-                      {getProviderStatusMessage(entry.snapshot)}
+                      {getDesktopBackedProviderStatusMessage(entry) ??
+                        getProviderStatusMessage(entry.snapshot)}
                     </p>
-                    <Button
-                      className="mt-1 px-0 text-foreground"
-                      onClick={() => {
-                        props.onRequestClose?.();
-                        props.onOpenProviderSetup?.(entry.instanceId);
-                      }}
-                      size="xs"
-                      variant="link"
-                    >
-                      {providerSetupEntries.length > 1
-                        ? `Set up ${entry.displayName}`
-                        : "Open provider setup"}
-                    </Button>
+                    {props.onOpenProviderSetup && hasProviderSetup(entry.snapshot) ? (
+                      <Button
+                        className="mt-1 px-0 text-foreground"
+                        onClick={() => {
+                          props.onRequestClose?.();
+                          props.onOpenProviderSetup?.(entry.instanceId);
+                        }}
+                        size="xs"
+                        variant="link"
+                      >
+                        {providerStatusEntries.length > 1
+                          ? `Set up ${entry.displayName}`
+                          : "Open provider setup"}
+                      </Button>
+                    ) : null}
                   </div>
                 ))}
               </div>

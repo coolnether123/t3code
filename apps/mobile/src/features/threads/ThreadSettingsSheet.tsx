@@ -106,7 +106,13 @@ function ModelRow(props: {
 }) {
   return (
     <Pressable
-      accessibilityLabel={[props.option.label, props.option.subtitle].filter(Boolean).join(", ")}
+      accessibilityLabel={[
+        props.option.label,
+        props.option.subtitle,
+        props.option.providerStatusMessage,
+      ]
+        .filter(Boolean)
+        .join(", ")}
       accessibilityRole="radio"
       accessibilityState={{
         checked: props.selected,
@@ -145,6 +151,11 @@ function ModelRow(props: {
         {props.option.subtitle ? (
           <Text className="text-xs text-foreground-muted" numberOfLines={1}>
             {props.option.subtitle}
+          </Text>
+        ) : null}
+        {props.option.providerStatusMessage ? (
+          <Text className="pt-1 text-xs text-destructive" numberOfLines={3}>
+            {props.option.providerStatusMessage}
           </Text>
         ) : null}
       </View>
@@ -557,6 +568,7 @@ type ThreadSettingsProviderCatalog = {
   readonly key: string;
   readonly driver: string | undefined;
   readonly label: string;
+  readonly statusMessage?: string;
   readonly collapsible: boolean;
   readonly collapsed: boolean;
   readonly modelCount: number;
@@ -575,6 +587,11 @@ type ThreadSettingsCatalogItem =
       readonly option: ModelOption;
       readonly isFirst: boolean;
       readonly isLast: boolean;
+    }
+  | {
+      readonly kind: "status";
+      readonly key: string;
+      readonly message: string;
     }
   | {
       readonly kind: "empty";
@@ -637,7 +654,7 @@ function useThreadSettingsCatalogItems(
         if (session.providerFilter !== null && group.providerKey !== session.providerFilter) {
           return [];
         }
-        const driver = group.models[0]?.providerDriver ?? group.providerKey;
+        const driver = group.models[0]?.providerDriver ?? group.providerDriver ?? group.providerKey;
         const catalogModels = session.showLegacy
           ? group.models
           : group.models.filter((model) => !model.isLegacy || session.isDisplayed(model));
@@ -648,7 +665,7 @@ function useThreadSettingsCatalogItems(
             query: session.searchQuery,
           }),
         );
-        if (visibleModels.length === 0) {
+        if (visibleModels.length === 0 && !group.statusMessage) {
           return [];
         }
         const isPrimary = driver !== undefined && PRIMARY_PROVIDER_DRIVERS.has(driver);
@@ -667,6 +684,7 @@ function useThreadSettingsCatalogItems(
           key: group.providerKey,
           driver,
           label: group.providerLabel,
+          ...(group.statusMessage ? { statusMessage: group.statusMessage } : {}),
           collapsible,
           collapsed,
           modelCount: visibleModels.length,
@@ -678,6 +696,15 @@ function useThreadSettingsCatalogItems(
             key: `provider:${group.providerKey}`,
             provider,
           },
+          ...(group.statusMessage
+            ? [
+                {
+                  kind: "status" as const,
+                  key: `status:${group.providerKey}`,
+                  message: group.statusMessage,
+                },
+              ]
+            : []),
           ...provider.models.map((option, index) => ({
             kind: "model" as const,
             key: `model:${option.key}`,
@@ -814,6 +841,15 @@ function ThreadSettingsMainContent(props: {
             isLast={item.isLast}
             option={item.option}
           />
+        );
+      } else if (item.kind === "status") {
+        content = (
+          <Text
+            accessibilityRole="alert"
+            className="mx-4 mb-2 rounded-xl bg-destructive/10 px-4 py-3 text-xs text-destructive"
+          >
+            {item.message}
+          </Text>
         );
       } else if (item.kind === "empty") {
         content = (

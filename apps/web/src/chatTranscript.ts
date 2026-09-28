@@ -1,4 +1,18 @@
-import type { OrchestrationMessage, OrchestrationThreadActivity } from "@t3tools/contracts";
+import {
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
+  type OrchestrationMessage,
+  type OrchestrationThreadActivity,
+} from "@t3tools/contracts";
+
+/** A copied, unsent handoff, bounded by the provider's actual message limit. */
+export function prepareDesktopDraftPrompt(title: string, loadedTranscript: string): string | null {
+  const prompt = [
+    `Continue the work from the earlier T3 chat "${title}". This is copied text from the loaded transcript, not a native provider continuation. Earlier turns may be omitted. Review the context and ask me if anything is missing.`,
+    "",
+    loadedTranscript,
+  ].join("\n");
+  return prompt.length <= PROVIDER_SEND_TURN_MAX_INPUT_CHARS ? prompt : null;
+}
 
 interface TaskTranscriptInput {
   readonly title: string;

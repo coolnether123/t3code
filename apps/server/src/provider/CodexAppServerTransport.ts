@@ -13,14 +13,179 @@ import * as Queue from "effect/Queue";
 import * as Sink from "effect/Sink";
 import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
+import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import * as CodexErrors from "effect-codex-app-server/errors";
+import { expandHomePathWith } from "../pathExpansion.ts";
 
 export type CodexAppServerTransport = "stdio" | "desktop-daemon";
 
+export function codexDesktopDaemonEnvironment(
+  environment: NodeJS.ProcessEnv = process.env,
+  hostEnvironment: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const daemonEnvironment = Object.fromEntries(
+    Object.entries(environment).filter(([name]) => name.toUpperCase() !== "CODEX_HOME"),
+  );
+  const hostCodexHome = Object.entries(hostEnvironment).find(
+    ([name]) => name.toUpperCase() === "CODEX_HOME",
+  )?.[1];
+  if (hostCodexHome !== undefined) daemonEnvironment.CODEX_HOME = hostCodexHome;
+  return daemonEnvironment;
+}
+
+/** The managed CLI that owns the desktop daemon, from its package manifest. */
+export const codexManagedCliPath = Effect.fn("codexManagedCliPath")(function* (
+  codexHome: string,
+  platform: NodeJS.Platform = HostProcessPlatform.defaultValue(),
+) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const packageRoot = path.join(codexHome, "packages", "standalone", "current");
+  const entrypoint = yield* fileSystem
+    .readFileString(path.join(packageRoot, "codex-package.json"))
+    .pipe(
+      Effect.map((text) => {
+        try {
+          const manifest = JSON.parse(text) as { readonly entrypoint?: unknown };
+          return typeof manifest.entrypoint === "string" && manifest.entrypoint.length > 0
+            ? manifest.entrypoint
+            : undefined;
+        } catch {
+          return undefined;
+        }
+      }),
+      Effect.orElseSucceed(() => undefined),
+    );
+  // Older Windows packages keep the executable under `bin`; older Unix
+  // packages kept it at the package root.
+  const fallback = platform === "win32" ? path.join("bin", "codex.exe") : "codex";
+  return path.join(packageRoot, entrypoint ?? fallback);
+});
+
+/**
+ * Starts the host's managed Codex daemon when its control socket is missing,
+ * for example after a reboot. `daemon start` is idempotent and keeps the
+ * user's saved daemon settings. A failure is left to the connection attempt,
+ * which reports the actionable repair message.
+ */
+export const ensureCodexDesktopDaemonStarted = Effect.fn("ensureCodexDesktopDaemonStarted")(
+  function* (environment: NodeJS.ProcessEnv) {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const platform = yield* HostProcessPlatform;
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const codexHome = environment.CODEX_HOME ?? path.join(NodeOS.homedir(), ".codex");
+    const socketPath = path.join(codexHome, "app-server-control", "app-server-control.sock");
+    if (yield* fileSystem.exists(socketPath).pipe(Effect.orElseSucceed(() => false))) return;
+    const managedCli = yield* codexManagedCliPath(codexHome, platform);
+    const exitCode = yield* spawner
+      .spawn(
+        ChildProcess.make(managedCli, ["app-server", "daemon", "start"], {
+          env: environment,
+          extendEnv: false,
+          shell: false,
+        }),
+      )
+      .pipe(
+        Effect.flatMap((child) => child.exitCode),
+        Effect.scoped,
+        Effect.timeout("30 seconds"),
+        Effect.map(Number),
+        Effect.orElseSucceed(() => -1),
+      );
+    yield* Effect.logInfo("codex.desktop-daemon.start", { exitCode });
+  },
+);
+
+interface CodexAppServerProtocolLogEvent {
+  readonly direction: "incoming" | "outgoing";
+  readonly stage: "raw" | "decoded" | "decode_failed";
+  readonly payload: unknown;
+}
+
+const REDACTED = "[REDACTED]";
+
+function redactLogValue(value: unknown, secrets: ReadonlyArray<string>, key?: string): unknown {
+  if (key && /http[_-]?headers$/iu.test(key)) return REDACTED;
+  if (typeof value === "string") {
+    let safeValue = value;
+    for (const secret of secrets) {
+      if (secret.length > 0) safeValue = safeValue.replaceAll(secret, REDACTED);
+    }
+    if (/^\s*[[{]/u.test(safeValue)) {
+      try {
+        return JSON.stringify(redactLogValue(JSON.parse(safeValue), secrets));
+      } catch {
+        return safeValue;
+      }
+    }
+    return safeValue;
+  }
+  if (Array.isArray(value)) return value.map((entry) => redactLogValue(entry, secrets));
+  if (typeof value !== "object" || value === null) return value;
+
+  return Object.fromEntries(
+    Object.entries(value).map(([entryKey, entryValue]) => [
+      entryKey,
+      redactLogValue(entryValue, secrets, entryKey),
+    ]),
+  );
+}
+
+export function redactCodexProtocolLogEvent<T>(value: T, secrets: ReadonlyArray<string> = []): T {
+  return redactLogValue(value, secrets) as T;
+}
+
+export function redactCodexSensitiveText(
+  text: string,
+  secrets: ReadonlyArray<string> = [],
+): string {
+  return secrets.reduce(
+    (safeText, secret) => (secret.length > 0 ? safeText.replaceAll(secret, REDACTED) : safeText),
+    text,
+  );
+}
+
+export function makeCodexAppServerProtocolLogger(secrets: ReadonlyArray<string> = []) {
+  return (event: CodexAppServerProtocolLogEvent) =>
+    Effect.logDebug("Codex App Server protocol event").pipe(
+      Effect.annotateLogs({ event: redactCodexProtocolLogEvent(event, secrets) }),
+    );
+}
+
+export function codexDesktopDaemonRepairMessage(problem: string): string {
+  return `Codex desktop app daemon ${problem}. Run the standalone managed Codex CLI's \`app-server daemon bootstrap\` command, then its \`app-server daemon version\` command, and confirm it reports status "running".`;
+}
+
+export function codexDesktopDaemonFailureProblem(cause: unknown): string {
+  const message = cause instanceof Error ? cause.message : String(cause);
+  if (/not.?signed.?in|unauthenticated|authentication required|login required/iu.test(message)) {
+    return "could not authenticate because the desktop app is not signed in";
+  }
+  if (/protocol|version|handshake|initialize/iu.test(message)) {
+    return "could not complete the proxy handshake or app-server protocol check";
+  }
+  if (/timed? ?out|timeout/iu.test(message)) {
+    return "timed out while connecting to the daemon";
+  }
+  if (/ENOENT|ECONNREFUSED|socket|connect/iu.test(message)) {
+    return "could not reach the daemon control socket";
+  }
+  if (/exit|terminated|closed/iu.test(message)) {
+    return "the app-server proxy exited unexpectedly";
+  }
+  return "could not complete the app-server proxy connection";
+}
+
+export function codexDesktopDaemonFailureMessage(cause: unknown): string {
+  return codexDesktopDaemonRepairMessage(codexDesktopDaemonFailureProblem(cause));
+}
+
 const CODEX_DESKTOP_DAEMON_WS_URL = "ws://localhost/";
+const CODEX_DESKTOP_DAEMON_KEEPALIVE_INTERVAL = "15 seconds";
 const CODEX_DESKTOP_DAEMON_HANDSHAKE_TIMEOUT_MS = 10_000;
 
 type DesktopDaemonChildProcess = Pick<
@@ -224,6 +389,31 @@ export const makeCodexDesktopDaemonStdio = Effect.fn("makeCodexDesktopDaemonStdi
   websocket.on("error", onError);
   websocket.on("close", onClose);
 
+  // The proxy stays silent when its daemon restarts and only fails on the next
+  // write, so a daemon restart would otherwise go unnoticed until the user's
+  // next turn is lost in the dead pipe. A ping makes that write; the proxy then
+  // exits and the session reports it. A missed pong tears the transport down.
+  let awaitingPong = false;
+  const onPong = () => {
+    awaitingPong = false;
+  };
+  websocket.on("pong", onPong);
+  yield* Effect.sync(() => {
+    if (websocket.readyState !== NodeSocket.NodeWS.WebSocket.OPEN) return;
+    if (awaitingPong) {
+      onError(new Error("Codex desktop daemon stopped answering keepalive pings"));
+      websocket.terminate();
+      return;
+    }
+    awaitingPong = true;
+    websocket.ping();
+  }).pipe(
+    Effect.delay(CODEX_DESKTOP_DAEMON_KEEPALIVE_INTERVAL),
+    Effect.repeat(Schedule.spaced(CODEX_DESKTOP_DAEMON_KEEPALIVE_INTERVAL)),
+    Effect.ignore,
+    Effect.forkScoped,
+  );
+
   const sendMessage = (message: string) =>
     Effect.callback<void, PlatformError.PlatformError>((resume) => {
       if (websocket.readyState !== NodeSocket.NodeWS.WebSocket.OPEN) {
@@ -288,6 +478,7 @@ export const makeCodexDesktopDaemonStdio = Effect.fn("makeCodexDesktopDaemonStdi
       websocket.off("message", onMessage);
       websocket.off("error", onError);
       websocket.off("close", onClose);
+      websocket.off("pong", onPong);
       shutdownIncoming();
       if (websocket.readyState !== NodeSocket.NodeWS.WebSocket.CLOSED) websocket.terminate();
       bridge?.destroy();
@@ -333,15 +524,31 @@ export function macDesktopCodexBinaryCandidates(homeDirectory: string): Readonly
  */
 export const resolveCodexBinaryPath = Effect.fn("resolveCodexBinaryPath")(function* (
   settings: Pick<CodexSettings, "binaryPath" | "useDesktopAppDaemon">,
+  environment: NodeJS.ProcessEnv = process.env,
 ): Effect.fn.Return<string, never, FileSystem.FileSystem | Path.Path> {
   const platform = yield* HostProcessPlatform;
-  if (!settings.useDesktopAppDaemon || settings.binaryPath !== "codex" || platform !== "darwin") {
+  if (!settings.useDesktopAppDaemon || settings.binaryPath !== "codex") {
     return settings.binaryPath;
   }
 
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  for (const candidate of macDesktopCodexBinaryCandidates(NodeOS.homedir())) {
+  let candidates: ReadonlyArray<string>;
+  if (platform === "darwin") {
+    candidates = macDesktopCodexBinaryCandidates(NodeOS.homedir());
+  } else if (platform === "win32") {
+    const configuredCodexHome = Object.entries(environment).find(
+      ([name]) => name.toUpperCase() === "CODEX_HOME",
+    )?.[1];
+    const codexHome = configuredCodexHome
+      ? expandHomePathWith(configuredCodexHome, path)
+      : path.join(NodeOS.homedir(), ".codex");
+    candidates = [yield* codexManagedCliPath(codexHome, platform)];
+  } else {
+    return settings.binaryPath;
+  }
+
+  for (const candidate of candidates) {
     const exists = yield* fileSystem
       .exists(path.normalize(candidate))
       .pipe(Effect.orElseSucceed(() => false));

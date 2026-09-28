@@ -204,7 +204,13 @@ import {
   resolveComposerSubagentBackend,
   resolveSelectableProvider,
 } from "../providerModels";
-import { NO_PROVIDER_MODEL_SELECTION } from "../providerInstances";
+import {
+  NO_PROVIDER_MODEL_SELECTION,
+  applyProviderInstanceSettings,
+  codexThreadRuntimeLabel,
+  deriveProviderInstanceEntries,
+  isDesktopBackedProviderInstanceReady,
+} from "../providerInstances";
 import {
   useClientSettings,
   useClientSettingsHydrated,
@@ -309,7 +315,7 @@ import {
 } from "./heldThreadTimeline";
 import { resolveTimelineIsAtEnd } from "./chat/MessagesTimeline.logic";
 import { ChatHeader } from "./chat/ChatHeader";
-import { serializeTaskTranscript } from "../chatTranscript";
+import { prepareDesktopDraftPrompt, serializeTaskTranscript } from "../chatTranscript";
 import { PanelLayoutControls, RightPanelMaximizeControl } from "./chat/PanelLayoutControls";
 import { type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
 import { NoActiveThreadState } from "./NoActiveThreadState";
@@ -2204,6 +2210,81 @@ function ChatViewContent(props: ChatViewProps) {
     ? (activeEnvironment?.serverConfig ?? null)
     : (primaryEnvironment?.serverConfig ?? null);
   const providerStatuses = serverConfig?.providers ?? EMPTY_PROVIDERS;
+  const providerEntries = useMemo(
+    () =>
+      serverConfig
+        ? applyProviderInstanceSettings(
+            deriveProviderInstanceEntries(providerStatuses),
+            serverConfig.settings,
+          )
+        : [],
+    [providerStatuses, serverConfig],
+  );
+  const threadProviderEntry =
+    providerEntries.find(
+      (entry) =>
+        entry.instanceId ===
+        (activeThread?.session?.providerInstanceId ?? activeThread?.modelSelection.instanceId),
+    ) ?? null;
+  const providerRuntimeLabel = isServerThread ? codexThreadRuntimeLabel(threadProviderEntry) : null;
+  const desktopEntry = providerEntries.find(
+    (entry) => entry.driverKind === "codex" && isDesktopBackedProviderInstanceReady(entry),
+  );
+  const startDesktopDraft = useCallback(() => {
+    if (!activeThread || !activeProjectRef || !desktopEntry || !isServerThread) return;
+    void (async () => {
+      try {
+        const model = resolveAppModelSelectionForInstance(
+          desktopEntry.instanceId,
+          settings,
+          providerStatuses,
+          null,
+        );
+        if (!model) throw new Error("No Codex desktop model is available.");
+        const prompt = prepareDesktopDraftPrompt(activeThread.title, activeTaskTranscript);
+        if (prompt === null) {
+          throw new Error(
+            "The loaded transcript exceeds the message limit. Copy the chat and choose the context to carry over manually.",
+          );
+        }
+        const opened = await handleNewThread(activeProjectRef, {
+          branch: activeThread.branch,
+          worktreePath: activeThread.worktreePath,
+          envMode: activeThread.worktreePath ? "worktree" : "local",
+          startFromOrigin: false,
+        });
+        if (!opened) return;
+        const drafts = useComposerDraftStore.getState();
+        drafts.setModelSelection(
+          opened.draftId,
+          { instanceId: desktopEntry.instanceId, model },
+          { replaceOptions: true },
+        );
+        drafts.setPrompt(opened.draftId, prompt);
+        toastManager.add({
+          type: "success",
+          title: "Desktop draft ready",
+          description:
+            "Review the loaded transcript before sending. The original chat remains unchanged.",
+        });
+      } catch (error) {
+        toastManager.add({
+          type: "error",
+          title: "Could not prepare desktop draft",
+          description: error instanceof Error ? error.message : "An error occurred.",
+        });
+      }
+    })();
+  }, [
+    activeProjectRef,
+    activeTaskTranscript,
+    activeThread,
+    desktopEntry,
+    handleNewThread,
+    isServerThread,
+    providerStatuses,
+    settings,
+  ]);
   const lockedProvider = deriveLockedProvider({
     thread: activeThread,
     selectedProvider: selectedProviderByThreadId,
@@ -7181,6 +7262,15 @@ function ChatViewContent(props: ChatViewProps) {
             activeThreadId={activeThread.id}
             {...(routeKind === "draft" && draftId ? { draftId } : {})}
             activeThreadTitle={activeThread.title}
+            providerRuntimeLabel={providerRuntimeLabel}
+            onStartDesktopDraft={
+              providerRuntimeLabel === "Codex CLI" &&
+              desktopEntry &&
+              activeThread.messages.length > 0 &&
+              activeThread.session?.status !== "running"
+                ? startDesktopDraft
+                : undefined
+            }
             isServerThread={isServerThread}
             changeRequest={activeThreadChangeRequest}
             activeProjectName={activeProject?.title}

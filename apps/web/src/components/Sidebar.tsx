@@ -177,6 +177,7 @@ import { ProjectFavicon } from "./ProjectFavicon";
 import { ProviderInstanceIcon } from "./chat/ProviderInstanceIcon";
 import { getTriggerDisplayModelLabel } from "./chat/providerIconUtils";
 import {
+  codexThreadRuntimeLabel,
   deriveProviderEntriesByEnvironment,
   shouldShowInstanceBadge,
   type ProviderInstanceEntry,
@@ -359,6 +360,9 @@ function SidebarThreadTooltip({
                   : modelLabel}
               </div>
             </div>
+          ) : null}
+          {codexThreadRuntimeLabel(providerEntry) ? (
+            <div className="pl-5 text-foreground/75">{codexThreadRuntimeLabel(providerEntry)}</div>
           ) : null}
           {terminalStatus ? (
             <div className="flex min-w-0 items-center gap-2">
@@ -1565,6 +1569,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               )}
               {terminalStatusIcon}
               {prBadge}
+              {codexThreadRuntimeLabel(providerEntry) ? (
+                <span
+                  className="shrink-0 rounded border border-sidebar-border px-1 text-[10px] leading-4"
+                  aria-label={`Chat runtime: ${codexThreadRuntimeLabel(providerEntry)}`}
+                >
+                  {providerEntry?.useDesktopAppDaemon ? "Desktop" : "CLI"}
+                </span>
+              ) : null}
               {diff ? (
                 <span className="shrink-0 font-mono">
                   <span className="text-emerald-600 dark:text-emerald-400">+{diff.insertions}</span>{" "}

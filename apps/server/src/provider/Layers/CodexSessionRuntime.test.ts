@@ -1,13 +1,16 @@
 import * as NodeAssert from "node:assert/strict";
 
 import { it } from "@effect/vitest";
+import { NodeServices } from "@effect/platform-node";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
-import { describe } from "vite-plus/test";
 import { DEFAULT_MODEL, ThreadId } from "@t3tools/contracts";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
+import { describe } from "vite-plus/test";
 
 import {
   buildCodexDeveloperInstructions,
@@ -22,14 +25,20 @@ import {
   buildTurnStartParams,
   classifyCodexStderrLine,
   codexSubagentBackendAppServerArgs,
+  buildCodexDaemonThreadConfig,
   assertCodexSubagentIsolationConfig,
+  assertCodexSubagentIsolationBeforeThreadOpen,
+  formatCodexThreadMcpInventory,
+  formatCodexDesktopPluginSkills,
   hasConfiguredMcpServer,
+  readCodexThreadMcpInventory,
   readCodexBrowserAvailability,
   isComputerUseMcpApproval,
   isMcpToolApproval,
   makeMemoryConsolidationNotificationFilter,
   mcpApprovalRequestKind,
   openCodexThread,
+  initializeCodexSessionClient,
   parseCodexDaemonThreadConfig,
 } from "./CodexSessionRuntime.ts";
 import { isWorkerLifecycleToolName } from "../../worker/WorkerThreadBoundary.ts";
@@ -706,12 +715,14 @@ describe("readCodexBrowserAvailability", () => {
     Effect.gen(function* () {
       const calls: Array<EffectCodexSchema.V2ListMcpServerStatusParams> = [];
       const client = {
-        request: (
-          _method: "mcpServerStatus/list",
-          params: EffectCodexSchema.V2ListMcpServerStatusParams,
-        ) => {
-          calls.push(params);
-          return Effect.succeed({ data: [], nextCursor: calls.length === 1 ? "page-2" : null });
+        raw: {
+          request: (
+            _method: "mcpServerStatus/list",
+            params: EffectCodexSchema.V2ListMcpServerStatusParams,
+          ) => {
+            calls.push(params);
+            return Effect.succeed({ data: [], nextCursor: calls.length === 1 ? "page-2" : null });
+          },
         },
       };
       NodeAssert.deepStrictEqual(yield* readCodexBrowserAvailability(client, "thread-browser"), {
@@ -744,6 +755,54 @@ describe("Codex sub-agent tool catalog routing", () => {
           config as unknown as EffectCodexSchema.V2ConfigReadResponse["config"],
         ).pipe(Effect.result);
         NodeAssert.equal(result._tag, "Failure");
+        NodeAssert.match(result.failure.message, /did not apply.*isolation/i);
+      }
+    }),
+  );
+
+  it.effect("attests desktop daemon isolation from thread config, not daemon-wide config", () =>
+    Effect.gen(function* () {
+      const daemonThreadConfig = yield* buildCodexDaemonThreadConfig(
+        codexSubagentBackendAppServerArgs({ enableT3Workers: true }),
+        {
+          endpoint: "http://127.0.0.1:3774/mcp",
+          authorizationHeader: "Bearer fake-session-token",
+        },
+      );
+      const configReadCalls: string[] = [];
+      const client = {
+        request: (method: "config/read") => {
+          configReadCalls.push(method);
+          return Effect.succeed({
+            config: {
+              agents: { enabled: true },
+              features: { multi_agent: true, multi_agent_v2: true },
+            },
+          });
+        },
+      } as unknown as Parameters<typeof assertCodexSubagentIsolationBeforeThreadOpen>[0];
+
+      yield* assertCodexSubagentIsolationBeforeThreadOpen(client, "A:/project", daemonThreadConfig);
+
+      NodeAssert.deepStrictEqual(
+        [
+          daemonThreadConfig["agents.enabled"],
+          daemonThreadConfig["features.multi_agent"],
+          daemonThreadConfig["features.multi_agent_v2"],
+        ],
+        [false, false, false],
+      );
+      NodeAssert.deepStrictEqual(configReadCalls, []);
+
+      const misconfigured = {
+        ...daemonThreadConfig,
+        "features.multi_agent_v2": true,
+      };
+      const result = yield* assertCodexSubagentIsolationConfig(misconfigured, "thread").pipe(
+        Effect.result,
+      );
+      NodeAssert.equal(result._tag, "Failure");
+      if (result._tag === "Failure") {
         NodeAssert.match(result.failure.message, /did not apply.*isolation/i);
       }
     }),
@@ -1021,7 +1080,131 @@ describe("codexSessionAppServerArgs", () => {
   });
 });
 
+describe("Codex desktop daemon command", () => {
+  it("starts the proxy instead of a stdio app-server process", () => {
+    NodeAssert.deepStrictEqual(
+      buildCodexAppServerCommandArgs({
+        appServerTransport: "desktop-daemon",
+        launchArgs: "--strict-config",
+        appServerArgs: ["-c", "model=gpt-test"],
+        enableT3Workers: true,
+      }),
+      ["app-server", "proxy"],
+    );
+  });
+});
+
+describe("Codex desktop plugin skill inventory", () => {
+  it("reports only skills the daemon loaded from accepted bundled roots", () => {
+    const response = {
+      data: [
+        {
+          cwd: "A:/project",
+          skills: [
+            {
+              name: "control-chrome",
+              enabled: true,
+              path: "A:\\bundle\\plugins\\chrome\\skills\\control-chrome\\SKILL.md",
+            },
+            {
+              name: "control-in-app-browser",
+              enabled: true,
+              path: "A:/bundle/plugins/browser/skills/control-in-app-browser/SKILL.md",
+            },
+            {
+              name: "computer-use",
+              enabled: true,
+              path: "A:/bundle/plugins/computer-use/skills/computer-use/SKILL.md",
+            },
+            {
+              name: "disabled",
+              enabled: false,
+              path: "A:/bundle/plugins/chrome/skills/disabled/SKILL.md",
+            },
+            { name: "unrelated", enabled: true, path: "A:/user/skills/unrelated/SKILL.md" },
+          ],
+        },
+      ],
+    } as unknown as EffectCodexSchema.V2SkillsListResponse;
+    NodeAssert.equal(
+      formatCodexDesktopPluginSkills(response, [
+        "A:/bundle/plugins/chrome/skills",
+        "A:/bundle/plugins/browser/skills",
+        "A:/bundle/plugins/computer-use/skills",
+      ]),
+      "Bundled desktop plugin skills: chrome:control-chrome, browser:control-in-app-browser, computer-use:computer-use.",
+    );
+    NodeAssert.equal(
+      formatCodexDesktopPluginSkills(response, ["A:/bundle/plugins/missing/skills"]),
+      "Bundled desktop plugin skills: none reported by the daemon.",
+    );
+  });
+});
+
 describe("openCodexThread", () => {
+  it.effect("attaches desktop plugin roots before thread/start and skips them for stdio", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      for (const desktopDaemon of [true, false]) {
+        const calls: string[] = [];
+        const client = {
+          request: (method: string) => {
+            calls.push(method);
+            return Effect.succeed(
+              method === "thread/start" ? makeThreadOpenResponse("opened-thread") : {},
+            );
+          },
+          notify: (method: string) => {
+            calls.push(method);
+            return Effect.void;
+          },
+          raw: {
+            request: (method: string, params: { extraRoots: ReadonlyArray<string> }) => {
+              NodeAssert.deepStrictEqual(params.extraRoots, [
+                path.join("A:/bundle", "plugins", "chrome", "skills"),
+              ]);
+              calls.push(method);
+              return Effect.succeed({});
+            },
+          },
+        };
+        yield* Effect.gen(function* () {
+          yield* initializeCodexSessionClient(
+            client as unknown as Parameters<typeof initializeCodexSessionClient>[0],
+            desktopDaemon,
+            { CODEX_HOME: "A:/fake-codex-home" },
+          );
+          yield* openCodexThread({
+            client: client as unknown as Parameters<typeof openCodexThread>[0]["client"],
+            threadId: ThreadId.make("thread-start"),
+            runtimeMode: "full-access",
+            cwd: "A:/project",
+            requestedModel: undefined,
+            serviceTier: undefined,
+            resumeThreadId: undefined,
+          });
+        }).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            readFileString: () =>
+              Effect.succeed(
+                '[marketplaces.openai-bundled]\nsource_type = "local"\nsource = \'A:/bundle\'\n[plugins."chrome@openai-bundled"]\nenabled = true',
+              ),
+            stat: () =>
+              Effect.succeed({ type: "Directory" }) as unknown as ReturnType<typeof fs.stat>,
+          }),
+        );
+        NodeAssert.deepStrictEqual(
+          calls,
+          desktopDaemon
+            ? ["initialize", "initialized", "skills/extraRoots/set", "thread/start"]
+            : ["initialize", "initialized", "thread/start"],
+        );
+      }
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("propagates daemon thread config through start, resume, and fork", () =>
     Effect.gen(function* () {
       const calls: Array<{
@@ -1032,7 +1215,11 @@ describe("openCodexThread", () => {
         "agents.enabled": false,
         "features.multi_agent": false,
         "features.multi_agent_v2": false,
+        "mcp_servers.t3-code.enabled": true,
         "mcp_servers.t3-code.url": "http://127.0.0.1:3774/mcp",
+        "mcp_servers.t3-code.http_headers": {
+          Authorization: "Bearer fake-session-token",
+        },
       } as const;
       const client = {
         request: <M extends "thread/start" | "thread/resume" | "thread/fork">(
@@ -1127,6 +1314,77 @@ describe("openCodexThread", () => {
         NodeAssert.ok(isCodexAppServerRequestError(t3Error));
         NodeAssert.match(t3Error.errorMessage, /T3 MCP bearer_token_env_var/);
       }),
+  );
+
+  it.effect("adds a per-session T3 MCP credential to daemon thread config", () =>
+    Effect.gen(function* () {
+      const config = yield* buildCodexDaemonThreadConfig([], {
+        endpoint: "http://127.0.0.1:3774/mcp",
+        authorizationHeader: "Bearer fake-session-token",
+      });
+      NodeAssert.deepStrictEqual(config, {
+        "mcp_servers.t3-code.enabled": true,
+        "mcp_servers.t3-code.url": "http://127.0.0.1:3774/mcp",
+        "mcp_servers.t3-code.http_headers": {
+          Authorization: "Bearer fake-session-token",
+        },
+      });
+
+      const missingCredential = yield* buildCodexDaemonThreadConfig([], undefined).pipe(
+        Effect.flip,
+      );
+      NodeAssert.match(missingCredential.message, /no usable authorization credential/);
+    }),
+  );
+
+  it.effect("bounds the daemon MCP inventory while following pagination", () =>
+    Effect.gen(function* () {
+      const makeServer = (name: string) => ({
+        name,
+        authStatus: "bearerToken" as const,
+        tools: { "private-tool-name": {} },
+      });
+      const firstPage = Array.from({ length: 25 }, (_, index) => makeServer(`server-${index}`));
+      const secondPage = Array.from({ length: 25 }, (_, index) => makeServer(`second-${index}`));
+      const thirdPage = [makeServer("cua_repl"), makeServer("node_repl")];
+      const pages = [
+        { data: firstPage, nextCursor: "page-2" },
+        { data: secondPage, nextCursor: "page-3" },
+        { data: thirdPage, nextCursor: undefined },
+      ] as unknown as ReadonlyArray<EffectCodexSchema.V2ListMcpServerStatusResponse>;
+      const calls: Array<EffectCodexSchema.V2ListMcpServerStatusParams> = [];
+      const client = {
+        raw: {
+          request: (
+            _method: "mcpServerStatus/list",
+            params: EffectCodexSchema.V2ListMcpServerStatusParams,
+          ) => {
+            calls.push(params);
+            return Effect.succeed(pages[calls.length - 1]!);
+          },
+        },
+      };
+
+      const inventory = yield* readCodexThreadMcpInventory(
+        client,
+        "provider-thread",
+        new Map([["server-0", "ready"]]),
+      );
+      const summary = formatCodexThreadMcpInventory(inventory);
+
+      NodeAssert.equal(calls.length, 3);
+      NodeAssert.equal(calls[0]?.cursor, undefined);
+      NodeAssert.equal(calls[1]?.cursor, "page-2");
+      NodeAssert.equal(calls[2]?.cursor, "page-3");
+      NodeAssert.equal(inventory.servers.length, 40);
+      NodeAssert.equal(inventory.omittedServers, true);
+      NodeAssert.equal(inventory.hasCuaRepl, true);
+      NodeAssert.equal(inventory.hasNodeRepl, true);
+      NodeAssert.equal(inventory.servers[0]?.startupStatus, "ready");
+      NodeAssert.match(summary, /^MCP servers attached to this thread:/);
+      NodeAssert.match(summary, /cua_repl present; node_repl present/);
+      NodeAssert.doesNotMatch(summary, /private-tool-name|connector account/i);
+    }),
   );
 
   it.effect("preserves a missing thread's identity instead of starting a replacement", () =>

@@ -90,6 +90,26 @@ describe("ProviderStatusBanner", () => {
 
     expect(markup).toContain('aria-label="Dismiss Codex provider error"');
   });
+
+  it("keeps a desktop daemon error visible for the selected instance", () => {
+    const message = "Codex desktop daemon is not running on this Mac.";
+    const status = {
+      ...warningProvider(),
+      instanceId: ProviderInstanceId.make("codex_elora"),
+      status: "error" as const,
+      auth: { status: "unknown" as const },
+      message,
+    };
+    const markup = renderToStaticMarkup(
+      <ProviderStatusBanner status={status} onDismiss={() => {}} />,
+    );
+
+    expect(shouldShowProviderStatusBanner(status, null)).toBe(true);
+    expect(getProviderStatusMessage(status)).toBe(message);
+    expect(getProviderStatusBannerKey(status)).toContain("codex_elora");
+    expect(markup).toContain(message);
+    expect(markup).toContain('role="alert"');
+  });
 });
 
 describe("getProviderStatusMessage", () => {

@@ -4,6 +4,40 @@ For one account, use the default Codex provider with your normal Codex login.
 [Provider setup](./install.md#providers) covers installation, Settings > Providers,
 and custom binaries or environment variables.
 
+## Use the Codex desktop app
+
+In **Settings > Providers**, turn on **Use Codex desktop app** for a Codex
+instance to run its threads in the Codex desktop installation on the machine
+hosting that environment. The host app supplies its sign-in, plugins, connectors,
+browser extension, and approvals. On macOS, install the host bridge setup. The
+server can run on macOS or Windows. The shadow-home setting is hidden while
+this option is on because the desktop installation owns the Codex home.
+
+On Windows, sign in to Codex Desktop and install the standalone Codex CLI for the
+same Windows account. In a non-elevated PowerShell window, run these commands
+once to install and start the local app-server daemon, then confirm its status:
+
+```powershell
+codex app-server daemon bootstrap
+codex app-server daemon version
+```
+
+If you use a custom `CODEX_HOME`, use it for both Codex Desktop and the T3 server.
+Keep the Windows path short; the daemon's local socket address has a 108-byte
+limit. With **Binary path** left as `codex`, T3 uses the standalone CLI from that
+Codex home when it is present. The provider model picker uses the desktop daemon's
+model catalog and reasoning options, and T3 sends the selected model and reasoning
+level with the turn request.
+
+The setting is saved with the provider instance on its environment. You can
+change it from a remote client; it does not switch the host or account used by
+another environment. If the host daemon is unavailable, the instance shows its
+connection error in provider settings, the model picker, and the thread. T3 does
+not switch that instance to managed Chrome or silently choose another provider.
+When a desktop-backed thread opens, its work log lists the MCP servers and
+bundled plugin skills the daemon reports for that thread. If either inventory
+cannot be read, the log says so instead of treating it as an empty list.
+
 ## Open native Codex chats
 
 Choose **Codex chats** in the sidebar to view your existing native Codex sessions.
@@ -28,6 +62,22 @@ continue to apply to these sessions. T3 can show that a session needs
 attention, but it cannot approve a Codex request that the connected host does
 not support. Use the native Codex session when it asks for an approval or other
 interaction.
+
+Existing chats show **Codex CLI** or **Codex desktop** in the chat header and
+sidebar. On mobile, the same label appears above the chat and beside its list
+entry. The label describes the chat's configured provider instance, not the app
+you use to view it. If you change that instance's runtime setting later, the
+label follows the setting; it is not a historical record of earlier turns.
+
+In the web or desktop client, **Start desktop draft** on a Codex CLI chat opens a separate chat draft in
+the same project and checkout when a desktop-backed Codex instance is ready.
+It copies the currently loaded transcript into the unsent message. Earlier
+turns may be omitted; load them first or add the missing context yourself.
+Review and edit the message before sending. A transcript above the message
+limit does not create a draft. This is text context, not a native
+continuation: the desktop app gets a new provider thread, while the original
+chat and its history stay unchanged. Files, attachments, approvals, and live
+tool state do not transfer as active state.
 
 ## Use multiple accounts
 

@@ -9,6 +9,7 @@ import { getProviderOptionDescriptors } from "@t3tools/shared/model";
 import { ComputerToolkit } from "../../mcp/toolkits/computer/tools.ts";
 import { PreviewToolkit } from "../../mcp/toolkits/preview/tools.ts";
 import { normalizeCodexComputerControlMode } from "../CodexComputerControl.ts";
+import * as CodexErrors from "effect-codex-app-server/errors";
 
 import {
   applyPreferredCodexDefaultModel,
@@ -19,6 +20,10 @@ import {
 
 const decodeModelListResponse = Schema.decodeUnknownSync(CodexSchema.V2ModelListResponse);
 const defaultCodexSettings = Schema.decodeSync(CodexSettings)({});
+const desktopDaemonSettings = Schema.decodeSync(CodexSettings)({
+  enabled: true,
+  useDesktopAppDaemon: true,
+});
 
 const CODEX_0_148_MODEL_LIST_SANITIZED = {
   data: [
@@ -372,6 +377,25 @@ it("does not offer host-specific routes based only on JavaScript or plugin tool 
   );
 });
 
+it("omits the Codex Browser option for desktop-backed instances", () => {
+  const model = decodeModelListResponse(CODEX_0_148_MODEL_LIST_SANITIZED).data[0]!;
+  const capabilities = mapCodexModelCapabilities(
+    model,
+    [{ name: "t3-code", tools: { ...ComputerToolkit.tools, ...PreviewToolkit.tools } }],
+    true,
+  );
+
+  assert.equal(
+    capabilities.optionDescriptors?.some((option) => option.id === "computerControl"),
+    false,
+  );
+  assert.equal(
+    capabilities.optionDescriptors?.some((option) => option.id === "serviceTier"),
+    true,
+  );
+  assert.equal(capabilities.subagentBackends?.v2.supported, true);
+});
+
 it("retains saved desktop compatibility without offering it as a new provider", () => {
   const model = decodeModelListResponse(CODEX_0_148_MODEL_LIST_SANITIZED).data[0]!;
   const caps = mapCodexModelCapabilities(model, [
@@ -406,6 +430,44 @@ it.effect("passes detected browser readiness through the provider catalog probe"
     );
     assert.deepStrictEqual(observedTools, tools);
   }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("reports a missing desktop daemon socket as an actionable provider error", () =>
+  Effect.gen(function* () {
+    let observedTransport: string | undefined;
+    const status = yield* checkCodexProviderStatus(desktopDaemonSettings, (input) => {
+      observedTransport = input.appServerTransport;
+      return Effect.fail(
+        new Error(
+          "ENOENT: app-server-control.sock not found",
+        ) as unknown as CodexErrors.CodexAppServerError,
+      );
+    }).pipe(Effect.provide(NodeServices.layer));
+
+    assert.equal(observedTransport, "desktop-daemon");
+    assert.equal(status.status, "error");
+    assert.match(status.message ?? "", /daemon control socket/);
+    assert.match(status.message ?? "", /app-server daemon bootstrap/);
+    assert.match(status.message ?? "", /app-server daemon version/);
+  }),
+);
+
+it.effect("keeps a signed-out desktop daemon instance in error state", () =>
+  Effect.gen(function* () {
+    const status = yield* checkCodexProviderStatus(desktopDaemonSettings, () =>
+      Effect.succeed({
+        account: { account: null, requiresOpenaiAuth: true },
+        version: undefined,
+        models: [],
+        skills: [],
+      }),
+    ).pipe(Effect.provide(NodeServices.layer));
+
+    assert.equal(status.status, "error");
+    assert.equal(status.auth.status, "unauthenticated");
+    assert.match(status.message ?? "", /desktop app is not signed in/);
+    assert.match(status.message ?? "", /daemon bootstrap/);
+  }),
 );
 
 it("prefers sol over terra when both are available", () => {

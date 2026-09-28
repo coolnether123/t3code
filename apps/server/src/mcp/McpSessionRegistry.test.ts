@@ -7,6 +7,7 @@ import {
   ThreadId,
   TurnId,
   type ModelSelection,
+  type ServerSettings as T3ServerSettings,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -55,6 +56,8 @@ const makeRegistry = (
   settings: {
     readonly enableAgentBrowserAccess?: boolean;
     readonly enableT3Workers?: boolean;
+    readonly providerInstances?: T3ServerSettings["providerInstances"];
+    readonly providers?: T3ServerSettings["providers"];
   } = {},
 ) =>
   McpSessionRegistry.__testing
@@ -198,6 +201,54 @@ it("derives computer capability from the canonical Codex mode", () => {
     ).has("computer"),
   ).toBe(true);
 });
+
+it("does not grant managed Chrome to a desktop-backed Codex instance with a stale selection", () => {
+  const threadId = ThreadId.make("thread-desktop-computer-capability");
+  const settings = { enableAgentBrowserAccess: true, enableT3Workers: true };
+
+  for (const selection of [chromeSelection, desktopSelection]) {
+    const capabilities = McpSessionRegistry.resolveMcpCapabilities(
+      settings,
+      threadId,
+      selection,
+      codexDriver,
+      codexInstanceId,
+      true,
+    );
+
+    expect(capabilities.has("computer")).toBe(false);
+    expect(capabilities.has("preview")).toBe(true);
+    expect(capabilities.has("workers")).toBe(true);
+  }
+});
+
+it.effect("resolves desktop-backed capability from the environment's instance settings", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000, fakeHttpServer, {
+      enableAgentBrowserAccess: true,
+      enableT3Workers: true,
+      providerInstances: {
+        [codexInstanceId]: {
+          driver: codexDriver,
+          config: { useDesktopAppDaemon: true },
+        },
+      } as T3ServerSettings["providerInstances"],
+    });
+    const issued = yield* registry.issue({
+      threadId: ThreadId.make("thread-desktop-settings-capability"),
+      providerInstanceId: codexInstanceId,
+      providerDriverKind: codexDriver,
+      modelSelection: chromeSelection,
+      runtimeMode: "full-access",
+    });
+    const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    const scope = yield* registry.resolve(token);
+
+    expect(scope?.capabilities.has("computer")).toBe(false);
+    expect(scope?.capabilities.has("preview")).toBe(true);
+    expect(scope?.capabilities.has("workers")).toBe(true);
+  }),
+);
 
 it("grants Worker computer control without nested Worker authority", () => {
   const worker = ThreadId.make(`${WORKER_PROVIDER_THREAD_PREFIX}computer-control`);

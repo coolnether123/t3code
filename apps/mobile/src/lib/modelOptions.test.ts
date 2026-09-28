@@ -4,6 +4,9 @@ import { ProviderInstanceId, type ModelSelection, type ServerConfig } from "@t3t
 
 import {
   buildModelOptions,
+  codexThreadRuntimeLabel,
+  getDesktopBackedProviderStatusMessage,
+  getModelSelectionUnavailableMessage,
   groupByProvider,
   isModelSelectionUnavailable,
   resolveDefaultableModelSelection,
@@ -13,6 +16,119 @@ import {
 } from "./modelOptions";
 
 describe("mobile model options", () => {
+  it("distinguishes legacy and desktop Codex thread instances", () => {
+    const config = {
+      providers: [
+        { instanceId: "codex", driver: "codex" },
+        { instanceId: "codex_desktop", driver: "codex" },
+        { instanceId: "claudeAgent", driver: "claudeAgent" },
+      ],
+      settings: {
+        providerInstances: {
+          codex_desktop: { driver: "codex", config: { useDesktopAppDaemon: true } },
+        },
+        providers: { codex: {} },
+      },
+    } as unknown as ServerConfig;
+    expect(codexThreadRuntimeLabel(config, "codex")).toBe("Codex CLI");
+    expect(codexThreadRuntimeLabel(config, "codex_desktop")).toBe("Codex desktop");
+    expect(codexThreadRuntimeLabel(config, "claudeAgent")).toBeNull();
+    expect(codexThreadRuntimeLabel(config, "missing")).toBeNull();
+  });
+  it("shows an unavailable desktop Codex instance and preserves its environment message", () => {
+    const selection = {
+      instanceId: ProviderInstanceId.make("codex_personal"),
+      model: "gpt-5.6-sol",
+      options: [{ id: "computerControl", value: "chrome" }],
+    };
+    const message = "Codex desktop daemon is not running on this Mac.";
+    const config = {
+      settings: {
+        providerInstances: {
+          codex_personal: {
+            driver: "codex",
+            config: { useDesktopAppDaemon: true },
+          },
+        },
+      },
+      providers: [
+        {
+          instanceId: "codex_personal",
+          driver: "codex",
+          displayName: "Codex Personal",
+          enabled: true,
+          installed: true,
+          status: "error",
+          message,
+          auth: { status: "unauthenticated" },
+          models: [],
+        },
+      ],
+    } as unknown as ServerConfig;
+
+    const options = buildModelOptions(config, selection);
+    expect(options[0]).toMatchObject({
+      isUnavailable: true,
+      providerStatusMessage: message,
+    });
+    expect(isModelSelectionUnavailable(config, selection)).toBe(true);
+    expect(resolveSelectableModelSelection(config, selection)).toEqual(selection);
+    expect(resolveDefaultableModelSelection(config, selection)).toEqual(selection);
+    expect(getModelSelectionUnavailableMessage(config, selection)).toBe(message);
+    expect(groupByProvider(options, config)).toMatchObject([
+      { providerKey: "codex_personal", statusMessage: message },
+    ]);
+    expect(getDesktopBackedProviderStatusMessage(config, "codex_personal")).toBe(message);
+  });
+
+  it("drops stale Browser selections when the desktop model catalog has no Browser option", () => {
+    const config = {
+      settings: {
+        providerInstances: {
+          codex_personal: {
+            driver: "codex",
+            config: { useDesktopAppDaemon: true },
+          },
+        },
+      },
+      providers: [
+        {
+          instanceId: "codex_personal",
+          driver: "codex",
+          enabled: true,
+          installed: true,
+          status: "ready",
+          auth: { status: "authenticated" },
+          models: [
+            {
+              slug: "gpt-test",
+              name: "GPT Test",
+              isCustom: false,
+              capabilities: {
+                optionDescriptors: [
+                  {
+                    id: "serviceTier",
+                    label: "Service Tier",
+                    type: "select",
+                    options: [{ id: "default", label: "Standard", isDefault: true }],
+                    currentValue: "default",
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    } as unknown as ServerConfig;
+    const selection = {
+      instanceId: ProviderInstanceId.make("codex_personal"),
+      model: "gpt-test",
+      options: [{ id: "computerControl", value: "chrome" }],
+    };
+
+    expect(buildModelOptions(config, selection)[0]?.selection.options).toBeUndefined();
+  });
+
   it("groups models by provider and flags legacy entries", () => {
     const config = {
       providers: [

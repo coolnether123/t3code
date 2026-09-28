@@ -6,6 +6,7 @@ import * as NodePath from "node:path";
 import {
   ApprovalRequestId,
   CodexSettings,
+  EnvironmentId,
   EventId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -23,6 +24,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, vi } from "@effect/vitest";
 
 import * as Context from "effect/Context";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -36,6 +38,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as CodexErrors from "effect-codex-app-server/errors";
 
 import { ServerConfig } from "../../config.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { WORKER_PROVIDER_THREAD_PREFIX } from "../../worker/WorkerThreadBoundary.ts";
 import { ProviderAdapterValidationError } from "../Errors.ts";
@@ -43,12 +46,13 @@ import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import {
   buildCodexAppServerCommandArgs,
+  type CodexSessionRuntimeError,
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeSendTurnInput,
   type CodexSessionRuntimeShape,
   type CodexThreadSnapshot,
 } from "./CodexSessionRuntime.ts";
-import { makeCodexAdapter } from "./CodexAdapter.ts";
+import { makeCodexAdapter, type CodexAdapterLiveOptions } from "./CodexAdapter.ts";
 import { runtimeEventToActivities } from "../../orchestration/Layers/ProviderRuntimeIngestion.ts";
 import { foldSubagentActivities } from "../../../../../packages/client-runtime/src/state/subagentRuntime.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
@@ -66,6 +70,7 @@ const asItemId = (value: string): ProviderItemId => ProviderItemId.make(value);
 class FakeCodexRuntime implements CodexSessionRuntimeShape {
   private readonly eventQueue = Effect.runSync(Queue.unbounded<ProviderEvent>());
   private readonly now = "2026-01-01T00:00:00.000Z";
+  private startupError: CodexSessionRuntimeError | undefined;
 
   public readonly startImpl = vi.fn(() =>
     Promise.resolve({
@@ -127,6 +132,10 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   );
 
   public readonly closeImpl = vi.fn(() => Promise.resolve(undefined));
+  public readonly checkConnectionImpl = vi.fn<() => Effect.Effect<void, Cause.TimeoutError>>(
+    () => Effect.void,
+  );
+  readonly checkConnection = Effect.suspend(() => this.checkConnectionImpl());
 
   readonly options: CodexSessionRuntimeOptions;
 
@@ -135,7 +144,12 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
   }
 
   start() {
+    if (this.startupError !== undefined) return Effect.fail(this.startupError);
     return Effect.promise(() => this.startImpl());
+  }
+
+  failStart(error: CodexSessionRuntimeError) {
+    this.startupError = error;
   }
 
   getSession = Effect.promise(() => this.startImpl());
@@ -239,6 +253,22 @@ const providerSessionDirectoryTestLayer = Layer.succeed(ProviderSessionDirectory
   listBindings: () => Effect.succeed([]),
 });
 
+function makeAdapterTestLayer(
+  codexConfig: ReturnType<typeof decodeCodexSettings>,
+  makeRuntime: ReturnType<typeof makeRuntimeFactory>["factory"],
+  adapterOptions: Pick<CodexAdapterLiveOptions, "enableT3Workers" | "preflightMcpServers"> = {},
+) {
+  return Layer.effect(
+    CodexAdapter,
+    makeCodexAdapter(codexConfig, { ...adapterOptions, makeRuntime }),
+  ).pipe(
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(ServerSettingsService.layerTest()),
+    Layer.provideMerge(providerSessionDirectoryTestLayer),
+    Layer.provideMerge(NodeServices.layer),
+  );
+}
+
 const validationRuntimeFactory = makeRuntimeFactory();
 const validationLayer = it.layer(
   Layer.effect(
@@ -311,6 +341,343 @@ validationLayer("CodexAdapterLive validation", (it) => {
         runtimeMode: "full-access",
       });
     }),
+  );
+});
+
+it.effect("passes each daemon session its own T3 MCP credential", () => {
+  const runtimeFactory = makeRuntimeFactory();
+  const sessions = [
+    { threadId: asThreadId("daemon-session-one"), token: "fake-daemon-token-one" },
+    { threadId: asThreadId("daemon-session-two"), token: "fake-daemon-token-two" },
+  ];
+  for (const [index, session] of sessions.entries()) {
+    McpProviderSession.setMcpProviderSession({
+      environmentId: EnvironmentId.make("daemon-test-environment"),
+      threadId: session.threadId,
+      providerSessionId: `daemon-provider-session-${index}`,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      endpoint: "http://127.0.0.1:3774/mcp",
+      authorizationHeader: `Bearer ${session.token}`,
+    });
+  }
+
+  const layer = makeAdapterTestLayer(
+    decodeCodexSettings({ useDesktopAppDaemon: true }),
+    runtimeFactory.factory,
+  );
+
+  return Effect.gen(function* () {
+    const adapter = yield* CodexAdapter;
+    for (const session of sessions) {
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: session.threadId,
+        runtimeMode: "full-access",
+      });
+    }
+
+    NodeAssert.equal(runtimeFactory.runtimes.length, 2);
+    for (const [index, session] of sessions.entries()) {
+      const runtime = runtimeFactory.runtimes[index];
+      NodeAssert.ok(runtime);
+      NodeAssert.equal(runtime.options.appServerTransport, "desktop-daemon");
+      NodeAssert.deepStrictEqual(runtime.options.daemonMcpServer, {
+        endpoint: "http://127.0.0.1:3774/mcp",
+        authorizationHeader: `Bearer ${session.token}`,
+      });
+      NodeAssert.deepStrictEqual(buildCodexAppServerCommandArgs(runtime.options), [
+        "app-server",
+        "proxy",
+      ]);
+      NodeAssert.equal(runtime.options.environment, undefined);
+    }
+
+    const activeTurnId = asTurnId("daemon-active-turn");
+    yield* adapter.sendTurn({
+      threadId: sessions[0]!.threadId,
+      input: "steer this turn",
+      expectedTurnId: activeTurnId,
+      attachments: [],
+    });
+    yield* adapter.interruptTurn(sessions[0]!.threadId, activeTurnId);
+    NodeAssert.equal(
+      runtimeFactory.runtimes[0]?.sendTurnImpl.mock.calls[0]?.[0].expectedTurnId,
+      activeTurnId,
+    );
+    NodeAssert.deepStrictEqual(runtimeFactory.runtimes[0]?.interruptTurnImpl.mock.calls, [
+      [activeTurnId],
+    ]);
+  }).pipe(
+    Effect.provide(layer),
+    Effect.ensuring(
+      Effect.sync(() => {
+        for (const session of sessions) {
+          McpProviderSession.clearMcpProviderSession(session.threadId);
+        }
+      }),
+    ),
+  );
+});
+
+it.effect("leaves daemon-owned MCP server enablement to the desktop daemon", () => {
+  const threadId = asThreadId("daemon-mcp-catalog");
+  McpProviderSession.setMcpProviderSession({
+    environmentId: EnvironmentId.make("daemon-test-environment"),
+    threadId,
+    providerSessionId: "daemon-mcp-catalog-session",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    endpoint: "http://127.0.0.1:3774/mcp",
+    authorizationHeader: "Bearer fake-daemon-catalog-token",
+  });
+  const runtimeFactory = makeRuntimeFactory();
+  const preflightMcpServers = vi.fn(() =>
+    Effect.succeed({
+      disabledServerNames: ["node_repl", "cua_repl"],
+      unavailable: [],
+    }),
+  );
+  const layer = makeAdapterTestLayer(
+    decodeCodexSettings({ useDesktopAppDaemon: true }),
+    runtimeFactory.factory,
+    { preflightMcpServers },
+  );
+
+  return Effect.gen(function* () {
+    const adapter = yield* CodexAdapter;
+    yield* adapter.startSession({
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      runtimeMode: "full-access",
+    });
+
+    NodeAssert.equal(preflightMcpServers.mock.calls.length, 0);
+    NodeAssert.equal(runtimeFactory.lastRuntime?.options.appServerArgs, undefined);
+  }).pipe(
+    Effect.provide(layer),
+    Effect.ensuring(Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
+  );
+});
+
+it.effect("keeps T3 Workers and linked worker sessions on the desktop daemon", () => {
+  const parentThreadId = asThreadId("daemon-worker-parent");
+  const workerThreadId = asThreadId(`${WORKER_PROVIDER_THREAD_PREFIX}daemon-worker-child`);
+  const sessions = [
+    { threadId: parentThreadId, token: "fake-daemon-worker-parent-token" },
+    { threadId: workerThreadId, token: "fake-daemon-worker-child-token" },
+  ];
+  for (const [index, session] of sessions.entries()) {
+    McpProviderSession.setMcpProviderSession({
+      environmentId: EnvironmentId.make("daemon-test-environment"),
+      threadId: session.threadId,
+      providerSessionId: `daemon-worker-session-${index}`,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      endpoint: "http://127.0.0.1:3774/mcp",
+      authorizationHeader: `Bearer ${session.token}`,
+    });
+  }
+  const runtimeFactory = makeRuntimeFactory();
+  const layer = makeAdapterTestLayer(
+    decodeCodexSettings({ useDesktopAppDaemon: true }),
+    runtimeFactory.factory,
+    { enableT3Workers: Effect.succeed(true) },
+  );
+
+  return Effect.gen(function* () {
+    const adapter = yield* CodexAdapter;
+    yield* adapter.startSession({
+      provider: ProviderDriverKind.make("codex"),
+      threadId: parentThreadId,
+      runtimeMode: "full-access",
+    });
+    yield* adapter.startSession({
+      provider: ProviderDriverKind.make("codex"),
+      threadId: workerThreadId,
+      runtimeMode: "full-access",
+    });
+
+    NodeAssert.equal(runtimeFactory.runtimes[0]?.options.appServerTransport, "desktop-daemon");
+    NodeAssert.equal(runtimeFactory.runtimes[0]?.options.enableT3Workers, true);
+    NodeAssert.equal(
+      runtimeFactory.runtimes[0]?.options.daemonMcpServer?.authorizationHeader,
+      `Bearer ${sessions[0]!.token}`,
+    );
+    NodeAssert.equal(runtimeFactory.runtimes[1]?.options.workerSession, true);
+    NodeAssert.notEqual(runtimeFactory.runtimes[1]?.options.enableT3Workers, true);
+    NodeAssert.equal(
+      runtimeFactory.runtimes[1]?.options.daemonMcpServer?.authorizationHeader,
+      `Bearer ${sessions[1]!.token}`,
+    );
+  }).pipe(
+    Effect.provide(layer),
+    Effect.ensuring(
+      Effect.sync(() => {
+        for (const session of sessions) {
+          McpProviderSession.clearMcpProviderSession(session.threadId);
+        }
+      }),
+    ),
+  );
+});
+
+it.effect("surfaces a desktop proxy exit during session start with repair steps", () => {
+  const threadId = asThreadId("daemon-proxy-exit");
+  const credential = "fake-daemon-exit-token";
+  McpProviderSession.setMcpProviderSession({
+    environmentId: EnvironmentId.make("daemon-test-environment"),
+    threadId,
+    providerSessionId: "daemon-exit-provider-session",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    endpoint: "http://127.0.0.1:3774/mcp",
+    authorizationHeader: `Bearer ${credential}`,
+  });
+  const runtimeFactory = makeRuntimeFactory();
+  runtimeFactory.factory.mockImplementationOnce((options: CodexSessionRuntimeOptions) => {
+    const runtime = new FakeCodexRuntime(options);
+    runtime.failStart(
+      new Error(
+        "desktop app-server proxy exited during handshake",
+      ) as unknown as CodexSessionRuntimeError,
+    );
+    return Effect.succeed(runtime);
+  });
+  const layer = makeAdapterTestLayer(
+    decodeCodexSettings({ useDesktopAppDaemon: true }),
+    runtimeFactory.factory,
+  );
+
+  return Effect.gen(function* () {
+    const adapter = yield* CodexAdapter;
+    const result = yield* adapter
+      .startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      })
+      .pipe(Effect.result);
+
+    NodeAssert.equal(result._tag, "Failure");
+    if (result._tag === "Failure") {
+      NodeAssert.equal(result.failure._tag, "ProviderAdapterProcessError");
+      NodeAssert.match(result.failure.message, /proxy handshake/);
+      NodeAssert.match(result.failure.message, /daemon bootstrap/);
+      NodeAssert.match(result.failure.message, /daemon version/);
+      NodeAssert.doesNotMatch(result.failure.message, new RegExp(credential));
+    }
+  }).pipe(
+    Effect.provide(layer),
+    Effect.ensuring(Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
+  );
+});
+
+it.effect("reconnects a stale desktop proxy before sending the first turn", () => {
+  const threadId = asThreadId("daemon-restarted-before-turn");
+  McpProviderSession.setMcpProviderSession({
+    environmentId: EnvironmentId.make("daemon-test-environment"),
+    threadId,
+    providerSessionId: "daemon-restarted-provider-session",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    endpoint: "http://127.0.0.1:3774/mcp",
+    authorizationHeader: "Bearer fake-restarted-token",
+  });
+  const runtimeFactory = makeRuntimeFactory();
+  const layer = makeAdapterTestLayer(
+    decodeCodexSettings({ useDesktopAppDaemon: true }),
+    runtimeFactory.factory,
+  );
+
+  return Effect.gen(function* () {
+    const adapter = yield* CodexAdapter;
+    yield* adapter.startSession({
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      runtimeMode: "full-access",
+    });
+    const staleRuntime = runtimeFactory.runtimes[0]!;
+    staleRuntime.checkConnectionImpl.mockImplementationOnce(() =>
+      Effect.fail(new Cause.TimeoutError("proxy broken pipe")),
+    );
+
+    const result = yield* adapter.sendTurn({ threadId, input: "RESUME-OK", attachments: [] });
+
+    NodeAssert.equal(result.turnId, asTurnId("turn-1"));
+    NodeAssert.equal(runtimeFactory.runtimes.length, 2);
+    NodeAssert.equal(staleRuntime.sendTurnImpl.mock.calls.length, 0);
+    NodeAssert.equal(
+      runtimeFactory.runtimes[1]?.sendTurnImpl.mock.calls[0]?.[0].input,
+      "RESUME-OK",
+    );
+    NodeAssert.deepStrictEqual(runtimeFactory.runtimes[1]?.options.resumeCursor, {
+      threadId: `provider-${String(threadId)}`,
+    });
+  }).pipe(
+    Effect.provide(layer),
+    Effect.ensuring(Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
+  );
+});
+
+it.effect("surfaces daemon MCP approval requests to T3 without answering them", () => {
+  const threadId = asThreadId("daemon-approval");
+  McpProviderSession.setMcpProviderSession({
+    environmentId: EnvironmentId.make("daemon-test-environment"),
+    threadId,
+    providerSessionId: "daemon-approval-provider-session",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+    endpoint: "http://127.0.0.1:3774/mcp",
+    authorizationHeader: "Bearer fake-daemon-approval-token",
+  });
+  const runtimeFactory = makeRuntimeFactory();
+  const layer = makeAdapterTestLayer(
+    decodeCodexSettings({ useDesktopAppDaemon: true }),
+    runtimeFactory.factory,
+  );
+
+  return Effect.gen(function* () {
+    const adapter = yield* CodexAdapter;
+    yield* adapter.startSession({
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      runtimeMode: "full-access",
+    });
+    const runtime = runtimeFactory.lastRuntime;
+    NodeAssert.ok(runtime);
+    const eventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+    yield* runtime.emit({
+      id: asEventId("evt-daemon-approval"),
+      kind: "request",
+      provider: ProviderDriverKind.make("codex"),
+      threadId,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      method: "mcpServer/elicitation/request",
+      requestId: ApprovalRequestId.make("daemon-approval-request"),
+      requestKind: "permissions",
+      payload: {
+        _meta: {
+          codex_approval_kind: "mcp_tool_call",
+          connector_id: "computer-use",
+        },
+        message: "Allow Computer Use to control this desktop?",
+        mode: "form",
+        requestedSchema: { type: "object", properties: {} },
+        serverName: "computer-use",
+        threadId: "provider-daemon-thread",
+        turnId: "daemon-turn",
+      },
+    } satisfies ProviderEvent);
+
+    const event = yield* Fiber.join(eventFiber);
+    NodeAssert.equal(event._tag, "Some");
+    if (event._tag === "Some") {
+      NodeAssert.equal(event.value.type, "request.opened");
+      if (event.value.type === "request.opened") {
+        NodeAssert.equal(event.value.payload.requestType, "permissions_approval");
+        NodeAssert.equal(event.value.payload.detail, "Allow Computer Use to control this desktop?");
+      }
+    }
+    NodeAssert.equal(runtime.respondToRequestImpl.mock.calls.length, 0);
+  }).pipe(
+    Effect.provide(layer),
+    Effect.ensuring(Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
   );
 });
 
@@ -1006,6 +1373,35 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
           notifications.map(() => "task.updated"),
         );
       }),
+  );
+
+  it.effect("shows the desktop daemon's tool inventory in the thread work log", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const eventsFiber = yield* Stream.runCollect(
+        adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "runtime.warning"),
+          Stream.take(1),
+        ),
+      ).pipe(Effect.forkChild);
+      const message =
+        "MCP servers attached to this thread: cua_repl (ready, 3 tools). cua_repl present; node_repl absent.";
+      yield* runtime.emit({
+        id: asEventId("desktop-tool-inventory"),
+        kind: "session",
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: "2026-09-26T23:41:40.000Z",
+        method: "session/tools",
+        threadId: asThreadId("thread-1"),
+        message,
+      });
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      const inventory = events.at(-1);
+      NodeAssert.equal(inventory?.type, "runtime.warning");
+      const [activity] = inventory ? runtimeEventToActivities(inventory) : [];
+      NodeAssert.equal(activity?.tone, "info");
+      NodeAssert.match(activity?.summary ?? "", /^MCP servers attached to this thread:/);
+    }),
   );
 
   it.effect("preserves completed child turn facts through persisted activity reconstruction", () =>

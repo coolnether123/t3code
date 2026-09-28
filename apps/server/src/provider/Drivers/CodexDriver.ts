@@ -48,7 +48,11 @@ import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import type { ProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
-import { resolveCodexBinaryPath } from "../CodexAppServerTransport.ts";
+import {
+  codexDesktopDaemonEnvironment,
+  ensureCodexDesktopDaemonStarted,
+  resolveCodexBinaryPath,
+} from "../CodexAppServerTransport.ts";
 import { preflightCodexMcpServers } from "../Layers/CodexMcpPreflight.ts";
 import {
   enrichProviderSnapshotWithVersionAdvisory,
@@ -136,7 +140,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const environmentId = yield* (yield* ServerEnvironment).getEnvironmentId;
       const processEnv = mergeProviderInstanceEnvironment(environment);
       const desktopDaemonConfig = config.useDesktopAppDaemon
-        ? { ...config, shadowHomePath: "" }
+        ? { ...config, homePath: "", shadowHomePath: "" }
         : config;
       const isolatedHomePath =
         !config.useDesktopAppDaemon && config.shadowHomePath.trim().length === 0
@@ -145,7 +149,7 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       const homeLayout = yield* resolveCodexHomeLayout(desktopDaemonConfig, {
         ...(isolatedHomePath ? { isolatedHomePath } : {}),
       });
-      const binaryPath = yield* resolveCodexBinaryPath(config);
+      const binaryPath = yield* resolveCodexBinaryPath(config, processEnv);
       const continuationIdentity = codexContinuationIdentity(homeLayout);
       const stampIdentity = withInstanceIdentity({
         instanceId,
@@ -202,10 +206,17 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       // running Codex thread has attached them. Each turn checks its own catalog.
       const checkProvider = Effect.gen(function* () {
         const settings = yield* serverSettings.getSettings;
-        const chromeExecutable = yield* findInstalledChrome();
+        const chromeExecutable = effectiveConfig.useDesktopAppDaemon
+          ? undefined
+          : yield* findInstalledChrome();
         const previewAvailable =
           settings.enableAgentBrowserAccess &&
           (yield* previewBroker.isBrowserAvailable(environmentId));
+        if (effectiveConfig.useDesktopAppDaemon) {
+          yield* ensureCodexDesktopDaemonStarted(
+            codexDesktopDaemonEnvironment({ ...process.env, ...processEnv }),
+          );
+        }
         return yield* checkCodexProviderStatus(effectiveConfig, undefined, processEnv, [
           {
             name: "t3-code",

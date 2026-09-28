@@ -18,7 +18,12 @@ import {
   getTriggerDisplayModelLabel,
   getTriggerDisplayModelName,
 } from "./providerIconUtils";
-import { shouldShowInstanceBadge, type ProviderInstanceEntry } from "../../providerInstances";
+import {
+  isDesktopBackedProviderInstanceReady,
+  isProviderInstancePickerReady,
+  shouldShowInstanceBadge,
+  type ProviderInstanceEntry,
+} from "../../providerInstances";
 import {
   ComposerControl,
   ComposerControlChevron,
@@ -86,7 +91,12 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
       ? "Choose model"
       : props.model || "Choose model";
   const triggerLabel = selectedModel
-    ? `${getTriggerDisplayModelLabel(selectedModel)}${selectedModel.isUnavailable ? " (Unavailable)" : ""}`
+    ? `${getTriggerDisplayModelLabel(selectedModel)}${
+        selectedModel.isUnavailable ||
+        (activeEntry?.useDesktopAppDaemon && !isDesktopBackedProviderInstanceReady(activeEntry))
+          ? " (Unavailable)"
+          : ""
+      }`
     : triggerTitle;
   const showInstanceBadge =
     activeEntry !== null && shouldShowInstanceBadge(activeEntry, props.instanceEntries);

@@ -20,6 +20,27 @@ describe("Codex browser provider instructions", () => {
     }
   });
 
+  it("describes the host Codex desktop tools without managed Chrome fallback guidance", () => {
+    const instructions = buildCodexDeveloperInstructions(
+      "default",
+      {
+        ...runtime,
+        useDesktopAppDaemon: true,
+        computerControlMode: "chrome",
+        computerControlAvailable: true,
+      },
+      true,
+    );
+
+    expect(instructions).toContain("host's Codex desktop installation");
+    expect(instructions).toContain("Codex Chrome browser-extension route");
+    expect(instructions).toContain("Windows Computer Use through Sky via node_repl");
+    expect(instructions).toContain("site permissions and action-time confirmations");
+    expect(instructions).toContain("report that instead of switching browsers");
+    expect(instructions).not.toContain("computer_start");
+    expect(instructions).not.toContain("Configured Windows Computer Use");
+  });
+
   it("describes only the discovered managed Chrome tools and their separate profile", () => {
     const instructions = buildCodexDeveloperInstructions(
       "default",

@@ -1,3 +1,4 @@
+import { NodeServices } from "@effect/platform-node";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -44,10 +45,15 @@ import { expandHomePath } from "../../pathExpansion.ts";
 import {
   codexAppServerCommandArgs,
   codexAppServerTransport,
+  codexDesktopDaemonEnvironment,
+  codexDesktopDaemonFailureMessage,
+  codexDesktopDaemonRepairMessage,
+  makeCodexAppServerProtocolLogger,
   makeCodexDesktopDaemonStdio,
   type CodexAppServerTransport,
 } from "../CodexAppServerTransport.ts";
 import { withCodexSandboxStartupRecovery } from "./CodexSandboxRecovery.ts";
+import { attachCodexDesktopPluginSkills } from "../CodexDesktopPluginSkills.ts";
 import { codexMcpDisableOverride, preflightCodexMcpServers } from "./CodexMcpPreflight.ts";
 import packageJson from "../../../package.json" with { type: "json" };
 const isCodexAppServerSpawnError = Schema.is(CodexErrors.CodexAppServerSpawnError);
@@ -146,6 +152,7 @@ function codexAccountEmail(account: CodexSchema.V2GetAccountResponse["account"])
 export function mapCodexModelCapabilities(
   model: CodexSchema.V2ModelListResponse__Model,
   browserTools: ReadonlyArray<CodexMcpToolInventory> = [],
+  desktopBacked = false,
 ): ModelCapabilities {
   const reasoningOptions = model.supportedReasoningEfforts.map(({ reasoningEffort }) =>
     reasoningEffort === model.defaultReasoningEffort
@@ -222,36 +229,38 @@ export function mapCodexModelCapabilities(
       currentValue: defaultServiceTier,
     });
   }
-  const browserOptions: ProviderOptionChoice[] = [];
-  for (const capability of resolveCodexBrowserCapabilities(browserTools)) {
-    if (capability.id === "t3-managed-chrome" && capability.available) {
+  if (!desktopBacked) {
+    const browserOptions: ProviderOptionChoice[] = [];
+    for (const capability of resolveCodexBrowserCapabilities(browserTools)) {
+      if (capability.id === "t3-managed-chrome" && capability.available) {
+        browserOptions.push({
+          id: "chrome",
+          label: capability.label,
+          description:
+            "Use T3's separate persistent Chrome profile. This does not control your normal Chrome profile or Windows desktop.",
+        });
+      }
+    }
+    if (hasT3PreviewBrowserTools(browserTools)) {
       browserOptions.push({
-        id: "chrome",
-        label: capability.label,
-        description:
-          "Use T3's separate persistent Chrome profile. This does not control your normal Chrome profile or Windows desktop.",
+        id: "preview",
+        label: "T3 Preview",
+        description: "Use T3's isolated collaborative preview browser.",
       });
     }
-  }
-  if (hasT3PreviewBrowserTools(browserTools)) {
-    browserOptions.push({
-      id: "preview",
-      label: "T3 Preview",
-      description: "Use T3's isolated collaborative preview browser.",
-    });
-  }
-  const defaultBrowser = browserOptions[0];
-  if (defaultBrowser) {
-    optionDescriptors.push({
-      id: CODEX_COMPUTER_CONTROL_OPTION_ID,
-      label: "Browser provider",
-      type: "select",
-      options: browserOptions.map((option) => ({
-        ...option,
-        ...(option.id === defaultBrowser.id ? { isDefault: true } : {}),
-      })),
-      currentValue: defaultBrowser.id,
-    });
+    const defaultBrowser = browserOptions[0];
+    if (defaultBrowser) {
+      optionDescriptors.push({
+        id: CODEX_COMPUTER_CONTROL_OPTION_ID,
+        label: "Browser provider",
+        type: "select",
+        options: browserOptions.map((option) => ({
+          ...option,
+          ...(option.id === defaultBrowser.id ? { isDefault: true } : {}),
+        })),
+        currentValue: defaultBrowser.id,
+      });
+    }
   }
 
   return createModelCapabilities({
@@ -284,6 +293,7 @@ const toDisplayName = (model: CodexSchema.V2ModelListResponse__Model): string =>
 function parseCodexModelListResponse(
   response: CodexSchema.V2ModelListResponse,
   browserTools: ReadonlyArray<CodexMcpToolInventory>,
+  desktopBacked: boolean,
 ): ReadonlyArray<ServerProviderModel> {
   return response.data.map((model) => ({
     slug: model.model,
@@ -291,7 +301,7 @@ function parseCodexModelListResponse(
     isCustom: false,
     ...(model.isDefault ? { isDefault: true } : {}),
     ...(isLegacyCodexModel(model.model) ? { isLegacy: true } : {}),
-    capabilities: mapCodexModelCapabilities(model, browserTools),
+    capabilities: mapCodexModelCapabilities(model, browserTools, desktopBacked),
   }));
 }
 
@@ -394,6 +404,7 @@ function parseCodexSkillsListResponse(
 const requestAllCodexModels = Effect.fn("requestAllCodexModels")(function* (
   client: CodexClient.CodexAppServerClient["Service"],
   browserTools: ReadonlyArray<CodexMcpToolInventory>,
+  desktopBacked: boolean,
 ) {
   const models: ServerProviderModel[] = [];
   let cursor: string | null | undefined = undefined;
@@ -403,7 +414,7 @@ const requestAllCodexModels = Effect.fn("requestAllCodexModels")(function* (
       "model/list",
       cursor ? { cursor } : {},
     );
-    models.push(...parseCodexModelListResponse(response, browserTools));
+    models.push(...parseCodexModelListResponse(response, browserTools, desktopBacked));
     cursor = response.nextCursor;
   } while (cursor);
 
@@ -434,17 +445,22 @@ const probeCodexAppServerProviderOnce = Effect.fn("probeCodexAppServerProviderOn
     readonly environment?: NodeJS.ProcessEnv;
     readonly appServerTransport?: CodexAppServerTransport;
     readonly browserTools: ReadonlyArray<CodexMcpToolInventory>;
+    readonly desktopBacked: boolean;
   }) {
     // `~` is not shell-expanded when env vars are set via `child_process.spawn`,
     // so `CODEX_HOME=~/.codex_work` would reach codex verbatim and trip
     // "CODEX_HOME points to '~/.codex_work', but that path does not exist".
     // Expand here for parity with `CodexTextGeneration`/`CodexSessionRuntime`.
-    const resolvedHomePath = input.homePath ? expandHomePath(input.homePath) : undefined;
+    const desktopDaemon = input.appServerTransport === "desktop-daemon";
+    const resolvedHomePath =
+      !desktopDaemon && input.homePath ? expandHomePath(input.homePath) : undefined;
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const environment = {
-      ...input.environment,
-      ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
-    };
+    const environment = desktopDaemon
+      ? codexDesktopDaemonEnvironment(input.environment)
+      : {
+          ...input.environment,
+          ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
+        };
     const launchArgs = codexLaunchArgv(input.launchArgs);
     const mcpPreflight = yield* Effect.promise(() =>
       preflightCodexMcpServers({
@@ -463,14 +479,14 @@ const probeCodexAppServerProviderOnce = Effect.fn("probeCodexAppServerProviderOn
     ]);
     const spawnCommand = yield* resolveSpawnCommand(input.binaryPath, commandArgs, {
       env: environment,
-      extendEnv: true,
+      extendEnv: !desktopDaemon,
     });
     const child = yield* spawner
       .spawn(
         ChildProcess.make(spawnCommand.command, spawnCommand.args, {
           cwd: input.cwd,
           env: environment,
-          extendEnv: true,
+          extendEnv: !desktopDaemon,
           forceKillAfter: CODEX_APP_SERVER_PROBE_FORCE_KILL_AFTER,
           shell: spawnCommand.shell,
         }),
@@ -486,7 +502,9 @@ const probeCodexAppServerProviderOnce = Effect.fn("probeCodexAppServerProviderOn
       );
     const clientLayer =
       input.appServerTransport === "desktop-daemon"
-        ? CodexClient.layerChildProcessStdio(child, yield* makeCodexDesktopDaemonStdio(child))
+        ? CodexClient.layerChildProcessStdio(child, yield* makeCodexDesktopDaemonStdio(child), {
+            logger: makeCodexAppServerProtocolLogger(),
+          })
         : CodexClient.layerChildProcess(child);
     const clientContext = yield* Layer.build(clientLayer);
     const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
@@ -504,6 +522,11 @@ const probeCodexAppServerProviderOnce = Effect.fn("probeCodexAppServerProviderOn
       },
     });
     yield* client.notify("initialized", undefined);
+    if (desktopDaemon) {
+      yield* attachCodexDesktopPluginSkills(client, { ...process.env, ...environment }).pipe(
+        Effect.provide(NodeServices.layer),
+      );
+    }
 
     // Extract the version string after the first '/' in userAgent, up to the next space or the end
     const versionMatch = initialize.userAgent.match(/\/([^\s]+)/);
@@ -523,8 +546,9 @@ const probeCodexAppServerProviderOnce = Effect.fn("probeCodexAppServerProviderOn
       [
         client.request("skills/list", {
           cwds: [input.cwd],
+          ...(desktopDaemon ? { forceReload: true } : {}),
         }),
-        requestAllCodexModels(client, input.browserTools),
+        requestAllCodexModels(client, input.browserTools, input.desktopBacked),
       ],
       { concurrency: "unbounded" },
     );
@@ -604,7 +628,10 @@ const makePendingCodexProvider = (
     });
   });
 
-function accountProbeStatus(account: CodexAppServerProviderSnapshot["account"]): {
+function accountProbeStatus(
+  account: CodexAppServerProviderSnapshot["account"],
+  desktopDaemon: boolean,
+): {
   readonly status: Exclude<ServerProviderState, "disabled">;
   readonly auth: ServerProvider["auth"];
   readonly message?: string;
@@ -626,7 +653,11 @@ function accountProbeStatus(account: CodexAppServerProviderSnapshot["account"]):
     return {
       status: "error",
       auth: { status: "unauthenticated" },
-      message: "Codex CLI is not authenticated. Run `codex login` and try again.",
+      message: desktopDaemon
+        ? codexDesktopDaemonRepairMessage(
+            "could not authenticate because the Codex desktop app is not signed in. Sign in to the desktop app",
+          )
+        : "Codex CLI is not authenticated. Run `codex login` and try again.",
     };
   }
 
@@ -644,6 +675,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     readonly environment?: NodeJS.ProcessEnv;
     readonly appServerTransport?: CodexAppServerTransport;
     readonly browserTools: ReadonlyArray<CodexMcpToolInventory>;
+    readonly desktopBacked: boolean;
   }) => Effect.Effect<
     CodexAppServerProviderSnapshot,
     CodexErrors.CodexAppServerError,
@@ -659,6 +691,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
   const resolvedEnvironment = environment ?? process.env;
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const emptyModels = emptyCodexModelsFromSettings(codexSettings);
+  const desktopDaemon = codexAppServerTransport(codexSettings) === "desktop-daemon";
 
   if (!codexSettings.enabled) {
     return buildServerProvider({
@@ -686,6 +719,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     environment: resolvedEnvironment,
     appServerTransport: codexAppServerTransport(codexSettings),
     browserTools,
+    desktopBacked: codexSettings.useDesktopAppDaemon,
   }).pipe(
     Effect.scoped,
     Effect.timeoutOption(Duration.millis(AUTH_PROBE_TIMEOUT_MS)),
@@ -706,9 +740,11 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
         version: null,
         status: "error",
         auth: { status: "unknown" },
-        message: installed
-          ? `Codex app-server provider probe failed: ${error.message}.`
-          : "Codex CLI (`codex`) was not found on PATH.",
+        message: desktopDaemon
+          ? codexDesktopDaemonFailureMessage(error)
+          : installed
+            ? `Codex app-server provider probe failed: ${error.message}.`
+            : "Codex CLI (`codex`) was not found on PATH.",
       },
     });
   }
@@ -725,13 +761,17 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
         version: null,
         status: "error",
         auth: { status: "unknown" },
-        message: "Timed out while checking Codex app-server provider status.",
+        message: desktopDaemon
+          ? codexDesktopDaemonRepairMessage(
+              "timed out while connecting to the daemon or checking its app-server protocol",
+            )
+          : "Timed out while checking Codex app-server provider status.",
       },
     });
   }
 
   const snapshot = probeResult.success.value;
-  const accountStatus = accountProbeStatus(snapshot.account);
+  const accountStatus = accountProbeStatus(snapshot.account, desktopDaemon);
 
   return buildServerProvider({
     presentation: CODEX_PRESENTATION,

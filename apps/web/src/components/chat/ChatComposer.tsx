@@ -243,6 +243,7 @@ import { proposedPlanTitle } from "../../proposedPlan";
 import { getProviderInteractionModeToggle, getSubagentBackendOptions } from "../../providerModels";
 import {
   applyProviderInstanceSettings,
+  canKeepExplicitProviderInstanceSelection,
   deriveProviderInstanceEntries,
   NO_PROVIDER_MODEL_SELECTION,
   resolveProviderDriverKindForInstanceSelection,
@@ -917,7 +918,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     for (const candidate of candidates) {
       if (!candidate) continue;
       const match = providerInstanceEntries.find(
-        (entry) => entry.instanceId === candidate && entry.enabled && entry.isAvailable,
+        (entry) =>
+          entry.instanceId === candidate && canKeepExplicitProviderInstanceSelection(entry),
       );
       if (match) {
         // When locked to a specific driver kind, ignore persisted instance

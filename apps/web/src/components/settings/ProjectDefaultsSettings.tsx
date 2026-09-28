@@ -71,7 +71,7 @@ export function ProjectDefaultsSettings({
   const providers = representative?.serverConfig?.providers ?? EMPTY_SERVER_PROVIDERS;
   const settings = { ...serverSettings, ...clientSettings };
   const storedSelection = serverSettings.defaultModelSelection;
-  const selection = resolveDefaultProviderModelSelection(providers, storedSelection);
+  const selection = resolveDefaultProviderModelSelection(providers, storedSelection, settings);
   const entries = sortProviderInstanceEntries(
     applyProviderInstanceSettings(deriveProviderInstanceEntries(providers), settings),
   );
