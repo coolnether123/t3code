@@ -1279,6 +1279,31 @@ function mapToRuntimeEvents(
     ];
   }
 
+  // Hooks that talk back to the agent (a Stop hook that keeps the turn going, a
+  // PreToolUse hook that blocks) are shown in the work log. Silent runs, which
+  // happen on every turn, produce no event.
+  if (event.method === "hook/completed") {
+    const payload = readPayload(EffectCodexSchema.V2HookCompletedNotification, event.payload);
+    const feedback = (payload?.run.entries ?? []).filter((entry) => trimText(entry.text));
+    if (!payload || feedback.length === 0) {
+      return [];
+    }
+    const { run } = payload;
+    return [
+      {
+        type: "hook.completed",
+        ...runtimeEventBase(event, canonicalThreadId),
+        payload: {
+          hookId: run.id,
+          outcome:
+            run.status === "failed" ? "error" : run.status === "stopped" ? "cancelled" : "success",
+          hookEvent: run.eventName,
+          feedback: feedback.map((entry) => ({ kind: entry.kind, text: entry.text })),
+        },
+      },
+    ];
+  }
+
   if (event.method === "thread/tokenUsage/updated") {
     const payload = readPayload(
       EffectCodexSchema.V2ThreadTokenUsageUpdatedNotification,

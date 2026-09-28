@@ -2352,6 +2352,57 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       }),
   );
 
+  it.effect("surfaces hook feedback and skips silent hook runs", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+      const hookRun = (id: string, entries: ReadonlyArray<{ kind: string; text: string }>) => ({
+        id,
+        displayOrder: 0,
+        entries,
+        eventName: "stop",
+        executionMode: "sync",
+        handlerType: "command",
+        scope: "turn",
+        source: "user",
+        sourcePath: "/Users/example/.codex/hooks.json",
+        startedAt: 1_790_000_000,
+        completedAt: 1_790_000_001,
+        status: entries.length > 0 ? "blocked" : "completed",
+      });
+      const emitHook = (id: string, entries: ReadonlyArray<{ kind: string; text: string }>) =>
+        runtime.emit({
+          id: asEventId(`evt-${id}`),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "hook/completed",
+          payload: { threadId: "thread-1", turnId: "turn-1", run: hookRun(id, entries) },
+        } satisfies ProviderEvent);
+
+      // Every turn runs the Stop hook; a run with nothing to say is not an event.
+      yield* emitHook("hook-silent", []);
+      yield* emitHook("hook-feedback", [
+        { kind: "feedback", text: "Christine already approved this in this chat." },
+      ]);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      NodeAssert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some" || firstEvent.value.type !== "hook.completed") {
+        NodeAssert.fail("expected hook.completed");
+        return;
+      }
+      NodeAssert.deepEqual(firstEvent.value.payload, {
+        hookId: "hook-feedback",
+        outcome: "success",
+        hookEvent: "stop",
+        feedback: [{ kind: "feedback", text: "Christine already approved this in this chat." }],
+      });
+    }),
+  );
+
   it.effect("unwraps Codex token usage payloads for context window events", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();

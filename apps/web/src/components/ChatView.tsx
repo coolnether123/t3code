@@ -7372,6 +7372,13 @@ function ChatViewContent(props: ChatViewProps) {
                   canonicalEditMessageIdByTimelineMessageId
                 }
                 onEditUserMessage={paintOnlyDisplayedTimeline ? () => {} : onEditUserMessage}
+                onStopTurn={
+                  paintOnlyDisplayedTimeline
+                    ? () => {}
+                    : () => {
+                        void onInterrupt();
+                      }
+                }
                 isRevertingCheckpoint={
                   isEditingFromHere || activeServerThread?.editFromHere != null
                 }

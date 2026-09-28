@@ -6,6 +6,10 @@ import {
 } from "@t3tools/client-runtime/diagnostics";
 import { isBackgroundTaskActivity } from "@t3tools/client-runtime/state/subagentRuntime";
 import {
+  parsePermissionContinuation,
+  type PermissionContinuation,
+} from "@t3tools/client-runtime/permissionContinuation";
+import {
   ApprovalRequestId,
   isToolLifecycleItemType,
   type OrchestrationLatestTurn,
@@ -127,6 +131,12 @@ export interface WorkLogEntry {
     workflowId: string | null;
     agentTaskIds: ReadonlyArray<string>;
   };
+  /**
+   * Present when a Stop hook kept the turn going because the user had already
+   * approved what the agent was about to ask. Renders as a "You already
+   * approved this" card with the quoted approval and a way to stop the agent.
+   */
+  permissionContinuation?: PermissionContinuation;
 }
 
 export function workLogEntryIsStandaloneDomainFailure(entry: WorkLogEntry): boolean {
@@ -1081,6 +1091,18 @@ function toDerivedWorkLogEntry(
   const workerToolCall = parseWorkerToolActivity(activity, knownWorkers);
   if (workerToolCall) {
     entry.workerToolCall = workerToolCall;
+  }
+  if (activity.kind === "hook.feedback") {
+    const feedback = Array.isArray(payload?.feedback) ? payload.feedback : [];
+    for (const item of feedback) {
+      const text = asRecord(item)?.text;
+      const continuation = parsePermissionContinuation(typeof text === "string" ? text : null);
+      if (continuation) {
+        entry.permissionContinuation = continuation;
+        entry.label = "You already approved this";
+        break;
+      }
+    }
   }
   if (itemType) {
     entry.itemType = itemType;

@@ -766,6 +766,12 @@ const HookProgressPayload = Schema.Struct({
 });
 export type HookProgressPayload = typeof HookProgressPayload.Type;
 
+const HookFeedbackEntry = Schema.Struct({
+  kind: Schema.Literals(["warning", "stop", "feedback", "context", "error"]),
+  text: Schema.String,
+});
+export type HookFeedbackEntry = typeof HookFeedbackEntry.Type;
+
 const HookCompletedPayload = Schema.Struct({
   hookId: TrimmedNonEmptyStringSchema,
   outcome: Schema.Literals(["success", "error", "cancelled"]),
@@ -773,6 +779,10 @@ const HookCompletedPayload = Schema.Struct({
   stdout: Schema.optional(Schema.String),
   stderr: Schema.optional(Schema.String),
   exitCode: Schema.optional(Schema.Int),
+  /** Hook event that ran, e.g. `stop`. Set by adapters that report it. */
+  hookEvent: Schema.optional(TrimmedNonEmptyStringSchema),
+  /** What the hook told the agent. Only adapters that surface it set this. */
+  feedback: Schema.optional(Schema.Array(HookFeedbackEntry)),
 });
 export type HookCompletedPayload = typeof HookCompletedPayload.Type;
 

@@ -1,3 +1,4 @@
+import { parsePermissionContinuation } from "@t3tools/client-runtime/permissionContinuation";
 import {
   ApprovalRequestId,
   isToolLifecycleItemType,
@@ -115,6 +116,8 @@ export interface WorkLogEntry {
   toolCallId?: string;
   agentSpawn?: boolean;
   toolData?: unknown;
+  /** A Stop hook continued the turn on an approval the user already gave. */
+  permissionApproved?: boolean;
 }
 
 interface DerivedWorkLogEntry extends WorkLogEntry {
@@ -502,6 +505,25 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
           : activity.tone,
     sourceActivityKind: activity.kind,
   };
+  if (activity.kind === "hook.feedback") {
+    // A Stop hook kept the turn going on an approval the user already gave.
+    // Stopping the agent uses the thread's existing stop control.
+    const feedback = Array.isArray(payload?.feedback) ? payload.feedback : [];
+    for (const item of feedback) {
+      const text = asRecord(item)?.text;
+      const continuation = parsePermissionContinuation(typeof text === "string" ? text : null);
+      if (continuation) {
+        entry.label = "You already approved this";
+        entry.detail = `“${continuation.quote}” — ${
+          continuation.source === "chat"
+            ? "from your message in this chat"
+            : "from your standing workroom rules"
+        }`;
+        entry.permissionApproved = true;
+        return entry;
+      }
+    }
+  }
   const toolCallId =
     asTrimmedString(payload?.toolCallId) ?? asTrimmedString(asRecord(payload?.data)?.toolCallId);
   if (toolCallId) {
@@ -837,6 +859,7 @@ function workEntryIcon(entry: DerivedWorkLogEntry): ThreadFeedActivity["icon"] {
     return "message";
   }
   if (entry.sourceActivityKind === "runtime.warning") return "warning";
+  if (entry.permissionApproved) return "check";
   if (entry.toolSurface) return entry.toolSurface;
   if (entry.requestKind === "command") return "command";
   if (entry.requestKind === "file-read") return "eye";

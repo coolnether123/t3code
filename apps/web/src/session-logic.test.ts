@@ -928,6 +928,48 @@ describe("workEntryIndicatesToolFailure", () => {
 });
 
 describe("deriveWorkLogEntries", () => {
+  it("turns an already-approved Stop hook continuation into the approval card entry", () => {
+    const text =
+      "Christine already approved this in this chat, so do not ask her again: " +
+      "“send it to Will and me”. Carry on and finish the task. " +
+      "(Otis permission check J-AB12CD)";
+    const [entry] = deriveWorkLogEntries([
+      makeActivity({
+        id: "evt-hook",
+        kind: "hook.feedback",
+        summary: text.slice(0, 117) + "...",
+        tone: "info",
+        turnId: "turn-1",
+        payload: { hookEvent: "stop", outcome: "success", feedback: [{ kind: "feedback", text }] },
+      }),
+    ]);
+    expect(entry).toMatchObject({
+      label: "You already approved this",
+      tone: "info",
+      permissionContinuation: {
+        quote: "send it to Will and me",
+        source: "chat",
+        checkId: "J-AB12CD",
+      },
+    });
+  });
+
+  it("keeps other hook feedback as an ordinary row", () => {
+    const [entry] = deriveWorkLogEntries([
+      makeActivity({
+        kind: "hook.feedback",
+        summary: "Run one more pass over the failing tests.",
+        tone: "info",
+        payload: {
+          hookEvent: "stop",
+          feedback: [{ kind: "feedback", text: "Run one more pass over the failing tests." }],
+        },
+      }),
+    ]);
+    expect(entry?.label).toBe("Run one more pass over the failing tests.");
+    expect(entry?.permissionContinuation).toBeUndefined();
+  });
+
   it("keeps persisted worktree setup visible before the first agent turn", () => {
     const activity = makeActivity({
       id: "worktree-setup:thread-1",

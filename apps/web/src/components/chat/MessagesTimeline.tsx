@@ -162,6 +162,8 @@ interface TimelineRowSharedState {
   onToggleWorkGroup: (groupId: string, anchorKey: string) => void;
   agentPanelModel: AgentPanelModel;
   onOpenAgents: () => void;
+  /** Stops the running turn, as the composer's stop button does. */
+  onStopTurn: () => void;
 }
 
 interface TimelineRowActivityState {
@@ -222,6 +224,7 @@ const TIMELINE_MAINTAIN_SCROLL_AT_END = {
 interface MessagesTimelineProps {
   agentPanelModel?: AgentPanelModel;
   onOpenAgents?: () => void;
+  onStopTurn?: () => void;
   isWorking: boolean;
   workingStepLabel?: string | null;
   activeWorkerWait?: ActiveWorkerWait | null;
@@ -273,6 +276,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   activeTurnStartedAt,
   agentPanelModel = EMPTY_AGENT_PANEL_MODEL,
   onOpenAgents = NOOP_OPEN_AGENTS,
+  onStopTurn = NOOP_OPEN_AGENTS,
   listRef,
   timelineEntries,
   latestTurn,
@@ -553,6 +557,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onToggleWorkGroup,
       agentPanelModel,
       onOpenAgents,
+      onStopTurn,
     }),
     [
       timestampFormat,
@@ -569,6 +574,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       onToggleWorkGroup,
       agentPanelModel,
       onOpenAgents,
+      onStopTurn,
     ],
   );
   const activityState = useMemo<TimelineRowActivityState>(
@@ -2825,6 +2831,63 @@ const AgentSpawnCtaRow = memo(function AgentSpawnCtaRow(props: { workEntry: Time
   );
 });
 
+// A Stop hook kept the turn going because the user had already approved what
+// the agent was about to ask. Shows the approval it relied on and, while that
+// turn is still running, a way to stop the agent if the approval was misread.
+const PermissionApprovedRow = memo(function PermissionApprovedRow(props: {
+  workEntry: TimelineWorkEntry;
+}) {
+  const { workEntry } = props;
+  const { onStopTurn } = use(TimelineRowCtx);
+  const activity = use(TimelineRowActivityCtx);
+  const [stopRequested, setStopRequested] = useState(false);
+  const continuation = workEntry.permissionContinuation;
+  if (!continuation) {
+    return null;
+  }
+  const turnStillRunning =
+    activity.isWorking && workEntry.turnId != null && workEntry.turnId === activity.latestTurnId;
+  return (
+    <div
+      className="flex w-full flex-col gap-1.5 rounded-md border border-border/60 bg-card/50 px-2.5 py-2 text-[13px]"
+      data-work-entry="permission-approved"
+    >
+      <div className="flex items-center gap-2">
+        <WorkEntryIconSvg name="check" className="size-3.5 shrink-0 text-muted-foreground" />
+        <span className="font-medium">You already approved this</span>
+        <span className="text-muted-foreground">· the agent kept going instead of asking</span>
+      </div>
+      <blockquote className="whitespace-pre-wrap break-words border-l-2 border-border pl-2.5 text-foreground/80">
+        {`“${continuation.quote}”`}
+      </blockquote>
+      <div className="flex items-center gap-2 text-[.7rem] text-muted-foreground">
+        <span>
+          {continuation.source === "chat"
+            ? "From your message in this chat"
+            : "From your standing workroom rules"}
+        </span>
+        {turnStillRunning ? (
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            className="ml-auto"
+            disabled={stopRequested}
+            onClick={() => {
+              setStopRequested(true);
+              onStopTurn();
+            }}
+          >
+            {stopRequested ? "Stopping…" : "That's wrong, stop"}
+          </Button>
+        ) : stopRequested ? (
+          <span className="ml-auto">Stopped</span>
+        ) : null}
+      </div>
+    </div>
+  );
+});
+
 const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   workEntry: TimelineWorkEntry;
   workspaceRoot: string | undefined;
@@ -2834,6 +2897,9 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   // Before any hooks: spawn CTA rows render their own component.
   if (workEntry.agentSpawn) {
     return <AgentSpawnCtaRow workEntry={workEntry} />;
+  }
+  if (workEntry.permissionContinuation) {
+    return <PermissionApprovedRow workEntry={workEntry} />;
   }
   if (workEntry.workerToolCall) {
     return <FriendlyWorkerToolCallRow call={workEntry.workerToolCall} />;

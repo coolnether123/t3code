@@ -7,6 +7,10 @@
       "types": "./src/capacityRetry.ts",
       "default": "./src/capacityRetry.ts"
     },
+    "./permissionContinuation": {
+      "types": "./src/permissionContinuation.ts",
+      "default": "./src/permissionContinuation.ts"
+    },
     "./usageRefresh": {
       "types": "./src/usageRefresh.ts",
       "default": "./src/usageRefresh.ts"

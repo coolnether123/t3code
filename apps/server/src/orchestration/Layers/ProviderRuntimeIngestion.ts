@@ -542,6 +542,35 @@ export function runtimeEventToActivities(
       ];
     }
 
+    case "hook.completed": {
+      // Only adapters that surface what the hook told the agent set `feedback`;
+      // other hook runs stay out of the work log.
+      const feedback = event.payload.feedback;
+      if (!feedback || feedback.length === 0) {
+        return [];
+      }
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          tone: "info",
+          kind: "hook.feedback",
+          summary: truncateDetail(feedback[0]!.text, 120),
+          payload: {
+            hookEvent: event.payload.hookEvent ?? null,
+            outcome: event.payload.outcome,
+            // Long enough to keep a quoted approval and its trailing reference.
+            feedback: feedback.map((entry) => ({
+              kind: entry.kind,
+              text: truncateDetail(entry.text, 1200),
+            })),
+          },
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
     case "runtime.warning": {
       return [
         {
