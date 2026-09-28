@@ -17,6 +17,7 @@ usually its `.t3` directory. Do not point a test at your daily-use environment.
 ```sh
 t3 agent capabilities --base-dir /path/to/worktree/.t3
 t3 agent snapshot --base-dir /path/to/worktree/.t3
+t3 agent providers --base-dir /path/to/worktree/.t3
 ```
 
 From a source checkout, replace `t3` with `node apps/server/src/bin.ts`.
@@ -36,6 +37,14 @@ Inspection uses a short-lived orchestration-read session. Actions also require
 orchestration-operate. These scopes cover the environment, not a single thread.
 The CLI retains the credential in memory and revokes its session on normal
 exit. A session expires after two minutes even if cleanup cannot finish.
+
+`providers` reads the running server's cached provider snapshots; it does not
+probe, start, or restart providers. Use `--instance INSTANCE_ID` to select one
+provider instance. The result includes its driver, display name, enabled and
+availability state, bounded status message, version, sign-in state, and model
+and skill counts, along with the environment and runtime identity. For Codex,
+`desktopBacked` is currently `null` because the provider snapshot does not
+expose `useDesktopAppDaemon`; treat that value as unknown, not as `false`.
 
 ## Inspect a thread before acting
 
@@ -59,14 +68,40 @@ to perform. Read the reported session, latest turn, and pending requests before
 sending a turn-control or approval command. A compact history window is not a
 claim that older messages or activities do not exist.
 
-Selected-thread output keeps the latest eight messages and 20 activities, plus
-up to 20 open-request records separately. Omission counts and truncated-question
-flags identify incomplete evidence. Do not answer a request whose choices have
-been truncated. Action files are limited to 256 KiB and JSON output to 192 KiB;
-these limits do not cap the HTTP response's memory use before compaction.
-The environment and action identifiers needed for a receipt must fit 96 KiB
-of encoded JSON. This is checked before dispatch so an oversized identifier
-cannot hide a receipt for an action that has already run.
+Selected-thread output includes the session's provider instance, status, and
+last error; the latest turn's state and result; the latest eight messages and
+20 activities; and up to 20 open-request records separately. It also includes
+up to ten recent session-level informational activities, such as a tool
+inventory observation, without depending on a particular activity kind.
+Omission counts and truncated-question flags identify incomplete evidence. Do
+not answer a request whose choices have been truncated. Action and stdin request
+objects are limited to 256 KiB and JSON output to 192 KiB; these limits do not
+cap the HTTP response's memory use before compaction.
+The environment and action identifiers needed for a receipt must fit 96 KiB of
+encoded JSON. This is checked before dispatch so an oversized identifier cannot
+hide a receipt for an action that has already run.
+
+## Send one request over stdin
+
+Relays that must use a fixed command line can send one JSON object to
+`request`. It accepts the same operation options as the subcommands; `base-dir`
+remains a command-line flag. Unknown fields, malformed or trailing JSON, and
+objects larger than 256 KiB are rejected. Successful requests write one JSON
+result to stdout. An `act` request must explicitly include `"confirm": true`
+and is run through the same action validation and identity checks as `act`.
+
+```sh
+printf '%s' '{"kind":"providers","instance":"codex"}' |
+  t3 agent request --base-dir /path/to/worktree/.t3
+```
+
+The supported request kinds are `capabilities` (optional `command`), `snapshot`
+(`thread`, `turnLimit`, `offset`, and `beforeCursor`), `providers` (optional
+`instance`), and `act` (`confirm`, `environmentId`, `runtime`, and `command`).
+For `act`, put the same environment/runtime/action fields used by an action file
+at the top level beside `kind` and `confirm`. Request validation does not
+weaken the scopes: reads use orchestration-read and actions use
+orchestration-read plus orchestration-operate.
 
 ## Submit an explicit action
 

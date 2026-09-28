@@ -33,6 +33,7 @@ import {
   type ProviderAuthState,
   ProviderDriverKind,
   ProviderInstanceId,
+  type ServerProvider,
   type ProviderInstallState,
   ProviderSetupError,
   ResolvedKeybindingRule,
@@ -2093,6 +2094,77 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.equal(response.status, 200);
       assert.deepEqual(body, testEnvironmentDescriptor);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("serves bounded provider status snapshots to authenticated read sessions", () =>
+    Effect.gen(function* () {
+      const provider: ServerProvider = {
+        instanceId: ProviderInstanceId.make("codex"),
+        driver: ProviderDriverKind.make("codex"),
+        displayName: "Codex",
+        enabled: true,
+        installed: true,
+        version: "0.155.0",
+        status: "ready",
+        auth: { status: "authenticated", type: "oauth", label: "Signed in" },
+        checkedAt: "1970-01-01T00:00:00.000Z",
+        message: "status ".repeat(1000),
+        models: [],
+        slashCommands: [],
+        skills: [{ name: "review", path: "/skills/review", enabled: true }],
+      };
+      const providers = Array.from({ length: 26 }, (_, index) => ({
+        ...provider,
+        instanceId: ProviderInstanceId.make(index === 0 ? "codex" : `codex_work_${index}`),
+      }));
+      yield* buildAppUnderTest({
+        layers: {
+          providerRegistry: { getProviders: Effect.succeed(providers) },
+        },
+      });
+
+      const url = yield* getHttpServerUrl("/api/providers?instanceId=codex");
+      const unauthenticated = yield* fetchEffect(url);
+      assert.equal(unauthenticated.status, 401);
+
+      const cookie = yield* getAuthenticatedSessionCookieHeader();
+      const response = yield* fetchEffect(url, { headers: { cookie } });
+      const body = yield* responseJsonEffect<{
+        readonly providers: ReadonlyArray<{
+          readonly instanceId: string;
+          readonly message: string;
+          readonly messageTruncated: boolean;
+          readonly modelCount: number;
+          readonly skillCount: number;
+          readonly desktopBacked?: boolean | null;
+        }>;
+        readonly providerCount: number;
+        readonly providersOmitted: number;
+      }>(response);
+
+      assert.equal(response.status, 200);
+      assert.equal(body.providerCount, 1);
+      assert.equal(body.providersOmitted, 0);
+      assert.equal(body.providers.length, 1);
+      assert.equal(body.providers[0]?.instanceId, "codex");
+      assert.equal(body.providers[0]?.message.length, 2000);
+      assert.equal(body.providers[0]?.messageTruncated, true);
+      assert.equal(body.providers[0]?.modelCount, 0);
+      assert.equal(body.providers[0]?.skillCount, 1);
+      assert.equal(body.providers[0]?.desktopBacked, null);
+
+      const fullUrl = yield* getHttpServerUrl("/api/providers");
+      const fullResponse = yield* fetchEffect(fullUrl, { headers: { cookie } });
+      const fullBody = yield* responseJsonEffect<{
+        readonly providers: ReadonlyArray<unknown>;
+        readonly providerCount: number;
+        readonly providersOmitted: number;
+      }>(fullResponse);
+      assert.equal(fullResponse.status, 200);
+      assert.equal(fullBody.providers.length, 25);
+      assert.equal(fullBody.providerCount, 26);
+      assert.equal(fullBody.providersOmitted, 1);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

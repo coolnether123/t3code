@@ -1,3 +1,4 @@
+import * as NodeProcess from "node:process";
 import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
@@ -6,6 +7,7 @@ import {
   EnvironmentAuthInvalidError,
   EnvironmentRequestInvalidError,
   EnvironmentScopeRequiredError,
+  ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Console from "effect/Console";
@@ -29,16 +31,23 @@ import {
   AGENT_COMMAND_TYPES,
   AGENT_OUTPUT_MAX_BYTES,
   AGENT_RECEIPT_METADATA_MAX_BYTES,
+  AGENT_REQUEST_MAX_BYTES,
+  AGENT_TURN_LIMIT_SCHEMA,
+  AGENT_OFFSET_SCHEMA,
   AgentCliError,
+  assertAgentActionConfirmed,
   agentCommandSchema,
   compactAgentSnapshot,
+  compactAgentProviders,
+  decodeAgentRequest,
   decodeAgentAction,
   encodeAgentOutput,
+  validateAgentRequest,
   validateAgentAction,
   validateAgentIdentity,
   validateAgentOrigin,
   validateAgentReceiptMetadata,
-  type AgentAction,
+  type AgentRequest,
 } from "./agentProtocol.ts";
 
 const fail = (message: string) => Effect.fail(new AgentCliError({ message }));
@@ -126,17 +135,6 @@ export const resolveAgentTarget = Effect.fn("resolveAgentTarget")(function* (bas
 });
 type AgentTarget = Effect.Success<ReturnType<typeof resolveAgentTarget>>;
 
-export type AgentRequest =
-  | { readonly kind: "capabilities"; readonly command?: string }
-  | {
-      readonly kind: "snapshot";
-      readonly threadId?: ThreadId;
-      readonly turnLimit: number;
-      readonly offset?: number;
-      readonly beforeCursor?: string;
-    }
-  | { readonly kind: "act"; readonly action: AgentAction };
-
 export const withAgentSession = <A, E, R>(
   auth: Pick<EnvironmentAuth.EnvironmentAuth["Service"], "issueSession" | "revokeSession">,
   operate: boolean,
@@ -179,13 +177,13 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
   return yield* withAgentSession(auth, request.kind === "act", (token) =>
     Effect.gen(function* () {
       const headers = { authorization: `Bearer ${token}` };
-      const shell = yield* boundedHttp(client.orchestration.shellSnapshot({ headers }));
       const context = {
         environmentId: target.environmentId,
         runtime: target.runtime,
         origin: target.origin,
       };
       if (request.kind === "capabilities") {
+        const shell = yield* boundedHttp(client.orchestration.shellSnapshot({ headers }));
         const capabilities = target.descriptor.capabilities;
         const commands = AGENT_COMMAND_TYPES.filter((type) => {
           if (type === "thread.pin" || type === "thread.unpin")
@@ -234,6 +232,16 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
           ],
         };
       }
+      if (request.kind === "providers") {
+        const providerSnapshot = yield* boundedHttp(
+          client.providers.snapshot({
+            headers,
+            payload: request.instanceId === undefined ? {} : { instanceId: request.instanceId },
+          }),
+        );
+        return compactAgentProviders(target, providerSnapshot);
+      }
+      const shell = yield* boundedHttp(client.orchestration.shellSnapshot({ headers }));
       const threadId =
         request.kind === "snapshot"
           ? request.threadId
@@ -377,8 +385,28 @@ const printOutput = Effect.fn("printAgentOutput")(function* (output: unknown) {
   yield* Console.log(json);
 });
 
+const readAgentRequestFromStdin = Effect.tryPromise({
+  try: async () => {
+    const chunks: Array<Uint8Array> = [];
+    let byteLength = 0;
+    for await (const chunk of NodeProcess.stdin) {
+      const bytes = Buffer.from(chunk);
+      byteLength += bytes.byteLength;
+      if (byteLength > AGENT_REQUEST_MAX_BYTES)
+        throw new AgentCliError({ message: "Request exceeds 256 KiB." });
+      chunks.push(bytes);
+    }
+    return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
+  },
+  catch: (error) =>
+    isAgentCliError(error)
+      ? error
+      : new AgentCliError({ message: "Cannot read one JSON request from stdin." }),
+}).pipe(Effect.flatMap((json) => checked(() => decodeAgentRequest(json))));
+
 const runAgent = Effect.fn("runAgent")(
   function* (baseDir: string, request: AgentRequest) {
+    yield* checked(() => validateAgentRequest(request));
     const logLevel = yield* GlobalFlag.LogLevel;
     const target = yield* resolveAgentTarget(baseDir);
     // Resolve the existing auth store only after checking the unauthenticated descriptor.
@@ -407,6 +435,10 @@ const baseDirFlag = Flag.string("base-dir").pipe(
   Flag.withDescription("Required absolute T3 data directory for the running local environment."),
 );
 const threadFlag = Flag.string("thread").pipe(Flag.withSchema(ThreadId), Flag.optional);
+const instanceFlag = Flag.string("instance").pipe(
+  Flag.withSchema(ProviderInstanceId),
+  Flag.optional,
+);
 const capabilitiesCommand = Command.make("capabilities", {
   baseDir: baseDirFlag,
   command: Flag.choice("command", AGENT_COMMAND_TYPES).pipe(Flag.optional),
@@ -423,12 +455,12 @@ const snapshotCommand = Command.make("snapshot", {
   baseDir: baseDirFlag,
   thread: threadFlag,
   turnLimit: Flag.integer("turn-limit").pipe(
-    Flag.withSchema(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 5 }))),
+    Flag.withSchema(AGENT_TURN_LIMIT_SCHEMA),
     Flag.withDefault(3),
   ),
   beforeCursor: Flag.string("before-cursor").pipe(Flag.optional),
   offset: Flag.integer("offset").pipe(
-    Flag.withSchema(Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 1_000_000 }))),
+    Flag.withSchema(AGENT_OFFSET_SCHEMA),
     Flag.withDefault(0),
     Flag.withDescription(
       "Project/thread list offset, 25 entries per list; use listPage.nextOffset.",
@@ -439,8 +471,6 @@ const snapshotCommand = Command.make("snapshot", {
     "Read bounded projects/tasks, or one task's messages, activity and request IDs.",
   ),
   Command.withHandler((flags) => {
-    if (Option.isSome(flags.beforeCursor) && Option.isNone(flags.thread))
-      return fail("--before-cursor requires --thread.").pipe(handleAgentCliFailure);
     return runAgent(flags.baseDir, {
       kind: "snapshot",
       turnLimit: flags.turnLimit,
@@ -453,6 +483,21 @@ const snapshotCommand = Command.make("snapshot", {
     }).pipe(handleAgentCliFailure);
   }),
 );
+const providersCommand = Command.make("providers", {
+  baseDir: baseDirFlag,
+  instance: instanceFlag,
+}).pipe(
+  Command.withDescription("Show bounded status for configured provider instances without probing."),
+  Command.withHandler((flags) =>
+    runAgent(flags.baseDir, {
+      kind: "providers",
+      ...Option.match(flags.instance, {
+        onNone: () => ({}),
+        onSome: (instanceId) => ({ instanceId }),
+      }),
+    }).pipe(handleAgentCliFailure),
+  ),
+);
 const actCommand = Command.make("act", {
   baseDir: baseDirFlag,
   file: Flag.string("file"),
@@ -463,10 +508,18 @@ const actCommand = Command.make("act", {
   ),
   Command.withHandler(
     Effect.fn(function* (flags) {
-      if (!flags.confirm)
-        return yield* fail("act requires --confirm after inspecting the action and its target.");
+      yield* checked(() => assertAgentActionConfirmed(flags.confirm));
       const action = yield* readAgentActionFile(flags.file);
       yield* runAgent(flags.baseDir, { kind: "act", action });
+    }, handleAgentCliFailure),
+  ),
+);
+const requestCommand = Command.make("request", { baseDir: baseDirFlag }).pipe(
+  Command.withDescription("Read one bounded JSON request from stdin and return one JSON result."),
+  Command.withHandler(
+    Effect.fn(function* (flags) {
+      const request = yield* readAgentRequestFromStdin;
+      yield* runAgent(flags.baseDir, request);
     }, handleAgentCliFailure),
   ),
 );
@@ -475,5 +528,11 @@ export const agentCommand = Command.make("agent").pipe(
   Command.withDescription(
     "Inspect and control a running T3 environment through its authenticated semantic API.",
   ),
-  Command.withSubcommands([capabilitiesCommand, snapshotCommand, actCommand]),
+  Command.withSubcommands([
+    capabilitiesCommand,
+    snapshotCommand,
+    providersCommand,
+    actCommand,
+    requestCommand,
+  ]),
 );

@@ -15,6 +15,7 @@ import * as ServerConfig from "./config.ts";
 import {
   otlpTracesProxyRouteLayer,
   assetRouteLayer,
+  providerSnapshotsHttpApiLayer,
   serverEnvironmentHttpApiLayer,
   staticAndDevRouteLayer,
   browserApiCorsLayer,
@@ -604,6 +605,7 @@ export const makeRoutesLayer = Layer.mergeAll(
       Layer.provide(connectHttpApiLayer),
       Layer.provide(orchestrationHttpApiLayer),
       Layer.provide(pullRequestHttpApiLayer),
+      Layer.provide(providerSnapshotsHttpApiLayer),
       Layer.provide(serverEnvironmentHttpApiLayer),
       Layer.provide(environmentAuthenticatedAuthLayer),
     ),
