@@ -2,6 +2,7 @@ import {
   type ClaudeSettings,
   type ModelCapabilities,
   type ServerProviderSlashCommand,
+  type ServerProviderUsageWindow,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -398,6 +399,45 @@ const probeClaudeCapabilities = (
     Effect.map((result) => (Result.isSuccess(result) ? result.success : undefined)),
   );
 };
+
+export type ClaudeSubscriptionReading =
+  | { readonly _tag: "Windows"; readonly windows: ReadonlyArray<ServerProviderUsageWindow> }
+  | { readonly _tag: "Unavailable"; readonly reason: string };
+
+/**
+ * Reads the account's subscription windows for usage history, whether or not
+ * the Claude provider is enabled for chats. Like the capability probe, it
+ * never sends a prompt.
+ */
+export const readClaudeSubscriptionWindows = Effect.fn("readClaudeSubscriptionWindows")(function* (
+  claudeSettings: ClaudeSettings,
+) {
+  const checkedAt = DateTime.formatIso(yield* DateTime.now);
+  const probe = yield* probeClaudeCapabilities(claudeSettings);
+  if (probe === undefined) {
+    return {
+      _tag: "Unavailable",
+      reason: "The Claude CLI could not be started to read limits.",
+    } satisfies ClaudeSubscriptionReading;
+  }
+  if (probe.usage === undefined) {
+    return {
+      _tag: "Unavailable",
+      reason: "The Claude CLI did not report subscription limits.",
+    } satisfies ClaudeSubscriptionReading;
+  }
+  const { limits } = claudeUsageResponseToLimits({ response: probe.usage, checkedAt });
+  if (limits.windows.length > 0) {
+    return { _tag: "Windows", windows: limits.windows } satisfies ClaudeSubscriptionReading;
+  }
+  return {
+    _tag: "Unavailable",
+    reason:
+      probe.subscriptionType === undefined
+        ? "Sign in to the Claude CLI on this computer with `claude auth login` to track Claude limits."
+        : "This Claude account does not report subscription limits.",
+  } satisfies ClaudeSubscriptionReading;
+});
 
 const runClaudeCommand = Effect.fn("runClaudeCommand")(function* (
   claudeSettings: ClaudeSettings,

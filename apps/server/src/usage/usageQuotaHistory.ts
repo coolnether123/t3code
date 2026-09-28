@@ -204,9 +204,16 @@ export class QuotaCostAccumulator {
   readonly rows;
   readonly rates: RateTable;
   readonly overrides: RateTable | undefined;
-  constructor(intervals: readonly UsageQuotaInterval[], rates: RateTable, overrides?: RateTable) {
+  readonly provider: "codex" | "claude";
+  constructor(
+    intervals: readonly UsageQuotaInterval[],
+    rates: RateTable,
+    overrides?: RateTable,
+    provider: "codex" | "claude" = "codex",
+  ) {
     this.rates = rates;
     this.overrides = overrides;
+    this.provider = provider;
     this.rows = intervals.map((interval) => ({
       intervalId: interval.id,
       start: Date.parse(interval.sinceTime),
@@ -225,12 +232,12 @@ export class QuotaCostAccumulator {
   }
 
   add(record: UsageRecord): void {
+    if (record.provider !== this.provider) return;
     // Spark has a separate quota; Qwen runs through the CLI without consuming
     // the OpenAI subscription. Neither belongs in its weekly conversion.
     if (
-      record.provider !== "codex" ||
-      /spark|bengalfox/i.test(record.model) ||
-      /^(?:[^/]+\/)?qwen/i.test(record.model)
+      this.provider === "codex" &&
+      (/spark|bengalfox/i.test(record.model) || /^(?:[^/]+\/)?qwen/i.test(record.model))
     )
       return;
     // Binary search keeps a 90-day scan independent of the number of reset periods.

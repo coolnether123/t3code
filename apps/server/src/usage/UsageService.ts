@@ -96,6 +96,12 @@ import {
   type CachedFileMeta,
 } from "./usageScanCache.ts";
 import { UsageScanStore } from "./usageScanStore.ts";
+import {
+  CLAUDE_QUOTA_HISTORY_FILE,
+  claudeQuotaHistories,
+  decodeClaudeQuotaHistory,
+  emptyClaudeQuotaHistory,
+} from "./claudeQuotaHistory.ts";
 import type { UsageRecord } from "./usageTranscripts.ts";
 import {
   applyCodexServiceTier,
@@ -500,6 +506,7 @@ export const make = Effect.gen(function* () {
   const ratesCachePath = path.join(config.stateDir, "usage-model-rates.json");
   /** The pre-SQLite cache. Imported once, then kept beside the store as a backup. */
   const legacyScanCachePath = path.join(config.stateDir, "usage-scan-cache.json");
+  const claudeQuotaHistoryPath = path.join(config.stateDir, CLAUDE_QUOTA_HISTORY_FILE);
   // Parsed transcript records live in SQLite; only a small per-file index is
   // resident. See usageScanStore for why the whole-document cache was retired.
   const scanStore = UsageScanStore.open(path.join(config.stateDir, "usage-scan-cache.sqlite"));
@@ -674,6 +681,7 @@ export const make = Effect.gen(function* () {
     readonly pendingSources: UsageSource[];
     readonly quotaCosts: UsageQuotaCost[];
     quotaHistory: UsageSummary["quotaHistory"];
+    providerQuotaHistories: UsageSummary["providerQuotaHistories"];
     aggregator: UsageAggregator | undefined;
   };
 
@@ -922,6 +930,7 @@ export const make = Effect.gen(function* () {
 
     const startedAtMs = yield* Clock.currentTimeMillis;
     const quotaIntervals = input.quotaIntervals ?? [];
+    const quotaProvider = input.quotaProvider ?? "codex";
     if (!validQuotaIntervals(quotaIntervals, input.sinceDay, input.untilDay)) {
       return yield* new UsageReadError({
         reason: "invalidWindow",
@@ -936,7 +945,19 @@ export const make = Effect.gen(function* () {
             Effect.provideService(Path.Path, path),
           )
         : undefined;
-    if (progress !== undefined) progress.quotaHistory = quotaHistory;
+    // Claude windows come from the sampler's saved readings, beside Codex's.
+    const providerQuotaHistories =
+      input.includeQuotaHistory || input.quotaHistoryOnly || input.quotaIntervals !== undefined
+        ? yield* fileSystem.readFileString(claudeQuotaHistoryPath).pipe(
+            Effect.flatMap((text) => decodeScanCacheFile(text)),
+            Effect.map((document) => claudeQuotaHistories(decodeClaudeQuotaHistory(document))),
+            Effect.orElseSucceed(() => claudeQuotaHistories(emptyClaudeQuotaHistory)),
+          )
+        : undefined;
+    if (progress !== undefined) {
+      progress.quotaHistory = quotaHistory;
+      progress.providerQuotaHistories = providerQuotaHistories;
+    }
     if (input.quotaHistoryOnly) {
       const finishedAtMs = yield* Clock.currentTimeMillis;
       return {
@@ -956,6 +977,7 @@ export const make = Effect.gen(function* () {
         },
         scanDurationMs: Math.max(0, finishedAtMs - startedAtMs),
         quotaHistory,
+        ...(providerQuotaHistories === undefined ? {} : { providerQuotaHistories }),
         quotaCostSnapshots:
           input.quotaIntervals === undefined
             ? quotaCostLedger
@@ -1076,7 +1098,7 @@ export const make = Effect.gen(function* () {
     const selectedTurnIds = input.turnIds === undefined ? null : new Set(input.turnIds);
     const activeDirs = dirs.filter(
       ({ provider }) =>
-        (input.quotaIntervals === undefined || provider === "codex") &&
+        (input.quotaIntervals === undefined || provider === (input.quotaProvider ?? "codex")) &&
         (selectedProviders === null || selectedProviders.has(provider)),
     );
     const plannedSources = yield* Effect.forEach(
@@ -1147,9 +1169,10 @@ export const make = Effect.gen(function* () {
         let scannedFiles = 0;
         const retainedVolumeId = coverage?.volumeId ?? volumeId;
         const quota = new QuotaCostAccumulator(
-          provider === "codex" ? quotaIntervals : [],
+          provider === quotaProvider ? quotaIntervals : [],
           scanRates,
           createOverrideRateTable(settings.usagePriceOverrides),
+          quotaProvider,
         );
         for (const [, entry] of retainedFiles) {
           if (entry.records.length > 0) scannedFiles += 1;
@@ -1326,9 +1349,10 @@ export const make = Effect.gen(function* () {
       // session spans days and models, so clients total this figure instead.
       const sessionIds = new Set<string>();
       const quota = new QuotaCostAccumulator(
-        provider === "codex" ? quotaIntervals : [],
+        provider === quotaProvider ? quotaIntervals : [],
         scanRates,
         createOverrideRateTable(settings.usagePriceOverrides),
+        quotaProvider,
       );
 
       for (const file of selection.files) {
@@ -1574,6 +1598,7 @@ export const make = Effect.gen(function* () {
       scanDurationMs: Math.max(0, finishedAtMs - startedAtMs),
       ...(repeatedInput === undefined ? {} : { repeatedInput }),
       ...(quotaHistory === undefined ? {} : { quotaHistory }),
+      ...(providerQuotaHistories === undefined ? {} : { providerQuotaHistories }),
       ...(input.quotaIntervals === undefined ? {} : { quotaCosts }),
       ...(input.quotaIntervals === undefined
         ? {}
@@ -1613,7 +1638,7 @@ export const make = Effect.gen(function* () {
     const unfinishedSources = dirs
       .filter(
         ({ provider }) =>
-          (input.quotaIntervals === undefined || provider === "codex") &&
+          (input.quotaIntervals === undefined || provider === (input.quotaProvider ?? "codex")) &&
           (selectedProviders === null || selectedProviders.has(provider)),
       )
       .filter(({ provider, dir }) => !completedPaths.has(`${provider}\u0000${dir}`))
@@ -1658,6 +1683,9 @@ export const make = Effect.gen(function* () {
       ),
       pricing: pricing(),
       ...(progress.quotaHistory === undefined ? {} : { quotaHistory: progress.quotaHistory }),
+      ...(progress.providerQuotaHistories === undefined
+        ? {}
+        : { providerQuotaHistories: progress.providerQuotaHistories }),
       ...(input.quotaIntervals === undefined
         ? {}
         : {
@@ -1680,6 +1708,7 @@ export const make = Effect.gen(function* () {
         pendingSources: [],
         quotaCosts: [],
         quotaHistory: undefined,
+        providerQuotaHistories: undefined,
         aggregator: undefined,
       };
       let ownedResult:
@@ -1702,7 +1731,8 @@ export const make = Effect.gen(function* () {
           const sources = yield* Effect.forEach(
             context.dirs.filter(
               ({ provider }) =>
-                (input.quotaIntervals === undefined || provider === "codex") &&
+                (input.quotaIntervals === undefined ||
+                  provider === (input.quotaProvider ?? "codex")) &&
                 (input.providers === undefined || input.providers.includes(provider)),
             ),
             Effect.fnUntraced(function* ({ provider, dir }) {

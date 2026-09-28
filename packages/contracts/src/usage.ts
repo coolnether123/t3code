@@ -210,6 +210,25 @@ export const UsageQuotaHistory = Schema.Struct({
 });
 export type UsageQuotaHistory = typeof UsageQuotaHistory.Type;
 
+/**
+ * Saved readings of one provider subscription window other than Codex's
+ * weekly limit, such as Claude's session and weekly windows. Samples use the
+ * Codex shape so cycle and pace math apply unchanged.
+ */
+export const UsageProviderQuotaHistory = Schema.Struct({
+  provider: Schema.Literals(["claude"]),
+  windowId: TrimmedNonEmptyString,
+  label: Schema.String,
+  kind: Schema.Literals(["session", "weekly", "monthly", "other"]),
+  windowDurationMins: Schema.optional(NonNegativeInt),
+  status: Schema.Literals(["ready", "missing", "unavailable"]),
+  message: Schema.NullOr(Schema.String),
+  /** Last reading attempt, successful or not. */
+  checkedAt: Schema.optional(Schema.String),
+  samples: Schema.Array(UsageQuotaSample),
+});
+export type UsageProviderQuotaHistory = typeof UsageProviderQuotaHistory.Type;
+
 /** Cost is measured after the first observation and through the last one. */
 export const UsageQuotaInterval = Schema.Struct({
   id: TrimmedNonEmptyString,
@@ -294,6 +313,8 @@ export const UsageSummaryInput = Schema.Struct({
   /** Read saved observations without scanning transcripts or fetching prices. */
   quotaHistoryOnly: Schema.optional(Schema.Boolean),
   quotaIntervals: Schema.optional(Schema.Array(UsageQuotaInterval).check(Schema.isMaxLength(64))),
+  /** Whose subscription the quota intervals measure. Defaults to Codex. */
+  quotaProvider: Schema.optional(Schema.Literals(["codex", "claude"])),
 });
 export type UsageSummaryInput = typeof UsageSummaryInput.Type;
 
@@ -465,6 +486,7 @@ export const UsageSummary = Schema.Struct({
   /** Wall-clock cost of the scan, surfaced in diagnostics. */
   scanDurationMs: NonNegativeInt,
   quotaHistory: Schema.optional(UsageQuotaHistory),
+  providerQuotaHistories: Schema.optional(Schema.Array(UsageProviderQuotaHistory)),
   quotaCosts: Schema.optional(Schema.Array(UsageQuotaCost)),
   quotaCostSnapshots: Schema.optional(Schema.Array(UsageQuotaCostSnapshot)),
   repeatedInput: Schema.optional(UsageRepeatedInputSummary),

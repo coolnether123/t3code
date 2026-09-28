@@ -130,6 +130,7 @@ import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as UsageService from "./usage/UsageService.ts";
 import * as UsageResetCheck from "./usage/UsageResetCheck.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
+import * as ClaudeQuotaSampler from "./usage/ClaudeQuotaSampler.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import {
   clearPersistedServerRuntimeState,
@@ -532,7 +533,12 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(Layer.mergeAll(WorkerRuntimeLayerLive, TerminalLayerLive, PreviewLayerLive)),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(
-    Layer.mergeAll(Keybindings.layer, EnvironmentTheme.layer, UsageLimitSources.layer),
+    Layer.mergeAll(
+      Keybindings.layer,
+      EnvironmentTheme.layer,
+      UsageLimitSources.layer,
+      ClaudeQuotaSampler.layer,
+    ),
   ),
   Layer.provideMerge(ProviderRegistryLive),
   // The instance registry is the new routing keystone — text generation,

@@ -105,7 +105,14 @@ describe("history-only usage requests", () => {
       expect(result.quotaHistory?.status).toBe("ready");
       expect(result.sources).toEqual([]);
       expect(result.buckets).toEqual([]);
-      expect(readFileString).not.toHaveBeenCalled();
+      // Only the small saved Claude limit history may be read.
+      expect(
+        readFileString.mock.calls.map(([filePath]) => String(filePath).split(/[\\/]/).at(-1)),
+      ).toEqual(["usage-claude-quota-history.json"]);
+      expect(result.providerQuotaHistories?.[0]).toMatchObject({
+        provider: "claude",
+        status: "missing",
+      });
       expect(request).not.toHaveBeenCalled();
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
