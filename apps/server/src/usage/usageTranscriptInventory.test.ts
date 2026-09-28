@@ -63,7 +63,9 @@ describe("bounded inventory ownership", () => {
               ),
             );
             expect(retry).toEqual({ files: [], complete: false });
-            expect(directoryReads).toBe(1);
+            // Each directory's mtime is read before its entries, so a blocked
+            // metadata read stops the walk before the directory is listed.
+            expect(directoryReads).toBe(blockedOperation === "readdir" ? 1 : 0);
             release.resolve();
             expect((yield* Effect.promise(() => abandoned)).complete).toBe(false);
             const complete = yield* Effect.promise(() =>
@@ -73,8 +75,9 @@ describe("bounded inventory ownership", () => {
               files: [{ path: rollout, size: 3, mtimeMs: 10 }],
               complete: true,
             });
+            // One directory listing and two metadata reads: the directory, then the rollout.
             expect(directoryReads).toBe(1);
-            expect(metadataReads).toBe(1);
+            expect(metadataReads).toBe(2);
           } finally {
             release.resolve();
             yield* Fiber.interrupt(first);

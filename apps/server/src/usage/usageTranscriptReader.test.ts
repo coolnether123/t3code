@@ -218,6 +218,63 @@ describe("incremental transcript reads", () => {
     }
   });
 
+  it("refreshes a known inventory from changed directories and recent transcripts", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-known-"));
+    const oldDay = NodePath.join(directory, "2026", "08", "01");
+    const today = NodePath.join(directory, "2026", "09", "28");
+    try {
+      await NodeFSP.mkdir(oldDay, { recursive: true });
+      await NodeFSP.mkdir(today, { recursive: true });
+      const old = NodePath.join(oldDay, "old.jsonl");
+      const active = NodePath.join(today, "active.jsonl");
+      await NodeFSP.writeFile(old, "{}\n");
+      await NodeFSP.utimes(old, 1_000, 1_000);
+      await NodeFSP.writeFile(active, "{}\n");
+      let wall = performance.timeOrigin + performance.now();
+      const clock = () => wall;
+      const list = () =>
+        listTranscriptFilesBounded(
+          directory,
+          0,
+          "codex",
+          Number.POSITIVE_INFINITY,
+          undefined,
+          clock,
+        );
+      expect((await list()).files).toHaveLength(2);
+
+      // A recent transcript grows and a new one appears; both are seen without a full walk.
+      await NodeFSP.appendFile(active, "{}\n");
+      const added = NodePath.join(today, "added.jsonl");
+      await NodeFSP.writeFile(added, "{}\n");
+      wall += 60_000;
+      const refreshed = await list();
+      expect(refreshed.complete).toBe(true);
+      expect(refreshed.files.find((file) => file.path === active)?.size).toBe(6);
+      expect(refreshed.files.map((file) => file.path).sort()).toEqual([active, added, old].sort());
+
+      // A deleted directory's transcripts disappear.
+      await NodeFSP.rm(oldDay, { recursive: true, force: true });
+      wall += 60_000;
+      expect((await list()).files.map((file) => file.path).sort()).toEqual([active, added].sort());
+
+      // An old transcript's append is left to the periodic full walk.
+      await NodeFSP.mkdir(oldDay, { recursive: true });
+      await NodeFSP.writeFile(old, "{}\n");
+      await NodeFSP.utimes(old, 1_000, 1_000);
+      wall += 6 * 60_000;
+      expect((await list()).files.some((file) => file.path === old)).toBe(true);
+      await NodeFSP.appendFile(old, "{}\n");
+      await NodeFSP.utimes(old, 1_000, 1_000);
+      wall += 60_000;
+      expect((await list()).files.find((file) => file.path === old)?.size).toBe(3);
+      wall += 6 * 60_000;
+      expect((await list()).files.find((file) => file.path === old)?.size).toBe(6);
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("resumes a growing Codex JSONL file without rereading its prefix", async () => {
     const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-append-"));
     const path = NodePath.join(directory, "rollout.jsonl");

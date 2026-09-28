@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
+// @effect-diagnostics globalDate:off - the inventory sweep interval is wall-clock, like file mtimes.
 /**
  * Raw filesystem access for transcript scanning.
  *
@@ -62,9 +63,137 @@ interface TranscriptInventoryWalk {
   readonly transcripts: string[];
   transcriptOffset: number;
   readonly files: Map<string, TranscriptFile>;
+  /** Each directory's mtime, taken before its entries were read. */
+  readonly directoryMtimes: Map<string, number>;
 }
 
 const pendingTranscriptInventories = new Map<string, TranscriptInventoryWalk>();
+
+/**
+ * The last complete walk of a root. Later reads refresh it instead of walking
+ * again: a directory whose mtime is unchanged has the same entries, so only
+ * changed directories are re-read and only recently written transcripts are
+ * re-stat'd. A full walk still runs every few minutes, because appending to an
+ * old transcript (a resumed session) changes neither its directory nor, until
+ * then, anything the refresh looks at.
+ */
+interface KnownTranscriptInventory {
+  readonly files: Map<string, TranscriptFile>;
+  readonly directoryMtimes: Map<string, number>;
+  readonly sweptAtMs: number;
+}
+
+const knownTranscriptInventories = new Map<string, KnownTranscriptInventory>();
+const FULL_INVENTORY_SWEEP_MS = 5 * 60_000;
+/** Transcripts written within this span are re-stat'd on every refresh. */
+const ACTIVE_TRANSCRIPT_MS = 48 * 60 * 60_000;
+const METADATA_BATCH = 128;
+
+const statMtime = async (path: string): Promise<number | null> => {
+  try {
+    return (await NodeFSP.stat(path)).mtimeMs;
+  } catch {
+    return null;
+  }
+};
+
+const isInside = (directory: string, path: string) =>
+  path.startsWith(directory.endsWith(NodePath.sep) ? directory : directory + NodePath.sep);
+
+/**
+ * Brings a known inventory up to date. Returns false when the deadline passed
+ * first; what was refreshed so far is kept and the rest is retried next time.
+ */
+async function refreshKnownInventory(
+  known: KnownTranscriptInventory,
+  isTranscript: (name: string) => boolean,
+  expired: () => boolean,
+  wallClock: () => number,
+): Promise<boolean> {
+  const changed: string[] = [];
+  const directories = [...known.directoryMtimes.keys()];
+  for (let offset = 0; offset < directories.length; offset += METADATA_BATCH) {
+    const batch = directories.slice(offset, offset + METADATA_BATCH);
+    const mtimes = await Promise.all(batch.map(statMtime));
+    batch.forEach((directory, index) => {
+      const mtime = mtimes[index];
+      if (mtime === null) {
+        for (const path of [...known.directoryMtimes.keys()]) {
+          if (path === directory || isInside(directory, path)) known.directoryMtimes.delete(path);
+        }
+        for (const path of [...known.files.keys()]) {
+          if (isInside(directory, path)) known.files.delete(path);
+        }
+      } else if (mtime !== known.directoryMtimes.get(directory)) {
+        changed.push(directory);
+      }
+    });
+    if (expired()) return false;
+  }
+
+  const restat = new Set<string>();
+  const queue = [...changed];
+  while (queue.length > 0) {
+    const batch = queue.splice(0, 64);
+    const listings = await Promise.all(
+      batch.map(async (directory) => {
+        const mtime = await statMtime(directory);
+        try {
+          return {
+            directory,
+            mtime,
+            entries: await NodeFSP.readdir(directory, { withFileTypes: true }),
+          };
+        } catch {
+          return { directory, mtime, entries: null };
+        }
+      }),
+    );
+    for (const { directory, mtime, entries } of listings) {
+      if (entries === null || mtime === null) continue;
+      known.directoryMtimes.set(directory, mtime);
+      const present = new Set<string>();
+      for (const entry of entries) {
+        const child = NodePath.join(directory, entry.name);
+        if (entry.isDirectory()) {
+          if (!known.directoryMtimes.has(child)) queue.push(child);
+        } else if (isTranscript(entry.name)) {
+          present.add(child);
+          restat.add(child);
+        }
+      }
+      for (const path of [...known.files.keys()]) {
+        if (NodePath.dirname(path) === directory && !present.has(path)) known.files.delete(path);
+      }
+    }
+    if (expired()) return false;
+  }
+
+  const activeSince = wallClock() - ACTIVE_TRANSCRIPT_MS;
+  for (const file of known.files.values()) {
+    if (file.mtimeMs >= activeSince) restat.add(file.path);
+  }
+  const paths = [...restat];
+  for (let offset = 0; offset < paths.length; offset += METADATA_BATCH) {
+    const batch = paths.slice(offset, offset + METADATA_BATCH);
+    const stats = await Promise.all(
+      batch.map(async (path) => {
+        try {
+          const stats = await NodeFSP.stat(path);
+          return { path, size: stats.size, mtimeMs: stats.mtimeMs };
+        } catch {
+          return { path, size: -1, mtimeMs: -1 };
+        }
+      }),
+    );
+    for (const file of stats) {
+      if (file.size < 0) known.files.delete(file.path);
+      else known.files.set(file.path, file);
+    }
+    if (expired()) return false;
+  }
+  return true;
+}
 
 export interface TranscriptScanSelection<File extends TranscriptFile = TranscriptFile> {
   readonly files: readonly File[];
@@ -154,12 +283,38 @@ export async function listTranscriptFilesBounded(
   provider: UsageProviderKind,
   maxDurationMs: number,
   now: () => number = () => performance.now(),
+  wallClock: () => number = () => Date.now(),
 ): Promise<TranscriptFileListing> {
   if (provider === "opencode") {
     return { files: await listOpenCodeDatabase(root, sinceMs), complete: true };
   }
 
+  const isTranscript = (name: string) =>
+    provider === "aistudio"
+      ? true
+      : provider === "chatgpt"
+        ? name === "conversations.json"
+        : provider === "gemini"
+          ? (name.startsWith("session-") && (name.endsWith(".json") || name.endsWith(".jsonl"))) ||
+            name === "tokens_cache.json"
+          : name.endsWith(".jsonl");
   const inventoryKey = `${provider}\u0000${root}`;
+  const deadline = now() + maxDurationMs;
+  const expired = () => now() >= deadline;
+  const withinWindow = (files: Iterable<TranscriptFile>) =>
+    [...files].filter((file) => file.mtimeMs >= sinceMs);
+
+  const known = knownTranscriptInventories.get(inventoryKey);
+  if (
+    known !== undefined &&
+    !pendingTranscriptInventories.has(inventoryKey) &&
+    wallClock() - known.sweptAtMs < FULL_INVENTORY_SWEEP_MS
+  ) {
+    if (expired()) return { files: withinWindow(known.files.values()), complete: false };
+    const refreshed = await refreshKnownInventory(known, isTranscript, expired, wallClock);
+    return { files: withinWindow(known.files.values()), complete: refreshed };
+  }
+
   const inventory = pendingTranscriptInventories.get(inventoryKey) ?? {
     running: false,
     directories: [root],
@@ -167,29 +322,17 @@ export async function listTranscriptFilesBounded(
     transcripts: [],
     transcriptOffset: 0,
     files: new Map<string, TranscriptFile>(),
+    directoryMtimes: new Map<string, number>(),
   };
   pendingTranscriptInventories.set(inventoryKey, inventory);
-  const deadline = now() + maxDurationMs;
-  const expired = () => now() >= deadline;
   const partial = (): TranscriptFileListing => ({
-    files: [...inventory.files.values()].filter((file) => file.mtimeMs >= sinceMs),
+    files: withinWindow(inventory.files.values()),
     complete: false,
   });
   // Effect cancellation does not stop an already-started native filesystem promise.
   if (inventory.running) return partial();
   inventory.running = true;
   try {
-    const isTranscript = (name: string) =>
-      provider === "aistudio"
-        ? true
-        : provider === "chatgpt"
-          ? name === "conversations.json"
-          : provider === "gemini"
-            ? (name.startsWith("session-") &&
-                (name.endsWith(".json") || name.endsWith(".jsonl"))) ||
-              name === "tokens_cache.json"
-            : name.endsWith(".jsonl");
-
     // The provider homes contain thousands of nested directories. Walking one
     // directory at a time made a warm refresh spend tens of seconds on metadata.
     // Breadth-first batches keep I/O bounded while allowing independent folders
@@ -229,14 +372,17 @@ export async function listTranscriptFilesBounded(
         inventory.directoryOffset += directories.length;
         const listings = await Promise.all(
           directories.map(async (dir) => {
+            // Taken before the entries, so an entry added meanwhile changes it.
+            const mtime = await statMtime(dir);
             try {
-              return { dir, entries: await NodeFSP.readdir(dir, { withFileTypes: true }) };
+              return { dir, mtime, entries: await NodeFSP.readdir(dir, { withFileTypes: true }) };
             } catch {
-              return { dir, entries: [] };
+              return { dir, mtime: null, entries: [] };
             }
           }),
         );
-        for (const { dir, entries } of listings) {
+        for (const { dir, mtime, entries } of listings) {
+          if (mtime !== null) inventory.directoryMtimes.set(dir, mtime);
           for (const entry of entries) {
             const child = NodePath.join(dir, entry.name);
             if (entry.isDirectory()) inventory.directories.push(child);
@@ -249,10 +395,12 @@ export async function listTranscriptFilesBounded(
       if (pendingTranscriptInventories.get(inventoryKey) === inventory) {
         pendingTranscriptInventories.delete(inventoryKey);
       }
-      return {
-        files: [...inventory.files.values()].filter((file) => file.mtimeMs >= sinceMs),
-        complete: true,
-      };
+      knownTranscriptInventories.set(inventoryKey, {
+        files: new Map(inventory.files),
+        directoryMtimes: new Map(inventory.directoryMtimes),
+        sweptAtMs: wallClock(),
+      });
+      return { files: withinWindow(inventory.files.values()), complete: true };
     }
   } finally {
     inventory.running = false;
