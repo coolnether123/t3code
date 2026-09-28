@@ -466,8 +466,15 @@ function decodeRepeatedInputActiveSources(
  * cache should cost one cold scan, never a broken page.
  */
 export function decodeScanCache(document: unknown): ScanCache {
-  const cache: ScanCache = new Map();
-  if (typeof document !== "object" || document === null) return cache;
+  return new Map(decodeScanCacheEntries(document));
+}
+
+/**
+ * Decodes entries one at a time so a large legacy document can be imported
+ * without holding a second complete copy of every record.
+ */
+export function* decodeScanCacheEntries(document: unknown): Generator<[string, CachedFile]> {
+  if (typeof document !== "object" || document === null) return;
 
   const root = document as Partial<SerializedCache>;
   if (
@@ -479,277 +486,349 @@ export function decodeScanCache(document: unknown): ScanCache {
     root.version !== 7 &&
     root.version !== USAGE_SCAN_CACHE_VERSION
   ) {
-    return cache;
+    return;
   }
-  if (!isRecordArray(root.models) || !isRecordArray(root.sessions)) return cache;
-  if (typeof root.files !== "object" || root.files === null) return cache;
+  if (!isRecordArray(root.models) || !isRecordArray(root.sessions)) return;
+  if (typeof root.files !== "object" || root.files === null) return;
 
   // The intern tables must be all strings: a numeric entry would pass the
   // undefined guard below, land in a record's model, and crash the aggregate
   // at normalizeModelName. A corrupt table rejects the whole cache.
-  if (!root.models.every((value) => typeof value === "string")) return cache;
-  if (!root.sessions.every((value) => typeof value === "string")) return cache;
+  if (!root.models.every((value) => typeof value === "string")) return;
+  if (!root.sessions.every((value) => typeof value === "string")) return;
   const models = root.models as readonly string[];
   const sessions = root.sessions as readonly string[];
+  const version = root.version;
 
   for (const [path, raw] of Object.entries(root.files)) {
-    if (typeof raw !== "object" || raw === null) continue;
-    const entry = raw as Partial<SerializedFile>;
-    if (typeof entry.s !== "number" || typeof entry.m !== "number") continue;
+    const entry = decodeSerializedFile(raw, version, models, sessions);
+    if (entry !== undefined) yield [path, entry];
+  }
+}
+
+function decodeSerializedFile(
+  raw: unknown,
+  version: number,
+  models: readonly string[],
+  sessions: readonly string[],
+): CachedFile | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const entry = raw as Partial<SerializedFile>;
+  if (typeof entry.s !== "number" || typeof entry.m !== "number") return undefined;
+  if (
+    entry.p !== "claude" &&
+    entry.p !== "codex" &&
+    entry.p !== "gemini" &&
+    entry.p !== "opencode" &&
+    entry.p !== "chatgpt" &&
+    entry.p !== "aistudio"
+  ) {
+    return undefined;
+  }
+  if (!isRecordArray(entry.r)) return undefined;
+
+  const provider: UsageProviderKind = entry.p;
+  // v6 introduced the stable Codex keys required by the current global
+  // de-duplication pass. Preserve those records during the v7 migration.
+  // They have no repeated-input cursor, so UsageService performs one full
+  // repeated-input read before enabling append-only attribution.
+  if (version < 6 && provider === "codex") return undefined;
+  const records: UsageRecord[] = [];
+  // Any corrupt row disqualifies the whole entry. Keeping the survivors
+  // under the original (size, mtime) would read as a valid warm hit and the
+  // file would never be re-parsed, silently losing the dropped rows' usage.
+  let corrupt = false;
+  for (const row of entry.r) {
+    if (!isRecordArray(row) || row.length < 10) {
+      corrupt = true;
+      break;
+    }
+    const [
+      timestampMs,
+      modelIndex,
+      sessionIndex,
+      uncached,
+      cached,
+      cacheCreation,
+      output,
+      reasoning,
+      dedupeKey,
+      reportedCostUsd,
+      serviceTier,
+      turnId,
+    ] = row as SerializedRecord;
+
+    const model = typeof modelIndex === "number" ? models[modelIndex] : undefined;
     if (
-      entry.p !== "claude" &&
-      entry.p !== "codex" &&
-      entry.p !== "gemini" &&
-      entry.p !== "opencode" &&
-      entry.p !== "chatgpt" &&
-      entry.p !== "aistudio"
+      typeof timestampMs !== "number" ||
+      !Number.isFinite(timestampMs) ||
+      model === undefined ||
+      !Number.isFinite(uncached) ||
+      !Number.isFinite(cached) ||
+      !Number.isFinite(cacheCreation) ||
+      !Number.isFinite(output) ||
+      !Number.isFinite(reasoning)
     ) {
-      continue;
-    }
-    if (!isRecordArray(entry.r)) continue;
-
-    const provider: UsageProviderKind = entry.p;
-    // v6 introduced the stable Codex keys required by the current global
-    // de-duplication pass. Preserve those records during the v7 migration.
-    // They have no repeated-input cursor, so UsageService performs one full
-    // repeated-input read before enabling append-only attribution.
-    if (root.version < 6 && provider === "codex") continue;
-    const records: UsageRecord[] = [];
-    // Any corrupt row disqualifies the whole entry. Keeping the survivors
-    // under the original (size, mtime) would read as a valid warm hit and the
-    // file would never be re-parsed, silently losing the dropped rows' usage.
-    let corrupt = false;
-    for (const row of entry.r) {
-      if (!isRecordArray(row) || row.length < 10) {
-        corrupt = true;
-        break;
-      }
-      const [
-        timestampMs,
-        modelIndex,
-        sessionIndex,
-        uncached,
-        cached,
-        cacheCreation,
-        output,
-        reasoning,
-        dedupeKey,
-        reportedCostUsd,
-        serviceTier,
-        turnId,
-      ] = row as SerializedRecord;
-
-      const model = typeof modelIndex === "number" ? models[modelIndex] : undefined;
-      if (
-        typeof timestampMs !== "number" ||
-        !Number.isFinite(timestampMs) ||
-        model === undefined ||
-        !Number.isFinite(uncached) ||
-        !Number.isFinite(cached) ||
-        !Number.isFinite(cacheCreation) ||
-        !Number.isFinite(output) ||
-        !Number.isFinite(reasoning)
-      ) {
-        corrupt = true;
-        break;
-      }
-
-      records.push({
-        provider,
-        timestampMs,
-        model,
-        sessionId: (typeof sessionIndex === "number" ? sessions[sessionIndex] : undefined) ?? "",
-        totals: {
-          uncachedInputTokens: uncached,
-          cachedInputTokens: cached,
-          cacheCreationTokens: cacheCreation,
-          outputTokens: output,
-          reasoningTokens: reasoning,
-        },
-        reportedCostUsd: typeof reportedCostUsd === "number" ? reportedCostUsd : null,
-        ...(typeof serviceTier === "string"
-          ? { serviceTier, serviceTierSource: "transcript" as const }
-          : {}),
-        ...(typeof turnId === "string" ? { turnId } : {}),
-        dedupeKey: typeof dedupeKey === "string" ? dedupeKey : null,
-      });
+      corrupt = true;
+      break;
     }
 
-    if (corrupt) continue;
-    const scanCursor =
-      typeof entry.q === "number" &&
-      Number.isSafeInteger(entry.q) &&
-      entry.q >= 0 &&
-      entry.q < entry.s
-        ? entry.q
-        : undefined;
-    if (root.version >= 8 && entry.q !== undefined && scanCursor === undefined) continue;
-    const scanIssue = entry.x;
-    const scanSkippedLines =
-      isRecordArray(scanIssue) &&
-      scanIssue.length === 2 &&
-      typeof scanIssue[0] === "number" &&
-      Number.isSafeInteger(scanIssue[0]) &&
-      scanIssue[0] > 0
-        ? scanIssue[0]
-        : undefined;
-    const scanDiscardingLine =
-      isRecordArray(scanIssue) && scanIssue.length === 2 && scanIssue[1] === true;
-    if (
-      root.version >= 8 &&
-      scanIssue !== undefined &&
-      scanSkippedLines === undefined &&
-      !scanDiscardingLine
-    ) {
-      continue;
-    }
-    if (scanDiscardingLine && scanCursor === undefined) continue;
-    const prefixFingerprint = typeof entry.h === "string" ? entry.h : undefined;
-    const repeatedInputVersion =
-      typeof entry.j === "number" && Number.isSafeInteger(entry.j) && entry.j >= 0
-        ? entry.j
-        : undefined;
-    const repeatedInputObservations: RepeatedInputObservation[] = [];
-    let repeatedInputCorrupt = false;
-    if (entry.i !== undefined) {
-      if (!isRecordArray(entry.i)) repeatedInputCorrupt = true;
-      else {
-        for (const row of entry.i) {
-          if (!isRecordArray(row) || row.length !== 15) {
-            repeatedInputCorrupt = true;
-            break;
-          }
-          const [
-            sourceKind,
-            displayName,
-            contentHash,
-            fileRevisionHash,
-            confidence,
-            observedAtMs,
-            sessionId,
-            turnId,
-            model,
-            project,
-            environment,
-            direct,
-            fullSession,
-            providerReportedCostUsd,
-            dedupeKey,
-          ] = row as SerializedRepeatedInput;
-          const directTokens = decodeRepeatedInputTokens(direct);
-          const fullSessionInputTokens = decodeRepeatedInputTokens(fullSession);
-          if (
-            !isRepeatedInputSourceKind(sourceKind) ||
-            typeof displayName !== "string" ||
-            typeof contentHash !== "string" ||
-            (fileRevisionHash !== null && typeof fileRevisionHash !== "string") ||
-            !isRepeatedInputConfidence(confidence) ||
-            typeof observedAtMs !== "number" ||
-            !Number.isFinite(observedAtMs) ||
-            typeof sessionId !== "string" ||
-            (turnId !== null && typeof turnId !== "string") ||
-            (model !== null && typeof model !== "string") ||
-            (project !== null && typeof project !== "string") ||
-            (environment !== null && typeof environment !== "string") ||
-            directTokens === null ||
-            fullSessionInputTokens === null ||
-            (providerReportedCostUsd !== null &&
-              (typeof providerReportedCostUsd !== "number" ||
-                !Number.isFinite(providerReportedCostUsd))) ||
-            typeof dedupeKey !== "string"
-          ) {
-            repeatedInputCorrupt = true;
-            break;
-          }
-          repeatedInputObservations.push({
-            sourceKind,
-            displayName,
-            contentHash,
-            fileRevisionHash,
-            confidence,
-            observedAtMs,
-            sessionId,
-            turnId,
-            model,
-            project,
-            environment,
-            directTokens,
-            fullSessionInputTokens,
-            providerReportedCostUsd,
-            dedupeKey,
-          });
-        }
-      }
-    }
-    if (repeatedInputCorrupt) continue;
-    const repeatedInputGaps = decodeRepeatedInputGaps(entry.g);
-    if (entry.g !== undefined && repeatedInputGaps === null) continue;
-    const repeatedInputActiveSources = decodeRepeatedInputActiveSources(entry.a);
-    // An invalid active-source cursor must force a repeated-input cold read,
-    // but it must not discard the ordinary usage rows in an otherwise valid
-    // cache entry.
-    const activeSourcesValid = repeatedInputActiveSources !== null;
-    const repeatedInputVersionForEntry =
-      activeSourcesValid &&
-      (repeatedInputVersion !== REPEATED_INPUT_CACHE_VERSION || entry.a !== undefined)
-        ? repeatedInputVersion
-        : undefined;
-    let codexState: CodexScanState | undefined;
-    if (root.version >= 4 && entry.c !== undefined) {
-      const [
-        model,
-        sessionId,
-        lastUsageSignature,
-        sawSessionMeta,
-        suppressingForkCopies,
-        anchor,
-        serviceTier,
-        turnId,
-      ] = entry.c;
-      if (
-        typeof model !== "string" ||
-        typeof sessionId !== "string" ||
-        (lastUsageSignature !== null && typeof lastUsageSignature !== "string") ||
-        typeof sawSessionMeta !== "boolean" ||
-        typeof suppressingForkCopies !== "boolean" ||
-        typeof anchor !== "number" ||
-        !Number.isFinite(anchor)
-      ) {
-        continue;
-      }
-      codexState = {
-        model,
-        sessionId,
-        lastUsageSignature,
-        sawSessionMeta,
-        suppressingForkCopies,
-        forkCopyAnchorMs: anchor,
-        ...(typeof serviceTier === "string" ? { serviceTier } : {}),
-        ...(typeof turnId === "string" ? { turnId } : {}),
-      };
-    }
-    cache.set(path, {
-      size: entry.s,
-      mtimeMs: entry.m,
+    records.push({
       provider,
-      records,
-      ...(codexState === undefined ? {} : { codexState }),
-      ...(scanCursor === undefined ? {} : { scanCursor }),
-      ...(scanSkippedLines === undefined ? {} : { scanSkippedLines }),
-      ...(scanDiscardingLine ? { scanDiscardingLine: true } : {}),
-      ...(prefixFingerprint === undefined ? {} : { prefixFingerprint }),
-      ...(entry.i === undefined ? {} : { repeatedInputObservations }),
-      ...(repeatedInputGaps === null || entry.g === undefined ? {} : { repeatedInputGaps }),
-      ...(activeSourcesValid && entry.a !== undefined && repeatedInputActiveSources !== undefined
-        ? { repeatedInputActiveSources }
+      timestampMs,
+      model,
+      sessionId: (typeof sessionIndex === "number" ? sessions[sessionIndex] : undefined) ?? "",
+      totals: {
+        uncachedInputTokens: uncached,
+        cachedInputTokens: cached,
+        cacheCreationTokens: cacheCreation,
+        outputTokens: output,
+        reasoningTokens: reasoning,
+      },
+      reportedCostUsd: typeof reportedCostUsd === "number" ? reportedCostUsd : null,
+      ...(typeof serviceTier === "string"
+        ? { serviceTier, serviceTierSource: "transcript" as const }
         : {}),
-      ...(repeatedInputVersionForEntry === undefined
-        ? {}
-        : { repeatedInputVersion: repeatedInputVersionForEntry }),
+      ...(typeof turnId === "string" ? { turnId } : {}),
+      dedupeKey: typeof dedupeKey === "string" ? dedupeKey : null,
     });
   }
 
-  return cache;
+  if (corrupt) return undefined;
+  const scanCursor =
+    typeof entry.q === "number" &&
+    Number.isSafeInteger(entry.q) &&
+    entry.q >= 0 &&
+    entry.q < entry.s
+      ? entry.q
+      : undefined;
+  if (version >= 8 && entry.q !== undefined && scanCursor === undefined) return undefined;
+  const scanIssue = entry.x;
+  const scanSkippedLines =
+    isRecordArray(scanIssue) &&
+    scanIssue.length === 2 &&
+    typeof scanIssue[0] === "number" &&
+    Number.isSafeInteger(scanIssue[0]) &&
+    scanIssue[0] > 0
+      ? scanIssue[0]
+      : undefined;
+  const scanDiscardingLine =
+    isRecordArray(scanIssue) && scanIssue.length === 2 && scanIssue[1] === true;
+  if (
+    version >= 8 &&
+    scanIssue !== undefined &&
+    scanSkippedLines === undefined &&
+    !scanDiscardingLine
+  ) {
+    return undefined;
+  }
+  if (scanDiscardingLine && scanCursor === undefined) return undefined;
+  const prefixFingerprint = typeof entry.h === "string" ? entry.h : undefined;
+  const repeatedInputVersion =
+    typeof entry.j === "number" && Number.isSafeInteger(entry.j) && entry.j >= 0
+      ? entry.j
+      : undefined;
+  const repeatedInputObservations: RepeatedInputObservation[] = [];
+  let repeatedInputCorrupt = false;
+  if (entry.i !== undefined) {
+    if (!isRecordArray(entry.i)) repeatedInputCorrupt = true;
+    else {
+      for (const row of entry.i) {
+        if (!isRecordArray(row) || row.length !== 15) {
+          repeatedInputCorrupt = true;
+          break;
+        }
+        const [
+          sourceKind,
+          displayName,
+          contentHash,
+          fileRevisionHash,
+          confidence,
+          observedAtMs,
+          sessionId,
+          turnId,
+          model,
+          project,
+          environment,
+          direct,
+          fullSession,
+          providerReportedCostUsd,
+          dedupeKey,
+        ] = row as SerializedRepeatedInput;
+        const directTokens = decodeRepeatedInputTokens(direct);
+        const fullSessionInputTokens = decodeRepeatedInputTokens(fullSession);
+        if (
+          !isRepeatedInputSourceKind(sourceKind) ||
+          typeof displayName !== "string" ||
+          typeof contentHash !== "string" ||
+          (fileRevisionHash !== null && typeof fileRevisionHash !== "string") ||
+          !isRepeatedInputConfidence(confidence) ||
+          typeof observedAtMs !== "number" ||
+          !Number.isFinite(observedAtMs) ||
+          typeof sessionId !== "string" ||
+          (turnId !== null && typeof turnId !== "string") ||
+          (model !== null && typeof model !== "string") ||
+          (project !== null && typeof project !== "string") ||
+          (environment !== null && typeof environment !== "string") ||
+          directTokens === null ||
+          fullSessionInputTokens === null ||
+          (providerReportedCostUsd !== null &&
+            (typeof providerReportedCostUsd !== "number" ||
+              !Number.isFinite(providerReportedCostUsd))) ||
+          typeof dedupeKey !== "string"
+        ) {
+          repeatedInputCorrupt = true;
+          break;
+        }
+        repeatedInputObservations.push({
+          sourceKind,
+          displayName,
+          contentHash,
+          fileRevisionHash,
+          confidence,
+          observedAtMs,
+          sessionId,
+          turnId,
+          model,
+          project,
+          environment,
+          directTokens,
+          fullSessionInputTokens,
+          providerReportedCostUsd,
+          dedupeKey,
+        });
+      }
+    }
+  }
+  if (repeatedInputCorrupt) return undefined;
+  const repeatedInputGaps = decodeRepeatedInputGaps(entry.g);
+  if (entry.g !== undefined && repeatedInputGaps === null) return undefined;
+  const repeatedInputActiveSources = decodeRepeatedInputActiveSources(entry.a);
+  // An invalid active-source cursor must force a repeated-input cold read,
+  // but it must not discard the ordinary usage rows in an otherwise valid
+  // cache entry.
+  const activeSourcesValid = repeatedInputActiveSources !== null;
+  const repeatedInputVersionForEntry =
+    activeSourcesValid &&
+    (repeatedInputVersion !== REPEATED_INPUT_CACHE_VERSION || entry.a !== undefined)
+      ? repeatedInputVersion
+      : undefined;
+  let codexState: CodexScanState | undefined;
+  if (version >= 4 && entry.c !== undefined) {
+    const [
+      model,
+      sessionId,
+      lastUsageSignature,
+      sawSessionMeta,
+      suppressingForkCopies,
+      anchor,
+      serviceTier,
+      turnId,
+    ] = entry.c;
+    if (
+      typeof model !== "string" ||
+      typeof sessionId !== "string" ||
+      (lastUsageSignature !== null && typeof lastUsageSignature !== "string") ||
+      typeof sawSessionMeta !== "boolean" ||
+      typeof suppressingForkCopies !== "boolean" ||
+      typeof anchor !== "number" ||
+      !Number.isFinite(anchor)
+    ) {
+      return undefined;
+    }
+    codexState = {
+      model,
+      sessionId,
+      lastUsageSignature,
+      sawSessionMeta,
+      suppressingForkCopies,
+      forkCopyAnchorMs: anchor,
+      ...(typeof serviceTier === "string" ? { serviceTier } : {}),
+      ...(typeof turnId === "string" ? { turnId } : {}),
+    };
+  }
+  return {
+    size: entry.s,
+    mtimeMs: entry.m,
+    provider,
+    records,
+    ...(codexState === undefined ? {} : { codexState }),
+    ...(scanCursor === undefined ? {} : { scanCursor }),
+    ...(scanSkippedLines === undefined ? {} : { scanSkippedLines }),
+    ...(scanDiscardingLine ? { scanDiscardingLine: true } : {}),
+    ...(prefixFingerprint === undefined ? {} : { prefixFingerprint }),
+    ...(entry.i === undefined ? {} : { repeatedInputObservations }),
+    ...(repeatedInputGaps === null || entry.g === undefined ? {} : { repeatedInputGaps }),
+    ...(activeSourcesValid && entry.a !== undefined && repeatedInputActiveSources !== undefined
+      ? { repeatedInputActiveSources }
+      : {}),
+    ...(repeatedInputVersionForEntry === undefined
+      ? {}
+      : { repeatedInputVersion: repeatedInputVersionForEntry }),
+  };
+}
+
+/** One file's entry in the same positional format the whole-cache document uses. */
+export function encodeCachedFile(entry: CachedFile): string {
+  return JSON.stringify(encodeScanCache(new Map([["", entry]])));
+}
+
+/** Reverses `encodeCachedFile`; malformed text reads as a missing entry. */
+export function decodeCachedFile(text: string): CachedFile | undefined {
+  let document: unknown;
+  try {
+    document = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  for (const [, entry] of decodeScanCacheEntries(document)) return entry;
+  return undefined;
+}
+
+/**
+ * What a scan plan needs to know about a cached transcript without decoding
+ * its records: whether the entry is warm, resumable, or inside a window.
+ */
+export interface CachedFileMeta {
+  readonly size: number;
+  readonly mtimeMs: number;
+  readonly provider: UsageProviderKind;
+  readonly scanCursor?: number;
+  readonly scanSkippedLines?: number;
+  readonly scanDiscardingLine?: boolean;
+  readonly prefixFingerprint?: string;
+  readonly repeatedInputVersion?: number;
+  readonly hasCodexState: boolean;
+  readonly hasRepeatedInput: boolean;
+  readonly recordCount: number;
+  /** Latest of the file mtime, its record times, and its observation times. */
+  readonly latestMs: number;
+}
+
+export function cachedFileMeta(entry: CachedFile): CachedFileMeta {
+  let latestMs = entry.mtimeMs;
+  for (const record of entry.records) latestMs = Math.max(latestMs, record.timestampMs);
+  for (const observation of entry.repeatedInputObservations ?? []) {
+    latestMs = Math.max(latestMs, observation.observedAtMs);
+  }
+  return {
+    size: entry.size,
+    mtimeMs: entry.mtimeMs,
+    provider: entry.provider,
+    ...(entry.scanCursor === undefined ? {} : { scanCursor: entry.scanCursor }),
+    ...(entry.scanSkippedLines === undefined ? {} : { scanSkippedLines: entry.scanSkippedLines }),
+    ...(entry.scanDiscardingLine === true ? { scanDiscardingLine: true } : {}),
+    ...(entry.prefixFingerprint === undefined
+      ? {}
+      : { prefixFingerprint: entry.prefixFingerprint }),
+    ...(entry.repeatedInputVersion === undefined
+      ? {}
+      : { repeatedInputVersion: entry.repeatedInputVersion }),
+    hasCodexState: entry.codexState !== undefined,
+    hasRepeatedInput: entry.repeatedInputObservations !== undefined,
+    recordCount: entry.records.length,
+    latestMs,
+  };
 }
 
 /** Reads provider-root coverage. v2 caches remain valid but start uncovered. */

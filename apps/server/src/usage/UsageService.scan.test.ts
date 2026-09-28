@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeSqlite from "node:sqlite";
 import * as Path from "effect/Path";
 import { describe, expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
@@ -50,6 +52,23 @@ vi.mock("./usageTranscriptReader.ts", async (importOriginal) => ({
   })),
   readRepeatedInputRecords: vi.fn(async () => null),
 }));
+
+/** Rows the durable scan store holds for each transcript. */
+const storedFiles = (stateDir: string) => {
+  const db = new NodeSqlite.DatabaseSync(`${stateDir}/usage-scan-cache.sqlite`, { readOnly: true });
+  try {
+    return db
+      .prepare("SELECT path, mtime_ms, scan_cursor, record_count FROM files ORDER BY path")
+      .all() as unknown as ReadonlyArray<{
+      readonly path: string;
+      readonly mtime_ms: number;
+      readonly scan_cursor: number | null;
+      readonly record_count: number;
+    }>;
+  } finally {
+    db.close();
+  }
+};
 
 const testLayer = Layer.mergeAll(
   ServerSettings.layerTest(),
@@ -383,7 +402,7 @@ describe("incremental scan integration", () => {
         };
       });
       try {
-        let persistedCache: string | undefined;
+        const config = yield* ServerConfig.ServerConfig;
         const input = {
           sinceDay: UsageDay.make("2026-08-29"),
           untilDay: UsageDay.make("2026-09-02"),
@@ -401,10 +420,6 @@ describe("incremental scan integration", () => {
                   path.endsWith("usage-scan-cache.json")
                     ? Effect.succeed(emptyScanCache)
                     : fs.readFileString(path, ...args),
-                writeFileString: (path, contents, ...args) => {
-                  if (path.endsWith("contents.tmp")) persistedCache = contents;
-                  return fs.writeFileString(path, contents, ...args);
-                },
               }),
               Effect.provideService(
                 HttpClient.HttpClient,
@@ -415,7 +430,9 @@ describe("incremental scan integration", () => {
           }),
         );
         expect(first.sources.some((source) => source.status === "partial")).toBe(true);
-        expect(persistedCache).toContain('"q":10');
+        expect(storedFiles(config.stateDir)).toEqual([
+          { path: files[0]!.path, mtime_ms: files[0]!.mtimeMs, scan_cursor: 10, record_count: 1 },
+        ]);
 
         completePass = true;
         vi.mocked(readTranscriptRecords).mockClear();
@@ -425,7 +442,7 @@ describe("incremental scan integration", () => {
             exists: () => Effect.succeed(true),
             readFileString: (path, ...args) =>
               path.endsWith("usage-scan-cache.json")
-                ? Effect.succeed(persistedCache ?? emptyScanCache)
+                ? Effect.succeed(emptyScanCache)
                 : fs.readFileString(path, ...args),
           }),
           Effect.provideService(
@@ -513,6 +530,7 @@ describe("incremental scan integration", () => {
           encodeJson({ version: 1, rows: [saved] }),
         );
         const firstCacheRead = yield* Deferred.make<void>();
+        const releaseCacheLoad = yield* Deferred.make<void>();
         let stallCacheLoad = true;
         let cacheReads = 0;
         const service = yield* make.pipe(
@@ -525,7 +543,7 @@ describe("incremental scan integration", () => {
                     cacheReads += 1;
                     if (stallCacheLoad) {
                       yield* Deferred.succeed(firstCacheRead, undefined);
-                      return yield* Effect.never;
+                      yield* Deferred.await(releaseCacheLoad);
                     }
                     return emptyScanCache;
                   })
@@ -563,10 +581,13 @@ describe("incremental scan integration", () => {
           partial.sources.every((source) => source.message?.includes("response budget expired")),
         ).toBe(true);
 
+        // The import outlives the request that started it; the retry waits for
+        // the same import instead of reading the legacy cache again.
         stallCacheLoad = false;
+        yield* Deferred.succeed(releaseCacheLoad, undefined);
         const retry = yield* service.readSummary(input);
         expect(retry.sources.every((source) => source.status === "missing")).toBe(true);
-        expect(cacheReads).toBe(2);
+        expect(cacheReads).toBe(1);
       }).pipe(Effect.scoped, Effect.provide(Layer.merge(testLayer, TestClock.layer()))),
   );
 
@@ -747,10 +768,11 @@ describe("incremental scan integration", () => {
       yield* Fiber.join(blocked);
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
-  it.effect("retries the cache load after its first reader is cancelled", () =>
+  it.effect("continues the legacy cache import after its first reader is cancelled", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const loading = yield* Deferred.make<void>();
+      const releaseLoad = yield* Deferred.make<void>();
       let cacheReads = 0;
       const service = yield* make.pipe(
         Effect.provideService(FileSystem.FileSystem, {
@@ -760,10 +782,8 @@ describe("incremental scan integration", () => {
             path.endsWith("usage-scan-cache.json")
               ? Effect.gen(function* () {
                   cacheReads += 1;
-                  if (cacheReads === 1) {
-                    yield* Deferred.succeed(loading, undefined);
-                    return yield* Effect.never;
-                  }
+                  yield* Deferred.succeed(loading, undefined);
+                  yield* Deferred.await(releaseLoad);
                   return emptyScanCache;
                 })
               : fs.readFileString(path, ...args),
@@ -783,38 +803,21 @@ describe("incremental scan integration", () => {
       const first = yield* service.readSummary(input).pipe(Effect.forkChild);
       yield* Deferred.await(loading);
       yield* Fiber.interrupt(first);
-      const retry = yield* service.readSummary(input).pipe(Effect.exit);
-      expect(retry._tag).toBe("Success");
-      expect(cacheReads).toBe(2);
+      const retry = yield* service.readSummary(input).pipe(Effect.exit, Effect.forkChild);
+      yield* Deferred.succeed(releaseLoad, undefined);
+      expect((yield* Fiber.join(retry))._tag).toBe("Success");
+      expect(cacheReads).toBe(1);
       yield* service.readSummary(input);
-      expect(cacheReads).toBe(2);
+      expect(cacheReads).toBe(1);
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
-  it.effect("flushes a queued cache revision when the service scope closes", () =>
+  it.effect("keeps scan progress durable without a flush when the service closes", () =>
     Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const firstCacheWrite = yield* Deferred.make<void>();
-      let cacheTempWrites = 0;
+      const config = yield* ServerConfig.ServerConfig;
       yield* Effect.scoped(
         Effect.gen(function* () {
           const service = yield* make.pipe(
-            Effect.provideService(FileSystem.FileSystem, {
-              ...fs,
-              exists: () => Effect.succeed(true),
-              writeFileString: (path, contents, ...args) => {
-                if (path.endsWith("contents.tmp")) {
-                  cacheTempWrites += 1;
-                  if (cacheTempWrites === 1) {
-                    return Effect.gen(function* () {
-                      yield* Deferred.succeed(firstCacheWrite, undefined);
-                      return yield* Effect.die("defer first cache publish");
-                    });
-                  }
-                }
-                return fs.writeFileString(path, contents, ...args);
-              },
-            }),
             Effect.provideService(
               HttpClient.HttpClient,
               HttpClient.make(() => Effect.die("Offline fixture")),
@@ -827,11 +830,16 @@ describe("incremental scan integration", () => {
             quotaIntervals: [],
             refresh: true,
           });
-          yield* Deferred.await(firstCacheWrite);
-        }),
+        }).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...(yield* FileSystem.FileSystem),
+            exists: () => Effect.succeed(true),
+          }),
+        ),
       );
-
-      expect(cacheTempWrites).toBe(2);
+      // The large fixture exceeds the cold-scan budget and is deferred; the
+      // file that was scanned is already durable with no background flush.
+      expect(storedFiles(config.stateDir).map((row) => row.path)).toEqual([files[1]!.path]);
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
@@ -853,7 +861,6 @@ describe("incremental scan integration", () => {
         ),
       );
       const writes: string[] = [];
-      const persisted = yield* Deferred.make<void>();
       vi.mocked(readTranscriptRecords).mockClear();
       vi.mocked(transcriptCursorIsLineBoundary).mockClear();
       const service = yield* make.pipe(
@@ -866,15 +873,7 @@ describe("incremental scan integration", () => {
               : fs.readFileString(path, ...args),
           writeFileString: (path, contents, ...args) => {
             writes.push(path);
-            return fs
-              .writeFileString(path, contents, ...args)
-              .pipe(
-                Effect.tap(() =>
-                  path.endsWith("contents.tmp")
-                    ? Deferred.succeed(persisted, undefined)
-                    : Effect.void,
-                ),
-              );
+            return fs.writeFileString(path, contents, ...args);
           },
         }),
         Effect.provideService(
@@ -889,7 +888,6 @@ describe("incremental scan integration", () => {
         quotaIntervals: [],
         refresh: true,
       });
-      yield* Deferred.await(persisted);
       expect(result.sources.every((source) => source.status === "ok")).toBe(true);
       expect(readTranscriptRecords).toHaveBeenCalledTimes(2);
       expect(readTranscriptRecords).toHaveBeenCalledWith(
@@ -903,8 +901,8 @@ describe("incremental scan integration", () => {
         expect.objectContaining({ startByte: 70_000_000 }),
       );
       expect(transcriptCursorIsLineBoundary).toHaveBeenCalledTimes(2);
-      expect(writes.some((path) => path.endsWith("contents.tmp"))).toBe(true);
-      expect(writes.some((path) => path.endsWith("usage-scan-cache.json"))).toBe(false);
+      // The retired whole-document cache is never rewritten.
+      expect(writes.some((path) => path.includes("usage-scan-cache.json"))).toBe(false);
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
@@ -1013,49 +1011,19 @@ describe("incremental scan integration", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
-  it.effect("keeps a large cache write off requests and publishes the newest revision", () =>
+  it.effect("stores each rescanned transcript with its newest mtime", () =>
     Effect.gen(function* () {
-      const writeStarted = yield* Deferred.make<void>();
-      const releaseWrite = yield* Deferred.make<void>();
-      const persistedTwice = yield* Deferred.make<void>();
+      const config = yield* ServerConfig.ServerConfig;
       const originalMtime = files[0]!.mtimeMs;
       const originalSizes = files.map((file) => file.size);
       yield* Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
-        const snapshots: string[] = [];
-        let tempWrites = 0;
-        let renames = 0;
         files[0]!.size = 10_000;
         files[1]!.size = 20_000;
         const service = yield* make.pipe(
           Effect.provideService(FileSystem.FileSystem, {
             ...fs,
             exists: () => Effect.succeed(true),
-            writeFileString: (path, contents, ...args) => {
-              if (!path.endsWith("contents.tmp"))
-                return fs.writeFileString(path, contents, ...args);
-              tempWrites += 1;
-              snapshots.push(contents);
-              if (tempWrites === 1) {
-                return Effect.gen(function* () {
-                  yield* Deferred.succeed(writeStarted, undefined);
-                  yield* Deferred.await(releaseWrite);
-                  return yield* fs.writeFileString(path, contents, ...args);
-                });
-              }
-              return fs.writeFileString(path, contents, ...args);
-            },
-            rename: (from, to, ...args) => {
-              if (from.endsWith("contents.tmp") && to.endsWith("usage-scan-cache.json")) {
-                renames += 1;
-                if (renames === 2) {
-                  return fs
-                    .rename(from, to, ...args)
-                    .pipe(Effect.tap(() => Deferred.succeed(persistedTwice, undefined)));
-                }
-              }
-              return fs.rename(from, to, ...args);
-            },
           }),
           Effect.provideService(
             HttpClient.HttpClient,
@@ -1069,39 +1037,27 @@ describe("incremental scan integration", () => {
           quotaIntervals: [],
           refresh: true,
         };
-        const first = yield* service.readSummary(input).pipe(Effect.forkChild);
-        yield* Deferred.await(writeStarted);
-        const firstSummary = yield* Fiber.join(first);
-        expect(firstSummary.sources.every((source) => source.status === "ok")).toBe(true);
-
-        files[0]!.mtimeMs = originalMtime + 1_000;
-        const second = yield* service.readSummary({
-          ...input,
-          sinceDay: UsageDay.make("2026-08-28"),
-        });
-        expect(second.sources.every((source) => source.status === "ok")).toBe(true);
-
-        files[0]!.mtimeMs = originalMtime + 2_000;
-        const third = yield* service.readSummary({
-          ...input,
-          sinceDay: UsageDay.make("2026-08-27"),
-        });
-        expect(third.sources.every((source) => source.status === "ok")).toBe(true);
-
-        yield* Deferred.succeed(releaseWrite, undefined);
-        yield* Deferred.await(persistedTwice);
-        expect(tempWrites).toBe(2);
-        expect(renames).toBe(2);
-        expect(snapshots[1]).toContain(String(originalMtime + 2_000));
+        for (const [offset, sinceDay] of [
+          [0, "2026-08-29"],
+          [1_000, "2026-08-28"],
+          [2_000, "2026-08-27"],
+        ] as const) {
+          files[0]!.mtimeMs = originalMtime + offset;
+          const summary = yield* service.readSummary({
+            ...input,
+            sinceDay: UsageDay.make(sinceDay),
+          });
+          expect(summary.sources.every((source) => source.status === "ok")).toBe(true);
+        }
+        expect(
+          storedFiles(config.stateDir).find((row) => row.path === files[0]!.path)?.mtime_ms,
+        ).toBe(originalMtime + 2_000);
       }).pipe(
         Effect.ensuring(
-          Effect.gen(function* () {
-            yield* Deferred.succeed(releaseWrite, undefined);
-            yield* Effect.sync(() => {
-              files[0]!.mtimeMs = Date.parse("2026-08-30T23:00:00Z");
-              files.forEach((file, index) => {
-                file.size = originalSizes[index]!;
-              });
+          Effect.sync(() => {
+            files[0]!.mtimeMs = Date.parse("2026-08-30T23:00:00Z");
+            files.forEach((file, index) => {
+              file.size = originalSizes[index]!;
             });
           }),
         ),
