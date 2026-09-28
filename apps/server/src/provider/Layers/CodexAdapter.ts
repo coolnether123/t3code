@@ -2031,6 +2031,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           ...(isCodexResumeCursorSchema(input.resumeCursor)
             ? { resumeCursor: input.resumeCursor }
             : {}),
+          ...(input.seedHistory !== undefined ? { seedHistory: input.seedHistory } : {}),
           ...(daemonMcpServer ? { daemonMcpServer } : {}),
           runtimeMode: input.runtimeMode,
           ...(workerSession ? { workerSession: true } : {}),

@@ -11,6 +11,31 @@ import {
 import { deriveProviderModelsForDisplay, ProviderInstanceCard } from "./ProviderInstanceCard";
 
 describe("deriveProviderModelsForDisplay", () => {
+  it("shows a same-driver continuation choice in the instance editor", () => {
+    const markup = renderToStaticMarkup(
+      createElement(ProviderInstanceCard, {
+        instanceId: ProviderInstanceId.make("codex"),
+        instance: {
+          driver: ProviderDriverKind.make("codex"),
+          continueThreadsOn: ProviderInstanceId.make("codex_desktop"),
+        },
+        continuationChoices: [{ id: ProviderInstanceId.make("codex_desktop"), name: "Desktop" }],
+        driverOption: undefined,
+        liveProvider: undefined,
+        mode: "editor",
+        onUpdate: () => undefined,
+        hiddenModels: [],
+        favoriteModels: [],
+        modelOrder: [],
+        onHiddenModelsChange: () => undefined,
+        onFavoriteModelsChange: () => undefined,
+        onModelOrderChange: () => undefined,
+      }),
+    );
+    expect(markup).toContain("Continue its chats on");
+    expect(markup).toContain('<option value="">None</option>');
+    expect(markup).toContain('<option value="codex_desktop" selected="">Desktop</option>');
+  });
   it("uses current config custom models instead of stale live custom rows", () => {
     const liveModels: ReadonlyArray<ServerProviderModel> = [
       {

@@ -92,7 +92,18 @@ describe("ProviderInstanceConfig", () => {
     expect(decoded.displayName).toBeUndefined();
     expect(decoded.enabled).toBeUndefined();
     expect(decoded.showInNewChats).toBeUndefined();
+    expect(decoded.continueThreadsOn).toBeUndefined();
     expect(decoded.config).toBeUndefined();
+  });
+
+  it("accepts a continuation target and rejects an invalid id", () => {
+    expect(
+      decodeProviderInstanceConfig({ driver: "codex", continueThreadsOn: "codex_desktop" })
+        .continueThreadsOn,
+    ).toBe("codex_desktop");
+    expect(() =>
+      decodeProviderInstanceConfig({ driver: "codex", continueThreadsOn: "has spaces" }),
+    ).toThrow();
   });
 
   it("round-trips the optional new-chat visibility flag", () => {

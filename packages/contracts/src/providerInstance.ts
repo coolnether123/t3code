@@ -128,6 +128,7 @@ export const ProviderInstanceConfig = Schema.Struct({
   environment: Schema.optionalKey(ProviderInstanceEnvironment),
   enabled: Schema.optionalKey(Schema.Boolean),
   showInNewChats: Schema.optionalKey(Schema.Boolean),
+  continueThreadsOn: Schema.optionalKey(ProviderInstanceId),
   config: Schema.optionalKey(Schema.Unknown),
 });
 export type ProviderInstanceConfig = typeof ProviderInstanceConfig.Type;

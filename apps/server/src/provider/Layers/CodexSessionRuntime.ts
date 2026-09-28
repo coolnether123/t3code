@@ -499,6 +499,10 @@ export interface CodexSessionRuntimeOptions {
   readonly onTurnServiceTier?: (observation: CodexTierObservation) => Effect.Effect<void>;
   readonly computerControlMode?: CodexComputerControlMode;
   readonly resumeCursor?: CodexResumeCursor;
+  readonly seedHistory?: ReadonlyArray<{
+    readonly role: "user" | "assistant";
+    readonly text: string;
+  }>;
   readonly appServerArgs?: ReadonlyArray<string>;
   readonly subagentBackend?: SubagentBackend;
   readonly enableT3Workers?: boolean;
@@ -992,7 +996,41 @@ interface CodexThreadOpenClient {
     method: M,
     payload: CodexRpc.ClientRequestParamsByMethod[M],
   ) => Effect.Effect<CodexRpc.ClientRequestResponsesByMethod[M], CodexErrors.CodexAppServerError>;
+  readonly raw?: Pick<CodexClient.CodexAppServerClient["Service"]["raw"], "request">;
 }
+
+export const buildCodexSeedHistory = (
+  messages: ReadonlyArray<{ readonly role: "user" | "assistant"; readonly text: string }>,
+) => {
+  const trimNote = "[Earlier messages were trimmed to fit the carried-over history.]\n";
+  const selected: Array<{ readonly role: "user" | "assistant"; readonly text: string }> = [];
+  let remaining = 150_000 - trimNote.length;
+  let trimmed = false;
+  for (let index = messages.length - 1; index >= 0 && remaining > 0; index--) {
+    const message = messages[index]!;
+    if (!message.text) continue;
+    const text = message.text.slice(-remaining);
+    if (text.length < message.text.length || index > 0) trimmed = true;
+    selected.unshift({ role: message.role, text });
+    remaining -= text.length;
+  }
+  if (trimmed) {
+    const oldest = selected[0];
+    if (oldest) {
+      selected[0] = { ...oldest, text: trimNote + oldest.text };
+    }
+  }
+  return selected.map((message) => ({
+    type: "message" as const,
+    role: message.role,
+    content: [
+      {
+        type: message.role === "user" ? ("input_text" as const) : ("output_text" as const),
+        text: message.text,
+      },
+    ],
+  }));
+};
 
 export const openCodexThread = (input: {
   readonly client: CodexThreadOpenClient;
@@ -1002,6 +1040,10 @@ export const openCodexThread = (input: {
   readonly requestedModel: string | undefined;
   readonly serviceTier: CodexServiceTier | undefined;
   readonly resumeThreadId: string | undefined;
+  readonly seedHistory?: ReadonlyArray<{
+    readonly role: "user" | "assistant";
+    readonly text: string;
+  }>;
   readonly forkLastTurnId?: string;
   readonly config?: Readonly<Record<string, CodexConfigJsonValue>>;
 }): Effect.Effect<CodexThreadOpenResponse, CodexErrors.CodexAppServerError> => {
@@ -1015,6 +1057,15 @@ export const openCodexThread = (input: {
   });
 
   if (resumeThreadId === undefined) {
+    if (input.seedHistory !== undefined) {
+      // The generated V2 params omit history despite documenting it. Use the
+      // untyped transport so its encoder cannot discard the experimental field.
+      return input.client.raw!.request("thread/resume", {
+        ...startParams,
+        threadId: "",
+        history: buildCodexSeedHistory(input.seedHistory),
+      }) as Effect.Effect<CodexThreadOpenResponse, CodexErrors.CodexAppServerError>;
+    }
     return input.client.request("thread/start", startParams);
   }
 
@@ -2610,6 +2661,7 @@ export const makeCodexSessionRuntime = (
         requestedModel,
         serviceTier: options.serviceTier,
         resumeThreadId: readResumeCursorThreadId(options.resumeCursor),
+        ...(options.seedHistory !== undefined ? { seedHistory: options.seedHistory } : {}),
         ...(options.resumeCursor?.forkLastTurnId !== undefined
           ? { forkLastTurnId: options.resumeCursor.forkLastTurnId }
           : {}),

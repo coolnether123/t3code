@@ -27,6 +27,15 @@ on that instance in **Settings > Providers**. Existing threads still use it,
 and you can turn the switch back on at any time. The setting applies only to
 the environment where you change it.
 
+To continue existing chats on another Codex instance, choose it under
+**Continue its chats on** for the original instance. The next message opens a
+new Codex conversation there, carrying over up to 150,000 characters of recent
+user and assistant text. Attachment names carry over, but file contents, tool
+results, and live tool state do not. The chat history remains visible in T3.
+Later messages use the new instance's conversation. If it is unavailable, the
+message fails and the chat stays on the original instance. Choose **None** to
+stop moving chats that have not yet moved.
+
 Existing chats show **Codex CLI** or **Codex desktop** in the chat header and
 sidebar. On mobile, the same label appears above the chat and beside its list
 entry. The label describes the chat's configured provider instance, not the app
@@ -73,14 +82,15 @@ store, configure file storage for this setup. See
 [OpenAI's credential storage guide](https://learn.chatgpt.com/docs/auth#credential-storage).
 
 Use a completely separate **CODEX_HOME path**, with no shadow home, when you want
-separate Codex sessions and configuration. That instance cannot continue threads
-from the other home.
+separate Codex sessions and configuration. A chat can move there with
+**Continue its chats on**, but Codex starts a new conversation from text history.
 
 ## Switch accounts in an existing thread
 
-Choose the other account from the thread's model picker. T3 Code offers compatible
-Codex instances that share the thread's **CODEX_HOME path**. Changing accounts does
-not move the conversation into a separate Codex home.
+Choose the other account from the thread's model picker. Compatible Codex
+instances share the thread's **CODEX_HOME path** and resume its provider
+conversation. Choosing an instance with a separate home instead carries over
+recent text history as described above.
 
 If the account is missing from the picker, compare the home paths in provider
 settings. If two instances show the same unexpected account or models, check their

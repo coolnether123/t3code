@@ -57,6 +57,10 @@ import {
 } from "./providerStatus";
 
 const ENVIRONMENT_VARIABLE_NAME_PATTERN = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+const NO_CONTINUATION_CHOICES: ReadonlyArray<{
+  readonly id: ProviderInstanceId;
+  readonly name: string;
+}> = [];
 
 let environmentVariableDraftId = 0;
 const nextEnvironmentVariableDraftId = () => `provider-env-${environmentVariableDraftId++}`;
@@ -345,6 +349,10 @@ function ProviderEnvironmentSection(props: {
 interface ProviderInstanceCardProps {
   readonly instanceId: ProviderInstanceId;
   readonly instance: ProviderInstanceConfig;
+  readonly continuationChoices?: ReadonlyArray<{
+    readonly id: ProviderInstanceId;
+    readonly name: string;
+  }>;
   readonly driverOption: DriverOption | undefined;
   readonly liveProvider: ServerProvider | undefined;
   readonly mode: "list" | "editor";
@@ -400,6 +408,7 @@ interface ProviderInstanceCardProps {
 export function ProviderInstanceCard({
   instanceId,
   instance,
+  continuationChoices = NO_CONTINUATION_CHOICES,
   driverOption,
   liveProvider,
   mode,
@@ -864,6 +873,34 @@ export function ProviderInstanceCard({
             />
           }
         />
+        {continuationChoices.length > 0 && instance.driver === "codex" ? (
+          <SettingsRow
+            title="Continue its chats on"
+            description="Existing chats move to this instance on their next turn. Earlier messages carry over, but tool results do not."
+            control={
+              <select
+                className="min-h-9 min-w-36 rounded-md border border-input bg-background px-3 text-sm text-foreground"
+                value={instance.continueThreadsOn ?? ""}
+                onChange={(event) => {
+                  const { continueThreadsOn: _omit, ...rest } = instance;
+                  onUpdate(
+                    event.target.value
+                      ? { ...rest, continueThreadsOn: event.target.value as ProviderInstanceId }
+                      : rest,
+                  );
+                }}
+                aria-label={`Continue ${displayName} chats on`}
+              >
+                <option value="">None</option>
+                {continuationChoices.map((choice) => (
+                  <option key={choice.id} value={choice.id}>
+                    {choice.name}
+                  </option>
+                ))}
+              </select>
+            }
+          />
+        ) : null}
         {driverOption ? (
           <ProviderSettingsForm
             definition={driverOption}

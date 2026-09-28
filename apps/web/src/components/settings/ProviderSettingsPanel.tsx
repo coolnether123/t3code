@@ -893,6 +893,15 @@ export function EnvironmentProviderSettings({
         key={row.instanceId}
         instanceId={row.instanceId}
         instance={row.instance}
+        continuationChoices={rows
+          .filter(
+            (candidate) =>
+              candidate.instanceId !== row.instanceId && candidate.driver === row.driver,
+          )
+          .map((candidate) => ({
+            id: candidate.instanceId,
+            name: candidate.instance.displayName ?? String(candidate.instanceId),
+          }))}
         driverOption={driverOption}
         liveProvider={liveProvider}
         mode={mode}

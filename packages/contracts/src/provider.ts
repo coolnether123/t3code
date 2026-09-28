@@ -60,6 +60,14 @@ export const ProviderSessionStartInput = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
   modelSelection: Schema.optional(ModelSelection),
   resumeCursor: Schema.optional(Schema.Unknown),
+  seedHistory: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        role: Schema.Literals(["user", "assistant"]),
+        text: Schema.String,
+      }),
+    ),
+  ),
   approvalPolicy: Schema.optional(ProviderApprovalPolicy),
   sandboxMode: Schema.optional(ProviderSandboxMode),
   subagentBackend: Schema.optional(SubagentBackend),

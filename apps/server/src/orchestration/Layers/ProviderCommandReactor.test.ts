@@ -96,7 +96,10 @@ async function waitFor(
 
 describe("ProviderCommandReactor", () => {
   let runtime: ManagedRuntime.ManagedRuntime<
-    OrchestrationEngineService | ProviderCommandReactor | ProjectionSnapshotQuery,
+    | OrchestrationEngineService
+    | ProviderCommandReactor
+    | ProjectionSnapshotQuery
+    | ServerSettingsService,
     unknown
   > | null = null;
   let scope: Scope.Closeable | null = null;
@@ -163,6 +166,7 @@ describe("ProviderCommandReactor", () => {
     readonly startSessionEffect?: (
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderAdapterRequestError>;
+    readonly separateCodexHomes?: boolean;
   }) {
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir =
@@ -234,6 +238,12 @@ describe("ProviderCommandReactor", () => {
       return (startSessionEffect?.(session) ?? Effect.succeed(session)).pipe(
         Effect.tap((startedSession) =>
           Effect.sync(() => {
+            if (typeof input === "object" && input !== null && "seedHistory" in input) {
+              const stale = runtimeSessions.findIndex(
+                (entry) => entry.threadId === startedSession.threadId,
+              );
+              if (stale >= 0) runtimeSessions.splice(stale, 1);
+            }
             runtimeSessions.push(startedSession);
           }),
         ),
@@ -351,7 +361,9 @@ describe("ProviderCommandReactor", () => {
             driverKind,
             continuationKey:
               driverKind === ProviderDriverKind.make("codex")
-                ? "codex:home:/shared-codex"
+                ? input?.separateCodexHomes
+                  ? `codex:home:${raw}`
+                  : "codex:home:/shared-codex"
                 : `${driverKind}:instance:${instanceId}`,
           },
         });
@@ -437,6 +449,7 @@ describe("ProviderCommandReactor", () => {
         } satisfies OrchestrationEngineService["Service"];
       }),
     ).pipe(Layer.provide(orchestrationLayer));
+    const settingsLayer = ServerSettingsService.layerTest();
     const layer = ProviderCommandReactorLive.pipe(
       Layer.provideMerge(reactorOrchestrationLayer),
       Layer.provideMerge(reactorProjectionSnapshotLayer),
@@ -464,15 +477,16 @@ describe("ProviderCommandReactor", () => {
           generateThreadTitle,
         }),
       ),
-      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(settingsLayer),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
       Layer.provideMerge(NodeServices.layer),
     );
-    runtime = ManagedRuntime.make(layer);
+    runtime = ManagedRuntime.make(Layer.merge(layer, settingsLayer));
 
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const reactor = await runtime.runPromise(Effect.service(ProviderCommandReactor));
+    const settingsService = await runtime.runPromise(Effect.service(ServerSettingsService));
     const runEffect = <A, E>(effect: Effect.Effect<A, E>) => runtime!.runPromise(effect);
 
     await Effect.runPromise(
@@ -678,6 +692,7 @@ describe("ProviderCommandReactor", () => {
 
     return {
       engine,
+      settingsService,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       readCompactions: () => Effect.runPromise(snapshotQuery.getActiveContextCompactions()),
       startSession,
@@ -2745,6 +2760,117 @@ describe("ProviderCommandReactor", () => {
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
     expect(thread?.session?.providerInstanceId).toBe(ProviderInstanceId.make("codex_work"));
+  });
+
+  for (const automatic of [true, false])
+    it(`carries a Codex chat to a separate home by ${automatic ? "setting" : "explicit pick"} once`, async () => {
+      const harness = await createHarness({
+        separateCodexHomes: true,
+      });
+      const now = "2026-01-01T00:00:00.000Z";
+      const send = async (index: number, requested?: string) => {
+        await harness.runEffect(
+          harness.engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make(`cmd-carry-${index}`),
+            threadId: ThreadId.make("thread-1"),
+            message: {
+              messageId: asMessageId(`carry-${index}`),
+              role: "user",
+              text: `message ${index}`,
+              attachments: [],
+            },
+            ...(requested
+              ? {
+                  modelSelection: {
+                    instanceId: ProviderInstanceId.make(requested),
+                    model: "gpt-5-codex",
+                  },
+                }
+              : {}),
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "approval-required",
+            createdAt: now,
+          }),
+        );
+        await waitFor(() => harness.sendTurn.mock.calls.length === index);
+      };
+      await send(1, automatic ? undefined : "codex");
+      if (automatic) {
+        await harness.runEffect(
+          harness.settingsService.updateSettings({
+            providerInstances: {
+              [ProviderInstanceId.make("codex")]: {
+                driver: ProviderDriverKind.make("codex"),
+                continueThreadsOn: ProviderInstanceId.make("codex_desktop"),
+              },
+              [ProviderInstanceId.make("codex_desktop")]: {
+                driver: ProviderDriverKind.make("codex"),
+                enabled: true,
+              },
+            },
+          }),
+        );
+      }
+      await send(2, automatic ? undefined : "codex_desktop");
+      expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+        providerInstanceId: ProviderInstanceId.make("codex_desktop"),
+        resumeCursor: null,
+        seedHistory: [{ role: "user", text: "message 1" }],
+      });
+      const afterMove = (await harness.readModel()).threads.find(
+        (entry) => entry.id === ThreadId.make("thread-1"),
+      );
+      expect(afterMove?.modelSelection.instanceId).toBe(ProviderInstanceId.make("codex_desktop"));
+      expect(
+        afterMove?.activities.filter((entry) => entry.kind === "provider.continued"),
+      ).toHaveLength(1);
+      await send(3);
+      expect(harness.startSession).toHaveBeenCalledTimes(2);
+      await harness.runEffect(harness.stopSession({ threadId: ThreadId.make("thread-1") }));
+      await send(4);
+      expect(harness.startSession.mock.calls[2]?.[1]).toMatchObject({
+        providerInstanceId: ProviderInstanceId.make("codex_desktop"),
+      });
+      expect(harness.startSession.mock.calls[2]?.[1]).not.toHaveProperty("seedHistory");
+    });
+
+  it("keeps the original binding when a separate-home Codex open fails", async () => {
+    const harness = await createHarness({ separateCodexHomes: true });
+    const now = "2026-01-01T00:00:00.000Z";
+    const send = (index: number, instanceId: string) =>
+      harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make(`cmd-carry-fail-${index}`),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId(`carry-fail-${index}`),
+            role: "user",
+            text: `message ${index}`,
+            attachments: [],
+          },
+          modelSelection: { instanceId: ProviderInstanceId.make(instanceId), model: "gpt-5-codex" },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        }),
+      );
+    await send(1, "codex");
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    harness.startSession.mockImplementationOnce(
+      () => Effect.fail("desktop daemon unavailable") as never,
+    );
+    await send(2, "codex_desktop");
+    await harness.drain();
+    expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+    const thread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === ThreadId.make("thread-1"),
+    );
+    expect(thread?.modelSelection.instanceId).toBe(ProviderInstanceId.make("codex"));
+    expect(thread?.activities.some((entry) => entry.kind === "provider.turn.start.failed")).toBe(
+      true,
+    );
   });
 
   it("restarts the provider session when the thread workspace changes", async () => {

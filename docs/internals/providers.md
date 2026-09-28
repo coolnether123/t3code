@@ -1,5 +1,23 @@
 # Provider constraints
 
+## Continue a Codex chat on another instance
+
+`providerInstances.<id>.continueThreadsOn` is an optional target instance id.
+On the next turn, the provider command reactor checks that the target is
+configured, enabled, and uses the same driver. An explicit same-driver instance
+pick also moves a Codex chat when continuation keys differ. Other drivers
+still reject incompatible resume state.
+
+The reactor passes projected user and assistant text, excluding the pending
+message, to the Codex adapter as `seedHistory`. The runtime keeps the newest
+150,000 characters and sends response `message` items to app-server
+`thread/resume` with `history` over the raw protocol. The generated V2 request
+schema documents this mode but omits the field, so typed encoding cannot be
+used. No old resume cursor or rollout path crosses the move. The provider
+service stores the new binding only after the target opens and stops the old
+session; the reactor then persists the model selection and an info activity.
+Later turns use the new cursor, including after server restart.
+
 Orchestration records intent and state without knowing which provider runs a thread. Provider
 protocols, account ownership, permissions, and capabilities belong at the
 [adapter boundary](../../apps/server/src/provider/Services/ProviderAdapter.ts). Normalize there
