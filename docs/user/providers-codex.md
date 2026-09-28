@@ -121,6 +121,17 @@ in the thread on web, desktop, or mobile. Some tools offer access for one reques
 the current session, or permanently. See [Permission modes](./permission-modes.md)
 for command and file approvals.
 
+## See when Codex already has your approval
+
+When a Codex Stop hook continues because you already approved an action in the
+chat or in your standing workroom rules, T3 Code adds the hook's feedback to the
+thread's work log. Web and desktop show a **You already approved this** card
+with the approval quoted. Mobile shows a check row with the quote. Other Codex
+hook feedback appears as a regular work-log row.
+
+If the approval is wrong, choose **That's wrong, stop** on web or desktop while
+the turn is running to interrupt it. On mobile, use the thread's Stop control.
+
 ## Send feedback to OpenAI
 
 In an existing Codex thread, send `/feedback` with an optional description, for

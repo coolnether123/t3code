@@ -559,10 +559,12 @@ export function runtimeEventToActivities(
           payload: {
             hookEvent: event.payload.hookEvent ?? null,
             outcome: event.payload.outcome,
-            // Long enough to keep a quoted approval and its trailing reference.
+            // Hook feedback is short by design, but clients parse its trailing
+            // reference (a permission continuation ends with one), so bound it
+            // generously rather than at the usual detail length.
             feedback: feedback.map((entry) => ({
               kind: entry.kind,
-              text: truncateDetail(entry.text, 1200),
+              text: truncateDetail(entry.text, 4000),
             })),
           },
           turnId: toTurnId(event.turnId) ?? null,

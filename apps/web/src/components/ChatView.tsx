@@ -6225,8 +6225,9 @@ function ChatViewContent(props: ChatViewProps) {
     }
   };
 
-  const onInterrupt = async () => {
-    if (!activeThread) return;
+  /** Resolves false when the interrupt was rejected, so callers can offer a retry. */
+  const onInterrupt = async (): Promise<boolean> => {
+    if (!activeThread) return false;
     if (activeThreadKey) useQueuedFollowUpStore.getState().holdThread(activeThreadKey);
     const result = await interruptThreadTurn({
       environmentId,
@@ -6238,8 +6239,15 @@ function ChatViewContent(props: ChatViewProps) {
         activeThread.id,
         error instanceof Error ? error.message : "Failed to interrupt the current turn.",
       );
+      return false;
     }
+    return true;
   };
+  // Timeline rows share one context; a stable stop callback keeps streaming
+  // updates from re-rendering every row.
+  const onInterruptRef = useRef(onInterrupt);
+  onInterruptRef.current = onInterrupt;
+  const stopTurnFromTimeline = useCallback(() => onInterruptRef.current(), []);
 
   const onSteerQueuedFollowUp = async (entry: QueuedFollowUp) => {
     const turnId = activeThread?.session?.activeTurnId;
@@ -7372,13 +7380,7 @@ function ChatViewContent(props: ChatViewProps) {
                   canonicalEditMessageIdByTimelineMessageId
                 }
                 onEditUserMessage={paintOnlyDisplayedTimeline ? () => {} : onEditUserMessage}
-                onStopTurn={
-                  paintOnlyDisplayedTimeline
-                    ? () => {}
-                    : () => {
-                        void onInterrupt();
-                      }
-                }
+                onStopTurn={paintOnlyDisplayedTimeline ? stopTurnUnavailable : stopTurnFromTimeline}
                 isRevertingCheckpoint={
                   isEditingFromHere || activeServerThread?.editFromHere != null
                 }
@@ -7891,6 +7893,8 @@ function ChatViewContent(props: ChatViewProps) {
     </div>
   );
 }
+
+const stopTurnUnavailable = async () => false;
 
 export default function ChatView(props: ChatViewProps) {
   return (

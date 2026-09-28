@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
-import { parsePermissionContinuation } from "./permissionContinuation";
+import { parsePermissionContinuation } from "./permissionContinuation.ts";
 
 const hookText = (where: string, quote: string, id = "J-AB12CD") =>
   `Christine already approved this ${where}, so do not ask her again: “${quote}”. ` +

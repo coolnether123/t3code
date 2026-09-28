@@ -14,6 +14,7 @@ import {
 
 const EMPTY_AGENT_PANEL_MODEL = emptyAgentPanelModel();
 const NOOP_OPEN_AGENTS = () => {};
+const NOOP_STOP_TURN = async () => false;
 import { resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
 import {
   createContext,
@@ -162,8 +163,8 @@ interface TimelineRowSharedState {
   onToggleWorkGroup: (groupId: string, anchorKey: string) => void;
   agentPanelModel: AgentPanelModel;
   onOpenAgents: () => void;
-  /** Stops the running turn, as the composer's stop button does. */
-  onStopTurn: () => void;
+  /** Stops the running turn, as the composer's stop button does. Resolves false on failure. */
+  onStopTurn: () => Promise<boolean>;
 }
 
 interface TimelineRowActivityState {
@@ -224,7 +225,7 @@ const TIMELINE_MAINTAIN_SCROLL_AT_END = {
 interface MessagesTimelineProps {
   agentPanelModel?: AgentPanelModel;
   onOpenAgents?: () => void;
-  onStopTurn?: () => void;
+  onStopTurn?: () => Promise<boolean>;
   isWorking: boolean;
   workingStepLabel?: string | null;
   activeWorkerWait?: ActiveWorkerWait | null;
@@ -276,7 +277,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   activeTurnStartedAt,
   agentPanelModel = EMPTY_AGENT_PANEL_MODEL,
   onOpenAgents = NOOP_OPEN_AGENTS,
-  onStopTurn = NOOP_OPEN_AGENTS,
+  onStopTurn = NOOP_STOP_TURN,
   listRef,
   timelineEntries,
   latestTurn,
@@ -2875,7 +2876,9 @@ const PermissionApprovedRow = memo(function PermissionApprovedRow(props: {
             disabled={stopRequested}
             onClick={() => {
               setStopRequested(true);
-              onStopTurn();
+              void onStopTurn().then((stopped) => {
+                if (!stopped) setStopRequested(false);
+              });
             }}
           >
             {stopRequested ? "Stopping…" : "That's wrong, stop"}

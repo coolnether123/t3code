@@ -165,3 +165,28 @@ File-change approval previews use the matching session, provider thread, turn, a
 is consumed once and has explicit size bounds. The protocol reader handles approval requests
 without blocking unrelated notifications. Browser selection never grants approval; see
 [Codex browser capability boundaries](./codex-browser-capabilities.md).
+
+#### Hook feedback
+
+The [Codex adapter](../../apps/server/src/provider/Layers/CodexAdapter.ts) maps
+`hook/completed` notifications to `hook.completed` only when a run has non-empty
+feedback entries. It includes the hook event and each entry's kind and text.
+The adapter drops silent runs so they do not add no-op events or work-log rows.
+Stop hooks can run every turn, so this keeps routine hook traffic out of the
+event stream for performance. Other provider adapters, including Claude, do not
+report feedback this way.
+
+[Runtime ingestion](../../apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.ts)
+records `hook.completed` events with feedback as `hook.feedback` info activities.
+It keeps the hook event, outcome, turn ID, and feedback text for the client; each
+text entry is limited to 1,200 characters. Events without feedback produce no
+activity.
+
+The [client parser](../../packages/client-runtime/src/permissionContinuation.ts)
+recognizes this text form:
+`<Name> already approved this <source>, so do not ask <pronoun> again: “<quote>”. ... (Otis permission check J-XXXXXX)`
+where `<source>` is `in this chat` or
+`in <pronoun> standing workroom rules`. The quote must contain text; the check
+ID accepts 4 to 12 uppercase letters or digits after `J-`. Matching feedback
+renders as the approval card on web and desktop, and as a check row on mobile.
+Other hook feedback stays an ordinary work-log row.
