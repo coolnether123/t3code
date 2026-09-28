@@ -134,11 +134,9 @@ import {
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { useAppearanceCodeSurface } from "../settings/appearance/useAppearanceCodeSurface";
 import { markdownFileIconSource } from "@t3tools/mobile-markdown-text/file-icons";
-import { markdownLinkIconSource } from "@t3tools/mobile-markdown-text/link-icons";
 import {
   normalizeNativeMarkdownUrl,
   resolveMarkdownInlineCodePresentation,
-  resolveMarkdownLinkIcon,
   resolveMarkdownLinkPresentation,
 } from "@t3tools/mobile-markdown-text/links";
 import {
@@ -155,10 +153,8 @@ import {
 } from "./thread-feed-live-follow";
 import {
   collapsedWorkLogHeight,
-  ThreadAgentSpawnCard,
   ThreadDisclosureChevron,
   ThreadWorkGroupToggle,
-  ThreadThinkingRow,
   ThreadWorkLog,
   THREAD_DISCLOSURE_TRANSITION_MS,
   WORK_GROUP_TOGGLE_HEIGHT,
@@ -180,9 +176,7 @@ import {
   resolveWorkspaceRelativeFilePath,
 } from "../files/filePath";
 import { fileChipMenu, resolveFileChipTarget, type FileChipAction } from "./fileChipMenu";
-import { useFileChipShare } from "./useFileChipShare";
 import {
-  MarkdownImageAvailableWidthContext,
   ThreadMarkdownImage,
   ThreadMarkdownImageUnavailable,
   ThreadMarkdownImageView,
@@ -212,10 +206,6 @@ function formatMessageTime(input: string): string {
 // text fits at the current font settings. Larger accessibility text is measured.
 const TURN_FOLD_HEIGHT = 42; // min-h-11 (38.5) + mb-1 (3.5), with the mobile 14px rem
 const THREAD_FEED_LAYOUT_TRANSITION = LinearTransition.duration(THREAD_DISCLOSURE_TRANSITION_MS);
-// Tailwind spacing on the mobile 14px rem: px-3.5 on the user bubble, px-1 on
-// assistant rows. Images size their frame from these before their own layout.
-const USER_BUBBLE_HORIZONTAL_PADDING = 3.5 * 3.5;
-const ASSISTANT_ROW_HORIZONTAL_PADDING = 3.5;
 // Let neighboring rows move out of the new rows' space before showing their text.
 const THREAD_FEED_DISCLOSURE_ENTER_TRANSITION = FadeIn.delay(
   THREAD_DISCLOSURE_TRANSITION_MS,
@@ -253,6 +243,9 @@ export interface ThreadFeedProps {
   readonly onEndFollowEnabledChange?: (enabled: boolean) => void;
   readonly skills?: ReadonlyArray<SelectableMarkdownSkill>;
   readonly onUseArtifactTemplate?: (template: CodexArtifactTemplate) => void;
+  readonly isWorking?: boolean;
+  readonly isEditFromHerePending?: boolean;
+  readonly onEditUserMessage?: (messageId: MessageId, text: string) => void;
   /** Non-null when older turns exist beyond the loaded window. */
   readonly loadEarlier?: {
     readonly loading: boolean;
@@ -608,8 +601,7 @@ const MarkdownExternalLink = memo(function MarkdownExternalLink(props: {
   readonly onPress: (href: string) => void;
 }) {
   const [failedHost, setFailedHost] = useState<string | null>(null);
-  const linkIcon = resolveMarkdownLinkIcon(props.host);
-  const faviconUrl = linkIcon ? null : faviconUrlForOrigin(`https://${props.host}`);
+  const faviconUrl = faviconUrlForOrigin(`https://${props.host}`);
 
   return (
     <NativeText
@@ -620,15 +612,9 @@ const MarkdownExternalLink = memo(function MarkdownExternalLink(props: {
         textDecorationLine: "none",
       }}
     >
-      {linkIcon ? (
-        <Image
-          source={markdownLinkIconSource(linkIcon)}
-          style={markdownLinkStyles.inlineIcon}
-          tintColor={props.color}
-        />
-      ) : faviconUrl !== null &&
-        failedHost !== props.host &&
-        !failedMarkdownFaviconHosts.has(props.host) ? (
+      {faviconUrl !== null &&
+      failedHost !== props.host &&
+      !failedMarkdownFaviconHosts.has(props.host) ? (
         <Image
           source={{
             uri: faviconUrl,
@@ -1342,15 +1328,15 @@ function renderFeedEntry(
     readonly renderMarkdownImage: MarkdownImageRenderer;
     readonly renderViewedImage: MarkdownImageRenderer;
     readonly iconSubtleColor: string | import("react-native").ColorValue;
-    readonly screenColor: string;
     readonly userBubbleColor: string | import("react-native").ColorValue;
     readonly markdownStyles: MarkdownStyleSets;
     readonly reviewCommentColors: ReviewCommentColors;
     readonly reviewCommentBubbleWidth: number;
     readonly themeAppearance: "light" | "dark";
     readonly userBubbleMaxWidth: number;
-    /** Width assistant markdown lays out in, so images can size their frame before layout. */
-    readonly markdownContentWidth: number;
+    readonly isWorking: boolean;
+    readonly isEditFromHerePending: boolean;
+    readonly onEditUserMessage?: (messageId: MessageId, text: string) => void;
   },
 ) {
   const entry = info.item;
@@ -1381,23 +1367,6 @@ function renderFeedEntry(
           tintColor={iconSubtleColor}
         />
       </Pressable>
-    );
-  }
-
-  if (entry.type === "thinking") {
-    return <ThreadThinkingRow rowSizing={props.workRowSizing} iconSubtleColor={iconSubtleColor} />;
-  }
-
-  if (entry.type === "agent-spawn") {
-    return (
-      <ThreadAgentSpawnCard
-        summary={entry.summary}
-        expanded={entry.expanded}
-        iconSubtleColor={iconSubtleColor}
-        rowSizing={props.workRowSizing}
-        onToggle={() => props.onToggleWorkGroup(entry.id, entry.id)}
-        onCopy={() => props.onCopyWorkRow(entry.activity.id, entry.activity.getCopyText())}
-      />
     );
   }
 
@@ -1489,18 +1458,14 @@ function renderFeedEntry(
             }}
           >
             {message.text.trim().length > 0 ? (
-              <MarkdownImageAvailableWidthContext
-                value={props.userBubbleMaxWidth - USER_BUBBLE_HORIZONTAL_PADDING * 2}
-              >
-                <UserMessageContent
-                  text={renderedText}
-                  markdownStyles={styles}
-                  reviewCommentColors={props.reviewCommentColors}
-                  skills={props.skills}
-                  linkHandlers={props.markdownLinkHandlers}
-                  renderImage={props.renderMarkdownImage}
-                />
-              </MarkdownImageAvailableWidthContext>
+              <UserMessageContent
+                text={renderedText}
+                markdownStyles={styles}
+                reviewCommentColors={props.reviewCommentColors}
+                skills={props.skills}
+                linkHandlers={props.markdownLinkHandlers}
+                renderImage={props.renderMarkdownImage}
+              />
             ) : null}
             {attachments.map((attachment) => {
               return isImageAttachment(attachment) ? (
@@ -1530,6 +1495,30 @@ function renderFeedEntry(
             <Text className="font-t3-medium text-xs tabular-nums text-adaptive-neutral-600-400">
               {timestampLabel}
             </Text>
+            {props.onEditUserMessage ? (
+              <Pressable
+                accessibilityHint="Edit this message and choose whether to rewind this task or start a new task."
+                accessibilityLabel="Edit from here"
+                accessibilityRole="button"
+                accessibilityState={{
+                  disabled: props.isWorking || props.isEditFromHerePending,
+                }}
+                disabled={props.isWorking || props.isEditFromHerePending}
+                hitSlop={8}
+                onPress={() => props.onEditUserMessage?.(message.id, message.text)}
+                className="h-7 w-7 items-center justify-center rounded-[9px] active:opacity-55"
+                style={{
+                  opacity: props.isWorking || props.isEditFromHerePending ? 0.45 : undefined,
+                }}
+              >
+                <SymbolView
+                  name={{ ios: "square.and.pencil", android: "edit" }}
+                  size={13}
+                  tintColor={iconSubtleColor}
+                  type="monochrome"
+                />
+              </Pressable>
+            ) : null}
             {message.text.trim().length > 0 ? (
               <CopyTextButton
                 accessibilityLabel="Copy message"
@@ -1557,16 +1546,14 @@ function renderFeedEntry(
         {...(enterAnimated ? { entering: FadeIn.duration(220) } : {})}
       >
         {renderedText.trim().length > 0 ? (
-          <MarkdownImageAvailableWidthContext value={props.markdownContentWidth}>
-            <AssistantMarkdownContent
-              markdown={renderedText}
-              markdownStyles={styles}
-              linkHandlers={props.markdownLinkHandlers}
-              onUseArtifactTemplate={props.onUseArtifactTemplate}
-              renderImage={props.renderMarkdownImage}
-              skills={props.skills}
-            />
-          </MarkdownImageAvailableWidthContext>
+          <AssistantMarkdownContent
+            markdown={renderedText}
+            markdownStyles={styles}
+            linkHandlers={props.markdownLinkHandlers}
+            onUseArtifactTemplate={props.onUseArtifactTemplate}
+            renderImage={props.renderMarkdownImage}
+            skills={props.skills}
+          />
         ) : null}
         {attachments.map((attachment) => {
           return isImageAttachment(attachment) ? (
@@ -1622,7 +1609,6 @@ function renderFeedEntry(
       rowSizing={props.workRowSizing}
       scrollPositions={props.workGroupScrollPositions}
       iconSubtleColor={iconSubtleColor}
-      edgeFadeColor={props.screenColor}
       themeAppearance={props.themeAppearance}
       onCopyRow={props.onCopyWorkRow}
       onToggleRow={props.onToggleWorkRow}
@@ -1974,12 +1960,6 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   const { copiedRowId, expandedWorkGroups, expandedWorkRows, expandedTurnIds } = interactionState;
   const [expandedFile, setExpandedFile] = useState<FilePreviewSource | null>(null);
   const [expandedVideo, setExpandedVideo] = useState<VideoPreviewSource | null>(null);
-  const fileShareSourceIdentifier = useId();
-  const shareFileChip = useFileChipShare(
-    props.environmentId,
-    props.threadId,
-    fileShareSourceIdentifier,
-  );
   useEffect(() => {
     setExpandedVideo(null);
     setExpandedFile(null);
@@ -1992,7 +1972,6 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   });
   const contentWidth = Math.max(0, viewportWidth - contentHorizontalPadding * 2);
   const userBubbleMaxWidth = contentWidth * 0.85;
-  const markdownContentWidth = Math.max(0, contentWidth - ASSISTANT_ROW_HORIZONTAL_PADDING * 2);
   const reviewCommentBubbleWidth = Math.min(Math.max(280, contentWidth * 0.85), contentWidth);
   const insets = useSafeAreaInsets();
   const topContentInset = props.contentTopInset ?? insets.top + IOS_NAV_BAR_HEIGHT;
@@ -2018,7 +1997,6 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
 
   const theme = useUniwindTheme();
   const iconSubtleColor = theme["--color-icon-subtle"];
-  const screenColor = theme["--color-screen"];
   const userBubbleColor = theme["--color-user-bubble"];
   const onMarkdownLinkPress = useCallback(
     (href: string) => {
@@ -2132,13 +2110,10 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
           case "open-file":
             onMarkdownLinkPress(href);
             return;
-          case "save":
-            shareFileChip(target);
-            return;
         }
       },
     }),
-    [onMarkdownLinkPress, props.workspaceRoot, shareFileChip],
+    [onMarkdownLinkPress, props.workspaceRoot],
   );
   const renderMarkdownImage = useCallback<MarkdownImageRenderer>(
     (image) => {
@@ -2223,6 +2198,8 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   );
   const markdownStyles = useMarkdownStyles(onMarkdownLinkPress, renderMarkdownImage);
   const reviewCommentColors = useReviewCommentColors();
+  const isWorking = props.isWorking ?? false;
+  const isEditFromHerePending = props.isEditFromHerePending ?? false;
   // LegendList does not invalidate visible rows when only the renderItem closure changes.
   // Keep row-local interaction props in extraData so disclosures and copy feedback repaint.
   const listAppearanceData = useMemo(
@@ -2236,6 +2213,8 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       themeAppearance,
       userBubbleColor,
       viewportWidth,
+      isWorking,
+      isEditFromHerePending,
     }),
     [
       copiedRowId,
@@ -2247,6 +2226,8 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       themeAppearance,
       userBubbleColor,
       viewportWidth,
+      isWorking,
+      isEditFromHerePending,
     ],
   );
   const reportHeaderMaterialVisibility = useCallback(
@@ -2625,7 +2606,6 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         case "turn-fold":
           return TURN_FOLD_HEIGHT;
         case "work-toggle":
-        case "thinking":
           return WORK_GROUP_TOGGLE_HEIGHT;
         case "activity-group":
           if (isContextCompactionActivityGroup(entry)) {
@@ -2670,16 +2650,17 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             renderMarkdownImage,
             renderViewedImage,
             iconSubtleColor,
-            screenColor,
             userBubbleColor,
             markdownStyles,
             reviewCommentColors,
             reviewCommentBubbleWidth,
             themeAppearance,
             userBubbleMaxWidth,
-            markdownContentWidth,
             skills: props.skills,
             onUseArtifactTemplate: props.onUseArtifactTemplate,
+            isWorking,
+            isEditFromHerePending,
+            onEditUserMessage: props.onEditUserMessage,
           })}
         </ThreadMediaVisibility>
       </Animated.View>
@@ -2693,14 +2674,12 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       terminalAssistantMessageIds,
       unsettledTurnId,
       iconSubtleColor,
-      screenColor,
       userBubbleColor,
       markdownStyles,
       reviewCommentColors,
       reviewCommentBubbleWidth,
       themeAppearance,
       userBubbleMaxWidth,
-      markdownContentWidth,
       onCopyWorkRow,
       markdownLinkHandlers,
       onPressPreview,
@@ -2711,6 +2690,11 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       props.environmentId,
       props.onUseArtifactTemplate,
       props.skills,
+      props.isWorking,
+      props.isEditFromHerePending,
+      props.onEditUserMessage,
+      isWorking,
+      isEditFromHerePending,
       renderMarkdownImage,
       renderViewedImage,
     ],
@@ -2729,7 +2713,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
   }
 
   return (
-    <PresentationSource identifier={fileShareSourceIdentifier} style={{ flex: 1 }}>
+    <>
       <View className="flex-1" onLayout={handleViewportLayout}>
         <View className="flex-1">
           <KeyboardAwareLegendList
@@ -2888,9 +2872,10 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
             />
           </View>
         ) : null}
-        <VideoPreviewModal source={expandedVideo} onRequestClose={() => setExpandedVideo(null)} />
-        <FilePreviewModal source={expandedFile} onRequestClose={() => setExpandedFile(null)} />
       </View>
-    </PresentationSource>
+
+      <VideoPreviewModal source={expandedVideo} onRequestClose={() => setExpandedVideo(null)} />
+      <FilePreviewModal source={expandedFile} onRequestClose={() => setExpandedFile(null)} />
+    </>
   );
 });

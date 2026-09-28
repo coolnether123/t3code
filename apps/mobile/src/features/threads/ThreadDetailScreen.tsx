@@ -3,10 +3,7 @@ import {
   appendCodexArtifactTemplateUsePrompt,
   type CodexArtifactTemplate,
 } from "@t3tools/client-runtime/codex-artifact-templates";
-import type {
-  CodexFeedbackSubmission,
-  EnvironmentThreadStatus,
-} from "@t3tools/client-runtime/state/threads";
+import type { EnvironmentThreadStatus } from "@t3tools/client-runtime/state/threads";
 import { useKeyboardChatComposerInset, useKeyboardScrollToEnd } from "@legendapp/list/keyboard";
 import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSkills";
 import type { LegendListRef } from "@legendapp/list/react-native";
@@ -22,7 +19,6 @@ import type {
   RuntimeMode,
   ServerConfig as T3ServerConfig,
   ThreadId,
-  UsageLimitsReport,
   UserInputQuestion,
 } from "@t3tools/contracts";
 import * as Haptics from "expo-haptics";
@@ -62,7 +58,6 @@ import Animated, {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
-import { collectProviderUsageLimits } from "@t3tools/shared/usageLimits";
 import { codexThreadRuntimeLabel } from "../../lib/modelOptions";
 import type { ComposerEditorHandle } from "../../components/ComposerEditor";
 import type { StatusTone } from "../../components/StatusPill";
@@ -77,9 +72,10 @@ import type {
   ThreadFeedEntry,
 } from "../../lib/threadActivity";
 import { PendingApprovalCard } from "./PendingApprovalCard";
-import { ComposerFeedback } from "./ComposerFeedback";
-import { ComposerUsageLimits } from "./ComposerUsageLimits";
 import { PendingUserInputCard } from "./PendingUserInputCard";
+import { EditFromHereDialog } from "./EditFromHereDialog";
+import { SteerTurnDialog } from "./SteerTurnDialog";
+import type { EditFromHereMode } from "./editFromHere";
 import {
   FLOATING_WORKING_CONTROL_COVERAGE,
   FloatingWorkingControl,
@@ -107,11 +103,17 @@ export interface ThreadDetailScreenProps {
   readonly screenTone: StatusTone;
   readonly connectionError: string | null;
   readonly environmentLabel: string | null;
-  readonly feedbackSubmissions: ReadonlyArray<CodexFeedbackSubmission>;
-  readonly onDismissFeedback: (id: MessageId) => void;
   readonly selectedThreadFeed: ReadonlyArray<ThreadFeedEntry>;
   readonly activeWorkStartedAt: string | null;
   readonly isCompacting: boolean;
+  readonly isWorking?: boolean;
+  readonly isEditFromHerePending?: boolean;
+  readonly editFromHereMode?: EditFromHereMode | null;
+  readonly onSubmitEditFromHere?: (input: {
+    readonly mode: EditFromHereMode;
+    readonly sourceMessageId: MessageId;
+    readonly editedText: string;
+  }) => Promise<boolean>;
   readonly activePendingApproval: PendingApproval | null;
   readonly respondingApprovalId: ApprovalRequestId | null;
   readonly activePendingUserInput: PendingUserInput | null;
@@ -160,7 +162,6 @@ export interface ThreadDetailScreenProps {
     customAnswer: string,
   ) => void;
   readonly onSubmitUserInput: () => Promise<unknown>;
-  readonly onDismissUserInput: () => Promise<unknown>;
   readonly showContent?: boolean;
 }
 
@@ -376,68 +377,6 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
   const [collapsedUserInputRequestId, setCollapsedUserInputRequestId] =
     useState<ApprovalRequestId | null>(null);
   const activeUserInputRequestId = props.activePendingUserInput?.requestId ?? null;
-  // The open /usage-limits panel for this thread, model and turn. Only the open
-  // moment is stored: the rows read live provider data, so a redeemed reset
-  // credit or refreshed probe shows through. Anything that spends quota closes
-  // it: a new turn from any source, or the agent resuming after an approval or
-  // answered question.
-  const [usageLimitsPanel, setUsageLimitsPanel] = useState<{
-    readonly key: string;
-    readonly threadKey: string;
-    readonly now: number;
-  } | null>(null);
-  // A pending approval or question is part of the key: once it is answered,
-  // from this client or any other, the agent resumes and spends quota.
-  const usageLimitsKey = [
-    selectedThreadKey,
-    props.selectedThread.modelSelection.instanceId,
-    props.selectedThread.latestTurn?.turnId ?? "",
-    props.activePendingApproval?.requestId ?? props.activePendingUserInput?.requestId ?? "",
-  ].join(":");
-  // Drop the snapshot as soon as the key changes so it cannot resurface stale.
-  if (usageLimitsPanel !== null && usageLimitsPanel.key !== usageLimitsKey) {
-    setUsageLimitsPanel(null);
-  }
-  const usageLimitsReport = useMemo(
-    () =>
-      usageLimitsPanel !== null && usageLimitsPanel.key === usageLimitsKey
-        ? collectProviderUsageLimits(
-            props.selectedThread.modelSelection.instanceId,
-            props.serverConfig?.providers ?? [],
-            props.serverConfig?.usageLimitSources ?? [],
-            usageLimitsPanel.now,
-          )
-        : null,
-    [
-      props.selectedThread.modelSelection.instanceId,
-      props.serverConfig,
-      usageLimitsKey,
-      usageLimitsPanel,
-    ],
-  );
-  const showUsageLimits = useCallback(
-    (report: UsageLimitsReport | null) =>
-      setUsageLimitsPanel(
-        report === null
-          ? null
-          : {
-              key: usageLimitsKey,
-              threadKey: selectedThreadKey,
-              now: Date.parse(report.createdAt),
-            },
-      ),
-    [selectedThreadKey, usageLimitsKey],
-  );
-  const dismissUsageLimits = useCallback(() => setUsageLimitsPanel(null), []);
-  // A send may resolve after navigating away, so only the originating
-  // thread's panel is cleared; a panel opened elsewhere in the meantime stays.
-  const clearUsageLimitsFor = useCallback(
-    (threadKey: string) =>
-      setUsageLimitsPanel((current) =>
-        current !== null && current.threadKey === threadKey ? null : current,
-      ),
-    [],
-  );
   const userInputCollapsed =
     activeUserInputRequestId !== null && collapsedUserInputRequestId === activeUserInputRequestId;
   // The card's height RESERVES keyboard space at all times instead of
@@ -615,6 +554,26 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
   const contentMaxWidth = isSplitLayout ? CHAT_CONTENT_MAX_WIDTH : undefined;
   const selectedInstanceId = props.selectedThread.modelSelection.instanceId;
   useStreamingHaptics(props.selectedThread.id, props.selectedThreadFeed);
+  const [editFromHereDialog, setEditFromHereDialog] = useState<{
+    readonly messageId: MessageId;
+    readonly text: string;
+  } | null>(null);
+  const submitEditFromHere = useCallback(
+    async (mode: EditFromHereMode, editedText: string) => {
+      if (!props.onSubmitEditFromHere || !editFromHereDialog) {
+        return;
+      }
+      const accepted = await props.onSubmitEditFromHere({
+        mode,
+        sourceMessageId: editFromHereDialog.messageId,
+        editedText,
+      });
+      if (accepted) {
+        setEditFromHereDialog(null);
+      }
+    },
+    [editFromHereDialog, props.onSubmitEditFromHere],
+  );
   const selectedProviderSkills = useMemo(() => {
     const provider = props.serverConfig?.providers.find(
       (candidate) => candidate.instanceId === selectedInstanceId,
@@ -702,9 +661,6 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
       return messageId;
     }
 
-    // A sent message makes the snapshot stale; a refused send leaves it in place.
-    clearUsageLimitsFor(targetThreadKey);
-
     setSubmittedMessageId(messageId);
     setAnchorMessageId(
       resolveThreadFeedSubmissionAnchor({
@@ -719,7 +675,6 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
     return messageId;
   }, [
     anchorMessageId,
-    clearUsageLimitsFor,
     props.onSendMessage,
     props.selectedThread.latestTurn,
     props.selectedThreadQueueCount,
@@ -816,6 +771,9 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
             agentLabel={agentLabel}
             latestTurn={props.selectedThread.latestTurn}
             activeWorkStartedAt={props.activeWorkStartedAt}
+            isWorking={props.isWorking ?? props.activeWorkStartedAt !== null}
+            isEditFromHerePending={props.isEditFromHerePending ?? false}
+            onEditUserMessage={(messageId, text) => setEditFromHereDialog({ messageId, text })}
             listRef={listRef}
             freeze={freeze}
             anchorMessageId={anchorMessageId}
@@ -838,6 +796,18 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
       ) : (
         <View className="flex-1" />
       )}
+
+      <EditFromHereDialog
+        open={editFromHereDialog !== null}
+        initialText={editFromHereDialog?.text ?? ""}
+        submitting={props.isEditFromHerePending ?? false}
+        onOpenChange={(open) => {
+          if (!open) {
+            setEditFromHereDialog(null);
+          }
+        }}
+        onSubmit={(mode, editedText) => void submitEditFromHere(mode, editedText)}
+      />
 
       {/* Floating composer — sticks to keyboard via KeyboardStickyView */}
       {showContent ? (
@@ -869,26 +839,6 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                 onScrollToEnd={handleScrollToEnd}
               />
               <View className="w-full self-center" style={{ maxWidth: contentMaxWidth }}>
-                {props.feedbackSubmissions.map((submission) => (
-                  <ComposerFeedback
-                    key={submission.id}
-                    submission={submission}
-                    onDismiss={() => props.onDismissFeedback(submission.id)}
-                  />
-                ))}
-                {usageLimitsReport && activeUserInputRequestId === null ? (
-                  <Animated.View
-                    className="shrink-0 px-4 pb-3"
-                    entering={FadeInDown.duration(220)}
-                    exiting={FadeOut.duration(140)}
-                  >
-                    <ComposerUsageLimits
-                      report={usageLimitsReport}
-                      environmentId={props.environmentId}
-                      onClose={dismissUsageLimits}
-                    />
-                  </Animated.View>
-                ) : null}
                 {props.activePendingApproval || props.activePendingUserInput ? (
                   <Animated.View
                     className="shrink-0 gap-3 px-4 pb-3"
@@ -925,7 +875,6 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                         onSelectOption={props.onSelectUserInputOption}
                         onChangeCustomAnswer={props.onChangeUserInputCustomAnswer}
                         onSubmit={props.onSubmitUserInput}
-                        onDismiss={props.onDismissUserInput}
                       />
                     ) : null}
                   </Animated.View>
@@ -935,6 +884,17 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
               {/* Hidden (not unmounted) while a user-input request owns the
                 composer slot, so composer drafts and editor state survive. */}
               <View style={activeUserInputRequestId !== null ? { display: "none" } : undefined}>
+                <SteerTurnDialog
+                  key={selectedThreadKey}
+                  environmentId={props.environmentId}
+                  threadId={props.selectedThread.id}
+                  session={props.selectedThread.session}
+                  disabled={
+                    props.connectionStateLabel !== "connected" ||
+                    props.editFromHereMode != null ||
+                    props.isEditFromHerePending === true
+                  }
+                />
                 <ThreadComposer
                   editorRef={composerEditorRef}
                   draftMessage={props.draftMessage}
@@ -958,7 +918,6 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                   onRemoveDraftImage={props.onRemoveDraftImage}
                   onStopThread={props.onStopThread}
                   onSendMessage={handleSendMessage}
-                  onShowUsageLimits={showUsageLimits}
                   onReconnectEnvironment={props.onReconnectEnvironment}
                   onUpdateModelSelection={props.onUpdateThreadModelSelection}
                   onUpdateRuntimeMode={props.onUpdateThreadRuntimeMode}
