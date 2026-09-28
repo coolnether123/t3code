@@ -38,3 +38,6 @@ node_modules/
 *.log
 .env*
 !.env.example
+
+# Local Codex trigger-tree hook state
+.trigger-tree/

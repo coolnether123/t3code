@@ -59,6 +59,7 @@ $excludedRelativeFiles = @(
 
 $excludedDirectoryNames = @(
     ".git",
+    ".trigger-tree",
     ".t3",
     ".vite-plus",
     "node_modules",
