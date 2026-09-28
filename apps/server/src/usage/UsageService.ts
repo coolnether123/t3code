@@ -160,6 +160,11 @@ const MAX_USAGE_READ_DURATION_MS = 12_000;
 
 /** Files changed in this span are checked between complete directory audits. */
 const RECENT_TRANSCRIPT_WINDOW_MS = 48 * 60 * 60 * 1000;
+/**
+ * A page asks for several windows at once. Within this span they share one
+ * transcript directory listing instead of each walking the same directories.
+ */
+const TRANSCRIPT_INVENTORY_REUSE_MS = 10 * 1000;
 
 /** Full audits catch deleted history without putting a tree walk on every request. */
 const FULL_SCAN_INTERVAL_MS = 15 * 60 * 1000;
@@ -477,6 +482,13 @@ export const make = Effect.gen(function* () {
   const scanSemaphore = yield* Semaphore.make(1);
 
   const recentScanAt = new Map<string, number>();
+  const recentInventories = new Map<
+    string,
+    {
+      readonly listedAtMs: number;
+      readonly listing: Awaited<ReturnType<typeof listTranscriptFilesBounded>>;
+    }
+  >();
   let repeatedInputCatalog: RepeatedInputCatalog | null = null;
   let repeatedInputCatalogRoots = "";
   let repeatedInputCatalogAtMs = 0;
@@ -1124,16 +1136,31 @@ export const make = Effect.gen(function* () {
           recentTranscriptWindowMs: RECENT_TRANSCRIPT_WINDOW_MS,
           fullScanIntervalMs: FULL_SCAN_INTERVAL_MS,
         });
-        const listing = plan.shouldRefresh
-          ? yield* Effect.promise(() =>
-              listTranscriptFilesBounded(
-                dir,
-                plan.scanStartMs,
-                provider,
-                MAX_TRANSCRIPT_INVENTORY_DURATION_MS,
-              ),
-            )
-          : { files: [], complete: true };
+        const inventoryKey = `${coverageKey}\u0000${plan.scanStartMs}`;
+        const reusable = recentInventories.get(inventoryKey);
+        const listing = !plan.shouldRefresh
+          ? { files: [], complete: true }
+          : reusable !== undefined &&
+              reusable.listing.complete &&
+              startedAtMs - reusable.listedAtMs < TRANSCRIPT_INVENTORY_REUSE_MS
+            ? reusable.listing
+            : yield* Effect.promise(() =>
+                listTranscriptFilesBounded(
+                  dir,
+                  plan.scanStartMs,
+                  provider,
+                  MAX_TRANSCRIPT_INVENTORY_DURATION_MS,
+                ),
+              ).pipe(
+                Effect.tap((fresh) =>
+                  Effect.sync(() => {
+                    recentInventories.set(inventoryKey, {
+                      listedAtMs: startedAtMs,
+                      listing: fresh,
+                    });
+                  }),
+                ),
+              );
         return {
           provider,
           dir,
@@ -1356,6 +1383,24 @@ export const make = Effect.gen(function* () {
       );
 
       for (const file of selection.files) {
+        // An unchanged transcript whose newest usage predates the window has
+        // nothing to contribute; its index row says so without decoding it.
+        const stored = scanStore.meta(file.path);
+        if (
+          !repeatedInputEnabled &&
+          stored !== undefined &&
+          stored.size === file.size &&
+          stored.mtimeMs === file.mtimeMs &&
+          stored.provider === provider &&
+          stored.scanCursor === undefined &&
+          stored.scanSkippedLines === undefined &&
+          stored.scanDiscardingLine !== true &&
+          stored.latestMs < windowStartMs
+        ) {
+          if (stored.recordCount > 0) scannedFiles += 1;
+          else skippedFiles += 1;
+          continue;
+        }
         // Repeated-input attribution reads the prior entry's observations and
         // parser state; ordinary scans never decode it here.
         const cachedBefore = repeatedInputEnabled ? scanStore.load(file.path) : undefined;
