@@ -4,6 +4,13 @@ For one account, use the default Codex provider with your normal Codex login.
 [Provider setup](./install.md#providers) covers installation, Settings > Providers,
 and custom binaries or environment variables.
 
+If Codex ends a turn because the selected model is at capacity, the thread shows
+"Model at capacity. Trying again in 5 seconds" and retries automatically. It
+tries up to five times on the same chat. You can press Stop while it waits, send
+a new message instead, or archive the chat to cancel the retry. After five failed
+attempts, the thread asks you to send again or choose another model. Usage limits
+and other errors do not trigger this retry.
+
 ## Use the Codex desktop app
 
 In **Settings > Providers**, turn on **Use Codex desktop app** for a Codex

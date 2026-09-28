@@ -10,6 +10,7 @@ import {
   ProviderRuntimeEvent,
   ProviderSession,
   ProviderInstanceId,
+  type ProviderSendTurnInput,
 } from "@t3tools/contracts";
 import {
   ApprovalRequestId,
@@ -25,6 +26,7 @@ import {
   TurnId,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
@@ -32,6 +34,7 @@ import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { it as effectIt } from "@effect/vitest";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
@@ -121,11 +124,18 @@ function isLegacyTurnCompletedEvent(
 function createProviderServiceHarness() {
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
   const runtimeSessions: ProviderSession[] = [];
+  const sentTurns: ProviderSendTurnInput[] = [];
 
   const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
   const service: ProviderServiceShape = {
     startSession: () => unsupported(),
-    sendTurn: () => unsupported(),
+    sendTurn: (input) => {
+      sentTurns.push(input);
+      return Effect.succeed({
+        threadId: input.threadId,
+        turnId: asTurnId(`retry-${sentTurns.length}`),
+      });
+    },
     interruptTurn: () => unsupported(),
     respondToRequest: () => unsupported(),
     respondToUserInput: () => unsupported(),
@@ -185,6 +195,7 @@ function createProviderServiceHarness() {
     service,
     emit,
     setSession,
+    sentTurns,
   };
 }
 
@@ -248,6 +259,7 @@ describe("ProviderRuntimeIngestion", () => {
   async function createHarness(options?: {
     serverSettings?: Partial<ServerSettings>;
     threadTitle?: string;
+    testClock?: boolean;
   }) {
     const workspaceRoot = makeTempDir("t3-provider-project-");
     NodeChildProcess.execFileSync("git", ["init", "--quiet"], {
@@ -283,7 +295,9 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provideMerge(Layer.succeed(WorkerService.WorkerService, testWorkerService)),
       Layer.provideMerge(NodeServices.layer),
     );
-    runtime = ManagedRuntime.make(layer);
+    runtime = ManagedRuntime.make(
+      options?.testClock ? Layer.provideMerge(layer, TestClock.layer()) : layer,
+    );
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const ingestion = await runtime.runPromise(Effect.service(ProviderRuntimeIngestionService));
@@ -352,6 +366,8 @@ describe("ProviderRuntimeIngestion", () => {
       emit: provider.emit,
       setProviderSession: provider.setSession,
       drain,
+      sentTurns: provider.sentTurns,
+      advance: (millis: number) => runtime!.runPromise(TestClock.adjust(Duration.millis(millis))),
     };
   }
 
@@ -396,6 +412,174 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("turn failed");
   });
+
+  it("retries capacity failures on the same thread without another user message, then stops at five", async () => {
+    const harness = await createHarness({ testClock: true });
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = asThreadId("thread-1");
+    await harness.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make("original-message"),
+      threadId,
+      message: {
+        messageId: asMessageId("original-message"),
+        role: "user",
+        text: "Please finish the work",
+        attachments: [],
+      },
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      runtimeMode: "approval-required",
+      createdAt: now,
+    });
+    await harness.drain();
+    for (let attempt = 1; attempt <= 5; attempt++) {
+      const turnId = asTurnId(attempt === 1 ? "original" : `retry-${attempt - 1}`);
+      harness.emit({
+        type: "turn.started",
+        eventId: asEventId(`started-${attempt}`),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId,
+        createdAt: now,
+        payload: {},
+      });
+      await waitForThread(harness.readModel, (thread) => thread.session?.activeTurnId === turnId);
+      harness.emit({
+        type: "turn.completed",
+        eventId: asEventId(`failed-${attempt}`),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId,
+        createdAt: now,
+        payload: { state: "failed", errorClass: "capacity", errorMessage: "at capacity" },
+      });
+      const expected =
+        attempt === 5
+          ? "Model still at capacity after 5 attempts. Send again or pick another model."
+          : `Model at capacity. Trying again in 5 seconds (attempt ${attempt + 1} of 5).`;
+      const thread = await waitForThread(harness.readModel, (entry) =>
+        entry.activities.some((activity) => activity.summary === expected),
+      );
+      expect(thread.messages.filter((message) => message.role === "user")).toHaveLength(1);
+      if (attempt === 1) {
+        harness.emit({
+          type: "turn.completed",
+          eventId: asEventId("duplicate-failure"),
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          turnId,
+          createdAt: now,
+          payload: { state: "failed", errorClass: "capacity", errorMessage: "at capacity" },
+        });
+        await harness.drain();
+        expect(
+          (await harness.readModel()).threads[0]?.activities.filter(
+            (activity) => activity.kind === "capacity.retry.waiting",
+          ),
+        ).toHaveLength(1);
+      }
+      if (attempt < 5) {
+        await harness.advance(4999);
+        expect(harness.sentTurns).toHaveLength(attempt - 1);
+        await harness.advance(1);
+        await waitForThread(harness.readModel, (entry) =>
+          entry.activities.some(
+            (activity) => activity.summary === "Trying again now." && activity.turnId === turnId,
+          ),
+        );
+        expect(harness.sentTurns).toHaveLength(attempt);
+        expect(harness.sentTurns[attempt - 1]).toMatchObject({
+          threadId,
+          continuation: true,
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          modelSelection: { instanceId: "codex", model: "gpt-5-codex" },
+        });
+        expect(harness.sentTurns[attempt - 1]?.input).toBeUndefined();
+      }
+    }
+    await harness.advance(30_000);
+    expect(harness.sentTurns).toHaveLength(4);
+  });
+
+  for (const action of ["interrupt", "new-message", "archive", "session-stop", "delete"] as const) {
+    it(`cancels a waiting capacity retry on ${action}`, async () => {
+      const harness = await createHarness({ testClock: true });
+      const now = "2026-01-01T00:00:00.000Z";
+      const threadId = asThreadId("thread-1");
+      harness.emit({
+        type: "turn.started",
+        eventId: asEventId("capacity-started"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId: asTurnId("capacity-turn"),
+        createdAt: now,
+        payload: {},
+      });
+      await waitForThread(harness.readModel, (thread) => thread.session?.status === "running");
+      harness.emit({
+        type: "turn.completed",
+        eventId: asEventId("capacity-failed"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId: asTurnId("capacity-turn"),
+        createdAt: now,
+        payload: { state: "failed", errorClass: "capacity", errorMessage: "at capacity" },
+      });
+      await waitForThread(harness.readModel, (thread) =>
+        thread.activities.some((activity) => activity.kind === "capacity.retry.waiting"),
+      );
+      await harness.dispatch(
+        action === "interrupt"
+          ? {
+              type: "thread.turn.interrupt",
+              commandId: CommandId.make("cancel-retry"),
+              threadId,
+              createdAt: now,
+            }
+          : action === "archive"
+            ? { type: "thread.archive", commandId: CommandId.make("archive-retry"), threadId }
+            : action === "session-stop"
+              ? {
+                  type: "thread.session.stop",
+                  commandId: CommandId.make("stop-retry"),
+                  threadId,
+                  createdAt: now,
+                }
+              : action === "delete"
+                ? { type: "thread.delete", commandId: CommandId.make("delete-retry"), threadId }
+                : {
+                    type: "thread.turn.start",
+                    commandId: CommandId.make("new-message"),
+                    threadId,
+                    message: {
+                      messageId: asMessageId("fresh"),
+                      role: "user",
+                      text: "New input",
+                      attachments: [],
+                    },
+                    interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+                    runtimeMode: "approval-required",
+                    createdAt: now,
+                  },
+      );
+      await harness.drain();
+      if (action !== "delete") {
+        const thread = await waitForThread(harness.readModel, (entry) =>
+          entry.activities.some((activity) => activity.summary === "Automatic retry canceled."),
+        );
+        expect(
+          thread.activities.some(
+            (activity) =>
+              activity.kind === "capacity.retry.finished" &&
+              activity.turnId === asTurnId("capacity-turn"),
+          ),
+        ).toBe(true);
+      }
+      await harness.advance(5_000);
+      expect(harness.sentTurns).toHaveLength(0);
+    });
+  }
 
   it("applies provider session.state.changed transitions directly", async () => {
     const harness = await createHarness();

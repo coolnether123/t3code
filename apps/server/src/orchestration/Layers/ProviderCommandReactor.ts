@@ -1818,6 +1818,10 @@ const make = Effect.gen(function* () {
       return;
     }
     const hasSession = thread.session && thread.session.status !== "stopped";
+    if (thread.session?.status === "error" && thread.session.activeTurnId === null) {
+      // An interrupt can cancel a delayed retry after its provider turn has ended.
+      return;
+    }
     if (!hasSession) {
       return yield* appendProviderFailureActivity({
         threadId: event.payload.threadId,

@@ -1908,7 +1908,8 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
           threadId: "thread-1",
           turnId: "turn-1",
           error: {
-            message: "Reconnecting... 2/5",
+            message: "Selected model is at capacity. Reconnecting... 2/5",
+            codexErrorInfo: "serverOverloaded",
           },
           willRetry: true,
         },
@@ -1925,9 +1926,67 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         return;
       }
       NodeAssert.equal(firstEvent.value.turnId, "turn-1");
-      NodeAssert.equal(firstEvent.value.payload.message, "Reconnecting... 2/5");
+      NodeAssert.equal(
+        firstEvent.value.payload.message,
+        "Selected model is at capacity. Reconnecting... 2/5",
+      );
     }),
   );
+
+  for (const [name, error, expectedClass] of [
+    ["server overload", { message: "Busy", codexErrorInfo: "serverOverloaded" }, "capacity"],
+    ["capacity wording", { message: "Selected model is at capacity." }, "capacity"],
+    [
+      "usage limit",
+      { message: "Usage limit reached", codexErrorInfo: "usageLimitExceeded" },
+      "provider_error",
+    ],
+    ["other failure", { message: "Authentication failed" }, "provider_error"],
+  ] as const) {
+    it.effect(`classifies ${name} only on final failure`, () =>
+      Effect.gen(function* () {
+        const { adapter, runtime } = yield* startLifecycleRuntime();
+        const eventsFiber = yield* adapter.streamEvents.pipe(
+          Stream.take(2),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* runtime.emit({
+          id: asEventId(`evt-${name}-error`),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "error",
+          payload: { threadId: "thread-1", turnId: "turn-1", error, willRetry: false },
+        } satisfies ProviderEvent);
+        yield* runtime.emit({
+          id: asEventId(`evt-${name}-completed`),
+          kind: "notification",
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("turn-1"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          method: "turn/completed",
+          payload: {
+            threadId: "thread-1",
+            turn: { id: "turn-1", items: [], status: "failed", error },
+          },
+        } satisfies ProviderEvent);
+        const events = Array.from(yield* Fiber.join(eventsFiber));
+        NodeAssert.equal(events[0]?.type, "runtime.error");
+        NodeAssert.equal(events[0]?.payload.class, expectedClass);
+        NodeAssert.equal(events[1]?.type, "turn.completed");
+        if (events[1]?.type === "turn.completed") {
+          NodeAssert.equal(
+            events[1].payload.errorClass,
+            expectedClass === "capacity" ? "capacity" : undefined,
+          );
+        }
+      }),
+    );
+  }
 
   it.effect("maps process stderr notifications to runtime.warning", () =>
     Effect.gen(function* () {

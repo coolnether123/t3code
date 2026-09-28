@@ -232,6 +232,18 @@ function trimText(value: string | undefined | null): string | undefined {
   return trimmed && trimmed.length > 0 ? trimmed : undefined;
 }
 
+function isCodexCapacityError(
+  error: { readonly message?: string; readonly codexErrorInfo?: unknown } | null | undefined,
+): boolean {
+  if (!error) return false;
+  if (error.codexErrorInfo === "serverOverloaded") return true;
+  // A known code takes precedence over wording (especially usage limits).
+  return (
+    (error.codexErrorInfo == null || error.codexErrorInfo === "other") &&
+    /\bat capacity\b/i.test(error.message ?? "")
+  );
+}
+
 const FATAL_CODEX_STDERR_SNIPPETS = ["failed to connect to websocket"];
 
 function isFatalCodexProcessStderrMessage(message: string): boolean {
@@ -1308,6 +1320,7 @@ function mapToRuntimeEvents(
       return [];
     }
     const errorMessage = trimText(payload.turn.error?.message);
+    const capacityError = isCodexCapacityError(payload.turn.error);
     return [
       {
         ...runtimeEventBase(event, canonicalThreadId),
@@ -1315,6 +1328,9 @@ function mapToRuntimeEvents(
         payload: {
           state: toTurnStatus(payload.turn.status),
           ...(errorMessage ? { errorMessage } : {}),
+          ...(payload.turn.status === "failed" && capacityError
+            ? { errorClass: "capacity" as const }
+            : {}),
         },
       },
     ];
@@ -1796,7 +1812,13 @@ function mapToRuntimeEvents(
         ...runtimeEventBase(event, canonicalThreadId),
         payload: {
           message,
-          ...(!willRetry ? { class: "provider_error" as const } : {}),
+          ...(!willRetry
+            ? {
+                class: isCodexCapacityError(payload?.error)
+                  ? ("capacity" as const)
+                  : ("provider_error" as const),
+              }
+            : {}),
           ...(event.payload !== undefined ? { detail: event.payload } : {}),
         },
       },
