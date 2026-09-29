@@ -119,6 +119,7 @@ import { formatRelativeTimeLabel, parseTimestampDate } from "../timestampFormat"
 import type { SidebarThreadSummary } from "../types";
 import { cn } from "~/lib/utils";
 import { buildThreadActionMenuItems } from "./threadActionMenu.logic";
+import { MultiChatTranscriptLoader, useMultiChatTranscriptCopy } from "./MultiChatTranscriptLoader";
 import {
   animatePinnedLayoutChanges,
   buildBulkTitleRegenerationContextMenuItem,
@@ -1804,6 +1805,12 @@ export default function Sidebar() {
   const { environments } = useEnvironments();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const clearSelection = useThreadSelectionStore((s) => s.clearSelection);
+  const {
+    request: multiChatCopyRequest,
+    startCopy: startMultiChatCopy,
+    onLoaded: handleMultiChatTranscriptLoaded,
+    onError: handleMultiChatTranscriptError,
+  } = useMultiChatTranscriptCopy(clearSelection);
   const setSelectionAnchor = useThreadSelectionStore((s) => s.setAnchor);
   const toggleThreadSelection = useThreadSelectionStore((s) => s.toggleThread);
   const rangeSelectTo = useThreadSelectionStore((s) => s.rangeSelectTo);
@@ -2855,6 +2862,7 @@ export default function Sidebar() {
                 ]
               : []),
             ...(titleRegenerationMenuItem ? [titleRegenerationMenuItem] : []),
+            { id: "copy", label: `Copy chats (${count})` },
             { id: "mark-unread", label: `Mark unread (${count})` },
             { id: "delete", label: `Delete (${count})`, destructive: true },
           ],
@@ -2862,6 +2870,12 @@ export default function Sidebar() {
         ),
       );
       if (clicked._tag === "Failure") return;
+      if (clicked.value === "copy") {
+        startMultiChatCopy(
+          selectedThreads.map((thread) => scopeThreadRef(thread.environmentId, thread.id)),
+        );
+        return;
+      }
       if (clicked.value?.startsWith("snooze:")) {
         const preset = snoozePresets.find(
           (candidate) => `snooze:${candidate.id}` === clicked.value,
@@ -3021,6 +3035,7 @@ export default function Sidebar() {
       attemptUnsnooze,
       updateThreadMetadata,
       timestampFormat,
+      startMultiChatCopy,
     ],
   );
 
@@ -3940,6 +3955,15 @@ export default function Sidebar() {
         </SidebarGroup>
       </SidebarContent>
       <SidebarChromeFooter />
+      {multiChatCopyRequest?.threadRefs.map((threadRef) => (
+        <MultiChatTranscriptLoader
+          key={`${multiChatCopyRequest.id}:${scopedThreadKey(threadRef)}`}
+          requestId={multiChatCopyRequest.id}
+          threadRef={threadRef}
+          onLoaded={handleMultiChatTranscriptLoaded}
+          onError={handleMultiChatTranscriptError}
+        />
+      ))}
     </>
   );
 }
