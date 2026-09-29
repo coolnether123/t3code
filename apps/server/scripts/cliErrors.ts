@@ -68,3 +68,12 @@ export class ServerCliBuildAssetMissingError extends Schema.TaggedErrorClass<Ser
     return `Missing build asset: ${this.assetPath}. Run the build subcommand first.`;
   }
 }
+
+export class ServerCliWebBuildMissingError extends Schema.TaggedErrorClass<ServerCliWebBuildMissingError>()(
+  "ServerCliWebBuildMissingError",
+  { assetPath: Schema.String },
+) {
+  override get message(): string {
+    return `Missing web build asset: ${this.assetPath}. Build @t3tools/web before building the server.`;
+  }
+}

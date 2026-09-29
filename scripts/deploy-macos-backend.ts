@@ -175,14 +175,27 @@ const walkSymlinksInside = async (root: string): Promise<void> => {
 };
 
 export const candidateEntryPath = async (candidate: string): Promise<string> => {
-  const candidates = [
-    NodePath.join(candidate, "dist/bin.mjs"),
-    NodePath.join(candidate, "apps/server/dist/bin.mjs"),
-  ];
-  for (const path of candidates) {
-    if (await optionalLstat(path)) return path;
-  }
-  return fail("candidate is missing dist/bin.mjs.");
+  const entry = NodePath.join(candidate, "dist/bin.mjs");
+  if (!(await optionalLstat(entry))) fail("candidate is missing dist/bin.mjs.");
+  return entry;
+};
+
+const requireClientBundle = async (root: string): Promise<void> => {
+  const client = NodePath.join(root, "dist/client");
+  const index = NodePath.join(client, "index.html");
+  const indexStat = await optionalLstat(index);
+  if (!indexStat?.isFile()) fail(`bundle is missing dist/client/index.html: ${root}`);
+  const assets = NodePath.join(client, "assets");
+  const assetsStat = await optionalLstat(assets);
+  if (!assetsStat?.isDirectory()) fail(`bundle is missing dist/client/assets files: ${root}`);
+  const hasFile = async (directory: string): Promise<boolean> => {
+    for (const entry of await NodeFSP.readdir(directory, { withFileTypes: true })) {
+      if (entry.isFile()) return true;
+      if (entry.isDirectory() && (await hasFile(NodePath.join(directory, entry.name)))) return true;
+    }
+    return false;
+  };
+  if (!(await hasFile(assets))) fail(`bundle is missing dist/client/assets files: ${root}`);
 };
 
 export const candidateCommitMarkerPaths = (candidate: string): ReadonlyArray<string> => [
@@ -191,13 +204,16 @@ export const candidateCommitMarkerPaths = (candidate: string): ReadonlyArray<str
 ];
 
 export const validateCandidate = async (options: BackendDeployOptions): Promise<void> => {
-  await requireNoSymlink(options.candidate, "candidate");
+  const candidate = await requireNoSymlink(options.candidate, "candidate");
+  if (!candidate.isDirectory()) fail(`candidate must be a directory: ${options.candidate}`);
   const entry = await candidateEntryPath(options.candidate);
-  await requireNoSymlink(entry, "candidate server entry");
+  const entryStat = await requireNoSymlink(entry, "candidate server entry");
+  if (!entryStat.isFile()) fail(`candidate server entry must be a file: ${entry}`);
   // npm/pnpm dependency trees legitimately contain package-manager symlinks.
   // Only the executable bundle itself is containment-checked; runtime package
   // links are followed below and must still resolve to a directory.
   await walkSymlinksInside(NodePath.dirname(entry));
+  await requireClientBundle(options.candidate);
   const runtimeDependencyCandidates = [
     NodePath.join(options.candidate, "node_modules/node-pty"),
     NodePath.join(options.candidate, "apps/server/node_modules/node-pty"),
@@ -698,14 +714,22 @@ const waitForHttp = async (
       const body = (await response.json()) as { environmentId?: unknown };
       if (expectedEnvironmentId !== undefined && body.environmentId !== expectedEnvironmentId)
         fail("health identity does not match the preserved T3 environment.");
+      const root = await fetch(`http://127.0.0.1:${port}/`, {
+        redirect: "manual",
+        signal: AbortSignal.timeout(5_000),
+      });
+      assertRootHttpStatus(root.status);
       return;
     } catch (error) {
       lastError = error;
       await new Promise((resolve) => setTimeout(resolve, 1_000));
     }
   }
-  void lastError;
-  fail(`HTTP health did not pass on loopback port ${port}.`);
+  fail(`HTTP health did not pass on loopback port ${port}: ${String(lastError)}.`);
+};
+
+export const assertRootHttpStatus = (status: number): void => {
+  if (status !== 200) fail(`GET / returned HTTP ${status}; expected 200 from the web client.`);
 };
 
 const spawnServer = (
@@ -918,6 +942,14 @@ const bootoutAndWait = async (uid: number, label: string, description: string): 
   fail(`${description} left ${label} loaded; refusing to bootstrap over it.`);
 };
 
+const waitForListenerRelease = async (options: BackendDeployOptions): Promise<void> => {
+  for (let wait = 0; wait < 30; wait += 1) {
+    if ((await inspectListeners(options, true)).length === 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  fail("server did not release its exact listener; refusing to start a second server.");
+};
+
 const runPlan = (options: BackendDeployOptions): void => {
   const destination = installPath(options.commit);
   const plist = launchAgentPath(options.label);
@@ -946,6 +978,7 @@ const rollbackDeployment = async (input: {
 }): Promise<void> => {
   await bootoutAndWait(input.uid, input.options.label, "rollback bootout");
   await restoreDeploymentFiles(input.plist, input.wrapper, input.oldPlist, input.oldWrapper);
+  await waitForListenerRelease(input.options);
   if (input.oldLaunchAgentWasLoaded) {
     await requireCommandSuccess(
       "launchctl",
@@ -953,11 +986,6 @@ const rollbackDeployment = async (input: {
       "owned LaunchAgent rollback bootstrap",
     );
   } else {
-    const listeners = await inspectListeners(input.options, true);
-    if (listeners.length !== 0)
-      fail(
-        "rollback found a listener after candidate shutdown; refusing to start a second old server.",
-      );
     const old = spawnServer(
       input.options.oldNodePath,
       input.options.oldEntry,
@@ -968,6 +996,15 @@ const rollbackDeployment = async (input: {
     await waitForHttp(input.options.port, input.environmentId, 60_000);
     if (old.exitCode !== null) fail("rollback old server exited before health completed.");
   }
+};
+
+export const recoverFailedDeployment = async (
+  stopped: boolean,
+  restore: () => Promise<void>,
+  rollback: () => Promise<void>,
+): Promise<void> => {
+  if (stopped) await rollback();
+  else await restore();
 };
 
 const restoreDeploymentFiles = async (
@@ -1051,6 +1088,7 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
     await NodeFSP.rm(temporaryInstall, { recursive: true, force: true });
     throw error;
   }
+  await validateCandidate({ ...options, candidate: destination });
 
   let stopped = false;
   try {
@@ -1089,13 +1127,7 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
     });
     process.kill(pid, "SIGTERM");
     stopped = true;
-    for (let wait = 0; wait < 30; wait += 1) {
-      const after = await inspectListeners(options, true);
-      if (after.length === 0) break;
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-      if (wait === 29)
-        fail("old server did not release its exact listener; refusing to bootstrap the candidate.");
-    }
+    await waitForListenerRelease(options);
     if (await launchctlPrint(uid, options.label))
       await bootoutAndWait(uid, options.label, "owned LaunchAgent bootout");
     await requireCommandSuccess(
@@ -1106,20 +1138,21 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
     await waitForHttp(options.port, environmentId, 90_000);
     console.log(`deployment passed for ${options.commit}; backup: ${runDir}`);
   } catch (error) {
-    if (!stopped) {
-      await restoreDeploymentFiles(plist, wrapper, oldPlist, oldWrapper);
-      throw error;
-    }
-    await rollbackDeployment({
-      options,
-      uid,
-      plist,
-      wrapper,
-      oldPlist,
-      oldWrapper,
-      oldLaunchAgentWasLoaded,
-      environmentId,
-    });
+    await recoverFailedDeployment(
+      stopped,
+      () => restoreDeploymentFiles(plist, wrapper, oldPlist, oldWrapper),
+      () =>
+        rollbackDeployment({
+          options,
+          uid,
+          plist,
+          wrapper,
+          oldPlist,
+          oldWrapper,
+          oldLaunchAgentWasLoaded,
+          environmentId,
+        }),
+    );
     throw error;
   }
 };
@@ -1173,12 +1206,14 @@ const isEntrypoint =
   NodeURL.fileURLToPath(import.meta.url) === NodePath.resolve(process.argv[1]);
 
 if (isEntrypoint) {
-  try {
+  void (async () => {
     const options = parseArgs(process.argv.slice(2));
-    if (options.dryRun) runPlan(options);
-    else void deploy(options);
-  } catch (error) {
+    if (options.dryRun) {
+      await validateCandidate(options);
+      runPlan(options);
+    } else await deploy(options);
+  })().catch((error: unknown) => {
     console.error(error instanceof Error ? error.message : "deployment guard failed");
     process.exitCode = 1;
-  }
+  });
 }

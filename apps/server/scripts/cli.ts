@@ -27,6 +27,7 @@ import {
   ServerCliDevelopmentIconTargetMissingError,
   ServerCliPublishIconSourceMissingError,
   ServerCliPublishIconTargetMissingError,
+  ServerCliWebBuildMissingError,
 } from "./cliErrors.ts";
 
 interface PackageJson {
@@ -151,6 +152,18 @@ const buildCmd = Command.make(
       const fs = yield* FileSystem.FileSystem;
       const repoRoot = yield* RepoRoot;
       const serverDir = path.join(repoRoot, "apps/server");
+      const webDist = path.join(repoRoot, "apps/web/dist");
+      for (const relative of ["index.html", "assets"]) {
+        const assetPath = path.join(webDist, relative);
+        if (!(yield* fs.exists(assetPath))) {
+          return yield* new ServerCliWebBuildMissingError({ assetPath });
+        }
+      }
+      if ((yield* fs.readDirectory(path.join(webDist, "assets"))).length === 0) {
+        return yield* new ServerCliWebBuildMissingError({
+          assetPath: path.join(webDist, "assets/*"),
+        });
+      }
 
       yield* Effect.log("[cli] Running tsdown...");
       yield* runCommand(
@@ -162,16 +175,10 @@ const buildCmd = Command.make(
         }),
       );
 
-      const webDist = path.join(repoRoot, "apps/web/dist");
       const clientTarget = path.join(serverDir, "dist/client");
-
-      if (yield* fs.exists(webDist)) {
-        yield* fs.copy(webDist, clientTarget);
-        yield* applyDevelopmentIconOverrides(repoRoot, serverDir);
-        yield* Effect.log("[cli] Bundled web app into dist/client");
-      } else {
-        yield* Effect.logWarning("[cli] Web dist not found — skipping client bundle.");
-      }
+      yield* fs.copy(webDist, clientTarget);
+      yield* applyDevelopmentIconOverrides(repoRoot, serverDir);
+      yield* Effect.log("[cli] Bundled web app into dist/client");
     }),
 ).pipe(Command.withDescription("Build the server package (tsdown + bundle web client)."));
 

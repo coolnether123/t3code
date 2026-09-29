@@ -17,14 +17,30 @@ shape:
 backend-candidate/
   .t3-source-commit       # exactly the requested full 40-character SHA
   dist/bin.mjs
+  dist/client/index.html
+  dist/client/assets/       # at least one bundled asset file
   node_modules/node-pty/
   ...other bundled runtime dependencies
 ```
 
 The helper accepts in-bundle package-manager symlinks only when they resolve
 inside the candidate. It rejects unresolved or escaping symlinks, an unpinned
-commit, missing `dist/bin.mjs`, missing `node-pty`, and a pre-existing versioned
-install directory.
+commit, missing `dist/bin.mjs`, missing web client files, missing `node-pty`,
+and a pre-existing versioned install directory. The same bundle checks run on
+the copied versioned install before the old server stops. Even `--dry-run`
+validates the candidate; it does not start a process or change files.
+
+Build the web client before invoking the server CLI directly:
+
+```sh
+vp run --filter @t3tools/web build
+node apps/server/scripts/cli.ts build
+```
+
+The server CLI fails if `apps/web/dist/index.html` or its assets directory is
+missing or empty. `vp run --filter t3 build` also builds web through its task
+dependency. Check that the staged candidate includes the client files, not just
+the server entry.
 
 Before deployment, build and copy the candidate, then stamp it with the exact
 source commit without printing any environment or credential values:
@@ -117,8 +133,10 @@ blocks.
 The versioned install is copied through a private temporary directory and is
 renamed only when the destination remains absent. Unknown existing wrappers,
 LaunchAgents, symlinks, or a loaded label without a matching owned plist are
-rejected. A failed health check boots out the candidate, restores the owned
-wrapper/plist bytes, and starts the known old entry against the preserved home.
+rejected. Health requires the environment endpoint and HTTP 200 from `GET /`
+on the loopback origin. A failed health check boots out the candidate, restores
+the owned wrapper/plist bytes, and starts the known old entry against the
+preserved home.
 The backup run is retained for audit and manual recovery.
 
 After a successful deployment, verify the loopback environment endpoint and

@@ -7,6 +7,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   assertProcessIdentity,
+  assertRootHttpStatus,
   assertLaunchAgentState,
   assertOwnedDestinationContent,
   assertSingleLoopbackListener,
@@ -20,6 +21,7 @@ import {
   parseLsofListeners,
   renderLaunchAgentPlist,
   renderWrapper,
+  recoverFailedDeployment,
   validateCandidate,
   validateOptions,
 } from "./deploy-macos-backend.ts";
@@ -51,6 +53,15 @@ const withTempDirectory = async (run: (root: string) => Promise<void>) => {
   } finally {
     await NodeFSP.rm(root, { recursive: true, force: true });
   }
+};
+
+const writeCandidate = async (candidate: string) => {
+  await NodeFSP.mkdir(NodePath.join(candidate, "dist/client/assets"), { recursive: true });
+  await NodeFSP.mkdir(NodePath.join(candidate, "node_modules/node-pty"), { recursive: true });
+  await NodeFSP.writeFile(NodePath.join(candidate, "dist/bin.mjs"), "#!/usr/bin/env node\n");
+  await NodeFSP.writeFile(NodePath.join(candidate, "dist/client/index.html"), "<html></html>");
+  await NodeFSP.writeFile(NodePath.join(candidate, "dist/client/assets/app.js"), "app");
+  await NodeFSP.writeFile(NodePath.join(candidate, ".t3-source-commit"), `${commit}\n`);
 };
 
 describe("deploy-macos-backend guards", () => {
@@ -120,12 +131,7 @@ describe("deploy-macos-backend guards", () => {
   it("accepts the real staged bundle layout and an in-bundle dependency symlink", async () => {
     await withTempDirectory(async (root) => {
       const candidate = NodePath.join(root, "candidate");
-      await NodeFSP.mkdir(NodePath.join(candidate, "dist"), { recursive: true });
-      await NodeFSP.mkdir(NodePath.join(candidate, "node_modules/node-pty"), {
-        recursive: true,
-      });
-      await NodeFSP.writeFile(NodePath.join(candidate, "dist/bin.mjs"), "#!/usr/bin/env node\n");
-      await NodeFSP.writeFile(NodePath.join(candidate, ".t3-source-commit"), `${commit}\n`);
+      await writeCandidate(candidate);
       await validateCandidate(baseOptions({ candidate }));
       await expect(candidateEntryPath(candidate)).resolves.toBe(
         NodePath.join(candidate, "dist/bin.mjs"),
@@ -133,14 +139,37 @@ describe("deploy-macos-backend guards", () => {
     });
   });
 
+  it("rejects missing client files before deployment and checks the copied install", async () => {
+    await withTempDirectory(async (root) => {
+      const candidate = NodePath.join(root, "candidate");
+      await writeCandidate(candidate);
+      await NodeFSP.rm(NodePath.join(candidate, "dist/bin.mjs"));
+      await expect(validateCandidate(baseOptions({ candidate }))).rejects.toThrow("dist/bin.mjs");
+      await NodeFSP.writeFile(NodePath.join(candidate, "dist/bin.mjs"), "#!/usr/bin/env node\n");
+      await NodeFSP.rm(NodePath.join(candidate, "dist/client/index.html"));
+      await expect(validateCandidate(baseOptions({ candidate }))).rejects.toThrow(
+        "dist/client/index.html",
+      );
+      await NodeFSP.writeFile(NodePath.join(candidate, "dist/client/index.html"), "<html></html>");
+      await NodeFSP.rm(NodePath.join(candidate, "dist/client/assets/app.js"));
+      await expect(validateCandidate(baseOptions({ candidate }))).rejects.toThrow(
+        "dist/client/assets files",
+      );
+      await NodeFSP.writeFile(NodePath.join(candidate, "dist/client/assets/app.js"), "app");
+      const installed = NodePath.join(root, "installed");
+      await NodeFSP.cp(candidate, installed, { recursive: true });
+      await validateCandidate(baseOptions({ candidate: installed }));
+      await NodeFSP.rm(NodePath.join(installed, "dist/client/index.html"));
+      await expect(validateCandidate(baseOptions({ candidate: installed }))).rejects.toThrow(
+        "dist/client/index.html",
+      );
+    });
+  });
+
   it("rejects a candidate symlink that escapes the bundle and a mismatched stamp", async () => {
     await withTempDirectory(async (root) => {
       const candidate = NodePath.join(root, "candidate");
-      await NodeFSP.mkdir(NodePath.join(candidate, "dist"), { recursive: true });
-      await NodeFSP.mkdir(NodePath.join(candidate, "node_modules/node-pty"), {
-        recursive: true,
-      });
-      await NodeFSP.writeFile(NodePath.join(candidate, "dist/bin.mjs"), "#!/usr/bin/env node\n");
+      await writeCandidate(candidate);
       await NodeFSP.writeFile(
         NodePath.join(candidate, ".t3-source-commit"),
         "fedcba9876543210fedcba9876543210fedcba98\n",
@@ -155,6 +184,28 @@ describe("deploy-macos-backend guards", () => {
       await NodeFSP.writeFile(NodePath.join(candidate, ".t3-source-commit"), "bad\n");
       await expect(validateCandidate(baseOptions({ candidate }))).rejects.toThrow("does not match");
     });
+  });
+
+  it("requires a 200 from the client root and rolls back after a stopped switch", async () => {
+    expect(() => assertRootHttpStatus(200)).not.toThrow();
+    for (const status of [302, 404, 503]) {
+      expect(() => assertRootHttpStatus(status)).toThrow(`GET / returned HTTP ${status}`);
+    }
+    const actions: string[] = [];
+    const restore = async () => {
+      actions.push("restore");
+    };
+    const rollback = async () => {
+      actions.push("rollback");
+    };
+    try {
+      assertRootHttpStatus(503);
+    } catch {
+      await recoverFailedDeployment(true, restore, rollback);
+    }
+    expect(actions).toEqual(["rollback"]);
+    await recoverFailedDeployment(false, restore, rollback);
+    expect(actions).toEqual(["rollback", "restore"]);
   });
 
   it("renders loopback-only persistent LaunchAgent arguments and owned wrapper", () => {
