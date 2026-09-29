@@ -763,14 +763,35 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           );
         }
         const persistedBinding = Option.getOrUndefined(yield* directory.getBinding(threadId));
+        const persistedInstanceId = persistedBinding?.providerInstanceId;
+        const compatibleBinding =
+          persistedInstanceId === resolvedInstanceId ||
+          (persistedInstanceId !== undefined &&
+            persistedBinding?.provider === "codex" &&
+            resolvedProvider === "codex" &&
+            (yield* registry.getInstanceInfo(persistedInstanceId)).continuationIdentity
+              .continuationKey === instanceInfo.continuationIdentity.continuationKey);
+        if (
+          persistedBinding &&
+          resolvedProvider === "codex" &&
+          persistedBinding.provider === "codex" &&
+          !compatibleBinding &&
+          input.resumeCursor === undefined &&
+          input.seedHistory === undefined
+        ) {
+          return yield* toValidationError(
+            "ProviderService.startSession",
+            `Thread '${threadId}' cannot resume on instance '${resolvedInstanceId}' because its provider history belongs to '${persistedInstanceId}'.`,
+          );
+        }
         // An explicit null is the server-authoritative "start a fresh
         // conversation" sentinel. Undefined continues to mean "resume the
         // persisted provider conversation when one exists".
         const effectiveResumeCursor =
           input.resumeCursor !== undefined
             ? (input.resumeCursor ?? undefined)
-            : persistedBinding?.providerInstanceId === resolvedInstanceId
-              ? persistedBinding.resumeCursor
+            : compatibleBinding
+              ? persistedBinding?.resumeCursor
               : undefined;
         const effectiveCwd =
           input.cwd ??

@@ -281,13 +281,42 @@ const hasMetricSnapshot = (
 
 function makeProviderServiceLayer() {
   const codex = makeFakeCodexAdapter();
+  const desktopCodex = makeFakeCodexAdapter();
+  const overlayCodex = makeFakeCodexAdapter();
   const claude = makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER);
   const cursor = makeFakeCodexAdapter(CURSOR_DRIVER);
-  const registry = makeAdapterRegistryMock({
+  const baseRegistry = makeAdapterRegistryMock({
     [ProviderDriverKind.make("codex")]: codex.adapter,
     [ProviderDriverKind.make("claudeAgent")]: claude.adapter,
     [ProviderDriverKind.make("cursor")]: cursor.adapter,
   });
+  const desktopId = ProviderInstanceId.make("codex_desktop");
+  const overlayId = ProviderInstanceId.make("codex_overlay");
+  const registry: typeof baseRegistry = {
+    ...baseRegistry,
+    getByInstance: (instanceId) =>
+      instanceId === desktopId
+        ? Effect.succeed(desktopCodex.adapter)
+        : instanceId === overlayId
+          ? Effect.succeed(overlayCodex.adapter)
+          : baseRegistry.getByInstance(instanceId),
+    getInstanceInfo: (instanceId) =>
+      instanceId === codexInstanceId || instanceId === desktopId || instanceId === overlayId
+        ? Effect.succeed({
+            instanceId,
+            driverKind: CODEX_DRIVER,
+            displayName: undefined,
+            enabled: true,
+            continuationIdentity: {
+              driverKind: CODEX_DRIVER,
+              continuationKey:
+                instanceId === codexInstanceId
+                  ? "codex:home:/t3/codex-home/codex"
+                  : "codex:home:/shared/.codex",
+            },
+          })
+        : baseRegistry.getInstanceInfo(instanceId),
+  };
 
   const providerAdapterLayer = Layer.succeed(
     ProviderAdapterRegistry.ProviderAdapterRegistry,
@@ -322,6 +351,8 @@ function makeProviderServiceLayer() {
 
   return {
     codex,
+    desktopCodex,
+    overlayCodex,
     claude,
     cursor,
     layer,
@@ -1435,6 +1466,54 @@ routing.layer("ProviderServiceLive routing", (it) => {
           .filter((session) => session.threadId === threadId)
           .map((session) => session.provider),
         ["claudeAgent"],
+      );
+    }),
+  );
+
+  it.effect("rejects an unseeded Codex home change and resumes compatible homes by cursor", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-codex-home-change");
+      const start = (
+        instanceId: ProviderInstanceId,
+        extra?: { resumeCursor: null; seedHistory: readonly { role: "user"; text: string }[] },
+      ) =>
+        provider.startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: instanceId,
+          threadId,
+          runtimeMode: "full-access",
+          ...extra,
+        });
+
+      yield* start(codexInstanceId);
+      routing.desktopCodex.startSession.mockClear();
+      const failure = yield* Effect.flip(start(ProviderInstanceId.make("codex_desktop")));
+      assert.instanceOf(failure, ProviderValidationError);
+      assert.include(failure.issue, "provider history belongs to 'codex'");
+      assert.equal(routing.desktopCodex.startSession.mock.calls.length, 0);
+
+      const moved = yield* start(ProviderInstanceId.make("codex_desktop"), {
+        resumeCursor: null,
+        seedHistory: [{ role: "user", text: "earlier message" }],
+      });
+      assert.deepEqual(routing.desktopCodex.startSession.mock.calls[0]?.[0].seedHistory, [
+        { role: "user", text: "earlier message" },
+      ]);
+      assert.equal(routing.desktopCodex.startSession.mock.calls[0]?.[0].resumeCursor, undefined);
+
+      routing.desktopCodex.startSession.mockClear();
+      yield* start(ProviderInstanceId.make("codex_desktop"));
+      assert.deepEqual(
+        routing.desktopCodex.startSession.mock.calls[0]?.[0].resumeCursor,
+        moved.resumeCursor,
+      );
+
+      routing.overlayCodex.startSession.mockClear();
+      yield* start(ProviderInstanceId.make("codex_overlay"));
+      assert.deepEqual(
+        routing.overlayCodex.startSession.mock.calls[0]?.[0].resumeCursor,
+        moved.resumeCursor,
       );
     }),
   );

@@ -85,7 +85,7 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
       }),
     );
 
-    it.effect("derives an isolated home while retaining the shared continuation identity", () =>
+    it.effect("derives an isolated continuation identity from its private history home", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
         const sharedHome = yield* makeTempDir("t3code-codex-shared-");
@@ -101,8 +101,28 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
           mode: "isolated",
           sharedHomePath: sharedHome,
           effectiveHomePath: isolatedHome,
-          continuationKey: `codex:home:${sharedHome}`,
+          continuationKey: `codex:home:${isolatedHome}`,
         });
+      }),
+    );
+
+    it.effect("keeps direct and auth-overlay homes compatible with blank desktop settings", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const shadowHome = yield* makeTempDir("t3code-codex-overlay-");
+        const settings = decodeCodexSettings({ homePath: "", shadowHomePath: "" });
+        const direct = yield* resolveCodexHomeLayout(settings);
+        const overlay = yield* resolveCodexHomeLayout(
+          decodeCodexSettings({ homePath: "", shadowHomePath: shadowHome }),
+        );
+        const isolated = yield* resolveCodexHomeLayout(settings, {
+          isolatedHomePath: path.join(shadowHome, "codex-home", "codex"),
+        });
+
+        expect(direct.mode).toBe("direct");
+        expect(direct.effectiveHomePath).toBeUndefined();
+        expect(overlay.continuationKey).toBe(direct.continuationKey);
+        expect(isolated.continuationKey).not.toBe(direct.continuationKey);
       }),
     );
   });

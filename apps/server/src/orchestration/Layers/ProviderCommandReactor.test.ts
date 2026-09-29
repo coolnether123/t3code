@@ -167,6 +167,7 @@ describe("ProviderCommandReactor", () => {
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderAdapterRequestError>;
     readonly separateCodexHomes?: boolean;
+    readonly localWorkspace?: boolean;
   }) {
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir =
@@ -362,7 +363,7 @@ describe("ProviderCommandReactor", () => {
             continuationKey:
               driverKind === ProviderDriverKind.make("codex")
                 ? input?.separateCodexHomes
-                  ? `codex:home:${raw}`
+                  ? `codex:home:${raw === "codex_desktop" ? NodePath.resolve(NodeOS.homedir(), ".codex") : NodePath.resolve(baseDir, "codex-home", raw)}`
                   : "codex:home:/shared-codex"
                 : `${driverKind}:instance:${instanceId}`,
           },
@@ -495,7 +496,7 @@ describe("ProviderCommandReactor", () => {
         commandId: CommandId.make("cmd-project-create"),
         projectId: asProjectId("project-1"),
         title: "Provider Project",
-        workspaceRoot: "/tmp/provider-project",
+        workspaceRoot: input?.localWorkspace ? baseDir : "/tmp/provider-project",
         defaultModelSelection: modelSelection,
         createdAt: now,
       }),
@@ -2701,7 +2702,7 @@ describe("ProviderCommandReactor", () => {
   });
 
   it("restarts an existing Codex thread on a compatible requested instance", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({ localWorkspace: true });
     const now = "2026-01-01T00:00:00.000Z";
 
     await Effect.runPromise(
@@ -2759,15 +2760,45 @@ describe("ProviderCommandReactor", () => {
 
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(thread?.modelSelection.instanceId).toBe(ProviderInstanceId.make("codex_work"));
     expect(thread?.session?.providerInstanceId).toBe(ProviderInstanceId.make("codex_work"));
+    expect(thread?.activities.filter((entry) => entry.kind === "provider.continued")).toHaveLength(
+      0,
+    );
   });
 
   for (const automatic of [true, false])
-    it(`carries a Codex chat to a separate home by ${automatic ? "setting" : "explicit pick"} once`, async () => {
+    it(`carries a Codex chat to a separate home by ${automatic ? "setting" : "explicit pick"} once despite an old native cursor`, async () => {
       const harness = await createHarness({
         separateCodexHomes: true,
+        localWorkspace: true,
+        startSessionEffect: (session) =>
+          Effect.succeed({
+            ...session,
+            resumeCursor: {
+              threadId:
+                session.providerInstanceId === ProviderInstanceId.make("codex")
+                  ? "01a0cf9f-b63e-7111-99ac-38cc2be89f66"
+                  : "01a0ec11-6e8a-7b40-868e-ca81a9828843",
+            },
+          }),
       });
       const now = "2026-01-01T00:00:00.000Z";
+      await harness.runEffect(
+        harness.settingsService.updateSettings({
+          providerInstances: {
+            [ProviderInstanceId.make("codex")]: {
+              driver: ProviderDriverKind.make("codex"),
+              config: { homePath: "", shadowHomePath: "", binaryPath: "codex" },
+            },
+            [ProviderInstanceId.make("codex_desktop")]: {
+              driver: ProviderDriverKind.make("codex"),
+              enabled: true,
+              config: { homePath: "", shadowHomePath: "", useDesktopAppDaemon: true },
+            },
+          },
+        }),
+      );
       const send = async (index: number, requested?: string) => {
         await harness.runEffect(
           harness.engine.dispatch({
@@ -2796,6 +2827,25 @@ describe("ProviderCommandReactor", () => {
         await waitFor(() => harness.sendTurn.mock.calls.length === index);
       };
       await send(1, automatic ? undefined : "codex");
+      await harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.message.assistant.delta",
+          commandId: CommandId.make(`cmd-carry-assistant-delta-${automatic}`),
+          threadId: ThreadId.make("thread-1"),
+          messageId: asMessageId(`carry-assistant-${automatic}`),
+          delta: "answer 1",
+          createdAt: now,
+        }),
+      );
+      await harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.message.assistant.complete",
+          commandId: CommandId.make(`cmd-carry-assistant-complete-${automatic}`),
+          threadId: ThreadId.make("thread-1"),
+          messageId: asMessageId(`carry-assistant-${automatic}`),
+          createdAt: now,
+        }),
+      );
       if (automatic) {
         await harness.runEffect(
           harness.settingsService.updateSettings({
@@ -2803,10 +2853,12 @@ describe("ProviderCommandReactor", () => {
               [ProviderInstanceId.make("codex")]: {
                 driver: ProviderDriverKind.make("codex"),
                 continueThreadsOn: ProviderInstanceId.make("codex_desktop"),
+                config: { homePath: "", shadowHomePath: "", binaryPath: "codex" },
               },
               [ProviderInstanceId.make("codex_desktop")]: {
                 driver: ProviderDriverKind.make("codex"),
                 enabled: true,
+                config: { homePath: "", shadowHomePath: "", useDesktopAppDaemon: true },
               },
             },
           }),
@@ -2816,7 +2868,10 @@ describe("ProviderCommandReactor", () => {
       expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
         providerInstanceId: ProviderInstanceId.make("codex_desktop"),
         resumeCursor: null,
-        seedHistory: [{ role: "user", text: "message 1" }],
+        seedHistory: [
+          { role: "user", text: "message 1" },
+          { role: "assistant", text: "answer 1" },
+        ],
       });
       const afterMove = (await harness.readModel()).threads.find(
         (entry) => entry.id === ThreadId.make("thread-1"),
@@ -2833,10 +2888,87 @@ describe("ProviderCommandReactor", () => {
         providerInstanceId: ProviderInstanceId.make("codex_desktop"),
       });
       expect(harness.startSession.mock.calls[2]?.[1]).not.toHaveProperty("seedHistory");
+      const afterRestart = (await harness.readModel()).threads.find(
+        (entry) => entry.id === ThreadId.make("thread-1"),
+      );
+      expect(afterRestart?.modelSelection.instanceId).toBe(
+        ProviderInstanceId.make("codex_desktop"),
+      );
+      expect(afterRestart?.session?.providerInstanceId).toBe(
+        ProviderInstanceId.make("codex_desktop"),
+      );
+      expect(
+        afterRestart?.activities.filter((entry) => entry.kind === "provider.continued"),
+      ).toHaveLength(1);
     });
 
+  it("repairs a projected Codex instance that already has a desktop session without seeding again", async () => {
+    const harness = await createHarness({ separateCodexHomes: true, localWorkspace: true });
+    const now = "2026-01-01T00:00:00.000Z";
+    const threadId = ThreadId.make("thread-1");
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-inconsistent-desktop-session"),
+        threadId,
+        session: {
+          threadId,
+          status: "ready",
+          providerName: ProviderDriverKind.make("codex"),
+          providerInstanceId: ProviderInstanceId.make("codex_desktop"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+    await harness.runEffect(
+      harness.settingsService.updateSettings({
+        providerInstances: {
+          [ProviderInstanceId.make("codex")]: {
+            driver: ProviderDriverKind.make("codex"),
+            continueThreadsOn: ProviderInstanceId.make("codex_desktop"),
+          },
+          [ProviderInstanceId.make("codex_desktop")]: {
+            driver: ProviderDriverKind.make("codex"),
+            enabled: true,
+          },
+        },
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-inconsistent-next-turn"),
+        threadId,
+        message: {
+          messageId: asMessageId("inconsistent-next-message"),
+          role: "user",
+          text: "next",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+      providerInstanceId: ProviderInstanceId.make("codex_desktop"),
+    });
+    expect(harness.startSession.mock.calls[0]?.[1]).not.toHaveProperty("seedHistory");
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+    expect(thread?.modelSelection.instanceId).toBe(ProviderInstanceId.make("codex_desktop"));
+    expect(thread?.session?.providerInstanceId).toBe(ProviderInstanceId.make("codex_desktop"));
+    expect(thread?.activities.filter((entry) => entry.kind === "provider.continued")).toHaveLength(
+      0,
+    );
+  });
+
   it("keeps the original binding when a separate-home Codex open fails", async () => {
-    const harness = await createHarness({ separateCodexHomes: true });
+    const harness = await createHarness({ separateCodexHomes: true, localWorkspace: true });
     const now = "2026-01-01T00:00:00.000Z";
     const send = (index: number, instanceId: string) =>
       harness.runEffect(

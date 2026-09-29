@@ -8,6 +8,13 @@ configured, enabled, and uses the same driver. An explicit same-driver instance
 pick also moves a Codex chat when continuation keys differ. Other drivers
 still reject incompatible resume state.
 
+Codex continuation keys identify the history store, not the authentication
+source. An isolated instance uses its T3-owned home; a direct instance and an
+auth overlay use the shared Codex home because the overlay links its sessions
+there. Two instances sharing that history can resume the same cursor. A change
+between isolated and desktop-daemon homes must seed from the T3 transcript,
+even if an older copy of the native thread ID happens to exist in both homes.
+
 The reactor passes projected user and assistant text, excluding the pending
 message, to the Codex adapter as `seedHistory`. The runtime keeps the newest
 150,000 characters and sends response `message` items to app-server
@@ -17,6 +24,10 @@ used. No old resume cursor or rollout path crosses the move. The provider
 service stores the new binding only after the target opens and stops the old
 session; the reactor then persists the model selection and an info activity.
 Later turns use the new cursor, including after server restart.
+If a previous session already belongs to the target but the projected model
+selection is stale, the next successful turn corrects that selection without
+seeding or claiming a second move. An incompatible Codex binding without
+explicit seed history fails rather than starting an empty conversation.
 
 Orchestration records intent and state without knowing which provider runs a thread. Provider
 protocols, account ownership, permissions, and capabilities belong at the
@@ -148,7 +159,8 @@ handling is documented under [citations](./assistant-citations.md).
 Codex uses the supported App Server protocol. The adapter stores the authoritative Codex thread ID
 in its resume cursor. New sessions use `thread/start`; continuation uses `thread/resume`, and an
 explicit fork uses `thread/fork`. A failed resume remains an error. T3 does not create a replacement
-thread containing reconstructed conversation text.
+thread on a failed ordinary resume. Explicit cross-home continuation is the
+separate transcript-seeding operation described above.
 
 Steering carries `expectedTurnId` through the orchestration command and provider service to
 `turn/steer`. The service rejects a stale target rather than steering a later turn or queuing new

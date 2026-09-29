@@ -63,11 +63,12 @@ export const resolveCodexHomeLayout = Effect.fn("resolveCodexHomeLayout")(functi
   if (shadowHomePath.length === 0) {
     const isolatedHomePath = options?.isolatedHomePath?.trim();
     if (isolatedHomePath) {
+      const effectiveHomePath = path.resolve(expandHomePath(isolatedHomePath));
       return {
         mode: "isolated",
         sharedHomePath,
-        effectiveHomePath: path.resolve(expandHomePath(isolatedHomePath)),
-        continuationKey: `codex:home:${sharedHomePath}`,
+        effectiveHomePath,
+        continuationKey: `codex:home:${effectiveHomePath}`,
       };
     }
     return {

@@ -710,7 +710,7 @@ const make = Effect.gen(function* () {
       activeSession !== undefined &&
       activeSession.providerInstanceId !== undefined
         ? activeSession.providerInstanceId
-        : thread.modelSelection.instanceId;
+        : (thread.session?.providerInstanceId ?? thread.modelSelection.instanceId);
     const selectedModelSelection = requestedModelSelection ?? thread.modelSelection;
     const settings = yield* serverSettingsService.getSettings;
     const continuationTarget =
@@ -903,13 +903,15 @@ const make = Effect.gen(function* () {
           }))
         : undefined;
     const recordMove = Effect.gen(function* () {
+      if (thread.modelSelection.instanceId !== desiredInstanceId) {
+        yield* orchestrationEngine.dispatch({
+          type: "thread.meta.update",
+          commandId: yield* serverCommandId("provider-continuation"),
+          threadId,
+          modelSelection: desiredModelSelection,
+        });
+      }
       if (!moving) return;
-      yield* orchestrationEngine.dispatch({
-        type: "thread.meta.update",
-        commandId: yield* serverCommandId("provider-continuation"),
-        threadId,
-        modelSelection: desiredModelSelection,
-      });
       yield* orchestrationEngine.dispatch({
         type: "thread.activity.append",
         commandId: yield* serverCommandId("provider-continuation-activity"),
