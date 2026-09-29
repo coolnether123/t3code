@@ -9,10 +9,10 @@ import { useKeyboardChatComposerInset, useKeyboardScrollToEnd } from "@legendapp
 import { resolveProviderSkillsForCwd } from "@t3tools/client-runtime/providerSkills";
 import type { LegendListRef } from "@legendapp/list/react-native";
 import { HeaderHeightContext } from "@react-navigation/elements";
+import { MessageId } from "@t3tools/contracts";
 import type {
   ApprovalRequestId,
   EnvironmentId,
-  MessageId,
   ModelSelection,
   OrchestrationThreadShell,
   ProviderApprovalDecision,
@@ -22,6 +22,7 @@ import type {
   ThreadId,
   UserInputQuestion,
 } from "@t3tools/contracts";
+import { AsyncResult } from "effect/unstable/reactivity";
 import * as Haptics from "expo-haptics";
 import {
   memo,
@@ -35,8 +36,10 @@ import {
 } from "react";
 import {
   AppState,
+  Alert,
   Keyboard,
   Platform,
+  Pressable,
   Text,
   useWindowDimensions,
   View,
@@ -66,6 +69,11 @@ import type { DraftComposerAttachment } from "../../lib/composerImages";
 import { CHAT_CONTENT_MAX_WIDTH, type LayoutVariant } from "../../lib/layout";
 import { IOS_NAV_BAR_HEIGHT } from "../../lib/layoutMetrics";
 import { scopedThreadKey } from "../../lib/scopedEntities";
+import { uuidv4 } from "../../lib/uuid";
+import { removeThreadOutboxMessage } from "../../state/thread-outbox-removal";
+import { useThreadOutboxMessages } from "../../state/use-thread-outbox";
+import { threadEnvironment } from "../../state/threads";
+import { useAtomCommand } from "../../state/use-atom-command";
 import type {
   PendingApproval,
   PendingUserInput,
@@ -242,6 +250,35 @@ const USER_INPUT_TOGGLE_TIMING = {
 };
 
 export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: ThreadDetailScreenProps) {
+  const queuedMessages =
+    useThreadOutboxMessages()[scopedThreadKey(props.environmentId, props.selectedThread.id)] ?? [];
+  const steerTurn = useAtomCommand(threadEnvironment.steerTurn, { reportFailure: false });
+  const [steeringMessageId, setSteeringMessageId] = useState<MessageId | null>(null);
+  const steerQueuedMessage = async (message: (typeof queuedMessages)[number]) => {
+    const turnId = props.selectedThread.session?.activeTurnId;
+    if (!turnId || steeringMessageId !== null) return;
+    setSteeringMessageId(message.messageId);
+    try {
+      const result = await steerTurn({
+        environmentId: props.environmentId,
+        input: {
+          threadId: props.selectedThread.id,
+          expectedTurnId: turnId,
+          messageId: MessageId.make(uuidv4()),
+          text: message.text.trim(),
+        },
+      });
+      if (AsyncResult.isFailure(result)) {
+        Alert.alert("Could not steer", "The message is still queued.");
+      } else {
+        await removeThreadOutboxMessage(message);
+      }
+    } catch {
+      Alert.alert("Could not steer", "The message is still queued.");
+    } finally {
+      setSteeringMessageId(null);
+    }
+  };
   const insets = useSafeAreaInsets();
   const isKeyboardVisible = useKeyboardState((state) => state.isVisible);
   const liveKeyboardHeight = useKeyboardState((state) => state.height);
@@ -885,6 +922,42 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
               {/* Hidden (not unmounted) while a user-input request owns the
                 composer slot, so composer drafts and editor state survive. */}
               <View style={activeUserInputRequestId !== null ? { display: "none" } : undefined}>
+                {queuedMessages.map((message) => {
+                  const canSteer =
+                    props.selectedThread.session?.providerName === "codex" &&
+                    props.selectedThread.session.status === "running" &&
+                    props.selectedThread.session.activeTurnId !== null &&
+                    message.text.trim().length > 0 &&
+                    message.attachments.length === 0 &&
+                    props.connectionStateLabel === "connected";
+                  return (
+                    <View
+                      key={message.messageId}
+                      className="mx-4 mb-2 flex-row items-center gap-2 rounded-xl border border-border bg-card px-3 py-2"
+                    >
+                      <Text numberOfLines={1} className="min-w-0 flex-1 text-sm text-foreground">
+                        {message.text.trim() || "Message with attachments"}
+                      </Text>
+                      {canSteer ? (
+                        <Pressable
+                          accessibilityRole="button"
+                          disabled={steeringMessageId !== null}
+                          onPress={() => void steerQueuedMessage(message)}
+                        >
+                          <Text className="text-sm text-accent">Steer now</Text>
+                        </Pressable>
+                      ) : null}
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel="Remove queued message"
+                        disabled={steeringMessageId === message.messageId}
+                        onPress={() => void removeThreadOutboxMessage(message)}
+                      >
+                        <Text className="text-sm text-foreground-secondary">Remove</Text>
+                      </Pressable>
+                    </View>
+                  );
+                })}
                 <SteerTurnDialog
                   key={selectedThreadKey}
                   environmentId={props.environmentId}

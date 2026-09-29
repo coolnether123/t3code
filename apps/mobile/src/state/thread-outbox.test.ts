@@ -1293,7 +1293,7 @@ describe("thread outbox", () => {
     ).toBe("send");
   });
 
-  it("sends existing-thread messages whenever connected so queued messages can steer", () => {
+  it("holds existing-thread messages until the current turn finishes", () => {
     expect(
       resolveThreadOutboxDeliveryAction({
         isCreation: false,
@@ -1302,7 +1302,7 @@ describe("thread outbox", () => {
         environmentConnected: true,
         threadBusy: true,
       }),
-    ).toBe("send");
+    ).toBe("wait");
     expect(
       resolveThreadOutboxDeliveryAction({
         isCreation: false,

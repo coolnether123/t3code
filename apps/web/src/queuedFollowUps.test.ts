@@ -117,22 +117,14 @@ it("removes a steered item without changing the remaining follow-up order", () =
   ).toBe("first");
 });
 
-it("holds queued follow-ups after interruption without losing their content", () => {
+it("sends queued follow-ups after an interrupted turn finishes", () => {
   const store = useQueuedFollowUpStore.getState();
   store.enqueue("env:one", sample("one"));
   store.enqueue("env:one", sample("two"));
-  store.holdThread("env:one");
   expect(
-    useQueuedFollowUpStore
-      .getState()
-      .byThread["env:one"]?.map((entry) => [entry.context.prompt, entry.holdUntilUserAction]),
-  ).toEqual([
-    ["one", true],
-    ["two", true],
-  ]);
-  expect(
-    nextAutoQueuedFollowUp(useQueuedFollowUpStore.getState().byThread["env:one"]!, "ready"),
-  ).toBeNull();
+    nextAutoQueuedFollowUp(useQueuedFollowUpStore.getState().byThread["env:one"]!, "disconnected")
+      ?.id,
+  ).toBe("one");
 });
 
 it("rechecks pending requests that arrive while a queued send is preparing", async () => {
@@ -152,12 +144,46 @@ it("rechecks pending requests that arrive while a queued send is preparing", asy
   hasPendingRequest = true;
   expect(canDispatch()).toBe(false);
   store.release("env:one", "one");
+  expect(
+    nextAutoQueuedFollowUp(useQueuedFollowUpStore.getState().byThread["env:one"]!, "ready", true),
+  ).toBeNull();
+  hasPendingRequest = false;
+  expect(
+    nextAutoQueuedFollowUp(useQueuedFollowUpStore.getState().byThread["env:one"]!, "ready"),
+  ).toBe(entry);
 });
 
 it("does not auto-select a queued follow-up while a provider request is pending", () => {
   const entry = sample("one");
   expect(nextAutoQueuedFollowUp([entry], "ready", true)).toBeNull();
   expect(nextAutoQueuedFollowUp([entry], "ready")).toBe(entry);
+});
+
+it("waits for a capacity retry, then sends after success or cancellation", () => {
+  const entry = sample("one");
+  expect(nextAutoQueuedFollowUp([entry], "disconnected", false, true)).toBeNull();
+  expect(nextAutoQueuedFollowUp([entry], "running")).toBeNull();
+  expect(nextAutoQueuedFollowUp([entry], "ready")).toBe(entry);
+  expect(nextAutoQueuedFollowUp([entry], "disconnected")).toBe(entry);
+});
+
+it("dispatches a queued message from a continued desktop thread under its scoped key", () => {
+  const store = useQueuedFollowUpStore.getState();
+  const key = "millie:continued-thread";
+  store.enqueue(key, sample("follow-up"));
+  const next = nextAutoQueuedFollowUp(useQueuedFollowUpStore.getState().byThread[key]!, "ready");
+  expect(next?.id).toBe("follow-up");
+  expect(store.claim(key, next!.id)).toBe(true);
+  expect(store.claim("elora:continued-thread", next!.id)).toBe(false);
+});
+
+it("dispatches a fresh desktop-backed thread when its first turn becomes ready", () => {
+  const store = useQueuedFollowUpStore.getState();
+  const key = "millie:fresh-thread";
+  store.enqueue(key, sample("next instruction"));
+  const entries = useQueuedFollowUpStore.getState().byThread[key]!;
+  expect(nextAutoQueuedFollowUp(entries, "running")).toBeNull();
+  expect(nextAutoQueuedFollowUp(entries, "ready")?.context.prompt).toBe("next instruction");
 });
 
 const composerSteerRestore = {

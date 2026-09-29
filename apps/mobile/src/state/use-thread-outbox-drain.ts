@@ -4,6 +4,8 @@ import type {
   EnvironmentThreadShell,
 } from "@t3tools/client-runtime/state/shell";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
+import { isCapacityRetryWaiting } from "@t3tools/client-runtime/capacityRetry";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
@@ -45,7 +47,7 @@ import {
   type QueuedThreadMessage,
   type ThreadOutboxCommandStage,
 } from "./thread-outbox-model";
-import { environmentThreadShells, threadEnvironment } from "./threads";
+import { environmentThreadDetails, environmentThreadShells, threadEnvironment } from "./threads";
 import {
   appendComposerDraftAttachments,
   composerDraftsAtom,
@@ -89,6 +91,14 @@ function findThread(
     (candidate) =>
       candidate.environmentId === message.environmentId && candidate.id === message.threadId,
   );
+}
+
+function capacityWait(candidate: EnvironmentThreadShell | undefined): boolean {
+  if (!candidate || candidate.session?.status !== "error") return false;
+  const detail = appAtomRegistry.get(
+    environmentThreadDetails.detailAtom(scopeThreadRef(candidate.environmentId, candidate.id)),
+  );
+  return isCapacityRetryWaiting(candidate.session.status, detail?.activities ?? []);
 }
 
 function findCreationProject(
@@ -545,6 +555,22 @@ export function useThreadOutboxDrain(): void {
       { readonly message: QueuedThreadMessage; readonly unsubscribe: () => void }
     >(),
   );
+
+  useEffect(() => {
+    const subscriptions = threads
+      .filter(
+        (thread) =>
+          thread.session?.status === "error" &&
+          queuedMessagesByThreadKey[scopedThreadKey(thread.environmentId, thread.id)]?.length,
+      )
+      .map((thread) =>
+        appAtomRegistry.subscribe(
+          environmentThreadDetails.detailAtom(scopeThreadRef(thread.environmentId, thread.id)),
+          () => setRetryTick((current) => current + 1),
+        ),
+      );
+    return () => subscriptions.forEach((unsubscribe) => unsubscribe());
+  }, [threads, queuedMessagesByThreadKey]);
 
   const scheduleQueuedMessageRetry = useCallback((messageId: MessageId) => {
     const retryAttempt = (retryAttemptRef.current.get(messageId) ?? 0) + 1;
@@ -1018,7 +1044,10 @@ export function useThreadOutboxDrain(): void {
         threadExists: thread !== undefined,
         shellStatus,
         environmentConnected: environment?.connectionState === "connected",
-        threadBusy: thread?.session?.status === "running" || thread?.session?.status === "starting",
+        threadBusy:
+          thread?.session?.status === "running" ||
+          thread?.session?.status === "starting" ||
+          capacityWait(thread),
       });
       // The delivery action resolves first; capability checks apply only to
       // a message that will send. Checking earlier would restore a
@@ -1118,14 +1147,16 @@ export function useThreadOutboxDrain(): void {
         }
         // The shell state is equally stale. Re-run the same delivery policy
         // against the live thread snapshot so a vanished thread or newly
-        // created target defers, while busy existing threads can still steer.
+        // created target defers, while busy existing threads wait their turn.
         if (deliveryAction === "send") {
           const liveThread = findThread(
             appAtomRegistry.get(environmentThreadShells.threadShellsAtom),
             nextQueuedMessage,
           );
           const liveThreadBusy =
-            liveThread?.session?.status === "running" || liveThread?.session?.status === "starting";
+            liveThread?.session?.status === "running" ||
+            liveThread?.session?.status === "starting" ||
+            capacityWait(liveThread);
           const liveDeliveryAction = resolveThreadOutboxDeliveryAction({
             isCreation: creation !== undefined,
             threadExists: liveThread !== undefined,

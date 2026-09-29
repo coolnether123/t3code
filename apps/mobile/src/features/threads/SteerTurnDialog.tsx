@@ -57,8 +57,8 @@ export function SteerTurnDialog(props: {
       {state.activeTurnId !== null ? (
         <View className="items-end">
           <ComposerInlineControl
-            label="Steer active turn"
-            accessibilityHint="Send an instruction to this running Codex turn without queuing a new turn"
+            label="Add to current turn"
+            accessibilityHint="Add an instruction to what the agent is doing now"
             showChevron={false}
             disabled={props.disabled || submitting}
             onPress={() => {
@@ -83,11 +83,11 @@ export function SteerTurnDialog(props: {
               className="gap-4 rounded-2xl border border-border bg-sheet p-5"
             >
               <Text accessibilityRole="header" className="text-xl font-t3-bold text-foreground">
-                Steer active turn
+                Add to current turn
               </Text>
               <Text className="text-sm leading-5 text-foreground-secondary">
-                Send an instruction to this running Codex turn. Its model and permissions stay
-                unchanged. This does not queue another turn.
+                Add this to what the agent is doing now. To send it after this turn, use the usual
+                message box.
               </Text>
               <TextInput
                 accessibilityLabel="Steering instruction"
@@ -143,7 +143,7 @@ export function SteerTurnDialog(props: {
                   )}
                 >
                   <Text className="font-t3-medium text-sm text-white">
-                    {submitting ? "Submitting…" : "Send instruction"}
+                    {submitting ? "Sending…" : "Add now"}
                   </Text>
                 </Pressable>
               </View>

@@ -27,6 +27,7 @@ import {
   connectionStatusTitle,
   type EnvironmentConnectionPresentation,
 } from "@t3tools/client-runtime/connection";
+import { isCapacityRetryWaiting } from "@t3tools/client-runtime/capacityRetry";
 import { wasBootstrapThreadDeleted } from "@t3tools/client-runtime/errors";
 import {
   changeRequestAutoSettles,
@@ -2491,6 +2492,10 @@ function ChatViewContent(props: ChatViewProps) {
   );
   const phase = derivePhase(activeThread?.session ?? null);
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
+  const capacityRetryWaiting = isCapacityRetryWaiting(
+    activeThread?.session?.status,
+    threadActivities,
+  );
   const workLogEntries = useMemo(() => deriveWorkLogEntries(threadActivities), [threadActivities]);
   const activeWorkerWait = useMemo(
     () => deriveActiveWorkerWait(threadActivities),
@@ -5408,8 +5413,8 @@ function ChatViewContent(props: ChatViewProps) {
         currentSendContext.reviewComments.length > 0),
     );
     const followUpSubmission = resolveFollowUpSubmission({
-      phase,
-      followUpBehavior: settings.followUpBehavior,
+      phase: capacityRetryWaiting ? "running" : phase,
+      followUpBehavior: capacityRetryWaiting ? "queue" : settings.followUpBehavior,
       hasThread: activeThread != null,
       hasContent: currentSendContextHasContent,
       hasPendingRequest: Boolean(
@@ -6144,6 +6149,9 @@ function ChatViewContent(props: ChatViewProps) {
 
     if (failure !== null) {
       if (queuedFollowUp) {
+        if (activeThreadKey && queuedFollowUpIsStillQueued) {
+          useQueuedFollowUpStore.getState().hold(activeThreadKey, queuedFollowUp.id);
+        }
         setOptimisticUserMessages((existing) =>
           existing.filter((message) => message.id !== messageIdForSend),
         );
@@ -6228,7 +6236,6 @@ function ChatViewContent(props: ChatViewProps) {
   /** Resolves false when the interrupt was rejected, so callers can offer a retry. */
   const onInterrupt = async (): Promise<boolean> => {
     if (!activeThread) return false;
-    if (activeThreadKey) useQueuedFollowUpStore.getState().holdThread(activeThreadKey);
     const result = await interruptThreadTurn({
       environmentId,
       input: buildThreadTurnInterruptInput(activeThread),
@@ -6336,16 +6343,23 @@ function ChatViewContent(props: ChatViewProps) {
   };
 
   useEffect(() => {
-    if (!activeThreadKey || isSendBusy || isConnecting) return;
+    if (
+      !activeThreadKey ||
+      isSendBusy ||
+      isConnecting ||
+      threadDetailLoading ||
+      activeEnvironmentUnavailable
+    )
+      return;
     const next = nextAutoQueuedFollowUp(
       queuedFollowUps,
       phase,
       Boolean(activePendingProgress || activePendingApproval || pendingUserInputs.length > 0),
+      capacityRetryWaiting,
     );
     if (!next) return;
     const queue = useQueuedFollowUpStore.getState();
     if (!queue.claim(activeThreadKey, next.id)) return;
-    queue.hold(activeThreadKey, next.id);
     void onSend(undefined, "foreground", undefined, next).finally(() => {
       queue.release(activeThreadKey, next.id);
     });
@@ -6355,6 +6369,9 @@ function ChatViewContent(props: ChatViewProps) {
     queuedFollowUps,
     isSendBusy,
     isConnecting,
+    threadDetailLoading,
+    activeEnvironmentUnavailable,
+    capacityRetryWaiting,
     activePendingProgress,
     activePendingApproval,
     pendingUserInputs,
@@ -7487,7 +7504,7 @@ function ChatViewContent(props: ChatViewProps) {
                           data-testid="queued-follow-up"
                         >
                           <span className="min-w-0 flex-1 truncate">
-                            {phase === "running"
+                            {phase === "running" || capacityRetryWaiting
                               ? "Waiting for the current turn"
                               : "Queued follow-up"}
                             {entry.context.prompt.trim()
@@ -7497,13 +7514,14 @@ function ChatViewContent(props: ChatViewProps) {
                               ? ` (${index + 1}/${queuedFollowUps.length})`
                               : ""}
                           </span>
-                          {phase !== "running" && index === 0 ? (
+                          {phase !== "running" && !capacityRetryWaiting && index === 0 ? (
                             <button
                               type="button"
                               className="shrink-0 rounded px-2 py-1 text-xs hover:bg-muted"
                               disabled={
                                 isSendBusy ||
                                 sendInFlightRef.current ||
+                                activeEnvironmentUnavailable ||
                                 Boolean(
                                   activePendingProgress ||
                                   activePendingApproval ||
@@ -7523,7 +7541,7 @@ function ChatViewContent(props: ChatViewProps) {
                             </button>
                           ) : null}
                           {phase === "running" &&
-                          selectedProvider === "codex" &&
+                          activeThread?.session?.providerName === "codex" &&
                           isServerThread &&
                           activeThread?.session?.activeTurnId &&
                           canSteerQueuedFollowUp(entry) ? (
@@ -7555,7 +7573,7 @@ function ChatViewContent(props: ChatViewProps) {
                       ))}
                     </div>
                   ) : null}
-                  {selectedProvider === "codex" && isServerThread && activeThread ? (
+                  {activeThread?.session?.providerName === "codex" && isServerThread ? (
                     <SteerTurnDialog
                       key={activeThread.id}
                       environmentId={environmentId}

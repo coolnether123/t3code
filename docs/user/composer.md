@@ -30,17 +30,22 @@ messages while disconnected. Uploads resume when you reconnect. Drafts and queue
 messages survive app restarts. Signing out of T3 Connect keeps that work on your
 device until you sign back into the same account.
 
+While a turn runs, mobile holds a new message in the queue until that turn ends.
+You can remove it, or tap **Steer now** on a text-only message during a running
+Codex turn to add it to the work in progress.
+
 ## Follow up while an agent runs
 
-On web and desktop, **Settings → General → Follow-up behavior** controls what
-Send does during an active turn. **Queue** holds your message until the turn
-finishes. The queue appears above the composer; you can remove a message or
-send the first one when the thread is ready. Text-only queued messages also
-offer **Steer now** while a Codex turn is running. New turns do not skip
-messages already in the queue. Stop holds queued messages until you choose
-**Send now**.
+On web and desktop, type in the usual message box and press Enter while the
+agent works. With **Queue** selected in Settings → General → Follow-up behavior,
+T3 Code sends your message after the current turn finishes. The queue appears
+above the composer. A text-only message has **Steer now** during a running Codex
+turn if you want the agent to see it immediately. **Remove** discards it. If a
+message cannot send automatically, **Send now** is available when the turn is
+idle. Messages send in order, including after a capacity wait finishes or is
+cancelled.
 
-**Steer** sends a text-only Codex prompt into the active turn. If the draft has
+The optional **Steer** setting sends a text-only Codex prompt into the active turn. If the draft has
 an attachment or other context, T3 Code leaves it in the composer and asks you
 to send it after the turn. If Codex refuses a steer after T3 Code accepts it,
 the text returns to the composer if it came from there and the draft is empty.

@@ -105,7 +105,6 @@ type QueuedFollowUpStore = {
   restoreAtHead: (threadKey: string, entry: QueuedFollowUp) => void;
   remove: (threadKey: string, id: string) => void;
   hold: (threadKey: string, id: string) => void;
-  holdThread: (threadKey: string) => void;
   contains: (threadKey: string, id: string) => boolean;
   claim: (threadKey: string, id: string) => boolean;
   release: (threadKey: string, id: string) => void;
@@ -164,16 +163,6 @@ export const useQueuedFollowUpStore = create<QueuedFollowUpStore>()((set, get) =
         [threadKey]: (current.byThread[threadKey] ?? EMPTY_QUEUE).map((entry) =>
           entry.id === id ? { ...entry, holdUntilUserAction: true } : entry,
         ),
-      },
-    })),
-  holdThread: (threadKey) =>
-    set((current) => ({
-      byThread: {
-        ...current.byThread,
-        [threadKey]: (current.byThread[threadKey] ?? EMPTY_QUEUE).map((entry) => ({
-          ...entry,
-          holdUntilUserAction: true,
-        })),
       },
     })),
   contains: (threadKey, id) => get().byThread[threadKey]?.some((entry) => entry.id === id) ?? false,
@@ -273,9 +262,15 @@ export function nextAutoQueuedFollowUp(
   entries: ReadonlyArray<QueuedFollowUp>,
   phase: "connecting" | "running" | "ready" | "disconnected",
   hasPendingRequest = false,
+  capacityRetryWaiting = false,
 ): QueuedFollowUp | null {
   const first = entries[0];
-  return phase === "ready" && !hasPendingRequest && first && !first.holdUntilUserAction
+  return phase !== "running" &&
+    phase !== "connecting" &&
+    !capacityRetryWaiting &&
+    !hasPendingRequest &&
+    first &&
+    !first.holdUntilUserAction
     ? first
     : null;
 }

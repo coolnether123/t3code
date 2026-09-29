@@ -85,16 +85,16 @@ export function SteerTurnDialog({
       {activeTurnId !== null ? (
         <div className="mx-auto flex w-full max-w-3xl justify-end pb-1">
           <DialogTrigger render={<Button size="sm" variant="ghost" disabled={disabled} />}>
-            Steer active turn
+            Add to current turn
           </DialogTrigger>
         </div>
       ) : null}
       <DialogPopup aria-busy={submitting}>
         <DialogHeader>
-          <DialogTitle>Steer active turn</DialogTitle>
+          <DialogTitle>Add to current turn</DialogTitle>
           <DialogDescription>
-            Send an instruction to this running Codex turn. Its model and permissions stay
-            unchanged. This does not queue another turn.
+            Add this to what the agent is doing now. To send it after this turn, use the usual
+            message box.
           </DialogDescription>
         </DialogHeader>
         <DialogPanel className="space-y-3">
@@ -121,7 +121,7 @@ export function SteerTurnDialog({
             onClick={() => void submit()}
             disabled={!targetIsRunning || !text.trim() || submitting || disabled}
           >
-            {submitting ? "Submitting…" : "Send instruction"}
+            {submitting ? "Sending…" : "Add now"}
           </Button>
         </DialogFooter>
       </DialogPopup>
