@@ -5,6 +5,7 @@ import * as NodeStream from "node:stream";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import type { CodexSettings } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -66,10 +67,11 @@ export const codexManagedCliPath = Effect.fn("codexManagedCliPath")(function* (
 });
 
 /**
- * Starts the host's managed Codex daemon when its control socket is missing,
- * for example after a reboot. `daemon start` is idempotent and keeps the
- * user's saved daemon settings. A failure is left to the connection attempt,
- * which reports the actionable repair message.
+ * Starts the host's managed Codex daemon unless it reports itself running,
+ * for example after a reboot or after the daemon exited and left its control
+ * socket file behind. `daemon start` is idempotent and keeps the user's saved
+ * daemon settings. A failure is left to the connection attempt, which reports
+ * the actionable repair message.
  */
 export const ensureCodexDesktopDaemonStarted = Effect.fn("ensureCodexDesktopDaemonStarted")(
   function* (environment: NodeJS.ProcessEnv) {
@@ -79,26 +81,54 @@ export const ensureCodexDesktopDaemonStarted = Effect.fn("ensureCodexDesktopDaem
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const codexHome = environment.CODEX_HOME ?? path.join(NodeOS.homedir(), ".codex");
     const socketPath = path.join(codexHome, "app-server-control", "app-server-control.sock");
-    if (yield* fileSystem.exists(socketPath).pipe(Effect.orElseSucceed(() => false))) return;
     const managedCli = yield* codexManagedCliPath(codexHome, platform);
-    const exitCode = yield* spawner
-      .spawn(
-        ChildProcess.make(managedCli, ["app-server", "daemon", "start"], {
-          env: environment,
-          extendEnv: false,
-          shell: false,
-        }),
-      )
-      .pipe(
-        Effect.flatMap((child) => child.exitCode),
-        Effect.scoped,
-        Effect.timeout("30 seconds"),
-        Effect.map(Number),
-        Effect.orElseSucceed(() => -1),
-      );
-    yield* Effect.logInfo("codex.desktop-daemon.start", { exitCode });
+    const runDaemonCommand = (command: "version" | "start", timeout: Duration.Input) =>
+      spawner
+        .spawn(
+          ChildProcess.make(managedCli, ["app-server", "daemon", command], {
+            env: environment,
+            extendEnv: false,
+            shell: false,
+          }),
+        )
+        .pipe(
+          Effect.flatMap((child) =>
+            Effect.all([child.all.pipe(Stream.decodeText(), Stream.mkString), child.exitCode], {
+              concurrency: "unbounded",
+            }),
+          ),
+          Effect.scoped,
+          Effect.timeout(timeout),
+          Effect.map(([output, exitCode]) => ({ output, exitCode: Number(exitCode) })),
+          Effect.orElseSucceed(() => ({ output: "", exitCode: -1 })),
+        );
+
+    // A socket file alone does not prove a live daemon: one that exits
+    // uncleanly leaves the file behind and refuses every connection.
+    if (yield* fileSystem.exists(socketPath).pipe(Effect.orElseSucceed(() => false))) {
+      const version = yield* runDaemonCommand("version", "10 seconds");
+      if (codexDaemonVersionReportsRunning(version.output)) return;
+    }
+    const started = yield* runDaemonCommand("start", "30 seconds");
+    yield* Effect.logInfo("codex.desktop-daemon.start", {
+      exitCode: started.exitCode,
+      output: started.output.trim().slice(-500),
+    });
   },
 );
+
+/** True when `codex app-server daemon version` printed a running status. */
+export function codexDaemonVersionReportsRunning(output: string): boolean {
+  for (const line of output.split(/\r?\n/u).reverse()) {
+    try {
+      const report = JSON.parse(line) as { readonly status?: unknown };
+      if (typeof report === "object" && report !== null) return report.status === "running";
+    } catch {
+      // Diagnostics such as ignored-config warnings share the stream.
+    }
+  }
+  return false;
+}
 
 interface CodexAppServerProtocolLogEvent {
   readonly direction: "incoming" | "outgoing";

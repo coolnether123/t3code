@@ -15,6 +15,7 @@ import * as Stream from "effect/Stream";
 import {
   codexAppServerCommandArgs,
   codexAppServerTransport,
+  codexDaemonVersionReportsRunning,
   codexDesktopDaemonEnvironment,
   codexDesktopDaemonRepairMessage,
   codexManagedCliPath,
@@ -165,7 +166,7 @@ describe("CodexAppServerTransport", () => {
 });
 
 describe("ensureCodexDesktopDaemonStarted", () => {
-  const recordingSpawner = (commands: Array<ReadonlyArray<string>>) =>
+  const recordingSpawner = (commands: Array<ReadonlyArray<string>>, versionOutput: () => string) =>
     ChildProcessSpawner.make((command) =>
       Effect.sync(() => {
         const input = command as unknown as {
@@ -173,6 +174,10 @@ describe("ensureCodexDesktopDaemonStarted", () => {
           readonly args: ReadonlyArray<string>;
         };
         commands.push([input.command, ...input.args]);
+        const output =
+          input.args.at(-1) === "version"
+            ? Stream.make(new TextEncoder().encode(versionOutput()))
+            : Stream.empty;
         return ChildProcessSpawner.makeHandle({
           pid: ChildProcessSpawner.ProcessId(1),
           exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
@@ -180,9 +185,9 @@ describe("ensureCodexDesktopDaemonStarted", () => {
           kill: () => Effect.void,
           unref: Effect.succeed(Effect.void),
           stdin: Sink.drain,
-          stdout: Stream.empty,
+          stdout: output,
           stderr: Stream.empty,
-          all: Stream.empty,
+          all: output,
           getInputFd: () => Sink.drain,
           getOutputFd: () => Stream.empty,
         });
@@ -197,6 +202,7 @@ describe("ensureCodexDesktopDaemonStarted", () => {
       PlatformError.PlatformError,
       FileSystem.FileSystem | Path.Path | ChildProcessSpawner.ChildProcessSpawner
     >,
+    versionOutput = "",
   ) => {
     const commands: Array<ReadonlyArray<string>> = [];
     return Effect.gen(function* () {
@@ -207,9 +213,10 @@ describe("ensureCodexDesktopDaemonStarted", () => {
       Effect.scoped,
       Effect.orDie,
       Effect.provide(
-        Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, recordingSpawner(commands)).pipe(
-          Layer.provideMerge(NodeServices.layer),
-        ),
+        Layer.succeed(
+          ChildProcessSpawner.ChildProcessSpawner,
+          recordingSpawner(commands, () => versionOutput),
+        ).pipe(Layer.provideMerge(NodeServices.layer)),
       ),
     );
   };
@@ -255,21 +262,55 @@ describe("ensureCodexDesktopDaemonStarted", () => {
     ),
   );
 
-  it.effect("does nothing while the daemon control socket exists", () =>
-    withCodexHome((codexHome, commands) =>
-      Effect.gen(function* () {
-        const fileSystem = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        yield* fileSystem.makeDirectory(path.join(codexHome, "app-server-control"), {
-          recursive: true,
-        });
-        yield* fileSystem.writeFileString(
-          path.join(codexHome, "app-server-control", "app-server-control.sock"),
-          "",
-        );
-        yield* ensureCodexDesktopDaemonStarted({ CODEX_HOME: codexHome });
-        expect(commands).toEqual([]);
-      }),
+  const writeControlSocket = (codexHome: string) =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      yield* fileSystem.makeDirectory(path.join(codexHome, "app-server-control"), {
+        recursive: true,
+      });
+      yield* fileSystem.writeFileString(
+        path.join(codexHome, "app-server-control", "app-server-control.sock"),
+        "",
+      );
+    });
+  const daemonCommands = (commands: Array<ReadonlyArray<string>>) =>
+    commands.map((command) => command.at(-1));
+
+  it.effect("only checks the daemon while its socket exists and it reports running", () =>
+    withCodexHome(
+      (codexHome, commands) =>
+        Effect.gen(function* () {
+          yield* writeControlSocket(codexHome);
+          yield* ensureCodexDesktopDaemonStarted({ CODEX_HOME: codexHome });
+          expect(daemonCommands(commands)).toEqual(["version"]);
+        }),
+      '{"status":"running","appServerVersion":"0.157.1"}\n',
     ),
   );
+
+  it.effect("starts the daemon when a leftover socket belongs to a daemon that exited", () =>
+    withCodexHome(
+      (codexHome, commands) =>
+        Effect.gen(function* () {
+          yield* writeControlSocket(codexHome);
+          yield* ensureCodexDesktopDaemonStarted({ CODEX_HOME: codexHome });
+          expect(daemonCommands(commands)).toEqual(["version", "start"]);
+        }),
+      "Error: failed to connect to app-server-control.sock\n",
+    ),
+  );
+});
+
+describe("codexDaemonVersionReportsRunning", () => {
+  it("reads the JSON status after unrelated diagnostics", () => {
+    expect(
+      codexDaemonVersionReportsRunning(
+        'Codex is ignoring 1 unrecognized configuration setting.\n{"status":"running"}\n',
+      ),
+    ).toBe(true);
+    expect(codexDaemonVersionReportsRunning('{"status":"notRunning"}')).toBe(false);
+    expect(codexDaemonVersionReportsRunning("Error: failed to connect")).toBe(false);
+    expect(codexDaemonVersionReportsRunning("")).toBe(false);
+  });
 });
