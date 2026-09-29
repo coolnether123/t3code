@@ -42,6 +42,7 @@ import { UsageAggregator } from "./usageAggregation.ts";
 import { parseRateTable, type RateTable } from "./usagePricing.ts";
 import {
   listTranscriptFiles,
+  resolveClaudeDesktopLocalAgentDir,
   readDirectoryVolumeId,
   readTranscriptRecords,
   selectTranscriptFilesForScan,
@@ -223,6 +224,7 @@ export const make = Effect.gen(function* () {
 
     const claudeHome = yield* resolveClaudeHomePath(settings.providers.claudeAgent);
     const claudeDir = yield* resolveClaudeTranscriptDir(claudeHome);
+    const claudeDesktopLocalAgentDir = resolveClaudeDesktopLocalAgentDir(process.env.APPDATA);
     const codexLayout = yield* resolveCodexHomeLayout(settings.providers.codex);
     const codexHome = codexLayout.sharedHomePath;
     const geminiHome = path.join(NodeOS.homedir(), ".gemini");
@@ -230,6 +232,9 @@ export const make = Effect.gen(function* () {
 
     return [
       { provider: "claude" as const, dir: claudeDir },
+      ...(claudeDesktopLocalAgentDir === null
+        ? []
+        : [{ provider: "claude" as const, dir: claudeDesktopLocalAgentDir }]),
       { provider: "codex" as const, dir: path.join(codexHome, "sessions") },
       { provider: "codex" as const, dir: path.join(codexHome, "archived_sessions") },
       { provider: "gemini" as const, dir: path.join(geminiHome, "tmp") },

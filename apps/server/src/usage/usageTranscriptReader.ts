@@ -44,6 +44,11 @@ export interface TranscriptScanSelection {
   readonly coldBytes: number;
 }
 
+/** Resolves Claude Desktop's JSONL store when Windows provides its app-data root. */
+export function resolveClaudeDesktopLocalAgentDir(appDataPath: string | undefined): string | null {
+  return appDataPath ? NodePath.join(appDataPath, "Claude", "local-agent-mode-sessions") : null;
+}
+
 /**
  * Chooses newest transcripts first while bounding uncached I/O for one request.
  * Warm files do not consume the budget, allowing repeated reads to progressively
