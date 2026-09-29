@@ -132,6 +132,7 @@ import {
   shouldToastDesktopUpdateActionResult,
 } from "./desktopUpdate.logic";
 import { showDesktopUpdateDownloadedToast } from "./desktopUpdate.toast";
+import { MultiChatTranscriptLoader, useMultiChatTranscriptCopy } from "./MultiChatTranscriptLoader";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "./ui/alert";
 import { Button } from "./ui/button";
 import {
@@ -1143,6 +1144,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const rangeSelectTo = useThreadSelectionStore((state) => state.rangeSelectTo);
   const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
   const removeFromSelection = useThreadSelectionStore((state) => state.removeFromSelection);
+  const {
+    request: multiChatCopyRequest,
+    startCopy: startMultiChatCopy,
+    onLoaded: handleMultiChatTranscriptLoaded,
+    onError: handleMultiChatTranscriptError,
+  } = useMultiChatTranscriptCopy(clearSelection);
   const setSelectionAnchor = useThreadSelectionStore((state) => state.setAnchor);
   const { copyToClipboard: copyThreadIdToClipboard } = useCopyToClipboard<{
     threadId: ThreadId;
@@ -1809,12 +1816,13 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       if (!api) return;
       const threadKeys = [...useThreadSelectionStore.getState().selectedThreadKeys];
       if (threadKeys.length === 0) return;
-      const count = threadKeys.length;
       const selectedThreadEntries = threadKeys.flatMap((threadKey) => {
         const threadRef = parseScopedThreadKey(threadKey);
         const thread = threadRef ? readThreadShell(threadRef) : null;
         return threadRef && thread ? [{ threadKey, threadRef, thread }] : [];
       });
+      if (selectedThreadEntries.length === 0) return;
+      const count = selectedThreadEntries.length;
       const hasRunningThread = selectedThreadEntries.some(
         ({ thread }) => thread.session?.status === "running" && thread.session.activeTurnId != null,
       );
@@ -1823,6 +1831,11 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         buildMultiSelectThreadContextMenuItems({ count, hasRunningThread }),
         position,
       );
+
+      if (clicked === "copy") {
+        startMultiChatCopy(selectedThreadEntries.map(({ threadRef }) => threadRef));
+        return;
+      }
 
       if (clicked === "mark-unread") {
         for (const { threadKey, thread } of selectedThreadEntries) {
@@ -1916,6 +1929,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       deleteThread,
       markThreadUnread,
       removeFromSelection,
+      startMultiChatCopy,
     ],
   );
 
@@ -2543,6 +2557,15 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           </DialogFooter>
         </DialogPopup>
       </Dialog>
+      {multiChatCopyRequest?.threadRefs.map((threadRef) => (
+        <MultiChatTranscriptLoader
+          key={`${multiChatCopyRequest.id}:${scopedThreadKey(threadRef)}`}
+          requestId={multiChatCopyRequest.id}
+          threadRef={threadRef}
+          onLoaded={handleMultiChatTranscriptLoaded}
+          onError={handleMultiChatTranscriptError}
+        />
+      ))}
     </>
   );
 });

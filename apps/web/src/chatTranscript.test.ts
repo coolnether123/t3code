@@ -9,7 +9,11 @@ import {
   type OrchestrationThreadActivity,
 } from "@t3tools/contracts";
 
-import { prepareDesktopDraftPrompt, serializeTaskTranscript } from "./chatTranscript";
+import {
+  prepareDesktopDraftPrompt,
+  serializeTaskTranscript,
+  serializeTaskTranscripts,
+} from "./chatTranscript";
 
 describe("prepareDesktopDraftPrompt", () => {
   it("labels copied context honestly without changing the original transcript", () => {
@@ -123,5 +127,25 @@ describe("serializeTaskTranscript", () => {
     });
 
     expect(transcript).not.toContain("hidden runtime instructions");
+  });
+});
+
+describe("serializeTaskTranscripts", () => {
+  it("keeps the supplied chat order and separates complete transcripts", () => {
+    const transcripts = serializeTaskTranscripts([
+      { title: "First chat", threadId: "thread-1", messages: [], activities: [] },
+      { title: "Second chat", threadId: "thread-2", messages: [], activities: [] },
+    ]);
+
+    expect(transcripts.indexOf("CHAT 1 OF 2")).toBeLessThan(transcripts.indexOf("CHAT 2 OF 2"));
+    expect(transcripts.indexOf("Title: First chat")).toBeLessThan(
+      transcripts.indexOf("Title: Second chat"),
+    );
+    expect(transcripts).toContain("Task: thread-1");
+    expect(transcripts).toContain("Task: thread-2");
+  });
+
+  it("returns empty text for an empty selection", () => {
+    expect(serializeTaskTranscripts([])).toBe("");
   });
 });
