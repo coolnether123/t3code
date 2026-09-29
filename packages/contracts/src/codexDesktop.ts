@@ -1,6 +1,6 @@
 import * as Schema from "effect/Schema";
 
-import { IsoDateTime, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { IsoDateTime, NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 /** The native Codex session states exposed by the T3 Codex chats surface. */
 export const CodexDesktopThreadStatus = Schema.Literals([
@@ -56,6 +56,34 @@ export const CodexDesktopThreadHistoryResponse = Schema.Struct({
   nextCursor: Schema.NullOr(Schema.String),
 });
 export type CodexDesktopThreadHistoryResponse = typeof CodexDesktopThreadHistoryResponse.Type;
+
+/** A Codex desktop automation run remains outside T3 until explicitly imported. */
+export const CodexScheduledRun = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+  preview: Schema.NullOr(Schema.String),
+  archived: Schema.Boolean,
+});
+export type CodexScheduledRun = typeof CodexScheduledRun.Type;
+
+export const CodexScheduledRoutine = Schema.Struct({
+  name: TrimmedNonEmptyString,
+  latestRun: CodexScheduledRun,
+  runCount: NonNegativeInt,
+});
+export type CodexScheduledRoutine = typeof CodexScheduledRoutine.Type;
+
+export const CodexScheduledRoutineListResponse = Schema.Struct({
+  routines: Schema.Array(CodexScheduledRoutine),
+  nextCursor: Schema.NullOr(Schema.String),
+});
+export type CodexScheduledRoutineListResponse = typeof CodexScheduledRoutineListResponse.Type;
+
+export const CodexScheduledRunListResponse = Schema.Struct({
+  runs: Schema.Array(CodexScheduledRun),
+  nextCursor: Schema.NullOr(Schema.String),
+});
+export type CodexScheduledRunListResponse = typeof CodexScheduledRunListResponse.Type;
 
 export const CodexDesktopSendMessageRequest = Schema.Struct({
   requestId: TrimmedNonEmptyString,

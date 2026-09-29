@@ -3,6 +3,20 @@
 Use a new thread for a separate task. Choose **New worktree** when its code changes
 need a separate branch and working directory.
 
+## Browse scheduled Codex runs
+
+Open **Scheduled** below your chats on web or desktop. Each routine shows its
+latest run and total run count. Expand a routine to browse its runs, including
+those archived in Codex desktop. Select a run to read its transcript. Use **More
+runs** or **Older messages** to page through history. The section loads when you
+open it and refreshes when you reopen it.
+
+The web and desktop section reads the primary environment's Codex desktop
+history. On mobile, open **Scheduled runs** from the home header and choose an
+environment if you have more than one connected. If the Codex host has no
+automations, the list says so. Runs are read-only for now. They remain separate
+from T3 chats, and opening one does not import it or change its archive state.
+
 ## Start a thread
 
 When more than one environment is connected, choose the Mac at the top of the

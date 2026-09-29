@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
+  CodexScheduledRunListResponse,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -32,6 +33,7 @@ import {
   pullRequestDiffLoaderLayer,
 } from "./pullRequestDiffHttp.ts";
 import { fetchEnvironmentSessionState } from "./session.ts";
+import { ScheduledRunLoader, scheduledRunLoaderLayer } from "./scheduled.ts";
 import { fetchEnvironmentShellSnapshot } from "./shellSnapshotHttp.ts";
 import { fetchEnvironmentThreadSnapshot } from "./threadSnapshotHttp.ts";
 
@@ -297,6 +299,43 @@ describe("authenticated environment HTTP requests", () => {
       expect(result).toEqual(DIFF_RESULT);
       expect(new Headers(harness.calls[0]!.init.headers).get("authorization")).toBe(
         "DPoP current-token",
+      );
+    }),
+  );
+
+  it.effect("loads an archived scheduled page after relay credential renewal", () =>
+    Effect.gen(function* () {
+      const page = {
+        runs: [
+          { id: "run-1", createdAt: "2026-09-28T12:00:00.000Z", preview: null, archived: true },
+        ],
+        nextCursor: null,
+      };
+      const harness = makeHarness((requestNumber) =>
+        requestNumber === 1 ? credentialRejectedResponse() : Response.json(page),
+      );
+      const loaderLayer = scheduledRunLoaderLayer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            harness.httpLayer,
+            Layer.succeed(ManagedRelayDpopSigner, Option.getOrThrow(harness.input.signer)),
+            Layer.succeed(RemoteEnvironmentAuthorization, harness.remoteAuthorization),
+          ),
+        ),
+      );
+      const loader = yield* ScheduledRunLoader.pipe(Effect.provide(loaderLayer));
+      const result = yield* loader.get(
+        PREPARED,
+        "/api/codex/scheduled/runs?name=Inbox",
+        CodexScheduledRunListResponse,
+      );
+      expect(result.runs[0]?.archived).toBe(true);
+      expect(harness.calls.map((call) => call.url)).toEqual([
+        `${CURRENT_ORIGIN}/api/codex/scheduled/runs?name=Inbox`,
+        `${RENEWED_ORIGIN}/api/codex/scheduled/runs?name=Inbox`,
+      ]);
+      expect(harness.proofs.map((proof) => proof.url)).toEqual(
+        harness.calls.map((call) => call.url),
       );
     }),
   );

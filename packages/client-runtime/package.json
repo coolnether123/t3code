@@ -183,6 +183,10 @@
       "types": "./src/state/runtime.ts",
       "default": "./src/state/runtime.ts"
     },
+    "./state/scheduled": {
+      "types": "./src/state/scheduled.ts",
+      "default": "./src/state/scheduled.ts"
+    },
     "./state/server": {
       "types": "./src/state/server.ts",
       "default": "./src/state/server.ts"

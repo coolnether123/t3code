@@ -148,6 +148,52 @@ export const codexDesktopRouteLayer = Layer.unwrap(
       ),
       HttpRouter.add(
         "GET",
+        `${CODEX_PATH}/scheduled`,
+        Effect.gen(function* () {
+          yield* authenticateRawRouteWithScope(AuthOrchestrationReadScope);
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const url = new URL(request.originalUrl, "http://127.0.0.1");
+          return HttpServerResponse.jsonUnsafe(
+            yield* store.listScheduledRoutines({
+              cursor: url.searchParams.get("cursor") ?? "",
+            }),
+          );
+        }).pipe(Effect.catch(routeError)),
+      ),
+      HttpRouter.add(
+        "GET",
+        `${CODEX_PATH}/scheduled/runs`,
+        Effect.gen(function* () {
+          yield* authenticateRawRouteWithScope(AuthOrchestrationReadScope);
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const url = new URL(request.originalUrl, "http://127.0.0.1");
+          const name = url.searchParams.get("name");
+          if (!name || name.length > 320) return badRequest("Invalid scheduled routine name.");
+          return HttpServerResponse.jsonUnsafe(
+            yield* store.listScheduledRuns(name, {
+              cursor: url.searchParams.get("cursor") ?? "",
+            }),
+          );
+        }).pipe(Effect.catch(routeError)),
+      ),
+      HttpRouter.add(
+        "GET",
+        `${CODEX_PATH}/scheduled/runs/:id`,
+        Effect.gen(function* () {
+          yield* authenticateRawRouteWithScope(AuthOrchestrationReadScope);
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const url = new URL(request.originalUrl, "http://127.0.0.1");
+          const threadId = url.pathname.match(/^\/api\/codex\/scheduled\/runs\/([^/]+)$/)?.[1];
+          if (!threadId || !UUID_PATTERN.test(threadId)) return badRequest("Invalid Codex run ID.");
+          return HttpServerResponse.jsonUnsafe(
+            yield* store.readScheduledRun(threadId, {
+              beforeCursor: url.searchParams.get("beforeCursor") ?? "",
+            }),
+          );
+        }).pipe(Effect.catch(routeError)),
+      ),
+      HttpRouter.add(
+        "GET",
         `${CODEX_PATH}/threads/:id`,
         Effect.gen(function* () {
           yield* authenticateRawRouteWithScope(AuthOrchestrationReadScope);

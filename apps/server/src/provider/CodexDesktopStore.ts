@@ -10,6 +10,9 @@ import {
   type CodexDesktopThread,
   type CodexDesktopThreadHistoryResponse,
   type CodexDesktopThreadListResponse,
+  type CodexScheduledRoutineListResponse,
+  type CodexScheduledRun,
+  type CodexScheduledRunListResponse,
   ServerSettingsError,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -42,6 +45,26 @@ export class CodexDesktopStoreError extends Schema.TaggedErrorClass<CodexDesktop
 }
 
 export interface CodexDesktopStoreShape {
+  readonly listScheduledRoutines: (input?: {
+    readonly cursor?: string;
+  }) => Effect.Effect<
+    CodexScheduledRoutineListResponse,
+    CodexDesktopStoreError | PlatformError.PlatformError | ServerSettingsError
+  >;
+  readonly listScheduledRuns: (
+    name: string,
+    input?: { readonly cursor?: string },
+  ) => Effect.Effect<
+    CodexScheduledRunListResponse,
+    CodexDesktopStoreError | PlatformError.PlatformError | ServerSettingsError
+  >;
+  readonly readScheduledRun: (
+    threadId: string,
+    input?: { readonly beforeCursor?: string; readonly limit?: number },
+  ) => Effect.Effect<
+    CodexDesktopThreadHistoryResponse,
+    CodexDesktopStoreError | PlatformError.PlatformError | ServerSettingsError
+  >;
   readonly listThreads: (input?: {
     readonly cursor?: string;
     readonly search?: string;
@@ -112,6 +135,29 @@ const rowToThread = (row: Record<string, unknown>): ThreadRow => ({
   archived: Number(row.archived ?? 0),
   rollout_path: String(row.rollout_path ?? ""),
   history_mode: String(row.history_mode ?? "legacy"),
+});
+
+// SQLite computes the grouping key, so listing routines does not transfer or
+// parse every run in JavaScript. The first title line is the only routine label.
+const ROUTINE_NAME_SQL = `CASE WHEN lower(substr(trim(title_line), 1, 11)) = 'automation:'
+  AND trim(substr(trim(title_line), 12)) != ''
+  THEN trim(substr(trim(substr(trim(title_line), 12)), 1, 160))
+  ELSE 'Scheduled automation' END`;
+const SCHEDULED_RUNS_SQL = `WITH title_lines AS (
+  SELECT id, created_at, created_at_ms, archived, substr(preview, 1, 240) AS preview,
+    replace(substr(COALESCE(title, ''), 1, instr(COALESCE(title, '') || char(10), char(10)) - 1), char(13), '') AS title_line
+  FROM threads WHERE thread_source = 'automation'
+), runs AS (
+  SELECT id, COALESCE(created_at_ms, created_at * 1000) AS run_time,
+    archived, preview, ${ROUTINE_NAME_SQL} AS name
+  FROM title_lines
+)`;
+
+const toScheduledRun = (row: Record<string, unknown>): CodexScheduledRun => ({
+  id: String(row.id),
+  createdAt: new Date(Number(row.run_time)).toISOString(),
+  preview: asText(row.preview),
+  archived: Number(row.archived) !== 0,
 });
 
 const textFromContent = (content: unknown): string => {
@@ -350,6 +396,69 @@ export const make = (options?: { readonly homePath?: string }) =>
       return raw === undefined ? undefined : rowToThread(raw);
     };
 
+    const scheduledDatabase = Effect.fn("CodexDesktopStore.scheduledDatabase")(function* () {
+      const home = yield* desktopHome();
+      if (!(yield* fileSystem.exists(home))) return null;
+      const databasePath = yield* stateDatabase(home).pipe(
+        Effect.catchTag("CodexDesktopStoreError", (error) =>
+          error.operation === "open" && error.detail.startsWith("no native Codex state database")
+            ? Effect.succeed(null)
+            : Effect.fail(error),
+        ),
+      );
+      return databasePath;
+    });
+
+    const listScheduledRoutines = (input?: { readonly cursor?: string }) =>
+      Effect.gen(function* () {
+        const databasePath = yield* scheduledDatabase();
+        if (databasePath === null) return { routines: [], nextCursor: null };
+        const offset = pageValue(input?.cursor);
+        const limit = 50;
+        const rows = yield* withDatabase(
+          databasePath,
+          "query",
+          (database) =>
+            database
+              .prepare(`${SCHEDULED_RUNS_SQL}, ranked AS (
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY name ORDER BY run_time DESC, id DESC) AS rank,
+              COUNT(*) OVER (PARTITION BY name) AS run_count FROM runs
+          ) SELECT name, id, run_time, archived, preview, run_count FROM ranked WHERE rank = 1
+          ORDER BY run_time DESC, id DESC LIMIT ? OFFSET ?`)
+              .all(limit + 1, offset) as Record<string, unknown>[],
+        );
+        return {
+          routines: rows.slice(0, limit).map((row) => ({
+            name: String(row.name),
+            latestRun: toScheduledRun(row),
+            runCount: Number(row.run_count),
+          })),
+          nextCursor: rows.length > limit ? String(offset + limit) : null,
+        } satisfies CodexScheduledRoutineListResponse;
+      });
+
+    const listScheduledRuns = (name: string, input?: { readonly cursor?: string }) =>
+      Effect.gen(function* () {
+        const databasePath = yield* scheduledDatabase();
+        if (databasePath === null) return { runs: [], nextCursor: null };
+        const offset = pageValue(input?.cursor);
+        const limit = 25;
+        const rows = yield* withDatabase(
+          databasePath,
+          "query",
+          (database) =>
+            database
+              .prepare(`${SCHEDULED_RUNS_SQL}
+            SELECT id, run_time, archived, preview FROM runs WHERE name = ?
+            ORDER BY run_time DESC, id DESC LIMIT ? OFFSET ?`)
+              .all(name, limit + 1, offset) as Record<string, unknown>[],
+        );
+        return {
+          runs: rows.slice(0, limit).map(toScheduledRun),
+          nextCursor: rows.length > limit ? String(offset + limit) : null,
+        } satisfies CodexScheduledRunListResponse;
+      });
+
     const listThreads = (input?: {
       readonly cursor?: string;
       readonly search?: string;
@@ -384,6 +493,7 @@ export const make = (options?: { readonly homePath?: string }) =>
     const readThread = (
       threadId: string,
       input?: { readonly beforeCursor?: string; readonly limit?: number },
+      scheduled = false,
     ) =>
       Effect.gen(function* () {
         const home = yield* desktopHome();
@@ -393,7 +503,13 @@ export const make = (options?: { readonly homePath?: string }) =>
         let nextCursor: string | null = null;
         const result = yield* withDatabase(databasePath, "query", (database) => {
           const row = readThreadRow(database, threadId);
-          if (!row || row.archived !== 0) return null;
+          if (!row || (!scheduled && row.archived !== 0)) return null;
+          if (scheduled) {
+            const source = database
+              .prepare("SELECT thread_source FROM threads WHERE id = ? LIMIT 1")
+              .get(threadId) as { thread_source?: string } | undefined;
+            if (source?.thread_source !== "automation") return null;
+          }
           return { row, messages: [], hasMore: false };
         });
         if (result === null) {
@@ -525,6 +641,11 @@ export const make = (options?: { readonly homePath?: string }) =>
         ? (effect as Effect.Effect<A, E, never>)
         : effect.pipe(Effect.provideService(ServerSettings.ServerSettingsService, settingsService));
     return CodexDesktopStore.of({
+      listScheduledRoutines: (input) => provideSettings(provideBase(listScheduledRoutines(input))),
+      listScheduledRuns: (name, input) =>
+        provideSettings(provideBase(listScheduledRuns(name, input))),
+      readScheduledRun: (threadId, input) =>
+        provideSettings(provideBase(readThread(threadId, input, true))),
       listThreads: (input) => provideSettings(provideBase(listThreads(input))),
       readThread: (threadId, input) => provideSettings(provideBase(readThread(threadId, input))),
     });
