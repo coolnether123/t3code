@@ -1,7 +1,8 @@
 # Review usage
 
-The Usage page combines Codex, Claude Code, Gemini, and OpenCode activity from your connected environments. It reads
-the providers' local session history and shows API-equivalent token cost, processed tokens, cache
+The Usage page combines Codex, Claude Code (including Claude Desktop local-agent sessions), Gemini,
+and OpenCode activity from your connected environments. It reads the providers' local session history
+and shows API-equivalent token cost, processed tokens, cache
 savings, provider shares, and model breakdowns. Subscription billing is separate from the raw token
 cost shown here.
 
