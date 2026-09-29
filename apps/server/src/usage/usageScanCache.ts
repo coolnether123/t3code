@@ -35,7 +35,9 @@ import {
 // their ordinary usage records; repeated-input data is cold-built until a v7
 // prefix fingerprint exists, so the established usage cache is not discarded.
 // v8 adds a complete-line ordinary-usage cursor for bounded JSONL scans.
-export const USAGE_SCAN_CACHE_VERSION = 8 as const;
+// v9 persists exact provider-native session IDs. Older rows cannot distinguish
+// those IDs from synthetic session IDs, so they must be reparsed.
+export const USAGE_SCAN_CACHE_VERSION = 9 as const;
 
 export interface CachedFile {
   readonly size: number;
@@ -124,6 +126,7 @@ type SerializedRecord = readonly [
   reportedCostUsd: number | null,
   serviceTier?: string | null,
   turnId?: string | null,
+  nativeSessionIndex?: number | null,
 ];
 
 type SerializedRepeatedInput = readonly [
@@ -312,6 +315,9 @@ export function encodeScanCache(
         record.reportedCostUsd,
         record.serviceTier ?? null,
         record.turnId ?? null,
+        record.nativeSessionId === undefined
+          ? null
+          : intern(sessions, sessionIndex, record.nativeSessionId),
       ]),
     };
   }
@@ -477,17 +483,9 @@ export function* decodeScanCacheEntries(document: unknown): Generator<[string, C
   if (typeof document !== "object" || document === null) return;
 
   const root = document as Partial<SerializedCache>;
-  if (
-    root.version !== 2 &&
-    root.version !== 3 &&
-    root.version !== 4 &&
-    root.version !== 5 &&
-    root.version !== 6 &&
-    root.version !== 7 &&
-    root.version !== USAGE_SCAN_CACHE_VERSION
-  ) {
-    return;
-  }
+  // Older rows have no separate native-session field. Reparse rather than
+  // treating a synthetic sessionId as an exact run ID.
+  if (root.version !== USAGE_SCAN_CACHE_VERSION) return;
   if (!isRecordArray(root.models) || !isRecordArray(root.sessions)) return;
   if (typeof root.files !== "object" || root.files === null) return;
 
@@ -557,8 +555,11 @@ function decodeSerializedFile(
       serviceTier,
       turnId,
     ] = row as SerializedRecord;
+    const nativeSessionIndex: unknown = row[12];
 
     const model = typeof modelIndex === "number" ? models[modelIndex] : undefined;
+    const nativeSessionId =
+      typeof nativeSessionIndex === "number" ? sessions[nativeSessionIndex] : undefined;
     if (
       typeof timestampMs !== "number" ||
       !Number.isFinite(timestampMs) ||
@@ -567,7 +568,10 @@ function decodeSerializedFile(
       !Number.isFinite(cached) ||
       !Number.isFinite(cacheCreation) ||
       !Number.isFinite(output) ||
-      !Number.isFinite(reasoning)
+      !Number.isFinite(reasoning) ||
+      (nativeSessionIndex !== undefined &&
+        nativeSessionIndex !== null &&
+        (typeof nativeSessionIndex !== "number" || nativeSessionId === undefined))
     ) {
       corrupt = true;
       break;
@@ -590,6 +594,7 @@ function decodeSerializedFile(
         ? { serviceTier, serviceTierSource: "transcript" as const }
         : {}),
       ...(typeof turnId === "string" ? { turnId } : {}),
+      ...(nativeSessionId === undefined ? {} : { nativeSessionId }),
       dedupeKey: typeof dedupeKey === "string" ? dedupeKey : null,
     });
   }
@@ -831,26 +836,16 @@ export function cachedFileMeta(entry: CachedFile): CachedFileMeta {
   };
 }
 
-/** Reads provider-root coverage. v2 caches remain valid but start uncovered. */
+/** Reads provider-root coverage for the current cache format. */
 export function decodeScanCoverage(document: unknown): readonly ScanCoverage[] {
   if (typeof document !== "object" || document === null) return [];
   const root = document as Partial<SerializedCache>;
-  if (
-    (root.version !== 3 &&
-      root.version !== 4 &&
-      root.version !== 6 &&
-      root.version !== 7 &&
-      root.version !== USAGE_SCAN_CACHE_VERSION) ||
-    !Array.isArray(root.coverage)
-  ) {
-    return [];
-  }
+  if (root.version !== USAGE_SCAN_CACHE_VERSION || !Array.isArray(root.coverage)) return [];
 
   const coverage: ScanCoverage[] = [];
   for (const row of root.coverage) {
     if (!Array.isArray(row) || (row.length !== 4 && row.length !== 5)) continue;
     const [provider, rootPath, sinceMs, scannedAtMs, volumeId] = row;
-    if (root.version < USAGE_SCAN_CACHE_VERSION && provider === "aistudio") continue;
     if (
       (provider !== "claude" &&
         provider !== "codex" &&

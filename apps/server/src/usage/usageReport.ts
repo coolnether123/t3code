@@ -1,5 +1,6 @@
 import type {
   UsageBucket,
+  UsageDay,
   UsageQuotaCost,
   UsageQuotaCostSnapshot,
   UsageReport,
@@ -7,6 +8,11 @@ import type {
   UsageReportInput,
   UsageReportModelRow,
   UsageReportQuotaCost,
+  UsageReportRunRow,
+  UsageReportDailyRunRow,
+  UsageReportDailyUnattributedRow,
+  UsageReportRuns,
+  UsageReportUnattributedRun,
   UsageReportSeriesPoint,
   UsageReportTotals,
   UsagePricing,
@@ -24,6 +30,8 @@ const DEFAULT_PROVIDER_LIMIT = 16;
 const DEFAULT_MODEL_LIMIT = 128;
 const DEFAULT_SERIES_LIMIT = 366;
 const DEFAULT_QUOTA_LIMIT = 256;
+const DEFAULT_RUN_LIMIT = 20;
+const MAX_RUN_MODELS = 16;
 const MAX_PRICE_OVERRIDE_ROWS = 128;
 
 export function makeUsageReportCalculation(
@@ -58,6 +66,22 @@ type MutableRollup = {
   records: number;
   unpricedRecords: number;
   sessions: number;
+};
+
+type MutableRunRollup = {
+  readonly provider: UsageProviderKind;
+  readonly runId: string;
+  readonly rollup: MutableRollup;
+  readonly models: Set<string>;
+  firstActivityAt: string | null;
+  lastActivityAt: string | null;
+};
+
+type MutableUnattributedRollup = {
+  readonly provider: UsageProviderKind;
+  readonly rollup: MutableRollup;
+  firstActivityAt: string | null;
+  lastActivityAt: string | null;
 };
 
 const emptyRollup = (): MutableRollup => ({
@@ -112,9 +136,162 @@ function reportLimit(input: UsageReportInput): number {
       return DEFAULT_SERIES_LIMIT;
     case "quota":
       return DEFAULT_QUOTA_LIMIT;
+    case "runs":
+      return DEFAULT_RUN_LIMIT;
     default:
       return 1;
   }
+}
+
+function updateActivityBounds(
+  current: { firstActivityAt: string | null; lastActivityAt: string | null },
+  bucket: UsageBucket,
+): void {
+  for (const timestamp of [bucket.firstActivityAt, bucket.lastActivityAt]) {
+    if (timestamp === undefined || !Number.isFinite(Date.parse(timestamp))) continue;
+    if (current.firstActivityAt === null || timestamp < current.firstActivityAt) {
+      current.firstActivityAt = timestamp;
+    }
+    if (current.lastActivityAt === null || timestamp > current.lastActivityAt) {
+      current.lastActivityAt = timestamp;
+    }
+  }
+}
+
+function runRows(summary: UsageSummary): {
+  readonly runs: UsageReportRunRow[];
+  readonly dailyRuns: UsageReportDailyRunRow[];
+  readonly dailyUnattributed: UsageReportDailyUnattributedRow[];
+  readonly unattributed: UsageReportUnattributedRun[];
+  readonly attributedRecords: number;
+  readonly unattributedRecords: number;
+} {
+  const runs = new Map<string, MutableRunRollup>();
+  const dailyRuns = new Map<string, MutableRollup>();
+  const dailyUnattributed = new Map<string, MutableRollup>();
+  const unattributed = new Map<UsageProviderKind, MutableUnattributedRollup>();
+  let attributedRecords = 0;
+  let unattributedRecords = 0;
+
+  for (const bucket of summary.buckets) {
+    const runId = bucket.runId;
+    if (runId === undefined || runId.trim().length === 0 || runId.length > 512) {
+      let row = unattributed.get(bucket.provider);
+      if (row === undefined) {
+        row = {
+          provider: bucket.provider,
+          rollup: emptyRollup(),
+          firstActivityAt: null,
+          lastActivityAt: null,
+        };
+        unattributed.set(bucket.provider, row);
+      }
+      addBucket(row.rollup, bucket);
+      addToMap(dailyUnattributed, `${bucket.day}\u0000${bucket.provider}`, bucket);
+      updateActivityBounds(row, bucket);
+      unattributedRecords += bucket.records;
+      continue;
+    }
+
+    const key = `${bucket.provider}\u0000${runId}`;
+    let row = runs.get(key);
+    if (row === undefined) {
+      row = {
+        provider: bucket.provider,
+        runId,
+        rollup: emptyRollup(),
+        models: new Set(),
+        firstActivityAt: null,
+        lastActivityAt: null,
+      };
+      runs.set(key, row);
+    }
+    addBucket(row.rollup, bucket);
+    addToMap(dailyRuns, `${bucket.day}\u0000${bucket.provider}\u0000${runId}`, bucket);
+    row.models.add(bucket.model);
+    updateActivityBounds(row, bucket);
+    attributedRecords += bucket.records;
+  }
+
+  const rows = [...runs.values()]
+    .map((row): UsageReportRunRow => {
+      const allModels = [...row.models].sort((left, right) => left.localeCompare(right));
+      const rollup = { ...row.rollup, sessions: 1 };
+      const totals = toTotals(rollup);
+      return {
+        provider: row.provider,
+        runId: row.runId,
+        threadId: null,
+        threadMapping: "unavailable",
+        models: allModels.slice(0, MAX_RUN_MODELS),
+        totalModels: allModels.length,
+        modelsTruncated: allModels.length > MAX_RUN_MODELS,
+        firstActivityAt: row.firstActivityAt,
+        lastActivityAt: row.lastActivityAt,
+        ...totals,
+        pricingCoverage:
+          totals.unpricedRecords === 0
+            ? "complete"
+            : totals.unpricedRecords === totals.records
+              ? "unpriced"
+              : "partial",
+      };
+    })
+    .sort(
+      (left, right) =>
+        right.costUsd - left.costUsd ||
+        right.records - left.records ||
+        (right.lastActivityAt ?? "").localeCompare(left.lastActivityAt ?? "") ||
+        left.provider.localeCompare(right.provider) ||
+        left.runId.localeCompare(right.runId),
+    );
+
+  const unattributedRows = [...unattributed.values()]
+    .map((row): UsageReportUnattributedRun => ({
+      provider: row.provider,
+      firstActivityAt: row.firstActivityAt,
+      lastActivityAt: row.lastActivityAt,
+      ...toTotals(row.rollup),
+    }))
+    .sort((left, right) => left.provider.localeCompare(right.provider));
+
+  const dailyRunRows = [...dailyRuns.entries()]
+    .map(([key, rollup]): UsageReportDailyRunRow => {
+      const [day = "", provider = "", runId = ""] = key.split("\u0000");
+      return {
+        day: day as UsageDay,
+        provider: provider as UsageProviderKind,
+        runId,
+        threadId: null,
+        threadMapping: "unavailable",
+        ...toTotals({ ...rollup, sessions: 1 }),
+      };
+    })
+    .sort(
+      (left, right) =>
+        right.day.localeCompare(left.day) ||
+        right.costUsd - left.costUsd ||
+        left.provider.localeCompare(right.provider) ||
+        left.runId.localeCompare(right.runId),
+    );
+  const dailyUnattributedRows = [...dailyUnattributed.entries()]
+    .map(([key, rollup]): UsageReportDailyUnattributedRow => {
+      const [day = "", provider = ""] = key.split("\u0000");
+      return { day: day as UsageDay, provider: provider as UsageProviderKind, ...toTotals(rollup) };
+    })
+    .sort(
+      (left, right) =>
+        right.day.localeCompare(left.day) || left.provider.localeCompare(right.provider),
+    );
+
+  return {
+    runs: rows,
+    dailyRuns: dailyRunRows,
+    dailyUnattributed: dailyUnattributedRows,
+    unattributed: unattributedRows,
+    attributedRecords,
+    unattributedRecords,
+  };
 }
 
 function sourceCoverageStatus(
@@ -431,5 +608,44 @@ export function projectUsageReport(
     }
     case "pricing":
       return { ...envelope, mode: "pricing" };
+    case "runs": {
+      const projected = runRows(summary);
+      const filtered = input.runIds !== undefined;
+      const runs = filtered
+        ? projected.runs.filter((run) => input.runIds!.includes(run.runId))
+        : projected.runs;
+      const dailyRuns = filtered
+        ? projected.dailyRuns.filter((row) => input.runIds!.includes(row.runId))
+        : projected.dailyRuns;
+      const limit = reportLimit(input);
+      const unattributed = filtered ? [] : projected.unattributed;
+      const attributedRecords = filtered
+        ? runs.reduce((total, run) => total + run.records, 0)
+        : projected.attributedRecords;
+      const unattributedRecords = filtered ? 0 : projected.unattributedRecords;
+      const report: UsageReportRuns = {
+        ...envelope,
+        mode: "runs",
+        runs: runs.slice(0, limit),
+        totalRuns: runs.length,
+        truncated: runs.length > limit,
+        dailyRuns: dailyRuns.slice(0, limit),
+        totalDailyRuns: dailyRuns.length,
+        dailyRunsTruncated: dailyRuns.length > limit,
+        dailyUnattributed: filtered ? [] : projected.dailyUnattributed.slice(0, limit),
+        totalDailyUnattributed: filtered ? 0 : projected.dailyUnattributed.length,
+        dailyUnattributedTruncated: !filtered && projected.dailyUnattributed.length > limit,
+        unattributed,
+        runCoverage: {
+          status: filtered ? "filtered" : unattributedRecords > 0 ? "partial" : "complete",
+          records: attributedRecords + unattributedRecords,
+          attributedRecords,
+          unattributedRecords,
+          distinctRuns: runs.length,
+        },
+        threadMappingStatus: "notRequested",
+      };
+      return report;
+    }
   }
 }

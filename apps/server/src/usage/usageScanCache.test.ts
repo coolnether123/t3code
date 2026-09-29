@@ -157,7 +157,7 @@ describe("scan cache round trip", () => {
     expect(decodeScanCache({ ...JSON.parse(JSON.stringify(encoded)), version: 5 }).size).toBe(0);
   });
 
-  it("keeps v6 Codex usage records while repeated-input metadata warms", () => {
+  it("invalidates v6 entries that cannot distinguish native from synthetic session IDs", () => {
     const original: ScanCache = new Map([
       [
         "/codex.jsonl",
@@ -173,10 +173,7 @@ describe("scan cache round trip", () => {
     const encoded = encodeScanCache(original);
     const decoded = decodeScanCache({ ...JSON.parse(JSON.stringify(encoded)), version: 6 });
 
-    expect(decoded.get("/codex.jsonl")?.records).toEqual(original.get("/codex.jsonl")?.records);
-    expect(decoded.get("/codex.jsonl")?.repeatedInputObservations).toBeUndefined();
-    expect(decoded.get("/codex.jsonl")?.prefixFingerprint).toBeUndefined();
-    expect(decoded.get("/codex.jsonl")?.repeatedInputVersion).toBeUndefined();
+    expect(decoded.size).toBe(0);
   });
 
   it("restores records unchanged", () => {
@@ -214,6 +211,42 @@ describe("scan cache round trip", () => {
     expect(restored.get("/b.jsonl")).toEqual(original.get("/b.jsonl"));
     expect(restored.get("/grok.jsonl")).toEqual(original.get("/grok.jsonl"));
     expect(restored.get("/codex.jsonl")).toEqual(original.get("/codex.jsonl"));
+  });
+
+  it("persists exact native session IDs without inferring them from session IDs", () => {
+    const original: ScanCache = new Map([
+      [
+        "/codex.jsonl",
+        {
+          size: 100,
+          mtimeMs: 100,
+          provider: "codex",
+          records: [
+            record({
+              provider: "codex",
+              sessionId: "internal:thread:synthetic",
+              nativeSessionId: "provider-run:exact",
+            }),
+          ],
+        },
+      ],
+      [
+        "/imported.jsonl",
+        {
+          size: 100,
+          mtimeMs: 100,
+          provider: "chatgpt",
+          records: [record({ provider: "chatgpt", sessionId: "imported-chat:synthetic" })],
+        },
+      ],
+    ]);
+
+    const encoded = JSON.stringify(encodeScanCache(original));
+    const restored = decodeScanCache(JSON.parse(encoded));
+
+    expect(restored.get("/codex.jsonl")).toEqual(original.get("/codex.jsonl"));
+    expect(restored.get("/imported.jsonl")).toEqual(original.get("/imported.jsonl"));
+    expect(restored.get("/imported.jsonl")?.records[0]?.nativeSessionId).toBeUndefined();
   });
 
   it("drops an entry whose persisted record row is corrupt", () => {
@@ -271,11 +304,15 @@ describe("scan cache round trip", () => {
     expect(decodeScanCache(JSON.parse(JSON.stringify(poisoned))).has("/a.jsonl")).toBe(false);
   });
 
-  it("accepts a document from a supported previous cache version", () => {
-    const encoded = encodeScanCache(cacheWith([["/a.jsonl", 100, [record()]]]));
-    const previous = { ...encoded, version: 2 };
+  it("invalidates v8 cache entries and coverage for a cold reparse", () => {
+    const coverage = [
+      { provider: "codex" as const, rootPath: "/sessions", sinceMs: 100, scannedAtMs: 200 },
+    ];
+    const encoded = encodeScanCache(cacheWith([["/a.jsonl", 100, [record()]]]), coverage);
+    const previous = { ...encoded, version: 8 };
 
-    expect(decodeScanCache(JSON.parse(JSON.stringify(previous))).size).toBe(1);
+    expect(decodeScanCache(JSON.parse(JSON.stringify(previous))).size).toBe(0);
+    expect(decodeScanCoverage(JSON.parse(JSON.stringify(previous)))).toEqual([]);
   });
 
   it("interns repeated model and session strings", () => {
@@ -351,28 +388,26 @@ describe("scan cache round trip", () => {
     );
   });
 
-  it("keeps v2 file entries but treats them as uncovered", () => {
+  it("invalidates v2 entries and coverage because they lack exact native session IDs", () => {
     const encoded = encodeScanCache(cacheWith([["/a.jsonl", 100, [record()]]]));
     const v2 = { ...encoded, version: 2, coverage: undefined };
 
-    expect(decodeScanCache(JSON.parse(JSON.stringify(v2))).size).toBe(1);
+    expect(decodeScanCache(JSON.parse(JSON.stringify(v2))).size).toBe(0);
     expect(decodeScanCoverage(JSON.parse(JSON.stringify(v2)))).toEqual([]);
   });
 
-  it("keeps v3 coverage while requiring a fresh parser state", () => {
+  it("invalidates v3 entries and coverage for a cold reparse", () => {
     const coverage = [
       { provider: "codex" as const, rootPath: "/sessions", sinceMs: 100, scannedAtMs: 200 },
     ];
     const encoded = encodeScanCache(cacheWith([["/a.jsonl", 100, [record()]]]), coverage);
     const v3 = { ...encoded, version: 3 };
 
-    expect(decodeScanCache(JSON.parse(JSON.stringify(v3))).get("/a.jsonl")?.codexState).toBe(
-      undefined,
-    );
-    expect(decodeScanCoverage(JSON.parse(JSON.stringify(v3)))).toEqual(coverage);
+    expect(decodeScanCache(JSON.parse(JSON.stringify(v3))).size).toBe(0);
+    expect(decodeScanCoverage(JSON.parse(JSON.stringify(v3)))).toEqual([]);
   });
 
-  it("invalidates old Codex parsing while retaining its coverage", () => {
+  it("invalidates v4 file entries and coverage for a cold reparse", () => {
     const cache = cacheWith([["/codex.jsonl", 100, [record({ provider: "codex" })]]]);
     cache.set("/codex.jsonl", { ...cache.get("/codex.jsonl")!, provider: "codex" });
     cache.set("/ai-studio.json", {
@@ -387,12 +422,8 @@ describe("scan cache round trip", () => {
     ]);
     const v4 = { ...encoded, version: 4 };
 
-    expect([...decodeScanCache(JSON.parse(JSON.stringify(v4))).keys()]).toEqual([
-      "/ai-studio.json",
-    ]);
-    expect(decodeScanCoverage(JSON.parse(JSON.stringify(v4)))).toEqual([
-      { provider: "codex", rootPath: "/sessions", sinceMs: 100, scannedAtMs: 200 },
-    ]);
+    expect(decodeScanCache(JSON.parse(JSON.stringify(v4))).size).toBe(0);
+    expect(decodeScanCoverage(JSON.parse(JSON.stringify(v4)))).toEqual([]);
   });
 
   it("treats a corrupt or foreign document as an empty cache", () => {

@@ -7,7 +7,12 @@ import * as NodePath from "node:path";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
-import { UsageDay, type UsageSummary, type UsageSummaryInput } from "@t3tools/contracts";
+import {
+  UsageDay,
+  type UsageReportInput,
+  type UsageSummary,
+  type UsageSummaryInput,
+} from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -20,15 +25,21 @@ import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
 import * as ServerConfig from "../config.ts";
+import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as UsageService from "./UsageService.ts";
 
-function claudeLine(id: number, outputTokens: number, model = "claude-fable-5"): string {
+function claudeLine(
+  id: number,
+  outputTokens: number,
+  model = "claude-fable-5",
+  sessionId = "session-1",
+): string {
   return `${JSON.stringify({
     type: "assistant",
     timestamp: "2026-08-01T10:00:00Z",
     requestId: `req_${id}`,
-    sessionId: "session-1",
+    sessionId,
     message: {
       id: `msg_${id}`,
       model,
@@ -326,6 +337,101 @@ describe("UsageService", () => {
         true,
       );
       assert.match(first.pricing.revision ?? "", /^[a-f0-9]{64}$/);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("filters a runs report by exact provider-native session ID", () =>
+    Effect.gen(function* () {
+      const { transcript, settings, home } = yield* setup;
+      yield* Effect.promise(() =>
+        NodeFSP.writeFile(
+          transcript,
+          `${claudeLine(1, 5, "claude-fable-5", "selected-run")}${claudeLine(2, 7, "claude-fable-5", "other-run")}${claudeLine(3, 9, "claude-fable-5", "missing-run")}`,
+        ),
+      );
+      const service = yield* UsageService.make.pipe(
+        Effect.provide(
+          serviceLayers({
+            prefix: "usage-service-runs-filter-test",
+            home,
+            settings,
+            ratesDocument: {
+              "claude-fable-5": { input_cost_per_token: 1e-5, output_cost_per_token: 5e-5 },
+            },
+          }),
+        ),
+      );
+      const input: UsageReportInput = {
+        mode: "runs",
+        sinceDay: UsageDay.make("2026-08-01"),
+        untilDay: UsageDay.make("2026-08-01"),
+        timeZone: "UTC",
+        providers: ["claude"],
+        runIds: ["selected-run"],
+      };
+
+      const report = yield* service.readReport(input);
+      assert.strictEqual(report.mode, "runs");
+      if (report.mode !== "runs") return;
+      assert.deepStrictEqual(
+        report.runs.map((run) => run.runId),
+        ["selected-run"],
+      );
+      assert.strictEqual(report.runs[0]?.totals.outputTokens, 5);
+      assert.strictEqual(report.runCoverage.status, "filtered");
+      assert.strictEqual(report.threadMappingStatus, "notRequested");
+      assert.strictEqual(report.runs[0]?.threadMapping, "unavailable");
+
+      const allRuns = { ...input, runIds: undefined };
+      const mapped = yield* service.readReport(allRuns).pipe(
+        Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+          findThreadMappingsByProviderSessionIds: (ids: readonly string[]) => {
+            assert.deepStrictEqual([...ids].sort(), ["missing-run", "other-run", "selected-run"]);
+            return Effect.succeed([
+              {
+                providerName: "claudeAgent",
+                providerSessionId: "selected-run",
+                threadId: "thread-selected",
+                threadCount: 1,
+              },
+              {
+                providerName: "claudeAgent",
+                providerSessionId: "other-run",
+                threadId: "thread-one",
+                threadCount: 2,
+              },
+            ]);
+          },
+        } as never),
+      );
+      assert.strictEqual(mapped.mode, "runs");
+      if (mapped.mode !== "runs") return;
+      assert.strictEqual(mapped.threadMappingStatus, "complete");
+      const byId = new Map(mapped.runs.map((run) => [run.runId, run]));
+      assert.deepInclude(byId.get("selected-run"), {
+        threadId: "thread-selected",
+        threadMapping: "matched",
+      });
+      assert.deepInclude(byId.get("other-run"), { threadId: null, threadMapping: "ambiguous" });
+      assert.deepInclude(byId.get("missing-run"), { threadId: null, threadMapping: "missing" });
+      assert.deepStrictEqual(mapped.dailyRuns.map((run) => run.threadMapping).sort(), [
+        "ambiguous",
+        "matched",
+        "missing",
+      ]);
+
+      const failed = yield* service.readReport(allRuns).pipe(
+        Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+          findThreadMappingsByProviderSessionIds: () => Effect.die("fixture lookup failure"),
+        } as never),
+      );
+      assert.strictEqual(failed.mode, "runs");
+      if (failed.mode !== "runs") return;
+      assert.strictEqual(failed.threadMappingStatus, "partial");
+      assert.strictEqual(
+        failed.runs.every((run) => run.threadMapping === "unavailable" && run.threadId === null),
+        true,
+      );
     }).pipe(Effect.scoped),
   );
 

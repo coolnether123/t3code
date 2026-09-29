@@ -13,7 +13,10 @@ export interface UsageRecord {
   readonly provider: UsageProviderKind;
   readonly timestampMs: number;
   readonly model: string;
+  /** Internal aggregation/dedupe identity; may be synthetic for imported chats. */
   readonly sessionId: string;
+  /** Exact provider-native run/session ID, absent when the source has none. */
+  readonly nativeSessionId?: string;
   readonly totals: UsageTokenTotals;
   readonly reportedCostUsd: number | null;
   readonly serviceTier?: string;
@@ -42,6 +45,10 @@ function parseTimestampMs(value: unknown): number | null {
   if (typeof value !== "string") return null;
   const parsed = Date.parse(value);
   return Number.isNaN(parsed) ? null : parsed;
+}
+
+function knownNativeSessionId(value: string): string | undefined {
+  return value.length > 0 && value.length <= 512 && value.trim() === value ? value : undefined;
 }
 
 export function addTotals(a: UsageTokenTotals, b: UsageTokenTotals): UsageTokenTotals {
@@ -123,12 +130,15 @@ export function parseClaudeLine(line: string): UsageRecord | null {
     messageId === null && requestId === null ? null : `${messageId ?? ""}:${requestId ?? ""}`;
 
   const cost = record["costUSD"];
+  const sessionId = typeof record["sessionId"] === "string" ? record["sessionId"] : "";
+  const nativeSessionId = knownNativeSessionId(sessionId);
 
   return {
     provider: "claude",
     timestampMs,
     model,
-    sessionId: typeof record["sessionId"] === "string" ? record["sessionId"] : "",
+    sessionId,
+    ...(nativeSessionId === undefined ? {} : { nativeSessionId }),
     totals: {
       uncachedInputTokens: int(usageRecord["input_tokens"]),
       cachedInputTokens: int(usageRecord["cache_read_input_tokens"]),
@@ -194,11 +204,13 @@ export function parseGeminiValue(parsed: unknown, state: GeminiScanState): Usage
   if (totalTokens(totals) === 0) return null;
 
   const messageId = typeof record["id"] === "string" ? record["id"] : null;
+  const nativeSessionId = knownNativeSessionId(state.sessionId);
   return {
     provider: "gemini",
     timestampMs,
     model,
     sessionId: state.sessionId,
+    ...(nativeSessionId === undefined ? {} : { nativeSessionId }),
     totals,
     reportedCostUsd: null,
     dedupeKey:
@@ -236,11 +248,13 @@ export function parseAntigravityTokenCache(
     reasoningTokens: 0,
   };
   if (totalTokens(totals) === 0) return null;
+  const nativeSessionId = knownNativeSessionId(input.sessionId);
   return {
     provider: "gemini",
     timestampMs: input.timestampMs,
     model: "gemini-antigravity",
     sessionId: input.sessionId,
+    ...(nativeSessionId === undefined ? {} : { nativeSessionId }),
     totals,
     // Antigravity's local cache reports subscription cost as zero. Usage uses
     // API-equivalent pricing, so leave this null for the normal rate lookup.
@@ -303,11 +317,13 @@ export function parseOpenCodeMessageValue(
   if (totalTokens(totals) === 0) return null;
 
   const cost = message["cost"];
+  const nativeSessionId = knownNativeSessionId(input.sessionId);
   return {
     provider: "opencode",
     timestampMs: input.timestampMs,
     model: `${providerId}/${modelId}`,
     sessionId: input.sessionId,
+    ...(nativeSessionId === undefined ? {} : { nativeSessionId }),
     totals,
     reportedCostUsd: typeof cost === "number" && Number.isFinite(cost) && cost >= 0 ? cost : null,
     dedupeKey: input.id.length > 0 ? `opencode:${input.id}` : null,
@@ -481,6 +497,7 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
     normalizeServiceTier(
       (info as Record<string, unknown>)["service_tier"] ?? payloadRecord["service_tier"],
     ) ?? state.serviceTier;
+  const nativeSessionId = knownNativeSessionId(state.sessionId);
   return {
     provider: "codex",
     timestampMs,
@@ -488,6 +505,7 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
     ...(state.turnId === undefined ? {} : { turnId: state.turnId }),
     ...(tier === undefined ? {} : { serviceTier: tier, serviceTierSource: "transcript" as const }),
     sessionId: state.sessionId,
+    ...(nativeSessionId === undefined ? {} : { nativeSessionId }),
     totals,
     // Codex does not report cost in the rollout.
     reportedCostUsd: null,

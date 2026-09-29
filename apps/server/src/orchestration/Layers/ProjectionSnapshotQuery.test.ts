@@ -41,6 +41,51 @@ const projectionSnapshotLayer = it.layer(
 );
 
 projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
+  it.effect("looks up native provider-session IDs without loading thread snapshots", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      const updatedAt = "2026-08-22T21:51:00.000Z";
+      yield* sql`DELETE FROM projection_thread_sessions WHERE thread_id LIKE 'usage-run-map-%'`;
+      yield* sql`
+        INSERT INTO projection_thread_sessions (
+          thread_id, status, provider_name, provider_session_id, updated_at
+        ) VALUES
+          ('usage-run-map-codex', 'ready', 'codex', 'native-run-codex', ${updatedAt}),
+          ('usage-run-map-claude', 'ready', 'claudeAgent', 'native-run-claude', ${updatedAt}),
+          ('usage-run-map-ambiguous-a', 'ready', 'codex', 'ambiguous-run', ${updatedAt}),
+          ('usage-run-map-ambiguous-b', 'ready', 'codex', 'ambiguous-run', ${updatedAt}),
+          ('usage-run-map-other', 'ready', 'codex', 'unrequested-run', ${updatedAt})
+      `;
+
+      const findMappings = snapshotQuery.findThreadMappingsByProviderSessionIds;
+      if (findMappings === undefined) throw new Error("thread mapping query is not available");
+      const rows = yield* findMappings(["native-run-claude", "native-run-codex", "ambiguous-run"]);
+      assert.deepEqual(rows, [
+        {
+          threadId: ThreadId.make("usage-run-map-ambiguous-a"),
+          threadCount: 2,
+          providerName: "codex",
+          providerSessionId: "ambiguous-run",
+        },
+        {
+          threadId: ThreadId.make("usage-run-map-claude"),
+          threadCount: 1,
+          providerName: "claudeAgent",
+          providerSessionId: "native-run-claude",
+        },
+        {
+          threadId: ThreadId.make("usage-run-map-codex"),
+          threadCount: 1,
+          providerName: "codex",
+          providerSessionId: "native-run-codex",
+        },
+      ]);
+
+      yield* sql`DELETE FROM projection_thread_sessions WHERE thread_id LIKE 'usage-run-map-%'`;
+    }),
+  );
+
   it.effect("lists one activity kind only for active threads", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

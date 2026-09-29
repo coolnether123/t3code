@@ -47,7 +47,9 @@ describe("parseAiStudioExport", () => {
       model: "gemini-2.5-pro",
       timestampMs: Date.parse("2026-03-05T17:00:02.000Z"),
       totals: { outputTokens: 10, reasoningTokens: 3 },
+      sessionId: "aistudio:abc",
     });
+    expect(records[0]?.nativeSessionId).toBeUndefined();
     expect(records[0]?.dedupeKey).toMatch(/^aistudio-turn:[a-f0-9]{64}$/);
     expect(records[1]?.timestampMs).toBe(Date.parse("2026-03-06T01:02:03.000Z"));
     expect(records[1]?.totals.uncachedInputTokens).toBe(estimateChatTokens("system") + 10 + 10 + 5);
@@ -190,6 +192,7 @@ describe("parseChatGptExport", () => {
       "chatgpt:conversation:a2",
     ]);
     expect(records[0]?.timestampMs).toBe(101_000);
+    expect(records[0]?.nativeSessionId).toBe("conversation");
     expect(records[0]?.totals.uncachedInputTokens).toBe(estimateChatTokens("hello"));
     expect(records[0]?.totals.outputTokens).toBe(estimateChatTokens("one"));
   });

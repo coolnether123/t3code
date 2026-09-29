@@ -144,6 +144,12 @@ const ProjectionImportedAgentSessionSourcesRowSchema = Schema.Struct({
   threadId: ThreadId,
   runtimePayload: Schema.Unknown,
 });
+const ProjectionProviderSessionMappingRowSchema = Schema.Struct({
+  threadId: ThreadId,
+  threadCount: NonNegativeInt,
+  providerName: Schema.NullOr(Schema.String),
+  providerSessionId: Schema.String,
+});
 const EventReplayStatsInput = Schema.Struct({
   fromSequenceExclusive: NonNegativeInt,
   toSequenceInclusive: NonNegativeInt,
@@ -714,6 +720,28 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         FROM projection_thread_sessions
         ORDER BY thread_id ASC
       `,
+  });
+
+  const listThreadSessionMappings = SqlSchema.findAll({
+    Request: Schema.Struct({
+      providerSessionIds: Schema.Array(Schema.String.check(Schema.isMaxLength(512))).check(
+        Schema.isMaxLength(512),
+      ),
+    }),
+    Result: ProjectionProviderSessionMappingRowSchema,
+    execute: ({ providerSessionIds }) => sql`
+      SELECT
+        MIN(thread_id) AS "threadId",
+        COUNT(DISTINCT thread_id) AS "threadCount",
+        provider_name AS "providerName",
+        provider_session_id AS "providerSessionId"
+      FROM projection_thread_sessions
+      WHERE provider_session_id IS NOT NULL
+        AND ${sql.in("provider_session_id", providerSessionIds)}
+      GROUP BY provider_name, provider_session_id
+      ORDER BY provider_session_id ASC, provider_name ASC
+      LIMIT 4096
+    `,
   });
 
   const listActiveThreadSessionRows = SqlSchema.findAll({
@@ -2650,6 +2678,19 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       });
     });
 
+  const findThreadMappingsByProviderSessionIds: ProjectionSnapshotQueryShape["findThreadMappingsByProviderSessionIds"] =
+    (providerSessionIds) => {
+      if (providerSessionIds.length === 0) return Effect.succeed([]);
+      return listThreadSessionMappings({ providerSessionIds }).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionSnapshotQuery.findThreadMappingsByProviderSessionIds:query",
+            "ProjectionSnapshotQuery.findThreadMappingsByProviderSessionIds:decodeRows",
+          ),
+        ),
+      );
+    };
+
   const getThreadRuntimeContext: ProjectionSnapshotQueryShape["getThreadRuntimeContext"] =
     Effect.fn("ProjectionSnapshotQuery.getThreadRuntimeContext")(function* (threadId) {
       const context = yield* getThreadRuntimeContextRow({ threadId }).pipe(
@@ -3283,6 +3324,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getProjectShellById,
     getFirstActiveThreadIdByProjectId,
     getImportedAgentSessionSources,
+    findThreadMappingsByProviderSessionIds,
     getThreadCheckpointContext,
     getFullThreadDiffContext,
     getThreadShellById,

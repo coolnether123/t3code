@@ -108,6 +108,8 @@ interface MutableBucket {
   unpricedRecords: number;
   providerReportedRecords: number;
   sessions: Set<string>;
+  firstActivityAtMs: number;
+  lastActivityAtMs: number;
 }
 
 export interface AggregateOptions {
@@ -121,8 +123,9 @@ export interface AggregateOptions {
   readonly untilTimeMs?: number;
   readonly providers?: readonly UsageRecord["provider"][];
   readonly sessionIds?: readonly string[];
+  readonly runIds?: readonly string[];
   readonly turnIds?: readonly string[];
-  readonly groupBy?: "model" | "session" | "turn";
+  readonly groupBy?: "model" | "session" | "turn" | "run";
 }
 
 export interface AggregateResult {
@@ -149,6 +152,7 @@ export class UsageAggregator {
   readonly #options: AggregateOptions;
   readonly #providers: ReadonlySet<UsageRecord["provider"]> | null;
   readonly #sessionIds: ReadonlySet<string> | null;
+  readonly #runIds: ReadonlySet<string> | null;
   readonly #turnIds: ReadonlySet<string> | null;
   #duplicatesDropped = 0;
   #outOfWindow = 0;
@@ -157,6 +161,7 @@ export class UsageAggregator {
     this.#options = options;
     this.#providers = options.providers === undefined ? null : new Set(options.providers);
     this.#sessionIds = options.sessionIds === undefined ? null : new Set(options.sessionIds);
+    this.#runIds = options.runIds === undefined ? null : new Set(options.runIds);
     this.#turnIds = options.turnIds === undefined ? null : new Set(options.turnIds);
     this.#toDay = makeDayFormatter(options.timeZone);
     if (options.resolution === "hour") {
@@ -180,9 +185,17 @@ export class UsageAggregator {
    * that landed rather than everything the mtime prefilter happened to admit.
    */
   add(record: UsageRecord): boolean {
+    const safeRunId =
+      record.nativeSessionId !== undefined &&
+      record.nativeSessionId.length > 0 &&
+      record.nativeSessionId.length <= 512 &&
+      record.nativeSessionId.trim() === record.nativeSessionId
+        ? record.nativeSessionId
+        : "";
     if (
       (this.#providers !== null && !this.#providers.has(record.provider)) ||
       (this.#sessionIds !== null && !this.#sessionIds.has(record.sessionId)) ||
+      (this.#runIds !== null && !this.#runIds.has(safeRunId)) ||
       (this.#turnIds !== null && (record.turnId === undefined || !this.#turnIds.has(record.turnId)))
     ) {
       return false;
@@ -223,12 +236,13 @@ export class UsageAggregator {
             this.#hourlyWindow.sinceTimeMs +
               Math.floor((record.timestampMs - this.#hourlyWindow.sinceTimeMs) / HOUR_MS) * HOUR_MS,
           ).toISOString();
+    const safeSessionId =
+      record.sessionId.length > 0 && record.sessionId.length <= 512 ? record.sessionId : "";
     const sessionId =
-      this.#options.groupBy === "session" || this.#options.groupBy === "turn"
-        ? record.sessionId
-        : "";
+      this.#options.groupBy === "session" || this.#options.groupBy === "turn" ? safeSessionId : "";
     const turnId = this.#options.groupBy === "turn" ? (record.turnId ?? "") : "";
-    const key = `${day}\u0000${hourStart}\u0000${record.provider}\u0000${record.model}\u0000${record.serviceTier ?? "unknown"}\u0000${record.serviceTierSource ?? "unknown"}\u0000${sessionId}\u0000${turnId}`;
+    const runId = this.#options.groupBy === "run" ? safeRunId : "";
+    const key = `${day}\u0000${hourStart}\u0000${record.provider}\u0000${record.model}\u0000${record.serviceTier ?? "unknown"}\u0000${record.serviceTierSource ?? "unknown"}\u0000${sessionId}\u0000${turnId}\u0000${runId}`;
     let bucket = this.#buckets.get(key);
     if (bucket === undefined) {
       bucket = {
@@ -239,6 +253,8 @@ export class UsageAggregator {
         unpricedRecords: 0,
         providerReportedRecords: 0,
         sessions: new Set<string>(),
+        firstActivityAtMs: record.timestampMs,
+        lastActivityAtMs: record.timestampMs,
       };
       this.#buckets.set(key, bucket);
     }
@@ -262,9 +278,12 @@ export class UsageAggregator {
       this.#options.priceOverrides,
     );
     bucket.records += 1;
+    bucket.firstActivityAtMs = Math.min(bucket.firstActivityAtMs, record.timestampMs);
+    bucket.lastActivityAtMs = Math.max(bucket.lastActivityAtMs, record.timestampMs);
     if (priced.costSource === "unpriced") bucket.unpricedRecords += 1;
     if (priced.costSource === "providerReported") bucket.providerReportedRecords += 1;
-    if (record.sessionId.length > 0) bucket.sessions.add(record.sessionId);
+    const distinctSessionId = this.#options.groupBy === "run" ? runId : safeSessionId;
+    if (distinctSessionId !== "") bucket.sessions.add(distinctSessionId);
     return true;
   }
 
@@ -280,6 +299,7 @@ export class UsageAggregator {
         serviceTierSource = "unknown",
         sessionId = "",
         turnId = "",
+        runId = "",
       ] = key.split("\u0000");
       buckets.push({
         day: day as UsageDay,
@@ -287,6 +307,13 @@ export class UsageAggregator {
         provider: provider as UsageBucket["provider"],
         model,
         ...(sessionId === "" ? {} : { sessionId }),
+        ...(runId === "" ? {} : { runId }),
+        ...(this.#options.groupBy === "run"
+          ? {
+              firstActivityAt: new Date(bucket.firstActivityAtMs).toISOString(),
+              lastActivityAt: new Date(bucket.lastActivityAtMs).toISOString(),
+            }
+          : {}),
         ...(turnId === "" ? {} : { turnId }),
         ...(provider === "codex"
           ? {

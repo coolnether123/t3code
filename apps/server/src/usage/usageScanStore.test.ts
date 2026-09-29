@@ -201,6 +201,28 @@ describe("UsageScanStore", () => {
     store.close();
   });
 
+  it("drops v2 records and coverage before reparsing native run IDs", () => {
+    const file = tempDatabase();
+    const first = UsageScanStore.open(file);
+    first.set("/sessions/a.jsonl", entry([record(1, { nativeSessionId: "run-a" })]));
+    first.setCoverage({
+      provider: "codex",
+      rootPath: "/sessions",
+      sinceMs: 1,
+      scannedAtMs: 2,
+    });
+    first.close();
+
+    const db = new NodeSqlite.DatabaseSync(file);
+    db.prepare("UPDATE store_meta SET value = '2' WHERE key = 'schema'").run();
+    db.close();
+
+    const reopened = UsageScanStore.open(file);
+    expect(reopened.size).toBe(0);
+    expect(reopened.coverage("codex", "/sessions")).toBeUndefined();
+    reopened.close();
+  });
+
   it("degrades to a process-local store when the database cannot open", () => {
     const directory = NodePath.dirname(tempDatabase());
     const store = UsageScanStore.open(directory);

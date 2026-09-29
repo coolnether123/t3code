@@ -45,6 +45,7 @@ describe("parseClaudeLine", () => {
     expect(record).not.toBeNull();
     expect(record?.provider).toBe("claude");
     expect(record?.model).toBe("claude-fable-5");
+    expect(record?.nativeSessionId).toBe("5a128faa-8253-489e-b935-6c08e8e670c0");
     expect(record?.totals).toEqual({
       uncachedInputTokens: 2,
       cachedInputTokens: 1000,
@@ -88,6 +89,7 @@ describe("parseGeminiValue", () => {
 
     expect(record?.provider).toBe("gemini");
     expect(record?.sessionId).toBe("gemini-session");
+    expect(record?.nativeSessionId).toBe("gemini-session");
     expect(record?.totals).toEqual({
       uncachedInputTokens: 2_364,
       cachedInputTokens: 51_790,
@@ -135,6 +137,7 @@ describe("parseOpenCodeMessageValue", () => {
 
     expect(record?.provider).toBe("opencode");
     expect(record?.model).toBe("google/gemini-3.1-flash-lite");
+    expect(record?.nativeSessionId).toBe("ses_1");
     expect(record?.totals).toEqual({
       uncachedInputTokens: 9_077,
       cachedInputTokens: 8_112,
@@ -211,6 +214,7 @@ describe("parseCodexLine", () => {
     expect(record?.provider).toBe("codex");
     expect(record?.model).toBe("gpt-5.6-sol");
     expect(record?.sessionId).toBe("019fbbc1-b12c-7360-a685-28c181f0025f");
+    expect(record?.nativeSessionId).toBe("019fbbc1-b12c-7360-a685-28c181f0025f");
     // Codex reports input_tokens inclusive of the cached portion.
     expect(record?.totals.uncachedInputTokens).toBe(19239 - 11008);
     expect(record?.totals.cachedInputTokens).toBe(11008);

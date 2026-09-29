@@ -48,12 +48,14 @@ describe("usageSummaryCacheKey", () => {
       }),
     ).not.toBe(usageSummaryCacheKey(request));
   });
-  it("isolates provider, session, turn, and grouping selections", () => {
+  it("isolates provider, run, session, turn, and grouping selections", () => {
     const plain = usageSummaryCacheKey(input);
     expect(usageSummaryCacheKey({ ...input, providers: ["codex"] })).not.toBe(plain);
+    expect(usageSummaryCacheKey({ ...input, runIds: ["run-1"] })).not.toBe(plain);
     expect(usageSummaryCacheKey({ ...input, sessionIds: ["session-1"] })).not.toBe(plain);
     expect(usageSummaryCacheKey({ ...input, turnIds: ["turn-1"] })).not.toBe(plain);
     expect(usageSummaryCacheKey({ ...input, groupBy: "turn" })).not.toBe(plain);
+    expect(usageSummaryCacheKey({ ...input, groupBy: "run" })).not.toBe(plain);
   });
   it("separates different reporting windows", () => {
     expect(usageSummaryCacheKey(input)).not.toBe(

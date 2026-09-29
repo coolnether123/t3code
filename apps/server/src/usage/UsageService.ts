@@ -54,6 +54,7 @@ import * as Scope from "effect/Scope";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
 import { ServerConfig } from "../config.ts";
+import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
 import {
@@ -1098,6 +1099,7 @@ export const make = Effect.gen(function* () {
       rates: scanRates,
       priceOverrides: createOverrideRateTable(settings.usagePriceOverrides),
       ...(input.providers === undefined ? {} : { providers: input.providers }),
+      ...(input.runIds === undefined ? {} : { runIds: input.runIds }),
       ...(input.sessionIds === undefined ? {} : { sessionIds: input.sessionIds }),
       ...(input.turnIds === undefined ? {} : { turnIds: input.turnIds }),
       ...(input.groupBy === undefined ? {} : { groupBy: input.groupBy }),
@@ -1887,6 +1889,12 @@ export const make = Effect.gen(function* () {
         ...(input.sinceTime === undefined ? {} : { sinceTime: input.sinceTime }),
         ...(input.untilTime === undefined ? {} : { untilTime: input.untilTime }),
         ...(input.providers === undefined ? {} : { providers: input.providers }),
+        ...(input.mode === "runs"
+          ? {
+              groupBy: "run" as const,
+              ...(input.runIds === undefined ? {} : { runIds: input.runIds }),
+            }
+          : {}),
         ...(input.mode !== "quota"
           ? {}
           : input.quotaIntervals === undefined
@@ -1894,11 +1902,71 @@ export const make = Effect.gen(function* () {
             : { includeQuotaHistory: true, quotaIntervals: input.quotaIntervals }),
       };
       const summary = yield* readSummary(summaryInput);
-      return projectUsageReport(
+      const report = projectUsageReport(
         summary,
         input,
         makeUsageReportCalculation(summary.pricing, settings.usagePriceOverrides),
       );
+      if (report.mode !== "runs" || (report.runs.length === 0 && report.dailyRuns.length === 0))
+        return report;
+
+      const projection = yield* Effect.serviceOption(
+        ProjectionSnapshotQuery.ProjectionSnapshotQuery,
+      );
+      if (
+        Option.isNone(projection) ||
+        projection.value.findThreadMappingsByProviderSessionIds === undefined
+      ) {
+        return report;
+      }
+
+      const runIds = [...new Set([...report.runs, ...report.dailyRuns].map((run) => run.runId))];
+      const lookupIds = runIds.slice(0, 512);
+      const lookupSet = new Set(lookupIds);
+      const mappings = yield* projection.value
+        .findThreadMappingsByProviderSessionIds(lookupIds)
+        .pipe(
+          Effect.map((rows) => ({ rows, failed: false as const })),
+          Effect.catchCause(() => Effect.succeed({ rows: [], failed: true as const })),
+        );
+      const reportRunKeys = new Set(
+        [...report.runs, ...report.dailyRuns].map((run) => `${run.provider}\u0000${run.runId}`),
+      );
+      const threadsByRun = new Map<string, Set<string>>();
+      const ambiguousKeys = new Set<string>();
+      for (const mapping of mappings.rows) {
+        const provider = mapping.providerName === "claudeAgent" ? "claude" : mapping.providerName;
+        const key = `${provider}\u0000${mapping.providerSessionId}`;
+        if (!reportRunKeys.has(key) || mapping.threadId.length > 512) continue;
+        const threadIds = threadsByRun.get(key) ?? new Set<string>();
+        threadIds.add(mapping.threadId);
+        threadsByRun.set(key, threadIds);
+        if (mapping.threadCount > 1) ambiguousKeys.add(key);
+      }
+      const mapRun = <T extends { readonly provider: string; readonly runId: string }>(run: T) => {
+        const key = `${run.provider}\u0000${run.runId}`;
+        const threadIds = threadsByRun.get(key);
+        const unavailable = mappings.failed || !lookupSet.has(run.runId);
+        const ambiguous = ambiguousKeys.has(key) || (threadIds?.size ?? 0) > 1;
+        return {
+          ...run,
+          threadId: !unavailable && !ambiguous && threadIds?.size === 1 ? [...threadIds][0]! : null,
+          threadMapping: unavailable
+            ? ("unavailable" as const)
+            : threadIds === undefined
+              ? ("missing" as const)
+              : ambiguous
+                ? ("ambiguous" as const)
+                : ("matched" as const),
+        };
+      };
+      return {
+        ...report,
+        runs: report.runs.map(mapRun),
+        dailyRuns: report.dailyRuns.map(mapRun),
+        threadMappingStatus:
+          mappings.failed || runIds.length > lookupIds.length ? "partial" : "complete",
+      };
     },
   );
 

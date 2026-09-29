@@ -47,6 +47,14 @@ describe("UsageSummaryInput", () => {
       decode({ ...base, sessionIds: Array.from({ length: 129 }, (_, index) => `s-${index}`) }),
     ).toThrow();
     expect(() => decode({ ...base, turnIds: ["t".repeat(513)] })).toThrow();
+    expect(() => decode({ ...base, runIds: ["r".repeat(513)] })).toThrow();
+  });
+
+  it("supports exact native run-ID selection", () => {
+    expect(decode({ ...base, groupBy: "run", runIds: ["native-run"] })).toMatchObject({
+      groupBy: "run",
+      runIds: ["native-run"],
+    });
   });
 });
 
@@ -71,10 +79,23 @@ describe("UsageReportInput", () => {
       mode: "quota",
       quotaIntervals: [],
     });
+    expect(reportDecode({ ...base, mode: "runs", runIds: ["native-session"] })).toMatchObject({
+      mode: "runs",
+      runIds: ["native-session"],
+    });
   });
 
   it("rejects an unbounded report row request", () => {
     expect(() => reportDecode({ ...base, mode: "models", limit: 513 })).toThrow();
     expect(() => reportDecode({ ...base, mode: "models", limit: 0 })).toThrow();
+    expect(() => reportDecode({ ...base, mode: "runs", runIds: [] })).toThrow();
+    expect(() =>
+      reportDecode({
+        ...base,
+        mode: "runs",
+        runIds: Array.from({ length: 33 }, (_, index) => `run-${index}`),
+      }),
+    ).toThrow();
+    expect(() => reportDecode({ ...base, mode: "runs", runIds: ["r".repeat(513)] })).toThrow();
   });
 });

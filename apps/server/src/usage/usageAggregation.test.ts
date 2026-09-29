@@ -283,6 +283,22 @@ describe("UsageAggregator", () => {
     ]);
   });
 
+  it("keeps session-grouped summary buckets free of run-only activity fields", () => {
+    const aggregator = new UsageAggregator({
+      timeZone: "UTC",
+      sinceDay: "2026-08-01",
+      untilDay: "2026-08-31",
+      rates,
+      groupBy: "session",
+    });
+    aggregator.add(record({ sessionId: "known-session", nativeSessionId: "known-session" }));
+
+    const bucket = aggregator.finish().buckets[0];
+    expect(bucket?.sessionId).toBe("known-session");
+    expect(bucket).not.toHaveProperty("firstActivityAt");
+    expect(bucket).not.toHaveProperty("lastActivityAt");
+  });
+
   it("reconciles completed, resumed, forked, parent, and child records without replay inflation", () => {
     const completed = record({
       provider: "codex",
@@ -325,6 +341,93 @@ describe("UsageAggregator", () => {
     expect(aggregator.add(record({ dedupeKey: "msg_1:" }))).toBe(true);
     expect(aggregator.add(record({ dedupeKey: "msg_1:" }))).toBe(false);
     expect(aggregator.add(record({ timestampMs: Date.parse("2026-07-01T12:00:00Z") }))).toBe(false);
+  });
+
+  it("groups by exact native run ID and deduplicates copied records", () => {
+    const aggregator = new UsageAggregator({
+      timeZone: "UTC",
+      sinceDay: "2026-08-01",
+      untilDay: "2026-08-31",
+      rates,
+      groupBy: "run",
+    });
+    const first = record({
+      sessionId: "run-a",
+      nativeSessionId: "run-a",
+      timestampMs: Date.parse("2026-08-01T10:00:00.000Z"),
+      dedupeKey: "copied-record",
+    });
+    aggregator.add(first);
+    aggregator.add({ ...first, timestampMs: Date.parse("2026-08-01T10:01:00.000Z") });
+    aggregator.add(
+      record({
+        sessionId: "run-a",
+        nativeSessionId: "run-a",
+        timestampMs: Date.parse("2026-08-01T10:02:00.000Z"),
+        dedupeKey: "run-a-second",
+      }),
+    );
+    aggregator.add(
+      record({
+        sessionId: "run-b",
+        nativeSessionId: "run-b",
+        timestampMs: Date.parse("2026-08-01T10:03:00.000Z"),
+        dedupeKey: "run-b-first",
+      }),
+    );
+
+    const result = aggregator.finish();
+    expect(result.duplicatesDropped).toBe(1);
+    expect(result.buckets).toHaveLength(2);
+    expect(result.buckets).toMatchObject([
+      {
+        runId: "run-a",
+        firstActivityAt: "2026-08-01T10:00:00.000Z",
+        lastActivityAt: "2026-08-01T10:02:00.000Z",
+        records: 2,
+        totals: { outputTokens: 100 },
+      },
+      {
+        runId: "run-b",
+        firstActivityAt: "2026-08-01T10:03:00.000Z",
+        lastActivityAt: "2026-08-01T10:03:00.000Z",
+        records: 1,
+      },
+    ]);
+  });
+
+  it("keeps synthetic session keys unattributed in run groups and filters exact IDs", () => {
+    const aggregator = new UsageAggregator({
+      timeZone: "UTC",
+      sinceDay: "2026-08-01",
+      untilDay: "2026-08-31",
+      rates,
+      runIds: ["native-run"],
+      groupBy: "run",
+    });
+    aggregator.add(
+      record({
+        sessionId: "archive-content-hash",
+        dedupeKey: "unattributed-archive-record",
+      }),
+    );
+    aggregator.add(
+      record({
+        sessionId: "other-run",
+        nativeSessionId: "other-run",
+        dedupeKey: "other-run-record",
+      }),
+    );
+    aggregator.add(
+      record({
+        sessionId: "internal-key",
+        nativeSessionId: "native-run",
+        dedupeKey: "selected-run-record",
+      }),
+    );
+
+    const result = aggregator.finish();
+    expect(result.buckets).toMatchObject([{ runId: "native-run", records: 1 }]);
   });
 
   it("separates providers and models into their own buckets", () => {

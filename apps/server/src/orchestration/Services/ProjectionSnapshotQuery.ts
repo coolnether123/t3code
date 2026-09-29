@@ -195,6 +195,19 @@ export interface ProjectionSnapshotQueryShape {
     ProjectionRepositoryError
   >;
 
+  /** Read exact native-session to T3-thread links for a bounded set of IDs. */
+  readonly findThreadMappingsByProviderSessionIds?: (
+    providerSessionIds: ReadonlyArray<string>,
+  ) => Effect.Effect<
+    ReadonlyArray<{
+      readonly threadId: ThreadId;
+      readonly threadCount: number;
+      readonly providerName: string | null;
+      readonly providerSessionId: string;
+    }>,
+    ProjectionRepositoryError
+  >;
+
   /**
    * Read the checkpoint context needed to resolve a single thread diff.
    */

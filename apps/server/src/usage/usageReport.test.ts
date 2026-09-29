@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vite-plus/test";
+import * as Schema from "effect/Schema";
 
 import {
   UsageDay,
+  UsageReport,
   type UsagePricing,
   type UsageReportInput,
   type UsageSource,
@@ -132,6 +134,33 @@ const summary: UsageSummary = {
   ],
 };
 
+const runSummary: UsageSummary = {
+  ...summary,
+  buckets: [
+    {
+      ...summary.buckets[0]!,
+      runId: "run-a",
+      firstActivityAt: "2026-08-01T10:00:00.000Z",
+      lastActivityAt: "2026-08-01T10:15:00.000Z",
+    },
+    {
+      ...summary.buckets[2]!,
+      model: "gpt-5.7-sol",
+      runId: "run-a",
+      firstActivityAt: "2026-08-02T11:00:00.000Z",
+      lastActivityAt: "2026-08-02T11:05:00.000Z",
+    },
+    {
+      ...summary.buckets[0]!,
+      runId: "run-b",
+      records: 1,
+      firstActivityAt: "2026-08-01T12:00:00.000Z",
+      lastActivityAt: "2026-08-01T12:00:00.000Z",
+    },
+    summary.buckets[1]!,
+  ],
+};
+
 const input = (mode: UsageReportInput["mode"], limit?: number): UsageReportInput => ({
   mode,
   sinceDay: UsageDay.make("2026-08-01"),
@@ -146,6 +175,7 @@ const calculation = makeUsageReportCalculation(pricing, {
     outputCostPerMillionTokens: 2,
   },
 });
+const decodeUsageReport = Schema.decodeUnknownSync(UsageReport);
 
 describe("agent usage report projections", () => {
   it("returns complete overall totals while preserving partial coverage", () => {
@@ -169,6 +199,7 @@ describe("agent usage report projections", () => {
     });
     expect(report.calculation.priceOverrides).toHaveLength(1);
     expect(report.calculation.costBasis).toBe("apiEquivalent");
+    expect(decodeUsageReport(report)).toEqual(report);
   });
 
   it("caps provider/model rows and marks truncation", () => {
@@ -232,5 +263,113 @@ describe("agent usage report projections", () => {
       lastRemainingPercent: 80,
       resetsAt: "2026-08-08T00:00:00.000Z",
     });
+  });
+
+  it("groups all model buckets by exact run and keeps activity and pricing coverage", () => {
+    const report = projectUsageReport(runSummary, input("runs"), calculation);
+    if (report.mode !== "runs") throw new Error("wrong mode");
+
+    expect(report).toMatchObject({
+      mode: "runs",
+      totalRuns: 2,
+      truncated: false,
+      totalDailyRuns: 3,
+      dailyRunsTruncated: false,
+      totalDailyUnattributed: 1,
+      dailyUnattributedTruncated: false,
+      runCoverage: {
+        status: "partial",
+        records: 5,
+        attributedRecords: 4,
+        unattributedRecords: 1,
+        distinctRuns: 2,
+      },
+      unattributed: [
+        {
+          provider: "claude",
+          records: 1,
+          unpricedRecords: 1,
+          totals: { outputTokens: 10 },
+        },
+      ],
+    });
+    expect(report.runs[0]).toMatchObject({
+      provider: "codex",
+      runId: "run-a",
+      threadId: null,
+      threadMapping: "unavailable",
+      models: ["gpt-5.6-sol", "gpt-5.7-sol"],
+      totalModels: 2,
+      firstActivityAt: "2026-08-01T10:00:00.000Z",
+      lastActivityAt: "2026-08-02T11:05:00.000Z",
+      records: 3,
+      pricedRecords: 3,
+      unpricedRecords: 0,
+      costUsd: 3,
+      pricingCoverage: "complete",
+    });
+    expect(report.dailyRuns).toMatchObject([
+      {
+        day: "2026-08-02",
+        provider: "codex",
+        runId: "run-a",
+        records: 1,
+        threadMapping: "unavailable",
+      },
+      {
+        day: "2026-08-01",
+        provider: "codex",
+        runId: "run-a",
+        records: 2,
+        threadMapping: "unavailable",
+      },
+      {
+        day: "2026-08-01",
+        provider: "codex",
+        runId: "run-b",
+        records: 1,
+        threadMapping: "unavailable",
+      },
+    ]);
+    expect(report.dailyUnattributed).toMatchObject([
+      { day: "2026-08-02", provider: "claude", records: 1 },
+    ]);
+    expect(report.dailyRuns[0]!.costUsd + report.dailyRuns[1]!.costUsd).toBe(
+      report.runs[0]!.costUsd,
+    );
+    expect(decodeUsageReport(report)).toEqual(report);
+    expect(report.calculation.costBasis).toBe("apiEquivalent");
+  });
+
+  it("filters to exact run IDs and leaves the row limit explicit", () => {
+    const selected = projectUsageReport(
+      runSummary,
+      { ...input("runs"), runIds: ["run-b"] },
+      calculation,
+    );
+    const limited = projectUsageReport(runSummary, input("runs", 1), calculation);
+    if (selected.mode !== "runs" || limited.mode !== "runs") throw new Error("wrong mode");
+
+    expect(selected.runs.map((run) => run.runId)).toEqual(["run-b"]);
+    expect(selected.dailyRuns.map((run) => run.runId)).toEqual(["run-b"]);
+    expect(selected.dailyUnattributed).toEqual([]);
+    expect(selected.unattributed).toEqual([]);
+    expect(selected.runCoverage).toMatchObject({
+      status: "filtered",
+      records: 1,
+      attributedRecords: 1,
+      unattributedRecords: 0,
+      distinctRuns: 1,
+    });
+    expect(limited).toMatchObject({ totalRuns: 2, truncated: true });
+    expect(limited).toMatchObject({
+      totalDailyRuns: 3,
+      dailyRunsTruncated: true,
+      totalDailyUnattributed: 1,
+      dailyUnattributedTruncated: false,
+    });
+    expect(limited.runs).toHaveLength(1);
+    expect(limited.runs[0]?.runId).toBe("run-a");
+    expect(limited.unattributed).toHaveLength(1);
   });
 });

@@ -131,7 +131,7 @@ function parseAiStudioPrompt(
   let responseIndex = 0;
   const records: UsageRecord[] = [];
 
-  for (let index = 0; index < chunks.length; ) {
+  for (let index = 0; index < chunks.length;) {
     const chunk = asRecord(chunks[index]);
     if (chunk === null) {
       index += 1;
@@ -295,10 +295,16 @@ export function parseChatGptExport(
     if (conversation === null) continue;
     const nodes = chatGptNodes(conversation["mapping"]);
     if (nodes.size === 0) continue;
+    const exportedConversationId = conversation["id"];
+    const nativeSessionId =
+      typeof exportedConversationId === "string" &&
+      exportedConversationId.length > 0 &&
+      exportedConversationId.length <= 512 &&
+      exportedConversationId.trim() === exportedConversationId
+        ? exportedConversationId
+        : undefined;
     const conversationId =
-      typeof conversation["id"] === "string"
-        ? conversation["id"]
-        : `created-${String(conversation["create_time"] ?? input.importedAtMs)}`;
+      nativeSessionId ?? `created-${String(conversation["create_time"] ?? input.importedAtMs)}`;
     const fallbackTimestamp = timestampMs(
       conversation["create_time"] ?? conversation["update_time"],
       input.importedAtMs,
@@ -332,6 +338,7 @@ export function parseChatGptExport(
         timestampMs: timestampMs(message["create_time"], fallbackTimestamp),
         model: chatGptModel(message, conversation),
         sessionId: `chatgpt:${conversationId}`,
+        ...(nativeSessionId === undefined ? {} : { nativeSessionId }),
         totals: {
           uncachedInputTokens: tokensThrough(node.parent),
           cachedInputTokens: 0,

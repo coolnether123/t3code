@@ -12,6 +12,7 @@ export function usageSummaryCacheKey(
     input.sinceTime ?? null,
     input.untilTime ?? null,
     input.providers ?? null,
+    input.runIds ?? null,
     input.sessionIds ?? null,
     input.turnIds ?? null,
     input.groupBy ?? "model",

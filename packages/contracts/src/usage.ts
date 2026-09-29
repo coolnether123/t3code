@@ -54,7 +54,7 @@ export type UsageDay = typeof UsageDay.Type;
 export const UsageResolution = Schema.Literals(["day", "hour"]);
 export type UsageResolution = typeof UsageResolution.Type;
 
-export const UsageAttributionGroup = Schema.Literals(["model", "session", "turn"]);
+export const UsageAttributionGroup = Schema.Literals(["model", "session", "turn", "run"]);
 export type UsageAttributionGroup = typeof UsageAttributionGroup.Type;
 
 const UsageNativeId = TrimmedNonEmptyString.check(Schema.isMaxLength(512));
@@ -105,6 +105,11 @@ export const UsageBucket = Schema.Struct({
   model: TrimmedNonEmptyString,
   /** Present when the request groups by native session or turn identity. */
   sessionId: Schema.optional(UsageNativeId),
+  /** Present only when the source record carried a provider-native run ID. */
+  runId: Schema.optional(UsageNativeId),
+  /** Exact activity bounds are present for run-grouped reads. */
+  firstActivityAt: Schema.optional(TrimmedNonEmptyString),
+  lastActivityAt: Schema.optional(TrimmedNonEmptyString),
   /** Present when the request groups by native turn identity. */
   turnId: Schema.optional(UsageNativeId),
   /** Omitted by older servers. Unknown metadata uses the standard estimate. */
@@ -305,6 +310,8 @@ export const UsageSummaryInput = Schema.Struct({
   ),
   /** Restrict the result to exact provider-native session IDs. */
   sessionIds: Schema.optional(UsageNativeIdList),
+  /** Restrict run-grouped reads to exact provider-native run IDs. */
+  runIds: Schema.optional(UsageNativeIdList),
   /** Restrict the result to exact provider-native turn IDs. */
   turnIds: Schema.optional(UsageNativeIdList),
   /** Retain native IDs in bucket keys. Defaults to model-level aggregation. */
@@ -508,12 +515,19 @@ export const UsageReportMode = Schema.Literals([
   "series",
   "quota",
   "pricing",
+  "runs",
 ]);
 export type UsageReportMode = typeof UsageReportMode.Type;
 
 /** Maximum number of rows an agent query can request from one projection. */
 export const UsageReportRowLimit = PositiveInt.check(Schema.isLessThanOrEqualTo(512));
 export type UsageReportRowLimit = typeof UsageReportRowLimit.Type;
+
+const UsageReportRunId = TrimmedNonEmptyString.check(Schema.isMaxLength(512));
+const UsageReportRunIds = Schema.Array(UsageReportRunId).check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(32),
+);
 
 export const UsageReportInput = Schema.Struct({
   mode: UsageReportMode,
@@ -530,6 +544,8 @@ export const UsageReportInput = Schema.Struct({
   ),
   /** Output row cap. The server applies a mode-specific default when omitted. */
   limit: Schema.optional(UsageReportRowLimit),
+  /** Exact provider-native run/session IDs; supported only by `mode: "runs"`. */
+  runIds: Schema.optional(UsageReportRunIds),
   /** Optional live quota interval reads; saved snapshots are returned by default. */
   quotaIntervals: Schema.optional(Schema.Array(UsageQuotaInterval).check(Schema.isMaxLength(64))),
 });
@@ -630,6 +646,90 @@ const UsageReportEnvelope = {
   coverage: UsageReportCoverage,
 } as const;
 
+export const UsageReportRunPriceCoverage = Schema.Literals(["complete", "partial", "unpriced"]);
+export type UsageReportRunPriceCoverage = typeof UsageReportRunPriceCoverage.Type;
+export const UsageReportThreadMapping = Schema.Literals([
+  "matched",
+  "missing",
+  "ambiguous",
+  "unavailable",
+]);
+
+/** One provider-native session in the requested window. */
+export const UsageReportRunRow = Schema.Struct({
+  provider: UsageProviderKind,
+  runId: UsageReportRunId,
+  /** Null when the projected T3 session index has no exact, unique match. */
+  threadId: Schema.NullOr(TrimmedNonEmptyString.check(Schema.isMaxLength(512))),
+  threadMapping: UsageReportThreadMapping,
+  models: Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(128))).check(
+    Schema.isMaxLength(16),
+  ),
+  totalModels: NonNegativeInt,
+  modelsTruncated: Schema.Boolean,
+  firstActivityAt: Schema.NullOr(Schema.String),
+  lastActivityAt: Schema.NullOr(Schema.String),
+  ...UsageReportTotals.fields,
+  pricingCoverage: UsageReportRunPriceCoverage,
+});
+export type UsageReportRunRow = typeof UsageReportRunRow.Type;
+
+/** One local calendar day of an exact provider-native run. */
+export const UsageReportDailyRunRow = Schema.Struct({
+  day: UsageDay,
+  provider: UsageProviderKind,
+  runId: UsageReportRunId,
+  threadId: Schema.NullOr(TrimmedNonEmptyString.check(Schema.isMaxLength(512))),
+  threadMapping: UsageReportThreadMapping,
+  ...UsageReportTotals.fields,
+});
+export type UsageReportDailyRunRow = typeof UsageReportDailyRunRow.Type;
+
+export const UsageReportDailyUnattributedRow = Schema.Struct({
+  day: UsageDay,
+  provider: UsageProviderKind,
+  ...UsageReportTotals.fields,
+});
+export type UsageReportDailyUnattributedRow = typeof UsageReportDailyUnattributedRow.Type;
+
+/** Records with provider usage but no safe native run identity. */
+export const UsageReportUnattributedRun = Schema.Struct({
+  provider: UsageProviderKind,
+  firstActivityAt: Schema.NullOr(Schema.String),
+  lastActivityAt: Schema.NullOr(Schema.String),
+  ...UsageReportTotals.fields,
+});
+export type UsageReportUnattributedRun = typeof UsageReportUnattributedRun.Type;
+
+export const UsageReportRunCoverage = Schema.Struct({
+  /** `filtered` means only the exact run IDs in the request were considered. */
+  status: Schema.Literals(["complete", "partial", "filtered"]),
+  records: NonNegativeInt,
+  attributedRecords: NonNegativeInt,
+  unattributedRecords: NonNegativeInt,
+  distinctRuns: NonNegativeInt,
+});
+export type UsageReportRunCoverage = typeof UsageReportRunCoverage.Type;
+
+export const UsageReportRuns = Schema.Struct({
+  ...UsageReportEnvelope,
+  mode: Schema.Literal("runs"),
+  runs: Schema.Array(UsageReportRunRow),
+  totalRuns: NonNegativeInt,
+  truncated: Schema.Boolean,
+  dailyRuns: Schema.Array(UsageReportDailyRunRow),
+  totalDailyRuns: NonNegativeInt,
+  dailyRunsTruncated: Schema.Boolean,
+  dailyUnattributed: Schema.Array(UsageReportDailyUnattributedRow),
+  totalDailyUnattributed: NonNegativeInt,
+  dailyUnattributedTruncated: Schema.Boolean,
+  /** At most one row per known provider; independent of the run row limit. */
+  unattributed: Schema.Array(UsageReportUnattributedRun).check(Schema.isMaxLength(8)),
+  runCoverage: UsageReportRunCoverage,
+  threadMappingStatus: Schema.Literals(["complete", "partial", "notRequested"]),
+});
+export type UsageReportRuns = typeof UsageReportRuns.Type;
+
 export const UsageReportOverview = Schema.Struct({
   ...UsageReportEnvelope,
   mode: Schema.Literal("overview"),
@@ -709,6 +809,7 @@ export const UsageReport = Schema.Union([
   UsageReportSeries,
   UsageReportQuota,
   UsageReportPricing,
+  UsageReportRuns,
 ]);
 export type UsageReport = typeof UsageReport.Type;
 

@@ -29,8 +29,8 @@ import {
 } from "./usageScanCache.ts";
 import type { UsageRecord } from "./usageTranscripts.ts";
 
-/** Bump when the table layout changes; an older layout is dropped and rebuilt. */
-const STORE_SCHEMA_VERSION = "2";
+/** Bump when stored records change meaning; old rows and coverage are rebuilt together. */
+const STORE_SCHEMA_VERSION = "3";
 /** Roughly 100 MB of decoded records at the observed 3x text-to-heap ratio. */
 const DEFAULT_DECODED_CACHE_CHARS = 32 * 1024 * 1024;
 /** Beyond this many appends a file's chunks are rewritten as one. */
