@@ -135,8 +135,9 @@ export async function archiveSelectedThreadEntries<
 export function buildMultiSelectThreadContextMenuItems(input: {
   count: number;
   hasRunningThread: boolean;
-}): readonly ContextMenuItem<"mark-unread" | "archive" | "delete">[] {
+}): readonly ContextMenuItem<"copy" | "mark-unread" | "archive" | "delete">[] {
   return [
+    { id: "copy", label: `Copy chats (${input.count})` },
     { id: "mark-unread", label: `Mark unread (${input.count})` },
     {
       id: "archive",

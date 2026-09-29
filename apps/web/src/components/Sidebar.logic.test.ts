@@ -222,6 +222,12 @@ describe("buildBulkTitleRegenerationContextMenuItem", () => {
 });
 
 describe("buildMultiSelectThreadContextMenuItems", () => {
+  it("offers copying all selected chats", () => {
+    expect(
+      buildMultiSelectThreadContextMenuItems({ count: 3, hasRunningThread: false }),
+    ).toContainEqual({ id: "copy", label: "Copy chats (3)" });
+  });
+
   it("offers bulk archive with the selected count", () => {
     expect(
       buildMultiSelectThreadContextMenuItems({ count: 3, hasRunningThread: false }),

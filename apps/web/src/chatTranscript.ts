@@ -1,6 +1,6 @@
 import type { OrchestrationMessage, OrchestrationThreadActivity } from "@t3tools/contracts";
 
-interface TaskTranscriptInput {
+export interface TaskTranscriptInput {
   readonly title: string;
   readonly threadId: string;
   readonly messages: ReadonlyArray<OrchestrationMessage>;
@@ -71,4 +71,13 @@ export function serializeTaskTranscript(input: TaskTranscriptInput): string {
     "",
     ...sections.flatMap((section, index) => (index === 0 ? [section] : ["", section])),
   ].join("\n");
+}
+
+export function serializeTaskTranscripts(inputs: ReadonlyArray<TaskTranscriptInput>): string {
+  return inputs
+    .map(
+      (input, index) =>
+        `CHAT ${index + 1} OF ${inputs.length}\n\n${serializeTaskTranscript(input)}`,
+    )
+    .join("\n\n\n");
 }
