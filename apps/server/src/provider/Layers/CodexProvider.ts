@@ -30,7 +30,10 @@ import { PREFERRED_DEFAULT_CODEX_MODELS, ServerSettingsError } from "@t3tools/co
 import { codexModelFamily, createModelCapabilities } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { codexLaunchArgv, resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
-import { CODEX_COMPUTER_CONTROL_OPTION_ID } from "../CodexComputerControl.ts";
+import {
+  CODEX_COMPUTER_CONTROL_OPTION_ID,
+  codexDesktopDaemonHasAppTools,
+} from "../CodexComputerControl.ts";
 import {
   type CodexMcpToolInventory,
   hasT3PreviewBrowserTools,
@@ -229,7 +232,7 @@ export function mapCodexModelCapabilities(
       currentValue: defaultServiceTier,
     });
   }
-  if (!desktopBacked) {
+  if (!desktopBacked || !codexDesktopDaemonHasAppTools()) {
     const browserOptions: ProviderOptionChoice[] = [];
     for (const capability of resolveCodexBrowserCapabilities(browserTools)) {
       if (capability.id === "t3-managed-chrome" && capability.available) {

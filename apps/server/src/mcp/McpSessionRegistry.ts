@@ -109,6 +109,7 @@ export const resolveMcpCapabilities = (
   providerDriverKind?: ProviderDriverKind,
   providerInstanceId?: ProviderInstanceId,
   desktopBackedCodex = false,
+  platform: NodeJS.Platform = process.platform,
 ): ReadonlySet<McpInvocationContext.McpCapability> =>
   new Set([
     ...(modelSelectionAllowsFullComputerControl(
@@ -116,6 +117,7 @@ export const resolveMcpCapabilities = (
       providerDriverKind,
       providerInstanceId,
       desktopBackedCodex,
+      platform,
     )
       ? (["computer"] as const)
       : []),

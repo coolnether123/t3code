@@ -8,7 +8,10 @@ import { getProviderOptionDescriptors } from "@t3tools/shared/model";
 
 import { ComputerToolkit } from "../../mcp/toolkits/computer/tools.ts";
 import { PreviewToolkit } from "../../mcp/toolkits/preview/tools.ts";
-import { normalizeCodexComputerControlMode } from "../CodexComputerControl.ts";
+import {
+  codexDesktopDaemonHasAppTools,
+  normalizeCodexComputerControlMode,
+} from "../CodexComputerControl.ts";
 import * as CodexErrors from "effect-codex-app-server/errors";
 
 import {
@@ -377,7 +380,7 @@ it("does not offer host-specific routes based only on JavaScript or plugin tool 
   );
 });
 
-it("omits the Codex Browser option for desktop-backed instances", () => {
+it("offers the Codex Browser option to desktop-backed instances only where the daemon lacks app tools", () => {
   const model = decodeModelListResponse(CODEX_0_148_MODEL_LIST_SANITIZED).data[0]!;
   const capabilities = mapCodexModelCapabilities(
     model,
@@ -387,7 +390,7 @@ it("omits the Codex Browser option for desktop-backed instances", () => {
 
   assert.equal(
     capabilities.optionDescriptors?.some((option) => option.id === "computerControl"),
-    false,
+    !codexDesktopDaemonHasAppTools(),
   );
   assert.equal(
     capabilities.optionDescriptors?.some((option) => option.id === "serviceTier"),

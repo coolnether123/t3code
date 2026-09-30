@@ -289,14 +289,18 @@ export function buildCodexDeveloperInstructions(
       ? codexPlanModeDeveloperInstructions(browserToolsAvailable)
       : codexDefaultModeDeveloperInstructions(browserToolsAvailable);
   const workerInstructions = runtime.enableT3Workers ? T3_CODE_WORKER_PARENT_INSTRUCTIONS : "";
-  const controlInstructions = runtime.useDesktopAppDaemon
+  // A desktop-backed thread that still received T3 managed Chrome runs on a
+  // host whose desktop app does not lend its tools to the daemon (Windows), so
+  // it gets the ordinary browser guidance instead of the host-extension route.
+  const desktopAppTools = runtime.useDesktopAppDaemon && !runtime.computerControlAvailable;
+  const controlInstructions = desktopAppTools
     ? CODEX_DESKTOP_APP_INSTRUCTIONS
     : computerControlInstructions(
         runtime.computerControlMode ?? DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
         browserToolsAvailable,
         runtime.computerControlAvailable ?? false,
       );
-  const configuredComputerUseInstructions = runtime.useDesktopAppDaemon
+  const configuredComputerUseInstructions = desktopAppTools
     ? ""
     : CONFIGURED_COMPUTER_USE_INSTRUCTIONS;
   const nativeSubagentInstructions =

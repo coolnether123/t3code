@@ -40,6 +40,7 @@ import { ComputerToolkit } from "../../mcp/toolkits/computer/tools.ts";
 import { PreviewToolkit } from "../../mcp/toolkits/preview/tools.ts";
 import { PreviewAutomationBroker } from "../../mcp/PreviewAutomationBroker.ts";
 import { ServerEnvironment } from "../../environment/ServerEnvironment.ts";
+import { codexDesktopDaemonHasAppTools } from "../CodexComputerControl.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeCodexAdapter } from "../Layers/CodexAdapter.ts";
 import { checkCodexProviderStatus, makePendingCodexProvider } from "../Layers/CodexProvider.ts";
@@ -206,9 +207,10 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
       // running Codex thread has attached them. Each turn checks its own catalog.
       const checkProvider = Effect.gen(function* () {
         const settings = yield* serverSettings.getSettings;
-        const chromeExecutable = effectiveConfig.useDesktopAppDaemon
-          ? undefined
-          : yield* findInstalledChrome();
+        const chromeExecutable =
+          effectiveConfig.useDesktopAppDaemon && codexDesktopDaemonHasAppTools()
+            ? undefined
+            : yield* findInstalledChrome();
         const previewAvailable =
           settings.enableAgentBrowserAccess &&
           (yield* previewBroker.isBrowserAvailable(environmentId));

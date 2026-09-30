@@ -14,6 +14,7 @@ import * as Layer from "effect/Layer";
 import { HttpServer } from "effect/unstable/http";
 
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import { codexDesktopDaemonHasAppTools } from "../provider/CodexComputerControl.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { WORKER_PROVIDER_THREAD_PREFIX } from "../worker/WorkerThreadBoundary.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
@@ -202,7 +203,7 @@ it("derives computer capability from the canonical Codex mode", () => {
   ).toBe(true);
 });
 
-it("does not grant managed Chrome to a desktop-backed Codex instance with a stale selection", () => {
+it("does not grant managed Chrome to a desktop-backed Codex instance whose daemon has app tools", () => {
   const threadId = ThreadId.make("thread-desktop-computer-capability");
   const settings = { enableAgentBrowserAccess: true, enableT3Workers: true };
 
@@ -214,12 +215,28 @@ it("does not grant managed Chrome to a desktop-backed Codex instance with a stal
       codexDriver,
       codexInstanceId,
       true,
+      "darwin",
     );
 
     expect(capabilities.has("computer")).toBe(false);
     expect(capabilities.has("preview")).toBe(true);
     expect(capabilities.has("workers")).toBe(true);
   }
+});
+
+it("grants managed Chrome to a desktop-backed Codex instance on Windows, where the daemon has no app tools", () => {
+  const capabilities = McpSessionRegistry.resolveMcpCapabilities(
+    { enableAgentBrowserAccess: true, enableT3Workers: false },
+    ThreadId.make("thread-desktop-windows-computer-capability"),
+    chromeSelection,
+    codexDriver,
+    codexInstanceId,
+    true,
+    "win32",
+  );
+
+  expect(capabilities.has("computer")).toBe(true);
+  expect(capabilities.has("preview")).toBe(true);
 });
 
 it.effect("resolves desktop-backed capability from the environment's instance settings", () =>
@@ -244,7 +261,7 @@ it.effect("resolves desktop-backed capability from the environment's instance se
     const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
     const scope = yield* registry.resolve(token);
 
-    expect(scope?.capabilities.has("computer")).toBe(false);
+    expect(scope?.capabilities.has("computer")).toBe(!codexDesktopDaemonHasAppTools());
     expect(scope?.capabilities.has("preview")).toBe(true);
     expect(scope?.capabilities.has("workers")).toBe(true);
   }),

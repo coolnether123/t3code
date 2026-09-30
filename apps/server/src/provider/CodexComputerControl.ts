@@ -15,14 +15,26 @@ export function normalizeCodexComputerControlMode(
     : DEFAULT_CODEX_COMPUTER_CONTROL_MODE;
 }
 
+/**
+ * Whether a desktop-backed Codex session gets the desktop app's own browser and
+ * computer-use tools. Codex Desktop attaches them to the managed app-server
+ * daemon only off Windows; on Windows the desktop app never uses the daemon, so
+ * the daemon exposes neither and T3 has to supply managed Chrome itself.
+ */
+export const codexDesktopDaemonHasAppTools = (
+  platform: NodeJS.Platform = process.platform,
+): boolean => platform !== "win32";
+
 /** Whether this session receives T3's managed Chrome MCP toolkit. */
 export const modelSelectionAllowsFullComputerControl = (
   selection: ModelSelection | undefined,
   providerDriverKind: ProviderDriverKind | undefined,
   boundInstanceId: ProviderInstanceId | undefined,
   desktopBacked = false,
+  platform: NodeJS.Platform = process.platform,
 ): boolean => {
-  if (providerDriverKind !== "codex" || desktopBacked) return false;
+  if (providerDriverKind !== "codex") return false;
+  if (desktopBacked && codexDesktopDaemonHasAppTools(platform)) return false;
   const selectedMode =
     selection !== undefined && selection.instanceId === boundInstanceId
       ? selection.options?.find((option) => option.id === CODEX_COMPUTER_CONTROL_OPTION_ID)?.value

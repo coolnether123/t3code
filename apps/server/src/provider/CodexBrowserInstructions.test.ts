@@ -20,7 +20,7 @@ describe("Codex browser provider instructions", () => {
     }
   });
 
-  it("describes the host Codex desktop tools without managed Chrome fallback guidance", () => {
+  it("gives desktop-backed Windows threads managed Chrome guidance when the daemon lends no app tools", () => {
     const instructions = buildCodexDeveloperInstructions(
       "default",
       {
@@ -28,6 +28,25 @@ describe("Codex browser provider instructions", () => {
         useDesktopAppDaemon: true,
         computerControlMode: "chrome",
         computerControlAvailable: true,
+      },
+      true,
+    );
+
+    expect(instructions).toMatch(/computer_start.*computer_navigate.*computer_snapshot/s);
+    expect(instructions).not.toContain("Codex Chrome browser-extension route");
+    expect(instructions).not.toContain(
+      "Do not substitute Sky, the built-in browser, T3 managed Chrome",
+    );
+  });
+
+  it("describes the host Codex desktop tools without managed Chrome fallback guidance", () => {
+    const instructions = buildCodexDeveloperInstructions(
+      "default",
+      {
+        ...runtime,
+        useDesktopAppDaemon: true,
+        computerControlMode: "chrome",
+        computerControlAvailable: false,
       },
       true,
     );
