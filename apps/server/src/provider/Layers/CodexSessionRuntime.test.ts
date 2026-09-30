@@ -3,6 +3,8 @@ import * as NodeAssert from "node:assert/strict";
 import { it } from "@effect/vitest";
 import { NodeServices } from "@effect/platform-node";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as TestClock from "effect/testing/TestClock";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
@@ -1110,6 +1112,88 @@ describe("Codex desktop plugin skill inventory", () => {
 });
 
 describe("openCodexThread", () => {
+  for (const mode of ["start", "resume", "fork", "history"] as const) {
+    it.effect(`times out a silent thread/${mode} without replacing the chat`, () =>
+      Effect.gen(function* () {
+        const calls: string[] = [];
+        const request = (method: string) =>
+          Effect.suspend(() => {
+            calls.push(method);
+            return Effect.never;
+          });
+        const pending = yield* openCodexThread({
+          client: { request, raw: { request } } as unknown as Parameters<
+            typeof openCodexThread
+          >[0]["client"],
+          threadId: ThreadId.make("thread-silent"),
+          runtimeMode: "full-access",
+          cwd: "A:/fake-project",
+          requestedModel: undefined,
+          serviceTier: undefined,
+          resumeThreadId: mode === "resume" || mode === "fork" ? "provider-existing" : undefined,
+          ...(mode === "fork" ? { forkLastTurnId: "last-turn" } : {}),
+          ...(mode === "history"
+            ? { seedHistory: [{ role: "user" as const, text: "history" }] }
+            : {}),
+        }).pipe(Effect.flip, Effect.forkChild);
+        yield* TestClock.adjust("90 seconds");
+        const error = yield* Fiber.join(pending);
+        NodeAssert.match(error.message, /Codex didn't answer while opening this chat; try again/);
+        NodeAssert.deepStrictEqual(calls, [
+          mode === "start" ? "thread/start" : mode === "fork" ? "thread/fork" : "thread/resume",
+        ]);
+      }),
+    );
+  }
+
+  it.effect("times out silent initialization", () =>
+    Effect.gen(function* () {
+      const pending = yield* initializeCodexSessionClient(
+        {
+          request: () => Effect.never,
+          notify: () => Effect.void,
+          raw: { request: () => Effect.never },
+        } as unknown as Parameters<typeof initializeCodexSessionClient>[0],
+        false,
+        {},
+      ).pipe(Effect.flip, Effect.forkChild);
+      yield* TestClock.adjust("90 seconds");
+      NodeAssert.match((yield* Fiber.join(pending)).message, /No response to initialize/);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("fails opening when desktop skill-root attachment never replies", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const pending = yield* initializeCodexSessionClient(
+        {
+          request: () => Effect.succeed({}),
+          notify: () => Effect.void,
+          raw: { request: () => Effect.never },
+        } as unknown as Parameters<typeof initializeCodexSessionClient>[0],
+        true,
+        { CODEX_HOME: "A:/fake-home" },
+      ).pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          readFileString: () =>
+            Effect.succeed(
+              '[marketplaces.openai-bundled]\nsource_type = "local"\nsource = \'A:/fake-bundle\'\n[plugins."chrome@openai-bundled"]\nenabled = true',
+            ),
+          stat: () =>
+            Effect.succeed({ type: "Directory" }) as unknown as ReturnType<typeof fs.stat>,
+        }),
+        Effect.flip,
+        Effect.forkChild,
+      );
+      yield* TestClock.adjust("90 seconds");
+      NodeAssert.match(
+        (yield* Fiber.join(pending)).message,
+        /No response to skills\/extraRoots\/set/,
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("attaches desktop plugin roots before thread/start and skips them for stdio", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

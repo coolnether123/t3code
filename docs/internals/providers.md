@@ -1,5 +1,36 @@
 # Provider constraints
 
+## Session and turn-start deadlines
+
+Provider intents enter a FIFO intake worker, then run independently by thread.
+Each intent waits for that thread's previous intent to finish, including its
+failure handling. A slow session open cannot hold up another thread. A second
+message for the same thread waits behind the first and can retry after a failed
+open. Worker drains wait for these per-thread chains as well as intake.
+Turn acceptance stays in the chain; running turns, compaction, and title
+generation remain background work.
+
+Codex runtime construction and session open each have a 90-second deadline.
+`initialize`, the `initialized` notification, desktop `skills/extraRoots/set`,
+`config/read`, and `thread/start`, `thread/resume`, or `thread/fork` are bounded too.
+The raw history-resume path uses the same deadline. Optional MCP and skill
+inventories keep their shorter existing deadlines.
+
+`turn/start` and `turn/steer` acceptance have a 90-second deadline, including the
+runtime's MCP availability lookup. This does not limit the running agent's turn. A missing response
+fails visibly with "Codex didn't answer while opening this chat; try again"
+or the corresponding turn-start message. The adapter closes its session scope
+and child or proxy; the provider service revokes the session's MCP credential
+on failed open or when a failed send leaves no active adapter session.
+Turn-acceptance timeouts also remove the active adapter session,
+so the next attempt resumes through a fresh connection to the same instance.
+There is no fallback to another instance or transport.
+
+A turn-acceptance timeout cannot prove that the daemon rejected the request.
+The daemon may have started work without replying. Check the provider thread
+before resending the same input. Closing T3's proxy does not stop the shared
+desktop daemon or guarantee cancellation of daemon-hosted work.
+
 ## Continue a Codex chat on another instance
 
 `providerInstances.<id>.continueThreadsOn` is an optional target instance id.

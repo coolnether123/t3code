@@ -92,6 +92,7 @@ import {
 } from "./CodexSessionRuntime.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { codexLaunchArgv, resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
+import { isCodexRequestTimeout, withCodexRequestDeadline } from "../CodexRequestDeadline.ts";
 import {
   codexMcpDisableOverride,
   type CodexMcpPreflightInput,
@@ -2114,7 +2115,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
         );
         const createRuntime = options?.makeRuntime ?? makeCodexSessionRuntime;
-        const runtime = yield* createRuntime(runtimeInput).pipe(
+        const runtime = yield* withCodexRequestDeadline(
+          createRuntime(runtimeInput),
+          "app-server startup",
+          "opening this chat",
+        ).pipe(
           Effect.provideService(Scope.Scope, sessionScope),
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
           Effect.provideService(Crypto.Crypto, crypto),
@@ -2216,7 +2221,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           }),
         ).pipe(Effect.forkIn(sessionScope));
 
-        const started = yield* runtime.start().pipe(
+        const started = yield* withCodexRequestDeadline(
+          runtime.start(),
+          "session open",
+          "opening this chat",
+        ).pipe(
           Effect.mapError((cause) => {
             const detail = desktopDaemon
               ? codexDesktopSessionStartFailureMessage(cause, daemonSecrets)
@@ -2293,22 +2302,27 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
 
     if (input.expectedTurnId !== undefined) {
       const session = yield* requireSession(input.threadId);
-      return yield* session.runtime
-        .sendTurn({
+      return yield* withCodexRequestDeadline(
+        session.runtime.sendTurn({
           expectedTurnId: input.expectedTurnId,
           ...(input.input !== undefined ? { input: input.input } : {}),
           ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
-        })
-        .pipe(
-          Effect.mapError((cause) =>
-            mapCodexRuntimeError(
-              input.threadId,
-              "turn/steer",
-              cause,
-              appServerTransport === "desktop-daemon",
-            ),
+        }),
+        "turn/steer",
+        "starting this turn",
+      ).pipe(
+        Effect.tapError((cause) =>
+          isCodexRequestTimeout(cause) ? stopSessionInternal(session) : Effect.void,
+        ),
+        Effect.mapError((cause) =>
+          mapCodexRuntimeError(
+            input.threadId,
+            "turn/steer",
+            cause,
+            appServerTransport === "desktop-daemon",
           ),
-        );
+        ),
+      );
     }
 
     const t3WorkersSettingEnabled =
@@ -2397,8 +2411,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             ),
           )
         : DEFAULT_CODEX_COMPUTER_CONTROL_MODE;
-    return yield* session.runtime
-      .sendTurn({
+    return yield* withCodexRequestDeadline(
+      session.runtime.sendTurn({
         ...(input.input !== undefined ? { input: input.input } : {}),
         ...(input.modelSelection?.instanceId === boundInstanceId
           ? { model: input.modelSelection.model }
@@ -2414,17 +2428,22 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         ...(input.subagentBackend !== undefined ? { subagentBackend: input.subagentBackend } : {}),
         ...(enableT3Workers ? { enableT3Workers: true } : {}),
         ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
-      })
-      .pipe(
-        Effect.mapError((cause) =>
-          mapCodexRuntimeError(
-            input.threadId,
-            "turn/start",
-            cause,
-            appServerTransport === "desktop-daemon",
-          ),
+      }),
+      "turn/start",
+      "starting this turn",
+    ).pipe(
+      Effect.tapError((cause) =>
+        isCodexRequestTimeout(cause) ? stopSessionInternal(session) : Effect.void,
+      ),
+      Effect.mapError((cause) =>
+        mapCodexRuntimeError(
+          input.threadId,
+          "turn/start",
+          cause,
+          appServerTransport === "desktop-daemon",
         ),
-      );
+      ),
+    );
   });
 
   const createForkResumeCursor: NonNullable<CodexAdapterShape["createForkResumeCursor"]> =

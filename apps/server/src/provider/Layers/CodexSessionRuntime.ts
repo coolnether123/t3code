@@ -68,6 +68,7 @@ import { makeCodexFileChangeApprovalContext } from "./CodexFileChangeApprovalCon
 import { normalizeServiceTier, type CodexTierObservation } from "../../usage/codexServiceTier.ts";
 import { migrateCodexResumeRollout } from "../Drivers/CodexHomeLayout.ts";
 import { attachCodexDesktopPluginSkills } from "../CodexDesktopPluginSkills.ts";
+import { withCodexRequestDeadline } from "../CodexRequestDeadline.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
 
 const PROVIDER = ProviderDriverKind.make("codex");
@@ -1060,13 +1061,21 @@ export const openCodexThread = (input: {
     if (input.seedHistory !== undefined) {
       // The generated V2 params omit history despite documenting it. Use the
       // untyped transport so its encoder cannot discard the experimental field.
-      return input.client.raw!.request("thread/resume", {
-        ...startParams,
-        threadId: "",
-        history: buildCodexSeedHistory(input.seedHistory),
-      }) as Effect.Effect<CodexThreadOpenResponse, CodexErrors.CodexAppServerError>;
+      return withCodexRequestDeadline(
+        input.client.raw!.request("thread/resume", {
+          ...startParams,
+          threadId: "",
+          history: buildCodexSeedHistory(input.seedHistory),
+        }),
+        "thread/resume (history)",
+        "opening this chat",
+      ) as Effect.Effect<CodexThreadOpenResponse, CodexErrors.CodexAppServerError>;
     }
-    return input.client.request("thread/start", startParams);
+    return withCodexRequestDeadline(
+      input.client.request("thread/start", startParams),
+      "thread/start",
+      "opening this chat",
+    );
   }
 
   if (input.forkLastTurnId !== undefined) {
@@ -1082,14 +1091,22 @@ export const openCodexThread = (input: {
       ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
       ...(input.config !== undefined ? { config: input.config } : {}),
     };
-    return input.client.request("thread/fork", forkParams);
+    return withCodexRequestDeadline(
+      input.client.request("thread/fork", forkParams),
+      "thread/fork",
+      "opening this chat",
+    );
   }
 
   // A missing rollout is an error, not permission to replace the conversation.
-  return input.client.request("thread/resume", {
-    threadId: resumeThreadId,
-    ...startParams,
-  });
+  return withCodexRequestDeadline(
+    input.client.request("thread/resume", {
+      threadId: resumeThreadId,
+      ...startParams,
+    }),
+    "thread/resume",
+    "opening this chat",
+  );
 };
 
 export const initializeCodexSessionClient = Effect.fn("initializeCodexSessionClient")(function* (
@@ -1097,9 +1114,23 @@ export const initializeCodexSessionClient = Effect.fn("initializeCodexSessionCli
   desktopDaemon: boolean,
   environment: NodeJS.ProcessEnv,
 ) {
-  yield* client.request("initialize", buildCodexInitializeParams());
-  yield* client.notify("initialized", undefined);
-  return desktopDaemon ? yield* attachCodexDesktopPluginSkills(client, environment) : undefined;
+  yield* withCodexRequestDeadline(
+    client.request("initialize", buildCodexInitializeParams()),
+    "initialize",
+    "opening this chat",
+  );
+  yield* withCodexRequestDeadline(
+    client.notify("initialized", undefined),
+    "initialized",
+    "opening this chat",
+  );
+  return desktopDaemon
+    ? yield* withCodexRequestDeadline(
+        attachCodexDesktopPluginSkills(client, environment),
+        "skills/extraRoots/set",
+        "opening this chat",
+      )
+    : undefined;
 });
 
 function readNotificationThreadId(notification: CodexServerNotification): string | undefined {
@@ -2644,10 +2675,14 @@ export const makeCodexSessionRuntime = (
         options.subagentBackend === "native-v1-control" ||
         (options.subagentBackend === undefined && options.enableT3Workers === true);
       if (requiresSubagentIsolation) {
-        const effectiveConfig = yield* client.request("config/read", {
-          includeLayers: false,
-          cwd: options.cwd,
-        });
+        const effectiveConfig = yield* withCodexRequestDeadline(
+          client.request("config/read", {
+            includeLayers: false,
+            cwd: options.cwd,
+          }),
+          "config/read",
+          "opening this chat",
+        );
         yield* assertCodexSubagentIsolationConfig(effectiveConfig.config);
       }
 
@@ -2775,11 +2810,15 @@ export const makeCodexSessionRuntime = (
             const turnInput: Array<EffectCodexSchema.V2TurnSteerParams["input"][number]> = [];
             if (input.input) turnInput.push({ type: "text", text: input.input });
             turnInput.push(...(input.attachments ?? []));
-            const response = yield* client.request("turn/steer", {
-              threadId: providerThreadId,
-              expectedTurnId: input.expectedTurnId,
-              input: turnInput,
-            });
+            const response = yield* withCodexRequestDeadline(
+              client.request("turn/steer", {
+                threadId: providerThreadId,
+                expectedTurnId: input.expectedTurnId,
+                input: turnInput,
+              }),
+              "turn/steer",
+              "starting this turn",
+            );
             return {
               threadId: options.threadId,
               turnId: TurnId.make(response.turnId),
@@ -2827,7 +2866,11 @@ export const makeCodexSessionRuntime = (
               ? { useDesktopAppDaemon: true }
               : {}),
           });
-          const rawResponse = yield* client.raw.request("turn/start", params);
+          const rawResponse = yield* withCodexRequestDeadline(
+            client.raw.request("turn/start", params),
+            "turn/start",
+            "starting this turn",
+          );
           const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
             Effect.mapError((error) =>
               CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(

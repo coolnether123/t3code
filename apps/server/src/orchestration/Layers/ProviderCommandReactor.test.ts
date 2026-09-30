@@ -61,6 +61,8 @@ import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Clock from "effect/Clock";
+import * as TestClock from "effect/testing/TestClock";
+import { openCodexThread } from "../../provider/Layers/CodexSessionRuntime.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
@@ -168,6 +170,7 @@ describe("ProviderCommandReactor", () => {
     ) => Effect.Effect<ProviderSession, ProviderAdapterRequestError>;
     readonly separateCodexHomes?: boolean;
     readonly localWorkspace?: boolean;
+    readonly clock?: Clock.Clock;
   }) {
     const now = "2026-01-01T00:00:00.000Z";
     const baseDir =
@@ -482,7 +485,12 @@ describe("ProviderCommandReactor", () => {
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
       Layer.provideMerge(NodeServices.layer),
     );
-    runtime = ManagedRuntime.make(Layer.merge(layer, settingsLayer));
+    const harnessLayer = Layer.merge(layer, settingsLayer);
+    runtime = ManagedRuntime.make(
+      input?.clock
+        ? harnessLayer.pipe(Layer.provideMerge(Layer.succeed(Clock.Clock, input.clock)))
+        : harnessLayer,
+    );
 
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
@@ -1343,6 +1351,175 @@ describe("ProviderCommandReactor", () => {
       input: "Check the target tab.",
     });
   });
+
+  effectIt.effect(
+    "isolates a silent resume and delivers the next same-thread message after failure",
+    () =>
+      Effect.gen(function* () {
+        const clock = yield* Clock.Clock;
+        const startedA = yield* Deferred.make<void>();
+        const sentB = yield* Deferred.make<void>();
+        const sentNextA = yield* Deferred.make<void>();
+        let opensA = 0;
+        const sends: string[] = [];
+        const harness = yield* Effect.promise(() =>
+          createHarness({
+            clock,
+            startSessionEffect: (session) => {
+              if (session.threadId !== ThreadId.make("thread-1") || ++opensA > 1)
+                return Effect.succeed(session);
+              return Deferred.succeed(startedA, undefined).pipe(
+                Effect.andThen(
+                  openCodexThread({
+                    client: { request: () => Effect.never },
+                    threadId: session.threadId,
+                    runtimeMode: session.runtimeMode,
+                    cwd: "A:/fake-project",
+                    requestedModel: undefined,
+                    serviceTier: undefined,
+                    resumeThreadId: "provider-existing",
+                  }),
+                ),
+                Effect.as(session),
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapterRequestError({
+                      provider: "codex",
+                      method: "thread/resume",
+                      detail: cause.message,
+                    }),
+                ),
+              );
+            },
+            sendTurnEffect: (input) =>
+              Effect.gen(function* () {
+                sends.push(input.input ?? "");
+                yield* Deferred.succeed(
+                  input.threadId === ThreadId.make("thread-2") ? sentB : sentNextA,
+                  undefined,
+                );
+                return { threadId: input.threadId, turnId: asTurnId(`turn-${input.input}`) };
+              }),
+          }),
+        );
+        const now = "2026-01-01T00:00:00.000Z";
+        yield* harness.engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("cmd-isolation-thread"),
+          threadId: ThreadId.make("thread-2"),
+          projectId: asProjectId("project-1"),
+          title: "Independent thread",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: null,
+          createdAt: now,
+        });
+        const start = (thread: string, text: string) =>
+          harness.engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make(`cmd-isolation-${text}`),
+            threadId: ThreadId.make(thread),
+            message: {
+              messageId: asMessageId(`message-${text}`),
+              role: "user",
+              text,
+              attachments: [],
+            },
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "approval-required",
+            createdAt: now,
+          });
+        yield* start("thread-1", "silent-first");
+        yield* Deferred.await(startedA);
+        yield* start("thread-1", "next-A");
+        yield* start("thread-2", "independent-B");
+        yield* Deferred.await(sentB);
+        expect(sends).toEqual(["independent-B"]);
+        expect(opensA).toBe(1);
+        yield* TestClock.adjust("90 seconds");
+        yield* Deferred.await(sentNextA);
+        yield* Effect.promise(() => harness.drain());
+        expect(sends).toEqual(["independent-B", "next-A"]);
+        expect(opensA).toBe(2);
+        const state = yield* Effect.promise(() => harness.readModel());
+        const thread = state.threads.find((thread) => thread.id === ThreadId.make("thread-1"));
+        expect(
+          thread?.activities.find((activity) => activity.kind === "provider.turn.start.failed"),
+        ).toMatchObject({
+          payload: {
+            detail: expect.stringContaining("Codex didn't answer while opening this chat"),
+          },
+        });
+        expect(thread?.session?.lastError).toBeNull();
+      }),
+  );
+
+  effectIt.effect("preserves same-thread ordering through turn acceptance", () =>
+    Effect.gen(function* () {
+      const firstEntered = yield* Deferred.make<void>();
+      const releaseFirst = yield* Deferred.make<void>();
+      const secondEntered = yield* Deferred.make<void>();
+      const otherEntered = yield* Deferred.make<void>();
+      let acceptedFirst = false;
+      let acceptedBeforeSecond = false;
+      const sends: string[] = [];
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          sendTurnEffect: (input) =>
+            Effect.gen(function* () {
+              sends.push(input.input ?? "");
+              if (input.input === "first") {
+                yield* Deferred.succeed(firstEntered, undefined);
+                yield* Deferred.await(releaseFirst);
+                acceptedFirst = true;
+              } else if (input.input === "other") {
+                yield* Deferred.succeed(otherEntered, undefined);
+              } else {
+                acceptedBeforeSecond = acceptedFirst;
+                yield* Deferred.succeed(secondEntered, undefined);
+              }
+              return { threadId: input.threadId, turnId: asTurnId(`turn-${input.input}`) };
+            }),
+        }),
+      );
+      yield* harness.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-order-thread-2"),
+        threadId: ThreadId.make("thread-2"),
+        projectId: asProjectId("project-1"),
+        title: "Other thread",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      const start = (text: string, threadId = ThreadId.make("thread-1")) =>
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make(`cmd-order-${text}`),
+          threadId,
+          message: { messageId: asMessageId(`order-${text}`), role: "user", text, attachments: [] },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        });
+      yield* start("first");
+      yield* Deferred.await(firstEntered);
+      yield* start("second");
+      yield* start("other", ThreadId.make("thread-2"));
+      yield* Deferred.await(otherEntered);
+      expect(sends).toEqual(["first", "other"]);
+      yield* Deferred.succeed(releaseFirst, undefined);
+      yield* Deferred.await(secondEntered);
+      yield* Effect.promise(() => harness.drain());
+      expect(sends).toEqual(["first", "other", "second"]);
+      expect(acceptedBeforeSecond).toBe(true);
+    }),
+  );
 
   effectIt.effect("projects starting before a slow provider session finishes", () =>
     Effect.gen(function* () {
@@ -4023,6 +4200,7 @@ describe("ProviderCommandReactor", () => {
     );
 
     await waitFor(() => harness.stopSession.mock.calls.length === 1);
+    await harness.drain();
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
     expect(thread?.session).not.toBeNull();
