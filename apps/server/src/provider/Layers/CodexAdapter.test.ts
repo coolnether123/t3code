@@ -57,6 +57,7 @@ import {
 import { makeCodexAdapter, type CodexAdapterLiveOptions } from "./CodexAdapter.ts";
 import { runtimeEventToActivities } from "../../orchestration/Layers/ProviderRuntimeIngestion.ts";
 import { foldSubagentActivities } from "../../../../../packages/client-runtime/src/state/subagentRuntime.ts";
+import { CODEX_SESSION_OPEN_TIMEOUT } from "../CodexRequestDeadline.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
 // Test-local service tag so the rest of the file can keep using `yield* CodexAdapter`.
@@ -2563,7 +2564,7 @@ scopedLifecycleLayer("CodexAdapterLive scoped lifecycle", (it) => {
         .startSession({ threadId, runtimeMode: "full-access" })
         .pipe(Effect.flip, Effect.forkChild);
       yield* Deferred.await(entered);
-      yield* TestClock.adjust("90 seconds");
+      yield* TestClock.adjust(CODEX_SESSION_OPEN_TIMEOUT);
       NodeAssert.match((yield* Fiber.join(pending)).message, /No response to app-server startup/);
       NodeAssert.deepStrictEqual(scopedLifecycleRuntimeFactory.releasedThreadIds, [threadId]);
       NodeAssert.equal(yield* adapter.hasSession(threadId), false);
@@ -2607,7 +2608,7 @@ scopedLifecycleLayer("CodexAdapterLive scoped lifecycle", (it) => {
       const pending = yield* adapter.startSession(input).pipe(Effect.flip, Effect.forkChild);
       yield* Deferred.await(entered);
       const original = scopedLifecycleRuntimeFactory.lastRuntime!;
-      yield* TestClock.adjust("90 seconds");
+      yield* TestClock.adjust(CODEX_SESSION_OPEN_TIMEOUT);
       const error = yield* Fiber.join(pending);
       NodeAssert.match(error.message, /Codex didn't answer while opening this chat/);
       NodeAssert.equal(original.closeImpl.mock.calls.length, 1);

@@ -66,6 +66,7 @@ import { openCodexThread } from "../../provider/Layers/CodexSessionRuntime.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import * as GitWorkflowService from "../../git/GitWorkflowService.ts";
+import { CODEX_SESSION_OPEN_TIMEOUT } from "../../provider/CodexRequestDeadline.ts";
 
 const effectIt = makeMethods(it);
 
@@ -1438,7 +1439,7 @@ describe("ProviderCommandReactor", () => {
         yield* Deferred.await(sentB);
         expect(sends).toEqual(["independent-B"]);
         expect(opensA).toBe(1);
-        yield* TestClock.adjust("90 seconds");
+        yield* TestClock.adjust(CODEX_SESSION_OPEN_TIMEOUT);
         yield* Deferred.await(sentNextA);
         yield* Effect.promise(() => harness.drain());
         expect(sends).toEqual(["independent-B", "next-A"]);

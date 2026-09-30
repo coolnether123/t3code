@@ -43,6 +43,7 @@ import {
   parseCodexDaemonThreadConfig,
 } from "./CodexSessionRuntime.ts";
 import { isWorkerLifecycleToolName } from "../../worker/WorkerThreadBoundary.ts";
+import { CODEX_SESSION_OPEN_TIMEOUT } from "../CodexRequestDeadline.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 
 describe("Codex stderr classification", () => {
@@ -1136,7 +1137,7 @@ describe("openCodexThread", () => {
             ? { seedHistory: [{ role: "user" as const, text: "history" }] }
             : {}),
         }).pipe(Effect.flip, Effect.forkChild);
-        yield* TestClock.adjust("90 seconds");
+        yield* TestClock.adjust(CODEX_SESSION_OPEN_TIMEOUT);
         const error = yield* Fiber.join(pending);
         NodeAssert.match(error.message, /Codex didn't answer while opening this chat; try again/);
         NodeAssert.deepStrictEqual(calls, [
@@ -1157,7 +1158,7 @@ describe("openCodexThread", () => {
         false,
         {},
       ).pipe(Effect.flip, Effect.forkChild);
-      yield* TestClock.adjust("90 seconds");
+      yield* TestClock.adjust(CODEX_SESSION_OPEN_TIMEOUT);
       NodeAssert.match((yield* Fiber.join(pending)).message, /No response to initialize/);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
@@ -1186,7 +1187,7 @@ describe("openCodexThread", () => {
         Effect.flip,
         Effect.forkChild,
       );
-      yield* TestClock.adjust("90 seconds");
+      yield* TestClock.adjust(CODEX_SESSION_OPEN_TIMEOUT);
       NodeAssert.match(
         (yield* Fiber.join(pending)).message,
         /No response to skills\/extraRoots\/set/,

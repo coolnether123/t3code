@@ -2,7 +2,9 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as CodexErrors from "effect-codex-app-server/errors";
 
-export const CODEX_SESSION_OPEN_TIMEOUT = "90 seconds";
+// Opening resumes the thread's whole history; long, reused chats can take minutes.
+// Turn starts are isolated per thread, so a slow open only delays its own chat.
+export const CODEX_SESSION_OPEN_TIMEOUT = "20 minutes";
 export const CODEX_TURN_ACCEPTANCE_TIMEOUT = "90 seconds";
 
 const isRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);

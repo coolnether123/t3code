@@ -10,7 +10,10 @@ open. Worker drains wait for these per-thread chains as well as intake.
 Turn acceptance stays in the chain; running turns, compaction, and title
 generation remain background work.
 
-Codex runtime construction and session open each have a 90-second deadline.
+Codex runtime construction and session open each have a 20-minute deadline.
+Opening resumes the thread's full history, and long, reused chats can take
+several minutes (a 130 MB history exceeded an earlier 90-second limit). Because
+turn starts are isolated per thread, a slow open delays only its own chat.
 `initialize`, the `initialized` notification, desktop `skills/extraRoots/set`,
 `config/read`, and `thread/start`, `thread/resume`, or `thread/fork` are bounded too.
 The raw history-resume path uses the same deadline. Optional MCP and skill
