@@ -150,6 +150,66 @@ function totalOutputTokens(summary: { buckets: readonly { totals: { outputTokens
 }
 
 describe("UsageService", () => {
+  it.live("reads prompt projections without fetching pricing or scanning provider history", () =>
+    Effect.gen(function* () {
+      const { settings, home } = yield* setup;
+      let ratesFetches = 0;
+      const service = yield* UsageService.make.pipe(
+        Effect.provide(
+          serviceLayers({
+            prefix: "prompt-usage-service",
+            home,
+            settings,
+            onRatesFetch: () => {
+              ratesFetches++;
+            },
+          }),
+        ),
+      );
+      const input = {
+        mode: "prompts" as const,
+        sinceDay: UsageDay.make("2026-08-01"),
+        untilDay: UsageDay.make("2026-08-01"),
+        timeZone: "UTC",
+      };
+      const missing = yield* service.readReport(input);
+      assert.strictEqual(missing.coverage.status, "missing");
+      let queries = 0;
+      const report = yield* service.readReport(input).pipe(
+        Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+          getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 1 }),
+          listPromptUsageMessages: (bounds: { sinceTime: string; untilTime: string }) => {
+            queries++;
+            assert.strictEqual(bounds.sinceTime, "2026-08-01T00:00:00.000Z");
+            assert.strictEqual(bounds.untilTime, "2026-08-02T00:00:00.000Z");
+            return Effect.succeed([
+              {
+                messageId: "m",
+                threadId: "t",
+                createdAt: "2026-08-01T10:00:00Z",
+                text: "build build",
+                textLength: 11,
+              },
+            ]);
+          },
+        } as never),
+      );
+      assert.strictEqual(queries, 1);
+      assert.strictEqual(report.totals.prompts, 1);
+      assert.strictEqual(report.totals.words, 2);
+      assert.strictEqual(report.coverage.status, "complete");
+      assert.strictEqual(ratesFetches, 0);
+      let sequence = 1;
+      const changing = yield* service.readReport(input).pipe(
+        Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+          getSnapshotSequence: () => Effect.succeed({ snapshotSequence: sequence++ }),
+          listPromptUsageMessages: () => Effect.succeed([]),
+        } as never),
+      );
+      assert.strictEqual(changing.coverage.status, "partial");
+      assert.include(changing.coverage.reasons, "projection-changed");
+    }).pipe(Effect.scoped),
+  );
   it.live("uses cached disk rates for the first summary", () =>
     Effect.gen(function* () {
       const { transcript, settings, home } = yield* setup;

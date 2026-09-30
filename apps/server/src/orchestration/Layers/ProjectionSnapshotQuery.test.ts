@@ -41,6 +41,50 @@ const projectionSnapshotLayer = it.layer(
 );
 
 projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
+  it.effect("pages prompt usage by durable IDs and uses the user-message date index", () =>
+    Effect.gen(function* () {
+      const query = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      const createdAt = "2030-09-29T12:00:00.000Z";
+      for (let index = 0; index < 34; index++) {
+        yield* sql`INSERT INTO projection_thread_messages
+          (message_id, thread_id, role, text, is_streaming, created_at, updated_at)
+          VALUES (${"prompt-usage-" + String(index).padStart(3, "0")}, 'archived-import-thread',
+            'user', 'repeat words', 0, ${createdAt}, ${createdAt})`;
+      }
+      yield* sql`INSERT INTO projection_thread_messages
+        (message_id, thread_id, role, text, is_streaming, created_at, updated_at)
+        VALUES ('prompt-usage-assistant', 'archived-import-thread', 'assistant', 'excluded', 0, ${createdAt}, ${createdAt})`;
+      const read = query.listPromptUsageMessages;
+      if (read === undefined) throw new Error("prompt query unavailable");
+      const input = {
+        sinceTime: "2030-09-29T00:00:00.000Z",
+        untilTime: "2030-09-30T00:00:00.000Z",
+        beforeCreatedAt: "2030-09-30T00:00:00.000Z",
+        beforeMessageId: "",
+      };
+      const first = yield* read(input);
+      assert.lengthOf(first, 32);
+      const last = first[first.length - 1]!;
+      const next = yield* read({
+        ...input,
+        beforeCreatedAt: last.createdAt,
+        beforeMessageId: last.messageId,
+      });
+      assert.lengthOf(next, 2);
+      assert.strictEqual(new Set([...first, ...next].map((row) => row.messageId)).size, 34);
+      assert.isTrue([...first, ...next].every((row) => row.text === "repeat words"));
+      const plan = yield* sql<{ detail: string }>`EXPLAIN QUERY PLAN
+        SELECT message_id FROM projection_thread_messages WHERE role = 'user'
+          AND created_at >= ${input.sinceTime} AND created_at < ${input.untilTime}
+          ORDER BY created_at DESC, message_id DESC LIMIT 32`;
+      assert.isTrue(
+        plan.some((row) => row.detail.includes("idx_projection_user_messages_created_id")),
+      );
+      assert.isFalse(plan.some((row) => row.detail.includes("TEMP B-TREE")));
+      yield* sql`DELETE FROM projection_thread_messages WHERE message_id LIKE 'prompt-usage-%'`;
+    }),
+  );
   it.effect("looks up native provider-session IDs without loading thread snapshots", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;

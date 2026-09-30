@@ -1048,6 +1048,11 @@ export function createServerEnvironmentAtoms<R, E>(
       staleTimeMs: 60_000,
       refreshTrigger: ({ environmentId }) => usagePricesAtom(environmentId),
     }),
+    usageReport: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:usage-report",
+      tag: WS_METHODS.serverGetUsageReport,
+      staleTimeMs: 60_000,
+    }),
     resetCheck: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:server:reset-check",
       tag: WS_METHODS.serverGetResetCheck,

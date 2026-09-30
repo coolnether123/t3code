@@ -10,6 +10,7 @@
 
 import * as Migrator from "effect/unstable/sql/Migrator";
 import * as Effect from "effect/Effect";
+import Migration0053 from "./Migrations/053_PromptUsageMessageIndex.ts";
 import * as Layer from "effect/Layer";
 
 // Import all migrations statically
@@ -129,6 +130,7 @@ export const migrationEntries = [
   [50, "ProjectionThreadsActiveOrderKeyCompatibility", Migration0050],
   [51, "ProjectionThreadContextCompactions", Migration0051],
   [52, "BootstrapThreadContextCompactions", Migration0052],
+  [53, "PromptUsageMessageIndex", Migration0053],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

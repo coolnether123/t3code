@@ -2691,6 +2691,45 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       );
     };
 
+  const promptUsageRows = SqlSchema.findAll({
+    Request: Schema.Struct({
+      sinceTime: Schema.String,
+      untilTime: Schema.String,
+      beforeCreatedAt: Schema.String,
+      beforeMessageId: Schema.String,
+    }),
+    Result: Schema.Struct({
+      messageId: Schema.String,
+      threadId: Schema.String,
+      createdAt: Schema.String,
+      text: Schema.String,
+      textLength: NonNegativeInt,
+    }),
+    execute: (input) => sql`
+      SELECT message_id AS "messageId", thread_id AS "threadId",
+        created_at AS "createdAt", substr(text, 1, 32768) AS text,
+        length(text) AS "textLength"
+      FROM projection_thread_messages
+      WHERE role = 'user' AND created_at >= ${input.sinceTime}
+        AND created_at < ${input.untilTime}
+        AND (created_at < ${input.beforeCreatedAt}
+          OR (created_at = ${input.beforeCreatedAt} AND message_id < ${input.beforeMessageId}))
+      ORDER BY created_at DESC, message_id DESC
+      LIMIT 32
+    `,
+  });
+  const listPromptUsageMessages: ProjectionSnapshotQueryShape["listPromptUsageMessages"] = (
+    input,
+  ) =>
+    promptUsageRows(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.listPromptUsageMessages:query",
+          "ProjectionSnapshotQuery.listPromptUsageMessages:decodeRows",
+        ),
+      ),
+    );
+
   const getThreadRuntimeContext: ProjectionSnapshotQueryShape["getThreadRuntimeContext"] =
     Effect.fn("ProjectionSnapshotQuery.getThreadRuntimeContext")(function* (threadId) {
       const context = yield* getThreadRuntimeContextRow({ threadId }).pipe(
@@ -3325,6 +3364,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getFirstActiveThreadIdByProjectId,
     getImportedAgentSessionSources,
     findThreadMappingsByProviderSessionIds,
+    listPromptUsageMessages,
     getThreadCheckpointContext,
     getFullThreadDiffContext,
     getThreadShellById,

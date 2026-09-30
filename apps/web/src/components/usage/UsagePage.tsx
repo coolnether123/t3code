@@ -51,6 +51,7 @@ import { UsageModelHourlyChart } from "./UsageModelHourlyChart";
 import { CodexUsageButton } from "./CodexUsageButton";
 import { UsageLimitsSection } from "./UsageLimits";
 import { UsagePriceOverrides } from "./UsagePriceOverrides";
+import { UsagePrompts } from "./UsagePrompts";
 import { PROVIDER_ORDER, PROVIDER_PRESENTATION, providersWithUsage } from "./usageProviders";
 import { readLimitsView, saveLimitsView } from "./usagePagePreferences";
 
@@ -71,6 +72,7 @@ export function UsagePage() {
   }));
   const [metric, setMetric] = useState<UsageChartMetric>("cost");
   const [breakdown, setBreakdown] = useState<"model" | "time">("model");
+  const [promptRefreshRevision, setPromptRefreshRevision] = useState(0);
   const [selectedEnvironmentIds, setSelectedEnvironmentIds] =
     useState<ReadonlySet<EnvironmentId> | null>(null);
   const { days: windowDays, window } = windowSelection;
@@ -138,6 +140,7 @@ export function UsagePage() {
   };
   const refreshWindow = () => {
     if (refreshing) return;
+    setPromptRefreshRevision((revision) => revision + 1);
     void refreshLimits();
     const nextWindow = makeWindow(windowDays, undefined, isPast24Hours ? "hour" : "day");
     if (
@@ -298,6 +301,12 @@ export function UsagePage() {
                 Limits &amp; resets
               </Link>
             </div>
+            <UsagePrompts
+              environments={environments}
+              selectedEnvironmentIds={selectedEnvironmentIds}
+              window={window}
+              refreshRevision={promptRefreshRevision}
+            />
             {settling ? (
               <>
                 {environments.length > 1 ? <UsageDeviceStrip environments={environments} /> : null}

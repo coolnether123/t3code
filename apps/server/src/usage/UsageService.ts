@@ -40,6 +40,7 @@ import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -65,6 +66,11 @@ import { makeDayFormatter, UsageAggregator } from "./usageAggregation.ts";
 import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
 import { UsageSummaryCache, usageSummaryCacheKey } from "./usageSummaryCache.ts";
 import { makeUsageReportCalculation, projectUsageReport } from "./usageReport.ts";
+import {
+  PromptUsageAccumulator,
+  promptUsageTimeBounds,
+  validatePromptUsageInput,
+} from "./usagePromptReport.ts";
 import {
   listTranscriptFilesBounded,
   readDirectoryVolumeId,
@@ -426,7 +432,9 @@ export class UsageService extends Context.Service<
   UsageService,
   {
     readonly readSummary: (input: UsageSummaryInput) => Effect.Effect<UsageSummary, UsageReadError>;
-    readonly readReport: (input: UsageReportInput) => Effect.Effect<UsageReport, UsageReadError>;
+    readonly readReport: <Input extends UsageReportInput>(
+      input: Input,
+    ) => Effect.Effect<Extract<UsageReport, { readonly mode: Input["mode"] }>, UsageReadError>;
     /** Refetches the rate table ahead of its TTL. */
     readonly refreshRates: Effect.Effect<UsagePricing>;
   }
@@ -461,13 +469,15 @@ export const layerTest = Layer.succeed(
   UsageService,
   UsageService.of({
     readSummary: (input) => Effect.succeed(emptyUsageSummary(input)),
-    readReport: (input) =>
+    readReport: <Input extends UsageReportInput>(input: Input) =>
       Effect.succeed(
-        projectUsageReport(
-          emptyUsageSummary(input),
-          input,
-          makeUsageReportCalculation(EMPTY_PRICING, {}),
-        ),
+        (input.mode === "prompts"
+          ? new PromptUsageAccumulator(input).report("1970-01-01T00:00:00.000Z")
+          : projectUsageReport(
+              emptyUsageSummary(input),
+              input,
+              makeUsageReportCalculation(EMPTY_PRICING, {}),
+            )) as Extract<UsageReport, { readonly mode: Input["mode"] }>,
       ),
     refreshRates: Effect.succeed(EMPTY_PRICING),
   }),
@@ -1854,123 +1864,190 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  const readReport: UsageService["Service"]["readReport"] = Effect.fn("UsageService.readReport")(
-    function* (input: UsageReportInput) {
-      if (input.sinceDay > input.untilDay) {
-        return yield* new UsageReadError({
-          reason: "invalidWindow",
-          detail: `sinceDay '${input.sinceDay}' is after untilDay '${input.untilDay}'`,
-        });
+  const readReport = Effect.fn("UsageService.readReport")(function* (input: UsageReportInput) {
+    if (input.mode === "prompts") {
+      yield* Effect.try({
+        try: () => validatePromptUsageInput(input),
+        catch: () =>
+          new UsageReadError({
+            reason: "invalidWindow",
+            detail: "Invalid prompt usage window or unsupported filter.",
+          }),
+      });
+      const accumulator = new PromptUsageAccumulator(input);
+      const projection = yield* Effect.serviceOption(
+        ProjectionSnapshotQuery.ProjectionSnapshotQuery,
+      );
+      const query = Option.isSome(projection)
+        ? projection.value.listPromptUsageMessages
+        : undefined;
+      if (Option.isNone(projection) || query === undefined) {
+        accumulator.reasons.add("projection-unavailable");
+        return accumulator.report(DateTime.formatIso(yield* DateTime.now), true);
       }
-
-      const settings = yield* readSettings;
-      if (input.mode === "pricing") {
-        yield* ensureRates(input.refresh === true);
-        const now = yield* DateTime.now;
-        const summary: UsageSummary = {
-          ...emptyUsageSummary(input),
-          readAt: DateTime.formatIso(now),
-          pricing: pricing(),
-        };
-        return projectUsageReport(
-          summary,
-          input,
-          makeUsageReportCalculation(summary.pricing, settings.usagePriceOverrides),
+      const startedAt = yield* Clock.currentTimeMillis;
+      const readSequence = () =>
+        projection.value.getSnapshotSequence().pipe(
+          Effect.map((state) => state.snapshotSequence),
+          Effect.catchCause(() => Effect.succeed(null)),
         );
+      const initialSequence = yield* readSequence();
+      const { sinceTime, untilTime } = promptUsageTimeBounds(input);
+      let beforeCreatedAt = untilTime;
+      let beforeMessageId = "";
+      while (true) {
+        const elapsedMs = (yield* Clock.currentTimeMillis) - startedAt;
+        if (elapsedMs >= 3000) {
+          accumulator.reasons.add("read-deadline");
+          break;
+        }
+        const rows = yield* query({ sinceTime, untilTime, beforeCreatedAt, beforeMessageId }).pipe(
+          Effect.timeout(Duration.millis(3000 - elapsedMs)),
+          Effect.catchCause(() => {
+            accumulator.reasons.add("projection-read-failed");
+            return Effect.succeed([]);
+          }),
+        );
+        for (const row of rows) {
+          if (
+            accumulator.examinedMessages >= 5000 ||
+            accumulator.textCharacters + row.text.length > 4 * 1024 * 1024
+          ) {
+            accumulator.reasons.add("read-limit");
+            break;
+          }
+          accumulator.add(row);
+        }
+        if (rows.length < 32 || accumulator.reasons.has("read-limit")) break;
+        const last = rows[rows.length - 1]!;
+        beforeCreatedAt = last.createdAt;
+        beforeMessageId = last.messageId;
       }
+      const finalSequence = yield* readSequence();
+      if (initialSequence === null || finalSequence === null) {
+        accumulator.reasons.add("projection-sequence-unavailable");
+      } else if (initialSequence !== finalSequence) {
+        accumulator.reasons.add("projection-changed");
+      }
+      return accumulator.report(
+        DateTime.formatIso(yield* DateTime.now),
+        accumulator.examinedMessages === 0 && accumulator.reasons.has("projection-read-failed"),
+      );
+    }
+    if (input.sinceDay > input.untilDay) {
+      return yield* new UsageReadError({
+        reason: "invalidWindow",
+        detail: `sinceDay '${input.sinceDay}' is after untilDay '${input.untilDay}'`,
+      });
+    }
 
-      const summaryInput: UsageSummaryInput = {
-        clientContractVersion: USAGE_CONTRACT_VERSION,
-        sinceDay: input.sinceDay,
-        untilDay: input.untilDay,
-        timeZone: input.timeZone,
-        ...(input.refresh === undefined ? {} : { refresh: input.refresh }),
-        ...(input.resolution === undefined ? {} : { resolution: input.resolution }),
-        ...(input.sinceTime === undefined ? {} : { sinceTime: input.sinceTime }),
-        ...(input.untilTime === undefined ? {} : { untilTime: input.untilTime }),
-        ...(input.providers === undefined ? {} : { providers: input.providers }),
-        ...(input.mode === "runs"
-          ? {
-              groupBy: "run" as const,
-              ...(input.runIds === undefined ? {} : { runIds: input.runIds }),
-            }
-          : {}),
-        ...(input.mode !== "quota"
-          ? {}
-          : input.quotaIntervals === undefined
-            ? { quotaHistoryOnly: true }
-            : { includeQuotaHistory: true, quotaIntervals: input.quotaIntervals }),
+    const settings = yield* readSettings;
+    if (input.mode === "pricing") {
+      yield* ensureRates(input.refresh === true);
+      const now = yield* DateTime.now;
+      const summary: UsageSummary = {
+        ...emptyUsageSummary(input),
+        readAt: DateTime.formatIso(now),
+        pricing: pricing(),
       };
-      const summary = yield* readSummary(summaryInput);
-      const report = projectUsageReport(
+      return projectUsageReport(
         summary,
         input,
         makeUsageReportCalculation(summary.pricing, settings.usagePriceOverrides),
       );
-      if (report.mode !== "runs" || (report.runs.length === 0 && report.dailyRuns.length === 0))
-        return report;
+    }
 
-      const projection = yield* Effect.serviceOption(
-        ProjectionSnapshotQuery.ProjectionSnapshotQuery,
-      );
-      if (
-        Option.isNone(projection) ||
-        projection.value.findThreadMappingsByProviderSessionIds === undefined
-      ) {
-        return report;
-      }
+    const summaryInput: UsageSummaryInput = {
+      clientContractVersion: USAGE_CONTRACT_VERSION,
+      sinceDay: input.sinceDay,
+      untilDay: input.untilDay,
+      timeZone: input.timeZone,
+      ...(input.refresh === undefined ? {} : { refresh: input.refresh }),
+      ...(input.resolution === undefined ? {} : { resolution: input.resolution }),
+      ...(input.sinceTime === undefined ? {} : { sinceTime: input.sinceTime }),
+      ...(input.untilTime === undefined ? {} : { untilTime: input.untilTime }),
+      ...(input.providers === undefined ? {} : { providers: input.providers }),
+      ...(input.mode === "runs"
+        ? {
+            groupBy: "run" as const,
+            ...(input.runIds === undefined ? {} : { runIds: input.runIds }),
+          }
+        : {}),
+      ...(input.mode !== "quota"
+        ? {}
+        : input.quotaIntervals === undefined
+          ? { quotaHistoryOnly: true }
+          : { includeQuotaHistory: true, quotaIntervals: input.quotaIntervals }),
+    };
+    const summary = yield* readSummary(summaryInput);
+    const report = projectUsageReport(
+      summary,
+      input,
+      makeUsageReportCalculation(summary.pricing, settings.usagePriceOverrides),
+    );
+    if (report.mode !== "runs" || (report.runs.length === 0 && report.dailyRuns.length === 0))
+      return report;
 
-      const runIds = [...new Set([...report.runs, ...report.dailyRuns].map((run) => run.runId))];
-      const lookupIds = runIds.slice(0, 512);
-      const lookupSet = new Set(lookupIds);
-      const mappings = yield* projection.value
-        .findThreadMappingsByProviderSessionIds(lookupIds)
-        .pipe(
-          Effect.map((rows) => ({ rows, failed: false as const })),
-          Effect.catchCause(() => Effect.succeed({ rows: [], failed: true as const })),
-        );
-      const reportRunKeys = new Set(
-        [...report.runs, ...report.dailyRuns].map((run) => `${run.provider}\u0000${run.runId}`),
-      );
-      const threadsByRun = new Map<string, Set<string>>();
-      const ambiguousKeys = new Set<string>();
-      for (const mapping of mappings.rows) {
-        const provider = mapping.providerName === "claudeAgent" ? "claude" : mapping.providerName;
-        const key = `${provider}\u0000${mapping.providerSessionId}`;
-        if (!reportRunKeys.has(key) || mapping.threadId.length > 512) continue;
-        const threadIds = threadsByRun.get(key) ?? new Set<string>();
-        threadIds.add(mapping.threadId);
-        threadsByRun.set(key, threadIds);
-        if (mapping.threadCount > 1) ambiguousKeys.add(key);
-      }
-      const mapRun = <T extends { readonly provider: string; readonly runId: string }>(run: T) => {
-        const key = `${run.provider}\u0000${run.runId}`;
-        const threadIds = threadsByRun.get(key);
-        const unavailable = mappings.failed || !lookupSet.has(run.runId);
-        const ambiguous = ambiguousKeys.has(key) || (threadIds?.size ?? 0) > 1;
-        return {
-          ...run,
-          threadId: !unavailable && !ambiguous && threadIds?.size === 1 ? [...threadIds][0]! : null,
-          threadMapping: unavailable
-            ? ("unavailable" as const)
-            : threadIds === undefined
-              ? ("missing" as const)
-              : ambiguous
-                ? ("ambiguous" as const)
-                : ("matched" as const),
-        };
-      };
+    const projection = yield* Effect.serviceOption(ProjectionSnapshotQuery.ProjectionSnapshotQuery);
+    if (
+      Option.isNone(projection) ||
+      projection.value.findThreadMappingsByProviderSessionIds === undefined
+    ) {
+      return report;
+    }
+
+    const runIds = [...new Set([...report.runs, ...report.dailyRuns].map((run) => run.runId))];
+    const lookupIds = runIds.slice(0, 512);
+    const lookupSet = new Set(lookupIds);
+    const mappings = yield* projection.value.findThreadMappingsByProviderSessionIds(lookupIds).pipe(
+      Effect.map((rows) => ({ rows, failed: false as const })),
+      Effect.catchCause(() => Effect.succeed({ rows: [], failed: true as const })),
+    );
+    const reportRunKeys = new Set(
+      [...report.runs, ...report.dailyRuns].map((run) => `${run.provider}\u0000${run.runId}`),
+    );
+    const threadsByRun = new Map<string, Set<string>>();
+    const ambiguousKeys = new Set<string>();
+    for (const mapping of mappings.rows) {
+      const provider = mapping.providerName === "claudeAgent" ? "claude" : mapping.providerName;
+      const key = `${provider}\u0000${mapping.providerSessionId}`;
+      if (!reportRunKeys.has(key) || mapping.threadId.length > 512) continue;
+      const threadIds = threadsByRun.get(key) ?? new Set<string>();
+      threadIds.add(mapping.threadId);
+      threadsByRun.set(key, threadIds);
+      if (mapping.threadCount > 1) ambiguousKeys.add(key);
+    }
+    const mapRun = <T extends { readonly provider: string; readonly runId: string }>(run: T) => {
+      const key = `${run.provider}\u0000${run.runId}`;
+      const threadIds = threadsByRun.get(key);
+      const unavailable = mappings.failed || !lookupSet.has(run.runId);
+      const ambiguous = ambiguousKeys.has(key) || (threadIds?.size ?? 0) > 1;
       return {
-        ...report,
-        runs: report.runs.map(mapRun),
-        dailyRuns: report.dailyRuns.map(mapRun),
-        threadMappingStatus:
-          mappings.failed || runIds.length > lookupIds.length ? "partial" : "complete",
+        ...run,
+        threadId: !unavailable && !ambiguous && threadIds?.size === 1 ? [...threadIds][0]! : null,
+        threadMapping: unavailable
+          ? ("unavailable" as const)
+          : threadIds === undefined
+            ? ("missing" as const)
+            : ambiguous
+              ? ("ambiguous" as const)
+              : ("matched" as const),
       };
-    },
-  );
+    };
+    return {
+      ...report,
+      runs: report.runs.map(mapRun),
+      dailyRuns: report.dailyRuns.map(mapRun),
+      threadMappingStatus:
+        mappings.failed || runIds.length > lookupIds.length ? "partial" : "complete",
+    };
+  });
 
-  return { readSummary, readReport, refreshRates } as const;
+  return {
+    readSummary,
+    readReport: readReport as UsageService["Service"]["readReport"],
+    refreshRates,
+  } as const;
 });
 
 export const layer = Layer.effect(UsageService, make);

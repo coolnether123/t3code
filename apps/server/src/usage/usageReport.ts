@@ -532,11 +532,15 @@ export function projectUsageReport(
   summary: UsageSummary,
   input: UsageReportInput,
   calculation: UsageReportCalculation,
-): UsageReport {
+): Exclude<UsageReport, { readonly mode: "prompts" }> {
   const coverage = projectCoverage(summary, input.mode);
   const envelope = calculationEnvelope(summary, input, calculation, coverage);
 
   switch (input.mode) {
+    case "prompts":
+      throw new Error(
+        "Prompt usage is projected from persisted user messages, not token summaries.",
+      );
     case "overview": {
       const total = emptyRollup();
       for (const bucket of summary.buckets) addBucket(total, bucket);

@@ -516,6 +516,7 @@ export const UsageReportMode = Schema.Literals([
   "quota",
   "pricing",
   "runs",
+  "prompts",
 ]);
 export type UsageReportMode = typeof UsageReportMode.Type;
 
@@ -802,6 +803,48 @@ export const UsageReportPricing = Schema.Struct({
 });
 export type UsageReportPricing = typeof UsageReportPricing.Type;
 
+export const UsageReportPrompts = Schema.Struct({
+  contractVersion: Schema.Literal(USAGE_REPORT_CONTRACT_VERSION),
+  mode: Schema.Literal("prompts"),
+  readAt: Schema.String,
+  timeZone: TrimmedNonEmptyString,
+  sinceDay: UsageDay,
+  untilDay: UsageDay,
+  scope: Schema.Literal("t3UserMessages"),
+  coverage: Schema.Struct({
+    status: Schema.Literals(["complete", "partial", "missing"]),
+    examinedMessages: NonNegativeInt,
+    countedMessages: NonNegativeInt,
+    truncatedMessages: NonNegativeInt,
+    reasons: Schema.Array(Schema.String).check(Schema.isMaxLength(8)),
+  }),
+  totals: Schema.Struct({
+    prompts: NonNegativeInt,
+    words: NonNegativeInt,
+    characters: NonNegativeInt,
+    threads: NonNegativeInt,
+    activeDays: NonNegativeInt,
+    averageWordsPerPrompt: Schema.NullOr(Schema.Number),
+  }),
+  daily: Schema.Array(
+    Schema.Struct({
+      day: UsageDay,
+      prompts: NonNegativeInt,
+      words: NonNegativeInt,
+    }),
+  ).check(Schema.isMaxLength(366)),
+  words: Schema.Array(
+    Schema.Struct({
+      word: TrimmedNonEmptyString.check(Schema.isMaxLength(64)),
+      count: NonNegativeInt,
+    }),
+  ).check(Schema.isMaxLength(512)),
+  countedDistinctWords: NonNegativeInt,
+  wordsTruncated: Schema.Boolean,
+  countingPolicy: Schema.String,
+});
+export type UsageReportPrompts = typeof UsageReportPrompts.Type;
+
 export const UsageReport = Schema.Union([
   UsageReportOverview,
   UsageReportProviders,
@@ -810,6 +853,7 @@ export const UsageReport = Schema.Union([
   UsageReportQuota,
   UsageReportPricing,
   UsageReportRuns,
+  UsageReportPrompts,
 ]);
 export type UsageReport = typeof UsageReport.Type;
 

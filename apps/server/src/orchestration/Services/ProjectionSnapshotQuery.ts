@@ -78,6 +78,22 @@ export interface ProjectionThreadDetailQuery {
  * ProjectionSnapshotQueryShape - Service API for read-model snapshots.
  */
 export interface ProjectionSnapshotQueryShape {
+  /** Bounded keyset read of persisted user messages, including archived threads. */
+  readonly listPromptUsageMessages?: (input: {
+    readonly sinceTime: string;
+    readonly untilTime: string;
+    readonly beforeCreatedAt: string;
+    readonly beforeMessageId: string;
+  }) => Effect.Effect<
+    ReadonlyArray<{
+      readonly messageId: string;
+      readonly threadId: string;
+      readonly createdAt: string;
+      readonly text: string;
+      readonly textLength: number;
+    }>,
+    ProjectionRepositoryError
+  >;
   /** Read the latest request or resolution without loading the thread history. */
   readonly getUserInputActivity: (input: {
     readonly threadId: ThreadId;

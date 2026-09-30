@@ -1,5 +1,29 @@
 # Review usage
 
+## Prompts and words
+
+The Usage page reports stored user messages in **Prompts & words** for the
+selected period. Each environment has its own counts, frequent words and daily
+table. Use the panel's Refresh button to read newly stored messages.
+
+Each stored user-message ID counts as one prompt. Imported and archived chats
+are included. Repeated submissions count separately, as do copies stored in
+separate chats. Chats outside this environment's T3 history are not included.
+These counts describe stored messages, not provider requests or authored text.
+
+Word counts use Unicode letter and number runs after text normalization.
+Frequent words are lowercase and omit common English words and word runs
+containing digits. Punctuation splits words, so `gpt-4o` contributes `gpt`.
+Code and pasted instructions in user messages contribute to the
+word count. Attachment-only messages count as prompts, but attachment contents,
+agent replies, system messages and tools do not contribute words.
+
+Words are not tokens, costs or subscription usage. Environments are shown
+separately rather than adding potentially copied history together. A partial
+history notice means the counts cover only the examined subset. Missing history
+is unavailable, not a zero. The report contains counts and individual frequent
+words, never full prompt text.
+
 For a birthday palette and tap effects on these screens, see [Celebrate your birthday](birthday-theme.md).
 
 The Usage page combines Codex, Claude Code, Gemini, OpenCode, and configured chat archives from
