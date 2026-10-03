@@ -1,5 +1,56 @@
 # Provider constraints
 
+## Reactor failures and repository lookups
+
+Drainable workers run each item in a child fiber and await its exit as data.
+An item's failure, defect, or interruption is logged without ending intake.
+Closing the worker's scope still cancels active work and stops consumption.
+Checkpoint and provider reactors subscribe independently. Failed pre-turn
+baseline work does not prevent provider dispatch; later baseline events can
+retry capture.
+
+Repository identity reads share caches for Git roots and remotes. Callers await
+cache reads in child fibers and retry an interrupted lookup once. A second
+interruption returns no identity rather than interrupting another reactor.
+Cancellation of the caller itself still cancels its wait.
+
+The pull-request reactor reads shell snapshots, whose repository identity
+resolution has a 100-millisecond deadline. Slow Git discovery can outlast that
+deadline. Cache reads must not propagate that snapshot's interrupted lookup
+into checkpoint or provider work that shares the same workspace root.
+
+## Session and turn-start deadlines
+
+Provider intents enter a FIFO intake worker, then run independently by thread.
+Each intent waits for that thread's previous intent to finish, including its
+failure handling. A slow session open cannot hold up another thread. A second
+message for the same thread waits behind the first and can retry after a failed
+open. Worker drains wait for these per-thread chains as well as intake.
+Turn acceptance stays in the chain; running turns, compaction, and title
+generation remain background work.
+
+Codex runtime construction and session open each have a 20-minute deadline.
+Opening resumes the thread's full history, and long, reused chats can take
+several minutes. Per-thread isolation keeps a slow open from delaying other chats.
+`initialize`, the `initialized` notification, desktop `skills/extraRoots/set`,
+`config/read`, and `thread/start`, `thread/resume`, or `thread/fork` are bounded too.
+Optional MCP and skill inventories keep their shorter existing deadlines.
+
+`turn/start` and `turn/steer` acceptance have a 90-second deadline, including the
+runtime's MCP availability lookup. This does not limit the running agent's turn. A missing response
+fails visibly with "Codex didn't answer while opening this chat; try again"
+or the corresponding turn-start message. The adapter closes its session scope
+and child or proxy; the provider service revokes the session's MCP credential
+on failed open or when a failed send leaves no active adapter session.
+Turn-acceptance timeouts also remove the active adapter session,
+so the next attempt resumes through a fresh connection to the same instance.
+There is no fallback to another instance or transport.
+
+A turn-acceptance timeout cannot prove that the daemon rejected the request.
+The daemon may have started work without replying. Check the provider thread
+before resending the same input. Closing T3's proxy does not stop the shared
+desktop daemon or guarantee cancellation of daemon-hosted work.
+
 Orchestration records intent and state without knowing which provider runs a thread. Provider
 protocols, account ownership, permissions, and capabilities belong at the
 [adapter boundary](../../apps/server/src/provider/Services/ProviderAdapter.ts). Normalize there

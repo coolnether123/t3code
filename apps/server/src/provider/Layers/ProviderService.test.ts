@@ -14,6 +14,7 @@ import type {
 } from "@t3tools/contracts";
 import {
   ApprovalRequestId,
+  EnvironmentId,
   EventId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -61,6 +62,7 @@ import * as ServerConfig from "../../config.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import { makeAdapterRegistryMock } from "../testUtils/providerAdapterRegistryMock.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 
 const defaultServerSettingsLayer = ServerSettings.ServerSettingsService.layerTest();
 const serverConfigTestLayer = ServerConfig.layerTest(process.cwd(), process.cwd()).pipe(
@@ -2219,6 +2221,76 @@ validation.layer("ProviderServiceLive validation", (it) => {
 
 describe("agent browser access", () => {
   const revokedThreads: Array<ThreadId> = [];
+
+  it.effect("revokes the MCP session when failed turn acceptance closes the adapter session", () =>
+    Effect.gen(function* () {
+      const threadId = asThreadId("thread-acceptance-closed");
+      const revoked: ThreadId[] = [];
+      const codex = makeFakeCodexAdapter();
+      const directoryLayer = ProviderSessionDirectoryLive.pipe(
+        Layer.provide(ProviderSessionRuntime.layer.pipe(Layer.provide(SqlitePersistenceMemory))),
+      );
+      const providerLayer = makeProviderServiceLive({
+        issueMcpCredential: () => Effect.succeed(undefined),
+        revokeMcpCredential: (threadId) => Effect.sync(() => void revoked.push(threadId)),
+      }).pipe(
+        Layer.provide(
+          Layer.succeed(
+            ProviderAdapterRegistry.ProviderAdapterRegistry,
+            makeAdapterRegistryMock({ [CODEX_DRIVER]: codex.adapter }),
+          ),
+        ),
+        Layer.provide(directoryLayer),
+        Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(serverConfigTestLayer),
+        Layer.provide(AnalyticsService.layerTest),
+        Layer.provide(
+          Layer.succeed(
+            ProviderEventLoggers.ProviderEventLoggers,
+            ProviderEventLoggers.NoOpProviderEventLoggers,
+          ),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+        yield* provider.startSession(threadId, {
+          threadId,
+          providerInstanceId: codexInstanceId,
+          runtimeMode: "full-access",
+        });
+        revoked.length = 0;
+        McpProviderSession.setMcpProviderSession({
+          environmentId: EnvironmentId.make("fake-environment"),
+          threadId,
+          providerSessionId: "fake-session",
+          providerInstanceId: codexInstanceId,
+          endpoint: "http://127.0.0.1:1/fake-mcp",
+          authorizationHeader: "Bearer fake-test-token",
+        });
+        codex.sendTurn.mockImplementationOnce(() =>
+          codex.stopSession(threadId).pipe(
+            Effect.andThen(
+              Effect.fail(
+                new ProviderAdapterRequestError({
+                  provider: "codex",
+                  method: "turn/start",
+                  detail: "Codex didn't answer while starting this turn; try again.",
+                }),
+              ),
+            ),
+          ),
+        );
+        const result = yield* provider
+          .sendTurn({ threadId, input: "hello", attachments: [] })
+          .pipe(Effect.result);
+        assert.equal(result._tag, "Failure");
+        assert.deepEqual(revoked, [threadId]);
+        assert.equal(McpProviderSession.readMcpProviderSession(threadId), undefined);
+        yield* provider.sendTurn({ threadId, input: "retry", attachments: [] });
+        assert.equal(codex.startSession.mock.calls.length, 2);
+      }).pipe(Effect.provide(providerLayer));
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 
   const startSessionWith = (
     settings: { readonly enableAgentBrowserAccess: boolean; readonly enableT3Workers?: boolean },

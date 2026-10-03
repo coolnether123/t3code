@@ -26,6 +26,7 @@ import { it, vi } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -46,6 +47,7 @@ import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import {
   buildCodexAppServerCommandArgs,
+  openCodexThread,
   type CodexSessionRuntimeError,
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeSendTurnInput,
@@ -55,6 +57,7 @@ import {
 import { makeCodexAdapter, type CodexAdapterLiveOptions } from "./CodexAdapter.ts";
 import { runtimeEventToActivities } from "../../orchestration/Layers/ProviderRuntimeIngestion.ts";
 import { foldSubagentActivities } from "../../../../../packages/client-runtime/src/state/subagentRuntime.ts";
+import { CODEX_SESSION_OPEN_TIMEOUT } from "../CodexRequestDeadline.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
 // Test-local service tag so the rest of the file can keep using `yield* CodexAdapter`.
@@ -2434,6 +2437,122 @@ const scopedLifecycleLayer = it.layer(
 );
 
 scopedLifecycleLayer("CodexAdapterLive scoped lifecycle", (it) => {
+  it.effect("closes the scope when runtime construction never finishes", () =>
+    Effect.gen(function* () {
+      scopedLifecycleRuntimeFactory.releasedThreadIds.length = 0;
+      const adapter = yield* CodexAdapter;
+      const entered = yield* Deferred.make<void>();
+      const originalFactory = scopedLifecycleRuntimeFactory.factory.getMockImplementation()!;
+      scopedLifecycleRuntimeFactory.factory.mockImplementationOnce((options) =>
+        originalFactory(options).pipe(
+          Effect.andThen(Deferred.succeed(entered, undefined)),
+          Effect.andThen(Effect.never),
+        ),
+      );
+      const threadId = asThreadId("thread-silent-construction");
+      const pending = yield* adapter
+        .startSession({ threadId, runtimeMode: "full-access" })
+        .pipe(Effect.flip, Effect.forkChild);
+      yield* Deferred.await(entered);
+      yield* TestClock.adjust(CODEX_SESSION_OPEN_TIMEOUT);
+      NodeAssert.match((yield* Fiber.join(pending)).message, /No response to app-server startup/);
+      NodeAssert.deepStrictEqual(scopedLifecycleRuntimeFactory.releasedThreadIds, [threadId]);
+      NodeAssert.equal(yield* adapter.hasSession(threadId), false);
+    }),
+  );
+
+  it.effect("closes a silent resume and retries the same chat on a fresh runtime", () =>
+    Effect.gen(function* () {
+      scopedLifecycleRuntimeFactory.releasedThreadIds.length = 0;
+      const adapter = yield* CodexAdapter;
+      const entered = yield* Deferred.make<void>();
+      const originalFactory = scopedLifecycleRuntimeFactory.factory.getMockImplementation()!;
+      scopedLifecycleRuntimeFactory.factory.mockImplementationOnce((options) =>
+        originalFactory(options).pipe(
+          Effect.tap((runtime) =>
+            Effect.sync(() => {
+              runtime.start = () =>
+                Deferred.succeed(entered, undefined).pipe(
+                  Effect.andThen(
+                    openCodexThread({
+                      client: { request: () => Effect.never },
+                      threadId: options.threadId,
+                      runtimeMode: options.runtimeMode,
+                      cwd: options.cwd,
+                      requestedModel: undefined,
+                      serviceTier: undefined,
+                      resumeThreadId: "provider-existing",
+                    }),
+                  ),
+                  Effect.andThen(Effect.never),
+                );
+            }),
+          ),
+        ),
+      );
+      const input = {
+        threadId: asThreadId("thread-silent-resume"),
+        runtimeMode: "full-access" as const,
+        resumeCursor: { threadId: "provider-existing" },
+      };
+      const pending = yield* adapter.startSession(input).pipe(Effect.flip, Effect.forkChild);
+      yield* Deferred.await(entered);
+      const original = scopedLifecycleRuntimeFactory.lastRuntime!;
+      yield* TestClock.adjust(CODEX_SESSION_OPEN_TIMEOUT);
+      const error = yield* Fiber.join(pending);
+      NodeAssert.match(error.message, /Codex didn't answer while opening this chat/);
+      NodeAssert.equal(original.closeImpl.mock.calls.length, 1);
+      NodeAssert.equal(yield* adapter.hasSession(input.threadId), false);
+      NodeAssert.deepStrictEqual(scopedLifecycleRuntimeFactory.releasedThreadIds, [input.threadId]);
+      yield* adapter.startSession(input);
+      const turn = yield* adapter.sendTurn({ threadId: input.threadId, input: "retry" });
+      NodeAssert.equal(turn.turnId, asTurnId("turn-1"));
+      NodeAssert.notEqual(scopedLifecycleRuntimeFactory.lastRuntime, original);
+      NodeAssert.deepStrictEqual(
+        scopedLifecycleRuntimeFactory.lastRuntime?.options.resumeCursor,
+        input.resumeCursor,
+      );
+      yield* adapter.stopSession(input.threadId);
+    }),
+  );
+
+  for (const steering of [false, true]) {
+    it.effect(
+      `closes the session when turn/${steering ? "steer" : "start"} acceptance never replies`,
+      () =>
+        Effect.gen(function* () {
+          const adapter = yield* CodexAdapter;
+          const threadId = asThreadId(`thread-silent-send-${steering}`);
+          yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+          const runtime = scopedLifecycleRuntimeFactory.lastRuntime!;
+          const entered = yield* Deferred.make<void>();
+          runtime.sendTurn = () =>
+            Deferred.succeed(entered, undefined).pipe(Effect.andThen(Effect.never));
+          const pending = yield* adapter
+            .sendTurn({
+              threadId,
+              input: "hello",
+              ...(steering ? { expectedTurnId: asTurnId("turn-1") } : {}),
+            })
+            .pipe(Effect.flip, Effect.forkChild);
+          yield* Deferred.await(entered);
+          yield* TestClock.adjust("90 seconds");
+          NodeAssert.match(
+            (yield* Fiber.join(pending)).message,
+            /Codex didn't answer while starting this turn/,
+          );
+          NodeAssert.equal(runtime.closeImpl.mock.calls.length, 1);
+          NodeAssert.equal(yield* adapter.hasSession(threadId), false);
+          yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+          NodeAssert.equal(
+            (yield* adapter.sendTurn({ threadId, input: "next" })).turnId,
+            asTurnId("turn-1"),
+          );
+          yield* adapter.stopSession(threadId);
+        }),
+    );
+  }
+
   it.effect("closes the externally owned session scope on stopSession", () =>
     Effect.gen(function* () {
       scopedLifecycleRuntimeFactory.releasedThreadIds.length = 0;

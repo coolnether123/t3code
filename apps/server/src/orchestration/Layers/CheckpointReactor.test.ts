@@ -329,6 +329,7 @@ describe("CheckpointReactor", () => {
     readonly gitStatusRefreshCalls?: Array<string>;
     readonly useLinkedWorktree?: boolean;
     readonly useNestedThreadCwd?: boolean;
+    readonly repositoryLookupEffect?: () => Effect.Effect<void>;
   }) {
     const repositoryRoot = createGitRepository();
     tempDirs.push(repositoryRoot);
@@ -356,6 +357,18 @@ describe("CheckpointReactor", () => {
       options?.providerSessionCwd ?? cwd,
       options?.providerName ?? ProviderDriverKind.make("codex"),
     );
+    const repositoryIdentityLayer = Layer.effect(
+      RepositoryIdentityResolver.RepositoryIdentityResolver,
+      Effect.gen(function* () {
+        const resolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
+        return {
+          resolve: (cwd, resolveOptions) =>
+            (options?.repositoryLookupEffect?.() ?? Effect.void).pipe(
+              Effect.andThen(resolver.resolve(cwd, resolveOptions)),
+            ),
+        } satisfies RepositoryIdentityResolver.RepositoryIdentityResolver["Service"];
+      }),
+    ).pipe(Layer.provide(RepositoryIdentityResolver.layer));
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionSnapshotQueryLive),
       Layer.provide(ThreadBackgroundLiveness.layer),
@@ -363,13 +376,13 @@ describe("CheckpointReactor", () => {
       Layer.provide(OrchestrationProjectionPipelineLive),
       Layer.provide(OrchestrationEventStoreLive),
       Layer.provide(OrchestrationCommandReceiptRepositoryLive),
-      Layer.provide(RepositoryIdentityResolver.layer),
+      Layer.provide(repositoryIdentityLayer),
       Layer.provide(SqlitePersistenceMemory),
     );
     const projectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
       Layer.provide(ThreadBackgroundLiveness.layer),
       Layer.provide(ThreadPlanProgress.layer),
-      Layer.provide(RepositoryIdentityResolver.layer),
+      Layer.provide(repositoryIdentityLayer),
       Layer.provide(SqlitePersistenceMemory),
     );
 
@@ -1128,6 +1141,43 @@ describe("CheckpointReactor", () => {
       thread.activities.some((activity) => activity.kind === "checkpoint.capture.failed"),
     ).toBe(true);
   });
+
+  it.each(["interrupt", "defect"] as const)(
+    "captures a later baseline after a %s",
+    async (failure) => {
+      let armed = false;
+      const harness = await createHarness({
+        hasSession: false,
+        seedFilesystemCheckpoints: false,
+        threadWorktreePath: null,
+        repositoryLookupEffect: () => {
+          if (!armed) return Effect.void;
+          armed = false;
+          return failure === "interrupt" ? Effect.interrupt : Effect.die("baseline lookup failed");
+        },
+      });
+      armed = true;
+      for (const tag of ["failed-baseline", "later-baseline"]) {
+        await harness.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make(`cmd-${tag}`),
+          threadId: ThreadId.make("thread-1"),
+          message: { messageId: MessageId.make(tag), role: "user", text: tag, attachments: [] },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        });
+      }
+      await harness.drain();
+      expect(
+        gitShowFileAtRef(
+          harness.cwd,
+          checkpointRefForThreadTurn(ThreadId.make("thread-1"), 0),
+          "README.md",
+        ),
+      ).toBe("v1\n");
+    },
+  );
 
   it("captures pre-turn baseline from project workspace root when thread worktree is unset", async () => {
     const harness = await createHarness({

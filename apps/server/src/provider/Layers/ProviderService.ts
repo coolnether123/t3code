@@ -963,7 +963,19 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       // rather than issuing a new one: sessions that go a long time between
       // browser tool calls used to lose the toolkit outright.
       yield* McpSessionRegistry.touchActiveMcpThread(input.threadId, activeModelSelection);
-      const turn = yield* routed.adapter.sendTurn(input);
+      const turn = yield* routed.adapter
+        .sendTurn(input)
+        .pipe(
+          Effect.onError(() =>
+            routed.adapter
+              .hasSession(input.threadId)
+              .pipe(
+                Effect.flatMap((active) =>
+                  active ? Effect.void : clearMcpSession(input.threadId),
+                ),
+              ),
+          ),
+        );
       yield* McpSessionRegistry.touchActiveMcpThread(
         input.threadId,
         activeModelSelection,

@@ -3,6 +3,8 @@ import * as NodeFS from "node:fs";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import * as Duration from "effect/Duration";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -38,6 +40,93 @@ const makeRepositoryIdentityResolverTestLayer = (options: {
   ).pipe(Layer.provide(ProcessRunner.layer));
 
 it.layer(NodeServices.layer)("RepositoryIdentityResolverLive", (it) => {
+  it.effect.each(["rev-parse", "remote"] as const)(
+    "recomputes a shared interrupted %s lookup for both callers",
+    (operation) =>
+      Effect.gen(function* () {
+        const started = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        let attempts = 0;
+        const processRunner = Layer.succeed(ProcessRunner.ProcessRunner, {
+          run: (input) =>
+            Effect.gen(function* () {
+              if (input.args.includes(operation) && attempts++ === 0) {
+                yield* Deferred.succeed(started, undefined);
+                yield* Deferred.await(release);
+                return yield* Effect.interrupt;
+              }
+              return {
+                stdout: input.args.includes("rev-parse")
+                  ? "/repo\n"
+                  : "origin\tgit@github.com:T3Tools/t3code.git (fetch)\n",
+                stderr: "",
+                code: ChildProcessSpawner.ExitCode(0),
+                timedOut: false,
+                stdoutTruncated: false,
+                stderrTruncated: false,
+                stdoutInvalidUtf8: false,
+                stderrInvalidUtf8: false,
+              };
+            }),
+        });
+        const resolver = yield* RepositoryIdentityResolver.make().pipe(
+          Effect.provide(processRunner),
+        );
+        const first = yield* resolver.resolve("/repo").pipe(Effect.forkChild);
+        yield* Deferred.await(started);
+        const secondStarted = yield* Deferred.make<void>();
+        const second = yield* Deferred.succeed(secondStarted, undefined).pipe(
+          Effect.andThen(resolver.resolve("/repo")),
+          Effect.forkChild,
+        );
+        yield* Deferred.await(secondStarted);
+        yield* Effect.yieldNow;
+        yield* Deferred.succeed(release, undefined);
+        expect((yield* Fiber.join(first))?.canonicalKey).toBe("github.com/t3tools/t3code");
+        expect((yield* Fiber.join(second))?.canonicalKey).toBe("github.com/t3tools/t3code");
+        expect((yield* resolver.resolve("/repo"))?.canonicalKey).toBe("github.com/t3tools/t3code");
+      }),
+  );
+
+  it.effect("keeps another caller alive when the first caller cancels", () =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const processRunner = Layer.succeed(ProcessRunner.ProcessRunner, {
+        run: (input) =>
+          Effect.gen(function* () {
+            yield* Deferred.succeed(started, undefined);
+            yield* Deferred.await(release);
+            return {
+              stdout: input.args.includes("rev-parse")
+                ? "/repo\n"
+                : "origin\tgit@github.com:T3Tools/t3code.git (fetch)\n",
+              stderr: "",
+              code: ChildProcessSpawner.ExitCode(0),
+              timedOut: false,
+              stdoutTruncated: false,
+              stderrTruncated: false,
+              stdoutInvalidUtf8: false,
+              stderrInvalidUtf8: false,
+            };
+          }),
+      });
+      const resolver = yield* RepositoryIdentityResolver.make().pipe(Effect.provide(processRunner));
+      const first = yield* resolver.resolve("/repo").pipe(Effect.forkChild);
+      yield* Deferred.await(started);
+      const secondStarted = yield* Deferred.make<void>();
+      const second = yield* Deferred.succeed(secondStarted, undefined).pipe(
+        Effect.andThen(resolver.resolve("/repo")),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(secondStarted);
+      yield* Effect.yieldNow;
+      yield* Fiber.interrupt(first);
+      yield* Deferred.succeed(release, undefined);
+      expect((yield* Fiber.join(second))?.canonicalKey).toBe("github.com/t3tools/t3code");
+    }),
+  );
+
   it.effect("refreshes the Git root only when requested", () => {
     const calls: Array<ReadonlyArray<string>> = [];
     let rootPath = "/repo";

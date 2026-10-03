@@ -9,7 +9,10 @@
  * @module DrainableWorker
  */
 import * as Scope from "effect/Scope";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as TxQueue from "effect/TxQueue";
 import * as TxRef from "effect/TxRef";
 
@@ -47,7 +50,17 @@ export const makeDrainableWorker = <A, E, R>(
     yield* TxQueue.take(queue).pipe(
       Effect.tap((a) =>
         Effect.ensuring(
-          process(a),
+          Effect.gen(function* () {
+            // Await the item's exit as data, so its interruption cannot end intake.
+            // Interrupting the worker itself still cancels its child and the await.
+            const item = yield* Effect.forkChild(Effect.suspend(() => process(a)));
+            const exit = yield* Fiber.await(item);
+            if (Exit.isFailure(exit)) {
+              yield* Effect.logWarning("queue worker failed to process item", {
+                cause: Cause.pretty(exit.cause),
+              });
+            }
+          }),
           TxRef.update(outstanding, (n) => n - 1),
         ),
       ),

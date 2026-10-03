@@ -1505,9 +1505,6 @@ const make = Effect.gen(function* () {
   const processInputSafely = (input: ReactorInput) =>
     processInput(input).pipe(
       Effect.catchCause((cause) => {
-        if (Cause.hasInterruptsOnly(cause)) {
-          return Effect.failCause(cause);
-        }
         return Effect.logWarning("checkpoint reactor failed to process input", {
           source: input.source,
           eventType: input.event.type,

@@ -4,10 +4,12 @@ import {
   normalizeGitRemoteUrl,
 } from "@t3tools/shared/git";
 import * as Cache from "effect/Cache";
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 
 import * as ProcessRunner from "../processRunner.ts";
@@ -15,6 +17,26 @@ import * as ProcessRunner from "../processRunner.ts";
 const DEFAULT_REPOSITORY_IDENTITY_CACHE_CAPACITY = 512;
 const DEFAULT_POSITIVE_CACHE_TTL = Duration.minutes(1);
 const DEFAULT_NEGATIVE_CACHE_TTL = Duration.minutes(1);
+
+const getRepositoryCacheValue = Effect.fn("RepositoryIdentityResolver.getCacheValue")(function* <A>(
+  cache: Cache.Cache<string, A | null>,
+  key: string,
+) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    // A joined cache lookup can carry another caller's interruption. Keep that
+    // exit in a child; cancellation of this caller still interrupts the await.
+    const lookup = yield* Cache.get(cache, key).pipe(Effect.forkChild);
+    const exit = yield* Fiber.await(lookup);
+    if (Exit.isSuccess(exit)) return exit.value;
+    if (!Cause.hasInterruptsOnly(exit.cause)) return yield* Effect.failCause(exit.cause);
+    yield* Effect.logWarning("repository identity lookup interrupted", {
+      key,
+      attempt: attempt + 1,
+      cause: Cause.pretty(exit.cause),
+    });
+  }
+  return null;
+});
 
 export interface RepositoryIdentityResolverOptions {
   readonly cacheCapacity?: number;
@@ -175,10 +197,10 @@ export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (
     "RepositoryIdentityResolver.resolve",
   )(function* (cwd, options) {
     if (options?.refresh) yield* Cache.invalidate(repositoryRootCache, cwd);
-    const cacheKey = yield* Cache.get(repositoryRootCache, cwd);
+    const cacheKey = yield* getRepositoryCacheValue(repositoryRootCache, cwd);
     if (cacheKey === null) return null;
     if (options?.refresh) yield* Cache.invalidate(repositoryIdentityCache, cacheKey);
-    return yield* Cache.get(repositoryIdentityCache, cacheKey);
+    return yield* getRepositoryCacheValue(repositoryIdentityCache, cacheKey);
   });
 
   return RepositoryIdentityResolver.of({ resolve });

@@ -23,6 +23,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Scope from "effect/Scope";
 import * as Equal from "effect/Equal";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -1661,7 +1662,6 @@ const make = Effect.gen(function* () {
     if (resumed && event.commandId !== null) resumedTurnStarts.delete(event.commandId);
     yield* send.pipe(
       Effect.ensuring(resumed ? Deferred.succeed(resumed.sent, undefined) : Effect.void),
-      Effect.forkScoped,
     );
   });
 
@@ -1947,9 +1947,6 @@ const make = Effect.gen(function* () {
         }),
       ),
       Effect.catchCause((cause) => {
-        if (Cause.hasInterruptsOnly(cause)) {
-          return Effect.interrupt;
-        }
         return Effect.logWarning("provider command reactor failed to process event", {
           eventType: event.type,
           cause: Cause.pretty(cause),
@@ -1957,7 +1954,30 @@ const make = Effect.gen(function* () {
       }),
     );
 
-  const worker = yield* makeDrainableWorker(processDomainEventSafely);
+  const workerScope = yield* Scope.Scope;
+  const threadTails = new Map<ThreadId, Deferred.Deferred<void>>();
+  // The intake worker assigns FIFO predecessors before forking provider work.
+  // Idle threads retain no worker or queue; each tail covers all earlier intents.
+  const worker = yield* makeDrainableWorker((event: ProviderIntentEvent) =>
+    Effect.gen(function* () {
+      const threadId = event.payload.threadId;
+      const previous = threadTails.get(threadId);
+      const completed = yield* Deferred.make<void>();
+      threadTails.set(threadId, completed);
+      yield* Effect.gen(function* () {
+        if (previous) yield* Deferred.await(previous);
+        yield* processDomainEventSafely(event);
+      }).pipe(
+        Effect.ensuring(
+          Effect.gen(function* () {
+            yield* Deferred.succeed(completed, undefined);
+            if (threadTails.get(threadId) === completed) threadTails.delete(threadId);
+          }),
+        ),
+        Effect.forkIn(workerScope),
+      );
+    }),
+  );
 
   const recoverInterruptedCompactions = Effect.fn("recoverInterruptedCompactions")(function* () {
     const generations = yield* projectionSnapshotQuery.getActiveContextCompactions();
@@ -2078,7 +2098,12 @@ const make = Effect.gen(function* () {
   return {
     start,
     drain: Effect.gen(function* () {
-      yield* worker.drain;
+      while (true) {
+        yield* worker.drain;
+        const tails = Array.from(threadTails.values());
+        if (tails.length === 0) break;
+        yield* Effect.forEach(tails, Deferred.await, { discard: true });
+      }
       yield* threadTitleRegenerationWorker.drain;
     }),
   } satisfies ProviderCommandReactorShape;
