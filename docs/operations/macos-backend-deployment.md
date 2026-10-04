@@ -106,6 +106,18 @@ environment needed by native Codex (`HOME`, `PATH`, `CODEX_HOME`, and the
 Codex binary/transport path settings when present). It does not copy arbitrary
 shell variables or credentials.
 
+The generated wrapper routes the exact production `serve` command through
+`launchctl kickstart` when called outside launchd. It does not use `-k`, so
+an already running backend stays running. The LaunchAgent sets
+`T3CODE_BACKEND_LAUNCHD=1` to run the backend directly. Inspection commands
+and isolated servers on other ports still invoke the installed runtime.
+This keeps an SSH desktop connection from spawning an unmanaged production
+server that competes with launchd for the port and data-directory lock.
+
+The LaunchAgent sets both file-descriptor limits to 16384. After deployment,
+check that its current PID owns port 3773; a historical exit status alone
+does not describe the running job.
+
 ## Safety and rollback
 
 Before stopping the old process, the helper:
