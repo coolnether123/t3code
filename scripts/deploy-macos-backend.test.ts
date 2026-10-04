@@ -3,6 +3,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
+import * as NodeChildProcess from "node:child_process";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -232,11 +233,56 @@ describe("deploy-macos-backend guards", () => {
     expect(plist).toContain("<true/>");
     expect(plist).toContain("<integer>30</integer>");
     expect(plist).toMatch(
-      /<key>SoftResourceLimits<\/key>\s*<dict>\s*<key>NumberOfFiles<\/key>\s*<integer>8192<\/integer>/,
+      /<key>SoftResourceLimits<\/key>\s*<dict>\s*<key>NumberOfFiles<\/key>\s*<integer>16384<\/integer>/,
     );
+    expect(plist).toContain("<key>T3CODE_BACKEND_LAUNCHD</key>\n    <string>1</string>");
     expect(plist).toContain(DEPLOYMENT_MARKER);
     expect(isOwnedPlist(plist, "com.christinesmith.t3-fork.backend")).toBe(true);
     expect(plist).not.toContain("SECRET_SHOULD_NOT_BE_COPIED");
+  });
+
+  it("routes SSH production starts through launchd without starting another runtime", async () => {
+    await withTempDirectory(async (root) => {
+      const launchctl = NodePath.join(root, "launchctl");
+      const node = NodePath.join(root, "node");
+      await NodeFSP.writeFile(launchctl, '#!/bin/sh\nprintf "launchd:%s\\n" "$*"\nexit 7\n', {
+        mode: 0o700,
+      });
+      await NodeFSP.writeFile(node, '#!/bin/sh\nprintf "runtime:%s\\n" "$*"\n', { mode: 0o700 });
+      const options = { label: "fixture.backend", baseDir: "/fixture/home", port: 3773 };
+      const wrapper = renderWrapper(node, "/fixture/install", options);
+      const serve = [
+        "serve",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "3773",
+        "--base-dir",
+        "/fixture/home",
+      ];
+      const execute = (args: string[], owned: boolean) =>
+        NodeChildProcess.spawnSync("/bin/sh", ["-c", wrapper, "t3", ...args], {
+          env: {
+            ...process.env,
+            PATH: `${root}:/usr/bin:/bin`,
+            T3CODE_BACKEND_LAUNCHD: owned ? "1" : "0",
+          },
+          encoding: "utf8",
+        });
+      const ssh = execute(serve, false);
+      expect(ssh.status).toBe(7);
+      expect(ssh.stdout).toMatch(/^launchd:kickstart gui\/\d+\/fixture.backend/);
+      expect(ssh.stdout).not.toContain("runtime:");
+      const owned = execute(serve, true);
+      expect(owned.status).toBe(0);
+      expect(owned.stdout).toContain("runtime:/fixture/install/dist/bin.mjs serve");
+      const inspect = execute(["agent", "providers"], false);
+      expect(inspect.status).toBe(0);
+      expect(inspect.stdout).toContain("runtime:/fixture/install/dist/bin.mjs agent providers");
+      const isolated = execute(["serve", "--port", "38773"], false);
+      expect(isolated.status).toBe(0);
+      expect(isolated.stdout).toContain("runtime:/fixture/install/dist/bin.mjs serve --port 38773");
+    });
   });
 
   it("fails closed for unknown wrapper/plist ownership and loaded labels without disk state", () => {

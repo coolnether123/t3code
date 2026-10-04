@@ -315,11 +315,24 @@ const xml = (value: string): string =>
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&apos;");
 
-export const renderWrapper = (nodePath: string, installPath: string): string => {
+export const renderWrapper = (
+  nodePath: string,
+  installPath: string,
+  server: Pick<BackendDeployOptions, "label" | "baseDir" | "port"> = {
+    label: DEFAULT_LABEL,
+    baseDir: DEFAULT_BASE_DIR,
+    port: DEFAULT_PORT,
+  },
+): string => {
+  const serve = `serve --host 127.0.0.1 --port ${server.port} --base-dir ${server.baseDir}`;
   return [
     "#!/bin/sh",
     WRAPPER_MARKER,
     "set -eu",
+    // SSH callers must reuse the persistent owner instead of racing it at login.
+    `if [ "\${T3CODE_BACKEND_LAUNCHD:-0}" != "1" ] && [ "$*" = ${shellQuote(serve)} ]; then`,
+    `  exec launchctl kickstart "gui/$(id -u)/${server.label}"`,
+    "fi",
     `exec ${shellQuote(nodePath)} ${shellQuote(NodePath.join(installPath, "dist/bin.mjs"))} "$@"`,
     "",
   ].join("\n");
@@ -354,6 +367,7 @@ export const renderLaunchAgentPlist = (input: {
     T3CODE_HOST: "127.0.0.1",
     T3CODE_PORT: String(input.port),
     T3CODE_NO_BROWSER: "true",
+    T3CODE_BACKEND_LAUNCHD: "1",
     T3_FORK_DEPLOYMENT_MARKER: DEPLOYMENT_MARKER,
     T3_FORK_DEPLOYMENT_COMMIT: input.commit,
   }).sort(([a], [b]) => a.localeCompare(b));
@@ -396,12 +410,12 @@ ${envXml}
   <key>SoftResourceLimits</key>
   <dict>
     <key>NumberOfFiles</key>
-    <integer>8192</integer>
+    <integer>16384</integer>
   </dict>
   <key>HardResourceLimits</key>
   <dict>
     <key>NumberOfFiles</key>
-    <integer>8192</integer>
+    <integer>16384</integer>
   </dict>
   <key>StandardOutPath</key>
   <string>${xml(NodePath.join(input.baseDir, "userdata/logs/t3-fork-backend.log"))}</string>
@@ -1094,7 +1108,7 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
   try {
     await atomicWriteOwned(
       wrapper,
-      renderWrapper(options.nodePath, destination),
+      renderWrapper(options.nodePath, destination, options),
       0o700,
       "wrapper",
       options.label,
