@@ -13,6 +13,7 @@
  */
 import * as NodeCrypto from "node:crypto";
 import * as NodeOS from "node:os";
+import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
 
 import {
   USAGE_CONTRACT_VERSION,
@@ -66,6 +67,7 @@ import { makeDayFormatter, UsageAggregator } from "./usageAggregation.ts";
 import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
 import { UsageSummaryCache, usageSummaryCacheKey } from "./usageSummaryCache.ts";
 import { makeUsageReportCalculation, projectUsageReport } from "./usageReport.ts";
+import { emptyObservationReport, readUsageObservations } from "./usageObservations.ts";
 import {
   PromptUsageAccumulator,
   promptUsageTimeBounds,
@@ -472,13 +474,15 @@ export const layerTest = Layer.succeed(
     readSummary: (input) => Effect.succeed(emptyUsageSummary(input)),
     readReport: <Input extends UsageReportInput>(input: Input) =>
       Effect.succeed(
-        (input.mode === "prompts"
-          ? new PromptUsageAccumulator(input).report("1970-01-01T00:00:00.000Z")
-          : projectUsageReport(
-              emptyUsageSummary(input),
-              input,
-              makeUsageReportCalculation(EMPTY_PRICING, {}),
-            )) as Extract<UsageReport, { readonly mode: Input["mode"] }>,
+        (input.mode === "observations"
+          ? emptyObservationReport(input, "1970-01-01T00:00:00.000Z")
+          : input.mode === "prompts"
+            ? new PromptUsageAccumulator(input).report("1970-01-01T00:00:00.000Z")
+            : projectUsageReport(
+                emptyUsageSummary(input),
+                input,
+                makeUsageReportCalculation(EMPTY_PRICING, {}),
+              )) as Extract<UsageReport, { readonly mode: Input["mode"] }>,
       ),
     refreshRates: Effect.succeed(EMPTY_PRICING),
   }),
@@ -488,6 +492,7 @@ export const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const config = yield* ServerConfig;
+  const hostEnvironment = yield* HostProcessEnvironment;
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const httpClient = yield* HttpClient.HttpClient;
   const serviceScope = yield* Scope.make("sequential");
@@ -2022,6 +2027,27 @@ export const make = Effect.gen(function* () {
   });
 
   const readReport = Effect.fn("UsageService.readReport")(function* (input: UsageReportInput) {
+    if (input.mode === "observations") {
+      const readAt = DateTime.formatIso(yield* DateTime.now);
+      return yield* Effect.tryPromise({
+        try: (signal) =>
+          readUsageObservations(input, {
+            ...(hostEnvironment.T3_USAGE_OBSERVATION_SOURCES === undefined
+              ? {}
+              : {
+                  configuration: hostEnvironment.T3_USAGE_OBSERVATION_SOURCES,
+                }),
+            readAt,
+            signal,
+          }),
+        catch: (cause) =>
+          new UsageReadError({
+            reason: "scanFailed",
+            detail: "Metadata usage observation read failed.",
+            cause,
+          }),
+      });
+    }
     if (
       input.threadIds !== undefined &&
       (input.mode !== "runs" ||

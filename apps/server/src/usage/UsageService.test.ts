@@ -21,6 +21,7 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Scheduler from "effect/Scheduler";
+import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
@@ -28,6 +29,7 @@ import * as ServerConfig from "../config.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as UsageService from "./UsageService.ts";
+const encodeObservationConfiguration = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 function claudeLine(
   id: number,
@@ -119,6 +121,7 @@ const serviceLayers = (input: {
   readonly neverRates?: boolean;
   /** Defaults to an unparsable document so every scan retries the fetch. */
   readonly ratesDocument?: unknown;
+  readonly observationConfiguration?: string;
 }) =>
   ServerConfig.layerTest(process.cwd(), input.configBaseDir ?? { prefix: input.prefix }).pipe(
     Layer.provideMerge(NodeServices.layer),
@@ -141,7 +144,12 @@ const serviceLayers = (input: {
       ),
     ),
     Layer.provideMerge(
-      Layer.succeed(HostProcessEnvironment, { GROK_HOME: NodePath.join(input.home, "grok") }),
+      Layer.succeed(HostProcessEnvironment, {
+        GROK_HOME: NodePath.join(input.home, "grok"),
+        ...(input.observationConfiguration === undefined
+          ? {}
+          : { T3_USAGE_OBSERVATION_SOURCES: input.observationConfiguration }),
+      }),
     ),
   );
 
@@ -150,6 +158,45 @@ function totalOutputTokens(summary: { buckets: readonly { totals: { outputTokens
 }
 
 describe("UsageService", () => {
+  it.live(
+    "routes metadata observations separately without pricing or native transcript scans",
+    () =>
+      Effect.gen(function* () {
+        const { settings, home } = yield* setup;
+        let ratesFetches = 0;
+        const file = NodePath.join(home, "synthetic-metadata.log");
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(file, "[2026-08-01T10:00:00Z] NTIVE: {malformed}\n"),
+        );
+        const observationConfiguration = yield* encodeObservationConfiguration([
+          { kind: "acp", sourceId: "synthetic", provider: "cursor", files: [file] },
+        ]);
+        const service = yield* UsageService.make.pipe(
+          Effect.provide(
+            serviceLayers({
+              prefix: "usage-observations-",
+              settings,
+              home,
+              onRatesFetch: () => {
+                ratesFetches++;
+              },
+              observationConfiguration,
+            }),
+          ),
+        );
+        const report = yield* service.readReport({
+          mode: "observations",
+          timeZone: "UTC",
+          sinceDay: UsageDay.make("2026-08-01"),
+          untilDay: UsageDay.make("2026-08-01"),
+        });
+        assert.strictEqual(report.mode, "observations");
+        assert.strictEqual(report.coverage.scannedFiles, 1);
+        assert.strictEqual(report.coverage.malformedRecords, 1);
+        assert.strictEqual(ratesFetches, 0);
+        assert.strictEqual("totals" in report, false);
+      }).pipe(Effect.scoped),
+  );
   it.live("reads prompt projections without fetching pricing or scanning provider history", () =>
     Effect.gen(function* () {
       const { settings, home } = yield* setup;

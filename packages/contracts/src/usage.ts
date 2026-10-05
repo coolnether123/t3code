@@ -517,6 +517,7 @@ export const UsageReportMode = Schema.Literals([
   "pricing",
   "runs",
   "prompts",
+  "observations",
 ]);
 export type UsageReportMode = typeof UsageReportMode.Type;
 
@@ -854,6 +855,68 @@ export const UsageReportPrompts = Schema.Struct({
 });
 export type UsageReportPrompts = typeof UsageReportPrompts.Type;
 
+/** Nullable metadata accounting is separate from priced native token totals. */
+export const UsageAccountingObservation = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  sourceId: TrimmedNonEmptyString,
+  provider: Schema.Literals(["qwen-router", "cursor", "grok", "otis-decisions"]),
+  runId: Schema.NullOr(TrimmedNonEmptyString),
+  turnId: Schema.NullOr(TrimmedNonEmptyString),
+  requestId: Schema.NullOr(TrimmedNonEmptyString),
+  nativeJobId: Schema.NullOr(TrimmedNonEmptyString),
+  model: Schema.NullOr(TrimmedNonEmptyString),
+  observedAt: Schema.NullOr(TrimmedNonEmptyString),
+  basis: Schema.Literals(["measured", "recorded", "ambiguous", "session", "unknown"]),
+  /** These rows never enter ordinary totals. Exact native-job correlations are nonadditive. */
+  disposition: Schema.Literals(["separate", "correlationOnly"]),
+  counters: Schema.Struct({
+    inputTokens: Schema.NullOr(NonNegativeInt),
+    outputTokens: Schema.NullOr(NonNegativeInt),
+    cachedInputTokens: Schema.NullOr(NonNegativeInt),
+    cacheCreationTokens: Schema.NullOr(NonNegativeInt),
+    reasoningTokens: Schema.NullOr(NonNegativeInt),
+  }),
+  recordedInputTokens: Schema.NullOr(NonNegativeInt),
+  recordedOutputTokens: Schema.NullOr(NonNegativeInt),
+  contextUsedTokens: Schema.NullOr(NonNegativeInt),
+  contextSizeTokens: Schema.NullOr(NonNegativeInt),
+  reportedCost: Schema.NullOr(
+    Schema.Struct({
+      amount: Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(0)),
+      currency: Schema.String.check(Schema.isPattern(/^[A-Z]{3}$/)),
+      scope: Schema.Literals(["providerCall", "session"]),
+    }),
+  ),
+  taskIds: Schema.Array(TrimmedNonEmptyString).check(Schema.isMaxLength(64)),
+  issues: Schema.Array(Schema.String).check(Schema.isMaxLength(16)),
+});
+export type UsageAccountingObservation = typeof UsageAccountingObservation.Type;
+
+export const UsageReportObservations = Schema.Struct({
+  contractVersion: Schema.Literal(USAGE_REPORT_CONTRACT_VERSION),
+  mode: Schema.Literal("observations"),
+  readAt: Schema.String,
+  timeZone: TrimmedNonEmptyString,
+  sinceDay: UsageDay,
+  untilDay: UsageDay,
+  accounting: Schema.Literal("separateMetadataNotNativeTotals"),
+  coverage: Schema.Struct({
+    status: Schema.Literals(["complete", "partial", "missing"]),
+    configuredSources: NonNegativeInt,
+    scannedFiles: NonNegativeInt,
+    malformedRecords: NonNegativeInt,
+    duplicateRecords: NonNegativeInt,
+    conflictingRecords: NonNegativeInt,
+    excludedNative: NonNegativeInt,
+    excludedCloud: NonNegativeInt,
+    reasons: Schema.Array(Schema.String).check(Schema.isMaxLength(16)),
+  }),
+  rows: Schema.Array(UsageAccountingObservation).check(Schema.isMaxLength(512)),
+  totalRows: NonNegativeInt,
+  truncated: Schema.Boolean,
+});
+export type UsageReportObservations = typeof UsageReportObservations.Type;
+
 export const UsageReport = Schema.Union([
   UsageReportOverview,
   UsageReportProviders,
@@ -863,6 +926,7 @@ export const UsageReport = Schema.Union([
   UsageReportPricing,
   UsageReportRuns,
   UsageReportPrompts,
+  UsageReportObservations,
 ]);
 export type UsageReport = typeof UsageReport.Type;
 

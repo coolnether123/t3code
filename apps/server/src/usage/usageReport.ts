@@ -532,7 +532,7 @@ export function projectUsageReport(
   summary: UsageSummary,
   input: UsageReportInput,
   calculation: UsageReportCalculation,
-): Exclude<UsageReport, { readonly mode: "prompts" }> {
+): Exclude<UsageReport, { readonly mode: "prompts" | "observations" }> {
   const coverage = projectCoverage(summary, input.mode);
   const envelope = calculationEnvelope(summary, input, calculation, coverage);
 
@@ -541,6 +541,8 @@ export function projectUsageReport(
       throw new Error(
         "Prompt usage is projected from persisted user messages, not token summaries.",
       );
+    case "observations":
+      throw new Error("Metadata usage is read separately from native token summaries.");
     case "overview": {
       const total = emptyRollup();
       for (const bucket of summary.buckets) addBucket(total, bucket);
