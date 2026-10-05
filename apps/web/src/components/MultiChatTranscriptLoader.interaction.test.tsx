@@ -4,6 +4,7 @@ import { EnvironmentId, MessageId, ThreadId, type ScopedThreadRef } from "@t3too
 import { scopeThreadRef, scopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { EnvironmentThreadState } from "@t3tools/client-runtime/state/threads";
 import * as Option from "effect/Option";
+import { AsyncResult } from "effect/unstable/reactivity";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -11,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import type { TaskTranscriptInput } from "../chatTranscript";
 import { MultiChatTranscriptLoader, useMultiChatTranscriptCopy } from "./MultiChatTranscriptLoader";
+import { ChatHeader } from "./chat/ChatHeader";
 
 const mocks = vi.hoisted(() => ({
   threads: new Map<string, TaskTranscriptInput & { id: ThreadId }>(),
@@ -30,6 +32,7 @@ vi.mock("../state/entities", async () => {
 vi.mock("../state/threads", async () => {
   const { useSyncExternalStore } = await import("react");
   return {
+    threadEnvironment: { updateMetadata: {} },
     useEnvironmentThread: (environmentId: EnvironmentId, threadId: ThreadId) =>
       useSyncExternalStore(subscribe, () =>
         mocks.states.get(scopedThreadKey(scopeThreadRef(environmentId, threadId))),
@@ -44,6 +47,13 @@ vi.mock("./ui/toast", () => ({
   toastManager: { add: mocks.toast },
   stackedThreadToast: (toast: unknown) => toast,
 }));
+vi.mock("../state/environments", () => ({ usePrimaryEnvironmentId: () => null }));
+vi.mock("../remoteOpen", () => ({ useRemoteOpenState: () => ({ mode: "local-exec" }) }));
+vi.mock("../hooks/useT3ProjectFileScripts", () => ({ useT3ProjectFileScripts: () => [] }));
+vi.mock("../hooks/useThreadActionMenu", () => ({
+  useThreadActionMenu: () => ({ openMenu: vi.fn(), closeMenu: vi.fn() }),
+}));
+vi.mock("../state/use-atom-command", () => ({ useAtomCommand: () => vi.fn() }));
 
 const first = scopeThreadRef(EnvironmentId.make("synthetic-local"), ThreadId.make("same-id"));
 const second = scopeThreadRef(EnvironmentId.make("synthetic-remote"), ThreadId.make("same-id"));
@@ -90,6 +100,38 @@ function subscribe(notify: () => void) {
 
 async function copySelected() {
   await act(async () => container.querySelector("button")!.click());
+}
+
+async function renderHeader(isServerThread = true) {
+  await act(async () => {
+    mocks.listeners.forEach((notify) => notify());
+    root.render(
+      <ChatHeader
+        activeThreadEnvironmentId={first.environmentId}
+        activeThreadId={first.threadId}
+        activeThreadTitle="First"
+        providerRuntimeLabel={null}
+        isServerThread={isServerThread}
+        changeRequest={null}
+        activeProjectName={undefined}
+        activeProjectCwd={null}
+        activeProjectFaviconPath={null}
+        openInCwd={null}
+        activeProjectScripts={undefined}
+        preferredScriptId={null}
+        keybindings={[]}
+        availableEditors={[]}
+        rightPanelOpen={false}
+        gitCwd={null}
+        transcript="Synthetic loaded window"
+        onNewThreadInProject={() => {}}
+        onRunProjectScript={() => {}}
+        onAddProjectScript={async () => AsyncResult.success(undefined)}
+        onUpdateProjectScript={async () => AsyncResult.success(undefined)}
+        onDeleteProjectScript={async () => AsyncResult.success(undefined)}
+      />,
+    );
+  });
 }
 
 function setState(ref: ScopedThreadRef, overrides: Partial<EnvironmentThreadState> = {}) {
@@ -263,6 +305,33 @@ describe("selected-chat copy interaction", () => {
     expect(container.textContent).toContain("Ready");
   });
 
+  it("leaves the latest requested batch on the clipboard after an older write completes", async () => {
+    let clipboard = "";
+    let finishFirstWrite = () => {};
+    write.mockImplementation(async (text) => {
+      clipboard = text;
+    });
+    write.mockImplementationOnce(
+      (text) =>
+        new Promise<void>((resolve) => {
+          finishFirstWrite = () => {
+            clipboard = text;
+            resolve();
+          };
+        }),
+    );
+    await copySelected();
+    selection = [added];
+    useThreadSelectionStore.getState().clearSelection();
+    useThreadSelectionStore.getState().toggleThread(scopedThreadKey(added));
+    await copySelected();
+    await act(async () => finishFirstWrite());
+    expect(clipboard).toContain("Title: Added");
+    expect(clipboard).not.toContain("Title: First");
+    expect(mocks.toast).toHaveBeenCalledOnce();
+    expect(useThreadSelectionStore.getState().selectedThreadKeys.size).toBe(0);
+  });
+
   it("loads older pages before copying complete message text", async () => {
     selection = [first];
     setState(first, {
@@ -289,6 +358,48 @@ describe("selected-chat copy interaction", () => {
     setState(first);
     await render();
     expect(write.mock.calls[0]![0]).toContain("Complete older message");
+  });
+
+  it("loads older history before the header writes a saved chat", async () => {
+    setState(first, {
+      page: Option.some({ beforeCursor: "older", hasMore: true, loadingOlder: false }),
+    });
+    await renderHeader();
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('button[aria-label="Copy chat"]')!.click(),
+    );
+    expect(mocks.older).toHaveBeenCalledWith(first.environmentId, first.threadId);
+    expect(write).not.toHaveBeenCalled();
+    const thread = mocks.threads.get(scopedThreadKey(first))!;
+    mocks.threads.set(scopedThreadKey(first), {
+      ...thread,
+      messages: [
+        {
+          id: MessageId.make("synthetic-header-history"),
+          role: "user",
+          text: "Older saved chat history",
+          turnId: null,
+          streaming: false,
+          createdAt: "2026-10-05T00:00:00Z",
+          updatedAt: "2026-10-05T00:00:00Z",
+        },
+      ],
+    });
+    setState(first);
+    await renderHeader();
+    expect(write).toHaveBeenCalledOnce();
+    expect(write.mock.calls[0]![0]).toContain("Older saved chat history");
+    expect(write.mock.calls[0]![0]).not.toContain("Synthetic loaded window");
+    expect(container.querySelector('[aria-label="Chat copied"]')).not.toBeNull();
+  });
+
+  it("copies a draft without loading a nonexistent server thread", async () => {
+    await renderHeader(false);
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('button[aria-label="Copy chat"]')!.click(),
+    );
+    expect(write).toHaveBeenCalledWith("Synthetic loaded window");
+    expect(mocks.older).not.toHaveBeenCalled();
   });
 
   it("does not write a partial batch when a selected chat is deleted", async () => {
