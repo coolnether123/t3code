@@ -18,33 +18,39 @@ export type MultiChatCopyRequest = {
   readonly threadRefs: ReadonlyArray<ScopedThreadRef>;
 };
 
-export function useMultiChatTranscriptCopy(onCopied: () => void) {
+export function useMultiChatTranscriptCopy(
+  onCopied: (threadRefs: ReadonlyArray<ScopedThreadRef>) => void,
+) {
   const [request, setRequest] = useState<MultiChatCopyRequest | null>(null);
   const requestRef = useRef(request);
   const resultsRef = useRef(new Map<string, TaskTranscriptInput>());
   const requestIdRef = useRef(0);
-  const { copyToClipboard } = useCopyToClipboard<{ count: number }>({
+  const { copyToClipboard } = useCopyToClipboard<MultiChatCopyRequest>({
     target: "selected chat transcripts",
-    onCopy: ({ count }) => {
+    onCopy: ({ id, threadRefs }) => {
+      if (id !== requestIdRef.current) return;
       toastManager.add({
         type: "success",
         title: "Chats copied",
-        description: `${count} chat transcripts copied to the clipboard.`,
+        description: `${threadRefs.length} chat transcripts copied to the clipboard.`,
       });
-      onCopied();
+      onCopied(threadRefs);
     },
-    onError: (error) =>
+    onError: (error, { id }) => {
+      if (id !== requestIdRef.current) return;
       toastManager.add(
         stackedThreadToast({
           type: "error",
           title: "Could not copy chats",
           description: error.message,
         }),
-      ),
+      );
+    },
   });
 
   const startCopy = useCallback((threadRefs: ReadonlyArray<ScopedThreadRef>) => {
-    const nextRequest = { id: ++requestIdRef.current, threadRefs };
+    if (threadRefs.length === 0) return;
+    const nextRequest = { id: ++requestIdRef.current, threadRefs: [...threadRefs] };
     resultsRef.current.clear();
     requestRef.current = nextRequest;
     setRequest(nextRequest);
@@ -77,7 +83,7 @@ export function useMultiChatTranscriptCopy(onCopied: () => void) {
         scopedThreadKey,
       );
       if (combinedTranscript === null) return;
-      copyToClipboard(combinedTranscript, { count: activeRequest.threadRefs.length });
+      copyToClipboard(combinedTranscript, activeRequest);
       requestRef.current = null;
       results.clear();
       setRequest(null);
