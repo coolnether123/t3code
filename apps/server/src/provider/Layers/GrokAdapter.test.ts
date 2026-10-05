@@ -35,7 +35,13 @@ import {
 } from "./GrokAdapter.ts";
 import { execScriptSource, writeFakeCli } from "../../testUtils/fakeCli.ts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { AcpUsageMetadata } from "../acp/AcpUsage.ts";
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
+const isUsageRecord = Schema.is(
+  Schema.Struct({
+    event: Schema.Struct({ kind: Schema.Literal("usage"), payload: AcpUsageMetadata }),
+  }),
+);
 
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
 const mockAgentPath = NodePath.join(__dirname, "../../../scripts/acp-mock-agent.ts");
@@ -212,6 +218,31 @@ it("requires a settlement to match the live Grok turn", () => {
 });
 
 it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
+  it.effect("retains an unavailable receipt when ACP omits prompt usage", () =>
+    Effect.gen(function* () {
+      const records: Array<unknown> = [];
+      const binaryPath = yield* Effect.promise(() => makeMockGrokWrapper());
+      const adapter = yield* makeTestAdapter(binaryPath, {
+        nativeEventLogger: {
+          filePath: "synthetic-native.ndjson",
+          write: (event) => Effect.sync(() => void records.push(event)),
+          close: () => Effect.void,
+        },
+      });
+      const threadId = ThreadId.make("grok-absent-usage");
+      yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode: "full-access" });
+      const result = yield* adapter.sendTurn({ threadId, input: "synthetic prompt" });
+      const usage = records.filter(isUsageRecord).map((record) => record.event.payload);
+      assert.lengthOf(usage, 1);
+      assert.equal(usage[0]!.source, "prompt-response");
+      assert.equal(usage[0]!.turnId, result.turnId);
+      assert.equal(usage[0]!.tokenBasis, "unavailable");
+      if (usage[0]!.source === "prompt-response")
+        assert.isNull(usage[0]!.requestTokens.inputTokens);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("sends runtime context with the current model without changing saved prompts", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("grok-runtime-context");
