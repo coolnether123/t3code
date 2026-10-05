@@ -1,6 +1,6 @@
 import type { CodexScheduledRoutine, CodexScheduledRun } from "@t3tools/contracts";
 import { ChevronDownIcon, ChevronRightIcon, Clock3Icon } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 
 import { scheduledApi } from "../../scheduledApi";
@@ -16,20 +16,24 @@ function RunHistory({ routine }: { routine: CodexScheduledRoutine }) {
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const latestRequest = useRef(0);
 
   const load = useCallback(
     async (next?: string) => {
+      const request = ++latestRequest.current;
       setLoading(true);
       try {
         const page = await scheduledApi.listRuns(routine.name, next);
+        if (request !== latestRequest.current) return;
         setRuns((previous) => (next ? [...previous, ...page.runs] : page.runs));
         setCursor(page.nextCursor);
         setLoaded(true);
         setError(null);
       } catch {
+        if (request !== latestRequest.current) return;
         setError("Could not load run history.");
       } finally {
-        setLoading(false);
+        if (request === latestRequest.current) setLoading(false);
       }
     },
     [routine.name],
@@ -117,19 +121,23 @@ export function ScheduledSidebarSection() {
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState(false);
+  const latestRequest = useRef(0);
 
   const load = useCallback(async (next?: string) => {
+    const request = ++latestRequest.current;
     setLoading(true);
     try {
       const page = await scheduledApi.listRoutines(next);
+      if (request !== latestRequest.current) return;
       setRoutines((previous) => (next ? [...previous, ...page.routines] : page.routines));
       setCursor(page.nextCursor);
       setLoaded(true);
       setError(false);
     } catch {
+      if (request !== latestRequest.current) return;
       setError(true);
     } finally {
-      setLoading(false);
+      if (request === latestRequest.current) setLoading(false);
     }
   }, []);
 
