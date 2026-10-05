@@ -6,6 +6,8 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
+import * as Schema from "effect/Schema";
+import * as NodeURL from "node:url";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import { referenceRepos } from "./lib/reference-repos.ts";
@@ -18,6 +20,15 @@ import {
 const encoder = new TextEncoder();
 const effectSmol = referenceRepos[0]!;
 const alchemyEffect = referenceRepos[1]!;
+const decodeWorktreeSetup = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(
+    Schema.Struct({
+      scripts: Schema.Array(
+        Schema.Struct({ command: Schema.String, runOnWorktreeCreate: Schema.Boolean }),
+      ),
+    }),
+  ),
+);
 
 function mockHandle(
   options: {
@@ -43,7 +54,9 @@ function mockHandle(
 
 function mockSpawnerLayer(
   commands: Array<{ readonly command: string; readonly args: ReadonlyArray<string> }>,
-  handle = mockHandle(),
+  handle:
+    | ReturnType<typeof mockHandle>
+    | ((args: ReadonlyArray<string>) => ReturnType<typeof mockHandle>) = mockHandle(),
 ) {
   return Layer.succeed(
     ChildProcessSpawner.ChildProcessSpawner,
@@ -56,12 +69,224 @@ function mockSpawnerLayer(
         command: childProcess.command,
         args: childProcess.args,
       });
-      return Effect.succeed(handle);
+      return Effect.succeed(typeof handle === "function" ? handle(childProcess.args) : handle);
     }),
   );
 }
 
+const guidanceFixture = Effect.fn("guidanceFixture")(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const rootDir = yield* fs.makeTempDirectoryScoped({ prefix: "reference-guidance-test-" });
+  yield* fs.writeFileString(
+    path.join(rootDir, "pnpm-workspace.yaml"),
+    "catalog:\n  effect: 4.0.0-beta.73\n",
+  );
+  const destination = path.join(rootDir, effectSmol.prefix, "LLMS.md");
+  yield* fs.makeDirectory(path.dirname(destination), { recursive: true });
+  // Windows will not remove read-only files when the scoped temporary directory closes.
+  yield* Effect.addFinalizer(() => fs.chmod(destination, 0o644).pipe(Effect.ignore));
+  return { fs, path, rootDir, destination };
+});
+
 it.layer(NodeServices.layer)("sync-reference-repos", (it) => {
+  it.effect("restores pinned read-only guidance without a subtree operation", () => {
+    const commands: Array<{ readonly command: string; readonly args: ReadonlyArray<string> }> = [];
+    return Effect.gen(function* () {
+      const { fs, rootDir, destination } = yield* guidanceFixture();
+      const plans = yield* syncReferenceRepos({
+        rootDir,
+        repoId: effectSmol.id,
+        guidanceOnly: true,
+      }).pipe(
+        Effect.provide(
+          mockSpawnerLayer(commands, mockHandle({ stdout: "# Synthetic guidance\n" })),
+        ),
+      );
+      assert.equal(plans[0]?.ref, "effect@4.0.0-beta.73");
+      assert.deepStrictEqual(
+        commands.map((command) => command.args),
+        [
+          ["init", "--bare"],
+          [
+            "fetch",
+            "--depth=1",
+            "--no-tags",
+            effectSmol.repository,
+            "refs/tags/effect@4.0.0-beta.73",
+          ],
+          ["show", "FETCH_HEAD:LLMS.md"],
+        ],
+      );
+      assert.equal(yield* fs.readFileString(destination), "# Synthetic guidance\n");
+      assert.equal((yield* fs.stat(destination)).mode & 0o222, 0);
+    });
+  });
+
+  it.effect("leaves an existing matching guide intact on repeated setup", () => {
+    const commands: Array<{ readonly command: string; readonly args: ReadonlyArray<string> }> = [];
+    return Effect.gen(function* () {
+      const { fs, rootDir, destination } = yield* guidanceFixture();
+      const setup = syncReferenceRepos({ rootDir, guidanceOnly: true }).pipe(
+        Effect.provide(mockSpawnerLayer(commands)),
+      );
+      yield* setup;
+      const before = (yield* fs.stat(destination)).mtime;
+      yield* setup;
+      assert.equal(yield* fs.readFileString(destination), "done\n");
+      assert.deepStrictEqual((yield* fs.stat(destination)).mtime, before);
+      assert.equal(commands.length, 6);
+    });
+  });
+
+  it.effect("does not overwrite existing guidance that differs from the pin", () => {
+    const commands: Array<{ readonly command: string; readonly args: ReadonlyArray<string> }> = [];
+    return Effect.gen(function* () {
+      const { fs, path, rootDir, destination } = yield* guidanceFixture();
+      yield* fs.makeDirectory(path.dirname(destination), { recursive: true });
+      yield* fs.writeFileString(destination, "# Existing synthetic document\n");
+      const error = yield* syncReferenceRepos({ rootDir, guidanceOnly: true }).pipe(
+        Effect.provide(mockSpawnerLayer(commands)),
+        Effect.flip,
+      );
+      assert.equal(error._tag, "ReferenceRepoGuidanceError");
+      assert.equal(yield* fs.readFileString(destination), "# Existing synthetic document\n");
+    });
+  });
+
+  it.effect("guidance dry-run neither fetches nor writes documents", () => {
+    const commands: Array<{ readonly command: string; readonly args: ReadonlyArray<string> }> = [];
+    return Effect.gen(function* () {
+      const { fs, rootDir, destination } = yield* guidanceFixture();
+      const plans = yield* syncReferenceRepos({ rootDir, guidanceOnly: true, dryRun: true }).pipe(
+        Effect.provide(mockSpawnerLayer(commands)),
+      );
+      assert.equal(plans.length, 1);
+      assert.equal(plans[0]?.action, "guidance");
+      assert.deepStrictEqual(commands, []);
+      assert.equal(yield* fs.exists(destination), false);
+    });
+  });
+
+  it.effect("rejects unpinned guidance before fetching or writing", () => {
+    const commands: Array<{ readonly command: string; readonly args: ReadonlyArray<string> }> = [];
+    return Effect.gen(function* () {
+      const { fs, rootDir, destination } = yield* guidanceFixture();
+      const error = yield* syncReferenceRepos({ rootDir, guidanceOnly: true, latest: true }).pipe(
+        Effect.provide(mockSpawnerLayer(commands)),
+        Effect.flip,
+      );
+      assert.equal(error._tag, "ReferenceRepoGuidanceError");
+      assert.deepStrictEqual(commands, []);
+      assert.equal(yield* fs.exists(destination), false);
+    });
+  });
+
+  it.effect("failed Git guidance setup leaves no document", () => {
+    const commands: Array<{ readonly command: string; readonly args: ReadonlyArray<string> }> = [];
+    return Effect.gen(function* () {
+      const { fs, rootDir, destination } = yield* guidanceFixture();
+      const error = yield* syncReferenceRepos({ rootDir, guidanceOnly: true }).pipe(
+        Effect.provide(
+          mockSpawnerLayer(commands, (args) =>
+            mockHandle({ exitCode: args[0] === "show" ? 1 : 0 }),
+          ),
+        ),
+        Effect.flip,
+      );
+      assert.equal(error._tag, "ReferenceRepoGitSubtreeError");
+      assert.equal(commands.length, 3);
+      assert.equal(yield* fs.exists(destination), false);
+    });
+  });
+
+  it.effect("rejects an empty pinned document without creating guidance", () => {
+    const commands: Array<{ readonly command: string; readonly args: ReadonlyArray<string> }> = [];
+    return Effect.gen(function* () {
+      const { fs, rootDir, destination } = yield* guidanceFixture();
+      const error = yield* syncReferenceRepos({ rootDir, guidanceOnly: true }).pipe(
+        Effect.provide(mockSpawnerLayer(commands, mockHandle({ stdout: "" }))),
+        Effect.flip,
+      );
+      assert.equal(error._tag, "ReferenceRepoGuidanceError");
+      assert.equal(yield* fs.exists(destination), false);
+    });
+  });
+
+  it.effect("does not fabricate a vendor subtree when reference source is missing", () => {
+    const commands: Array<{ readonly command: string; readonly args: ReadonlyArray<string> }> = [];
+    return Effect.gen(function* () {
+      const { fs, path, rootDir, destination } = yield* guidanceFixture();
+      yield* fs.rename(path.dirname(destination), path.join(rootDir, "synthetic-reference-source"));
+      const error = yield* syncReferenceRepos({ rootDir, guidanceOnly: true }).pipe(
+        Effect.provide(mockSpawnerLayer(commands)),
+        Effect.flip,
+      );
+      assert.equal(error._tag, "ReferenceRepoGuidanceError");
+      assert.deepStrictEqual(commands, []);
+      assert.equal(yield* fs.exists(destination), false);
+    });
+  });
+
+  it.effect("rejects a reference directory resolved outside the worktree before fetching", () => {
+    const commands: Array<{ readonly command: string; readonly args: ReadonlyArray<string> }> = [];
+    return Effect.gen(function* () {
+      const { fs, path, rootDir, destination } = yield* guidanceFixture();
+      const redirectedPaths = Layer.succeed(FileSystem.FileSystem, {
+        ...fs,
+        realPath: () => Effect.succeed(path.join(rootDir, "synthetic-external-reference")),
+      });
+      const error = yield* syncReferenceRepos({ rootDir, guidanceOnly: true }).pipe(
+        Effect.provide(Layer.merge(redirectedPaths, mockSpawnerLayer(commands))),
+        Effect.flip,
+      );
+      assert.equal(error._tag, "ReferenceRepoGuidanceError");
+      assert.deepStrictEqual(commands, []);
+      assert.equal(yield* fs.exists(destination), false);
+    });
+  });
+
+  it.effect("leaves redirected existing guidance content and permissions unchanged", () => {
+    const commands: Array<{ readonly command: string; readonly args: ReadonlyArray<string> }> = [];
+    return Effect.gen(function* () {
+      const { fs, path, rootDir, destination } = yield* guidanceFixture();
+      yield* fs.writeFileString(destination, "done\n");
+      const before = (yield* fs.stat(destination)).mode;
+      const redirectedPaths = Layer.succeed(FileSystem.FileSystem, {
+        ...fs,
+        realPath: (value) =>
+          value === destination
+            ? Effect.succeed(path.join(rootDir, "synthetic-external-document"))
+            : fs.realPath(value),
+      });
+      const error = yield* syncReferenceRepos({ rootDir, guidanceOnly: true }).pipe(
+        Effect.provide(Layer.merge(redirectedPaths, mockSpawnerLayer(commands))),
+        Effect.flip,
+      );
+      assert.equal(error._tag, "ReferenceRepoGuidanceError");
+      assert.equal(yield* fs.readFileString(destination), "done\n");
+      assert.equal((yield* fs.stat(destination)).mode, before);
+    });
+  });
+
+  it.effect("both worktree setup commands restore guidance before optional environment links", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const config = yield* decodeWorktreeSetup(
+        yield* fs.readFileString(NodeURL.fileURLToPath(new URL("../t3.json", import.meta.url))),
+      );
+      assert.equal(config.scripts.length, 2);
+      for (const script of config.scripts) {
+        assert.ok(script.runOnWorktreeCreate);
+        assert.ok(
+          script.command.startsWith(
+            "vp i && node scripts/sync-reference-repos.ts --repo effect-smol --guidance-only && ",
+          ),
+        );
+      }
+    }),
+  );
+
   it.effect("resolves the effect-smol tag from the root catalog", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

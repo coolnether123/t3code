@@ -15,13 +15,14 @@ import { fromYaml } from "@t3tools/shared/schemaYaml";
 
 import { referenceRepos, type ReferenceRepo } from "./lib/reference-repos.ts";
 
-export type ReferenceRepoSyncAction = "add" | "pull";
+export type ReferenceRepoSyncAction = "add" | "pull" | "guidance";
 
 export interface ReferenceRepoSyncOptions {
   readonly rootDir?: string | undefined;
   readonly repoId?: string | undefined;
   readonly latest?: boolean | undefined;
   readonly dryRun?: boolean | undefined;
+  readonly guidanceOnly?: boolean | undefined;
 }
 
 export interface ReferenceRepoSyncPlan {
@@ -75,7 +76,7 @@ export class ReferenceRepoGitSubtreeError extends Schema.TaggedErrorClass<Refere
   {
     operation: Schema.Literals(["spawn", "communicate", "exit"]),
     repoId: Schema.String,
-    action: Schema.Literals(["add", "pull"]),
+    action: Schema.Literals(["add", "pull", "guidance"]),
     repository: Schema.String,
     ref: Schema.String,
     rootDir: Schema.String,
@@ -87,7 +88,16 @@ export class ReferenceRepoGitSubtreeError extends Schema.TaggedErrorClass<Refere
   },
 ) {
   override get message(): string {
-    return `Git subtree ${this.action} for reference repo "${this.repoId}" failed during "${this.operation}".`;
+    return `Git reference ${this.action} for repo "${this.repoId}" failed during "${this.operation}".`;
+  }
+}
+
+export class ReferenceRepoGuidanceError extends Schema.TaggedErrorClass<ReferenceRepoGuidanceError>()(
+  "ReferenceRepoGuidanceError",
+  { repoId: Schema.String, reason: Schema.String },
+) {
+  override get message(): string {
+    return `Guidance setup for reference repo "${this.repoId}" failed: ${this.reason}.`;
   }
 }
 
@@ -96,6 +106,7 @@ export const ReferenceRepoSyncError = Schema.Union([
   ReferenceRepoVersionSourceError,
   ReferenceRepoVersionResolutionError,
   ReferenceRepoGitSubtreeError,
+  ReferenceRepoGuidanceError,
 ]);
 export type ReferenceRepoSyncError = typeof ReferenceRepoSyncError.Type;
 export const isReferenceRepoSyncError = Schema.is(ReferenceRepoSyncError);
@@ -268,10 +279,64 @@ const runGit = Effect.fn("runGit")(function* (rootDir: string, plan: ReferenceRe
     });
   }
 
-  if (stdout.trim().length > 0) {
+  if (plan.action !== "guidance" && stdout.trim().length > 0) {
     yield* Console.log(stdout.trim());
   }
+  return stdout;
 });
+
+// Fetch into a disposable repository so setup never changes the worktree's refs or subtree.
+const restoreReferenceRepoGuidance = Effect.fn("restoreReferenceRepoGuidance")(function* (
+  rootDir: string,
+  plan: ReferenceRepoSyncPlan,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const prefix = path.join(rootDir, plan.repo.prefix);
+  if (!(yield* fs.exists(prefix))) {
+    return yield* new ReferenceRepoGuidanceError({
+      repoId: plan.repo.id,
+      reason: "reference source is missing",
+    });
+  }
+  if (path.relative(prefix, yield* fs.realPath(prefix)) !== "") {
+    return yield* new ReferenceRepoGuidanceError({
+      repoId: plan.repo.id,
+      reason: "reference source must be worktree-local",
+    });
+  }
+  const temporaryRepo = yield* fs.makeTempDirectoryScoped({ prefix: "t3-reference-guidance-" });
+  const git = (args: ReadonlyArray<string>) => runGit(temporaryRepo, { ...plan, args });
+  yield* git(["init", "--bare"]);
+  yield* git(["fetch", "--depth=1", "--no-tags", plan.repo.repository, `refs/tags/${plan.ref}`]);
+  for (const file of plan.repo.guidanceFiles ?? []) {
+    const content = yield* git(["show", `FETCH_HEAD:${file}`]);
+    if (content.trim().length === 0) {
+      return yield* new ReferenceRepoGuidanceError({
+        repoId: plan.repo.id,
+        reason: "empty document",
+      });
+    }
+    const destination = path.join(rootDir, plan.repo.prefix, file);
+    if (yield* fs.exists(destination)) {
+      if (path.relative(destination, yield* fs.realPath(destination)) !== "") {
+        return yield* new ReferenceRepoGuidanceError({
+          repoId: plan.repo.id,
+          reason: "guidance must be worktree-local",
+        });
+      }
+      if ((yield* fs.readFileString(destination)) !== content) {
+        return yield* new ReferenceRepoGuidanceError({
+          repoId: plan.repo.id,
+          reason: `existing ${file} differs from ${plan.ref}; left unchanged`,
+        });
+      }
+    } else {
+      yield* fs.writeFileString(destination, content, { flag: "wx", mode: 0o444 });
+    }
+    yield* fs.chmod(destination, 0o444);
+  }
+}, Effect.scoped);
 
 export const syncReferenceRepos = Effect.fn("syncReferenceRepos")(function* (
   options: ReferenceRepoSyncOptions = {},
@@ -282,6 +347,21 @@ export const syncReferenceRepos = Effect.fn("syncReferenceRepos")(function* (
   const plans: Array<ReferenceRepoSyncPlan> = [];
 
   for (const repo of repos) {
+    if (options.guidanceOnly) {
+      if (options.latest) {
+        return yield* new ReferenceRepoGuidanceError({
+          repoId: repo.id,
+          reason: "guidance requires the pinned version, not --latest",
+        });
+      }
+      if (!repo.guidanceFiles?.length) continue;
+      const ref = yield* resolveReferenceRepoRef(repo, rootDir, false);
+      const plan = { repo, action: "guidance", ref, args: [] } satisfies ReferenceRepoSyncPlan;
+      plans.push(plan);
+      yield* Console.log(`Restoring read-only guidance for ${repo.id} from ${ref}.`);
+      if (!options.dryRun) yield* restoreReferenceRepoGuidance(rootDir, plan);
+      continue;
+    }
     const plan = yield* planReferenceRepoSync(repo, rootDir, options.latest ?? false);
     plans.push(plan);
     yield* Console.log(`Syncing ${repo.id} from ${plan.ref} with git subtree ${plan.action}.`);
@@ -314,13 +394,20 @@ export const syncReferenceReposCommand = Command.make(
       Flag.withDescription("Print planned subtree operations without running git."),
       Flag.withDefault(false),
     ),
+    guidanceOnly: Flag.boolean("guidance-only").pipe(
+      Flag.withDescription(
+        "Restore pinned read-only guidance without changing Git history or vendor source.",
+      ),
+      Flag.withDefault(false),
+    ),
   },
-  ({ repo, latest, root, dryRun }) =>
+  ({ repo, latest, root, dryRun, guidanceOnly }) =>
     syncReferenceRepos({
       repoId: Option.getOrUndefined(repo),
       rootDir: Option.getOrUndefined(root),
       latest,
       dryRun,
+      guidanceOnly,
     }),
 ).pipe(Command.withDescription("Sync vendored reference repositories under .repos/."));
 
