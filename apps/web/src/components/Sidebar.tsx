@@ -1810,7 +1810,9 @@ export default function Sidebar() {
     startCopy: startMultiChatCopy,
     onLoaded: handleMultiChatTranscriptLoaded,
     onError: handleMultiChatTranscriptError,
-  } = useMultiChatTranscriptCopy(clearSelection);
+  } = useMultiChatTranscriptCopy((threadRefs) =>
+    useThreadSelectionStore.getState().removeFromSelection(threadRefs.map(scopedThreadKey)),
+  );
   const setSelectionAnchor = useThreadSelectionStore((s) => s.setAnchor);
   const toggleThreadSelection = useThreadSelectionStore((s) => s.toggleThread);
   const rangeSelectTo = useThreadSelectionStore((s) => s.rangeSelectTo);

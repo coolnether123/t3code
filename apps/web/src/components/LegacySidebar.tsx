@@ -1151,7 +1151,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     startCopy: startMultiChatCopy,
     onLoaded: handleMultiChatTranscriptLoaded,
     onError: handleMultiChatTranscriptError,
-  } = useMultiChatTranscriptCopy(clearSelection);
+  } = useMultiChatTranscriptCopy((threadRefs) =>
+    useThreadSelectionStore.getState().removeFromSelection(threadRefs.map(scopedThreadKey)),
+  );
   const setSelectionAnchor = useThreadSelectionStore((state) => state.setAnchor);
   const { copyToClipboard: copyThreadIdToClipboard } = useCopyToClipboard<{
     threadId: ThreadId;
