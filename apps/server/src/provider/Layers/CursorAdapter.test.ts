@@ -32,7 +32,13 @@ import type { CursorAdapterShape } from "../Services/CursorAdapter.ts";
 import { makeCursorAdapter } from "./CursorAdapter.ts";
 import { execScriptSource, writeFakeCli } from "../../testUtils/fakeCli.ts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { AcpUsageMetadata } from "../acp/AcpUsage.ts";
 const decodeCursorSettings = Schema.decodeSync(CursorSettings);
+const isUsageRecord = Schema.is(
+  Schema.Struct({
+    event: Schema.Struct({ kind: Schema.Literal("usage"), payload: AcpUsageMetadata }),
+  }),
+);
 
 // Test-local service tag so the rest of the file can keep using `yield* CursorAdapter`.
 class CursorAdapter extends Context.Service<CursorAdapter, CursorAdapterShape>()(
@@ -162,6 +168,31 @@ const cursorAdapterTestLayer = it.layer(
 );
 
 cursorAdapterTestLayer("CursorAdapterLive", (it) => {
+  it.effect("retains an unavailable receipt when ACP omits prompt usage", () =>
+    Effect.gen(function* () {
+      const records: Array<unknown> = [];
+      const binaryPath = yield* Effect.promise(() => makeMockAgentWrapper());
+      const adapter = yield* makeCursorAdapter(decodeCursorSettings({ binaryPath }), {
+        nativeEventLogger: {
+          filePath: "synthetic-native.ndjson",
+          write: (event) => Effect.sync(() => void records.push(event)),
+          close: () => Effect.void,
+        },
+      });
+      const threadId = ThreadId.make("cursor-absent-usage");
+      yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode: "full-access" });
+      const result = yield* adapter.sendTurn({ threadId, input: "synthetic prompt" });
+      const usage = records.filter(isUsageRecord).map((record) => record.event.payload);
+      assert.lengthOf(usage, 1);
+      assert.equal(usage[0]!.source, "prompt-response");
+      assert.equal(usage[0]!.turnId, result.turnId);
+      assert.equal(usage[0]!.tokenBasis, "unavailable");
+      if (usage[0]!.source === "prompt-response")
+        assert.isNull(usage[0]!.requestTokens.inputTokens);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("starts a session and maps mock ACP prompt flow to runtime events", () =>
     Effect.gen(function* () {
       const adapter = yield* CursorAdapter;

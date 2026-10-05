@@ -66,6 +66,7 @@ import {
   parsePermissionRequest,
 } from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
+import { makeAcpUsageCapture } from "../acp/AcpUsage.ts";
 import { applyCursorAcpModelSelection, makeCursorAcpRuntime } from "../acp/CursorAcpSupport.ts";
 import {
   CursorAskQuestionRequest,
@@ -133,6 +134,7 @@ interface CursorSessionContext {
   session: ProviderSession;
   readonly scope: Scope.Closeable;
   readonly acp: AcpSessionRuntime.AcpSessionRuntime["Service"];
+  readonly usageCapture: Effect.Success<ReturnType<typeof makeAcpUsageCapture>>;
   notificationFiber: Fiber.Fiber<void, never> | undefined;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
@@ -780,6 +782,12 @@ export function makeCursorAdapter(
             session,
             scope: sessionScope,
             acp,
+            usageCapture: yield* makeAcpUsageCapture({
+              provider: "cursor",
+              threadId: input.threadId,
+              nativeSessionId: started.sessionId,
+              nativeEventLogger,
+            }).pipe(Effect.provideService(Crypto.Crypto, crypto)),
             notificationFiber: undefined,
             pendingApprovals,
             pendingUserInputs,
@@ -790,6 +798,8 @@ export function makeCursorAdapter(
             promptsInFlight: 0,
             stopped: false,
           };
+
+          yield* acp.handleSessionUpdate(ctx.usageCapture.captureSessionUpdate);
 
           const nf = yield* Stream.runDrain(
             Stream.mapEffect(acp.getEvents(), (event) =>
@@ -1045,8 +1055,10 @@ export function makeCursorAdapter(
           }
 
           // ACP has no system-message field; keep runtime context separate from the user's text.
+          const requestId = yield* randomUUIDv4;
           const result = yield* ctx.acp
             .prompt({
+              messageId: requestId,
               prompt: [
                 ...promptParts,
                 {
@@ -1056,6 +1068,7 @@ export function makeCursorAdapter(
               ],
             })
             .pipe(
+              Effect.onExit(ctx.usageCapture.capturePromptExit(turnId, requestId)),
               Effect.mapError((error) =>
                 mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
               ),

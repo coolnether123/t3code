@@ -60,6 +60,7 @@ import {
 } from "../acp/AcpCoreRuntimeEvents.ts";
 import { parsePermissionRequest } from "../acp/AcpRuntimeModel.ts";
 import { makeAcpNativeLoggerFactory } from "../acp/AcpNativeLogging.ts";
+import { makeAcpUsageCapture } from "../acp/AcpUsage.ts";
 import {
   applyGrokAcpModelSelection,
   currentGrokModelIdFromSessionSetup,
@@ -134,6 +135,7 @@ interface GrokSessionContext {
   session: ProviderSession;
   readonly scope: Scope.Closeable;
   readonly acp: AcpSessionRuntime.AcpSessionRuntime["Service"];
+  readonly usageCapture: Effect.Success<ReturnType<typeof makeAcpUsageCapture>>;
   notificationFiber: Fiber.Fiber<void, never> | undefined;
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
@@ -1276,6 +1278,12 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
             session,
             scope: sessionScope,
             acp,
+            usageCapture: yield* makeAcpUsageCapture({
+              provider: "grok",
+              threadId: input.threadId,
+              nativeSessionId: started.sessionId,
+              nativeEventLogger,
+            }).pipe(Effect.provideService(Crypto.Crypto, crypto)),
             notificationFiber: undefined,
             pendingApprovals,
             pendingUserInputs,
@@ -1303,6 +1311,8 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                 : currentStartReasoningEffort,
             stopped: false,
           };
+
+          yield* acp.handleSessionUpdate(ctx.usageCapture.captureSessionUpdate);
 
           const nf = yield* Stream.runDrain(
             Stream.mapEffect(acp.getEvents(), (event) =>
@@ -1700,9 +1710,11 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                 return { _tag: "Skipped" as const, interrupted: true };
               }
               const dispatched = yield* Deferred.make<void>();
+              const requestId = yield* randomUUIDv4;
               const fiber = yield* liveCtx.acp
                 .prompt(
                   {
+                    messageId: requestId,
                     prompt: [
                       ...prepared.promptParts,
                       { type: "text", text: prepared.runtimeInstructions },
@@ -1710,7 +1722,10 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                   },
                   { dispatched },
                 )
-                .pipe(Effect.forkChild({ startImmediately: true }));
+                .pipe(
+                  Effect.onExit(liveCtx.usageCapture.capturePromptExit(prepared.turnId, requestId)),
+                  Effect.forkChild({ startImmediately: true }),
+                );
               // Hold the lifecycle permit until the runtime has registered this
               // prompt's RPC fiber, so a later steer's session/cancel targets
               // this prompt. Fall through if the prompt fails before that point.
