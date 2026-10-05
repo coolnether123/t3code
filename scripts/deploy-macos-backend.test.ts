@@ -1,8 +1,12 @@
 // @effect-diagnostics nodeBuiltinImport:off - This test exercises the standalone host-side operator script with temporary filesystem fixtures.
 import * as NodeFSP from "node:fs/promises";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeHttp from "node:http";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
+import * as NodeURL from "node:url";
+import * as NodeUtil from "node:util";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -81,6 +85,13 @@ describe("deploy-macos-backend guards", () => {
   });
 
   it("parses only exact loopback listeners and rejects PID drift", () => {
+    const oldEntry = NodePath.normalize(
+      "/Users/millie/.npm/_npx/b56d26d977534b62/node_modules/t3/dist/bin.mjs",
+    );
+    const oldAlias = NodePath.normalize(
+      "/Users/millie/.npm/_npx/b56d26d977534b62/node_modules/.bin/t3",
+    );
+    const baseDir = NodePath.normalize("/Users/millie/.t3");
     const listeners = parseLsofListeners(
       "p16658\ncnode\ntIPv4\nn127.0.0.1:3773\np17777\ncother\ntIPv4\nn*:3773\n",
       "127.0.0.1",
@@ -95,10 +106,9 @@ describe("deploy-macos-backend guards", () => {
       assertProcessIdentity({
         expectedPid: 16658,
         actualPid: 16658,
-        command:
-          "node /Users/millie/.npm/_npx/b56d26d977534b62/node_modules/.bin/t3 serve --host 127.0.0.1 --port 3773 --base-dir /Users/millie/.t3",
-        oldEntry: "/Users/millie/.npm/_npx/b56d26d977534b62/node_modules/t3/dist/bin.mjs",
-        baseDir: "/Users/millie/.t3",
+        command: `node ${oldAlias} serve --host 127.0.0.1 --port 3773 --base-dir ${baseDir}`,
+        oldEntry,
+        baseDir,
         host: "127.0.0.1",
         port: 3773,
       }),
@@ -107,10 +117,9 @@ describe("deploy-macos-backend guards", () => {
       assertProcessIdentity({
         expectedPid: 16658,
         actualPid: 16658,
-        command:
-          "node /Users/millie/.npm/_npx/b56d26d977534b62/node_modules/.bin/t3 serve --host 127.0.0.1 --port 37730 --base-dir /Users/millie/.t3-wrong",
-        oldEntry: "/Users/millie/.npm/_npx/b56d26d977534b62/node_modules/t3/dist/bin.mjs",
-        baseDir: "/Users/millie/.t3",
+        command: `node ${oldAlias} serve --host 127.0.0.1 --port 37730 --base-dir ${baseDir}-wrong`,
+        oldEntry,
+        baseDir,
         host: "127.0.0.1",
         port: 3773,
       }),
@@ -209,11 +218,9 @@ describe("deploy-macos-backend guards", () => {
   });
 
   it("renders loopback-only persistent LaunchAgent arguments and owned wrapper", () => {
-    const wrapper = renderWrapper(
-      "/Users/millie/.local/lib/node-v24.18.0/bin/node",
-      `/Users/millie/.local/lib/t3-fork/${commit}`,
-    );
-    expect(wrapper).toContain("dist/bin.mjs");
+    const installation = NodePath.normalize(`/Users/millie/.local/lib/t3-fork/${commit}`);
+    const wrapper = renderWrapper("/Users/millie/.local/lib/node-v24.18.0/bin/node", installation);
+    expect(wrapper).toContain(`'${NodePath.join(installation, "dist/bin.mjs")}' "$@"`);
     expect(isOwnedWrapper(wrapper)).toBe(true);
     const plist = renderLaunchAgentPlist({
       label: "com.christinesmith.t3-fork.backend",
@@ -298,5 +305,156 @@ describe("deploy-macos-backend guards", () => {
     expect(options.dryRun).toBe(true);
     expect(options.port).toBe(3773);
     expect(DeploymentGuardError).toBeDefined();
+  });
+
+  it("validates the CLI plan and rejects missing client in both modes before mutation", async () => {
+    await withTempDirectory(async (root) => {
+      const candidate = NodePath.join(root, "candidate");
+      await writeCandidate(candidate);
+      const preload = NodePath.join(root, "synthetic-millie.cjs");
+      // This child-only fixture reaches the execute preflight on any host.
+      // Every write or process action is trapped before importing production.
+      await NodeFSP.writeFile(
+        preload,
+        `const os = require('node:os');
+const fs = require('node:fs/promises');
+const child = require('node:child_process');
+const denied = () => { throw new Error('SYNTHETIC MUTATION ATTEMPT'); };
+Object.defineProperty(process, 'platform', { value: 'darwin' });
+os.userInfo = () => ({ username: 'millie' });
+os.homedir = () => '/Users/millie';
+for (const key of ['mkdir', 'cp', 'rename', 'writeFile', 'rm', 'chmod', 'unlink', 'rmdir']) fs[key] = denied;
+child.execFile = denied;
+child.spawn = denied;
+process.kill = denied;
+require('node:module').syncBuiltinESMExports();
+`,
+      );
+      const args = [
+        NodeURL.fileURLToPath(new URL("./deploy-macos-backend.ts", import.meta.url)),
+        "--candidate",
+        candidate,
+        "--commit",
+        commit,
+        "--base-dir",
+        NodePath.join(root, "synthetic-live"),
+        "--backup-root",
+        NodePath.join(root, "backup"),
+        "--smoke-home",
+        NodePath.join(root, "smoke"),
+        "--expected-old-pid",
+        "12345",
+      ];
+      const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
+      const node = process.execPath;
+      const plan = await execFile(node, ["--require", preload, ...args, "--dry-run"], {
+        windowsHide: true,
+      });
+      expect(plan.stdout).toContain("PLAN ONLY");
+      expect(plan.stderr).not.toContain("SYNTHETIC MUTATION ATTEMPT");
+      await NodeFSP.rm(NodePath.join(candidate, "dist/client/index.html"));
+      for (const mode of ["--dry-run", "--execute"]) {
+        await expect(
+          execFile(node, ["--require", preload, ...args, mode], { windowsHide: true }),
+        ).rejects.toMatchObject({
+          code: 1,
+          stderr: expect.stringContaining("dist/client/index.html"),
+        });
+      }
+      expect((await NodeFSP.readdir(root)).sort()).toEqual(["candidate", "synthetic-millie.cjs"]);
+      expect(await NodeFSP.readFile(NodePath.join(candidate, "dist/bin.mjs"), "utf8")).toBe(
+        "#!/usr/bin/env node\n",
+      );
+    });
+  });
+
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- This test only applies to the standalone CLI's real non-Mac host gate.
+  it.skipIf(NodeOS.platform() === "darwin")(
+    "preserves the real host restriction for execute",
+    async () => {
+      await withTempDirectory(async (root) => {
+        const candidate = NodePath.join(root, "candidate");
+        await writeCandidate(candidate);
+        const node = process.execPath;
+        await expect(
+          NodeUtil.promisify(NodeChildProcess.execFile)(
+            node,
+            [
+              NodeURL.fileURLToPath(new URL("./deploy-macos-backend.ts", import.meta.url)),
+              "--execute",
+              "--candidate",
+              candidate,
+              "--commit",
+              commit,
+              "--expected-old-pid",
+              "12345",
+              "--backup-root",
+              NodePath.join(root, "backup"),
+              "--smoke-home",
+              NodePath.join(root, "smoke"),
+            ],
+            { windowsHide: true },
+          ),
+        ).rejects.toMatchObject({
+          code: 1,
+          stderr: expect.stringContaining("restricted to macOS"),
+        });
+        expect(await NodeFSP.readdir(root)).toEqual(["candidate"]);
+      });
+    },
+  );
+
+  it("selects rollback on HTTP 503 and runs the synthetic recovery callback", async () => {
+    await withTempDirectory(async (root) => {
+      const wrapper = NodePath.join(root, "wrapper");
+      const plist = NodePath.join(root, "launch-agent.plist");
+      await NodeFSP.writeFile(wrapper, "candidate wrapper");
+      await NodeFSP.writeFile(plist, "candidate plist");
+      const server = NodeHttp.createServer((_request, response) => {
+        response.writeHead(503);
+        response.end("synthetic missing client");
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      try {
+        const address = server.address();
+        if (!address || typeof address === "string") throw new Error("missing synthetic listener");
+        // Exercise the exported HTTP-status and recovery boundaries, not launchd.
+        const status = await new Promise<number>((resolve, reject) => {
+          NodeHttp.get(`http://127.0.0.1:${address.port}/`, (response) => {
+            response.resume();
+            response.on("error", reject);
+            response.on("end", () => {
+              if (response.statusCode === undefined) reject(new Error("missing HTTP status"));
+              else resolve(response.statusCode);
+            });
+          }).on("error", reject);
+        });
+        expect(() => assertRootHttpStatus(status)).toThrow("GET / returned HTTP 503");
+        const actions: string[] = [];
+        try {
+          assertRootHttpStatus(status);
+        } catch {
+          await recoverFailedDeployment(
+            true,
+            async () => {
+              actions.push("restore-only");
+            },
+            async () => {
+              actions.push("rollback");
+              await NodeFSP.writeFile(wrapper, "old wrapper");
+              await NodeFSP.writeFile(plist, "old plist");
+              actions.push("restored-old-fixture");
+            },
+          );
+        }
+        expect(actions).toEqual(["rollback", "restored-old-fixture"]);
+        expect(await NodeFSP.readFile(wrapper, "utf8")).toBe("old wrapper");
+        expect(await NodeFSP.readFile(plist, "utf8")).toBe("old plist");
+      } finally {
+        await new Promise<void>((resolve, reject) =>
+          server.close((error) => (error ? reject(error) : resolve())),
+        );
+      }
+    });
   });
 });
