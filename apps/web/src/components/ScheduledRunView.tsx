@@ -28,6 +28,10 @@ function Message({ message }: { message: CodexDesktopMessage }) {
 }
 
 export function ScheduledRunView({ runId }: { runId: string }) {
+  return <ScheduledRunTranscript key={runId} runId={runId} />;
+}
+
+function ScheduledRunTranscript({ runId }: { runId: string }) {
   const navigate = useNavigate();
   const [history, setHistory] = useState<CodexDesktopThreadHistoryResponse | null>(null);
   const [messages, setMessages] = useState<readonly CodexDesktopMessage[]>([]);
