@@ -4,6 +4,8 @@ import { describe, expect, it } from "@effect/vitest";
 import {
   CodexDesktopSendMessageResponse,
   CodexDesktopThreadHistoryResponse,
+  CodexScheduledRoutineListResponse,
+  CodexScheduledRunListResponse,
 } from "./codexDesktop.ts";
 
 describe("Codex desktop contracts", () => {
@@ -42,5 +44,30 @@ describe("Codex desktop contracts", () => {
     });
 
     expect(delivery.status).toBe("queued");
+  });
+
+  it("decodes a compact scheduled routine and archived run page", () => {
+    const run = {
+      id: "run-1",
+      createdAt: "2026-09-28T12:00:00.000Z",
+      preview: "Done",
+      archived: true,
+    };
+    const routines = Schema.decodeUnknownSync(CodexScheduledRoutineListResponse)({
+      routines: [{ name: "Inbox", latestRun: run, runCount: 344 }],
+      nextCursor: null,
+    });
+    const history = Schema.decodeUnknownSync(CodexScheduledRunListResponse)({
+      runs: [run],
+      nextCursor: "25",
+    });
+    expect(routines.routines[0]?.latestRun.archived).toBe(true);
+    expect(history.nextCursor).toBe("25");
+    expect(() =>
+      Schema.decodeUnknownSync(CodexScheduledRunListResponse)({
+        runs: [{ ...run, archived: 1 }],
+        nextCursor: null,
+      }),
+    ).toThrow();
   });
 });

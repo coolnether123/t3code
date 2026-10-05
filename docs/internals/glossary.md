@@ -13,6 +13,7 @@ Terms whose meaning matters across T3 Code. Architecture and lifecycle constrain
 | Workspace root | The project's base filesystem directory on the environment.                                       |
 | Worktree       | A separate Git checkout a thread can use instead of the project's main checkout.                  |
 | Thread         | The durable conversation and work history for a project. It survives provider process exits.      |
+| Scheduled run  | One native Codex desktop automation conversation, separate from T3 threads.                       |
 | Turn           | One user-to-agent work cycle. Provider work can finish before checkpoint and diff work settles.   |
 | Activity       | A non-message timeline item, such as a tool action, approval, or failure.                         |
 | Hook feedback  | Text from a provider hook, recorded as a work-log activity when an adapter reports it.            |

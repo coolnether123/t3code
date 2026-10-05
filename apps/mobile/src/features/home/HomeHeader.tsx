@@ -50,6 +50,7 @@ export function HomeHeader(props: {
   readonly onThreadSortOrderChange: (sortOrder: SidebarThreadSortOrder) => void;
   readonly onOpenEnvironments: () => void;
   readonly onOpenSettings: () => void;
+  readonly onOpenScheduled: () => void;
   readonly onStartNewTask: () => void;
 }) {
   if (Platform.OS === "android") {
@@ -77,6 +78,7 @@ function AndroidHomeHeader(props: HomeHeaderProps) {
     : hasCustomHomeListOptions(props);
   const menuActions = useMemo<MenuAction[]>(
     () => [
+      { id: "scheduled", title: "Scheduled runs" },
       {
         id: "environment",
         title: "Environment",
@@ -149,6 +151,10 @@ function AndroidHomeHeader(props: HomeHeaderProps) {
   const handleMenuAction = useCallback(
     (event: { nativeEvent: { event: string } }) => {
       const id = event.nativeEvent.event;
+      if (id === "scheduled") {
+        props.onOpenScheduled();
+        return;
+      }
       if (id === "environment:all") {
         props.onEnvironmentChange(null);
         return;
@@ -337,6 +343,14 @@ function IosHomeHeader(props: HomeHeaderProps) {
           unstable_headerRightItems:
             Platform.OS === "ios"
               ? () => [
+                  withNativeGlassHeaderItem({
+                    accessibilityLabel: "Scheduled runs",
+                    icon: { name: "clock", type: "sfSymbol" } as const,
+                    identifier: "home-scheduled",
+                    label: "",
+                    onPress: props.onOpenScheduled,
+                    type: "button",
+                  }),
                   withNativeGlassHeaderItem({
                     accessibilityLabel: "Open settings",
                     icon: { name: "ellipsis", type: "sfSymbol" } as const,

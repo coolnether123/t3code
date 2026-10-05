@@ -118,11 +118,18 @@ export function HomeRouteScreen() {
         />
         <WorkspaceSidebarToolbar
           afterSidebarButton={
-            <NativeHeaderToolbar.Button
-              accessibilityLabel="New task"
-              icon="square.and.pencil"
-              onPress={() => navigation.navigate("NewTaskSheet", { screen: "NewTask" })}
-            />
+            <>
+              <NativeHeaderToolbar.Button
+                accessibilityLabel="Scheduled runs"
+                icon="clock"
+                onPress={() => navigation.navigate("Scheduled")}
+              />
+              <NativeHeaderToolbar.Button
+                accessibilityLabel="New task"
+                icon="square.and.pencil"
+                onPress={() => navigation.navigate("NewTaskSheet", { screen: "NewTask" })}
+              />
+            </>
           }
         />
         <WorkspaceEmptyDetail
@@ -176,6 +183,7 @@ export function HomeRouteScreen() {
               params: { screen: "Settings" },
             })
           }
+          onOpenScheduled={() => navigation.navigate("Scheduled")}
           onProjectSortOrderChange={setProjectSortOrder}
           onSearchQueryChange={setSearchQuery}
           onStartNewTask={() => navigation.navigate("NewTaskSheet", { screen: "NewTask" })}
