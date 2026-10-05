@@ -13,7 +13,9 @@ use recorded token totals and API-equivalent prices, not subscription charges.
 
 The Usage page reports stored user messages in **Prompts & words** for the
 selected period. Each environment has its own counts, frequent words and daily
-table. Use the panel's Refresh button to read newly stored messages.
+table. On mobile, open Usage from Settings. Use the panel's Refresh button or
+pull down on mobile to read newly stored messages. Prompt counts load separately
+from provider transcript totals.
 
 Each stored user-message ID counts as one prompt. Imported and archived chats
 are included. Repeated submissions count separately, as do copies stored in

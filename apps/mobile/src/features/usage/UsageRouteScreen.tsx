@@ -25,6 +25,7 @@ import { UsageDailyChart } from "./UsageDailyChart";
 import type { UsageChartMetric } from "./usageChartData";
 import { PROVIDER_LABEL, useProviderColors } from "./usageProviders";
 import { UsageResetScreen } from "./UsageResetScreen";
+import { UsagePrompts } from "./UsagePrompts";
 
 const WINDOW_OPTIONS = [
   { days: 1, label: "Past 24h" },
@@ -52,6 +53,7 @@ function UsageTotalsScreen({ onShowResets }: { readonly onShowResets: () => void
     window: makeWindow(30),
   }));
   const [metric, setMetric] = useState<UsageChartMetric>("cost");
+  const [promptRefreshRevision, setPromptRefreshRevision] = useState(0);
   const { days: windowDays, window } = windowSelection;
   const isPast24Hours = windowDays === 1;
   const { merged, environments, isPending, isPartial, refresh } = useUsage(window);
@@ -92,6 +94,7 @@ function UsageTotalsScreen({ onShowResets }: { readonly onShowResets: () => void
   };
   const refreshWindow = () => {
     if (refreshing) return;
+    setPromptRefreshRevision((revision) => revision + 1);
     const nextWindow = makeWindow(windowDays, undefined, isPast24Hours ? "hour" : "day");
     if (
       nextWindow.sinceDay === window.sinceDay &&
@@ -136,6 +139,11 @@ function UsageTotalsScreen({ onShowResets }: { readonly onShowResets: () => void
         />
 
         <UsageCoverageNotice environments={environments} merged={merged} isPartial={isPartial} />
+        <UsagePrompts
+          environments={environments}
+          window={window}
+          refreshRevision={promptRefreshRevision}
+        />
 
         {isPending ? (
           <Text className="py-16 text-center text-base text-foreground-muted">
