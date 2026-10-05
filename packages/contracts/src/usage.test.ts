@@ -83,6 +83,9 @@ describe("UsageReportInput", () => {
       mode: "runs",
       runIds: ["native-session"],
     });
+    expect(reportDecode({ ...base, mode: "runs", threadIds: ["t3-thread"] })).toMatchObject({
+      threadIds: ["t3-thread"],
+    });
   });
 
   it("rejects an unbounded report row request", () => {
@@ -97,5 +100,10 @@ describe("UsageReportInput", () => {
       }),
     ).toThrow();
     expect(() => reportDecode({ ...base, mode: "runs", runIds: ["r".repeat(513)] })).toThrow();
+    expect(() => reportDecode({ ...base, mode: "runs", threadIds: [] })).toThrow();
+    expect(() =>
+      reportDecode({ ...base, mode: "runs", threadIds: Array(33).fill("thread") }),
+    ).toThrow();
+    expect(() => reportDecode({ ...base, mode: "runs", threadIds: ["t".repeat(513)] })).toThrow();
   });
 });

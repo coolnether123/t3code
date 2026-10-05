@@ -224,6 +224,17 @@ export interface ProjectionSnapshotQueryShape {
     ProjectionRepositoryError
   >;
 
+  /** Read current exact session links for at most 32 selected T3 threads. */
+  readonly findProviderSessionsByThreadIds?: (threadIds: ReadonlyArray<string>) => Effect.Effect<
+    ReadonlyArray<{
+      readonly threadId: ThreadId;
+      readonly threadCount: number;
+      readonly providerName: string | null;
+      readonly providerSessionId: string;
+    }>,
+    ProjectionRepositoryError
+  >;
+
   /**
    * Read the checkpoint context needed to resolve a single thread diff.
    */

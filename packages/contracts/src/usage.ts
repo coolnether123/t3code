@@ -547,6 +547,8 @@ export const UsageReportInput = Schema.Struct({
   limit: Schema.optional(UsageReportRowLimit),
   /** Exact provider-native run/session IDs; supported only by `mode: "runs"`. */
   runIds: Schema.optional(UsageReportRunIds),
+  /** Exact T3 thread IDs, resolved before the run row cap. Mutually exclusive with runIds. */
+  threadIds: Schema.optional(UsageReportRunIds),
   /** Optional live quota interval reads; saved snapshots are returned by default. */
   quotaIntervals: Schema.optional(Schema.Array(UsageQuotaInterval).check(Schema.isMaxLength(64))),
 });
@@ -728,6 +730,13 @@ export const UsageReportRuns = Schema.Struct({
   unattributed: Schema.Array(UsageReportUnattributedRun).check(Schema.isMaxLength(8)),
   runCoverage: UsageReportRunCoverage,
   threadMappingStatus: Schema.Literals(["complete", "partial", "notRequested"]),
+  /** Selection proves current session links, not all historical sessions of a thread. */
+  threadSelection: Schema.optional(
+    Schema.Struct({
+      threadIds: UsageReportRunIds,
+      scope: Schema.Literal("current-provider-session-links"),
+    }),
+  ),
 });
 export type UsageReportRuns = typeof UsageReportRuns.Type;
 

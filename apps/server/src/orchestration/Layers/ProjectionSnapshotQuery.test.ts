@@ -126,6 +126,36 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         },
       ]);
 
+      const reverse = snapshotQuery.findProviderSessionsByThreadIds;
+      if (reverse === undefined) throw new Error("reverse thread mapping query is not available");
+      assert.deepEqual(yield* reverse(["usage-run-map-codex", "usage-run-map-ambiguous-b"]), [
+        {
+          threadId: ThreadId.make("usage-run-map-ambiguous-a"),
+          threadCount: 2,
+          providerName: "codex",
+          providerSessionId: "ambiguous-run",
+        },
+        {
+          threadId: ThreadId.make("usage-run-map-codex"),
+          threadCount: 1,
+          providerName: "codex",
+          providerSessionId: "native-run-codex",
+        },
+      ]);
+      assert.deepEqual(yield* reverse(["not-a-thread"]), []);
+      assert.deepEqual(yield* reverse([]), []);
+      yield* sql`INSERT INTO projection_thread_sessions
+        (thread_id, status, provider_name, provider_session_id, updated_at)
+        VALUES ('usage-run-map-collision', 'ready', 'claudeAgent', 'native-run-codex', ${updatedAt})`;
+      assert.deepEqual(yield* reverse(["usage-run-map-codex"]), [
+        {
+          threadId: ThreadId.make("usage-run-map-codex"),
+          threadCount: 1,
+          providerName: "codex",
+          providerSessionId: "native-run-codex",
+        },
+      ]);
+
       yield* sql`DELETE FROM projection_thread_sessions WHERE thread_id LIKE 'usage-run-map-%'`;
     }),
   );

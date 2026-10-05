@@ -614,13 +614,15 @@ export function projectUsageReport(
       return { ...envelope, mode: "pricing" };
     case "runs": {
       const projected = runRows(summary);
-      const filtered = input.runIds !== undefined;
-      const runs = filtered
-        ? projected.runs.filter((run) => input.runIds!.includes(run.runId))
-        : projected.runs;
-      const dailyRuns = filtered
-        ? projected.dailyRuns.filter((row) => input.runIds!.includes(row.runId))
-        : projected.dailyRuns;
+      const filtered = input.runIds !== undefined || input.threadIds !== undefined;
+      const runs =
+        input.runIds !== undefined
+          ? projected.runs.filter((run) => input.runIds!.includes(run.runId))
+          : projected.runs;
+      const dailyRuns =
+        input.runIds !== undefined
+          ? projected.dailyRuns.filter((row) => input.runIds!.includes(row.runId))
+          : projected.dailyRuns;
       const limit = reportLimit(input);
       const unattributed = filtered ? [] : projected.unattributed;
       const attributedRecords = filtered

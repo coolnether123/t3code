@@ -1,5 +1,14 @@
 # Review usage
 
+## Exact chat reports
+
+Exact chat reports can select up to 32 T3 thread IDs. Each selection resolves
+the thread's current provider session before the report's row limit applies.
+Missing or shared links return unavailable, not zero usage. This covers the
+current session link only, not every older session the thread may have used.
+Provider-native run IDs remain a separate selection option. These reports
+use recorded token totals and API-equivalent prices, not subscription charges.
+
 ## Prompts and words
 
 The Usage page reports stored user messages in **Prompts & words** for the

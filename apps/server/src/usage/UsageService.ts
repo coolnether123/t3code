@@ -17,7 +17,7 @@ import * as NodeOS from "node:os";
 import {
   USAGE_CONTRACT_VERSION,
   CodexSettings,
-  type UsageProviderKind,
+  UsageProviderKind,
   type UsageRepeatedInputCoverageGap,
   type UsageRepeatedInputCatalogItem,
   type UsageRepeatedInputSummary,
@@ -141,6 +141,7 @@ const SUMMARY_CACHE_TTL_MS = 60 * 1000;
 const LEGACY_SCAN_CACHE_IMPORT_FLAG = "legacyJsonImportedAt";
 /** Records per import transaction; small enough that each write is brief. */
 const LEGACY_SCAN_CACHE_IMPORT_BATCH_ROWS = 5_000;
+const isUsageProviderKind = Schema.is(UsageProviderKind);
 const MAX_SUMMARY_CACHE_ENTRIES = 16;
 
 /**
@@ -1864,7 +1865,76 @@ export const make = Effect.gen(function* () {
     },
   );
 
+  const resolveThreadSelection = Effect.fn("UsageService.resolveThreadSelection")(function* (
+    threadIds: NonNullable<UsageReportInput["threadIds"]>,
+    providers: UsageReportInput["providers"],
+  ) {
+    const selectionProjection = yield* Effect.serviceOption(
+      ProjectionSnapshotQuery.ProjectionSnapshotQuery,
+    );
+    if (
+      Option.isNone(selectionProjection) ||
+      selectionProjection.value.findProviderSessionsByThreadIds === undefined
+    ) {
+      return yield* new UsageReadError({
+        reason: "scanFailed",
+        detail: "Exact T3 thread mapping is unavailable.",
+      });
+    }
+    const rows = yield* selectionProjection.value.findProviderSessionsByThreadIds(threadIds).pipe(
+      Effect.timeout(2000),
+      Effect.catchCause(() =>
+        Effect.fail(
+          new UsageReadError({
+            reason: "scanFailed",
+            detail: "Exact T3 thread mapping is unavailable.",
+          }),
+        ),
+      ),
+    );
+    const requested = new Set(threadIds);
+    const found = new Set<string>();
+    for (const row of rows) {
+      const provider = row.providerName === "claudeAgent" ? "claude" : row.providerName;
+      if (
+        !requested.has(row.threadId) ||
+        found.has(row.threadId) ||
+        row.threadCount !== 1 ||
+        !isUsageProviderKind(provider) ||
+        row.providerSessionId.length < 1 ||
+        row.providerSessionId.length > 512 ||
+        (providers !== undefined && !providers.includes(provider))
+      ) {
+        return yield* new UsageReadError({
+          reason: "scanFailed",
+          detail:
+            "Exact T3 thread mapping is missing, ambiguous or outside the provider selection.",
+        });
+      }
+      found.add(row.threadId);
+    }
+    if (found.size !== requested.size) {
+      return yield* new UsageReadError({
+        reason: "scanFailed",
+        detail: "Exact T3 thread mapping is missing or ambiguous.",
+      });
+    }
+    return rows;
+  });
+
   const readReport = Effect.fn("UsageService.readReport")(function* (input: UsageReportInput) {
+    if (
+      input.threadIds !== undefined &&
+      (input.mode !== "runs" ||
+        input.runIds !== undefined ||
+        new Set(input.threadIds).size !== input.threadIds.length)
+    ) {
+      return yield* new UsageReadError({
+        reason: "invalidWindow",
+        detail:
+          "Exact thread selection requires runs mode and distinct thread IDs, without runIds.",
+      });
+    }
     if (input.mode === "prompts") {
       yield* Effect.try({
         try: () => validatePromptUsageInput(input),
@@ -1941,6 +2011,23 @@ export const make = Effect.gen(function* () {
       });
     }
 
+    const selectedMappings =
+      input.threadIds === undefined
+        ? undefined
+        : yield* resolveThreadSelection(input.threadIds, input.providers);
+    const selectedRunKeys =
+      selectedMappings === undefined
+        ? undefined
+        : new Set(
+            selectedMappings.map(
+              (row) =>
+                `${row.providerName === "claudeAgent" ? "claude" : row.providerName}\u0000${row.providerSessionId}`,
+            ),
+          );
+    const selectedRunIds =
+      selectedMappings === undefined
+        ? undefined
+        : [...new Set(selectedMappings.map((row) => row.providerSessionId))];
     const settings = yield* readSettings;
     if (input.mode === "pricing") {
       yield* ensureRates(input.refresh === true);
@@ -1970,7 +2057,11 @@ export const make = Effect.gen(function* () {
       ...(input.mode === "runs"
         ? {
             groupBy: "run" as const,
-            ...(input.runIds === undefined ? {} : { runIds: input.runIds }),
+            ...(selectedRunIds === undefined
+              ? input.runIds === undefined
+                ? {}
+                : { runIds: input.runIds }
+              : { runIds: selectedRunIds }),
           }
         : {}),
       ...(input.mode !== "quota"
@@ -1979,30 +2070,52 @@ export const make = Effect.gen(function* () {
           ? { quotaHistoryOnly: true }
           : { includeQuotaHistory: true, quotaIntervals: input.quotaIntervals }),
     };
-    const summary = yield* readSummary(summaryInput);
+    const scannedSummary = yield* readSummary(summaryInput);
+    const summary =
+      selectedRunKeys === undefined
+        ? scannedSummary
+        : {
+            ...scannedSummary,
+            buckets: scannedSummary.buckets.filter((bucket) =>
+              selectedRunKeys.has(`${bucket.provider}\u0000${bucket.runId}`),
+            ),
+          };
     const report = projectUsageReport(
       summary,
       input,
       makeUsageReportCalculation(summary.pricing, settings.usagePriceOverrides),
     );
-    if (report.mode !== "runs" || (report.runs.length === 0 && report.dailyRuns.length === 0))
-      return report;
+    if (report.mode !== "runs") return report;
+    if (report.runs.length === 0 && report.dailyRuns.length === 0)
+      return input.threadIds === undefined
+        ? report
+        : {
+            ...report,
+            threadMappingStatus: "complete" as const,
+            threadSelection: {
+              threadIds: input.threadIds,
+              scope: "current-provider-session-links" as const,
+            },
+          };
 
     const projection = yield* Effect.serviceOption(ProjectionSnapshotQuery.ProjectionSnapshotQuery);
-    if (
-      Option.isNone(projection) ||
-      projection.value.findThreadMappingsByProviderSessionIds === undefined
-    ) {
+    const findMappings = Option.isSome(projection)
+      ? projection.value.findThreadMappingsByProviderSessionIds
+      : undefined;
+    if (selectedMappings === undefined && findMappings === undefined) {
       return report;
     }
 
     const runIds = [...new Set([...report.runs, ...report.dailyRuns].map((run) => run.runId))];
     const lookupIds = runIds.slice(0, 512);
     const lookupSet = new Set(lookupIds);
-    const mappings = yield* projection.value.findThreadMappingsByProviderSessionIds(lookupIds).pipe(
-      Effect.map((rows) => ({ rows, failed: false as const })),
-      Effect.catchCause(() => Effect.succeed({ rows: [], failed: true as const })),
-    );
+    const mappings =
+      selectedMappings === undefined
+        ? yield* findMappings!(lookupIds).pipe(
+            Effect.map((rows) => ({ rows, failed: false as const })),
+            Effect.catchCause(() => Effect.succeed({ rows: [], failed: true as const })),
+          )
+        : { rows: selectedMappings, failed: false as const };
     const reportRunKeys = new Set(
       [...report.runs, ...report.dailyRuns].map((run) => `${run.provider}\u0000${run.runId}`),
     );
@@ -2040,6 +2153,14 @@ export const make = Effect.gen(function* () {
       dailyRuns: report.dailyRuns.map(mapRun),
       threadMappingStatus:
         mappings.failed || runIds.length > lookupIds.length ? "partial" : "complete",
+      ...(input.threadIds === undefined
+        ? {}
+        : {
+            threadSelection: {
+              threadIds: input.threadIds,
+              scope: "current-provider-session-links" as const,
+            },
+          }),
     };
   });
 

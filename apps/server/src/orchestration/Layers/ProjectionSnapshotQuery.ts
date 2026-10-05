@@ -744,6 +744,31 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     `,
   });
 
+  const listProviderSessionsByThreadIds = SqlSchema.findAll({
+    Request: Schema.Struct({
+      threadIds: Schema.Array(Schema.String.check(Schema.isMaxLength(512))).check(
+        Schema.isMaxLength(32),
+      ),
+    }),
+    Result: ProjectionProviderSessionMappingRowSchema,
+    execute: ({ threadIds }) => sql`
+      SELECT MIN(sessions.thread_id) AS "threadId",
+        COUNT(DISTINCT sessions.thread_id) AS "threadCount",
+        sessions.provider_name AS "providerName",
+        sessions.provider_session_id AS "providerSessionId"
+      FROM projection_thread_sessions AS sessions
+      WHERE sessions.provider_session_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM projection_thread_sessions AS selected
+        WHERE ${sql.in("selected.thread_id", threadIds)}
+          AND selected.provider_name = sessions.provider_name
+          AND selected.provider_session_id = sessions.provider_session_id
+      )
+      GROUP BY sessions.provider_name, sessions.provider_session_id
+      ORDER BY sessions.provider_session_id ASC, sessions.provider_name ASC
+      LIMIT 32
+    `,
+  });
+
   const listActiveThreadSessionRows = SqlSchema.findAll({
     Request: Schema.Void,
     Result: ProjectionThreadSessionDbRowSchema,
@@ -2691,6 +2716,19 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       );
     };
 
+  const findProviderSessionsByThreadIds: ProjectionSnapshotQueryShape["findProviderSessionsByThreadIds"] =
+    (threadIds) => {
+      if (threadIds.length === 0) return Effect.succeed([]);
+      return listProviderSessionsByThreadIds({ threadIds }).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionSnapshotQuery.findProviderSessionsByThreadIds:query",
+            "ProjectionSnapshotQuery.findProviderSessionsByThreadIds:decodeRows",
+          ),
+        ),
+      );
+    };
+
   const promptUsageRows = SqlSchema.findAll({
     Request: Schema.Struct({
       sinceTime: Schema.String,
@@ -3364,6 +3402,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getFirstActiveThreadIdByProjectId,
     getImportedAgentSessionSources,
     findThreadMappingsByProviderSessionIds,
+    findProviderSessionsByThreadIds,
     listPromptUsageMessages,
     getThreadCheckpointContext,
     getFullThreadDiffContext,

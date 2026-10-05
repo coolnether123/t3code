@@ -495,6 +495,147 @@ describe("UsageService", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.live("selects exact T3 threads before row caps and keeps provider identities separate", () =>
+    Effect.gen(function* () {
+      const { transcript, settings, home } = yield* setup;
+      yield* Effect.promise(() =>
+        NodeFSP.writeFile(
+          transcript,
+          claudeLine(1, 5, "claude-fable-5", "selected-run") +
+            claudeLine(2, 700, "claude-fable-5", "large-other-run"),
+        ),
+      );
+      const sessions = NodePath.join(home, "codex", "sessions");
+      yield* Effect.promise(() => NodeFSP.mkdir(sessions, { recursive: true }));
+      yield* Effect.promise(() =>
+        NodeFSP.writeFile(
+          NodePath.join(sessions, "collision.jsonl"),
+          codexTranscript("selected-run", 99),
+        ),
+      );
+      const service = yield* UsageService.make.pipe(
+        Effect.provide(
+          serviceLayers({
+            prefix: "usage-exact-thread-test",
+            home,
+            settings,
+            ratesDocument: {
+              "claude-fable-5": { input_cost_per_token: 1e-5, output_cost_per_token: 5e-5 },
+              "gpt-5.6-sol": { input_cost_per_token: 1e-6, output_cost_per_token: 2e-6 },
+            },
+          }),
+        ),
+      );
+      const report = yield* service
+        .readReport({
+          mode: "runs",
+          ...WINDOW,
+          threadIds: ["t3-selected"],
+          limit: 1,
+        })
+        .pipe(
+          Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+            findProviderSessionsByThreadIds: (ids: readonly string[]) => {
+              assert.deepEqual(ids, ["t3-selected"]);
+              return Effect.succeed([
+                {
+                  threadId: "t3-selected",
+                  threadCount: 1,
+                  providerName: "claudeAgent",
+                  providerSessionId: "selected-run",
+                },
+              ]);
+            },
+          } as never),
+        );
+      assert.strictEqual(report.mode, "runs");
+      if (report.mode !== "runs") return;
+      assert.lengthOf(report.runs, 1);
+      assert.deepInclude(report.runs[0], {
+        provider: "claude",
+        runId: "selected-run",
+        threadId: "t3-selected",
+        threadMapping: "matched",
+      });
+      assert.strictEqual(report.runs[0]?.totals.outputTokens, 5);
+      assert.strictEqual(report.totalRuns, 1);
+      assert.strictEqual(report.truncated, false);
+      assert.strictEqual(report.runCoverage.status, "filtered");
+      assert.strictEqual(report.threadMappingStatus, "complete");
+      assert.deepEqual(report.threadSelection, {
+        threadIds: ["t3-selected"],
+        scope: "current-provider-session-links",
+      });
+      assert.isTrue(report.dailyRuns.every((row) => row.threadId === "t3-selected"));
+      assert.deepEqual(report.unattributed, []);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("fails closed for missing or ambiguous T3 selections and unsupported filters", () =>
+    Effect.gen(function* () {
+      const { settings, home } = yield* setup;
+      const service = yield* UsageService.make.pipe(
+        Effect.provide(
+          serviceLayers({
+            prefix: "usage-thread-selection-errors",
+            home,
+            settings,
+            ratesDocument: {},
+          }),
+        ),
+      );
+      const input: UsageReportInput = { mode: "runs", ...WINDOW, threadIds: ["selected"] };
+      assert.isTrue(Exit.isFailure(yield* Effect.exit(service.readReport(input))));
+      for (const rows of [
+        [],
+        [
+          {
+            threadId: "selected",
+            threadCount: 2,
+            providerName: "codex",
+            providerSessionId: "native",
+          },
+        ],
+        [
+          {
+            threadId: "selected",
+            threadCount: 1,
+            providerName: "unknown",
+            providerSessionId: "native",
+          },
+        ],
+        [{ threadId: "other", threadCount: 1, providerName: "codex", providerSessionId: "native" }],
+      ]) {
+        const result = yield* Effect.exit(
+          service.readReport(input).pipe(
+            Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+              findProviderSessionsByThreadIds: () => Effect.succeed(rows),
+            } as never),
+          ),
+        );
+        assert.isTrue(Exit.isFailure(result));
+      }
+      for (const request of [
+        { ...input, threadIds: ["selected", "selected"] },
+        { ...input, runIds: ["native"] },
+        { ...input, mode: "overview" as const },
+        { ...input, mode: "prompts" as const },
+      ])
+        assert.isTrue(Exit.isFailure(yield* Effect.exit(service.readReport(request))));
+      assert.isTrue(
+        Exit.isFailure(
+          yield* Effect.exit(
+            service.readReport(input).pipe(
+              Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+                findProviderSessionsByThreadIds: () => Effect.die("synthetic lookup failure"),
+              } as never),
+            ),
+          ),
+        ),
+      );
+    }).pipe(Effect.scoped),
+  );
+
   it.live("projects repeated Codex input separately from the full session total", () =>
     Effect.gen(function* () {
       const { settings, home } = yield* setup;
