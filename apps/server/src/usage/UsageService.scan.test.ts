@@ -957,7 +957,7 @@ describe("incremental scan integration", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
-  it.effect("defers old warm entries until repeated-input metadata is rebuilt", () =>
+  it.effect("defers warm entries until repeated-input metadata is rebuilt", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const encodedCache = encodeScanCache(
@@ -973,7 +973,7 @@ describe("incremental scan integration", () => {
           ]),
         ),
       );
-      const oldCache = encodeJson({ ...encodedCache, version: 6 });
+      const ordinaryCache = encodeJson(encodedCache);
       vi.mocked(readTranscriptRecords).mockClear();
       vi.mocked(readRepeatedInputRecords).mockClear();
       const service = yield* make.pipe(
@@ -982,7 +982,7 @@ describe("incremental scan integration", () => {
           exists: () => Effect.succeed(true),
           readFileString: (path, ...args) =>
             path.endsWith("usage-scan-cache.json")
-              ? Effect.succeed(oldCache)
+              ? Effect.succeed(ordinaryCache)
               : fs.readFileString(path, ...args),
         }),
         Effect.provideService(
@@ -1000,7 +1000,10 @@ describe("incremental scan integration", () => {
       });
 
       const codexSource = result.sources.find((source) => source.fingerprint.provider === "codex");
-      expect(codexSource?.status).toBe("partial");
+      expect(codexSource?.status).toBe("ok");
+      expect(result.repeatedInput?.coverageGaps).toEqual(
+        expect.arrayContaining([expect.objectContaining({ reason: "unattributed", count: 1 })]),
+      );
       expect(readTranscriptRecords).not.toHaveBeenCalled();
       expect(readRepeatedInputRecords).toHaveBeenCalledTimes(1);
       expect(readRepeatedInputRecords).toHaveBeenCalledWith(
