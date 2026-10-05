@@ -10,7 +10,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { serializeTaskTranscripts, type TaskTranscriptInput } from "../chatTranscript";
 import { useThread } from "../state/entities";
 import { useEnvironmentThread } from "../state/threads";
-import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
+import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 
 export type MultiChatCopyRequest = {
@@ -19,37 +19,51 @@ export type MultiChatCopyRequest = {
 };
 
 export function useMultiChatTranscriptCopy(
-  onCopied: (threadRefs: ReadonlyArray<ScopedThreadRef>) => void,
+  onCopied?: (threadRefs: ReadonlyArray<ScopedThreadRef>) => void,
 ) {
   const [request, setRequest] = useState<MultiChatCopyRequest | null>(null);
+  const [isCopied, setIsCopied] = useState(false);
   const requestRef = useRef(request);
   const resultsRef = useRef(new Map<string, TaskTranscriptInput>());
   const requestIdRef = useRef(0);
-  const { copyToClipboard } = useCopyToClipboard<MultiChatCopyRequest>({
-    target: "selected chat transcripts",
-    onCopy: ({ id, threadRefs }) => {
-      if (id !== requestIdRef.current) return;
-      toastManager.add({
-        type: "success",
-        title: "Chats copied",
-        description: `${threadRefs.length} chat transcripts copied to the clipboard.`,
-      });
-      onCopied(threadRefs);
-    },
-    onError: (error, { id }) => {
-      if (id !== requestIdRef.current) return;
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Could not copy chats",
-          description: error.message,
-        }),
+  const copyTailRef = useRef<Promise<void> | null>(null);
+  const onCopiedRef = useRef(onCopied);
+  useEffect(() => {
+    onCopiedRef.current = onCopied;
+  }, [onCopied]);
+
+  const copyToClipboard = useCallback((text: string, copyRequest: MultiChatCopyRequest) => {
+    copyTailRef.current = (copyTailRef.current ?? Promise.resolve()).then(() => {
+      if (copyRequest.id !== requestIdRef.current) return;
+      return writeTextToClipboard(text, "selected chat transcripts").then(
+        (didCopy) => {
+          if (!didCopy || copyRequest.id !== requestIdRef.current) return;
+          toastManager.add({
+            type: "success",
+            title: copyRequest.threadRefs.length === 1 ? "Chat copied" : "Chats copied",
+            description: `${copyRequest.threadRefs.length} chat transcripts copied to the clipboard.`,
+          });
+          setIsCopied(true);
+          onCopiedRef.current?.(copyRequest.threadRefs);
+        },
+        (error: Error) => {
+          if (copyRequest.id !== requestIdRef.current) return;
+          console.error(error);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Could not copy chats",
+              description: error.message,
+            }),
+          );
+        },
       );
-    },
-  });
+    });
+  }, []);
 
   const startCopy = useCallback((threadRefs: ReadonlyArray<ScopedThreadRef>) => {
     if (threadRefs.length === 0) return;
+    setIsCopied(false);
     const nextRequest = { id: ++requestIdRef.current, threadRefs: [...threadRefs] };
     resultsRef.current.clear();
     requestRef.current = nextRequest;
@@ -91,7 +105,20 @@ export function useMultiChatTranscriptCopy(
     [copyToClipboard],
   );
 
-  return { request, startCopy, onLoaded, onError };
+  useEffect(() => {
+    if (!isCopied) return;
+    const timeout = setTimeout(() => setIsCopied(false), 2000);
+    return () => clearTimeout(timeout);
+  }, [isCopied]);
+
+  useEffect(
+    () => () => {
+      requestIdRef.current += 1;
+    },
+    [],
+  );
+
+  return { request, startCopy, onLoaded, onError, isCopied };
 }
 
 export function MultiChatTranscriptLoader(props: {

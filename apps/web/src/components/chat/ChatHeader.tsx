@@ -48,6 +48,10 @@ import {
 import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
+import {
+  MultiChatTranscriptLoader,
+  useMultiChatTranscriptCopy,
+} from "../MultiChatTranscriptLoader";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 
 interface ChatHeaderProps {
@@ -197,12 +201,21 @@ export const ChatHeader = memo(function ChatHeader({
   onDeleteProjectScript,
 }: ChatHeaderProps) {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const { copyToClipboard, isCopied } = useCopyToClipboard({
+  const { copyToClipboard, isCopied: isDraftCopied } = useCopyToClipboard({
     target: "task transcript",
     onCopy: () => toastManager.add({ type: "success", title: "Chat copied" }),
     onError: (error) =>
       toastManager.add({ type: "error", title: "Could not copy chat", description: error.message }),
   });
+  const fullChatCopy = useMultiChatTranscriptCopy();
+  const isCopied = isServerThread ? fullChatCopy.isCopied : isDraftCopied;
+  const copyChat = () => {
+    if (isServerThread) {
+      fullChatCopy.startCopy([scopeThreadRef(activeThreadEnvironmentId, activeThreadId)]);
+    } else {
+      copyToClipboard(transcript, undefined);
+    }
+  };
   const fileScripts = useT3ProjectFileScripts(
     activeThreadEnvironmentId,
     activeProjectScripts ? activeProjectCwd : null,
@@ -504,7 +517,7 @@ export const ChatHeader = memo(function ChatHeader({
             className="min-h-11 w-full justify-start border-0 px-3"
             aria-label={isCopied ? "Chat copied" : "Copy chat"}
             onClick={() => {
-              copyToClipboard(transcript, undefined);
+              copyChat();
               setMobileActionsOpen(false);
             }}
           >
@@ -597,7 +610,7 @@ export const ChatHeader = memo(function ChatHeader({
                 variant="outline"
                 className="no-drag min-h-9 shrink-0 gap-1.5 px-2.5"
                 aria-label={isCopied ? "Chat copied" : "Copy chat"}
-                onClick={() => copyToClipboard(transcript, undefined)}
+                onClick={copyChat}
               />
             }
           >
@@ -641,6 +654,15 @@ export const ChatHeader = memo(function ChatHeader({
           />
         )}
       </div>
+      {fullChatCopy.request?.threadRefs.map((threadRef) => (
+        <MultiChatTranscriptLoader
+          key={fullChatCopy.request!.id}
+          requestId={fullChatCopy.request!.id}
+          threadRef={threadRef}
+          onLoaded={fullChatCopy.onLoaded}
+          onError={fullChatCopy.onError}
+        />
+      ))}
     </div>
   );
 });

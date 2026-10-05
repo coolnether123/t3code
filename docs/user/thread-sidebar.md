@@ -15,6 +15,22 @@ If reordering is unavailable for one environment, update the T3 Code server runn
 environment. Older servers can still pin and unpin threads, but do not understand synced ordering;
 their pinned threads keep the default newest-first order below the ones you have arranged.
 
+## Copy chats
+
+On web and desktop, choose **Copy chat** in the chat header to copy its full
+transcript. On a narrow screen, open **Task actions** first. Saved chats load
+earlier history before copying. Drafts copy their current text.
+
+To copy several chats, select them in the sidebar with `Cmd`-click on macOS or
+`Ctrl`-click on Windows and Linux. Use `Shift`-click for a range. Right-click
+the selection and choose **Copy chats**, followed by the selected count.
+T3 loads every selected chat's history and copies one text document in sidebar
+order, with a title and separator for each chat.
+
+If a chat cannot load or the clipboard rejects the write, no partial batch is
+copied. Your selection stays available to retry. Chats you select while copying
+are not removed from the selection when the earlier batch finishes.
+
 ## Environment artwork
 
 Dev and Nightly environments can identify themselves with artwork at the top of the sidebar and in
