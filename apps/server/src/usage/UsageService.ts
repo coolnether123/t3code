@@ -658,12 +658,10 @@ export const make = Effect.gen(function* () {
       codexConfig: CodexSettings,
     ) {
       const layout = yield* resolveCodexHomeLayout(codexConfig);
-      // Usage must retain the legacy source while also seeing new T3-owned
-      // transcripts. The private home is derived exactly as in CodexDriver.
+      // Historical usage is independent of the currently selected launch mode.
       codexHomes.add(layout.sharedHomePath);
-      if (!codexConfig.useDesktopAppDaemon && codexConfig.shadowHomePath.trim().length === 0) {
-        codexHomes.add(codexIsolatedHomePath(path, config.baseDir, instanceId));
-      }
+      if (layout.effectiveHomePath) codexHomes.add(layout.effectiveHomePath);
+      codexHomes.add(codexIsolatedHomePath(path, config.baseDir, instanceId));
     });
     yield* addCodexHome("codex", settings.providers.codex);
     for (const [instanceId, instance] of Object.entries(settings.providerInstances)) {

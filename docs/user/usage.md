@@ -60,6 +60,10 @@ from Usage. Gemini totals include Gemini CLI sessions and locally recorded Antig
 OpenCode totals come from its local session database and remain available when OpenCode is disabled
 as a provider for new chats.
 
+Codex history includes each configured shared and shadow home and the retained T3-owned private
+home. Switching to Desktop launch mode does not hide that private history. Copied native events
+still count once.
+
 ## Understand API estimates
 
 Recorded dollar costs take precedence over token estimates. Otherwise, Usage applies the latest

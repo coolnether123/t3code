@@ -321,6 +321,56 @@ describe("UsageService", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.live("retains private and shadow history when Desktop launch mode is selected", () =>
+    Effect.gen(function* () {
+      const { settings, home } = yield* setup;
+      const baseDir = NodePath.join(home, "server");
+      const shadowHome = NodePath.join(home, "shadow");
+      const sharedHome = NodePath.join(home, "codex");
+      const isolatedHome = NodePath.join(baseDir, "codex-home", "codex");
+      for (const [root, sessionId, output] of [
+        [sharedHome, "shared-session", 10],
+        [isolatedHome, "shared-session", 10],
+        [isolatedHome, "isolated-session", 20],
+        [shadowHome, "shadow-session", 30],
+      ] as const) {
+        const sessions = NodePath.join(root, "sessions", "2026", "08");
+        yield* Effect.promise(() => NodeFSP.mkdir(sessions, { recursive: true }));
+        yield* Effect.promise(() =>
+          NodeFSP.writeFile(
+            NodePath.join(sessions, `${sessionId}.jsonl`),
+            codexTranscript(sessionId, output),
+          ),
+        );
+      }
+      const service = yield* UsageService.make.pipe(
+        Effect.provide(
+          serviceLayers({
+            prefix: "usage-service-retained-homes-test",
+            configBaseDir: baseDir,
+            home,
+            settings: {
+              providers: {
+                ...settings.providers,
+                codex: {
+                  ...settings.providers.codex,
+                  useDesktopAppDaemon: true,
+                  shadowHomePath: shadowHome,
+                },
+              },
+            },
+          }),
+        ),
+      );
+      const summary = yield* service.readSummary(WINDOW);
+      assert.strictEqual(totalOutputTokens(summary), 60);
+      assert.strictEqual(
+        summary.buckets.reduce((total, bucket) => total + bucket.records, 0),
+        3,
+      );
+    }).pipe(Effect.scoped),
+  );
+
   it.live("returns an idempotent native session and turn attribution", () =>
     Effect.gen(function* () {
       const { settings, home } = yield* setup;
