@@ -699,6 +699,18 @@ export const make = Effect.gen(function* () {
     readonly dirs: readonly { readonly provider: UsageProviderKind; readonly dir: string }[];
   };
 
+  type RepeatedInputScanFile = TranscriptFile & {
+    readonly previous: CachedFileMeta | undefined;
+    readonly parserState: RepeatedInputParserState | undefined;
+    readonly previousObservations: readonly RepeatedInputObservation[] | undefined;
+  };
+
+  type RepeatedInputScanProgress = {
+    readonly observations: RepeatedInputObservation[];
+    readonly gaps: UsageRepeatedInputCoverageGap[];
+    catalog: RepeatedInputCatalog | null;
+  };
+
   type UsageReadProgress = {
     readonly sources: UsageSource[];
     readonly pendingSources: UsageSource[];
@@ -706,6 +718,10 @@ export const make = Effect.gen(function* () {
     quotaHistory: UsageSummary["quotaHistory"];
     providerQuotaHistories: UsageSummary["providerQuotaHistories"];
     aggregator: UsageAggregator | undefined;
+    ordinarySummary: UsageSummary | undefined;
+    repeatedInput:
+      | ((gaps?: readonly UsageRepeatedInputCoverageGap[]) => UsageRepeatedInputSummary)
+      | undefined;
   };
 
   const resolveReadContext = Effect.fn("UsageService.resolveReadContext")(function* () {
@@ -915,6 +931,135 @@ export const make = Effect.gen(function* () {
       return { records, complete };
     });
 
+  /** Optional attribution runs after ordinary totals, with a separate byte budget. */
+  const readRepeatedInputAttribution = Effect.fn("UsageService.readRepeatedInputAttribution")(
+    function* (
+      input: UsageSummaryInput,
+      dirs: UsageReadContext["dirs"],
+      fileGroups: readonly (readonly RepeatedInputScanFile[])[],
+      progress: RepeatedInputScanProgress,
+      hostId: string,
+    ) {
+      if (input.providers === undefined || input.providers.includes("codex")) {
+        const inputRoots = dirs
+          .filter(({ provider }) => provider === "codex")
+          .flatMap(({ dir }) => {
+            const home = path.dirname(dir);
+            return [path.join(home, "skills"), path.join(home, "plugins")];
+          });
+        progress.catalog = yield* ensureRepeatedInputCatalog(inputRoots, input.refresh === true);
+        progress.gaps.push(...repeatedInputDiscoveryGaps);
+      }
+      for (const group of fileGroups) {
+        const planned = yield* Effect.forEach(
+          group,
+          Effect.fnUntraced(function* (file) {
+            const cached = file.previous;
+            const parserMatches = cached?.repeatedInputVersion === REPEATED_INPUT_CACHE_VERSION;
+            const warm =
+              cached !== undefined &&
+              cached.size === file.size &&
+              cached.mtimeMs === file.mtimeMs &&
+              cached.provider === "codex" &&
+              cached.scanCursor === undefined &&
+              cached.scanSkippedLines === undefined &&
+              cached.scanDiscardingLine !== true &&
+              parserMatches &&
+              cached.hasRepeatedInput &&
+              scanStore.meta(file.path)?.hasRepeatedInput === true;
+            const appendable =
+              !warm &&
+              parserMatches &&
+              cached !== undefined &&
+              cached.provider === "codex" &&
+              file.parserState !== undefined &&
+              file.size > cached.size &&
+              cached.prefixFingerprint !== undefined &&
+              (yield* Effect.promise(() =>
+                transcriptAppendIsSafe(file.path, {
+                  offset: cached.size,
+                  prefixFingerprint: cached.prefixFingerprint!,
+                }),
+              ));
+            return {
+              ...file,
+              warm,
+              appendable,
+              startByte: warm ? file.size : appendable ? cached!.size : 0,
+            };
+          }),
+          { concurrency: 16 },
+        );
+        const selection = selectTranscriptFilesForScan(
+          planned,
+          (file) => file.size - file.startByte,
+          MAX_COLD_SCAN_BYTES_PER_SOURCE,
+        );
+        if (selection.deferredFiles > 0) {
+          progress.gaps.push({
+            reason: "unattributed",
+            count: selection.deferredFiles,
+            message:
+              "Some Codex transcript files were deferred before repeated-input attribution could inspect them.",
+          });
+        }
+        for (const file of selection.files) {
+          const { warm, appendable, startByte } = file;
+          const cached = warm ? scanStore.load(file.path) : undefined;
+          let observations = cached?.repeatedInputObservations;
+          let gaps = cached?.repeatedInputGaps;
+          let activeSources = cached?.repeatedInputActiveSources;
+          if (cached === undefined) {
+            const parserState = appendable ? file.parserState : undefined;
+            const parsed = yield* Effect.promise(() =>
+              readRepeatedInputRecords(file.path, {
+                startByte,
+                endByte: file.size - 1,
+                catalog: progress.catalog ?? undefined,
+                maxPayloadBytes: 4 * 1024 * 1024,
+                project: null,
+                environment: hostId,
+                ...(parserState === undefined ? {} : { parserState }),
+              }),
+            );
+            observations =
+              parsed === null
+                ? []
+                : dedupeRepeatedInputObservations([
+                    ...(appendable ? (file.previousObservations ?? []) : []),
+                    ...parsed.observations,
+                  ]);
+            gaps = parsed?.gaps ?? [
+              {
+                reason: "unavailable",
+                count: 1,
+                message: "The Codex transcript could not be read for repeated-input attribution.",
+              },
+            ];
+            activeSources = parsed?.parserState.activeSources ?? [];
+          }
+          const entry = cached ?? scanStore.load(file.path);
+          observations = attachRepeatedInputUsage(observations ?? [], entry?.records ?? []);
+          progress.observations.push(...observations);
+          progress.gaps.push(...(gaps ?? []));
+          if (cached === undefined && entry !== undefined) {
+            const prefixFingerprint = yield* Effect.promise(() =>
+              readTranscriptPrefixFingerprint(file.path, file.size),
+            );
+            scanStore.set(file.path, {
+              ...entry,
+              ...(prefixFingerprint === null ? {} : { prefixFingerprint }),
+              repeatedInputObservations: observations,
+              repeatedInputGaps: gaps ?? [],
+              repeatedInputActiveSources: activeSources ?? [],
+              repeatedInputVersion: REPEATED_INPUT_CACHE_VERSION,
+            });
+          }
+        }
+      }
+    },
+  );
+
   const readSummaryUnlocked = Effect.fn("UsageService.readSummaryUnlocked")(function* (
     input: UsageSummaryInput,
     context: UsageReadContext | undefined,
@@ -1069,24 +1214,12 @@ export const make = Effect.gen(function* () {
       }
     }
     const repeatedInputEnabled = includeRepeatedInput(input);
-    const repeatedInputObservations: RepeatedInputObservation[] = [];
-    const repeatedInputGaps: UsageRepeatedInputCoverageGap[] = [];
-    let repeatedInputCatalogForScan: RepeatedInputCatalog | null = null;
-    const repeatedInputProviderSelected =
-      input.providers === undefined || input.providers.includes("codex");
-    if (repeatedInputEnabled && repeatedInputProviderSelected) {
-      const inputRoots = dirs
-        .filter(({ provider }) => provider === "codex")
-        .flatMap(({ dir }) => {
-          const home = path.dirname(dir);
-          return [path.join(home, "skills"), path.join(home, "plugins")];
-        });
-      repeatedInputCatalogForScan = yield* ensureRepeatedInputCatalog(
-        inputRoots,
-        input.refresh === true,
-      );
-      repeatedInputGaps.push(...repeatedInputDiscoveryGaps);
-    }
+    const repeatedInputProgress: RepeatedInputScanProgress = {
+      observations: [],
+      gaps: [],
+      catalog: null,
+    };
+    const repeatedInputFileGroups: RepeatedInputScanFile[][] = [];
     const windowStart = DateTime.make(`${input.sinceDay}T00:00:00Z`);
     if (Option.isNone(windowStart)) {
       return yield* new UsageReadError({
@@ -1120,6 +1253,41 @@ export const make = Effect.gen(function* () {
     const selectedProviders = input.providers === undefined ? null : new Set(input.providers);
     const selectedSessionIds = input.sessionIds === undefined ? null : new Set(input.sessionIds);
     const selectedTurnIds = input.turnIds === undefined ? null : new Set(input.turnIds);
+    const repeatedDayAt = makeDayFormatter(input.timeZone);
+    const repeatedInputSummary = (additionalGaps: readonly UsageRepeatedInputCoverageGap[] = []) =>
+      mapRepeatedInputSummary(
+        aggregateRepeatedInputObservations(
+          repeatedInputProgress.observations.filter((observation) => {
+            if (selectedSessionIds !== null && !selectedSessionIds.has(observation.sessionId)) {
+              return false;
+            }
+            if (
+              selectedTurnIds !== null &&
+              (observation.turnId === null || !selectedTurnIds.has(observation.turnId))
+            ) {
+              return false;
+            }
+            if (
+              hourlyWindow !== null &&
+              (observation.observedAtMs < hourlyWindow.sinceTimeMs ||
+                observation.observedAtMs >= hourlyWindow.untilTimeMs)
+            ) {
+              return false;
+            }
+            const day = repeatedDayAt(observation.observedAtMs);
+            return day >= input.sinceDay && day <= input.untilDay;
+          }),
+          {
+            rates: scanRates,
+            priceOverrides: createOverrideRateTable(settings.usagePriceOverrides),
+            dayAt: repeatedDayAt,
+            coverageGaps: [...repeatedInputProgress.gaps, ...additionalGaps],
+            catalog: repeatedInputProgress.catalog?.sources ?? [],
+          },
+        ),
+      );
+    if (progress !== undefined && repeatedInputEnabled)
+      progress.repeatedInput = repeatedInputSummary;
     const activeDirs = dirs.filter(
       ({ provider }) =>
         (input.quotaIntervals === undefined || provider === (input.quotaProvider ?? "codex")) &&
@@ -1215,9 +1383,13 @@ export const make = Effect.gen(function* () {
         );
         for (const [, entry] of retainedFiles) {
           if (entry.records.length > 0) scannedFiles += 1;
-          if (repeatedInputEnabled && entry.repeatedInputObservations !== undefined) {
-            repeatedInputObservations.push(...entry.repeatedInputObservations);
-            repeatedInputGaps.push(...(entry.repeatedInputGaps ?? []));
+          if (
+            repeatedInputEnabled &&
+            provider === "codex" &&
+            entry.repeatedInputObservations !== undefined
+          ) {
+            repeatedInputProgress.observations.push(...entry.repeatedInputObservations);
+            repeatedInputProgress.gaps.push(...(entry.repeatedInputGaps ?? []));
           }
           for (const rawRecord of entry.records) {
             const record = applyCodexServiceTier(rawRecord, tiers, fastWindows);
@@ -1322,50 +1494,13 @@ export const make = Effect.gen(function* () {
             (resumePartial || cached.provider === provider) &&
             (provider === "claude" || (provider === "codex" && cached.hasCodexState));
           const startByte = warm ? file.size : appendable ? resumeByte : 0;
-          const parserMatches = cached?.repeatedInputVersion === REPEATED_INPUT_CACHE_VERSION;
-          const repeatedInputWarm =
-            repeatedInputEnabled &&
-            provider === "codex" &&
-            warm &&
-            parserMatches &&
-            cached?.hasRepeatedInput === true;
-          const repeatedInputAppendable =
-            repeatedInputEnabled &&
-            provider === "codex" &&
-            !warm &&
-            parserMatches &&
-            cached !== undefined &&
-            cached.provider === provider &&
-            cached.hasRepeatedInput &&
-            file.size > cached.size &&
-            cached.prefixFingerprint !== undefined &&
-            (yield* Effect.promise(() =>
-              transcriptAppendIsSafe(file.path, {
-                offset: cached.size,
-                prefixFingerprint: cached.prefixFingerprint!,
-              }),
-            ));
-          const repeatedInputStartByte =
-            !repeatedInputEnabled || provider !== "codex"
-              ? file.size
-              : repeatedInputWarm
-                ? file.size
-                : repeatedInputAppendable
-                  ? cached!.size
-                  : 0;
-          return {
-            ...file,
-            startByte,
-            repeatedInputStartByte,
-            repeatedInputWarm,
-            repeatedInputAppendable,
-          };
+          return { ...file, startByte };
         }),
         { concurrency: 16 },
       ).pipe(Effect.withSpan("UsageService.planTranscriptFiles"));
       const selection = selectTranscriptFilesForScan(
         plannedFiles,
-        (file) => Math.max(file.size - file.startByte, file.size - file.repeatedInputStartByte),
+        (file) => file.size - file.startByte,
         MAX_COLD_SCAN_BYTES_PER_SOURCE,
       );
       if (repeatedInputEnabled && provider === "codex" && selection.deferredFiles > 0) {
@@ -1373,7 +1508,7 @@ export const make = Effect.gen(function* () {
         // long-range request responsive. Repeated-input attribution must make
         // that boundary visible instead of presenting a complete-looking
         // aggregate from the subset that happened to fit the budget.
-        repeatedInputGaps.push({
+        repeatedInputProgress.gaps.push({
           reason: "unattributed",
           count: selection.deferredFiles,
           message:
@@ -1393,6 +1528,9 @@ export const make = Effect.gen(function* () {
         createOverrideRateTable(settings.usagePriceOverrides),
         quotaProvider,
       );
+      const repeatedInputFiles: (typeof repeatedInputFileGroups)[number] = [];
+      if (repeatedInputEnabled && provider === "codex")
+        repeatedInputFileGroups.push(repeatedInputFiles);
 
       for (const file of selection.files) {
         // An unchanged transcript whose newest usage predates the window has
@@ -1413,9 +1551,22 @@ export const make = Effect.gen(function* () {
           else skippedFiles += 1;
           continue;
         }
-        // Repeated-input attribution reads the prior entry's observations and
-        // parser state; ordinary scans never decode it here.
-        const cachedBefore = repeatedInputEnabled ? scanStore.load(file.path) : undefined;
+        // Keep only the append state that an ordinary cache write would replace.
+        // Warm attribution reloads one file at a time after ordinary aggregation.
+        const previous = scanStore.meta(file.path);
+        const cachedBefore =
+          repeatedInputEnabled &&
+          provider === "codex" &&
+          previous !== undefined &&
+          file.size > previous.size &&
+          previous.hasRepeatedInput &&
+          previous.repeatedInputVersion === REPEATED_INPUT_CACHE_VERSION
+            ? scanStore.load(file.path)
+            : undefined;
+        const parserState =
+          cachedBefore === undefined
+            ? undefined
+            : repeatedInputParserStateForCached(cachedBefore, null, hostId);
         const fileRead = yield* readFileRecords(
           file.path,
           file.size,
@@ -1426,69 +1577,12 @@ export const make = Effect.gen(function* () {
         const { records } = fileRead;
         if (!fileRead.complete) incompleteFiles += 1;
         if (repeatedInputEnabled && provider === "codex") {
-          const repeatedWarm = file.repeatedInputWarm;
-          const appendable = file.repeatedInputAppendable;
-          let nextObservations = repeatedWarm ? cachedBefore?.repeatedInputObservations : undefined;
-          let nextGaps = repeatedWarm ? cachedBefore?.repeatedInputGaps : undefined;
-          let nextActiveSources = repeatedWarm
-            ? cachedBefore?.repeatedInputActiveSources
-            : undefined;
-          if (!repeatedWarm) {
-            const repeatedStartByte = file.repeatedInputStartByte;
-            const parserState = appendable
-              ? repeatedInputParserStateForCached(cachedBefore!, null, hostId)
-              : undefined;
-            const parsed = yield* Effect.promise(() =>
-              readRepeatedInputRecords(file.path, {
-                startByte: repeatedStartByte,
-                endByte: file.size - 1,
-                catalog: repeatedInputCatalogForScan ?? undefined,
-                maxPayloadBytes: 4 * 1024 * 1024,
-                project: null,
-                environment: hostId,
-                ...(parserState === undefined ? {} : { parserState }),
-              }),
-            );
-            nextObservations =
-              parsed === null
-                ? []
-                : appendable
-                  ? dedupeRepeatedInputObservations([
-                      ...(cachedBefore?.repeatedInputObservations ?? []),
-                      ...parsed.observations,
-                    ])
-                  : dedupeRepeatedInputObservations(parsed.observations);
-            nextGaps = parsed?.gaps ?? [
-              {
-                reason: "unavailable" as const,
-                count: 1,
-                message: "The Codex transcript could not be read for repeated-input attribution.",
-              },
-            ];
-            nextActiveSources = parsed?.parserState.activeSources ?? [];
-          }
-          nextObservations = attachRepeatedInputUsage(nextObservations ?? [], records);
-          repeatedInputObservations.push(...(nextObservations ?? []));
-          repeatedInputGaps.push(...(nextGaps ?? []));
-          const entry = repeatedWarm ? undefined : scanStore.load(file.path);
-          if (entry !== undefined) {
-            const prefixFingerprint = yield* Effect.promise(() =>
-              readTranscriptPrefixFingerprint(file.path, file.size),
-            );
-            scanStore.set(file.path, {
-              ...entry,
-              ...(prefixFingerprint === null ? {} : { prefixFingerprint }),
-              repeatedInputObservations: nextObservations ?? [],
-              repeatedInputGaps: nextGaps ?? [],
-              repeatedInputActiveSources: nextActiveSources ?? [],
-              repeatedInputVersion: REPEATED_INPUT_CACHE_VERSION,
-            });
-          }
-        } else if (repeatedInputEnabled && cachedBefore?.repeatedInputObservations !== undefined) {
-          // Only Codex transcript payloads are currently attributable. Do not
-          // accidentally expose observations from a provider that shares a path.
-          repeatedInputObservations.push(...cachedBefore.repeatedInputObservations);
-          repeatedInputGaps.push(...(cachedBefore.repeatedInputGaps ?? []));
+          repeatedInputFiles.push({
+            ...file,
+            previous,
+            parserState,
+            previousObservations: cachedBefore?.repeatedInputObservations,
+          });
         }
         if (records.length === 0) {
           skippedFiles += 1;
@@ -1602,40 +1696,6 @@ export const make = Effect.gen(function* () {
     const aggregated = aggregator.finish();
     const readAt = yield* DateTime.now;
     const finishedAtMs = yield* Clock.currentTimeMillis;
-    const repeatedDayAt = makeDayFormatter(input.timeZone);
-    const repeatedInput = repeatedInputEnabled
-      ? mapRepeatedInputSummary(
-          aggregateRepeatedInputObservations(
-            repeatedInputObservations.filter((observation) => {
-              if (selectedSessionIds !== null && !selectedSessionIds.has(observation.sessionId)) {
-                return false;
-              }
-              if (
-                selectedTurnIds !== null &&
-                (observation.turnId === null || !selectedTurnIds.has(observation.turnId))
-              ) {
-                return false;
-              }
-              if (
-                hourlyWindow !== null &&
-                (observation.observedAtMs < hourlyWindow.sinceTimeMs ||
-                  observation.observedAtMs >= hourlyWindow.untilTimeMs)
-              ) {
-                return false;
-              }
-              const day = repeatedDayAt(observation.observedAtMs);
-              return day >= input.sinceDay && day <= input.untilDay;
-            }),
-            {
-              rates: scanRates,
-              priceOverrides: createOverrideRateTable(settings.usagePriceOverrides),
-              dayAt: repeatedDayAt,
-              coverageGaps: repeatedInputGaps,
-              catalog: repeatedInputCatalogForScan?.sources ?? [],
-            },
-          ),
-        )
-      : undefined;
     const clientContractVersion = input.clientContractVersion ?? 5;
     const supportsOpenCode = clientContractVersion >= 6;
     const supportsImports = clientContractVersion >= 7;
@@ -1643,7 +1703,7 @@ export const make = Effect.gen(function* () {
       (provider !== "opencode" || supportsOpenCode) &&
       ((provider !== "chatgpt" && provider !== "aistudio") || supportsImports);
 
-    return {
+    const ordinarySummary = {
       contractVersion: supportsImports ? USAGE_CONTRACT_VERSION : supportsOpenCode ? 6 : 5,
       readAt: DateTime.formatIso(readAt),
       timeZone: input.timeZone,
@@ -1653,7 +1713,6 @@ export const make = Effect.gen(function* () {
       sources: sources.filter((source) => supportsProvider(source.fingerprint.provider)),
       pricing: scanPricing,
       scanDurationMs: Math.max(0, finishedAtMs - startedAtMs),
-      ...(repeatedInput === undefined ? {} : { repeatedInput }),
       ...(quotaHistory === undefined ? {} : { quotaHistory }),
       ...(providerQuotaHistories === undefined ? {} : { providerQuotaHistories }),
       ...(input.quotaIntervals === undefined ? {} : { quotaCosts }),
@@ -1664,6 +1723,21 @@ export const make = Effect.gen(function* () {
               input.quotaIntervals!.some((interval) => interval.id === row.intervalId),
             ),
           }),
+    } satisfies UsageSummary;
+    if (!repeatedInputEnabled) return ordinarySummary;
+    if (progress !== undefined) progress.ordinarySummary = ordinarySummary;
+
+    yield* readRepeatedInputAttribution(
+      input,
+      dirs,
+      repeatedInputFileGroups,
+      repeatedInputProgress,
+      hostId,
+    );
+    return {
+      ...ordinarySummary,
+      repeatedInput: repeatedInputSummary(),
+      scanDurationMs: Math.max(0, (yield* Clock.currentTimeMillis) - startedAtMs),
     } satisfies UsageSummary;
   });
 
@@ -1685,6 +1759,30 @@ export const make = Effect.gen(function* () {
     progress: UsageReadProgress,
   ) {
     const finishedAtMs = yield* Clock.currentTimeMillis;
+    const repeatedInputGaps: readonly UsageRepeatedInputCoverageGap[] = [
+      {
+        reason: "unattributed",
+        count: 1,
+        message: "Repeated-input attribution is partial because its response budget expired.",
+      },
+    ];
+    const repeatedInput = !includeRepeatedInput(input)
+      ? undefined
+      : (progress.repeatedInput?.(repeatedInputGaps) ??
+        mapRepeatedInputSummary(
+          aggregateRepeatedInputObservations([], {
+            rates,
+            dayAt: makeDayFormatter(input.timeZone),
+            coverageGaps: repeatedInputGaps,
+          }),
+        ));
+    if (progress.ordinarySummary !== undefined)
+      return {
+        ...progress.ordinarySummary,
+        readAt: DateTime.formatIso(DateTime.makeUnsafe(finishedAtMs)),
+        scanDurationMs: Math.max(0, finishedAtMs - startedAtMs),
+        ...(repeatedInput === undefined ? {} : { repeatedInput }),
+      } satisfies UsageSummary;
     const selectedProviders = input.providers === undefined ? null : new Set(input.providers);
     const completedSources = progress.sources;
     const completedPaths = new Set(
@@ -1739,6 +1837,7 @@ export const make = Effect.gen(function* () {
         supportsProvider(source.fingerprint.provider),
       ),
       pricing: pricing(),
+      ...(repeatedInput === undefined ? {} : { repeatedInput }),
       ...(progress.quotaHistory === undefined ? {} : { quotaHistory: progress.quotaHistory }),
       ...(progress.providerQuotaHistories === undefined
         ? {}
@@ -1767,6 +1866,8 @@ export const make = Effect.gen(function* () {
         quotaHistory: undefined,
         providerQuotaHistories: undefined,
         aggregator: undefined,
+        ordinarySummary: undefined,
+        repeatedInput: undefined,
       };
       let ownedResult:
         | { key: string; result: Deferred.Deferred<Exit.Exit<UsageSummary, UsageReadError>, never> }
