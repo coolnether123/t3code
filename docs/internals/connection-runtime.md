@@ -6,6 +6,24 @@ signals, and application lifecycle events. React views consume the runtime.
 Keeping retries and session lifetime here prevents competing reconnect loops when
 several views need the same environment.
 
+## Computer identity
+
+Each server persists `environmentName`, `environmentColor`, and
+`developerToolsEnabled` in its own settings. These keys stay out of shared-settings
+replication. Updates use the existing settings RPC and configuration broadcast,
+so desktop and browser clients connected to a computer read the same values.
+
+The shared `computerAppearance` projection prefers the configured name over the
+server's system name and the saved connection alias. An empty name restores the
+system name; a null color selects a stable automatic color from the environment ID.
+Servers advertise the `computerAppearance` capability so clients can disable
+editing when an older server cannot persist these fields.
+
+Web and desktop show computer badges and per-computer developer controls. Native
+mobile uses the configured name but does not offer color badges or these settings.
+New-chat pickers list physical projects instead of collapsing computers through
+repository grouping. Draft reuse stays on the selected computer.
+
 ## One transport retry owner
 
 The [supervisor](../../packages/client-runtime/src/connection/supervisor.ts) owns

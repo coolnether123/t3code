@@ -1,14 +1,19 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 
+type TestDraft = {
+  readonly draftId: string;
+  readonly environmentId: string;
+  readonly promotedTo: null;
+  readonly threadId: string;
+  readonly logicalProjectKey?: string;
+};
+
 const testState = vi.hoisted(() => {
   let completeProjectFileRead: (value: null) => void = () => undefined;
   let projectFileRead = Promise.resolve<null>(null);
-  let storedDraft: {
-    readonly draftId: string;
-    readonly environmentId: string;
-    readonly promotedTo: null;
-    readonly threadId: string;
-  } | null = null;
+  let storedDraft: TestDraft | null = null;
+  let activeDraft: TestDraft | null = null;
+  let routeTarget: { kind: "draft"; draftId: string } | null = null;
   const router = {
     state: {
       location: { href: "/" },
@@ -21,7 +26,7 @@ const testState = vi.hoisted(() => {
   const draftStore = {
     getComposerDraft: vi.fn(() => ({})),
     getDraftSessionByLogicalProjectKey: vi.fn(() => storedDraft),
-    getDraftSession: vi.fn(() => null),
+    getDraftSession: vi.fn(() => activeDraft),
     getDraftThread: vi.fn(() => null),
     applyStickyState: vi.fn(),
     setDraftThreadContext: vi.fn(),
@@ -35,8 +40,21 @@ const testState = vi.hoisted(() => {
     get projectFileRead() {
       return projectFileRead;
     },
-    reset(nextStoredDraft: typeof storedDraft) {
+    get routeTarget() {
+      return routeTarget;
+    },
+    setStoredDraft(draft: TestDraft | null) {
+      storedDraft = draft;
+    },
+    openDraft(draft: TestDraft) {
+      activeDraft = draft;
+      routeTarget = { kind: "draft", draftId: draft.draftId };
+      router.state.location.href = `/draft/${draft.draftId}`;
+    },
+    reset(nextStoredDraft: TestDraft | null) {
       storedDraft = nextStoredDraft;
+      activeDraft = null;
+      routeTarget = null;
       router.state.location.href = "/";
       router.navigate.mockClear();
       draftStore.setLogicalProjectDraftThreadId.mockClear();
@@ -134,16 +152,68 @@ vi.mock("../state/server", () => ({
   environmentServerConfigsAtom: {},
   primaryServerSettingsAtom: "primary-settings",
 }));
-vi.mock("../threadRoutes", () => ({ resolveThreadRouteTarget: () => null }));
+vi.mock("../threadRoutes", () => ({ resolveThreadRouteTarget: () => testState.routeTarget }));
 vi.mock("../uiStateStore", () => ({
   legacyProjectCwdPreferenceKey: () => "remote-project",
   useUiStateStore: () => [],
 }));
 vi.mock("./useSettings", () => ({ useClientSettings: () => ({}) }));
+vi.mock("./useSidebarEnvironmentScope", () => ({
+  useSidebarEnvironmentScope: () => ({ selectedEnvironmentId: null }),
+}));
 
 import { useNewThreadHandler } from "./useHandleNewThread";
 
 describe("useNewThreadHandler", () => {
+  const otherComputerDraft = {
+    draftId: "draft-other-computer",
+    environmentId: "environment-elora",
+    promotedTo: null,
+    threadId: "thread-other-computer",
+    logicalProjectKey: "remote-project",
+  } as const;
+
+  it.each(["stored", "open", "concurrent"])(
+    "creates on the selected computer without reassigning a %s draft from another computer",
+    async (mode) => {
+      testState.reset(mode === "stored" ? otherComputerDraft : null);
+      if (mode === "open") testState.openDraft(otherComputerDraft);
+      const openThread = useNewThreadHandler();
+      const projectRef = {
+        environmentId: "environment-ssh",
+        projectId: "project-remote",
+      } as never;
+      const pendingOpen = openThread(projectRef);
+      if (mode === "concurrent") testState.setStoredDraft(otherComputerDraft);
+      testState.completeProjectFileRead(null);
+
+      expect(await pendingOpen).toEqual({
+        draftId: "draft-delayed",
+        threadId: "thread-delayed",
+      });
+      expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledExactlyOnceWith(
+        "remote-project",
+        projectRef,
+        "draft-delayed",
+        expect.objectContaining({ threadId: "thread-delayed" }),
+      );
+      expect(testState.router.state.location.href).toBe("/draft/draft-delayed");
+    },
+  );
+
+  it("reuses an empty draft on the selected computer", async () => {
+    const draft = { ...otherComputerDraft, environmentId: "environment-ssh" };
+    testState.reset(draft);
+    const pendingOpen = useNewThreadHandler()({
+      environmentId: "environment-ssh",
+      projectId: "project-remote",
+    } as never);
+    testState.completeProjectFileRead(null);
+
+    expect(await pendingOpen).toEqual({ draftId: draft.draftId, threadId: draft.threadId });
+    expect(testState.router.state.location.href).toBe(`/draft/${draft.draftId}`);
+  });
+
   it.each([
     ["new", null],
     [

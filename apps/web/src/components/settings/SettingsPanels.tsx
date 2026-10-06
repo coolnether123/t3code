@@ -65,6 +65,8 @@ import {
 } from "../../hooks/useTheme";
 import { useLocalStorage } from "../../hooks/useLocalStorage";
 import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSettings";
+import { ComputerSettings } from "./ComputerSettings";
+import { ComputerBadge } from "../ComputerBadge";
 import { useThreadActions } from "../../hooks/useThreadActions";
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
 import {
@@ -1916,6 +1918,7 @@ export function GeneralSettingsPanel() {
 
   return (
     <SettingsPageContainer>
+      <ComputerSettings />
       <SettingsSection title="General">
         <SettingsRow
           {...searchableSetting("project-grouping")}
@@ -2776,7 +2779,15 @@ export function ArchivedThreadsPanel() {
                     }
                   })();
                 }}
-                title={thread.title}
+                title={
+                  <span className="flex min-w-0 items-center gap-2">
+                    <ComputerBadge
+                      environmentId={thread.environmentId}
+                      className="max-w-28 shrink-0"
+                    />
+                    {thread.title}
+                  </span>
+                }
                 description={
                   <>
                     Archived {formatRelativeTimeLabel(thread.archivedAt ?? thread.createdAt)}

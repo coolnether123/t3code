@@ -65,6 +65,12 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
  * that may not be mounted point at their nearest stable section instead.
  */
 export const SETTINGS_SEARCH_ITEMS = [
+  {
+    id: "computers",
+    title: "Computer names and colors",
+    to: "/settings/general",
+    searchTerms: ["developer tools simple controls"],
+  },
   { id: "birthday-celebration", title: "Birthday celebration", to: "/settings/appearance" },
   { id: "t3-workers", title: "T3 Workers", to: "/settings/general" },
   {

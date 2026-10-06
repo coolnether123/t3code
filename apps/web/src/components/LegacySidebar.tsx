@@ -114,6 +114,7 @@ import { useThreadActions } from "../hooks/useThreadActions";
 import { projectEnvironment } from "../state/projects";
 import { threadEnvironment, useEnvironmentThread } from "../state/threads";
 import { useEnvironment, useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
+import { ComputerBadge } from "./ComputerBadge";
 import {
   buildThreadRouteParams,
   resolveActiveThreadRouteRef,
@@ -681,6 +682,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         onContextMenu={handleRowContextMenu}
       >
         <div className="flex min-w-0 flex-1 items-center gap-1.5 text-left">
+          <ComputerBadge environmentId={thread.environmentId} className="max-w-24 shrink-0" />
           {prStatus && pr && (
             <Tooltip>
               <TooltipTrigger

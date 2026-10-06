@@ -32,6 +32,16 @@ export interface SidebarProjectPickerEntry {
   isPreferred: boolean;
 }
 
+/** New chats target a physical project on a chosen computer, even when the sidebar groups repositories. */
+export function newThreadProjectTargets(
+  projects: ReadonlyArray<Project>,
+  selectedEnvironmentId: EnvironmentId | null,
+): ReadonlyArray<Project> {
+  return projects.filter(
+    (project) => selectedEnvironmentId === null || project.environmentId === selectedEnvironmentId,
+  );
+}
+
 export function buildPhysicalToLogicalProjectKeyMap(input: {
   projects: ReadonlyArray<Project>;
   settings: ProjectGroupingSettings;

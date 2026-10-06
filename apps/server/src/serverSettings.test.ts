@@ -27,6 +27,7 @@ import { resolveProviderInstanceTerminalEnvironment } from "./terminal/Manager.t
 
 const decodeSettingsPatch = Schema.decodeUnknownEffect(ServerSettingsPatch);
 const decodeServerSettings = Schema.decodeUnknownEffect(ServerSettings);
+const decodeServerSettingsFile = Schema.decodeUnknownEffect(Schema.fromJsonString(ServerSettings));
 
 const makeServerSettingsLayer = () =>
   ServerSettingsModule.layer.pipe(
@@ -75,6 +76,64 @@ const recordProviderUsage = (provider: string, instanceId: string | null = provi
   });
 
 it.layer(NodeServices.layer)("server settings", (it) => {
+  it.effect("persists, reloads, broadcasts, and resets computer appearance", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const serverConfig = yield* ServerConfig.ServerConfig;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+        const changes = yield* serverSettings.subscribeChanges;
+        const preferences = {
+          environmentName: "Example Mac",
+          environmentColor: "#aB12Cd",
+          developerToolsEnabled: true,
+        };
+
+        const next = yield* serverSettings.updateSettings({
+          ...preferences,
+          environmentName: "  Example Mac  ",
+        });
+        const change = Option.getOrThrow(yield* Stream.runHead(changes));
+        const raw = yield* fileSystem.readFileString(serverConfig.settingsPath);
+        const persisted = yield* decodeServerSettingsFile(raw);
+        const reloaded = yield* Effect.gen(function* () {
+          const fresh = yield* ServerSettingsModule.ServerSettingsService;
+          return yield* fresh.getSettings;
+        }).pipe(
+          Effect.provide(
+            Layer.fresh(ServerSettingsModule.layer).pipe(Layer.provide(ServerSecretStore.layer)),
+          ),
+        );
+
+        for (const settings of [next, change, persisted, reloaded]) {
+          assert.equal(settings.environmentName, preferences.environmentName);
+          assert.equal(settings.environmentColor, preferences.environmentColor);
+          assert.isTrue(settings.developerToolsEnabled);
+        }
+        assert.include(raw, '"environmentName": "Example Mac"');
+        assert.include(raw, '"environmentColor": "#aB12Cd"');
+        assert.include(raw, '"developerToolsEnabled": true');
+
+        const reset = yield* serverSettings.updateSettings({
+          environmentName: "",
+          environmentColor: null,
+          developerToolsEnabled: false,
+        });
+        const resetChange = Option.getOrThrow(yield* Stream.runHead(changes));
+        const resetRaw = yield* fileSystem.readFileString(serverConfig.settingsPath);
+        const resetPersisted = yield* decodeServerSettingsFile(resetRaw);
+        for (const settings of [reset, resetChange, resetPersisted]) {
+          assert.equal(settings.environmentName, "");
+          assert.isNull(settings.environmentColor);
+          assert.isFalse(settings.developerToolsEnabled);
+        }
+        assert.notInclude(resetRaw, '"environmentName"');
+        assert.notInclude(resetRaw, '"environmentColor"');
+        assert.notInclude(resetRaw, '"developerToolsEnabled"');
+      }),
+    ).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
   it.effect("preserves context when reading a provider environment secret fails", () => {
     const platformCause = PlatformError.systemError({
       _tag: "PermissionDenied",

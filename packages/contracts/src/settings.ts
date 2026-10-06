@@ -878,7 +878,17 @@ export const BirthdayCelebrationPreference = Schema.Struct({
 }).check(Schema.makeFilter((value) => value.day <= BIRTHDAY_DAYS_IN_MONTH[value.month - 1]!));
 export type BirthdayCelebrationPreference = typeof BirthdayCelebrationPreference.Type;
 
+const EnvironmentColor = Schema.String.check(
+  Schema.isPattern(/^#[0-9a-fA-F]{6}$/),
+  Schema.isMaxLength(7),
+);
+
 export const ServerSettings = Schema.Struct({
+  environmentName: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  environmentColor: Schema.NullOr(EnvironmentColor).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  developerToolsEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   birthdayCelebration: Schema.NullOr(BirthdayCelebrationPreference).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
@@ -1179,6 +1189,9 @@ const OpenCodeSettingsPatch = Schema.Struct({
 
 export const ServerSettingsPatch = Schema.Struct({
   // Server settings
+  environmentName: Schema.optionalKey(TrimmedString),
+  environmentColor: Schema.optionalKey(Schema.NullOr(EnvironmentColor)),
+  developerToolsEnabled: Schema.optionalKey(Schema.Boolean),
   birthdayCelebration: Schema.optionalKey(Schema.NullOr(BirthdayCelebrationPreference)),
   enableLegacyTokenStreaming: Schema.optionalKey(Schema.Boolean),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),

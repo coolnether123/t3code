@@ -38,6 +38,18 @@ describe("supportsSharedSettingsSync", () => {
 });
 
 describe("splitSharedServerPatch", () => {
+  it("keeps computer identity and developer controls on the selected computer", () => {
+    const patch = {
+      environmentName: "Example",
+      environmentColor: "#123abc",
+      developerToolsEnabled: true,
+    };
+    expect(splitSharedServerPatch(patch)).toEqual({ localPatch: patch, sharedPatch: {} });
+    const shared = pickSharedServerSettings({ ...DEFAULT_SERVER_SETTINGS, ...patch });
+    expect(shared).not.toHaveProperty("environmentName");
+    expect(shared).not.toHaveProperty("environmentColor");
+    expect(shared).not.toHaveProperty("developerToolsEnabled");
+  });
   it("routes preference keys to the shared patch and machine keys to the local patch", () => {
     const { sharedPatch, localPatch } = splitSharedServerPatch({
       sidebarAutoSettleAfterDays: 7,

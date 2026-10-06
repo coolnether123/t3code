@@ -92,6 +92,7 @@ import { readLocalApi } from "../localApi";
 import { getProjectOrderKey, selectProjectGroupingSettings } from "../logicalProject";
 import {
   buildSidebarProjectSnapshots,
+  newThreadProjectTargets,
   type SidebarProjectSnapshot,
 } from "../sidebarProjectGrouping";
 import {
@@ -112,6 +113,8 @@ import { useNowMinute } from "../hooks/useNowMinute";
 import { useSidebarEnvironmentScope } from "../hooks/useSidebarEnvironmentScope";
 import { resolveEnvironmentSwitchTarget } from "../hooks/environmentSwitch.logic";
 import { usePrimaryEnvironmentId } from "../state/environments";
+import { ComputerBadge } from "./ComputerBadge";
+import { ComputerMenu } from "./sidebar/ComputerMenu";
 import {
   useAllEnvironmentShellsBootstrapped,
   useProjects,
@@ -548,6 +551,7 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
               aria-hidden
               className="size-3 shrink-0 text-amber-600 dark:text-amber-300/80"
             />
+            <ComputerBadge environmentId={session.environmentId} className="max-w-28 shrink-0" />
             <ProjectFavicon
               environmentId={session.environmentId}
               cwd={props.projectCwd ?? ""}
@@ -1283,6 +1287,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 fallbackIcon={MessageSquareIcon}
               />
             </span>
+            <ComputerBadge environmentId={thread.environmentId} className="max-w-24 shrink-0" />
             {title}
             {pinIndicator}
             {terminalStatusIcon}
@@ -1423,6 +1428,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
         >
           <div className="relative z-10 h-[4.875rem] px-[var(--sidebar-row-content-inset)] py-[var(--sidebar-content-inset)] pointer-coarse:pr-12">
             <div className="flex h-5 min-w-0 items-center gap-1.5">
+              <ComputerBadge environmentId={thread.environmentId} className="max-w-28 shrink-0" />
               <ProjectFavicon
                 environmentId={thread.environmentId}
                 cwd={props.projectCwd ?? ""}
@@ -1714,6 +1720,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
             className="size-4 shrink-0"
             fallbackIcon={MessageSquareIcon}
           />
+          <ComputerBadge environmentId={thread.environmentId} className="max-w-24 shrink-0" />
           <span className="min-w-0 flex-1 truncate">{thread.title}</span>
           <span className="shrink-0 text-xs text-muted-foreground/55 tabular-nums">
             {threadTimeLabel(thread)}
@@ -1742,6 +1749,11 @@ export default function Sidebar() {
   const projects = useProjects();
   const { environments, selectedEnvironmentId, setSelectedEnvironmentId } =
     useSidebarEnvironmentScope();
+  const developerToolsEnabled = environments.some(
+    (environment) =>
+      (selectedEnvironmentId === null || environment.environmentId === selectedEnvironmentId) &&
+      environment.serverConfig?.settings.developerToolsEnabled === true,
+  );
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const threads = useThreadShells();
   const environmentShellsBootstrapped = useAllEnvironmentShellsBootstrapped();
@@ -1825,7 +1837,8 @@ export default function Sidebar() {
     },
   });
   const [projectScopeMenuOpen, setProjectScopeMenuOpen] = useState(false);
-  const [projectScopeKey, setProjectScopeKey] = useState<string | null>(null);
+  const [savedProjectScopeKey, setProjectScopeKey] = useState<string | null>(null);
+  const projectScopeKey = developerToolsEnabled ? savedProjectScopeKey : null;
   const [pendingEnvironmentSwitch, setPendingEnvironmentSwitch] = useState<string | null>(null);
   const newThreadContext = useHandleNewThread();
   const handleNewThread = newThreadContext.handleNewThread;
@@ -3516,9 +3529,10 @@ export default function Sidebar() {
   // falling back to the top project) — same resolution the command palette
   // uses. The command palette already offers a "New thread in..." submenu
   // for multi-project setups.
+  const newThreadTargetCount = newThreadProjectTargets(projects, selectedEnvironmentId).length;
   const handleNewThreadClick = useCallback(
     (event?: ReactMouseEvent) => {
-      if (projectGroups.length === 0) {
+      if (newThreadTargetCount === 0) {
         if (isMobile) setOpenMobile(false);
         openAddProjectCommandPalette();
         return;
@@ -3526,7 +3540,7 @@ export default function Sidebar() {
       // One project: nothing to pick, create immediately. Shift+click creates
       // directly in the current project even with several projects, skipping
       // the palette picker.
-      if (shouldCreateNewThreadInCurrentProject(event?.shiftKey ?? false, projectGroups.length)) {
+      if (shouldCreateNewThreadInCurrentProject(event?.shiftKey ?? false, newThreadTargetCount)) {
         if (isMobile) setOpenMobile(false);
         void startNewThreadFromContext({
           activeDraftThread: newThreadContext.activeDraftThread,
@@ -3544,7 +3558,7 @@ export default function Sidebar() {
       isMobile,
       newThreadContext,
       openAddProjectCommandPalette,
-      projectGroups.length,
+      newThreadTargetCount,
       selectedEnvironmentId,
       setOpenMobile,
     ],
@@ -3560,7 +3574,7 @@ export default function Sidebar() {
   // shift+click and its keyboard twin chat.newLocal for direct create.
   const newThreadShortcutLabel =
     shortcutLabelForCommand(keybindings, "chat.new") ??
-    (projectGroups.length <= 1 ? shortcutLabelForCommand(keybindings, "chat.newLocal") : undefined);
+    (newThreadTargetCount <= 1 ? shortcutLabelForCommand(keybindings, "chat.newLocal") : undefined);
   const newThreadInProjectShortcutLabel = shortcutLabelForCommand(keybindings, "chat.newLocal");
   return (
     <>
@@ -3571,50 +3585,12 @@ export default function Sidebar() {
           // Lifted above the stage backdrop, whose fade bleeds below the
           // header and would otherwise paint across the search row's outline.
           <SidebarGroup className="relative z-[1] gap-1 p-[var(--sidebar-content-inset)]">
-            {environments.length > 1 ? (
-              <Menu>
-                <MenuTrigger
-                  render={
-                    <SidebarMenuButton
-                      aria-label="Browse environment"
-                      className="min-w-0 w-full bg-sidebar-row-hover ps-[calc(var(--sidebar-row-content-inset)-1px)] focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar"
-                    />
-                  }
-                >
-                  <ServerIcon className="size-4 shrink-0" />
-                  <span className="min-w-0 flex-1 truncate text-left">
-                    {selectedEnvironmentId === null
-                      ? "All environments"
-                      : (environments.find(
-                          (environment) => environment.environmentId === selectedEnvironmentId,
-                        )?.label ?? "Environment")}
-                  </span>
-                  <ChevronDownIcon className="size-4 shrink-0" />
-                </MenuTrigger>
-                <MenuPopup align="start" className="w-(--anchor-width)">
-                  <MenuRadioGroup
-                    value={selectedEnvironmentId ?? ALL_ENVIRONMENTS_CHAT_LOCATION_SCOPE}
-                    onValueChange={(value) => {
-                      switchEnvironment(value);
-                    }}
-                  >
-                    {environments.map((environment) => (
-                      <MenuRadioItem
-                        key={environment.environmentId}
-                        value={environment.environmentId}
-                        closeOnClick
-                      >
-                        <ServerIcon className="size-4 shrink-0" />
-                        <span className="truncate">{environment.label}</span>
-                      </MenuRadioItem>
-                    ))}
-                    <MenuRadioItem value={ALL_ENVIRONMENTS_CHAT_LOCATION_SCOPE} closeOnClick>
-                      <ServerIcon className="size-4 shrink-0" />
-                      <span>All environments</span>
-                    </MenuRadioItem>
-                  </MenuRadioGroup>
-                </MenuPopup>
-              </Menu>
+            {environments.length > 0 ? (
+              <ComputerMenu
+                environments={environments}
+                selectedEnvironmentId={selectedEnvironmentId}
+                onSelect={switchEnvironment}
+              />
             ) : null}
             <div className="flex items-center gap-1">
               <div className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-sm font-medium text-sidebar-muted-foreground hover:bg-sidebar-row-hover hover:text-sidebar-foreground">
@@ -3674,7 +3650,7 @@ export default function Sidebar() {
                         onClick={handleNewThreadClick}
                         disabled={environments.length === 0}
                         aria-label={
-                          projectGroups.length === 0
+                          newThreadTargetCount === 0
                             ? "Add project to start a thread"
                             : "New thread"
                         }
@@ -3688,9 +3664,9 @@ export default function Sidebar() {
                     />
                   </TooltipTrigger>
                   <TooltipPopup side="right">
-                    {projectGroups.length === 0 ? (
+                    {newThreadTargetCount === 0 ? (
                       "Add project to start a thread"
-                    ) : projectGroups.length > 1 ? (
+                    ) : newThreadTargetCount > 1 ? (
                       <span className="flex flex-col gap-0.5">
                         <span>
                           {newThreadShortcutLabel
@@ -3713,7 +3689,7 @@ export default function Sidebar() {
                 </Tooltip>
               </div>
             </div>
-            {environments.length > 0 ? (
+            {developerToolsEnabled && environments.length > 0 ? (
               <Popover open={activeWorkOpen} onOpenChange={setActiveWorkOpen}>
                 <PopoverTrigger
                   render={
@@ -3777,9 +3753,10 @@ export default function Sidebar() {
                         />
                         <span className="min-w-0 flex-1">
                           <span className="block truncate text-sm font-medium">{thread.title}</span>
-                          <span className="block truncate text-xs text-muted-foreground">
-                            {environmentLabelById.get(thread.environmentId) ?? "Environment"}
-                          </span>
+                          <ComputerBadge
+                            environmentId={thread.environmentId}
+                            className="max-w-full"
+                          />
                         </span>
                         <span className="shrink-0 text-xs text-muted-foreground">
                           {status === "approval"
@@ -3802,7 +3779,7 @@ export default function Sidebar() {
                 </PopoverPopup>
               </Popover>
             ) : null}
-            {environments.length > 0 ? (
+            {developerToolsEnabled && environments.length > 0 ? (
               <div className="flex items-center gap-1">
                 {projectGroups.length > 0 ? (
                   <Menu open={projectScopeMenuOpen} onOpenChange={setProjectScopeMenuOpen}>

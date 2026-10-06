@@ -14,6 +14,19 @@ const descriptor = {
 } as const;
 
 describe("ExecutionEnvironmentDescriptor", () => {
+  it("leaves computer appearance unsupported on older servers", () => {
+    expect(decodeDescriptor(descriptor).capabilities.computerAppearance).toBeUndefined();
+  });
+
+  it.each([true, false])("preserves computer appearance capability %s", (computerAppearance) => {
+    expect(
+      decodeDescriptor({
+        ...descriptor,
+        capabilities: { ...descriptor.capabilities, computerAppearance },
+      }).capabilities.computerAppearance,
+    ).toBe(computerAppearance);
+  });
+
   it("treats a missing pull-request capability as unsupported under version skew", () => {
     expect(decodeDescriptor(descriptor).capabilities.pullRequests).toBeUndefined();
   });

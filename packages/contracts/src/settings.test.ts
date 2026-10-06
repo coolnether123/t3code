@@ -18,6 +18,39 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 
+describe("ServerSettings computer appearance", () => {
+  it("defaults legacy settings without choosing a computer name or color", () => {
+    const settings = decodeServerSettings({});
+    expect(settings.environmentName).toBe("");
+    expect(settings.environmentColor).toBeNull();
+    expect(settings.developerToolsEnabled).toBe(false);
+    expect(decodeServerSettingsPatch({})).toEqual({});
+  });
+
+  it("trims names and round-trips computer preferences", () => {
+    const preferences = {
+      environmentName: "  Example Mac  ",
+      environmentColor: "#aB12Cd",
+      developerToolsEnabled: true,
+    };
+    const expected = { ...preferences, environmentName: "Example Mac" };
+    expect(decodeServerSettingsPatch(preferences)).toEqual(expected);
+    expect(encodeServerSettings(decodeServerSettings(preferences))).toMatchObject(expected);
+    expect(decodeServerSettingsPatch({ environmentName: "  ", environmentColor: null })).toEqual({
+      environmentName: "",
+      environmentColor: null,
+    });
+  });
+
+  it.each(["#abc", "#12345678", "123456", "#12345g", "red", " #123456 ", "#123456\n", ""])(
+    "rejects invalid computer color %j",
+    (environmentColor) => {
+      expect(() => decodeServerSettings({ environmentColor })).toThrow();
+      expect(() => decodeServerSettingsPatch({ environmentColor })).toThrow();
+    },
+  );
+});
+
 describe("private birthday settings", () => {
   const birthday = { month: 5, day: 14, enabled: true, tapEffects: true };
   it("round-trips private notes and accepts clearing them without changing the date", () => {

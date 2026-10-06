@@ -3,6 +3,7 @@ import { FolderGit2Icon, FolderIcon, GitBranchIcon } from "lucide-react";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { ProviderInstanceIcon } from "./chat/ProviderInstanceIcon";
 import { cn } from "~/lib/utils";
+import { ComputerBadge } from "./ComputerBadge";
 
 /**
  * Flip this while reviewing command-palette thread subtitles.
@@ -55,10 +56,6 @@ export function ThreadCommandSubtitle(props: {
   const projectLabel = props.projectTitle?.trim() || null;
   const branchLabel = props.branch?.trim() || null;
 
-  if (!projectLabel && !branchLabel && !props.isCurrent && !showHarness) {
-    return null;
-  }
-
   return (
     <span
       className={cn(
@@ -66,6 +63,7 @@ export function ThreadCommandSubtitle(props: {
         props.className,
       )}
     >
+      <ComputerBadge environmentId={props.environmentId} className="max-w-28 shrink-0" />
       {projectLabel ? (
         <span className="inline-flex min-w-0 items-center gap-1">
           {props.projectCwd ? (

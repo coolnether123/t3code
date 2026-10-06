@@ -49,6 +49,8 @@ import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+import { ComputerBadge } from "../ComputerBadge";
+import { useEnvironmentSettings } from "../../hooks/useSettings";
 
 interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
@@ -201,6 +203,10 @@ export const ChatHeader = memo(function ChatHeader({
   onDeleteProjectScript,
 }: ChatHeaderProps) {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const developerToolsEnabled = useEnvironmentSettings(
+    activeThreadEnvironmentId,
+    (settings) => settings.developerToolsEnabled,
+  );
   const { copyToClipboard, isCopied } = useCopyToClipboard({
     target: "task transcript",
     onCopy: () => toastManager.add({ type: "success", title: "Chat copied" }),
@@ -209,7 +215,7 @@ export const ChatHeader = memo(function ChatHeader({
   });
   const fileScripts = useT3ProjectFileScripts(
     activeThreadEnvironmentId,
-    activeProjectScripts ? activeProjectCwd : null,
+    developerToolsEnabled && activeProjectScripts ? activeProjectCwd : null,
   );
   const remoteOpenState = useRemoteOpenState(activeThreadEnvironmentId);
   const showOpenInPicker = shouldShowOpenInPicker({
@@ -353,6 +359,10 @@ export const ChatHeader = memo(function ChatHeader({
       className="@container/header-actions flex min-w-0 flex-1 items-center gap-1 @xl/header-actions:gap-3"
       onContextMenu={handleHeaderContextMenu}
     >
+      <ComputerBadge
+        environmentId={activeThreadEnvironmentId}
+        className="max-w-28 shrink-0 font-medium text-foreground"
+      />
       <div
         data-mobile-chat-header-context
         className="flex min-w-0 flex-1 items-center @xl/header-actions:hidden"
@@ -495,7 +505,7 @@ export const ChatHeader = memo(function ChatHeader({
           )}
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
-      {providerRuntimeLabel ? (
+      {developerToolsEnabled && providerRuntimeLabel ? (
         <span
           className="no-drag shrink-0 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground"
           aria-label={`Chat runtime: ${providerRuntimeLabel}`}
@@ -503,140 +513,118 @@ export const ChatHeader = memo(function ChatHeader({
           {providerRuntimeLabel}
         </span>
       ) : null}
-      <CompactTaskActions
-        open={mobileActionsOpen}
-        onOpenChange={setMobileActionsOpen}
-        reservePanelControls={!rightPanelOpen}
-      >
-        <div aria-label="Task actions" className="flex min-w-0 flex-col gap-1" role="group">
-          <Button
-            type="button"
-            variant="ghost"
-            className="min-h-11 w-full justify-start border-0 px-3"
-            aria-label={isCopied ? "Chat copied" : "Copy chat"}
-            onClick={() => {
-              copyToClipboard(transcript, undefined);
-              setMobileActionsOpen(false);
-            }}
-          >
-            {isCopied ? (
-              <CheckIcon aria-hidden className="size-4" />
-            ) : (
-              <CopyIcon aria-hidden className="size-4" />
-            )}
-            {isCopied ? "Chat copied" : "Copy chat"}
-          </Button>
-          {activeProjectName ? (
+      {developerToolsEnabled ? (
+        <CompactTaskActions
+          open={mobileActionsOpen}
+          onOpenChange={setMobileActionsOpen}
+          reservePanelControls={!rightPanelOpen}
+        >
+          <div aria-label="Task actions" className="flex min-w-0 flex-col gap-1" role="group">
             <Button
               type="button"
               variant="ghost"
               className="min-h-11 w-full justify-start border-0 px-3"
+              aria-label={isCopied ? "Chat copied" : "Copy chat"}
               onClick={() => {
+                copyToClipboard(transcript, undefined);
                 setMobileActionsOpen(false);
-                onNewThreadInProject();
               }}
             >
-              <PlusIcon aria-hidden className="size-4" />
-              New task in {activeProjectName}
+              {isCopied ? (
+                <CheckIcon aria-hidden className="size-4" />
+              ) : (
+                <CopyIcon aria-hidden className="size-4" />
+              )}
+              {isCopied ? "Chat copied" : "Copy chat"}
             </Button>
-          ) : null}
-          {onStartDesktopDraft ? (
-            <Button
-              type="button"
-              variant="ghost"
-              className="min-h-11 w-full justify-start border-0 px-3"
-              onClick={() => {
-                setMobileActionsOpen(false);
-                onStartDesktopDraft();
-              }}
-            >
-              Start desktop draft with loaded transcript
-            </Button>
-          ) : null}
-          {(activeProjectScripts || showOpenInPicker || activeProjectName) && (
-            <div className="my-1 h-px bg-border" aria-hidden />
-          )}
-          <div className="grid min-w-0 gap-2 px-1 pb-1 [&_[data-slot=button]]:min-h-11 [&_[data-slot=button]]:min-w-11">
-            {activeProjectScripts ? (
-              <div className="flex min-h-11 min-w-0 items-center justify-between gap-3 px-2">
-                <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
-                  Project actions
-                </span>
-                <ProjectScriptsControl
-                  scripts={activeProjectScripts}
-                  fileScripts={fileScripts}
-                  keybindings={keybindings}
-                  preferredScriptId={preferredScriptId}
-                  onRunScript={onRunProjectScript}
-                  onAddScript={onAddProjectScript}
-                  onUpdateScript={onUpdateProjectScript}
-                  onDeleteScript={onDeleteProjectScript}
-                />
-              </div>
-            ) : null}
-            {showOpenInPicker ? (
-              <div className="flex min-h-11 min-w-0 items-center justify-between gap-3 px-2">
-                <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
-                  Open in editor
-                </span>
-                <OpenInPicker
-                  environmentId={activeThreadEnvironmentId}
-                  keybindings={keybindings}
-                  availableEditors={availableEditors}
-                  openInCwd={openInCwd}
-                  compact
-                  enableShortcut={false}
-                />
-              </div>
-            ) : null}
             {activeProjectName ? (
-              <div className="flex min-h-11 min-w-0 items-center justify-between gap-3 px-2">
-                <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
-                  Git actions
-                </span>
-                <GitActionsControl
-                  gitCwd={gitCwd}
-                  activeThreadRef={scopeThreadRef(activeThreadEnvironmentId, activeThreadId)}
-                  onOpenPullRequest={onOpenPullRequest}
-                  {...(draftId ? { draftId } : {})}
-                />
-              </div>
-            ) : null}
-          </div>
-        </div>
-      </CompactTaskActions>
-      <div
-        data-chat-header-actions
-        className={cn(
-          "hidden shrink-0 items-center justify-end gap-2 @xl/header-actions:flex @3xl/header-actions:gap-3",
-          rightPanelOpen ? "pr-0" : "@xl/header-actions:pr-16",
-        )}
-      >
-        <Tooltip>
-          <TooltipTrigger
-            render={
               <Button
                 type="button"
-                size="sm"
-                variant="outline"
-                className="no-drag min-h-9 shrink-0 gap-1.5 px-2.5"
-                aria-label={isCopied ? "Chat copied" : "Copy chat"}
-                onClick={() => copyToClipboard(transcript, undefined)}
-              />
-            }
-          >
-            {isCopied ? (
-              <CheckIcon aria-hidden className="size-3.5" />
-            ) : (
-              <CopyIcon aria-hidden className="size-3.5" />
+                variant="ghost"
+                className="min-h-11 w-full justify-start border-0 px-3"
+                onClick={() => {
+                  setMobileActionsOpen(false);
+                  onNewThreadInProject();
+                }}
+              >
+                <PlusIcon aria-hidden className="size-4" />
+                New task in {activeProjectName}
+              </Button>
+            ) : null}
+            {onStartDesktopDraft ? (
+              <Button
+                type="button"
+                variant="ghost"
+                className="min-h-11 w-full justify-start border-0 px-3"
+                onClick={() => {
+                  setMobileActionsOpen(false);
+                  onStartDesktopDraft();
+                }}
+              >
+                Start desktop draft with loaded transcript
+              </Button>
+            ) : null}
+            {(activeProjectScripts || showOpenInPicker || activeProjectName) && (
+              <div className="my-1 h-px bg-border" aria-hidden />
             )}
-            <span>Copy chat</span>
-          </TooltipTrigger>
-          <TooltipPopup side="bottom">
-            {isCopied ? "Copied full chat" : "Copy full chat"}
-          </TooltipPopup>
-        </Tooltip>
-        {onStartDesktopDraft ? (
+            <div className="grid min-w-0 gap-2 px-1 pb-1 [&_[data-slot=button]]:min-h-11 [&_[data-slot=button]]:min-w-11">
+              {activeProjectScripts ? (
+                <div className="flex min-h-11 min-w-0 items-center justify-between gap-3 px-2">
+                  <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
+                    Project actions
+                  </span>
+                  <ProjectScriptsControl
+                    scripts={activeProjectScripts}
+                    fileScripts={fileScripts}
+                    keybindings={keybindings}
+                    preferredScriptId={preferredScriptId}
+                    onRunScript={onRunProjectScript}
+                    onAddScript={onAddProjectScript}
+                    onUpdateScript={onUpdateProjectScript}
+                    onDeleteScript={onDeleteProjectScript}
+                  />
+                </div>
+              ) : null}
+              {showOpenInPicker ? (
+                <div className="flex min-h-11 min-w-0 items-center justify-between gap-3 px-2">
+                  <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
+                    Open in editor
+                  </span>
+                  <OpenInPicker
+                    environmentId={activeThreadEnvironmentId}
+                    keybindings={keybindings}
+                    availableEditors={availableEditors}
+                    openInCwd={openInCwd}
+                    compact
+                    enableShortcut={false}
+                  />
+                </div>
+              ) : null}
+              {activeProjectName ? (
+                <div className="flex min-h-11 min-w-0 items-center justify-between gap-3 px-2">
+                  <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
+                    Git actions
+                  </span>
+                  <GitActionsControl
+                    gitCwd={gitCwd}
+                    activeThreadRef={scopeThreadRef(activeThreadEnvironmentId, activeThreadId)}
+                    onOpenPullRequest={onOpenPullRequest}
+                    {...(draftId ? { draftId } : {})}
+                  />
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </CompactTaskActions>
+      ) : null}
+      {developerToolsEnabled ? (
+        <div
+          data-chat-header-actions
+          className={cn(
+            "hidden shrink-0 items-center justify-end gap-2 @xl/header-actions:flex @3xl/header-actions:gap-3",
+            rightPanelOpen ? "pr-0" : "@xl/header-actions:pr-16",
+          )}
+        >
           <Tooltip>
             <TooltipTrigger
               render={
@@ -644,48 +632,74 @@ export const ChatHeader = memo(function ChatHeader({
                   type="button"
                   size="sm"
                   variant="outline"
-                  className="no-drag min-h-9 shrink-0"
-                  onClick={onStartDesktopDraft}
+                  className="no-drag min-h-9 shrink-0 gap-1.5 px-2.5"
+                  aria-label={isCopied ? "Chat copied" : "Copy chat"}
+                  onClick={() => copyToClipboard(transcript, undefined)}
                 />
               }
             >
-              Start desktop draft
+              {isCopied ? (
+                <CheckIcon aria-hidden className="size-3.5" />
+              ) : (
+                <CopyIcon aria-hidden className="size-3.5" />
+              )}
+              <span>Copy chat</span>
             </TooltipTrigger>
             <TooltipPopup side="bottom">
-              Copies the loaded transcript into a new Codex desktop draft for review. Earlier turns
-              may be omitted. The original chat stays here.
+              {isCopied ? "Copied full chat" : "Copy full chat"}
             </TooltipPopup>
           </Tooltip>
-        ) : null}
-        {activeProjectScripts && (
-          <ProjectScriptsControl
-            scripts={activeProjectScripts}
-            fileScripts={fileScripts}
-            keybindings={keybindings}
-            preferredScriptId={preferredScriptId}
-            onRunScript={onRunProjectScript}
-            onAddScript={onAddProjectScript}
-            onUpdateScript={onUpdateProjectScript}
-            onDeleteScript={onDeleteProjectScript}
-          />
-        )}
-        {showOpenInPicker && (
-          <OpenInPicker
-            environmentId={activeThreadEnvironmentId}
-            keybindings={keybindings}
-            availableEditors={availableEditors}
-            openInCwd={openInCwd}
-          />
-        )}
-        {activeProjectName && (
-          <GitActionsControl
-            gitCwd={gitCwd}
-            activeThreadRef={scopeThreadRef(activeThreadEnvironmentId, activeThreadId)}
-            onOpenPullRequest={onOpenPullRequest}
-            {...(draftId ? { draftId } : {})}
-          />
-        )}
-      </div>
+          {onStartDesktopDraft ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="no-drag min-h-9 shrink-0"
+                    onClick={onStartDesktopDraft}
+                  />
+                }
+              >
+                Start desktop draft
+              </TooltipTrigger>
+              <TooltipPopup side="bottom">
+                Copies the loaded transcript into a new Codex desktop draft for review. Earlier
+                turns may be omitted. The original chat stays here.
+              </TooltipPopup>
+            </Tooltip>
+          ) : null}
+          {activeProjectScripts && (
+            <ProjectScriptsControl
+              scripts={activeProjectScripts}
+              fileScripts={fileScripts}
+              keybindings={keybindings}
+              preferredScriptId={preferredScriptId}
+              onRunScript={onRunProjectScript}
+              onAddScript={onAddProjectScript}
+              onUpdateScript={onUpdateProjectScript}
+              onDeleteScript={onDeleteProjectScript}
+            />
+          )}
+          {showOpenInPicker && (
+            <OpenInPicker
+              environmentId={activeThreadEnvironmentId}
+              keybindings={keybindings}
+              availableEditors={availableEditors}
+              openInCwd={openInCwd}
+            />
+          )}
+          {activeProjectName && (
+            <GitActionsControl
+              gitCwd={gitCwd}
+              activeThreadRef={scopeThreadRef(activeThreadEnvironmentId, activeThreadId)}
+              onOpenPullRequest={onOpenPullRequest}
+              {...(draftId ? { draftId } : {})}
+            />
+          )}
+        </div>
+      ) : null}
     </div>
   );
 });

@@ -9,12 +9,10 @@ import { useAtomValue } from "@effect/atom-react";
 import { useEffect, useMemo, useRef } from "react";
 
 import { isCommandPaletteOpen } from "../commandPaletteBus";
-import { useClientSettings, useLegacySidebarEnabled } from "../hooks/useSettings";
+import { useLegacySidebarEnabled } from "../hooks/useSettings";
 import { openCommandPalette } from "../commandPaletteBus";
 import { useProjects, useThreadShell, useThreadStatus } from "../state/entities";
-import { usePrimaryEnvironmentId } from "../state/environments";
-import { selectProjectGroupingSettings } from "../logicalProject";
-import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
+import { newThreadProjectTargets } from "../sidebarProjectGrouping";
 import { dispatchPreviewAction } from "../components/preview/previewActionBus";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useSidebarEnvironmentScope } from "../hooks/useSidebarEnvironmentScope";
@@ -49,21 +47,10 @@ function ChatRouteGlobalShortcuts() {
   } = useHandleNewThread();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const legacySidebarEnabled = useLegacySidebarEnabled();
-  const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const projects = useProjects();
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const projectGroupCount = useMemo(
-    () =>
-      buildSidebarProjectSnapshots({
-        projects: projects.filter(
-          (project) =>
-            selectedEnvironmentId === null || project.environmentId === selectedEnvironmentId,
-        ),
-        settings: projectGroupingSettings,
-        primaryEnvironmentId,
-        resolveEnvironmentLabel: () => null,
-      }).length,
-    [primaryEnvironmentId, projectGroupingSettings, projects, selectedEnvironmentId],
+  const projectTargetCount = useMemo(
+    () => newThreadProjectTargets(projects, selectedEnvironmentId).length,
+    [projects, selectedEnvironmentId],
   );
   const terminalOpen = useTerminalUiStateStore((state) =>
     routeThreadRef
@@ -103,7 +90,7 @@ function ChatRouteGlobalShortcuts() {
       if (command === "chat.newLocal") {
         event.preventDefault();
         event.stopPropagation();
-        if (projectGroupCount === 0) {
+        if (projectTargetCount === 0) {
           openCommandPalette({ open: "add-project" });
           return;
         }
@@ -120,14 +107,14 @@ function ChatRouteGlobalShortcuts() {
       if (command === "chat.new") {
         event.preventDefault();
         event.stopPropagation();
-        if (projectGroupCount === 0) {
+        if (projectTargetCount === 0) {
           openCommandPalette({ open: "add-project" });
           return;
         }
         // The default sidebar routes creation through the command palette
         // whenever there is a real choice to make; the legacy sidebar (and
         // single-project setups) keep the immediate contextual create.
-        if (!legacySidebarEnabled && projectGroupCount > 1) {
+        if (!legacySidebarEnabled && projectTargetCount > 1) {
           openCommandPalette({ open: "new-thread-in" });
           return;
         }
@@ -198,7 +185,7 @@ function ChatRouteGlobalShortcuts() {
     defaultProjectRef,
     selectedEnvironmentId,
     previewOpen,
-    projectGroupCount,
+    projectTargetCount,
     routeThreadRef,
     selectedThreadKeysSize,
     legacySidebarEnabled,
