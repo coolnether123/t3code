@@ -23,8 +23,10 @@ file fallback serves Codex app history. The legacy `/api/codex` store routes
 remain separate and unchanged.
 
 The daemon's `searchTerm` filters titles only. Message search therefore reads
-histories for pages of 20 threads, with at most four reads in flight and a
-five-second bound per read. Active pages precede archived pages. The opaque
+histories for pages of four threads, with at most four reads in flight and a
+15-second bound per read. A timed-out read retries once. A page therefore has
+at most 30 seconds of history-read waiting within the 45-second RPC bound.
+Active pages precede archived pages. The opaque
 `codexCursor` contains the archive phase and native cursor. Each request closes
 its client when it finishes. Search has a 45-second request bound; read has a
 15-second bound. Neither operation launches or restarts a daemon.

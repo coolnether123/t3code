@@ -52,7 +52,7 @@ export const searchDaemonChats = Effect.fn("searchDaemonChats")(function* (
   const page = yield* client.request("thread/list", {
     archived,
     cursor,
-    limit: 20,
+    limit: 4,
     sortKey: "updated_at",
     sourceKinds: [],
     modelProviders: [],
@@ -66,7 +66,11 @@ export const searchDaemonChats = Effect.fn("searchDaemonChats")(function* (
     (entry) =>
       client
         .request("thread/read", { threadId: entry.id, includeTurns: true })
-        .pipe(Effect.timeout("5 seconds"), Effect.result),
+        .pipe(
+          Effect.timeout("15 seconds"),
+          Effect.retry({ times: 1, while: (error) => error._tag === "TimeoutError" }),
+          Effect.result,
+        ),
     { concurrency: 4 },
   );
   for (const [index, result] of histories.entries()) {

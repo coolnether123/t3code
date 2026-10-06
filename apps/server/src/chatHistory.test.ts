@@ -9,6 +9,8 @@ import { WebSocketServer } from "ws";
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as TestClock from "effect/testing/TestClock";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import type { V2ThreadReadResponse__Thread } from "effect-codex-app-server/schema";
@@ -132,6 +134,60 @@ const syntheticThread = (id: string, text: string): V2ThreadReadResponse__Thread
     },
   ],
 });
+
+it.effect(
+  "finds a slow daemon history and retries a timed-out read without skipping the chat",
+  () =>
+    Effect.gen(function* () {
+      let attempts = 0;
+      const client = {
+        request: (method: string, params: { limit?: number }) => {
+          if (method === "thread/list") {
+            assert.equal(params.limit, 4);
+            return Effect.succeed({
+              data: [syntheticThread("slow", "Slow message needle")],
+              nextCursor: null,
+            });
+          }
+          return Effect.suspend(() => {
+            attempts++;
+            return attempts === 1
+              ? Effect.never
+              : Effect.succeed({ thread: syntheticThread("slow", "Slow message needle") });
+          });
+        },
+      } as unknown as Parameters<typeof searchDaemonChats>[0];
+      const fiber = yield* searchDaemonChats(client, { query: "message needle" }).pipe(
+        Effect.forkScoped,
+      );
+      yield* TestClock.adjust("15 seconds");
+      const result = yield* Fiber.join(fiber);
+      assert.equal(attempts, 2);
+      assert.equal(result.matches[0]?.threadId, "slow");
+      assert.equal(result.coverage[0]?.readGaps, false);
+    }).pipe(Effect.provide(TestClock.layer())),
+);
+
+it.effect("keeps an explicit gap after both bounded daemon reads time out", () =>
+  Effect.gen(function* () {
+    let attempts = 0;
+    const client = {
+      request: (method: string) =>
+        method === "thread/list"
+          ? Effect.succeed({ data: [syntheticThread("unresponsive", "")], nextCursor: null })
+          : Effect.suspend(() => {
+              attempts++;
+              return Effect.never;
+            }),
+    } as unknown as Parameters<typeof searchDaemonChats>[0];
+    const fiber = yield* searchDaemonChats(client, { query: "needle" }).pipe(Effect.forkScoped);
+    yield* TestClock.adjust("30 seconds");
+    const result = yield* Fiber.join(fiber);
+    assert.equal(attempts, 2);
+    assert.lengthOf(result.matches, 0);
+    assert.equal(result.coverage[0]?.readGaps, true);
+  }).pipe(Effect.provide(TestClock.layer())),
+);
 
 async function syntheticDaemon(platform: NodeJS.Platform) {
   const homePath =
