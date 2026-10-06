@@ -26,3 +26,11 @@ the targeted lint. Install an exact source build through the guarded Mac
 backend deployment route only after its live idle checks pass. Preserve the
 current package version and the user's T3 data. Remove the independent enable
 marker to disable this step without disabling JEV.
+
+# Scheduled routine authority
+
+The local requested-save step can cite Christine's scheduled routine prompt as
+her standing request. `saveAuthority` contains that prompt plus human messages
+in chat order; `humans` keeps its existing JEV provenance. Both sources bind the
+serialized revision guard. This is not a fresh human action-time confirmation.
+Later wait/review/withdrawal instructions and protected-action holds still apply.

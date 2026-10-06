@@ -110,6 +110,26 @@ function command(thread = fixture()) {
   };
 }
 describe("stopped-chat authority", () => {
+  it("binds scheduled authority separately and invalidates it on edits or later holds", () => {
+    for (const text of [
+      "<heartbeat><automation_id>synthetic</automation_id><instructions>Please update the tracker.</instructions></heartbeat>",
+      "Automation: Synthetic\nAutomation ID: synthetic\n\nPlease update the tracker.",
+      "# Synthetic work - standing assignment from Christine\nPlease update the tracker.\nRun browser-output directory: /Users/synthetic/Codex_Workroom/Automation_Harnesses/synthetic/runs/test",
+    ]) {
+      const t = fixture();
+      t.messages[0] = { ...t.messages[0]!, text };
+      const input = stoppedChatContext(t)!;
+      expect(input.humans).toHaveLength(0);
+      expect(input.saveAuthority).toEqual([
+        { id: "synthetic-human", text, at: AT, kind: "routine_prompt" },
+      ]);
+      expect(stoppedChatGuardFailure(t, input.guard)).toBeNull();
+      t.messages[0] = { ...t.messages[0]!, text: text.replace("update", "review") };
+      expect(stoppedChatGuardFailure(t, input.guard)).not.toBeNull();
+      t.messages.push({ ...t.messages[0]!, id: MessageId.make("new-wait"), text: "Wait." });
+      expect(stoppedChatContext(t)).toBeNull();
+    }
+  });
   it("untagged requested-save replies cannot become human authority", () => {
     const t = fixture();
     t.messages.splice(1, 0, {
@@ -338,6 +358,43 @@ effectIt.layer(NodeServices.layer)("serialized delivery guard", (it) => {
 });
 
 describe("local judge bridge, synthetic account only", () => {
+  it("cites a scheduled prompt without passing it off as a typed human message", async () => {
+    const home = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "synthetic-routine-save-"));
+    try {
+      await NodeFSP.mkdir(NodePath.join(home, ".codexdeck"));
+      await NodeFSP.writeFile(
+        NodePath.join(home, ".codexdeck", "requested_save_t3_enabled"),
+        "synthetic",
+      );
+      const t = fixture();
+      t.messages[0] = {
+        ...t.messages[0]!,
+        text: "Automation: Synthetic\nAutomation ID: synthetic\n\nPlease update the tracker.",
+      };
+      const input = stoppedChatContext(t)!;
+      const result = await judgeStoppedChat(input, threadId, NodePath.join(home, ".t3"), {
+        home,
+        request: async () => {
+          throw new Error("No JEV calls");
+        },
+        requestedSave: async (received) => {
+          expect(received.humans).toEqual([]);
+          expect(received.saveAuthority[0]!.kind).toBe("routine_prompt");
+          return {
+            status: "yes",
+            message: "Yes, save it. You asked for this at 9:12 PM CDT.",
+            source_id: "synthetic-human",
+            citation: t.messages[0]!.text,
+            citation_at: AT,
+          };
+        },
+      });
+      expect(result!.decision.reason).toBe("standing_routine_request");
+      expect(result!.text).not.toContain("JEV");
+    } finally {
+      await NodeFSP.rm(home, { recursive: true, force: true });
+    }
+  });
   it("answers requested saves before JEV without credentials or a model verdict", async () => {
     const home = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "synthetic-requested-save-"));
     try {

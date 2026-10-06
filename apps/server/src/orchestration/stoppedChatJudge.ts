@@ -60,7 +60,7 @@ export async function readRequestedSave(input: StoppedChatInput, home: string): 
         reject(error);
       }
     });
-    child.stdin.end(JSON.stringify({ question: input.question, humans: input.humans }));
+    child.stdin.end(JSON.stringify({ question: input.question, humans: input.saveAuthority }));
   });
 }
 
@@ -79,7 +79,7 @@ export async function judgeStoppedChat(
     const answer = decodeRequestedSave(
       await (options.requestedSave ?? readRequestedSave)(input, home),
     );
-    const cited = input.humans.find(
+    const cited = input.saveAuthority.find(
       (human) =>
         human.id === answer.source_id &&
         human.text === answer.citation &&
@@ -98,7 +98,8 @@ export async function judgeStoppedChat(
           verdict: "requested_completion",
           intent: "yes",
           source: "requested_save",
-          reason: "existing_chat_request",
+          reason:
+            cited.kind === "routine_prompt" ? "standing_routine_request" : "existing_chat_request",
           citation: cited.text,
           citation_message_id: cited.id,
           citation_at: cited.at,

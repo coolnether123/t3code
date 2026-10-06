@@ -12,14 +12,27 @@ export const isRequestedSaveReply = (text: string): boolean =>
   /^Yes, save it\. You asked for this at \d{1,2}:\d{2} [AP]M (?:CST|CDT)\.$/.test(text.trim());
 
 export function stoppedChatContext(thread: OrchestrationThread) {
+  const isRoutine = (text: string): boolean =>
+    /^\s*<heartbeat>\s*<automation_id>[A-Za-z0-9_-]+<\/automation_id>[\s\S]*<instructions>[\s\S]*<\/instructions>[\s\S]*<\/heartbeat>\s*$/.test(
+      text,
+    ) ||
+    /^Automation: [^\n]+\nAutomation ID: [A-Za-z0-9_-]+\n/.test(text) ||
+    (/^# [^\n]+standing assignment from Christine\b/m.test(text) &&
+      /^Run browser-output directory: \/Users\/[^\n]+\/Automation_Harnesses\//m.test(text));
   const humans = thread.messages.filter(
     (message) =>
       message.role === "user" &&
+      !isRoutine(message.text) &&
       !isAutomaticApproval(message.text) &&
       !/^\s*(?:<|# AGENTS\.md|Otis applying )/i.test(message.text) &&
       !message.id.startsWith("automation:"),
   );
-  const latestHuman = humans.at(-1);
+  const authority = thread.messages.filter(
+    (message) =>
+      humans.includes(message) ||
+      (message.role === "user" && !isAutomaticApproval(message.text) && isRoutine(message.text)),
+  );
+  const latestHuman = authority.at(-1);
   const assistant = thread.messages.findLast(
     (message) => message.role === "assistant" && message.turnId === thread.latestTurn?.turnId,
   );
@@ -49,6 +62,12 @@ export function stoppedChatContext(thread: OrchestrationThread) {
       text: message.text,
       at: message.createdAt,
     })),
+    saveAuthority: authority.map((message) => ({
+      id: message.id,
+      text: message.text,
+      at: message.createdAt,
+      kind: isRoutine(message.text) ? "routine_prompt" : "chat_message",
+    })),
     question: assistant.text,
     count:
       automated.length +
@@ -69,7 +88,12 @@ export function stoppedChatContext(thread: OrchestrationThread) {
       expectedTurnId: thread.latestTurn!.turnId,
       humanRevision: authorityHash(
         JSON.stringify(
-          humans.map((message) => [message.id, message.text, message.createdAt, message.updatedAt]),
+          authority.map((message) => [
+            message.id,
+            message.text,
+            message.createdAt,
+            message.updatedAt,
+          ]),
         ),
       ),
       assistantMessageId: assistant.id,
