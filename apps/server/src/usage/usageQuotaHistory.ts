@@ -10,6 +10,13 @@ import * as Schema from "effect/Schema";
 import type { UsageQuotaHistory, UsageQuotaInterval, UsageQuotaSample } from "@t3tools/contracts";
 
 import { priceUsage, type RateTable } from "./usagePricing.ts";
+import {
+  lowerBound,
+  readGroupRange,
+  type GroupRange,
+  type IndexedGroup,
+  type PricedRecord,
+} from "./usageRecordIndex.ts";
 import type { UsageRecord } from "./usageTranscripts.ts";
 
 const MAX_HISTORY_BYTES = 2 * 1024 * 1024;
@@ -232,14 +239,22 @@ export class QuotaCostAccumulator {
   }
 
   add(record: UsageRecord): void {
-    if (record.provider !== this.provider) return;
-    // Spark has a separate quota; Qwen runs through the CLI without consuming
-    // the OpenAI subscription. Neither belongs in its weekly conversion.
-    if (
-      this.provider === "codex" &&
-      (/spark|bengalfox/i.test(record.model) || /^(?:[^/]+\/)?qwen/i.test(record.model))
-    )
-      return;
+    if (!this.#counts(record)) return;
+    const priced = priceUsage(
+      this.rates,
+      record.model,
+      record.totals,
+      record.reportedCostUsd,
+      record.serviceTier,
+      this.overrides,
+    );
+    this.addPriced({ record, costUsd: priced.costUsd, costSource: priced.costSource });
+  }
+
+  /** `add` for a record priced with this accumulator's rates when it was indexed. */
+  addPriced(priced: Pick<PricedRecord, "record" | "costUsd" | "costSource">): void {
+    const { record } = priced;
+    if (!this.#counts(record)) return;
     // Binary search keeps a 90-day scan independent of the number of reset periods.
     let low = 0;
     let high = this.rows.length;
@@ -250,21 +265,50 @@ export class QuotaCostAccumulator {
     }
     const row = this.rows[low];
     if (!row || record.timestampMs < row.start) return;
-    const priced = priceUsage(
-      this.rates,
-      record.model,
-      record.totals,
-      record.reportedCostUsd,
-      record.serviceTier,
-      this.overrides,
+    this.#accumulate(row, record.model, {
+      totals: record.totals,
+      costUsd: priced.costUsd,
+      records: 1,
+      unpricedRecords: priced.costSource === "unpriced" ? 1 : 0,
+    });
+  }
+
+  /**
+   * Folds in an indexed group's records inside `[sinceTimeMs, untilTimeMs)`,
+   * the window the aggregator accepted them for.
+   */
+  addGroup(group: IndexedGroup, sinceTimeMs: number, untilTimeMs: number): void {
+    if (!this.#counts(group)) return;
+    for (const row of this.rows) {
+      const start = lowerBound(group.timestamps, Math.max(row.start, sinceTimeMs));
+      const end = lowerBound(group.timestamps, Math.min(row.end, untilTimeMs));
+      if (end <= start) continue;
+      this.#accumulate(row, group.model, readGroupRange(group, start, end));
+    }
+  }
+
+  #counts(record: Pick<UsageRecord, "provider" | "model">): boolean {
+    if (record.provider !== this.provider) return false;
+    // Spark has a separate quota; Qwen runs through the CLI without consuming
+    // the OpenAI subscription. Neither belongs in its weekly conversion.
+    return !(
+      this.provider === "codex" &&
+      (/spark|bengalfox/i.test(record.model) || /^(?:[^/]+\/)?qwen/i.test(record.model))
     );
-    row.costUsd += priced.costUsd;
-    row.records++;
-    if (priced.costSource === "unpriced") row.unpricedRecords++;
-    let model = row.models.find((entry) => entry.model === record.model);
+  }
+
+  #accumulate(
+    row: (typeof this.rows)[number],
+    modelName: string,
+    range: Pick<GroupRange, "totals" | "costUsd" | "records" | "unpricedRecords">,
+  ): void {
+    row.costUsd += range.costUsd;
+    row.records += range.records;
+    row.unpricedRecords += range.unpricedRecords;
+    let model = row.models.find((entry) => entry.model === modelName);
     if (!model) {
       model = {
-        model: record.model,
+        model: modelName,
         totals: {
           uncachedInputTokens: 0,
           cachedInputTokens: 0,
@@ -279,14 +323,14 @@ export class QuotaCostAccumulator {
       row.models.push(model);
     }
     model.totals = {
-      uncachedInputTokens: model.totals.uncachedInputTokens + record.totals.uncachedInputTokens,
-      cachedInputTokens: model.totals.cachedInputTokens + record.totals.cachedInputTokens,
-      cacheCreationTokens: model.totals.cacheCreationTokens + record.totals.cacheCreationTokens,
-      outputTokens: model.totals.outputTokens + record.totals.outputTokens,
-      reasoningTokens: model.totals.reasoningTokens + record.totals.reasoningTokens,
+      uncachedInputTokens: model.totals.uncachedInputTokens + range.totals.uncachedInputTokens,
+      cachedInputTokens: model.totals.cachedInputTokens + range.totals.cachedInputTokens,
+      cacheCreationTokens: model.totals.cacheCreationTokens + range.totals.cacheCreationTokens,
+      outputTokens: model.totals.outputTokens + range.totals.outputTokens,
+      reasoningTokens: model.totals.reasoningTokens + range.totals.reasoningTokens,
     };
-    model.costUsd += priced.costUsd;
-    model.records++;
-    if (priced.costSource === "unpriced") model.unpricedRecords++;
+    model.costUsd += range.costUsd;
+    model.records += range.records;
+    model.unpricedRecords += range.unpricedRecords;
   }
 }

@@ -27,7 +27,9 @@ import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import * as ServerConfig from "../config.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { vi } from "vite-plus/test";
 import * as UsageService from "./UsageService.ts";
+import { UsageScanStore } from "./usageScanStore.ts";
 
 function claudeLine(
   id: number,
@@ -715,6 +717,34 @@ describe("UsageService", () => {
       yield* Effect.promise(() => NodeFSP.appendFile(transcript, claudeLine(2, 7)));
       const second = yield* service.readSummary(WINDOW);
       assert.strictEqual(totalOutputTokens(second), 12);
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("reuses an unchanged transcript's priced index without decoding it", () =>
+    Effect.gen(function* () {
+      const { transcript, settings, home } = yield* setup;
+      yield* Effect.promise(() =>
+        NodeFSP.writeFile(transcript, claudeLine(1, 5) + claudeLine(2, 7)),
+      );
+
+      const service = yield* UsageService.make.pipe(
+        Effect.provide(serviceLayers({ prefix: "usage-service-index-test", home, settings })),
+      );
+
+      yield* service.refreshRates;
+      const first = yield* service.readSummary(WINDOW);
+      const loads = vi.spyOn(UsageScanStore.prototype, "load");
+      try {
+        const second = yield* service.readSummary({ ...WINDOW, groupBy: "session" });
+        assert.strictEqual(totalOutputTokens(second), totalOutputTokens(first));
+        assert.strictEqual(loads.mock.calls.length, 0);
+
+        yield* Effect.promise(() => NodeFSP.appendFile(transcript, claudeLine(3, 11)));
+        const grown = yield* service.readSummary(WINDOW);
+        assert.strictEqual(totalOutputTokens(grown), 23);
+      } finally {
+        loads.mockRestore();
+      }
     }).pipe(Effect.scoped),
   );
 

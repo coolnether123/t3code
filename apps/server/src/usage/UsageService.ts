@@ -104,6 +104,11 @@ import {
 } from "./usageScanCache.ts";
 import { UsageScanStore } from "./usageScanStore.ts";
 import {
+  buildTranscriptUsageIndex,
+  DedupeKeyRegistry,
+  type TranscriptUsageIndex,
+} from "./usageRecordIndex.ts";
+import {
   CLAUDE_QUOTA_HISTORY_FILE,
   claudeQuotaHistories,
   decodeClaudeQuotaHistory,
@@ -164,6 +169,21 @@ const MAX_TRANSCRIPT_INVENTORY_DURATION_MS = 2_000;
 
 /** Keep a margin for WebSocket serialization before the consumer's 15-second deadline. */
 const MAX_USAGE_READ_DURATION_MS = 12_000;
+
+/** Returned by a read pass that must restart; see `readSummaryUnlocked`. */
+const RESTART_READ = Symbol("UsageService.restartRead");
+/** The last attempt aggregates record by record and cannot restart. */
+const MAX_INDEXED_READ_ATTEMPTS = 3;
+
+/** Everything a transcript index's prices depend on. */
+const transcriptIndexRevisionOf = (
+  ratesRevision: string | null,
+  knownModels: number,
+  priceOverrides: unknown,
+  tierJournal: string,
+  fastWindows: string,
+): string =>
+  JSON.stringify([ratesRevision, knownModels, priceOverrides ?? null, tierJournal, fastWindows]);
 
 /** Files changed in this span are checked between complete directory audits. */
 const RECENT_TRANSCRIPT_WINDOW_MS = 48 * 60 * 60 * 1000;
@@ -516,6 +536,21 @@ export const make = Effect.gen(function* () {
     string,
     Deferred.Deferred<Exit.Exit<UsageSummary, UsageReadError>, never>
   >();
+  // Each transcript's records priced once, reused until the transcript, its
+  // prices or its shared de-duplication keys change. Reads happen under the
+  // scan semaphore, so these are never touched concurrently.
+  const transcriptIndexes = new Map<
+    string,
+    {
+      readonly size: number;
+      readonly mtimeMs: number;
+      readonly provider: UsageProviderKind;
+      readonly index: TranscriptUsageIndex;
+    }
+  >();
+  let transcriptIndexRevision = "";
+  const staleTranscriptIndexes = new Set<string>();
+  const dedupeKeys = new DedupeKeyRegistry();
   const readSettings = settingsService.getSettings.pipe(
     Effect.catchCause(
       (cause) =>
@@ -920,6 +955,31 @@ export const make = Effect.gen(function* () {
     context: UsageReadContext | undefined,
     progress?: UsageReadProgress,
   ) {
+    // A transcript read late in a pass can reveal that an earlier one, already
+    // summed, shares a de-duplication key with it (the same Codex event in two
+    // homes). The pass restarts with every key now registered; a read that
+    // keeps colliding falls back to per-record aggregation.
+    for (let attempt = 1; ; attempt++) {
+      const result = yield* readSummaryAttempt(
+        input,
+        context,
+        progress,
+        attempt < MAX_INDEXED_READ_ATTEMPTS ? "indexed" : "records",
+      );
+      if (result !== RESTART_READ) return result;
+      if (progress !== undefined) {
+        progress.sources.length = 0;
+        progress.quotaCosts.length = 0;
+      }
+    }
+  });
+
+  const readSummaryAttempt = Effect.fnUntraced(function* (
+    input: UsageSummaryInput,
+    context: UsageReadContext | undefined,
+    progress: UsageReadProgress | undefined,
+    mode: "indexed" | "records",
+  ) {
     if (input.sinceDay > input.untilDay) {
       return yield* new UsageReadError({
         reason: "invalidWindow",
@@ -1115,6 +1175,44 @@ export const make = Effect.gen(function* () {
       ...(input.groupBy === undefined ? {} : { groupBy: input.groupBy }),
     });
     if (progress !== undefined) progress.aggregator = aggregator;
+
+    // Prices are fixed for the length of a read. An index priced under other
+    // rates, overrides, tier corrections or Fast windows is rebuilt.
+    const indexRevision = transcriptIndexRevisionOf(
+      ratesRevision,
+      scanRates.size,
+      settings.usagePriceOverrides,
+      tierJournal,
+      fastWindowText,
+    );
+    if (indexRevision !== transcriptIndexRevision) {
+      transcriptIndexes.clear();
+      staleTranscriptIndexes.clear();
+      dedupeKeys.clear();
+      transcriptIndexRevision = indexRevision;
+    }
+    const summedThisRead = new Set<string>();
+    const indexRecords = (
+      filePath: string,
+      size: number,
+      mtimeMs: number,
+      provider: UsageProviderKind,
+      records: readonly UsageRecord[],
+      complete: boolean,
+    ): TranscriptUsageIndex => {
+      const index = buildTranscriptUsageIndex(
+        records,
+        (record) => aggregator.price(applyCodexServiceTier(record, tiers, fastWindows)),
+        (keyHash) => dedupeKeys.isShared(keyHash, filePath),
+      );
+      for (const stale of dedupeKeys.register(filePath, index.keyHashes)) {
+        if (stale !== filePath) staleTranscriptIndexes.add(stale);
+      }
+      staleTranscriptIndexes.delete(filePath);
+      if (complete) transcriptIndexes.set(filePath, { size, mtimeMs, provider, index });
+      else transcriptIndexes.delete(filePath);
+      return index;
+    };
 
     const sources = progress?.sources ?? [];
     const selectedProviders = input.providers === undefined ? null : new Set(input.providers);
@@ -1393,6 +1491,13 @@ export const make = Effect.gen(function* () {
         createOverrideRateTable(settings.usagePriceOverrides),
         quotaProvider,
       );
+      const indexed: {
+        readonly file: (typeof selection.files)[number];
+        index: TranscriptUsageIndex;
+      }[] = [];
+      // Records read by this pass, so an index another transcript made stale is
+      // rebuilt without decoding the transcript again.
+      const readRecords = new Map<string, { records: readonly UsageRecord[]; complete: boolean }>();
 
       for (const file of selection.files) {
         // An unchanged transcript whose newest usage predates the window has
@@ -1411,6 +1516,40 @@ export const make = Effect.gen(function* () {
         ) {
           if (stored.recordCount > 0) scannedFiles += 1;
           else skippedFiles += 1;
+          continue;
+        }
+        if (!repeatedInputEnabled && mode === "indexed") {
+          const held = transcriptIndexes.get(file.path);
+          if (
+            held !== undefined &&
+            held.size === file.size &&
+            held.mtimeMs === file.mtimeMs &&
+            held.provider === provider &&
+            !staleTranscriptIndexes.has(file.path)
+          ) {
+            indexed.push({ file, index: held.index });
+            continue;
+          }
+          const fileRead = yield* readFileRecords(
+            file.path,
+            file.size,
+            file.mtimeMs,
+            provider,
+            file.startByte,
+          );
+          if (!fileRead.complete) incompleteFiles += 1;
+          readRecords.set(file.path, fileRead);
+          indexed.push({
+            file,
+            index: indexRecords(
+              file.path,
+              file.size,
+              file.mtimeMs,
+              provider,
+              fileRead.records,
+              fileRead.complete,
+            ),
+          });
           continue;
         }
         // Repeated-input attribution reads the prior entry's observations and
@@ -1506,6 +1645,47 @@ export const make = Effect.gen(function* () {
         }
       }
 
+      // A transcript read above may share a key with one indexed earlier. Its
+      // index folded that record into sums, so rebuild it before summing.
+      for (const entry of indexed) {
+        if (!staleTranscriptIndexes.has(entry.file.path)) continue;
+        const read = readRecords.get(entry.file.path) ?? {
+          records: scanStore.load(entry.file.path)?.records ?? [],
+          complete: true,
+        };
+        entry.index = indexRecords(
+          entry.file.path,
+          entry.file.size,
+          entry.file.mtimeMs,
+          provider,
+          read.records,
+          read.complete,
+        );
+      }
+      for (const stale of staleTranscriptIndexes) {
+        if (summedThisRead.has(stale)) return RESTART_READ;
+      }
+      const { sinceTimeMs: windowSinceMs, untilTimeMs: windowUntilMs } = aggregator.window();
+      for (const { file, index } of indexed) {
+        summedThisRead.add(file.path);
+        if (index.recordCount === 0) {
+          skippedFiles += 1;
+          continue;
+        }
+        scannedFiles += 1;
+        for (const group of index.groups) {
+          if (!aggregator.addGroup(group)) continue;
+          if (group.sessionId.length > 0) sessionIds.add(group.sessionId);
+          if (quotaIntervals.length > 0) quota.addGroup(group, windowSinceMs, windowUntilMs);
+        }
+        // Keys another transcript also holds resolve in file order, first copy wins.
+        for (const priced of index.shared) {
+          if (!aggregator.addPriced(priced)) continue;
+          if (priced.record.sessionId.length > 0) sessionIds.add(priced.record.sessionId);
+          if (quotaIntervals.length > 0) quota.addPriced(priced);
+        }
+      }
+
       const scanCompleted =
         listingComplete &&
         selection.deferredFiles === 0 &&
@@ -1568,6 +1748,12 @@ export const make = Effect.gen(function* () {
     }
 
     scanStore.prune(startedAtMs - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+    for (const filePath of transcriptIndexes.keys()) {
+      if (scanStore.meta(filePath) !== undefined) continue;
+      transcriptIndexes.delete(filePath);
+      staleTranscriptIndexes.delete(filePath);
+      dedupeKeys.remove(filePath);
+    }
     const recordedAt = DateTime.formatIso(DateTime.makeUnsafe(startedAtMs));
     for (const cost of quotaCosts) {
       const interval = quotaIntervals.find((candidate) => candidate.id === cost.intervalId);
