@@ -1,5 +1,5 @@
 export * from "./catalog.ts";
-export { computerAppearance } from "./computerAppearance.ts";
+export { COMPUTER_COLORS, computerAppearance } from "./computerAppearance.ts";
 export * as Connectivity from "./connectivity.ts";
 export * as CredentialStore from "./credentialStore.ts";
 export { type ConnectionDriverProgress, type EnvironmentConnectionLease } from "./driver.ts";

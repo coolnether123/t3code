@@ -4,17 +4,22 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { ComputerSettings } from "./ComputerSettings";
 
-const state = vi.hoisted(() => ({ writes: vi.fn(), connected: true, supported: true }));
+const state = vi.hoisted(() => ({
+  writes: vi.fn(),
+  connected: true,
+  supported: true,
+  phase: "connected",
+}));
 vi.mock("../../state/environments", () => ({
   useEnvironments: () => ({
     environments: ["Example A", "Example B"].map((label, index) => ({
       environmentId: `computer-${index}`,
       label,
       color: index === 0 ? "#123abc" : "#654321",
-      connection: { phase: state.connected ? "connected" : "disconnected" },
-      serverConfig: {
-        environment: { label, capabilities: { computerAppearance: state.supported } },
-      },
+      connection: { phase: state.connected ? state.phase : "disconnected" },
+      serverConfig: state.connected
+        ? { environment: { label, capabilities: { computerAppearance: state.supported } } }
+        : null,
     })),
   }),
   useEnvironment: (id: string) => ({
@@ -29,6 +34,9 @@ vi.mock("../../hooks/useSettings", () => ({
     developerToolsEnabled: false,
   }),
   useUpdateEnvironmentSettings: (id: string) => (patch: unknown) => state.writes(id, patch),
+}));
+vi.mock("./EnvironmentIconPicker", () => ({
+  useEnvironmentOperateAccess: () => "granted",
 }));
 vi.mock("./settingsLayout", () => ({
   SettingsSection: ({ title, children }: { title: string; children: ReactNode }) => (
@@ -55,6 +63,7 @@ afterEach(async () => {
   state.writes.mockClear();
   state.connected = true;
   state.supported = true;
+  state.phase = "connected";
   vi.unstubAllGlobals();
 });
 
@@ -100,6 +109,16 @@ describe("computer settings", () => {
     ]);
     expect(document.querySelectorAll('input[type="color"]')).toHaveLength(2);
     expect(document.querySelectorAll('[role="switch"]')).toHaveLength(2);
+  });
+
+  it("lets the computer serving this page edit itself even though it is not a saved remote", async () => {
+    state.phase = "available";
+    await renderSettings();
+    const name = document.querySelector<HTMLInputElement>(
+      '[aria-label="Computer name for Example A"]',
+    )!;
+    expect(name.disabled).toBe(false);
+    expect(document.body.textContent).not.toContain("Connect to this computer");
   });
 
   it.each(["disconnected", "older server"])(

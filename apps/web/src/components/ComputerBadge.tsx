@@ -1,9 +1,28 @@
-import { memo } from "react";
+import { memo, type CSSProperties } from "react";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { computerAppearance } from "@t3tools/client-runtime/connection";
 
 import { useEnvironment } from "../state/environments";
 import { cn } from "../lib/utils";
+
+/** Name and color of the computer that owns a chat, before and after it connects. */
+export function useComputerIdentity(environmentId: EnvironmentId): { name: string; color: string } {
+  const environment = useEnvironment(environmentId);
+  const fallback = computerAppearance({
+    environmentId,
+    fallbackLabel: "Computer",
+    serverConfig: null,
+  });
+  return {
+    name: environment?.label ?? fallback.name,
+    color: environment?.color ?? fallback.color,
+  };
+}
+
+/** Colored left edge for a row, so a list of chats reads by computer at a glance. */
+export function computerEdgeStyle(color: string): CSSProperties {
+  return { boxShadow: `inset 3px 0 0 ${color}` };
+}
 
 export function ComputerIdentityBadge({
   name,
@@ -40,17 +59,8 @@ export const ComputerBadge = memo(function ComputerBadge({
   environmentId: EnvironmentId;
   className?: string | undefined;
 }) {
-  const environment = useEnvironment(environmentId);
-  const fallback = computerAppearance({
-    environmentId,
-    fallbackLabel: "Computer",
-    serverConfig: null,
-  });
+  const computer = useComputerIdentity(environmentId);
   return (
-    <ComputerIdentityBadge
-      name={environment?.label ?? fallback.name}
-      color={environment?.color ?? fallback.color}
-      className={className}
-    />
+    <ComputerIdentityBadge name={computer.name} color={computer.color} className={className} />
   );
 });

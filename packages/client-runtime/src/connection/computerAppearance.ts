@@ -1,6 +1,14 @@
 import type { EnvironmentId, ServerConfig } from "@t3tools/contracts";
 
-const COMPUTER_COLORS = ["#2563eb", "#9333ea", "#0d9488", "#e11d48", "#d97706", "#0891b2"];
+/** Colors offered in Settings; unset computers get one of these by ID. */
+export const COMPUTER_COLORS = [
+  "#2563eb",
+  "#9333ea",
+  "#0d9488",
+  "#e11d48",
+  "#d97706",
+  "#0891b2",
+] as const;
 
 /** Read identity from the computer's settings, with stable defaults for older servers. */
 export function computerAppearance(input: {

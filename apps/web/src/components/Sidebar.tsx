@@ -113,7 +113,12 @@ import { useNowMinute } from "../hooks/useNowMinute";
 import { useSidebarEnvironmentScope } from "../hooks/useSidebarEnvironmentScope";
 import { resolveEnvironmentSwitchTarget } from "../hooks/environmentSwitch.logic";
 import { usePrimaryEnvironmentId } from "../state/environments";
-import { ComputerBadge } from "./ComputerBadge";
+import {
+  ComputerBadge,
+  ComputerIdentityBadge,
+  computerEdgeStyle,
+  useComputerIdentity,
+} from "./ComputerBadge";
 import { ComputerMenu } from "./sidebar/ComputerMenu";
 import {
   useAllEnvironmentShellsBootstrapped,
@@ -495,6 +500,7 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
   onDiscard: (draftId: DraftId) => void;
 }) {
   const { composer, draftId, onDiscard, onNavigate, session } = props;
+  const computer = useComputerIdentity(session.environmentId);
   const promptPreview = composer.prompt.trim().split("\n", 1)[0] ?? "";
   // images mirrors persistedAttachments once rehydration finishes; before
   // that only the persisted list is populated, hence max not sum.
@@ -542,6 +548,7 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
             ? "bg-sidebar-row-active"
             : "bg-amber-400/[0.04] hover:bg-amber-400/[0.08]",
         )}
+        style={computerEdgeStyle(computer.color)}
         onClick={handleActivate}
         onKeyDown={handleKeyDown}
       >
@@ -551,7 +558,11 @@ const SidebarDraftRow = memo(function SidebarDraftRow(props: {
               aria-hidden
               className="size-3 shrink-0 text-amber-600 dark:text-amber-300/80"
             />
-            <ComputerBadge environmentId={session.environmentId} className="max-w-28 shrink-0" />
+            <ComputerIdentityBadge
+              name={computer.name}
+              color={computer.color}
+              className="max-w-28 shrink-0"
+            />
             <ProjectFavicon
               environmentId={session.environmentId}
               cwd={props.projectCwd ?? ""}
@@ -794,6 +805,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     variant,
     variantAction,
   } = props;
+  const computer = useComputerIdentity(thread.environmentId);
   const threadRef = useMemo(
     () => scopeThreadRef(thread.environmentId, thread.id),
     [thread.environmentId, thread.id],
@@ -1263,6 +1275,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                   rowSurfaceClassName,
                   "flex h-11 items-center gap-2.5 px-2.5 pointer-fine:h-9 pointer-coarse:pr-12",
                 )}
+                style={computerEdgeStyle(computer.color)}
                 onClick={handleClick}
                 onDoubleClick={handleDoubleClick}
                 onKeyDown={handleKeyDown}
@@ -1287,7 +1300,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 fallbackIcon={MessageSquareIcon}
               />
             </span>
-            <ComputerBadge environmentId={thread.environmentId} className="max-w-24 shrink-0" />
+            <ComputerIdentityBadge
+              name={computer.name}
+              color={computer.color}
+              className="max-w-24 shrink-0"
+            />
             {title}
             {pinIndicator}
             {terminalStatusIcon}
@@ -1419,6 +1436,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               data-testid="sidebar-row-card"
               aria-busy={isRegeneratingTitle || undefined}
               className={rowSurfaceClassName}
+              style={computerEdgeStyle(computer.color)}
               onClick={handleClick}
               onDoubleClick={handleDoubleClick}
               onKeyDown={handleKeyDown}
@@ -1428,7 +1446,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
         >
           <div className="relative z-10 h-[4.875rem] px-[var(--sidebar-row-content-inset)] py-[var(--sidebar-content-inset)] pointer-coarse:pr-12">
             <div className="flex h-5 min-w-0 items-center gap-1.5">
-              <ComputerBadge environmentId={thread.environmentId} className="max-w-28 shrink-0" />
+              <ComputerIdentityBadge
+                name={computer.name}
+                color={computer.color}
+                className="max-w-28 shrink-0"
+              />
               <ProjectFavicon
                 environmentId={thread.environmentId}
                 cwd={props.projectCwd ?? ""}

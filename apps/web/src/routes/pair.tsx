@@ -1,10 +1,12 @@
 import { createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
+import { useState } from "react";
 
 import {
   HostedPairingRouteSurface,
   PairingPendingSurface,
   PairingRouteSurface,
 } from "../components/auth/PairingRouteSurface";
+import { addComputerHash, readAddComputerLink } from "../connection/addComputerLink";
 
 export const Route = createFileRoute("/pair")({
   beforeLoad: async ({ context }) => {
@@ -29,6 +31,8 @@ export const Route = createFileRoute("/pair")({
 function PairRouteView() {
   const { authGateState } = Route.useRouteContext();
   const navigate = useNavigate();
+  // Read before sign-in rewrites the URL; the app asks about it after sign-in.
+  const [addComputerLink] = useState(() => readAddComputerLink(new URL(window.location.href)));
 
   if (!authGateState) {
     return null;
@@ -42,7 +46,11 @@ function PairRouteView() {
     <PairingRouteSurface
       auth={authGateState.auth}
       onAuthenticated={() => {
-        void navigate({ to: "/", replace: true });
+        void navigate({
+          to: "/",
+          replace: true,
+          ...(addComputerLink ? { hash: addComputerHash(addComputerLink) } : {}),
+        });
       }}
       {...(authGateState.errorMessage ? { initialErrorMessage: authGateState.errorMessage } : {})}
     />
