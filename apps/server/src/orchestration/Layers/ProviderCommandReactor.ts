@@ -2004,6 +2004,7 @@ const make = Effect.gen(function* () {
         citation_at: result.decision.citation_at,
         reason: result.decision.reason,
         decision_id: result.decision.decision_id,
+        source: result.decision.source,
       };
       // Write intent before dispatch; only the accepted receipt proves persistence.
       yield* Effect.tryPromise(() =>

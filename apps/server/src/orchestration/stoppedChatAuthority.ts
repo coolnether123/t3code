@@ -5,11 +5,17 @@ import type { OrchestrationThread, StoppedChatContinuationGuard } from "@t3tools
 export const authorityHash = (text: string): string =>
   NodeCrypto.createHash("sha256").update(text).digest("hex");
 
+export const isAutomaticApproval = (text: string): boolean =>
+  text.includes("(via JEV)") || text.includes("Yes, save it. You asked for this at ");
+
+export const isRequestedSaveReply = (text: string): boolean =>
+  /^Yes, save it\. You asked for this at \d{1,2}:\d{2} [AP]M (?:CST|CDT)\.$/.test(text.trim());
+
 export function stoppedChatContext(thread: OrchestrationThread) {
   const humans = thread.messages.filter(
     (message) =>
       message.role === "user" &&
-      !message.text.includes("(via JEV)") &&
+      !isAutomaticApproval(message.text) &&
       !/^\s*(?:<|# AGENTS\.md|Otis applying )/i.test(message.text) &&
       !message.id.startsWith("automation:"),
   );
@@ -27,7 +33,7 @@ export function stoppedChatContext(thread: OrchestrationThread) {
     return null;
   const automated = thread.messages
     .slice(thread.messages.indexOf(latestHuman) + 1)
-    .filter((message) => message.role === "user" && message.text.includes("(via JEV)"));
+    .filter((message) => message.role === "user" && isAutomaticApproval(message.text));
   const progress = thread.activities.some(
     (activity) =>
       activity.turnId === thread.latestTurn?.turnId &&
@@ -38,9 +44,11 @@ export function stoppedChatContext(thread: OrchestrationThread) {
       (activity.payload as Record<string, unknown>).status === "completed",
   );
   return {
-    humans: humans
-      .slice(-15)
-      .map((message) => ({ id: message.id, text: message.text, at: message.createdAt })),
+    humans: humans.map((message) => ({
+      id: message.id,
+      text: message.text,
+      at: message.createdAt,
+    })),
     question: assistant.text,
     count:
       automated.length +
@@ -48,13 +56,13 @@ export function stoppedChatContext(thread: OrchestrationThread) {
         (activity) =>
           activity.kind === "hook.feedback" &&
           activity.createdAt >= latestHuman.createdAt &&
-          JSON.stringify(activity.payload).includes("(via JEV)"),
+          isAutomaticApproval(JSON.stringify(activity.payload)),
       ).length,
     nativeHookOwnsTurn: thread.activities.some(
       (activity) =>
         activity.kind === "hook.feedback" &&
         activity.turnId === thread.latestTurn?.turnId &&
-        JSON.stringify(activity.payload).includes("(via JEV)"),
+        isAutomaticApproval(JSON.stringify(activity.payload)),
     ),
     progress,
     guard: {

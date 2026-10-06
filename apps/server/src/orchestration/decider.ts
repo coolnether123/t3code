@@ -23,7 +23,11 @@ import {
   requireThreadNotArchived,
 } from "./commandInvariants.ts";
 import { projectEvent } from "./projector.ts";
-import { stoppedChatGuardFailure } from "./stoppedChatAuthority.ts";
+import {
+  isAutomaticApproval,
+  isRequestedSaveReply,
+  stoppedChatGuardFailure,
+} from "./stoppedChatAuthority.ts";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
@@ -994,11 +998,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
-      if (command.continuationGuard || command.message.text.includes("(via JEV)")) {
+      if (command.continuationGuard || isAutomaticApproval(command.message.text)) {
         const detail = !command.continuationGuard
           ? "Automated continuation requires a stopped-chat guard."
-          : !command.message.text.trim().endsWith("(via JEV)")
-            ? "Automated continuation must retain its attribution tag."
+          : !command.message.text.trim().endsWith("(via JEV)") &&
+              !isRequestedSaveReply(command.message.text)
+            ? "Automated continuation must retain its known reply format."
             : hasOpenBlockingRequest(targetThread)
               ? "A platform approval or user-input request remains open."
               : stoppedChatGuardFailure(targetThread, command.continuationGuard);
