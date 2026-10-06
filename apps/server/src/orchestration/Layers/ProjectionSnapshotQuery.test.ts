@@ -85,6 +85,24 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       yield* sql`DELETE FROM projection_thread_messages WHERE message_id LIKE 'prompt-usage-%'`;
     }),
   );
+  it.effect("reads user-message identities from an index without visiting message rows", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      // Startup runs this before any client connects; on a cold page cache a
+      // row visit per message took minutes for a few hundred thousand.
+      const plan = yield* sql<{ detail: string }>`EXPLAIN QUERY PLAN
+        SELECT message_id, thread_id, turn_id, created_at, updated_at
+        FROM projection_thread_messages
+        WHERE role = 'user'
+        ORDER BY thread_id ASC, created_at ASC, message_id ASC`;
+      assert.isTrue(
+        plan.some((row) =>
+          row.detail.includes("COVERING INDEX idx_projection_user_messages_thread_identity"),
+        ),
+      );
+      assert.isFalse(plan.some((row) => row.detail.includes("TEMP B-TREE")));
+    }),
+  );
   it.effect("looks up native provider-session IDs without loading thread snapshots", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;
