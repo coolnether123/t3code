@@ -4,6 +4,7 @@ import {
   ProjectId,
   ThreadId,
   type OrchestrationSearchThreadsResult,
+  type ChatHistorySearchResult,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import { AsyncResult, Atom, AtomRegistry } from "effect/unstable/reactivity";
@@ -15,10 +16,67 @@ import {
   threadSearchMatchKey,
   chatHistoryDateInput,
   mergeChatHistoryMatches,
+  advanceChatHistoryScan,
+  INITIAL_CHAT_HISTORY_SCAN,
 } from "./threadSearch.ts";
 
 const envA = EnvironmentId.make("env-a");
 const envB = EnvironmentId.make("env-b");
+
+it("retains scan results and earlier coverage gaps through the final daemon page", () => {
+  const first: ChatHistorySearchResult = {
+    matches: [
+      {
+        source: "t3",
+        threadId: "synthetic",
+        codexThreadId: "native",
+        title: "Synthetic chat",
+        updatedAt: "2026-10-06T00:00:00.000Z",
+        archived: false,
+        snippet: "needle",
+      },
+    ],
+    coverage: [
+      {
+        source: "codex-app",
+        status: "partial",
+        detail: "Synthetic missing history",
+        readGaps: true,
+      },
+    ],
+    nextCodexCursor: "next",
+    nextT3Offset: null,
+  };
+  const intermediate = advanceChatHistoryScan(INITIAL_CHAT_HISTORY_SCAN, first);
+  expect(intermediate.codexCursor).toBe("next");
+  expect(intermediate.done).toBe(false);
+  const last: ChatHistorySearchResult = {
+    ...first,
+    matches: [{ ...first.matches[0]!, source: "codex-app", threadId: "native" }],
+    coverage: [{ source: "codex-app", status: "complete", detail: "Synthetic end" }],
+    nextCodexCursor: null,
+  };
+  const complete = advanceChatHistoryScan(intermediate, last);
+  expect(complete.done).toBe(true);
+  expect(complete.readGaps).toBe(true);
+  expect(complete.pages).toBe(2);
+  expect(complete.matches).toEqual(last.matches);
+  expect(advanceChatHistoryScan(complete, last)).toBe(complete);
+});
+
+it("stops a repeated daemon cursor rather than claiming full coverage or looping", () => {
+  const page: ChatHistorySearchResult = {
+    matches: [],
+    coverage: [],
+    nextCodexCursor: "next",
+    nextT3Offset: null,
+  };
+  const first = advanceChatHistoryScan(INITIAL_CHAT_HISTORY_SCAN, page);
+  const repeated = advanceChatHistoryScan(first, page);
+  expect(repeated.done).toBe(true);
+  expect(repeated.readGaps).toBe(true);
+  expect(repeated.pages).toBe(2);
+});
 
 it("uses inclusive local calendar days and rejects invalid or reversed dates", () => {
   const input = chatHistoryDateInput(" needle ", "2026-10-06", "2026-10-06");

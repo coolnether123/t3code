@@ -2,6 +2,7 @@
 import {
   type ChatHistorySearchInput,
   type ChatHistoryMatch,
+  type ChatHistorySearchResult,
   EnvironmentId,
   OrchestrationSearchThreadsInput,
   type OrchestrationSearchThreadsResult,
@@ -60,6 +61,48 @@ export function mergeChatHistoryMatches(
     if (!existing || match.source === "codex-app") matches.set(key, match);
   }
   return [...matches.values()];
+}
+
+export interface ChatHistoryScan {
+  readonly codexCursor: string | undefined;
+  readonly matches: ReadonlyArray<ChatHistoryMatch>;
+  readonly pages: number;
+  readonly seenCursors: ReadonlyArray<string>;
+  readonly done: boolean;
+  readonly readGaps: boolean;
+}
+
+export const INITIAL_CHAT_HISTORY_SCAN: ChatHistoryScan = {
+  codexCursor: undefined,
+  matches: [],
+  pages: 0,
+  seenCursors: [],
+  done: false,
+  readGaps: false,
+};
+
+/** Each computer scans bounded daemon pages, retaining results and coverage gaps. */
+export function advanceChatHistoryScan(
+  scan: ChatHistoryScan,
+  page: ChatHistorySearchResult,
+): ChatHistoryScan {
+  const current = scan.codexCursor ?? "";
+  if (scan.done || scan.seenCursors.includes(current)) return scan;
+  const seenCursors = [...scan.seenCursors, current];
+  const repeatsCursor = page.nextCodexCursor !== null && seenCursors.includes(page.nextCodexCursor);
+  return {
+    codexCursor: page.nextCodexCursor ?? scan.codexCursor,
+    matches: mergeChatHistoryMatches(scan.matches, page.matches),
+    pages: scan.pages + 1,
+    seenCursors,
+    done: page.nextCodexCursor === null || repeatsCursor,
+    readGaps:
+      scan.readGaps ||
+      repeatsCursor ||
+      page.coverage.some(
+        (coverage) => coverage.readGaps === true || coverage.status === "unavailable",
+      ),
+  };
 }
 
 export interface ThreadSearchResultsState {

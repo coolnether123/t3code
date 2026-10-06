@@ -54,8 +54,9 @@ the chat's last-update date.
 Results show the computer, chat source, date and archive status. T3 searches its
 saved chat names, user messages and completed assistant replies, including
 archived chats. Codex app histories come from that computer's running Codex app
-daemon. Use **Search more Codex chats** to search the next page, including
-archived app chats after the active pages. A linked T3 chat and Codex app chat
+daemon. Search continues through older and archived Codex chats automatically.
+Choose **Stop searching** to stop after the current page, then **Continue
+searching** to resume. A linked T3 chat and Codex app chat
 appear once when both match.
 
 Open a result to read it without resuming, importing or changing the chat. Use

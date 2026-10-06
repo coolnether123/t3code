@@ -1,13 +1,16 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import {
   CHAT_HISTORY_MESSAGE_PAGE_SIZE,
   type ChatHistoryMatch,
   type ChatHistorySearchInput,
+  type ChatHistorySearchResult,
   type EnvironmentId,
 } from "@t3tools/contracts";
 import {
   chatHistoryDateInput,
   mergeChatHistoryMatches,
+  advanceChatHistoryScan,
+  INITIAL_CHAT_HISTORY_SCAN,
 } from "@t3tools/client-runtime/state/thread-search";
 import { orchestrationEnvironment } from "../../state/orchestration";
 import { useEnvironmentQuery } from "../../state/query";
@@ -26,17 +29,33 @@ function ComputerResults({
   input: ChatHistorySearchInput;
   onOpen: (match: ChatHistoryMatch, computer: Computer) => void;
 }) {
-  const [cursor, setCursor] = useState<string>();
+  const [scan, setScan] = useState(INITIAL_CHAT_HISTORY_SCAN);
+  const [paused, setPaused] = useState(false);
+  const consumedPage = useRef<ChatHistorySearchResult | null>(null);
   const [t3Offset, setT3Offset] = useState(0);
   const [previous, setPrevious] = useState<ReadonlyArray<ChatHistoryMatch>>([]);
-  const [hadMissingHistory, setHadMissingHistory] = useState(false);
   const search = useEnvironmentQuery(
     orchestrationEnvironment.chatHistorySearch({
       environmentId: computer.environmentId,
-      input: { ...input, t3Offset, ...(cursor ? { codexCursor: cursor } : {}) },
+      input: { ...input, t3Offset, ...(scan.codexCursor ? { codexCursor: scan.codexCursor } : {}) },
     }),
   );
-  const matches = mergeChatHistoryMatches(previous, search.data?.matches ?? []);
+  useEffect(() => {
+    if (
+      search.isPending ||
+      !search.data ||
+      paused ||
+      scan.done ||
+      consumedPage.current === search.data
+    )
+      return;
+    consumedPage.current = search.data;
+    setScan((current) => advanceChatHistoryScan(current, search.data!));
+  }, [search.data, search.isPending, paused, scan.done]);
+  const matches = mergeChatHistoryMatches(
+    [...previous, ...scan.matches],
+    search.data?.matches ?? [],
+  );
   return (
     <section className="space-y-2 border-t border-border py-3">
       <h3 className="text-sm font-medium">{computer.label}</h3>
@@ -52,7 +71,19 @@ function ComputerResults({
       )}
       {(search.error ||
         search.data?.coverage.some((coverage) => coverage.status === "unavailable")) && (
-        <Button variant="outline" onClick={search.refresh}>
+        <Button
+          variant="outline"
+          onClick={() => {
+            setScan((current) => ({
+              ...current,
+              done: false,
+              seenCursors: current.seenCursors.filter(
+                (cursor) => cursor !== (current.codexCursor ?? ""),
+              ),
+            }));
+            search.refresh();
+          }}
+        >
           Retry this computer
         </Button>
       )}
@@ -61,13 +92,28 @@ function ComputerResults({
           {coverage.source === "t3" ? "T3" : "Codex app"}: {coverage.status}. {coverage.detail}
         </p>
       ))}
-      {hadMissingHistory && (
+      {scan.readGaps && (
         <p className="text-xs text-muted-foreground">
           An earlier page had missing or unreadable message history. Coverage remains incomplete.
         </p>
       )}
-      {!search.isPending && search.data && matches.length === 0 && (
+      {!search.isPending && (scan.done || paused) && search.data && matches.length === 0 && (
         <p className="text-sm text-muted-foreground">No matches in the searched chats.</p>
+      )}
+      {!scan.done && !search.error && (
+        <div className="space-y-2">
+          <p role="status" className="text-sm text-muted-foreground">
+            {paused
+              ? "Search stopped. Results show chats checked so far."
+              : `Searching older Codex chats. ${scan.pages} pages checked.`}
+          </p>
+          <Button variant="outline" onClick={() => setPaused(!paused)}>
+            {paused ? "Continue searching" : "Stop searching"}
+          </Button>
+          {search.isPending && !paused && (
+            <p className="text-xs text-muted-foreground">Stops after the current page.</p>
+          )}
+        </div>
       )}
       {matches.map((match) => (
         <button
@@ -88,37 +134,13 @@ function ComputerResults({
       {search.data?.nextT3Offset != null && (
         <Button
           variant="outline"
-          disabled={search.isPending}
+          disabled={search.isPending || (!scan.done && !paused)}
           onClick={() => {
             setPrevious(matches);
-            setHadMissingHistory(
-              hadMissingHistory ||
-                search.data!.coverage.some(
-                  (coverage) => coverage.readGaps === true || coverage.status === "unavailable",
-                ),
-            );
             setT3Offset(search.data!.nextT3Offset!);
           }}
         >
           Show more T3 matches
-        </Button>
-      )}
-      {search.data?.nextCodexCursor && (
-        <Button
-          variant="outline"
-          disabled={search.isPending}
-          onClick={() => {
-            setPrevious(matches);
-            setHadMissingHistory(
-              hadMissingHistory ||
-                search.data!.coverage.some(
-                  (coverage) => coverage.readGaps === true || coverage.status === "unavailable",
-                ),
-            );
-            setCursor(search.data!.nextCodexCursor!);
-          }}
-        >
-          Search more Codex chats
         </Button>
       )}
     </section>
@@ -200,8 +222,16 @@ export function ChatHistorySearchDialog({ computers }: { computers: ReadonlyArra
   const [open, setOpen] = useState(false);
   useEffect(() => {
     const show = () => setOpen(true);
+    const fromLink = () => {
+      if (window.location.hash === "#search-chats") show();
+    };
     window.addEventListener(CHAT_HISTORY_SEARCH_EVENT, show);
-    return () => window.removeEventListener(CHAT_HISTORY_SEARCH_EVENT, show);
+    window.addEventListener("hashchange", fromLink);
+    fromLink();
+    return () => {
+      window.removeEventListener(CHAT_HISTORY_SEARCH_EVENT, show);
+      window.removeEventListener("hashchange", fromLink);
+    };
   }, []);
   const [query, setQuery] = useState("");
   const [from, setFrom] = useState("");

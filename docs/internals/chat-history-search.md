@@ -44,7 +44,13 @@ current sidebar filter. Each computer reports its own coverage and retry
 action. Unsupported or disconnected servers never count as successful empty
 searches.
 
-Clients submit searches explicitly. They append pages and deduplicate known
+Clients submit searches explicitly, then automatically follow Codex cursors.
+Each computer has a stop/continue control. Stopping prevents further pages;
+the current bounded request can finish. `advanceChatHistoryScan` shares result
+retention, coverage-gap tracking and repeated-cursor protection between web and
+mobile. T3 match pagination stays separate. The web fragment `#search-chats`
+opens the dialog directly without submitting a search or changing authentication.
+Clients append pages and deduplicate known
 T3/Codex links through `projection_thread_sessions.provider_thread_id`. A Codex
 history match wins over its linked projection match. Unrelated identical IDs
 and chats on different computers remain distinct. There is no title-based

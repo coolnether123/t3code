@@ -1,15 +1,18 @@
-import { useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { Modal, Pressable, ScrollView, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import {
   CHAT_HISTORY_MESSAGE_PAGE_SIZE,
   type ChatHistoryMatch,
   type ChatHistorySearchInput,
+  type ChatHistorySearchResult,
   type EnvironmentId,
 } from "@t3tools/contracts";
 import {
   chatHistoryDateInput,
   mergeChatHistoryMatches,
+  advanceChatHistoryScan,
+  INITIAL_CHAT_HISTORY_SCAN,
 } from "@t3tools/client-runtime/state/thread-search";
 import { AppText as Text } from "../../components/AppText";
 import { orchestrationEnvironment } from "../../state/orchestration";
@@ -26,17 +29,33 @@ function ComputerResults({
   input: ChatHistorySearchInput;
   onOpen: (match: ChatHistoryMatch, computer: Computer) => void;
 }) {
-  const [cursor, setCursor] = useState<string>();
+  const [scan, setScan] = useState(INITIAL_CHAT_HISTORY_SCAN);
+  const [paused, setPaused] = useState(false);
+  const consumedPage = useRef<ChatHistorySearchResult | null>(null);
   const [t3Offset, setT3Offset] = useState(0);
   const [previous, setPrevious] = useState<ReadonlyArray<ChatHistoryMatch>>([]);
-  const [hadMissingHistory, setHadMissingHistory] = useState(false);
   const search = useEnvironmentQuery(
     orchestrationEnvironment.chatHistorySearch({
       environmentId: computer.environmentId,
-      input: { ...input, t3Offset, ...(cursor ? { codexCursor: cursor } : {}) },
+      input: { ...input, t3Offset, ...(scan.codexCursor ? { codexCursor: scan.codexCursor } : {}) },
     }),
   );
-  const matches = mergeChatHistoryMatches(previous, search.data?.matches ?? []);
+  useEffect(() => {
+    if (
+      search.isPending ||
+      !search.data ||
+      paused ||
+      scan.done ||
+      consumedPage.current === search.data
+    )
+      return;
+    consumedPage.current = search.data;
+    setScan((current) => advanceChatHistoryScan(current, search.data!));
+  }, [search.data, search.isPending, paused, scan.done]);
+  const matches = mergeChatHistoryMatches(
+    [...previous, ...scan.matches],
+    search.data?.matches ?? [],
+  );
   return (
     <View className="gap-2 border-t border-border py-4">
       <Text className="font-t3-medium text-foreground">{computer.label}</Text>
@@ -50,7 +69,16 @@ function ComputerResults({
         search.data?.coverage.some((coverage) => coverage.status === "unavailable")) && (
         <Pressable
           accessibilityRole="button"
-          onPress={search.refresh}
+          onPress={() => {
+            setScan((current) => ({
+              ...current,
+              done: false,
+              seenCursors: current.seenCursors.filter(
+                (cursor) => cursor !== (current.codexCursor ?? ""),
+              ),
+            }));
+            search.refresh();
+          }}
           className="min-h-11 justify-center"
         >
           <Text>Retry this computer</Text>
@@ -61,13 +89,32 @@ function ComputerResults({
           {coverage.source === "t3" ? "T3" : "Codex app"}: {coverage.status}. {coverage.detail}
         </Text>
       ))}
-      {hadMissingHistory && (
+      {scan.readGaps && (
         <Text className="text-xs text-foreground-muted">
           An earlier page had missing or unreadable message history. Coverage remains incomplete.
         </Text>
       )}
-      {!search.isPending && search.data && matches.length === 0 && (
+      {!search.isPending && (scan.done || paused) && search.data && matches.length === 0 && (
         <Text>No matches in the searched chats.</Text>
+      )}
+      {!scan.done && !search.error && (
+        <View className="gap-2">
+          <Text accessibilityLiveRegion="polite">
+            {paused
+              ? "Search stopped. Results show chats checked so far."
+              : `Searching older Codex chats. ${scan.pages} pages checked.`}
+          </Text>
+          <Pressable
+            accessibilityRole="button"
+            onPress={() => setPaused(!paused)}
+            className="min-h-11 justify-center rounded-lg border border-border p-3"
+          >
+            <Text>{paused ? "Continue searching" : "Stop searching"}</Text>
+          </Pressable>
+          {search.isPending && !paused && (
+            <Text className="text-xs text-foreground-muted">Stops after the current page.</Text>
+          )}
+        </View>
       )}
       {matches.map((match) => (
         <Pressable
@@ -88,39 +135,14 @@ function ComputerResults({
       {search.data?.nextT3Offset != null && (
         <Pressable
           accessibilityRole="button"
-          disabled={search.isPending}
+          disabled={search.isPending || (!scan.done && !paused)}
           onPress={() => {
             setPrevious(matches);
-            setHadMissingHistory(
-              hadMissingHistory ||
-                search.data!.coverage.some(
-                  (coverage) => coverage.readGaps === true || coverage.status === "unavailable",
-                ),
-            );
             setT3Offset(search.data!.nextT3Offset!);
           }}
           className="min-h-11 justify-center"
         >
           <Text>Show more T3 matches</Text>
-        </Pressable>
-      )}
-      {search.data?.nextCodexCursor && (
-        <Pressable
-          accessibilityRole="button"
-          disabled={search.isPending}
-          onPress={() => {
-            setPrevious(matches);
-            setHadMissingHistory(
-              hadMissingHistory ||
-                search.data!.coverage.some(
-                  (coverage) => coverage.readGaps === true || coverage.status === "unavailable",
-                ),
-            );
-            setCursor(search.data!.nextCodexCursor!);
-          }}
-          className="min-h-11 justify-center rounded-lg border border-border p-3"
-        >
-          <Text>Search more Codex chats</Text>
         </Pressable>
       )}
     </View>

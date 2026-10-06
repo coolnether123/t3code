@@ -5,7 +5,7 @@ import { EnvironmentId, type ChatHistoryMatch } from "@t3tools/contracts";
 import { ChatHistorySearchDialog, CHAT_HISTORY_SEARCH_EVENT } from "./ChatHistorySearchDialog";
 
 type Request = { kind: "search" | "read"; environmentId: string; input: Record<string, unknown> };
-const state = vi.hoisted(() => ({ requests: [] as Request[] }));
+const state = vi.hoisted(() => ({ requests: [] as Request[], pendingNext: false }));
 vi.mock("../../state/orchestration", () => ({
   orchestrationEnvironment: {
     chatHistorySearch: (request: Omit<Request, "kind">) => ({ ...request, kind: "search" }),
@@ -44,6 +44,8 @@ vi.mock("../../state/query", () => ({
       };
     if (request.environmentId === "millie")
       return { data: null, error: "Synthetic disconnected computer", isPending: false };
+    if (request.input.codexCursor && state.pendingNext)
+      return { data: null, error: null, isPending: true };
     return {
       data: {
         matches: [match("t3"), match("codex-app")],
@@ -89,8 +91,9 @@ const submit = () =>
   act(() => renderer.root.findByType("form").props.onSubmit({ preventDefault() {} }));
 beforeEach(async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  vi.stubGlobal("window", new EventTarget());
+  vi.stubGlobal("window", Object.assign(new EventTarget(), { location: { hash: "" } }));
   state.requests = [];
+  state.pendingNext = false;
   await act(() => {
     renderer = create(<ChatHistorySearchDialog computers={computers} />);
   });
@@ -120,7 +123,10 @@ it("searches both named computers, preserves missing coverage across pages and o
     );
   expect(results).toHaveLength(1);
   expect(state.requests.some((request) => request.kind === "read")).toBe(false);
-  await act(() => button("Search more Codex chats").props.onClick());
+  expect(button("Search more Codex chats")).toBeUndefined();
+  expect(state.requests.some((request) => request.input.codexCursor === "synthetic-next")).toBe(
+    true,
+  );
   expect(JSON.stringify(renderer.toJSON())).toContain("Coverage remains incomplete");
   await act(() => results[0]!.props.onClick());
   expect(state.requests.findLast((request) => request.kind === "read")).toMatchObject({
@@ -182,4 +188,28 @@ it("opens from the command palette event and removes the listener when unmounted
   expect(renderer.root.findByType("h2").children).toContain("Search chats");
   await act(() => renderer.unmount());
   expect(remove).toHaveBeenCalledWith(CHAT_HISTORY_SEARCH_EVENT, expect.any(Function));
+});
+
+it("stops additional scanning while a page is in flight and continues when requested", async () => {
+  state.pendingNext = true;
+  await submit();
+  await act(() => button("Stop searching").props.onClick());
+  expect(JSON.stringify(renderer.toJSON())).toContain("Search stopped");
+  state.pendingNext = false;
+  await act(() => renderer.update(<ChatHistorySearchDialog computers={computers} />));
+  expect(button("Continue searching")).toBeTruthy();
+  await act(() => button("Continue searching").props.onClick());
+  expect(button("Continue searching")).toBeUndefined();
+  expect(JSON.stringify(renderer.toJSON())).toContain("Synthetic final page");
+});
+
+it("opens directly from the search link and listens for later links", async () => {
+  await act(() => renderer.unmount());
+  window.location.hash = "#search-chats";
+  await act(() => {
+    renderer = create(<ChatHistorySearchDialog computers={computers} />);
+  });
+  expect(renderer.root.findByType("h2").children).toContain("Search chats");
+  await act(() => window.dispatchEvent(new Event("hashchange")));
+  expect(renderer.root.findByType("h2").children).toContain("Search chats");
 });
