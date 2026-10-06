@@ -1520,7 +1520,7 @@ const makeWsRpcLayer = (
                       CodexChatHistory.searchDaemonChats(client, input),
                     ),
                   ).pipe(
-                    Effect.timeout("45 seconds"),
+                    Effect.timeout("5 minutes"),
                     Effect.catch(() =>
                       Effect.succeed({
                         matches: [],
@@ -1577,7 +1577,7 @@ const makeWsRpcLayer = (
                 CodexChatHistory.withChatDaemon(settings.providers.codex.homePath, (client) =>
                   CodexChatHistory.readDaemonChat(client, input.threadId, input.offset),
                 ),
-              ).pipe(Effect.timeout("15 seconds"));
+              ).pipe(Effect.timeout("2 minutes"));
             }).pipe(
               Effect.mapError(
                 () => new ChatHistoryError({ message: "This chat could not be opened read-only." }),

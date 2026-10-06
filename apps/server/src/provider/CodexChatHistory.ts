@@ -129,7 +129,7 @@ export const searchDaemonChats = Effect.fn("searchDaemonChats")(function* (
     page.data,
     (entry) =>
       readHistory(client, entry.id).pipe(
-        Effect.timeout("15 seconds"),
+        Effect.timeout("2 minutes"),
         Effect.retry({ times: 1, while: (error) => error._tag === "TimeoutError" }),
         Effect.result,
       ),

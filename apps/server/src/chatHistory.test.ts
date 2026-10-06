@@ -1,7 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off preferSchemaOverJson:off - The synthetic WebSocket peer sends raw protocol frames.
 import * as NodeHttp from "node:http";
 import * as NodeCrypto from "node:crypto";
-import * as NodeOS from "node:os";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as NodePath from "node:path";
 import * as NodeFSP from "node:fs/promises";
@@ -164,7 +163,7 @@ it.effect(
       const fiber = yield* searchDaemonChats(client, { query: "message needle" }).pipe(
         Effect.forkScoped,
       );
-      yield* TestClock.adjust("15 seconds");
+      yield* TestClock.adjust("2 minutes");
       const result = yield* Fiber.join(fiber);
       assert.equal(attempts, 2);
       assert.equal(result.matches[0]?.threadId, "slow");
@@ -189,7 +188,7 @@ it.effect("keeps an explicit gap after both bounded daemon reads time out", () =
       },
     } as unknown as Parameters<typeof searchDaemonChats>[0];
     const fiber = yield* searchDaemonChats(client, { query: "needle" }).pipe(Effect.forkScoped);
-    yield* TestClock.adjust("30 seconds");
+    yield* TestClock.adjust("4 minutes");
     const result = yield* Fiber.join(fiber);
     assert.equal(attempts, 2);
     assert.lengthOf(result.matches, 0);
@@ -201,7 +200,7 @@ async function syntheticDaemon(platform: NodeJS.Platform) {
   const homePath =
     platform === "win32"
       ? `\\\\.\\pipe\\t3-chat-synthetic-${NodeCrypto.randomUUID()}`
-      : await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-chat-synthetic-"));
+      : await NodeFSP.mkdtemp(NodePath.join("/tmp", "t3-chat-synthetic-"));
   const socketPath = `${homePath}/app-server-control/app-server-control.sock`;
   if (platform !== "win32") await NodeFSP.mkdir(NodePath.dirname(socketPath), { recursive: true });
   const server = NodeHttp.createServer();
