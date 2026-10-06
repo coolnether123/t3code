@@ -1,4 +1,7 @@
+// @effect-diagnostics globalDate:off - Calendar filters use the client's local timezone, including daylight-saving boundaries.
 import {
+  type ChatHistorySearchInput,
+  type ChatHistoryMatch,
   EnvironmentId,
   OrchestrationSearchThreadsInput,
   type OrchestrationSearchThreadsResult,
@@ -10,6 +13,53 @@ import { AsyncResult, Atom } from "effect/unstable/reactivity";
 
 export interface EnvironmentThreadSearchMatch extends OrchestrationThreadSearchMatch {
   readonly environmentId: EnvironmentId;
+}
+
+/** Local calendar days become an inclusive start and exclusive end on the wire. */
+export function chatHistoryDateInput(
+  query: string,
+  from: string,
+  through: string,
+): ChatHistorySearchInput {
+  for (const date of [from, through]) {
+    if (!date) continue;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("Enter dates as YYYY-MM-DD.");
+    const parsed = new Date(`${date}T00:00:00`);
+    const [year, month, day] = date.split("-").map(Number);
+    if (
+      parsed.getFullYear() !== year ||
+      parsed.getMonth() + 1 !== month ||
+      parsed.getDate() !== day
+    )
+      throw new Error("Enter valid dates.");
+  }
+  const start = from ? new Date(`${from}T00:00:00`) : null;
+  const end = through ? new Date(`${through}T00:00:00`) : null;
+  if ((start && Number.isNaN(start.getTime())) || (end && Number.isNaN(end.getTime())))
+    throw new Error("Enter valid dates.");
+  if (start && end && start > end)
+    throw new Error("The end date must be on or after the start date.");
+  if (end) end.setDate(end.getDate() + 1);
+  return {
+    query: query.trim(),
+    ...(start ? { from: start.toISOString() } : {}),
+    ...(end ? { before: end.toISOString() } : {}),
+  };
+}
+
+export function mergeChatHistoryMatches(
+  previous: ReadonlyArray<ChatHistoryMatch>,
+  next: ReadonlyArray<ChatHistoryMatch>,
+) {
+  const matches = new Map<string, ChatHistoryMatch>();
+  for (const match of [...previous, ...next]) {
+    const key = match.codexThreadId
+      ? `codex:${match.codexThreadId}`
+      : `${match.source}:${match.threadId}`;
+    const existing = matches.get(key);
+    if (!existing || match.source === "codex-app") matches.set(key, match);
+  }
+  return [...matches.values()];
 }
 
 export interface ThreadSearchResultsState {

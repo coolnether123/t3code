@@ -6,6 +6,7 @@ import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hos
 
 import {
   AuthAccessTokenType,
+  CHAT_HISTORY_METHODS,
   AuthStandardClientScopes,
   AuthEnvironmentBootstrapTokenType,
   AuthTokenExchangeGrantType,
@@ -119,6 +120,8 @@ import {
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ThreadDeletionReactor } from "./orchestration/Services/ThreadDeletionReactor.ts";
 import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite.ts";
+import * as ChatHistory from "./chatHistory.ts";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { OrchestrationEventStoreLive } from "./persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationEventStore } from "./persistence/Services/OrchestrationEventStore.ts";
 import { PersistenceSqlError } from "./persistence/Errors.ts";
@@ -531,6 +534,7 @@ const buildAppUnderTest = (options?: {
     threadDeletionReactor?: Partial<ThreadDeletionReactor["Service"]>;
     analyticsService?: Partial<AnalyticsService.AnalyticsService["Service"]>;
     projectionSnapshotQuery?: Partial<ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"]>;
+    chatHistoryProjection?: ChatHistory.ChatHistoryProjection["Service"];
     checkpointDiffQuery?: Partial<CheckpointDiffQuery.CheckpointDiffQuery["Service"]>;
     browserTraceCollector?: Partial<BrowserTraceCollector.BrowserTraceCollector["Service"]>;
     serverLifecycleEvents?: Partial<ServerLifecycleEvents.ServerLifecycleEvents["Service"]>;
@@ -759,6 +763,13 @@ const buildAppUnderTest = (options?: {
             streamChanges: Stream.empty,
             ...options?.layers?.keybindings,
           }),
+          Layer.succeed(
+            ChatHistory.ChatHistoryProjection,
+            options?.layers?.chatHistoryProjection ?? {
+              search: () => Effect.die("Unused chat history search fixture"),
+              read: () => Effect.die("Unused chat history read fixture"),
+            },
+          ),
           Layer.mock(EnvironmentTheme.EnvironmentThemeService)({
             current: Effect.succeed([]),
             streamChanges: Stream.empty,
@@ -8261,6 +8272,67 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         },
       ]);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect(
+    "routes read-only chat search and archived result opening against disposable projections",
+    () =>
+      Effect.gen(function* () {
+        const context = yield* Layer.build(
+          ChatHistory.layer.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
+        );
+        const projection = yield* Effect.service(ChatHistory.ChatHistoryProjection).pipe(
+          Effect.provide(context),
+        );
+        yield* buildAppUnderTest({
+          layers: {
+            chatHistoryProjection: projection,
+            serverSettings: {
+              getSettings: Effect.succeed({
+                ...DEFAULT_SERVER_SETTINGS,
+                providers: {
+                  ...DEFAULT_SERVER_SETTINGS.providers,
+                  codex: { ...DEFAULT_SERVER_SETTINGS.providers.codex, enabled: false },
+                },
+              }),
+            },
+            orchestrationEngine: {
+              dispatch: () => Effect.die("Read-only search must not dispatch commands"),
+            },
+          },
+        });
+        yield* Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          const date = "2026-10-06T12:00:00.000Z";
+          yield* sql`INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json, created_at, updated_at) VALUES ('synthetic-search-project', 'Synthetic', '/synthetic', '[]', ${date}, ${date})`;
+          yield* sql`INSERT INTO projection_threads (thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode, created_at, updated_at, archived_at) VALUES ('synthetic-search-chat', 'synthetic-search-project', 'Synthetic archive name', '{"instanceId":"codex","model":"synthetic"}', 'full-access', 'default', ${date}, ${date}, ${date})`;
+          yield* sql`INSERT INTO projection_thread_messages (message_id, thread_id, role, text, is_streaming, created_at, updated_at) VALUES ('synthetic-search-message', 'synthetic-search-chat', 'user', 'Synthetic message needle', 0, ${date}, ${date})`;
+        }).pipe(Effect.provide(context));
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const result = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[CHAT_HISTORY_METHODS.search]({ query: "needle" }),
+          ),
+        );
+        assert.equal(result.matches[0]?.threadId, "synthetic-search-chat");
+        assert.isTrue(result.matches[0]?.archived);
+        assert.equal(
+          result.coverage.find((coverage) => coverage.source === "t3")?.status,
+          "complete",
+        );
+        assert.equal(
+          result.coverage.find((coverage) => coverage.source === "codex-app")?.status,
+          "unavailable",
+        );
+        const read = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[CHAT_HISTORY_METHODS.read]({ source: "t3", threadId: "synthetic-search-chat" }),
+          ),
+        );
+        assert.equal(read.title, "Synthetic archive name");
+        assert.equal(read.messages[0]?.text, "Synthetic message needle");
+        assert.isNull(read.nextOffset);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
   it.effect("routes websocket rpc orchestration shell snapshot errors", () =>

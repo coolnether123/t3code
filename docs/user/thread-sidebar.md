@@ -37,6 +37,38 @@ on Windows and Linux to start a new thread and immediately open another draft. T
 next draft keeps the workspace mode and base branch you selected. With **New
 worktree**, each background submission creates its own worktree.
 
+## Search chats across computers
+
+Choose **Search all chats** above the sidebar list on web or desktop, or at the
+top of the chat list on your phone. You can also choose **Search all chats** in
+the command palette. The list's **Filter list** field only filters the current
+list; it does not search all chat history. On mobile, this filter is called
+**Filter current chats**.
+
+Enter a chat name or message text, choose one computer or **All computers**, and
+optionally set **From** and **Through** dates. Choose **Search chats**. Leave the
+text blank to browse by date. Dates use your device's calendar, including the
+whole end date. Message matches use the message's date; chat-name matches use
+the chat's last-update date.
+
+Results show the computer, chat source, date and archive status. T3 searches its
+saved chat names, user messages and completed assistant replies, including
+archived chats. Codex app histories come from that computer's running Codex app
+daemon. Use **Search more Codex chats** to search the next page, including
+archived app chats after the active pages. A linked T3 chat and Codex app chat
+appear once when both match.
+
+Open a result to read it without resuming, importing or changing the chat. Use
+**Older messages**, **Newer messages** and **Back to results** to navigate. Long
+messages may be shortened; the reader tells you when this happens.
+
+Each computer reports its search coverage. A disconnected computer, older T3
+server, unavailable Codex daemon, unreadable history or missing message date can
+leave results incomplete. **No matches** means no matches in the chats searched
+so far. Tool output, deleted chats and chats from other apps are not included.
+T3 returns matching chats in pages of 50. Use **Show more T3 matches** for the
+next page. Use **Retry this computer** after a connection recovers.
+
 ## Pin and reorder threads
 
 Pin a thread from its menu to keep it above your active work.

@@ -1,4 +1,4 @@
-import { ORCHESTRATION_WS_METHODS } from "@t3tools/contracts";
+import { CHAT_HISTORY_METHODS, ORCHESTRATION_WS_METHODS } from "@t3tools/contracts";
 import { Atom } from "effect/unstable/reactivity";
 
 import { createEnvironmentRpcQueryAtomFamily } from "./runtime.ts";
@@ -8,6 +8,18 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
 ) {
   return {
+    chatHistorySearch: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:chat-history:search",
+      tag: CHAT_HISTORY_METHODS.search,
+      staleTimeMs: 30_000,
+      idleTtlMs: 60_000,
+    }),
+    chatHistoryRead: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:chat-history:read",
+      tag: CHAT_HISTORY_METHODS.read,
+      staleTimeMs: 30_000,
+      idleTtlMs: 60_000,
+    }),
     turnDiff: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:orchestration:turn-diff",
       tag: ORCHESTRATION_WS_METHODS.getTurnDiff,

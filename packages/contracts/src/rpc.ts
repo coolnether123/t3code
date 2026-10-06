@@ -1,6 +1,14 @@
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
+import {
+  CHAT_HISTORY_METHODS,
+  ChatHistorySearchInput,
+  ChatHistorySearchResult,
+  ChatHistoryReadInput,
+  ChatHistoryReadResult,
+  ChatHistoryError,
+} from "./chatSearch.ts";
 import { NonNegativeInt } from "./baseSchemas.ts";
 
 import {
@@ -1263,6 +1271,16 @@ export const WsOrchestrationGetFullThreadDiffRpc = Rpc.make(
   },
 );
 
+export const WsChatHistorySearchRpc = Rpc.make(CHAT_HISTORY_METHODS.search, {
+  payload: ChatHistorySearchInput,
+  success: ChatHistorySearchResult,
+  error: Schema.Union([ChatHistoryError, EnvironmentAuthorizationError]),
+});
+export const WsChatHistoryReadRpc = Rpc.make(CHAT_HISTORY_METHODS.read, {
+  payload: ChatHistoryReadInput,
+  success: ChatHistoryReadResult,
+  error: Schema.Union([ChatHistoryError, EnvironmentAuthorizationError]),
+});
 export const WsOrchestrationSearchThreadsRpc = Rpc.make(ORCHESTRATION_WS_METHODS.searchThreads, {
   payload: OrchestrationSearchThreadsInput,
   success: OrchestrationRpcSchemas.searchThreads.output,
@@ -1480,6 +1498,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationGetTurnDiffRpc,
   WsOrchestrationGetFullThreadDiffRpc,
   WsOrchestrationSearchThreadsRpc,
+  WsChatHistorySearchRpc,
+  WsChatHistoryReadRpc,
   WsOrchestrationGetArchivedShellSnapshotRpc,
   WsOrchestrationSubscribeShellRpc,
   WsOrchestrationSubscribeThreadRpc,

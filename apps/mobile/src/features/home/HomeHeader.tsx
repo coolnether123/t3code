@@ -277,10 +277,10 @@ function AndroidHomeHeader(props: HomeHeaderProps) {
               type="monochrome"
             />
             <TextInput
-              accessibilityLabel="Search threads"
+              accessibilityLabel="Filter current chats"
               autoCapitalize="none"
               onChangeText={props.onSearchQueryChange}
-              placeholder="Search threads"
+              placeholder="Filter current chats"
               placeholderTextColorClassName="accent-placeholder"
               className="flex-1 py-2.5 text-base font-sans text-foreground"
               value={props.searchQuery}
@@ -362,7 +362,7 @@ function IosHomeHeader(props: HomeHeaderProps) {
                       : "line.3.horizontal.decrease",
                     onComposePress: props.onStartNewTask,
                     onSearchTextChange: props.onSearchQueryChange,
-                    placeholder: "Search",
+                    placeholder: "Filter current chats",
                     searchTextChangeId: "home-search-text",
                     showsSearchDismissButton: true,
                   }),
@@ -375,7 +375,7 @@ function IosHomeHeader(props: HomeHeaderProps) {
                   ref: searchBarRef,
                   autoCapitalize: "none" as const,
                   hideNavigationBar: false,
-                  placeholder: "Search",
+                  placeholder: "Filter current chats",
                   onCancelButtonPress: () => {
                     props.onSearchQueryChange("");
                   },

@@ -10,6 +10,9 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as ChatHistory from "./chatHistory.ts";
+import * as CodexChatHistory from "./provider/CodexChatHistory.ts";
+import { CHAT_HISTORY_METHODS, ChatHistoryError } from "@t3tools/contracts";
 import {
   DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL,
   AuthAccessStreamError,
@@ -517,6 +520,7 @@ const makeWsRpcLayer = (
       const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const context = yield* Effect.context<never>();
+      const chatHistoryProjection = yield* ChatHistory.ChatHistoryProjection;
       const workers = Option.getOrElse(
         Context.getOption(context, WorkerService.WorkerService),
         () => unavailableWorkerService,
@@ -1486,6 +1490,97 @@ const makeWsRpcLayer = (
                     message: "Failed to search threads",
                     cause,
                   }),
+              ),
+            ),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [CHAT_HISTORY_METHODS.search]: (input) =>
+          observeRpcEffect(
+            CHAT_HISTORY_METHODS.search,
+            Effect.gen(function* () {
+              const t3 = yield* chatHistoryProjection.search(input).pipe(
+                Effect.catch(() =>
+                  Effect.succeed({
+                    matches: [],
+                    nextT3Offset: null,
+                    coverage: [
+                      {
+                        source: "t3" as const,
+                        status: "unavailable" as const,
+                        detail: "T3 history could not be searched.",
+                      },
+                    ],
+                  }),
+                ),
+              );
+              const settings = yield* serverSettings.getSettings;
+              const codex = settings.providers.codex.enabled
+                ? yield* Effect.scoped(
+                    CodexChatHistory.withChatDaemon(settings.providers.codex.homePath, (client) =>
+                      CodexChatHistory.searchDaemonChats(client, input),
+                    ),
+                  ).pipe(
+                    Effect.timeout("45 seconds"),
+                    Effect.catch(() =>
+                      Effect.succeed({
+                        matches: [],
+                        nextCodexCursor: null,
+                        coverage: [
+                          {
+                            source: "codex-app" as const,
+                            status: "unavailable" as const,
+                            detail:
+                              "Codex app daemon is unavailable or incompatible. Its chats are not included.",
+                          },
+                        ],
+                      }),
+                    ),
+                  )
+                : {
+                    matches: [],
+                    nextCodexCursor: null,
+                    coverage: [
+                      {
+                        source: "codex-app" as const,
+                        status: "unavailable" as const,
+                        detail:
+                          "Codex is disabled on this computer. Its app chats are not included.",
+                      },
+                    ],
+                  };
+              return {
+                matches: [...t3.matches, ...codex.matches],
+                coverage: [...t3.coverage, ...codex.coverage],
+                nextCodexCursor: codex.nextCodexCursor,
+                nextT3Offset: t3.nextT3Offset,
+              };
+            }).pipe(
+              Effect.mapError(
+                () => new ChatHistoryError({ message: "Chat search is unavailable." }),
+              ),
+            ),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [CHAT_HISTORY_METHODS.read]: (input) =>
+          observeRpcEffect(
+            CHAT_HISTORY_METHODS.read,
+            Effect.gen(function* () {
+              if (input.source === "t3") {
+                return yield* chatHistoryProjection.read(input.threadId, input.offset);
+              }
+              const settings = yield* serverSettings.getSettings;
+              if (!settings.providers.codex.enabled)
+                return yield* new ChatHistoryError({
+                  message: "Codex is disabled on this computer.",
+                });
+              return yield* Effect.scoped(
+                CodexChatHistory.withChatDaemon(settings.providers.codex.homePath, (client) =>
+                  CodexChatHistory.readDaemonChat(client, input.threadId, input.offset),
+                ),
+              ).pipe(Effect.timeout("15 seconds"));
+            }).pipe(
+              Effect.mapError(
+                () => new ChatHistoryError({ message: "This chat could not be opened read-only." }),
               ),
             ),
             { "rpc.aggregate": "orchestration" },

@@ -1,5 +1,6 @@
 import {
   AuthOrchestrationOperateScope,
+  CHAT_HISTORY_METHODS,
   AuthOrchestrationReadScope,
   AuthRelayReadScope,
   AuthRelayWriteScope,
@@ -11,6 +12,10 @@ import { describe, expect, it } from "@effect/vitest";
 import { RPC_REQUIRED_SCOPES, requiredScopeForRpcMethod } from "./RpcAuthorization.ts";
 
 describe("RPC authorization scopes", () => {
+  it("requires only orchestration read scope for chat search and opening", () => {
+    expect(RPC_REQUIRED_SCOPES[CHAT_HISTORY_METHODS.search]).toBe(AuthOrchestrationReadScope);
+    expect(RPC_REQUIRED_SCOPES[CHAT_HISTORY_METHODS.read]).toBe(AuthOrchestrationReadScope);
+  });
   it("requires operate scope for research that consumes Codex allowance", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.serverGetResetCheck)).toBe(
       AuthOrchestrationReadScope,

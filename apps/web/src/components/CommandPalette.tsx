@@ -12,6 +12,7 @@ import {
 import { connectionStatusText } from "@t3tools/client-runtime/connection";
 import { ComputerBadge } from "./ComputerBadge";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
+import { CHAT_HISTORY_SEARCH_EVENT } from "./search/ChatHistorySearchDialog";
 import { resolveThreadReferenceCopyTarget } from "@t3tools/shared/threadReference";
 import {
   canPreloadBrowsePath,
@@ -1519,6 +1520,16 @@ function OpenCommandPaletteDialog(props: {
   ]);
 
   const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> = [];
+  actionItems.push({
+    kind: "action",
+    value: "action:search-all-chats",
+    title: "Search all chats",
+    searchTerms: ["chat search", "Codex app", "archived chats", "message text", "date", "computer"],
+    icon: <TextSearchIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      window.dispatchEvent(new Event(CHAT_HISTORY_SEARCH_EVENT));
+    },
+  });
 
   if (projectGroups.length > 0) {
     const activeProjectTitle =

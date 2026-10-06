@@ -1327,12 +1327,12 @@ function ThreadNavigationSidebarPane(
           />
           <TextInput
             ref={searchInputRef}
-            accessibilityLabel="Search threads"
+            accessibilityLabel="Filter current chats"
             autoCapitalize="none"
             autoCorrect={false}
             clearButtonMode="while-editing"
             onChangeText={props.onSearchQueryChange}
-            placeholder="Search"
+            placeholder="Filter current chats"
             placeholderTextColorClassName={"accent-placeholder"}
             returnKeyType="search"
             className="h-[34px] flex-1 px-0 py-0 font-sans text-base text-foreground"

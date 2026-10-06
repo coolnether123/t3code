@@ -1,3 +1,4 @@
+// @effect-diagnostics globalDate:off - Assert local calendar-day conversion.
 import {
   EnvironmentId,
   ProjectId,
@@ -12,10 +13,38 @@ import {
   createThreadSearchResultsAtomFamily,
   makeThreadSearchKey,
   threadSearchMatchKey,
+  chatHistoryDateInput,
+  mergeChatHistoryMatches,
 } from "./threadSearch.ts";
 
 const envA = EnvironmentId.make("env-a");
 const envB = EnvironmentId.make("env-b");
+
+it("uses inclusive local calendar days and rejects invalid or reversed dates", () => {
+  const input = chatHistoryDateInput(" needle ", "2026-10-06", "2026-10-06");
+  expect(input.query).toBe("needle");
+  expect(input.from).toBe(new Date("2026-10-06T00:00:00").toISOString());
+  expect(input.before).toBe(new Date("2026-10-07T00:00:00").toISOString());
+  expect(() => chatHistoryDateInput("", "2026-02-30", "")).toThrow();
+  expect(() => chatHistoryDateInput("", "2026-10-07", "2026-10-06")).toThrow();
+  expect(() => chatHistoryDateInput("", "10/06/2026", "")).toThrow();
+});
+
+it("deduplicates linked T3 and Codex matches while preserving unrelated identical IDs", () => {
+  const t3 = {
+    source: "t3" as const,
+    threadId: "t3-a",
+    codexThreadId: "native-a",
+    title: "T3",
+    updatedAt: "2026-10-06T00:00:00.000Z",
+    archived: false,
+    snippet: "needle",
+  };
+  const native = { ...t3, source: "codex-app" as const, threadId: "native-a", title: "Codex" };
+  const unrelated = { ...t3, threadId: "native-a", codexThreadId: null };
+  expect(mergeChatHistoryMatches([t3], [native, native, unrelated])).toEqual([native, unrelated]);
+  expect(mergeChatHistoryMatches([native], [t3])).toEqual([native]);
+});
 
 it("creates stable keys regardless of environment order", () => {
   expect(makeThreadSearchKey([envB, envA], "needle")).toBe(

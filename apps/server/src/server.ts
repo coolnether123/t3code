@@ -37,6 +37,7 @@ import * as ModelManifest from "./provider/ModelManifest.ts";
 import * as CodexResetCredit from "./provider/Layers/codexResetCredit.ts";
 import { codexDesktopRouteLayer } from "./provider/CodexDesktopHttp.ts";
 import * as CodexDesktopStore from "./provider/CodexDesktopStore.ts";
+import * as ChatHistory from "./chatHistory.ts";
 import * as ProviderEventLoggers from "./provider/Layers/ProviderEventLoggers.ts";
 import { ProviderServiceLive } from "./provider/Layers/ProviderService.ts";
 import { ProviderAuthServiceLive } from "./provider/Layers/ProviderAuthService.ts";
@@ -532,7 +533,9 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(GitLayerLive),
   Layer.provideMerge(VcsLayerLive),
   Layer.provideMerge(ProviderRuntimeLayerLive),
-  Layer.provideMerge(Layer.mergeAll(WorkerRuntimeLayerLive, TerminalLayerLive, PreviewLayerLive)),
+  Layer.provideMerge(
+    Layer.mergeAll(WorkerRuntimeLayerLive, TerminalLayerLive, PreviewLayerLive, ChatHistory.layer),
+  ),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(
     Layer.mergeAll(Keybindings.layer, EnvironmentTheme.layer, UsageLimitSources.layer),
