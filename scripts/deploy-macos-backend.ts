@@ -1064,7 +1064,9 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
     NodePath.join(options.baseDir, "userdata/state.sqlite"),
     NodePath.join(runDir, "state.sqlite"),
   );
-  await backupConfig(options.baseDir, NodePath.join(runDir, "config"));
+  if (process.env.T3CODE_DEPLOY_CODE_ONLY !== "1") {
+    await backupConfig(options.baseDir, NodePath.join(runDir, "config"));
+  }
   const plist = launchAgentPath(options.label);
   const wrapper = wrapperPath();
   const oldPlist = await readText(plist);
@@ -1139,6 +1141,13 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
       host: "127.0.0.1",
       port: options.port,
     });
+    if (process.env.T3CODE_PRESTOP_GUARD) {
+      await requireCommandSuccess(
+        "/usr/bin/python3",
+        [process.env.T3CODE_PRESTOP_GUARD, "--gate-only"],
+        "overnight idle gate",
+      );
+    }
     process.kill(pid, "SIGTERM");
     stopped = true;
     await waitForListenerRelease(options);

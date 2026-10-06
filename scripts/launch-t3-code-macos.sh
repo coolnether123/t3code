@@ -174,6 +174,7 @@ capture_tree() {
 listeners() { lsof -nP -t -iTCP:"$SERVER_PORT" -sTCP:LISTEN 2>/dev/null | sort -u || true; }
 check_listeners() { local p; while read -r p; do [[ -z "$p" ]] || in_owned "$p" || fail "port $SERVER_PORT held by unrelated PID $p"; done < <(listeners); }
 stop_tree() {
+  if [[ -n "${T3CODE_PRESTOP_GUARD:-}" ]]; then /usr/bin/python3 "$T3CODE_PRESTOP_GUARD" --gate-only || fail "overnight idle gate changed"; fi
   local p i live; [[ "${#OWNED_PIDS[@]}" -gt 0 ]] || return 0; plan "Stopping captured T3 PID ${OWNED_PIDS[0]} and its descendants."
   [[ "$DRY_RUN" -eq 1 ]] && return; kill -TERM "${OWNED_PIDS[0]}" 2>/dev/null || true
   for i in {1..10}; do live=0; for p in "${OWNED_PIDS[@]}"; do alive "$p" && live=1; done; [[ "$live" -eq 0 ]] && return; sleep 1; done
@@ -187,13 +188,17 @@ stop_existing() {
 }
 backup() {
   real_dir "$T3_HOME" "T3 home"; real_dir "$T3_HOME/userdata" "T3 userdata"; plan "Backing up T3 home to $RUN_DIR/t3-home; live data stays in place."
-  ditto "$T3_HOME" "$RUN_DIR/t3-home" >>"$LOG_PATH" 2>&1 || fail "T3 home backup failed"
+  if [[ "${T3CODE_DEPLOY_CODE_ONLY:-0}" == 1 ]]; then
+    mkdir -p "$RUN_DIR/t3-home/userdata"
+  else
+    ditto "$T3_HOME" "$RUN_DIR/t3-home" >>"$LOG_PATH" 2>&1 || fail "T3 home backup failed"
+  fi
   local db="$T3_HOME/userdata/state.sqlite" out="$RUN_DIR/t3-home/userdata/state.sqlite" snap="$RUN_DIR/t3-home/userdata/state.sqlite.consistent" sql
   real_file "$db" "live SQLite database"; command -v sqlite3 >/dev/null || fail "sqlite3 is required"; sql="$(printf '%s' "$snap"|sed "s/'/''/g")"
   sqlite3 -readonly "$db" "PRAGMA busy_timeout=5000; VACUUM INTO '$sql';" >>"$LOG_PATH" 2>&1 || fail "consistent SQLite backup failed"
   [[ -f "$snap" ]] || fail "SQLite snapshot was not created"; mv "$snap" "$out"; rm -f "$out-wal" "$out-shm"
   [[ "$(sqlite3 -readonly "$out" 'PRAGMA integrity_check;' 2>>"$LOG_PATH")" == ok ]] || fail "backup SQLite integrity_check failed"
-  if [[ -d "$APP_SUPPORT_PATH" ]]; then plan "Backing up Electron support data to $RUN_DIR/application-support; live data stays in place."; ditto "$APP_SUPPORT_PATH" "$RUN_DIR/application-support" >>"$LOG_PATH" 2>&1 || fail "Electron support backup failed"; fi
+  if [[ "${T3CODE_DEPLOY_CODE_ONLY:-0}" != 1 && -d "$APP_SUPPORT_PATH" ]]; then plan "Backing up Electron support data to $RUN_DIR/application-support; live data stays in place."; ditto "$APP_SUPPORT_PATH" "$RUN_DIR/application-support" >>"$LOG_PATH" 2>&1 || fail "Electron support backup failed"; fi
 }
 record_environment_identity() {
   local identity_path="$T3_HOME/userdata/environment-id"
@@ -357,6 +362,7 @@ extract_app() {
   [[ "$apps" -eq 1 ]] || fail "expected one app in ZIP; found $apps"; STAGED_APP="$app"; validate_app "$STAGED_APP" 1 >/dev/null
 }
 package_app() {
+  if [[ -n "${T3CODE_PREPARED_APP:-}" ]]; then STAGED_APP="$T3CODE_PREPARED_APP"; validate_app "$STAGED_APP" 1 >/dev/null; return; fi
   if [[ "$DRY_RUN" -eq 1 ]]; then plan "Would create artifact directory $ARTIFACT_DIR"; vp_run "macOS DMG/ZIP packaging" run dist:desktop:artifact --platform mac --target dmg --arch "$ARCH" --output-dir "$ARTIFACT_DIR" --skip-build; return; fi
   mkdir -p "$ARTIFACT_DIR"; vp_run "macOS DMG/ZIP packaging" run dist:desktop:artifact --platform mac --target dmg --arch "$ARCH" --output-dir "$ARTIFACT_DIR" --skip-build; extract_app
 }
@@ -372,7 +378,7 @@ launch_verify() {
   # Launch through LaunchServices so the app runs in the user's GUI session. A child of an SSH
   # shell cannot reach the login keychain, so Electron safeStorage fails to decrypt the saved
   # connection catalog and remote environments silently disappear until a manual relaunch.
-  open -n -a "$APP_PATH" --env "T3CODE_HOME=$T3_HOME" --env "T3CODE_PORT=$SERVER_PORT" --stdout "$log" --stderr "$log" || { printf 'LaunchServices could not open %s\n' "$APP_PATH" >&2; return 1; }
+  open -g -n -a "$APP_PATH" --env "T3CODE_HOME=$T3_HOME" --env "T3CODE_PORT=$SERVER_PORT" --stdout "$log" --stderr "$log" || { printf 'LaunchServices could not open %s\n' "$APP_PATH" >&2; return 1; }
   for ((i=0; i<WAIT_SECONDS; i++)); do root_pid="$(root "$exe")"
     if [[ -n "$root_pid" ]]; then
       capture_tree "$root_pid"; check_listeners

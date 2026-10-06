@@ -64,7 +64,7 @@ describe("launch-t3-code-macos", () => {
   });
 
   it("launches through LaunchServices so saved connections stay readable", () => {
-    assert.include(source, 'open -n -a "$APP_PATH" --env "T3CODE_HOME=$T3_HOME"');
+    assert.include(source, 'open -g -n -a "$APP_PATH" --env "T3CODE_HOME=$T3_HOME"');
     assert.notInclude(source, 'T3CODE_PORT="$SERVER_PORT" "$exe"');
   });
 
