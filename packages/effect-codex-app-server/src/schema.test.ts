@@ -8,10 +8,9 @@ const encodeThreadResumeParams = Schema.encodeSync(CodexSchema.V2ThreadResumePar
 it("preserves metadata-only resume on the wire", () => {
   const params = { threadId: "existing-thread", excludeTurns: true };
   assert.deepEqual(encodeThreadResumeParams(params), params);
-  assert.deepEqual(
-    encodeThreadResumeParams({ threadId: "existing-thread" }),
-    { threadId: "existing-thread" },
-  );
+  assert.deepEqual(encodeThreadResumeParams({ threadId: "existing-thread" }), {
+    threadId: "existing-thread",
+  });
 });
 
 const isGetAccountResponse = Schema.is(CodexSchema.V2GetAccountResponse);
