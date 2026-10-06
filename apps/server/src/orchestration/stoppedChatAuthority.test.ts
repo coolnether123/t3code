@@ -110,6 +110,37 @@ function command(thread = fixture()) {
   };
 }
 describe("stopped-chat authority", () => {
+  it("binds scheduled authority separately and invalidates it on edits or later holds", () => {
+    for (const text of [
+      "<heartbeat><automation_id>synthetic</automation_id><instructions>Please update the tracker.</instructions></heartbeat>",
+      "Automation: Synthetic\nAutomation ID: synthetic\n\nPlease update the tracker.",
+      "# Synthetic work - standing assignment from Christine\nPlease update the tracker.\nRun browser-output directory: /Users/synthetic/Codex_Workroom/Automation_Harnesses/synthetic/runs/test",
+    ]) {
+      const t = fixture();
+      t.messages[0] = { ...t.messages[0]!, text };
+      const input = stoppedChatContext(t)!;
+      expect(input.humans).toHaveLength(0);
+      expect(input.saveAuthority).toEqual([
+        { id: "synthetic-human", text, at: AT, kind: "routine_prompt" },
+      ]);
+      expect(stoppedChatGuardFailure(t, input.guard)).toBeNull();
+      t.messages[0] = { ...t.messages[0]!, text: text.replace("update", "review") };
+      expect(stoppedChatGuardFailure(t, input.guard)).not.toBeNull();
+      t.messages.push({ ...t.messages[0]!, id: MessageId.make("new-wait"), text: "Wait." });
+      expect(stoppedChatContext(t)).toBeNull();
+    }
+  });
+  it("untagged requested-save replies cannot become human authority", () => {
+    const t = fixture();
+    t.messages.splice(1, 0, {
+      ...t.messages[0]!,
+      id: MessageId.make("save-auto"),
+      text: "Yes, save it. You asked for this at 9:12 PM CDT.",
+    });
+    expect(stoppedChatContext(t)!.humans).toHaveLength(1);
+    expect(stoppedChatContext(t)!.count).toBe(1);
+    expect(stoppedChatGuardFailure(t, stoppedChatContext(t)!.guard)).toMatch(/no tool progress/);
+  });
   it("binds exact human revision and ask, and keeps stable idempotency keys", () => {
     const input = stoppedChatContext(fixture())!;
     expect(input.humans).toEqual([
@@ -216,6 +247,47 @@ describe("stopped-chat authority", () => {
 });
 
 effectIt.layer(NodeServices.layer)("serialized delivery guard", (it) => {
+  it.effect("persists the untagged reply and rejects missing guards or changed sources", () =>
+    Effect.gen(function* () {
+      const c = command();
+      const message = { ...c.message, text: "Yes, save it. You asked for this at 9:12 PM CDT." };
+      const model = { snapshotSequence: 0, projects: [], threads: [fixture()], updatedAt: AT };
+      const result = yield* decideOrchestrationCommand({
+        command: { ...c, message },
+        readModel: model,
+      });
+      let projected: OrchestrationReadModel = model;
+      for (const event of Array.isArray(result) ? result : [result])
+        projected = yield* projectEvent(projected, {
+          ...event,
+          sequence: projected.snapshotSequence + 1,
+        });
+      expect(projected.threads[0]!.messages.at(-1)!.text).toBe(message.text);
+      for (const variant of ["missing-guard", "changed-human", "platform-request"] as const) {
+        const t = fixture();
+        if (variant === "changed-human") t.messages[0] = { ...t.messages[0]!, text: "Wait." };
+        if (variant === "platform-request")
+          t.activities.push({
+            id: EventId.make("save-approval"),
+            tone: "approval",
+            kind: "approval.requested",
+            summary: "Browser confirmation",
+            turnId,
+            createdAt: AT,
+            payload: { requestId: "synthetic-browser-save-request" },
+          });
+        const rejected = yield* decideOrchestrationCommand({
+          command: {
+            ...c,
+            message,
+            continuationGuard: variant === "missing-guard" ? undefined : c.continuationGuard,
+          },
+          readModel: { ...model, threads: [t] },
+        }).pipe(Effect.flip);
+        expect(rejected._tag).toBe("OrchestrationCommandInvariantError");
+      }
+    }),
+  );
   it.effect("persists an ordinary attributed user message through the existing projector", () =>
     Effect.gen(function* () {
       let readModel: OrchestrationReadModel = {
@@ -286,6 +358,101 @@ effectIt.layer(NodeServices.layer)("serialized delivery guard", (it) => {
 });
 
 describe("local judge bridge, synthetic account only", () => {
+  it("cites a scheduled prompt without passing it off as a typed human message", async () => {
+    const home = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "synthetic-routine-save-"));
+    try {
+      await NodeFSP.mkdir(NodePath.join(home, ".codexdeck"));
+      await NodeFSP.writeFile(
+        NodePath.join(home, ".codexdeck", "requested_save_t3_enabled"),
+        "synthetic",
+      );
+      const t = fixture();
+      t.messages[0] = {
+        ...t.messages[0]!,
+        text: "Automation: Synthetic\nAutomation ID: synthetic\n\nPlease update the tracker.",
+      };
+      const input = stoppedChatContext(t)!;
+      const result = await judgeStoppedChat(input, threadId, NodePath.join(home, ".t3"), {
+        home,
+        request: async () => {
+          throw new Error("No JEV calls");
+        },
+        requestedSave: async (received) => {
+          expect(received.humans).toEqual([]);
+          expect(received.saveAuthority[0]!.kind).toBe("routine_prompt");
+          return {
+            status: "yes",
+            message: "Yes, save it. You asked for this at 9:12 PM CDT.",
+            source_id: "synthetic-human",
+            citation: t.messages[0]!.text,
+            citation_at: AT,
+          };
+        },
+      });
+      expect(result!.decision.reason).toBe("standing_routine_request");
+      expect(result!.text).not.toContain("JEV");
+    } finally {
+      await NodeFSP.rm(home, { recursive: true, force: true });
+    }
+  });
+  it("answers requested saves before JEV without credentials or a model verdict", async () => {
+    const home = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "synthetic-requested-save-"));
+    try {
+      await NodeFSP.mkdir(NodePath.join(home, ".codexdeck"));
+      await NodeFSP.writeFile(
+        NodePath.join(home, ".codexdeck", "requested_save_t3_enabled"),
+        "synthetic",
+      );
+      const input = stoppedChatContext(fixture())!;
+      const result = await judgeStoppedChat(input, threadId, NodePath.join(home, ".t3"), {
+        home,
+        request: async () => {
+          throw new Error("JEV must not be called");
+        },
+        requestedSave: async (received) => {
+          expect(received.humans).toEqual(input.humans);
+          expect(received.question).toBe(input.question);
+          return {
+            status: "yes",
+            message: "Yes, save it. You asked for this at 9:12 PM CDT.",
+            source_id: "synthetic-human",
+            citation: "Please update the tracker.",
+            citation_at: AT,
+          };
+        },
+      });
+      expect(result!.text).toBe("Yes, save it. You asked for this at 9:12 PM CDT.");
+      expect(result!.decision.source).toBe("requested_save");
+      for (const answer of [
+        { status: "hold" },
+        {
+          status: "yes",
+          message: "Yes, save it. You asked for this at 9:12 PM CDT.",
+          source_id: "synthetic-human",
+          citation: "Send money.",
+          citation_at: AT,
+        },
+        {
+          status: "yes",
+          message: "Yes, save it. (via JEV)",
+          source_id: "synthetic-human",
+          citation: "Please update the tracker.",
+          citation_at: AT,
+        },
+      ]) {
+        const held = await judgeStoppedChat(input, threadId, NodePath.join(home, ".t3"), {
+          home,
+          requestedSave: async () => answer,
+          request: async () => {
+            throw new Error("No JEV marker or credentials exist");
+          },
+        });
+        expect(held).toBeNull();
+      }
+    } finally {
+      await NodeFSP.rm(home, { recursive: true, force: true });
+    }
+  });
   it("sends only the two authority inputs and renders a cited ordinary sentence", async () => {
     const home = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "synthetic-stopped-chat-"));
     try {
