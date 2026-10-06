@@ -1113,6 +1113,41 @@ describe("Codex desktop plugin skill inventory", () => {
 });
 
 describe("openCodexThread", () => {
+  it.effect("resumes the same thread without transferring its saved history", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ method: string; payload: unknown }> = [];
+      const client = {
+        request: <M extends "thread/start" | "thread/resume" | "thread/fork">(
+          method: M,
+          payload: CodexRpc.ClientRequestParamsByMethod[M],
+        ) => {
+          calls.push({ method, payload });
+          return Effect.succeed(
+            makeThreadOpenResponse(
+              "provider-existing",
+            ) as CodexRpc.ClientRequestResponsesByMethod[M],
+          );
+        },
+      };
+      const response = yield* openCodexThread({
+        client,
+        threadId: ThreadId.make("thread-existing"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: undefined,
+        serviceTier: undefined,
+        resumeThreadId: "provider-existing",
+      });
+      NodeAssert.equal(response.thread.id, "provider-existing");
+      NodeAssert.equal(calls.length, 1);
+      NodeAssert.equal(calls[0]!.method, "thread/resume");
+      NodeAssert.partialDeepStrictEqual(calls[0]!.payload, {
+        threadId: "provider-existing",
+        excludeTurns: true,
+      });
+    }),
+  );
+
   for (const mode of ["start", "resume", "fork", "history"] as const) {
     it.effect(`times out a silent thread/${mode} without replacing the chat`, () =>
       Effect.gen(function* () {

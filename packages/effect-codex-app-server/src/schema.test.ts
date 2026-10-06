@@ -3,6 +3,17 @@ import * as Schema from "effect/Schema";
 
 import * as CodexSchema from "./schema.ts";
 
+const encodeThreadResumeParams = Schema.encodeSync(CodexSchema.V2ThreadResumeParams);
+
+it("preserves metadata-only resume on the wire", () => {
+  const params = { threadId: "existing-thread", excludeTurns: true };
+  assert.deepEqual(encodeThreadResumeParams(params), params);
+  assert.deepEqual(
+    encodeThreadResumeParams({ threadId: "existing-thread" }),
+    { threadId: "existing-thread" },
+  );
+});
+
 const isGetAccountResponse = Schema.is(CodexSchema.V2GetAccountResponse);
 const isThreadReadResponse = Schema.is(CodexSchema.V2ThreadReadResponse);
 const isThreadResumeResponse = Schema.is(CodexSchema.V2ThreadResumeResponse);

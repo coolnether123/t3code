@@ -778,6 +778,25 @@ const generateFiles = Effect.fn("generateFiles")(function* () {
   // the upstream protocol schema publishes it. Keep the decoded response
   // typed and preserve the value for the provider capability mapper.
   const modelListModel = aggregateSchemas["V2ModelListResponse__Model"];
+  // Keep metadata-only resume available until the next full protocol refresh.
+  const threadResumeParams = aggregateSchemas["V2ThreadResumeParams"];
+  if (
+    threadResumeParams &&
+    typeof threadResumeParams === "object" &&
+    !Array.isArray(threadResumeParams)
+  ) {
+    const resumeSchema = threadResumeParams as {
+      properties?: Record<string, Schema.Json>;
+    };
+    resumeSchema.properties = {
+      ...resumeSchema.properties,
+      excludeTurns: {
+        type: "boolean",
+        description: "Return thread metadata and live state without the saved turns.",
+      },
+    };
+  }
+
   if (modelListModel && typeof modelListModel === "object" && !Array.isArray(modelListModel)) {
     const modelSchema = modelListModel as {
       properties?: Record<string, Schema.Json>;
