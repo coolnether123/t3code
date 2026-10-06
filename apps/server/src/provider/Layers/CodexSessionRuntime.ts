@@ -1103,6 +1103,8 @@ export const openCodexThread = (input: {
     input.client.request("thread/resume", {
       threadId: resumeThreadId,
       ...startParams,
+      // T3 keeps display history separately; reopening only needs the live session.
+      excludeTurns: true,
     }),
     "thread/resume",
     "opening this chat",

@@ -43935,6 +43935,7 @@ export type V2ThreadResumeParams = {
   readonly sandbox?: V2ThreadResumeParams__SandboxMode | null;
   readonly serviceTier?: string | null;
   readonly threadId: string;
+  readonly excludeTurns?: boolean;
 };
 export const V2ThreadResumeParams = Schema.Struct({
   approvalPolicy: Schema.optionalKey(
@@ -43968,6 +43969,11 @@ export const V2ThreadResumeParams = Schema.Struct({
   sandbox: Schema.optionalKey(Schema.Union([V2ThreadResumeParams__SandboxMode, Schema.Null])),
   serviceTier: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
   threadId: Schema.String,
+  excludeTurns: Schema.optionalKey(
+    Schema.Boolean.annotate({
+      description: "Return thread metadata and live state without the saved turns.",
+    }),
+  ),
 }).annotate({
   title: "ThreadResumeParams",
   description:
