@@ -530,9 +530,38 @@ const MAX_JSONL_LINE_BYTES = 8 * 1024 * 1024;
 
 interface JsonlReadProgress {
   readonly nextByte: number;
+  /** Oversized lines skipped that could have carried usage. */
   readonly discardedLines: number;
   readonly discardingLine: boolean;
 }
+
+/**
+ * Which oversized lines could have carried usage, using the same markers as
+ * the per-line gate. A line without them is ignored whatever its size, so
+ * skipping it loses nothing and must not leave the transcript incomplete.
+ */
+export interface OversizedLineRelevance {
+  /** Markers that count only in a line's first `PREFIX_MARKER_BYTES`. */
+  readonly prefixMarkers: readonly string[];
+  /** Markers that count anywhere in the line. */
+  readonly anywhereMarkers: readonly string[];
+}
+
+/**
+ * Codex writes `{"timestamp":…,"type":…,"payload":{"type":…` with the event
+ * type first, so a tool output that merely quotes "token_count" does not match.
+ */
+const PREFIX_MARKER_BYTES = 4 * 1024;
+
+const CODEX_LINE_RELEVANCE: OversizedLineRelevance = {
+  prefixMarkers: ['"type":"token_count"', '"type":"turn_context"', '"type":"session_meta"'],
+  anywhereMarkers: [],
+};
+// Claude writes `usage` after the message content, so it can sit anywhere.
+const CLAUDE_LINE_RELEVANCE: OversizedLineRelevance = {
+  prefixMarkers: [],
+  anywhereMarkers: ['"usage"'],
+};
 
 async function readCompleteJsonlLines(
   filePath: string,
@@ -541,6 +570,7 @@ async function readCompleteJsonlLines(
     "startByte" | "endByte" | "sourceSize" | "discardPartialLine"
   >,
   visit: (line: string) => void,
+  relevance: OversizedLineRelevance,
 ): Promise<JsonlReadProgress> {
   const start = options.startByte ?? 0;
   const end = options.endByte;
@@ -548,19 +578,45 @@ async function readCompleteJsonlLines(
     return { nextByte: start, discardedLines: 0, discardingLine: false };
   }
 
+  const prefixMarkers = relevance.prefixMarkers.map((marker) => Buffer.from(marker));
+  const anywhereMarkers = relevance.anywhereMarkers.map((marker) => Buffer.from(marker));
+  const overlap = Math.max(0, ...anywhereMarkers.map((marker) => marker.length - 1));
+  const holds = (bytes: Buffer, markers: readonly Buffer[]) =>
+    markers.some((marker) => bytes.includes(marker));
+
   let nextByte = start;
   let pending = Buffer.alloc(0);
   let discardedLines = 0;
   let discardingLine = options.discardPartialLine === true;
+  // A line resumed mid-skip started in an earlier read whose bytes are gone.
+  let discardRelevant = discardingLine;
+  let discardTail = Buffer.alloc(0);
+  const startDiscarding = (line: Buffer) => {
+    discardingLine = true;
+    discardRelevant =
+      holds(line.subarray(0, PREFIX_MARKER_BYTES), prefixMarkers) || holds(line, anywhereMarkers);
+    discardTail = overlap > 0 ? Buffer.from(line.subarray(-overlap)) : Buffer.alloc(0);
+  };
+  const finishDiscarding = () => {
+    if (discardRelevant) discardedLines += 1;
+    discardingLine = false;
+    discardRelevant = false;
+    discardTail = Buffer.alloc(0);
+  };
   const discardUntilLineEnd = (bytes: Buffer): Buffer => {
     const lineEnd = bytes.indexOf(0x0a);
+    const part = lineEnd < 0 ? bytes : bytes.subarray(0, lineEnd);
+    if (!discardRelevant && anywhereMarkers.length > 0) {
+      const window = Buffer.concat([discardTail, part]);
+      discardRelevant = holds(window, anywhereMarkers);
+      discardTail = Buffer.from(window.subarray(-overlap));
+    }
     if (lineEnd < 0) {
       nextByte += bytes.length;
       return Buffer.alloc(0);
     }
     nextByte += lineEnd + 1;
-    discardedLines += 1;
-    discardingLine = false;
+    finishDiscarding();
     return bytes.subarray(lineEnd + 1);
   };
   const input = NodeFS.createReadStream(filePath, {
@@ -583,10 +639,27 @@ async function readCompleteJsonlLines(
     if (pending.length > MAX_JSONL_LINE_BYTES) {
       // Retaining an arbitrary JSON value only to find its newline would make
       // the response memory-unbounded. Skip it in fixed-size chunks instead,
-      // and preserve partial source coverage for the omitted record.
-      discardingLine = true;
+      // and preserve partial source coverage when it could have held usage.
+      startDiscarding(pending);
       nextByte += pending.length;
       pending = Buffer.alloc(0);
+    }
+  }
+
+  // Finish a skipped line past the range end rather than carrying it into the
+  // next read: its relevance is known only while its first bytes are at hand.
+  if (discardingLine && end !== undefined) {
+    const sourceEnd = options.sourceSize === undefined ? undefined : options.sourceSize - 1;
+    if (sourceEnd === undefined || sourceEnd > end) {
+      const rest = NodeFS.createReadStream(filePath, {
+        start: end + 1,
+        ...(sourceEnd === undefined ? {} : { end: sourceEnd }),
+      });
+      for await (const chunk of rest) {
+        discardUntilLineEnd(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        if (!discardingLine) break;
+      }
+      rest.destroy();
     }
   }
 
@@ -594,9 +667,9 @@ async function readCompleteJsonlLines(
   // that final record only when this range reaches the known end of the file.
   const reachesEnd =
     end === undefined || options.sourceSize === undefined || end >= options.sourceSize - 1;
-  if (discardingLine && reachesEnd) {
-    discardedLines += 1;
-    discardingLine = false;
+  if (discardingLine) {
+    // The line runs to the end of the file; it may still be being written.
+    finishDiscarding();
   } else if (pending.length > 0 && reachesEnd) {
     const hasCarriageReturn = pending[pending.length - 1] === 0x0d;
     visit(
@@ -657,24 +730,29 @@ export async function readTranscriptRecords(
         ? { records, nextByte: start, discardedLines: 0, discardingLine: false, codexState }
         : { records, nextByte: start, discardedLines: 0, discardingLine: false };
     }
-    const progress = await readCompleteJsonlLines(filePath, options, (line) => {
-      if (provider === "codex") {
-        if (
-          !mightCarryUsage(line, provider) &&
-          !line.includes('"turn_context"') &&
-          !line.includes('"session_meta"')
-        ) {
+    const progress = await readCompleteJsonlLines(
+      filePath,
+      options,
+      (line) => {
+        if (provider === "codex") {
+          if (
+            !mightCarryUsage(line, provider) &&
+            !line.includes('"turn_context"') &&
+            !line.includes('"session_meta"')
+          ) {
+            return;
+          }
+          const record = parseCodexLine(line, codexState);
+          if (record !== null) records.push(record);
           return;
         }
-        const record = parseCodexLine(line, codexState);
-        if (record !== null) records.push(record);
-        return;
-      }
 
-      if (!mightCarryUsage(line, provider)) return;
-      const record = parseClaudeLine(line);
-      if (record !== null) records.push(record);
-    });
+        if (!mightCarryUsage(line, provider)) return;
+        const record = parseClaudeLine(line);
+        if (record !== null) records.push(record);
+      },
+      provider === "codex" ? CODEX_LINE_RELEVANCE : CLAUDE_LINE_RELEVANCE,
+    );
     return provider === "codex" ? { records, ...progress, codexState } : { records, ...progress };
   } catch {
     return null;

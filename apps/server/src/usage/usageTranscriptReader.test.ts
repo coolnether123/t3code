@@ -437,7 +437,7 @@ describe("incremental transcript reads", () => {
     }
   });
 
-  it("advances past an oversized JSONL record without treating its usage as complete", async () => {
+  it("skips an oversized record that cannot carry usage and keeps the transcript complete", async () => {
     const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-oversized-"));
     const path = NodePath.join(directory, "rollout.jsonl");
     const prefix =
@@ -472,22 +472,72 @@ describe("incremental transcript reads", () => {
         endByte: Buffer.byteLength(prefix) + 8 * 1024 * 1024,
         sourceSize: Buffer.byteLength(contents),
       });
-      expect(first?.discardingLine).toBe(true);
+      // The skipped line is finished in the same read, past the range end.
+      expect(first?.discardingLine).toBe(false);
       expect(first?.discardedLines).toBe(0);
-      expect(first?.nextByte).toBeGreaterThan(Buffer.byteLength(prefix));
+      expect(first?.nextByte).toBe(Buffer.byteLength(prefix) + Buffer.byteLength(oversized));
       expect(first?.records).toEqual([]);
 
       const second = await readTranscriptRecords(path, "codex", {
         startByte: first!.nextByte,
         endByte: Buffer.byteLength(contents) - 1,
         sourceSize: Buffer.byteLength(contents),
-        discardPartialLine: first!.discardingLine,
         ...(first!.codexState === undefined ? {} : { codexState: first!.codexState }),
       });
       expect(second?.nextByte).toBe(Buffer.byteLength(contents));
       expect(second?.discardingLine).toBe(false);
-      expect(second?.discardedLines).toBe(1);
+      expect(second?.discardedLines).toBe(0);
       expect(second?.records).toMatchObject([{ totals: { outputTokens: 2 } }]);
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("counts an oversized record that could carry usage as missing coverage", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-oversized-"));
+    const codexPath = NodePath.join(directory, "rollout.jsonl");
+    const claudePath = NodePath.join(directory, "session.jsonl");
+    const padding = "x".repeat(10 * 1024 * 1024);
+    const codexUsage = `${JSON.stringify({
+      timestamp: "2026-08-29T10:00:02.000Z",
+      type: "event_msg",
+      payload: { type: "token_count", info: { padding } },
+    })}\n`;
+    // A tool output that quotes a usage event is not one.
+    const codexQuote = `${JSON.stringify({
+      timestamp: "2026-08-29T10:00:03.000Z",
+      type: "response_item",
+      payload: { type: "function_call_output", output: `${padding}"type":"token_count"` },
+    })}\n`;
+    // Claude writes usage after the content, deep inside an oversized line.
+    const claudeUsage = `${JSON.stringify({
+      message: { id: "msg_1", content: padding, usage: { output_tokens: 2 } },
+      type: "assistant",
+    })}\n`;
+    try {
+      await NodeFSP.writeFile(codexPath, codexUsage + codexQuote);
+      const codex = await readTranscriptRecords(codexPath, "codex", {
+        endByte: 11 * 1024 * 1024,
+        sourceSize: Buffer.byteLength(codexUsage + codexQuote),
+      });
+      expect(codex?.discardedLines).toBe(1);
+      expect(codex?.nextByte).toBe(Buffer.byteLength(codexUsage));
+      const quote = await readTranscriptRecords(codexPath, "codex", {
+        startByte: codex!.nextByte,
+      });
+      expect(quote?.discardedLines).toBe(0);
+
+      await NodeFSP.writeFile(claudePath, claudeUsage);
+      const claude = await readTranscriptRecords(claudePath, "claude");
+      expect(claude?.discardedLines).toBe(1);
+
+      // A skip resumed from an older read cannot see the line's start.
+      const resumed = await readTranscriptRecords(codexPath, "codex", {
+        startByte: Buffer.byteLength(codexUsage) + 1024 * 1024,
+        discardPartialLine: true,
+      });
+      expect(resumed?.discardedLines).toBe(1);
+      expect(resumed?.nextByte).toBe(Buffer.byteLength(codexUsage + codexQuote));
     } finally {
       await NodeFSP.rm(directory, { recursive: true, force: true });
     }
