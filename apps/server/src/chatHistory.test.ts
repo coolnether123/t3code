@@ -143,18 +143,22 @@ it.effect(
       const client = {
         request: (method: string, params: { limit?: number }) => {
           if (method === "thread/list") {
-            assert.equal(params.limit, 4);
+            assert.equal(params.limit, 1);
             return Effect.succeed({
               data: [syntheticThread("slow", "Slow message needle")],
               nextCursor: null,
             });
           }
-          return Effect.suspend(() => {
-            attempts++;
-            return attempts === 1
-              ? Effect.never
-              : Effect.succeed({ thread: syntheticThread("slow", "Slow message needle") });
-          });
+          throw new Error("Unexpected typed request");
+        },
+        raw: {
+          request: () =>
+            Effect.suspend(() => {
+              attempts++;
+              return attempts === 1
+                ? Effect.never
+                : Effect.succeed({ thread: syntheticThread("slow", "Slow message needle") });
+            }),
         },
       } as unknown as Parameters<typeof searchDaemonChats>[0];
       const fiber = yield* searchDaemonChats(client, { query: "message needle" }).pipe(
@@ -175,10 +179,14 @@ it.effect("keeps an explicit gap after both bounded daemon reads time out", () =
       request: (method: string) =>
         method === "thread/list"
           ? Effect.succeed({ data: [syntheticThread("unresponsive", "")], nextCursor: null })
-          : Effect.suspend(() => {
-              attempts++;
-              return Effect.never;
-            }),
+          : Effect.die("Unexpected typed request"),
+      raw: {
+        request: () =>
+          Effect.suspend(() => {
+            attempts++;
+            return Effect.never;
+          }),
+      },
     } as unknown as Parameters<typeof searchDaemonChats>[0];
     const fiber = yield* searchDaemonChats(client, { query: "needle" }).pipe(Effect.forkScoped);
     yield* TestClock.adjust("30 seconds");
@@ -248,7 +256,21 @@ async function syntheticDaemon(platform: NodeJS.Platform) {
           JSON.stringify(
             request.params.threadId === "unreadable"
               ? { id: request.id, error: { code: -32000, message: "Synthetic read failure" } }
-              : { id: request.id, result: { thread: history } },
+              : {
+                  id: request.id,
+                  result: {
+                    thread: {
+                      ...history,
+                      turns: history.turns.map((turn) => ({
+                        ...turn,
+                        items: [
+                          ...turn.items,
+                          { type: "futureToolResult", payload: { unknown: true } },
+                        ],
+                      })),
+                    },
+                  },
+                },
           ),
         );
       } else

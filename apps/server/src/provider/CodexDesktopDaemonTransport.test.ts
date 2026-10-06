@@ -120,6 +120,31 @@ it.effect("round-trips initialize over the Unix WebSocket adapter", () =>
   }),
 );
 
+it.effect("accepts history frames within a caller-supplied payload limit", () =>
+  Effect.gen(function* () {
+    const daemon = yield* Effect.promise(() => makeMockDaemon());
+    const scope = yield* Scope.make();
+    try {
+      const stdio = yield* makeCodexDesktopDaemonStdio(
+        daemon.homePath,
+        undefined,
+        undefined,
+        4096,
+      ).pipe(Effect.provideService(Scope.Scope, scope));
+      const socket = yield* Effect.promise(() => daemon.connected);
+      const received = yield* Stream.runHead(stdio.stdin).pipe(Effect.forkChild);
+      const frame = "x".repeat(2048);
+      socket.send(frame);
+      const chunk = yield* Fiber.join(received);
+      assert.isTrue(Option.isSome(chunk));
+      if (Option.isSome(chunk)) assert.equal(new TextDecoder().decode(chunk.value), frame + "\n");
+    } finally {
+      yield* Scope.close(scope, Exit.void);
+      yield* Effect.promise(() => daemon.close());
+    }
+  }),
+);
+
 it.effect("fails promptly for a missing daemon socket", () =>
   Effect.gen(function* () {
     const homePath = yield* Effect.promise(() => NodeFSP.mkdtemp("/tmp/t3-codex-missing-"));

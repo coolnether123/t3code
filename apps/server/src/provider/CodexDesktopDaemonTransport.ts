@@ -59,6 +59,7 @@ export const makeCodexDesktopDaemonStdio = Effect.fn("makeCodexDesktopDaemonStdi
   homePath?: string,
   environment: CodexDesktopDaemonEnvironment = process.env,
   handshakeTimeout: Duration.Input = CODEX_DESKTOP_DAEMON_HANDSHAKE_TIMEOUT,
+  maxPayload?: number,
 ) {
   const socketPath = codexDesktopDaemonSocketPath(homePath, environment);
   const incoming = yield* Queue.unbounded<Uint8Array, Cause.Done<void>>();
@@ -67,6 +68,7 @@ export const makeCodexDesktopDaemonStdio = Effect.fn("makeCodexDesktopDaemonStdi
       let transportSocket: NodeNet.Socket | undefined;
       const client = new WebSocket("ws://localhost/", {
         perMessageDeflate: false,
+        ...(maxPayload === undefined ? {} : { maxPayload }),
         createConnection: () => {
           transportSocket = NodeNet.createConnection(socketPath);
           transportSocket.setTimeout(Duration.toMillis(handshakeTimeout), () =>

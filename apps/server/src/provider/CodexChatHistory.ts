@@ -11,10 +11,74 @@ import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 import * as Result from "effect/Result";
 import * as CodexClient from "effect-codex-app-server/client";
-import type { V2ThreadReadResponse__Thread } from "effect-codex-app-server/schema";
 import { makeCodexDesktopDaemonStdio } from "./CodexDesktopDaemonTransport.ts";
 
-function daemonMessages(thread: V2ThreadReadResponse__Thread) {
+const ItemType = Schema.Struct({ type: Schema.String });
+const TextContent = Schema.Struct({ type: Schema.Literal("text"), text: Schema.String });
+const UserItem = Schema.Struct({
+  type: Schema.Literal("userMessage"),
+  id: Schema.String,
+  content: Schema.Array(Schema.Unknown),
+});
+const AssistantItem = Schema.Struct({
+  type: Schema.Literal("agentMessage"),
+  id: Schema.String,
+  text: Schema.String,
+});
+const HistoryResponse = Schema.Struct({
+  thread: Schema.Struct({
+    id: Schema.String,
+    name: Schema.optionalKey(Schema.NullOr(Schema.String)),
+    preview: Schema.String,
+    updatedAt: Schema.Number,
+    turns: Schema.Array(
+      Schema.Struct({
+        status: Schema.String,
+        startedAt: Schema.optionalKey(Schema.NullOr(Schema.Number)),
+        items: Schema.Array(Schema.Unknown),
+      }),
+    ),
+  }),
+});
+
+const decodeHistory = Schema.decodeUnknownEffect(HistoryResponse);
+const decodeItemType = Schema.decodeUnknownEffect(ItemType);
+const decodeAssistant = Schema.decodeUnknownEffect(AssistantItem);
+const decodeUser = Schema.decodeUnknownEffect(UserItem);
+const decodeText = Schema.decodeUnknownEffect(TextContent);
+
+/** Decode search text only. Tool payloads need neither validation nor copies. */
+const readHistory = Effect.fn("readChatSearchHistory")(function* (
+  client: CodexClient.CodexAppServerClient["Service"],
+  threadId: string,
+) {
+  const response = yield* client.raw
+    .request("thread/read", { threadId, includeTurns: true })
+    .pipe(Effect.flatMap(decodeHistory));
+  const turns = yield* Effect.forEach(response.thread.turns, (turn) =>
+    Effect.gen(function* () {
+      const items = yield* Effect.forEach(turn.items, (raw) =>
+        Effect.gen(function* () {
+          const header = yield* decodeItemType(raw);
+          if (header.type === "agentMessage") return yield* decodeAssistant(raw);
+          if (header.type !== "userMessage") return null;
+          const user = yield* decodeUser(raw);
+          const content = yield* Effect.forEach(user.content, (part) =>
+            Effect.gen(function* () {
+              const header = yield* decodeItemType(part);
+              return header.type === "text" ? yield* decodeText(part) : null;
+            }),
+          );
+          return { ...user, content: content.filter((part) => part !== null) };
+        }),
+      );
+      return { ...turn, items: items.filter((item) => item !== null) };
+    }),
+  );
+  return { ...response.thread, turns };
+});
+
+function daemonMessages(thread: Effect.Success<ReturnType<typeof readHistory>>) {
   return thread.turns.flatMap((turn) =>
     turn.items.flatMap<ChatHistoryReadResult["messages"][number]>((item) => {
       const createdAt =
@@ -52,7 +116,7 @@ export const searchDaemonChats = Effect.fn("searchDaemonChats")(function* (
   const page = yield* client.request("thread/list", {
     archived,
     cursor,
-    limit: 4,
+    limit: 1,
     sortKey: "updated_at",
     sourceKinds: [],
     modelProviders: [],
@@ -64,26 +128,24 @@ export const searchDaemonChats = Effect.fn("searchDaemonChats")(function* (
   const histories = yield* Effect.forEach(
     page.data,
     (entry) =>
-      client
-        .request("thread/read", { threadId: entry.id, includeTurns: true })
-        .pipe(
-          Effect.timeout("15 seconds"),
-          Effect.retry({ times: 1, while: (error) => error._tag === "TimeoutError" }),
-          Effect.result,
-        ),
-    { concurrency: 4 },
+      readHistory(client, entry.id).pipe(
+        Effect.timeout("15 seconds"),
+        Effect.retry({ times: 1, while: (error) => error._tag === "TimeoutError" }),
+        Effect.result,
+      ),
+    { concurrency: 1 },
   );
   for (const [index, result] of histories.entries()) {
     const readable = Result.isSuccess(result);
     failed ||= !readable;
-    const thread = readable ? result.success.thread : page.data[index]!;
+    const thread = readable ? result.success : page.data[index]!;
     const title = thread.name || thread.preview || "Untitled Codex chat";
     const updatedAt = DateTime.formatIso(DateTime.makeUnsafe(thread.updatedAt * 1000));
     const inRange = (date: string | null) =>
       date === null
         ? !input.from && !input.before
         : (!input.from || date >= input.from) && (!input.before || date < input.before);
-    const messages = readable ? daemonMessages(thread) : [];
+    const messages = readable ? daemonMessages(result.success) : [];
     unknownDates ||=
       Boolean(input.from || input.before) &&
       messages.some(
@@ -137,7 +199,7 @@ export const readDaemonChat = Effect.fn("readDaemonChat")(function* (
   threadId: string,
   offset = 0,
 ) {
-  const { thread } = yield* client.request("thread/read", { threadId, includeTurns: true });
+  const thread = yield* readHistory(client, threadId);
   const messages = daemonMessages(thread);
   const end = Math.max(0, messages.length - offset);
   const start = Math.max(0, end - CHAT_HISTORY_MESSAGE_PAGE_SIZE);
@@ -157,7 +219,14 @@ export const withChatDaemon = Effect.fn("withChatDaemon")(function* <A, E>(
   homePath: string,
   use: (client: CodexClient.CodexAppServerClient["Service"]) => Effect.Effect<A, E>,
 ) {
-  const stdio = yield* makeCodexDesktopDaemonStdio(homePath || undefined);
+  // Tool-heavy histories can exceed ws's 100 MB default. Search reads one at a
+  // time, with a separate frame bound; normal provider connections are unchanged.
+  const stdio = yield* makeCodexDesktopDaemonStdio(
+    homePath || undefined,
+    undefined,
+    undefined,
+    512 * 1024 * 1024,
+  );
   return yield* Effect.gen(function* () {
     const client = yield* CodexClient.CodexAppServerClient;
     yield* client.request("initialize", {

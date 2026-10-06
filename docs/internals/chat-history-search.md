@@ -23,13 +23,17 @@ file fallback serves Codex app history. The legacy `/api/codex` store routes
 remain separate and unchanged.
 
 The daemon's `searchTerm` filters titles only. Message search therefore reads
-histories for pages of four threads, with at most four reads in flight and a
+histories for pages of one thread, with one read in flight and a
 15-second bound per read. A timed-out read retries once. A page therefore has
 at most 30 seconds of history-read waiting within the 45-second RPC bound.
 Active pages precede archived pages. The opaque
 `codexCursor` contains the archive phase and native cursor. Each request closes
 its client when it finishes. Search has a 45-second request bound; read has a
 15-second bound. Neither operation launches or restarts a daemon.
+Search alone allows daemon frames up to 512 MiB because tool-heavy histories
+can exceed the WebSocket adapter's default 100 MiB limit. Normal provider
+connections keep the default. Histories beyond that bound remain an explicit
+coverage gap; no tool payload is sent to the search UI.
 
 Codex search includes user text and assistant replies in completed turns. It
 excludes tool output. Undated messages can match without a date filter. With a
