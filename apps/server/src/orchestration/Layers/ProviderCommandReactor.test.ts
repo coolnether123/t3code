@@ -51,6 +51,7 @@ import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
+import * as StoppedChatJudge from "../stoppedChatJudge.ts";
 import {
   providerErrorLabel,
   providerErrorLabelFromInstanceHint,
@@ -786,6 +787,118 @@ describe("ProviderCommandReactor", () => {
       runtimeMode: "approval-required",
       createdAt: input.createdAt,
     });
+
+  it.each([false, true])(
+    "delivers once into a disposable memory thread, unless a newer human arrives: %s",
+    async (newerHuman) => {
+      const judge = vi.spyOn(StoppedChatJudge, "judgeStoppedChat");
+      const audit = vi.spyOn(StoppedChatJudge, "recordStoppedChatDecision").mockResolvedValue();
+      try {
+        const harness = await createHarness();
+        const threadId = ThreadId.make("thread-1");
+        const now = "2026-10-06T02:12:00Z";
+        const doneAt = "2026-10-06T02:13:00Z";
+        await harness.runEffect(
+          dispatchTurnStart(harness, {
+            messageId: "synthetic-human-tracker",
+            text: "Please update the tracker.",
+            createdAt: now,
+          }),
+        );
+        await harness.drain();
+        const initial = (await harness.readModel()).threads.find((t) => t.id === threadId)!;
+        const turnId = asTurnId("synthetic-stopped-turn");
+        await harness.runEffect(
+          harness.engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("synthetic-running-session"),
+            threadId,
+            session: {
+              ...initial.session!,
+              status: "running",
+              activeTurnId: turnId,
+              updatedAt: now,
+            },
+            createdAt: now,
+          }),
+        );
+        const entered = Deferred.makeUnsafe<void>();
+        judge.mockImplementation(async (input) => {
+          await harness.runEffect(Deferred.succeed(entered, undefined));
+          if (newerHuman)
+            await harness.runEffect(
+              dispatchTurnStart(harness, {
+                messageId: "synthetic-newer-human",
+                text: "Wait. Review it first.",
+                createdAt: "2026-10-06T02:14:00Z",
+              }),
+            );
+          return {
+            decision: {
+              act: true,
+              verdict: "already_approved",
+              intent: "yes",
+              citation: input.humans[0]!.text,
+              citation_message_id: input.humans[0]!.id,
+              citation_at: now,
+            },
+            text: "Yes, update the tracker. I asked for this at 9:12 PM already. (via JEV)",
+          };
+        });
+        await harness.runEffect(
+          harness.engine.dispatch({
+            type: "thread.message.assistant.delta",
+            commandId: CommandId.make("synthetic-ask-delta"),
+            threadId,
+            messageId: asMessageId("synthetic-ask"),
+            delta: "Should I update the tracker?",
+            turnId,
+            createdAt: doneAt,
+          }),
+        );
+        await harness.runEffect(
+          harness.engine.dispatch({
+            type: "thread.message.assistant.complete",
+            commandId: CommandId.make("synthetic-ask"),
+            threadId,
+            messageId: asMessageId("synthetic-ask"),
+            turnId,
+            createdAt: doneAt,
+          }),
+        );
+        await harness.runEffect(
+          harness.engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("synthetic-completed-session"),
+            threadId,
+            session: {
+              ...initial.session!,
+              status: "ready",
+              activeTurnId: null,
+              updatedAt: doneAt,
+            },
+            createdAt: doneAt,
+          }),
+        );
+        await harness.runEffect(Deferred.await(entered));
+        await harness.drain();
+        // The continuation's requested-turn event is processed by the provider worker.
+        await harness.drain();
+        const t = (await harness.readModel()).threads.find((t) => t.id === threadId)!;
+        const replies = t.messages.filter((m) => m.text.endsWith("(via JEV)"));
+        expect(replies).toHaveLength(newerHuman ? 0 : 1);
+        expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+        if (!newerHuman) {
+          expect(replies[0]!.role).toBe("user");
+          expect(harness.sendTurn.mock.calls[1]![0].input).toBe(replies[0]!.text);
+          expect(audit.mock.calls.some(([row]) => row.status === "message_persisted")).toBe(true);
+        }
+      } finally {
+        judge.mockRestore();
+        audit.mockRestore();
+      }
+    },
+  );
 
   it.each(["active", "attempted"] as const)(
     "marks a pre-restart %s compaction queue uncertain without replaying it",

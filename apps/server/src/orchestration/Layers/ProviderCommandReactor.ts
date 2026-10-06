@@ -2,7 +2,7 @@ import {
   type ChatAttachment,
   CommandId,
   EventId,
-  type MessageId,
+  MessageId,
   type ModelSelection,
   type OrchestrationEvent,
   ProviderDriverKind,
@@ -27,6 +27,7 @@ import * as Scope from "effect/Scope";
 import * as Equal from "effect/Equal";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
@@ -52,6 +53,13 @@ import {
 } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
+import { ServerConfig } from "../../config.ts";
+import { stoppedChatContext, stoppedChatGuardFailure } from "../stoppedChatAuthority.ts";
+import {
+  judgeStoppedChat,
+  recordStoppedChatDecision,
+  stoppedChatCommandKey,
+} from "../stoppedChatJudge.ts";
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
 
@@ -67,6 +75,7 @@ type ProviderIntentEvent = Extract<
       | "thread.approval-response-requested"
       | "thread.user-input-response-requested"
       | "thread.session-stop-requested"
+      | "thread.message-sent"
       | "thread.session-set";
   }
 >;
@@ -321,6 +330,7 @@ const make = Effect.gen(function* () {
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
   const textGeneration = yield* TextGeneration;
   const serverSettingsService = yield* ServerSettingsService;
+  const serverConfig = yield* ServerConfig;
   const serverCommandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
   const serverEventId = () => crypto.randomUUIDv4.pipe(Effect.map(EventId.make));
@@ -1969,6 +1979,77 @@ const make = Effect.gen(function* () {
     );
   });
 
+  const stoppedChatWorker = yield* makeDrainableWorker((threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const thread = Option.getOrNull(yield* projectionSnapshotQuery.getThreadDetailById(threadId));
+      if (!thread) return;
+      const input = stoppedChatContext(thread);
+      if (!input || stoppedChatGuardFailure(thread, input.guard)) return;
+      const result = yield* Effect.tryPromise(() =>
+        judgeStoppedChat(input, threadId, serverConfig.baseDir),
+      );
+      if (!result) return;
+      const key = stoppedChatCommandKey(threadId, input);
+      const audit = {
+        at: DateTime.formatIso(yield* DateTime.now),
+        thread_id: threadId,
+        turn_id: input.guard.expectedTurnId,
+        message_id: key,
+        pending_ask_sha256: input.guard.pendingAskHash,
+        human_revision: input.guard.humanRevision,
+        question: input.question,
+        message: result.text,
+        citation: result.decision.citation,
+        citation_id: result.decision.citation_message_id,
+        citation_at: result.decision.citation_at,
+        reason: result.decision.reason,
+        decision_id: result.decision.decision_id,
+      };
+      // Write intent before dispatch; only the accepted receipt proves persistence.
+      yield* Effect.tryPromise(() =>
+        recordStoppedChatDecision({
+          ...audit,
+          status: result.text ? "dispatch_intent" : "left_for_her",
+        }),
+      );
+      if (!result.text) return;
+      const dispatched = yield* Effect.exit(
+        orchestrationEngine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make(key),
+          threadId,
+          message: {
+            messageId: MessageId.make(key),
+            role: "user",
+            text: result.text,
+            attachments: [],
+          },
+          continuationGuard: input.guard,
+          runtimeMode: thread.runtimeMode,
+          interactionMode: thread.interactionMode,
+          createdAt: DateTime.formatIso(yield* DateTime.now),
+        }),
+      );
+      yield* Effect.tryPromise(() =>
+        recordStoppedChatDecision(
+          Exit.isSuccess(dispatched)
+            ? { ...audit, status: "message_persisted", receipt: dispatched.value }
+            : {
+                ...audit,
+                status: "left_for_her",
+                reason: "atomic delivery guard rejected the reply",
+              },
+        ),
+      );
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("stopped-chat continuation left unchanged", {
+          cause: Cause.pretty(cause),
+        }),
+      ),
+    ),
+  );
+
   const processDomainEvent = Effect.fn("processDomainEvent")(function* (
     event: ProviderIntentEvent,
   ) {
@@ -1981,6 +2062,10 @@ const make = Effect.gen(function* () {
       eventType: event.type,
     });
     switch (event.type) {
+      case "thread.message-sent":
+        if (event.payload.role === "assistant" && !event.payload.streaming)
+          yield* stoppedChatWorker.enqueue(event.payload.threadId);
+        return;
       case "thread.meta-updated":
         yield* threadTitleRegenerationWorker.enqueue(event);
         return;
@@ -2016,6 +2101,8 @@ const make = Effect.gen(function* () {
         yield* processSessionStopRequested(event);
         return;
       case "thread.session-set": {
+        if (event.payload.session.status === "ready")
+          yield* stoppedChatWorker.enqueue(event.payload.threadId);
         const waiter = queuedTurnCompletionWaiters.get(event.payload.threadId);
         if (!waiter) return;
         const status = event.payload.session.status;
@@ -2152,6 +2239,9 @@ const make = Effect.gen(function* () {
         event.type === "thread.approval-response-requested" ||
         event.type === "thread.user-input-response-requested" ||
         event.type === "thread.session-stop-requested" ||
+        (event.type === "thread.message-sent" &&
+          event.payload.role === "assistant" &&
+          !event.payload.streaming) ||
         event.type === "thread.session-set"
       ) {
         return yield* worker.enqueue(event);
@@ -2198,6 +2288,7 @@ const make = Effect.gen(function* () {
     drain: Effect.gen(function* () {
       while (true) {
         yield* worker.drain;
+        yield* stoppedChatWorker.drain;
         const tails = Array.from(threadTails.values());
         if (tails.length === 0) break;
         yield* Effect.forEach(tails, Deferred.await, { discard: true });
