@@ -768,6 +768,55 @@ describe("incremental scan integration", () => {
       yield* Fiber.join(blocked);
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
+  it.effect("keeps scanning after the reader that started the scan is cancelled", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const reading = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const service = yield* make.pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          exists: () => Effect.succeed(true),
+        }),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("Offline fixture")),
+        ),
+      );
+      const input = {
+        sinceDay: UsageDay.make("2026-08-29"),
+        untilDay: UsageDay.make("2026-09-02"),
+        timeZone: "UTC",
+        providers: ["codex"] as const,
+        refresh: true,
+      };
+      vi.mocked(readTranscriptRecords).mockClear();
+      vi.mocked(readTranscriptRecords).mockImplementationOnce(async (filePath) => {
+        reading.resolve();
+        await release.promise;
+        return {
+          records: [],
+          nextByte: files.find((file) => file.path === filePath)?.size ?? Number.MAX_SAFE_INTEGER,
+          discardedLines: 0,
+          discardingLine: false,
+          codexState: initialCodexScanState(),
+        };
+      });
+      const first = yield* service.readSummary(input).pipe(Effect.forkChild);
+      yield* Effect.promise(() => reading.promise);
+      yield* Fiber.interrupt(first);
+      const retry = yield* service.readSummary(input).pipe(Effect.exit, Effect.forkChild);
+      release.resolve();
+      expect((yield* Fiber.join(retry))._tag).toBe("Success");
+      // A restarted scan would read the blocked transcript from its first byte again.
+      const readsFromStart = vi
+        .mocked(readTranscriptRecords)
+        .mock.calls.filter(([, , options]) => (options?.startByte ?? 0) === 0)
+        .map(([filePath]) => filePath);
+      expect(readsFromStart.toSorted()).toEqual(files.map((file) => file.path).toSorted());
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("continues the legacy cache import after its first reader is cancelled", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

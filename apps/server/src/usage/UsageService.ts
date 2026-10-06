@@ -1768,9 +1768,6 @@ export const make = Effect.gen(function* () {
         providerQuotaHistories: undefined,
         aggregator: undefined,
       };
-      let ownedResult:
-        | { key: string; result: Deferred.Deferred<Exit.Exit<UsageSummary, UsageReadError>, never> }
-        | undefined;
       return yield* Effect.gen(function* () {
         const result = yield* Effect.gen(function* () {
           if (input.sinceDay > input.untilDay) {
@@ -1820,22 +1817,36 @@ export const make = Effect.gen(function* () {
             const cached = summaryCache.get(key, yield* Clock.currentTimeMillis);
             if (cached !== undefined) return cached;
           }
-          if (!input.includeQuotaHistory) {
-            const existing = inFlightSummaries.get(key);
-            if (existing !== undefined) {
-              const exit = yield* Deferred.await(existing);
-              if (Exit.isFailure(exit)) return yield* Effect.failCause(exit.cause);
-              return exit.value;
-            }
-            const shared = Deferred.makeUnsafe<Exit.Exit<UsageSummary, UsageReadError>>();
-            inFlightSummaries.set(key, shared);
-            ownedResult = { key, result: shared };
+          let shared = inFlightSummaries.get(key);
+          if (shared === undefined) {
+            const result = Deferred.makeUnsafe<Exit.Exit<UsageSummary, UsageReadError>>();
+            inFlightSummaries.set(key, result);
+            shared = result;
+            // Detached from the request that starts it: a reader that reaches its
+            // deadline stops waiting, but the scan keeps going. Interrupting it
+            // threw away the inventory and unpersisted chunks, so a transcript
+            // backlog larger than one budget never finished.
+            yield* Effect.forkIn(
+              scanSemaphore
+                .withPermits(1)(
+                  readSummaryUnlocked(input, context, progress).pipe(
+                    Effect.ensuring(Effect.sync(() => scanStore.release())),
+                  ),
+                )
+                .pipe(
+                  Effect.onExit((exit) =>
+                    Effect.sync(() => inFlightSummaries.delete(key)).pipe(
+                      Effect.andThen(Deferred.succeed(result, exit)),
+                    ),
+                  ),
+                ),
+              serviceScope,
+              { startImmediately: true },
+            );
           }
-          const summary = yield* scanSemaphore.withPermits(1)(
-            readSummaryUnlocked(input, context, progress).pipe(
-              Effect.ensuring(Effect.sync(() => scanStore.release())),
-            ),
-          );
+          const exit = yield* Deferred.await(shared);
+          if (Exit.isFailure(exit)) return yield* Effect.failCause(exit.cause);
+          const summary = exit.value;
           if (
             summary.sources.length > 0 &&
             summary.sources.every((source) => source.status === "missing")
@@ -1852,15 +1863,7 @@ export const make = Effect.gen(function* () {
           });
         }
         return yield* partialSummaryAtDeadline(input, startedAtMs, resolvedDirs, progress);
-      }).pipe(
-        Effect.onExit((completed) => {
-          if (ownedResult === undefined) return Effect.void;
-          const { key, result } = ownedResult;
-          return Effect.sync(() => inFlightSummaries.delete(key)).pipe(
-            Effect.andThen(Deferred.succeed(result, completed)),
-          );
-        }),
-      );
+      });
     },
   );
 
