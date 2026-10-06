@@ -831,6 +831,18 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (command.expectedTitle !== undefined && command.expectedTitle !== thread.title) {
+        return {
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: yield* nowIso,
+            commandId: command.commandId,
+          })),
+          type: "thread.meta-updated",
+          payload: { threadId: command.threadId, updatedAt: thread.updatedAt },
+        };
+      }
       const branch =
         command.branch !== undefined &&
         command.expectedBranch !== undefined &&

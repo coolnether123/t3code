@@ -1674,12 +1674,12 @@ describe("ProviderCommandReactor", () => {
       const readModel = await harness.readModel();
       return (
         readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"))?.title ===
-        "Generated title"
+        "12/31 Generated title"
       );
     });
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-    expect(thread?.title).toBe("Generated title");
+    expect(thread?.title).toBe("12/31 Generated title");
   });
 
   it("regenerates a thread title from the current conversation", async () => {
@@ -1757,7 +1757,7 @@ describe("ProviderCommandReactor", () => {
     });
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-    expect(thread?.title).toBe("Resolve stale reconnect state");
+    expect(thread?.title).toBe("12/31 Resolve stale reconnect state");
     expect(thread?.titleRegeneration).toBeNull();
   });
 
@@ -2044,7 +2044,7 @@ describe("ProviderCommandReactor", () => {
 
     let readModel = await harness.readModel();
     let thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-    expect(thread?.title).toBe("Title lost to completion failure");
+    expect(thread?.title).toBe("12/31 Title lost to completion failure");
     expect(thread?.titleRegeneration).toBeNull();
 
     await harness.runEffect(
@@ -2061,7 +2061,7 @@ describe("ProviderCommandReactor", () => {
     expect(harness.titleRegenerationCompletionDispatchAttempts).toBe(3);
     readModel = await harness.readModel();
     thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-    expect(thread?.title).toBe("Recovered regeneration worker");
+    expect(thread?.title).toBe("12/31 Recovered regeneration worker");
     expect(thread?.titleRegeneration).toBeNull();
   });
 
@@ -2331,7 +2331,7 @@ describe("ProviderCommandReactor", () => {
     expect(harness.titleRegenerationCompletionDispatchAttempts).toBe(1);
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-    expect(thread?.title).toBe("Latest regenerated title");
+    expect(thread?.title).toBe("12/31 Latest regenerated title");
     expect(thread?.titleRegeneration).toBeNull();
   });
 
@@ -2417,13 +2417,13 @@ describe("ProviderCommandReactor", () => {
       const readModel = await harness.readModel();
       return (
         readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"))?.title ===
-        "Reconnect spinner resume bug"
+        "12/31 Reconnect spinner resume bug"
       );
     });
 
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-    expect(thread?.title).toBe("Reconnect spinner resume bug");
+    expect(thread?.title).toBe("12/31 Reconnect spinner resume bug");
   });
 
   it("generates a worktree branch name for the first turn", async () => {

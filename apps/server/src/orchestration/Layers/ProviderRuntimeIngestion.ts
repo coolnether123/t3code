@@ -50,7 +50,7 @@ import {
 import { forkParked } from "../../serverActivation.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { WorkerService } from "../../worker/WorkerService.ts";
-import { canReplaceThreadTitle } from "../threadTitles.ts";
+import { canReplaceThreadTitle, withCreationDate } from "../threadTitles.ts";
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
 const providerTaskKey = (threadId: ThreadId, taskId: string) => `${threadId}:${taskId}`;
@@ -2163,7 +2163,7 @@ const make = Effect.gen(function* () {
             type: "thread.meta.update",
             commandId: yield* providerCommandId(event, "thread-meta-update"),
             threadId: thread.id,
-            title: event.payload.name,
+            title: withCreationDate(event.payload.name, thread.createdAt),
           });
         }
       }

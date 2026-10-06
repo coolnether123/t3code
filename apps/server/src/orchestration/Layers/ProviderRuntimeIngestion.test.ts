@@ -3287,9 +3287,9 @@ describe("ProviderRuntimeIngestion", () => {
 
     const thread = await waitForThread(
       harness.readModel,
-      (entry) => entry.title === "Renamed by provider",
+      (entry) => entry.title === "12/31 Renamed by provider",
     );
-    expect(thread.title).toBe("Renamed by provider");
+    expect(thread.title).toBe("12/31 Renamed by provider");
   });
 
   it("rejects a provider title once the thread has a real title", async () => {

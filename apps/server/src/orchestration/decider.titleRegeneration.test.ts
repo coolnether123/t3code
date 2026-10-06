@@ -46,6 +46,48 @@ const readModel: OrchestrationReadModel = {
 };
 
 it.layer(NodeServices.layer)("title regeneration decider", (it) => {
+  it.effect("does not backfill a title renamed after inspection", () =>
+    Effect.gen(function* () {
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-title-backfill-stale"),
+          threadId: ThreadId.make("thread-1"),
+          expectedTitle: "Original automatic title",
+          title: "12/31 Original automatic title",
+        },
+        readModel,
+      });
+      const event = Array.isArray(result) ? result[0] : result;
+      expect(event.type).toBe("thread.meta-updated");
+      if (event.type === "thread.meta-updated") {
+        expect(event.payload).toEqual({
+          threadId: ThreadId.make("thread-1"),
+          updatedAt: UPDATED_AT,
+        });
+      }
+    }),
+  );
+
+  it.effect("accepts a title backfill when the inspected title is unchanged", () =>
+    Effect.gen(function* () {
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-title-backfill-current"),
+          threadId: ThreadId.make("thread-1"),
+          expectedTitle: "Manual title",
+          title: "12/31 Manual title",
+        },
+        readModel,
+      });
+      const event = Array.isArray(result) ? result[0] : result;
+      expect(event.type).toBe("thread.meta-updated");
+      if (event.type === "thread.meta-updated")
+        expect(event.payload.title).toBe("12/31 Manual title");
+    }),
+  );
+
   it.effect("preserves updatedAt for a stale completion", () =>
     Effect.gen(function* () {
       const result = yield* decideOrchestrationCommand({

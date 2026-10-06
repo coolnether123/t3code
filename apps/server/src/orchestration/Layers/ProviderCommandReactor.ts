@@ -45,7 +45,7 @@ import {
   type ProviderCommandReactorShape,
 } from "../Services/ProviderCommandReactor.ts";
 import { forkParked, ServerActivation } from "../../serverActivation.ts";
-import { canReplaceThreadTitle, DEFAULT_THREAD_TITLE } from "../threadTitles.ts";
+import { canReplaceThreadTitle, DEFAULT_THREAD_TITLE, withCreationDate } from "../threadTitles.ts";
 import {
   resolveSourceControlWriterModelSelection,
   ServerSettingsService,
@@ -1226,7 +1226,7 @@ const make = Effect.gen(function* () {
           type: "thread.meta.update",
           commandId: yield* serverCommandId("thread-title-rename"),
           threadId: input.threadId,
-          title: generated.title,
+          title: withCreationDate(generated.title, thread.createdAt),
         });
       }).pipe(
         Effect.catchCause((cause) =>
@@ -1277,7 +1277,8 @@ const make = Effect.gen(function* () {
       ...(attachments.length > 0 ? { attachments } : {}),
       modelSelection,
     });
-    if (generated.title === DEFAULT_THREAD_TITLE || generated.title === previousTitle) {
+    const title = withCreationDate(generated.title, thread.createdAt);
+    if (generated.title === DEFAULT_THREAD_TITLE || title === previousTitle) {
       return { _tag: "Completed", title: undefined } as const;
     }
 
@@ -1290,7 +1291,7 @@ const make = Effect.gen(function* () {
       return { _tag: "Superseded" } as const;
     }
 
-    return { _tag: "Completed", title: generated.title } as const;
+    return { _tag: "Completed", title } as const;
   });
   const dispatchThreadTitleRegenerationCompletion = Effect.fn(
     "dispatchThreadTitleRegenerationCompletion",
