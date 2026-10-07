@@ -83,14 +83,14 @@ const model: OrchestrationReadModel = {
 it.layer(NodeServices.layer)("operator agent final display", (it) => {
   it.effect("shows the exact final with attribution, without user input or provider intent", () =>
     Effect.gen(function* () {
-      const decodedCommand = Schema.decodeUnknownSync(OrchestrationCommand)(command);
+      const decodedCommand = yield* Schema.decodeUnknownEffect(OrchestrationCommand)(command);
       const planned = yield* decideOrchestrationCommand({
         command: decodedCommand,
         readModel: model,
       });
       const events = Array.isArray(planned) ? planned : [planned];
       expect(events.map((event) => event.type)).toEqual(["thread.message-sent"]);
-      const event = Schema.decodeUnknownSync(OrchestrationEvent)({ ...events[0]!, sequence: 1 });
+      const event = yield* Schema.decodeUnknownEffect(OrchestrationEvent)({ ...events[0]!, sequence: 1 });
       expect(event.metadata).toMatchObject({
         operatorAttachment: true,
         historyImport: true,
