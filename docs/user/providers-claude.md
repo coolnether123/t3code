@@ -61,6 +61,10 @@ Claude Code holds the turn until that window reopens, so it can keep showing as
 working. Wait for the reset, or stop the turn and continue later. The warning's
 timestamp shows when the displayed wait started.
 
+If Claude stops after repeated usage-limit retries, T3 Code shows a usage-limit
+error. Wait for the limit to reset, then send the message again. If Claude recovers
+before stopping, a later failure keeps its own error message.
+
 ## Skills
 
 Claude skills come from the config directory's `skills` folder and the project's
