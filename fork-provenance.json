@@ -9,7 +9,7 @@
   "inheritedUpstreamBase": "7e03dcfe5d405626a94037e19a18f9950162b3ea",
   "customBaseline": "9f2dcc21ee2cfed6dee15cef2bbe22f54308bb1e",
   "customBranch": "fix/computer-names-and-colors",
-  "integrationBranch": "integrate/mac-upstream-native-20261007",
+  "integrationBranch": "integrate/mac-upstream-correlation-20261007",
   "selectedUpstreamCommits": [
     "9da066dbe906310671b86290b09df0b56a88ffa5",
     "94f92a7a386a26c98892b24fabdd0ea9fa804ce3",
@@ -27,10 +27,26 @@
   "upstreamParity": "partial",
   "migrationManifest": "unchanged",
   "macSourceStatus": "Elora source observed clean on fix/computer-names-and-colors at 9f2dcc21ee2cfed6dee15cef2bbe22f54308bb1e through existing strict-host-key SSH route; local Mac integration is separate",
-  "integrationParent": "ccb4d686e1acdbd4bd302cf00822d0ce8cae474e",
+  "integrationParent": "3b56973bd0393e1d7b79fa627a9a596658f9b75b",
   "localFixtureCorrections": [
     "Typed protocol-valid MCP pagination fixture; runtime bindings and decoders unchanged"
   ],
   "authoringProvider": "codex",
-  "claudeChildRunIds": []
+  "claudeChildRunIds": [],
+  "priorIntegrationParent": "ccb4d686e1acdbd4bd302cf00822d0ce8cae474e",
+  "selectedPrerequisiteHunks": [
+    {
+      "commit": "fd5553f1afcef4f410a067687faa991743b5034c",
+      "path": "apps/server/src/provider/Layers/ClaudeAdapter.ts",
+      "behavior": "Queue.offer assigns uuid: turnId only to new real prompts; SDK owns steering UUIDs",
+      "requiredBy": "9da066dbe906310671b86290b09df0b56a88ffa5 result correlation",
+      "scope": "Prompt identity hunk only; native rewind/history/checkpoint changes are not adopted"
+    }
+  ],
+  "correlationReviewFix": {
+    "reviewerTask": "01a115d1-bff4-7698-b12d-6af25f1f00c7",
+    "issue": "Missing outgoing real prompt UUID prerequisite",
+    "implementation": "Captured outgoing prompt regression coverage and upstream prerequisite hunk",
+    "independentRecheck": "pending"
+  }
 }
