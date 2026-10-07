@@ -9,9 +9,13 @@ export const isAutomaticApproval = (text: string): boolean =>
   text.includes("(via JEV)") || text.includes("Yes, save it. You asked for this at ");
 
 export const isRequestedSaveReply = (text: string): boolean =>
+  /^(?:Go ahead with|Go ahead and|Continue with) [^\n.!?]+\.$/.test(text.trim()) ||
+  text === "Continue the requested work." ||
   /^Yes, save it\. You asked for this at \d{1,2}:\d{2} [AP]M (?:CST|CDT)\.$/.test(text.trim());
 
 export function stoppedChatContext(thread: OrchestrationThread) {
+  const isInjected = (message: (typeof thread.messages)[number]): boolean =>
+    message.id.startsWith("stopped-chat:") || isAutomaticApproval(message.text);
   const isRoutine = (text: string): boolean =>
     /^\s*<heartbeat>\s*<automation_id>[A-Za-z0-9_-]+<\/automation_id>[\s\S]*<instructions>[\s\S]*<\/instructions>[\s\S]*<\/heartbeat>\s*$/.test(
       text,
@@ -23,14 +27,14 @@ export function stoppedChatContext(thread: OrchestrationThread) {
     (message) =>
       message.role === "user" &&
       !isRoutine(message.text) &&
-      !isAutomaticApproval(message.text) &&
+      !isInjected(message) &&
       !/^\s*(?:<|# AGENTS\.md|Otis applying )/i.test(message.text) &&
       !message.id.startsWith("automation:"),
   );
   const authority = thread.messages.filter(
     (message) =>
       humans.includes(message) ||
-      (message.role === "user" && !isAutomaticApproval(message.text) && isRoutine(message.text)),
+      (message.role === "user" && !isInjected(message) && isRoutine(message.text)),
   );
   const latestHuman = authority.at(-1);
   const assistant = thread.messages.findLast(
@@ -46,7 +50,7 @@ export function stoppedChatContext(thread: OrchestrationThread) {
     return null;
   const automated = thread.messages
     .slice(thread.messages.indexOf(latestHuman) + 1)
-    .filter((message) => message.role === "user" && isAutomaticApproval(message.text));
+    .filter((message) => message.role === "user" && isInjected(message));
   const progress = thread.activities.some(
     (activity) =>
       activity.turnId === thread.latestTurn?.turnId &&
@@ -75,13 +79,19 @@ export function stoppedChatContext(thread: OrchestrationThread) {
         (activity) =>
           activity.kind === "hook.feedback" &&
           activity.createdAt >= latestHuman.createdAt &&
-          isAutomaticApproval(JSON.stringify(activity.payload)),
+          (isAutomaticApproval(JSON.stringify(activity.payload)) ||
+            /Go ahead with|Continue with|Continue the requested work/.test(
+              JSON.stringify(activity.payload),
+            )),
       ).length,
     nativeHookOwnsTurn: thread.activities.some(
       (activity) =>
         activity.kind === "hook.feedback" &&
         activity.turnId === thread.latestTurn?.turnId &&
-        isAutomaticApproval(JSON.stringify(activity.payload)),
+        (isAutomaticApproval(JSON.stringify(activity.payload)) ||
+          /Go ahead with|Continue with|Continue the requested work/.test(
+            JSON.stringify(activity.payload),
+          )),
     ),
     progress,
     guard: {
