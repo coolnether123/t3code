@@ -204,6 +204,14 @@ function readPersistedCwd(
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+/** Stopped rows with no active turn retain their resume cursors during shutdown. */
+function isSettledBinding(binding: ProviderSessionDirectory.ProviderRuntimeBinding): boolean {
+  if (binding.status !== "stopped") return false;
+  const payload = binding.runtimePayload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return true;
+  return !("activeTurnId" in payload) || payload.activeTurnId == null;
+}
+
 const dieOnMissingBindingInstanceId = (
   operation: string,
   payload: {
@@ -1518,7 +1526,6 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   );
 
   const runStopAll = Effect.fn("runStopAll")(function* () {
-    const threadIds = yield* directory.listThreadIds();
     const currentAdapters = yield* getAdapterEntries;
     const activeSessions = yield* Effect.forEach(currentAdapters, ([instanceId, adapter]) =>
       adapter.listSessions().pipe(
@@ -1541,7 +1548,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     yield* Effect.forEach(currentAdapters, ([, adapter]) => adapter.stopAll()).pipe(Effect.asVoid);
     yield* McpSessionRegistry.revokeAllActiveMcpCredentials();
     McpProviderSession.clearAllMcpProviderSessions();
-    const bindings = yield* directory.listBindings().pipe(Effect.orElseSucceed(() => []));
+    // Preserve settled session rows; only rewrite sessions this shutdown stops.
+    const bindings = yield* directory.listBindings().pipe(
+      Effect.map((all) => all.filter((binding) => !isSettledBinding(binding))),
+      Effect.orElseSucceed(() => []),
+    );
     yield* Effect.forEach(bindings, (binding) =>
       Effect.gen(function* () {
         const providerInstanceId = dieOnMissingBindingInstanceId(
@@ -1562,7 +1573,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       }),
     ).pipe(Effect.asVoid);
     yield* analytics.record("provider.sessions.stopped_all", {
-      sessionCount: threadIds.length,
+      stoppedSessionCount: bindings.length,
     });
     yield* analytics.flush;
   });
