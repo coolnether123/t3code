@@ -1424,16 +1424,23 @@ describe("openCodexThread", () => {
       const makeServer = (name: string) => ({
         name,
         authStatus: "bearerToken" as const,
-        tools: { "private-tool-name": {} },
+        tools: {
+          "private-tool-name": {
+            name: "private-tool-name",
+            inputSchema: { type: "object", properties: {} },
+          },
+        },
+        resources: [],
+        resourceTemplates: [],
       });
       const firstPage = Array.from({ length: 25 }, (_, index) => makeServer(`server-${index}`));
       const secondPage = Array.from({ length: 25 }, (_, index) => makeServer(`second-${index}`));
       const thirdPage = [makeServer("cua_repl"), makeServer("node_repl")];
-      const pages = [
+      const pages: ReadonlyArray<EffectCodexSchema.V2ListMcpServerStatusResponse> = [
         { data: firstPage, nextCursor: "page-2" },
         { data: secondPage, nextCursor: "page-3" },
-        { data: thirdPage, nextCursor: undefined },
-      ] as unknown as ReadonlyArray<EffectCodexSchema.V2ListMcpServerStatusResponse>;
+        { data: thirdPage },
+      ];
       const calls: Array<EffectCodexSchema.V2ListMcpServerStatusParams> = [];
       const client = {
         raw: {
