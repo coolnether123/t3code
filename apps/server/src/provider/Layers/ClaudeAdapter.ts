@@ -5093,7 +5093,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     yield* Queue.offer(context.promptQueue, {
       type: "message",
-      message,
+      message:
+        steeringTurnState === null
+          ? { ...message, uuid: turnId as NonNullable<SDKUserMessage["uuid"]> }
+          : message,
     }).pipe(Effect.mapError((cause) => toRequestError(input.threadId, "turn/start", cause)));
 
     return {
