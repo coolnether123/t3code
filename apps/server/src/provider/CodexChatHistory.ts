@@ -87,7 +87,7 @@ const readHistory = Effect.fn("readChatSearchHistory")(function* (
       "thread/turns/list",
       {
         threadId,
-        limit: 10,
+        limit: 1,
         itemsView: "full",
         sortDirection: "asc",
         ...(cursor ? { cursor } : {}),

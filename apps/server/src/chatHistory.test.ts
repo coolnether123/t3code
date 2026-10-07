@@ -205,7 +205,7 @@ it.effect("keeps an explicit gap after both bounded daemon reads time out", () =
   }).pipe(Effect.provide(TestClock.layer())),
 );
 
-it.effect("searches every turn page and includes desktop app conversations", () =>
+it.effect("searches every bounded turn page and includes desktop app conversations", () =>
   Effect.gen(function* () {
     const cursors: Array<string | undefined> = [];
     const client = {
@@ -216,7 +216,7 @@ it.effect("searches every turn page and includes desktop app conversations", () 
       raw: {
         request: (
           method: string,
-          params: { includeTurns?: boolean; cursor?: string; itemsView?: string },
+          params: { includeTurns?: boolean; cursor?: string; itemsView?: string; limit?: number },
         ) => {
           if (method === "thread/read") {
             assert.equal(params.includeTurns, false);
@@ -224,6 +224,8 @@ it.effect("searches every turn page and includes desktop app conversations", () 
           }
           assert.equal(method, "thread/turns/list");
           assert.equal(params.itemsView, "full");
+          if (params.limit !== 1)
+            return Effect.fail(new Error("Synthetic oversized multi-turn history page"));
           cursors.push(params.cursor);
           return Effect.succeed({
             data: syntheticThread("paged", params.cursor ? "Older message needle" : "Other text")
