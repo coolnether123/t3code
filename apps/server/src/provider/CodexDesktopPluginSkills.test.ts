@@ -1,5 +1,4 @@
 import * as NodeAssert from "node:assert/strict";
-import * as NodePath from "node:path";
 
 import { NodeServices } from "@effect/platform-node";
 import { it } from "@effect/vitest";
@@ -15,9 +14,8 @@ import {
   resolveCodexDesktopPluginSkillRoots,
 } from "./CodexDesktopPluginSkills.ts";
 
-const bundleSource = NodePath.resolve("/bundle").replaceAll("\\", "/");
-const chromeSkillsRoot = NodePath.join(bundleSource, "plugins", "chrome", "skills");
-const codexHome = NodePath.resolve("/fake-codex-home");
+const bundleSource = "/bundle";
+const codexHome = "/fake-codex-home";
 const config = `
 [marketplaces.openai-bundled]
 source_type = "local"
@@ -81,10 +79,11 @@ enabled = true
 
   it.effect("skips missing skill directories and uses the daemon CODEX_HOME", () =>
     Effect.gen(function* () {
+      const path = yield* Path.Path;
       const home = codexHome;
       const result = yield* withConfig(
         config,
-        [chromeSkillsRoot],
+        [path.join(bundleSource, "plugins", "chrome", "skills")],
         resolveCodexDesktopPluginSkillRoots({ CODEX_HOME: home }),
       );
       NodeAssert.deepStrictEqual(result.reads, [result.path.join(home, "config.toml")]);
@@ -93,7 +92,7 @@ enabled = true
         result.path.join(bundleSource, "plugins", "computer-use", "skills"),
       ]);
       NodeAssert.deepStrictEqual(result.result, [result.checked[0]]);
-    }),
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect("does not call the daemon when no enabled skill directory exists", () =>
@@ -121,7 +120,8 @@ enabled = true
 
   it.effect("returns roots only after the daemon accepts them", () =>
     Effect.gen(function* () {
-      const root = chromeSkillsRoot;
+      const path = yield* Path.Path;
+      const root = path.join(bundleSource, "plugins", "chrome", "skills");
       const { result } = yield* withConfig(
         config,
         [root],
@@ -131,7 +131,7 @@ enabled = true
         ),
       );
       NodeAssert.deepStrictEqual(result, { extraRoots: [root], warning: undefined });
-    }),
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect("reports malformed config without sending roots", () =>
@@ -162,9 +162,10 @@ enabled = true
 
   it.effect("reports a rejected daemon skill-root request without failing startup", () =>
     Effect.gen(function* () {
+      const path = yield* Path.Path;
       const { result } = yield* withConfig(
         config,
-        [chromeSkillsRoot],
+        [path.join(bundleSource, "plugins", "chrome", "skills")],
         attachCodexDesktopPluginSkills(
           {
             raw: {
@@ -186,6 +187,6 @@ enabled = true
         "desktop plugin skills could not be attached: skills/extraRoots/set was rejected by the daemon",
       );
       NodeAssert.deepStrictEqual(result.extraRoots, []);
-    }),
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 });

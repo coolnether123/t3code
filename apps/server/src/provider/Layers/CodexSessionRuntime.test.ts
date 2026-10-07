@@ -1,5 +1,4 @@
 import * as NodeAssert from "node:assert/strict";
-import * as NodePath from "node:path";
 
 import { it } from "@effect/vitest";
 import { NodeServices } from "@effect/platform-node";
@@ -1202,6 +1201,7 @@ describe("openCodexThread", () => {
   it.effect("fails opening when desktop skill-root attachment never replies", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
       const pending = yield* initializeCodexSessionClient(
         {
           request: () => Effect.succeed({}),
@@ -1215,7 +1215,7 @@ describe("openCodexThread", () => {
           ...fs,
           readFileString: () =>
             Effect.succeed(
-              `[marketplaces.openai-bundled]\nsource_type = "local"\nsource = '${NodePath.resolve("/fake-bundle").replaceAll("\\", "/")}'\n[plugins."chrome@openai-bundled"]\nenabled = true`,
+              `[marketplaces.openai-bundled]\nsource_type = "local"\nsource = '${path.resolve("/fake-bundle").replaceAll("\\", "/")}'\n[plugins."chrome@openai-bundled"]\nenabled = true`,
             ),
           stat: () =>
             Effect.succeed({ type: "Directory" }) as unknown as ReturnType<typeof fs.stat>,
@@ -1251,7 +1251,7 @@ describe("openCodexThread", () => {
           raw: {
             request: (method: string, params: { extraRoots: ReadonlyArray<string> }) => {
               NodeAssert.deepStrictEqual(params.extraRoots, [
-                path.join(NodePath.resolve("/bundle"), "plugins", "chrome", "skills"),
+                path.join(path.resolve("/bundle"), "plugins", "chrome", "skills"),
               ]);
               calls.push(method);
               return Effect.succeed({});
@@ -1278,7 +1278,7 @@ describe("openCodexThread", () => {
             ...fs,
             readFileString: () =>
               Effect.succeed(
-                `[marketplaces.openai-bundled]\nsource_type = "local"\nsource = '${NodePath.resolve("/bundle").replaceAll("\\", "/")}'\n[plugins."chrome@openai-bundled"]\nenabled = true`,
+                `[marketplaces.openai-bundled]\nsource_type = "local"\nsource = '${path.resolve("/bundle").replaceAll("\\", "/")}'\n[plugins."chrome@openai-bundled"]\nenabled = true`,
               ),
             stat: () =>
               Effect.succeed({ type: "Directory" }) as unknown as ReturnType<typeof fs.stat>,
