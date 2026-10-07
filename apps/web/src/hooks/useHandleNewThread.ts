@@ -96,6 +96,7 @@ export function useNewThreadHandler() {
         setDraftThreadContext,
         setLogicalProjectDraftThreadId,
         setModelSelection,
+        setRuntimeMode,
       } = useComposerDraftStore.getState();
       const requestingRouteHref = router.state.location.href;
       const routeChangedSinceRequest = () => router.state.location.href !== requestingRouteHref;
@@ -293,6 +294,7 @@ export function useNewThreadHandler() {
           // targets a different physical member of the logical project,
           // createDraftThreadState treats the remap as a project change and
           // would otherwise wipe branch/worktree, undoing the write above.
+          setRuntimeMode(emptyStoredDraftThread.draftId, initialRuntimeMode);
           setLogicalProjectDraftThreadId(
             logicalProjectKey,
             projectRef,
@@ -345,10 +347,11 @@ export function useNewThreadHandler() {
         ) {
           setDraftThreadContext(currentRouteTarget.draftId, pickExplicitWorkspaceOptions(options));
         }
+        setRuntimeMode(currentRouteTarget.draftId, initialRuntimeMode);
         setLogicalProjectDraftThreadId(logicalProjectKey, projectRef, currentRouteTarget.draftId, {
           threadId: latestActiveDraftThread.threadId,
           createdAt: latestActiveDraftThread.createdAt,
-          runtimeMode: latestActiveDraftThread.runtimeMode,
+          runtimeMode: initialRuntimeMode,
           interactionMode: latestActiveDraftThread.interactionMode,
           ...pickExplicitWorkspaceOptions(options),
         });

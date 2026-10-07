@@ -32,6 +32,7 @@ const testState = vi.hoisted(() => {
     setDraftThreadContext: vi.fn(),
     setLogicalProjectDraftThreadId: vi.fn(),
     setModelSelection: vi.fn(),
+    setRuntimeMode: vi.fn(),
   };
 
   return {
@@ -60,6 +61,7 @@ const testState = vi.hoisted(() => {
       draftStore.setLogicalProjectDraftThreadId.mockClear();
       draftStore.getComposerDraft.mockReset().mockReturnValue({});
       draftStore.setDraftThreadContext.mockClear();
+      draftStore.setRuntimeMode.mockClear();
       projectFileRead = new Promise<null>((resolve) => {
         completeProjectFileRead = resolve;
       });
@@ -230,6 +232,28 @@ describe("useNewThreadHandler", () => {
       "remote-project",
       expect.anything(),
       "draft-delayed",
+      expect.objectContaining({ runtimeMode: "full-access" }),
+    );
+  });
+
+  it("clears a reused empty draft's approval-required composer override", async () => {
+    const draft = { ...otherComputerDraft, environmentId: "environment-ssh" };
+    testState.reset(draft);
+    testState.draftStore.getComposerDraft.mockReturnValue({ runtimeMode: "approval-required" });
+    const pendingOpen = useNewThreadHandler()({
+      environmentId: "environment-ssh",
+      projectId: "project-remote",
+    } as never);
+    testState.completeProjectFileRead(null);
+    await pendingOpen;
+    expect(testState.draftStore.setRuntimeMode).toHaveBeenCalledExactlyOnceWith(
+      draft.draftId,
+      "full-access",
+    );
+    expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
+      "remote-project",
+      expect.anything(),
+      draft.draftId,
       expect.objectContaining({ runtimeMode: "full-access" }),
     );
   });
