@@ -9,17 +9,28 @@
   "inheritedUpstreamBase": "7e03dcfe5d405626a94037e19a18f9950162b3ea",
   "customBaseline": "2943946bc52cd2e379284cbac2a4b4a57a53193c",
   "customBranch": "feat/t3-workers-prototype",
-  "integrationBranch": "integrate/windows-upstream-20261007",
+  "integrationBranch": "integrate/windows-upstream-native-20261007",
   "selectedUpstreamCommits": [
     "9da066dbe906310671b86290b09df0b56a88ffa5",
     "94f92a7a386a26c98892b24fabdd0ea9fa804ce3",
     "7ab800a43c770b2c48a2d9306c89b6177f61ad4a",
     "88fbc2cac77ff2bf0d406c44754ecd8014976f5f",
-    "6c8fed35dded9ff71c5b46807125457acbb76be6"
+    "6c8fed35dded9ff71c5b46807125457acbb76be6",
+    "574b18090281225de3449816c8366f0ee9ab886c",
+    "3bf74eb6dce3e1372cfafc2ca84825f4b13bae6a"
   ],
   "regressionTestOnly": ["80d9c181da41ee3890791c9b65018ce093e7bc9e"],
-  "alreadyPresent": ["2efb8178d83f4f7c4ccc3ae1165f2a2ded0b2742"],
+  "alreadyPresent": [
+    "2efb8178d83f4f7c4ccc3ae1165f2a2ded0b2742",
+    "430fbd1ffc98378f6a6a41027ddc6004a79b2e7b"
+  ],
   "upstreamParity": "partial",
   "migrationManifest": "unchanged",
-  "macSourceStatus": "Elora source observed clean on fix/computer-names-and-colors at 9f2dcc21ee2cfed6dee15cef2bbe22f54308bb1e through existing strict-host-key SSH route; local Mac integration is separate"
+  "macSourceStatus": "Elora source observed clean on fix/computer-names-and-colors at 9f2dcc21ee2cfed6dee15cef2bbe22f54308bb1e through existing strict-host-key SSH route; local Mac integration is separate",
+  "integrationParent": "a8ef25977c866417db11cce182137a7875f545c2",
+  "localFixtureCorrections": [
+    "Typed protocol-valid MCP pagination fixture; runtime bindings and decoders unchanged"
+  ],
+  "authoringProvider": "codex",
+  "claudeChildRunIds": []
 }
