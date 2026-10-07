@@ -255,7 +255,7 @@ it.effect("searches every bounded turn and item page, including earlier assistan
           assert.equal(method, "thread/turns/list");
           assert.equal(params.itemsView, "notLoaded");
           if (params.limit !== 1)
-            return Effect.fail(new Error("Synthetic oversized multi-turn history page"));
+            return Effect.fail({ _tag: "SyntheticOversizedHistoryPage" as const });
           cursors.push(params.cursor);
           return Effect.succeed({
             data: syntheticThread("paged", "").turns.map((turn) => ({ ...turn, items: [] })),
@@ -307,7 +307,7 @@ for (const failure of ["repeated-item-cursor", "wrong-turn", "unsupported-items"
                 nextCursor: null,
               });
             if (failure === "unsupported-items")
-              return Effect.fail(new Error("Unsupported method"));
+              return Effect.fail({ _tag: "SyntheticUnsupportedHistoryMethod" as const });
             return Effect.succeed({
               data: [
                 {
