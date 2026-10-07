@@ -11,6 +11,7 @@ import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 import * as Result from "effect/Result";
 import * as CodexClient from "effect-codex-app-server/client";
+import * as CodexErrors from "effect-codex-app-server/errors";
 import { makeCodexDesktopDaemonStdio } from "./CodexDesktopDaemonTransport.ts";
 
 const ItemType = Schema.Struct({ type: Schema.String });
@@ -67,43 +68,63 @@ const readHistory = Effect.fn("readChatSearchHistory")(function* (
   const response = yield* request("thread/read", { threadId, includeTurns: false }).pipe(
     Effect.flatMap(decodeHistory),
   );
-  const history: Array<typeof HistoryTurn.Type> = [];
+  const turns: Array<{
+    status: string;
+    startedAt: number | null | undefined;
+    items: ReadonlyArray<
+      | typeof AssistantItem.Type
+      | {
+          type: "userMessage";
+          id: string;
+          content: ReadonlyArray<typeof TextContent.Type>;
+        }
+    >;
+  }> = [];
   const cursors = new Set<string>();
   let cursor: string | null = null;
   do {
-    const page = yield* request("thread/turns/list", {
-      threadId,
-      limit: 10,
-      itemsView: "full",
-      sortDirection: "asc",
-      ...(cursor ? { cursor } : {}),
-    }).pipe(Effect.flatMap(decodeTurnsPage));
-    history.push(...page.data);
+    const page: Effect.Success<ReturnType<typeof decodeTurnsPage>> = yield* request(
+      "thread/turns/list",
+      {
+        threadId,
+        limit: 10,
+        itemsView: "full",
+        sortDirection: "asc",
+        ...(cursor ? { cursor } : {}),
+      },
+    ).pipe(Effect.flatMap(decodeTurnsPage));
+    const searchTurns = yield* Effect.forEach(page.data, (turn) =>
+      Effect.gen(function* () {
+        const items = yield* Effect.forEach(turn.items, (raw) =>
+          Effect.gen(function* () {
+            const header = yield* decodeItemType(raw);
+            if (header.type === "agentMessage") return yield* decodeAssistant(raw);
+            if (header.type !== "userMessage") return null;
+            const user = yield* decodeUser(raw);
+            const content = yield* Effect.forEach(user.content, (part) =>
+              Effect.gen(function* () {
+                const header = yield* decodeItemType(part);
+                return header.type === "text" ? yield* decodeText(part) : null;
+              }),
+            );
+            return { ...user, content: content.filter((part) => part !== null) };
+          }),
+        );
+        return {
+          status: turn.status,
+          startedAt: turn.startedAt,
+          items: items.filter((item) => item !== null),
+        };
+      }),
+    );
+    turns.push(...searchTurns);
     cursor = page.nextCursor;
     if (cursor && cursors.has(cursor))
-      return yield* Effect.fail(new Error("Daemon history cursor repeated"));
+      return yield* CodexErrors.CodexAppServerProtocolParseError.fromUnroutableMessage({
+        type: "repeatedChatHistoryCursor",
+      });
     if (cursor) cursors.add(cursor);
   } while (cursor);
-  const turns = yield* Effect.forEach(history, (turn) =>
-    Effect.gen(function* () {
-      const items = yield* Effect.forEach(turn.items, (raw) =>
-        Effect.gen(function* () {
-          const header = yield* decodeItemType(raw);
-          if (header.type === "agentMessage") return yield* decodeAssistant(raw);
-          if (header.type !== "userMessage") return null;
-          const user = yield* decodeUser(raw);
-          const content = yield* Effect.forEach(user.content, (part) =>
-            Effect.gen(function* () {
-              const header = yield* decodeItemType(part);
-              return header.type === "text" ? yield* decodeText(part) : null;
-            }),
-          );
-          return { ...user, content: content.filter((part) => part !== null) };
-        }),
-      );
-      return { ...turn, items: items.filter((item) => item !== null) };
-    }),
-  );
   return { ...response.thread, turns };
 });
 
