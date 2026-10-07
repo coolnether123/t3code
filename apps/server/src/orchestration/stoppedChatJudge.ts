@@ -26,6 +26,7 @@ export type JudgeRequest = (url: string, init: RequestInit) => Promise<Response>
 
 const RequestedSave = Schema.Struct({
   status: Schema.String,
+  silent: Schema.optional(Schema.Boolean),
   message: Schema.optional(Schema.String),
   source_id: Schema.optional(Schema.String),
   citation: Schema.optional(Schema.String),
@@ -79,6 +80,7 @@ export async function judgeStoppedChat(
     const answer = decodeRequestedSave(
       await (options.requestedSave ?? readRequestedSave)(input, home),
     );
+    if (answer.silent === true) return null;
     const cited = input.saveAuthority.find(
       (human) =>
         human.id === answer.source_id &&
@@ -146,7 +148,7 @@ export async function judgeStoppedChat(
     }),
   });
   if (!response.ok) throw new Error(`Stopped-chat judge HTTP ${response.status}`);
-  const decision = decodeDecision(await response.json());
+  const decision = { ...decodeDecision(await response.json()), source: "jev" };
   const cited = input.humans.find(
     (human) =>
       human.id === decision.citation_message_id &&
@@ -161,17 +163,14 @@ export async function judgeStoppedChat(
     cited &&
     /(?:Z|[+-]\d\d:\d\d)$/.test(cited.at)
   ) {
-    const stamp = new Intl.DateTimeFormat("en-US", {
-      timeZone: "America/Chicago",
-      hour: "numeric",
-      minute: "2-digit",
-      hour12: true,
-    }).format(Date.parse(cited.at));
     const action = /\b(?:should I|shall I|may I|can I|want me to)\s+([^?\n]+)\?\s*$/i
       .exec(input.question)?.[1]
       ?.replace(/[*_`]/g, "")
       .trim();
-    text = `Yes, ${action && action.length <= 100 ? action : "go ahead with this exact action"}. I asked for this at ${stamp} already. (via JEV)`;
+    text =
+      action && action.length <= 100
+        ? `Go ahead and ${action.replace(/\bI\b/g, "the agent")}.`
+        : "Continue the requested work.";
   }
   return { decision, text };
 }

@@ -998,7 +998,11 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
-      if (command.continuationGuard || isAutomaticApproval(command.message.text)) {
+      if (
+        command.continuationGuard ||
+        command.message.messageId.startsWith("stopped-chat:") ||
+        isAutomaticApproval(command.message.text)
+      ) {
         const detail = !command.continuationGuard
           ? "Automated continuation requires a stopped-chat guard."
           : !command.message.text.trim().endsWith("(via JEV)") &&
