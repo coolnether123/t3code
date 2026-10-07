@@ -90,7 +90,10 @@ it.layer(NodeServices.layer)("operator agent final display", (it) => {
       });
       const events = Array.isArray(planned) ? planned : [planned];
       expect(events.map((event) => event.type)).toEqual(["thread.message-sent"]);
-      const event = yield* Schema.decodeUnknownEffect(OrchestrationEvent)({ ...events[0]!, sequence: 1 });
+      const event = yield* Schema.decodeUnknownEffect(OrchestrationEvent)({
+        ...events[0]!,
+        sequence: 1,
+      });
       expect(event.metadata).toMatchObject({
         operatorAttachment: true,
         historyImport: true,

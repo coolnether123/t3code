@@ -15,7 +15,9 @@ describe("RPC authorization scopes", () => {
   it("requires only orchestration read scope for chat search and opening", () => {
     expect(RPC_REQUIRED_SCOPES[CHAT_HISTORY_METHODS.search]).toBe(AuthOrchestrationReadScope);
     expect(RPC_REQUIRED_SCOPES[CHAT_HISTORY_METHODS.read]).toBe(AuthOrchestrationReadScope);
-    expect(RPC_REQUIRED_SCOPES[CHAT_HISTORY_METHODS.attachFinal]).toBe(AuthOrchestrationOperateScope);
+    expect(RPC_REQUIRED_SCOPES[CHAT_HISTORY_METHODS.attachFinal]).toBe(
+      AuthOrchestrationOperateScope,
+    );
   });
   it("requires operate scope for research that consumes Codex allowance", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.serverGetResetCheck)).toBe(
