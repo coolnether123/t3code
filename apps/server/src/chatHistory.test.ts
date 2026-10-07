@@ -155,6 +155,13 @@ it.effect(
             Effect.suspend((): Effect.Effect<unknown> => {
               if (method === "thread/read")
                 return Effect.succeed({ thread: { ...syntheticThread("slow", ""), turns: [] } });
+              if (method === "thread/items/list")
+                return Effect.succeed({
+                  data: syntheticThread("slow", "Slow message needle").turns.flatMap((turn) =>
+                    turn.items.map((item) => ({ turnId: turn.id, item })),
+                  ),
+                  nextCursor: null,
+                });
               attempts++;
               return attempts === 1
                 ? Effect.never
@@ -205,9 +212,10 @@ it.effect("keeps an explicit gap after both bounded daemon reads time out", () =
   }).pipe(Effect.provide(TestClock.layer())),
 );
 
-it.effect("searches every bounded turn page and includes desktop app conversations", () =>
+it.effect("searches every bounded turn and item page, including earlier assistant commentary", () =>
   Effect.gen(function* () {
     const cursors: Array<string | undefined> = [];
+    const itemCursors: Array<string | undefined> = [];
     const client = {
       request: (_method: string, params: { sourceKinds: string[] }) => {
         assert.include(params.sourceKinds, "appServer");
@@ -216,27 +224,49 @@ it.effect("searches every bounded turn page and includes desktop app conversatio
       raw: {
         request: (
           method: string,
-          params: { includeTurns?: boolean; cursor?: string; itemsView?: string; limit?: number },
+          params: {
+            includeTurns?: boolean;
+            cursor?: string;
+            itemsView?: string;
+            limit?: number;
+            turnId?: string;
+          },
         ) => {
           if (method === "thread/read") {
             assert.equal(params.includeTurns, false);
             return Effect.succeed({ thread: { ...syntheticThread("paged", ""), turns: [] } });
           }
+          if (method === "thread/items/list") {
+            assert.equal(params.limit, 10);
+            assert.equal(params.turnId, "synthetic-turn");
+            itemCursors.push(params.cursor);
+            return Effect.succeed({
+              data: [
+                {
+                  turnId: "synthetic-turn",
+                  item: params.cursor
+                    ? { type: "agentMessage", id: "commentary", text: "Earlier commentary needle" }
+                    : { type: "futureToolResult", payload: { ignored: true } },
+                },
+              ],
+              nextCursor: params.cursor ? null : "next-item",
+            });
+          }
           assert.equal(method, "thread/turns/list");
-          assert.equal(params.itemsView, "full");
+          assert.equal(params.itemsView, "notLoaded");
           if (params.limit !== 1)
             return Effect.fail(new Error("Synthetic oversized multi-turn history page"));
           cursors.push(params.cursor);
           return Effect.succeed({
-            data: syntheticThread("paged", params.cursor ? "Older message needle" : "Other text")
-              .turns,
+            data: syntheticThread("paged", "").turns.map((turn) => ({ ...turn, items: [] })),
             nextCursor: params.cursor ? null : "older",
           });
         },
       },
     } as unknown as Parameters<typeof searchDaemonChats>[0];
-    const result = yield* searchDaemonChats(client, { query: "Older message needle" });
+    const result = yield* searchDaemonChats(client, { query: "Earlier commentary needle" });
     assert.deepEqual(cursors, [undefined, "older"]);
+    assert.deepEqual(itemCursors, [undefined, "next-item", undefined, "next-item"]);
     assert.equal(result.matches[0]?.threadId, "paged");
     assert.equal(result.coverage[0]?.readGaps, false);
   }),
@@ -258,6 +288,78 @@ it.effect("reports a gap when the daemon repeats a turn-history cursor", () =>
     } as unknown as Parameters<typeof searchDaemonChats>[0];
     const result = yield* searchDaemonChats(client, { query: "needle" });
     assert.equal(result.coverage[0]?.readGaps, true);
+  }),
+);
+
+for (const failure of ["repeated-item-cursor", "wrong-turn", "unsupported-items"] as const) {
+  it.effect(`reports incomplete coverage for ${failure}`, () =>
+    Effect.gen(function* () {
+      const thread = syntheticThread("item-failure", "");
+      const client = {
+        request: () => Effect.succeed({ data: [thread], nextCursor: null }),
+        raw: {
+          request: (method: string) => {
+            if (method === "thread/read")
+              return Effect.succeed({ thread: { ...thread, turns: [] } });
+            if (method === "thread/turns/list")
+              return Effect.succeed({
+                data: thread.turns.map((turn) => ({ ...turn, items: [] })),
+                nextCursor: null,
+              });
+            if (failure === "unsupported-items")
+              return Effect.fail(new Error("Unsupported method"));
+            return Effect.succeed({
+              data: [
+                {
+                  turnId: failure === "wrong-turn" ? "other-turn" : "synthetic-turn",
+                  item: { type: "agentMessage", id: "a", text: "Needle" },
+                },
+              ],
+              nextCursor: failure === "repeated-item-cursor" ? "repeat" : null,
+            });
+          },
+        },
+      } as unknown as Parameters<typeof searchDaemonChats>[0];
+      const result = yield* searchDaemonChats(client, { query: "needle" });
+      assert.lengthOf(result.matches, 0);
+      assert.equal(result.coverage[0]?.readGaps, true);
+    }),
+  );
+}
+
+it.effect("keeps users searchable while excluding assistant text from unfinished turns", () =>
+  Effect.gen(function* () {
+    const thread = syntheticThread("unfinished", "User needle");
+    const client = {
+      request: () => Effect.succeed({ data: [thread], nextCursor: null }),
+      raw: {
+        request: (method: string) =>
+          Effect.succeed(
+            method === "thread/read"
+              ? { thread: { ...thread, turns: [] } }
+              : method === "thread/turns/list"
+                ? {
+                    data: thread.turns.map((turn) => ({
+                      ...turn,
+                      status: "inProgress",
+                      items: [],
+                    })),
+                    nextCursor: null,
+                  }
+                : {
+                    data: thread.turns.flatMap((turn) =>
+                      turn.items.map((item) => ({ turnId: turn.id, item })),
+                    ),
+                    nextCursor: null,
+                  },
+          ),
+      },
+    } as unknown as Parameters<typeof searchDaemonChats>[0];
+    const user = yield* searchDaemonChats(client, { query: "User needle", from: date });
+    assert.lengthOf(user.matches, 1);
+    const assistant = yield* searchDaemonChats(client, { query: "Synthetic final reply" });
+    assert.lengthOf(assistant.matches, 0);
+    assert.equal(assistant.coverage[0]?.readGaps, false);
   }),
 );
 
@@ -344,8 +446,26 @@ async function syntheticDaemon(platform: NodeJS.Platform) {
               data: thread.turns.map((turn) => ({
                 ...turn,
                 startedAt: request.params.threadId === "undated" ? null : turn.startedAt,
-                items: [...turn.items, { type: "futureToolResult", payload: { unknown: true } }],
+                items: [],
               })),
+              nextCursor: null,
+            },
+          }),
+        );
+      } else if (request.method === "thread/items/list") {
+        const thread = syntheticThread(
+          request.params.threadId!,
+          request.params.threadId === "archived" ? "Archived needle" : "Text needle",
+        );
+        socket.send(
+          JSON.stringify({
+            id: request.id,
+            result: {
+              data: thread.turns.flatMap((turn) =>
+                [...turn.items, { type: "futureToolResult", payload: { unknown: true } }].map(
+                  (item) => ({ turnId: turn.id, item }),
+                ),
+              ),
               nextCursor: null,
             },
           }),
@@ -439,6 +559,7 @@ it.effect(
         assert.deepEqual([...new Set(peer.methods)].sort(), [
           "initialize",
           "initialized",
+          "thread/items/list",
           "thread/list",
           "thread/read",
           "thread/turns/list",

@@ -27,6 +27,7 @@ const AssistantItem = Schema.Struct({
   text: Schema.String,
 });
 const HistoryTurn = Schema.Struct({
+  id: Schema.String,
   status: Schema.String,
   startedAt: Schema.optionalKey(Schema.NullOr(Schema.Number)),
   items: Schema.Array(Schema.Unknown),
@@ -45,6 +46,12 @@ const decodeHistory = Schema.decodeUnknownEffect(HistoryResponse);
 const decodeTurnsPage = Schema.decodeUnknownEffect(
   Schema.Struct({
     data: Schema.Array(HistoryTurn),
+    nextCursor: Schema.NullOr(Schema.String),
+  }),
+);
+const decodeItemsPage = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    data: Schema.Array(Schema.Struct({ turnId: Schema.String, item: Schema.Unknown })),
     nextCursor: Schema.NullOr(Schema.String),
   }),
 );
@@ -88,32 +95,61 @@ const readHistory = Effect.fn("readChatSearchHistory")(function* (
       {
         threadId,
         limit: 1,
-        itemsView: "full",
+        itemsView: "notLoaded",
         sortDirection: "asc",
         ...(cursor ? { cursor } : {}),
       },
     ).pipe(Effect.flatMap(decodeTurnsPage));
     const searchTurns = yield* Effect.forEach(page.data, (turn) =>
       Effect.gen(function* () {
-        const items = yield* Effect.forEach(turn.items, (raw) =>
-          Effect.gen(function* () {
-            const header = yield* decodeItemType(raw);
-            if (header.type === "agentMessage") return yield* decodeAssistant(raw);
-            if (header.type !== "userMessage") return null;
-            const user = yield* decodeUser(raw);
-            const content = yield* Effect.forEach(user.content, (part) =>
-              Effect.gen(function* () {
-                const header = yield* decodeItemType(part);
-                return header.type === "text" ? yield* decodeText(part) : null;
-              }),
-            );
-            return { ...user, content: content.filter((part) => part !== null) };
-          }),
-        );
+        const items: Array<
+          | typeof AssistantItem.Type
+          | { type: "userMessage"; id: string; content: ReadonlyArray<typeof TextContent.Type> }
+        > = [];
+        const itemCursors = new Set<string>();
+        let itemCursor: string | null = null;
+        do {
+          const itemPage: Effect.Success<ReturnType<typeof decodeItemsPage>> = yield* request(
+            "thread/items/list",
+            {
+              threadId,
+              turnId: turn.id,
+              limit: 10,
+              sortDirection: "asc",
+              ...(itemCursor ? { cursor: itemCursor } : {}),
+            },
+          ).pipe(Effect.flatMap(decodeItemsPage));
+          const searchItems = yield* Effect.forEach(itemPage.data, ({ turnId, item: raw }) =>
+            Effect.gen(function* () {
+              if (turnId !== turn.id)
+                return yield* CodexErrors.CodexAppServerProtocolParseError.fromUnroutableMessage({
+                  type: "mismatchedChatHistoryTurn",
+                });
+              const header = yield* decodeItemType(raw);
+              if (header.type === "agentMessage") return yield* decodeAssistant(raw);
+              if (header.type !== "userMessage") return null;
+              const user = yield* decodeUser(raw);
+              const content = yield* Effect.forEach(user.content, (part) =>
+                Effect.gen(function* () {
+                  const header = yield* decodeItemType(part);
+                  return header.type === "text" ? yield* decodeText(part) : null;
+                }),
+              );
+              return { ...user, content: content.filter((part) => part !== null) };
+            }),
+          );
+          items.push(...searchItems.filter((item) => item !== null));
+          itemCursor = itemPage.nextCursor;
+          if (itemCursor && itemCursors.has(itemCursor))
+            return yield* CodexErrors.CodexAppServerProtocolParseError.fromUnroutableMessage({
+              type: "repeatedChatHistoryItemCursor",
+            });
+          if (itemCursor) itemCursors.add(itemCursor);
+        } while (itemCursor);
         return {
           status: turn.status,
           startedAt: turn.startedAt,
-          items: items.filter((item) => item !== null),
+          items,
         };
       }),
     );
