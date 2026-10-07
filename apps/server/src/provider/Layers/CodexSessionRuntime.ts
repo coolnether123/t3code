@@ -203,10 +203,15 @@ export function formatCodexThreadMcpInventory(inventory: CodexThreadMcpInventory
     inventory.servers.length === 0
       ? "none reported"
       : inventory.servers
-          .map(
-            (server) =>
-              `${server.name} (startup ${server.startupStatus}, auth ${server.authStatus}, ${server.toolCount} tools)`,
-          )
+          .map((server) => {
+            const startup =
+              server.startupStatus === "unknown"
+                ? "startup not observed"
+                : `startup ${server.startupStatus}`;
+            const auth =
+              server.authStatus === "unsupported" ? "OAuth not used" : `auth ${server.authStatus}`;
+            return `${server.name} (${startup}, ${auth}, ${server.toolCount} tools discovered)`;
+          })
           .join("; ");
   const omitted = inventory.omittedServers ? "; additional servers omitted" : "";
   return `Tools attached to this thread: ${servers}${omitted}. cua_repl ${inventory.hasCuaRepl ? "present" : "absent"}; node_repl ${inventory.hasNodeRepl ? "present" : "absent"}.`;

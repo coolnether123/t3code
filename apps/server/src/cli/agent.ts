@@ -222,7 +222,7 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
           restrictions: [
             "--confirm required for act",
             "Unique commandId for each distinct payload; never automatically retry an action",
-            "New threads use approval-required mode and the project's existing checkout",
+            "New threads default to full-access mode and the project's existing checkout",
             "No bootstrap, deletes, checkpoint rewinds, runtime mode changes, or session-wide approval",
             "Metadata updates change titles only",
             "Send preserves existing runtimeMode; steer/interrupt require the observed active turn ID",

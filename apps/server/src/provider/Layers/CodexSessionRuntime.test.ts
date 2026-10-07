@@ -1473,6 +1473,28 @@ describe("openCodexThread", () => {
     }),
   );
 
+  it("describes stdio discovery without presenting unavailable OAuth as an error", () => {
+    const summary = formatCodexThreadMcpInventory({
+      servers: [
+        { name: "bookkeeping", startupStatus: "unknown", authStatus: "unsupported", toolCount: 28 },
+      ],
+      hasCuaRepl: false,
+      hasNodeRepl: false,
+      omittedServers: false,
+    });
+    NodeAssert.match(summary, /startup not observed, OAuth not used, 28 tools discovered/);
+    NodeAssert.doesNotMatch(summary, /startup unknown|auth unsupported|startup ready/);
+    const failed = formatCodexThreadMcpInventory({
+      servers: [
+        { name: "bookkeeping", startupStatus: "failed", authStatus: "unsupported", toolCount: 28 },
+      ],
+      hasCuaRepl: false,
+      hasNodeRepl: false,
+      omittedServers: false,
+    });
+    NodeAssert.match(failed, /startup failed/);
+  });
+
   it.effect("preserves a missing thread's identity instead of starting a replacement", () =>
     Effect.gen(function* () {
       const calls: Array<{

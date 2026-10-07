@@ -24,7 +24,7 @@ const testState = vi.hoisted(() => {
     }),
   };
   const draftStore = {
-    getComposerDraft: vi.fn(() => ({})),
+    getComposerDraft: vi.fn((): { runtimeMode?: string } => ({})),
     getDraftSessionByLogicalProjectKey: vi.fn(() => storedDraft),
     getDraftSession: vi.fn(() => activeDraft),
     getDraftThread: vi.fn(() => null),
@@ -58,6 +58,8 @@ const testState = vi.hoisted(() => {
       router.state.location.href = "/";
       router.navigate.mockClear();
       draftStore.setLogicalProjectDraftThreadId.mockClear();
+      draftStore.getComposerDraft.mockReset().mockReturnValue({});
+      draftStore.setDraftThreadContext.mockClear();
       projectFileRead = new Promise<null>((resolve) => {
         completeProjectFileRead = resolve;
       });
@@ -89,7 +91,7 @@ vi.mock("@t3tools/client-runtime/environment", () => ({
   scopeThreadRef: (environmentId: string, threadId: string) => ({ environmentId, threadId }),
 }));
 vi.mock("@t3tools/contracts", () => ({
-  DEFAULT_RUNTIME_MODE: "default",
+  DEFAULT_RUNTIME_MODE: "full-access",
   DEFAULT_SERVER_SETTINGS: {},
 }));
 vi.mock("@t3tools/shared/threadEnvMode", () => ({
@@ -212,6 +214,24 @@ describe("useNewThreadHandler", () => {
 
     expect(await pendingOpen).toEqual({ draftId: draft.draftId, threadId: draft.threadId });
     expect(testState.router.state.location.href).toBe(`/draft/${draft.draftId}`);
+  });
+
+  it("starts a new chat with full access when the previous composer requires approvals", async () => {
+    testState.reset(null);
+    testState.openDraft(otherComputerDraft);
+    testState.draftStore.getComposerDraft.mockReturnValue({ runtimeMode: "approval-required" });
+    const pendingOpen = useNewThreadHandler()({
+      environmentId: "environment-ssh",
+      projectId: "project-remote",
+    } as never);
+    testState.completeProjectFileRead(null);
+    await pendingOpen;
+    expect(testState.draftStore.setLogicalProjectDraftThreadId).toHaveBeenCalledWith(
+      "remote-project",
+      expect.anything(),
+      "draft-delayed",
+      expect.objectContaining({ runtimeMode: "full-access" }),
+    );
   });
 
   it.each([
