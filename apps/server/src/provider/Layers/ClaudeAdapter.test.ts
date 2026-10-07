@@ -306,6 +306,41 @@ async function readPromptMessages(
   return messages;
 }
 
+function observePromptCorrelationEvents(adapter: ClaudeAdapterShape, query: FakeClaudeQuery) {
+  return Effect.gen(function* () {
+    const events: Array<ProviderRuntimeEvent> = [];
+    let receipt: Deferred.Deferred<void> | undefined;
+    yield* Stream.runForEach(adapter.streamEvents, (event) =>
+      Effect.gen(function* () {
+        events.push(event);
+        if (
+          receipt &&
+          event.type === "session.state.changed" &&
+          event.payload.reason === "api_retry:1/2"
+        ) {
+          yield* Deferred.succeed(receipt, undefined);
+        }
+      }),
+    ).pipe(Effect.forkChild);
+    const drain = Effect.gen(function* () {
+      receipt = yield* Deferred.make<void>();
+      query.emit({
+        type: "system",
+        subtype: "api_retry",
+        attempt: 1,
+        max_retries: 2,
+        retry_delay_ms: 0,
+        error_status: 502,
+        error: { type: "api_error" },
+        session_id: "sdk-session-correlation",
+        uuid: "correlation-drain",
+      } as unknown as SDKMessage);
+      yield* Deferred.await(receipt);
+    });
+    return { events, drain };
+  });
+}
+
 const THREAD_ID = ThreadId.make("thread-claude-1");
 const RESUME_THREAD_ID = ThreadId.make("thread-claude-resume");
 const SYNTHETIC_SUBAGENT_MODEL = "claude-synthetic-subagent[expanded]";
@@ -1402,6 +1437,150 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect.each([
+    { subtype: "success", echo: "singular" },
+    { subtype: "error_during_execution", echo: "singular" },
+    { subtype: "success", echo: "plural" },
+    { subtype: "error_during_execution", echo: "plural" },
+    { subtype: "success", echo: "legacy" },
+    { subtype: "error_during_execution", echo: "legacy" },
+  ] as const)(
+    "correlates captured prompt UUID with $subtype results using $echo echoes",
+    ({ subtype, echo }) => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const { events, drain } = yield* observePromptCorrelationEvents(adapter, harness.query);
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        const turn = yield* adapter.sendTurn({
+          threadId: THREAD_ID,
+          input: "hello",
+          attachments: [],
+        });
+        const prompt = yield* Effect.promise(() =>
+          readFirstPromptMessage(harness.getLastCreateQueryInput()),
+        );
+        assert.equal(String(prompt?.uuid), String(turn.turnId));
+        if (!prompt?.uuid) throw new Error("The SDK must receive the real prompt UUID.");
+        harness.query.emit({
+          type: "result",
+          subtype,
+          is_error: subtype !== "success",
+          num_turns: 1,
+          errors: subtype === "success" ? [] : ["Provider error detail"],
+          ...(echo === "singular"
+            ? { user_message_uuid: prompt.uuid }
+            : echo === "plural"
+              ? { user_message_uuids: [prompt.uuid] }
+              : {}),
+          session_id: "sdk-session-correlation",
+          uuid: "result-correlation",
+        } as unknown as SDKMessage);
+        yield* drain;
+        const completed = events.filter((event) => event.type === "turn.completed");
+        assert.equal(completed.length, 1);
+        assert.equal(completed[0]?.turnId, turn.turnId);
+        assert.equal(completed[0]?.payload.state, subtype === "success" ? "completed" : "failed");
+        assert.equal(
+          completed[0]?.payload.errorMessage,
+          subtype === "success" ? undefined : "Provider error detail",
+        );
+        const [session] = yield* adapter.listSessions();
+        assert.equal(session?.status, "ready");
+        assert.equal(session?.activeTurnId, undefined);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
+  it.effect("keeps stale echoed results out of a later captured prompt through API retry", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const { events, drain } = yield* observePromptCorrelationEvents(adapter, harness.query);
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const first = yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "first",
+        attachments: [],
+      });
+      const firstPrompt = yield* Effect.promise(() =>
+        readFirstPromptMessage(harness.getLastCreateQueryInput()),
+      );
+      assert.equal(String(firstPrompt?.uuid), String(first.turnId));
+      if (!firstPrompt?.uuid) throw new Error("The SDK must receive the first prompt UUID.");
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        num_turns: 1,
+        user_message_uuid: firstPrompt.uuid,
+        session_id: "sdk-session-correlation",
+        uuid: "first-result",
+      } as unknown as SDKMessage);
+      yield* drain;
+      const second = yield* adapter.sendTurn({
+        threadId: THREAD_ID,
+        input: "second",
+        attachments: [],
+      });
+      const secondPrompt = yield* Effect.promise(() =>
+        readFirstPromptMessage(harness.getLastCreateQueryInput()),
+      );
+      assert.equal(String(secondPrompt?.uuid), String(second.turnId));
+      assert.notEqual(secondPrompt?.uuid, firstPrompt.uuid);
+      if (!secondPrompt?.uuid) throw new Error("The SDK must receive the second prompt UUID.");
+      // A delayed error for the first real SDK prompt must not close the second.
+      harness.query.emit({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        errors: ["Stale provider error"],
+        user_message_uuids: [firstPrompt.uuid],
+        session_id: "sdk-session-correlation",
+        uuid: "stale-result",
+      } as unknown as SDKMessage);
+      yield* drain;
+      assert.equal(events.filter((event) => event.type === "turn.completed").length, 1);
+      assert.equal(events.filter((event) => event.type === "runtime.error").length, 0);
+      const [running] = yield* adapter.listSessions();
+      assert.equal(running?.activeTurnId, second.turnId);
+      assert.equal(running?.status, "running");
+      // The drain receipt is a real API-retry heartbeat; it leaves prompt identity intact.
+      harness.query.emit({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        errors: ["Retry exhausted"],
+        user_message_uuids: [secondPrompt.uuid],
+        session_id: "sdk-session-correlation",
+        uuid: "retry-result",
+      } as unknown as SDKMessage);
+      yield* drain;
+      const completed = events.filter((event) => event.type === "turn.completed");
+      assert.equal(completed.length, 2);
+      assert.equal(completed[1]?.turnId, second.turnId);
+      assert.equal(completed[1]?.payload.state, "failed");
+      assert.equal(completed[1]?.payload.errorMessage, "Retry exhausted");
+      const [ready] = yield* adapter.listSessions();
+      assert.equal(ready?.activeTurnId, undefined);
+      assert.equal(ready?.status, "ready");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("keeps a turn open past the result of a Claude-initiated turn", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -1422,6 +1601,13 @@ describe("ClaudeAdapterLive", () => {
         input: "/compact",
         attachments: [],
       });
+
+      const prompt = yield* Effect.promise(() =>
+        readFirstPromptMessage(harness.getLastCreateQueryInput()),
+      );
+      assert.equal(String(prompt?.uuid), String(turn.turnId));
+      if (!prompt?.uuid) throw new Error("The SDK must receive the compact prompt UUID.");
+      assert.deepEqual(prompt.message.content, [{ type: "text", text: "/compact" }]);
 
       // Recorded order after a resume: Claude first reports a background task
       // the previous process left behind, then runs the queued `/compact`.
@@ -1446,8 +1632,8 @@ describe("ClaudeAdapterLive", () => {
         subtype: "success",
         is_error: false,
         num_turns: 0,
-        user_message_uuid: turn.turnId,
-        user_message_uuids: [turn.turnId],
+        user_message_uuid: prompt.uuid,
+        user_message_uuids: [prompt.uuid],
         local_command: "compact",
         session_id: "sdk-session-1",
         uuid: "result-compact",
@@ -1499,6 +1685,13 @@ describe("ClaudeAdapterLive", () => {
         attachments: [],
       });
       assert.equal(String(steeredTurn.turnId), String(turn.turnId));
+      const prompts = yield* Effect.promise(() =>
+        readPromptMessages(harness.getLastCreateQueryInput(), 2),
+      );
+      assert.equal(String(prompts[0]?.uuid), String(turn.turnId));
+      if (!prompts[0]?.uuid) throw new Error("The SDK must receive the original prompt UUID.");
+      // The SDK owns the steer message UUID; the real prompt still owns the T3 turn.
+      assert.equal(prompts[1]?.uuid, undefined);
 
       harness.query.emit({
         type: "assistant",
@@ -1518,6 +1711,7 @@ describe("ClaudeAdapterLive", () => {
         errors: [],
         session_id: "sdk-session-steer",
         uuid: "result-steer-1",
+        user_message_uuids: [prompts[0].uuid, "cli-assigned-steer-uuid"],
       } as unknown as SDKMessage);
 
       const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
