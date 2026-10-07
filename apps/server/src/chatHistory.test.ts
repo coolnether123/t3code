@@ -151,12 +151,17 @@ it.effect(
           throw new Error("Unexpected typed request");
         },
         raw: {
-          request: () =>
-            Effect.suspend(() => {
+          request: (method: string) =>
+            Effect.suspend((): Effect.Effect<unknown> => {
+              if (method === "thread/read")
+                return Effect.succeed({ thread: { ...syntheticThread("slow", ""), turns: [] } });
               attempts++;
               return attempts === 1
                 ? Effect.never
-                : Effect.succeed({ thread: syntheticThread("slow", "Slow message needle") });
+                : Effect.succeed({
+                    data: syntheticThread("slow", "Slow message needle").turns,
+                    nextCursor: null,
+                  });
             }),
         },
       } as unknown as Parameters<typeof searchDaemonChats>[0];
@@ -180,8 +185,12 @@ it.effect("keeps an explicit gap after both bounded daemon reads time out", () =
           ? Effect.succeed({ data: [syntheticThread("unresponsive", "")], nextCursor: null })
           : Effect.die("Unexpected typed request"),
       raw: {
-        request: () =>
-          Effect.suspend(() => {
+        request: (method: string) =>
+          Effect.suspend((): Effect.Effect<unknown> => {
+            if (method === "thread/read")
+              return Effect.succeed({
+                thread: { ...syntheticThread("unresponsive", ""), turns: [] },
+              });
             attempts++;
             return Effect.never;
           }),
@@ -194,6 +203,60 @@ it.effect("keeps an explicit gap after both bounded daemon reads time out", () =
     assert.lengthOf(result.matches, 0);
     assert.equal(result.coverage[0]?.readGaps, true);
   }).pipe(Effect.provide(TestClock.layer())),
+);
+
+it.effect("searches every turn page and includes desktop app conversations", () =>
+  Effect.gen(function* () {
+    const cursors: Array<string | undefined> = [];
+    const client = {
+      request: (_method: string, params: { sourceKinds: string[] }) => {
+        assert.include(params.sourceKinds, "appServer");
+        return Effect.succeed({ data: [syntheticThread("paged", "")], nextCursor: null });
+      },
+      raw: {
+        request: (
+          method: string,
+          params: { includeTurns?: boolean; cursor?: string; itemsView?: string },
+        ) => {
+          if (method === "thread/read") {
+            assert.equal(params.includeTurns, false);
+            return Effect.succeed({ thread: { ...syntheticThread("paged", ""), turns: [] } });
+          }
+          assert.equal(method, "thread/turns/list");
+          assert.equal(params.itemsView, "full");
+          cursors.push(params.cursor);
+          return Effect.succeed({
+            data: syntheticThread("paged", params.cursor ? "Older message needle" : "Other text")
+              .turns,
+            nextCursor: params.cursor ? null : "older",
+          });
+        },
+      },
+    } as unknown as Parameters<typeof searchDaemonChats>[0];
+    const result = yield* searchDaemonChats(client, { query: "Older message needle" });
+    assert.deepEqual(cursors, [undefined, "older"]);
+    assert.equal(result.matches[0]?.threadId, "paged");
+    assert.equal(result.coverage[0]?.readGaps, false);
+  }),
+);
+
+it.effect("reports a gap when the daemon repeats a turn-history cursor", () =>
+  Effect.gen(function* () {
+    const thread = syntheticThread("loop", "");
+    const client = {
+      request: () => Effect.succeed({ data: [thread], nextCursor: null }),
+      raw: {
+        request: (method: string) =>
+          Effect.succeed(
+            method === "thread/read"
+              ? { thread: { ...thread, turns: [] } }
+              : { data: [], nextCursor: "repeat" },
+          ),
+      },
+    } as unknown as Parameters<typeof searchDaemonChats>[0];
+    const result = yield* searchDaemonChats(client, { query: "needle" });
+    assert.equal(result.coverage[0]?.readGaps, true);
+  }),
 );
 
 async function syntheticDaemon(platform: NodeJS.Platform) {
@@ -211,7 +274,7 @@ async function syntheticDaemon(platform: NodeJS.Platform) {
       const request = JSON.parse(data.toString()) as {
         id?: number;
         method: string;
-        params: { archived?: boolean; threadId?: string; cursor?: string };
+        params: { archived?: boolean; threadId?: string; cursor?: string; includeTurns?: boolean };
       };
       methods.push(request.method);
       if (request.id === undefined) return;
@@ -243,6 +306,7 @@ async function syntheticDaemon(platform: NodeJS.Platform) {
           }),
         );
       else if (request.method === "thread/read") {
+        assert.equal(request.params.includeTurns, false);
         const thread = syntheticThread(
           request.params.threadId!,
           request.params.threadId === "archived" ? "Archived needle" : "Text needle",
@@ -260,17 +324,29 @@ async function syntheticDaemon(platform: NodeJS.Platform) {
                   result: {
                     thread: {
                       ...history,
-                      turns: history.turns.map((turn) => ({
-                        ...turn,
-                        items: [
-                          ...turn.items,
-                          { type: "futureToolResult", payload: { unknown: true } },
-                        ],
-                      })),
+                      turns: [],
                     },
                   },
                 },
           ),
+        );
+      } else if (request.method === "thread/turns/list") {
+        const thread = syntheticThread(
+          request.params.threadId!,
+          request.params.threadId === "archived" ? "Archived needle" : "Text needle",
+        );
+        socket.send(
+          JSON.stringify({
+            id: request.id,
+            result: {
+              data: thread.turns.map((turn) => ({
+                ...turn,
+                startedAt: request.params.threadId === "undated" ? null : turn.startedAt,
+                items: [...turn.items, { type: "futureToolResult", payload: { unknown: true } }],
+              })),
+              nextCursor: null,
+            },
+          }),
         );
       } else
         socket.send(
@@ -363,6 +439,7 @@ it.effect(
           "initialized",
           "thread/list",
           "thread/read",
+          "thread/turns/list",
         ]);
       } finally {
         yield* Effect.promise(peer.close);

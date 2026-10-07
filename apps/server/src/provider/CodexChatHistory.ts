@@ -25,23 +25,28 @@ const AssistantItem = Schema.Struct({
   id: Schema.String,
   text: Schema.String,
 });
+const HistoryTurn = Schema.Struct({
+  status: Schema.String,
+  startedAt: Schema.optionalKey(Schema.NullOr(Schema.Number)),
+  items: Schema.Array(Schema.Unknown),
+});
 const HistoryResponse = Schema.Struct({
   thread: Schema.Struct({
     id: Schema.String,
     name: Schema.optionalKey(Schema.NullOr(Schema.String)),
     preview: Schema.String,
     updatedAt: Schema.Number,
-    turns: Schema.Array(
-      Schema.Struct({
-        status: Schema.String,
-        startedAt: Schema.optionalKey(Schema.NullOr(Schema.Number)),
-        items: Schema.Array(Schema.Unknown),
-      }),
-    ),
+    turns: Schema.Array(HistoryTurn),
   }),
 });
 
 const decodeHistory = Schema.decodeUnknownEffect(HistoryResponse);
+const decodeTurnsPage = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    data: Schema.Array(HistoryTurn),
+    nextCursor: Schema.NullOr(Schema.String),
+  }),
+);
 const decodeItemType = Schema.decodeUnknownEffect(ItemType);
 const decodeAssistant = Schema.decodeUnknownEffect(AssistantItem);
 const decodeUser = Schema.decodeUnknownEffect(UserItem);
@@ -52,10 +57,34 @@ const readHistory = Effect.fn("readChatSearchHistory")(function* (
   client: CodexClient.CodexAppServerClient["Service"],
   threadId: string,
 ) {
-  const response = yield* client.raw
-    .request("thread/read", { threadId, includeTurns: true })
-    .pipe(Effect.flatMap(decodeHistory));
-  const turns = yield* Effect.forEach(response.thread.turns, (turn) =>
+  const request = (method: string, params: unknown) =>
+    client.raw
+      .request(method, params)
+      .pipe(
+        Effect.timeout("2 minutes"),
+        Effect.retry({ times: 1, while: (error) => error._tag === "TimeoutError" }),
+      );
+  const response = yield* request("thread/read", { threadId, includeTurns: false }).pipe(
+    Effect.flatMap(decodeHistory),
+  );
+  const history: Array<typeof HistoryTurn.Type> = [];
+  const cursors = new Set<string>();
+  let cursor: string | null = null;
+  do {
+    const page = yield* request("thread/turns/list", {
+      threadId,
+      limit: 10,
+      itemsView: "full",
+      sortDirection: "asc",
+      ...(cursor ? { cursor } : {}),
+    }).pipe(Effect.flatMap(decodeTurnsPage));
+    history.push(...page.data);
+    cursor = page.nextCursor;
+    if (cursor && cursors.has(cursor))
+      return yield* Effect.fail(new Error("Daemon history cursor repeated"));
+    if (cursor) cursors.add(cursor);
+  } while (cursor);
+  const turns = yield* Effect.forEach(history, (turn) =>
     Effect.gen(function* () {
       const items = yield* Effect.forEach(turn.items, (raw) =>
         Effect.gen(function* () {
@@ -118,7 +147,7 @@ export const searchDaemonChats = Effect.fn("searchDaemonChats")(function* (
     cursor,
     limit: 1,
     sortKey: "updated_at",
-    sourceKinds: [],
+    sourceKinds: ["cli", "vscode", "appServer", "exec", "unknown"],
     modelProviders: [],
   });
   const needle = input.query.trim().toLocaleLowerCase();
@@ -127,12 +156,7 @@ export const searchDaemonChats = Effect.fn("searchDaemonChats")(function* (
   let unknownDates = false;
   const histories = yield* Effect.forEach(
     page.data,
-    (entry) =>
-      readHistory(client, entry.id).pipe(
-        Effect.timeout("2 minutes"),
-        Effect.retry({ times: 1, while: (error) => error._tag === "TimeoutError" }),
-        Effect.result,
-      ),
+    (entry) => readHistory(client, entry.id).pipe(Effect.result),
     { concurrency: 1 },
   );
   for (const [index, result] of histories.entries()) {
