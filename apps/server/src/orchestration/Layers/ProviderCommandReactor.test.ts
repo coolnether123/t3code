@@ -788,6 +788,39 @@ describe("ProviderCommandReactor", () => {
       createdAt: input.createdAt,
     });
 
+  it("operator copies never invoke the stopped-chat judge or provider", async () => {
+    const judge = vi.spyOn(StoppedChatJudge, "judgeStoppedChat");
+    try {
+      const harness = await createHarness();
+      const before = (await harness.readModel()).threads.find(
+        (thread) => thread.id === ThreadId.make("thread-1"),
+      )!;
+      await harness.runEffect(
+        harness.engine.dispatch({
+          type: "thread.agent-final.attach",
+          commandId: CommandId.make("synthetic-copy"),
+          threadId: before.id,
+          messageId: asMessageId("operator-agent-final:synthetic"),
+          text: "Should I save it?",
+          nativeThreadId: "synthetic-native",
+          nativeTurnId: "synthetic-turn",
+          nativeMessageId: "synthetic-message",
+          expectedLatestUserMessageAt: null,
+          createdAt: "2026-10-07T09:30:00.000Z",
+        }),
+      );
+      await harness.drain();
+      expect(judge).not.toHaveBeenCalled();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      const after = (await harness.readModel()).threads.find((thread) => thread.id === before.id)!;
+      expect(after.messages).toHaveLength(before.messages.length + 1);
+      expect(after.latestTurn).toEqual(before.latestTurn);
+      expect(after.session).toEqual(before.session);
+    } finally {
+      judge.mockRestore();
+    }
+  });
+
   it.each([false, true])(
     "delivers once into a disposable memory thread, unless a newer human arrives: %s",
     async (newerHuman) => {

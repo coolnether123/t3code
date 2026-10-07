@@ -1,4 +1,5 @@
 import * as Cause from "effect/Cause";
+import * as NodeCrypto from "node:crypto";
 import * as Crypto from "effect/Crypto";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -21,6 +22,7 @@ import {
   AuthSessionId,
   ClientSurface,
   CommandId,
+  MessageId,
   type DiscoveredLocalServerList,
   type FileManagerRevealKind,
   EventId,
@@ -1489,6 +1491,60 @@ const makeWsRpcLayer = (
                   new OrchestrationSearchThreadsError({
                     message: "Failed to search threads",
                     cause,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [CHAT_HISTORY_METHODS.attachFinal]: (input) =>
+          observeRpcEffect(
+            CHAT_HISTORY_METHODS.attachFinal,
+            Effect.gen(function* () {
+              const binding = yield* chatHistoryProjection.nativeBinding(input.threadId);
+              const settings = yield* serverSettings.getSettings;
+              if (!settings.providers.codex.enabled)
+                return yield* new ChatHistoryError({
+                  message: "Codex is disabled on this computer.",
+                });
+              const final = yield* Effect.scoped(
+                CodexChatHistory.withChatDaemon(settings.providers.codex.homePath, (client) =>
+                  CodexChatHistory.readDaemonFinal(
+                    client,
+                    binding.nativeThreadId,
+                    input.nativeTurnId,
+                  ),
+                ),
+              );
+              if (
+                NodeCrypto.createHash("sha256").update(final.text).digest("hex") !==
+                input.expectedSha256
+              )
+                return yield* new ChatHistoryError({
+                  message: "The native agent final does not match the reviewed reply.",
+                });
+              const messageId = MessageId.make(
+                `operator-agent-final:${binding.nativeThreadId}:${input.nativeTurnId}`,
+              );
+              const receipt = yield* startup.enqueueCommand(
+                orchestrationEngine.dispatch({
+                  type: "thread.agent-final.attach",
+                  commandId: CommandId.make(messageId),
+                  threadId: ThreadId.make(input.threadId),
+                  messageId,
+                  text: final.text,
+                  nativeThreadId: binding.nativeThreadId,
+                  nativeTurnId: input.nativeTurnId,
+                  nativeMessageId: final.messageId,
+                  expectedLatestUserMessageAt: binding.latestUserMessageAt,
+                  createdAt: DateTime.formatIso(yield* DateTime.now),
+                }),
+              );
+              return { sequence: receipt.sequence, messageId };
+            }).pipe(
+              Effect.mapError(
+                () =>
+                  new ChatHistoryError({
+                    message: "The existing agent reply could not be attached.",
                   }),
               ),
             ),

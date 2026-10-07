@@ -121,6 +121,7 @@ import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSna
 import { ThreadDeletionReactor } from "./orchestration/Services/ThreadDeletionReactor.ts";
 import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite.ts";
 import * as ChatHistory from "./chatHistory.ts";
+import * as CodexChatHistory from "./provider/CodexChatHistory.ts";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { OrchestrationEventStoreLive } from "./persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationEventStore } from "./persistence/Services/OrchestrationEventStore.ts";
@@ -766,6 +767,7 @@ const buildAppUnderTest = (options?: {
           Layer.succeed(
             ChatHistory.ChatHistoryProjection,
             options?.layers?.chatHistoryProjection ?? {
+              nativeBinding: () => Effect.die("No native binding configured for this fixture"),
               search: () => Effect.die("Unused chat history search fixture"),
               read: () => Effect.die("Unused chat history read fixture"),
             },
@@ -8334,6 +8336,81 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         assert.isNull(read.nextOffset);
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
+
+  for (const matchesReviewedHash of [true, false]) {
+    it.effect(
+      `attaches an existing native final only when its reviewed fingerprint matches: ${matchesReviewedHash}`,
+      () =>
+        Effect.gen(function* () {
+          const commands: OrchestrationCommand[] = [];
+          const read = vi
+            .spyOn(CodexChatHistory, "withChatDaemon")
+            .mockImplementation(
+              <A, E>(
+                _home: string,
+                use: (
+                  client: Parameters<typeof CodexChatHistory.readDaemonFinal>[0],
+                ) => Effect.Effect<A, E>,
+              ) => use({} as Parameters<typeof CodexChatHistory.readDaemonFinal>[0]),
+            );
+          const final = vi.spyOn(CodexChatHistory, "readDaemonFinal").mockReturnValue(
+            Effect.succeed({
+              text: "Synthetic existing final",
+              messageId: "synthetic-native-final",
+            }),
+          );
+          try {
+            yield* buildAppUnderTest({
+              layers: {
+                chatHistoryProjection: {
+                  search: () => Effect.die("This attachment fixture does not search"),
+                  read: () => Effect.die("This attachment fixture does not open history"),
+                  nativeBinding: () =>
+                    Effect.succeed({
+                      nativeThreadId: "bound-native-chat",
+                      latestUserMessageAt: null,
+                    }),
+                },
+                orchestrationEngine: {
+                  dispatch: (command) => {
+                    commands.push(command);
+                    return Effect.succeed({ sequence: 42 });
+                  },
+                },
+              },
+            });
+            const wsUrl = yield* getWsServerUrl("/ws");
+            const result = yield* Effect.scoped(
+              withWsRpcClient(wsUrl, (client) =>
+                client[CHAT_HISTORY_METHODS.attachFinal]({
+                  threadId: "synthetic-t3-chat",
+                  nativeTurnId: "synthetic-native-turn",
+                  expectedSha256: matchesReviewedHash
+                    ? NodeCrypto.createHash("sha256")
+                        .update("Synthetic existing final")
+                        .digest("hex")
+                    : "0".repeat(64),
+                }),
+              ),
+            ).pipe(Effect.result);
+            assert.equal(result._tag, matchesReviewedHash ? "Success" : "Failure");
+            assert.equal(commands.length, matchesReviewedHash ? 1 : 0);
+            if (matchesReviewedHash) {
+              assert.equal(commands[0]?.type, "thread.agent-final.attach");
+              assert.deepInclude(commands[0]!, {
+                text: "Synthetic existing final",
+                nativeThreadId: "bound-native-chat",
+                nativeTurnId: "synthetic-native-turn",
+              });
+            }
+            assert.equal(final.mock.calls[0]?.[1], "bound-native-chat");
+          } finally {
+            read.mockRestore();
+            final.mockRestore();
+          }
+        }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    );
+  }
 
   it.effect("routes websocket rpc orchestration shell snapshot errors", () =>
     Effect.gen(function* () {

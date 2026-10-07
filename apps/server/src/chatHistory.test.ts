@@ -15,7 +15,12 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import type { V2ThreadReadResponse__Thread } from "effect-codex-app-server/schema";
 import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite.ts";
 import { readT3Chat, searchT3Chats } from "./chatHistory.ts";
-import { readDaemonChat, searchDaemonChats, withChatDaemon } from "./provider/CodexChatHistory.ts";
+import {
+  readDaemonChat,
+  readDaemonFinal,
+  searchDaemonChats,
+  withChatDaemon,
+} from "./provider/CodexChatHistory.ts";
 
 const memory = SqlitePersistenceMemory.pipe(Layer.provide(NodeServices.layer));
 const date = "2026-10-06T12:00:00.000Z";
@@ -362,6 +367,54 @@ it.effect("keeps users searchable while excluding assistant text from unfinished
     assert.equal(assistant.coverage[0]?.readGaps, false);
   }),
 );
+
+for (const status of ["completed", "inProgress"] as const) {
+  it.effect(`attaches only the selected native turn's existing final when ${status}`, () =>
+    Effect.gen(function* () {
+      const methods: string[] = [];
+      const thread = syntheticThread("native", "User message");
+      const client = {
+        raw: {
+          request: (method: string, params: { turnId?: string }) => {
+            methods.push(method);
+            if (method === "thread/read")
+              return Effect.succeed({ thread: { ...thread, turns: [] } });
+            if (method === "thread/turns/list")
+              return Effect.succeed({
+                data: [
+                  { ...thread.turns[0]!, id: "unrelated-turn", status: "completed", items: [] },
+                  { ...thread.turns[0]!, status, items: [] },
+                ],
+                nextCursor: null,
+              });
+            assert.equal(method, "thread/items/list");
+            assert.equal(params.turnId, "synthetic-turn");
+            return Effect.succeed({
+              data: [
+                {
+                  turnId: "synthetic-turn",
+                  item: { type: "agentMessage", id: "commentary", text: "Earlier commentary" },
+                },
+                {
+                  turnId: "synthetic-turn",
+                  item: { type: "agentMessage", id: "final", text: "Exact existing final" },
+                },
+              ],
+              nextCursor: null,
+            });
+          },
+        },
+      } as unknown as Parameters<typeof readDaemonFinal>[0];
+      const result = yield* readDaemonFinal(client, "native", "synthetic-turn").pipe(Effect.result);
+      if (status === "completed") {
+        assert.equal(result._tag, "Success");
+        if (result._tag === "Success")
+          assert.deepEqual(result.success, { text: "Exact existing final", messageId: "final" });
+      } else assert.equal(result._tag, "Failure");
+      assert.deepEqual(methods, ["thread/read", "thread/turns/list", "thread/items/list"]);
+    }),
+  );
+}
 
 async function syntheticDaemon(platform: NodeJS.Platform) {
   const homePath =

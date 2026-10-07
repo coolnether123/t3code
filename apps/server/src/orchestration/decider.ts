@@ -1773,6 +1773,65 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.agent-final.attach": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      const latestUserMessageAt = thread.messages
+        .filter((message) => message.role === "user")
+        .reduce<string | null>(
+          (latest, message) =>
+            !latest || Date.parse(message.createdAt) > Date.parse(latest)
+              ? message.createdAt
+              : latest,
+          null,
+        );
+      if (
+        thread.deletedAt !== null ||
+        latestUserMessageAt !== command.expectedLatestUserMessageAt
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "The target chat changed before its existing agent reply could be attached.",
+        });
+      }
+      const text =
+        "Otis operator copy, not from Christine. Existing agent reply, copied without sending instructions.\n\n" +
+        command.text;
+      const existing = thread.messages.find((message) => message.id === command.messageId);
+      if (existing) {
+        if (existing.role === "assistant" && existing.text === text) return [];
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "This attachment already has different contents.",
+        });
+      }
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+          metadata: {
+            historyImport: true,
+            operatorAttachment: true,
+            nativeThreadId: command.nativeThreadId,
+            nativeTurnId: command.nativeTurnId,
+            nativeMessageId: command.nativeMessageId,
+          },
+        })),
+        type: "thread.message-sent",
+        payload: {
+          threadId: command.threadId,
+          messageId: command.messageId,
+          role: "assistant",
+          text,
+          turnId: null,
+          streaming: false,
+          createdAt: command.createdAt,
+          updatedAt: command.createdAt,
+        },
+      };
+    }
+
     case "thread.history.import": {
       const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
       if (

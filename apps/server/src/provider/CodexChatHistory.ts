@@ -5,6 +5,7 @@ import {
   type ChatHistorySearchResult,
   type ChatHistoryReadResult,
   type ChatHistoryMatch,
+  ChatHistoryError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
@@ -64,6 +65,7 @@ const decodeText = Schema.decodeUnknownEffect(TextContent);
 const readHistory = Effect.fn("readChatSearchHistory")(function* (
   client: CodexClient.CodexAppServerClient["Service"],
   threadId: string,
+  onlyTurnId?: string,
 ) {
   const request = (method: string, params: unknown) =>
     client.raw
@@ -76,6 +78,7 @@ const readHistory = Effect.fn("readChatSearchHistory")(function* (
     Effect.flatMap(decodeHistory),
   );
   const turns: Array<{
+    id: string;
     status: string;
     startedAt: number | null | undefined;
     items: ReadonlyArray<
@@ -100,58 +103,61 @@ const readHistory = Effect.fn("readChatSearchHistory")(function* (
         ...(cursor ? { cursor } : {}),
       },
     ).pipe(Effect.flatMap(decodeTurnsPage));
-    const searchTurns = yield* Effect.forEach(page.data, (turn) =>
-      Effect.gen(function* () {
-        const items: Array<
-          | typeof AssistantItem.Type
-          | { type: "userMessage"; id: string; content: ReadonlyArray<typeof TextContent.Type> }
-        > = [];
-        const itemCursors = new Set<string>();
-        let itemCursor: string | null = null;
-        do {
-          const itemPage: Effect.Success<ReturnType<typeof decodeItemsPage>> = yield* request(
-            "thread/items/list",
-            {
-              threadId,
-              turnId: turn.id,
-              limit: 10,
-              sortDirection: "asc",
-              ...(itemCursor ? { cursor: itemCursor } : {}),
-            },
-          ).pipe(Effect.flatMap(decodeItemsPage));
-          const searchItems = yield* Effect.forEach(itemPage.data, ({ turnId, item: raw }) =>
-            Effect.gen(function* () {
-              if (turnId !== turn.id)
-                return yield* CodexErrors.CodexAppServerProtocolParseError.fromUnroutableMessage({
-                  type: "mismatchedChatHistoryTurn",
-                });
-              const header = yield* decodeItemType(raw);
-              if (header.type === "agentMessage") return yield* decodeAssistant(raw);
-              if (header.type !== "userMessage") return null;
-              const user = yield* decodeUser(raw);
-              const content = yield* Effect.forEach(user.content, (part) =>
-                Effect.gen(function* () {
-                  const header = yield* decodeItemType(part);
-                  return header.type === "text" ? yield* decodeText(part) : null;
-                }),
-              );
-              return { ...user, content: content.filter((part) => part !== null) };
-            }),
-          );
-          items.push(...searchItems.filter((item) => item !== null));
-          itemCursor = itemPage.nextCursor;
-          if (itemCursor && itemCursors.has(itemCursor))
-            return yield* CodexErrors.CodexAppServerProtocolParseError.fromUnroutableMessage({
-              type: "repeatedChatHistoryItemCursor",
-            });
-          if (itemCursor) itemCursors.add(itemCursor);
-        } while (itemCursor);
-        return {
-          status: turn.status,
-          startedAt: turn.startedAt,
-          items,
-        };
-      }),
+    const searchTurns = yield* Effect.forEach(
+      page.data.filter((turn) => !onlyTurnId || turn.id === onlyTurnId),
+      (turn) =>
+        Effect.gen(function* () {
+          const items: Array<
+            | typeof AssistantItem.Type
+            | { type: "userMessage"; id: string; content: ReadonlyArray<typeof TextContent.Type> }
+          > = [];
+          const itemCursors = new Set<string>();
+          let itemCursor: string | null = null;
+          do {
+            const itemPage: Effect.Success<ReturnType<typeof decodeItemsPage>> = yield* request(
+              "thread/items/list",
+              {
+                threadId,
+                turnId: turn.id,
+                limit: 10,
+                sortDirection: "asc",
+                ...(itemCursor ? { cursor: itemCursor } : {}),
+              },
+            ).pipe(Effect.flatMap(decodeItemsPage));
+            const searchItems = yield* Effect.forEach(itemPage.data, ({ turnId, item: raw }) =>
+              Effect.gen(function* () {
+                if (turnId !== turn.id)
+                  return yield* CodexErrors.CodexAppServerProtocolParseError.fromUnroutableMessage({
+                    type: "mismatchedChatHistoryTurn",
+                  });
+                const header = yield* decodeItemType(raw);
+                if (header.type === "agentMessage") return yield* decodeAssistant(raw);
+                if (header.type !== "userMessage") return null;
+                const user = yield* decodeUser(raw);
+                const content = yield* Effect.forEach(user.content, (part) =>
+                  Effect.gen(function* () {
+                    const header = yield* decodeItemType(part);
+                    return header.type === "text" ? yield* decodeText(part) : null;
+                  }),
+                );
+                return { ...user, content: content.filter((part) => part !== null) };
+              }),
+            );
+            items.push(...searchItems.filter((item) => item !== null));
+            itemCursor = itemPage.nextCursor;
+            if (itemCursor && itemCursors.has(itemCursor))
+              return yield* CodexErrors.CodexAppServerProtocolParseError.fromUnroutableMessage({
+                type: "repeatedChatHistoryItemCursor",
+              });
+            if (itemCursor) itemCursors.add(itemCursor);
+          } while (itemCursor);
+          return {
+            status: turn.status,
+            id: turn.id,
+            startedAt: turn.startedAt,
+            items,
+          };
+        }),
     );
     turns.push(...searchTurns);
     cursor = page.nextCursor;
@@ -162,6 +168,25 @@ const readHistory = Effect.fn("readChatSearchHistory")(function* (
     if (cursor) cursors.add(cursor);
   } while (cursor);
   return { ...response.thread, turns };
+});
+
+/** Read a completed native final without subscribing, resuming or sending input. */
+export const readDaemonFinal = Effect.fn("readDaemonFinal")(function* (
+  client: CodexClient.CodexAppServerClient["Service"],
+  threadId: string,
+  turnId: string,
+) {
+  const thread = yield* readHistory(client, threadId, turnId);
+  const turn = thread.turns.find((turn) => turn.id === turnId);
+  const final =
+    turn?.status === "completed"
+      ? turn.items.findLast((item) => item.type === "agentMessage")
+      : undefined;
+  if (!final?.text.trim())
+    return yield* new ChatHistoryError({
+      message: "This native turn has no completed agent final.",
+    });
+  return { text: final.text, messageId: final.id };
 });
 
 function daemonMessages(thread: Effect.Success<ReturnType<typeof readHistory>>) {

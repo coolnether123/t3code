@@ -1307,6 +1307,20 @@ const ThreadHistoryImportCommand = Schema.Struct({
   ).check(Schema.isNonEmpty()),
 });
 
+// Display a verified existing agent final. Never a user message or turn request.
+const ThreadAgentFinalAttachCommand = Schema.Struct({
+  type: Schema.Literal("thread.agent-final.attach"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  messageId: MessageId,
+  text: Schema.String.check(Schema.isNonEmpty()),
+  nativeThreadId: TrimmedNonEmptyString,
+  nativeTurnId: TrimmedNonEmptyString,
+  nativeMessageId: TrimmedNonEmptyString,
+  expectedLatestUserMessageAt: Schema.NullOr(IsoDateTime),
+  createdAt: IsoDateTime,
+});
+
 const ThreadProposedPlanUpsertCommand = Schema.Struct({
   type: Schema.Literal("thread.proposed-plan.upsert"),
   commandId: CommandId,
@@ -1412,6 +1426,7 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadMessageAssistantDeltaCommand,
   ThreadMessageAssistantCompleteCommand,
   ThreadHistoryImportCommand,
+  ThreadAgentFinalAttachCommand,
   ThreadProposedPlanUpsertCommand,
   ThreadTurnDiffCompleteCommand,
   ThreadActivityAppendCommand,
@@ -1783,6 +1798,10 @@ export const OrchestrationEventMetadata = Schema.Struct({
   requestId: Schema.optional(ApprovalRequestId),
   ingestedAt: Schema.optional(IsoDateTime),
   historyImport: Schema.optional(Schema.Boolean),
+  operatorAttachment: Schema.optional(Schema.Boolean),
+  nativeThreadId: Schema.optional(Schema.String),
+  nativeTurnId: Schema.optional(Schema.String),
+  nativeMessageId: Schema.optional(Schema.String),
   origin: Schema.optional(OrchestrationClientOrigin),
 });
 export type OrchestrationEventMetadata = typeof OrchestrationEventMetadata.Type;

@@ -5,6 +5,7 @@ import * as Option from "effect/Option";
 export const CHAT_HISTORY_METHODS = {
   search: "chatHistory.search",
   read: "chatHistory.read",
+  attachFinal: "chatHistory.attachFinal",
 } as const;
 export const CHAT_HISTORY_MESSAGE_PAGE_SIZE = 50;
 export const CHAT_HISTORY_MESSAGE_TEXT_LIMIT = 8_000;
@@ -72,6 +73,15 @@ export const ChatHistoryReadResult = Schema.Struct({
   nextOffset: Schema.NullOr(Schema.Int),
 });
 export type ChatHistoryReadResult = typeof ChatHistoryReadResult.Type;
+export const ChatHistoryAttachFinalInput = Schema.Struct({
+  threadId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200)),
+  nativeTurnId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200)),
+  expectedSha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+});
+export const ChatHistoryAttachFinalResult = Schema.Struct({
+  sequence: Schema.Int,
+  messageId: Schema.String,
+});
 export class ChatHistoryError extends Schema.TaggedErrorClass<ChatHistoryError>()(
   "ChatHistoryError",
   { message: Schema.String },

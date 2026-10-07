@@ -101,6 +101,20 @@ export const readT3Chat = Effect.fn("readT3Chat")(function* (threadId: string, o
   } satisfies ChatHistoryReadResult;
 });
 
+/** Resolve only the native chat already attached to this T3 thread. */
+export const nativeChatBinding = Effect.fn("nativeChatBinding")(function* (threadId: string) {
+  const sql = yield* SqlClient.SqlClient;
+  const rows = yield* sql<{ nativeThreadId: string; latestUserMessageAt: string | null }>`
+    SELECT s.provider_thread_id AS "nativeThreadId", t.latest_user_message_at AS "latestUserMessageAt"
+    FROM projection_threads t JOIN projection_thread_sessions s ON s.thread_id = t.thread_id
+      JOIN projection_projects p ON p.project_id = t.project_id
+    WHERE t.thread_id = ${threadId} AND t.deleted_at IS NULL AND p.deleted_at IS NULL
+      AND s.provider_name = 'codex' AND s.provider_thread_id IS NOT NULL`;
+  if (!rows[0])
+    return yield* new ChatHistoryError({ message: "This T3 chat has no attached Codex history." });
+  return rows[0];
+});
+
 export class ChatHistoryProjection extends Context.Service<
   ChatHistoryProjection,
   {
@@ -117,6 +131,12 @@ export class ChatHistoryProjection extends Context.Service<
       ChatHistoryReadResult,
       import("effect/unstable/sql/SqlError").SqlError | ChatHistoryError
     >;
+    readonly nativeBinding: (
+      threadId: string,
+    ) => Effect.Effect<
+      { nativeThreadId: string; latestUserMessageAt: string | null },
+      import("effect/unstable/sql/SqlError").SqlError | ChatHistoryError
+    >;
   }
 >()("t3/chatHistory/ChatHistoryProjection") {}
 
@@ -128,6 +148,8 @@ export const layer = Layer.effect(
       search: (input) => searchT3Chats(input).pipe(Effect.provideService(SqlClient.SqlClient, sql)),
       read: (threadId, offset) =>
         readT3Chat(threadId, offset).pipe(Effect.provideService(SqlClient.SqlClient, sql)),
+      nativeBinding: (threadId) =>
+        nativeChatBinding(threadId).pipe(Effect.provideService(SqlClient.SqlClient, sql)),
     });
   }),
 );
