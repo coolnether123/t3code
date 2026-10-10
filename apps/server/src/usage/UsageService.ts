@@ -72,6 +72,16 @@ import {
   validatePromptUsageInput,
 } from "./usagePromptReport.ts";
 import {
+  readOtisPromptReport,
+  selectPromptReport,
+  usableOtisReport,
+} from "./otisPromptSubscriber.ts";
+import {
+  promptCutoverEnabled,
+  requestLocalPromptIndex,
+  setPromptIndexCutover,
+} from "./promptSubscriberState.ts";
+import {
   listTranscriptFilesBounded,
   readDirectoryVolumeId,
   readTranscriptRecords,
@@ -505,6 +515,7 @@ export const layerTest = Layer.succeed(
 
 export const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
+  setPromptIndexCutover(yield* promptCutoverEnabled(process.env, fileSystem));
   const path = yield* Path.Path;
   const config = yield* ServerConfig;
   const settingsService = yield* ServerSettings.ServerSettingsService;
@@ -2063,78 +2074,101 @@ export const make = Effect.gen(function* () {
             detail: "Invalid prompt usage window or unsupported filter.",
           }),
       });
-      const accumulator = new PromptUsageAccumulator(input);
-      const projection = yield* Effect.serviceOption(
-        ProjectionSnapshotQuery.ProjectionSnapshotQuery,
-      );
-      if (Option.isSome(projection) && projection.value.readPromptWordIndex !== undefined) {
-        return yield* projection.value
-          .readPromptWordIndex(input, DateTime.formatIso(yield* DateTime.now))
-          .pipe(
-            Effect.timeout(Duration.millis(3000)),
-            Effect.catchCause(() => {
-              accumulator.reasons.add("projection-read-failed");
-              return Effect.map(DateTime.now, (at) =>
-                accumulator.report(DateTime.formatIso(at), true),
-              );
-            }),
-          );
-      }
-      const query = Option.isSome(projection)
-        ? projection.value.listPromptUsageMessages
-        : undefined;
-      if (Option.isNone(projection) || query === undefined) {
-        accumulator.reasons.add("projection-unavailable");
-        return accumulator.report(DateTime.formatIso(yield* DateTime.now), true);
-      }
-      const startedAt = yield* Clock.currentTimeMillis;
-      const readSequence = () =>
-        projection.value.getSnapshotSequence().pipe(
-          Effect.map((state) => state.snapshotSequence),
-          Effect.catchCause(() => Effect.succeed(null)),
+      const otis =
+        input.promptSource === "t3"
+          ? null
+          : yield* Effect.tryPromise(() => readOtisPromptReport(input)).pipe(
+              Effect.catchCause(() => Effect.succeed(null)),
+            );
+      const cutover = yield* promptCutoverEnabled(process.env, fileSystem);
+      setPromptIndexCutover(cutover);
+      if (input.promptSource !== "t3" && cutover && usableOtisReport(otis))
+        return selectPromptReport(input, otis);
+      yield* requestLocalPromptIndex;
+      const local = yield* Effect.gen(function* () {
+        const accumulator = new PromptUsageAccumulator(input);
+        const projection = yield* Effect.serviceOption(
+          ProjectionSnapshotQuery.ProjectionSnapshotQuery,
         );
-      const initialSequence = yield* readSequence();
-      const { sinceTime, untilTime } = promptUsageTimeBounds(input);
-      let beforeCreatedAt = untilTime;
-      let beforeMessageId = "";
-      while (true) {
-        const elapsedMs = (yield* Clock.currentTimeMillis) - startedAt;
-        if (elapsedMs >= 3000) {
-          accumulator.reasons.add("read-deadline");
-          break;
+        if (Option.isSome(projection) && projection.value.readPromptWordIndex !== undefined) {
+          return yield* projection.value
+            .readPromptWordIndex(input, DateTime.formatIso(yield* DateTime.now))
+            .pipe(
+              Effect.timeout(Duration.millis(3000)),
+              Effect.catchCause(() => {
+                accumulator.reasons.add("projection-read-failed");
+                return Effect.map(DateTime.now, (at) =>
+                  accumulator.report(DateTime.formatIso(at), true),
+                );
+              }),
+            );
         }
-        const rows = yield* query({ sinceTime, untilTime, beforeCreatedAt, beforeMessageId }).pipe(
-          Effect.timeout(Duration.millis(3000 - elapsedMs)),
-          Effect.catchCause(() => {
-            accumulator.reasons.add("projection-read-failed");
-            return Effect.succeed([]);
-          }),
-        );
-        for (const row of rows) {
-          if (
-            accumulator.examinedMessages >= 5000 ||
-            accumulator.textCharacters + row.text.length > 4 * 1024 * 1024
-          ) {
-            accumulator.reasons.add("read-limit");
+        const query = Option.isSome(projection)
+          ? projection.value.listPromptUsageMessages
+          : undefined;
+        if (Option.isNone(projection) || query === undefined) {
+          accumulator.reasons.add("projection-unavailable");
+          return accumulator.report(DateTime.formatIso(yield* DateTime.now), true);
+        }
+        const startedAt = yield* Clock.currentTimeMillis;
+        const readSequence = () =>
+          projection.value.getSnapshotSequence().pipe(
+            Effect.map((state) => state.snapshotSequence),
+            Effect.catchCause(() => Effect.succeed(null)),
+          );
+        const initialSequence = yield* readSequence();
+        const { sinceTime, untilTime } = promptUsageTimeBounds(input);
+        let beforeCreatedAt = untilTime;
+        let beforeMessageId = "";
+        while (true) {
+          const elapsedMs = (yield* Clock.currentTimeMillis) - startedAt;
+          if (elapsedMs >= 3000) {
+            accumulator.reasons.add("read-deadline");
             break;
           }
-          accumulator.add(row);
+          const rows = yield* query({
+            sinceTime,
+            untilTime,
+            beforeCreatedAt,
+            beforeMessageId,
+          }).pipe(
+            Effect.timeout(Duration.millis(3000 - elapsedMs)),
+            Effect.catchCause(() => {
+              accumulator.reasons.add("projection-read-failed");
+              return Effect.succeed([]);
+            }),
+          );
+          for (const row of rows) {
+            if (
+              accumulator.examinedMessages >= 5000 ||
+              accumulator.textCharacters + row.text.length > 4 * 1024 * 1024
+            ) {
+              accumulator.reasons.add("read-limit");
+              break;
+            }
+            accumulator.add(row);
+          }
+          if (rows.length < 32 || accumulator.reasons.has("read-limit")) break;
+          const last = rows[rows.length - 1]!;
+          beforeCreatedAt = last.createdAt;
+          beforeMessageId = last.messageId;
         }
-        if (rows.length < 32 || accumulator.reasons.has("read-limit")) break;
-        const last = rows[rows.length - 1]!;
-        beforeCreatedAt = last.createdAt;
-        beforeMessageId = last.messageId;
-      }
-      const finalSequence = yield* readSequence();
-      if (initialSequence === null || finalSequence === null) {
-        accumulator.reasons.add("projection-sequence-unavailable");
-      } else if (initialSequence !== finalSequence) {
-        accumulator.reasons.add("projection-changed");
-      }
-      return accumulator.report(
-        DateTime.formatIso(yield* DateTime.now),
-        accumulator.examinedMessages === 0 && accumulator.reasons.has("projection-read-failed"),
-      );
+        const finalSequence = yield* readSequence();
+        if (initialSequence === null || finalSequence === null) {
+          accumulator.reasons.add("projection-sequence-unavailable");
+        } else if (initialSequence !== finalSequence) {
+          accumulator.reasons.add("projection-changed");
+        }
+        return accumulator.report(
+          DateTime.formatIso(yield* DateTime.now),
+          accumulator.examinedMessages === 0 && accumulator.reasons.has("projection-read-failed"),
+        );
+      });
+      return input.promptSource === "t3" ||
+        !process.env.T3_OTIS_USAGE_ORIGIN ||
+        process.env.T3_OTIS_USAGE_MODE === "off"
+        ? local
+        : selectPromptReport(input, otis, local);
     }
     if (input.keyword !== undefined || input.sinceDay > input.untilDay) {
       return yield* new UsageReadError({

@@ -5,6 +5,7 @@ import * as Clock from "effect/Clock";
 import type * as SqlClient from "effect/unstable/sql/SqlClient";
 import { isFrequentPromptWord, normalizePromptKeyword, promptWords } from "./promptWords.ts";
 import { promptUsageTimeBounds } from "./usagePromptReport.ts";
+import { promptIndexCutoverEnabled, localPromptFallbackActive } from "./promptSubscriberState.ts";
 
 const MAX_MESSAGE_CHARACTERS = 262144;
 const BATCH_MESSAGES = 32;
@@ -96,6 +97,10 @@ export const warmPromptWordIndexBatch = (sql: SqlClient.SqlClient) =>
 export const runPromptWordIndexer = (sql: SqlClient.SqlClient) =>
   Effect.gen(function* () {
     while (true) {
+      if (promptIndexCutoverEnabled() && !(yield* localPromptFallbackActive)) {
+        yield* Effect.sleep(1000);
+        continue;
+      }
       const processed = yield* warmPromptWordIndexBatch(sql).pipe(
         Effect.catchCause(() => Effect.succeed(0)),
       );

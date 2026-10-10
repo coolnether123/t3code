@@ -11,11 +11,37 @@ export function PromptUsageContent({ report }: { report: UsageReportPrompts }) {
     return (
       <p role="status" className="text-sm text-muted-foreground">
         Prompt history is unavailable.
+        {report.analytics?.reason === "otis-unavailable"
+          ? " Otis is unavailable. Refresh to reconnect."
+          : null}
+      </p>
+    );
+  }
+  if (report.coverage.status === "partial" && report.totals.prompts === 0) {
+    return (
+      <p role="status" className="text-sm text-muted-foreground">
+        Prompt history is partial. No complete counts are available yet. Refresh to check indexing.
       </p>
     );
   }
   return (
     <>
+      {report.analytics ? (
+        <p role="status" className="text-xs text-muted-foreground">
+          {report.analytics.authority === "Otis" ? "Otis analytics." : "Using T3's retained index."}
+          {report.analytics.reason === "otis-unavailable"
+            ? " Otis is unavailable. Refresh to reconnect."
+            : null}
+          {report.analytics.reason === "otis-index-partial" ? " Otis is still indexing." : null}
+          {report.analytics.freshness === "stale" ? " Otis data is stale." : null}
+          {report.analytics.parity === "mismatch"
+            ? " The two reports differ. T3 remains selected."
+            : null}
+          {report.analytics.sourceObservedAt
+            ? ` Otis source observed ${report.analytics.sourceObservedAt}.`
+            : null}
+        </p>
+      ) : null}
       {report.coverage.status === "partial" ? (
         <p role="status" className="text-xs text-muted-foreground">
           Partial history. These counts cover only the messages examined, not the entire period.

@@ -21,6 +21,7 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Scheduler from "effect/Scheduler";
+import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
@@ -30,6 +31,8 @@ import * as ServerSettings from "../serverSettings.ts";
 import { vi } from "vite-plus/test";
 import * as UsageService from "./UsageService.ts";
 import { UsageScanStore } from "./usageScanStore.ts";
+
+const encodeProof = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 function claudeLine(
   id: number,
@@ -152,6 +155,103 @@ function totalOutputTokens(summary: { buckets: readonly { totals: { outputTokens
 }
 
 describe("UsageService", () => {
+  it.live(
+    "dual-reads prompts, admits a receipt-gated subscriber and independently falls back",
+    () =>
+      Effect.gen(function* () {
+        const { settings, home } = yield* setup;
+        const service = yield* UsageService.make.pipe(
+          Effect.provide(serviceLayers({ prefix: "otis-prompt-subscriber", home, settings })),
+        );
+        const input = {
+          mode: "prompts" as const,
+          sinceDay: UsageDay.make("2026-08-01"),
+          untilDay: UsageDay.make("2026-08-01"),
+          timeZone: "UTC",
+        };
+        const producer = yield* service.readReport(input).pipe(
+          Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+            getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 1 }),
+            listPromptUsageMessages: () =>
+              Effect.succeed([
+                {
+                  messageId: "synthetic",
+                  threadId: "thread",
+                  createdAt: "2026-08-01T10:00:00Z",
+                  text: "build build",
+                  textLength: 11,
+                },
+              ]),
+          } as never),
+        );
+        const analytics = {
+          ...producer,
+          schemaVersion: 1,
+          authority: "Otis:usage-analytics",
+          sourceId: "t3-local",
+          countingPolicy: "unicode-runs-nfkc-v1",
+          status: "available",
+          window: {
+            ...input,
+            sinceTime: "2026-08-01T00:00:00.000Z",
+            untilTime: "2026-08-02T00:00:00.000Z",
+          },
+          coverage: { ...producer.coverage, sourceMessages: 1 },
+          freshness: {
+            status: "current",
+            sourceObservedAt: producer.readAt,
+            ageMs: 0,
+            revision: 1,
+          },
+        };
+        vi.stubEnv("T3_OTIS_USAGE_ORIGIN", "http://127.0.0.1:5197");
+        vi.stubEnv("T3_OTIS_USAGE_TOKEN", "synthetic-token");
+        vi.stubEnv("T3_OTIS_USAGE_MODE", "dual");
+        vi.stubGlobal("fetch", async () => Response.json(analytics));
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            vi.unstubAllEnvs();
+            vi.unstubAllGlobals();
+          }),
+        );
+        let localReads = 0;
+        const read = (forced = false) =>
+          service.readReport({ ...input, ...(forced ? { promptSource: "t3" as const } : {}) }).pipe(
+            Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+              readPromptWordIndex: () => {
+                localReads++;
+                return Effect.succeed(producer);
+              },
+            } as never),
+          );
+        assert.strictEqual((yield* read()).analytics?.parity, "matched");
+        assert.strictEqual(localReads, 1);
+        const receipt = NodePath.join(home, "synthetic-parity.json");
+        const proof = yield* encodeProof({
+          schemaVersion: 1,
+          reportContractVersion: 1,
+          countingPolicy: "unicode-runs-nfkc-v1",
+          matched: true,
+          sourceDrift: false,
+          windows: [{ matched: true }],
+        });
+        yield* Effect.promise(() => NodeFSP.writeFile(receipt, proof));
+        vi.stubEnv("T3_OTIS_USAGE_MODE", "otis");
+        vi.stubEnv("T3_OTIS_USAGE_PARITY_RECEIPT", receipt);
+        assert.strictEqual((yield* read()).analytics?.parity, "cutover-verified");
+        assert.strictEqual(localReads, 1);
+        assert.isUndefined((yield* read(true)).analytics);
+        assert.strictEqual(localReads, 2);
+        vi.stubGlobal("fetch", async () => new Response(null, { status: 503 }));
+        assert.strictEqual((yield* read()).analytics?.reason, "otis-unavailable");
+        assert.strictEqual(localReads, 3);
+        vi.stubGlobal("fetch", async () => Response.json(analytics));
+        assert.strictEqual((yield* read()).analytics?.authority, "Otis");
+        yield* Effect.promise(() => NodeFSP.unlink(receipt));
+        assert.strictEqual((yield* read()).analytics?.parity, "matched");
+        assert.strictEqual(localReads, 4);
+      }).pipe(Effect.scoped),
+  );
   it.live("reads prompt projections without fetching pricing or scanning provider history", () =>
     Effect.gen(function* () {
       const { settings, home } = yield* setup;

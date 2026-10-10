@@ -48,6 +48,62 @@ const report: UsageReportPrompts = {
 };
 
 describe("prompt usage rendering", () => {
+  it("does not show zero measurements while a partial index has no counted prompts", () => {
+    const html = renderToStaticMarkup(
+      <PromptUsageContent
+        report={{
+          ...report,
+          totals: { ...report.totals, prompts: 0 },
+          coverage: { ...report.coverage, status: "partial" },
+        }}
+      />,
+    );
+    expect(html).toContain("No complete counts");
+    expect(html).not.toContain("Words per prompt");
+    expect(html).not.toContain("No stored user prompts");
+  });
+  it("labels fallback, stale data and mismatches without claiming Otis is selected", () => {
+    const html = renderToStaticMarkup(
+      <PromptUsageContent
+        report={{
+          ...report,
+          analytics: {
+            authority: "T3-fallback",
+            freshness: "stale",
+            sourceObservedAt: "2026-10-09T00:00:00.000Z",
+            parity: "mismatch",
+            differences: ["words"],
+            reason: "otis-stale",
+          },
+        }}
+      />,
+    );
+    expect(html).toContain("retained index");
+    expect(html).toContain("stale");
+    expect(html).toContain("reports differ");
+  });
+  it("shows unavailable and reconnection instructions without a false zero", () => {
+    const html = renderToStaticMarkup(
+      <PromptUsageContent
+        report={{
+          ...report,
+          coverage: { ...report.coverage, status: "missing" },
+          totals: { ...report.totals, prompts: 0 },
+          analytics: {
+            authority: "T3-fallback",
+            freshness: "unavailable",
+            sourceObservedAt: null,
+            parity: "unavailable",
+            differences: [],
+            reason: "otis-unavailable",
+          },
+        }}
+      />,
+    );
+    expect(html).toContain("unavailable");
+    expect(html).not.toContain("No stored user prompts");
+    expect(html).not.toContain("Words per prompt");
+  });
   it("shows partial indexing progress without inventing older producer coverage", () => {
     const partial = {
       ...report,

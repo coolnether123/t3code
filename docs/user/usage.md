@@ -1,5 +1,10 @@
 # Review usage
 
+Prompt and word reports can come from Otis analytics. If Otis is unavailable,
+still indexing or stale, the page labels its retained T3 fallback. If reports
+disagree, T3 remains selected. Refresh retries the connection. Missing history
+is shown as unavailable, not zero prompts. Words are not tokens.
+
 ## Prompts and words
 
 The Usage page reports stored user messages in **Prompts & words** for the

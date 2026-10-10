@@ -35,6 +35,7 @@ export * from "./previewAutomation.ts";
 export * from "./computerControl.ts";
 export * from "./resourceTelemetry.ts";
 export * from "./usage.ts";
+export * from "./otisUsage.ts";
 export * from "./providerUsageLimits.ts";
 export * from "./usageLimitSourceId.ts";
 export * from "./resetCheck.ts";

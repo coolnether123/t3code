@@ -19,6 +19,7 @@ import {
   warmPromptWordIndexBatch,
   runPromptWordIndexer,
 } from "./promptWordIndex.ts";
+import { requestLocalPromptIndex, setPromptIndexCutover } from "./promptSubscriberState.ts";
 
 const input = {
   mode: "prompts" as const,
@@ -203,6 +204,44 @@ it.effect("the background worker progresses without reads and is interrupted wit
       assert.strictEqual((yield* readPromptWordIndex(sql, input, now)).keyword?.count, 65);
     }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
   ),
+);
+
+it.effect(
+  "admitted cutover retains pending IDs, fallback resumes indexing and rollback stays independent",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* createSource(sql);
+        yield* migration;
+        setPromptIndexCutover(true);
+        yield* Effect.addFinalizer(() => Effect.sync(() => setPromptIndexCutover(false)));
+        yield* sql`INSERT INTO projection_thread_messages VALUES ('first', 'thread', 'user', 'build', ${now}, ${now})`;
+        yield* Effect.forkScoped(runPromptWordIndexer(sql));
+        yield* TestClock.adjust(1000);
+        const paused = yield* readPromptWordIndex(sql, input, now);
+        assert.strictEqual(paused.coverage.status, "partial");
+        assert.strictEqual(paused.coverage.examinedMessages, 0);
+        assert.strictEqual(paused.coverage.sourceMessages, 1);
+        yield* requestLocalPromptIndex;
+        yield* TestClock.adjust(1000);
+        assert.strictEqual((yield* readPromptWordIndex(sql, input, now)).keyword?.count, 1);
+        yield* TestClock.adjust(61000);
+        yield* sql`UPDATE projection_thread_messages SET text = 'build build' WHERE message_id = 'first'`;
+        yield* TestClock.adjust(1000);
+        assert.strictEqual(
+          (yield* readPromptWordIndex(sql, input, now)).coverage.status,
+          "partial",
+        );
+        setPromptIndexCutover(false);
+        yield* TestClock.adjust(1000);
+        assert.strictEqual((yield* readPromptWordIndex(sql, input, now)).keyword?.count, 2);
+        assert.strictEqual(
+          (yield* sql`SELECT message_id FROM projection_thread_messages`).length,
+          1,
+        );
+      }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
+    ),
 );
 
 it.effect("migration is additive and a pre-migration backup remains restorable", () =>

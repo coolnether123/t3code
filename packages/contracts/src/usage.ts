@@ -547,6 +547,8 @@ export const UsageReportInput = Schema.Struct({
   limit: Schema.optional(UsageReportRowLimit),
   /** Single normalized whole word; supported only by prompt reports. */
   keyword: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(64))),
+  /** Read the retained local producer during the prompt compatibility window. */
+  promptSource: Schema.optional(Schema.Literal("t3")),
   /** Exact provider-native run/session IDs; supported only by `mode: "runs"`. */
   runIds: Schema.optional(UsageReportRunIds),
   /** Optional live quota interval reads; saved snapshots are returned by default. */
@@ -852,6 +854,16 @@ export const UsageReportPrompts = Schema.Struct({
   ),
   wordsTruncated: Schema.Boolean,
   countingPolicy: Schema.String,
+  analytics: Schema.optional(
+    Schema.Struct({
+      authority: Schema.Literals(["Otis", "T3-fallback"]),
+      freshness: Schema.Literals(["current", "stale", "unavailable"]),
+      sourceObservedAt: Schema.NullOr(Schema.String),
+      parity: Schema.Literals(["matched", "mismatch", "unavailable", "cutover-verified"]),
+      differences: Schema.Array(Schema.String).check(Schema.isMaxLength(16)),
+      reason: Schema.optional(Schema.String),
+    }),
+  ),
 });
 export type UsageReportPrompts = typeof UsageReportPrompts.Type;
 
