@@ -1,3 +1,4 @@
+import { readPromptWordIndex, runPromptWordIndexer } from "../../usage/promptWordIndex.ts";
 import {
   AgentSessionImportSource,
   ApprovalRequestId,
@@ -447,6 +448,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const threadBackgroundLiveness = yield* ThreadBackgroundLivenessService;
   const threadPlanProgress = yield* ThreadPlanProgressService;
   const sql = yield* SqlClient.SqlClient;
+  yield* Effect.forkScoped(runPromptWordIndexer(sql));
   const repositoryIdentityResolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
   const repositoryIdentityResolutionConcurrency = 4;
   const resolveRepositoryIdentitiesForProjects = Effect.fn(
@@ -3365,6 +3367,10 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getImportedAgentSessionSources,
     findThreadMappingsByProviderSessionIds,
     listPromptUsageMessages,
+    readPromptWordIndex: (input, readAt) =>
+      readPromptWordIndex(sql, input, readAt).pipe(
+        Effect.mapError(toPersistenceSqlError("ProjectionSnapshotQuery.readPromptWordIndex")),
+      ),
     getThreadCheckpointContext,
     getFullThreadDiffContext,
     getThreadShellById,

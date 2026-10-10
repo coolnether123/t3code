@@ -545,6 +545,8 @@ export const UsageReportInput = Schema.Struct({
   ),
   /** Output row cap. The server applies a mode-specific default when omitted. */
   limit: Schema.optional(UsageReportRowLimit),
+  /** Single normalized whole word; supported only by prompt reports. */
+  keyword: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(64))),
   /** Exact provider-native run/session IDs; supported only by `mode: "runs"`. */
   runIds: Schema.optional(UsageReportRunIds),
   /** Optional live quota interval reads; saved snapshots are returned by default. */
@@ -815,6 +817,7 @@ export const UsageReportPrompts = Schema.Struct({
     status: Schema.Literals(["complete", "partial", "missing"]),
     examinedMessages: NonNegativeInt,
     countedMessages: NonNegativeInt,
+    sourceMessages: Schema.optional(NonNegativeInt),
     truncatedMessages: NonNegativeInt,
     reasons: Schema.Array(Schema.String).check(Schema.isMaxLength(8)),
   }),
@@ -840,6 +843,13 @@ export const UsageReportPrompts = Schema.Struct({
     }),
   ).check(Schema.isMaxLength(512)),
   countedDistinctWords: NonNegativeInt,
+  keyword: Schema.optional(
+    Schema.Struct({
+      word: Schema.String,
+      count: NonNegativeInt,
+      prompts: NonNegativeInt,
+    }),
+  ),
   wordsTruncated: Schema.Boolean,
   countingPolicy: Schema.String,
 });

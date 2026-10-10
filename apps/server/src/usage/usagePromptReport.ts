@@ -1,11 +1,6 @@
 import { UsageDay, type UsageReportInput, type UsageReportPrompts } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
-
-const COMMON_WORDS = new Set(
-  "a an and are as at be been but by can do for from had has have i if in is it its me my not of on or our so that the their them then there these they this to us was we were what when which who will with you your".split(
-    " ",
-  ),
-);
+import { normalizePromptKeyword, promptWords, isFrequentPromptWord } from "./promptWords.ts";
 
 export type PromptUsageMessage = {
   readonly messageId: string;
@@ -24,6 +19,8 @@ export class PromptUsageAccumulator {
   private words = 0;
   private characters = 0;
   private truncatedMessages = 0;
+  private keywordCount = 0;
+  private keywordPrompts = 0;
   private readonly threads = new Set<string>();
   private readonly seenMessages = new Set<string>();
   private readonly vocabulary = new Map<string, number>();
@@ -73,20 +70,24 @@ export class PromptUsageAccumulator {
       this.reasons.add("message-text-limit");
       return;
     }
-    for (const match of message.text
-      .normalize("NFKC")
-      .matchAll(/[\p{L}\p{N}][\p{L}\p{M}\p{N}]*/gu)) {
+    const keyword =
+      this.input.keyword === undefined ? undefined : normalizePromptKeyword(this.input.keyword);
+    let matched = false;
+    for (const word of promptWords(message.text)) {
       this.words++;
       daily.words++;
-      const word = match[0].toLowerCase();
-      if (word.length < 2 || word.length > 64 || /\p{N}/u.test(word) || COMMON_WORDS.has(word))
-        continue;
+      if (word === keyword) {
+        this.keywordCount++;
+        matched = true;
+      }
+      if (!isFrequentPromptWord(word)) continue;
       if (this.vocabulary.has(word) || this.vocabulary.size < 50_000) {
         this.vocabulary.set(word, (this.vocabulary.get(word) ?? 0) + 1);
       } else {
         this.reasons.add("vocabulary-limit");
       }
     }
+    if (matched) this.keywordPrompts++;
   }
 
   report(readAt: string, missing = false): UsageReportPrompts {
@@ -114,7 +115,7 @@ export class PromptUsageAccumulator {
         threads: this.threads.size,
         activeDays: this.daily.size,
         averageWordsPerPrompt:
-          this.prompts === 0 || this.truncatedMessages > 0 ? null : this.words / this.prompts,
+          this.prompts === 0 || this.reasons.size > 0 ? null : this.words / this.prompts,
       },
       daily: [...this.daily]
         .sort(([a], [b]) => a.localeCompare(b))
@@ -124,6 +125,15 @@ export class PromptUsageAccumulator {
         })),
       words: words.slice(0, limit).map(([word, count]) => ({ word, count })),
       countedDistinctWords: words.length,
+      ...(this.input.keyword === undefined || missing
+        ? {}
+        : {
+            keyword: {
+              word: normalizePromptKeyword(this.input.keyword),
+              count: this.keywordCount,
+              prompts: this.keywordPrompts,
+            },
+          }),
       wordsTruncated: words.length > limit || this.reasons.has("vocabulary-limit"),
       countingPolicy:
         "One persisted T3 user-message ID is one prompt, including imports and archived chats. Copies in separate T3 threads count separately. Attachment-only messages count as prompts; attachment contents, system instructions, tools and assistant text are excluded. Words are NFKC-normalized Unicode letter/number runs; characters are Unicode code points. Frequent words are lowercase, omit common English words and word runs containing digits, and are not token counts. Punctuation splits words, so gpt-4o contributes gpt. A changing projection or read limit makes totals best-effort partial observations, not complete usage.",
@@ -164,6 +174,7 @@ export function promptUsageTimeBounds(input: UsageReportInput) {
 }
 
 export function validatePromptUsageInput(input: UsageReportInput): void {
+  if (input.keyword !== undefined) normalizePromptKeyword(input.keyword);
   const since = Date.parse(`${input.sinceDay}T00:00:00Z`);
   const until = Date.parse(`${input.untilDay}T00:00:00Z`);
   if (

@@ -2067,6 +2067,19 @@ export const make = Effect.gen(function* () {
       const projection = yield* Effect.serviceOption(
         ProjectionSnapshotQuery.ProjectionSnapshotQuery,
       );
+      if (Option.isSome(projection) && projection.value.readPromptWordIndex !== undefined) {
+        return yield* projection.value
+          .readPromptWordIndex(input, DateTime.formatIso(yield* DateTime.now))
+          .pipe(
+            Effect.timeout(Duration.millis(3000)),
+            Effect.catchCause(() => {
+              accumulator.reasons.add("projection-read-failed");
+              return Effect.map(DateTime.now, (at) =>
+                accumulator.report(DateTime.formatIso(at), true),
+              );
+            }),
+          );
+      }
       const query = Option.isSome(projection)
         ? projection.value.listPromptUsageMessages
         : undefined;
@@ -2123,7 +2136,7 @@ export const make = Effect.gen(function* () {
         accumulator.examinedMessages === 0 && accumulator.reasons.has("projection-read-failed"),
       );
     }
-    if (input.sinceDay > input.untilDay) {
+    if (input.keyword !== undefined || input.sinceDay > input.untilDay) {
       return yield* new UsageReadError({
         reason: "invalidWindow",
         detail: `sinceDay '${input.sinceDay}' is after untilDay '${input.untilDay}'`,

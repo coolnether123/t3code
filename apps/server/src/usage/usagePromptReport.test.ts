@@ -91,6 +91,26 @@ describe("persisted prompt usage", () => {
     expect(new PromptUsageAccumulator(input).report(now).coverage.status).toBe("complete");
   });
 
+  it("reproduces the legacy projection's long-prompt undercount", () => {
+    const text = "word ".repeat(7000);
+    const accumulator = new PromptUsageAccumulator(input);
+    // ProjectionSnapshotQuery previously selected substr(text, 1, 32768).
+    accumulator.add({ ...message(text.slice(0, 32768)), textLength: text.length });
+    expect(accumulator.report(now).totals.words).toBe(0);
+    expect(accumulator.report(now).coverage.reasons).toContain("message-text-limit");
+  });
+
+  it("uses the same whole-word normalization for keyword totals including common words", () => {
+    const accumulator = new PromptUsageAccumulator({ ...input, keyword: "THE" });
+    accumulator.add(message("The theater the\nTHE", "voice-id"));
+    accumulator.add(message("The theater the\nTHE", "voice-id"));
+    accumulator.add(message("the", "real-repeat"));
+    const report = accumulator.report(now);
+    expect(report.keyword).toEqual({ word: "the", count: 4, prompts: 2 });
+    expect(report.totals.words).toBe(5);
+    expect(report.totals.averageWordsPerPrompt).toBeNull();
+  });
+
   it("caps word output without changing counts", () => {
     const accumulator = new PromptUsageAccumulator({ ...input, limit: 1 });
     accumulator.add(message("zebra build build alpha"));

@@ -1,6 +1,6 @@
 import type { EnvironmentId, UsageReportInput, UsageReportPrompts } from "@t3tools/contracts";
 import { formatCount } from "@t3tools/shared/usageFormat";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { serverEnvironment } from "../../state/server";
 import { useEnvironmentQuery } from "../../state/query";
 import type { EnvironmentUsageStatus } from "../../state/usage";
@@ -19,6 +19,9 @@ export function PromptUsageContent({ report }: { report: UsageReportPrompts }) {
       {report.coverage.status === "partial" ? (
         <p role="status" className="text-xs text-muted-foreground">
           Partial history. These counts cover only the messages examined, not the entire period.
+          {report.coverage.sourceMessages !== undefined
+            ? ` Indexed ${formatCount(report.coverage.examinedMessages)} of ${formatCount(report.coverage.sourceMessages)} stored prompts. Refresh to check progress.`
+            : null}
         </p>
       ) : null}
       <dl className="flex flex-wrap gap-x-8 gap-y-3 text-sm">
@@ -40,8 +43,23 @@ export function PromptUsageContent({ report }: { report: UsageReportPrompts }) {
           </div>
         ))}
       </dl>
+      {report.keyword ? (
+        <p role="status" className="text-sm">
+          {report.keyword.word}: {formatCount(report.keyword.count)} occurrences in{" "}
+          {formatCount(report.keyword.prompts)} prompts.
+        </p>
+      ) : null}
+      <details className="text-xs text-muted-foreground">
+        <summary>Counting rules and source coverage</summary>
+        <p className="mt-2">{report.countingPolicy}</p>
+        {report.coverage.reasons.length ? <p>{report.coverage.reasons.join(", ")}</p> : null}
+      </details>
       {report.totals.prompts === 0 ? (
-        <p className="text-sm text-muted-foreground">No stored user prompts in this period.</p>
+        <p className="text-sm text-muted-foreground">
+          {report.coverage.status === "complete"
+            ? "No stored user prompts in this period."
+            : "No counted prompts yet; history is partial."}
+        </p>
       ) : (
         <div className="grid min-w-0 gap-5 md:grid-cols-2">
           <div>
@@ -166,6 +184,8 @@ export function UsagePrompts({
   window: Omit<UsageReportInput, "mode">;
   refreshRevision: number;
 }) {
+  const [keywordDraft, setKeywordDraft] = useState("");
+  const [keyword, setKeyword] = useState("");
   const input: UsageReportInput = {
     mode: "prompts",
     sinceDay: window.sinceDay,
@@ -175,6 +195,7 @@ export function UsagePrompts({
       ? {}
       : { sinceTime: window.sinceTime, untilTime: window.untilTime }),
     limit: 20,
+    ...(keyword ? { keyword } : {}),
   };
   const selected = environments.filter(
     (entry) => selectedEnvironmentIds === null || selectedEnvironmentIds.has(entry.environmentId),
@@ -189,6 +210,39 @@ export function UsagePrompts({
           separately; environments are not added together.
         </p>
       </div>
+      <form
+        className="flex flex-wrap items-end gap-2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          setKeyword(keywordDraft.trim());
+        }}
+      >
+        <label className="text-xs">
+          Count a word (including common words and numbers)
+          <input
+            aria-label="Count a word"
+            value={keywordDraft}
+            maxLength={64}
+            pattern="[\p{L}\p{N}][\p{L}\p{M}\p{N}]*"
+            onChange={(event) => setKeywordDraft(event.target.value)}
+            className="mt-1 block rounded border border-border bg-background px-2 py-1 text-sm"
+          />
+        </label>
+        <Button type="submit" size="xs">
+          Count word
+        </Button>
+        <Button
+          type="button"
+          size="xs"
+          variant="ghost"
+          onClick={() => {
+            setKeywordDraft("");
+            setKeyword("");
+          }}
+        >
+          Clear
+        </Button>
+      </form>
       {selected.length === 0 ? (
         <p role="status" className="text-sm text-muted-foreground">
           No environments selected.

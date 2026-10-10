@@ -6,10 +6,18 @@ The Usage page reports stored user messages in **Prompts & words** for the
 selected period. Each environment has its own counts, frequent words and daily
 table. Use the panel's Refresh button to read newly stored messages.
 
+Use **Count a word** to find occurrences across the selected period. Enter one
+word, including common words or numbers. Search matches a whole normalized
+word, so `the` does not match `theater`. **Clear** removes the search. The result
+shows occurrences and the number of prompts containing the word.
+
 Each stored user-message ID counts as one prompt. Imported and archived chats
 are included. Repeated submissions count separately, as do copies stored in
 separate chats. Chats outside this environment's T3 history are not included.
 These counts describe stored messages, not provider requests or authored text.
+They do not verify who authored every imported user message. Voice mirrors that
+reuse a message ID count once. Copies with separate IDs count separately when
+the stored history has no shared source identity.
 
 Word counts use Unicode letter and number runs after text normalization.
 Frequent words are lowercase and omit common English words and word runs
@@ -17,12 +25,24 @@ containing digits. Punctuation splits words, so `gpt-4o` contributes `gpt`.
 Code and pasted instructions in user messages contribute to the
 word count. Attachment-only messages count as prompts, but attachment contents,
 agent replies, system messages and tools do not contribute words.
+Combining marks remain inside words; composed and decomposed accents match.
+Emoji do not count as words. Inline quotations count as submitted text.
 
 Words are not tokens, costs or subscription usage. Environments are shown
 separately rather than adding potentially copied history together. A partial
 history notice means the counts cover only the examined subset. Missing history
 is unavailable, not a zero. The report contains counts and individual frequent
 words, never full prompt text.
+
+Counts use a local derived index. A partial `index-warming` notice means the
+background indexer is building the remaining stored history. The indexed and
+stored prompt counts show progress. Use Refresh to read the latest counts.
+Indexing continues without more requests and resumes after a server restart.
+Edits and deletions invalidate their indexed counts. Oversized messages remain
+partial instead of contributing a prefix word count, and partial reports omit
+the word average. Complete coverage means all stored messages in the period
+were indexed. Imports may omit older messages, and messages outside the stored
+history remain unknown.
 
 For a birthday palette and tap effects on these screens, see [Celebrate your birthday](birthday-theme.md).
 

@@ -78,6 +78,10 @@ export interface ProjectionThreadDetailQuery {
  * ProjectionSnapshotQueryShape - Service API for read-model snapshots.
  */
 export interface ProjectionSnapshotQueryShape {
+  readonly readPromptWordIndex?: (
+    input: import("@t3tools/contracts").UsageReportInput,
+    readAt: string,
+  ) => Effect.Effect<import("@t3tools/contracts").UsageReportPrompts, ProjectionRepositoryError>;
   /** Bounded keyset read of persisted user messages, including archived threads. */
   readonly listPromptUsageMessages?: (input: {
     readonly sinceTime: string;

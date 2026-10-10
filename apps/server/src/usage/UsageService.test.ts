@@ -201,6 +201,28 @@ describe("UsageService", () => {
       assert.strictEqual(report.totals.words, 2);
       assert.strictEqual(report.coverage.status, "complete");
       assert.strictEqual(ratesFetches, 0);
+      let indexedReads = 0;
+      const indexed = yield* service.readReport({ ...input, keyword: "build" }).pipe(
+        Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+          readPromptWordIndex: (request: UsageReportInput) => {
+            indexedReads++;
+            assert.strictEqual(request.keyword, "build");
+            return Effect.succeed({ ...report, keyword: { word: "build", count: 2, prompts: 1 } });
+          },
+          listPromptUsageMessages: () =>
+            Effect.die("Legacy scan should not run when the index is present"),
+        } as never),
+      );
+      assert.strictEqual(indexedReads, 1);
+      assert.strictEqual(indexed.keyword?.count, 2);
+      const indexFailure = yield* service.readReport({ ...input, keyword: "build" }).pipe(
+        Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+          readPromptWordIndex: () => Effect.die("Fixture index unavailable"),
+        } as never),
+      );
+      assert.strictEqual(indexFailure.coverage.status, "missing");
+      assert.isUndefined(indexFailure.keyword);
+      assert.include(indexFailure.coverage.reasons, "projection-read-failed");
       let sequence = 1;
       const changing = yield* service.readReport(input).pipe(
         Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
