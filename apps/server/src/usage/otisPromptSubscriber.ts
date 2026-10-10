@@ -129,10 +129,15 @@ export function selectPromptReport(
     "countedDistinctWords",
     "wordsTruncated",
   ] as const;
+  // Both sides are JSON contract values. Local rows come from SQLite with null prototypes,
+  // so compare their JSON form instead of object identity or prototype.
+  const sameValue = (left: unknown, right: unknown) =>
+    NodeUtil.isDeepStrictEqual(
+      left === undefined ? undefined : JSON.parse(JSON.stringify(left)),
+      right === undefined ? undefined : JSON.parse(JSON.stringify(right)),
+    );
   const differences: string[] =
-    local && otis
-      ? fields.filter((field) => !NodeUtil.isDeepStrictEqual(otis[field], local[field]))
-      : [];
+    local && otis ? fields.filter((field) => !sameValue(otis[field], local[field])) : [];
   if (local && otis)
     for (const field of [
       "status",
@@ -141,7 +146,7 @@ export function selectPromptReport(
       "truncatedMessages",
       "reasons",
     ] as const)
-      if (!NodeUtil.isDeepStrictEqual(otis.coverage[field], local.coverage[field]))
+      if (!sameValue(otis.coverage[field], local.coverage[field]))
         differences.push(`coverage.${field}`);
   const parity = !local
     ? "cutover-verified"

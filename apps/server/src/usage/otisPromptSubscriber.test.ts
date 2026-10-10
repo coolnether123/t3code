@@ -147,6 +147,25 @@ describe("Otis prompt subscriber compatibility", () => {
     expect(counted.analytics?.differences).toContain("totals");
     expect(counted.totals.prompts).toBe(2);
   });
+  it("compares SQLite rows and decoded reports by value, not prototype", () => {
+    // node:sqlite returns null-prototype row objects; the decoded Otis report has plain ones.
+    const row = <T extends object>(value: T): T => Object.assign(Object.create(null), value);
+    const sqliteLocal: UsageReportPrompts = {
+      ...local,
+      words: report.words.map(row),
+      keyword: row(report.keyword!),
+    };
+    const decoded = Schema.decodeUnknownSync(OtisPromptReport)(JSON.parse(JSON.stringify(report)));
+    const matched = selectPromptReport(input, decoded, sqliteLocal);
+    expect(matched.analytics?.parity).toBe("matched");
+    expect(matched.analytics?.differences).toEqual([]);
+    const miscounted = selectPromptReport(input, decoded, {
+      ...sqliteLocal,
+      words: [row({ word: "chrome", count: 3 }), row({ word: "build", count: 1 })],
+    });
+    expect(miscounted.analytics?.parity).toBe("mismatch");
+    expect(miscounted.analytics?.differences).toEqual(["words"]);
+  });
   it("missing history stays missing and old producers remain compatible", () => {
     const old = decodeLocalReport(local);
     expect(old.analytics).toBeUndefined();
