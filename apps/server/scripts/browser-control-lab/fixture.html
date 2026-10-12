@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Browser control synthetic lab</title>
+  <style>
+    body {
+      font: 16px system-ui;
+      color: #17251d;
+      background: #f7f9f7;
+      margin: 24px;
+      max-width: 960px;
+    }
+    nav,
+    main,
+    dialog {
+      background: white;
+      border: 1px solid #b6c6ba;
+      padding: 20px;
+    }
+    nav a {
+      margin-right: 24px;
+    }
+    h1 {
+      font-size: 24px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-block: 16px;
+    }
+    td,
+    th {
+      text-align: left;
+      border-bottom: 1px solid #ccd7cf;
+      padding: 12px;
+    }
+    button,
+    input {
+      font: inherit;
+      padding: 8px;
+      border: 1px solid #788f7d;
+      border-radius: 6px;
+    }
+    button {
+      background: #edf4ee;
+      cursor: pointer;
+    }
+    button:disabled {
+      cursor: wait;
+    }
+    label {
+      display: block;
+      margin-block: 16px;
+    }
+    label input {
+      display: block;
+      margin-top: 6px;
+    }
+    :focus-visible {
+      outline: 2px solid #316f43;
+      outline-offset: 2px;
+    }
+    dialog::backdrop {
+      background: #17251d66;
+    }
+    [role="status"] {
+      min-height: 24px;
+    }
+    @media (max-width: 600px) {
+      body {
+        margin: 8px;
+      }
+      main {
+        padding: 12px;
+      }
+      table {
+        font-size: 14px;
+      }
+    }
+  </style>
+  <nav>
+    <a href="/?step=bank">For review</a><a href="/?step=bill">Bill</a
+    ><a href="/?step=time">Timesheet</a>
+  </nav>
+  <p>LOCAL SYNTHETIC FIXTURE. No accounts, payments, employees or personal data.</p>
+  <main id="app"></main>
+  <script type="module">
+    const params = new URLSearchParams(location.search);
+    const step = params.get("step") || "bank";
+    const run = params.get("run") || "manual";
+    const seed = Number(params.get("seed") || 0);
+    const mode = params.get("mode");
+    const app = document.querySelector("#app");
+    const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+    let generation = 0;
+    let selected;
+    async function save(payload) {
+      const button = document.querySelector("[data-save]");
+      button.disabled = true;
+      document.querySelector("[role=status]").textContent = "Saving";
+      const result = await fetch("/save?run=" + encodeURIComponent(run), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ step, seed, ...payload }),
+      });
+      document.querySelector("[role=status]").textContent = result.ok ? "Saved" : "Save failed";
+      button.disabled = false;
+    }
+    if (step === "bank") {
+      app.innerHTML = `<h1>Banking: For review</h1><p>Deposit DEP-104, 2026-10-09, Example customer, $1,240.00. Match saved payment PAY-104, not the adjacent duplicates.</p>
+    <label>Search saved payments<input aria-label="Search saved payments"></label>
+    <button id="refresh">Refresh payments</button><p id="list-state" role="status">Loading payments</p>
+    <table><thead><tr><th>Payment</th><th>Date</th><th>Amount</th><th>Action</th></tr></thead><tbody></tbody></table>
+    <button data-save id="match" disabled>Match deposit</button>
+    <dialog aria-label="Confirm deposit match"><p id="chosen"></p><button id="cancel">Cancel</button><button id="confirm">Confirm match</button></dialog>`;
+      const payments = [
+        { id: "PAY-103", date: "2026-10-08", amount: "1,240.00" },
+        { id: "PAY-104", date: "2026-10-09", amount: "1,240.00" },
+        { id: "PAY-105", date: "2026-10-09", amount: "1,240.01" },
+        ...Array.from({ length: 21 }, (_, i) => ({
+          id: "PAY-" + (200 + i),
+          date: "2026-10-09",
+          amount: "900.00",
+        })),
+      ];
+      function refresh() {
+        const current = ++generation;
+        document.querySelector("#list-state").textContent = "Loading payments";
+        document.querySelector("tbody").replaceChildren();
+        setTimeout(
+          () => {
+            if (current !== generation) return;
+            const filter = document.querySelector("input").value;
+            const ordered = [
+              ...payments.slice((seed + current) % payments.length),
+              ...payments.slice(0, (seed + current) % payments.length),
+            ];
+            for (const payment of ordered.filter((p) => p.id.includes(filter))) {
+              const row = document.createElement("tr");
+              row.innerHTML = `<td>${payment.id}</td><td>${payment.date}</td><td>$${payment.amount}</td><td><button aria-label="Select ${payment.id}">Select</button></td>`;
+              row.querySelector("button").onclick = () => {
+                selected = payment.id;
+                document.querySelector("#match").disabled = false;
+                document.querySelector("#list-state").textContent = "Selected " + selected;
+              };
+              document.querySelector("tbody").append(row);
+            }
+            document.querySelector("#list-state").textContent = "Payments ready";
+          },
+          40 + (seed % 5) * 35,
+        );
+      }
+      document.querySelector("#refresh").onclick = refresh;
+      document.querySelector("input").oninput = refresh;
+      document.querySelector("#match").onclick = () => {
+        if (mode === "native") {
+          if (confirm("Confirm synthetic deposit match?"))
+            void save({ deposit: "DEP-104", payment: selected });
+          else document.querySelector("#list-state").textContent = "Cancelled";
+        } else {
+          document.querySelector("#chosen").textContent = "Match DEP-104 to " + selected + "?";
+          document.querySelector("dialog").showModal();
+        }
+      };
+      document.querySelector("#cancel").onclick = () => document.querySelector("dialog").close();
+      document.querySelector("#confirm").onclick = () => {
+        document.querySelector("dialog").close();
+        void save({ deposit: "DEP-104", payment: selected });
+      };
+      refresh();
+    } else if (step === "bill") {
+      app.innerHTML = `<h1>Bill BILL-042</h1><p>Example vendor. Three custom text fields. Each must survive a slow save.</p>
+    <form>${["Work order", "Department", "Reference"].map((name) => `<label>${name}<input id="duplicate-field" aria-label="${name}" required></label>`).join("")}
+    <button data-save>Save bill</button></form><p role="status">Unsaved</p>`;
+      document.querySelector("form").onsubmit = (event) => {
+        event.preventDefault();
+        void save({
+          bill: "BILL-042",
+          fields: [...document.querySelectorAll("input")].map((input) => input.value),
+        });
+      };
+    } else if (step === "time") {
+      app.innerHTML = `<h1>Weekly timesheet</h1><p>Week of 2026-10-05. Synthetic cards total 40 hours, including explicit zero-hour weekends.</p>
+    <button id="cards">Load time cards</button><section id="entries"></section>
+    <button data-save disabled>Save timesheet</button><p role="status">Cards not loaded</p>`;
+      document.querySelector("#cards").onclick = () => {
+        document.querySelector("[role=status]").textContent = "Loading cards";
+        setTimeout(
+          () => {
+            document.querySelector("#entries").innerHTML = days
+              .map(
+                (day, i) =>
+                  `<label>${day}: card TC-${i + 1}, ${i < 5 ? 8 : 0} hours<input aria-label="${day} hours" inputmode="decimal" required></label>`,
+              )
+              .join("");
+            document.querySelector("[data-save]").disabled = false;
+            document.querySelector("[role=status]").textContent = "Cards ready";
+          },
+          50 + (seed % 5) * 35,
+        );
+      };
+      document.querySelector("[data-save]").onclick = () =>
+        void save({
+          week: "2026-10-05",
+          entries: [...document.querySelectorAll("input")].map((input, i) => ({
+            day: days[i],
+            hours: input.value,
+          })),
+        });
+    }
+  </script>
+</html>
