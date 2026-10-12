@@ -2,7 +2,7 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
-import { CommandId, ProjectId, ThreadId } from "./baseSchemas.ts";
+import { CommandId, MessageId, ProjectId, ThreadId, TurnId } from "./baseSchemas.ts";
 
 import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
@@ -31,6 +31,7 @@ import {
   ThreadTurnStartRequestedPayload,
   isProviderSendTurnSupportedImageMimeType,
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
+  PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
 } from "./orchestration.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
@@ -65,6 +66,51 @@ const decodeOrchestrationCommand = Schema.decodeUnknownEffect(OrchestrationComma
 const decodeOrchestrationEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
 const decodeThreadMetaUpdatedPayload = Schema.decodeUnknownEffect(ThreadMetaUpdatedPayload);
 const decodeDispatchCommandError = Schema.decodeUnknownEffect(OrchestrationDispatchCommandError);
+
+const syntheticSteeringCommand = {
+  type: "thread.turn.steer" as const,
+  commandId: CommandId.make("synthetic-command"),
+  threadId: ThreadId.make("synthetic-thread"),
+  expectedTurnId: TurnId.make("synthetic-turn"),
+  messageId: MessageId.make("synthetic-message"),
+  createdAt: "2026-10-12T00:00:00.000Z",
+};
+
+it.effect("preserves steering message text through decode and encode", () =>
+  Effect.gen(function* () {
+    for (const text of [" Synthetic.\n", "\tSynthetic.\r\n", "Synthetic.", "Synthetic.\n  \n"]) {
+      const command = { ...syntheticSteeringCommand, text };
+      const parsed = yield* decodeClientOrchestrationCommand(command);
+      const encoded = yield* Schema.encodeEffect(ClientOrchestrationCommand)(parsed);
+      assert.deepStrictEqual(parsed, command);
+      assert.deepStrictEqual(encoded, command);
+    }
+  }),
+);
+
+it.effect("rejects blank steering messages without normalizing nonblank text", () =>
+  Effect.gen(function* () {
+    for (const text of ["", " \t\r\n", "\u00a0"]) {
+      const result = yield* Effect.exit(
+        decodeClientOrchestrationCommand({ ...syntheticSteeringCommand, text }),
+      );
+      assert.strictEqual(result._tag, "Failure");
+    }
+  }),
+);
+
+it.effect("checks the raw steering message length", () =>
+  Effect.gen(function* () {
+    const text = "x".repeat(PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
+    const command = { ...syntheticSteeringCommand, text };
+    const parsed = yield* decodeClientOrchestrationCommand(command);
+    assert.deepStrictEqual(parsed, command);
+    const result = yield* Effect.exit(
+      decodeClientOrchestrationCommand({ ...command, text: " " + text }),
+    );
+    assert.strictEqual(result._tag, "Failure");
+  }),
+);
 
 it.effect("decodes a dispatch error after its bootstrap thread was deleted", () =>
   Effect.gen(function* () {
