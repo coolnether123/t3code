@@ -1122,7 +1122,10 @@ const ThreadTurnSteerCommand = Schema.Struct({
   threadId: ThreadId,
   expectedTurnId: TurnId,
   messageId: MessageId,
-  text: TrimmedNonEmptyString.check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)),
+  text: Schema.String.check(
+    Schema.isPattern(/\S/),
+    Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS),
+  ),
   createdAt: IsoDateTime,
 });
 
