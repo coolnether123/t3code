@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./sidebarSections": {
+      "types": "./src/sidebarSections.ts",
+      "import": "./src/sidebarSections.ts"
+    },
     "./themePalettes": {
       "types": "./src/themePalettes.ts",
       "import": "./src/themePalettes.ts"

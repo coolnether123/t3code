@@ -54,12 +54,14 @@ import {
   isModelSelectionProviderEnabled,
 } from "@t3tools/shared/serverSettings";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
+import { importCodexSidebarSections } from "@t3tools/shared/sidebarSections";
 
 export { resolveSourceControlWriterModelSelection } from "@t3tools/shared/serverSettings";
 
 const encodeServerSettings = Schema.encodeEffect(ServerSettings);
 const encodeServerSettingsJson = Schema.encodeUnknownEffect(fromJsonStringPretty(ServerSettings));
 const decodeServerSettings = Schema.decodeUnknownEffect(ServerSettings);
+const decodeSectionImportJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -818,7 +820,62 @@ const make = Effect.gen(function* () {
     const startup = Effect.gen(function* () {
       yield* startWatcher;
       yield* Cache.invalidate(settingsCache, cacheKey);
-      yield* getSettingsFromCache;
+      const current = yield* getSettingsFromCache;
+      // Opt-in owner import. The saved metadata prevents every later startup
+      // from reimporting deleted sections or changing the user's grouping.
+      const importPath = process.env.T3CODE_IMPORT_CODEX_SECTIONS_PATH;
+      if (importPath && current.sidebarSections === undefined) {
+        yield* Effect.gen(function* () {
+          const raw = yield* fs.readFileString(importPath);
+          const rows = yield* sql<{
+            threadId: string;
+            providerThreadId: string | null;
+            providerSessionId: string | null;
+            cursor: string | null;
+          }>`
+            SELECT t.thread_id AS "threadId", s.provider_thread_id AS "providerThreadId",
+              s.provider_session_id AS "providerSessionId", r.resume_cursor_json AS cursor
+            FROM projection_threads t
+            LEFT JOIN projection_thread_sessions s ON s.thread_id=t.thread_id AND s.provider_name='codex'
+            LEFT JOIN provider_session_runtime r ON r.thread_id=t.thread_id AND r.provider_name='codex'
+            WHERE t.deleted_at IS NULL
+          `;
+          const identities = rows.map((row) => {
+            let cursorId: string | null = null;
+            try {
+              const cursor = decodeSectionImportJson(row.cursor ?? "{}");
+              if (
+                cursor !== null &&
+                typeof cursor === "object" &&
+                "threadId" in cursor &&
+                typeof cursor.threadId === "string"
+              )
+                cursorId = cursor.threadId;
+            } catch {
+              /* An invalid cursor provides no identity. */
+            }
+            return {
+              threadId: row.threadId,
+              codexIds: [row.providerThreadId, row.providerSessionId, cursorId].filter(
+                (id): id is string => id !== null,
+              ),
+            };
+          });
+          const sidebarSections = importCodexSidebarSections(
+            decodeSectionImportJson(raw),
+            identities,
+          );
+          const next = yield* normalizeServerSettings({ ...current, sidebarSections });
+          yield* writeSettingsAtomically(next);
+          yield* Cache.set(settingsCache, cacheKey, next);
+          yield* emitChange(next);
+          yield* Effect.logInfo("Imported Codex sidebar sections", sidebarSections.codexImport);
+        }).pipe(
+          Effect.catch(() =>
+            Effect.logWarning("Codex sidebar import failed; existing settings retained"),
+          ),
+        );
+      }
     });
 
     const startupExit = yield* Effect.exit(startup);
