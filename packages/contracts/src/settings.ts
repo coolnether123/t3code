@@ -906,6 +906,7 @@ export const SidebarSections = Schema.Struct({
       unmatchedCount: Schema.Number,
       ambiguousCount: Schema.Number,
       duplicateCount: Schema.Number,
+      orphanOrderCount: Schema.optionalKey(Schema.Number),
     }),
   ),
 }).check(

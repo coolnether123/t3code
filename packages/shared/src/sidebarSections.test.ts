@@ -19,6 +19,17 @@ const section = (id: string, itemKeys: string[]) => ({
   appearance: { color: "#ff5500", icon: "📁" },
 });
 describe("sidebar sections", () => {
+  it("skips and counts orphan order identities, keeping unlisted sections in source order", () => {
+    const raw = source([section("b", []), section("a", [])], ["missing", "a", "missing"]);
+    const before = JSON.stringify(raw);
+    const plan = importCodexSidebarSections(raw, []);
+    expect(plan.sections.map((entry) => entry.name)).toEqual(["Client a", "Client b"]);
+    expect(plan.codexImport).toMatchObject({ sectionCount: 2, orphanOrderCount: 1 });
+    expect(
+      decodePatch({ sidebarSections: plan }).sidebarSections?.codexImport?.orphanOrderCount,
+    ).toBe(1);
+    expect(JSON.stringify(raw)).toBe(before);
+  });
   it("preserves source order, collapse, appearance and exact cross-project matches", () => {
     const raw = source([
       section("b", ["codex:thread:local:provider-2"]),

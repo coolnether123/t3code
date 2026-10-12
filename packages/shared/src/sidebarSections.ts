@@ -48,6 +48,7 @@ export function importCodexSidebarSections(
   const assigned = new Set<string>();
   const counts = {
     sectionCount: ordered.length,
+    orphanOrderCount: new Set(order.filter((id) => !byId.has(id))).size,
     matchedCount: 0,
     unmatchedCount: 0,
     ambiguousCount: 0,
