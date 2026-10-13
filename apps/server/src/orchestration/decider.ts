@@ -84,7 +84,12 @@ function hasOpenBlockingRequest(thread: {
     if (requestId === null) continue;
     if (activity.kind === "approval.requested" || activity.kind === "user-input.requested") {
       openRequestIds.add(requestId);
-    } else if (activity.kind === "approval.resolved" || activity.kind === "user-input.resolved") {
+    } else if (
+      activity.kind === "approval.resolved" ||
+      activity.kind === "user-input.resolved" ||
+      activity.kind === "provider.approval.delivery.pending" ||
+      activity.kind === "provider.approval.delivery.confirmed"
+    ) {
       openRequestIds.delete(requestId);
     } else if (
       (activity.kind === "provider.approval.respond.failed" ||

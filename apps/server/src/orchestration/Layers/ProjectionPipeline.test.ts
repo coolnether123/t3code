@@ -1,5 +1,6 @@
 import {
   CheckpointRef,
+  ApprovalRequestId,
   CommandId,
   CorrelationId,
   EventId,
@@ -2046,148 +2047,184 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
       }),
   );
 
-  it.effect("clears stale pending approvals from projected shell summaries", () =>
-    Effect.gen(function* () {
-      const projectionPipeline = yield* OrchestrationProjectionPipeline;
-      const eventStore = yield* OrchestrationEventStore;
-      const sql = yield* SqlClient.SqlClient;
-      const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
-        eventStore
-          .append(event)
-          .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+  for (const outcome of ["stale", "confirmed"] as const) {
+    it.effect(
+      `keeps approval intent separate from delivery and clears shell summaries: ${outcome}`,
+      () =>
+        Effect.gen(function* () {
+          const threadKey = `thread-stale-approval-${outcome}`;
+          const projectKey = `project-stale-approval-${outcome}`;
+          const requestKey = `approval-request-stale-1-${outcome}`;
+          const projectionPipeline = yield* OrchestrationProjectionPipeline;
+          const eventStore = yield* OrchestrationEventStore;
+          const sql = yield* SqlClient.SqlClient;
+          const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+            eventStore
+              .append(event)
+              .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
 
-      yield* appendAndProject({
-        type: "project.created",
-        eventId: EventId.make("evt-stale-approval-1"),
-        aggregateKind: "project",
-        aggregateId: ProjectId.make("project-stale-approval"),
-        occurredAt: "2026-02-26T12:30:00.000Z",
-        commandId: CommandId.make("cmd-stale-approval-1"),
-        causationEventId: null,
-        correlationId: CorrelationId.make("cmd-stale-approval-1"),
-        metadata: {},
-        payload: {
-          projectId: ProjectId.make("project-stale-approval"),
-          title: "Project Stale Approval",
-          workspaceRoot: "/tmp/project-stale-approval",
-          defaultModelSelection: null,
-          scripts: [],
-          createdAt: "2026-02-26T12:30:00.000Z",
-          updatedAt: "2026-02-26T12:30:00.000Z",
-        },
-      });
-
-      yield* appendAndProject({
-        type: "thread.created",
-        eventId: EventId.make("evt-stale-approval-2"),
-        aggregateKind: "thread",
-        aggregateId: ThreadId.make("thread-stale-approval"),
-        occurredAt: "2026-02-26T12:30:01.000Z",
-        commandId: CommandId.make("cmd-stale-approval-2"),
-        causationEventId: null,
-        correlationId: CorrelationId.make("cmd-stale-approval-2"),
-        metadata: {},
-        payload: {
-          threadId: ThreadId.make("thread-stale-approval"),
-          projectId: ProjectId.make("project-stale-approval"),
-          title: "Thread Stale Approval",
-          modelSelection: {
-            instanceId: ProviderInstanceId.make("codex"),
-            model: "gpt-5-codex",
-          },
-          runtimeMode: "approval-required",
-          interactionMode: "default",
-          branch: null,
-          worktreePath: null,
-          createdAt: "2026-02-26T12:30:01.000Z",
-          updatedAt: "2026-02-26T12:30:01.000Z",
-        },
-      });
-
-      yield* appendAndProject({
-        type: "thread.activity-appended",
-        eventId: EventId.make("evt-stale-approval-3"),
-        aggregateKind: "thread",
-        aggregateId: ThreadId.make("thread-stale-approval"),
-        occurredAt: "2026-02-26T12:30:02.000Z",
-        commandId: CommandId.make("cmd-stale-approval-3"),
-        causationEventId: null,
-        correlationId: CorrelationId.make("cmd-stale-approval-3"),
-        metadata: {},
-        payload: {
-          threadId: ThreadId.make("thread-stale-approval"),
-          activity: {
-            id: EventId.make("activity-stale-approval-requested"),
-            tone: "approval",
-            kind: "approval.requested",
-            summary: "Command approval requested",
+          yield* appendAndProject({
+            type: "project.created",
+            eventId: EventId.make(`evt-stale-approval-1-${outcome}`),
+            aggregateKind: "project",
+            aggregateId: ProjectId.make(projectKey),
+            occurredAt: "2026-02-26T12:30:00.000Z",
+            commandId: CommandId.make(`cmd-stale-approval-1-${outcome}`),
+            causationEventId: null,
+            correlationId: CorrelationId.make(`cmd-stale-approval-1-${outcome}`),
+            metadata: {},
             payload: {
-              requestId: "approval-request-stale-1",
-              requestKind: "command",
+              projectId: ProjectId.make(projectKey),
+              title: "Project Stale Approval",
+              workspaceRoot: "/tmp/project-stale-approval",
+              defaultModelSelection: null,
+              scripts: [],
+              createdAt: "2026-02-26T12:30:00.000Z",
+              updatedAt: "2026-02-26T12:30:00.000Z",
             },
-            turnId: null,
-            createdAt: "2026-02-26T12:30:02.000Z",
-          },
-        },
-      });
+          });
 
-      yield* appendAndProject({
-        type: "thread.activity-appended",
-        eventId: EventId.make("evt-stale-approval-4"),
-        aggregateKind: "thread",
-        aggregateId: ThreadId.make("thread-stale-approval"),
-        occurredAt: "2026-02-26T12:30:03.000Z",
-        commandId: CommandId.make("cmd-stale-approval-4"),
-        causationEventId: null,
-        correlationId: CorrelationId.make("cmd-stale-approval-4"),
-        metadata: {},
-        payload: {
-          threadId: ThreadId.make("thread-stale-approval"),
-          activity: {
-            id: EventId.make("activity-stale-approval-failed"),
-            tone: "error",
-            kind: "provider.approval.respond.failed",
-            summary: "Provider approval response failed",
+          yield* appendAndProject({
+            type: "thread.created",
+            eventId: EventId.make(`evt-stale-approval-2-${outcome}`),
+            aggregateKind: "thread",
+            aggregateId: ThreadId.make(threadKey),
+            occurredAt: "2026-02-26T12:30:01.000Z",
+            commandId: CommandId.make(`cmd-stale-approval-2-${outcome}`),
+            causationEventId: null,
+            correlationId: CorrelationId.make(`cmd-stale-approval-2-${outcome}`),
+            metadata: {},
             payload: {
-              requestId: "approval-request-stale-1",
-              detail: "Unknown pending permission request: approval-request-stale-1",
+              threadId: ThreadId.make(threadKey),
+              projectId: ProjectId.make(projectKey),
+              title: "Thread Stale Approval",
+              modelSelection: {
+                instanceId: ProviderInstanceId.make("codex"),
+                model: "gpt-5-codex",
+              },
+              runtimeMode: "approval-required",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: null,
+              createdAt: "2026-02-26T12:30:01.000Z",
+              updatedAt: "2026-02-26T12:30:01.000Z",
             },
-            turnId: null,
-            createdAt: "2026-02-26T12:30:03.000Z",
-          },
-        },
-      });
+          });
 
-      const approvalRows = yield* sql<{
-        readonly requestId: string;
-        readonly status: string;
-        readonly resolvedAt: string | null;
-      }>`
+          yield* appendAndProject({
+            type: "thread.activity-appended",
+            eventId: EventId.make(`evt-stale-approval-3-${outcome}`),
+            aggregateKind: "thread",
+            aggregateId: ThreadId.make(threadKey),
+            occurredAt: "2026-02-26T12:30:02.000Z",
+            commandId: CommandId.make(`cmd-stale-approval-3-${outcome}`),
+            causationEventId: null,
+            correlationId: CorrelationId.make(`cmd-stale-approval-3-${outcome}`),
+            metadata: {},
+            payload: {
+              threadId: ThreadId.make(threadKey),
+              activity: {
+                id: EventId.make(`activity-stale-approval-requested-${outcome}`),
+                tone: "approval",
+                kind: "approval.requested",
+                summary: "Command approval requested",
+                payload: {
+                  requestId: requestKey,
+                  requestKind: "command",
+                },
+                turnId: null,
+                createdAt: "2026-02-26T12:30:02.000Z",
+              },
+            },
+          });
+
+          yield* appendAndProject({
+            eventId: EventId.make(`evt-stale-approval-intent-${outcome}`),
+            type: "thread.approval-response-requested",
+            aggregateKind: "thread",
+            aggregateId: ThreadId.make(threadKey),
+            occurredAt: "2026-02-26T12:30:02.100Z",
+            commandId: CommandId.make(`cmd-stale-approval-intent-${outcome}`),
+            causationEventId: null,
+            correlationId: CorrelationId.make(`cmd-stale-approval-intent-${outcome}`),
+            metadata: {},
+            payload: {
+              threadId: ThreadId.make(threadKey),
+              requestId: ApprovalRequestId.make(requestKey),
+              decision: "accept",
+              createdAt: "2026-02-26T12:30:02.100Z",
+            },
+          });
+          const awaitingDelivery = yield* sql<{
+            status: string;
+            decision: string;
+            resolved_at: string | null;
+          }>`SELECT status,decision,resolved_at FROM projection_pending_approvals WHERE request_id=${requestKey}`;
+          assert.deepEqual(awaitingDelivery, [
+            { status: "pending", decision: "accept", resolved_at: null },
+          ]);
+          yield* appendAndProject({
+            type: "thread.activity-appended",
+            eventId: EventId.make(`evt-stale-approval-4-${outcome}`),
+            aggregateKind: "thread",
+            aggregateId: ThreadId.make(threadKey),
+            occurredAt: "2026-02-26T12:30:03.000Z",
+            commandId: CommandId.make(`cmd-stale-approval-4-${outcome}`),
+            causationEventId: null,
+            correlationId: CorrelationId.make(`cmd-stale-approval-4-${outcome}`),
+            metadata: {},
+            payload: {
+              threadId: ThreadId.make(threadKey),
+              activity: {
+                id: EventId.make(`activity-stale-approval-failed-${outcome}`),
+                tone: "error",
+                kind:
+                  outcome === "stale"
+                    ? "provider.approval.respond.failed"
+                    : "provider.approval.delivery.confirmed",
+                summary: "Provider approval response failed",
+                payload: {
+                  requestId: requestKey,
+                  decision: "accept",
+                  detail: "Unknown pending permission request: approval-request-stale-1",
+                },
+                turnId: null,
+                createdAt: "2026-02-26T12:30:03.000Z",
+              },
+            },
+          });
+
+          const approvalRows = yield* sql<{
+            readonly requestId: string;
+            readonly status: string;
+            readonly resolvedAt: string | null;
+          }>`
         SELECT
           request_id AS "requestId",
           status,
           resolved_at AS "resolvedAt"
         FROM projection_pending_approvals
-        WHERE request_id = 'approval-request-stale-1'
+        WHERE request_id = ${requestKey}
       `;
-      assert.deepEqual(approvalRows, [
-        {
-          requestId: "approval-request-stale-1",
-          status: "resolved",
-          resolvedAt: "2026-02-26T12:30:03.000Z",
-        },
-      ]);
+          assert.deepEqual(approvalRows, [
+            {
+              requestId: requestKey,
+              status: "resolved",
+              resolvedAt: "2026-02-26T12:30:03.000Z",
+            },
+          ]);
 
-      const threadRows = yield* sql<{
-        readonly pendingApprovalCount: number;
-      }>`
+          const threadRows = yield* sql<{
+            readonly pendingApprovalCount: number;
+          }>`
         SELECT pending_approval_count AS "pendingApprovalCount"
         FROM projection_threads
-        WHERE thread_id = 'thread-stale-approval'
+        WHERE thread_id = ${threadKey}
       `;
-      assert.deepEqual(threadRows, [{ pendingApprovalCount: 0 }]);
-    }),
-  );
+          assert.deepEqual(threadRows, [{ pendingApprovalCount: 0 }]);
+        }),
+    );
+  }
 
   it.effect("clears stale pending user input from projected shell summaries", () =>
     Effect.gen(function* () {

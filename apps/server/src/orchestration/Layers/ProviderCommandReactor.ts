@@ -55,6 +55,7 @@ import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import { ServerConfig } from "../../config.ts";
 import { stoppedChatContext, stoppedChatGuardFailure } from "../stoppedChatAuthority.ts";
+import { makeApprovalResponseDelivery } from "../approvalResponseDelivery.ts";
 import {
   judgeStoppedChat,
   recordStoppedChatDecision,
@@ -257,17 +258,26 @@ function findProviderAdapterRequestError(
 }
 
 function isUnknownPendingApprovalRequestError(cause: Cause.Cause<ProviderServiceError>): boolean {
+  if (
+    cause.reasons.some(
+      (reason) =>
+        Cause.isFailReason(reason) && reason.error._tag === "ProviderAdapterSessionNotFoundError",
+    )
+  )
+    return true;
   const error = findProviderAdapterRequestError(cause);
   if (error) {
     const detail = error.detail.toLowerCase();
     return (
       detail.includes("unknown pending approval request") ||
+      detail.includes("unknown pending codex approval request") ||
       detail.includes("unknown pending permission request")
     );
   }
-  const message = Cause.pretty(cause);
+  const message = Cause.pretty(cause).toLowerCase();
   return (
     message.includes("unknown pending approval request") ||
+    message.includes("unknown pending codex approval request") ||
     message.includes("unknown pending permission request")
   );
 }
@@ -1850,6 +1860,76 @@ const make = Effect.gen(function* () {
     yield* providerService.interruptTurn({ threadId: event.payload.threadId });
   });
 
+  const approvalDelivery = yield* makeApprovalResponseDelivery({
+    provider: providerService,
+    stale: isUnknownPendingApprovalRequestError,
+    record: (answer, kind, route) =>
+      orchestrationEngine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make(`server:approval:${answer.threadId}:${answer.requestId}:${kind}`),
+        threadId: answer.threadId,
+        activity: {
+          id: EventId.make(`approval:${answer.threadId}:${answer.requestId}:${kind}`),
+          tone: kind.endsWith("escalated") || kind.endsWith("failed") ? "error" : "info",
+          kind,
+          summary: kind.endsWith("confirmed")
+            ? "Approval reply delivered"
+            : kind.endsWith("escalated")
+              ? "Saved approval reply needs recovery"
+              : "Approval reply saved",
+          payload: {
+            requestId: answer.requestId,
+            decision: answer.decision,
+            route,
+            ...(kind.endsWith("failed")
+              ? {
+                  detail:
+                    route === "stale"
+                      ? stalePendingRequestDetail("approval", answer.requestId)
+                      : "Approval delivery was not confirmed. The saved reply remains available for recovery.",
+                }
+              : {}),
+          },
+          turnId: null,
+          createdAt: answer.createdAt,
+        },
+        createdAt: answer.createdAt,
+      }),
+    sendMessage: (answer, messageId, text) =>
+      Effect.gen(function* () {
+        const thread = yield* resolveThread(answer.threadId);
+        if (!thread)
+          return yield* new ProviderAdapterRequestError({
+            provider: "unknown",
+            method: "approval-recovery",
+            detail: "The original conversation is unavailable.",
+          });
+        const commandId = CommandId.make(
+          `server:approval-message:${answer.threadId}:${answer.requestId}`,
+        );
+        if (thread.session?.status === "running" && thread.session.activeTurnId !== null) {
+          return yield* orchestrationEngine.dispatch({
+            type: "thread.turn.steer",
+            commandId,
+            threadId: answer.threadId,
+            expectedTurnId: thread.session.activeTurnId,
+            messageId: MessageId.make(messageId),
+            text,
+            createdAt: answer.createdAt,
+          });
+        }
+        return yield* orchestrationEngine.dispatch({
+          type: "thread.turn.start",
+          commandId,
+          threadId: answer.threadId,
+          message: { messageId: MessageId.make(messageId), role: "user", text, attachments: [] },
+          runtimeMode: thread.runtimeMode,
+          interactionMode: thread.interactionMode,
+          modelSelection: thread.modelSelection,
+          createdAt: answer.createdAt,
+        });
+      }),
+  });
   const processApprovalResponseRequested = Effect.fn("processApprovalResponseRequested")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.approval-response-requested" }>,
   ) {
@@ -1857,40 +1937,7 @@ const make = Effect.gen(function* () {
     if (!thread) {
       return;
     }
-    const hasSession = thread.session && thread.session.status !== "stopped";
-    if (!hasSession) {
-      return yield* appendProviderFailureActivity({
-        threadId: event.payload.threadId,
-        kind: "provider.approval.respond.failed",
-        summary: "Provider approval response failed",
-        detail: "No active provider session is bound to this thread.",
-        turnId: null,
-        createdAt: event.payload.createdAt,
-        requestId: event.payload.requestId,
-      });
-    }
-
-    yield* providerService
-      .respondToRequest({
-        threadId: event.payload.threadId,
-        requestId: event.payload.requestId,
-        decision: event.payload.decision,
-      })
-      .pipe(
-        Effect.catchCause((cause) =>
-          appendProviderFailureActivity({
-            threadId: event.payload.threadId,
-            kind: "provider.approval.respond.failed",
-            summary: "Provider approval response failed",
-            detail: isUnknownPendingApprovalRequestError(cause)
-              ? stalePendingRequestDetail("approval", event.payload.requestId)
-              : Cause.pretty(cause),
-            turnId: null,
-            createdAt: event.payload.createdAt,
-            requestId: event.payload.requestId,
-          }),
-        ),
-      );
+    yield* approvalDelivery.respond(event.payload);
   });
 
   const processUserInputResponseRequested = Effect.fn("processUserInputResponseRequested")(
@@ -2123,6 +2170,11 @@ const make = Effect.gen(function* () {
 
   const processDomainEventSafely = (event: ProviderIntentEvent) =>
     processDomainEvent(event).pipe(
+      Effect.tap(() =>
+        event.type === "thread.turn-start-requested" || event.type === "thread.turn-steer-requested"
+          ? approvalDelivery.confirmThread(event.payload.threadId)
+          : Effect.void,
+      ),
       Effect.ensuring(
         Effect.suspend(() => {
           const resumed = event.commandId !== null && resumedTurnStarts.get(event.commandId);
@@ -2250,6 +2302,9 @@ const make = Effect.gen(function* () {
     });
 
     yield* forkParked(Stream.runForEach(orchestrationEngine.streamDomainEvents, processEvent));
+    yield* approvalDelivery
+      .recover()
+      .pipe(Effect.catchCause(() => Effect.logWarning("Approval recovery remains pending")));
     yield* recoverInterruptedCompactions().pipe(
       Effect.catchCause((cause) =>
         Effect.logWarning("failed to recover interrupted context compactions", {

@@ -34,12 +34,17 @@ import type * as Stream from "effect/Stream";
 
 import type { ProviderServiceError } from "../Errors.ts";
 import type { ProviderAdapterCapabilities } from "./ProviderAdapter.ts";
+import type { ProviderThreadSnapshot } from "./ProviderAdapter.ts";
 import type { ProviderInstanceRoutingInfo } from "./ProviderAdapterRegistry.ts";
 
 /**
  * ProviderServiceShape - Service API for provider session and turn orchestration.
  */
 export interface ProviderServiceShape {
+  /** Read the bound conversation. Recovery requires existing provider resume state. */
+  readonly readThread?: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ProviderThreadSnapshot, ProviderServiceError>;
   /**
    * Start a provider session.
    */

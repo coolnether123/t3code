@@ -616,7 +616,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       }
 
       const pendingApprovalCount = pendingApprovals.filter(
-        (approval) => approval.status === "pending",
+        (approval) => approval.status === "pending" && approval.decision === null,
       ).length;
       const pendingUserInputCount = derivePendingUserInputCountFromActivities(activities);
       const hasActionableProposedPlan = deriveHasActionableProposedPlan({
@@ -1743,7 +1743,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           const existingRow = yield* projectionPendingApprovalRepository.getByRequestId({
             requestId,
           });
-          if (event.payload.activity.kind === "approval.resolved") {
+          if (
+            event.payload.activity.kind === "approval.resolved" ||
+            event.payload.activity.kind === "provider.approval.delivery.confirmed"
+          ) {
             const resolvedDecisionRaw =
               typeof event.payload.activity.payload === "object" &&
               event.payload.activity.payload !== null &&
@@ -1831,18 +1834,23 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           const existingRow = yield* projectionPendingApprovalRepository.getByRequestId({
             requestId: event.payload.requestId,
           });
+          if (
+            Option.isSome(existingRow) &&
+            (existingRow.value.status === "resolved" || existingRow.value.decision !== null)
+          )
+            return;
           yield* projectionPendingApprovalRepository.upsert({
             requestId: event.payload.requestId,
             threadId: Option.isSome(existingRow)
               ? existingRow.value.threadId
               : event.payload.threadId,
             turnId: Option.isSome(existingRow) ? existingRow.value.turnId : null,
-            status: "resolved",
+            status: "pending",
             decision: event.payload.decision,
             createdAt: Option.isSome(existingRow)
               ? existingRow.value.createdAt
               : event.payload.createdAt,
-            resolvedAt: event.payload.createdAt,
+            resolvedAt: null,
           });
           return;
         }

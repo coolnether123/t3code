@@ -499,7 +499,12 @@ export function derivePendingApprovals(
       continue;
     }
 
-    if (activity.kind === "approval.resolved" && requestId) {
+    if (
+      (activity.kind === "approval.resolved" ||
+        activity.kind === "provider.approval.delivery.pending" ||
+        activity.kind === "provider.approval.delivery.confirmed") &&
+      requestId
+    ) {
       openByRequestId.delete(requestId);
       continue;
     }

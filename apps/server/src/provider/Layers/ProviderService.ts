@@ -582,6 +582,26 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           `Cannot recover thread '${input.binding.threadId}' because no provider resume state is persisted.`,
         );
       }
+      if (
+        input.binding.provider === "codex" &&
+        (input.operation === "ProviderService.respondToRequest" ||
+          input.operation === "ProviderService.readThread")
+      ) {
+        const cursor = input.binding.resumeCursor;
+        if (
+          cursor === null ||
+          typeof cursor !== "object" ||
+          !("threadId" in cursor) ||
+          typeof cursor.threadId !== "string" ||
+          !cursor.threadId.trim() ||
+          ("forkLastTurnId" in cursor && cursor.forkLastTurnId !== undefined)
+        ) {
+          return yield* toValidationError(
+            input.operation,
+            "Approval recovery requires an exact existing Codex conversation, without a fork.",
+          );
+        }
+      }
 
       const persistedCwd = readPersistedCwd(input.binding.runtimePayload);
       const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
@@ -1600,6 +1620,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
   return {
     startSession,
+    readThread: (threadId) =>
+      resolveRoutableSession({
+        threadId,
+        operation: "ProviderService.readThread",
+        allowRecovery: true,
+      }).pipe(Effect.flatMap((routed) => routed.adapter.readThread(routed.threadId))),
     sendTurn,
     compactThread,
     interruptTurn,

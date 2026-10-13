@@ -2188,6 +2188,33 @@ fanout.layer("ProviderServiceLive fanout", (it) => {
 
 const validation = makeProviderServiceLayer();
 validation.layer("ProviderServiceLive validation", (it) => {
+  for (const [index, cursor] of [
+    { opaque: "synthetic" },
+    { threadId: "native-original", forkLastTurnId: "turn" },
+    { threadId: "native-original" },
+  ].entries()) {
+    it.effect(`approval readback resumes only the original conversation: ${index}`, () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+        const threadId = asThreadId(`approval-cursor-${index}`);
+        yield* provider.startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          threadId,
+          runtimeMode: "full-access",
+          resumeCursor: cursor,
+        });
+        yield* provider.stopSession({ threadId });
+        validation.codex.startSession.mockClear();
+        const result = yield* Effect.result(provider.readThread!(threadId));
+        const exact = "threadId" in cursor && !("forkLastTurnId" in cursor);
+        assert.equal(result._tag, exact ? "Success" : "Failure");
+        assert.equal(validation.codex.startSession.mock.calls.length, exact ? 1 : 0);
+        if (exact)
+          assert.deepEqual(validation.codex.startSession.mock.calls[0]?.[0].resumeCursor, cursor);
+      }),
+    );
+  }
   it.effect("rejects session starts without an explicit provider instance id", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;

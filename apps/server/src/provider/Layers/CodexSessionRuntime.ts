@@ -2952,6 +2952,11 @@ export const makeCodexSessionRuntime = (
           threadId: providerThreadId,
           includeTurns: true,
         });
+        if (response.thread.id !== providerThreadId) {
+          return yield* CodexErrors.CodexAppServerProtocolParseError.fromUnroutableMessage({
+            type: "mismatchedConversationReadback",
+          });
+        }
         return parseThreadSnapshot(response);
       }),
       rollbackThread: (numTurns) =>

@@ -65,6 +65,7 @@ import Migration0049 from "./Migrations/049_ProjectionThreadsActiveOrderKey.ts";
 import Migration0050 from "./Migrations/050_ProjectionThreadsActiveOrderKeyCompatibility.ts";
 import Migration0053 from "./Migrations/053_ProjectionThreadContextCompactions.ts";
 import Migration0054 from "./Migrations/054_BootstrapThreadContextCompactions.ts";
+import Migration0055 from "./Migrations/055_ApprovalResponseDeliveries.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -130,6 +131,7 @@ export const migrationEntries = [
   // Existing macOS installs already used 51 and 52 for different migrations.
   [53, "ProjectionThreadContextCompactions", Migration0053],
   [54, "BootstrapThreadContextCompactions", Migration0054],
+  [55, "ApprovalResponseDeliveries", Migration0055],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
