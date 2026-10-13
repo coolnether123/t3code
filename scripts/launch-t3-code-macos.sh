@@ -322,6 +322,11 @@ agent_snapshot() {
   done
 }
 idle_gate() {
+  if [[ "${T3CODE_PRESERVE_PENDING_REQUESTS:-0}" == 1 ]]; then
+    [[ -n "${T3CODE_PRESTOP_GUARD:-}" ]] || fail "Pending preservation requires the exact pre-stop fingerprint guard"
+    /usr/bin/python3 "$T3CODE_PRESTOP_GUARD" --gate-only || fail "Current turn or pending fingerprint blocks restart"
+    return 0
+  fi
   local snapshot_status
   if agent_snapshot; then return 0; else snapshot_status=$?; fi
   case "$snapshot_status" in

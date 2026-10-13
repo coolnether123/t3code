@@ -47,6 +47,8 @@ describe("launch-t3-code-macos", () => {
   });
 
   it("has recoverable app swap and API health gates", () => {
+    assert.include(source, '"${T3CODE_PRESERVE_PENDING_REQUESTS:-0}" == 1');
+    assert.include(source, "Pending preservation requires the exact pre-stop fingerprint guard");
     assert.include(source, "write_state ready-to-swap");
     assert.include(source, "write_state old-moved");
     assert.include(source, "write_state new-installed");
