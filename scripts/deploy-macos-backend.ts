@@ -31,7 +31,7 @@ export const assertCapacity = (available: number, allocation = 0): void => {
     );
 };
 
-const requireCapacity = async (path: string, allocation = 0): Promise<void> => {
+const requireCapacity = async (path: string, allocation = 1024 * 1024): Promise<void> => {
   const volume = await NodeFSP.statfs(path);
   assertCapacity(volume.bavail * volume.bsize, allocation);
 };
@@ -496,6 +496,7 @@ const copyIfPresent = async (
     return true;
   }
   if (stat.isDirectory()) {
+    await requireCapacity(NodePath.dirname(destination));
     await NodeFSP.mkdir(destination, { mode: 0o700 });
     for (const entry of await NodeFSP.readdir(source))
       await copyIfPresent(NodePath.join(source, entry), NodePath.join(destination, entry), links);
@@ -990,6 +991,7 @@ export const retirePreviousRollback = async (
     }
   }
   const temporary = `${marker}.${NodeCrypto.randomUUID()}.pending`;
+  await requireCapacity(backupRoot);
   await NodeFSP.writeFile(
     temporary,
     JSON.stringify({ marker: DEPLOYMENT_MARKER, directory: current }),
