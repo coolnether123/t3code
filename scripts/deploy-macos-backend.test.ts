@@ -74,7 +74,7 @@ const writeCandidate = async (candidate: string) => {
 
 describe("deploy-macos-backend guards", () => {
   it("clones a code tree with links and keeps the clone unchanged after source edits", async () => {
-    if (NodeOS.platform() !== "darwin") return;
+    if (NodeOS.type() !== "Darwin") return;
     await withTempDirectory(async (root) => {
       const source = NodePath.join(root, "source");
       const destination = NodePath.join(root, "clone");
