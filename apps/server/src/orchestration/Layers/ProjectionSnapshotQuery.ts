@@ -49,6 +49,7 @@ import {
   type ProjectionRepositoryError,
 } from "../../persistence/Errors.ts";
 import { ProjectionCheckpoint } from "../../persistence/Services/ProjectionCheckpoints.ts";
+import { RetainedPayloadFromJsonString } from "../../persistence/RetainedPayloadSchema.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
 import { ThreadPlanProgressService } from "../ThreadPlanProgress.ts";
 import { ProjectionProject } from "../../persistence/Services/ProjectionProjects.ts";
@@ -114,7 +115,7 @@ const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
 );
 const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
   Struct.assign({
-    payload: Schema.fromJsonString(Schema.Unknown),
+    payload: RetainedPayloadFromJsonString,
     sequence: Schema.NullOr(NonNegativeInt),
   }),
 );

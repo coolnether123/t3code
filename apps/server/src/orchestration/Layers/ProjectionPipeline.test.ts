@@ -18,6 +18,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as Schema from "effect/Schema";
 
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
@@ -27,6 +28,9 @@ import {
 } from "../../persistence/Layers/Sqlite.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { ProjectionThreadMessageRepository } from "../../persistence/Services/ProjectionThreadMessages.ts";
+import { ProjectionThreadActivityRepository } from "../../persistence/Services/ProjectionThreadActivities.ts";
+import { restoreStoredPayload } from "../../persistence/ToolPayloadCodec.ts";
+import * as Stream from "effect/Stream";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import {
@@ -56,12 +60,104 @@ const exists = (filePath: string) =>
     return fileInfo._tag === "Success";
   });
 
+const encodeRetentionTestJson = Schema.encodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
+const decodeRetentionTestJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
+
 const BaseTestLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
   Layer.provide(ThreadBackgroundLiveness.layer),
   Layer.provide(ThreadPlanProgress.layer),
   Layer.provideMerge(RepositoryIdentityResolver.layer),
   Layer.provideMerge(makeProjectionPipelinePrefixedTestLayer("t3-projection-pipeline-test-")),
 );
+
+it.layer(BaseTestLayer)("ToolRetentionProjection", (it) => {
+  it.effect(
+    "cold rebuilds compressed tool history without losing old messages or replay cursors",
+    () =>
+      Effect.gen(function* () {
+        const pipeline = yield* OrchestrationProjectionPipeline;
+        const store = yield* OrchestrationEventStore;
+        const repository = yield* ProjectionThreadActivityRepository;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make("retained-old-thread");
+        const now = "2026-01-01T00:00:00.000Z";
+        const payload = {
+          detail: "synthetic",
+          toolCallId: "call-1",
+          data: { content: "synthetic historical tool output\n".repeat(10000) },
+        };
+        const event = yield* store.append({
+          type: "thread.activity-appended",
+          eventId: EventId.make("retained-activity"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          payload: {
+            threadId,
+            activity: {
+              id: EventId.make("retained-activity"),
+              kind: "tool.completed",
+              tone: "tool",
+              summary: "synthetic tool complete",
+              payload,
+              turnId: null,
+              createdAt: now,
+            },
+          },
+        });
+        yield* store.append({
+          type: "thread.message-sent",
+          eventId: EventId.make("retained-message"),
+          aggregateKind: "thread",
+          aggregateId: threadId,
+          occurredAt: now,
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          payload: {
+            threadId,
+            messageId: MessageId.make("retained-message"),
+            role: "assistant",
+            text: "original synthetic final",
+            turnId: null,
+            streaming: false,
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        yield* pipeline.bootstrap;
+        const before = yield* repository.listByThreadId({ threadId });
+        assert.deepEqual(before[0]?.payload, payload);
+        const stored = yield* sql<{
+          payload: string;
+        }>`SELECT payload_json AS payload FROM projection_thread_activities WHERE thread_id=${threadId}`;
+        assert.isBelow(
+          stored[0]!.payload.length,
+          (yield* encodeRetentionTestJson(payload)).length / 10,
+        );
+        // A fresh projector must still consume every retained event from sequence zero.
+        yield* sql`DELETE FROM projection_thread_activities WHERE thread_id=${threadId}`;
+        yield* sql`DELETE FROM projection_state`;
+        yield* pipeline.bootstrap;
+        assert.deepEqual(yield* repository.listByThreadId({ threadId }), before);
+        const replay = yield* Stream.runCollect(store.readFromSequence(event.sequence - 1, 10));
+        assert.deepEqual(replay[0]?.payload, event.payload);
+        assert.deepEqual(
+          restoreStoredPayload(yield* decodeRetentionTestJson(stored[0]!.payload)),
+          payload,
+        );
+        const messages = yield* sql<{
+          text: string;
+        }>`SELECT text FROM projection_thread_messages WHERE thread_id=${threadId}`;
+        assert.deepEqual(messages, [{ text: "original synthetic final" }]);
+      }),
+  );
+});
 
 it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
   it.effect("bootstraps all projection states and writes projection rows", () =>

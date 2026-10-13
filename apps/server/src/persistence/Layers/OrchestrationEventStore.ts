@@ -18,6 +18,8 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import { RetainedPayloadFromJsonString } from "../RetainedPayloadSchema.ts";
+import { retainEventPayload } from "../ToolPayloadCodec.ts";
 
 import {
   toPersistenceDecodeError,
@@ -57,7 +59,7 @@ const OrchestrationEventPersistedRowSchema = Schema.Struct({
   commandId: Schema.NullOr(CommandId),
   causationEventId: Schema.NullOr(EventId),
   correlationId: Schema.NullOr(CommandId),
-  payload: UnknownFromJsonString,
+  payload: RetainedPayloadFromJsonString,
   metadata: EventMetadataFromJsonString,
 });
 
@@ -263,7 +265,7 @@ const makeEventStore = Effect.gen(function* () {
       actorKind: inferActorKind(event),
       occurredAt: event.occurredAt,
       commandId: event.commandId,
-      payloadJson: event.payload,
+      payloadJson: retainEventPayload(event.type, event.payload),
       metadataJson: event.metadata,
     }).pipe(
       Effect.mapError(

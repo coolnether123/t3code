@@ -8,6 +8,8 @@ import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
 
 import { toPersistenceDecodeError, toPersistenceSqlError } from "../Errors.ts";
+import { RetainedPayloadFromJsonString } from "../RetainedPayloadSchema.ts";
+import { retainToolPayload } from "../ToolPayloadCodec.ts";
 
 import {
   DeleteProjectionThreadActivitiesInput,
@@ -20,7 +22,7 @@ import {
 
 const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
   Struct.assign({
-    payload: Schema.fromJsonString(Schema.Unknown),
+    payload: RetainedPayloadFromJsonString,
     sequence: Schema.NullOr(NonNegativeInt),
   }),
 );
@@ -77,7 +79,7 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
               ${row.tone},
               ${row.kind},
               ${row.summary},
-              ${JSON.stringify(row.payload)},
+              ${JSON.stringify(row.kind === "tool.completed" || row.kind === "tool.updated" ? retainToolPayload(row.payload) : row.payload)},
               ${row.sequence ?? null},
               ${row.createdAt}
             )

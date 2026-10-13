@@ -1,3 +1,4 @@
+import { restoreToolPayload } from "../persistence/ToolPayloadCodec.ts";
 import type {
   ApprovalRequestId,
   ModelSelection,
@@ -426,7 +427,7 @@ const makeWorkerStore = Effect.gen(function* () {
                 tone: row.tone,
                 kind: row.kind,
                 summary: row.summary,
-                payload: parseJson<unknown>(row.payloadJson),
+                payload: restoreToolPayload(parseJson<unknown>(row.payloadJson)),
                 turnId: row.turnId,
                 ...(row.sequence === null ? {} : { sequence: row.sequence }),
                 createdAt: row.createdAt,
