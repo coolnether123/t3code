@@ -64,6 +64,16 @@ function makeActivity(overrides: {
 }
 
 describe("derivePendingApprovals", () => {
+  it("hides retired approvals and restores their original request context", () => {
+    const payload = { requestId: "retired-request", requestKind: "command", detail: "synthetic" };
+    const requested = makeActivity({ kind: "approval.requested", payload });
+    const retired = makeActivity({ kind: "approval.retired", payload });
+    const restored = makeActivity({ kind: "approval.restored", payload });
+    expect(derivePendingApprovals([requested, retired])).toEqual([]);
+    expect(derivePendingApprovals([requested, retired, restored])).toMatchObject([
+      { requestId: payload.requestId, detail: "synthetic" },
+    ]);
+  });
   it("tracks open approvals and removes resolved ones", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

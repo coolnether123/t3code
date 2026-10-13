@@ -1206,6 +1206,15 @@ const ThreadSessionStopCommand = Schema.Struct({
   onlyIfSettled: Schema.optional(Schema.Boolean),
 });
 
+const ThreadApprovalRetirementSetCommand = Schema.Struct({
+  type: Schema.Literal("thread.approval.retirement.set"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  requestId: ApprovalRequestId,
+  retired: Schema.Boolean,
+  createdAt: IsoDateTime,
+});
+
 const DispatchableClientOrchestrationCommand = Schema.Union([
   ProjectCreateCommand,
   ProjectMetaUpdateCommand,
@@ -1229,6 +1238,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadTurnInterruptCommand,
   ThreadTurnSteerCommand,
   ThreadApprovalRespondCommand,
+  ThreadApprovalRetirementSetCommand,
   ThreadUserInputRespondCommand,
   ThreadUserInputDismissCommand,
   ThreadCheckpointRevertCommand,
@@ -1261,6 +1271,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadTurnInterruptCommand,
   ThreadTurnSteerCommand,
   ThreadApprovalRespondCommand,
+  ThreadApprovalRetirementSetCommand,
   ThreadUserInputRespondCommand,
   ThreadUserInputDismissCommand,
   ThreadCheckpointRevertCommand,

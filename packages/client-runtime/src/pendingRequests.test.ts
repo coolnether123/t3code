@@ -27,6 +27,18 @@ function makeActivity(overrides: {
 }
 
 describe("pending approvals", () => {
+  it("supports reversible operator retirement without reopening an answered request", () => {
+    const payload = { requestId: "retired-request", requestKind: "command", detail: "synthetic" };
+    const requested = makeActivity({ kind: "approval.requested", payload });
+    const retired = makeActivity({ kind: "approval.retired", payload });
+    const restored = makeActivity({ kind: "approval.restored", payload });
+    const resolved = makeActivity({ kind: "approval.resolved", payload });
+    expect(derivePendingRequests([requested, retired]).approvals).toEqual([]);
+    expect(derivePendingRequests([requested, retired, restored]).approvals).toMatchObject([
+      { requestId: payload.requestId },
+    ]);
+    expect(derivePendingRequests([requested, resolved, retired, restored]).approvals).toEqual([]);
+  });
   it.each([{}, { requestType: "unknown" }])(
     "exposes legacy OpenCode approvals without a known request kind: %j",
     (legacyPayload) => {

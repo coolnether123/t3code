@@ -2,9 +2,11 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeSqlite from "node:sqlite";
 
 import {
   ApprovalRequestId,
+  ClientOrchestrationCommand,
   EventId,
   CheckpointRef,
   CommandId,
@@ -26,6 +28,7 @@ import * as Metric from "effect/Metric";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
+import * as Schema from "effect/Schema";
 import { TestClock } from "effect/testing";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -56,6 +59,7 @@ import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts"
 import { ServerConfig } from "../../config.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
+const decodeClientCommand = Schema.decodeUnknownSync(ClientOrchestrationCommand);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
 const asCheckpointRef = (value: string): CheckpointRef => CheckpointRef.make(value);
@@ -115,6 +119,137 @@ const hasMetricSnapshot = (
   );
 
 describe("OrchestrationEngine", () => {
+  it("retires and restores an archived unanswered approval through the public command without answering it", async () => {
+    const directory = await NodeFSP.mkdtemp(
+      NodePath.join(NodeOS.tmpdir(), "t3-approval-retirement-"),
+    );
+    const databasePath = NodePath.join(directory, "state.sqlite");
+    let system = await createOrchestrationSystem(databasePath);
+    const threadId = ThreadId.make("retirement-thread");
+    const projectId = ProjectId.make("retirement-project");
+    const requestId = ApprovalRequestId.make("retirement-request");
+    const dispatch = (command: OrchestrationCommand) => system.run(system.engine.dispatch(command));
+    const row = () => {
+      const db = new NodeSqlite.DatabaseSync(databasePath, { readOnly: true });
+      try {
+        return db
+          .prepare("SELECT status,decision FROM projection_pending_approvals WHERE request_id=?")
+          .all(requestId);
+      } finally {
+        db.close();
+      }
+    };
+    try {
+      await dispatch({
+        type: "project.create",
+        commandId: CommandId.make("retirement-project"),
+        projectId,
+        title: "Synthetic",
+        workspaceRoot: "/tmp/retirement",
+        createdAt: now(),
+      });
+      await dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("retirement-thread"),
+        threadId,
+        projectId,
+        title: "Synthetic",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdAt: now(),
+      });
+      await dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("retirement-request"),
+        threadId,
+        createdAt: now(),
+        activity: {
+          id: EventId.make("retirement-request"),
+          tone: "approval",
+          kind: "approval.requested",
+          summary: "Synthetic request",
+          turnId: null,
+          createdAt: now(),
+          payload: { requestId, requestKind: "command", detail: "synthetic" },
+        },
+      });
+      const command = decodeClientCommand({
+        type: "thread.approval.retirement.set",
+        commandId: CommandId.make("retire"),
+        threadId,
+        requestId,
+        retired: true,
+        createdAt: now(),
+      });
+      await expect(dispatch(command as OrchestrationCommand)).rejects.toThrow(
+        "inactive archived or completed",
+      );
+      await dispatch({
+        type: "thread.archive",
+        commandId: CommandId.make("retirement-archive"),
+        threadId,
+      });
+      const retired = {
+        ...command,
+        commandId: CommandId.make("retire-archived"),
+      } as OrchestrationCommand;
+      await dispatch(retired);
+      await dispatch(retired);
+      expect(await row()).toEqual([{ status: "resolved", decision: null }]);
+      await expect(
+        dispatch({
+          type: "thread.approval.respond",
+          commandId: CommandId.make("retired-answer"),
+          threadId,
+          requestId,
+          decision: "accept",
+          createdAt: now(),
+        }),
+      ).rejects.toThrow("Restore it before answering");
+      await dispatch({
+        type: "thread.approval.retirement.set",
+        commandId: CommandId.make("restore"),
+        threadId,
+        requestId,
+        retired: false,
+        createdAt: now(),
+      });
+      expect(await row()).toEqual([{ status: "pending", decision: null }]);
+      await system.dispose();
+      const fixture = new NodeSqlite.DatabaseSync(databasePath);
+      try {
+        fixture
+          .prepare("DELETE FROM projection_pending_approvals WHERE request_id=?")
+          .run(requestId);
+        fixture.exec(
+          "UPDATE projection_state SET last_applied_sequence=0 WHERE projector='projection.pending-approvals'",
+        );
+      } finally {
+        fixture.close();
+      }
+      system = await createOrchestrationSystem(databasePath);
+      expect(await row()).toEqual([{ status: "pending", decision: null }]);
+      const events = Array.from(await system.run(Stream.runCollect(system.engine.readEvents(0))));
+      expect(events.filter((e) => e.type === "thread.approval-response-requested")).toHaveLength(0);
+      const activities = events.flatMap((e) =>
+        e.type === "thread.activity-appended" ? [e.payload.activity] : [],
+      );
+      expect(activities.filter((a) => a.kind === "approval.retired")).toHaveLength(1);
+      expect(activities.find((a) => a.kind === "approval.restored")?.payload).toMatchObject({
+        requestId,
+        requestKind: "command",
+        detail: "synthetic",
+        decisionSent: false,
+      });
+    } finally {
+      await system.dispose();
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it.each(["running", "stopped"] as const)(
     "sends async answers with a %s session and rejects old duplicate replies",
     async (status) => {

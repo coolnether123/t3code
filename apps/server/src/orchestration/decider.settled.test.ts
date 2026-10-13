@@ -5,6 +5,8 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
+  TurnId,
+  ApprovalRequestId,
   type OrchestrationEvent,
   type OrchestrationReadModel,
   type OrchestrationSession,
@@ -81,6 +83,66 @@ function makeSession(status: OrchestrationSession["status"]): OrchestrationSessi
 }
 
 it.layer(NodeServices.layer)("settled thread decider", (it) => {
+  it.effect(
+    "retires completed-chat requests but refuses active, answered, missing or non-retired restoration",
+    () =>
+      Effect.gen(function* () {
+        const base = makeReadModel(null);
+        const command = {
+          type: "thread.approval.retirement.set" as const,
+          commandId: CommandId.make("operator-retire"),
+          threadId: ThreadId.make("thread-1"),
+          requestId: ApprovalRequestId.make("request-1"),
+          retired: true,
+          createdAt: NOW,
+        };
+        const completed = {
+          ...base,
+          threads: base.threads.map((t) => ({
+            ...t,
+            latestTurn: {
+              turnId: TurnId.make("turn-1"),
+              state: "completed" as const,
+              requestedAt: NOW,
+              startedAt: NOW,
+              completedAt: NOW,
+              assistantMessageId: null,
+            },
+          })),
+        };
+        const approvalRetirement = {
+          status: "pending",
+          decision: null,
+          retired: false,
+          payload: { requestKind: "command" },
+        };
+        const result = yield* decideOrchestrationCommand({
+          command,
+          readModel: completed,
+          approvalRetirement,
+        });
+        expect(result).toMatchObject({ type: "thread.activity-appended" });
+        for (const input of [
+          { command, readModel: base, approvalRetirement },
+          {
+            command,
+            readModel: makeReadModel(null, NOW, makeSession("running")),
+            approvalRetirement,
+          },
+          {
+            command,
+            readModel: completed,
+            approvalRetirement: { ...approvalRetirement, decision: "accept" },
+          },
+          { command, readModel: completed },
+          { command: { ...command, retired: false }, readModel: completed, approvalRetirement },
+        ]) {
+          const exit = yield* Effect.exit(decideOrchestrationCommand(input));
+          expect(exit._tag).toBe("Failure");
+        }
+      }),
+  );
+
   it.effect("preserves the activity stamp when automatically settling", () =>
     Effect.gen(function* () {
       const result = yield* decideOrchestrationCommand({

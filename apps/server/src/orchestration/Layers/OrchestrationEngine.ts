@@ -53,6 +53,7 @@ const isOrchestrationCommandPreviouslyRejectedError = Schema.is(
   OrchestrationCommandPreviouslyRejectedError,
 );
 const isOrchestrationCommandIdConflictError = Schema.is(OrchestrationCommandIdConflictError);
+const decodeApprovalPayloadJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 
 interface CommandEnvelope {
   command: OrchestrationCommand;
@@ -219,9 +220,45 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           envelope.command.type === "thread.user-input.dismiss"
             ? yield* projectionSnapshotQuery.getUserInputActivity(envelope.command)
             : Option.none();
+        let approvalRetirement;
+        if (
+          envelope.command.type === "thread.approval.retirement.set" ||
+          envelope.command.type === "thread.approval.respond"
+        ) {
+          const rows = yield* sql<{
+            status: string;
+            decision: string | null;
+            kind: string | null;
+            payload: string | null;
+            sending: number;
+          }>`
+            SELECT p.status, p.decision,
+              EXISTS(SELECT 1 FROM projection_thread_messages m JOIN projection_threads t ON t.thread_id=m.thread_id
+                WHERE m.thread_id=p.thread_id AND m.role='assistant' AND m.is_streaming=1
+                AND (m.turn_id=t.latest_turn_id OR m.turn_id IS NULL)) AS sending,
+              (SELECT kind FROM projection_thread_activities a WHERE a.thread_id=p.thread_id
+                AND json_extract(a.payload_json,'$.requestId')=p.request_id
+                AND kind IN ('approval.retired','approval.restored') ORDER BY sequence DESC LIMIT 1) AS kind,
+              (SELECT payload_json FROM projection_thread_activities a WHERE a.thread_id=p.thread_id
+                AND json_extract(a.payload_json,'$.requestId')=p.request_id
+                AND kind='approval.requested' ORDER BY sequence ASC LIMIT 1) AS payload
+            FROM projection_pending_approvals p
+            WHERE p.thread_id=${envelope.command.threadId} AND p.request_id=${envelope.command.requestId}`;
+          const row = rows[0];
+          if (row !== undefined && row.payload !== null) {
+            approvalRetirement = {
+              status: row.status,
+              decision: row.decision,
+              retired: row.kind === "approval.retired",
+              sending: row.sending !== 0,
+              payload: yield* decodeApprovalPayloadJson(row.payload),
+            };
+          }
+        }
         const eventBase = yield* decideOrchestrationCommand({
           command: envelope.command,
           readModel: commandReadModel,
+          ...(approvalRetirement !== undefined ? { approvalRetirement } : {}),
           ...(Option.isSome(userInputActivity)
             ? { userInputActivity: userInputActivity.value }
             : {}),

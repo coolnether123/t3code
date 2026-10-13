@@ -489,7 +489,11 @@ export function derivePendingApprovals(
           : null;
     const detail = payload && typeof payload.detail === "string" ? payload.detail : undefined;
 
-    if (activity.kind === "approval.requested" && requestId && requestKind) {
+    if (
+      (activity.kind === "approval.requested" || activity.kind === "approval.restored") &&
+      requestId &&
+      requestKind
+    ) {
       openByRequestId.set(requestId, {
         requestId,
         requestKind,
@@ -501,6 +505,7 @@ export function derivePendingApprovals(
 
     if (
       (activity.kind === "approval.resolved" ||
+        activity.kind === "approval.retired" ||
         activity.kind === "provider.approval.delivery.pending" ||
         activity.kind === "provider.approval.delivery.confirmed") &&
       requestId

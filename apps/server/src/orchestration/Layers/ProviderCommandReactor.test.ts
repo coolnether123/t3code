@@ -167,6 +167,7 @@ describe("ProviderCommandReactor", () => {
       | "completed-dispatched";
     readonly compactThreadEffect?: NonNullable<ProviderServiceShape["compactThread"]>;
     readonly sendTurnEffect?: ProviderServiceShape["sendTurn"];
+    readonly readThreadEffect?: ProviderServiceShape["readThread"];
     readonly startSessionEffect?: (
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderAdapterRequestError>;
@@ -346,6 +347,7 @@ describe("ProviderCommandReactor", () => {
       compactThread,
       interruptTurn: interruptTurn as ProviderServiceShape["interruptTurn"],
       respondToRequest: respondToRequest as ProviderServiceShape["respondToRequest"],
+      ...(input?.readThreadEffect ? { readThread: input.readThreadEffect } : {}),
       respondToUserInput: respondToUserInput as ProviderServiceShape["respondToUserInput"],
       stopSession: stopSession as ProviderServiceShape["stopSession"],
       listSessions: () => Effect.succeed(runtimeSessions),
@@ -4109,6 +4111,90 @@ describe("ProviderCommandReactor", () => {
         sandbox_mode: "workspace-write",
       },
     });
+  });
+
+  it("resumes the same interrupted conversation once when its stale approval is answered", async () => {
+    const messages: string[] = [];
+    const threadId = ThreadId.make("thread-1");
+    const harness = await createHarness({
+      readThreadEffect: (id) =>
+        Effect.succeed({
+          threadId: id,
+          turns: [
+            {
+              id: TurnId.make("interrupted-turn"),
+              items: messages.map((text) => ({
+                type: "userMessage",
+                content: [{ type: "text", text }],
+              })),
+            },
+          ],
+        }),
+      sendTurnEffect: (input) =>
+        Effect.sync(() => {
+          if (input.input?.startsWith("Approval reply recovered by T3."))
+            messages.push(input.input);
+          return { threadId: input.threadId, turnId: TurnId.make("resumed-turn") };
+        }),
+    });
+    const { now } = await seedExistingReadyConversation(harness);
+    harness.respondToRequest.mockImplementation(() =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: ProviderDriverKind.make("codex"),
+          method: "approval",
+          detail: "Unknown pending Codex approval request: interrupted-approval",
+        }),
+      ),
+    );
+    const session = (await harness.readModel()).threads.find((t) => t.id === threadId)?.session;
+    if (!session) throw Error("Expected synthetic session");
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("interrupted-session"),
+        threadId,
+        session: { ...session, status: "stopped", activeTurnId: null },
+        createdAt: now,
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("interrupted-request"),
+        threadId,
+        createdAt: now,
+        activity: {
+          id: EventId.make("interrupted-request"),
+          tone: "approval",
+          kind: "approval.requested",
+          summary: "Synthetic request",
+          turnId: null,
+          createdAt: now,
+          payload: { requestId: "interrupted-approval", requestKind: "command" },
+        },
+      }),
+    );
+    const reply = {
+      type: "thread.approval.respond" as const,
+      commandId: CommandId.make("interrupted-answer"),
+      threadId,
+      requestId: asApprovalRequestId("interrupted-approval"),
+      decision: "accept" as const,
+      createdAt: now,
+    };
+    await harness.runEffect(harness.engine.dispatch(reply));
+    await harness.drain();
+    expect(messages).toHaveLength(1);
+    expect(
+      harness.sendTurn.mock.calls.filter(([input]) =>
+        input.input?.startsWith("Approval reply recovered by T3."),
+      ),
+    ).toMatchObject([[{ threadId }]]);
+    await harness.runEffect(harness.engine.dispatch(reply));
+    await harness.drain();
+    expect(messages).toHaveLength(1);
+    expect(harness.respondToRequest).toHaveBeenCalledTimes(1);
   });
 
   it.each([

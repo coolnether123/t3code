@@ -1777,6 +1777,21 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             });
             return;
           }
+          if (
+            event.payload.activity.kind === "approval.retired" ||
+            event.payload.activity.kind === "approval.restored"
+          ) {
+            if (Option.isNone(existingRow) || existingRow.value.decision !== null) return;
+            yield* projectionPendingApprovalRepository.upsert({
+              ...existingRow.value,
+              status: event.payload.activity.kind === "approval.retired" ? "resolved" : "pending",
+              resolvedAt:
+                event.payload.activity.kind === "approval.retired"
+                  ? event.payload.activity.createdAt
+                  : null,
+            });
+            return;
+          }
           if (event.payload.activity.kind === "provider.approval.respond.failed") {
             const payload =
               typeof event.payload.activity.payload === "object" &&

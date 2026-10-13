@@ -87,6 +87,8 @@ function parseQuestions(value: unknown): UserInputQuestion[] {
 const requestActivityKinds = new Set([
   "approval.requested",
   "approval.resolved",
+  "approval.retired",
+  "approval.restored",
   "provider.approval.respond.failed",
   "user-input.requested",
   "user-input.resolved",
@@ -123,6 +125,7 @@ export function derivePendingRequests(activities: ReadonlyArray<OrchestrationThr
   const approvals = new Map<ApprovalRequestId, PendingApproval>();
   const userInputs = new Map<ApprovalRequestId, PendingUserInput>();
   const closedApprovals = new Set<ApprovalRequestId>();
+  const retiredApprovals = new Set<ApprovalRequestId>();
   const closedUserInputs = new Set<ApprovalRequestId>();
 
   // Request IDs are unique. A terminal event stays final even when provider
@@ -133,7 +136,10 @@ export function derivePendingRequests(activities: ReadonlyArray<OrchestrationThr
     if (!payload || !isRequestId(payload.requestId)) continue;
     const requestId = payload.requestId;
 
-    if (activity.kind === "approval.requested") {
+    if (activity.kind === "approval.restored" && retiredApprovals.delete(requestId)) {
+      closedApprovals.delete(requestId);
+    }
+    if (activity.kind === "approval.requested" || activity.kind === "approval.restored") {
       if (
         closedApprovals.has(requestId) ||
         payload.requestType === "tool_user_input" ||
@@ -170,9 +176,13 @@ export function derivePendingRequests(activities: ReadonlyArray<OrchestrationThr
       });
     } else if (
       activity.kind === "approval.resolved" ||
+      activity.kind === "approval.retired" ||
       (activity.kind === "provider.approval.respond.failed" &&
         isStaleRequestFailure(activity.kind, payload))
     ) {
+      if (activity.kind === "approval.retired" && !closedApprovals.has(requestId))
+        retiredApprovals.add(requestId);
+      else retiredApprovals.delete(requestId);
       closedApprovals.add(requestId);
       approvals.delete(requestId);
     } else if (

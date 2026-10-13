@@ -82,10 +82,15 @@ function hasOpenBlockingRequest(thread: {
         : null;
     const requestId = typeof payload?.requestId === "string" ? payload.requestId : null;
     if (requestId === null) continue;
-    if (activity.kind === "approval.requested" || activity.kind === "user-input.requested") {
+    if (
+      activity.kind === "approval.requested" ||
+      activity.kind === "approval.restored" ||
+      activity.kind === "user-input.requested"
+    ) {
       openRequestIds.add(requestId);
     } else if (
       activity.kind === "approval.resolved" ||
+      activity.kind === "approval.retired" ||
       activity.kind === "user-input.resolved" ||
       activity.kind === "provider.approval.delivery.pending" ||
       activity.kind === "provider.approval.delivery.confirmed"
@@ -232,10 +237,18 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
   command,
   readModel,
   userInputActivity,
+  approvalRetirement,
 }: {
   readonly command: OrchestrationCommand;
   readonly readModel: OrchestrationReadModel;
   readonly userInputActivity?: OrchestrationThreadActivity;
+  readonly approvalRetirement?: {
+    readonly status: string;
+    readonly decision: string | null;
+    readonly retired: boolean;
+    readonly payload: unknown;
+    readonly sending?: boolean;
+  };
 }): Effect.fn.Return<
   DecideOrchestrationCommandResult,
   OrchestrationCommandInvariantError | PlatformError.PlatformError,
@@ -1326,7 +1339,71 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.approval.retirement.set": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      const busy =
+        thread.session?.status === "starting" ||
+        thread.session?.status === "running" ||
+        thread.session?.activeTurnId != null ||
+        approvalRetirement?.sending === true ||
+        thread.latestTurn?.state === "running" ||
+        threadHasQueuedTurnStart(thread, command.createdAt);
+      const stale = thread.archivedAt !== null || thread.latestTurn?.state === "completed";
+      const valid =
+        approvalRetirement !== undefined &&
+        approvalRetirement.decision === null &&
+        (command.retired
+          ? approvalRetirement.status === "pending" && !approvalRetirement.retired
+          : approvalRetirement.status === "resolved" && approvalRetirement.retired);
+      if (busy || (command.retired && !stale) || !valid) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail:
+            "Only an unanswered stale request on an inactive archived or completed chat can be retired or restored.",
+        });
+      }
+      const kind = command.retired ? "approval.retired" : "approval.restored";
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+          metadata: { requestId: command.requestId },
+        })),
+        type: "thread.activity-appended",
+        payload: {
+          threadId: command.threadId,
+          activity: {
+            id: EventId.make(`operator:${command.commandId}`),
+            tone: "info",
+            kind,
+            summary: command.retired
+              ? "Operator retired stale approval; no decision sent"
+              : "Operator restored unanswered approval; no decision sent",
+            payload: {
+              ...(Predicate.isObject(approvalRetirement?.payload)
+                ? approvalRetirement.payload
+                : {}),
+              requestId: command.requestId,
+              attribution: "T3 operator, not Christine",
+              reason: thread.archivedAt !== null ? "archived" : "completed",
+              decisionSent: false,
+            },
+            turnId: null,
+            createdAt: command.createdAt,
+          },
+        },
+      };
+    }
+
     case "thread.approval.respond": {
+      if (approvalRetirement?.retired) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "This approval was retired. Restore it before answering.",
+        });
+      }
       yield* requireThread({
         readModel,
         command,
