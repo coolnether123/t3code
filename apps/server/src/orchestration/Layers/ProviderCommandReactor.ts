@@ -2171,7 +2171,9 @@ const make = Effect.gen(function* () {
   const processDomainEventSafely = (event: ProviderIntentEvent) =>
     processDomainEvent(event).pipe(
       Effect.tap(() =>
-        event.type === "thread.turn-start-requested" || event.type === "thread.turn-steer-requested"
+        event.type === "thread.turn-start-requested" ||
+        event.type === "thread.turn-steer-requested" ||
+        (event.type === "thread.session-set" && event.payload.session.status === "ready")
           ? approvalDelivery.confirmThread(event.payload.threadId)
           : Effect.void,
       ),

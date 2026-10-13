@@ -38,6 +38,7 @@ describe("approval reply delivery", () => {
     "readback-delayed",
     "readback-missing",
     "readback-unavailable",
+    "readback-after-escalation",
   ] as const) {
     it.effect(`retains and delivers the saved answer safely: ${scenario}`, () => {
       const messages: string[] = [];
@@ -85,7 +86,11 @@ describe("approval reply delivery", () => {
           turns: [
             {
               id: TurnId.make("synthetic-turn"),
-              items: (scenario === "readback-delayed" && reads < 3 ? [] : messages).map((text) => ({
+              items: ((scenario === "readback-delayed" && reads < 3) ||
+              (scenario === "readback-after-escalation" && reads < 5)
+                ? []
+                : messages
+              ).map((text) => ({
                 type: "userMessage",
                 content: [{ type: "text", text }],
               })),
@@ -119,7 +124,9 @@ describe("approval reply delivery", () => {
         yield* delivery.respond(answer);
         const restarted = yield* make();
         yield* restarted.respond(answer);
-        yield* restarted.recover();
+        const recovery = yield* restarted.recover().pipe(Effect.forkChild);
+        yield* TestClock.adjust("2 seconds");
+        yield* Fiber.join(recovery);
         if (scenario === "readback-unavailable") {
           yield* restarted.confirmThread(answer.threadId);
           yield* restarted.recover();
@@ -148,6 +155,7 @@ describe("approval reply delivery", () => {
                 "readback-delayed",
                 "readback-missing",
                 "readback-unavailable",
+                "readback-after-escalation",
               ].includes(scenario)
                 ? 1
                 : 0,
@@ -163,11 +171,12 @@ describe("approval reply delivery", () => {
                 "send-uncertain",
                 "readback-missing",
                 "readback-unavailable",
+                "readback-after-escalation",
               ].includes(scenario)
                 ? 1
                 : 0,
             );
-            if (scenario === "readback-missing") expect(readThread).toHaveBeenCalledTimes(4);
+            if (scenario === "readback-missing") expect(readThread).toHaveBeenCalledTimes(7);
             if (scenario === "stale") expect(savedText).toContain(answer.requestId);
           }),
         ),

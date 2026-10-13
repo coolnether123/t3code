@@ -143,7 +143,7 @@ export const makeApprovalResponseDelivery = Effect.fn("makeApprovalResponseDeliv
     const recover = Effect.fn("recoverApprovalDeliveries")(function* () {
       const rows =
         yield* sql<Delivery>`SELECT * FROM approval_response_deliveries WHERE status NOT IN ('delivered','escalated') OR recorded=0
-        OR (status='escalated' AND route='readback-unavailable')`;
+        OR (status='escalated' AND route IN ('readback-unavailable','delivery-uncertain'))`;
       for (const row of rows) {
         const answer: Answer = {
           threadId: ThreadId.make(row.thread_id),
@@ -169,7 +169,9 @@ export const makeApprovalResponseDelivery = Effect.fn("makeApprovalResponseDeliv
             row.message_text,
             "readback-recovery-unavailable",
           );
-        } else if (row.status === "escalated")
+        } else if (row.status === "escalated" && row.route === "delivery-uncertain")
+          yield* confirmThread(answer.threadId);
+        else if (row.status === "escalated")
           yield* escalate(answer, row.route ?? "delivery-uncertain");
         else if (row.status.startsWith("fallback-"))
           yield* fallback(
@@ -183,7 +185,8 @@ export const makeApprovalResponseDelivery = Effect.fn("makeApprovalResponseDeliv
     });
     const confirmThread = Effect.fn("confirmApprovalMessage")(function* (threadId: ThreadId) {
       const rows =
-        yield* sql<Delivery>`SELECT * FROM approval_response_deliveries WHERE thread_id=${threadId} AND status='fallback-queued'`;
+        yield* sql<Delivery>`SELECT * FROM approval_response_deliveries WHERE thread_id=${threadId}
+        AND (status='fallback-queued' OR (status='escalated' AND route='delivery-uncertain'))`;
       for (const row of rows) {
         const answer: Answer = {
           threadId,
@@ -192,6 +195,7 @@ export const makeApprovalResponseDelivery = Effect.fn("makeApprovalResponseDeliv
           createdAt: row.created_at,
         };
         if (!input.provider.readThread) {
+          if (row.status === "escalated") continue;
           yield* escalate(answer, "readback-unavailable");
           continue;
         }
@@ -209,7 +213,7 @@ export const makeApprovalResponseDelivery = Effect.fn("makeApprovalResponseDeliv
             break;
           }
         }
-        if (!found) yield* escalate(answer, "delivery-uncertain");
+        if (!found && row.status !== "escalated") yield* escalate(answer, "delivery-uncertain");
       }
     });
     return { respond, recover, confirmThread };
