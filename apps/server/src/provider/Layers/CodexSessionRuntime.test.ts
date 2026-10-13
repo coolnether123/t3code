@@ -1201,6 +1201,7 @@ describe("openCodexThread", () => {
   it.effect("fails opening when desktop skill-root attachment never replies", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
       const pending = yield* initializeCodexSessionClient(
         {
           request: () => Effect.succeed({}),
@@ -1208,13 +1209,13 @@ describe("openCodexThread", () => {
           raw: { request: () => Effect.never },
         } as unknown as Parameters<typeof initializeCodexSessionClient>[0],
         true,
-        { CODEX_HOME: "A:/fake-home" },
+        { CODEX_HOME: path.resolve("fake-home") },
       ).pipe(
         Effect.provideService(FileSystem.FileSystem, {
           ...fs,
           readFileString: () =>
             Effect.succeed(
-              '[marketplaces.openai-bundled]\nsource_type = "local"\nsource = \'A:/fake-bundle\'\n[plugins."chrome@openai-bundled"]\nenabled = true',
+              `[marketplaces.openai-bundled]\nsource_type = "local"\nsource = '${path.resolve("fake-bundle")}'\n[plugins."chrome@openai-bundled"]\nenabled = true`,
             ),
           stat: () =>
             Effect.succeed({ type: "Directory" }) as unknown as ReturnType<typeof fs.stat>,
@@ -1250,7 +1251,7 @@ describe("openCodexThread", () => {
           raw: {
             request: (method: string, params: { extraRoots: ReadonlyArray<string> }) => {
               NodeAssert.deepStrictEqual(params.extraRoots, [
-                path.join("A:/bundle", "plugins", "chrome", "skills"),
+                path.join(path.resolve("fake-bundle"), "plugins", "chrome", "skills"),
               ]);
               calls.push(method);
               return Effect.succeed({});
@@ -1261,7 +1262,7 @@ describe("openCodexThread", () => {
           yield* initializeCodexSessionClient(
             client as unknown as Parameters<typeof initializeCodexSessionClient>[0],
             desktopDaemon,
-            { CODEX_HOME: "A:/fake-codex-home" },
+            { CODEX_HOME: path.resolve("fake-codex-home") },
           );
           yield* openCodexThread({
             client: client as unknown as Parameters<typeof openCodexThread>[0]["client"],
@@ -1277,7 +1278,7 @@ describe("openCodexThread", () => {
             ...fs,
             readFileString: () =>
               Effect.succeed(
-                '[marketplaces.openai-bundled]\nsource_type = "local"\nsource = \'A:/bundle\'\n[plugins."chrome@openai-bundled"]\nenabled = true',
+                `[marketplaces.openai-bundled]\nsource_type = "local"\nsource = '${path.resolve("fake-bundle")}'\n[plugins."chrome@openai-bundled"]\nenabled = true`,
               ),
             stat: () =>
               Effect.succeed({ type: "Directory" }) as unknown as ReturnType<typeof fs.stat>,
