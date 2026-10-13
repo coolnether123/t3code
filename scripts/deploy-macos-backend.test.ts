@@ -29,6 +29,8 @@ import {
   MINIMUM_FREE_BYTES,
   backupDatabase,
   retirePreviousRollback,
+  verifyDatabaseBackup,
+  assertInstallMatches,
 } from "./deploy-macos-backend.ts";
 
 const commit = "0123456789abcdef0123456789abcdef01234567";
@@ -75,6 +77,22 @@ describe("deploy-macos-backend guards", () => {
     expect(() => assertCapacity(Number.NaN)).toThrow();
     expect(() => assertCapacity(MINIMUM_FREE_BYTES)).not.toThrow();
   });
+  it("reuses only a byte-identical bundle without replacing existing code", async () => {
+    await withTempDirectory(async (root) => {
+      const candidate = NodePath.join(root, "candidate");
+      const installed = NodePath.join(root, "installed");
+      await writeCandidate(candidate);
+      await NodeFSP.cp(candidate, installed, { recursive: true });
+      await expect(assertInstallMatches(candidate, installed)).resolves.toBeUndefined();
+      await NodeFSP.writeFile(NodePath.join(installed, "dist/client/assets/app.js"), "different");
+      await expect(assertInstallMatches(candidate, installed)).rejects.toThrow(
+        "differs from the verified candidate",
+      );
+      expect(
+        await NodeFSP.readFile(NodePath.join(installed, "dist/client/assets/app.js"), "utf8"),
+      ).toBe("different");
+    });
+  });
 
   // oxlint-disable-next-line t3code/no-global-process-runtime -- Native clone support belongs to the host filesystem, not an injected Effect platform.
   it.skipIf(NodeOS.platform() !== "darwin")(
@@ -89,6 +107,7 @@ describe("deploy-macos-backend guards", () => {
         );
         const before = await NodeFSP.statfs(root);
         await backupDatabase(source, backup);
+        await verifyDatabaseBackup(backup);
         database.exec("INSERT INTO saved VALUES ('later reply');");
         const clone = new NodeSqlite.DatabaseSync(backup, { readOnly: true });
         try {

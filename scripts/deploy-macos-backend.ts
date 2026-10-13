@@ -899,14 +899,50 @@ export const backupDatabase = async (dbPath: string, destination: string): Promi
   await NodeFSP.chmod(destination, 0o600);
 };
 
-const verifyDatabaseBackup = async (destination: string): Promise<void> => {
+export const verifyDatabaseBackup = async (destination: string): Promise<void> => {
   const check = await requireCommandSuccess(
-    "sqlite3",
-    ["-readonly", destination, "PRAGMA integrity_check;"],
+    "/usr/bin/python3",
+    [
+      "-c",
+      [
+        "import pathlib,sqlite3,sys",
+        "database=sqlite3.connect(pathlib.Path(sys.argv[1]).as_uri()+'?mode=ro&immutable=1',uri=True)",
+        "rows=database.execute('PRAGMA integrity_check').fetchall()",
+        "assert rows==[('ok',)], 'SQLite snapshot integrity check failed'",
+        "database.close();print('ok')",
+      ].join("\n"),
+      destination,
+    ],
     "SQLite integrity check",
-    180_000,
+    0,
   );
   if (check.trim() !== "ok") fail("SQLite integrity check did not return ok.");
+};
+
+/** A recovery may activate an existing identical bundle, never replace its contents. */
+export const assertInstallMatches = async (candidate: string, installed: string): Promise<void> => {
+  const fingerprint = async (root: string): Promise<string> => {
+    const digest = NodeCrypto.createHash("sha256");
+    const walk = async (directory: string): Promise<void> => {
+      for (const name of (await NodeFSP.readdir(directory)).toSorted()) {
+        const path = NodePath.join(directory, name);
+        const stat = await NodeFSP.lstat(path);
+        digest.update(`${NodePath.relative(root, path)}\0`);
+        if (stat.isSymbolicLink()) digest.update(`link:${await NodeFSP.readlink(path)}\0`);
+        else if (stat.isDirectory()) {
+          digest.update("directory\0");
+          await walk(path);
+        } else {
+          digest.update(`file:${stat.size}\0`);
+          digest.update(await NodeFSP.readFile(path));
+        }
+      }
+    };
+    await walk(root);
+    return digest.digest("hex");
+  };
+  if ((await fingerprint(candidate)) !== (await fingerprint(installed)))
+    fail("Existing install differs from the verified candidate; refusing to overwrite it.");
 };
 
 /** Only this deployer's receipt-owned prior rollback is eligible for retirement. */
@@ -1154,29 +1190,35 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
   const destinationParent = NodePath.dirname(destination);
   await NodeFSP.mkdir(destinationParent, { recursive: true, mode: 0o700 });
   await requireNoSymlink(destinationParent, "versioned install parent");
-  if (await optionalLstat(destination))
-    fail(`versioned install already exists; refusing to overwrite ${destination}`);
-  const temporaryInstall = NodePath.join(
-    destinationParent,
-    `.${options.commit}.tmp-${process.pid}-${NodeCrypto.randomUUID()}`,
-  );
-  await ensurePrivateDirectory(temporaryInstall, "temporary install", true);
-  try {
-    for (const entry of await NodeFSP.readdir(options.candidate)) {
-      await NodeFSP.cp(
-        NodePath.join(options.candidate, entry),
-        NodePath.join(temporaryInstall, entry),
-        { recursive: true, force: false, errorOnExist: true, verbatimSymlinks: true },
-      );
+  if (await optionalLstat(destination)) {
+    if (process.env.T3CODE_REUSE_VERIFIED_INSTALL !== "1")
+      fail(`versioned install already exists; refusing to overwrite ${destination}`);
+    await requireNoSymlink(destination, "existing install");
+    await validateCandidate({ ...options, candidate: destination });
+    await assertInstallMatches(options.candidate, destination);
+  } else {
+    const temporaryInstall = NodePath.join(
+      destinationParent,
+      `.${options.commit}.tmp-${process.pid}-${NodeCrypto.randomUUID()}`,
+    );
+    await ensurePrivateDirectory(temporaryInstall, "temporary install", true);
+    try {
+      for (const entry of await NodeFSP.readdir(options.candidate)) {
+        await NodeFSP.cp(
+          NodePath.join(options.candidate, entry),
+          NodePath.join(temporaryInstall, entry),
+          { recursive: true, force: false, errorOnExist: true, verbatimSymlinks: true },
+        );
+      }
+      if (await optionalLstat(destination))
+        fail("versioned install appeared during copy; refusing to replace it.");
+      await NodeFSP.rename(temporaryInstall, destination);
+    } catch (error) {
+      await NodeFSP.rm(temporaryInstall, { recursive: true, force: true });
+      throw error;
     }
-    if (await optionalLstat(destination))
-      fail("versioned install appeared during copy; refusing to replace it.");
-    await NodeFSP.rename(temporaryInstall, destination);
-  } catch (error) {
-    await NodeFSP.rm(temporaryInstall, { recursive: true, force: true });
-    throw error;
+    await validateCandidate({ ...options, candidate: destination });
   }
-  await validateCandidate({ ...options, candidate: destination });
 
   let stopped = false;
   try {
