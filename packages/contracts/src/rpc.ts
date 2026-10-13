@@ -7,6 +7,8 @@ import {
   ChatHistorySearchResult,
   ChatHistoryReadInput,
   ChatHistoryReadResult,
+  ChatHistoryAttachFinalInput,
+  ChatHistoryAttachFinalResult,
   ChatHistoryError,
 } from "./chatSearch.ts";
 import { NonNegativeInt } from "./baseSchemas.ts";
@@ -1281,6 +1283,11 @@ export const WsChatHistoryReadRpc = Rpc.make(CHAT_HISTORY_METHODS.read, {
   success: ChatHistoryReadResult,
   error: Schema.Union([ChatHistoryError, EnvironmentAuthorizationError]),
 });
+export const WsChatHistoryAttachFinalRpc = Rpc.make(CHAT_HISTORY_METHODS.attachFinal, {
+  payload: ChatHistoryAttachFinalInput,
+  success: ChatHistoryAttachFinalResult,
+  error: Schema.Union([ChatHistoryError, EnvironmentAuthorizationError]),
+});
 export const WsOrchestrationSearchThreadsRpc = Rpc.make(ORCHESTRATION_WS_METHODS.searchThreads, {
   payload: OrchestrationSearchThreadsInput,
   success: OrchestrationRpcSchemas.searchThreads.output,
@@ -1500,6 +1507,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationSearchThreadsRpc,
   WsChatHistorySearchRpc,
   WsChatHistoryReadRpc,
+  WsChatHistoryAttachFinalRpc,
   WsOrchestrationGetArchivedShellSnapshotRpc,
   WsOrchestrationSubscribeShellRpc,
   WsOrchestrationSubscribeThreadRpc,

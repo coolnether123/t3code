@@ -129,6 +129,9 @@ import {
 import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../state/server";
 import { vcsEnvironment } from "../state/vcs";
 import { threadEnvironment } from "../state/threads";
+import { serverEnvironment } from "../state/server";
+import { moveThreadToSidebarSection } from "@t3tools/shared/sidebarSections";
+import { SidebarClientSections } from "./SidebarClientSections";
 import { useEnvironmentQuery } from "../state/query";
 import { useAtomCommand } from "../state/use-atom-command";
 import {
@@ -2067,6 +2070,30 @@ export default function Sidebar() {
     [sidebarProjectSortOrder, threads, unsortedProjectGroups],
   );
   const serverConfigs = useAtomValue(environmentServerConfigsAtom);
+  const updateSectionSettings = useAtomCommand(
+    serverEnvironment.updateSettings,
+    "sidebar sections update",
+  );
+  const sectionEnvironments = useMemo(
+    () =>
+      environments.filter(
+        (environment) =>
+          (selectedEnvironmentId === null || environment.environmentId === selectedEnvironmentId) &&
+          environment.serverConfig?.environment.capabilities.sidebarSections === true,
+      ),
+    [environments, selectedEnvironmentId],
+  );
+  const sectionThreadKeys = useMemo(
+    () =>
+      new Set(
+        sectionEnvironments.flatMap((environment) =>
+          (environment.serverConfig?.settings.sidebarSections?.sections ?? []).flatMap((section) =>
+            section.threadIds.map((id) => `${environment.environmentId}:${id}`),
+          ),
+        ),
+      ),
+    [sectionEnvironments],
+  );
   const [activeWorkOpen, setActiveWorkOpen] = useState(false);
   const disconnectedEnvironmentCount = environments.filter(
     (environment) => environment.connection.phase !== "connected",
@@ -3273,27 +3300,56 @@ export default function Sidebar() {
         const snoozePresets = resolveSnoozePresets(new Date(), timestampFormat);
         const clicked = await settlePromise(() =>
           api.contextMenu.show(
-            buildThreadActionMenuItems({
-              branch: thread.branch ?? null,
-              isPinned,
-              isSettled,
-              isSnoozed,
-              canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
-              isRegeneratingTitle,
-              isRunning:
-                thread.session?.status === "running" && thread.session.activeTurnId != null,
-              supports: {
-                settlement: supportsSettlement,
-                snooze: supportsSnooze,
-                pinning: supportsPinning,
-                titleRegeneration: supportsTitleRegeneration,
-              },
-              snoozePresets,
-            }),
+            [
+              ...buildThreadActionMenuItems({
+                branch: thread.branch ?? null,
+                isPinned,
+                isSettled,
+                isSnoozed,
+                canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
+                isRegeneratingTitle,
+                isRunning:
+                  thread.session?.status === "running" && thread.session.activeTurnId != null,
+                supports: {
+                  settlement: supportsSettlement,
+                  snooze: supportsSnooze,
+                  pinning: supportsPinning,
+                  titleRegeneration: supportsTitleRegeneration,
+                },
+                snoozePresets,
+              }),
+              ...(
+                serverConfigs.get(thread.environmentId)?.settings.sidebarSections?.sections ?? []
+              ).map((section) => ({
+                id: `move-section:${section.id}`,
+                label: `Move to section: ${section.name}`,
+              })),
+              ...(sectionThreadKeys.has(`${thread.environmentId}:${thread.id}`)
+                ? [{ id: "remove-section", label: "Remove from section" }]
+                : []),
+            ],
             position,
           ),
         );
         if (clicked._tag === "Failure") return;
+        if (clicked.value === "remove-section" || clicked.value?.startsWith("move-section:")) {
+          const current = serverConfigs.get(thread.environmentId)?.settings.sidebarSections;
+          if (!current) return;
+          const sidebarSections = moveThreadToSidebarSection(
+            current,
+            thread.id,
+            clicked.value === "remove-section" ? null : clicked.value.slice("move-section:".length),
+          );
+          const result = await updateSectionSettings({
+            environmentId: thread.environmentId,
+            input: { patch: { sidebarSections } },
+          });
+          if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+            toastManager.add({ type: "error", title: "Chat section was not saved" });
+          }
+          clearSelection();
+          return;
+        }
         if (clicked.value?.startsWith("snooze:")) {
           const preset = snoozePresets.find(
             (candidate) => `snooze:${candidate.id}` === clicked.value,
@@ -3465,6 +3521,9 @@ export default function Sidebar() {
       serverConfigs,
       startThreadRename,
       updateThreadMetadata,
+      updateSectionSettings,
+      sectionThreadKeys,
+      clearSelection,
       timestampFormat,
     ],
   );
@@ -3985,15 +4044,14 @@ export default function Sidebar() {
                     thread: EnvironmentThreadShell,
                     section: "pinned" | "active" | "snoozed" | "settled",
                     sortable?: SortablePinnedRowBag,
+                    compact = false,
                   ) => {
                     const threadKey = scopedThreadKey(
                       scopeThreadRef(thread.environmentId, thread.id),
                     );
-                    // Settled and snoozed are the ONLY things that collapse a
-                    // row: every other thread is a full card. Density comes
-                    // from users (or the auto rules) actually parking work,
-                    // not from the sidebar second-guessing what still matters.
-                    const isCard = section === "active" || section === "pinned";
+                    // Custom sections use compact rows without changing the
+                    // thread's lifecycle. Ungrouped active work stays a card.
+                    const isCard = !compact && (section === "active" || section === "pinned");
                     const rowVariant = isCard ? "card" : "slim";
                     return (
                       <SidebarThreadRow
@@ -4103,6 +4161,42 @@ export default function Sidebar() {
                       routeDraftId={routeDraftIdForRows}
                       onNavigateToDraft={navigateToDraft}
                     />,
+                    ...sectionEnvironments.map((environment) => (
+                      <SidebarClientSections
+                        key={`sections:${environment.environmentId}`}
+                        environmentId={environment.environmentId}
+                        environmentLabel={environment.label}
+                        threads={threads.filter(
+                          (thread) =>
+                            thread.environmentId === environment.environmentId &&
+                            (scopedProjectKeys === null ||
+                              scopedProjectKeys.has(`${thread.environmentId}:${thread.projectId}`)),
+                        )}
+                        onLayoutChange={clearSelection}
+                        renderThread={(thread) =>
+                          renderThreadRow(
+                            thread,
+                            snoozedThreads.some(
+                              (entry) =>
+                                entry.id === thread.id &&
+                                entry.environmentId === thread.environmentId,
+                            )
+                              ? "snoozed"
+                              : settledThreads.some(
+                                    (entry) =>
+                                      entry.id === thread.id &&
+                                      entry.environmentId === thread.environmentId,
+                                  )
+                                ? "settled"
+                                : thread.pinnedAt !== null
+                                  ? "pinned"
+                                  : "active",
+                            undefined,
+                            true,
+                          )
+                        }
+                      />
+                    )),
                     pinnedThreads.length > 0 ? (
                       <li key="pinned-dnd" className="list-none">
                         <DndContext
@@ -4124,19 +4218,24 @@ export default function Sidebar() {
                               aria-label="Pinned threads"
                               className="flex flex-col gap-px"
                             >
-                              {orderedPinnedThreads.map((thread) => {
-                                const threadKey = scopedThreadKey(
-                                  scopeThreadRef(thread.environmentId, thread.id),
-                                );
-                                if (!reorderablePinnedKeys.has(threadKey)) {
-                                  return renderThreadRow(thread, "pinned");
-                                }
-                                return (
-                                  <SortablePinnedThreadRow key={threadKey} id={threadKey}>
-                                    {(bag) => renderThreadRow(thread, "pinned", bag)}
-                                  </SortablePinnedThreadRow>
-                                );
-                              })}
+                              {orderedPinnedThreads
+                                .filter(
+                                  (thread) =>
+                                    !sectionThreadKeys.has(`${thread.environmentId}:${thread.id}`),
+                                )
+                                .map((thread) => {
+                                  const threadKey = scopedThreadKey(
+                                    scopeThreadRef(thread.environmentId, thread.id),
+                                  );
+                                  if (!reorderablePinnedKeys.has(threadKey)) {
+                                    return renderThreadRow(thread, "pinned");
+                                  }
+                                  return (
+                                    <SortablePinnedThreadRow key={threadKey} id={threadKey}>
+                                      {(bag) => renderThreadRow(thread, "pinned", bag)}
+                                    </SortablePinnedThreadRow>
+                                  );
+                                })}
                             </ul>
                           </SortableContext>
                         </DndContext>
@@ -4154,6 +4253,7 @@ export default function Sidebar() {
                     );
                   }
                   for (const thread of activeThreads) {
+                    if (sectionThreadKeys.has(`${thread.environmentId}:${thread.id}`)) continue;
                     items.push(renderThreadRow(thread, "active"));
                   }
                   // Snoozed shelf: between the inbox and Settled — out of the
@@ -4192,6 +4292,7 @@ export default function Sidebar() {
                       </li>,
                     );
                     for (const thread of visibleSnoozedThreads) {
+                      if (sectionThreadKeys.has(`${thread.environmentId}:${thread.id}`)) continue;
                       items.push(renderThreadRow(thread, "snoozed"));
                     }
                   }
@@ -4227,6 +4328,7 @@ export default function Sidebar() {
                     );
                   }
                   for (const thread of renderedSettledThreads) {
+                    if (sectionThreadKeys.has(`${thread.environmentId}:${thread.id}`)) continue;
                     items.push(renderThreadRow(thread, "settled"));
                   }
                   return items;

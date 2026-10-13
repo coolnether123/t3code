@@ -76,6 +76,99 @@ const recordProviderUsage = (provider: string, instanceId: string | null = provi
   });
 
 it.layer(NodeServices.layer)("server settings", (it) => {
+  it.effect("imports Codex sections once and does not restore a deleted section on restart", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const previousPath = process.env.T3CODE_IMPORT_CODEX_SECTIONS_PATH;
+        const settings = yield* ServerSettingsModule.ServerSettingsService;
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const directory = yield* fs.makeTempDirectoryScoped();
+        const importPath = path.join(directory, "synthetic-codex-state.json");
+        const source =
+          '{"electron-persisted-atom-state":{"sidebar-custom-sections-v3":{"synthetic":{"sections":[{"id":"client","name":"Synthetic client","itemKeys":["codex:thread:local:missing"],"appearance":null}],"sectionOrder":["client"],"collapsedSectionIds":["client"]}}}}';
+        yield* fs.writeFileString(importPath, source);
+        process.env.T3CODE_IMPORT_CODEX_SECTIONS_PATH = importPath;
+        yield* Effect.gen(function* () {
+          yield* settings.start;
+          const imported = yield* settings.getSettings;
+          assert.equal(imported.sidebarSections?.sections[0]?.name, "Synthetic client");
+          assert.isTrue(imported.sidebarSections?.sections[0]?.collapsed);
+          assert.equal(imported.sidebarSections?.codexImport?.unmatchedCount, 1);
+          assert.equal(yield* fs.readFileString(importPath), source);
+          yield* settings.updateSettings({
+            sidebarSections: { ...imported.sidebarSections!, sections: [] },
+          });
+          const reloaded = yield* Effect.gen(function* () {
+            const fresh = yield* ServerSettingsModule.ServerSettingsService;
+            yield* fresh.start;
+            return yield* fresh.getSettings;
+          }).pipe(
+            Effect.provide(
+              Layer.fresh(ServerSettingsModule.layer).pipe(Layer.provide(ServerSecretStore.layer)),
+            ),
+          );
+          assert.deepEqual(reloaded.sidebarSections?.sections, []);
+          assert.equal(reloaded.sidebarSections?.codexImport?.unmatchedCount, 1);
+        }).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              if (previousPath === undefined) delete process.env.T3CODE_IMPORT_CODEX_SECTIONS_PATH;
+              else process.env.T3CODE_IMPORT_CODEX_SECTIONS_PATH = previousPath;
+            }),
+          ),
+        );
+      }).pipe(Effect.provide(makeServerSettingsLayer())),
+    ),
+  );
+  it.effect("persists section moves and deletion without changing conversation records", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const settings = yield* ServerSettingsModule.ServerSettingsService;
+        const config = yield* ServerConfig.ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`INSERT INTO projection_threads (thread_id,project_id,title,model_selection_json,runtime_mode,interaction_mode,created_at,updated_at)
+        VALUES ('synthetic-old-long-thread','synthetic-project','Synthetic old thread','{"instanceId":"codex","model":"synthetic"}','full-access','default','2026-09-01T00:00:00Z','2026-09-01T00:00:00Z')`;
+        const longHistory = "Synthetic history, not client data. ".repeat(4000);
+        yield* sql`INSERT INTO projection_thread_messages (message_id,thread_id,role,text,is_streaming,created_at,updated_at)
+        VALUES ('synthetic-long-message','synthetic-old-long-thread','assistant',${longHistory},0,'2026-09-01T00:00:00Z','2026-09-01T00:00:00Z')`;
+        const before = yield* sql`SELECT * FROM projection_threads`;
+        const messagesBefore = yield* sql`SELECT * FROM projection_thread_messages`;
+        const sectionState = {
+          sections: [
+            {
+              id: "a",
+              name: "Client A",
+              collapsed: false,
+              threadIds: ["synthetic-old-long-thread"],
+            },
+            { id: "b", name: "Client B", collapsed: true, threadIds: [] },
+          ],
+          codexImport: {
+            sectionCount: 2,
+            matchedCount: 1,
+            unmatchedCount: 0,
+            ambiguousCount: 0,
+            duplicateCount: 0,
+          },
+        };
+        const changed = yield* settings.updateSettings({ sidebarSections: sectionState });
+        assert.deepEqual(changed.sidebarSections, sectionState);
+        const persisted = yield* decodeServerSettingsFile(
+          yield* fs.readFileString(config.settingsPath),
+        );
+        assert.deepEqual(persisted.sidebarSections, sectionState);
+        const deleted = yield* settings.updateSettings({
+          sidebarSections: { ...sectionState, sections: [] },
+        });
+        assert.deepEqual(deleted.sidebarSections?.sections, []);
+        assert.deepEqual(deleted.sidebarSections?.codexImport, sectionState.codexImport);
+        assert.deepEqual(yield* sql`SELECT * FROM projection_threads`, before);
+        assert.deepEqual(yield* sql`SELECT * FROM projection_thread_messages`, messagesBefore);
+      }).pipe(Effect.provide(makeServerSettingsLayer())),
+    ),
+  );
   it.effect("persists, reloads, broadcasts, and resets computer appearance", () =>
     Effect.scoped(
       Effect.gen(function* () {

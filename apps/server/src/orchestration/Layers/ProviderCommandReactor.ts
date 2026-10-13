@@ -2111,7 +2111,11 @@ const make = Effect.gen(function* () {
     });
     switch (event.type) {
       case "thread.message-sent":
-        if (event.payload.role === "assistant" && !event.payload.streaming)
+        if (
+          event.payload.role === "assistant" &&
+          !event.payload.streaming &&
+          event.metadata.operatorAttachment !== true
+        )
           yield* stoppedChatWorker.enqueue(event.payload.threadId);
         return;
       case "thread.meta-updated":

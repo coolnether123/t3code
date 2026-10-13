@@ -883,7 +883,44 @@ const EnvironmentColor = Schema.String.check(
   Schema.isMaxLength(7),
 );
 
+export const SidebarSection = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  name: TrimmedNonEmptyString,
+  threadIds: Schema.Array(TrimmedNonEmptyString),
+  collapsed: Schema.Boolean,
+  appearance: Schema.optionalKey(
+    Schema.Struct({
+      color: Schema.optionalKey(TrimmedNonEmptyString),
+      icon: Schema.optionalKey(TrimmedNonEmptyString),
+    }),
+  ),
+});
+export type SidebarSection = typeof SidebarSection.Type;
+
+export const SidebarSections = Schema.Struct({
+  sections: Schema.Array(SidebarSection),
+  codexImport: Schema.optionalKey(
+    Schema.Struct({
+      sectionCount: Schema.Number,
+      matchedCount: Schema.Number,
+      unmatchedCount: Schema.Number,
+      ambiguousCount: Schema.Number,
+      duplicateCount: Schema.Number,
+    }),
+  ),
+}).check(
+  Schema.makeFilter((value) => {
+    const sectionIds = value.sections.map((section) => section.id);
+    const threadIds = value.sections.flatMap((section) => section.threadIds);
+    return (
+      new Set(sectionIds).size === sectionIds.length && new Set(threadIds).size === threadIds.length
+    );
+  }),
+);
+export type SidebarSections = typeof SidebarSections.Type;
+
 export const ServerSettings = Schema.Struct({
+  sidebarSections: Schema.optionalKey(SidebarSections),
   environmentName: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   environmentColor: Schema.NullOr(EnvironmentColor).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
@@ -1188,6 +1225,7 @@ const OpenCodeSettingsPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
+  sidebarSections: Schema.optionalKey(SidebarSections),
   // Server settings
   environmentName: Schema.optionalKey(TrimmedString),
   environmentColor: Schema.optionalKey(Schema.NullOr(EnvironmentColor)),
