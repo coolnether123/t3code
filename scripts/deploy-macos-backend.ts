@@ -21,7 +21,7 @@ export const MINIMUM_FREE_BYTES = 20 * 1024 * 1024 * 1024;
 
 export const assertCapacity = (available: number): void => {
   if (!Number.isFinite(available) || available < MINIMUM_FREE_BYTES)
-    fail("Less than 2 GiB free; refusing to prepare or restart T3.");
+    fail("Less than 20 GiB free; refusing to prepare or restart T3.");
 };
 
 const requireCapacity = async (path: string): Promise<void> => {

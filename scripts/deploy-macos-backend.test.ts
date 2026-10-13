@@ -73,7 +73,7 @@ const writeCandidate = async (candidate: string) => {
 
 describe("deploy-macos-backend guards", () => {
   it("fails closed below the rollback reserve", () => {
-    expect(() => assertCapacity(MINIMUM_FREE_BYTES - 1)).toThrow("Less than 2 GiB");
+    expect(() => assertCapacity(MINIMUM_FREE_BYTES - 1)).toThrow("Less than 20 GiB");
     expect(() => assertCapacity(Number.NaN)).toThrow();
     expect(() => assertCapacity(MINIMUM_FREE_BYTES)).not.toThrow();
   });
