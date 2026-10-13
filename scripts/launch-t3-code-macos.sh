@@ -14,7 +14,7 @@ DRY_RUN=0; PREPARE_ONLY=0; BUILD_ONLY=0; SKIP_BUILD=0
 RUN_ID=""; RUN_DIR=""; LOG_PATH=/dev/null; STATE_PATH=""; STAGED_APP=""; PREVIOUS_APP=""
 EXPECTED_ENVIRONMENT_ID=""
 VP_PATH=""; declare -a OWNED_PIDS=()
-STORAGE_HELPER="$ROOT/scripts/macos-storage.py"
+STORAGE_HELPER="$(dirname -- "${BASH_SOURCE[0]}")/macos-storage.py"
 RESTART_OLD_ON_FAILURE=0
 storage() { /usr/bin/python3 "$STORAGE_HELPER" "$@"; }
 space_gate() { storage capacity "$1" --allocation "${2:-1048576}" || fail "T3 space guard refused step; 20 GiB reserve required"; }
