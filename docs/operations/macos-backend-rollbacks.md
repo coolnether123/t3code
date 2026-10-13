@@ -1,6 +1,6 @@
 # Keep a Mac backend rollback without a full data copy
 
-Use one stable `--backup-root` for successive backend installs. The guarded deployer requires at least 2 GiB free before preparation and immediately before stopping. It retains pending requests only when `T3CODE_PRESERVE_PENDING_REQUESTS=1` and an exact fingerprint guard is supplied.
+Use one stable `--backup-root` for successive backend installs. The guarded deployer requires at least 20 GiB free before preparation and immediately before stopping. It retains pending requests only when `T3CODE_PRESERVE_PENDING_REQUESTS=1` and an exact fingerprint guard is supplied.
 
 The deployer validates the isolated candidate, captures the old launcher, and rechecks idle admission. It then stops the captured backend and unloads its launch agent. With no backend writer, it checkpoints SQLite's WAL and force-clones the database on the same filesystem. Unsupported cloning fails rather than silently copying the database. Configuration backups also use forced cloning. The live database is never restored during code rollback.
 
