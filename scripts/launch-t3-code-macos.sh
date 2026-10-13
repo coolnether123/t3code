@@ -14,6 +14,10 @@ DRY_RUN=0; PREPARE_ONLY=0; BUILD_ONLY=0; SKIP_BUILD=0
 RUN_ID=""; RUN_DIR=""; LOG_PATH=/dev/null; STATE_PATH=""; STAGED_APP=""; PREVIOUS_APP=""
 EXPECTED_ENVIRONMENT_ID=""
 VP_PATH=""; declare -a OWNED_PIDS=()
+STORAGE_HELPER="$ROOT/scripts/macos-storage.py"
+RESTART_OLD_ON_FAILURE=0
+storage() { /usr/bin/python3 "$STORAGE_HELPER" "$@"; }
+space_gate() { storage capacity "$1" --allocation "${2:-1048576}" || fail "T3 space guard refused step; 20 GiB reserve required"; }
 
 usage() {
   cat <<'HELP'
@@ -191,14 +195,15 @@ backup() {
   if [[ "${T3CODE_DEPLOY_CODE_ONLY:-0}" == 1 ]]; then
     mkdir -p "$RUN_DIR/t3-home/userdata"
   else
-    ditto "$T3_HOME" "$RUN_DIR/t3-home" >>"$LOG_PATH" 2>&1 || fail "T3 home backup failed"
+    storage clone "$T3_HOME" "$RUN_DIR/t3-home" >>"$LOG_PATH" 2>&1 || fail "T3 home APFS clone failed"
   fi
-  local db="$T3_HOME/userdata/state.sqlite" out="$RUN_DIR/t3-home/userdata/state.sqlite" snap="$RUN_DIR/t3-home/userdata/state.sqlite.consistent" sql
-  real_file "$db" "live SQLite database"; command -v sqlite3 >/dev/null || fail "sqlite3 is required"; sql="$(printf '%s' "$snap"|sed "s/'/''/g")"
-  sqlite3 -readonly "$db" "PRAGMA busy_timeout=5000; VACUUM INTO '$sql';" >>"$LOG_PATH" 2>&1 || fail "consistent SQLite backup failed"
-  [[ -f "$snap" ]] || fail "SQLite snapshot was not created"; mv "$snap" "$out"; rm -f "$out-wal" "$out-shm"
-  [[ "$(sqlite3 -readonly "$out" 'PRAGMA integrity_check;' 2>>"$LOG_PATH")" == ok ]] || fail "backup SQLite integrity_check failed"
-  if [[ "${T3CODE_DEPLOY_CODE_ONLY:-0}" != 1 && -d "$APP_SUPPORT_PATH" ]]; then plan "Backing up Electron support data to $RUN_DIR/application-support; live data stays in place."; ditto "$APP_SUPPORT_PATH" "$RUN_DIR/application-support" >>"$LOG_PATH" 2>&1 || fail "Electron support backup failed"; fi
+  local db="$T3_HOME/userdata/state.sqlite" out="$RUN_DIR/t3-home/userdata/state.sqlite"
+  real_file "$db" "live SQLite database"
+  if [[ "${T3CODE_DEPLOY_CODE_ONLY:-0}" == 1 ]]; then
+    storage clone "$db" "$out" >>"$LOG_PATH" 2>&1 || fail "SQLite APFS clone failed"
+  fi
+  storage verify "$out" >>"$LOG_PATH" 2>&1 || fail "backup SQLite integrity_check failed"
+  if [[ "${T3CODE_DEPLOY_CODE_ONLY:-0}" != 1 && -d "$APP_SUPPORT_PATH" ]]; then plan "Backing up Electron support data with APFS clones."; storage clone "$APP_SUPPORT_PATH" "$RUN_DIR/application-support" >>"$LOG_PATH" 2>&1 || fail "Electron support APFS clone failed"; fi
 }
 record_environment_identity() {
   local identity_path="$T3_HOME/userdata/environment-id"
@@ -327,7 +332,7 @@ idle_gate() {
 }
 backup_app() {
   [[ -d "$APP_PATH" && ! -L "$APP_PATH" ]] || fail "installed app is absent or a symlink"; mkdir -p "$RUN_DIR/installed-app"
-  plan "Backing up installed app to $RUN_DIR/installed-app"; ditto "$APP_PATH" "$RUN_DIR/installed-app/$(basename "$APP_PATH")" >>"$LOG_PATH" 2>&1 || fail "app backup failed"
+  plan "Backing up installed app with APFS clones"; mkdir -p "$RUN_DIR/installed-app"; storage clone "$APP_PATH" "$RUN_DIR/installed-app/$(basename "$APP_PATH")" >>"$LOG_PATH" 2>&1 || fail "app APFS clone failed"
   shasum -a 256 "$APP_PATH/Contents/Resources/app.asar" >"$RUN_DIR/installed-app/app.asar.sha256" || fail "app checksum failed"
 }
 write_state() {
@@ -357,7 +362,9 @@ recover() {
 }
 extract_app() {
   local z="" p n=0 app="" apps=0; while read -r p; do [[ -z "$p" ]] || { z="$p"; n=$((n+1)); }; done < <(find "$ARTIFACT_DIR" -maxdepth 1 -type f -name '*.zip' -print)
-  [[ "$n" -eq 1 ]] || fail "expected one artifact ZIP; found $n"; local x="$ARTIFACT_DIR/extracted"; mkdir -p "$x"; ditto -x -k "$z" "$x" >>"$LOG_PATH" 2>&1 || fail "artifact extraction failed"
+  [[ "$n" -eq 1 ]] || fail "expected one artifact ZIP; found $n"; local x="$ARTIFACT_DIR/extracted" size
+  size="$(/usr/bin/python3 -c 'import sys,zipfile; print(sum(x.file_size for x in zipfile.ZipFile(sys.argv[1]).infolist()))' "$z")"
+  space_gate "$ARTIFACT_DIR" "$size"; mkdir -p "$x"; ditto -x -k "$z" "$x" >>"$LOG_PATH" 2>&1 || fail "artifact extraction failed"
   while read -r p; do [[ -z "$p" ]] || { app="$p"; apps=$((apps+1)); }; done < <(find "$x" -type d -name '*.app' -prune -print)
   [[ "$apps" -eq 1 ]] || fail "expected one app in ZIP; found $apps"; STAGED_APP="$app"; validate_app "$STAGED_APP" 1 >/dev/null
 }
@@ -397,12 +404,18 @@ rollback() {
 }
 deploy() {
   [[ -d "$APP_PATH" ]] || fail "installed app missing; refusing deployment"; local old new app_parent app_name
-  old="$(validate_app "$APP_PATH")"; record_environment_identity; idle_gate; backup_app; backup; idle_gate; stop_existing "$old"
+  old="$(validate_app "$APP_PATH")"; record_environment_identity; space_gate "$T3_HOME"; idle_gate; backup_app; idle_gate
+  trap 'if [[ "$RESTART_OLD_ON_FAILURE" == 1 ]]; then launch_verify >>"$LOG_PATH" 2>&1 || true; fi' EXIT
+  stop_existing "$old"; RESTART_OLD_ON_FAILURE=1
+  storage checkpoint "$T3_HOME/userdata/state.sqlite" >>"$LOG_PATH" 2>&1 || fail "quiescent SQLite checkpoint failed"
+  backup; space_gate "$T3_HOME"
   app_parent="$(dirname "$APP_PATH")"; app_name="$(basename "$APP_PATH" .app)"
   PREVIOUS_APP="$app_parent/.$app_name.previous.$RUN_ID.app"; new="$app_parent/.$app_name.new.$RUN_ID.app"
-  [[ ! -e "$PREVIOUS_APP" && ! -e "$new" ]] || fail "app staging path exists"; ditto "$STAGED_APP" "$new" >>"$LOG_PATH" 2>&1 || fail "candidate staging copy failed"; validate_app "$new" 1 >/dev/null; STAGED_APP="$new"; write_state ready-to-swap
+  [[ ! -e "$PREVIOUS_APP" && ! -e "$new" ]] || fail "app staging path exists"; storage clone "$STAGED_APP" "$new" >>"$LOG_PATH" 2>&1 || fail "candidate staging APFS clone failed"; validate_app "$new" 1 >/dev/null; STAGED_APP="$new"; write_state ready-to-swap
+  RESTART_OLD_ON_FAILURE=0
   mv "$APP_PATH" "$PREVIOUS_APP"; write_state old-moved; mv "$STAGED_APP" "$APP_PATH"; write_state new-installed
   if ! launch_verify; then printf 'new app health failed; rolling back\n' >&2; rollback; fail "deployment rolled back"; fi
+  storage retire "$RUN_DIR" "$PREVIOUS_APP" --app "$APP_PATH" >>"$LOG_PATH" 2>&1 || fail "accepted rollback retirement failed; current rollback retained"
   rm -f "$STATE_PATH"; printf 'deployment ready: %s\nbackup: %s\nprevious app retained: %s\n' "$APP_PATH" "$RUN_DIR" "$PREVIOUS_APP"
 }
 main() {

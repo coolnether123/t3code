@@ -19,14 +19,21 @@ import * as NodeUtil from "node:util";
 const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
 export const MINIMUM_FREE_BYTES = 20 * 1024 * 1024 * 1024;
 
-export const assertCapacity = (available: number): void => {
-  if (!Number.isFinite(available) || available < MINIMUM_FREE_BYTES)
-    fail("Less than 20 GiB free; refusing to prepare or restart T3.");
+export const assertCapacity = (available: number, allocation = 0): void => {
+  if (
+    !Number.isFinite(available) ||
+    !Number.isFinite(allocation) ||
+    allocation < 0 ||
+    available - allocation < MINIMUM_FREE_BYTES
+  )
+    fail(
+      `Less than 20 GiB projected free; refusing T3 step (available=${available}, allocation=${allocation}).`,
+    );
 };
 
-const requireCapacity = async (path: string): Promise<void> => {
+const requireCapacity = async (path: string, allocation = 0): Promise<void> => {
   const volume = await NodeFSP.statfs(path);
-  assertCapacity(volume.bavail * volume.bsize);
+  assertCapacity(volume.bavail * volume.bsize, allocation);
 };
 
 export const DEFAULT_BASE_DIR = "/Users/millie/.t3";
@@ -475,19 +482,29 @@ const readText = async (path: string): Promise<string | undefined> => {
   }
 };
 
-const copyIfPresent = async (source: string, destination: string): Promise<boolean> => {
+const copyIfPresent = async (
+  source: string,
+  destination: string,
+  links = false,
+): Promise<boolean> => {
   const stat = await optionalLstat(source);
   if (!stat) return false;
-  if (stat.isSymbolicLink()) fail(`refusing to back up a symlink: ${source}`);
+  if (stat.isSymbolicLink()) {
+    if (!links) fail(`refusing to back up a symlink: ${source}`);
+    await requireCapacity(NodePath.dirname(destination), 1024 * 1024);
+    await NodeFSP.symlink(await NodeFSP.readlink(source), destination);
+    return true;
+  }
   if (stat.isDirectory()) {
     await NodeFSP.mkdir(destination, { mode: 0o700 });
     for (const entry of await NodeFSP.readdir(source))
-      await copyIfPresent(NodePath.join(source, entry), NodePath.join(destination, entry));
+      await copyIfPresent(NodePath.join(source, entry), NodePath.join(destination, entry), links);
   } else await forceClone(source, destination);
   return true;
 };
 
 const forceClone = async (source: string, destination: string): Promise<void> => {
+  await requireCapacity(NodePath.dirname(destination), 1024 * 1024);
   await requireCommandSuccess(
     "/usr/bin/python3",
     [
@@ -884,7 +901,8 @@ const atomicWriteOwned = async (
 export const backupDatabase = async (dbPath: string, destination: string): Promise<void> => {
   await requireNoSymlink(dbPath, "live SQLite database");
   if (await optionalLstat(destination)) fail("Database rollback already exists.");
-  await requireCapacity(NodePath.dirname(destination));
+  const pendingWal = await optionalLstat(`${dbPath}-wal`);
+  await requireCapacity(NodePath.dirname(destination), (pendingWal?.size ?? 0) * 2 + 1024 * 1024);
   // The caller has stopped T3 and unloaded its launch agent before checkpointing.
   const checkpoint = await requireCommandSuccess(
     "sqlite3",
@@ -1006,11 +1024,7 @@ const backupPath = async (path: string, destination: string): Promise<void> => {
   const stat = await optionalLstat(path);
   if (!stat) return;
   if (stat.isSymbolicLink()) fail(`refusing to back up symlink ${path}`);
-  await NodeFSP.cp(path, destination, {
-    recursive: stat.isDirectory(),
-    force: false,
-    errorOnExist: true,
-  });
+  await copyIfPresent(path, destination);
 };
 
 const localEnvironment = (): Record<string, string> => {
@@ -1204,10 +1218,10 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
     await ensurePrivateDirectory(temporaryInstall, "temporary install", true);
     try {
       for (const entry of await NodeFSP.readdir(options.candidate)) {
-        await NodeFSP.cp(
+        await copyIfPresent(
           NodePath.join(options.candidate, entry),
           NodePath.join(temporaryInstall, entry),
-          { recursive: true, force: false, errorOnExist: true, verbatimSymlinks: true },
+          true,
         );
       }
       if (await optionalLstat(destination))

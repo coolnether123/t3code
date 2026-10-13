@@ -76,6 +76,9 @@ describe("deploy-macos-backend guards", () => {
     expect(() => assertCapacity(MINIMUM_FREE_BYTES - 1)).toThrow("Less than 20 GiB");
     expect(() => assertCapacity(Number.NaN)).toThrow();
     expect(() => assertCapacity(MINIMUM_FREE_BYTES)).not.toThrow();
+    expect(() => assertCapacity(MINIMUM_FREE_BYTES + 4096, 8192)).toThrow("projected free");
+    expect(() => assertCapacity(MINIMUM_FREE_BYTES + 8192, 8192)).not.toThrow();
+    expect(() => assertCapacity(MINIMUM_FREE_BYTES, -1)).toThrow();
   });
   it("reuses only a byte-identical bundle without replacing existing code", async () => {
     await withTempDirectory(async (root) => {

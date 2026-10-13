@@ -37,8 +37,10 @@ describe("launch-t3-code-macos", () => {
     assert.include(source, 'row="${row#"${row%%[![:space:]]*}"}"');
     assert.include(source, "ps -axo pid=,ppid=");
     assert.include(source, "lsof -nP -t -iTCP:");
-    assert.include(source, "VACUUM INTO");
-    assert.include(source, "PRAGMA integrity_check");
+    assert.notInclude(source, "VACUUM INTO");
+    assert.include(source, 'storage checkpoint "$T3_HOME/userdata/state.sqlite"');
+    assert.include(source, 'storage verify "$out"');
+    assert.include(source, 'storage clone "$db" "$out"');
     assert.include(source, "T3_HOME");
     assert.include(source, "APP_SUPPORT_PATH");
     assert.notMatch(source, /\b(?:pkill|pgrep|killall)\b/);
