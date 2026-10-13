@@ -496,6 +496,10 @@ const copyIfPresent = async (
     return true;
   }
   if (stat.isDirectory()) {
+    if (links) {
+      await cloneCodeTree(source, destination);
+      return true;
+    }
     await requireCapacity(NodePath.dirname(destination));
     await NodeFSP.mkdir(destination, { mode: 0o700 });
     for (const entry of await NodeFSP.readdir(source))
@@ -521,6 +525,22 @@ const forceClone = async (source: string, destination: string): Promise<void> =>
       destination,
     ],
     "forced APFS clone",
+  );
+};
+
+/** Clone a code tree in one process while retaining per-file APFS and capacity admission. */
+export const cloneCodeTree = async (source: string, destination: string): Promise<void> => {
+  await requireCapacity(NodePath.dirname(destination));
+  await requireCommandSuccess(
+    "/usr/bin/python3",
+    [
+      NodePath.join(NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)), "macos-storage.py"),
+      "clone",
+      source,
+      destination,
+    ],
+    "forced APFS code tree clone",
+    0,
   );
 };
 

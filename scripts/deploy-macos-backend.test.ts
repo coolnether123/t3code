@@ -31,6 +31,7 @@ import {
   retirePreviousRollback,
   verifyDatabaseBackup,
   assertInstallMatches,
+  cloneCodeTree,
 } from "./deploy-macos-backend.ts";
 
 const commit = "0123456789abcdef0123456789abcdef01234567";
@@ -72,6 +73,23 @@ const writeCandidate = async (candidate: string) => {
 };
 
 describe("deploy-macos-backend guards", () => {
+  it("clones a code tree with links and keeps the clone unchanged after source edits", async () => {
+    if (NodeOS.platform() !== "darwin") return;
+    await withTempDirectory(async (root) => {
+      const source = NodePath.join(root, "source");
+      const destination = NodePath.join(root, "clone");
+      await NodeFSP.mkdir(NodePath.join(source, "nested"), { recursive: true });
+      await NodeFSP.writeFile(NodePath.join(source, "nested/code.js"), "synthetic original");
+      await NodeFSP.symlink("nested/code.js", NodePath.join(source, "entry.js"));
+      await cloneCodeTree(source, destination);
+      await NodeFSP.writeFile(NodePath.join(source, "nested/code.js"), "synthetic newer");
+      expect(await NodeFSP.readFile(NodePath.join(destination, "entry.js"), "utf8")).toBe(
+        "synthetic original",
+      );
+      expect(await NodeFSP.readlink(NodePath.join(destination, "entry.js"))).toBe("nested/code.js");
+      await expect(cloneCodeTree(source, destination)).rejects.toThrow();
+    });
+  });
   it("fails closed below the rollback reserve", () => {
     expect(() => assertCapacity(MINIMUM_FREE_BYTES - 1)).toThrow("Less than 20 GiB");
     expect(() => assertCapacity(Number.NaN)).toThrow();
