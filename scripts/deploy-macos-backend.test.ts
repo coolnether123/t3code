@@ -405,6 +405,29 @@ describe("deploy-macos-backend guards", () => {
   });
 
   it("keeps stopped historical requests while blocking active or unaccounted requests", async () => {
+    const ready = new NodeSqlite.DatabaseSync(":memory:");
+    try {
+      ready.exec(
+        "CREATE TABLE provider_session_runtime(thread_id TEXT PRIMARY KEY,status TEXT); CREATE TABLE projection_thread_sessions(thread_id TEXT PRIMARY KEY,status TEXT,active_turn_id TEXT); INSERT INTO provider_session_runtime VALUES('connected','running'); INSERT INTO projection_thread_sessions VALUES('connected','ready',NULL);",
+      );
+      const count = () =>
+        (ready.prepare(idleGuardQueries.activeRuntime).get() as { "COUNT(*)": number })["COUNT(*)"];
+      expect(count()).toBe(0);
+      ready.exec("UPDATE projection_thread_sessions SET active_turn_id='turn';");
+      expect(count()).toBe(1);
+      ready.exec("UPDATE projection_thread_sessions SET active_turn_id=NULL,status='running';");
+      expect(count()).toBe(1);
+      ready.exec("UPDATE projection_thread_sessions SET status=NULL;");
+      expect(count()).toBe(1);
+      ready.exec("DELETE FROM projection_thread_sessions;");
+      expect(count()).toBe(1);
+      ready.exec(
+        "INSERT INTO projection_thread_sessions VALUES('connected','ready',NULL); UPDATE provider_session_runtime SET status='starting';",
+      );
+      expect(count()).toBe(1);
+    } finally {
+      ready.close();
+    }
     await withTempDirectory(async (root) => {
       const db = new NodeSqlite.DatabaseSync(NodePath.join(root, "idle-guard.sqlite"));
       try {

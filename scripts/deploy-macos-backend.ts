@@ -677,7 +677,7 @@ export const idleGuardQueries = {
   unknownRuntime:
     "SELECT COUNT(*) FROM provider_session_runtime WHERE status IS NULL OR status NOT IN ('starting','running','stopped','error');",
   activeRuntime:
-    "SELECT COUNT(*) FROM provider_session_runtime WHERE status IN ('starting','running');",
+    "SELECT COUNT(*) FROM provider_session_runtime r LEFT JOIN projection_thread_sessions s ON s.thread_id=r.thread_id WHERE r.status='starting' OR (r.status='running' AND (s.thread_id IS NULL OR s.status IS NULL OR s.status<>'ready' OR s.active_turn_id IS NOT NULL));",
   unknownSessions:
     "SELECT COUNT(*) FROM projection_thread_sessions WHERE status IS NULL OR status NOT IN ('idle','starting','running','ready','interrupted','stopped','error');",
   unknownApprovals:
@@ -746,9 +746,9 @@ export const assertLiveIdleReadOnly = async (dbPath: string): Promise<void> => {
     idleGuardQueries.invalidInputs,
     "SQLite pending-input guard",
   );
-  // provider_session_runtime is authoritative for live provider work. Older
-  // projection rows can retain active_turn_id after a stopped runtime; only
-  // an active or unknown runtime, or an unaccounted projection, blocks us.
+  // Runtime 'running' also represents a connected, ready provider. Only an
+  // explicit ready session with no active turn is exempt; starting, missing
+  // or unknown session state still blocks. The external guard checks native work.
   const unaccountedProjectionActivity = await sqliteCount(
     dbPath,
     idleGuardQueries.unaccountedProjectionActivity,
