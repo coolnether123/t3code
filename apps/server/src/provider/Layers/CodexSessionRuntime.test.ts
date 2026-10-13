@@ -40,11 +40,49 @@ import {
   mcpApprovalRequestKind,
   openCodexThread,
   initializeCodexSessionClient,
+  parseCodexThreadReadback,
   parseCodexDaemonThreadConfig,
 } from "./CodexSessionRuntime.ts";
 import { isWorkerLifecycleToolName } from "../../worker/WorkerThreadBoundary.ts";
 import { CODEX_SESSION_OPEN_TIMEOUT } from "../CodexRequestDeadline.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
+
+describe("approval conversation readback", () => {
+  it.effect("preserves newer tool items and the exact saved user message", () =>
+    Effect.gen(function* () {
+      const items = [
+        {
+          type: "functionCallOutput",
+          id: "synthetic-output",
+          name: "synthetic",
+          output: "synthetic result",
+        },
+        {
+          type: "userMessage",
+          id: "synthetic-reply",
+          content: [{ type: "text", text: "synthetic saved approval" }],
+        },
+      ];
+      const result = yield* parseCodexThreadReadback(
+        { thread: { id: "synthetic-thread", turns: [{ id: "synthetic-turn", items }] } },
+        "synthetic-thread",
+      );
+      NodeAssert.deepEqual(result.turns[0]?.items, items);
+      NodeAssert.equal(result.threadId, "synthetic-thread");
+    }),
+  );
+  for (const response of [
+    { thread: { id: "wrong-thread", turns: [] } },
+    { thread: { id: "synthetic-thread", turns: [{ id: "synthetic-turn", items: null }] } },
+  ]) {
+    it.effect("rejects mismatched or malformed conversation history", () =>
+      Effect.gen(function* () {
+        const result = yield* Effect.result(parseCodexThreadReadback(response, "synthetic-thread"));
+        NodeAssert.equal(result._tag, "Failure");
+      }),
+    );
+  }
+});
 
 describe("Codex stderr classification", () => {
   it("drops exact structured MCP retry payloads captured from the live provider", () => {

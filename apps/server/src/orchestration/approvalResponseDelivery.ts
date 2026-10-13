@@ -79,14 +79,15 @@ export const makeApprovalResponseDelivery = Effect.fn("makeApprovalResponseDeliv
       messageId: string,
       attempted: boolean,
       text: string,
+      readbackFailureRoute = "readback-unavailable",
     ) {
       const original = yield* sql`SELECT activity_id FROM projection_thread_activities
       WHERE thread_id=${answer.threadId} AND kind='approval.requested'
       AND json_extract(payload_json,'$.requestId')=${answer.requestId} LIMIT 1`;
       if (!original.length) return yield* escalate(answer, "request-context-unavailable");
-      if (!input.provider.readThread) return yield* escalate(answer, "readback-unavailable");
+      if (!input.provider.readThread) return yield* escalate(answer, readbackFailureRoute);
       const before = yield* Effect.result(input.provider.readThread(answer.threadId));
-      if (before._tag === "Failure") return yield* escalate(answer, "readback-unavailable");
+      if (before._tag === "Failure") return yield* escalate(answer, readbackFailureRoute);
       if (before.success.threadId !== answer.threadId)
         return yield* escalate(answer, "conversation-mismatch");
       if (hasMessage(before.success.turns, text))
@@ -141,7 +142,8 @@ export const makeApprovalResponseDelivery = Effect.fn("makeApprovalResponseDeliv
     });
     const recover = Effect.fn("recoverApprovalDeliveries")(function* () {
       const rows =
-        yield* sql<Delivery>`SELECT * FROM approval_response_deliveries WHERE status NOT IN ('delivered','escalated') OR recorded=0`;
+        yield* sql<Delivery>`SELECT * FROM approval_response_deliveries WHERE status NOT IN ('delivered','escalated') OR recorded=0
+        OR (status='escalated' AND route='readback-unavailable')`;
       for (const row of rows) {
         const answer: Answer = {
           threadId: ThreadId.make(row.thread_id),
@@ -152,7 +154,22 @@ export const makeApprovalResponseDelivery = Effect.fn("makeApprovalResponseDeliv
         if (row.status === "pending")
           yield* deliverClaimed(answer, row.message_id, row.message_text);
         else if (row.status === "delivered") yield* confirmed(answer, row.route ?? "callback");
-        else if (row.status === "escalated")
+        else if (row.status === "escalated" && row.route === "readback-unavailable") {
+          // Only a pre-send readback failure can be recovered without ambiguity.
+          // Persist the one recovery attempt before touching the provider.
+          const sent = yield* sql`SELECT sequence FROM orchestration_events
+            WHERE command_id=${`server:approval-message:${row.thread_id}:${row.request_id}`} LIMIT 1`;
+          if (sent.length) continue;
+          yield* sql`UPDATE approval_response_deliveries SET status='fallback-recovery-attempting',route='readback-recovery-attempted'
+            WHERE thread_id=${row.thread_id} AND request_id=${row.request_id}`;
+          yield* fallback(
+            answer,
+            row.message_id,
+            false,
+            row.message_text,
+            "readback-recovery-unavailable",
+          );
+        } else if (row.status === "escalated")
           yield* escalate(answer, row.route ?? "delivery-uncertain");
         else if (row.status.startsWith("fallback-"))
           yield* fallback(

@@ -485,10 +485,6 @@ export type CodexTurnStartParamsWithCollaborationMode =
 
 export type CodexResumeCursor = typeof CodexResumeCursorSchema.Type;
 type CodexServiceTier = NonNullable<EffectCodexSchema.V2ThreadStartParams["serviceTier"]>;
-type CodexThreadItem =
-  | EffectCodexSchema.V2ThreadReadResponse["thread"]["turns"][number]["items"][number]
-  | EffectCodexSchema.V2ThreadRollbackResponse["thread"]["turns"][number]["items"][number];
-
 export interface CodexSessionRuntimeOptions {
   readonly threadId: ThreadId;
   readonly providerInstanceId?: ProviderInstanceId;
@@ -535,7 +531,7 @@ export interface CodexSessionRuntimeSendTurnInput {
 
 export interface CodexThreadTurnSnapshot {
   readonly id: TurnId;
-  readonly items: ReadonlyArray<CodexThreadItem>;
+  readonly items: ReadonlyArray<unknown>;
 }
 
 export interface CodexThreadSnapshot {
@@ -1521,6 +1517,38 @@ function parseThreadSnapshot(
     })),
   };
 }
+
+// Readback only needs conversation identity and opaque history items. New tool
+// item variants must not prevent checking whether a saved user reply arrived.
+const CodexThreadReadback = Schema.Struct({
+  thread: Schema.Struct({
+    id: Schema.String,
+    turns: Schema.Array(Schema.Struct({ id: Schema.String, items: Schema.Array(Schema.Unknown) })),
+  }),
+});
+const decodeCodexThreadReadback = Schema.decodeUnknownEffect(CodexThreadReadback);
+
+export const parseCodexThreadReadback = Effect.fn("parseCodexThreadReadback")(function* (
+  response: unknown,
+  expectedThreadId: string,
+) {
+  const decoded = yield* decodeCodexThreadReadback(response).pipe(
+    Effect.mapError(() =>
+      CodexErrors.CodexAppServerProtocolParseError.fromUnroutableMessage({
+        type: "invalidConversationReadback",
+      }),
+    ),
+  );
+  if (decoded.thread.id !== expectedThreadId) {
+    return yield* CodexErrors.CodexAppServerProtocolParseError.fromUnroutableMessage({
+      type: "mismatchedConversationReadback",
+    });
+  }
+  return {
+    threadId: decoded.thread.id,
+    turns: decoded.thread.turns.map((turn) => ({ id: TurnId.make(turn.id), items: turn.items })),
+  } satisfies CodexThreadSnapshot;
+});
 
 export const makeCodexSessionRuntime = (
   options: CodexSessionRuntimeOptions,
@@ -2948,16 +2976,11 @@ export const makeCodexSessionRuntime = (
         }),
       readThread: Effect.gen(function* () {
         const providerThreadId = yield* readProviderThreadId;
-        const response = yield* client.request("thread/read", {
+        const response = yield* client.raw.request("thread/read", {
           threadId: providerThreadId,
           includeTurns: true,
         });
-        if (response.thread.id !== providerThreadId) {
-          return yield* CodexErrors.CodexAppServerProtocolParseError.fromUnroutableMessage({
-            type: "mismatchedConversationReadback",
-          });
-        }
-        return parseThreadSnapshot(response);
+        return yield* parseCodexThreadReadback(response, providerThreadId);
       }),
       rollbackThread: (numTurns) =>
         Effect.gen(function* () {

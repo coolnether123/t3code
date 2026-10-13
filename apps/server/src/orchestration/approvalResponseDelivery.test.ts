@@ -37,6 +37,7 @@ describe("approval reply delivery", () => {
     "send-uncertain",
     "readback-delayed",
     "readback-missing",
+    "readback-unavailable",
   ] as const) {
     it.effect(`retains and delivers the saved answer safely: ${scenario}`, () => {
       const messages: string[] = [];
@@ -76,6 +77,7 @@ describe("approval reply delivery", () => {
       let reads = 0;
       const readThread = vi.fn(() => {
         reads++;
+        if (scenario === "readback-unavailable" && reads === 1) return Effect.fail(staleError);
         return Effect.succeed({
           threadId: ThreadId.make(
             scenario === "wrong-thread" ? "other-thread" : "synthetic-thread",
@@ -118,6 +120,10 @@ describe("approval reply delivery", () => {
         const restarted = yield* make();
         yield* restarted.respond(answer);
         yield* restarted.recover();
+        if (scenario === "readback-unavailable") {
+          yield* restarted.confirmThread(answer.threadId);
+          yield* restarted.recover();
+        }
         const [row] = yield* sql<{
           decision: string;
           status: string;
@@ -136,7 +142,13 @@ describe("approval reply delivery", () => {
           Effect.sync(() => {
             expect(respondToRequest).toHaveBeenCalledTimes(1);
             expect(sendMessage).toHaveBeenCalledTimes(
-              ["stale", "send-uncertain", "readback-delayed", "readback-missing"].includes(scenario)
+              [
+                "stale",
+                "send-uncertain",
+                "readback-delayed",
+                "readback-missing",
+                "readback-unavailable",
+              ].includes(scenario)
                 ? 1
                 : 0,
             );
@@ -145,7 +157,13 @@ describe("approval reply delivery", () => {
                 (args) => args[1] === "provider.approval.delivery.escalated",
               ),
             ).toHaveLength(
-              ["uncertain", "wrong-thread", "send-uncertain", "readback-missing"].includes(scenario)
+              [
+                "uncertain",
+                "wrong-thread",
+                "send-uncertain",
+                "readback-missing",
+                "readback-unavailable",
+              ].includes(scenario)
                 ? 1
                 : 0,
             );

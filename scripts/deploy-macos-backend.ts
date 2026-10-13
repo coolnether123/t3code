@@ -17,7 +17,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeUtil from "node:util";
 
 const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
-export const MINIMUM_FREE_BYTES = 2 * 1024 * 1024 * 1024;
+export const MINIMUM_FREE_BYTES = 20 * 1024 * 1024 * 1024;
 
 export const assertCapacity = (available: number): void => {
   if (!Number.isFinite(available) || available < MINIMUM_FREE_BYTES)
