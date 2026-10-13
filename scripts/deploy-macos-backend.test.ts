@@ -25,6 +25,10 @@ import {
   recoverFailedDeployment,
   validateCandidate,
   validateOptions,
+  assertCapacity,
+  MINIMUM_FREE_BYTES,
+  backupDatabase,
+  retirePreviousRollback,
 } from "./deploy-macos-backend.ts";
 
 const commit = "0123456789abcdef0123456789abcdef01234567";
@@ -66,6 +70,66 @@ const writeCandidate = async (candidate: string) => {
 };
 
 describe("deploy-macos-backend guards", () => {
+  it("fails closed below the rollback reserve", () => {
+    expect(() => assertCapacity(MINIMUM_FREE_BYTES - 1)).toThrow("Less than 2 GiB");
+    expect(() => assertCapacity(Number.NaN)).toThrow();
+    expect(() => assertCapacity(MINIMUM_FREE_BYTES)).not.toThrow();
+  });
+
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- Native clone support belongs to the host filesystem, not an injected Effect platform.
+  it.skipIf(NodeOS.platform() !== "darwin")(
+    "clones a checkpointed SQLite rollback and keeps later writes independent",
+    async () => {
+      await withTempDirectory(async (root) => {
+        const source = NodePath.join(root, "source.sqlite");
+        const backup = NodePath.join(root, "rollback.sqlite");
+        const database = new NodeSqlite.DatabaseSync(source);
+        database.exec(
+          "PRAGMA journal_mode=WAL; CREATE TABLE saved(value TEXT); INSERT INTO saved VALUES ('saved reply');",
+        );
+        const before = await NodeFSP.statfs(root);
+        await backupDatabase(source, backup);
+        database.exec("INSERT INTO saved VALUES ('later reply');");
+        const clone = new NodeSqlite.DatabaseSync(backup, { readOnly: true });
+        try {
+          expect(clone.prepare("SELECT count(*) AS n FROM saved").get()).toEqual({ n: 1 });
+          expect(clone.prepare("PRAGMA integrity_check").get()).toEqual({ integrity_check: "ok" });
+          expect((await NodeFSP.stat(source)).ino).not.toBe((await NodeFSP.stat(backup)).ino);
+          const after = await NodeFSP.statfs(root);
+          expect((before.bavail - after.bavail) * before.bsize).toBeLessThan(16 * 1024 * 1024);
+          await expect(backupDatabase(source, backup)).rejects.toThrow("already exists");
+        } finally {
+          clone.close();
+          database.close();
+        }
+      });
+    },
+  );
+
+  it("retires only the last owned rollback and refuses unrelated paths", async () => {
+    await withTempDirectory(async (root) => {
+      const old = NodePath.join(root, "20261013010000-0123456789ab");
+      const current = NodePath.join(root, "20261013020000-0123456789ab");
+      await NodeFSP.mkdir(old);
+      await NodeFSP.mkdir(current);
+      await NodeFSP.writeFile(NodePath.join(old, "state.sqlite"), "synthetic");
+      await NodeFSP.writeFile(NodePath.join(current, "state.sqlite"), "synthetic");
+      const marker = NodePath.join(root, "latest-rollback.json");
+      await NodeFSP.writeFile(
+        marker,
+        JSON.stringify({ marker: DEPLOYMENT_MARKER, directory: old }),
+      );
+      await retirePreviousRollback(root, current);
+      await expect(NodeFSP.stat(old)).rejects.toThrow();
+      expect((await NodeFSP.stat(current)).isDirectory()).toBe(true);
+      await NodeFSP.writeFile(
+        marker,
+        JSON.stringify({ marker: DEPLOYMENT_MARKER, directory: NodeOS.tmpdir() }),
+      );
+      await expect(retirePreviousRollback(root, current)).rejects.toThrow("escapes its root");
+      expect((await NodeFSP.stat(current)).isDirectory()).toBe(true);
+    });
+  });
   it("requires an exact commit and fresh smoke home for execute mode", () => {
     expect(() =>
       parseArgs([

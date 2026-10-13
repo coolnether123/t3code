@@ -17,6 +17,17 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeUtil from "node:util";
 
 const execFile = NodeUtil.promisify(NodeChildProcess.execFile);
+export const MINIMUM_FREE_BYTES = 2 * 1024 * 1024 * 1024;
+
+export const assertCapacity = (available: number): void => {
+  if (!Number.isFinite(available) || available < MINIMUM_FREE_BYTES)
+    fail("Less than 2 GiB free; refusing to prepare or restart T3.");
+};
+
+const requireCapacity = async (path: string): Promise<void> => {
+  const volume = await NodeFSP.statfs(path);
+  assertCapacity(volume.bavail * volume.bsize);
+};
 
 export const DEFAULT_BASE_DIR = "/Users/millie/.t3";
 export const DEFAULT_CANDIDATE =
@@ -468,12 +479,31 @@ const copyIfPresent = async (source: string, destination: string): Promise<boole
   const stat = await optionalLstat(source);
   if (!stat) return false;
   if (stat.isSymbolicLink()) fail(`refusing to back up a symlink: ${source}`);
-  await NodeFSP.cp(source, destination, {
-    recursive: stat.isDirectory(),
-    force: false,
-    errorOnExist: true,
-  });
+  if (stat.isDirectory()) {
+    await NodeFSP.mkdir(destination, { mode: 0o700 });
+    for (const entry of await NodeFSP.readdir(source))
+      await copyIfPresent(NodePath.join(source, entry), NodePath.join(destination, entry));
+  } else await forceClone(source, destination);
   return true;
+};
+
+const forceClone = async (source: string, destination: string): Promise<void> => {
+  await requireCommandSuccess(
+    "/usr/bin/python3",
+    [
+      "-c",
+      [
+        "import ctypes,os,sys",
+        "lib=ctypes.CDLL('/usr/lib/libSystem.B.dylib',use_errno=True)",
+        "clone=lib.clonefile;clone.argtypes=[ctypes.c_char_p,ctypes.c_char_p,ctypes.c_int];clone.restype=ctypes.c_int",
+        "result=clone(os.fsencode(sys.argv[1]),os.fsencode(sys.argv[2]),0)",
+        "assert result==0, 'clonefile errno='+str(ctypes.get_errno())",
+      ].join("\n"),
+      source,
+      destination,
+    ],
+    "forced APFS clone",
+  );
 };
 
 const runCommand = async (command: string, args: ReadonlyArray<string>, timeout = 30_000) => {
@@ -696,6 +726,9 @@ export const assertLiveIdleReadOnly = async (dbPath: string): Promise<void> => {
     idleGuardQueries.pendingInputs,
     "SQLite pending-input count guard",
   );
+  const preservePending = process.env.T3CODE_PRESERVE_PENDING_REQUESTS === "1";
+  if (preservePending && !process.env.T3CODE_PRESTOP_GUARD)
+    fail("Pending preservation requires the exact pre-stop fingerprint guard.");
   if (
     unknownRuntime ||
     activeRuntime ||
@@ -703,8 +736,7 @@ export const assertLiveIdleReadOnly = async (dbPath: string): Promise<void> => {
     unknownApprovals ||
     invalidInputs ||
     unaccountedProjectionActivity ||
-    pendingApprovals ||
-    pendingInputs
+    (!preservePending && (pendingApprovals || pendingInputs))
   ) {
     fail(
       "T3 is not idle (active session, approval, user input, or unknown state); refusing to restart.",
@@ -849,15 +881,25 @@ const atomicWriteOwned = async (
   }
 };
 
-const backupDatabase = async (dbPath: string, destination: string): Promise<void> => {
+export const backupDatabase = async (dbPath: string, destination: string): Promise<void> => {
   await requireNoSymlink(dbPath, "live SQLite database");
-  const escaped = destination.replaceAll("'", "''");
-  await requireCommandSuccess(
+  if (await optionalLstat(destination)) fail("Database rollback already exists.");
+  await requireCapacity(NodePath.dirname(destination));
+  // The caller has stopped T3 and unloaded its launch agent before checkpointing.
+  const checkpoint = await requireCommandSuccess(
     "sqlite3",
-    ["-readonly", dbPath, `PRAGMA busy_timeout=5000; VACUUM INTO '${escaped}';`],
-    "consistent SQLite backup",
-    180_000,
+    [dbPath, "PRAGMA busy_timeout=5000; PRAGMA wal_checkpoint(TRUNCATE);"],
+    "quiescent SQLite checkpoint",
   );
+  const row = checkpoint.trim().split(/\r?\n/).at(-1);
+  if (row !== "0|0|0" && row !== "0|-1|-1") fail("SQLite checkpoint is incomplete.");
+  const wal = await optionalLstat(`${dbPath}-wal`);
+  if (wal && wal.size !== 0) fail("SQLite WAL still contains writes.");
+  await forceClone(dbPath, destination);
+  await NodeFSP.chmod(destination, 0o600);
+};
+
+const verifyDatabaseBackup = async (destination: string): Promise<void> => {
   const check = await requireCommandSuccess(
     "sqlite3",
     ["-readonly", destination, "PRAGMA integrity_check;"],
@@ -865,6 +907,42 @@ const backupDatabase = async (dbPath: string, destination: string): Promise<void
     180_000,
   );
   if (check.trim() !== "ok") fail("SQLite integrity check did not return ok.");
+};
+
+/** Only this deployer's receipt-owned prior rollback is eligible for retirement. */
+export const retirePreviousRollback = async (
+  backupRoot: string,
+  current: string,
+): Promise<void> => {
+  await requireNoSymlink(current, "current rollback");
+  await requireNoSymlink(NodePath.join(current, "state.sqlite"), "current rollback database");
+  const marker = NodePath.join(backupRoot, "latest-rollback.json");
+  const text = await readText(marker);
+  let obsolete: string | undefined;
+  if (text) {
+    const previous = JSON.parse(text) as { marker?: string; directory?: string };
+    if (previous.marker !== DEPLOYMENT_MARKER || typeof previous.directory !== "string")
+      fail("Previous rollback marker is not owned by this deployer.");
+    const root = await NodeFSP.realpath(backupRoot);
+    const old = await NodeFSP.realpath(previous.directory);
+    if (NodePath.dirname(old) !== root || old === root)
+      fail("Rollback retirement escapes its root.");
+    if (old !== (await NodeFSP.realpath(current))) {
+      await requireNoSymlink(previous.directory, "previous rollback");
+      await requireNoSymlink(NodePath.join(old, "state.sqlite"), "previous rollback database");
+      if (!/^[0-9]+-[0-9a-f]{12}$/.test(NodePath.basename(old)))
+        fail("Previous rollback directory is not an install receipt.");
+      obsolete = old;
+    }
+  }
+  const temporary = `${marker}.${NodeCrypto.randomUUID()}.pending`;
+  await NodeFSP.writeFile(
+    temporary,
+    JSON.stringify({ marker: DEPLOYMENT_MARKER, directory: current }),
+    { mode: 0o600, flag: "wx" },
+  );
+  await NodeFSP.rename(temporary, marker);
+  if (obsolete) await NodeFSP.rm(obsolete, { recursive: true, force: false });
 };
 
 const backupConfig = async (baseDir: string, destination: string): Promise<void> => {
@@ -1039,6 +1117,7 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
   if (NodeOS.userInfo().username !== "millie" || NodeOS.homedir() !== "/Users/millie")
     fail("--execute must run as the millie user with /Users/millie as HOME.");
   await validateCandidate(options);
+  await requireCapacity(options.baseDir);
   await requireNoSymlink(options.baseDir, "live T3 base directory");
   const environmentId = await readEnvironmentId(options.baseDir);
   const listeners = await inspectListeners(options);
@@ -1060,13 +1139,6 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
   const runDir = NodePath.join(options.backupRoot, runId);
   await ensurePrivateDirectory(options.backupRoot, "backup root", false);
   await ensurePrivateDirectory(runDir, "backup run directory", true);
-  await backupDatabase(
-    NodePath.join(options.baseDir, "userdata/state.sqlite"),
-    NodePath.join(runDir, "state.sqlite"),
-  );
-  if (process.env.T3CODE_DEPLOY_CODE_ONLY !== "1") {
-    await backupConfig(options.baseDir, NodePath.join(runDir, "config"));
-  }
   const plist = launchAgentPath(options.label);
   const wrapper = wrapperPath();
   const oldPlist = await readText(plist);
@@ -1148,17 +1220,30 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
         "overnight idle gate",
       );
     }
-    process.kill(pid, "SIGTERM");
-    stopped = true;
-    await waitForListenerRelease(options);
-    if (await launchctlPrint(uid, options.label))
+    await requireCapacity(options.baseDir);
+    if (oldLaunchAgentWasLoaded) {
+      // Unload first so KeepAlive cannot restart a writer during the checkpoint.
+      stopped = true;
       await bootoutAndWait(uid, options.label, "owned LaunchAgent bootout");
+    } else {
+      process.kill(pid, "SIGTERM");
+      stopped = true;
+    }
+    await waitForListenerRelease(options);
+    await backupDatabase(
+      NodePath.join(options.baseDir, "userdata/state.sqlite"),
+      NodePath.join(runDir, "state.sqlite"),
+    );
+    if (process.env.T3CODE_DEPLOY_CODE_ONLY !== "1") {
+      await backupConfig(options.baseDir, NodePath.join(runDir, "config"));
+    }
     await requireCommandSuccess(
       "launchctl",
       ["bootstrap", `gui/${uid}`, plist],
       "candidate LaunchAgent bootstrap",
     );
     await waitForHttp(options.port, environmentId, 90_000);
+    await verifyDatabaseBackup(NodePath.join(runDir, "state.sqlite"));
     console.log(`deployment passed for ${options.commit}; backup: ${runDir}`);
   } catch (error) {
     await recoverFailedDeployment(
@@ -1178,6 +1263,7 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
     );
     throw error;
   }
+  await retirePreviousRollback(options.backupRoot, runDir);
 };
 
 export const parseArgs = (argv: ReadonlyArray<string>): BackendDeployOptions => {
