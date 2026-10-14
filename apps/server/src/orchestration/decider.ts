@@ -1840,13 +1840,16 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           aggregateId: command.threadId,
           occurredAt: command.createdAt,
           commandId: command.commandId,
+          ...(command.expectedText !== undefined
+            ? { metadata: { historyImport: true, operatorReconciliation: true } }
+            : {}),
         })),
         type: "thread.message-sent",
         payload: {
           threadId: command.threadId,
           messageId: command.messageId,
           role: "assistant",
-          text: "",
+          text: command.text ?? "",
           turnId: command.turnId ?? null,
           streaming: false,
           createdAt: command.createdAt,

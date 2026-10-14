@@ -213,6 +213,36 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           });
         }
 
+        if (
+          envelope.command.type === "thread.message.assistant.complete" &&
+          envelope.command.expectedText !== undefined
+        ) {
+          const command = envelope.command;
+          const rows = yield* sql<{
+            text: string;
+            role: string;
+            streaming: number;
+            active: string | null;
+          }>`
+            SELECT m.text, m.role, m.is_streaming AS streaming, s.active_turn_id AS active
+            FROM projection_thread_messages m LEFT JOIN projection_thread_sessions s ON s.thread_id=m.thread_id
+            WHERE m.thread_id=${command.threadId} AND m.message_id=${command.messageId}`;
+          const row = rows[0];
+          if (
+            !row ||
+            row.text !== command.expectedText ||
+            row.role !== "assistant" ||
+            row.streaming !== 0 ||
+            row.active !== null ||
+            command.text === undefined
+          ) {
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: "The existing reply changed or its chat is active.",
+            });
+          }
+        }
+
         // Command snapshots omit activities at startup and cap them while running.
         // Read this request's durable state before deciding how to send the answer.
         const userInputActivity =

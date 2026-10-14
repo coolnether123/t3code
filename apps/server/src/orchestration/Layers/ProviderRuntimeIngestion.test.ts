@@ -2101,6 +2101,96 @@ describe("ProviderRuntimeIngestion", () => {
     expect(proposedPlan?.planMarkdown).toBe("## Buffered plan\n\n- first\n- second");
   });
 
+  it.each([false, true])(
+    "uses completed native text after repeated deltas, streaming=%s",
+    async (streaming) => {
+      const harness = await createHarness({
+        serverSettings: { enableLegacyTokenStreaming: streaming },
+      });
+      const now = "2026-01-01T00:00:00.000Z";
+      harness.emit({
+        type: "turn.started",
+        eventId: asEventId("stutter-start"),
+        provider: ProviderDriverKind.make("codex"),
+        createdAt: now,
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("stutter-turn"),
+      });
+      for (const [index, delta] of ["Very ", "Very ", "very good.", "very good."].entries()) {
+        harness.emit({
+          type: "content.delta",
+          eventId: asEventId(`stutter-delta-${index}`),
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: now,
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("stutter-turn"),
+          itemId: asItemId("stutter-item"),
+          payload: { streamKind: "assistant_text", delta },
+        });
+      }
+      for (const index of [1, 2]) {
+        harness.emit({
+          type: "item.completed",
+          eventId: asEventId(`stutter-completed-${index}`),
+          provider: ProviderDriverKind.make("codex"),
+          createdAt: now,
+          threadId: asThreadId("thread-1"),
+          turnId: asTurnId("stutter-turn"),
+          itemId: asItemId("stutter-item"),
+          payload: {
+            itemType: "assistant_message",
+            status: "completed",
+            detail: "Very very good.",
+          },
+        });
+      }
+      await harness.drain();
+      const thread = (await harness.readModel()).threads.find((entry) => entry.id === "thread-1");
+      const matches = thread?.messages.filter((message) => message.id === "assistant:stutter-item");
+      expect(matches).toHaveLength(1);
+      expect(matches?.[0]?.text).toBe("Very very good.");
+      expect(matches?.[0]?.streaming).toBe(false);
+    },
+  );
+
+  it("reconciles a reviewed saved assistant reply without sending input and refuses stale readback", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    await harness.dispatch({
+      type: "thread.message.assistant.delta",
+      commandId: CommandId.make("repair-seed"),
+      threadId: asThreadId("thread-1"),
+      messageId: MessageId.make("assistant:repair-item"),
+      delta: "Repeated Repeated reply.",
+      createdAt: now,
+    });
+    await harness.dispatch({
+      type: "thread.message.assistant.complete",
+      commandId: CommandId.make("repair-seed-complete"),
+      threadId: asThreadId("thread-1"),
+      messageId: MessageId.make("assistant:repair-item"),
+      createdAt: now,
+    });
+    const command = {
+      type: "thread.message.assistant.complete" as const,
+      commandId: CommandId.make("repair-reviewed"),
+      threadId: asThreadId("thread-1"),
+      messageId: MessageId.make("assistant:repair-item"),
+      expectedText: "Repeated Repeated reply.",
+      text: "Repeated reply.",
+      createdAt: now,
+    };
+    await harness.dispatch(command);
+    await harness.dispatch(command);
+    await expect(
+      harness.dispatch({ ...command, commandId: CommandId.make("repair-stale") }),
+    ).rejects.toThrow();
+    const thread = (await harness.readModel()).threads.find((entry) => entry.id === "thread-1");
+    expect(thread?.messages).toHaveLength(1);
+    expect(thread?.messages[0]?.text).toBe("Repeated reply.");
+    expect(harness.sentTurns).toHaveLength(0);
+  });
+
   it("buffers assistant deltas by default until completion", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

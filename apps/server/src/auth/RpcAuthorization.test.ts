@@ -18,6 +18,9 @@ describe("RPC authorization scopes", () => {
     expect(RPC_REQUIRED_SCOPES[CHAT_HISTORY_METHODS.attachFinal]).toBe(
       AuthOrchestrationOperateScope,
     );
+    expect(RPC_REQUIRED_SCOPES[CHAT_HISTORY_METHODS.reconcileReply]).toBe(
+      AuthOrchestrationOperateScope,
+    );
   });
   it("requires operate scope for research that consumes Codex allowance", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.serverGetResetCheck)).toBe(

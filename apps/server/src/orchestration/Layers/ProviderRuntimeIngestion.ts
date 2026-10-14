@@ -1454,19 +1454,22 @@ const make = Effect.gen(function* () {
     commandTag: string;
     finalDeltaCommandTag: string;
     fallbackText?: string;
+    authoritativeText?: string;
     hasProjectedMessage?: boolean;
   }) =>
     Effect.gen(function* () {
       const bufferedText = yield* takeBufferedAssistantText(input.messageId);
       const text =
-        bufferedText.length > 0
-          ? bufferedText
-          : (input.fallbackText?.trim().length ?? 0) > 0
-            ? input.fallbackText!
-            : "";
+        input.authoritativeText !== undefined
+          ? input.authoritativeText
+          : bufferedText.length > 0
+            ? bufferedText
+            : (input.fallbackText?.trim().length ?? 0) > 0
+              ? input.fallbackText!
+              : "";
       const hasRenderableText = hasRenderableAssistantText(text);
 
-      if (hasRenderableText) {
+      if (hasRenderableText && input.authoritativeText === undefined) {
         yield* orchestrationEngine.dispatch({
           type: "thread.message.assistant.delta",
           commandId: yield* providerCommandId(input.event, input.finalDeltaCommandTag),
@@ -1484,6 +1487,7 @@ const make = Effect.gen(function* () {
           commandId: yield* providerCommandId(input.event, input.commandTag),
           threadId: input.threadId,
           messageId: input.messageId,
+          ...(input.authoritativeText !== undefined ? { text: input.authoritativeText } : {}),
           ...(input.turnId ? { turnId: input.turnId } : {}),
           createdAt: input.createdAt,
         });
@@ -2037,6 +2041,14 @@ const make = Effect.gen(function* () {
           () => assistantCompletion.messageId,
         );
         const existingAssistantMessage = findMessageById(messages, assistantMessageId);
+        // A completed native item owns its full text. Delta delivery can repeat,
+        // but segmented approval commentary must retain its separate boundaries.
+        const authoritativeText =
+          event.provider === "codex" &&
+          assistantMessageId === assistantCompletion.messageId &&
+          (assistantCompletion.fallbackText?.trim().length ?? 0) > 0
+            ? assistantCompletion.fallbackText
+            : undefined;
         const shouldApplyFallbackCompletionText =
           !existingAssistantMessage || existingAssistantMessage.text.length === 0;
 
@@ -2060,6 +2072,7 @@ const make = Effect.gen(function* () {
             commandTag: "assistant-complete",
             finalDeltaCommandTag: "assistant-delta-finalize",
             hasProjectedMessage: existingAssistantMessage !== undefined,
+            ...(authoritativeText !== undefined ? { authoritativeText } : {}),
             ...(assistantCompletion.fallbackText !== undefined && shouldApplyFallbackCompletionText
               ? { fallbackText: assistantCompletion.fallbackText }
               : {}),

@@ -189,6 +189,26 @@ export const readDaemonFinal = Effect.fn("readDaemonFinal")(function* (
   return { text: final.text, messageId: final.id };
 });
 
+/** Read one exact existing reply without sending input or changing native state. */
+export const readDaemonReply = Effect.fn("readDaemonReply")(function* (
+  client: CodexClient.CodexAppServerClient["Service"],
+  threadId: string,
+  turnId: string,
+  messageId: string,
+) {
+  const thread = yield* readHistory(client, threadId, turnId);
+  const turn = thread.turns.find((turn) => turn.id === turnId);
+  const reply =
+    turn?.status === "completed"
+      ? turn.items.find((item) => item.type === "agentMessage" && item.id === messageId)
+      : undefined;
+  if (reply?.type !== "agentMessage" || !reply.text.trim())
+    return yield* new ChatHistoryError({
+      message: "The exact completed native reply is unavailable.",
+    });
+  return { text: reply.text, messageId: reply.id };
+});
+
 function daemonMessages(thread: Effect.Success<ReturnType<typeof readHistory>>) {
   return thread.turns.flatMap((turn) =>
     turn.items.flatMap<ChatHistoryReadResult["messages"][number]>((item) => {

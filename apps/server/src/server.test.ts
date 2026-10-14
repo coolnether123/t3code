@@ -8338,6 +8338,99 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
   );
 
   for (const matchesReviewedHash of [true, false]) {
+    it.effect(`reconciles only an exact reviewed native reply: ${matchesReviewedHash}`, () =>
+      Effect.gen(function* () {
+        const commands: OrchestrationCommand[] = [];
+        const daemon = vi
+          .spyOn(CodexChatHistory, "withChatDaemon")
+          .mockImplementation(
+            <A, E>(
+              _home: string,
+              use: (
+                client: Parameters<typeof CodexChatHistory.readDaemonReply>[0],
+              ) => Effect.Effect<A, E>,
+            ) => use({} as Parameters<typeof CodexChatHistory.readDaemonReply>[0]),
+          );
+        const reply = vi
+          .spyOn(CodexChatHistory, "readDaemonReply")
+          .mockReturnValue(Effect.succeed({ text: "Very very good.", messageId: "native-item" }));
+        try {
+          yield* buildAppUnderTest({
+            layers: {
+              chatHistoryProjection: {
+                search: () => Effect.die("This reconciliation fixture does not search"),
+                read: () => Effect.die("This reconciliation fixture does not open history"),
+                nativeBinding: () =>
+                  Effect.succeed({ nativeThreadId: "bound-native", latestUserMessageAt: null }),
+              },
+              projectionSnapshotQuery: {
+                getThreadDetailById: () =>
+                  Effect.succeed(
+                    Option.some({
+                      ...makeDefaultOrchestrationThreadShell(),
+                      deletedAt: null,
+                      proposedPlans: [],
+                      checkpoints: [],
+                      activities: [],
+                      messages: [
+                        {
+                          id: MessageId.make("assistant:native-item"),
+                          role: "assistant" as const,
+                          text: "Very Very very good.very good.",
+                          turnId: TurnId.make("native-turn"),
+                          streaming: false,
+                          createdAt: "2026-01-01T00:00:00.000Z",
+                          updatedAt: "2026-01-01T00:00:00.000Z",
+                        },
+                      ],
+                    }),
+                  ),
+              },
+              orchestrationEngine: {
+                dispatch: (command) => {
+                  commands.push(command);
+                  return Effect.succeed({ sequence: 42 });
+                },
+              },
+            },
+          });
+          const wsUrl = yield* getWsServerUrl("/ws");
+          const result = yield* Effect.scoped(
+            withWsRpcClient(wsUrl, (client) =>
+              client[CHAT_HISTORY_METHODS.reconcileReply]({
+                threadId: "synthetic-chat",
+                nativeTurnId: "native-turn",
+                nativeMessageId: "native-item",
+                expectedNativeSha256: NodeCrypto.createHash("sha256")
+                  .update("Very very good.")
+                  .digest("hex"),
+                expectedProjectionSha256: matchesReviewedHash
+                  ? NodeCrypto.createHash("sha256")
+                      .update("Very Very very good.very good.")
+                      .digest("hex")
+                  : "0".repeat(64),
+              }),
+            ),
+          ).pipe(Effect.result);
+          assert.equal(result._tag, matchesReviewedHash ? "Success" : "Failure");
+          assert.equal(commands.length, matchesReviewedHash ? 1 : 0);
+          if (matchesReviewedHash)
+            assert.deepInclude(commands[0]!, {
+              type: "thread.message.assistant.complete",
+              text: "Very very good.",
+              expectedText: "Very Very very good.very good.",
+              messageId: MessageId.make("assistant:native-item"),
+            });
+          assert.equal(reply.mock.calls[0]?.[1], "bound-native");
+        } finally {
+          daemon.mockRestore();
+          reply.mockRestore();
+        }
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    );
+  }
+
+  for (const matchesReviewedHash of [true, false]) {
     it.effect(
       `attaches an existing native final only when its reviewed fingerprint matches: ${matchesReviewedHash}`,
       () =>

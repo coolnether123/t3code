@@ -66,6 +66,7 @@ import {
   type WorkerEvent,
   type WorkerSubscribeInput,
   ThreadId,
+  TurnId,
   type TerminalAttachStreamEvent,
   type TerminalError,
   type TerminalEvent,
@@ -1491,6 +1492,72 @@ const makeWsRpcLayer = (
                   new OrchestrationSearchThreadsError({
                     message: "Failed to search threads",
                     cause,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [CHAT_HISTORY_METHODS.reconcileReply]: (input) =>
+          observeRpcEffect(
+            CHAT_HISTORY_METHODS.reconcileReply,
+            Effect.gen(function* () {
+              const binding = yield* chatHistoryProjection.nativeBinding(input.threadId);
+              const settings = yield* serverSettings.getSettings;
+              if (!settings.providers.codex.enabled)
+                return yield* new ChatHistoryError({
+                  message: "Codex is disabled on this computer.",
+                });
+              const reply = yield* Effect.scoped(
+                CodexChatHistory.withChatDaemon(settings.providers.codex.homePath, (client) =>
+                  CodexChatHistory.readDaemonReply(
+                    client,
+                    binding.nativeThreadId,
+                    input.nativeTurnId,
+                    input.nativeMessageId,
+                  ),
+                ),
+              );
+              const messageId = MessageId.make(`assistant:${reply.messageId}`);
+              const detail = yield* projectionSnapshotQuery.getThreadDetailById(
+                ThreadId.make(input.threadId),
+              );
+              const message = Option.getOrUndefined(detail)?.messages.find(
+                (message) => message.id === messageId,
+              );
+              const hash = (text: string) =>
+                NodeCrypto.createHash("sha256").update(text).digest("hex");
+              if (
+                !message ||
+                message.role !== "assistant" ||
+                message.streaming ||
+                message.turnId !== input.nativeTurnId ||
+                hash(reply.text) !== input.expectedNativeSha256 ||
+                hash(message.text) !== input.expectedProjectionSha256
+              ) {
+                return yield* new ChatHistoryError({
+                  message: "The existing reply does not match the reviewed native message.",
+                });
+              }
+              const receipt = yield* startup.enqueueCommand(
+                orchestrationEngine.dispatch({
+                  type: "thread.message.assistant.complete",
+                  commandId: CommandId.make(
+                    `operator-reconcile:${input.threadId}:${reply.messageId}:${input.expectedNativeSha256}`,
+                  ),
+                  threadId: ThreadId.make(input.threadId),
+                  messageId,
+                  text: reply.text,
+                  expectedText: message.text,
+                  turnId: TurnId.make(input.nativeTurnId),
+                  createdAt: DateTime.formatIso(yield* DateTime.now),
+                }),
+              );
+              return { sequence: receipt.sequence, messageId };
+            }).pipe(
+              Effect.mapError(
+                () =>
+                  new ChatHistoryError({
+                    message: "The existing agent reply could not be reconciled.",
                   }),
               ),
             ),

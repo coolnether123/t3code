@@ -18,6 +18,7 @@ import { readT3Chat, searchT3Chats } from "./chatHistory.ts";
 import {
   readDaemonChat,
   readDaemonFinal,
+  readDaemonReply,
   searchDaemonChats,
   withChatDaemon,
 } from "./provider/CodexChatHistory.ts";
@@ -406,12 +407,37 @@ for (const status of ["completed", "inProgress"] as const) {
         },
       } as unknown as Parameters<typeof readDaemonFinal>[0];
       const result = yield* readDaemonFinal(client, "native", "synthetic-turn").pipe(Effect.result);
+      const commentary = yield* readDaemonReply(
+        client,
+        "native",
+        "synthetic-turn",
+        "commentary",
+      ).pipe(Effect.result);
+      const missing = yield* readDaemonReply(client, "native", "synthetic-turn", "missing").pipe(
+        Effect.result,
+      );
+      assert.equal(missing._tag, "Failure");
+      if (status === "completed") {
+        assert.equal(commentary._tag, "Success");
+        if (commentary._tag === "Success")
+          assert.deepEqual(commentary.success, {
+            text: "Earlier commentary",
+            messageId: "commentary",
+          });
+      } else assert.equal(commentary._tag, "Failure");
       if (status === "completed") {
         assert.equal(result._tag, "Success");
         if (result._tag === "Success")
           assert.deepEqual(result.success, { text: "Exact existing final", messageId: "final" });
       } else assert.equal(result._tag, "Failure");
-      assert.deepEqual(methods, ["thread/read", "thread/turns/list", "thread/items/list"]);
+      assert.deepEqual(
+        methods,
+        Array.from({ length: 3 }, () => [
+          "thread/read",
+          "thread/turns/list",
+          "thread/items/list",
+        ]).flat(),
+      );
     }),
   );
 }

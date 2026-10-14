@@ -1303,6 +1303,8 @@ const ThreadMessageAssistantCompleteCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   messageId: MessageId,
+  text: Schema.optional(Schema.String),
+  expectedText: Schema.optional(Schema.String),
   turnId: Schema.optional(TurnId),
   createdAt: IsoDateTime,
 });
@@ -1813,6 +1815,7 @@ export const OrchestrationEventMetadata = Schema.Struct({
   ingestedAt: Schema.optional(IsoDateTime),
   historyImport: Schema.optional(Schema.Boolean),
   operatorAttachment: Schema.optional(Schema.Boolean),
+  operatorReconciliation: Schema.optional(Schema.Boolean),
   nativeThreadId: Schema.optional(Schema.String),
   nativeTurnId: Schema.optional(Schema.String),
   nativeMessageId: Schema.optional(Schema.String),
