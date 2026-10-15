@@ -6,6 +6,8 @@ For a damaged saved reply, use `chatHistory.reconcileReply` with orchestration o
 
 The server reads only the native conversation already bound to that T3 thread. It requires a completed native turn and an existing non-streaming assistant message with the exact native item identity and turn. Both fingerprints must match. The serialized command checks the saved text again and refuses an active chat. No user message, turn request or approval decision is sent.
 
+The native binding uses the session's provider thread ID first. If a restarted session has no transient ID, it uses the exact string thread ID in its persisted Codex resume cursor. Invalid, missing or foreign-provider cursors are rejected. Deleted chats and projects remain excluded. It never matches names or reply text to choose a conversation.
+
 The accepted command replaces that message's display text through the normal event store and projectors. Its metadata records `operatorReconciliation` and `historyImport`, so the agent-awareness relay does not interpret the correction as new instructions. Original events remain intact. Read back the exact saved text before any retry. A stable command ID makes an identical accepted command replay safe; a changed projection fails closed.
 
 Use private local evidence for original text and native readback. Reports contain only counts, IDs and fingerprints. Never guess identities or remove repeated phrases heuristically: repeated words can be intentional.

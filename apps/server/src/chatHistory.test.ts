@@ -14,7 +14,7 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import type { V2ThreadReadResponse__Thread } from "effect-codex-app-server/schema";
 import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite.ts";
-import { readT3Chat, searchT3Chats } from "./chatHistory.ts";
+import { nativeChatBinding, readT3Chat, searchT3Chats } from "./chatHistory.ts";
 import {
   readDaemonChat,
   readDaemonFinal,
@@ -111,6 +111,37 @@ it.effect("bounds T3 results and pages read-only history without repeating messa
     assert.isTrue(second.truncated);
     assert.isAtMost(Math.max(...second.messages.map((message) => message.text.length)), 8000);
     assert.isNull(second.nextOffset);
+  }).pipe(Effect.provide(memory)),
+);
+
+it.effect("keeps the exact native binding after a session projection loses its transient ids", () =>
+  Effect.gen(function* () {
+    yield* seed;
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`INSERT INTO projection_thread_sessions (thread_id,status,provider_name,updated_at) VALUES ('archive','ready','codex',${date})`;
+    yield* sql`INSERT INTO provider_session_runtime (thread_id,provider_name,adapter_key,status,last_seen_at,resume_cursor_json) VALUES ('archive','codex','codex:synthetic','stopped',${date},'{"threadId":"synthetic-native"}')`;
+    assert.equal((yield* nativeChatBinding("archive")).nativeThreadId, "synthetic-native");
+    yield* sql`UPDATE projection_thread_sessions SET provider_thread_id='synthetic-current' WHERE thread_id='archive'`;
+    assert.equal((yield* nativeChatBinding("archive")).nativeThreadId, "synthetic-current");
+    yield* sql`UPDATE projection_thread_sessions SET provider_thread_id=NULL WHERE thread_id='archive'`;
+    for (const cursor of [
+      "not-json",
+      "{}",
+      '{"threadId":17}',
+      '{"threadId":{}}',
+      '{"threadId":""}',
+    ]) {
+      yield* sql`UPDATE provider_session_runtime SET resume_cursor_json=${cursor} WHERE thread_id='archive'`;
+      assert.equal(
+        (yield* nativeChatBinding("archive").pipe(Effect.flip))._tag,
+        "ChatHistoryError",
+      );
+    }
+    yield* sql`UPDATE provider_session_runtime SET provider_name='claude',resume_cursor_json='{"threadId":"synthetic-foreign"}' WHERE thread_id='archive'`;
+    assert.equal((yield* nativeChatBinding("archive").pipe(Effect.flip))._tag, "ChatHistoryError");
+    yield* sql`UPDATE provider_session_runtime SET provider_name='codex',resume_cursor_json='{"threadId":"synthetic-native"}' WHERE thread_id='archive'`;
+    yield* sql`UPDATE projection_projects SET deleted_at=${date} WHERE project_id='synthetic-project'`;
+    assert.equal((yield* nativeChatBinding("archive").pipe(Effect.flip))._tag, "ChatHistoryError");
   }).pipe(Effect.provide(memory)),
 );
 

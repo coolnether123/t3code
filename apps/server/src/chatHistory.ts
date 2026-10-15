@@ -105,12 +105,17 @@ export const readT3Chat = Effect.fn("readT3Chat")(function* (threadId: string, o
 export const nativeChatBinding = Effect.fn("nativeChatBinding")(function* (threadId: string) {
   const sql = yield* SqlClient.SqlClient;
   const rows = yield* sql<{ nativeThreadId: string; latestUserMessageAt: string | null }>`
-    SELECT s.provider_thread_id AS "nativeThreadId", t.latest_user_message_at AS "latestUserMessageAt"
+    SELECT COALESCE(NULLIF(s.provider_thread_id, ''),
+      CASE WHEN r.provider_name = 'codex' AND json_valid(r.resume_cursor_json)
+        THEN CASE WHEN json_type(r.resume_cursor_json, '$.threadId') = 'text'
+          THEN json_extract(r.resume_cursor_json, '$.threadId') END
+        END) AS "nativeThreadId", t.latest_user_message_at AS "latestUserMessageAt"
     FROM projection_threads t JOIN projection_thread_sessions s ON s.thread_id = t.thread_id
       JOIN projection_projects p ON p.project_id = t.project_id
+      LEFT JOIN provider_session_runtime r ON r.thread_id = t.thread_id
     WHERE t.thread_id = ${threadId} AND t.deleted_at IS NULL AND p.deleted_at IS NULL
-      AND s.provider_name = 'codex' AND s.provider_thread_id IS NOT NULL`;
-  if (!rows[0])
+      AND s.provider_name = 'codex'`;
+  if (!rows[0] || typeof rows[0].nativeThreadId !== "string" || !rows[0].nativeThreadId.trim())
     return yield* new ChatHistoryError({ message: "This T3 chat has no attached Codex history." });
   return rows[0];
 });
