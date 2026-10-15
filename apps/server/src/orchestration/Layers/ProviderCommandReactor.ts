@@ -910,7 +910,7 @@ const make = Effect.gen(function* () {
         message.id !== options?.pendingMessageId,
     );
     const seedHistory =
-      moving && preferredProvider === "codex"
+      moving && preferredProvider === "codex" && priorMessages.length > 0
         ? priorMessages.map((message) => ({
             role: message.role as "user" | "assistant",
             text: [
@@ -932,7 +932,7 @@ const make = Effect.gen(function* () {
           modelSelection: desiredModelSelection,
         });
       }
-      if (!moving) return;
+      if (!moving || seedHistory === undefined) return;
       yield* orchestrationEngine.dispatch({
         type: "thread.activity.append",
         commandId: yield* serverCommandId("provider-continuation-activity"),

@@ -1059,14 +1059,15 @@ export const openCodexThread = (input: {
   });
 
   if (resumeThreadId === undefined) {
-    if (input.seedHistory !== undefined) {
+    const history = input.seedHistory === undefined ? [] : buildCodexSeedHistory(input.seedHistory);
+    if (history.length > 0) {
       // The generated V2 params omit history despite documenting it. Use the
       // untyped transport so its encoder cannot discard the experimental field.
       return withCodexRequestDeadline(
         input.client.raw!.request("thread/resume", {
           ...startParams,
           threadId: "",
-          history: buildCodexSeedHistory(input.seedHistory),
+          history,
         }),
         "thread/resume (history)",
         "opening this chat",

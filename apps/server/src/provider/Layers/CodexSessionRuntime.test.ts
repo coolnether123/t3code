@@ -1151,6 +1151,84 @@ describe("Codex desktop plugin skill inventory", () => {
 });
 
 describe("openCodexThread", () => {
+  for (const seedHistory of [[], [{ role: "user" as const, text: "" }]] as const) {
+    it.effect(
+      `starts a new thread when carried history has no content (${seedHistory.length} messages)`,
+      () =>
+        Effect.gen(function* () {
+          const calls: Array<{ method: string; payload: unknown }> = [];
+          const client = {
+            request: <M extends "thread/start" | "thread/resume" | "thread/fork">(
+              method: M,
+              payload: CodexRpc.ClientRequestParamsByMethod[M],
+            ) => {
+              calls.push({ method, payload });
+              return Effect.succeed(
+                makeThreadOpenResponse(
+                  "provider-new",
+                ) as CodexRpc.ClientRequestResponsesByMethod[M],
+              );
+            },
+            raw: {
+              request: () => Effect.die("Empty history must not reach thread/resume"),
+            },
+          };
+          const response = yield* openCodexThread({
+            client,
+            threadId: ThreadId.make("thread-new"),
+            runtimeMode: "full-access",
+            cwd: "/tmp/project",
+            requestedModel: "gpt-6.1-sol",
+            serviceTier: undefined,
+            resumeThreadId: undefined,
+            seedHistory,
+          });
+          NodeAssert.equal(response.thread.id, "provider-new");
+          NodeAssert.deepStrictEqual(
+            calls.map((call) => call.method),
+            ["thread/start"],
+          );
+        }),
+    );
+  }
+
+  it.effect("carries nonempty history through the raw resume transport", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ method: string; payload: unknown }> = [];
+      const response = yield* openCodexThread({
+        client: {
+          request: () => Effect.die("History must use the raw transport"),
+          raw: {
+            request: (method, payload) => {
+              calls.push({ method, payload });
+              return Effect.succeed(makeThreadOpenResponse("provider-carried"));
+            },
+          },
+        },
+        threadId: ThreadId.make("thread-carried"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: undefined,
+        serviceTier: undefined,
+        resumeThreadId: undefined,
+        seedHistory: [{ role: "user", text: "Earlier message" }],
+      });
+      NodeAssert.equal(response.thread.id, "provider-carried");
+      NodeAssert.equal(calls.length, 1);
+      NodeAssert.equal(calls[0]!.method, "thread/resume");
+      NodeAssert.partialDeepStrictEqual(calls[0]!.payload, {
+        threadId: "",
+        history: [
+          {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "Earlier message" }],
+          },
+        ],
+      });
+    }),
+  );
+
   it.effect("resumes the same thread without transferring its saved history", () =>
     Effect.gen(function* () {
       const calls: Array<{ method: string; payload: unknown }> = [];

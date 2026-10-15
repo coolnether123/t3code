@@ -3229,6 +3229,53 @@ describe("ProviderCommandReactor", () => {
       ).toHaveLength(1);
     });
 
+  it("starts a fresh redirected Codex chat without seeding empty history", async () => {
+    const harness = await createHarness({ separateCodexHomes: true, localWorkspace: true });
+    await harness.runEffect(
+      harness.settingsService.updateSettings({
+        providerInstances: {
+          [ProviderInstanceId.make("codex")]: {
+            driver: ProviderDriverKind.make("codex"),
+            continueThreadsOn: ProviderInstanceId.make("codex_desktop"),
+          },
+          [ProviderInstanceId.make("codex_desktop")]: {
+            driver: ProviderDriverKind.make("codex"),
+            enabled: true,
+            config: { useDesktopAppDaemon: true },
+          },
+        },
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-fresh-redirect"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("fresh-redirect"),
+          role: "user",
+          text: "Hello",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({
+      providerInstanceId: ProviderInstanceId.make("codex_desktop"),
+    });
+    expect(harness.startSession.mock.calls[0]?.[1]).not.toHaveProperty("seedHistory");
+    const thread = (await harness.readModel()).threads.find(
+      (entry) => entry.id === ThreadId.make("thread-1"),
+    );
+    expect(thread?.modelSelection.instanceId).toBe(ProviderInstanceId.make("codex_desktop"));
+    expect(thread?.activities.filter((entry) => entry.kind === "provider.continued")).toHaveLength(
+      0,
+    );
+  });
+
   it("repairs a projected Codex instance that already has a desktop session without seeding again", async () => {
     const harness = await createHarness({ separateCodexHomes: true, localWorkspace: true });
     const now = "2026-01-01T00:00:00.000Z";

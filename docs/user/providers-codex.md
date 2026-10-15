@@ -43,6 +43,10 @@ Later messages use the new instance's conversation. If it is unavailable, the
 message fails and the chat stays on the original instance. Choose **None** to
 stop moving chats that have not yet moved.
 
+A new chat selected through the original instance starts normally on the
+continuation instance. History is carried over only when earlier messages
+exist; the first message is sent once as the new conversation's first turn.
+
 Existing chats show **Codex CLI** or **Codex desktop** in the chat header and
 sidebar. On mobile, the same label appears above the chat and beside its list
 entry. The label describes the chat's configured provider instance, not the app
