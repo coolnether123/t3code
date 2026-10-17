@@ -23,6 +23,7 @@ export function SteerTurnDialog({
   environmentId,
   threadId,
   activeTurnId,
+  canSteer,
   disabled,
   onSteerAttempt,
   onSteerAccepted,
@@ -31,8 +32,9 @@ export function SteerTurnDialog({
   environmentId: EnvironmentId;
   threadId: ThreadId;
   activeTurnId: TurnId | null;
+  canSteer: boolean;
   disabled: boolean;
-  onSteerAttempt: (messageId: MessageId, text: string, turnId: TurnId) => boolean;
+  onSteerAttempt: (messageId: MessageId, text: string, turnId: TurnId | null) => boolean;
   onSteerAccepted: (messageId: MessageId) => void;
   onSteerRejected: (messageId: MessageId) => void;
 }) {
@@ -42,10 +44,9 @@ export function SteerTurnDialog({
   const [text, setText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const targetIsRunning = targetTurnId !== null && targetTurnId === activeTurnId;
 
   const submit = async () => {
-    if (!targetIsRunning || !targetTurnId || !text.trim() || submitting || disabled) return;
+    if (!canSteer || !text.trim() || submitting || disabled) return;
     setSubmitting(true);
     setError(null);
     const messageId = newMessageId();
@@ -82,16 +83,16 @@ export function SteerTurnDialog({
         setOpen(nextOpen);
       }}
     >
-      {activeTurnId !== null ? (
+      {canSteer ? (
         <div className="mx-auto flex w-full max-w-3xl justify-end pb-1">
           <DialogTrigger render={<Button size="sm" variant="ghost" disabled={disabled} />}>
-            Add to current turn
+            Steer active turn
           </DialogTrigger>
         </div>
       ) : null}
       <DialogPopup aria-busy={submitting}>
         <DialogHeader>
-          <DialogTitle>Add to current turn</DialogTitle>
+          <DialogTitle>Steer active turn</DialogTitle>
           <DialogDescription>
             Add this to what the agent is doing now. To send it after this turn, use the usual
             message box.
@@ -104,11 +105,6 @@ export function SteerTurnDialog({
             onChange={(event) => setText(event.currentTarget.value)}
             disabled={submitting}
           />
-          {!targetIsRunning ? (
-            <p role="status" className="text-sm text-muted-foreground">
-              This turn has ended. Close this dialog to choose another turn.
-            </p>
-          ) : null}
           {error ? (
             <p role="alert" className="text-sm text-destructive-foreground">
               {error}
@@ -119,7 +115,7 @@ export function SteerTurnDialog({
           <DialogClose render={<Button variant="outline" />}>Cancel</DialogClose>
           <Button
             onClick={() => void submit()}
-            disabled={!targetIsRunning || !text.trim() || submitting || disabled}
+            disabled={!canSteer || !text.trim() || submitting || disabled}
           >
             {submitting ? "Sending…" : "Add now"}
           </Button>

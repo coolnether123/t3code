@@ -1064,6 +1064,7 @@ export type StoppedChatContinuationGuard = typeof StoppedChatContinuationGuard.T
 
 export const ThreadTurnStartCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.start"),
+  deliveryMode: Schema.optional(Schema.Literal("immediate")),
   commandId: CommandId,
   threadId: ThreadId,
   message: Schema.Struct({
@@ -1088,6 +1089,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
 
 const ClientThreadTurnStartCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.start"),
+  deliveryMode: Schema.optional(Schema.Literal("immediate")),
   commandId: CommandId,
   threadId: ThreadId,
   message: Schema.Struct({
@@ -1120,7 +1122,7 @@ const ThreadTurnSteerCommand = Schema.Struct({
   type: Schema.Literal("thread.turn.steer"),
   commandId: CommandId,
   threadId: ThreadId,
-  expectedTurnId: TurnId,
+  expectedTurnId: Schema.NullOr(TurnId),
   messageId: MessageId,
   text: Schema.String.check(
     Schema.isPattern(/\S/),
@@ -1285,6 +1287,8 @@ const ThreadSessionSetCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   session: OrchestrationSession,
+  /** Reconcile existing provider work without consuming a queued next-turn request. */
+  preservePendingTurnStart: Schema.optional(Schema.Boolean),
   createdAt: IsoDateTime,
 });
 
@@ -1667,6 +1671,7 @@ export const ThreadMessageSentPayload = Schema.Struct({
 });
 
 export const ThreadTurnStartRequestedPayload = Schema.Struct({
+  deliveryMode: Schema.optional(Schema.Literal("immediate")),
   threadId: ThreadId,
   messageId: MessageId,
   modelSelection: Schema.optional(ModelSelection),
@@ -1718,7 +1723,7 @@ export const ThreadTurnInterruptRequestedPayload = Schema.Struct({
 
 const ThreadTurnSteerRequestedPayload = Schema.Struct({
   threadId: ThreadId,
-  expectedTurnId: TurnId,
+  expectedTurnId: Schema.NullOr(TurnId),
   messageId: MessageId,
   createdAt: IsoDateTime,
 });
@@ -1772,6 +1777,7 @@ export const ThreadSessionStopRequestedPayload = Schema.Struct({
 export const ThreadSessionSetPayload = Schema.Struct({
   threadId: ThreadId,
   session: OrchestrationSession,
+  preservePendingTurnStart: Schema.optional(Schema.Boolean),
 });
 
 export const ThreadProposedPlanUpsertedPayload = Schema.Struct({

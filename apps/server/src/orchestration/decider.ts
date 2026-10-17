@@ -1102,6 +1102,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         causationEventId: userMessageEvent.eventId,
         type: "thread.turn-start-requested",
         payload: {
+          ...(command.deliveryMode !== undefined ? { deliveryMode: command.deliveryMode } : {}),
           threadId: command.threadId,
           messageId: command.message.messageId,
           ...(command.modelSelection !== undefined
@@ -1266,14 +1267,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
 
     case "thread.turn.steer": {
       const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
-      if (
-        thread.editFromHere != null ||
-        thread.session?.status !== "running" ||
-        thread.session.activeTurnId !== command.expectedTurnId
-      ) {
+      if (thread.editFromHere != null) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
-          detail: "The requested turn is no longer running. Steering was not sent or queued.",
+          detail: "The thread is being edited. Steering was not sent or queued.",
         });
       }
       const userMessageEvent: Omit<OrchestrationEvent, "sequence"> = {
@@ -1290,7 +1287,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           role: "user",
           text: command.text,
           attachments: [],
-          turnId: command.expectedTurnId,
+          // User messages stay turnless so windowed history cannot drop them
+          // when the caller observed a stale or child turn ID.
+          turnId: null,
           streaming: false,
           createdAt: command.createdAt,
           updatedAt: command.createdAt,
@@ -1648,6 +1647,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           session: command.session,
+          ...(command.preservePendingTurnStart !== undefined
+            ? { preservePendingTurnStart: command.preservePendingTurnStart }
+            : {}),
         },
       };
       // Only a session coming alive is activity worth waking a settled thread

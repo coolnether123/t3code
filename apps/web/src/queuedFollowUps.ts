@@ -14,7 +14,7 @@ type SteerRestoreBase = {
   readonly threadRef: ScopedThreadRef;
   readonly messageId: string;
   readonly text: string;
-  readonly targetTurnId: string;
+  readonly targetTurnId: string | null;
 };
 
 export type SteerRestoreRecord = SteerRestoreBase & {
@@ -85,6 +85,16 @@ export function failedSteerMessageId(activity: {
   return typeof requestId === "string" && requestId.length > 0 ? requestId : null;
 }
 
+/** Unconfirmed delivery may already have reached Codex, so never queue it again. */
+export function canRestoreFailedSteer(payload: unknown): boolean {
+  return !(
+    typeof payload === "object" &&
+    payload !== null &&
+    "deliveryStatus" in payload &&
+    payload.deliveryStatus === "not-confirmed"
+  );
+}
+
 export function canSteerQueuedFollowUp(entry: QueuedFollowUp): boolean {
   const { prompt, images, terminalContexts, elementContexts, previewAnnotations, reviewComments } =
     entry.context;
@@ -113,7 +123,7 @@ type QueuedFollowUpStore = {
   observeSteerFailure: (threadKey: string, messageId: string) => SteerRestoreRecord | null;
   cancelSteerRestore: (threadKey: string, messageId: string) => void;
   getSteerRestores: (threadKey: string) => ReadonlyArray<PendingSteerRestore>;
-  clearSteerRestoresForTurn: (threadKey: string, turnId: string) => void;
+  clearSteerRestoresForTurn: (threadKey: string, turnId: string | null) => void;
 };
 
 const EMPTY_QUEUE: ReadonlyArray<QueuedFollowUp> = [];

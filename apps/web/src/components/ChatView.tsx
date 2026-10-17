@@ -293,6 +293,7 @@ import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import {
   canSteerQueuedFollowUp,
+  canRestoreFailedSteer,
   createSteerFallbackFollowUp,
   failedSteerMessageId,
   nextAutoQueuedFollowUp,
@@ -1768,6 +1769,10 @@ function ChatViewContent(props: ChatViewProps) {
     for (const activity of activities.slice(firstNewActivity)) {
       const messageId = failedSteerMessageId(activity);
       if (!messageId) continue;
+      if (!canRestoreFailedSteer(activity.payload)) {
+        steerRestores.cancelSteerRestore(activeThreadKey, messageId);
+        continue;
+      }
       const restore = steerRestores.observeSteerFailure(activeThreadKey, messageId);
       if (restore) restoreSteerText(restore);
     }
@@ -5427,79 +5432,6 @@ function ChatViewContent(props: ChatViewProps) {
       isThreadLoading: threadDetailLoading,
       isEnvironmentUnavailable: activeEnvironmentUnavailable,
     });
-    if (!queuedFollowUp && followUpSubmission === "steer" && !sendInFlightRef.current) {
-      const context = currentSendContext;
-      const text = context?.prompt.trim() ?? "";
-      if (
-        !activeThread?.session?.activeTurnId ||
-        !activeThreadRef ||
-        !activeThreadKey ||
-        !context?.providerAvailable ||
-        context.selectedProvider !== "codex" ||
-        !text ||
-        context.images.length > 0 ||
-        context.terminalContexts.length > 0 ||
-        context.elementContexts.length > 0 ||
-        context.previewAnnotations.length > 0 ||
-        context.reviewComments.length > 0 ||
-        activeEnvironmentUnavailable
-      ) {
-        toastManager.add(
-          stackedThreadToast({
-            type: "info",
-            title: "Cannot steer with this draft",
-            description:
-              "Steering needs an active Codex turn and a text-only draft. Your draft is still here.",
-          }),
-        );
-        return;
-      }
-      sendInFlightRef.current = true;
-      const messageId = newMessageId();
-      const restoreStore = useQueuedFollowUpStore.getState();
-      restoreStore.registerSteerRestore({
-        threadKey: activeThreadKey,
-        threadRef: activeThreadRef,
-        messageId,
-        text,
-        targetTurnId: activeThread.session.activeTurnId,
-        origin: "composer",
-        queuedFollowUp: createSteerFallbackFollowUp(messageId, text, {
-          ...context,
-          prompt: text,
-        }),
-      });
-      try {
-        const result = await steerThreadTurn({
-          environmentId,
-          input: {
-            threadId: activeThread.id,
-            expectedTurnId: activeThread.session.activeTurnId,
-            messageId,
-            text,
-          },
-        });
-        if (result._tag === "Failure") {
-          restoreStore.cancelSteerRestore(activeThreadKey, messageId);
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Could not steer the active turn",
-              description: chatActionErrorMessage(squashAtomCommandFailure(result)),
-            }),
-          );
-        } else if (promptRef.current === context.prompt) {
-          promptRef.current = "";
-          clearComposerDraftContent(composerDraftTarget);
-          composerRef.current?.resetCursorState();
-        }
-        const restore = restoreStore.acceptSteerRestore(activeThreadKey, messageId);
-        if (restore) restoreSteerText(restore);
-      } finally {
-        sendInFlightRef.current = false;
-      }
-      return;
-    }
     if (
       activeThreadKey &&
       !queuedFollowUp &&
@@ -6084,6 +6016,9 @@ function ChatViewContent(props: ChatViewProps) {
           titleSeed: title,
           runtimeMode,
           interactionMode,
+          ...(ctxSelectedProvider === "codex" && !queuedFollowUp
+            ? { deliveryMode: "immediate" as const }
+            : {}),
           ...(ctxSubagentBackend !== null ? { subagentBackend: ctxSubagentBackend } : {}),
           ...(bootstrap ? { bootstrap } : {}),
           createdAt: messageCreatedAt,
@@ -6096,6 +6031,10 @@ function ChatViewContent(props: ChatViewProps) {
         failure = startResult;
       } else {
         turnStartSucceeded = true;
+        // The command was persisted, so the composer can accept another
+        // instruction while the provider resolves this immediate delivery.
+        // This is not a provider-delivered receipt.
+        if (ctxSelectedProvider === "codex" && !queuedFollowUp) resetLocalDispatch();
         acknowledgeActiveThreadWoke();
         if (backgroundThreadRef) {
           markPromotedDraftThreadByRef(backgroundThreadRef);
@@ -6257,13 +6196,12 @@ function ChatViewContent(props: ChatViewProps) {
   const stopTurnFromTimeline = useCallback(() => onInterruptRef.current(), []);
 
   const onSteerQueuedFollowUp = async (entry: QueuedFollowUp) => {
-    const turnId = activeThread?.session?.activeTurnId;
+    const turnId = activeThread?.session?.activeTurnId ?? null;
     if (
       !activeThreadKey ||
       !activeThreadRef ||
       !activeThread ||
-      phase !== "running" ||
-      !turnId ||
+      activeThread.session?.providerName !== "codex" ||
       !canSteerQueuedFollowUp(entry) ||
       sendInFlightRef.current ||
       isSendBusy ||
@@ -6313,7 +6251,11 @@ function ChatViewContent(props: ChatViewProps) {
     }
   };
 
-  const onSteerDialogAttempt = (messageId: MessageId, text: string, turnId: TurnId): boolean => {
+  const onSteerDialogAttempt = (
+    messageId: MessageId,
+    text: string,
+    turnId: TurnId | null,
+  ): boolean => {
     if (!activeThreadKey || !activeThreadRef) return false;
     const context = composerRef.current?.getSendContext();
     if (!context) return false;
@@ -6638,6 +6580,7 @@ function ChatViewContent(props: ChatViewProps) {
             },
             modelSelection: ctxSelectedModelSelection,
             titleSeed: activeThread.title,
+            ...(ctxSelectedProvider === "codex" ? { deliveryMode: "immediate" as const } : {}),
             runtimeMode,
             interactionMode: nextInteractionMode,
             ...(ctxSubagentBackend !== null ? { subagentBackend: ctxSubagentBackend } : {}),
@@ -6776,6 +6719,7 @@ function ChatViewContent(props: ChatViewProps) {
           },
           modelSelection: ctxSelectedModelSelection,
           titleSeed: nextThreadTitle,
+          ...(ctxSelectedProvider === "codex" ? { deliveryMode: "immediate" as const } : {}),
           runtimeMode,
           interactionMode: "default",
           ...(ctxSubagentBackend !== null ? { subagentBackend: ctxSubagentBackend } : {}),
@@ -7540,10 +7484,9 @@ function ChatViewContent(props: ChatViewProps) {
                               Send now
                             </button>
                           ) : null}
-                          {phase === "running" &&
-                          activeThread?.session?.providerName === "codex" &&
+                          {selectedProvider === "codex" &&
                           isServerThread &&
-                          activeThread?.session?.activeTurnId &&
+                          activeThread?.session?.providerName === "codex" &&
                           canSteerQueuedFollowUp(entry) ? (
                             <button
                               type="button"
@@ -7578,11 +7521,8 @@ function ChatViewContent(props: ChatViewProps) {
                       key={activeThread.id}
                       environmentId={environmentId}
                       threadId={activeThread.id}
-                      activeTurnId={
-                        activeThread.session?.status === "running"
-                          ? activeThread.session.activeTurnId
-                          : null
-                      }
+                      activeTurnId={activeThread.session?.activeTurnId ?? null}
+                      canSteer={activeThread.session?.providerName === "codex"}
                       disabled={activeEnvironmentUnavailable || isEditingFromHere}
                       onSteerAttempt={onSteerDialogAttempt}
                       onSteerAccepted={onSteerDialogAccepted}

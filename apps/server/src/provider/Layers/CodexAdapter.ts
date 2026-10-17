@@ -2300,24 +2300,66 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       { concurrency: 1 },
     );
 
-    if (input.expectedTurnId !== undefined) {
+    if (input.expectedTurnId !== undefined || input.deliveryMode === "immediate") {
       const session = yield* requireSession(input.threadId);
-      return yield* withCodexRequestDeadline(
-        session.runtime.sendTurn({
-          expectedTurnId: input.expectedTurnId,
-          ...(input.input !== undefined ? { input: input.input } : {}),
-          ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
-        }),
-        "turn/steer",
-        "starting this turn",
+      // Runtime ignores these start-only settings when its authoritative read
+      // resolves to steering. Verified-idle starts retain the bound settings.
+      const selection =
+        input.deliveryMode === "immediate"
+          ? (input.modelSelection ?? session.startInput.modelSelection)
+          : undefined;
+      const effort =
+        selection?.instanceId === boundInstanceId
+          ? getModelSelectionStringOptionValue(selection, "reasoningEffort")
+          : undefined;
+      const serviceTier =
+        selection?.instanceId === boundInstanceId
+          ? getCodexServiceTierOptionValue(selection)
+          : undefined;
+      const enableT3Workers =
+        input.deliveryMode === "immediate" &&
+        !isWorkerLinkedProviderThreadId(input.threadId) &&
+        (session.launchBackend === undefined || session.launchBackend === "native-v1-control") &&
+        (yield* options?.enableT3Workers ?? Effect.succeed(false));
+      const send = session.runtime.sendTurn({
+        ...(input.expectedTurnId !== undefined ? { expectedTurnId: input.expectedTurnId } : {}),
+        ...(input.deliveryMode !== undefined ? { deliveryMode: input.deliveryMode } : {}),
+        ...(selection?.instanceId === boundInstanceId
+          ? {
+              model: selection.model,
+              computerControlMode: normalizeCodexComputerControlMode(
+                getModelSelectionStringOptionValue(selection, CODEX_COMPUTER_CONTROL_OPTION_ID),
+              ),
+            }
+          : {}),
+        ...(effort
+          ? { effort: effort as EffectCodexSchema.V2TurnStartParams__ReasoningEffort }
+          : {}),
+        ...(serviceTier ? { serviceTier } : {}),
+        ...(input.deliveryMode === "immediate" && session.launchBackend !== undefined
+          ? { subagentBackend: session.launchBackend }
+          : {}),
+        ...(input.deliveryMode === "immediate" && input.interactionMode !== undefined
+          ? { interactionMode: input.interactionMode }
+          : {}),
+        ...(enableT3Workers ? { enableT3Workers: true } : {}),
+        ...(input.input !== undefined ? { input: input.input } : {}),
+        ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
+      });
+      return yield* (
+        input.deliveryMode === "immediate"
+          ? send
+          : withCodexRequestDeadline(send, "turn/steer", "starting this turn")
       ).pipe(
+        // A verified-idle start keeps the established timeout cleanup. An
+        // unconfirmed steer must leave its possibly running parent intact.
         Effect.tapError((cause) =>
           isCodexRequestTimeout(cause) ? stopSessionInternal(session) : Effect.void,
         ),
         Effect.mapError((cause) =>
           mapCodexRuntimeError(
             input.threadId,
-            "turn/steer",
+            input.deliveryMode === "immediate" ? "turn/send-immediate" : "turn/steer",
             cause,
             appServerTransport === "desktop-daemon",
           ),

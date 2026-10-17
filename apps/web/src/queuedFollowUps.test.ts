@@ -2,6 +2,7 @@ import { afterEach, expect, it } from "vite-plus/test";
 
 import {
   canSteerQueuedFollowUp,
+  canRestoreFailedSteer,
   createSteerFallbackFollowUp,
   failedSteerMessageId,
   nextAutoQueuedFollowUp,
@@ -291,4 +292,10 @@ it("extracts only correlated steer failure activities", () => {
     }),
   ).toBeNull();
   expect(failedSteerMessageId({ kind: "provider.turn.steer.failed", payload: {} })).toBeNull();
+});
+
+it("never restores an unconfirmed delivery into the follow-up queue", () => {
+  expect(canRestoreFailedSteer({ deliveryStatus: "not-confirmed" })).toBe(false);
+  expect(canRestoreFailedSteer({ requestId: "legacy-safe-refusal" })).toBe(true);
+  expect(canRestoreFailedSteer(null)).toBe(true);
 });
