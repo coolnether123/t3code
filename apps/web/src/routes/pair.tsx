@@ -1,5 +1,4 @@
 import { createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
 
 import {
   HostedPairingRouteSurface,
@@ -31,8 +30,6 @@ export const Route = createFileRoute("/pair")({
 function PairRouteView() {
   const { authGateState } = Route.useRouteContext();
   const navigate = useNavigate();
-  // Read before sign-in rewrites the URL; the app asks about it after sign-in.
-  const [addComputerLink] = useState(() => readAddComputerLink(new URL(window.location.href)));
 
   if (!authGateState) {
     return null;
@@ -46,6 +43,8 @@ function PairRouteView() {
     <PairingRouteSurface
       auth={authGateState.auth}
       onAuthenticated={() => {
+        // Token stripping preserves this value, including links opened after mount.
+        const addComputerLink = readAddComputerLink(new URL(window.location.href));
         void navigate({
           to: "/",
           replace: true,

@@ -10,6 +10,7 @@ import {
   submitServerAuthCredential,
 } from "../../environments/primary";
 import { readHostedPairingRequest } from "../../hostedPairing";
+import { useUrlChange } from "../../hooks/useUrlChange";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -47,11 +48,19 @@ export function PairingRouteSurface({
   initialErrorMessage?: string;
   onAuthenticated: () => void;
 }) {
-  const autoPairTokenRef = useRef<string | null>(peekPairingTokenFromUrl());
-  const [credential, setCredential] = useState(() => autoPairTokenRef.current ?? "");
+  const [credential, setCredential] = useState("");
   const [errorMessage, setErrorMessage] = useState(initialErrorMessage ?? "");
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const autoSubmitAttemptedRef = useRef(false);
+  const submittedTokensRef = useRef(new Set<string>());
+  const pendingSubmissionsRef = useRef(Promise.resolve());
+  const mountedRef = useRef(false);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const submitCredential = useCallback(
     async (nextCredential: string) => {
@@ -85,16 +94,20 @@ export function PairingRouteSurface({
     [submitCredential, credential],
   );
 
-  useEffect(() => {
-    const token = autoPairTokenRef.current;
-    if (!token || autoSubmitAttemptedRef.current) {
+  useUrlChange(() => {
+    const token = peekPairingTokenFromUrl();
+    if (!token) {
       return;
     }
-
-    autoSubmitAttemptedRef.current = true;
+    // Strip even a repeated link, but never exchange the same one-time token twice.
     stripPairingTokenFromUrl();
-    void submitCredential(token);
-  }, [submitCredential]);
+    if (submittedTokensRef.current.has(token)) return;
+    submittedTokensRef.current.add(token);
+    setCredential("");
+    pendingSubmissionsRef.current = pendingSubmissionsRef.current.then(async () => {
+      if (mountedRef.current) await submitCredential(token);
+    });
+  });
 
   return (
     <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background px-4 py-10 text-foreground sm:px-6">
@@ -316,7 +329,7 @@ function describeSupportedMethods(bootstrapMethods: ReadonlyArray<string>): stri
   }
 
   if (bootstrapMethods.includes("desktop-bootstrap")) {
-    return "This environment is desktop-managed. Open it from the desktop app or paste a bootstrap credential if one was issued explicitly.";
+    return "This environment is desktop-managed. Open an explicitly issued pairing link, open it from the desktop app, or paste a trusted pairing credential.";
   }
 
   return "This environment accepts one-time pairing tokens. Pairing links can open this page directly, or you can paste the token here.";
