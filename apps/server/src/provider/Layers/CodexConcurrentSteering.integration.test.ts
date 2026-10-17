@@ -210,7 +210,7 @@ const directoryLayer = Layer.succeed(ProviderSessionDirectory, {
   listBindings: () => Effect.succeed([]),
 });
 
-it.effect("isolates two concurrent fleets and steers each provider's actual parent turn", () =>
+const concurrentSteering = (unsupportedTurnHistory: boolean) =>
   Effect.gen(function* () {
     const scratch = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-concurrent-steer-"));
     yield* Effect.addFinalizer(() =>
@@ -228,7 +228,10 @@ it.effect("isolates two concurrent fleets and steers each provider's actual pare
           rootThreadId: parent.providerThreadId,
           turnIds: [parent.observedTurnId],
           holdTurnOpen: true,
-          expectedActiveTurnId: parent.actualTurnId,
+          unsupportedTurnHistory,
+          expectedActiveTurnId: unsupportedTurnHistory
+            ? parent.observedTurnId
+            : parent.actualTurnId,
           // The provider advances after the initial turn was observed. A
           // later steer must resolve this transition, not trust that cache.
           threadReadResponses: [
@@ -366,10 +369,13 @@ it.effect("isolates two concurrent fleets and steers each provider's actual pare
         }),
       { concurrency: "unbounded" },
     );
-    // Both caller and session metadata are stale. The provider read is the authority.
+    // Caller metadata is always stale. With history support the provider also
+    // advances beyond the session's root observation before this steer.
     assert.deepEqual(
       results.map((result) => result.turnId),
-      coordinators.map((parent) => parent.actualTurnId),
+      coordinators.map((parent) =>
+        unsupportedTurnHistory ? parent.observedTurnId : parent.actualTurnId,
+      ),
     );
     assert.deepEqual(
       results.map((result) => result.resumeCursor),
@@ -381,12 +387,15 @@ it.effect("isolates two concurrent fleets and steers each provider's actual pare
       assert.isDefined(probe);
       assert.deepEqual((probe!.payload as { params?: unknown }).params, {
         threadId: parent.providerThreadId,
-        expectedTurnId: parent.actualTurnId,
+        expectedTurnId: unsupportedTurnHistory ? parent.observedTurnId : parent.actualTurnId,
         input: [{ type: "text", text: `STEER:${parent.threadId}` }],
       });
     }
     const parent = coordinators[0]!;
-    yield* adapter.interruptTurn(parent.threadId, TurnId.make(parent.actualTurnId));
+    const interruptedRootTurn = unsupportedTurnHistory
+      ? parent.observedTurnId
+      : parent.actualTurnId;
+    yield* adapter.interruptTurn(parent.threadId, TurnId.make(interruptedRootTurn));
     const interrupted = NodeFS.readFileSync(
       NodePath.join(scratch, `${parent.threadId}.json.interrupts`),
       "utf8",
@@ -396,7 +405,7 @@ it.effect("isolates two concurrent fleets and steers each provider's actual pare
       .map((line) => decodeInterrupt(line));
     assert.deepEqual(interrupted, [
       { threadId: parent.children[2], turnId: `${parent.children[2]}-resumed-turn` },
-      { threadId: parent.providerThreadId, turnId: parent.actualTurnId },
+      { threadId: parent.providerThreadId, turnId: interruptedRootTurn },
     ]);
     assert.isFalse(
       NodeFS.existsSync(NodePath.join(scratch, `${coordinators[1]!.threadId}.json.interrupts`)),
@@ -411,5 +420,11 @@ it.effect("isolates two concurrent fleets and steers each provider's actual pare
         directoryLayer,
       ).pipe(Layer.provideMerge(NodeServices.layer)),
     ),
-  ),
-);
+  );
+
+for (const unsupportedTurnHistory of [false, true]) {
+  it.effect(
+    `isolates two concurrent fleets and steers each provider's actual parent turn, unsupported history ${unsupportedTurnHistory}`,
+    () => concurrentSteering(unsupportedTurnHistory),
+  );
+}

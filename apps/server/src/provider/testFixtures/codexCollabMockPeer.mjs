@@ -52,6 +52,23 @@ rl.on("line", (line) => {
     return;
   }
   if (method === "thread/read") {
+    if (script.unsupportedTurnHistory) {
+      if (message.params.includeTurns) {
+        write({ id, error: { code: -32601, message: "list_turns is not supported yet" } });
+      } else {
+        write({
+          id,
+          result: {
+            thread: {
+              id: script.rootThreadId,
+              status: { type: turnStartCount > 0 && script.holdTurnOpen ? "active" : "idle" },
+              turns: [],
+            },
+          },
+        });
+      }
+      return;
+    }
     const scripted = script.threadReadResponses?.[threadReadCount++];
     if (scripted) {
       write({ id, result: scripted });
@@ -63,6 +80,7 @@ rl.on("line", (line) => {
         thread: {
           ...fixture.responses.threadStart.thread,
           id: script.rootThreadId,
+          status: { type: script.expectedActiveTurnId ? "active" : "idle" },
           turns: script.expectedActiveTurnId
             ? [
                 {

@@ -7,6 +7,12 @@ import * as CodexErrors from "effect-codex-app-server/errors";
 import { readCodexActiveTurn, steerCodexActiveTurn } from "./CodexTurnSteering.ts";
 
 const active = (id: string) => ({ id, status: "inProgress" });
+const unsupportedHistory = () =>
+  CodexErrors.CodexAppServerRequestError.fromProtocolError(
+    { code: -32601, message: "list_turns is not supported yet" },
+    "thread/read",
+    "history-read",
+  );
 const staleRejection = () =>
   CodexErrors.CodexAppServerRequestError.fromProtocolError(
     { code: -32600, message: "active turn mismatch" },
@@ -48,6 +54,233 @@ function harness(options?: {
 }
 
 describe("provider-authoritative Codex steering", () => {
+  it.effect(
+    "accepts a new or finished daemon thread only after provider metadata verifies idle",
+    () =>
+      Effect.gen(function* () {
+        for (const summaryTurns of [[], undefined]) {
+          let metadataReads = 0;
+          const result = yield* readCodexActiveTurn({
+            providerThreadId: "parent-thread",
+            readThread: unsupportedHistory(),
+            readObservedRootTurn: Effect.succeed({
+              threadId: "parent-thread",
+              turnId: "stale-finished-native-root",
+            }),
+            readThreadMetadata: Effect.sync(() => {
+              metadataReads++;
+              return {
+                thread: {
+                  id: "parent-thread",
+                  status: { type: "idle" },
+                  ...(summaryTurns ? { turns: summaryTurns } : {}),
+                },
+              };
+            }),
+          });
+          assert.isNull(result);
+          assert.equal(metadataReads, 1);
+        }
+      }),
+  );
+
+  for (const thread of [
+    { id: "parent-thread", turns: [] },
+    { id: "parent-thread", turns: [], status: { type: "active" } },
+    { id: "parent-thread", turns: [], status: { type: "notLoaded" } },
+    { id: "parent-thread", turns: [], status: { type: "systemError" } },
+    { id: "parent-thread", turns: [], status: { type: "futureStatus" } },
+    { id: "wrong-thread", turns: [], status: { type: "idle" } },
+  ]) {
+    it.effect(
+      `does not send after unsupported history with ambiguous metadata ${JSON.stringify(thread)}`,
+      () =>
+        Effect.gen(function* () {
+          let sends = 0;
+          yield* steerCodexActiveTurn({
+            providerThreadId: "parent-thread",
+            readThread: unsupportedHistory(),
+            readThreadMetadata: Effect.succeed({ thread }),
+            steerTurn: (turnId) =>
+              Effect.sync(() => {
+                sends++;
+                return { turnId };
+              }),
+          }).pipe(Effect.flip);
+          assert.equal(sends, 0);
+        }),
+    );
+  }
+
+  for (const error of [
+    CodexErrors.CodexAppServerRequestError.internalError("connection lost"),
+    CodexErrors.CodexAppServerRequestError.fromProtocolError(
+      { code: -32600, message: "list_turns is not supported yet" },
+      "thread/read",
+      "read",
+    ),
+    CodexErrors.CodexAppServerRequestError.fromProtocolError(
+      { code: -32601, message: "other unsupported method" },
+      "thread/read",
+      "read",
+    ),
+  ]) {
+    it.effect(
+      `does not use idle metadata to mask an unrelated history failure ${error.message}`,
+      () =>
+        Effect.gen(function* () {
+          let metadataReads = 0;
+          const result = yield* readCodexActiveTurn({
+            providerThreadId: "parent-thread",
+            readThread: error,
+            readThreadMetadata: Effect.sync(() => {
+              metadataReads++;
+              return { thread: { id: "parent-thread", status: { type: "idle" } } };
+            }),
+          }).pipe(Effect.flip);
+          assert.equal(result, error);
+          assert.equal(metadataReads, 0);
+        }),
+    );
+  }
+
+  it.effect("does not interpret missing full-history turns as an empty thread", () =>
+    Effect.gen(function* () {
+      let metadataReads = 0;
+      yield* readCodexActiveTurn({
+        providerThreadId: "parent-thread",
+        readThread: Effect.succeed({ thread: { id: "parent-thread", status: { type: "idle" } } }),
+        readThreadMetadata: Effect.sync(() => {
+          metadataReads++;
+          return {};
+        }),
+      }).pipe(Effect.flip);
+      assert.equal(metadataReads, 0);
+    }),
+  );
+
+  it.effect("steers unsupported active history only with a bound native root observation", () =>
+    Effect.gen(function* () {
+      const sends: string[] = [];
+      const result = yield* steerCodexActiveTurn({
+        providerThreadId: "parent-thread",
+        readThread: unsupportedHistory(),
+        readThreadMetadata: Effect.succeed({
+          thread: { id: "parent-thread", status: { type: "active" }, turns: [] },
+        }),
+        readObservedRootTurn: Effect.succeed({ threadId: "parent-thread", turnId: "native-root" }),
+        steerTurn: (turnId) =>
+          Effect.sync(() => {
+            sends.push(turnId);
+            return { turnId };
+          }),
+      });
+      assert.equal(result.turnId, "native-root");
+      assert.deepEqual(sends, ["native-root"]);
+      yield* readCodexActiveTurn({
+        providerThreadId: "parent-thread",
+        readThread: unsupportedHistory(),
+        readThreadMetadata: Effect.succeed({
+          thread: { id: "parent-thread", status: { type: "active" } },
+        }),
+        readObservedRootTurn: Effect.succeed({ threadId: "child-thread", turnId: "child-turn" }),
+      }).pipe(Effect.flip);
+    }),
+  );
+
+  it.effect(
+    "does not resend a stale native observation after an unsupported-history rejection",
+    () =>
+      Effect.gen(function* () {
+        const sends: string[] = [];
+        yield* steerCodexActiveTurn({
+          providerThreadId: "parent-thread",
+          readThread: unsupportedHistory(),
+          readThreadMetadata: Effect.succeed({
+            thread: { id: "parent-thread", status: { type: "active" } },
+          }),
+          readObservedRootTurn: Effect.succeed({
+            threadId: "parent-thread",
+            turnId: "stale-native",
+          }),
+          steerTurn: (turnId) =>
+            Effect.sync(() => {
+              sends.push(turnId);
+            }).pipe(Effect.andThen(staleRejection())),
+        }).pipe(Effect.flip);
+        assert.deepEqual(sends, ["stale-native"]);
+      }),
+  );
+
+  it.effect("refreshes a native root observation only after definitive provider rejection", () =>
+    Effect.gen(function* () {
+      const sends: string[] = [];
+      let observations = 0;
+      const result = yield* steerCodexActiveTurn({
+        providerThreadId: "parent-thread",
+        readThread: unsupportedHistory(),
+        readThreadMetadata: Effect.succeed({
+          thread: { id: "parent-thread", status: { type: "active" } },
+        }),
+        readObservedRootTurn: Effect.sync(() => ({
+          threadId: "parent-thread",
+          turnId: ++observations === 1 ? "before-race" : "after-race",
+        })),
+        steerTurn: (turnId) =>
+          Effect.gen(function* () {
+            sends.push(turnId);
+            if (sends.length === 1) return yield* staleRejection();
+            return { turnId };
+          }),
+      });
+      assert.equal(result.turnId, "after-race");
+      assert.deepEqual(sends, ["before-race", "after-race"]);
+    }),
+  );
+
+  it.effect("preserves verified full-history reads for detached runtime status", () =>
+    Effect.gen(function* () {
+      assert.isNull(
+        yield* readCodexActiveTurn({
+          providerThreadId: "parent-thread",
+          readThread: Effect.succeed({
+            thread: {
+              id: "parent-thread",
+              status: { type: "notLoaded" },
+              turns: [{ id: "finished", status: "completed" }],
+            },
+          }),
+        }),
+      );
+    }),
+  );
+
+  it.effect("rejects full-history runtime status that conflicts with its turns", () =>
+    Effect.gen(function* () {
+      for (const [type, turns] of [
+        ["active", []],
+        ["idle", [active("parent")]],
+      ] as const) {
+        yield* readCodexActiveTurn({
+          providerThreadId: "parent-thread",
+          readThread: Effect.succeed({ thread: { id: "parent-thread", status: { type }, turns } }),
+        }).pipe(Effect.flip);
+      }
+    }),
+  );
+
+  it.effect("keeps the combined history and metadata read inside one deadline", () =>
+    Effect.gen(function* () {
+      const fiber = yield* readCodexActiveTurn({
+        providerThreadId: "parent-thread",
+        readThread: unsupportedHistory(),
+        readThreadMetadata: Effect.never,
+      }).pipe(Effect.flip, Effect.forkChild);
+      yield* TestClock.adjust("90 seconds");
+      assert.include((yield* Fiber.join(fiber)).message, "thread/read timed out");
+    }),
+  );
+
   it.effect("recognizes only verified terminal parent history as idle", () =>
     Effect.gen(function* () {
       const read = (turns: Array<{ id: string; status: string }>) =>

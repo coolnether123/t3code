@@ -3,14 +3,35 @@ import * as Schema from "effect/Schema";
 import * as CodexErrors from "effect-codex-app-server/errors";
 
 const isRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
+const isRuntimeStatus = Schema.is(Schema.Struct({ type: Schema.String }));
 const decodeSteeringThread = Schema.decodeUnknownEffect(
   Schema.Struct({
     thread: Schema.Struct({
       id: Schema.String,
       turns: Schema.Array(Schema.Struct({ id: Schema.String, status: Schema.String })),
+      status: Schema.optionalKey(Schema.Unknown),
     }),
   }),
 );
+const decodeThreadMetadata = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    thread: Schema.Struct({
+      id: Schema.String,
+      status: Schema.Struct({ type: Schema.Literals(["idle", "active"]) }),
+    }),
+  }),
+);
+type ObservedRootTurn = { readonly threadId: string; readonly turnId: string };
+
+function isUnsupportedTurnHistory(error: CodexErrors.CodexAppServerError): boolean {
+  return (
+    isRequestError(error) &&
+    error.operation === "receive-response" &&
+    error.method === "thread/read" &&
+    error.code === -32601 &&
+    error.errorMessage === "list_turns is not supported yet"
+  );
+}
 
 export function withCodexDeliveryDeadline<A>(
   method: "thread/read" | "turn/steer" | "turn/start",
@@ -47,10 +68,60 @@ function isRejectedStaleTurn(error: CodexErrors.CodexAppServerError): boolean {
 export const readCodexActiveTurn = Effect.fn("readCodexActiveTurn")(function* (input: {
   readonly providerThreadId: string;
   readonly readThread: Effect.Effect<unknown, CodexErrors.CodexAppServerError>;
+  readonly readThreadMetadata?: Effect.Effect<unknown, CodexErrors.CodexAppServerError>;
+  readonly readObservedRootTurn?: Effect.Effect<ObservedRootTurn | undefined>;
 }) {
   // Native Codex can add item variants before our generated protocol catches
   // up. Steering needs only parent identity and turn status, never item data.
-  const snapshot = yield* withCodexDeliveryDeadline("thread/read", input.readThread).pipe(
+  const readThread = input.readThread.pipe(
+    Effect.catch((error) => {
+      if (!isUnsupportedTurnHistory(error) || input.readThreadMetadata === undefined) {
+        return Effect.fail(error);
+      }
+      // Some desktop daemons cannot load turn history, even for new threads.
+      // Summary turns:[] is not history. Idle status proves no active turn.
+      // Active status needs a root-native observation, never a T3 projection;
+      // turn/steer's expectedTurnId still lets the provider reject stale IDs.
+      return input.readThreadMetadata.pipe(
+        Effect.flatMap(decodeThreadMetadata),
+        Effect.mapError((error) =>
+          Schema.isSchemaError(error)
+            ? CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
+                "decode-response-payload",
+                error,
+                { method: "thread/read" },
+              )
+            : error,
+        ),
+        Effect.flatMap((metadata) =>
+          Effect.gen(function* () {
+            if (metadata.thread.status.type === "idle") {
+              return { thread: { id: metadata.thread.id, turns: [] } };
+            }
+            const observed = input.readObservedRootTurn
+              ? yield* input.readObservedRootTurn
+              : undefined;
+            if (
+              metadata.thread.id !== input.providerThreadId ||
+              observed?.threadId !== input.providerThreadId ||
+              !observed.turnId
+            ) {
+              return yield* CodexErrors.CodexAppServerRequestError.invalidRequest(
+                "Message was not sent: active provider metadata has no bound native root turn observation.",
+              );
+            }
+            return {
+              thread: {
+                id: metadata.thread.id,
+                turns: [{ id: observed.turnId, status: "inProgress" }],
+              },
+            };
+          }),
+        ),
+      );
+    }),
+  );
+  const snapshot = yield* withCodexDeliveryDeadline("thread/read", readThread).pipe(
     Effect.flatMap((response) =>
       decodeSteeringThread(response).pipe(
         Effect.mapError((error) =>
@@ -65,9 +136,14 @@ export const readCodexActiveTurn = Effect.fn("readCodexActiveTurn")(function* (i
   );
   const active = snapshot.thread.turns.filter((turn) => turn.status === "inProgress");
   const [turn] = active;
+  const runtimeStatus = isRuntimeStatus(snapshot.thread.status)
+    ? snapshot.thread.status.type
+    : undefined;
   if (
     snapshot.thread.id !== input.providerThreadId ||
     active.length > 1 ||
+    (runtimeStatus === "active" && active.length !== 1) ||
+    (runtimeStatus === "idle" && active.length !== 0) ||
     snapshot.thread.turns.some(
       (entry) => !["inProgress", "completed", "interrupted", "failed"].includes(entry.status),
     )
@@ -83,6 +159,8 @@ export const readCodexActiveTurn = Effect.fn("readCodexActiveTurn")(function* (i
 export const steerCodexActiveTurn = Effect.fn("steerCodexActiveTurn")(function* (input: {
   readonly providerThreadId: string;
   readonly readThread: Effect.Effect<unknown, CodexErrors.CodexAppServerError>;
+  readonly readThreadMetadata?: Effect.Effect<unknown, CodexErrors.CodexAppServerError>;
+  readonly readObservedRootTurn?: Effect.Effect<ObservedRootTurn | undefined>;
   readonly initialActiveTurnId?: string;
   readonly steerTurn: (
     turnId: string,

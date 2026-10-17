@@ -2895,9 +2895,28 @@ export const makeCodexSessionRuntime = (
             threadId: providerThreadId,
             includeTurns: true,
           });
+          const readThreadMetadata = client.raw.request("thread/read", {
+            threadId: providerThreadId,
+            includeTurns: false,
+          });
+          // This runtime-local session is populated by bound-root native
+          // notifications and accepted native responses, never projections.
+          const readObservedRootTurn = Ref.get(sessionRef).pipe(
+            Effect.map((session) => {
+              const threadId = currentProviderThreadId(session);
+              return threadId && session.activeTurnId
+                ? { threadId, turnId: session.activeTurnId }
+                : undefined;
+            }),
+          );
           const providerActiveTurnId =
             input.expectedTurnId === undefined
-              ? yield* readCodexActiveTurn({ providerThreadId, readThread })
+              ? yield* readCodexActiveTurn({
+                  providerThreadId,
+                  readThread,
+                  readThreadMetadata,
+                  readObservedRootTurn,
+                })
               : null;
           const immediateActiveTurnId =
             input.deliveryMode === "immediate" ? providerActiveTurnId : null;
@@ -2908,6 +2927,8 @@ export const makeCodexSessionRuntime = (
             const response = yield* steerCodexActiveTurn({
               providerThreadId,
               readThread,
+              readThreadMetadata,
+              readObservedRootTurn,
               ...(immediateActiveTurnId !== null
                 ? { initialActiveTurnId: immediateActiveTurnId }
                 : {}),
