@@ -1,6 +1,10 @@
 import { buildHostedPairingUrl } from "../../hostedPairing";
 import { setPairingTokenOnUrl } from "../../pairingUrl";
 
+export function resolveCurrentOriginPairingUrl(currentUrl: string, credential: string): string {
+  return setPairingTokenOnUrl(new URL("/pair", currentUrl), credential).toString();
+}
+
 export function resolveDesktopPairingUrl(endpointUrl: string, credential: string): string {
   const url = new URL(endpointUrl);
   url.pathname = "/pair";

@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { resolveDesktopPairingUrl, resolveHostedPairingUrl } from "./pairingUrls";
+import {
+  resolveCurrentOriginPairingUrl,
+  resolveDesktopPairingUrl,
+  resolveHostedPairingUrl,
+} from "./pairingUrls";
 
 describe("settings pairing URL helpers", () => {
   afterEach(() => {
@@ -20,5 +24,16 @@ describe("settings pairing URL helpers", () => {
     expect(resolveHostedPairingUrl("https://host.tailnet.example.ts.net:3773", "PAIRCODE")).toBe(
       "https://preview.t3.codes/pair?host=https%3A%2F%2Fhost.tailnet.example.ts.net%3A3773#token=PAIRCODE",
     );
+  });
+
+  it("shares the current HTTPS proxy origin without desktop endpoints or query credentials", () => {
+    const url = new URL(
+      resolveCurrentOriginPairingUrl(
+        "https://example.tailnet.test/settings/connections?ignored=value#old",
+        "PAIRCODE",
+      ),
+    );
+    expect(url.toString()).toBe("https://example.tailnet.test/pair#token=PAIRCODE");
+    expect(url.search).toBe("");
   });
 });
