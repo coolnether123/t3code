@@ -1,8 +1,8 @@
 // Only native read methods. Input is task-local JSON on stdin, output is counts
 // and a status fingerprint, never conversation contents or native IDs.
-import * as Net from "node:net";
-import { createRequire } from "node:module";
-import { createHash } from "node:crypto";
+import * as NodeNet from "node:net";
+import * as NodeModule from "node:module";
+import * as NodeCrypto from "node:crypto";
 
 const idleTypes = new Set(["idle", "notLoaded"]);
 const endedTypes = new Set(["completed", "interrupted", "failed"]);
@@ -84,7 +84,7 @@ export async function proveNativeIdle(rpc, bindings) {
     reads.push([thread_id, native_id, thread.status.type, turn.id, turn.status]);
   }
   statuses.sort((a, b) => a[0].localeCompare(b[0]));
-  const fingerprint = createHash("sha256")
+  const fingerprint = NodeCrypto.createHash("sha256")
     .update(JSON.stringify([statuses, reads]))
     .digest("hex");
   return {
@@ -106,10 +106,10 @@ async function main() {
     let input = "";
     for await (const chunk of process.stdin) input += chunk;
     const request = JSON.parse(input);
-    const WebSocket = createRequire(request.ws_require_from)("ws");
+    const WebSocket = NodeModule.createRequire(request.ws_require_from)("ws");
     socket = new WebSocket("ws://localhost/", {
       perMessageDeflate: false,
-      createConnection: () => Net.createConnection(request.socket),
+      createConnection: () => NodeNet.createConnection(request.socket),
     });
     let serial = 0;
     socket.on("message", (data) => {

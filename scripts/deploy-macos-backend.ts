@@ -997,7 +997,7 @@ export const retirePreviousRollback = async (
   if (text) {
     const previous = JSON.parse(text) as { marker?: string; directory?: string };
     if (previous.marker !== DEPLOYMENT_MARKER || typeof previous.directory !== "string")
-      fail("Previous rollback marker is not owned by this deployer.");
+      throw new DeploymentGuardError("Previous rollback marker is not owned by this deployer.");
     const root = await NodeFSP.realpath(backupRoot);
     const old = await NodeFSP.realpath(previous.directory);
     if (NodePath.dirname(old) !== root || old === root)
@@ -1167,8 +1167,19 @@ export const recoverFailedDeployment = async (
   restore: () => Promise<void>,
   rollback: () => Promise<void>,
 ): Promise<void> => {
-  if (stopped) await rollback();
-  else await restore();
+  if (stopped) {
+    // The candidate may now own the listener and have started native work.
+    // A stale old-PID manifest must fail closed before any rollback mutation.
+    await requireExternalPreStopGuard();
+    await rollback();
+  } else await restore();
+};
+
+const requireExternalPreStopGuard = async (): Promise<void> => {
+  const guard = process.env.T3CODE_PRESTOP_GUARD;
+  if (guard) {
+    await requireCommandSuccess("/usr/bin/python3", [guard, "--gate-only"], "overnight idle gate");
+  }
 };
 
 const restoreDeploymentFiles = async (
@@ -1291,13 +1302,7 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
       host: "127.0.0.1",
       port: options.port,
     });
-    if (process.env.T3CODE_PRESTOP_GUARD) {
-      await requireCommandSuccess(
-        "/usr/bin/python3",
-        [process.env.T3CODE_PRESTOP_GUARD, "--gate-only"],
-        "overnight idle gate",
-      );
-    }
+    await requireExternalPreStopGuard();
     await requireCapacity(options.baseDir);
     if (oldLaunchAgentWasLoaded) {
       // Unload first so KeepAlive cannot restart a writer during the checkpoint.

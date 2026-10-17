@@ -4,7 +4,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
 import * as NodeChildProcess from "node:child_process";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   assertProcessIdentity,
@@ -311,6 +311,39 @@ describe("deploy-macos-backend guards", () => {
     expect(actions).toEqual(["rollback"]);
     await recoverFailedDeployment(false, restore, rollback);
     expect(actions).toEqual(["rollback", "restore"]);
+  });
+
+  it("preserves the candidate when the external rollback idle guard rejects", async () => {
+    await withTempDirectory(async (root) => {
+      const guard = NodePath.join(root, "idle-guard.py");
+      const invoked = NodePath.join(root, "invoked");
+      await NodeFSP.writeFile(
+        guard,
+        `import pathlib,sys\nassert sys.argv[1:] == ['--gate-only']\npathlib.Path(${JSON.stringify(invoked)}).write_text('checked')\nraise SystemExit(1)\n`,
+      );
+      const actions: string[] = [];
+      const restore = async () => {
+        actions.push("restore");
+      };
+      const rollback = async () => {
+        actions.push("stop candidate and restore old deployment");
+      };
+      vi.stubEnv("T3CODE_PRESTOP_GUARD", guard);
+      try {
+        await expect(recoverFailedDeployment(true, restore, rollback)).rejects.toThrow(
+          "overnight idle gate",
+        );
+        expect(await NodeFSP.readFile(invoked, "utf8")).toBe("checked");
+        expect(actions).toEqual([]);
+        await recoverFailedDeployment(false, restore, rollback);
+        expect(actions).toEqual(["restore"]);
+        await NodeFSP.writeFile(guard, "import sys\nassert sys.argv[1:] == ['--gate-only']\n");
+        await recoverFailedDeployment(true, restore, rollback);
+        expect(actions).toEqual(["restore", "stop candidate and restore old deployment"]);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
   });
 
   it("renders loopback-only persistent LaunchAgent arguments and owned wrapper", () => {

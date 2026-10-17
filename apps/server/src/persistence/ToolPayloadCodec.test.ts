@@ -41,14 +41,8 @@ describe("lossless tool payload retention", () => {
     };
     const stored = retainEventPayload("thread.activity-appended", event);
     expect(restoreStoredPayload(stored)).toEqual(event);
-    expect(decodeRetainedJson(JSON.stringify(stored))).toEqual(
-      event,
-    );
-    expect(
-      decodeRetainedJson(
-        JSON.stringify(retainToolPayload(payload)),
-      ),
-    ).toEqual(payload);
+    expect(decodeRetainedJson(JSON.stringify(stored))).toEqual(event);
+    expect(decodeRetainedJson(JSON.stringify(retainToolPayload(payload)))).toEqual(payload);
   });
   it("leaves messages, plans, approvals, user inputs and unknown event types unchanged", () => {
     for (const kind of [
@@ -71,9 +65,7 @@ describe("lossless tool payload retention", () => {
     const stored = JSON.parse(JSON.stringify(retainToolPayload(payload)));
     stored.data.__t3CompressedToolDataV1.sha256 = "corrupted";
     expect(() => restoreToolPayload(stored)).toThrow("checksum");
-    expect(() =>
-      decodeRetainedJson(JSON.stringify(stored)),
-    ).toThrow("Invalid retained");
+    expect(() => decodeRetainedJson(JSON.stringify(stored))).toThrow("Invalid retained");
     stored.data.__t3CompressedToolDataV1.codec = "future-codec";
     expect(() => restoreToolPayload(stored)).toThrow("Invalid retained");
   });

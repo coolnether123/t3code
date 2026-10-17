@@ -1,5 +1,5 @@
-import { test } from "node:test";
-import assert from "node:assert/strict";
+import * as NodeTest from "node:test";
+import * as NodeAssert from "node:assert/strict";
 import { proveNativeIdle, sourceKinds } from "./macos-native-idle.mjs";
 
 const bindings = [{ thread_id: "t3", native_id: "native" }];
@@ -14,13 +14,13 @@ const fixtureRpc = (fixture) => async (method, params) =>
     ? { result: { data: [], nextCursor: null } }
     : fixture[method];
 
-test("only read-only native methods and notLoaded turn items", async () => {
+NodeTest.test("only read-only native methods and notLoaded turn items", async () => {
   const fixture = replies();
   const methods = [];
   const proof = await proveNativeIdle(async (method, params) => {
     methods.push(method);
     if (method === "thread/list") {
-      assert.deepEqual(params.sourceKinds, [
+      NodeAssert.deepEqual(params.sourceKinds, [
         "cli",
         "vscode",
         "appServer",
@@ -33,25 +33,25 @@ test("only read-only native methods and notLoaded turn items", async () => {
         "unknown",
       ]);
     }
-    if (method === "thread/read") assert.equal(params.includeTurns, false);
-    if (method === "thread/turns/list") assert.equal(params.itemsView, "notLoaded");
+    if (method === "thread/read") NodeAssert.equal(params.includeTurns, false);
+    if (method === "thread/turns/list") NodeAssert.equal(params.itemsView, "notLoaded");
     return fixtureRpc(fixture)(method, params);
   }, bindings);
-  assert.equal(proof.idle, true);
-  assert.equal(proof.bindings_checked, 1);
-  assert.deepEqual(methods, ["thread/list", "thread/list", "thread/read", "thread/turns/list"]);
+  NodeAssert.equal(proof.idle, true);
+  NodeAssert.equal(proof.bindings_checked, 1);
+  NodeAssert.deepEqual(methods, ["thread/list", "thread/list", "thread/read", "thread/turns/list"]);
 });
 
-test("active Elora native root refuses, including later list pages", async () => {
+NodeTest.test("active Elora native root refuses, including later list pages", async () => {
   let page = 0;
   const proof = await proveNativeIdle(async (method) => {
-    assert.equal(method, "thread/list");
+    NodeAssert.equal(method, "thread/list");
     return ++page === 1
       ? { result: { data: [thread], nextCursor: "second" } }
       : { result: { data: [{ id: "root", status: { type: "active" } }], nextCursor: null } };
   }, bindings);
-  assert.equal(page, 2);
-  assert.equal(proof.busy, true);
+  NodeAssert.equal(page, 2);
+  NodeAssert.equal(proof.busy, true);
 });
 
 for (const [name, mutation] of [
@@ -86,33 +86,33 @@ for (const [name, mutation] of [
     },
   ],
 ]) {
-  test(name + " holds", async () => {
+  NodeTest.test(name + " holds", async () => {
     const fixture = replies();
     mutation(fixture);
-    await assert.rejects(proveNativeIdle(fixtureRpc(fixture), bindings));
+    await NodeAssert.rejects(proveNativeIdle(fixtureRpc(fixture), bindings));
   });
 }
 
-test("inProgress turn is busy despite idle native thread", async () => {
+NodeTest.test("inProgress turn is busy despite idle native thread", async () => {
   const fixture = replies();
   fixture["thread/turns/list"].result.data[0].status = "inProgress";
-  assert.equal((await proveNativeIdle(fixtureRpc(fixture), bindings)).busy, true);
+  NodeAssert.equal((await proveNativeIdle(fixtureRpc(fixture), bindings)).busy, true);
 });
 
-test("repeated pagination cursor holds", async () => {
-  await assert.rejects(
+NodeTest.test("repeated pagination cursor holds", async () => {
+  await NodeAssert.rejects(
     proveNativeIdle(async () => ({ result: { data: [thread], nextCursor: "repeated" } }), []),
   );
 });
 
-test("active child and archived native turns are never omitted", async () => {
+NodeTest.test("active child and archived native turns are never omitted", async () => {
   for (const archived of [false, true]) {
     for (const kind of sourceKinds.filter((value) => value.startsWith("subAgent"))) {
       const observed = [];
       const proof = await proveNativeIdle(async (method, params) => {
-        assert.equal(method, "thread/list");
+        NodeAssert.equal(method, "thread/list");
         observed.push(params.archived);
-        assert.ok(params.sourceKinds.includes(kind));
+        NodeAssert.ok(params.sourceKinds.includes(kind));
         return {
           result: {
             data:
@@ -123,16 +123,16 @@ test("active child and archived native turns are never omitted", async () => {
           },
         };
       }, []);
-      assert.equal(proof.busy, true);
-      assert.deepEqual(observed, archived ? [false, true] : [false]);
+      NodeAssert.equal(proof.busy, true);
+      NodeAssert.deepEqual(observed, archived ? [false, true] : [false]);
     }
   }
 });
 
-test("inconsistent list/read state and duplicates hold", async () => {
+NodeTest.test("inconsistent list/read state and duplicates hold", async () => {
   const fixture = replies();
   fixture["thread/read"].result.thread = { ...thread, status: { type: "notLoaded" } };
-  await assert.rejects(proveNativeIdle(fixtureRpc(fixture), bindings));
+  await NodeAssert.rejects(proveNativeIdle(fixtureRpc(fixture), bindings));
   fixture["thread/list"].result.data = [thread, thread];
-  await assert.rejects(proveNativeIdle(fixtureRpc(fixture), bindings));
+  await NodeAssert.rejects(proveNativeIdle(fixtureRpc(fixture), bindings));
 });
