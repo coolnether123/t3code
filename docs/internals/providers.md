@@ -72,6 +72,19 @@ protocols, account ownership, permissions, and capabilities belong at the
 [adapter boundary](../../apps/server/src/provider/Services/ProviderAdapter.ts). Normalize there
 instead of spreading provider checks through reactors and clients.
 
+## Runtime ingestion
+
+Runtime ingestion acquires scoped provider and domain subscriptions before
+returning from startup. Consumption still waits for server activation, so
+updates broadcast during that wait remain queued rather than disappearing.
+
+Each queued input runs in a child fiber. A processing failure, including an
+internal interruption, logs its source and event ID and appends a keyed
+`runtime.ingestion.error` activity. The input may have already persisted some
+commands, so ingestion never replays it. Later inputs continue in order.
+Closing the service scope interrupts the queue owner and its child, without
+reporting shutdown as an event failure or restarting either fiber.
+
 ## Capacity failures
 
 The Codex adapter marks a final `serverOverloaded` or known "at capacity" failure

@@ -380,6 +380,9 @@ describe("ProviderCommandReactor", () => {
       rollbackConversation: () => unsupported(),
       uploadFeedback: () => unsupported(),
       forkConversation: () => unsupported(),
+      subscribeEvents: PubSub.subscribe(runtimeEventPubSub).pipe(
+        Effect.map(Stream.fromSubscription),
+      ),
       get streamEvents() {
         return Stream.fromPubSub(runtimeEventPubSub);
       },

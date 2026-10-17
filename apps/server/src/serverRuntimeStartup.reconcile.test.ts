@@ -72,6 +72,7 @@ const makeProviderService = (liveThreadIds: ReadonlyArray<ThreadId> = []) =>
     uploadFeedback: () => Effect.die("unused"),
     forkConversation: () => Effect.die("unused"),
     streamEvents: Stream.empty,
+    subscribeEvents: Effect.succeed(Stream.empty),
   }) satisfies ProviderService.ProviderService["Service"];
 
 const queryWithThreads = (threads: ReadonlyArray<ReturnType<typeof makeThread>>) =>

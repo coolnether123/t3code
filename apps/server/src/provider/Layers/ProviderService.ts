@@ -1648,6 +1648,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     rollbackConversation,
     uploadFeedback,
     forkConversation,
+    subscribeEvents: PubSub.subscribe(runtimeEventPubSub).pipe(Effect.map(Stream.fromSubscription)),
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (ProviderRuntimeIngestion, CheckpointReactor, etc.) each
     // independently receive all runtime events.

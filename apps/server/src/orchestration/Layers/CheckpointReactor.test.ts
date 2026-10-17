@@ -161,6 +161,7 @@ function createProviderServiceHarness(
     rollbackConversation,
     uploadFeedback: () => unsupported(),
     forkConversation: forkConversation as ProviderServiceShape["forkConversation"],
+    subscribeEvents: PubSub.subscribe(runtimeEventPubSub).pipe(Effect.map(Stream.fromSubscription)),
     get streamEvents() {
       return Stream.fromPubSub(runtimeEventPubSub);
     },

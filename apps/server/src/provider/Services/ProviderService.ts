@@ -31,6 +31,7 @@ import type {
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
+import type * as Scope from "effect/Scope";
 
 import type { ProviderServiceError } from "../Errors.ts";
 import type { ProviderAdapterCapabilities } from "./ProviderAdapter.ts";
@@ -142,6 +143,9 @@ export interface ProviderServiceShape {
    * Fan-out is owned by ProviderService (not by a standalone event-bus service).
    */
   readonly streamEvents: Stream.Stream<ProviderRuntimeEvent>;
+
+  /** Acquire a runtime-event subscription that is ready before this effect returns. */
+  readonly subscribeEvents: Effect.Effect<Stream.Stream<ProviderRuntimeEvent>, never, Scope.Scope>;
 }
 
 /**

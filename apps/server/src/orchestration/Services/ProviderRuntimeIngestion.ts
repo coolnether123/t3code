@@ -20,8 +20,9 @@ export interface ProviderRuntimeIngestionShape {
    * The returned effect must be run in a scope so all worker fibers can be
    * finalized on shutdown.
    *
-   * Uses an internal queue and continues after non-interrupt failures by
-   * logging warnings.
+   * Subscriptions are ready before this returns; consumption waits for server
+   * activation. Each queued input is isolated so a processing interruption or
+   * failure is reported without replaying it or stopping later updates.
    */
   readonly start: () => Effect.Effect<void, never, Scope.Scope>;
 

@@ -26,6 +26,8 @@ import * as Crypto from "effect/Crypto";
 import * as Duration from "effect/Duration";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
@@ -2414,32 +2416,73 @@ const make = Effect.gen(function* () {
   const processInput = (input: RuntimeIngestionInput) =>
     input.source === "runtime" ? processRuntimeEvent(input.event) : processDomainEvent(input.event);
 
+  const reportInputFailure = (input: RuntimeIngestionInput, cause: Cause.Cause<unknown>) =>
+    Effect.gen(function* () {
+      yield* Effect.logWarning("provider runtime ingestion failed to process event", {
+        source: input.source,
+        eventId: input.event.eventId,
+        eventType: input.event.type,
+        replayed: false,
+        cause: Cause.pretty(cause),
+      });
+      const threadId = input.source === "runtime" ? input.event.threadId : input.event.aggregateId;
+      const createdAt = DateTime.formatIso(yield* DateTime.now);
+      yield* orchestrationEngine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make(`ingestion-error:${input.source}:${input.event.eventId}`),
+        threadId: ThreadId.make(threadId),
+        activity: {
+          id: EventId.make(`ingestion-error:${input.source}:${input.event.eventId}`),
+          kind: "runtime.ingestion.error",
+          tone: "error",
+          summary: "A provider update could not be fully processed. Later updates will continue.",
+          payload: {
+            source: input.source,
+            eventId: input.event.eventId,
+            eventType: input.event.type,
+            replayed: false,
+          },
+          turnId: input.source === "runtime" ? (toTurnId(input.event.turnId) ?? null) : null,
+          createdAt,
+        },
+        createdAt,
+      });
+    });
+
   const processInputSafely = (input: RuntimeIngestionInput) =>
-    processInput(input).pipe(
-      Effect.catchCause((cause) => {
-        if (Cause.hasInterruptsOnly(cause)) {
-          return Effect.failCause(cause);
-        }
-        return Effect.logWarning("provider runtime ingestion failed to process event", {
+    Effect.gen(function* () {
+      // An internal interruption must not terminate the queue owner. Awaiting
+      // the child remains interruptible when the service scope shuts down.
+      const result = yield* Fiber.await(yield* Effect.forkChild(processInput(input)));
+      if (Exit.isSuccess(result)) return;
+      // Processing may already have dispatched commands. Report uncertainty,
+      // never replay the input with new command IDs.
+      const reported = yield* Fiber.await(
+        yield* Effect.forkChild(reportInputFailure(input, result.cause)),
+      );
+      if (Exit.isFailure(reported)) {
+        yield* Effect.logError("provider runtime ingestion failure reporting failed", {
           source: input.source,
           eventId: input.event.eventId,
           eventType: input.event.type,
-          cause: Cause.pretty(cause),
+          cause: Cause.pretty(reported.cause),
         });
-      }),
-    );
+      }
+    });
 
   const worker = yield* makeDrainableWorker(processInputSafely);
 
   const start: ProviderRuntimeIngestionShape["start"] = () =>
     Effect.gen(function* () {
+      // Acquire both broadcast subscriptions before start returns or activation
+      // opens. Parking only the consumer can otherwise lose early events.
+      const runtimeEvents = yield* providerService.subscribeEvents;
+      const domainEvents = yield* orchestrationEngine.subscribeDomainEvents;
       yield* forkParked(
-        Stream.runForEach(providerService.streamEvents, (event) =>
-          worker.enqueue({ source: "runtime", event }),
-        ),
+        Stream.runForEach(runtimeEvents, (event) => worker.enqueue({ source: "runtime", event })),
       );
       yield* forkParked(
-        Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) => {
+        Stream.runForEach(domainEvents, (event) => {
           if (
             event.type !== "thread.turn-start-requested" &&
             event.type !== "thread.turn-steer-requested" &&

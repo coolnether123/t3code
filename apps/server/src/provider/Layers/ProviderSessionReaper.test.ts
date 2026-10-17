@@ -214,6 +214,7 @@ describe("ProviderSessionReaper", () => {
       uploadFeedback: () => unsupported(),
       forkConversation: () => unsupported(),
       streamEvents: Stream.empty,
+      subscribeEvents: Effect.succeed(Stream.empty),
     };
 
     const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(

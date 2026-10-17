@@ -124,6 +124,7 @@ const startupDependencies = Layer.mergeAll(
     uploadFeedback: () => Effect.die("unused"),
     forkConversation: () => Effect.die("unused"),
     streamEvents: Stream.empty,
+    subscribeEvents: Effect.succeed(Stream.empty),
   }),
 );
 
