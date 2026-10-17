@@ -13,6 +13,7 @@ import {
   ProviderItemId,
   type ProviderApprovalDecision,
   type ProviderEvent,
+  type ProviderRuntimeEvent,
   type ProviderSession,
   type ProviderTurnStartResult,
   type ProviderUserInputAnswers,
@@ -1298,6 +1299,147 @@ function startLifecycleRuntime() {
 }
 
 lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
+  it.effect(
+    "bounds child progress before ingestion without delaying either coordinator's message",
+    () =>
+      Effect.gen(function* () {
+        const adapter = yield* CodexAdapter;
+        const parents = ["flood-alpha", "flood-bravo"];
+        const runtimes: Array<FakeCodexRuntime> = [];
+        for (const parent of parents) {
+          yield* adapter.startSession({ threadId: asThreadId(parent), runtimeMode: "full-access" });
+          const runtime = lifecycleRuntimeFactory.lastRuntime;
+          NodeAssert.ok(runtime);
+          runtimes.push(runtime);
+        }
+        const events: Array<ProviderRuntimeEvent> = [];
+        const drained = yield* Deferred.make<void>();
+        const terminalsDrained = yield* Deferred.make<void>();
+        const roots = new Set<string>();
+        const terminalRoots = new Set<string>();
+        yield* adapter.streamEvents.pipe(
+          Stream.runForEach((event) =>
+            Effect.gen(function* () {
+              if (!parents.includes(event.threadId)) return;
+              events.push(event);
+              if (event.type === "content.delta" && event.payload.delta === "STEERING RECEIVED") {
+                roots.add(event.threadId);
+                if (roots.size === 2) yield* Deferred.succeed(drained, undefined);
+              }
+              if (event.type === "content.delta" && event.payload.delta === "TERMINALS DRAINED") {
+                terminalRoots.add(event.threadId);
+                if (terminalRoots.size === 2) yield* Deferred.succeed(terminalsDrained, undefined);
+              }
+            }),
+          ),
+          Effect.forkChild,
+        );
+        for (let chunk = 1; chunk <= 500; chunk++) {
+          for (const [index, parent] of parents.entries()) {
+            for (let child = 1; child <= 3; child++) {
+              const childId = `${parent}-child-${child}`;
+              yield* runtimes[index]!.emit({
+                id: asEventId(`${childId}-${chunk}`),
+                kind: "notification",
+                provider: ProviderDriverKind.make("codex"),
+                threadId: asThreadId(parent),
+                createdAt: "2026-10-17T00:00:00.000Z",
+                method: "collabAgent/notification",
+                payload: {
+                  agentThreadId: childId,
+                  parentThreadId: `provider-${parent}`,
+                  summary: `FULL CHILD RESULT ${childId} ${chunk}`,
+                  wire: {
+                    method: "item/agentMessage/delta",
+                    params: { threadId: childId, turnId: "child-turn", itemId: "item", delta: "." },
+                  },
+                },
+              });
+            }
+            yield* runtimes[index]!.emit({
+              id: asEventId(`${parent}-content-${chunk}`),
+              kind: "notification",
+              provider: ProviderDriverKind.make("codex"),
+              threadId: asThreadId(parent),
+              createdAt: "2026-10-17T00:00:00.000Z",
+              method: "item/agentMessage/delta",
+              payload: {
+                threadId: `provider-${parent}`,
+                turnId: "parent-turn",
+                itemId: "parent-message",
+                delta: `ROOT CONTENT ${chunk}`,
+              },
+            });
+          }
+        }
+        for (const [index, parent] of parents.entries()) {
+          yield* runtimes[index]!.emit({
+            id: asEventId(`${parent}-steer`),
+            kind: "notification",
+            provider: ProviderDriverKind.make("codex"),
+            threadId: asThreadId(parent),
+            createdAt: "2026-10-17T00:00:00.000Z",
+            method: "item/agentMessage/delta",
+            payload: {
+              threadId: `provider-${parent}`,
+              turnId: "parent-turn",
+              itemId: "parent-message",
+              delta: "STEERING RECEIVED",
+            },
+          });
+        }
+        yield* Deferred.await(drained);
+        // Root content must neither wait for nor reset child coalescing.
+        NodeAssert.equal(events.filter((event) => event.type === "content.delta").length, 1_002);
+        // These are exactly the events delivered to durable runtime ingestion,
+        // not just a reduced count in the client projection.
+        NodeAssert.equal(events.filter((event) => event.type === "task.progress").length, 6);
+        for (const [index, parent] of parents.entries()) {
+          for (let child = 1; child <= 3; child++) {
+            yield* runtimes[index]!.emit({
+              id: asEventId(`${parent}-terminal-${child}`),
+              kind: "notification",
+              provider: ProviderDriverKind.make("codex"),
+              threadId: asThreadId(parent),
+              createdAt: "2026-10-17T00:00:00.000Z",
+              method: "collabAgent/turnCompleted",
+              payload: {
+                agentThreadId: `${parent}-child-${child}`,
+                turn: { id: "child-turn", status: "completed", items: [] },
+              },
+            });
+          }
+          yield* runtimes[index]!.emit({
+            id: asEventId(`${parent}-terminal-drain`),
+            kind: "notification",
+            provider: ProviderDriverKind.make("codex"),
+            threadId: asThreadId(parent),
+            createdAt: "2026-10-17T00:00:00.000Z",
+            method: "item/agentMessage/delta",
+            payload: {
+              threadId: `provider-${parent}`,
+              turnId: "parent-turn",
+              itemId: "parent-message",
+              delta: "TERMINALS DRAINED",
+            },
+          });
+        }
+        yield* Deferred.await(terminalsDrained);
+        const progress = events.filter((event) => event.type === "task.progress");
+        NodeAssert.equal(progress.length, 12);
+        for (const parent of parents) {
+          for (let child = 1; child <= 3; child++) {
+            const childId = `${parent}-child-${child}`;
+            const latest = progress.findLast((event) => event.payload.taskId === childId);
+            NodeAssert.equal(latest?.threadId, parent);
+            NodeAssert.equal(latest?.payload.parentAgentId, `provider-${parent}`);
+            NodeAssert.equal(latest?.payload.summary, `FULL CHILD RESULT ${childId} 500`);
+          }
+          yield* adapter.stopSession(asThreadId(parent));
+        }
+      }),
+  );
+
   it.effect(
     "persists correlated file-change approval detail without altering the wire request",
     () =>

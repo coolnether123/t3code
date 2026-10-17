@@ -91,6 +91,7 @@ import {
   type CodexSessionRuntimeShape,
 } from "./CodexSessionRuntime.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
+import { makeCodexChildProgress } from "./CodexChildProgress.ts";
 import { codexLaunchArgv, resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
 import { isCodexRequestTimeout, withCodexRequestDeadline } from "../CodexRequestDeadline.ts";
 import {
@@ -2143,6 +2144,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         // children when it completes, so the consumer died on return and every
         // runtime event the session emitted afterwards was dropped.
         let rateLimits: CodexRateLimitSnapshot | undefined;
+        const forwardEvents = yield* makeCodexChildProgress((events) =>
+          Queue.offerAll(runtimeEventQueue, events).pipe(Effect.asVoid),
+        ).pipe(Effect.provideService(Scope.Scope, sessionScope));
         const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>
           Effect.gen(function* () {
             const visibleEvent = desktopDaemon
@@ -2217,7 +2221,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
               });
               return;
             }
-            yield* Queue.offerAll(runtimeEventQueue, runtimeEvents);
+            yield* forwardEvents(visibleEvent, runtimeEvents);
           }),
         ).pipe(Effect.forkIn(sessionScope));
 
