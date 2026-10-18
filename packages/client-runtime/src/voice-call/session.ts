@@ -7,7 +7,6 @@ import type {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as Fiber from "effect/Fiber";
 
 const now = () => DateTime.formatIso(Effect.runSync(DateTime.now));
 
@@ -88,7 +87,7 @@ export class ThreadVoiceSession {
   private abort = new AbortController();
   private playback = new AbortController();
   private watching = new AbortController();
-  private renew: Fiber.Fiber<never, never> | undefined;
+  private renewal = new AbortController();
   private state: VoiceState = "idle";
   private active = false;
   private busy = false;
@@ -140,7 +139,20 @@ export class ThreadVoiceSession {
       signal,
       ...(onAudio ? ([onAudio] as const) : []),
     );
-    if (response.call) this.status = response.call;
+    if (response.call) {
+      this.status = response.call;
+      if (
+        this.active &&
+        this.status.ready &&
+        !this.status.closed &&
+        !this.busy &&
+        !["preparing", "reconnecting", "error"].includes(this.state)
+      ) {
+        this.change(this.state);
+        if (this.capture && this.hasUnannouncedUpdates()) this.deps.audio.finishAtPause();
+        if (!this.capture) void this.announceAtPause();
+      }
+    }
     return response;
   }
   private failed(error: unknown) {
@@ -149,7 +161,6 @@ export class ThreadVoiceSession {
     this.deps.audio.finish();
     this.playback.abort();
     this.watching.abort();
-    if (this.renew) Effect.runFork(Fiber.interrupt(this.renew));
     const recoverable =
       error instanceof TypeError ||
       (error instanceof Error && "recoverable" in error && error.recoverable === true) ||
@@ -255,17 +266,28 @@ export class ThreadVoiceSession {
     }
   }
   private startRenewal() {
-    if (this.renew) Effect.runFork(Fiber.interrupt(this.renew));
-    this.renew = Effect.runFork(
+    this.stopRenewal();
+    this.renewal = new AbortController();
+    const signal = this.renewal.signal;
+    // The call owns the lease, including time spent listening or waiting for work.
+    Effect.runFork(
       Effect.forever(
         Effect.delay(
           Effect.promise(() =>
-            this.request({ action: "call.renew" }).catch((error) => this.failed(error)),
+            this.request({ action: "call.renew" }, signal).catch((error) => {
+              if (!signal.aborted) this.failed(error);
+            }),
           ),
           "60 seconds",
         ),
+        // Each iteration already yields for a minute and for the HTTP request.
+        { disableYield: true },
       ),
+      { signal },
     );
+  }
+  private stopRenewal() {
+    this.renewal.abort();
   }
   private async watch() {
     const signal = this.watching.signal;
@@ -282,18 +304,6 @@ export class ThreadVoiceSession {
             new Error("Speech lease is unavailable. Retry to prepare it again."),
             { recoverable: true },
           );
-        this.change(this.state);
-        if (
-          this.capture &&
-          this.status?.operatorUpdates?.some(
-            (update) =>
-              !update.heardAt &&
-              !update.announcementId &&
-              (update.status === "done" || update.status === "needs-Jared"),
-          )
-        )
-          this.deps.audio.finishAtPause();
-        if (!this.capture) void this.announceAtPause();
         if (!this.capture) void this.speak();
       }
     } catch (error) {
@@ -323,6 +333,10 @@ export class ThreadVoiceSession {
       if (this.queue.length) void this.speak();
       if (this.running || this.queue.length) return;
     }
+    if (this.hasUnannouncedUpdates()) {
+      await this.announceAtPause();
+      if (!this.active || this.running || this.announcing || this.recovering) return;
+    }
     const startedAt = now();
     this.change("listening");
     const capture = (async () => {
@@ -346,7 +360,11 @@ export class ThreadVoiceSession {
         this.recording = true;
         const audio = await this.deps.audio.capture(this.abort.signal, journal);
         this.recording = false;
-        if (!audio.audio) return;
+        if (!audio.audio) {
+          this.saved!.recordings = this.saved!.recordings.filter((entry) => entry.id !== id);
+          await this.persist();
+          return;
+        }
         const recording: Recording = {
           ...audio,
           id,
@@ -368,8 +386,8 @@ export class ThreadVoiceSession {
         this.recording = false;
         this.capture = undefined;
         if (this.active && !["reconnecting", "error"].includes(this.state)) {
+          this.change(this.running ? "waiting" : "ready");
           if (this.queue.length) void this.speak();
-          else if (!this.running) this.change("ready");
           if (!this.queue.length && !this.running) void this.announceAtPause();
         }
       }
@@ -459,12 +477,7 @@ export class ThreadVoiceSession {
       this.running ||
       this.queue.length ||
       this.playbackTask ||
-      !this.status?.operatorUpdates?.some(
-        (update) =>
-          !update.heardAt &&
-          !update.announcementId &&
-          (update.status === "done" || update.status === "needs-Jared"),
-      )
+      !this.hasUnannouncedUpdates()
     )
       return;
     this.announcing = true;
@@ -478,6 +491,14 @@ export class ThreadVoiceSession {
     } finally {
       this.announcing = false;
     }
+  }
+  private hasUnannouncedUpdates() {
+    return this.status?.operatorUpdates?.some(
+      (update) =>
+        !update.heardAt &&
+        !update.announcementId &&
+        (update.status === "done" || update.status === "needs-Jared"),
+    );
   }
   private async acknowledgeUpdates() {
     if (this.running || this.queue.length || !this.saved) return;
@@ -607,7 +628,7 @@ export class ThreadVoiceSession {
     this.active = false;
     this.playback.abort();
     this.watching.abort();
-    if (this.renew) Effect.runFork(Fiber.interrupt(this.renew));
+    this.stopRenewal();
     this.deps.audio.finish();
     if (!this.recording) this.abort.abort();
     await this.capture;
@@ -623,6 +644,7 @@ export class ThreadVoiceSession {
   }
   private async hangUp() {
     this.active = false;
+    this.stopRenewal();
     this.playback.abort();
     this.watching.abort();
     if (!this.recording) this.abort.abort();
@@ -633,7 +655,6 @@ export class ThreadVoiceSession {
     }
     this.active = false;
     this.playback.abort();
-    if (this.renew) Effect.runFork(Fiber.interrupt(this.renew));
     this.deps.audio.finish();
     await this.capture;
     this.abort.abort();

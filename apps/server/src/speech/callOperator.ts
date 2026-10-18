@@ -474,7 +474,7 @@ export class CallOperator {
       message: {
         messageId: MessageId.make(id),
         role: "user",
-        text: `At this pause, decide which operator results are worth saying. Use one short natural reply, or no text for routine information. Do not delegate these updates back to the operator.\n${JSON.stringify(updates.map(({ status, text }) => ({ status, text })))}`,
+        text: `At this pause, tell Jared these completed results or questions in one short natural reply. For needs-Jared, ask the question or explain what is needed. Do not delegate these updates back to the operator.\n${JSON.stringify(updates.map(({ status, text }) => ({ status, text })))}`,
         attachments: [],
       },
       modelSelection: chat.models.voice,

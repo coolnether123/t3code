@@ -166,6 +166,13 @@ export class CallService {
     }
     if (input.action === "call.watch") {
       await this.store.wait(input.callId, input.version, signal);
+      await this.store.serial(`renew:${input.callId}`, async () => {
+        const record = await this.store.require(input.callId);
+        const remaining = (record.leaseUntil ?? 0) - time();
+        // An attached call keeps speech ready while both provider sessions are quiet.
+        if (!record.closed && record.lease && remaining > 0 && remaining <= 60_000)
+          await this.renewLease(input.callId, signal);
+      });
       return { call: await this.status(input.callId) };
     }
     // Engine work owns an operation lock, never the call's short state lock.
@@ -176,7 +183,7 @@ export class CallService {
       return { call: await this.status(input.callId) };
     }
     if (input.action === "call.renew") {
-      await this.renewLease(input.callId, signal);
+      await this.store.serial(`renew:${input.callId}`, () => this.renewLease(input.callId, signal));
       return { call: await this.status(input.callId) };
     }
     if (

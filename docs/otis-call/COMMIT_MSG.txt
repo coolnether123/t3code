@@ -1,7 +1,7 @@
-feat(voice): separate conversation from background execution
+fix(voice): keep calls ready and speak background results
 
-Link voice and operator provider sessions to one chat, retain typed updates,
-and speak results at microphone pauses. Add separate model and effort pickers,
-saved defaults, hang-up continuation and acceptance timing stages.
+Keep the speech lease alive throughout the call and release queued speech at
+microphone pauses. Bound acceptance setup, result waits and cleanup with one
+deadline and save partial reports before cleanup.
 
 Otis-Task: agenda-task:515bbc54cb61482681e950e524421ce4

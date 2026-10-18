@@ -2,6 +2,7 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as Clock from "effect/Clock";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   ProviderInstanceId,
@@ -80,6 +81,28 @@ async function fixture() {
 }
 
 describe("durable calls", () => {
+  it("renews an attached idle call through its status watch and stops after hang-up", async () => {
+    const f = await fixture();
+    const record = await f.store.require("call-1");
+    record.leaseUntil = Clock.Clock.defaultValue().currentTimeMillisUnsafe() + 59_000;
+    await f.store.changed(record);
+    const watched = await f.request({ action: "call.watch" });
+    expect(watched.call?.ready).toBe(true);
+    expect(f.ports.speech).toHaveBeenCalledWith(
+      { action: "renew", sessionId: "lease-1" },
+      expect.any(AbortSignal),
+    );
+    await f.request({ action: "call.watch" });
+    expect(
+      vi.mocked(f.ports.speech).mock.calls.filter(([input]) => input.action === "renew"),
+    ).toHaveLength(1);
+    await f.request({ action: "call.close" });
+    const closed = await f.request({ action: "call.watch" });
+    expect(closed.call?.closed).toBe(true);
+    expect(
+      vi.mocked(f.ports.speech).mock.calls.filter(([input]) => input.action === "renew"),
+    ).toHaveLength(1);
+  });
   it("streams a sentence before its final chunk and preserves played acknowledgment", async () => {
     const f = await fixture();
     const end = deferred<void>();
