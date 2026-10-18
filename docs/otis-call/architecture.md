@@ -1,7 +1,7 @@
 # Otis Call architecture
 
 Task `agenda-task:515bbc54cb61482681e950e524421ce4`.
-Candidate follows baseline `3c3b69d714` on `work/otis-call-20261018`.
+Candidate follows baseline `d96f549d66` on `work/otis-call-20261018`.
 Updated 18 October 2026, America/Chicago, CDT.
 
 Jared's correction packet at
@@ -32,7 +32,10 @@ upload identity, raw PCM, transcript and dispatch command in that order. The
 existing engine deduplicates stable command IDs after a lost acknowledgment.
 The browser discards a recording only after delivery acknowledgment, or after a
 closed call has acknowledged raw-only drain. Speech output IDs hash message ID
-and range, with durable played records. Interrupted turns stay silent.
+and range, with durable played records. Interrupted turns stay silent. A queued reply finishes an active microphone
+capture before playback. Its raw input remains queued until playback and the
+current chat turn finish, then uses ordinary delivery. Durable turn state governs
+work-in-progress even during provider startup.
 
 The router owns speech process startup and GPU admission. Breeze TTS 2 and Whisper
 large-v3-turbo are installed according to the parent. No download or router

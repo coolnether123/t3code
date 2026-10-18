@@ -2,6 +2,55 @@ import * as NodeAssert from "node:assert/strict";
 import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
+import * as NodeCrypto from "node:crypto";
+
+/** Claude's canonical MCP receipt identifies the server and tool in data.toolName. */
+export function completedOtisTool(event, expected) {
+  const payload = event.payload;
+  if (
+    event.type !== "item.completed" ||
+    payload?.itemType !== "mcp_tool_call" ||
+    payload.status !== "completed"
+  )
+    return false;
+  const name = expected.startsWith("mcp__otis__") ? expected : `mcp__otis__${expected}`;
+  return payload.data?.toolName === name;
+}
+
+export function callTimings(stages) {
+  const elapsed = (from, to) =>
+    Number.isFinite(stages[from]) && Number.isFinite(stages[to]) ? stages[to] - stages[from] : null;
+  return {
+    ...Object.fromEntries(
+      [
+        "uploadAcknowledgment",
+        "transcript",
+        "delivery",
+        "firstRenderedText",
+        "firstScheduledAudio",
+      ].map((name) => [name, elapsed("speechEnded", name)]),
+    ),
+    speechEndToTranscript: elapsed("speechEnded", "transcript"),
+    transcriptToDelivery: elapsed("transcript", "delivery"),
+    deliveryToFirstText: elapsed("delivery", "firstRenderedText"),
+    firstTextToFirstAudio: elapsed("firstRenderedText", "firstScheduledAudio"),
+  };
+}
+
+/** Verify the PC archive independently of later provider and audio acceptance. */
+export async function verifyCallRaw(home, uploaded) {
+  for (const id of [uploaded.callId, uploaded.utteranceId])
+    NodeAssert.match(id, /^[a-zA-Z0-9_-]{1,100}$/);
+  const directory = NodePath.join(home, "userdata/voice/calls", uploaded.callId);
+  const stem = NodePath.join(directory, uploaded.utteranceId);
+  const raw = JSON.parse(await NodeFSP.readFile(`${stem}.raw.json`, "utf8"));
+  const pcm = await NodeFSP.readFile(`${stem}.pcm`);
+  const sha256 = NodeCrypto.createHash("sha256").update(pcm).digest("hex");
+  NodeAssert.equal(sha256, raw.sha256);
+  NodeAssert.equal(pcm.toString("base64"), uploaded.audio);
+  NodeAssert.equal(raw.bytes, pcm.length);
+  return { rawVerified: true, rawSha256: sha256, rawBytes: pcm.length };
+}
 
 export function validatePcmWav(bytes) {
   NodeAssert.ok(
@@ -116,7 +165,10 @@ export async function watchCallReceipts(path, threadId, onEvent) {
   watcher.on("error", rejectCompletion);
   return {
     completion,
-    drain: () => tail,
+    drain: () => {
+      tail = tail.then(read);
+      return tail;
+    },
     close: () => {
       closed = true;
       watcher.close();

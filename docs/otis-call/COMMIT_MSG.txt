@@ -1,12 +1,12 @@
-fix(voice): keep phone calls available through startup and recovery
+fix(voice): play queued replies and retain partial acceptance evidence
 
-Keep phone call controls and the normal model selector reachable when the
-composer collapses. Preserve calls while ordinary tool approvals are shown.
-Wait through cold speech startup and release grants received after cancellation.
-Clear ended call bindings and start a fresh call after draining saved audio.
+Finish microphone capture before playing an assistant reply, retain its audio,
+and deliver queued input after playback and chat work finish. Use durable turn
+state while the provider starts or waits on an ordinary approval.
 
-Add acceptance stage output, a cold-start budget, phone-width checks and exact
-approval-required acceptance instructions. Offline evidence is in the phase 1
-handoff. Live acceptance remains with the parent; nothing is deployed.
+Match successful named Otis MCP receipts, verify raw uploads independently,
+and calculate timings even when acceptance fails. Preserve call alerts, state
+and screenshots for diagnosis. Offline checks are recorded in the handoff;
+real speech acceptance remains with the parent. Nothing is deployed.
 
 Otis-Task: agenda-task:515bbc54cb61482681e950e524421ce4

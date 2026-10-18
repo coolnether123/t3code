@@ -3537,7 +3537,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     key={`${environmentId}:${activeThread.id}`}
                     ref={voiceRef}
                     thread={activeThread}
-                    running={phase === "running" || isSendBusy}
+                    running={
+                      phase === "running" ||
+                      isSendBusy ||
+                      activeThread.latestTurn?.state === "running"
+                    }
                     enabled={
                       !isConnecting &&
                       !noProviderAvailable &&

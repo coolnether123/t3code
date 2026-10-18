@@ -1,22 +1,22 @@
 # Otis Call phase 1 handoff
 
 Task `agenda-task:515bbc54cb61482681e950e524421ce4`.
-Branch `work/otis-call-20261018`, baseline HEAD `3c3b69d714`, upstream
+Branch `work/otis-call-20261018`, baseline HEAD `d96f549d66`, upstream
 `origin/work/otis-call-20261018`. Changes are uncommitted, as requested.
 Observation date: 18 October 2026, America/Chicago, CDT. Exact check times and
-commands for this revision are in ignored `.logs/otis-call/acceptance-fixes` evidence.
+commands for this revision are in ignored `.logs/otis-call/speech-reply-fixes` evidence.
 The host did not expose independent runtime model and reasoning-effort
 attestation. No subagents were used.
 
 ## Evidence rungs
 
-| Rung                    | State                                                                                                                                                                                         |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Built                   | Four parent-observed acceptance defects repaired in source. No distributable server/web bundle was produced here.                                                                             |
-| Tested offline          | Focused behavior, auth and contract tests; real T3 engine/SQLite delivery recovery with synthetic speech; acceptance parser/watcher tests. Exact final counts and exits follow below.         |
-| Needs parent acceptance | Repeat phone-width, cold-start, cancellation and cross-device new-call acceptance on this candidate. Real audio, provider execution, tool approvals and remote workflows remain parent gates. |
-| Committed/pushed        | These changes are neither committed nor pushed. The baseline was already pushed. Parent publication is required.                                                                              |
-| Not deployed            | No live T3 restart, deployment, router restart, engine download or Otis-side change occurred.                                                                                                 |
+| Rung                    | State                                                                                                                                                                                            |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Built                   | Reply capture/playback gating and independent acceptance reporting repaired in source. No distributable server/web bundle was produced here.                                                     |
+| Tested offline          | Focused behavior, auth and contract tests; real T3 engine/SQLite delivery recovery with synthetic speech; acceptance parser/watcher tests. Exact final counts and exits follow below.            |
+| Needs parent acceptance | Repeat real spoken reply and helper acceptance on this candidate. Parent already observed phone controls, transcription, one message, Haiku 5.5 medium and completed Otis tools at the baseline. |
+| Committed/pushed        | These changes are neither committed nor pushed. The baseline was already pushed. Parent publication is required.                                                                                 |
+| Not deployed            | No live T3 restart, deployment, router restart, engine download or Otis-side change occurred.                                                                                                    |
 
 The voice gate and Claude hook are deleted. Calls use ordinary T3 turns and the
 thread's existing permissions. Hang-up does not send an interrupt. The normal
@@ -31,35 +31,72 @@ retry and hang-up, journals capture locally, cancels the ready cue, and silences
 late output from interrupted turns. Environment transport reuses cookie, desktop
 bearer and refreshed DPoP authorization.
 
-## Acceptance fixes after the parent run
+## Spoken reply and evidence follow-up
 
-The parent ran baseline `3c3b69d714` against isolated T3, the real router,
-Breeze, Whisper and Claude Code CLI 2.1.302. The parent reported working call
-logs, model validation, visible HTTP 503 errors and retained device audio.
-Those observations apply to that baseline; the four fixes below need a fresh run.
+The parent committed the preceding fixes as `d96f549d66`. Its isolated 390 px
+run reached first text, but scheduled no reply audio. The retained report is
+`.logs/otis-call/medium-baseline/report.json`. The source and offline evidence
+for this follow-up are separate from that real run.
 
-- `apps/web/src/components/chat/ChatComposer.tsx` keeps the toolbar mounted
-  when the phone composer collapses. Call Otis and the normal model selector
-  remain reachable. Pending approvals or user input no longer disable Start call.
-  Tool approvals hide text actions without detaching the call.
-  The call panel continues to show state, explicit interruption and End call.
-- `packages/contracts/src/speech.ts`, server `speech/callService.ts`,
-  `speech/proxy.ts` and client-runtime `voice-call/transport.ts` allow the
-  router's 600-second startup budget. Acquisition has a 660-second deadline;
-  browser preparation has 720 seconds. Acquisition uses Node HTTP to avoid
-  Node fetch's shorter headers deadline. The controller explains the cold wait.
-  Caller cancellation does not discard the acquisition response. A lease granted
-  after cancellation or close is released before preparation completes.
-- Server `speech/callStore.ts` and `speech/callService.ts` remove a closed
-  call's thread binding under the thread lock. A delayed old close cannot remove
-  a newer binding. Open call records remain authoritative over stale indexes.
-  Client-runtime `voice-call/session.ts` drains a closed archive as raw audio,
-  then creates a new call in the same Start action. It never prepares the ended call.
-- `scripts/otis-call-acceptance.mjs` defaults to 900000 ms, supports
-  `--width 375|390`, verifies the model selector is visible, and prints one
-  stderr line per reached stage: pair, thread open, call open, prepare, ready,
-  upload, transcript, delivery, first text, first audio and close. Retries do not
-  duplicate stage lines. First audio means scheduled PCM playback, not the cue.
+- `packages/client-runtime/src/voice-call/session.ts` reproduced a playback
+  gate: an active microphone capture keeps a queued assistant sentence from
+  reaching `call.speak`. New replies now finish microphone capture, retain its
+  raw bytes on PC, and play the reply. Retained input waits until playback and
+  the current turn finish before normal transcription/delivery. Streaming
+  sentences and completed replies have regression coverage. JSON/code filtering
+  stays in place; the reproduced failure is queue/capture state, not that filter.
+- `apps/web/src/components/chat/ChatComposer.tsx` also uses the durable latest
+  turn's running state when supplying call state. Provider session startup and
+  approval transitions must not falsely tell voice that chat work is idle.
+- `scripts/lib/otis-call-evidence.mjs` matches Claude's actual canonical
+  `item.completed` receipt with `itemType=mcp_tool_call`, `status=completed`
+  and exact `data.toolName=mcp__otis__get_task` for `--expect-tool get_task`.
+  Failed calls, other tools, other servers and generic tool titles do not count.
+- `scripts/otis-call-acceptance.mjs` verifies raw PCM immediately after upload
+  acknowledgment. Provider completion is collected independently after a voice
+  failure; the final drain reads appended receipts before closing the watcher.
+  Timings derive from stage stamps on every update and in finalization. Alert
+  text, call state and its transitions, error kind/detail, failed voice action/status and a screenshot
+  are retained on failure. A screenshot is taken before attempting hang-up.
+
+The original suffix matcher already accepts the retained successful receipt.
+The old report stopped before completion and did not preserve enough failure
+context to assign the missing receipt to a matcher defect. The new matcher is
+stricter and tested against the observed event shape. The completed `get_task`
+receipt is at 5:36:08.562 AM CDT and turn completion at 5:36:12.647 AM CDT.
+The call's router activity in the requested interval contains acquisition,
+transcription and renewal, with no TTS request.
+
+The original alert is unknown. No screenshot or alert text survived that run;
+its generic `Acceptance stopped` error does not prove an alert appeared.
+The source-reproduced capture gate explains a way to suppress `call.speak`,
+but the exact old browser state cannot be recovered. A live rerun must confirm
+that this was the remaining speech failure. No live UI or router probe ran here.
+
+The actual raw layout already matches the helper:
+`userdata/voice/calls/<callId>/<utteranceId>.raw.json` and adjacent `.pcm`.
+The false raw flag came from running verification only after all audio/provider
+checks. An offline read of the retained archive verifies 1,024,000 PCM bytes and
+the metadata hash. The audit is local at
+`.logs/otis-call/speech-reply-fixes/parent-evidence-audit.json`; it contains no
+transcript, tool arguments or audio payload.
+
+Recovered timing from the parent's recorded stages:
+
+| Interval                            | Measured milliseconds |
+| ----------------------------------- | --------------------: |
+| Speech end to upload acknowledgment |                   140 |
+| Speech end to transcript            |                  8710 |
+| Transcript to delivery              |                   135 |
+| Delivery to first text              |                 69465 |
+| Speech end to first text            |                 78310 |
+| First text to first audio           |                  null |
+
+These are one parent-run sample, not a performance recommendation. Whisper is
+unchanged. New timing fields include `speechEndToTranscript`,
+`transcriptToDelivery`, `deliveryToFirstText` and `firstTextToFirstAudio`.
+Existing cumulative fields remain elapsed from `stages.speechEnded`. A failed
+run keeps known measurements and leaves genuinely missing observations null.
 
 ## Offline checks
 
@@ -85,7 +122,7 @@ node scripts/otis-call-acceptance.mjs --help
 git diff --check
 ```
 
-Final checks on 18 October 2026, 5:28 to 5:32 AM CDT:
+Final checks on 18 October 2026, America/Chicago, CDT. Exact times are in the local receipts:
 
 | Check                                                       | Exit and count                                  | Local evidence                                |
 | ----------------------------------------------------------- | ----------------------------------------------- | --------------------------------------------- |
@@ -93,22 +130,20 @@ Final checks on 18 October 2026, 5:28 to 5:32 AM CDT:
 | Client-runtime typecheck                                    | 0                                               | `typecheck-packages-client-runtime-final.log` |
 | Web typecheck                                               | 0                                               | `typecheck-apps-web-final.log`                |
 | Server typecheck                                            | 0                                               | `typecheck-apps-server-final.log`             |
-| Focused regressions, contracts, auth and composer lifecycle | 0; 97 passed in 7 files                         | `tests.log`                                   |
+| Focused regressions, contracts, auth and composer lifecycle | 0; 100 passed in 7 files                        | `tests.log`                                   |
 | Engine/SQLite delivery recovery                             | 0; 1 passed, 29 excluded by name filter         | `integration.log`                             |
-| Acceptance WAV/parser and receipt watcher                   | 0; 3 passed                                     | `helper-tests.log`                            |
+| Acceptance WAV/parser and receipt watcher                   | 0; 6 passed                                     | `helper-tests.log`                            |
 | Acceptance syntax and help                                  | 0 each                                          | `helper-syntax.log`, `helper-help.log`        |
 | Affected source lint                                        | 0; no errors; 24 existing ChatComposer warnings | `lint-final.log`                              |
 | Affected source format                                      | 0                                               | `format-check.log`                            |
-| Three affected Markdown documents                           | 0                                               | `docs-check.log`                              |
+| Two affected Markdown documents                             | 0                                               | `docs-check.log`                              |
 | Diff whitespace                                             | 0                                               | `diff-check.log`                              |
 
-The final test job is `35766248-70a1-4289-babd-89dbadbb4df2`, succeeded with
+The final test job is `45ff0b10-ea24-4ba8-9f55-af2fc1340044`, succeeded with
 exit 0. Its command is the headless PowerShell launcher for the retained
-`.logs/otis-call/acceptance-fixes/tests.ps1`; that script sets the required Node
+`.logs/otis-call/speech-reply-fixes/tests.ps1`; that script sets the required Node
 PATH and runs the exact test commands above. Typecheck commands and individual
-exits are in `typecheck-results-final.json`. The initial queued native-loader
-attempt failed because Vite+ children inherited an older Node. The corrected
-launcher supplies the required PATH. That failed attempt is not a passing gate.
+exits are in `typecheck-results-final.json`. The launcher supplies the required Node PATH for Vite+ child processes.
 The 4 GiB queue limit from the earlier phase remains the reason for direct,
 sequential package typechecks. No unresolved queue receipt from this revision is
 counted as success.
@@ -117,21 +152,24 @@ Exact affected lint and format commands, after loading the unchanged repository
 configuration with `.logs/otis-call/gate-config.mjs`:
 
 ```powershell
-$callSourceFiles = @(git diff --name-only) | Where-Object { $_ -match '\.(ts|tsx|mjs|json)$' }
-$callSourceFiles += 'apps/web/src/components/chat/ChatComposerVoice.test.tsx'
+$callSourceFiles = @(
+  'packages/client-runtime/src/voice-call/session.ts',
+  'apps/web/src/components/chat/ChatComposer.tsx', 'apps/web/src/voice/session.test.ts',
+  'scripts/otis-call-acceptance.mjs', 'scripts/lib/otis-call-evidence.mjs',
+  'scripts/lib/otis-call-evidence.test.mjs'
+)
 node .logs/otis-call/native-gates.mjs lint @callSourceFiles
 node .logs/otis-call/native-gates.mjs fmt --check @callSourceFiles
 $env:CALL_FORMAT_CHECK = '1'
-node .logs/otis-call/format-markdown.mjs docs/otis-call/handoff-phase1.md docs/otis-call/architecture.md docs/user/voice.md
+node .logs/otis-call/format-markdown.mjs docs/otis-call/handoff-phase1.md docs/otis-call/architecture.md
 Remove-Item Env:CALL_FORMAT_CHECK
 ```
 
-The new source test is untracked until the parent stages it, so it is named
-explicitly. Remove the temporary `.otis-call-gates.config.mjs` after these checks.
+The gate scope excludes the parent-owned server package edit. Remove the temporary `.otis-call-gates.config.mjs` after these checks.
 The bundled Node fetch source records a 300000 ms headers default in
 `node-fetch-deadline-source.log`, which is why acquisition uses Node HTTP.
 
-Logs and exact command receipts are under `.logs/otis-call/acceptance-fixes`.
+Logs and exact command receipts are under `.logs/otis-call/speech-reply-fixes`.
 Tests use synthetic speech and disposable storage. The integration case retains
 real T3 engine, SQLite receipts, projections and restart, while substituting
 speech and repository discovery. It proves one persisted message and turn,
@@ -299,7 +337,7 @@ An early-hang-up run requires the provider's own completion timestamp to follow
 the close acknowledgment. If the read finished sooner, repeat with a longer
 read-only operation. The helper never requires a stopped chat after hang-up.
 
-For this revision, the parent acceptance gates are:
+The earlier phone, cold-start and cross-device gates still apply. For this revision, first rerun the fresh-chat helper and verify a successful named Otis tool, audible natural reply and populated raw/timing fields. Then verify the failure report on a disposable synthetic speech failure, including its alert or explicit absence. No simulated failure against the router is authorized here. Remaining parent acceptance gates:
 
 1. Run the helper with `--width 375` and `--width 390` on fresh chats.
    Check the collapsed composer, model picker, call state, interruption and End.
@@ -336,7 +374,7 @@ entry or hidden voice authority. End, resume and explicit interrupt are present.
 Native mobile retains its old draft dictation. Native calls remain an unfulfilled
 surface requirement for the parent to resolve; the phone browser is implemented.
 
-Retain the single-caller helpers as intentional boundaries. New in this fix, `acquireSpeechLease` owns the Node HTTP cold-start transport and `unbind` owns guarded thread-index cleanup. Inlining either would mix transport or storage lifecycle into its caller. `newCall` has two callers and shares fresh-call initialization. Earlier boundaries remain: `activeCall` owns
+Retain the new single-caller `verifyCallRaw` and `completedOtisTool` as archive-verification and provider-receipt boundaries. Their focused fixture tests guard those external formats. `callTimings` is shared by live updates and finalization. Earlier single-caller helpers remain intentional boundaries. The preceding fix introduced `acquireSpeechLease`, which owns the Node HTTP cold-start transport and `unbind` owns guarded thread-index cleanup. Inlining either would mix transport or storage lifecycle into its caller. `newCall` has two callers and shares fresh-call initialization. Earlier boundaries remain: `activeCall` owns
 binding recovery; `speechIdentifier` owns bounded replay identity; `startRenewal`
 owns the renewal fiber; `fetchEnvironmentSpeech` and `createVoiceRequestCommand`
 own environment auth adaptation; `validatePcmWav` and `watchCallReceipts` own CLI
@@ -344,8 +382,8 @@ preflight and receipt parsing; `spokenMessageText` owns speech sanitization behi
 the per-message cache. Their behavior crosses storage, lifecycle or
 transport seams. Inlining would mix those responsibilities into their callers.
 
-Parent review should compare this dirty candidate with `3c3b69d714`, include new
-source/test files, exclude `.logs`, recordings, the isolated home and temporary
+Parent review should compare this dirty candidate with `d96f549d66`, include new
+source/test files. Preserve the parent-owned `apps/server/package.json` no-watch edit and exclude it from this commit. Exclude `.logs`, recordings, the isolated home and temporary
 gate configuration, and use `COMMIT_MSG.txt`. Git metadata is outside this
 sandbox's write authority, so no commit or push was attempted.
 The live T3 owner must provide exact build/install/release and rollback commands

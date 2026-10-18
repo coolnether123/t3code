@@ -98,6 +98,76 @@ afterEach(async () => {
 });
 
 describe("durable thread voice session", () => {
+  it("delivers microphone input retained during a reply after playback and turn completion", async () => {
+    const f = fixture();
+    const playing = deferred<void>();
+    const finishPlayback = deferred<void>();
+    const delivered = deferred<void>();
+    f.audio.play.mockImplementation(async () => {
+      playing.resolve();
+      await finishPlayback.promise;
+    });
+    const original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (input, signal) => {
+      const result = await original(input, signal);
+      if (input.action === "call.deliver") delivered.resolve();
+      return result;
+    });
+    await f.session.start(options, []);
+    const reply = {
+      id: "reply",
+      role: "assistant",
+      text: "The work is saved.",
+      streaming: false,
+      turnId: "turn",
+    };
+    f.session.observe([reply], true, "turn");
+    await playing.promise;
+    expect(f.saved()?.recordings).toHaveLength(1);
+    f.session.observe([reply], false, "turn");
+    f.transcript.resolve({ text: "Go" });
+    finishPlayback.resolve();
+    await delivered.promise;
+    const actions = f.request.mock.calls.map(([input]) => input.action);
+    expect(actions.indexOf("call.played")).toBeLessThan(actions.indexOf("call.transcribe"));
+    expect(f.audio.capture).toHaveBeenCalledOnce();
+  });
+  it.each([true, false])(
+    "speaks an incoming reply during microphone capture, streaming=%s",
+    async (streaming) => {
+      const f = fixture();
+      const played = deferred<void>();
+      f.audio.play.mockImplementation(async () => {
+        played.resolve();
+      });
+      await f.session.start(options, []);
+      f.session.observe(
+        [
+          {
+            id: "reply",
+            role: "assistant",
+            text: "The call task is open. I saved the details in the chat.",
+            streaming,
+            turnId: "turn",
+          },
+        ],
+        true,
+        "turn",
+      );
+      expect(f.audio.finish).toHaveBeenCalledOnce();
+      await played.promise;
+      expect(f.request).toHaveBeenCalledWith(
+        expect.objectContaining({ action: "call.upload" }),
+        expect.any(AbortSignal),
+      );
+      expect(f.request.mock.calls.some(([input]) => input.action === "call.deliver")).toBe(false);
+      expect(f.saved()?.recordings).toHaveLength(1);
+      expect(f.request).toHaveBeenCalledWith(
+        expect.objectContaining({ action: "call.speak", text: "The call task is open. " }),
+        expect.any(AbortSignal),
+      );
+    },
+  );
   it("cannot resume capture after hang-up during the ready cue", async () => {
     const f = fixture();
     const entered = deferred<void>();

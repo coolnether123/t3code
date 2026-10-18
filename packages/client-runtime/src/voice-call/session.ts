@@ -269,6 +269,20 @@ export class ThreadVoiceSession {
   async listen() {
     if (!this.active || this.busy || this.capture || !["ready", "waiting"].includes(this.state))
       return;
+    if (this.saved!.recordings.some((recording) => !recording.capturing)) {
+      this.busy = true;
+      try {
+        await this.flush();
+        if (this.active && !this.recovering) this.change(this.running ? "waiting" : "ready");
+      } catch (error) {
+        this.failed(error);
+      } finally {
+        this.busy = false;
+      }
+      if (!this.active || this.recovering) return;
+      if (this.queue.length) void this.speak();
+      if (this.running || this.queue.length) return;
+    }
     const startedAt = now();
     this.change("listening");
     const capture = (async () => {
@@ -303,7 +317,8 @@ export class ThreadVoiceSession {
         this.saved!.recordings.push(recording);
         await this.persist();
         if (!this.recovering) this.change("saving", "Saving raw audio on the PC");
-        if (this.active && !this.detached && !this.recovering) await this.flush();
+        if (this.active && !this.detached && !this.recovering)
+          await this.flush(this.queue.length === 0);
         if (this.active && !this.recovering) this.change("waiting");
       } catch (error) {
         this.failed(error);
@@ -375,6 +390,11 @@ export class ThreadVoiceSession {
         this.queue.push({ text, messageId: message.id, start: offset, end });
         offset = end;
       }
+    }
+    if (this.capture && this.queue.length && this.recording) {
+      // Finish retaining microphone input before speaking the queued reply.
+      this.change("waiting");
+      this.deps.audio.finish();
     }
     if (!this.capture && !this.busy) void this.speak();
     if (!running && !this.queue.length && !this.capture && !this.busy && this.state === "waiting") {

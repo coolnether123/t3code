@@ -1,6 +1,5 @@
 // Parent-run real acceptance against an already running isolated dev environment.
 import * as NodeAssert from "node:assert/strict";
-import * as NodeCrypto from "node:crypto";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeModule from "node:module";
@@ -8,7 +7,13 @@ import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import * as NodeUtil from "node:util";
 import { toSafeThreadAttachmentSegment } from "../apps/server/src/attachmentStore.ts";
-import { validatePcmWav, watchCallReceipts } from "./lib/otis-call-evidence.mjs";
+import {
+  validatePcmWav,
+  watchCallReceipts,
+  completedOtisTool,
+  callTimings,
+  verifyCallRaw,
+} from "./lib/otis-call-evidence.mjs";
 
 const { values } = NodeUtil.parseArgs({
   options: {
@@ -169,13 +174,15 @@ const report = {
   reloaded: false,
   chatCompletedAfterHangUp: false,
   stages: {},
-  timingsMs: {
-    uploadAcknowledgment: null,
-    transcript: null,
-    delivery: null,
-    firstRenderedText: null,
-    firstScheduledAudio: null,
-  },
+  timingsMs: callTimings({}),
+  callAlert: null,
+  callState: null,
+  voiceStates: [],
+  failureKind: null,
+  errorDetail: null,
+  closeError: null,
+  rawVerificationError: null,
+  failedVoiceRequests: [],
   callId: null,
   utteranceId: null,
   status: "failed",
@@ -183,6 +190,7 @@ const report = {
 };
 let uploaded;
 let delivered;
+let rawCheck;
 let resolveUploaded;
 let resolveDelivered;
 const uploadedReceipt = new Promise((resolve) => {
@@ -194,6 +202,7 @@ const deliveredReceipt = new Promise((resolve) => {
 const responseTasks = new Set();
 const mark = (name, at = Date.now()) => {
   report.stages[name] ??= at;
+  report.timingsMs = callTimings(report.stages);
   const label = {
     firstRenderedText: "first text",
     firstScheduledAudio: "first audio",
@@ -215,15 +224,9 @@ const receipts = await watchCallReceipts(log, values["thread-id"], (event) => {
     }
   }
   if (event.type === "turn.started") mark("turnStarted", Date.parse(event.createdAt));
-  if (event.type === "item.completed" && payload.status === "completed") {
-    const name = payload.data?.toolName;
-    if (
-      typeof name === "string" &&
-      (name === values["expect-tool"] || name.endsWith(`__${values["expect-tool"]}`))
-    ) {
-      report.otisToolCompleted = true;
-      mark("otisToolCompleted", Date.parse(event.createdAt));
-    }
+  if (completedOtisTool(event, values["expect-tool"])) {
+    report.otisToolCompleted = true;
+    mark("otisToolCompleted", Date.parse(event.createdAt));
   }
   if (event.type === "turn.completed") {
     report.turnCompleted = payload.state === "completed";
@@ -241,7 +244,10 @@ page.on("response", (response) => {
   if (new URL(response.url()).pathname !== "/api/voice") return;
   const task = (async () => {
     const input = response.request().postDataJSON();
-    if (!response.ok()) return;
+    if (!response.ok()) {
+      report.failedVoiceRequests.push({ action: input.action, status: response.status() });
+      return;
+    }
     if (input.action === "call.prepare" && (await response.json()).call?.ready) progress("ready");
     if (input.action === "call.open") {
       NodeAssert.equal(
@@ -264,6 +270,11 @@ page.on("response", (response) => {
     }
     if (input.action === "call.upload" && input.utteranceId === uploaded?.utteranceId) {
       mark("uploadAcknowledgment");
+      rawCheck ??= verifyCallRaw(home, uploaded)
+        .then((proof) => Object.assign(report, proof))
+        .catch(() => {
+          report.rawVerificationError = "PC raw archive did not match the acknowledged upload.";
+        });
       resolveUploaded();
     }
     if (input.action === "call.transcribe") mark("transcript");
@@ -310,6 +321,7 @@ await page.route("**/api/voice", async (route) => {
     uploaded = input;
     report.callId = input.callId;
     report.utteranceId = input.utteranceId;
+    mark("speechEnded", Date.parse(input.endedAt));
   }
   const target = { upload: "call.upload", delivery: "call.deliver", speech: "call.speak" }[
     disconnectAt
@@ -330,7 +342,7 @@ async function instrument() {
         node.getAttribute("data-message-id"),
       ),
     );
-    window.__otisCallEvidence = { firstTextAt: null, firstAudioAt: null };
+    window.__otisCallEvidence = { firstTextAt: null, firstAudioAt: null, voiceStates: [] };
     const original = AudioBufferSourceNode.prototype.start;
     AudioBufferSourceNode.prototype.start = function (...args) {
       if (window.__otisCallEvidence.firstAudioAt === null) {
@@ -340,6 +352,9 @@ async function instrument() {
       return original.apply(this, args);
     };
     new MutationObserver(() => {
+      const state = document.querySelector("[data-voice-state]")?.getAttribute("data-voice-state");
+      const states = window.__otisCallEvidence.voiceStates;
+      if (state && states.at(-1)?.state !== state) states.push({ at: Date.now(), state });
       for (const row of document.querySelectorAll('[data-message-role="assistant"]'))
         if (
           !existing.has(row.getAttribute("data-message-id")) &&
@@ -350,7 +365,13 @@ async function instrument() {
             void window.__otisCallMark("firstRenderedText", window.__otisCallEvidence.firstTextAt);
           }
         }
-    }).observe(document.body, { subtree: true, childList: true, characterData: true });
+    }).observe(document.body, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ["data-voice-state"],
+    });
   });
 }
 async function start() {
@@ -365,8 +386,10 @@ async function close() {
       response.ok(),
     { timeout: 10000 },
   );
-  await page.getByRole("button", { name: "End call", exact: true }).last().click();
-  await receipt;
+  await Promise.all([
+    receipt,
+    page.getByRole("button", { name: "End call", exact: true }).last().click(),
+  ]);
 }
 let deadline;
 const expired = new Promise((_, reject) => {
@@ -397,44 +420,37 @@ try {
     await Promise.race([deliveredReceipt, expired]);
     await close();
   }
-  const attention = page
-    .getByRole("region", { name: "Otis call", exact: true })
-    .getByRole("alert")
-    .waitFor()
-    .then(() => {
-      throw new Error("Call needs attention.");
-    });
-  await Promise.race([receipts.completion, attention, expired]);
+  const attention = page.getByRole("region", { name: "Otis call", exact: true }).getByRole("alert");
+  const attentionFailure = attention.waitFor().then(async () => {
+    report.callAlert = await attention.innerText();
+    throw new Error("Call displayed an alert. See callAlert and phone-call.png.");
+  });
+  await Promise.race([receipts.completion, attentionFailure, expired]);
   await receipts.drain();
   await Promise.race([deliveredReceipt, expired]);
   if (!values["hang-up-after-delivery"])
-    await page.waitForFunction(
-      () => window.__otisCallEvidence?.firstTextAt && window.__otisCallEvidence?.firstAudioAt,
-      null,
-      { polling: "raf", timeout },
-    );
-  const observed = await page.evaluate(() => window.__otisCallEvidence);
+    await Promise.race([
+      attentionFailure,
+      expired,
+      page.waitForFunction(
+        () => window.__otisCallEvidence?.firstTextAt && window.__otisCallEvidence?.firstAudioAt,
+        null,
+        { polling: "raf", timeout },
+      ),
+    ]);
   await page.screenshot({ path: NodePath.join(output, "phone-call.png"), fullPage: true });
   await Promise.all(responseTasks);
   NodeAssert.ok(uploaded && delivered?.deliveredAt, "Raw or delivery acknowledgment is missing.");
   const callPath = NodePath.join(home, "userdata/voice/calls", uploaded.callId);
-  const raw = JSON.parse(
-    await NodeFSP.readFile(NodePath.join(callPath, `${uploaded.utteranceId}.raw.json`), "utf8"),
-  );
-  const pcm = await NodeFSP.readFile(NodePath.join(callPath, `${uploaded.utteranceId}.pcm`));
   const transcript = JSON.parse(
     await NodeFSP.readFile(
       NodePath.join(callPath, `${uploaded.utteranceId}.transcript.json`),
       "utf8",
     ),
   );
-  NodeAssert.equal(NodeCrypto.createHash("sha256").update(pcm).digest("hex"), raw.sha256);
-  NodeAssert.equal(pcm.toString("base64"), uploaded.audio);
-  NodeAssert.equal(raw.bytes, pcm.length);
-  NodeAssert.equal(transcript.text, delivered.text);
-  report.rawVerified = true;
-  report.rawSha256 = raw.sha256;
-  report.rawBytes = raw.bytes;
+  NodeAssert.ok(transcript.text === delivered.text, "Saved transcript and delivery disagree.");
+  await rawCheck;
+  NodeAssert.ok(report.rawVerified, "PC raw verification failed.");
   const snapshot = await page.evaluate(async (threadId) => {
     const response = await fetch(
       `/api/orchestration/threads/${encodeURIComponent(threadId)}?turnLimit=1`,
@@ -465,13 +481,6 @@ try {
     "Provider effort differs from the requested setting.",
   );
   NodeAssert.ok(!disconnectAt || report.responseDropped, "Disconnect was not injected.");
-  const end = Date.parse(uploaded.endedAt);
-  for (const name of ["uploadAcknowledgment", "transcript", "delivery"])
-    report.timingsMs[name] = report.stages[name] === undefined ? null : report.stages[name] - end;
-  report.timingsMs.firstRenderedText =
-    observed.firstTextAt === null ? null : observed.firstTextAt - end;
-  report.timingsMs.firstScheduledAudio =
-    observed.firstAudioAt === null ? null : observed.firstAudioAt - end;
   report.chatCompletedAfterHangUp =
     !!values["hang-up-after-delivery"] && report.stages.turnCompleted > report.stages.closed;
   if (values["hang-up-after-delivery"])
@@ -482,21 +491,79 @@ try {
   NodeAssert.ok(!report.error, "An observed request failed selection validation.");
   report.status = "passed-observations-needs-parent-acceptance";
 } catch (error) {
-  report.error =
-    error instanceof NodeAssert.AssertionError
+  report.failureKind = error instanceof Error ? error.name : "UnknownError";
+  report.errorDetail =
+    error instanceof Error
+      ? error.name === "SyntaxError"
+        ? "Malformed receipt or browser response."
+        : error.message
+            .split("\n")[0]
+            .replace(/https?:\/\/\S+/g, "[URL withheld]")
+            .replace(/token=\S+/gi, "token=[withheld]")
+            .slice(0, 400)
+      : null;
+  report.error = report.callAlert
+    ? "Call displayed an alert. See callAlert and phone-call.png."
+    : error instanceof NodeAssert.AssertionError
       ? error.message
-      : "Acceptance stopped. Inspect this isolated chat and its private evidence.";
+      : error instanceof Error && error.message.startsWith("Acceptance deadline")
+        ? error.message
+        : "Acceptance browser or receipt step failed. See failureKind, callState and private screenshot.";
+  // Voice failure does not stop the chat. Retain its independently completed receipts.
+  if (delivered && !report.turnCompleted)
+    await Promise.race([receipts.completion, expired]).catch(() => {});
   process.exitCode = 1;
 } finally {
   clearTimeout(deadline);
+  await Promise.all(responseTasks);
+  await receipts.drain().catch(() => {});
   receipts.close();
+  await rawCheck;
+  const evidence = await page
+    .evaluate(() => {
+      const call = document.querySelector("[data-voice-state]");
+      return {
+        state: call?.getAttribute("data-voice-state") ?? null,
+        alert: call?.querySelector('[role="alert"]')?.textContent ?? null,
+        timing: window.__otisCallEvidence,
+      };
+    })
+    .catch(() => null);
+  report.callState = evidence?.state ?? report.callState;
+  report.voiceStates = evidence?.timing?.voiceStates ?? [];
+  report.callAlert ??= evidence?.alert ?? null;
+  if (evidence?.timing?.firstTextAt != null) mark("firstRenderedText", evidence.timing.firstTextAt);
+  if (evidence?.timing?.firstAudioAt != null)
+    mark("firstScheduledAudio", evidence.timing.firstAudioAt);
+  await page
+    .screenshot({ path: NodePath.join(output, "phone-call.png"), fullPage: true })
+    .catch(() => {});
+  if (delivered) {
+    const count = await page
+      .evaluate(
+        async ({ threadId, messageId }) => {
+          const response = await fetch(
+            `/api/orchestration/threads/${encodeURIComponent(threadId)}?turnLimit=1`,
+            { credentials: "include" },
+          );
+          if (!response.ok) throw new Error("Readback failed");
+          const snapshot = await response.json();
+          return snapshot.thread.messages.filter((message) => message.id === messageId).length;
+        },
+        { threadId: values["thread-id"], messageId: delivered.messageId },
+      )
+      .catch(() => null);
+    report.exactlyOneChatMessage = count === 1;
+  }
   if (!report.closedAcknowledged)
-    await close().catch(() => {
+    await close().catch((error) => {
+      report.closeError = error instanceof Error ? error.name : "UnknownError";
       report.status = "failed";
       report.error ??= "Hang-up was not acknowledged. Retain the isolated data.";
       process.exitCode = 1;
     });
   await Promise.all(responseTasks);
+  report.timingsMs = callTimings(report.stages);
   await NodeFSP.writeFile(NodePath.join(output, "report.json"), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
   await browser.close();
