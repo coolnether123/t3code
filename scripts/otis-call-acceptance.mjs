@@ -15,6 +15,7 @@ import {
   verifyCallRaw,
   sentenceSpeechId,
   sentenceTimings,
+  assertCallSelection,
 } from "./lib/otis-call-evidence.mjs";
 
 const { values } = NodeUtil.parseArgs({
@@ -130,21 +131,8 @@ const progress = (name) => {
 };
 progress("pair");
 const baseline = JSON.parse(cli("agent", "snapshot", "--thread", values["thread-id"]));
-if (effort !== "default") {
-  const catalog = JSON.parse(cli("agent", "providers", "--instance", values.instance));
-  const selected = catalog.providers
-    ?.find((provider) => provider.instanceId === values.instance)
-    ?.models?.find((entry) => entry.slug === model);
-  NodeAssert.ok(
-    selected?.capabilities?.optionDescriptors?.some(
-      (option) =>
-        option.id === "effort" &&
-        option.type === "select" &&
-        option.options.some((entry) => entry.id === effort),
-    ),
-    `Select a model that advertises effort=${effort} in T3. No effort fallback was selected.`,
-  );
-}
+const expectedSelection = { instanceId: values.instance, model, effort };
+assertCallSelection(baseline.thread?.modelSelection, expectedSelection);
 NodeAssert.ok(
   baseline.thread && baseline.thread.latestTurn == null,
   "Use a fresh disposable chat for each run.",
@@ -307,22 +295,7 @@ page.on("response", (response) => {
     }
     if (input.action === "call.prepare" && (await response.json()).call?.ready) progress("ready");
     if (input.action === "call.open") {
-      NodeAssert.equal(
-        input.options.modelSelection.instanceId,
-        values.instance,
-        "Select the intended provider in T3.",
-      );
-      NodeAssert.equal(
-        input.options.modelSelection.model,
-        model,
-        "Select the intended model in T3.",
-      );
-      NodeAssert.equal(
-        input.options.modelSelection.options?.find((option) => option.id === "effort")?.value ??
-          "default",
-        effort,
-        "Select the intended thinking setting in T3.",
-      );
+      assertCallSelection(input.options.modelSelection, expectedSelection);
       report.requestedSelectionVerified = true;
     }
     if (input.action === "call.upload" && input.utteranceId === uploaded?.utteranceId) {

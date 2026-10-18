@@ -11,8 +11,102 @@ import {
   verifyCallRaw,
   sentenceSpeechId,
   sentenceTimings,
+  assertCallSelection,
 } from "./otis-call-evidence.mjs";
 import * as NodeCrypto from "node:crypto";
+
+NodeTest.test("preflights medium and low from the CLI thread snapshot model selection", () => {
+  for (const effort of ["medium", "low"]) {
+    const snapshot = {
+      thread: {
+        id: "synthetic-thread",
+        modelSelection: {
+          instanceId: "claudeAgent",
+          model: "claude-haiku-5-5",
+          options: [{ id: "effort", value: effort }],
+        },
+        runtimeMode: "approval-required",
+        latestTurn: null,
+      },
+    };
+    NodeAssert.doesNotThrow(() =>
+      assertCallSelection(snapshot.thread.modelSelection, {
+        instanceId: "claudeAgent",
+        model: "claude-haiku-5-5",
+        effort,
+      }),
+    );
+  }
+});
+
+NodeTest.test("CLI provider summaries supply counts, never evidence of a selected effort", () => {
+  const providers = {
+    providers: [
+      {
+        instanceId: "claudeAgent",
+        driver: "claude-code",
+        displayName: "Claude",
+        enabled: true,
+        status: "ready",
+        availability: "available",
+        messageTruncated: false,
+        version: "2.1.302",
+        auth: { status: "authenticated" },
+        modelCount: 3,
+        skillCount: 0,
+      },
+    ],
+    providerCount: 1,
+    providersOmitted: 0,
+    providersTruncated: false,
+  };
+  NodeAssert.throws(
+    () =>
+      assertCallSelection(providers.providers[0], {
+        instanceId: "claudeAgent",
+        model: "claude-haiku-5-5",
+        effort: "low",
+      }),
+    /Select the intended model/,
+  );
+});
+
+NodeTest.test(
+  "preflight refuses missing or different model, instance and effort without fallback",
+  () => {
+    const selection = {
+      instanceId: "claudeAgent",
+      model: "claude-haiku-5-5",
+      options: [{ id: "effort", value: "medium" }],
+    };
+    const expected = { instanceId: selection.instanceId, model: selection.model, effort: "low" };
+    for (const candidate of [
+      selection,
+      { ...selection, options: [] },
+      { ...selection, options: undefined },
+    ])
+      NodeAssert.throws(() => assertCallSelection(candidate, expected), /Select effort=low/);
+    NodeAssert.throws(
+      () => assertCallSelection({ ...selection, instanceId: "other" }, expected),
+      /Select the intended provider/,
+    );
+    NodeAssert.throws(
+      () => assertCallSelection({ ...selection, model: "other" }, expected),
+      /Select the intended model/,
+    );
+    NodeAssert.throws(
+      () => assertCallSelection(undefined, expected),
+      /Select the intended provider/,
+    );
+    NodeAssert.throws(
+      () => assertCallSelection(selection, { ...expected, effort: "default" }),
+      /Select effort=default/,
+    );
+    NodeAssert.doesNotThrow(() =>
+      assertCallSelection({ ...selection, options: [] }, { ...expected, effort: "default" }),
+    );
+  },
+);
 
 NodeTest.test(
   "measures each sentence without treating missing or cancelled audio as zero latency",

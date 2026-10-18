@@ -4,6 +4,20 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeCrypto from "node:crypto";
 
+export function assertCallSelection(selection, expected) {
+  NodeAssert.equal(
+    selection?.instanceId,
+    expected.instanceId,
+    "Select the intended provider in T3.",
+  );
+  NodeAssert.equal(selection?.model, expected.model, "Select the intended model in T3.");
+  NodeAssert.equal(
+    selection?.options?.find((option) => option.id === "effort")?.value ?? "default",
+    expected.effort,
+    `Select effort=${expected.effort} in T3. No effort fallback was selected.`,
+  );
+}
+
 export function sentenceSpeechId({ messageId, start, end }) {
   return `s-${NodeCrypto.createHash("sha256")
     .update(JSON.stringify([messageId, start, end]))

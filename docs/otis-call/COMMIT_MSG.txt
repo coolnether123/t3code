@@ -1,14 +1,10 @@
-perf(voice): stream sentence audio and request conversational replies
+fix(voice): validate acceptance effort from the thread snapshot
 
-Forward PCM chunks through the existing authenticated call route and schedule
-them as they arrive. Keep a short ordered sentence queue, preserve played
-acknowledgments and cancel pending audio on interrupt.
+Read the exact provider, model and effort from agent snapshot instead of
+expecting model descriptors in the compact agent providers output. Reuse the
+selection check for call requests and retain the SDK effort evidence guard.
 
-Add conversational brevity to ordinary voice turn input without changing saved
-transcripts or harness permissions. Record sentence availability and TTS timing,
-and provide supported low-versus-medium acceptance commands.
-
-Offline evidence is in the phase 1 handoff. Live speed comparison remains with
-the parent. Changes are uncommitted and not deployed.
+Cover medium and low selections, the real compact provider output shape,
+and missing or mismatched selections without an effort fallback.
 
 Otis-Task: agenda-task:515bbc54cb61482681e950e524421ce4
