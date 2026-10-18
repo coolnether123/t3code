@@ -29,15 +29,15 @@ or write Git metadata. No downloads, live service changes or router restart occu
 
 ## Evidence rungs
 
-| Rung | Current evidence |
-| --- | --- |
-| Built | Partial source: file store, call protocol, shared controller, browser UI, router integration and optional Claude hook. No successful build or typecheck. |
-| Tested | Four production-file Node syntax checks and acceptance-script syntax check exit 0. `git diff --check` exits 0 with no diagnostics. Zero application test cases executed. |
-| Measured | Speech-end-to-transcript, first text, first audio and thinking overhead are all null. No real call. |
-| Raw/recovery | 16 synthetic cases written but not run. No real raw-save proof or disconnect acceptance. |
-| Client | No live UI, screenshots or screenshot inspection. Helper can capture a 390x844 image after repairs. Native mobile untouched. |
-| Committed/pushed | Neither. Proposed message is [COMMIT_MSG.txt](COMMIT_MSG.txt). |
-| Deployed | Nothing deployed. Daily-use T3 and port 8085 untouched. |
+| Rung             | Current evidence                                                                                                                                                         |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Built            | Partial source: file store, call protocol, shared controller, browser UI, router integration and optional Claude hook. No successful build or typecheck.                 |
+| Tested           | Four production-file Node syntax checks and acceptance-script syntax check exit 0. `git diff --check` exits 0 with no diagnostics. Zero application test cases executed. |
+| Measured         | Speech-end-to-transcript, first text, first audio and thinking overhead are all null. No real call.                                                                      |
+| Raw/recovery     | 16 synthetic cases written but not run. No real raw-save proof or disconnect acceptance.                                                                                 |
+| Client           | No live UI, screenshots or screenshot inspection. Helper can capture a 390x844 image after repairs. Native mobile untouched.                                             |
+| Committed/pushed | Neither. Proposed message is [COMMIT_MSG.txt](COMMIT_MSG.txt).                                                                                                           |
+| Deployed         | Nothing deployed. Daily-use T3 and port 8085 untouched.                                                                                                                  |
 
 Exact offline results:
 

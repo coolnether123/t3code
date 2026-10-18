@@ -23,9 +23,19 @@ export const CallOptions = Schema.Struct({
 export type CallOptions = typeof CallOptions.Type;
 export const CallRequest = Schema.Struct({
   action: Schema.Literals([
-    "call.open", "call.prepare", "call.renew", "call.upload", "call.transcribe",
-    "call.deliver", "call.status", "call.watch", "call.speak", "call.played",
-    "call.interrupt", "call.confirm", "call.close",
+    "call.open",
+    "call.prepare",
+    "call.renew",
+    "call.upload",
+    "call.transcribe",
+    "call.deliver",
+    "call.status",
+    "call.watch",
+    "call.speak",
+    "call.played",
+    "call.interrupt",
+    "call.confirm",
+    "call.close",
   ]),
   callId: CallId,
   options: Schema.optional(CallOptions),

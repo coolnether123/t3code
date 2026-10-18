@@ -87,8 +87,11 @@ export async function proxySpeech(
   ) {
     return {
       sessionId: result.sessionId,
-      ...("tenants" in result && Array.isArray(result.tenants) && result.tenants.every((id) => typeof id === "string")
-        ? { tenants: result.tenants as string[] } : {}),
+      ...("tenants" in result &&
+      Array.isArray(result.tenants) &&
+      result.tenants.every((id) => typeof id === "string")
+        ? { tenants: result.tenants as string[] }
+        : {}),
     };
   }
   if (input.action === "transcribe" && "text" in result && typeof result.text === "string") {

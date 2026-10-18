@@ -16,7 +16,8 @@ export interface StoredConfirmation extends CallConfirmation {
   inputHash: string;
   decision?: "yes" | "no";
 }
-export const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
+export const sha256 = (value: string | Uint8Array) =>
+  createHash("sha256").update(value).digest("hex");
 export function callIdentifier(value: string | undefined): string {
   if (!value || !/^[a-zA-Z0-9_-]{1,100}$/.test(value)) throw new Error("Invalid call record ID.");
   return value;
@@ -28,17 +29,23 @@ export class CallStore {
   private listeners = new Map<string, Set<() => void>>();
   constructor(readonly root: string) {}
 
-  directory(callId: string) { return join(this.root, callIdentifier(callId)); }
+  directory(callId: string) {
+    return join(this.root, callIdentifier(callId));
+  }
   async serial<T>(key: string, work: () => Promise<T>): Promise<T> {
     const previous = this.locks.get(key) ?? Promise.resolve();
     const next = previous.catch(() => {}).then(work);
     this.locks.set(key, next);
-    try { return await next; }
-    finally { if (this.locks.get(key) === next) this.locks.delete(key); }
+    try {
+      return await next;
+    } finally {
+      if (this.locks.get(key) === next) this.locks.delete(key);
+    }
   }
   async read<T>(callId: string, name: string): Promise<T | undefined> {
-    try { return JSON.parse(await readFile(join(this.directory(callId), name), "utf8")) as T; }
-    catch (error) {
+    try {
+      return JSON.parse(await readFile(join(this.directory(callId), name), "utf8")) as T;
+    } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
       throw error;
     }
@@ -57,17 +64,28 @@ export class CallStore {
     const target = join(directory, name);
     const temporary = `${target}.${randomUUID()}.tmp`;
     const file = await open(temporary, "wx");
-    try { await file.writeFile(bytes); await file.sync(); } finally { await file.close(); }
+    try {
+      await file.writeFile(bytes);
+      await file.sync();
+    } finally {
+      await file.close();
+    }
     await rename(temporary, target);
     // Windows does not support opening directories for fsync. File data is flushed
     // before rename; POSIX additionally flushes the directory entry.
     if (process.platform !== "win32") {
       const parent = await open(directory, "r");
-      try { await parent.sync(); } finally { await parent.close(); }
+      try {
+        await parent.sync();
+      } finally {
+        await parent.close();
+      }
     }
   }
   async records<T>(callId: string, suffix: string): Promise<T[]> {
-    const names = (await readdir(this.directory(callId))).filter((name) => name.endsWith(suffix)).sort();
+    const names = (await readdir(this.directory(callId)))
+      .filter((name) => name.endsWith(suffix))
+      .sort();
     return Promise.all(names.map(async (name) => (await this.read<T>(callId, name))!));
   }
   async changed(record: CallRecord) {
@@ -78,14 +96,17 @@ export class CallStore {
   async wait(callId: string, version: string | undefined, signal: AbortSignal) {
     signal.throwIfAborted();
     let wake!: () => void;
-    const changed = new Promise<void>((resolve) => { wake = resolve; });
+    const changed = new Promise<void>((resolve) => {
+      wake = resolve;
+    });
     const listeners = this.listeners.get(callId) ?? new Set<() => void>();
     listeners.add(wake);
     this.listeners.set(callId, listeners);
     signal.addEventListener("abort", wake, { once: true });
     const keepalive = setTimeout(wake, 25_000);
-    try { if ((await this.require(callId)).version === version) await changed; }
-    finally {
+    try {
+      if ((await this.require(callId)).version === version) await changed;
+    } finally {
       clearTimeout(keepalive);
       signal.removeEventListener("abort", wake);
       listeners.delete(wake);
@@ -105,6 +126,9 @@ const stores = new Map<string, CallStore>();
 export function callStore(stateDir: string) {
   const root = resolve(stateDir, "voice", "calls");
   let store = stores.get(root);
-  if (!store) { store = new CallStore(root); stores.set(root, store); }
+  if (!store) {
+    store = new CallStore(root);
+    stores.set(root, store);
+  }
   return store;
 }

@@ -65,19 +65,19 @@ the GPU-resident 27B conflicts with the call's GPU profile.
 
 ## Components and call lifecycle
 
-| Component | Responsibility and boundary |
-| --- | --- |
-| `packages/contracts/src/speech.ts` | Wire requests, call options, acknowledgments and snapshots. Existing speech transport requests remain a separate union member. |
-| `packages/client-runtime/src/voice-call/session.ts` | Client lifecycle, outbox replay, sentence queue, playback acknowledgment, and interruption. Audio, persistence and transport are injected ports. |
-| `apps/web/src/voice/browserSpeech.ts` | Browser microphone, PCM conversion, playback, ready cue and authenticated HTTP. Currently bound to the primary environment. |
-| `apps/web/src/voice/callPersistence.ts` | IndexedDB outbox, scoped by environment and thread. It is a transport buffer, not the authoritative call archive. |
-| `ThreadVoiceControls.tsx` / `ChatComposer.tsx` under `apps/web/src/components/chat/` | Phone-width call entry and status, exact model/effort, policy, confirmation and end controls. |
-| `apps/server/src/speech/http.ts` | Authenticated `/api/voice`; resolves T3 services and local engine configuration. |
-| `apps/server/src/speech/callStore.ts` | File durability, identities, per-call serialization and change notifications. No provider or engine decisions. |
-| `apps/server/src/speech/callService.ts` | Raw-save/transcribe/deliver ordering, leases, model validation, status, confirmations and hang-up. |
-| `apps/server/src/speech/proxy.ts` | Fixed loopback router API adapter. No cloud recognizer or client-controlled destination. |
-| `apps/server/src/speech/callToolGate.ts` | Claude PreToolUse decision persistence and wait. Current classification is provisional. |
-| T3 decider, ProviderCommandReactor and ClaudeAdapter | Ordinary turn dispatch, user/assistant history, provider streaming and execution-hook installation. |
+| Component                                                                            | Responsibility and boundary                                                                                                                      |
+| ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `packages/contracts/src/speech.ts`                                                   | Wire requests, call options, acknowledgments and snapshots. Existing speech transport requests remain a separate union member.                   |
+| `packages/client-runtime/src/voice-call/session.ts`                                  | Client lifecycle, outbox replay, sentence queue, playback acknowledgment, and interruption. Audio, persistence and transport are injected ports. |
+| `apps/web/src/voice/browserSpeech.ts`                                                | Browser microphone, PCM conversion, playback, ready cue and authenticated HTTP. Currently bound to the primary environment.                      |
+| `apps/web/src/voice/callPersistence.ts`                                              | IndexedDB outbox, scoped by environment and thread. It is a transport buffer, not the authoritative call archive.                                |
+| `ThreadVoiceControls.tsx` / `ChatComposer.tsx` under `apps/web/src/components/chat/` | Phone-width call entry and status, exact model/effort, policy, confirmation and end controls.                                                    |
+| `apps/server/src/speech/http.ts`                                                     | Authenticated `/api/voice`; resolves T3 services and local engine configuration.                                                                 |
+| `apps/server/src/speech/callStore.ts`                                                | File durability, identities, per-call serialization and change notifications. No provider or engine decisions.                                   |
+| `apps/server/src/speech/callService.ts`                                              | Raw-save/transcribe/deliver ordering, leases, model validation, status, confirmations and hang-up.                                               |
+| `apps/server/src/speech/proxy.ts`                                                    | Fixed loopback router API adapter. No cloud recognizer or client-controlled destination.                                                         |
+| `apps/server/src/speech/callToolGate.ts`                                             | Claude PreToolUse decision persistence and wait. Current classification is provisional.                                                          |
+| T3 decider, ProviderCommandReactor and ClaudeAdapter                                 | Ordinary turn dispatch, user/assistant history, provider streaming and execution-hook installation.                                              |
 
 Intended flow, with deviations called out below:
 
@@ -170,17 +170,17 @@ message ID are both `voice:<callId>:<utteranceId>`. Interrupt commands use
 not a monotonic event sequence. Speech IDs derive from assistant message ID plus
 text range; confirmation speech uses `confirm-<confirmationId>`.
 
-| Request | Acknowledgment and replay rule |
-| --- | --- |
-| `call.open` | Saves call options and thread binding. Retrying the same ID requires identical thread, model selection and policy. Existing closed calls currently reject. |
-| `call.prepare`, `call.renew` | Return call status after lease persistence. No microphone upload is consumed by these operations. |
-| `call.upload` | Returns an utterance only after PCM and raw metadata are flushed. Same ID must match hash, sample rate, capture timestamps and confirmation binding. Conflicts reject without replacing the original. |
-| `call.transcribe` | Requires raw metadata and verifies the saved PCM hash. Returns the saved transcript on replay. A crash after STT but before transcript save may repeat STT, which is safe. |
-| `call.deliver` | Requires saved transcript. Dispatches the deterministic T3 command, then writes delivery metadata. A lost response is retried with the same command identity. |
-| `call.status`, `call.watch` | Return call state, utterances, unanswered confirmations and played speech IDs. Watch registers a listener before reading the version, with a 25-second keepalive. This is a full snapshot, not a paged event replay. |
-| `call.speak`, `call.played` | Persist text before synthesis; same speech ID with different text rejects. Record playback acknowledgment after playback completes. Generated PCM is not cached. |
-| `call.confirm` | Requires a pending ID and exact yes/no decision. Opposite decisions on an already answered invocation reject. |
-| `call.interrupt`, `call.close` | Dispatch ordinary T3 interrupt; close first writes the closed fence and then releases the lease. Repeated close needs repair for expired leases. |
+| Request                        | Acknowledgment and replay rule                                                                                                                                                                                       |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `call.open`                    | Saves call options and thread binding. Retrying the same ID requires identical thread, model selection and policy. Existing closed calls currently reject.                                                           |
+| `call.prepare`, `call.renew`   | Return call status after lease persistence. No microphone upload is consumed by these operations.                                                                                                                    |
+| `call.upload`                  | Returns an utterance only after PCM and raw metadata are flushed. Same ID must match hash, sample rate, capture timestamps and confirmation binding. Conflicts reject without replacing the original.                |
+| `call.transcribe`              | Requires raw metadata and verifies the saved PCM hash. Returns the saved transcript on replay. A crash after STT but before transcript save may repeat STT, which is safe.                                           |
+| `call.deliver`                 | Requires saved transcript. Dispatches the deterministic T3 command, then writes delivery metadata. A lost response is retried with the same command identity.                                                        |
+| `call.status`, `call.watch`    | Return call state, utterances, unanswered confirmations and played speech IDs. Watch registers a listener before reading the version, with a 25-second keepalive. This is a full snapshot, not a paged event replay. |
+| `call.speak`, `call.played`    | Persist text before synthesis; same speech ID with different text rejects. Record playback acknowledgment after playback completes. Generated PCM is not cached.                                                     |
+| `call.confirm`                 | Requires a pending ID and exact yes/no decision. Opposite decisions on an already answered invocation reject.                                                                                                        |
+| `call.interrupt`, `call.close` | Dispatch ordinary T3 interrupt; close first writes the closed fence and then releases the lease. Repeated close needs repair for expired leases.                                                                     |
 
 Idempotency relies on two different mechanisms. File identities deduplicate local
 stages. T3 command receipts deduplicate the ambiguous window between accepted
@@ -212,11 +212,11 @@ still requires integration proof.
 
 The call option `policy` is persisted at open and selected in the call popover:
 
-| Policy | Current behavior |
-| --- | --- |
+| Policy            | Current behavior                                                                                                           |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | `confirm-actions` | Handlisted read tools run immediately; handlisted agent actions use `read-back`; every other tool requires `explicit-yes`. |
-| `confirm-all` | Every tool waits; agent actions retain the read-back label. |
-| `off` | No additional voice confirmation. Ordinary T3/provider permissions still apply. |
+| `confirm-all`     | Every tool waits; agent actions retain the read-back label.                                                                |
+| `off`             | No additional voice confirmation. Ordinary T3/provider permissions still apply.                                            |
 
 Both confirmation levels currently require exactly yes or no; their difference is
 only a label. The original recommendation was immediate reads, one-line read-back
@@ -268,13 +268,13 @@ Current source authority is
 and the `/v1/voice/sessions` handlers. The old
 `A:/Dev/Projects/otis-voice/docs/speech-contract.md` is historical context only.
 
-| Operation | Existing adapter behavior |
-| --- | --- |
-| Acquire | `POST http://127.0.0.1:8085/v1/voice/sessions`, body `{client:"t3-code",ttlSeconds:120}`. Router returns sessionId, expiresAt and configured tenant IDs. |
-| Renew | `POST /v1/voice/sessions/<id>/renew`, TTL 120 seconds. Client schedules every 60 seconds. |
-| Release | `DELETE /v1/voice/sessions/<id>`. Unknown/expired session returns 404, currently treated as failure. |
-| STT | `POST /v1/audio/transcriptions/pcm?sample_rate=N&language=en`, raw PCM, `X-Voice-Session-Id`. |
-| TTS | `POST /v1/audio/speech`, model, text, voice `otis`, PCM response and `stream:true`; same lease header. Response needs `x-sample-rate`. |
+| Operation | Existing adapter behavior                                                                                                                                |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Acquire   | `POST http://127.0.0.1:8085/v1/voice/sessions`, body `{client:"t3-code",ttlSeconds:120}`. Router returns sessionId, expiresAt and configured tenant IDs. |
+| Renew     | `POST /v1/voice/sessions/<id>/renew`, TTL 120 seconds. Client schedules every 60 seconds.                                                                |
+| Release   | `DELETE /v1/voice/sessions/<id>`. Unknown/expired session returns 404, currently treated as failure.                                                     |
+| STT       | `POST /v1/audio/transcriptions/pcm?sample_rate=N&language=en`, raw PCM, `X-Voice-Session-Id`.                                                            |
+| TTS       | `POST /v1/audio/speech`, model, text, voice `otis`, PCM response and `stream:true`; same lease header. Response needs `x-sample-rate`.                   |
 
 The correction packet also says Jared wants the 27B retained for triage, in its
 later-phase discussion. That does not establish that 27B and these speech tenants
@@ -356,31 +356,31 @@ All paths below are relative to the worktree. No file has a passing owner typech
 "Implemented" means the code is present, not that its behavior has been accepted.
 No production engine fake is wired in; fakes exist only in the new tests.
 
-| File | State and remaining work |
-| --- | --- |
-| `packages/contracts/src/speech.ts` | Partial: typed call protocol present. One broad optional-field request shape relies on service validation. Add action-specific schemas, durable metrics and compatibility tests. |
-| `packages/contracts/src/provider.ts` | Small propagation change present: optional send-turn messageId. Verify every adapter/caller remains compatible. |
-| `packages/contracts/src/orchestration.ts` | Internal `thread.voice.transcript` command present. Not a public client command. Check union consumers. |
-| `apps/server/src/orchestration/decider.ts` | Transcript-only message event present. Add invariants, archived-thread policy and replay tests. |
-| `apps/server/src/orchestration/Layers/ProviderCommandReactor.ts` | messageId propagated into normal send-turn request. Recovery, steering and queued-turn provenance are unproven. |
-| `apps/server/src/provider/Layers/ClaudeAdapter.ts` | Hook and session call context wired. SDK behavior, hook composition, resume and context races untested. |
-| `apps/server/src/speech/callStore.ts` | Storage implementation present; syntax check passes. Repair transactional open/binding, decode/version records, restart recovery and durability tests. |
-| `apps/server/src/speech/callService.ts` | Partial lifecycle implementation; syntax check passes. Fix long-held lock, closed recovery, ambiguous dispatch integration, invalid-confirmation queue and lease cleanup. |
-| `apps/server/src/speech/callToolGate.ts` | Partial optional gate; syntax check passes. Default-on behavior conflicts with the correction. If retained, metadata, safe read-back and provenance remain unfinished. No new downstream voice policy is requested. |
-| `apps/server/src/speech/http.ts` | New route integration present. Verify Effect layer dependencies and request cancellation; avoid exposing raw internal error messages. |
-| `apps/server/src/speech/proxy.ts` | Tenant IDs and configurable TTS model added. Legacy path retained. Expiry, error semantics and streamed response still need work. |
-| `apps/server/src/speech/callService.test.ts` | 16 synthetic tests written, zero executed. Real temporary files, fake speech/provider ports. Covers save order, conflict, orphan PCM, retry identity, gate and catalog selection. |
-| `packages/client-runtime/package.json` | Shared `./voice-call` export added. Check consumer resolution and package typecheck. |
-| `packages/client-runtime/src/voice-call/session.ts` | Partial client state machine; syntax check passes. Closed recovery, cancellation, reload, outbox journal, replay and interruption need tests and repairs. |
-| `apps/web/src/voice/session.ts` | Compatibility re-export of new shared controller. Its old tests have not been migrated and use incompatible signatures. |
-| `apps/web/src/voice/callPersistence.ts` | IndexedDB implementation present. Quota/transaction failure, schema upgrades and multi-tab ownership untested. |
-| `apps/web/src/voice/browserSpeech.ts` | Mic warm-up, ready sound and simple silence endpointing present. No output-time acoustic barge-in, chunk persistence or native implementation. |
-| `apps/web/src/components/chat/ThreadVoiceControls.tsx` | Partial call popover and controls. No screenshot/runtime proof; unmount currently ends the call and undermines reload recovery. |
-| `apps/web/src/components/chat/ChatComposer.tsx` | Existing entry point adapted. Still primary environment only; ordinary interrupt path stops voice. Original NUL bytes preserved, no unrelated cleanup. |
-| `scripts/otis-call-acceptance.mjs` | Parent-run acceptance candidate. Syntax checked separately; no browser, provider or engine execution. Limits below. |
-| `docs/otis-call/architecture.md` | This design and repair handoff. |
-| `docs/otis-call/handoff-phase1.md` | Current evidence and parent run commands, replacing the obsolete investigation-only checkpoint. |
-| `docs/otis-call/COMMIT_MSG.txt` | Proposed commit message for parent review. Exactly one task trailer. No commit performed. |
+| File                                                             | State and remaining work                                                                                                                                                                                            |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/contracts/src/speech.ts`                               | Partial: typed call protocol present. One broad optional-field request shape relies on service validation. Add action-specific schemas, durable metrics and compatibility tests.                                    |
+| `packages/contracts/src/provider.ts`                             | Small propagation change present: optional send-turn messageId. Verify every adapter/caller remains compatible.                                                                                                     |
+| `packages/contracts/src/orchestration.ts`                        | Internal `thread.voice.transcript` command present. Not a public client command. Check union consumers.                                                                                                             |
+| `apps/server/src/orchestration/decider.ts`                       | Transcript-only message event present. Add invariants, archived-thread policy and replay tests.                                                                                                                     |
+| `apps/server/src/orchestration/Layers/ProviderCommandReactor.ts` | messageId propagated into normal send-turn request. Recovery, steering and queued-turn provenance are unproven.                                                                                                     |
+| `apps/server/src/provider/Layers/ClaudeAdapter.ts`               | Hook and session call context wired. SDK behavior, hook composition, resume and context races untested.                                                                                                             |
+| `apps/server/src/speech/callStore.ts`                            | Storage implementation present; syntax check passes. Repair transactional open/binding, decode/version records, restart recovery and durability tests.                                                              |
+| `apps/server/src/speech/callService.ts`                          | Partial lifecycle implementation; syntax check passes. Fix long-held lock, closed recovery, ambiguous dispatch integration, invalid-confirmation queue and lease cleanup.                                           |
+| `apps/server/src/speech/callToolGate.ts`                         | Partial optional gate; syntax check passes. Default-on behavior conflicts with the correction. If retained, metadata, safe read-back and provenance remain unfinished. No new downstream voice policy is requested. |
+| `apps/server/src/speech/http.ts`                                 | New route integration present. Verify Effect layer dependencies and request cancellation; avoid exposing raw internal error messages.                                                                               |
+| `apps/server/src/speech/proxy.ts`                                | Tenant IDs and configurable TTS model added. Legacy path retained. Expiry, error semantics and streamed response still need work.                                                                                   |
+| `apps/server/src/speech/callService.test.ts`                     | 16 synthetic tests written, zero executed. Real temporary files, fake speech/provider ports. Covers save order, conflict, orphan PCM, retry identity, gate and catalog selection.                                   |
+| `packages/client-runtime/package.json`                           | Shared `./voice-call` export added. Check consumer resolution and package typecheck.                                                                                                                                |
+| `packages/client-runtime/src/voice-call/session.ts`              | Partial client state machine; syntax check passes. Closed recovery, cancellation, reload, outbox journal, replay and interruption need tests and repairs.                                                           |
+| `apps/web/src/voice/session.ts`                                  | Compatibility re-export of new shared controller. Its old tests have not been migrated and use incompatible signatures.                                                                                             |
+| `apps/web/src/voice/callPersistence.ts`                          | IndexedDB implementation present. Quota/transaction failure, schema upgrades and multi-tab ownership untested.                                                                                                      |
+| `apps/web/src/voice/browserSpeech.ts`                            | Mic warm-up, ready sound and simple silence endpointing present. No output-time acoustic barge-in, chunk persistence or native implementation.                                                                      |
+| `apps/web/src/components/chat/ThreadVoiceControls.tsx`           | Partial call popover and controls. No screenshot/runtime proof; unmount currently ends the call and undermines reload recovery.                                                                                     |
+| `apps/web/src/components/chat/ChatComposer.tsx`                  | Existing entry point adapted. Still primary environment only; ordinary interrupt path stops voice. Original NUL bytes preserved, no unrelated cleanup.                                                              |
+| `scripts/otis-call-acceptance.mjs`                               | Parent-run acceptance candidate. Syntax checked separately; no browser, provider or engine execution. Limits below.                                                                                                 |
+| `docs/otis-call/architecture.md`                                 | This design and repair handoff.                                                                                                                                                                                     |
+| `docs/otis-call/handoff-phase1.md`                               | Current evidence and parent run commands, replacing the obsolete investigation-only checkpoint.                                                                                                                     |
+| `docs/otis-call/COMMIT_MSG.txt`                                  | Proposed commit message for parent review. Exactly one task trailer. No commit performed.                                                                                                                           |
 
 Unchanged but affected: `apps/server/src/speech/proxy.test.ts` has 5 tests;
 `apps/web/src/voice/session.test.ts` has 7 tests for the old controller. Preserve
@@ -446,14 +446,14 @@ Use Node `A:/Dev/Tooling/t3-node-v24.19.0/node.exe` with repo-local
 `node_modules/vite-plus/bin/vp`. Dependencies are installed. The previous handoff's
 missing-architecture and missing-dependencies claims are obsolete.
 
-| Check | Exact outcome |
-| --- | --- |
-| Server owner typecheck: `node node_modules/vite-plus/bin/vp run --filter t3 typecheck` | Job `31b764af-72fb-4f0c-b127-63ad354f6174` still reports running, exitCode null. stderr contains `VirtualAlloc of 8192 bytes failed with errno=1455` and `fatal error: out of memory`. The native job setup specifies a 4 GiB commit limit. No completed type diagnostics or passing result. |
-| Focused tests: `node node_modules/vite-plus/bin/vp test run apps/server/src/speech/proxy.test.ts apps/server/src/speech/callService.test.ts apps/web/src/voice/session.test.ts --reporter=dot --maxWorkers=1` | Job `711a4385-df7e-4b81-84e0-3c1fc8f568d5` is blocked, queue position 1, reason `waiting-for-working-directory-or-output-owner`, exitCode null. Zero tests executed; 28 declared cases across these files. |
-| `node --check` on callStore, callService, callToolGate, shared session | Four exits 0. Syntax only; no dependency resolution, type checking or test execution. Logs `.logs/otis-call/syntax-0.log` through `syntax-3.log`, summary `syntax-results.json`. |
-| Acceptance helper syntax and final diff whitespace | See the exact final results in `handoff-phase1.md`. |
-| Web/contracts/client-runtime typecheck, affected lint/format, build | Not run. Required after repair. |
-| Real audio, provider, router, disconnect, UI | Not run in this sandbox. No measurements or screenshots. |
+| Check                                                                                                                                                                                                         | Exact outcome                                                                                                                                                                                                                                                                                |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Server owner typecheck: `node node_modules/vite-plus/bin/vp run --filter t3 typecheck`                                                                                                                        | Job `31b764af-72fb-4f0c-b127-63ad354f6174` still reports running, exitCode null. stderr contains `VirtualAlloc of 8192 bytes failed with errno=1455` and `fatal error: out of memory`. The native job setup specifies a 4 GiB commit limit. No completed type diagnostics or passing result. |
+| Focused tests: `node node_modules/vite-plus/bin/vp test run apps/server/src/speech/proxy.test.ts apps/server/src/speech/callService.test.ts apps/web/src/voice/session.test.ts --reporter=dot --maxWorkers=1` | Job `711a4385-df7e-4b81-84e0-3c1fc8f568d5` is blocked, queue position 1, reason `waiting-for-working-directory-or-output-owner`, exitCode null. Zero tests executed; 28 declared cases across these files.                                                                                   |
+| `node --check` on callStore, callService, callToolGate, shared session                                                                                                                                        | Four exits 0. Syntax only; no dependency resolution, type checking or test execution. Logs `.logs/otis-call/syntax-0.log` through `syntax-3.log`, summary `syntax-results.json`.                                                                                                             |
+| Acceptance helper syntax and final diff whitespace                                                                                                                                                            | See the exact final results in `handoff-phase1.md`.                                                                                                                                                                                                                                          |
+| Web/contracts/client-runtime typecheck, affected lint/format, build                                                                                                                                           | Not run. Required after repair.                                                                                                                                                                                                                                                              |
+| Real audio, provider, router, disconnect, UI                                                                                                                                                                  | Not run in this sandbox. No measurements or screenshots.                                                                                                                                                                                                                                     |
 
 Typecheck logs are under
 `C:/Users/PrecisionX/AppData/Local/Otis/build-jobs/logs/31b764af-72fb-4f0c-b127-63ad354f6174/command/c80bcc48-a1f9-4ef8-82e0-60795d3eb698/`.

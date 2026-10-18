@@ -46,8 +46,13 @@ export function createBrowserAudio() {
       finishCapture?.();
     },
     async prepare(signal: AbortSignal) {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
-      if (signal.aborted) { stream.getTracks().forEach((track) => track.stop()); signal.throwIfAborted(); }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+      });
+      if (signal.aborted) {
+        stream.getTracks().forEach((track) => track.stop());
+        signal.throwIfAborted();
+      }
       preparedStream?.getTracks().forEach((track) => track.stop());
       preparedStream = stream;
       await context!.resume();
@@ -59,10 +64,16 @@ export function createBrowserAudio() {
       tone.frequency.value = 660;
       gain.gain.setValueAtTime(0.08, audio.currentTime);
       gain.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + 0.2);
-      tone.connect(gain); gain.connect(audio.destination);
+      tone.connect(gain);
+      gain.connect(audio.destination);
       await new Promise<void>((resolve) => {
-        tone.onended = () => { tone.disconnect(); gain.disconnect(); resolve(); };
-        tone.start(); tone.stop(audio.currentTime + 0.22);
+        tone.onended = () => {
+          tone.disconnect();
+          gain.disconnect();
+          resolve();
+        };
+        tone.start();
+        tone.stop(audio.currentTime + 0.22);
       });
     },
     close() {
@@ -74,9 +85,11 @@ export function createBrowserAudio() {
     },
     async capture(signal: AbortSignal): Promise<{ audio: string; sampleRate: number }> {
       const audioContext = context!;
-      const stream = preparedStream ?? await navigator.mediaDevices.getUserMedia({
-        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
-      });
+      const stream =
+        preparedStream ??
+        (await navigator.mediaDevices.getUserMedia({
+          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+        }));
       if (signal.aborted) {
         stream.getTracks().forEach((track) => track.stop());
         signal.throwIfAborted();
@@ -101,9 +114,13 @@ export function createBrowserAudio() {
             const chunk = new Float32Array(event.inputBuffer.getChannelData(0));
             chunks.push(chunk);
             length += chunk.length;
-            const rms = Math.sqrt(chunk.reduce((sum, sample) => sum + sample * sample, 0) / chunk.length);
-            if (rms > 0.015) { speechSeen = true; silenceSamples = 0; }
-            else silenceSamples += chunk.length;
+            const rms = Math.sqrt(
+              chunk.reduce((sum, sample) => sum + sample * sample, 0) / chunk.length,
+            );
+            if (rms > 0.015) {
+              speechSeen = true;
+              silenceSamples = 0;
+            } else silenceSamples += chunk.length;
             if (speechSeen && silenceSamples > audioContext.sampleRate * 0.9) finishCapture?.();
             if (length >= audioContext.sampleRate * 59) finishCapture?.();
           };

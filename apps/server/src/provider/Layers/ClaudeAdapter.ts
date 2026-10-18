@@ -4783,10 +4783,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         includePartialMessages: true,
         canUseTool,
         hooks: {
-          PreToolUse: [{ hooks: [callToolHook(callStore(serverConfig.stateDir), input.threadId, () => {
-            const context = Ref.getUnsafe(contextRef);
-            return context?.voiceCallId;
-          })] }],
+          PreToolUse: [
+            {
+              hooks: [
+                callToolHook(callStore(serverConfig.stateDir), input.threadId, () => {
+                  const context = Ref.getUnsafe(contextRef);
+                  return context?.voiceCallId;
+                }),
+              ],
+            },
+          ],
         },
         onUserDialog,
         supportedDialogKinds: ["resume_return"],
