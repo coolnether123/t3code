@@ -81,8 +81,6 @@ import * as Stream from "effect/Stream";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
-import { callStore } from "../../speech/callStore.ts";
-import { callToolHook, voiceCallFromMessage } from "../../speech/callToolGate.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { resolveClaudeSdkExecutablePath } from "../Drivers/ClaudeExecutable.ts";
 import { claudeSignedOutMessage, makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
@@ -293,7 +291,6 @@ function rememberPendingTaskEntry(
 }
 
 interface ClaudeSessionContext {
-  voiceCallId?: string | undefined;
   session: ProviderSession;
   readonly promptQueue: Queue.Queue<PromptQueueItem>;
   readonly query: ClaudeQueryRuntime;
@@ -4782,18 +4779,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(newSessionId ? { sessionId: newSessionId } : {}),
         includePartialMessages: true,
         canUseTool,
-        hooks: {
-          PreToolUse: [
-            {
-              hooks: [
-                callToolHook(callStore(serverConfig.stateDir), input.threadId, () => {
-                  const context = Ref.getUnsafe(contextRef);
-                  return context?.voiceCallId;
-                }),
-              ],
-            },
-          ],
-        },
         onUserDialog,
         supportedDialogKinds: ["resume_return"],
         env: claudeEnvironment,
@@ -4982,9 +4967,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
   const sendTurn: ClaudeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
     const context = yield* requireSession(input.threadId);
-    if (!context.turnState || context.turnState.synthetic === true) {
-      context.voiceCallId = voiceCallFromMessage(input.messageId);
-    }
     const modelCatalog = yield* modelCatalogEffect;
     const selectedModel =
       input.modelSelection !== undefined && input.modelSelection.instanceId === boundInstanceId

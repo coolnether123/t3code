@@ -1,9 +1,10 @@
 import { useLayoutEffect, useRef, useState, useImperativeHandle, type Ref } from "react";
-import type { CallPolicy, CallStatus, ModelSelection } from "@t3tools/contracts";
+import type { CallStatus, EnvironmentId, ModelSelection } from "@t3tools/contracts";
 import type { Thread } from "../../types";
 import { createBrowserAudio, requestSpeech } from "../../voice/browserSpeech";
 import { callPersistence } from "../../voice/callPersistence";
 import { ThreadVoiceSession, type VoiceState } from "../../voice/session";
+import { randomUUID } from "../../lib/utils";
 import { Button } from "../ui/button";
 
 export interface ThreadVoiceHandle {
@@ -15,17 +16,20 @@ const labels: Record<VoiceState, string> = {
   listening: "Listening",
   saving: "Saving on PC",
   transcribing: "Transcribing",
-  waiting: "Otis is thinking",
-  speaking: "Otis is speaking",
+  waiting: "Waiting for the chat",
+  speaking: "Speaking",
   ready: "Ready",
   reconnecting: "Connection interrupted",
   error: "Call needs attention",
 };
 
-export function ThreadVoiceControls(props: {
+export function ThreadVoiceControls({
+  ref,
+  ...props
+}: {
   ref: Ref<ThreadVoiceHandle>;
   thread: Thread;
-  environmentId: string;
+  environmentId: EnvironmentId;
   modelSelection: ModelSelection;
   enabled: boolean;
   running: boolean;
@@ -35,15 +39,12 @@ export function ThreadVoiceControls(props: {
   const [detail, setDetail] = useState<string>();
   const [call, setCall] = useState<CallStatus>();
   const [expanded, setExpanded] = useState(false);
-  const [model, setModel] = useState("claude-haiku-5-5");
-  const [effort, setEffort] = useState("medium");
-  const [policy, setPolicy] = useState<CallPolicy>("confirm-actions");
   const sessionRef = useRef<ThreadVoiceSession | null>(null);
   useLayoutEffect(() => {
     const session = new ThreadVoiceSession({
-      request: requestSpeech,
+      request: (input, signal) => requestSpeech(props.environmentId, input, signal),
       audio: createBrowserAudio(),
-      id: () => crypto.randomUUID(),
+      id: randomUUID,
       persistence: callPersistence(`${props.environmentId}:${props.thread.id}`),
       change: (next, message, status) => {
         setState(next);
@@ -58,12 +59,12 @@ export function ThreadVoiceControls(props: {
     window.addEventListener("online", reconnect);
     return () => {
       window.removeEventListener("online", reconnect);
-      void session.stop();
+      void session.detach();
       sessionRef.current = null;
     };
   }, [props.environmentId, props.thread.id]);
   useImperativeHandle(
-    props.ref,
+    ref,
     () => ({
       stop: () => {
         void sessionRef.current?.stop();
@@ -72,9 +73,15 @@ export function ThreadVoiceControls(props: {
     [],
   );
   useLayoutEffect(() => {
-    sessionRef.current?.observe(props.thread.messages, props.running);
-  }, [props.thread.messages, props.running]);
-  const active = !["idle", "error"].includes(state);
+    sessionRef.current?.observe(
+      props.thread.messages,
+      props.running,
+      props.thread.latestTurn?.turnId,
+      props.modelSelection,
+    );
+  }, [props.thread.messages, props.running, props.thread.latestTurn?.turnId, props.modelSelection]);
+  const active = state !== "idle";
+  const selection = props.modelSelection;
   return (
     <div className="relative" data-voice-state={state}>
       {!active ? (
@@ -90,6 +97,12 @@ export function ThreadVoiceControls(props: {
           <p role="status" className="text-sm font-medium">
             {labels[state]}
           </p>
+          <p className="mt-2 text-xs">
+            {selection.model}
+            {selection.options
+              ?.map((option) => ` · ${option.id}: ${String(option.value)}`)
+              .join("")}
+          </p>
           {detail ? (
             <p
               role={state === "error" || state === "reconnecting" ? "alert" : undefined}
@@ -100,45 +113,9 @@ export function ThreadVoiceControls(props: {
           ) : null}
           {!active ? (
             <div className="mt-3 grid gap-2 text-xs">
-              <label>
-                Claude model
-                <input
-                  aria-label="Call model"
-                  className="mt-1 w-full rounded border bg-background p-2"
-                  value={model}
-                  onChange={(event) => setModel(event.target.value)}
-                />
-              </label>
-              <label>
-                Thinking
-                <select
-                  aria-label="Call thinking"
-                  className="ml-2 rounded border bg-background p-1"
-                  value={effort}
-                  onChange={(event) => setEffort(event.target.value)}
-                >
-                  <option value="medium">Medium</option>
-                  <option value="low">Low</option>
-                  <option value="high">High</option>
-                  <option value="">Model default</option>
-                </select>
-              </label>
-              <label>
-                Confirm commands
-                <select
-                  aria-label="Call confirmation policy"
-                  className="mt-1 w-full rounded border bg-background p-1"
-                  value={policy}
-                  onChange={(event) => setPolicy(event.target.value as CallPolicy)}
-                >
-                  <option value="confirm-actions">Actions, with reads immediate</option>
-                  <option value="confirm-all">Every tool</option>
-                  <option value="off">Use ordinary chat permissions</option>
-                </select>
-              </label>
               <p>
-                Audio and transcripts stay saved on your PC. The selected Claude provider handles
-                the chat. An unavailable model will show an error.
+                Uses this chat's model and permissions. Recordings save on this device, then on your
+                PC before transcription. Ending the call leaves the chat working.
               </p>
               <Button
                 type="button"
@@ -146,15 +123,7 @@ export function ThreadVoiceControls(props: {
                 disabled={!props.enabled}
                 onClick={() =>
                   void sessionRef.current?.start(
-                    {
-                      threadId: props.thread.id,
-                      modelSelection: {
-                        ...props.modelSelection,
-                        model: model.trim(),
-                        options: effort ? [{ id: "effort", value: effort }] : [],
-                      },
-                      policy,
-                    },
+                    { threadId: props.thread.id, modelSelection: props.modelSelection },
                     props.thread.messages,
                   )
                 }
@@ -166,31 +135,9 @@ export function ThreadVoiceControls(props: {
           {state === "preparing" ? (
             <ul className="mt-2 space-y-1 text-xs">
               {call?.steps.map((step) => (
-                <li key={step}>✓ {step}</li>
+                <li key={step}>{step}</li>
               ))}
             </ul>
-          ) : null}
-          {call?.pending[0] ? (
-            <div className="mt-2 rounded border p-2 text-xs">
-              <p>{call.pending[0].summary}</p>
-              <div className="mt-2 flex gap-2">
-                <Button
-                  type="button"
-                  size="sm"
-                  onClick={() => void sessionRef.current?.confirm("yes")}
-                >
-                  Yes, run it
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  onClick={() => void sessionRef.current?.confirm("no")}
-                >
-                  No
-                </Button>
-              </div>
-            </div>
           ) : null}
           {active ? (
             <div className="mt-3 flex flex-wrap gap-2">
@@ -213,7 +160,7 @@ export function ThreadVoiceControls(props: {
                   Speak
                 </Button>
               ) : null}
-              {state === "reconnecting" ? (
+              {state === "reconnecting" || state === "error" ? (
                 <Button type="button" size="sm" onClick={() => void sessionRef.current?.resume()}>
                   Retry saved speech
                 </Button>
@@ -230,7 +177,8 @@ export function ThreadVoiceControls(props: {
           ) : null}
           {!props.connected && active ? (
             <p className="mt-2 text-xs">
-              Chat connection lost. Keep this page open; recorded speech stays queued.
+              Chat connection lost. Speech saved only on this device stays queued until the PC
+              acknowledges it.
             </p>
           ) : null}
         </section>

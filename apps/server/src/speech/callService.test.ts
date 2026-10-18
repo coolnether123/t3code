@@ -1,9 +1,11 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+// @effect-diagnostics nodeBuiltinImport:off - Disposable archive fault injection uses real Node files.
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   ProviderInstanceId,
+  ProviderDriverKind,
   type CallOptions,
   type CallRequest,
   type ServerProvider,
@@ -11,17 +13,17 @@ import {
 } from "@t3tools/contracts";
 import { CallStore, sha256 } from "./callStore.ts";
 import { CallService, verifyCallModel, type CallPorts } from "./callService.ts";
-import { callToolHook } from "./callToolGate.ts";
 
 const directories: string[] = [];
 afterEach(async () => {
   await Promise.all(
-    directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
+    directories
+      .splice(0)
+      .map((directory) => NodeFSP.rm(directory, { recursive: true, force: true })),
   );
 });
 const options: CallOptions = {
   threadId: "synthetic-thread",
-  policy: "confirm-actions",
   modelSelection: {
     instanceId: ProviderInstanceId.make("claudeAgent"),
     model: "claude-haiku-5-5",
@@ -29,6 +31,13 @@ const options: CallOptions = {
   },
 };
 const pcm = Buffer.from([1, 0, 2, 0]);
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
 const upload: CallRequest = {
   action: "call.upload",
   callId: "call-1",
@@ -39,20 +48,25 @@ const upload: CallRequest = {
   endedAt: "2026-10-18T00:00:01.000Z",
 };
 async function fixture() {
-  const directory = await mkdtemp(join(tmpdir(), "t3-call-synthetic-"));
+  const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-call-synthetic-"));
   directories.push(directory);
   const store = new CallStore(directory);
   const ports: CallPorts = {
-    verify: vi.fn(async () => {}),
+    verify: vi.fn(async () => ({
+      runtimeMode: "full-access" as const,
+      interactionMode: "default" as const,
+    })),
     dispatch: vi.fn(async () => ({ sequence: 1 })),
     speech: vi.fn(async (input: SpeechTransportRequest) =>
       input.action === "acquire"
-        ? { sessionId: "lease-1", tenants: ["stt", "tts"] }
-        : input.action === "transcribe"
-          ? { text: "Read the build status." }
-          : input.action === "speak"
-            ? { audio: pcm.toString("base64"), sampleRate: 16000 }
-            : {},
+        ? { sessionId: "lease-1", tenants: ["stt", "tts"], expiresAt: "2099-10-18T00:00:00.000Z" }
+        : input.action === "renew"
+          ? { sessionId: "lease-1", tenants: ["stt", "tts"], expiresAt: "2099-10-18T00:01:00.000Z" }
+          : input.action === "transcribe"
+            ? { text: "Read the build status." }
+            : input.action === "speak"
+              ? { audio: pcm.toString("base64"), sampleRate: 16000 }
+              : {},
     ),
     tenants: ["stt", "tts"],
     ttsModel: "synthetic-tts",
@@ -66,12 +80,221 @@ async function fixture() {
 }
 
 describe("durable calls", () => {
+  it("acknowledges an empty transcript without starting a chat turn", async () => {
+    const f = await fixture();
+    f.ports.speech = vi.fn(async () => ({ text: "  " }));
+    await f.service.handle(upload, new AbortController().signal);
+    await f.request({ action: "call.transcribe", utteranceId: "utterance-1" });
+    const delivered = await f.request({ action: "call.deliver", utteranceId: "utterance-1" });
+    expect(delivered.utterance?.deliveredAt).toBeDefined();
+    expect(f.ports.dispatch).not.toHaveBeenCalled();
+  });
+  it("retains each recording's selected model and rejects a conflicting model on retry", async () => {
+    const f = await fixture();
+    const selection = { instanceId: ProviderInstanceId.make("codex"), model: "synthetic-next" };
+    await f.service.handle({ ...upload, modelSelection: selection }, new AbortController().signal);
+    await expect(
+      f.service.handle(
+        { ...upload, modelSelection: options.modelSelection },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow("different audio or metadata");
+    await f.request({ action: "call.transcribe", utteranceId: "utterance-1" });
+    await f.request({ action: "call.deliver", utteranceId: "utterance-1" });
+    expect(f.ports.dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ modelSelection: selection }),
+    );
+  });
+  it("uses ordinary chat permissions and never interrupts the chat on hang-up", async () => {
+    const f = await fixture();
+    f.ports.verify = vi.fn<CallPorts["verify"]>(async () => ({
+      runtimeMode: "approval-required",
+      interactionMode: "plan",
+    }));
+    await f.service.handle(upload, new AbortController().signal);
+    await f.request({ action: "call.transcribe", utteranceId: "utterance-1" });
+    await f.request({ action: "call.deliver", utteranceId: "utterance-1" });
+    expect(f.ports.dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runtimeMode: "approval-required" as const,
+        interactionMode: "plan" as const,
+      }),
+    );
+    await f.request({ action: "call.close" });
+    expect(f.ports.dispatch).toHaveBeenCalledTimes(1);
+    expect((await f.service.status("call-1")).closed).toBe(true);
+  });
+  it.each(["transcribe", "speak"] as const)(
+    "renews, interrupts and closes while %s is stalled",
+    async (action) => {
+      const f = await fixture();
+      await f.service.handle(upload, new AbortController().signal);
+      const entered = deferred<void>();
+      const engine = deferred<{}>();
+      const original = f.ports.speech;
+      f.ports.speech = vi.fn(async (input, signal) => {
+        if (input.action === action) {
+          entered.resolve();
+          await engine.promise;
+        }
+        return original(input, signal);
+      });
+      const pending = f.request(
+        action === "transcribe"
+          ? { action: "call.transcribe", utteranceId: "utterance-1" }
+          : { action: "call.speak", speechId: "s1", text: "Synthetic response." },
+      );
+      await entered.promise;
+      await f.request({ action: "call.renew" });
+      await f.request({ action: "call.interrupt", utteranceId: "interrupt-1" });
+      await f.request({ action: "call.close" });
+      expect((await f.service.status("call-1")).closed).toBe(true);
+      engine.resolve({});
+      await pending;
+      expect((await f.store.require("call-1")).lease).toBeUndefined();
+    },
+  );
+  it.each(["close", "cancel"])("releases a lease acquired after %s", async (operation) => {
+    const f = await fixture();
+    const record = await f.store.require("call-1");
+    delete record.lease;
+    await f.store.changed(record);
+    const entered = deferred<void>();
+    const engine = deferred<Awaited<ReturnType<CallPorts["speech"]>>>();
+    const original = f.ports.speech;
+    f.ports.speech = vi.fn((input, signal) => {
+      if (input.action === "acquire") {
+        entered.resolve();
+        return engine.promise;
+      }
+      return original(input, signal);
+    });
+    const cancellation = new AbortController();
+    const preparation = expect(
+      f.service.handle({ callId: "call-1", action: "call.prepare" }, cancellation.signal),
+    ).rejects.toThrow(operation === "close" ? "ended" : "cancelled");
+    await entered.promise;
+    if (operation === "close") await f.request({ action: "call.close" });
+    else cancellation.abort(new Error("cancelled"));
+    engine.resolve({
+      sessionId: "late",
+      tenants: ["stt", "tts"],
+      expiresAt: "2099-10-18T00:00:00.000Z",
+    });
+    await preparation;
+    expect(f.ports.speech).toHaveBeenLastCalledWith(
+      { action: "release", sessionId: "late" },
+      expect.any(AbortSignal),
+    );
+    expect((await f.service.status("call-1")).ready).toBe(false);
+  });
+  it("invalidates readiness after a failed renewal without extending the lease", async () => {
+    const f = await fixture();
+    f.ports.speech = vi.fn(async () => {
+      throw new Error("Engine lost");
+    });
+    await expect(f.request({ action: "call.renew" })).rejects.toThrow("Engine lost");
+    expect((await f.service.status("call-1")).ready).toBe(false);
+  });
+  it("repairs an interrupted thread binding and refuses a second active call", async () => {
+    const f = await fixture();
+    await NodeFSP.rm(NodePath.join(f.directory, "_threads"), { recursive: true });
+    const restarted = new CallService(new CallStore(f.directory), f.ports);
+    await expect(
+      restarted.handle(
+        { action: "call.open", callId: "call-2", options },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow("already has a call");
+    await f.request({ action: "call.open", options });
+    expect(await f.store.read("_threads", `${sha256(options.threadId)}.json`)).toEqual({
+      callId: "call-1",
+    });
+  });
+  it("can reopen a closed archive to drain raw audio without preparing speech", async () => {
+    const f = await fixture();
+    await f.request({ action: "call.close" });
+    expect((await f.request({ action: "call.open", options })).call?.closed).toBe(true);
+    await f.service.handle(upload, new AbortController().signal);
+    expect(await NodeFSP.readFile(NodePath.join(f.directory, "call-1", "utterance-1.pcm"))).toEqual(
+      pcm,
+    );
+  });
+  it("refuses corrupt saved metadata and never overwrites its raw audio", async () => {
+    const f = await fixture();
+    await f.service.handle(upload, new AbortController().signal);
+    await NodeFSP.writeFile(
+      NodePath.join(f.directory, "call-1", "utterance-1.raw.json"),
+      '{"id":"utterance-1"}',
+    );
+    await expect(f.service.handle(upload, new AbortController().signal)).rejects.toThrow(
+      "Invalid saved call record",
+    );
+    expect(await NodeFSP.readFile(NodePath.join(f.directory, "call-1", "utterance-1.pcm"))).toEqual(
+      pcm,
+    );
+  });
+  it.each(["upload-intent", "pcm", "raw", "transcript", "intent", "dispatch", "delivery"])(
+    "recovers a crash at the %s write boundary",
+    async (boundary) => {
+      const f = await fixture();
+      const original = f.store.writeBytes.bind(f.store);
+      let failed = false;
+      vi.spyOn(f.store, "writeBytes").mockImplementation(async (callId, name, bytes) => {
+        const hit =
+          boundary === "upload-intent"
+            ? name.endsWith(".upload.json")
+            : boundary === "dispatch"
+              ? name.endsWith(".dispatch.json")
+              : boundary === "pcm"
+                ? name.endsWith(".pcm")
+                : boundary === "raw"
+                  ? name.endsWith(".raw.json")
+                  : boundary === "transcript"
+                    ? name.endsWith(".transcript.json")
+                    : name.endsWith(".delivery.json") &&
+                      (boundary === "delivery"
+                        ? bytes.toString().includes("deliveredAt")
+                        : !bytes.toString().includes("deliveredAt"));
+        if (hit && !failed) {
+          failed = true;
+          throw new Error("synthetic crash");
+        }
+        return original(callId, name, bytes);
+      });
+      const accepted = new Set<string>();
+      f.ports.dispatch = vi.fn(async (command) => {
+        accepted.add(command.commandId);
+      });
+      try {
+        await f.service.handle(upload, new AbortController().signal);
+        await f.request({ action: "call.transcribe", utteranceId: "utterance-1" });
+        await f.request({ action: "call.deliver", utteranceId: "utterance-1" });
+      } catch (error) {
+        expect((error as Error).message).toBe("synthetic crash");
+      }
+      expect(failed).toBe(true);
+      const service = new CallService(new CallStore(f.directory), f.ports);
+      for (const input of [
+        upload,
+        { action: "call.transcribe", callId: "call-1", utteranceId: "utterance-1" },
+        { action: "call.deliver", callId: "call-1", utteranceId: "utterance-1" },
+      ] as const)
+        await service.handle(input, new AbortController().signal);
+      expect(accepted.size).toBe(1);
+      expect(
+        await NodeFSP.readFile(NodePath.join(f.directory, "call-1", "utterance-1.pcm")),
+      ).toEqual(pcm);
+    },
+  );
   it("flushes raw PCM before STT and transcript before normal chat dispatch", async () => {
     const f = await fixture();
     const originalSpeech = f.ports.speech;
     f.ports.speech = vi.fn(async (input, signal) => {
       if (input.action === "transcribe") {
-        expect(await readFile(join(f.directory, "call-1", "utterance-1.pcm"))).toEqual(pcm);
+        expect(
+          await NodeFSP.readFile(NodePath.join(f.directory, "call-1", "utterance-1.pcm")),
+        ).toEqual(pcm);
         expect((await f.store.utterance("call-1", "utterance-1")).sha256).toBe(sha256(pcm));
       }
       return originalSpeech(input, signal);
@@ -123,7 +346,9 @@ describe("durable calls", () => {
     await expect(
       f.service.handle({ ...upload, audio: "AwAEAA==" }, new AbortController().signal),
     ).rejects.toThrow("different audio");
-    expect(await readFile(join(f.directory, "call-1", "utterance-1.pcm"))).toEqual(pcm);
+    expect(await NodeFSP.readFile(NodePath.join(f.directory, "call-1", "utterance-1.pcm"))).toEqual(
+      pcm,
+    );
   });
   it("preserves orphaned PCM when metadata persistence did not complete", async () => {
     const f = await fixture();
@@ -192,69 +417,6 @@ describe("durable calls", () => {
   });
 });
 
-describe("tool execution confirmation", () => {
-  async function pendingTool(
-    f: Awaited<ReturnType<typeof fixture>>,
-    name = "mcp__otis__start_agent",
-  ) {
-    const record = await f.store.require("call-1");
-    const hook = callToolHook(f.store, options.threadId, () => "call-1");
-    const result = hook(
-      {
-        hook_event_name: "PreToolUse",
-        tool_name: name,
-        tool_input: { task: "Synthetic build" },
-        tool_use_id: "tool-1",
-        session_id: "synthetic",
-        transcript_path: "synthetic",
-        cwd: f.directory,
-      },
-      "tool-1",
-      { signal: new AbortController().signal },
-    );
-    await f.store.wait("call-1", record.version, new AbortController().signal);
-    return { result, pending: (await f.service.status("call-1")).pending[0]! };
-  }
-  it("holds an agent launch at PreToolUse until its exact invocation is confirmed", async () => {
-    const f = await fixture();
-    const { result, pending } = await pendingTool(f);
-    expect(pending.level).toBe("read-back");
-    await f.request({ action: "call.confirm", confirmationId: pending.id, decision: "yes" });
-    expect(await result).toMatchObject({ hookSpecificOutput: { permissionDecision: "allow" } });
-  });
-  it("denies pending tools when the call closes", async () => {
-    const f = await fixture();
-    const { result } = await pendingTool(f, "mcp__otis__deploy");
-    await f.request({ action: "call.close" });
-    expect(await result).toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
-  });
-  it("records a spoken yes in chat and resolves only the bound confirmation", async () => {
-    const f = await fixture();
-    const { result, pending } = await pendingTool(f);
-    f.ports.speech = vi.fn(async () => ({ text: "Yes." }));
-    await f.service.handle({ ...upload, confirmationId: pending.id }, new AbortController().signal);
-    await f.request({ action: "call.transcribe", utteranceId: "utterance-1" });
-    await f.request({ action: "call.deliver", utteranceId: "utterance-1" });
-    expect(f.ports.dispatch).toHaveBeenCalledWith(
-      expect.objectContaining({ type: "thread.voice.transcript", text: "Yes." }),
-    );
-    expect(await result).toMatchObject({ hookSpecificOutput: { permissionDecision: "allow" } });
-  });
-  it("does not interpret a sentence containing yes as consent", async () => {
-    const f = await fixture();
-    const { result, pending } = await pendingTool(f);
-    f.ports.speech = vi.fn(async () => ({ text: "Yesterday I said yes, but do not run it." }));
-    await f.service.handle({ ...upload, confirmationId: pending.id }, new AbortController().signal);
-    await f.request({ action: "call.transcribe", utteranceId: "utterance-1" });
-    await expect(f.request({ action: "call.deliver", utteranceId: "utterance-1" })).rejects.toThrow(
-      "exactly yes or no",
-    );
-    expect((await f.service.status("call-1")).pending).toHaveLength(1);
-    await f.request({ action: "call.confirm", confirmationId: pending.id, decision: "no" });
-    expect(await result).toMatchObject({ hookSpecificOutput: { permissionDecision: "deny" } });
-  });
-});
-
 describe("exact call model", () => {
   const provider: ServerProvider = {
     instanceId: options.modelSelection.instanceId,
@@ -288,6 +450,14 @@ describe("exact call model", () => {
   it("accepts a configured 5.5 model and medium without replacing either", () => {
     expect(() => verifyCallModel(options, [provider])).not.toThrow();
   });
+  it.each(["codex", "claudeAgent", "cursor", "grok", "opencode"])(
+    "uses the advertised selection with the ordinary %s adapter",
+    (driver) => {
+      expect(() =>
+        verifyCallModel(options, [{ ...provider, driver: ProviderDriverKind.make(driver) }]),
+      ).not.toThrow();
+    },
+  );
   it("refuses an absent model instead of choosing 4.5", () => {
     expect(() =>
       verifyCallModel(options, [

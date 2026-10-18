@@ -2,6 +2,58 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { proxySpeech } from "./proxy.ts";
 
 describe("local speech proxy", () => {
+  it("retains router expiry and verifies tenant health when renewing", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        Response.json({
+          sessionId: "lease",
+          expiresAt: "2099-01-01T00:00:00Z",
+          tenants: ["stt", "tts"],
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          speech: {
+            tenants: [
+              { id: "stt", healthy: true, running: true },
+              { id: "tts", healthy: true, running: true },
+            ],
+          },
+        }),
+      );
+    expect(
+      await proxySpeech(
+        { action: "renew", sessionId: "lease" },
+        new AbortController().signal,
+        fetcher,
+      ),
+    ).toMatchObject({ expiresAt: "2099-01-01T00:00:00Z" });
+    expect(fetcher.mock.calls[1]?.[0]).toBe("http://127.0.0.1:8085/health");
+  });
+  it("refuses renewal readiness when a speech tenant is unhealthy", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        Response.json({ sessionId: "lease", expiresAt: "2099-01-01T00:00:00Z", tenants: ["stt"] }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({ speech: { tenants: [{ id: "stt", healthy: false, running: true }] } }),
+      );
+    await expect(
+      proxySpeech({ action: "renew", sessionId: "lease" }, new AbortController().signal, fetcher),
+    ).rejects.toThrow("health was lost");
+  });
+  it("releases expired leases idempotently", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 404 }));
+    await expect(
+      proxySpeech(
+        { action: "release", sessionId: "expired" },
+        new AbortController().signal,
+        fetcher,
+      ),
+    ).resolves.toEqual({});
+  });
   const signal = new AbortController().signal;
   it("acquires only a local GPU lease, without opening an AI conversation", async () => {
     const fetcher = vi

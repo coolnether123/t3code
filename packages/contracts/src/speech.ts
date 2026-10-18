@@ -13,12 +13,9 @@ export const SpeechTransportRequest = Schema.Struct({
 export type SpeechTransportRequest = typeof SpeechTransportRequest.Type;
 
 const CallId = Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9_-]{1,100}$/));
-export const CallPolicy = Schema.Literals(["confirm-actions", "confirm-all", "off"]);
-export type CallPolicy = typeof CallPolicy.Type;
 export const CallOptions = Schema.Struct({
   threadId: Schema.String,
   modelSelection: ModelSelection,
-  policy: CallPolicy,
 });
 export type CallOptions = typeof CallOptions.Type;
 export const CallRequest = Schema.Struct({
@@ -34,11 +31,11 @@ export const CallRequest = Schema.Struct({
     "call.speak",
     "call.played",
     "call.interrupt",
-    "call.confirm",
     "call.close",
   ]),
   callId: CallId,
   options: Schema.optional(CallOptions),
+  modelSelection: Schema.optional(ModelSelection),
   utteranceId: Schema.optional(CallId),
   audio: Schema.optional(Schema.String),
   sampleRate: Schema.optional(Schema.Number),
@@ -46,21 +43,39 @@ export const CallRequest = Schema.Struct({
   endedAt: Schema.optional(Schema.String),
   text: Schema.optional(Schema.String),
   speechId: Schema.optional(CallId),
-  confirmationId: Schema.optional(CallId),
-  decision: Schema.optional(Schema.Literals(["yes", "no"])),
   version: Schema.optional(Schema.String),
 });
 export type CallRequest = typeof CallRequest.Type;
-export const SpeechRequest = Schema.Union([SpeechTransportRequest, CallRequest]);
+export const ValidCallRequest = CallRequest.check(
+  Schema.makeFilter((input) => {
+    switch (input.action) {
+      case "call.open":
+        return !!input.options || "Call options are required.";
+      case "call.upload":
+        return (
+          (!!input.utteranceId &&
+            !!input.audio &&
+            !!input.sampleRate &&
+            !!input.startedAt &&
+            !!input.endedAt) ||
+          "Upload requires PCM and recording metadata."
+        );
+      case "call.transcribe":
+      case "call.deliver":
+      case "call.interrupt":
+        return !!input.utteranceId || "An utterance or operation ID is required.";
+      case "call.speak":
+        return (!!input.speechId && !!input.text?.trim()) || "Speech requires an ID and text.";
+      case "call.played":
+        return !!input.speechId || "A speech ID is required.";
+      default:
+        return true;
+    }
+  }),
+);
+export const SpeechRequest = Schema.Union([SpeechTransportRequest, ValidCallRequest]);
 export type SpeechRequest = typeof SpeechRequest.Type;
 
-export const CallConfirmation = Schema.Struct({
-  id: CallId,
-  tool: Schema.String,
-  summary: Schema.String,
-  level: Schema.Literals(["read-back", "explicit-yes"]),
-});
-export type CallConfirmation = typeof CallConfirmation.Type;
 export const CallUtterance = Schema.Struct({
   id: CallId,
   sha256: Schema.String,
@@ -73,7 +88,7 @@ export const CallUtterance = Schema.Struct({
   transcribedAt: Schema.optional(Schema.String),
   deliveredAt: Schema.optional(Schema.String),
   messageId: Schema.optional(Schema.String),
-  confirmationId: Schema.optional(Schema.String),
+  modelSelection: Schema.optional(ModelSelection),
 });
 export type CallUtterance = typeof CallUtterance.Type;
 export const CallStatus = Schema.Struct({
@@ -83,16 +98,16 @@ export const CallStatus = Schema.Struct({
   ready: Schema.Boolean,
   closed: Schema.Boolean,
   modelSelection: ModelSelection,
-  policy: CallPolicy,
   steps: Schema.Array(Schema.String),
   utterances: Schema.Array(CallUtterance),
-  pending: Schema.Array(CallConfirmation),
   played: Schema.Array(Schema.String),
 });
 export type CallStatus = typeof CallStatus.Type;
 
 export const SpeechResponse = Schema.Struct({
+  played: Schema.optional(Schema.Boolean),
   sessionId: Schema.optional(Schema.String),
+  expiresAt: Schema.optional(Schema.String),
   text: Schema.optional(Schema.String),
   audio: Schema.optional(Schema.String),
   sampleRate: Schema.optional(Schema.Number),

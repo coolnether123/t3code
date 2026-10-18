@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./voice-call/transport": {
+      "types": "./src/voice-call/transport.ts",
+      "default": "./src/voice-call/transport.ts"
+    },
     "./voice-call": {
       "types": "./src/voice-call/session.ts",
       "default": "./src/voice-call/session.ts"

@@ -54,13 +54,15 @@ import {
 } from "../Services/ProjectionPipeline.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import { ServerConfig } from "../../config.ts";
+import { CallService, type CallPorts } from "../../speech/callService.ts";
+import { CallStore } from "../../speech/callStore.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
 const asCheckpointRef = (value: string): CheckpointRef => CheckpointRef.make(value);
 
-function makeOrchestrationLayer(databasePath?: string) {
+function makeOrchestrationLayer(databasePath?: string, syntheticRepository = false) {
   const persistence = databasePath
     ? makeSqlitePersistenceLive(databasePath)
     : SqlitePersistenceMemory;
@@ -78,15 +80,21 @@ function makeOrchestrationLayer(databasePath?: string) {
     Layer.provide(ThreadPlanProgress.layer),
     Layer.provide(OrchestrationEventStoreLive),
     Layer.provideMerge(OrchestrationCommandReceiptRepositoryLive),
-    Layer.provide(RepositoryIdentityResolver.layer),
+    Layer.provide(
+      syntheticRepository
+        ? Layer.succeed(RepositoryIdentityResolver.RepositoryIdentityResolver, {
+            resolve: () => Effect.succeed(null),
+          })
+        : RepositoryIdentityResolver.layer,
+    ),
     Layer.provide(persistence),
     Layer.provideMerge(ServerConfigLayer),
     Layer.provideMerge(NodeServices.layer),
   );
 }
 
-async function createOrchestrationSystem(databasePath?: string) {
-  const runtime = ManagedRuntime.make(makeOrchestrationLayer(databasePath));
+async function createOrchestrationSystem(databasePath?: string, syntheticRepository = false) {
+  const runtime = ManagedRuntime.make(makeOrchestrationLayer(databasePath, syntheticRepository));
   const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
   const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
   return {
@@ -115,6 +123,107 @@ const hasMetricSnapshot = (
   );
 
 describe("OrchestrationEngine", () => {
+  it("delivers a saved voice utterance once across lost dispatch acknowledgment and restart", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-voice-delivery-"));
+    const database = NodePath.join(directory, "synthetic.sqlite");
+    let system = await createOrchestrationSystem(database, true);
+    const threadId = ThreadId.make("synthetic-voice-thread");
+    const modelSelection = {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "synthetic-model",
+    };
+    try {
+      await system.run(
+        system.engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("voice-project"),
+          projectId: ProjectId.make("voice-project"),
+          title: "Synthetic voice",
+          workspaceRoot: directory,
+          createdAt: now(),
+        }),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("voice-thread"),
+          threadId,
+          projectId: ProjectId.make("voice-project"),
+          title: "Synthetic voice",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: now(),
+        }),
+      );
+      let loseResponse = true;
+      const ports: CallPorts = {
+        verify: async () => ({ runtimeMode: "full-access", interactionMode: "default" }),
+        dispatch: async (command) => {
+          const result = await system.run(system.engine.dispatch(command));
+          if (loseResponse) {
+            loseResponse = false;
+            throw new Error("synthetic lost acknowledgment");
+          }
+          return result;
+        },
+        speech: async (input) =>
+          input.action === "acquire"
+            ? {
+                sessionId: "synthetic-lease",
+                expiresAt: "2099-01-01T00:00:00.000Z",
+                tenants: ["synthetic-stt", "synthetic-tts"],
+              }
+            : { text: "Read synthetic status." },
+        tenants: ["synthetic-stt", "synthetic-tts"],
+        ttsModel: "synthetic-tts",
+      };
+      let call = new CallService(new CallStore(NodePath.join(directory, "calls")), ports);
+      const request = (input: Omit<import("@t3tools/contracts").CallRequest, "callId">) =>
+        call.handle({ callId: "synthetic-call", ...input }, new AbortController().signal);
+      await request({ action: "call.open", options: { threadId, modelSelection } });
+      await request({ action: "call.prepare" });
+      await request({
+        action: "call.upload",
+        utteranceId: "synthetic-utterance",
+        audio: "AQACAA==",
+        sampleRate: 16000,
+        startedAt: now(),
+        endedAt: now(),
+      });
+      await request({ action: "call.transcribe", utteranceId: "synthetic-utterance" });
+      await expect(
+        request({ action: "call.deliver", utteranceId: "synthetic-utterance" }),
+      ).rejects.toThrow("lost acknowledgment");
+      await system.dispose();
+      system = await createOrchestrationSystem(database, true);
+      call = new CallService(new CallStore(NodePath.join(directory, "calls")), ports);
+      await request({ action: "call.deliver", utteranceId: "synthetic-utterance" });
+      const thread = Option.getOrThrow(await system.readThread(threadId));
+      expect(
+        thread.messages.filter(
+          (message) => message.id === "voice:synthetic-call:synthetic-utterance",
+        ),
+      ).toHaveLength(1);
+      const events = await system.run(
+        Stream.runCollect(system.engine.readEvents(0)).pipe(
+          Effect.map((events) => Array.from(events)),
+        ),
+      );
+      expect(events.filter((event) => event.type === "thread.turn-start-requested")).toHaveLength(
+        1,
+      );
+      await request({ action: "call.close" });
+      expect(
+        (await system.readModel()).threads.find((thread) => thread.id === threadId)?.latestTurn,
+      ).toBeDefined();
+    } finally {
+      await system.dispose();
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
   it.each(["running", "stopped"] as const)(
     "sends async answers with a %s session and rejects old duplicate replies",
     async (status) => {

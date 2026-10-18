@@ -1,4 +1,15 @@
-import type { CallOptions, CallRequest, CallStatus, SpeechResponse } from "@t3tools/contracts";
+import type {
+  CallOptions,
+  CallRequest,
+  CallStatus,
+  SpeechResponse,
+  ModelSelection,
+} from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+
+const now = () => DateTime.formatIso(Effect.runSync(DateTime.now));
 
 export type VoiceState =
   | "idle"
@@ -11,14 +22,21 @@ export type VoiceState =
   | "ready"
   | "reconnecting"
   | "error";
-type Message = { id: string; role: string; text: string; streaming: boolean };
+type Message = {
+  id: string;
+  role: string;
+  text: string;
+  streaming: boolean;
+  turnId?: string | null;
+};
 export interface Recording {
   id: string;
   audio: string;
   sampleRate: number;
   startedAt: string;
   endedAt: string;
-  confirmationId?: string;
+  capturing?: boolean;
+  modelSelection?: ModelSelection;
 }
 export interface SavedCall {
   callId: string;
@@ -26,6 +44,8 @@ export interface SavedCall {
   recordings: Recording[];
   offsets: Record<string, number>;
   closed?: boolean;
+  silencedTurns?: string[];
+  silencedMessages?: string[];
 }
 export interface VoiceDependencies {
   request(input: CallRequest, signal: AbortSignal): Promise<SpeechResponse>;
@@ -37,10 +57,13 @@ export interface VoiceDependencies {
   audio: {
     unlock(): void;
     prepare(signal: AbortSignal): Promise<void>;
-    ready(): Promise<void>;
+    ready(signal: AbortSignal): Promise<void>;
     close(): void;
     finish(): void;
-    capture(signal: AbortSignal): Promise<{ audio: string; sampleRate: number }>;
+    capture(
+      signal: AbortSignal,
+      journal?: (audio: { audio: string; sampleRate: number }) => Promise<void>,
+    ): Promise<{ audio: string; sampleRate: number }>;
     play(audio: string, sampleRate: number, signal: AbortSignal): Promise<void>;
   };
   change(state: VoiceState, detail?: string, call?: CallStatus): void;
@@ -49,25 +72,43 @@ export interface VoiceDependencies {
 
 /** Transport failures retain the outbox; only a server delivery acknowledgment removes it. */
 export class ThreadVoiceSession {
-  private saved?: SavedCall;
+  private saved: SavedCall | undefined;
   private status?: CallStatus;
   private abort = new AbortController();
   private playback = new AbortController();
   private watching = new AbortController();
-  private renew?: ReturnType<typeof setInterval>;
+  private renew: Fiber.Fiber<never, never> | undefined;
   private state: VoiceState = "idle";
   private active = false;
   private busy = false;
-  private capture?: Promise<void>;
-  private playbackTask?: Promise<void>;
+  private detached = false;
+  private recovering = false;
+  private recording = false;
+  private stopTask: Promise<void> | undefined;
+  private capture: Promise<void> | undefined;
+  private playbackTask: Promise<void> | undefined;
   private running = false;
+  private turnId: string | undefined;
+  private modelSelection: ModelSelection | undefined;
   private messages: readonly Message[] = [];
-  private queue: { id: string; text: string; messageId?: string; end?: number }[] = [];
+  private spokenText = new Map<string, { source: string; streaming: boolean; text: string }>();
+  private queue: { text: string; messageId: string; start: number; end: number }[] = [];
   private persistenceTail: Promise<void> = Promise.resolve();
-  constructor(private deps: VoiceDependencies) {}
+  private deps: VoiceDependencies;
+  constructor(deps: VoiceDependencies) {
+    this.deps = deps;
+  }
   private change(state: VoiceState, detail?: string) {
     this.state = state;
     this.deps.change(state, detail, this.status);
+  }
+  private speechText(message: Message) {
+    const cached = this.spokenText.get(message.id);
+    if (cached?.source === message.text && cached.streaming === message.streaming)
+      return cached.text;
+    const text = spokenMessageText(message.text, message.streaming);
+    this.spokenText.set(message.id, { source: message.text, streaming: message.streaming, text });
+    return text;
   }
   private persist() {
     const snapshot = structuredClone(this.saved!);
@@ -83,17 +124,27 @@ export class ThreadVoiceSession {
   }
   private failed(error: unknown) {
     if (!this.active) return;
+    this.recovering = true;
+    this.deps.audio.finish();
     this.playback.abort();
     this.watching.abort();
-    clearInterval(this.renew);
+    if (this.renew) Effect.runFork(Fiber.interrupt(this.renew));
+    const recoverable =
+      error instanceof TypeError ||
+      (error instanceof Error && "recoverable" in error && error.recoverable === true) ||
+      (error instanceof Error &&
+        "_tag" in error &&
+        (error._tag === "RemoteEnvironmentAuthFetchError" ||
+          error._tag === "RemoteEnvironmentAuthTimeoutError"));
     this.change(
-      "reconnecting",
-      `${error instanceof Error ? error.message : "Connection lost."} Saved speech stays queued. Retry to resume.`,
+      recoverable ? "reconnecting" : "error",
+      `${error instanceof Error ? error.message : "Voice request failed."} Check the message above, then retry saved speech. Queued audio without a PC acknowledgment remains on this device.`,
     );
   }
   async start(options: CallOptions, messages: readonly Message[]) {
     if (this.active) return;
     this.active = true;
+    this.modelSelection = options.modelSelection;
     this.abort = new AbortController();
     this.playback = new AbortController();
     this.messages = messages;
@@ -101,17 +152,22 @@ export class ThreadVoiceSession {
       this.deps.audio.unlock();
       this.change("preparing", "Checking microphone and saved call");
       this.saved = await this.deps.persistence.read();
+      if (!this.active) return;
       if (!this.saved) {
         this.saved = {
           callId: this.deps.id(),
           options,
           recordings: [],
-          offsets: Object.fromEntries(messages.map((message) => [message.id, message.text.length])),
+          offsets: Object.fromEntries(
+            messages.map((message) => [message.id, this.speechText(message).length]),
+          ),
         };
         await this.persist();
       }
       if (this.saved.options.threadId !== options.threadId)
         throw new Error("Saved call belongs to another chat.");
+      for (const recording of this.saved.recordings) delete recording.capturing;
+      await this.persist();
       await this.resume();
     } catch (error) {
       this.failed(error);
@@ -122,11 +178,11 @@ export class ThreadVoiceSession {
     this.busy = true;
     try {
       this.playback = new AbortController();
-      this.change("preparing", "Checking microphone");
-      await this.deps.audio.prepare(this.abort.signal);
-      this.change("preparing", "Opening call log and checking the selected Claude model");
+      this.change("preparing", "Opening call log and checking the selected chat model");
       await this.request({ action: "call.open", options: this.saved.options });
-      if (this.saved.closed) {
+      if (!this.active) return;
+      if (this.saved.closed || this.status?.closed) {
+        this.saved.closed = true;
         await this.flush(false);
         await this.request({ action: "call.close" });
         await this.deps.persistence.clear();
@@ -135,15 +191,21 @@ export class ThreadVoiceSession {
         return;
       }
       this.change("preparing", "Waiting for the router's speech profile");
-      await this.request({ action: "call.prepare" });
+      await this.request({
+        action: "call.prepare",
+        modelSelection: this.modelSelection ?? this.saved.options.modelSelection,
+      });
+      if (!this.active) return;
+      this.recovering = false;
+      this.startRenewal();
+      this.change("preparing", "Checking microphone");
+      await this.deps.audio.prepare(this.abort.signal);
       if (!this.active) return;
       await this.flush();
-      clearInterval(this.renew);
-      this.renew = setInterval(() => {
-        void this.request({ action: "call.renew" }).catch((error) => this.failed(error));
-      }, 60_000);
-      await this.deps.audio.ready();
-      this.change("ready", "Otis is ready");
+      if (!this.active || this.recovering) return;
+      await this.deps.audio.ready(this.abort.signal);
+      if (!this.active || this.recovering) return;
+      this.change("ready", "Speech is ready");
       this.watching.abort();
       this.watching = new AbortController();
       void this.watch();
@@ -153,9 +215,22 @@ export class ThreadVoiceSession {
       this.busy = false;
     }
     if (this.state === "ready") {
-      this.observe(this.messages, this.running);
-      if (!this.running && !this.queue.length && !this.status?.pending.length) void this.listen();
+      this.observe(this.messages, this.running, this.turnId, this.modelSelection);
+      if (!this.running && !this.queue.length) void this.listen();
     }
+  }
+  private startRenewal() {
+    if (this.renew) Effect.runFork(Fiber.interrupt(this.renew));
+    this.renew = Effect.runFork(
+      Effect.forever(
+        Effect.delay(
+          Effect.promise(() =>
+            this.request({ action: "call.renew" }).catch((error) => this.failed(error)),
+          ),
+          "60 seconds",
+        ),
+      ),
+    );
   }
   private async watch() {
     const signal = this.watching.signal;
@@ -163,11 +238,15 @@ export class ThreadVoiceSession {
       while (this.active && !signal.aborted && this.state !== "reconnecting") {
         await this.request({ action: "call.watch", version: this.status?.version }, signal);
         if (!this.active) return;
-        for (const pending of this.status?.pending ?? []) {
-          const id = `confirm-${pending.id}`;
-          if (!this.status?.played.includes(id) && !this.queue.some((item) => item.id === id))
-            this.queue.push({ id, text: pending.summary });
+        if (this.status?.closed) {
+          await this.stop();
+          return;
         }
+        if (this.status && !this.status.ready)
+          throw Object.assign(
+            new Error("Speech lease is unavailable. Retry to prepare it again."),
+            { recoverable: true },
+          );
         this.change(this.state);
         if (!this.capture) void this.speak();
       }
@@ -178,30 +257,48 @@ export class ThreadVoiceSession {
   async listen() {
     if (!this.active || this.busy || this.capture || !["ready", "waiting"].includes(this.state))
       return;
-    const startedAt = new Date().toISOString();
-    const confirmationId = this.status?.pending[0]?.id;
+    const startedAt = now();
     this.change("listening");
     const capture = (async () => {
       try {
-        const audio = await this.deps.audio.capture(this.abort.signal);
+        const id = this.deps.id();
+        const journal = async (audio: { audio: string; sampleRate: number }) => {
+          const recording: Recording = {
+            ...audio,
+            id,
+            startedAt,
+            endedAt: now(),
+            capturing: true,
+            modelSelection: this.modelSelection ?? this.saved!.options.modelSelection,
+          };
+          const index = this.saved!.recordings.findIndex((entry) => entry.id === id);
+          if (index === -1) this.saved!.recordings.push(recording);
+          else this.saved!.recordings[index] = recording;
+          await this.persist();
+        };
+        this.recording = true;
+        const audio = await this.deps.audio.capture(this.abort.signal, journal);
+        this.recording = false;
         if (!audio.audio) return;
         const recording: Recording = {
           ...audio,
-          id: this.deps.id(),
+          id,
           startedAt,
-          endedAt: new Date().toISOString(),
-          ...(confirmationId ? { confirmationId } : {}),
+          endedAt: now(),
+          modelSelection: this.modelSelection ?? this.saved!.options.modelSelection,
         };
+        this.saved!.recordings = this.saved!.recordings.filter((entry) => entry.id !== id);
         this.saved!.recordings.push(recording);
         await this.persist();
-        this.change("saving", "Saving raw audio on the PC");
-        await this.flush(this.active);
-        if (this.active) this.change("waiting");
+        if (!this.recovering) this.change("saving", "Saving raw audio on the PC");
+        if (this.active && !this.detached && !this.recovering) await this.flush();
+        if (this.active && !this.recovering) this.change("waiting");
       } catch (error) {
         this.failed(error);
       } finally {
+        this.recording = false;
         this.capture = undefined;
-        if (this.active && this.state !== "reconnecting") {
+        if (this.active && !["reconnecting", "error"].includes(this.state)) {
           if (this.queue.length) void this.speak();
           else if (!this.running) this.change("ready");
         }
@@ -210,14 +307,22 @@ export class ThreadVoiceSession {
     this.capture = capture;
     return capture;
   }
-  private async flush(deliver = true) {
-    for (const recording of [...this.saved!.recordings]) {
-      await this.request({ action: "call.upload", utteranceId: recording.id, ...recording });
-      if (!deliver) continue;
+  private async flush(deliver = true, signal = this.abort.signal) {
+    for (const recording of this.saved!.recordings) {
+      if (recording.capturing) continue;
+      await this.request(
+        { action: "call.upload", utteranceId: recording.id, ...recording },
+        signal,
+      );
+      if (!deliver || !this.active || this.saved!.closed || this.recovering) continue;
       this.change("transcribing");
-      await this.request({ action: "call.transcribe", utteranceId: recording.id });
-      const response = await this.request({ action: "call.deliver", utteranceId: recording.id });
-      if (response.utterance?.text?.trim() && !recording.confirmationId) this.running = true;
+      await this.request({ action: "call.transcribe", utteranceId: recording.id }, signal);
+      if (!this.active || this.saved!.closed || this.recovering) continue;
+      const response = await this.request(
+        { action: "call.deliver", utteranceId: recording.id },
+        signal,
+      );
+      if (response.utterance?.text?.trim()) this.running = true;
       this.saved!.recordings = this.saved!.recordings.filter((entry) => entry.id !== recording.id);
       await this.persist();
     }
@@ -225,25 +330,37 @@ export class ThreadVoiceSession {
   finish() {
     this.deps.audio.finish();
   }
-  observe(messages: readonly Message[], running: boolean) {
+  observe(
+    messages: readonly Message[],
+    running: boolean,
+    turnId?: string,
+    modelSelection?: ModelSelection,
+  ) {
     this.messages = messages;
     this.running = running;
-    if (!this.active || !this.saved || ["preparing", "reconnecting"].includes(this.state)) return;
+    this.turnId = turnId;
+    if (modelSelection) this.modelSelection = modelSelection;
+    if (!this.active || !this.saved || ["preparing", "reconnecting", "error"].includes(this.state))
+      return;
     for (const message of messages) {
       if (message.role !== "assistant") continue;
+      if (
+        this.saved.silencedMessages?.includes(message.id) ||
+        (message.turnId && this.saved.silencedTurns?.includes(message.turnId))
+      )
+        continue;
+      const spoken = this.speechText(message);
       let offset = this.saved.offsets[message.id] ?? 0;
       const queued = this.queue.filter((entry) => entry.messageId === message.id);
       if (queued.length) offset = Math.max(offset, ...queued.map((entry) => entry.end ?? 0));
-      while (offset < message.text.length) {
-        const rest = message.text.slice(offset);
+      while (offset < spoken.length) {
+        const rest = spoken.slice(offset);
         const text =
           rest.match(/^[\s\S]{1,1200}?[.!?](?:\s|$)/)?.[0] ??
           (!message.streaming || rest.length >= 1200 ? rest.slice(0, 1200) : "");
         if (!text) break;
         const end = offset + text.length;
-        // Message IDs may contain punctuation; deterministic numeric ranges need no URL encoding.
-        const id = `s-${safeId(message.id)}-${offset}-${end}`;
-        this.queue.push({ id, text, messageId: message.id, end });
+        this.queue.push({ text, messageId: message.id, start: offset, end });
         offset = end;
       }
     }
@@ -258,7 +375,9 @@ export class ThreadVoiceSession {
       this.playbackTask ||
       !this.active ||
       !this.queue.length ||
-      ["preparing", "reconnecting", "listening", "saving", "transcribing"].includes(this.state)
+      ["preparing", "reconnecting", "error", "listening", "saving", "transcribing"].includes(
+        this.state,
+      )
     )
       return;
     const signal = this.playback.signal;
@@ -266,18 +385,21 @@ export class ThreadVoiceSession {
       try {
         while (this.queue.length && this.active && !signal.aborted) {
           const item = this.queue[0]!;
+          const id = await speechIdentifier(item.messageId, item.start, item.end);
+          signal.throwIfAborted();
           this.change("speaking");
-          if (!this.status?.played.includes(item.id)) {
+          if (!this.status?.played.includes(id)) {
             const result = await this.request(
-              { action: "call.speak", speechId: item.id, text: item.text.replace(/[`#*_]/g, "") },
+              { action: "call.speak", speechId: id, text: item.text.replace(/[#*_]/g, "") },
               signal,
             );
             signal.throwIfAborted();
-            if (!result.audio || !result.sampleRate)
+            if (!result.played && (!result.audio || !result.sampleRate))
               throw new Error("Speech service returned no audio.");
-            await this.deps.audio.play(result.audio, result.sampleRate, signal);
+            if (!result.played)
+              await this.deps.audio.play(result.audio!, result.sampleRate!, signal);
             signal.throwIfAborted();
-            await this.request({ action: "call.played", speechId: item.id });
+            await this.request({ action: "call.played", speechId: id });
           }
           if (item.messageId) {
             this.saved!.offsets[item.messageId] = item.end!;
@@ -285,8 +407,7 @@ export class ThreadVoiceSession {
           }
           this.queue.shift();
         }
-        if (this.active && !signal.aborted)
-          this.change(this.running && !this.status?.pending.length ? "waiting" : "ready");
+        if (this.active && !signal.aborted) this.change(this.running ? "waiting" : "ready");
       } catch (error) {
         if (!signal.aborted) this.failed(error);
       } finally {
@@ -300,42 +421,75 @@ export class ThreadVoiceSession {
     if (!this.active) return;
     this.playback.abort();
     this.queue = [];
-    for (const message of this.messages) this.saved!.offsets[message.id] = message.text.length;
+    this.saved!.silencedTurns = [
+      ...new Set([
+        ...(this.saved!.silencedTurns ?? []),
+        ...this.messages
+          .filter((message) => message.streaming && message.turnId)
+          .map((message) => message.turnId!),
+        ...(this.turnId ? [this.turnId] : []),
+      ]),
+    ];
+    this.saved!.silencedMessages = [
+      ...new Set([
+        ...(this.saved!.silencedMessages ?? []),
+        ...this.messages
+          .filter((message) => message.role === "assistant")
+          .map((message) => message.id),
+      ]),
+    ];
+    for (const message of this.messages)
+      this.saved!.offsets[message.id] = this.speechText(message).length;
     await this.persist();
     try {
       await this.request({ action: "call.interrupt", utteranceId: this.deps.id() });
       await this.playbackTask;
       this.playback = new AbortController();
       this.change("ready");
-      await this.listen();
+      void this.listen();
     } catch (error) {
       this.failed(error);
     }
   }
-  async confirm(decision: "yes" | "no") {
-    const pending = this.status?.pending[0];
-    if (!pending) return;
-    try {
-      await this.request({ action: "call.confirm", confirmationId: pending.id, decision });
-    } catch (error) {
-      this.failed(error);
-    }
+  async detach() {
+    this.detached = true;
+    this.active = false;
+    this.playback.abort();
+    this.watching.abort();
+    if (this.renew) Effect.runFork(Fiber.interrupt(this.renew));
+    this.deps.audio.finish();
+    if (!this.recording) this.abort.abort();
+    await this.capture;
+    this.abort.abort();
+    this.queue = [];
+    this.deps.audio.close();
   }
-  async stop() {
+  stop() {
+    this.stopTask ??= this.hangUp().finally(() => {
+      this.stopTask = undefined;
+    });
+    return this.stopTask;
+  }
+  private async hangUp() {
+    this.active = false;
+    this.playback.abort();
+    this.watching.abort();
+    if (!this.recording) this.abort.abort();
     if (!this.saved) {
-      this.active = false;
       this.deps.audio.close();
+      this.change("idle");
       return;
     }
     this.active = false;
     this.playback.abort();
-    clearInterval(this.renew);
+    if (this.renew) Effect.runFork(Fiber.interrupt(this.renew));
     this.deps.audio.finish();
     await this.capture;
-    this.saved.closed = true;
-    await this.persist();
+    this.abort.abort();
     try {
-      await this.flush(false);
+      this.saved.closed = true;
+      await this.persist();
+      await this.flush(false, new AbortController().signal);
       await this.request({ action: "call.close" }, new AbortController().signal);
       await this.deps.persistence.clear();
       this.change("idle");
@@ -353,9 +507,43 @@ export class ThreadVoiceSession {
   }
 }
 
-// Stable encoding, including punctuation, avoids collisions between message IDs.
-function safeId(value: string) {
-  return Array.from(new TextEncoder().encode(value), (byte) =>
-    byte.toString(16).padStart(2, "0"),
-  ).join("");
+// Hash the message and explicit range together; wire IDs stay 66 characters.
+export async function speechIdentifier(value: string, start: number, end: number) {
+  const digest = await globalThis.crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(JSON.stringify([value, start, end])),
+  );
+  return (
+    "s-" + Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")
+  );
+}
+
+function spokenMessageText(value: string, streaming = false) {
+  const text = value
+    .replace(/```[\s\S]*?(?:```|$)/g, "")
+    .replace(/`[^`]*(?:`|$)/g, "")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
+  let output = "";
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  for (const char of text) {
+    if (!depth) {
+      if (char === "{" || char === "[") depth = 1;
+      else output += char;
+      continue;
+    }
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (quoted && char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === '"') quoted = !quoted;
+    if (!quoted && (char === "{" || char === "[")) depth++;
+    if (!quoted && (char === "}" || char === "]")) depth--;
+  }
+  return output.trim() || streaming || !value.trim() ? output : "I've put the details in the chat.";
 }

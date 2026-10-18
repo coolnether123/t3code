@@ -1,5 +1,7 @@
 import type { SpeechTransportRequest, SpeechResponse } from "@t3tools/contracts";
 
+export class SpeechUnavailableError extends Error {}
+
 /** Fixed loopback destination: microphone audio never follows client-supplied URLs. */
 export async function proxySpeech(
   input: SpeechTransportRequest,
@@ -64,8 +66,10 @@ export async function proxySpeech(
     redirect: "error",
     signal: AbortSignal.any([signal, AbortSignal.timeout(90_000)]),
   });
-  if (!response.ok) throw new Error(`Local speech service unavailable (${response.status}).`);
-  if (input.action === "release" || input.action === "renew") return {};
+  if (input.action === "release" && response.status === 404) return {};
+  if (!response.ok)
+    throw new SpeechUnavailableError(`Local speech service unavailable (${response.status}).`);
+  if (input.action === "release") return {};
   if (input.action === "speak") {
     const sampleRate = Number(response.headers.get("x-sample-rate"));
     if (!Number.isInteger(sampleRate) || sampleRate < 8000 || sampleRate > 96000) {
@@ -80,13 +84,47 @@ export async function proxySpeech(
   const result: unknown = await response.json();
   if (typeof result !== "object" || result === null) throw new Error("Invalid speech response.");
   if (
-    input.action === "acquire" &&
+    (input.action === "acquire" || input.action === "renew") &&
     "sessionId" in result &&
     typeof result.sessionId === "string" &&
     /^[\w-]{1,128}$/.test(result.sessionId)
   ) {
+    if (input.action === "renew") {
+      const health = await fetcher("http://127.0.0.1:8085/health", { signal, redirect: "error" });
+      const snapshot: unknown = await health.json();
+      const speech =
+        snapshot && typeof snapshot === "object" && "speech" in snapshot
+          ? snapshot.speech
+          : undefined;
+      const tenants =
+        speech && typeof speech === "object" && "tenants" in speech ? speech.tenants : undefined;
+      if (
+        !health.ok ||
+        !Array.isArray(tenants) ||
+        !("tenants" in result) ||
+        !Array.isArray(result.tenants) ||
+        !result.tenants.length ||
+        !result.tenants.every((id: unknown) =>
+          tenants.some(
+            (tenant: unknown) =>
+              tenant &&
+              typeof tenant === "object" &&
+              "id" in tenant &&
+              tenant.id === id &&
+              "healthy" in tenant &&
+              tenant.healthy === true &&
+              "running" in tenant &&
+              tenant.running === true,
+          ),
+        )
+      )
+        throw new SpeechUnavailableError("Speech engine health was lost. Prepare the call again.");
+    }
     return {
       sessionId: result.sessionId,
+      ...("expiresAt" in result && typeof result.expiresAt === "string"
+        ? { expiresAt: result.expiresAt }
+        : {}),
       ...("tenants" in result &&
       Array.isArray(result.tenants) &&
       result.tenants.every((id) => typeof id === "string")

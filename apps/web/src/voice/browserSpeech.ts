@@ -1,32 +1,21 @@
-import { SpeechResponse, type SpeechRequest } from "@t3tools/contracts";
-import * as Schema from "effect/Schema";
-import { readDesktopPrimaryBearerToken } from "../environments/primary/desktopAuth";
-import { resolvePrimaryEnvironmentHttpUrl } from "../environments/primary/target";
+import type { EnvironmentId, SpeechRequest } from "@t3tools/contracts";
+import { createVoiceRequestCommand } from "@t3tools/client-runtime/voice-call/transport";
+import * as Cause from "effect/Cause";
+import { connectionAtomRuntime } from "../connection/runtime";
+import { appAtomRegistry } from "../rpc/atomRegistry";
 
-const decodeSpeechResponse = Schema.decodeUnknownSync(SpeechResponse);
-
-export async function requestSpeech(input: SpeechRequest, signal: AbortSignal) {
-  const url = resolvePrimaryEnvironmentHttpUrl("/api/voice");
-  const sameOrigin = new URL(url).origin === window.location.origin && !window.desktopBridge;
-  const token = sameOrigin ? null : await readDesktopPrimaryBearerToken();
-  signal.throwIfAborted();
-  const response = await fetch(url, {
-    method: "POST",
-    credentials: sameOrigin ? "include" : "omit",
-    signal,
-    headers: {
-      "content-type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    body: JSON.stringify(input),
+const speechRequest = createVoiceRequestCommand(connectionAtomRuntime);
+export async function requestSpeech(
+  environmentId: EnvironmentId,
+  input: SpeechRequest,
+  signal: AbortSignal,
+) {
+  const result = await speechRequest.run(appAtomRegistry, {
+    environmentId,
+    input: { request: input, signal },
   });
-  if (!response.ok)
-    throw new Error(
-      response.status === 404
-        ? "This server needs the voice integration update."
-        : (await response.text()).slice(0, 600) || `Local speech unavailable (${response.status}).`,
-    );
-  return decodeSpeechResponse(await response.json());
+  if (result._tag === "Failure") throw Cause.squash(result.cause);
+  return result.value;
 }
 
 /** Owns microphone tracks and playback nodes for one visible voice session. */
@@ -57,7 +46,8 @@ export function createBrowserAudio() {
       preparedStream = stream;
       await context!.resume();
     },
-    async ready() {
+    async ready(signal: AbortSignal) {
+      signal.throwIfAborted();
       const audio = context!;
       const tone = audio.createOscillator();
       const gain = audio.createGain();
@@ -66,15 +56,23 @@ export function createBrowserAudio() {
       gain.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + 0.2);
       tone.connect(gain);
       gain.connect(audio.destination);
-      await new Promise<void>((resolve) => {
-        tone.onended = () => {
-          tone.disconnect();
-          gain.disconnect();
-          resolve();
-        };
-        tone.start();
-        tone.stop(audio.currentTime + 0.22);
-      });
+      let cancel: () => void;
+      try {
+        await new Promise<void>((resolve, reject) => {
+          cancel = () => {
+            tone.stop();
+            reject(signal.reason);
+          };
+          signal.addEventListener("abort", cancel, { once: true });
+          tone.addEventListener("ended", () => resolve(), { once: true });
+          tone.start();
+          tone.stop(audio.currentTime + 0.22);
+        });
+      } finally {
+        signal.removeEventListener("abort", cancel!);
+        tone.disconnect();
+        gain.disconnect();
+      }
     },
     close() {
       finishCapture = undefined;
@@ -83,7 +81,10 @@ export function createBrowserAudio() {
       void context?.close();
       context = undefined;
     },
-    async capture(signal: AbortSignal): Promise<{ audio: string; sampleRate: number }> {
+    async capture(
+      signal: AbortSignal,
+      journal?: (audio: { audio: string; sampleRate: number }) => Promise<void>,
+    ): Promise<{ audio: string; sampleRate: number }> {
       const audioContext = context!;
       const stream =
         preparedStream ??
@@ -102,6 +103,23 @@ export function createBrowserAudio() {
       let length = 0;
       let speechSeen = false;
       let silenceSamples = 0;
+      let journalTask: Promise<void> | undefined;
+      let journalLength = 0;
+      const recording = () => {
+        const bytes = new Uint8Array(length * 2);
+        const view = new DataView(bytes.buffer);
+        let index = 0;
+        for (const chunk of chunks)
+          for (const sample of chunk) {
+            const clipped = Math.max(-1, Math.min(1, sample));
+            view.setInt16(index, clipped * (clipped < 0 ? 32768 : 32767), true);
+            index += 2;
+          }
+        let binary = "";
+        for (let offset = 0; offset < bytes.length; offset += 8192)
+          binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+        return { audio: btoa(binary), sampleRate: audioContext.sampleRate };
+      };
       try {
         await new Promise<void>((resolve, reject) => {
           const abort = () => reject(new DOMException("Cancelled", "AbortError"));
@@ -114,6 +132,16 @@ export function createBrowserAudio() {
             const chunk = new Float32Array(event.inputBuffer.getChannelData(0));
             chunks.push(chunk);
             length += chunk.length;
+            if (journal && !journalTask && length - journalLength >= audioContext.sampleRate) {
+              journalLength = length;
+              journalTask = journal(recording())
+                .catch(() => {
+                  finishCapture?.();
+                })
+                .finally(() => {
+                  journalTask = undefined;
+                });
+            }
             const rms = Math.sqrt(
               chunk.reduce((sum, sample) => sum + sample * sample, 0) / chunk.length,
             );
@@ -128,20 +156,9 @@ export function createBrowserAudio() {
           processor.connect(mute);
           mute.connect(audioContext.destination);
         });
+        await journalTask;
         signal.throwIfAborted();
-        const bytes = new Uint8Array(length * 2);
-        const view = new DataView(bytes.buffer);
-        let index = 0;
-        for (const chunk of chunks)
-          for (const sample of chunk) {
-            const clipped = Math.max(-1, Math.min(1, sample));
-            view.setInt16(index, clipped * (clipped < 0 ? 32768 : 32767), true);
-            index += 2;
-          }
-        let binary = "";
-        for (let offset = 0; offset < bytes.length; offset += 8192)
-          binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
-        return { audio: btoa(binary), sampleRate: audioContext.sampleRate };
+        return recording();
       } finally {
         finishCapture = undefined;
         processor.onaudioprocess = null;

@@ -14,7 +14,7 @@ import {
   HttpServerRespondable,
 } from "effect/unstable/http";
 import { authenticateRawRouteWithScope } from "../http.ts";
-import { proxySpeech } from "./proxy.ts";
+import { proxySpeech, SpeechUnavailableError } from "./proxy.ts";
 import { ServerConfig } from "../config.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -28,6 +28,7 @@ class SpeechServiceError extends Schema.TaggedErrorClass<SpeechServiceError>()(
   "SpeechServiceError",
   {
     message: Schema.String,
+    recoverable: Schema.Boolean,
   },
 ) {}
 
@@ -53,6 +54,10 @@ export const speechRouteLayer = HttpRouter.add(
         if (Option.isNone(snapshot) || snapshot.value.thread.archivedAt)
           throw new Error("Open an existing chat before starting a call.");
         verifyCallModel(options, await Effect.runPromise(providers.getProviders));
+        return {
+          runtimeMode: snapshot.value.thread.runtimeMode,
+          interactionMode: snapshot.value.thread.interactionMode,
+        };
       },
       dispatch: (command) => Effect.runPromise(engine.dispatch(command)),
       speech: proxySpeech,
@@ -67,6 +72,10 @@ export const speechRouteLayer = HttpRouter.add(
         "callId" in input ? calls.handle(input as CallRequest, signal) : proxySpeech(input, signal),
       catch: (cause) =>
         new SpeechServiceError({
+          recoverable:
+            cause instanceof SpeechUnavailableError ||
+            cause instanceof TypeError ||
+            (cause instanceof Error && cause.name === "TimeoutError"),
           message:
             cause instanceof Error
               ? cause.message
@@ -75,7 +84,9 @@ export const speechRouteLayer = HttpRouter.add(
     }).pipe(
       Effect.map((result) => HttpServerResponse.jsonUnsafe(result)),
       Effect.catch((error) =>
-        Effect.succeed(HttpServerResponse.text(error.message, { status: 503 })),
+        Effect.succeed(
+          HttpServerResponse.text(error.message, { status: error.recoverable ? 503 : 409 }),
+        ),
       ),
     );
   }).pipe(

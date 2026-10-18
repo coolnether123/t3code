@@ -1,9 +1,15 @@
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+// @effect-diagnostics nodeBuiltinImport:off - Read the retained PCM archive through the Node storage boundary.
+import * as NodeFSP from "node:fs/promises";
+import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import * as NodePath from "node:path";
 import {
   CommandId,
   MessageId,
   ThreadId,
+  ValidCallRequest,
   type CallOptions,
   type CallRequest,
   type CallStatus,
@@ -12,17 +18,15 @@ import {
   type SpeechResponse,
   type SpeechTransportRequest,
   type ServerProvider,
+  type RuntimeMode,
+  type ProviderInteractionMode,
 } from "@t3tools/contracts";
-import {
-  callIdentifier,
-  type CallStore,
-  type CallRecord,
-  type StoredConfirmation,
-  sha256,
-} from "./callStore.ts";
+import { callIdentifier, type CallStore, type CallRecord, sha256 } from "./callStore.ts";
 
 export interface CallPorts {
-  verify(options: CallOptions): Promise<void>;
+  verify(
+    options: CallOptions,
+  ): Promise<{ runtimeMode: RuntimeMode; interactionMode: ProviderInteractionMode }>;
   dispatch(command: OrchestrationCommand): Promise<unknown>;
   speech(request: SpeechTransportRequest, signal: AbortSignal): Promise<SpeechResponse>;
   tenants: readonly [string, string];
@@ -36,19 +40,18 @@ export function verifyCallModel(options: CallOptions, providers: readonly Server
   );
   if (
     !provider ||
-    provider.driver !== "claudeAgent" ||
     !provider.enabled ||
     !provider.installed ||
     provider.availability === "unavailable" ||
     provider.status === "error" ||
     provider.auth.status === "unauthenticated"
   ) {
-    throw new Error("Select an available, signed-in Claude provider for this call.");
+    throw new Error("Select an available, signed-in provider in this chat.");
   }
   const model = provider.models.find((entry) => entry.slug === options.modelSelection.model);
   if (!model)
     throw new Error(
-      `Configure the exact model ${options.modelSelection.model} in this Claude provider's custom models first. No fallback was selected.`,
+      `The selected provider does not advertise ${options.modelSelection.model}. Choose an available model in the chat selector. No fallback was selected.`,
     );
   for (const option of options.modelSelection.options ?? []) {
     const descriptor = model.capabilities?.optionDescriptors?.find(
@@ -56,6 +59,7 @@ export function verifyCallModel(options: CallOptions, providers: readonly Server
     );
     if (
       !descriptor ||
+      (descriptor.type === "boolean" && typeof option.value !== "boolean") ||
       (descriptor.type === "select" &&
         !descriptor.options.some((entry) => entry.id === option.value))
     ) {
@@ -66,51 +70,104 @@ export function verifyCallModel(options: CallOptions, providers: readonly Server
   }
 }
 
-const now = () => new Date().toISOString();
+const decodeCallRequest = Schema.decodeUnknownSync(ValidCallRequest);
+const now = () => DateTime.formatIso(Effect.runSync(DateTime.now));
+const time = () => Effect.runSync(Clock.currentTimeMillis);
+const expiry = (response: SpeechResponse) => {
+  const until = Date.parse(response.expiresAt ?? "");
+  if (!Number.isFinite(until) || until <= time())
+    throw new Error("Router returned an invalid speech lease expiry.");
+  return until;
+};
 const active = (record: CallRecord) => {
   if (record.closed) throw new Error("This call has ended. Its saved speech is retained.");
 };
 const lease = (record: CallRecord) => {
   active(record);
-  if (!record.lease || (record.leaseUntil ?? 0) <= Date.now())
+  if (!record.lease || (record.leaseUntil ?? 0) <= time())
     throw new Error("The speech lease expired. Resume preparation; saved speech is retained.");
   return record.lease;
 };
 
 export class CallService {
-  constructor(
-    readonly store: CallStore,
-    private ports: CallPorts,
-  ) {}
+  readonly store: CallStore;
+  private ports: CallPorts;
+  constructor(store: CallStore, ports: CallPorts) {
+    this.store = store;
+    this.ports = ports;
+  }
 
   async status(callId: string): Promise<CallStatus> {
     const record = await this.store.require(callId);
-    const raws = await this.store.records<CallUtterance>(callId, ".raw.json");
-    const confirmations = await this.store.records<StoredConfirmation>(
-      callId,
-      ".confirmation.json",
-    );
-    const played = await this.store.records<{ id: string }>(callId, ".played.json");
     return {
       callId,
       threadId: record.threadId,
       version: record.version,
-      ready: !record.closed && !!record.lease && (record.leaseUntil ?? 0) > Date.now(),
+      ready: !record.closed && !!record.lease && (record.leaseUntil ?? 0) > time(),
       closed: record.closed,
       modelSelection: record.modelSelection,
-      policy: record.policy,
       steps: record.steps,
-      utterances: await Promise.all(raws.map((raw) => this.store.utterance(callId, raw.id))),
-      pending: confirmations
-        .filter((item) => !item.decision)
-        .map(({ id, tool, summary, level }) => ({ id, tool, summary, level })),
-      played: played.map((item) => item.id),
+      utterances: await Promise.all(
+        (record.recentUtterances ?? []).map((id) => this.store.utterance(callId, id)),
+      ),
+      played: record.recentPlayed ?? [],
     };
   }
   async handle(input: CallRequest, signal: AbortSignal): Promise<SpeechResponse> {
+    for (const id of [input.callId, input.utteranceId, input.speechId])
+      if (id !== undefined) callIdentifier(id);
+    decodeCallRequest(input);
     callIdentifier(input.callId);
     if (input.action === "call.watch") {
       await this.store.wait(input.callId, input.version, signal);
+      return { call: await this.status(input.callId) };
+    }
+    // Engine work owns an operation lock, never the call's short state lock.
+    if (input.action === "call.prepare") {
+      await this.store.serial(`prepare:${input.callId}`, () =>
+        this.prepare(input.callId, signal, input.modelSelection),
+      );
+      return { call: await this.status(input.callId) };
+    }
+    if (input.action === "call.renew") {
+      await this.renewLease(input.callId, signal);
+      return { call: await this.status(input.callId) };
+    }
+    if (
+      input.action === "call.transcribe" ||
+      input.action === "call.speak" ||
+      input.action === "call.deliver"
+    ) {
+      return this.store.serial(
+        `${input.action}:${input.callId}:${input.utteranceId ?? input.speechId}`,
+        async () => {
+          const record = await this.store.require(input.callId);
+          if (input.action === "call.transcribe")
+            return { utterance: await this.transcribe(record, callIdentifier(input.utteranceId)) };
+          if (input.action === "call.deliver")
+            return { utterance: await this.deliver(record, callIdentifier(input.utteranceId)) };
+          return this.speak(record, input, signal);
+        },
+      );
+    }
+    if (input.action === "call.close") {
+      const sessionId = await this.store.serial(input.callId, async () => {
+        const record = await this.store.require(input.callId);
+        record.closed = true;
+        await this.store.changed(record);
+        return record.lease;
+      });
+      if (sessionId) {
+        await this.ports.speech({ action: "release", sessionId }, AbortSignal.timeout(90_000));
+        await this.store.serial(input.callId, async () => {
+          const record = await this.store.require(input.callId);
+          if (record.lease === sessionId) {
+            delete record.lease;
+            delete record.leaseUntil;
+            await this.store.changed(record);
+          }
+        });
+      }
       return { call: await this.status(input.callId) };
     }
     return this.store.serial(input.callId, async () => {
@@ -122,52 +179,19 @@ export class CallService {
           return { call: await this.status(input.callId) };
         case "call.upload":
           return { utterance: await this.upload(record, input) };
-        case "call.transcribe":
-          return { utterance: await this.transcribe(record, callIdentifier(input.utteranceId)) };
-        case "call.deliver":
-          return { utterance: await this.deliver(record, callIdentifier(input.utteranceId)) };
-        case "call.prepare":
-          await this.prepare(record);
-          break;
-        case "call.renew":
-          await this.ports.speech(
-            { action: "renew", sessionId: lease(record) },
-            AbortSignal.timeout(90_000),
-          );
-          record.leaseUntil = Date.now() + 110_000;
-          await this.store.changed(record);
-          break;
-        case "call.speak":
-          return this.speak(record, input, signal);
         case "call.played":
           await this.store.write(record.callId, `${callIdentifier(input.speechId)}.played.json`, {
             id: input.speechId,
             at: now(),
           });
+          record.recentPlayed = [
+            ...(record.recentPlayed ?? []).filter((id) => id !== input.speechId),
+            input.speechId!,
+          ].slice(-128);
           await this.store.changed(record);
-          break;
-        case "call.confirm":
-          await this.confirm(record, callIdentifier(input.confirmationId), input.decision);
           break;
         case "call.interrupt":
           await this.interrupt(record, callIdentifier(input.utteranceId));
-          break;
-        case "call.close":
-          // Persist the closed fence before interrupting. Late tools cannot escape it.
-          record.closed = true;
-          await this.store.changed(record);
-          try {
-            await this.interrupt(record, "close");
-          } finally {
-            if (record.lease) {
-              await this.ports.speech(
-                { action: "release", sessionId: record.lease },
-                AbortSignal.timeout(90_000),
-              );
-              delete record.lease;
-              await this.store.changed(record);
-            }
-          }
           break;
       }
       return { call: await this.status(input.callId) };
@@ -176,38 +200,60 @@ export class CallService {
   private async open(input: CallRequest): Promise<SpeechResponse> {
     if (!input.options) throw new Error("Call options are required.");
     const previous = await this.store.read<CallRecord>(input.callId, "call.json");
+    const bindingName = `${sha256(input.options.threadId)}.json`;
+    if (!previous?.closed && (await this.store.activeCall(input.options.threadId, input.callId)))
+      throw new Error("This chat already has a call. Resume it or end that call first.");
     if (previous) {
       if (
-        JSON.stringify([previous.threadId, previous.modelSelection, previous.policy]) !==
-        JSON.stringify([input.options.threadId, input.options.modelSelection, input.options.policy])
+        JSON.stringify([previous.threadId, previous.modelSelection]) !==
+        JSON.stringify([input.options.threadId, input.options.modelSelection])
       )
         throw new Error("Call ID already belongs to different options.");
-      active(previous);
+      if (!previous.closed)
+        await this.store.write("_threads", bindingName, { callId: input.callId });
       return { call: await this.status(input.callId) };
     }
     await this.ports.verify(input.options);
-    const bindingName = `${sha256(input.options.threadId)}.json`;
-    const binding = await this.store.read<{ callId: string }>("_threads", bindingName);
-    if (binding && !(await this.store.require(binding.callId)).closed)
-      throw new Error(
-        "This chat already has a call. Resume it from the device that started it or end that call first.",
-      );
     const record: CallRecord = {
       ...input.options,
       callId: input.callId,
       createdAt: now(),
       version: "",
       closed: false,
-      steps: ["Call log saved on PC", "Exact Claude model and thinking setting configured"],
+      steps: ["Call log saved on PC", "Selected chat model and options configured"],
     };
-    await this.store.changed(record);
     await this.store.write("_threads", bindingName, { callId: input.callId });
+    await this.store.changed(record);
     return { call: await this.status(input.callId) };
   }
-  private async prepare(record: CallRecord) {
+  private async prepare(
+    callId: string,
+    signal: AbortSignal,
+    modelSelection?: CallOptions["modelSelection"],
+  ) {
+    const record = await this.store.require(callId);
     active(record);
-    await this.ports.verify(record);
-    if (record.lease && (record.leaseUntil ?? 0) > Date.now()) return;
+    await this.ports.verify({ ...record, modelSelection: modelSelection ?? record.modelSelection });
+    if (record.lease && (record.leaseUntil ?? 0) > time()) {
+      await this.renewLease(callId, signal);
+      return;
+    }
+    if (record.lease) {
+      await this.ports.speech(
+        { action: "release", sessionId: record.lease },
+        AbortSignal.timeout(90_000),
+      );
+      await this.store.serial(callId, async () => {
+        const current = await this.store.require(callId);
+        if (current.lease === record.lease) {
+          delete current.lease;
+          delete current.leaseUntil;
+          await this.store.changed(current);
+        }
+      });
+    }
+    signal.throwIfAborted();
+    active(await this.store.require(callId));
     const result = await this.ports.speech({ action: "acquire" }, AbortSignal.timeout(90_000));
     if (!result.sessionId) throw new Error("The router did not grant a speech lease.");
     if (!this.ports.tenants.every((id) => result.tenants?.includes(id))) {
@@ -219,14 +265,19 @@ export class CallService {
         "Router speech tenants do not match the configured call profile. Ask the router owner to configure the STT and TTS tenants.",
       );
     }
-    record.lease = result.sessionId;
-    record.leaseUntil = Date.now() + 110_000;
-    record.steps = [
-      ...record.steps.slice(0, 2),
-      "Router granted the call profile; speech tenants ready",
-    ];
     try {
-      await this.store.changed(record);
+      await this.store.serial(callId, async () => {
+        const current = await this.store.require(callId);
+        active(current);
+        signal.throwIfAborted();
+        current.lease = result.sessionId!;
+        current.leaseUntil = expiry(result);
+        current.steps = [
+          ...current.steps.slice(0, 2),
+          "Router granted the call profile; speech tenants ready",
+        ];
+        await this.store.changed(current);
+      });
     } catch (error) {
       await this.ports.speech(
         { action: "release", sessionId: result.sessionId },
@@ -234,6 +285,30 @@ export class CallService {
       );
       throw error;
     }
+  }
+  private async renewLease(callId: string, signal: AbortSignal) {
+    const record = await this.store.require(callId);
+    const sessionId = lease(record);
+    let until: number;
+    try {
+      until = expiry(await this.ports.speech({ action: "renew", sessionId }, signal));
+    } catch (error) {
+      await this.store.serial(callId, async () => {
+        const current = await this.store.require(callId);
+        if (current.lease === sessionId) {
+          current.leaseUntil = 0;
+          await this.store.changed(current);
+        }
+      });
+      throw error;
+    }
+    await this.store.serial(callId, async () => {
+      const current = await this.store.require(callId);
+      if (!current.closed && current.lease === sessionId) {
+        current.leaseUntil = until;
+        await this.store.changed(current);
+      }
+    });
   }
   private async upload(record: CallRecord, input: CallRequest) {
     // Upload remains available after hang-up, so a disconnected phone can save
@@ -258,19 +333,32 @@ export class CallService {
       throw new Error("Recording timestamps are required.");
     const hash = sha256(audio);
     const existing = await this.store.read<CallUtterance>(record.callId, `${id}.raw.json`);
-    if (existing) {
+    const intent = await this.store.read<CallUtterance>(record.callId, `${id}.upload.json`);
+    const identity = existing ?? intent;
+    if (identity) {
       if (
-        existing.sha256 !== hash ||
-        existing.sampleRate !== rate ||
-        existing.startedAt !== input.startedAt ||
-        existing.endedAt !== input.endedAt ||
-        existing.confirmationId !== input.confirmationId
+        identity.sha256 !== hash ||
+        identity.sampleRate !== rate ||
+        identity.startedAt !== input.startedAt ||
+        identity.endedAt !== input.endedAt ||
+        JSON.stringify(identity.modelSelection) !== JSON.stringify(input.modelSelection)
       )
         throw new Error("Utterance ID already belongs to different audio or metadata.");
+    }
+    if (existing) {
+      const retained = await NodeFSP.readFile(
+        NodePath.join(this.store.directory(record.callId), `${id}.pcm`),
+      );
+      if (retained.length !== existing.bytes || sha256(retained) !== hash)
+        throw new Error(
+          "Saved recording failed its integrity check. Retain the archive for recovery.",
+        );
+      if (!record.recentUtterances?.includes(id)) {
+        record.recentUtterances = [...(record.recentUtterances ?? []), id].slice(-64);
+        await this.store.changed(record);
+      }
       return this.store.utterance(record.callId, id);
     }
-    if ((await this.store.records(record.callId, ".raw.json")).length >= 1000)
-      throw new Error("Start a new call after 1000 utterances. Existing recordings are retained.");
     const raw: CallUtterance = {
       id,
       sha256: hash,
@@ -279,24 +367,30 @@ export class CallService {
       startedAt: input.startedAt!,
       endedAt: input.endedAt!,
       savedAt: now(),
-      ...(input.confirmationId ? { confirmationId: callIdentifier(input.confirmationId) } : {}),
+      ...(input.modelSelection ? { modelSelection: input.modelSelection } : {}),
     };
     try {
-      const orphan = await readFile(join(this.store.directory(record.callId), `${id}.pcm`));
+      const orphan = await NodeFSP.readFile(
+        NodePath.join(this.store.directory(record.callId), `${id}.pcm`),
+      );
       if (sha256(orphan) !== hash)
         throw new Error("Utterance ID already has saved audio. It will not be overwritten.");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
+    if (!intent) await this.store.write(record.callId, `${id}.upload.json`, raw);
     await this.store.writeBytes(record.callId, `${id}.pcm`, audio);
     await this.store.write(record.callId, `${id}.raw.json`, raw);
+    record.recentUtterances = [...(record.recentUtterances ?? []), id].slice(-64);
     await this.store.changed(record);
     return raw;
   }
   private async transcribe(record: CallRecord, id: string) {
     const raw = await this.store.utterance(record.callId, id);
     if (raw.transcribedAt) return raw;
-    const audio = await readFile(join(this.store.directory(record.callId), `${id}.pcm`));
+    const audio = await NodeFSP.readFile(
+      NodePath.join(this.store.directory(record.callId), `${id}.pcm`),
+    );
     if (sha256(audio) !== raw.sha256)
       throw new Error("Saved recording failed its integrity check.");
     const result = await this.ports.speech(
@@ -314,7 +408,9 @@ export class CallService {
       text: result.text,
       transcribedAt: now(),
     });
-    await this.store.changed(record);
+    await this.store.serial(record.callId, async () =>
+      this.store.changed(await this.store.require(record.callId)),
+    );
     return this.store.utterance(record.callId, id);
   }
   private async deliver(record: CallRecord, id: string) {
@@ -324,44 +420,46 @@ export class CallService {
     if (!utterance.transcribedAt || utterance.text === undefined)
       throw new Error("Save the transcript before delivery.");
     const messageId = `voice:${record.callId}:${id}`;
-    if (utterance.confirmationId) {
-      await this.ports.dispatch({
-        type: "thread.voice.transcript",
-        commandId: CommandId.make(messageId),
-        threadId: ThreadId.make(record.threadId),
-        messageId: MessageId.make(messageId),
-        text: utterance.text,
-        createdAt: utterance.savedAt,
-      });
-      const word = utterance.text
-        .trim()
-        .toLowerCase()
-        .replace(/[.!?]+$/, "");
-      if (word !== "yes" && word !== "no")
-        throw new Error(
-          "Confirmation needs exactly yes or no. The recording is saved; confirm with the button or record again.",
-        );
-      await this.confirm(record, utterance.confirmationId, word);
-    } else if (utterance.text.trim()) {
-      await this.ports.verify(record);
-      await this.ports.dispatch({
-        type: "thread.turn.start",
-        commandId: CommandId.make(messageId),
-        threadId: ThreadId.make(record.threadId),
-        message: {
-          messageId: MessageId.make(messageId),
-          role: "user",
-          text: utterance.text,
-          attachments: [],
-        },
-        modelSelection: record.modelSelection,
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        createdAt: utterance.savedAt,
-      });
+    await this.store.write(record.callId, `${id}.delivery.json`, { messageId, preparedAt: now() });
+    if (utterance.text.trim()) {
+      let command = await this.store.read<
+        Extract<OrchestrationCommand, { type: "thread.turn.start" }>
+      >(record.callId, `${id}.dispatch.json`);
+      if (!command) {
+        const selection = utterance.modelSelection ?? record.modelSelection;
+        const context = await this.ports.verify({ ...record, modelSelection: selection });
+        active(await this.store.require(record.callId));
+        command = {
+          type: "thread.turn.start",
+          commandId: CommandId.make(messageId),
+          threadId: ThreadId.make(record.threadId),
+          message: {
+            messageId: MessageId.make(messageId),
+            role: "user",
+            text: utterance.text,
+            attachments: [],
+          },
+          modelSelection: selection,
+          runtimeMode: context.runtimeMode,
+          interactionMode: context.interactionMode,
+          createdAt: utterance.savedAt,
+        };
+        await this.store.write(record.callId, `${id}.dispatch.json`, command);
+      }
+      if (
+        JSON.stringify(command.modelSelection) !==
+          JSON.stringify(utterance.modelSelection ?? record.modelSelection) ||
+        command.threadId !== record.threadId ||
+        command.message.messageId !== messageId ||
+        command.message.text !== utterance.text
+      )
+        throw new Error("Saved voice delivery identity does not match its transcript.");
+      await this.ports.dispatch(command);
     }
     await this.store.write(record.callId, `${id}.delivery.json`, { deliveredAt: now(), messageId });
-    await this.store.changed(record);
+    await this.store.serial(record.callId, async () =>
+      this.store.changed(await this.store.require(record.callId)),
+    );
     return this.store.utterance(record.callId, id);
   }
   private async speak(
@@ -374,25 +472,13 @@ export class CallService {
     const existing = await this.store.read<{ text: string }>(record.callId, `${id}.speech.json`);
     if (existing && existing.text !== input.text)
       throw new Error("Speech ID already belongs to different text.");
+    if (await this.store.read(record.callId, `${id}.played.json`)) return { played: true };
     if (!existing)
       await this.store.write(record.callId, `${id}.speech.json`, { text: input.text, at: now() });
     return this.ports.speech(
       { action: "speak", sessionId: lease(record), model: this.ports.ttsModel, text: input.text },
       signal,
     );
-  }
-  private async confirm(record: CallRecord, id: string, decision: "yes" | "no" | undefined) {
-    active(record);
-    if (!decision) throw new Error("An explicit yes or no is required.");
-    const confirmation = await this.store.read<StoredConfirmation>(
-      record.callId,
-      `${id}.confirmation.json`,
-    );
-    if (!confirmation) throw new Error("That tool confirmation is no longer available.");
-    if (confirmation.decision && confirmation.decision !== decision)
-      throw new Error("That tool invocation was already answered.");
-    await this.store.write(record.callId, `${id}.confirmation.json`, { ...confirmation, decision });
-    await this.store.changed(record);
   }
   private async interrupt(record: CallRecord, id: string) {
     await this.ports.dispatch({

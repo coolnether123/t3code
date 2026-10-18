@@ -1,10 +1,11 @@
-feat(voice): lay groundwork for durable chat calls
+feat(voice): add durable voice calls to ordinary chats
 
-Add call storage, delivery identities, browser call controls and provider hooks.
-Document the unfinished integration, corrected chat semantics and remaining checks.
-Include an isolated acceptance helper for parent-run verification.
+Retain audio before transcription and dispatch ordinary chat turns with stable
+delivery identities. Recover interrupted uploads, transcripts and dispatches,
+and separate speech hang-up from chat interruption.
 
-The foundation is not yet accepted or deployed. Remaining lifecycle, model
-selection and optional confirmation work is detailed in the architecture handoff.
+Use the normal model selector and environment authentication without a voice
+confirmation gate. Include focused recovery checks and a parent-run acceptance
+helper. Real audio and client acceptance remain pending; nothing is deployed.
 
 Otis-Task: agenda-task:515bbc54cb61482681e950e524421ce4
