@@ -51,7 +51,35 @@ export function completedOtisTool(event, expected) {
   )
     return false;
   const name = expected.startsWith("mcp__otis__") ? expected : `mcp__otis__${expected}`;
-  return payload.data?.toolName === name;
+  const native = payload.data?.item;
+  return (
+    payload.data?.toolName === name ||
+    (native?.type === "mcpToolCall" &&
+      native.server === "otis" &&
+      native.tool === name.replace(/^mcp__otis__/, "") &&
+      !native.error)
+  );
+}
+
+export function hasOperatorResult(event) {
+  if (
+    event.type !== "item.completed" ||
+    event.payload?.itemType !== "assistant_message" ||
+    event.payload.status !== "completed"
+  )
+    return false;
+  return [...(event.payload.detail ?? "").matchAll(/<otis-status>([\s\S]*?)<\/otis-status>/g)].some(
+    (match) => {
+      try {
+        const value = JSON.parse(match[1]);
+        return (
+          value.status === "done" && typeof value.text === "string" && value.text.trim().length > 0
+        );
+      } catch {
+        return false;
+      }
+    },
+  );
 }
 
 export function callTimings(stages) {
@@ -72,6 +100,8 @@ export function callTimings(stages) {
     deliveryToFirstText: elapsed("delivery", "firstRenderedText"),
     firstTextToFirstAudio: elapsed("firstRenderedText", "firstScheduledAudio"),
     firstSentenceToFirstAudio: elapsed("firstSentence", "firstScheduledAudio"),
+    voiceAckLatency: elapsed("speechEnded", "firstScheduledAudio"),
+    operatorResult: elapsed("speechEnded", "operatorResult"),
   };
 }
 
@@ -142,14 +172,16 @@ export function validatePcmWav(bytes) {
 }
 
 /** Consume appended provider receipts only. Private payloads remain in the owner's log. */
-export async function watchCallReceipts(path, threadId, onEvent) {
-  let offset = await NodeFSP.stat(path).then(
-    (stat) => stat.size,
-    (error) => {
-      if (error.code === "ENOENT") return 0;
-      throw error;
-    },
-  );
+export async function watchCallReceipts(path, threadId, onEvent, fromStart = false) {
+  let offset = fromStart
+    ? 0
+    : await NodeFSP.stat(path).then(
+        (stat) => stat.size,
+        (error) => {
+          if (error.code === "ENOENT") return 0;
+          throw error;
+        },
+      );
   let partial = "";
   let tail = Promise.resolve();
   let closed = false;
@@ -188,8 +220,8 @@ export async function watchCallReceipts(path, threadId, onEvent) {
         const match = line.match(/^\[[^\]]+\] CANON: (.+)$/);
         if (!match) continue;
         const event = JSON.parse(match[1]);
-        if (event.threadId !== threadId) continue;
-        onEvent(event);
+        if (threadId !== null && event.threadId !== threadId) continue;
+        await onEvent(event);
         if (event.type === "turn.completed") resolveCompletion(event);
       }
     } finally {
@@ -201,6 +233,7 @@ export async function watchCallReceipts(path, threadId, onEvent) {
     tail = tail.then(read).catch(rejectCompletion);
   });
   watcher.on("error", rejectCompletion);
+  tail = tail.then(read).catch(rejectCompletion);
   return {
     completion,
     drain: () => {
@@ -210,6 +243,67 @@ export async function watchCallReceipts(path, threadId, onEvent) {
     close: () => {
       closed = true;
       watcher.close();
+    },
+  };
+}
+
+/** Follow provider receipts for both linked sessions, validating their durable parent link. */
+export async function watchLinkedCallReceipts(home, parentThreadId, onEvent) {
+  const directory = NodePath.join(home, "userdata/logs/provider");
+  await NodeFSP.mkdir(directory, { recursive: true });
+  const existing = new Set(await NodeFSP.readdir(directory));
+  const readers = new Map();
+  const opening = new Map();
+  let stopped = false;
+  let resolveCompletion;
+  let rejectCompletion;
+  const completion = new Promise((resolve, reject) => {
+    resolveCompletion = resolve;
+    rejectCompletion = reject;
+  });
+  void completion.catch(() => {});
+  const open = (name) => {
+    if (stopped || readers.has(name) || !/^events\..+\.log$/.test(name)) return Promise.resolve();
+    if (opening.has(name)) return opening.get(name);
+    const work = watchCallReceipts(
+      NodePath.join(directory, name),
+      null,
+      async (event) => {
+        if (!event.threadId?.startsWith("t3-call-")) return;
+        const hash = NodeCrypto.createHash("sha256").update(event.threadId).digest("hex");
+        const link = await NodeFSP.readFile(
+          NodePath.join(home, "userdata/voice/calls/_operatorLinks", `${hash}.link.json`),
+          "utf8",
+        ).then(JSON.parse);
+        if (link.threadId !== parentThreadId || link.sessionId !== event.threadId) return;
+        await onEvent(event, link.role);
+        if (link.role === "operator" && event.type === "turn.completed") resolveCompletion(event);
+      },
+      !existing.has(name),
+    )
+      .then((reader) => {
+        readers.set(name, reader);
+        if (stopped) reader.close();
+      })
+      .catch(rejectCompletion);
+    opening.set(name, work);
+    return work;
+  };
+  const watcher = NodeFS.watch(directory, (_event, name) => {
+    void open(String(name));
+  });
+  watcher.on("error", rejectCompletion);
+  await Promise.all([...existing].map(open));
+  return {
+    completion,
+    drain: async () => {
+      await Promise.all(opening.values());
+      await Promise.all([...readers.values()].map((reader) => reader.drain()));
+    },
+    close: () => {
+      stopped = true;
+      watcher.close();
+      for (const reader of readers.values()) reader.close();
     },
   };
 }

@@ -23,6 +23,7 @@ import {
   type ProviderInteractionMode,
 } from "@t3tools/contracts";
 import { callIdentifier, type CallStore, type CallRecord, sha256 } from "./callStore.ts";
+import type { CallOperator } from "./callOperator.ts";
 
 export interface CallPorts {
   verify(
@@ -36,6 +37,7 @@ export interface CallPorts {
   ): AsyncIterable<SpeechResponse>;
   tenants: readonly [string, string];
   ttsModel: string;
+  verifyVoice?(selection: CallOptions["modelSelection"]): Promise<void>;
 }
 
 /** Require an exact configured model and effort. No alias or default fallback. */
@@ -97,9 +99,11 @@ const lease = (record: CallRecord) => {
 export class CallService {
   readonly store: CallStore;
   private ports: CallPorts;
-  constructor(store: CallStore, ports: CallPorts) {
+  private operator: CallOperator | undefined;
+  constructor(store: CallStore, ports: CallPorts, operator?: CallOperator) {
     this.store = store;
     this.ports = ports;
+    this.operator = operator;
   }
 
   async status(callId: string): Promise<CallStatus> {
@@ -116,6 +120,9 @@ export class CallService {
         (record.recentUtterances ?? []).map((id) => this.store.utterance(callId, id)),
       ),
       played: record.recentPlayed ?? [],
+      ...(this.operator
+        ? { operatorUpdates: (await this.operator.read(record.threadId))?.updates ?? [] }
+        : {}),
     };
   }
   async handle(input: CallRequest, signal: AbortSignal): Promise<SpeechResponse> {
@@ -123,6 +130,40 @@ export class CallService {
       if (id !== undefined) callIdentifier(id);
     decodeCallRequest(input);
     callIdentifier(input.callId);
+    if (input.action === "call.configure") {
+      if (!this.operator || !input.options)
+        throw new Error("Call model configuration is unavailable.");
+      const existing = await this.operator.read(input.options.threadId);
+      const defaults = await this.operator.defaults();
+      if (!input.options.operatorSelection)
+        return {
+          ...((existing?.models ?? defaults) ? { models: existing?.models ?? defaults! } : {}),
+          operatorUpdates: existing?.updates ?? [],
+        };
+      const models = {
+        voice: input.options.modelSelection,
+        operator: input.options.operatorSelection,
+      };
+      await this.ports.verifyVoice?.(models.voice);
+      await this.ports.verify({ threadId: input.options.threadId, modelSelection: models.voice });
+      await this.ports.verify({
+        threadId: input.options.threadId,
+        modelSelection: models.operator,
+      });
+      return {
+        models: await this.operator.configure(input.options.threadId, models, input.saveDefault),
+      };
+    }
+    if (input.action === "call.announce" || input.action === "call.heard") {
+      const record = await this.store.require(input.callId);
+      if (!this.operator) throw new Error("Call operator is unavailable.");
+      if (input.action === "call.announce") {
+        active(record);
+        const announced = await this.operator.announce(record.threadId, record.callId);
+        return { call: await this.status(input.callId), announced };
+      } else await this.operator.heard(record.threadId, input.updateIds ?? []);
+      return { call: await this.status(input.callId) };
+    }
     if (input.action === "call.watch") {
       await this.store.wait(input.callId, input.version, signal);
       return { call: await this.status(input.callId) };
@@ -130,7 +171,7 @@ export class CallService {
     // Engine work owns an operation lock, never the call's short state lock.
     if (input.action === "call.prepare") {
       await this.store.serial(`prepare:${input.callId}`, () =>
-        this.prepare(input.callId, signal, input.modelSelection),
+        this.prepare(input.callId, signal, input.modelSelection, input.operatorSelection),
       );
       return { call: await this.status(input.callId) };
     }
@@ -222,6 +263,17 @@ export class CallService {
       return { call: await this.status(input.callId) };
     }
     await this.ports.verify(input.options);
+    if (this.operator && input.options.operatorSelection) {
+      await this.ports.verifyVoice?.(input.options.modelSelection);
+      await this.ports.verify({
+        threadId: input.options.threadId,
+        modelSelection: input.options.operatorSelection,
+      });
+      await this.operator.configure(input.options.threadId, {
+        voice: input.options.modelSelection,
+        operator: input.options.operatorSelection,
+      });
+    }
     const record: CallRecord = {
       ...input.options,
       callId: input.callId,
@@ -232,16 +284,24 @@ export class CallService {
     };
     await this.store.write("_threads", bindingName, { callId: input.callId });
     await this.store.changed(record);
+    await this.operator?.reopen(record.threadId, record.callId);
     return { call: await this.status(input.callId) };
   }
   private async prepare(
     callId: string,
     signal: AbortSignal,
     modelSelection?: CallOptions["modelSelection"],
+    operatorSelection?: CallOptions["modelSelection"],
   ) {
     const record = await this.store.require(callId);
     active(record);
     await this.ports.verify({ ...record, modelSelection: modelSelection ?? record.modelSelection });
+    if (this.operator && operatorSelection) {
+      const voice = modelSelection ?? record.modelSelection;
+      await this.ports.verifyVoice?.(voice);
+      await this.ports.verify({ ...record, modelSelection: operatorSelection });
+      await this.operator.configure(record.threadId, { voice, operator: operatorSelection });
+    }
     if (record.lease && (record.leaseUntil ?? 0) > time()) {
       await this.renewLease(callId, signal);
       return;
@@ -353,7 +413,8 @@ export class CallService {
         identity.sampleRate !== rate ||
         identity.startedAt !== input.startedAt ||
         identity.endedAt !== input.endedAt ||
-        JSON.stringify(identity.modelSelection) !== JSON.stringify(input.modelSelection)
+        JSON.stringify(identity.modelSelection) !== JSON.stringify(input.modelSelection) ||
+        JSON.stringify(identity.operatorSelection) !== JSON.stringify(input.operatorSelection)
       )
         throw new Error("Utterance ID already belongs to different audio or metadata.");
     }
@@ -380,6 +441,7 @@ export class CallService {
       endedAt: input.endedAt!,
       savedAt: now(),
       ...(input.modelSelection ? { modelSelection: input.modelSelection } : {}),
+      ...(input.operatorSelection ? { operatorSelection: input.operatorSelection } : {}),
     };
     try {
       const orphan = await NodeFSP.readFile(
@@ -440,6 +502,18 @@ export class CallService {
       if (!command) {
         const selection = utterance.modelSelection ?? record.modelSelection;
         const context = await this.ports.verify({ ...record, modelSelection: selection });
+        const operatorSelection =
+          utterance.operatorSelection ??
+          record.operatorSelection ??
+          (await this.operator?.read(record.threadId))?.models.operator;
+        if (this.operator && operatorSelection) {
+          await this.ports.verifyVoice?.(selection);
+          await this.ports.verify({ ...record, modelSelection: operatorSelection });
+          await this.operator.configure(record.threadId, {
+            voice: selection,
+            operator: operatorSelection,
+          });
+        }
         active(await this.store.require(record.callId));
         command = {
           type: "thread.turn.start",

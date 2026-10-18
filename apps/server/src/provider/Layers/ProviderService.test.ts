@@ -109,7 +109,10 @@ type LegacyProviderRuntimeEvent = {
   readonly [key: string]: unknown;
 };
 
-function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
+function makeFakeCodexAdapter(
+  provider: ProviderDriverKind = CODEX_DRIVER,
+  toolFreeConversation = false,
+) {
   const sessions = new Map<ThreadId, ProviderSession>();
   const runtimeEventPubSub = Effect.runSync(PubSub.unbounded<ProviderRuntimeEvent>());
 
@@ -231,6 +234,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
   const adapter: ProviderAdapterShape<ProviderAdapterError> = {
     provider,
     capabilities: {
+      ...(toolFreeConversation ? { toolFreeConversation: true } : {}),
       sessionModelSwitch: "in-session",
     },
     startSession,
@@ -300,7 +304,7 @@ const hasMetricSnapshot = (
 
 function makeProviderServiceLayer() {
   const codex = makeFakeCodexAdapter();
-  const claude = makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER);
+  const claude = makeFakeCodexAdapter(CLAUDE_AGENT_DRIVER, true);
   const cursor = makeFakeCodexAdapter(CURSOR_DRIVER);
   const registry = makeAdapterRegistryMock({
     [ProviderDriverKind.make("codex")]: codex.adapter,
@@ -1010,7 +1014,42 @@ it.effect(
     }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+const voiceRecovery = makeProviderServiceLayer();
+voiceRecovery.layer("ProviderServiceLive voice recovery", (it) => {
+  it.effect("preserves tool-free voice mode when the harness resumes a stopped session", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("tool-free-resume");
+      yield* provider.startSession(threadId, {
+        threadId,
+        providerInstanceId: claudeAgentInstanceId,
+        runtimeMode: "full-access",
+        toolMode: "none",
+      });
+      yield* provider.sendTurn({ threadId, input: "First conversation" });
+      yield* provider.stopSession({ threadId });
+      yield* provider.sendTurn({ threadId, input: "Next conversation" });
+      assert.equal(voiceRecovery.claude.startSession.mock.lastCall?.[0].toolMode, "none");
+    }),
+  );
+});
 routing.layer("ProviderServiceLive routing", (it) => {
+  it.effect("rejects tool-free voice sessions when the adapter cannot remove tools", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("unsupported-tool-free-voice");
+      const failure = yield* Effect.flip(
+        provider.startSession(threadId, {
+          threadId,
+          providerInstanceId: codexInstanceId,
+          runtimeMode: "full-access",
+          toolMode: "none",
+        }),
+      );
+      assert.instanceOf(failure, ProviderValidationError);
+      assert.include(failure.issue, "tool-free voice session");
+    }),
+  );
   it.effect("routes provider operations and rollback conversation", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;

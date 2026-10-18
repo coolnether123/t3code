@@ -7,6 +7,8 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { CallOptions, CallUtterance, ThreadTurnStartCommand } from "@t3tools/contracts";
+import { CallModels } from "@t3tools/contracts";
+import { OperatorChat, OperatorLink } from "./operatorProtocol.ts";
 
 const callRecord = Schema.Struct({
   ...CallOptions.fields,
@@ -31,22 +33,27 @@ const playedRecord = Schema.Struct({ id: Schema.String, at: Schema.String });
 const bindingRecord = Schema.Struct({ callId: Schema.String });
 
 function validateRecord(name: string, value: unknown) {
-  const schema =
-    name === "call.json"
-      ? callRecord
-      : name.endsWith(".raw.json") || name.endsWith(".upload.json")
-        ? CallUtterance
-        : name.endsWith(".transcript.json")
-          ? transcriptRecord
-          : name.endsWith(".delivery.json")
-            ? deliveryRecord
-            : name.endsWith(".dispatch.json")
-              ? ThreadTurnStartCommand
-              : name.endsWith(".speech.json")
-                ? speechRecord
-                : name.endsWith(".played.json")
-                  ? playedRecord
-                  : bindingRecord;
+  const schema = name.endsWith(".operator.json")
+    ? OperatorChat
+    : name.endsWith(".link.json")
+      ? OperatorLink
+      : name === "default.models.json"
+        ? CallModels
+        : name === "call.json"
+          ? callRecord
+          : name.endsWith(".raw.json") || name.endsWith(".upload.json")
+            ? CallUtterance
+            : name.endsWith(".transcript.json")
+              ? transcriptRecord
+              : name.endsWith(".delivery.json")
+                ? deliveryRecord
+                : name.endsWith(".dispatch.json")
+                  ? ThreadTurnStartCommand
+                  : name.endsWith(".speech.json")
+                    ? speechRecord
+                    : name.endsWith(".played.json")
+                      ? playedRecord
+                      : bindingRecord;
   if (!Schema.is(schema)(value))
     throw new Error(`Invalid saved call record: ${name}. Retain the archive for recovery.`);
   if (schema === CallUtterance) {

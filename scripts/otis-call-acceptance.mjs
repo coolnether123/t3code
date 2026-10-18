@@ -10,7 +10,9 @@ import { toSafeThreadAttachmentSegment } from "../apps/server/src/attachmentStor
 import {
   validatePcmWav,
   watchCallReceipts,
+  watchLinkedCallReceipts,
   completedOtisTool,
+  hasOperatorResult,
   callTimings,
   verifyCallRaw,
   sentenceSpeechId,
@@ -33,6 +35,10 @@ const { values } = NodeUtil.parseArgs({
         "model",
         "effort",
         "expect-tool",
+        "operator-instance",
+        "operator-model",
+        "operator-effort",
+        "operator-effort-option",
         "timeout-ms",
         "width",
         "disconnect-at",
@@ -48,7 +54,7 @@ const { values } = NodeUtil.parseArgs({
 });
 if (values.help) {
   console.log(
-    "Use a fresh approval-required isolated chat. Select the model and effort in T3, then pass --base-dir --origin --thread-url --thread-id --instance --wav --browser --expect-tool. Optional: --model --effort --width 375|390 --timeout-ms (default 900000) --disconnect-at upload|delivery|speech --reload-after-save --hang-up-after-delivery --output. Progress goes to stderr. See docs/otis-call/handoff-phase1.md for tool approvals.",
+    "Use a fresh approval-required isolated chat. Pass --base-dir --origin --thread-url --thread-id --instance --model --effort --wav --browser --expect-tool. For the split add --operator-instance --operator-model --operator-effort --operator-effort-option using the live catalog. Optional: --width 375|390 --timeout-ms --disconnect-at upload|delivery|speech --reload-after-save --hang-up-after-delivery --output. Progress goes to stderr. See docs/otis-call/handoff-phase2.md.",
   );
   process.exit(0);
 }
@@ -132,6 +138,8 @@ const progress = (name) => {
 progress("pair");
 const baseline = JSON.parse(cli("agent", "snapshot", "--thread", values["thread-id"]));
 const expectedSelection = { instanceId: values.instance, model, effort };
+const split = !!values["operator-instance"];
+NodeAssert.ok(!split || values["operator-model"], "Split acceptance needs --operator-model.");
 assertCallSelection(baseline.thread?.modelSelection, expectedSelection);
 NodeAssert.ok(
   baseline.thread && baseline.thread.latestTurn == null,
@@ -173,6 +181,16 @@ const report = {
   actualModel: null,
   sdkConfiguredEffort: null,
   providerAttestedEffort: null,
+  operator: {
+    requestedModel: values["operator-model"] ?? null,
+    requestedEffort: values["operator-effort"] ?? null,
+    actualModel: null,
+    sdkConfiguredEffort: null,
+    providerAttestedEffort: null,
+    turnCompleted: false,
+    typedResult: false,
+    heard: false,
+  },
   otisToolCompleted: false,
   turnCompleted: false,
   closedAcknowledged: false,
@@ -200,6 +218,10 @@ let delivered;
 let rawCheck;
 let resolveUploaded;
 let resolveDelivered;
+let resolveOperatorHeard;
+const operatorHeard = new Promise((resolve) => {
+  resolveOperatorHeard = resolve;
+});
 const uploadedReceipt = new Promise((resolve) => {
   resolveUploaded = resolve;
 });
@@ -247,8 +269,28 @@ await page.exposeFunction("__otisCallSpeech", (event, at) => {
 const segment = toSafeThreadAttachmentSegment(values["thread-id"]);
 NodeAssert.ok(segment, "Invalid disposable thread ID.");
 const log = NodePath.join(home, "userdata/logs/provider", `events.${segment}.log`);
-const receipts = await watchCallReceipts(log, values["thread-id"], (event) => {
+const consumeReceipt = (event, role = "voice") => {
   const payload = event.payload ?? {};
+  if (role === "operator") {
+    if (event.type === "session.configured") {
+      const config = payload.config ?? {};
+      report.operator.sdkConfiguredEffort =
+        config.reasoningEffort ?? config.effort ?? report.operator.sdkConfiguredEffort;
+      report.operator.actualModel = config.model ?? report.operator.actualModel;
+    }
+    if (completedOtisTool(event, values["expect-tool"])) {
+      report.otisToolCompleted = true;
+      mark("otisToolCompleted", Date.parse(event.createdAt));
+    }
+    if (hasOperatorResult(event)) report.operator.typedResult = true;
+    if (event.type === "turn.completed") {
+      report.operator.turnCompleted = payload.state === "completed";
+      mark("operatorCompleted", Date.parse(event.createdAt));
+      if (report.operator.turnCompleted && report.operator.typedResult)
+        mark("operatorResult", Date.parse(event.createdAt));
+    }
+    return;
+  }
   if (event.type === "session.configured") {
     const config = payload.config ?? {};
     if (typeof config.effort === "string") report.sdkConfiguredEffort = config.effort;
@@ -270,7 +312,12 @@ const receipts = await watchCallReceipts(log, values["thread-id"], (event) => {
     if (actual) report.actualModel = actual;
     mark("turnCompleted", Date.parse(event.createdAt));
   }
-}).catch(async (error) => {
+};
+const receipts = await (
+  split
+    ? watchLinkedCallReceipts(home, values["thread-id"], consumeReceipt)
+    : watchCallReceipts(log, values["thread-id"], consumeReceipt)
+).catch(async (error) => {
   await browser.close();
   throw error;
 });
@@ -289,6 +336,17 @@ page.on("response", (response) => {
     }
     if (input.action === "call.played" && response.ok())
       sentenceRecord(input.speechId).playedAt = Date.now();
+    if (input.action === "call.heard" && response.ok()) {
+      const result = await response.json();
+      if (
+        result.call?.operatorUpdates?.some((update) => update.status === "done" && update.heardAt)
+      ) {
+        report.operator.heard = true;
+        mark("operatorHeard");
+        resolveOperatorHeard();
+      }
+      return;
+    }
     if (!response.ok()) {
       report.failedVoiceRequests.push({ action: input.action, status: response.status() });
       return;
@@ -449,6 +507,48 @@ try {
   await page.waitForURL((url) => url.pathname !== "/pair");
   progress("thread open");
   await page.goto(threadUrl.href);
+  if (split) {
+    const configured = await page.evaluate(
+      async ({ threadId, voice, operator }) => {
+        const response = await fetch("/api/voice", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({
+            action: "call.configure",
+            callId: "settings",
+            options: { threadId, modelSelection: voice, operatorSelection: operator },
+          }),
+        });
+        if (!response.ok)
+          throw new Error(
+            "Call model configuration failed. Check both live catalogs and tool-free voice support.",
+          );
+        return response.json();
+      },
+      {
+        threadId: values["thread-id"],
+        voice: baseline.thread.modelSelection,
+        operator: {
+          instanceId: values["operator-instance"],
+          model: values["operator-model"],
+          ...(values["operator-effort"] && values["operator-effort"] !== "default"
+            ? {
+                options: [
+                  {
+                    id: values["operator-effort-option"] ?? "reasoningEffort",
+                    value: values["operator-effort"],
+                  },
+                ],
+              }
+            : {}),
+        },
+      },
+    );
+    NodeAssert.equal(configured.models?.operator?.model, values["operator-model"]);
+    // Reload so the real controls read the persisted per-chat selection.
+    await page.reload();
+  }
   await page.getByRole("button", { name: "Choose model", exact: true }).waitFor();
   await page.getByRole("button", { name: "Call Otis", exact: true }).waitFor();
   await instrument();
@@ -485,6 +585,7 @@ try {
       ),
     ]);
   if (!values["hang-up-after-delivery"]) {
+    if (split) await Promise.race([operatorHeard, attentionFailure, expired]);
     await page.screenshot({
       path: NodePath.join(output, "phone-call-speaking.png"),
       fullPage: true,
@@ -518,7 +619,7 @@ try {
   NodeAssert.ok(report.rawVerified, "PC raw verification failed.");
   const snapshot = await page.evaluate(async (threadId) => {
     const response = await fetch(
-      `/api/orchestration/threads/${encodeURIComponent(threadId)}?turnLimit=1`,
+      `/api/orchestration/threads/${encodeURIComponent(threadId)}?turnLimit=20`,
       { credentials: "include" },
     );
     if (!response.ok) throw new Error("Readback failed");
@@ -526,6 +627,11 @@ try {
   }, values["thread-id"]);
   report.exactlyOneChatMessage =
     snapshot.thread.messages.filter((message) => message.id === delivered.messageId).length === 1;
+  if (split)
+    NodeAssert.ok(
+      report.operator.turnCompleted && report.operator.typedResult,
+      "Missing successful operator turn or typed result.",
+    );
   NodeAssert.ok(
     report.exactlyOneChatMessage &&
       report.otisToolCompleted &&
@@ -547,7 +653,8 @@ try {
   );
   NodeAssert.ok(!disconnectAt || report.responseDropped, "Disconnect was not injected.");
   report.chatCompletedAfterHangUp =
-    !!values["hang-up-after-delivery"] && report.stages.turnCompleted > report.stages.closed;
+    !!values["hang-up-after-delivery"] &&
+    (split ? report.stages.operatorCompleted : report.stages.turnCompleted) > report.stages.closed;
   if (values["hang-up-after-delivery"])
     NodeAssert.ok(
       report.chatCompletedAfterHangUp,

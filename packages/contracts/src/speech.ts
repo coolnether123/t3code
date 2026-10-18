@@ -16,9 +16,37 @@ export const SpeechTransportRequest = Schema.Struct({
 export type SpeechTransportRequest = typeof SpeechTransportRequest.Type;
 
 const CallId = Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9_-]{1,100}$/));
+export const CallModels = Schema.Struct({
+  voice: ModelSelection,
+  operator: ModelSelection,
+});
+export type CallModels = typeof CallModels.Type;
+export const OperatorStatus = Schema.Literals([
+  "started",
+  "waiting",
+  "progress",
+  "done",
+  "needs-Jared",
+]);
+export const OperatorUpdate = Schema.Struct({
+  id: Schema.String,
+  jobId: Schema.String,
+  status: OperatorStatus,
+  text: Schema.String,
+  createdAt: Schema.String,
+  heardAt: Schema.optional(Schema.String),
+  announcementId: Schema.optional(Schema.String),
+  announcementTurnId: Schema.optional(Schema.String),
+});
+export type OperatorUpdate = typeof OperatorUpdate.Type;
+export const VoiceDelegation = Schema.Struct({
+  intent: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(8000)),
+});
+export type VoiceDelegation = typeof VoiceDelegation.Type;
 export const CallOptions = Schema.Struct({
   threadId: Schema.String,
   modelSelection: ModelSelection,
+  operatorSelection: Schema.optional(ModelSelection),
 });
 export type CallOptions = typeof CallOptions.Type;
 export const CallRequest = Schema.Struct({
@@ -36,10 +64,16 @@ export const CallRequest = Schema.Struct({
     "call.played",
     "call.interrupt",
     "call.close",
+    "call.configure",
+    "call.announce",
+    "call.heard",
   ]),
   callId: CallId,
   options: Schema.optional(CallOptions),
   modelSelection: Schema.optional(ModelSelection),
+  operatorSelection: Schema.optional(ModelSelection),
+  saveDefault: Schema.optional(Schema.Boolean),
+  updateIds: Schema.optional(Schema.Array(Schema.String)),
   utteranceId: Schema.optional(CallId),
   audio: Schema.optional(Schema.String),
   sampleRate: Schema.optional(Schema.Number),
@@ -54,6 +88,7 @@ export const ValidCallRequest = CallRequest.check(
   Schema.makeFilter((input) => {
     switch (input.action) {
       case "call.open":
+      case "call.configure":
         return !!input.options || "Call options are required.";
       case "call.upload":
         return (
@@ -93,6 +128,7 @@ export const CallUtterance = Schema.Struct({
   deliveredAt: Schema.optional(Schema.String),
   messageId: Schema.optional(Schema.String),
   modelSelection: Schema.optional(ModelSelection),
+  operatorSelection: Schema.optional(ModelSelection),
 });
 export type CallUtterance = typeof CallUtterance.Type;
 export const CallStatus = Schema.Struct({
@@ -105,6 +141,7 @@ export const CallStatus = Schema.Struct({
   steps: Schema.Array(Schema.String),
   utterances: Schema.Array(CallUtterance),
   played: Schema.Array(Schema.String),
+  operatorUpdates: Schema.optional(Schema.Array(OperatorUpdate)),
 });
 export type CallStatus = typeof CallStatus.Type;
 
@@ -120,5 +157,8 @@ export const SpeechResponse = Schema.Struct({
   tenants: Schema.optional(Schema.Array(Schema.String)),
   call: Schema.optional(CallStatus),
   utterance: Schema.optional(CallUtterance),
+  models: Schema.optional(CallModels),
+  announced: Schema.optional(Schema.Boolean),
+  operatorUpdates: Schema.optional(Schema.Array(OperatorUpdate)),
 });
 export type SpeechResponse = typeof SpeechResponse.Type;

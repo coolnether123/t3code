@@ -53,6 +53,7 @@ function fixture(initial?: SavedCall) {
     ready: vi.fn(async () => {}),
     close: vi.fn(),
     finish: vi.fn(() => currentRecording.resolve({ audio: "AAA=", sampleRate: 16000 })),
+    finishAtPause: vi.fn(),
     capture: vi.fn<VoiceDependencies["audio"]["capture"]>(() => {
       if (captureCount++) currentRecording = deferred();
       return currentRecording.promise;
@@ -98,6 +99,82 @@ afterEach(async () => {
 });
 
 describe("durable thread voice session", () => {
+  it("holds an operator result during speech and marks it heard only after the voice reply plays", async () => {
+    const f = fixture();
+    const watch = deferred<SpeechResponse>();
+    const pause = deferred<void>();
+    const announced = deferred<void>();
+    const played = deferred<void>();
+    const heard = deferred<void>();
+    f.audio.finishAtPause.mockImplementation(() => {
+      pause.resolve();
+    });
+    const original = f.request.getMockImplementation()!;
+    let watching = false;
+    const update = {
+      id: "result",
+      jobId: "job",
+      status: "done" as const,
+      text: "Build passed.",
+      createdAt: "2026-10-18T00:00:00Z",
+    };
+    const status = () => ({
+      callId: f.saved()!.callId,
+      threadId: options.threadId,
+      version: "v2",
+      ready: true,
+      closed: false,
+      modelSelection: options.modelSelection,
+      steps: [],
+      utterances: [],
+      played: [],
+      operatorUpdates: [update],
+    });
+    f.request.mockImplementation(async (input, signal, onAudio) => {
+      if (input.action === "call.watch" && !watching) {
+        watching = true;
+        return watch.promise;
+      }
+      if (input.action === "call.announce") {
+        announced.resolve();
+        return {
+          announced: true,
+          call: {
+            ...status(),
+            operatorUpdates: [
+              { ...update, announcementId: "voice-update", announcementTurnId: "update-turn" },
+            ],
+          },
+        };
+      }
+      if (input.action === "call.played") played.resolve();
+      if (input.action === "call.heard") heard.resolve();
+      return original(input, signal, onAudio);
+    });
+    await f.session.start(options, []);
+    watch.resolve({ call: status() });
+    await pause.promise;
+    expect(f.request.mock.calls.some(([input]) => input.action === "call.announce")).toBe(false);
+    expect(f.audio.play).not.toHaveBeenCalled();
+    f.recording.resolve({ audio: "", sampleRate: 16000 });
+    await announced.promise;
+    const reply = {
+      id: "update-reply",
+      role: "assistant",
+      text: "The build passed.",
+      streaming: false,
+      turnId: "update-turn",
+    };
+    f.session.observe([reply], true, "update-turn");
+    await played.promise;
+    expect(f.request.mock.calls.some(([input]) => input.action === "call.heard")).toBe(false);
+    f.session.observe([reply], false, "update-turn");
+    await heard.promise;
+    expect(f.request).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "call.heard", updateIds: ["result"] }),
+      expect.any(AbortSignal),
+    );
+  });
   it("plays streamed PCM before synthesis ends and drops queued sentences on interrupt", async () => {
     const f = fixture();
     await f.session.start(options, []);
@@ -188,6 +265,8 @@ describe("durable thread voice session", () => {
       turnId: "turn",
     };
     f.session.observe([reply], true, "turn");
+    expect(f.audio.play).not.toHaveBeenCalled();
+    f.session.finish();
     await playing.promise;
     expect(f.saved()?.recordings).toHaveLength(1);
     f.session.observe([reply], false, "turn");
@@ -199,7 +278,7 @@ describe("durable thread voice session", () => {
     expect(f.audio.capture).toHaveBeenCalledOnce();
   });
   it.each([true, false])(
-    "speaks an incoming reply during microphone capture, streaming=%s",
+    "queues an incoming reply until the microphone reaches a pause, streaming=%s",
     async (streaming) => {
       const f = fixture();
       const played = deferred<void>();
@@ -220,7 +299,10 @@ describe("durable thread voice session", () => {
         true,
         "turn",
       );
-      expect(f.audio.finish).toHaveBeenCalledOnce();
+      expect(f.audio.finishAtPause).toHaveBeenCalledOnce();
+      expect(f.audio.finish).not.toHaveBeenCalled();
+      expect(f.audio.play).not.toHaveBeenCalled();
+      f.session.finish();
       await played.promise;
       expect(f.request).toHaveBeenCalledWith(
         expect.objectContaining({ action: "call.upload" }),

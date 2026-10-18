@@ -459,6 +459,46 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect(
+    "removes tools, MCP and hooks from voice sessions and denies callbacks immediately",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+          toolMode: "none",
+        });
+        const options = harness.getLastCreateQueryInput()!.options;
+        assert.deepEqual(options.tools, []);
+        assert.deepEqual(options.mcpServers, {});
+        assert.equal(options.strictMcpConfig, true);
+        assert.deepEqual(options.settingSources, []);
+        assert.equal(
+          typeof options.settings === "object" && options.settings.disableAllHooks,
+          true,
+        );
+        const result = yield* Effect.promise(() =>
+          options.canUseTool!(
+            "Bash",
+            { command: "never execute" },
+            {
+              signal: new AbortController().signal,
+              toolUseID: "voice-tool",
+              requestId: "voice-request",
+            },
+          ),
+        );
+        assert.equal(result?.behavior, "deny");
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
+
   it.effect("loads Claude filesystem settings sources for SDK sessions", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

@@ -164,6 +164,7 @@ function toRuntimeStatus(session: ProviderSession): "starting" | "running" | "st
 function toRuntimePayloadFromSession(
   session: ProviderSession,
   extra?: {
+    readonly toolMode?: "none";
     readonly modelSelection?: unknown;
     readonly lastRuntimeEvent?: string;
     readonly lastRuntimeEventAt?: string;
@@ -175,6 +176,7 @@ function toRuntimePayloadFromSession(
     activeTurnId: session.activeTurnId ?? null,
     lastError: session.lastError ?? null,
     ...(extra?.modelSelection !== undefined ? { modelSelection: extra.modelSelection } : {}),
+    ...(extra?.toolMode ? { toolMode: extra.toolMode } : {}),
     ...(extra?.lastRuntimeEvent !== undefined ? { lastRuntimeEvent: extra.lastRuntimeEvent } : {}),
     ...(extra?.lastRuntimeEventAt !== undefined
       ? { lastRuntimeEventAt: extra.lastRuntimeEventAt }
@@ -426,6 +428,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     session: ProviderSession,
     threadId: ThreadId,
     extra?: {
+      readonly toolMode?: "none";
       readonly modelSelection?: unknown;
       readonly lastRuntimeEvent?: string;
       readonly lastRuntimeEventAt?: string;
@@ -593,6 +596,19 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
       const persistedCwd = readPersistedCwd(input.binding.runtimePayload);
       const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
+      const payload = input.binding.runtimePayload;
+      const toolMode =
+        payload &&
+        typeof payload === "object" &&
+        "toolMode" in payload &&
+        payload.toolMode === "none"
+          ? ("none" as const)
+          : undefined;
+      if (toolMode && !adapter.capabilities.toolFreeConversation)
+        return yield* toValidationError(
+          input.operation,
+          "The saved voice session requires tool-free conversation support.",
+        );
 
       yield* prepareMcpSession(
         input.binding.threadId,
@@ -609,6 +625,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           providerInstanceId: bindingInstanceId,
           ...(persistedCwd ? { cwd: persistedCwd } : {}),
           ...(persistedModelSelection ? { modelSelection: persistedModelSelection } : {}),
+          ...(toolMode ? { toolMode } : {}),
           ...(hasResumeCursor ? { resumeCursor: input.binding.resumeCursor } : {}),
           runtimeMode: input.binding.runtimeMode ?? "full-access",
         })
@@ -770,6 +787,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             `Provider instance '${resolvedInstanceId}' is disabled in T3 Code settings.`,
           );
         }
+        if (input.toolMode === "none") {
+          const selectedAdapter = yield* registry.getByInstance(resolvedInstanceId);
+          if (!selectedAdapter.capabilities.toolFreeConversation)
+            return yield* toValidationError(
+              "ProviderService.startSession",
+              "This provider does not expose a tool-free voice session. Choose a provider with tool-free conversation support. Background execution supports all configured providers.",
+            );
+        }
         const persistedBinding = Option.getOrUndefined(yield* directory.getBinding(threadId));
         // An explicit null is the server-authoritative "start a fresh
         // conversation" sentinel. Undefined continues to mean "resume the
@@ -841,6 +866,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         });
         yield* upsertSessionBinding(sessionWithInstance, threadId, {
           modelSelection: input.modelSelection,
+          ...(input.toolMode ? { toolMode: input.toolMode } : {}),
         });
         yield* analytics.record("provider.session.started", {
           provider: sessionWithInstance.provider,

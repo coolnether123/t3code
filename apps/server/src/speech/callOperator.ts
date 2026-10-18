@@ -1,0 +1,554 @@
+import {
+  CommandId,
+  EventId,
+  MessageId,
+  ThreadId,
+  type CallModels,
+  type ModelSelection,
+  type OperatorUpdate,
+  type OrchestrationCommand,
+  type ProviderRuntimeEvent,
+  type ProviderSessionStartInput,
+  type ProviderSendTurnInput,
+} from "@t3tools/contracts";
+import { isToolLifecycleItemType } from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
+import { callStore, sha256, type CallStore } from "./callStore.ts";
+import {
+  type OperatorChat,
+  type OperatorJob,
+  type OperatorLink,
+  operatorPrompt,
+  operatorUpdates,
+  voiceDelegation,
+  VOICE_ROLE_PROMPT,
+} from "./operatorProtocol.ts";
+
+const now = () => DateTime.formatIso(Effect.runSync(DateTime.now));
+export const isCallLinkedSession = (id: string) => id.startsWith("t3-call-");
+export interface OperatorPorts {
+  context(threadId: string): Promise<{
+    cwd: string;
+    runtimeMode: ProviderSessionStartInput["runtimeMode"];
+    interactionMode: "default" | "plan";
+    conversation?: string;
+    running?: boolean;
+  }>;
+  start(input: ProviderSessionStartInput): Promise<unknown>;
+  send(input: ProviderSendTurnInput): Promise<unknown>;
+  sessions(): Promise<readonly { threadId: string }[]>;
+  dispatch(command: OrchestrationCommand): Promise<unknown>;
+}
+
+/** Links ordinary provider sessions to one visible chat. */
+export class CallOperator {
+  private ports: OperatorPorts | undefined;
+  private tasks = new Set<Promise<unknown>>();
+  private store: CallStore;
+  constructor(store: CallStore) {
+    this.store = store;
+  }
+  bind(ports: OperatorPorts) {
+    this.ports = ports;
+  }
+  private file(threadId: string) {
+    return `${sha256(threadId)}.operator.json`;
+  }
+  read(threadId: string) {
+    return this.store.read<OperatorChat>("_operators", this.file(threadId));
+  }
+  private save(chat: OperatorChat) {
+    return this.store.write("_operators", this.file(chat.threadId), chat);
+  }
+  async defaults() {
+    return this.store.read<CallModels>("_operators", "default.models.json");
+  }
+  async configure(threadId: string, models: CallModels, saveDefault = false) {
+    let revision: number | undefined;
+    await this.store.serial(`operator:${threadId}`, async () => {
+      const current = await this.read(threadId);
+      if (JSON.stringify(current?.models) !== JSON.stringify(models))
+        revision = (current?.modelRevision ?? 0) + 1;
+      await this.save(
+        current
+          ? { ...current, models, ...(revision ? { modelRevision: revision } : {}) }
+          : {
+              threadId,
+              models,
+              modelRevision: 1,
+              links: [],
+              jobs: [],
+              updates: [],
+              voices: [],
+              requests: {},
+            },
+      );
+      if (saveDefault) await this.store.write("_operators", "default.models.json", models);
+    });
+    if (revision && this.ports) {
+      const at = now();
+      const id = `call-models:${sha256(threadId)}:${revision}`;
+      await this.ports.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make(id),
+        threadId: ThreadId.make(threadId),
+        activity: {
+          id: EventId.make(id),
+          kind: "call.models.changed",
+          summary: `Voice: ${models.voice.model}. Background agent: ${models.operator.model}.`,
+          tone: "info",
+          payload: { models },
+          turnId: null,
+          createdAt: at,
+        },
+        createdAt: at,
+      });
+    }
+    return models;
+  }
+  private async change(
+    threadId: string,
+    work: (chat: MutableChat) => void | Promise<void>,
+    notify = true,
+  ) {
+    const chat = await this.store.serial(`operator:${threadId}`, async () => {
+      const chat = structuredClone(await this.read(threadId)) as MutableChat | undefined;
+      if (!chat) throw new Error("Configure both call models first.");
+      await work(chat);
+      await this.save(chat);
+      return chat;
+    });
+    if (notify) {
+      const call = await this.store.activeCall(threadId, "");
+      if (call)
+        await this.store.serial(call.callId, async () =>
+          this.store.changed(await this.store.require(call.callId)),
+        );
+    }
+    return chat;
+  }
+  private background(task: Promise<unknown>) {
+    this.tasks.add(task);
+    void task.finally(() => this.tasks.delete(task)).catch(() => {});
+  }
+  async drain() {
+    while (this.tasks.size) await Promise.all([...this.tasks]);
+  }
+  private requirePorts() {
+    if (!this.ports) throw new Error("Call sessions are not connected to the provider runtime.");
+    return this.ports;
+  }
+  async link(threadId: string, role: OperatorLink["role"], selection: ModelSelection) {
+    const sessionId = `t3-call-${role}-${sha256(JSON.stringify([threadId, selection])).slice(0, 48)}`;
+    const link: OperatorLink = { sessionId, threadId, role, selection };
+    await this.change(threadId, (chat) => {
+      if (!chat.links.some((entry) => entry.sessionId === sessionId)) chat.links.push(link);
+    });
+    await this.store.write("_operatorLinks", `${sha256(sessionId)}.link.json`, link);
+    return link;
+  }
+  async findLink(sessionId: string) {
+    return isCallLinkedSession(sessionId)
+      ? this.store.read<OperatorLink>("_operatorLinks", `${sha256(sessionId)}.link.json`)
+      : undefined;
+  }
+  private async ensure(link: OperatorLink) {
+    const ports = this.requirePorts();
+    if ((await ports.sessions()).some((session) => session.threadId === link.sessionId)) return;
+    const context = await ports.context(link.threadId);
+    await ports.start({
+      threadId: ThreadId.make(link.sessionId),
+      providerInstanceId: link.selection.instanceId,
+      modelSelection: link.selection,
+      cwd: context.cwd,
+      runtimeMode: context.runtimeMode,
+      ...(link.role === "voice" ? { toolMode: "none" as const } : {}),
+    });
+  }
+  async voice(input: {
+    threadId: string;
+    messageId: string;
+    text: string;
+    selection: ModelSelection;
+  }) {
+    const chat = await this.read(input.threadId);
+    if (!chat) return false;
+    if (chat.voices.some((voice) => voice.id === input.messageId)) return true;
+    const link = await this.link(input.threadId, "voice", input.selection);
+    await this.ensure(link);
+    const context = await this.requirePorts().context(input.threadId);
+    await this.change(input.threadId, (current) => {
+      current.voices.push({
+        id: input.messageId,
+        exactWords: input.text,
+        sessionId: link.sessionId,
+        operator: current.models.operator,
+        ...(context.conversation ? { context: context.conversation } : {}),
+        finished: false,
+      });
+    });
+    await this.requirePorts().send({
+      threadId: ThreadId.make(link.sessionId),
+      messageId: input.messageId,
+      modelSelection: link.selection,
+      input: `${VOICE_ROLE_PROMPT}\n\nRecent conversation:\n${context.conversation ?? ""}\n\nOperator receipts:\n${JSON.stringify(chat.updates.slice(-20).map(({ status, text }) => ({ status, text })))}\n\n${input.messageId.startsWith("voice-update:") ? "Operator update at this pause" : "Jared's message"}:\n${input.text}`,
+    });
+    return true;
+  }
+  async requestSession(threadId: string, requestId: string) {
+    return (await this.read(threadId))?.requests[requestId];
+  }
+  async voiceSession(threadId: string) {
+    return (await this.read(threadId))?.voices.findLast((voice) => !voice.finished)?.sessionId;
+  }
+  async update(
+    threadId: string,
+    jobId: string,
+    id: string,
+    status: OperatorUpdate["status"],
+    text: string,
+  ) {
+    const update: OperatorUpdate = { id, jobId, status, text, createdAt: now() };
+    await this.change(threadId, (chat) => {
+      if (!chat.updates.some((entry) => entry.id === id)) chat.updates.push(update);
+    });
+    await this.requirePorts().dispatch({
+      type: "thread.activity.append",
+      commandId: CommandId.make(`call-status:${id}`),
+      threadId: ThreadId.make(threadId),
+      activity: {
+        id: EventId.make(`call-status:${id}`),
+        kind: "call.operator.status",
+        summary: `Background agent: ${status}. ${text}`,
+        tone: status === "needs-Jared" ? "approval" : "info",
+        payload: { ...update, source: "operator" },
+        turnId: null,
+        createdAt: update.createdAt,
+      },
+      createdAt: update.createdAt,
+    });
+  }
+  async event(event: ProviderRuntimeEvent, assistantText?: string) {
+    const link = await this.findLink(event.threadId);
+    if (!link) return undefined;
+    const chat = await this.read(link.threadId);
+    if (!chat) throw new Error("Call session lost its owning chat.");
+    if (link.role === "voice") return this.voiceEvent(link, chat, event, assistantText);
+    return this.operatorEvent(link, chat, event);
+  }
+  private async voiceEvent(
+    link: OperatorLink,
+    chat: OperatorChat,
+    event: ProviderRuntimeEvent,
+    assistantText?: string,
+  ) {
+    if (event.type === "turn.started" && event.turnId) {
+      const voice = chat.voices.findLast(
+        (entry) => entry.sessionId === link.sessionId && !entry.finished,
+      );
+      if (voice && !voice.turnId)
+        await this.change(link.threadId, (current) => {
+          current.voices.find((entry) => entry.id === voice.id)!.turnId = event.turnId;
+          for (const update of current.updates)
+            if (update.announcementId === voice.id) update.announcementTurnId = event.turnId;
+        });
+    }
+    if (event.type === "turn.completed") {
+      const voice = chat.voices.find(
+        (entry) =>
+          entry.sessionId === link.sessionId && !entry.finished && entry.turnId === event.turnId,
+      );
+      if (voice) {
+        let intent: string | undefined;
+        try {
+          if (event.payload.state === "completed" && !voice.id.startsWith("voice-update:"))
+            intent = voiceDelegation(assistantText ?? "")?.intent;
+        } catch {
+          await this.update(
+            link.threadId,
+            voice.id,
+            `${voice.id}:invalid`,
+            "needs-Jared",
+            "The voice handoff was invalid. Please repeat the request.",
+          );
+        }
+        await this.change(link.threadId, (current) => {
+          const entry = current.voices.find((entry) => entry.id === voice.id)!;
+          entry.finished = true;
+          if (intent && !current.jobs.some((job) => job.id === voice.id))
+            current.jobs.push({
+              id: voice.id,
+              exactWords: voice.exactWords,
+              intent,
+              ...(voice.context ? { context: voice.context } : {}),
+              selection: voice.operator,
+              phase: "queued",
+            });
+        });
+        this.background(this.kick(link.threadId));
+      }
+    }
+    return link;
+  }
+  private async operatorEvent(link: OperatorLink, chat: OperatorChat, event: ProviderRuntimeEvent) {
+    const job = chat.jobs.find(
+      (entry) =>
+        entry.sessionId === link.sessionId &&
+        (entry.phase === "running" || entry.phase === "sending" || entry.phase === "uncertain") &&
+        (!entry.turnId || entry.turnId === event.turnId),
+    );
+    if (!job) return link;
+    if (event.type === "turn.started" && event.turnId && !job.turnId)
+      await this.change(link.threadId, (current) => {
+        current.jobs.find((entry) => entry.id === job.id)!.turnId = event.turnId;
+      });
+    if (event.type === "item.started" && isToolLifecycleItemType(event.payload.itemType))
+      await this.update(
+        link.threadId,
+        job.id,
+        `${event.eventId}:progress`,
+        "progress",
+        event.payload.title ?? "The background agent started a tool.",
+      );
+    if (
+      (event.type === "request.opened" || event.type === "user-input.requested") &&
+      event.requestId
+    ) {
+      await this.change(link.threadId, (current) => {
+        current.requests[event.requestId!] = link.sessionId;
+      });
+      await this.update(
+        link.threadId,
+        job.id,
+        `${event.eventId}:waiting`,
+        "needs-Jared",
+        "The background agent needs a response in this chat.",
+      );
+    }
+    if (
+      event.type === "item.completed" &&
+      event.payload.itemType === "assistant_message" &&
+      event.payload.detail
+    ) {
+      await this.operatorReply(link, job, event.eventId, event.payload.detail);
+    }
+    if (event.type === "turn.completed" || event.type === "runtime.error")
+      await this.finishOperator(link, job, event);
+    return link;
+  }
+  private async operatorReply(link: OperatorLink, job: OperatorJob, eventId: string, text: string) {
+    try {
+      for (const [index, update] of operatorUpdates(text).entries()) {
+        if (update.status === "done")
+          await this.change(link.threadId, (current) => {
+            current.jobs.find((entry) => entry.id === job.id)!.result = update.text;
+          });
+        else
+          await this.update(
+            link.threadId,
+            job.id,
+            `${eventId}:${index}`,
+            update.status,
+            update.text,
+          );
+      }
+    } catch {
+      await this.update(
+        link.threadId,
+        job.id,
+        `${eventId}:invalid`,
+        "needs-Jared",
+        "The background agent returned an invalid status. Its activity is available in the chat.",
+      );
+    }
+  }
+  private async finishOperator(
+    link: OperatorLink,
+    job: OperatorJob,
+    event: Extract<ProviderRuntimeEvent, { type: "turn.completed" | "runtime.error" }>,
+  ) {
+    const latest = await this.read(link.threadId);
+    const completedJob = latest?.jobs.find((entry) => entry.id === job.id);
+    const succeeded = event.type === "turn.completed" && event.payload.state === "completed";
+    if (succeeded && completedJob?.result)
+      await this.update(
+        link.threadId,
+        job.id,
+        `${event.eventId}:result`,
+        "done",
+        completedJob.result,
+      );
+    else if (
+      !succeeded ||
+      !latest?.updates.some((update) => update.jobId === job.id && update.status === "needs-Jared")
+    ) {
+      await this.update(
+        link.threadId,
+        job.id,
+        `${event.eventId}:result`,
+        "needs-Jared",
+        "The background turn ended without a verified result. Check its activity.",
+      );
+    }
+    await this.change(link.threadId, (current) => {
+      current.jobs.find((entry) => entry.id === job.id)!.phase = "done";
+    });
+    this.background(this.kick(link.threadId));
+  }
+  async kick(threadId: string) {
+    const chat = await this.read(threadId);
+    if (
+      !chat ||
+      chat.jobs.some(
+        (job) => job.phase === "running" || job.phase === "sending" || job.phase === "uncertain",
+      )
+    )
+      return;
+    const job = chat.jobs.find((job) => job.phase === "queued");
+    if (!job) return;
+    const link = await this.link(threadId, "operator", job.selection);
+    let claimed = false;
+    await this.change(threadId, (current) => {
+      if (current.jobs.some((entry) => ["running", "sending", "uncertain"].includes(entry.phase)))
+        return;
+      const entry = current.jobs.find((entry) => entry.id === job.id)!;
+      entry.phase = "sending";
+      entry.sessionId = link.sessionId;
+      claimed = true;
+    });
+    if (!claimed) return;
+    try {
+      await this.ensure(link);
+      await this.requirePorts().send({
+        threadId: ThreadId.make(link.sessionId),
+        messageId: job.id,
+        modelSelection: job.selection,
+        input: operatorPrompt(job),
+      });
+      await this.change(threadId, (current) => {
+        const entry = current.jobs.find((entry) => entry.id === job.id)!;
+        if (entry.phase === "sending") entry.phase = "running";
+      });
+      await this.update(
+        threadId,
+        job.id,
+        `${job.id}:started`,
+        "started",
+        "The background agent received the request.",
+      );
+    } catch {
+      await this.change(threadId, (current) => {
+        current.jobs.find((entry) => entry.id === job.id)!.phase = "uncertain";
+      });
+      await this.update(
+        threadId,
+        job.id,
+        `${job.id}:uncertain`,
+        "needs-Jared",
+        "Background delivery could not be confirmed. Check activity before retrying.",
+      );
+    }
+  }
+  async announce(threadId: string, callId: string) {
+    const chat = await this.read(threadId);
+    const updates =
+      chat?.updates.filter(
+        (update) =>
+          !update.heardAt &&
+          !update.announcementId &&
+          (update.status === "done" || update.status === "needs-Jared"),
+      ) ?? [];
+    if (!chat || !updates.length) return false;
+    const id = `voice-update:${callId}:${sha256(updates.map((update) => update.id).join()).slice(0, 24)}`;
+    const context = await this.requirePorts().context(threadId);
+    if (context.running) return false;
+    await this.change(threadId, (current) => {
+      for (const update of current.updates)
+        if (updates.some((entry) => entry.id === update.id)) update.announcementId = id;
+    });
+    await this.requirePorts().dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make(id),
+      threadId: ThreadId.make(threadId),
+      message: {
+        messageId: MessageId.make(id),
+        role: "user",
+        text: `At this pause, decide which operator results are worth saying. Use one short natural reply, or no text for routine information. Do not delegate these updates back to the operator.\n${JSON.stringify(updates.map(({ status, text }) => ({ status, text })))}`,
+        attachments: [],
+      },
+      modelSelection: chat.models.voice,
+      runtimeMode: context.runtimeMode,
+      interactionMode: "default",
+      createdAt: now(),
+    });
+    return true;
+  }
+  async reopen(threadId: string, callId: string) {
+    if (!(await this.read(threadId))) return;
+    await this.change(
+      threadId,
+      (chat) => {
+        for (const update of chat.updates)
+          if (
+            !update.heardAt &&
+            update.announcementId &&
+            !update.announcementId.startsWith(`voice-update:${callId}:`)
+          ) {
+            delete update.announcementId;
+            delete update.announcementTurnId;
+          }
+      },
+      false,
+    );
+  }
+  async heard(threadId: string, ids: readonly string[]) {
+    await this.change(threadId, (chat) => {
+      for (const update of chat.updates) if (ids.includes(update.id)) update.heardAt = now();
+    });
+    const at = now();
+    const id = `call-heard:${sha256(JSON.stringify(ids))}`;
+    await this.requirePorts().dispatch({
+      type: "thread.activity.append",
+      commandId: CommandId.make(id),
+      threadId: ThreadId.make(threadId),
+      activity: {
+        id: EventId.make(id),
+        kind: "call.operator.heard",
+        summary: "Operator update heard",
+        tone: "info",
+        payload: { updateIds: ids },
+        turnId: null,
+        createdAt: at,
+      },
+      createdAt: at,
+    });
+  }
+}
+type MutableChat = {
+  -readonly [K in keyof OperatorChat]: K extends "links"
+    ? OperatorLink[]
+    : K extends "jobs"
+      ? MutableJob[]
+      : K extends "updates"
+        ? MutableUpdate[]
+        : K extends "voices"
+          ? MutableVoice[]
+          : K extends "requests"
+            ? Record<string, string>
+            : OperatorChat[K];
+};
+type MutableJob = { -readonly [K in keyof OperatorJob]: OperatorJob[K] };
+type MutableUpdate = { -readonly [K in keyof OperatorUpdate]: OperatorUpdate[K] };
+type MutableVoice = {
+  -readonly [K in keyof OperatorChat["voices"][number]]: OperatorChat["voices"][number][K];
+};
+const operators = new Map<string, CallOperator>();
+export function callOperator(stateDir: string) {
+  let value = operators.get(stateDir);
+  if (!value) {
+    value = new CallOperator(callStore(stateDir));
+    operators.set(stateDir, value);
+  }
+  return value;
+}

@@ -1,10 +1,7 @@
-fix(voice): validate acceptance effort from the thread snapshot
+feat(voice): separate conversation from background execution
 
-Read the exact provider, model and effort from agent snapshot instead of
-expecting model descriptors in the compact agent providers output. Reuse the
-selection check for call requests and retain the SDK effort evidence guard.
-
-Cover medium and low selections, the real compact provider output shape,
-and missing or mismatched selections without an effort fallback.
+Link voice and operator provider sessions to one chat, retain typed updates,
+and speak results at microphone pauses. Add separate model and effort pickers,
+saved defaults, hang-up continuation and acceptance timing stages.
 
 Otis-Task: agenda-task:515bbc54cb61482681e950e524421ce4

@@ -4527,6 +4527,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         toolInput: Parameters<CanUseTool>[1],
         callbackOptions: Parameters<CanUseTool>[2],
       ) {
+        if (input.toolMode === "none")
+          return {
+            behavior: "deny",
+            message: "The voice session delegates all tools to its operator.",
+          } satisfies PermissionResult;
         const context = yield* Ref.get(contextRef);
         if (!context) {
           return {
@@ -4798,6 +4803,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             }
           : {}),
       };
+      if (input.toolMode === "none") {
+        queryOptions.tools = [];
+        queryOptions.allowedTools = [];
+        queryOptions.mcpServers = {};
+        queryOptions.strictMcpConfig = true;
+        queryOptions.settingSources = [];
+        queryOptions.settings = { ...settings, disableAllHooks: true };
+        queryOptions.env = { ...claudeEnvironment, ENABLE_CLAUDEAI_MCP_SERVERS: "false" };
+      }
 
       yield* Effect.annotateCurrentSpan({
         "provider.kind": PROVIDER,
@@ -5238,6 +5252,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   return {
     provider: PROVIDER,
     capabilities: {
+      toolFreeConversation: true,
       sessionModelSwitch: "in-session",
     },
     compaction: { type: "slash-command", command: "/compact" },

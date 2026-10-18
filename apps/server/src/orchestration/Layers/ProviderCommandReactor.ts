@@ -33,6 +33,8 @@ import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
 import { voiceTurnInput } from "../../speech/turnInput.ts";
+import { callOperator } from "../../speech/callOperator.ts";
+import { ServerConfig } from "../../config.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
@@ -322,6 +324,38 @@ const make = Effect.gen(function* () {
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
   const textGeneration = yield* TextGeneration;
   const serverSettingsService = yield* ServerSettingsService;
+  const callConfig = yield* ServerConfig;
+  const callSessions = callOperator(callConfig.stateDir);
+  callSessions.bind({
+    context: async (threadId) => {
+      const snapshot = await Effect.runPromise(
+        projectionSnapshotQuery.getThreadDetailById(ThreadId.make(threadId)),
+      );
+      if (Option.isNone(snapshot) || snapshot.value.archivedAt)
+        throw new Error("Open an existing chat for call work.");
+      const thread = snapshot.value;
+      const project = await Effect.runPromise(
+        projectionSnapshotQuery.getProjectShellById(thread.projectId),
+      );
+      if (Option.isNone(project)) throw new Error("The call project is unavailable.");
+      return {
+        cwd: thread.worktreePath ?? project.value.workspaceRoot,
+        runtimeMode: thread.runtimeMode,
+        interactionMode: thread.interactionMode,
+        running: thread.latestTurn?.state === "running",
+        conversation: JSON.stringify(
+          thread.messages
+            .filter((message) => !message.id.startsWith("voice-update:"))
+            .slice(-20)
+            .map(({ role, text }) => ({ role, text })),
+        ),
+      };
+    },
+    sessions: () => Effect.runPromise(providerService.listSessions()),
+    start: (input) => Effect.runPromise(providerService.startSession(input.threadId, input)),
+    send: (input) => Effect.runPromise(providerService.sendTurn(input)),
+    dispatch: (command) => Effect.runPromise(orchestrationEngine.dispatch(command)),
+  });
   const serverCommandId = (tag: string) =>
     crypto.randomUUIDv4.pipe(Effect.map((uuid) => CommandId.make(`server:${tag}:${uuid}`)));
   const serverEventId = () => crypto.randomUUIDv4.pipe(Effect.map(EventId.make));
@@ -1640,6 +1674,17 @@ const make = Effect.gen(function* () {
         ),
       );
 
+    if (message.id.startsWith("voice:") || message.id.startsWith("voice-update:")) {
+      const handled = yield* Effect.tryPromise(() =>
+        callSessions.voice({
+          threadId: event.payload.threadId,
+          messageId: message.id,
+          text: message.text,
+          selection: event.payload.modelSelection ?? thread.modelSelection,
+        }),
+      ).pipe(Effect.catchCause((cause) => handleTurnStartFailure(cause).pipe(Effect.as(true))));
+      if (handled) return;
+    }
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
       messageId: message.id,
@@ -1748,17 +1793,25 @@ const make = Effect.gen(function* () {
     }
 
     // Orchestration turn ids are not provider turn ids, so interrupt by session.
-    yield* providerService.interruptTurn({ threadId: event.payload.threadId });
+    const voiceSession = yield* Effect.promise(() =>
+      callSessions.voiceSession(event.payload.threadId),
+    );
+    yield* providerService.interruptTurn({
+      threadId: voiceSession ? ThreadId.make(voiceSession) : event.payload.threadId,
+    });
   });
 
   const processApprovalResponseRequested = Effect.fn("processApprovalResponseRequested")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.approval-response-requested" }>,
   ) {
+    const linked = yield* Effect.promise(() =>
+      callSessions.requestSession(event.payload.threadId, event.payload.requestId),
+    );
     const thread = yield* resolveThread(event.payload.threadId);
     if (!thread) {
       return;
     }
-    const hasSession = thread.session && thread.session.status !== "stopped";
+    const hasSession = linked || (thread.session && thread.session.status !== "stopped");
     if (!hasSession) {
       return yield* appendProviderFailureActivity({
         threadId: event.payload.threadId,
@@ -1773,7 +1826,7 @@ const make = Effect.gen(function* () {
 
     yield* providerService
       .respondToRequest({
-        threadId: event.payload.threadId,
+        threadId: linked ? ThreadId.make(linked) : event.payload.threadId,
         requestId: event.payload.requestId,
         decision: event.payload.decision,
       })
@@ -1798,11 +1851,14 @@ const make = Effect.gen(function* () {
     function* (
       event: Extract<ProviderIntentEvent, { type: "thread.user-input-response-requested" }>,
     ) {
+      const linked = yield* Effect.promise(() =>
+        callSessions.requestSession(event.payload.threadId, event.payload.requestId),
+      );
       const thread = yield* resolveThread(event.payload.threadId);
       if (!thread) {
         return;
       }
-      const hasSession = thread.session && thread.session.status !== "stopped";
+      const hasSession = linked || (thread.session && thread.session.status !== "stopped");
       if (!hasSession) {
         return yield* appendProviderFailureActivity({
           threadId: event.payload.threadId,
@@ -1817,7 +1873,7 @@ const make = Effect.gen(function* () {
 
       yield* providerService
         .respondToUserInput({
-          threadId: event.payload.threadId,
+          threadId: linked ? ThreadId.make(linked) : event.payload.threadId,
           requestId: event.payload.requestId,
           answers: event.payload.answers,
         })

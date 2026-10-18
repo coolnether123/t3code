@@ -52,6 +52,8 @@ export const ProviderSession = Schema.Struct({
 export type ProviderSession = typeof ProviderSession.Type;
 
 export const ProviderSessionStartInput = Schema.Struct({
+  /** Tool-free conversation session. Adapters must reject unsupported isolation. */
+  toolMode: Schema.optional(Schema.Literal("none")),
   threadId: ThreadId,
   provider: Schema.optional(ProviderDriverKind),
   // See ProviderSession for the migration story.

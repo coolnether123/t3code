@@ -3534,6 +3534,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 {showMobilePendingAnswerActions ? null : inlineStashBadge}
                 {activeThread ? (
                   <ThreadVoiceControls
+                    instanceEntries={providerInstanceEntries}
+                    modelOptionsByInstance={modelOptionsByInstance}
                     key={`${environmentId}:${activeThread.id}`}
                     ref={voiceRef}
                     thread={activeThread}

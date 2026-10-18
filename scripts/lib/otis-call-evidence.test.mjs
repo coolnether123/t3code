@@ -6,7 +6,9 @@ import * as NodePath from "node:path";
 import {
   validatePcmWav,
   watchCallReceipts,
+  watchLinkedCallReceipts,
   completedOtisTool,
+  hasOperatorResult,
   callTimings,
   verifyCallRaw,
   sentenceSpeechId,
@@ -182,12 +184,72 @@ NodeTest.test(
       deliveryToFirstText: 1250,
       firstTextToFirstAudio: null,
       firstSentenceToFirstAudio: null,
+      voiceAckLatency: null,
+      operatorResult: null,
     });
     NodeAssert.equal(
       callTimings({ ...stages, firstScheduledAudio: 12000 }).firstTextToFirstAudio,
       1000,
     );
     NodeAssert.equal(callTimings({ transcript: 100 }).speechEndToTranscript, null);
+    NodeAssert.equal(
+      callTimings({ speechEnded: 1000, firstScheduledAudio: 2000, operatorResult: 9000 })
+        .voiceAckLatency,
+      1000,
+    );
+    NodeAssert.equal(callTimings({ speechEnded: 1000, operatorResult: 9000 }).operatorResult, 8000);
+  },
+);
+NodeTest.test(
+  "requires valid typed operator results and recognizes exact Codex MCP receipts",
+  () => {
+    const event = {
+      type: "item.completed",
+      payload: {
+        itemType: "assistant_message",
+        status: "completed",
+        detail: '<otis-status>{"status":"done","text":"Build passed."}</otis-status>',
+      },
+    };
+    NodeAssert.equal(hasOperatorResult(event), true);
+    NodeAssert.equal(
+      hasOperatorResult({
+        ...event,
+        payload: {
+          ...event.payload,
+          detail: '<otis-status>{"status":"done","text":""}</otis-status>',
+        },
+      }),
+      false,
+    );
+    NodeAssert.equal(
+      completedOtisTool(
+        {
+          type: "item.completed",
+          payload: {
+            itemType: "mcp_tool_call",
+            status: "completed",
+            data: { item: { type: "mcpToolCall", server: "otis", tool: "get_task" } },
+          },
+        },
+        "get_task",
+      ),
+      true,
+    );
+    NodeAssert.equal(
+      completedOtisTool(
+        {
+          type: "item.completed",
+          payload: {
+            itemType: "mcp_tool_call",
+            status: "completed",
+            data: { item: { type: "mcpToolCall", server: "other", tool: "get_task" } },
+          },
+        },
+        "get_task",
+      ),
+      false,
+    );
   },
 );
 NodeTest.test(
@@ -237,6 +299,42 @@ function wav() {
 NodeTest.test("validates mono integer PCM before launching a browser", () => {
   NodeAssert.deepEqual(validatePcmWav(wav()), { sampleRate: 16000, audioBytes: 4 });
 });
+NodeTest.test(
+  "follows both linked sessions and waits for the operator rather than the voice turn",
+  async () => {
+    const home = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-linked-proof-"));
+    const directory = NodePath.join(home, "userdata/logs/provider");
+    const links = NodePath.join(home, "userdata/voice/calls/_operatorLinks");
+    await NodeFSP.mkdir(directory, { recursive: true });
+    await NodeFSP.mkdir(links, { recursive: true });
+    const sessions = ["t3-call-voice-synthetic", "t3-call-operator-synthetic"];
+    for (const [index, sessionId] of sessions.entries())
+      await NodeFSP.writeFile(
+        NodePath.join(
+          links,
+          `${NodeCrypto.createHash("sha256").update(sessionId).digest("hex")}.link.json`,
+        ),
+        JSON.stringify({ threadId: "parent", sessionId, role: index === 0 ? "voice" : "operator" }),
+      );
+    const seen = [];
+    const watcher = await watchLinkedCallReceipts(home, "parent", (event, role) => {
+      seen.push([role, event.eventId]);
+    });
+    try {
+      for (const [index, sessionId] of sessions.entries())
+        await NodeFSP.writeFile(
+          NodePath.join(directory, `events.${sessionId}.log`),
+          `[now] CANON: ${JSON.stringify({ threadId: sessionId, type: "turn.completed", eventId: `event-${index}` })}\n`,
+        );
+      NodeAssert.equal((await watcher.completion).eventId, "event-1");
+      await watcher.drain();
+      NodeAssert.deepEqual(new Set(seen.map(([role]) => role)), new Set(["voice", "operator"]));
+    } finally {
+      watcher.close();
+      await NodeFSP.rm(home, { recursive: true, force: true });
+    }
+  },
+);
 NodeTest.test("rejects compressed audio, mismatched lengths and truncated chunks", () => {
   const compressed = wav();
   compressed.writeUInt16LE(3, 20);

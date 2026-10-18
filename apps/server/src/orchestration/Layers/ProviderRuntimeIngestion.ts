@@ -49,6 +49,9 @@ import {
 import { forkParked } from "../../serverActivation.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { WorkerService } from "../../worker/WorkerService.ts";
+import { callOperator, isCallLinkedSession } from "../../speech/callOperator.ts";
+import { CallReplyBuffer, withoutCallControl } from "../../speech/operatorProtocol.ts";
+import { ServerConfig } from "../../config.ts";
 import { canReplaceThreadTitle } from "../threadTitles.ts";
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
@@ -979,6 +982,9 @@ const make = Effect.gen(function* () {
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const serverSettingsService = yield* ServerSettingsService;
   const workerService = yield* WorkerService;
+  const callConfig = yield* ServerConfig;
+  const callSessions = callOperator(callConfig.stateDir);
+  const callText = new CallReplyBuffer();
   const isLinkedProviderThread =
     workerService.isLinkedProviderThread ?? (() => Effect.succeed(false));
   const providerCommandId = (event: ProviderRuntimeEvent, tag: string) =>
@@ -2136,7 +2142,55 @@ const make = Effect.gen(function* () {
     });
 
   const processRuntimeEvent = (event: ProviderRuntimeEvent) =>
-    runNormalProviderRuntimeEvent(isLinkedProviderThread, event, projectRuntimeEvent);
+    Effect.gen(function* () {
+      if (!isCallLinkedSession(event.threadId))
+        return yield* runNormalProviderRuntimeEvent(
+          isLinkedProviderThread,
+          event,
+          projectRuntimeEvent,
+        );
+      const reply = callText.accept(event);
+      const link = yield* Effect.tryPromise(() => callSessions.event(event, reply.raw));
+      if (!link) return;
+      if (link.role === "voice") {
+        let projected: ProviderRuntimeEvent = { ...event, threadId: ThreadId.make(link.threadId) };
+        if (event.type === "content.delta" && event.payload.streamKind === "assistant_text")
+          projected = {
+            ...event,
+            threadId: ThreadId.make(link.threadId),
+            payload: { ...event.payload, delta: reply.delta ?? "" },
+          };
+        if (event.type === "item.completed" && event.payload.itemType === "assistant_message")
+          projected = {
+            ...event,
+            threadId: ThreadId.make(link.threadId),
+            payload: { ...event.payload, detail: withoutCallControl(event.payload.detail ?? "") },
+          };
+        yield* projectRuntimeEvent(projected);
+      } else {
+        const activities = runtimeEventToActivities(event);
+        yield* Effect.forEach(activities, (activity) =>
+          orchestrationEngine.dispatch({
+            type: "thread.activity.append",
+            commandId: CommandId.make(`call-operator:${event.eventId}:${activity.id}`),
+            threadId: ThreadId.make(link.threadId),
+            activity: {
+              ...activity,
+              turnId: null,
+              summary: `Background agent: ${activity.summary}`,
+              payload: {
+                ...(typeof activity.payload === "object" && activity.payload !== null
+                  ? activity.payload
+                  : {}),
+                callOperatorSessionId: link.sessionId,
+                modelSelection: link.selection,
+              },
+            },
+            createdAt: activity.createdAt,
+          }),
+        );
+      }
+    });
 
   const processDomainEvent = (_event: TurnStartRequestedDomainEvent) => Effect.void;
 

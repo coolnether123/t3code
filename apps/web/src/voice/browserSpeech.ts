@@ -25,6 +25,7 @@ export function createBrowserAudio() {
   let finishCapture: (() => void) | undefined;
   let preparedStream: MediaStream | undefined;
   let playbackUntil = 0;
+  let finishAtPause = false;
   return {
     unlock() {
       if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
@@ -35,6 +36,9 @@ export function createBrowserAudio() {
     },
     finish() {
       finishCapture?.();
+    },
+    finishAtPause() {
+      finishAtPause = true;
     },
     async prepare(signal: AbortSignal) {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -89,6 +93,7 @@ export function createBrowserAudio() {
       journal?: (audio: { audio: string; sampleRate: number }) => Promise<void>,
     ): Promise<{ audio: string; sampleRate: number }> {
       const audioContext = context!;
+      finishAtPause = false;
       const stream =
         preparedStream ??
         (await navigator.mediaDevices.getUserMedia({
@@ -152,7 +157,8 @@ export function createBrowserAudio() {
               speechSeen = true;
               silenceSamples = 0;
             } else silenceSamples += chunk.length;
-            if (speechSeen && silenceSamples > audioContext.sampleRate * 0.9) finishCapture?.();
+            if ((speechSeen || finishAtPause) && silenceSamples > audioContext.sampleRate * 0.9)
+              finishCapture?.();
             if (length >= audioContext.sampleRate * 59) finishCapture?.();
           };
           source.connect(processor);
@@ -161,7 +167,7 @@ export function createBrowserAudio() {
         });
         await journalTask;
         signal.throwIfAborted();
-        return recording();
+        return speechSeen ? recording() : { audio: "", sampleRate: audioContext.sampleRate };
       } finally {
         finishCapture = undefined;
         processor.onaudioprocess = null;

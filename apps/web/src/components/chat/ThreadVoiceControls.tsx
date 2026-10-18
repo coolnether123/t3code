@@ -1,11 +1,19 @@
-import { useLayoutEffect, useRef, useState, useImperativeHandle, type Ref } from "react";
-import type { CallStatus, EnvironmentId, ModelSelection } from "@t3tools/contracts";
+import { useEffect, useLayoutEffect, useRef, useState, useImperativeHandle, type Ref } from "react";
+import type {
+  CallModels,
+  CallStatus,
+  EnvironmentId,
+  ModelSelection,
+  OperatorUpdate,
+} from "@t3tools/contracts";
 import type { Thread } from "../../types";
 import { createBrowserAudio, requestSpeech } from "../../voice/browserSpeech";
 import { callPersistence } from "../../voice/callPersistence";
 import { ThreadVoiceSession, type VoiceState } from "../../voice/session";
 import { randomUUID } from "../../lib/utils";
 import { Button } from "../ui/button";
+import { CallModelSelectors, type CallSelectorCatalog } from "./CallModelSelectors";
+import { initialCallModels } from "../../voice/modelDefaults";
 
 export interface ThreadVoiceHandle {
   stop(): void;
@@ -26,7 +34,7 @@ const labels: Record<VoiceState, string> = {
 export function ThreadVoiceControls({
   ref,
   ...props
-}: {
+}: CallSelectorCatalog & {
   ref: Ref<ThreadVoiceHandle>;
   thread: Thread;
   environmentId: EnvironmentId;
@@ -39,7 +47,86 @@ export function ThreadVoiceControls({
   const [detail, setDetail] = useState<string>();
   const [call, setCall] = useState<CallStatus>();
   const [expanded, setExpanded] = useState(false);
+  const [models, setModels] = useState<CallModels>(() =>
+    initialCallModels(
+      props.instanceEntries.map((entry) => entry.snapshot),
+      props.modelSelection,
+    ),
+  );
+  const [configurationError, setConfigurationError] = useState<string>();
+  const [configurationReady, setConfigurationReady] = useState(false);
+  const [updates, setUpdates] = useState<readonly OperatorUpdate[]>([]);
+  const configurationVersion = useRef(0);
+  const configurationTail = useRef<Promise<unknown>>(Promise.resolve());
+  const lastOperatorActivity = props.thread.activities.findLast((activity) =>
+    activity.kind.startsWith("call.operator."),
+  )?.id;
   const sessionRef = useRef<ThreadVoiceSession | null>(null);
+  useEffect(() => {
+    const abort = new AbortController();
+    const version = configurationVersion.current;
+    void requestSpeech(
+      props.environmentId,
+      {
+        action: "call.configure",
+        callId: "settings",
+        options: { threadId: props.thread.id, modelSelection: props.modelSelection },
+      },
+      abort.signal,
+    )
+      .then((response) => {
+        if (abort.signal.aborted) return;
+        if (response.models && version === configurationVersion.current) setModels(response.models);
+        setUpdates(response.operatorUpdates ?? []);
+        if (version === configurationVersion.current) setConfigurationReady(true);
+      })
+      .catch((error: unknown) => {
+        if (!abort.signal.aborted)
+          setConfigurationError(
+            error instanceof Error ? error.message : "Call settings could not be loaded.",
+          );
+      });
+    return () => abort.abort();
+  }, [props.environmentId, props.thread.id, lastOperatorActivity]);
+  useEffect(() => {
+    if (call?.operatorUpdates) setUpdates(call.operatorUpdates);
+  }, [call?.operatorUpdates]);
+  const configure = async (next: CallModels, saveDefault = false) => {
+    const version = ++configurationVersion.current;
+    setModels(next);
+    setConfigurationReady(false);
+    try {
+      const task = configurationTail.current
+        .catch(() => {})
+        .then(() =>
+          requestSpeech(
+            props.environmentId,
+            {
+              action: "call.configure",
+              callId: "settings",
+              options: {
+                threadId: props.thread.id,
+                modelSelection: next.voice,
+                operatorSelection: next.operator,
+              },
+              saveDefault,
+            },
+            new AbortController().signal,
+          ),
+        );
+      configurationTail.current = task;
+      await task;
+      if (version === configurationVersion.current) {
+        setConfigurationError(undefined);
+        setConfigurationReady(true);
+      }
+    } catch (error) {
+      if (version === configurationVersion.current)
+        setConfigurationError(
+          error instanceof Error ? error.message : "Call settings could not be saved.",
+        );
+    }
+  };
   useLayoutEffect(() => {
     const session = new ThreadVoiceSession({
       speechEvent: (event) =>
@@ -80,11 +167,15 @@ export function ThreadVoiceControls({
       props.thread.messages,
       props.running,
       props.thread.latestTurn?.turnId,
-      props.modelSelection,
+      models.voice,
+      models.operator,
     );
-  }, [props.thread.messages, props.running, props.thread.latestTurn?.turnId, props.modelSelection]);
+  }, [props.thread.messages, props.running, props.thread.latestTurn?.turnId, models]);
   const active = state !== "idle";
-  const selection = props.modelSelection;
+  const selection = models.voice;
+  const unheard = updates.filter(
+    (update) => !update.heardAt && (update.status === "done" || update.status === "needs-Jared"),
+  );
   return (
     <div className="relative" data-voice-state={state}>
       {!active ? (
@@ -95,11 +186,45 @@ export function ThreadVoiceControls({
       {active || expanded || detail ? (
         <section
           aria-label="Otis call"
-          className="absolute bottom-full right-0 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-xl border bg-popover p-3 text-popover-foreground shadow-lg"
+          className="absolute bottom-full right-0 mb-2 max-h-[70dvh] w-80 max-w-[calc(100vw-2rem)] overflow-y-auto rounded-xl border bg-popover p-3 text-popover-foreground shadow-lg"
         >
           <p role="status" className="text-sm font-medium">
             {labels[state]}
           </p>
+          <CallModelSelectors
+            models={models}
+            instanceEntries={props.instanceEntries}
+            modelOptionsByInstance={props.modelOptionsByInstance}
+            onChange={(next) => void configure(next)}
+            disabled={!configurationReady && !configurationError}
+          />
+          <p className="mt-1 text-xs">Changes apply to the next turn.</p>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={!configurationReady}
+            onClick={() => void configure(models, true)}
+          >
+            Use these models by default
+          </Button>
+          {configurationError ? (
+            <p role="alert" className="mt-2 text-xs">
+              {configurationError}
+            </p>
+          ) : null}
+          {unheard.length ? (
+            <details className="mt-2 text-xs">
+              <summary>Unheard updates ({unheard.length})</summary>
+              <ul>
+                {unheard.map((update) => (
+                  <li key={update.id} className="mt-1">
+                    {update.text}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ) : null}
           <p className="mt-2 text-xs">
             {selection.model}
             {selection.options
@@ -117,16 +242,21 @@ export function ThreadVoiceControls({
           {!active ? (
             <div className="mt-3 grid gap-2 text-xs">
               <p>
-                Uses this chat's model and permissions. Recordings save on this device, then on your
-                PC before transcription. Ending the call leaves the chat working.
+                The voice model handles conversation while the background agent works with this
+                chat's permissions. Recordings save on this device, then on your PC before
+                transcription. Ending the call leaves the chat working.
               </p>
               <Button
                 type="button"
                 size="sm"
-                disabled={!props.enabled}
+                disabled={!props.enabled || !configurationReady}
                 onClick={() =>
                   void sessionRef.current?.start(
-                    { threadId: props.thread.id, modelSelection: props.modelSelection },
+                    {
+                      threadId: props.thread.id,
+                      modelSelection: models.voice,
+                      operatorSelection: models.operator,
+                    },
                     props.thread.messages,
                   )
                 }

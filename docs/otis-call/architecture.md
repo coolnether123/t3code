@@ -1,7 +1,7 @@
 # Otis Call architecture
 
 Task `agenda-task:515bbc54cb61482681e950e524421ce4`.
-Candidate follows baseline `e01c37875e` on `work/otis-call-20261018`.
+Phase 2 candidate follows baseline `6f18caa404` on `work/otis-call-20261018`.
 Updated 18 October 2026, America/Chicago, CDT.
 
 Jared's correction packet at
@@ -10,6 +10,16 @@ governs this work. Calls attach local speech to an ordinary T3 chat. T3's normal
 selector supplies the model. Ordinary harness permissions govern tools and
 children. Hanging up never stops chat work. Speak natural prose, never tool JSON.
 The parent directed complete removal of the additional voice confirmation gate.
+
+Phase 2 adds linked voice and operator sessions behind the same visible thread.
+Voice is tool-free; the operator keeps ordinary harness permissions.
+`apps/server/src/speech/callOperator.ts` owns durable links, delegation, typed
+updates and heard records. Operator activity projects into the visible chat.
+Hanging up releases speech while provider work continues. Model pairs persist
+per chat with an environment default. The browser queues results during speech
+and requests a voice announcement at a pause. See `handoff-phase2.md` for checks
+and explicit compatibility limits. The remaining sections describe the phase 1
+speech/archive foundation.
 
 ## Owners and flow
 

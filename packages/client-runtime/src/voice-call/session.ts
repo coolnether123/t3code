@@ -37,6 +37,7 @@ export interface Recording {
   endedAt: string;
   capturing?: boolean;
   modelSelection?: ModelSelection;
+  operatorSelection?: ModelSelection;
 }
 export interface SavedCall {
   callId: string;
@@ -69,6 +70,7 @@ export interface VoiceDependencies {
     ready(signal: AbortSignal): Promise<void>;
     close(): void;
     finish(): void;
+    finishAtPause(): void;
     capture(
       signal: AbortSignal,
       journal?: (audio: { audio: string; sampleRate: number }) => Promise<void>,
@@ -99,6 +101,8 @@ export class ThreadVoiceSession {
   private running = false;
   private turnId: string | undefined;
   private modelSelection: ModelSelection | undefined;
+  private operatorSelection: ModelSelection | undefined;
+  private announcing = false;
   private messages: readonly Message[] = [];
   private spokenText = new Map<string, { source: string; streaming: boolean; text: string }>();
   private queue: { text: string; messageId: string; start: number; end: number }[] = [];
@@ -162,6 +166,7 @@ export class ThreadVoiceSession {
     if (this.active) return;
     this.active = true;
     this.modelSelection = options.modelSelection;
+    this.operatorSelection = options.operatorSelection;
     this.abort = new AbortController();
     this.playback = new AbortController();
     this.messages = messages;
@@ -223,6 +228,7 @@ export class ThreadVoiceSession {
       await this.request({
         action: "call.prepare",
         modelSelection: this.modelSelection ?? this.saved.options.modelSelection,
+        ...(this.operatorSelection ? { operatorSelection: this.operatorSelection } : {}),
       });
       if (!this.active) return;
       this.recovering = false;
@@ -277,6 +283,17 @@ export class ThreadVoiceSession {
             { recoverable: true },
           );
         this.change(this.state);
+        if (
+          this.capture &&
+          this.status?.operatorUpdates?.some(
+            (update) =>
+              !update.heardAt &&
+              !update.announcementId &&
+              (update.status === "done" || update.status === "needs-Jared"),
+          )
+        )
+          this.deps.audio.finishAtPause();
+        if (!this.capture) void this.announceAtPause();
         if (!this.capture) void this.speak();
       }
     } catch (error) {
@@ -284,7 +301,13 @@ export class ThreadVoiceSession {
     }
   }
   async listen() {
-    if (!this.active || this.busy || this.capture || !["ready", "waiting"].includes(this.state))
+    if (
+      !this.active ||
+      this.busy ||
+      this.announcing ||
+      this.capture ||
+      !["ready", "waiting"].includes(this.state)
+    )
       return;
     if (this.saved!.recordings.some((recording) => !recording.capturing)) {
       this.busy = true;
@@ -313,6 +336,7 @@ export class ThreadVoiceSession {
             endedAt: now(),
             capturing: true,
             modelSelection: this.modelSelection ?? this.saved!.options.modelSelection,
+            ...(this.operatorSelection ? { operatorSelection: this.operatorSelection } : {}),
           };
           const index = this.saved!.recordings.findIndex((entry) => entry.id === id);
           if (index === -1) this.saved!.recordings.push(recording);
@@ -329,6 +353,7 @@ export class ThreadVoiceSession {
           startedAt,
           endedAt: now(),
           modelSelection: this.modelSelection ?? this.saved!.options.modelSelection,
+          ...(this.operatorSelection ? { operatorSelection: this.operatorSelection } : {}),
         };
         this.saved!.recordings = this.saved!.recordings.filter((entry) => entry.id !== id);
         this.saved!.recordings.push(recording);
@@ -345,6 +370,7 @@ export class ThreadVoiceSession {
         if (this.active && !["reconnecting", "error"].includes(this.state)) {
           if (this.queue.length) void this.speak();
           else if (!this.running) this.change("ready");
+          if (!this.queue.length && !this.running) void this.announceAtPause();
         }
       }
     })();
@@ -379,11 +405,13 @@ export class ThreadVoiceSession {
     running: boolean,
     turnId?: string,
     modelSelection?: ModelSelection,
+    operatorSelection?: ModelSelection,
   ) {
     this.messages = messages;
     this.running = running;
     this.turnId = turnId;
     if (modelSelection) this.modelSelection = modelSelection;
+    if (operatorSelection) this.operatorSelection = operatorSelection;
     if (!this.active || !this.saved || ["preparing", "reconnecting", "error"].includes(this.state))
       return;
     for (const message of messages) {
@@ -410,15 +438,70 @@ export class ThreadVoiceSession {
       }
     }
     if (this.capture && this.queue.length && this.recording) {
-      // Finish retaining microphone input before speaking the queued reply.
-      this.change("waiting");
-      this.deps.audio.finish();
+      this.deps.audio.finishAtPause();
     }
     if (!this.capture && !this.busy) void this.speak();
+    if (!running && !this.queue.length && !this.capture && !this.busy) {
+      void this.acknowledgeUpdates().catch((error) => this.failed(error));
+      void this.announceAtPause();
+    }
     if (!running && !this.queue.length && !this.capture && !this.busy && this.state === "waiting") {
       this.change("ready");
       void this.listen();
     }
+  }
+  private async announceAtPause() {
+    if (
+      !this.active ||
+      this.announcing ||
+      this.capture ||
+      this.busy ||
+      this.running ||
+      this.queue.length ||
+      this.playbackTask ||
+      !this.status?.operatorUpdates?.some(
+        (update) =>
+          !update.heardAt &&
+          !update.announcementId &&
+          (update.status === "done" || update.status === "needs-Jared"),
+      )
+    )
+      return;
+    this.announcing = true;
+    this.running = true;
+    try {
+      const result = await this.request({ action: "call.announce" });
+      this.running = result.announced === true;
+      this.change(this.running ? "waiting" : "ready");
+    } catch (error) {
+      this.failed(error);
+    } finally {
+      this.announcing = false;
+    }
+  }
+  private async acknowledgeUpdates() {
+    if (this.running || this.queue.length || !this.saved) return;
+    const heard =
+      this.status?.operatorUpdates
+        ?.filter((update) => {
+          if (update.heardAt || !update.announcementTurnId) return false;
+          const replies = this.messages.filter(
+            (message) =>
+              message.role === "assistant" && message.turnId === update.announcementTurnId,
+          );
+          return (
+            replies.length > 0 &&
+            replies.every(
+              (message) =>
+                !message.streaming &&
+                this.speechText(message).trim() &&
+                (this.saved!.offsets[message.id] ?? 0) >= this.speechText(message).length &&
+                !this.saved!.silencedMessages?.includes(message.id),
+            )
+          );
+        })
+        .map((update) => update.id) ?? [];
+    if (heard.length) await this.request({ action: "call.heard", updateIds: heard });
   }
   private async speak() {
     if (
@@ -474,6 +557,7 @@ export class ThreadVoiceSession {
           this.queue.shift();
           this.observe(this.messages, this.running, this.turnId, this.modelSelection);
         }
+        await this.acknowledgeUpdates();
         if (this.active && !signal.aborted) this.change(this.running ? "waiting" : "ready");
       } catch (error) {
         if (!signal.aborted) this.failed(error);
@@ -587,6 +671,7 @@ export async function speechIdentifier(value: string, start: number, end: number
 
 function spokenMessageText(value: string, streaming = false) {
   const text = value
+    .replace(/<otis-(?:delegate|status)>[\s\S]*?(?:<\/otis-(?:delegate|status)>|$)/g, "")
     .replace(/```[\s\S]*?(?:```|$)/g, "")
     .replace(/`[^`]*(?:`|$)/g, "")
     .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");

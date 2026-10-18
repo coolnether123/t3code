@@ -22,6 +22,14 @@ class Source extends EventTarget {
 }
 const contexts: FakeAudio[] = [];
 class FakeAudio {
+  sampleRate = 16000;
+  processor = {
+    onaudioprocess: null as
+      | ((event: { inputBuffer: { getChannelData(channel: number): Float32Array } }) => void)
+      | null,
+    connect: vi.fn(),
+    disconnect: vi.fn(),
+  };
   currentTime = 0;
   destination = {};
   sources: Source[] = [];
@@ -37,6 +45,15 @@ class FakeAudio {
     const source = new Source();
     this.sources.push(source);
     return source;
+  }
+  createMediaStreamSource() {
+    return { connect: vi.fn(), disconnect: vi.fn() };
+  }
+  createScriptProcessor() {
+    return this.processor;
+  }
+  createGain() {
+    return { gain: { value: 0 }, connect: vi.fn(), disconnect: vi.fn() };
   }
 }
 function fixture() {
@@ -54,6 +71,44 @@ afterEach(() => {
 });
 
 describe("streamed browser PCM scheduling", () => {
+  it("holds pending speech through microphone activity and ends capture at a pause", async () => {
+    const audio = fixture();
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue({
+      getTracks: () => [{ stop: vi.fn() }],
+    } as unknown as MediaStream);
+    const signal = new AbortController().signal;
+    await audio.prepare(signal);
+    const captured = audio.capture(signal);
+    const processor = contexts[0]!.processor;
+    const frame = (value: number) =>
+      processor.onaudioprocess!({
+        inputBuffer: { getChannelData: () => new Float32Array(4096).fill(value) },
+      });
+    frame(0.1);
+    audio.finishAtPause();
+    frame(0.1);
+    expect(processor.onaudioprocess).not.toBeNull();
+    for (let index = 0; index < 4; index++) frame(0);
+    expect((await captured).audio.length).toBeGreaterThan(0);
+    expect(processor.onaudioprocess).toBeNull();
+    audio.close();
+  });
+  it("releases an idle microphone for an update without sending silence as a new utterance", async () => {
+    const audio = fixture();
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue({
+      getTracks: () => [{ stop: vi.fn() }],
+    } as unknown as MediaStream);
+    const signal = new AbortController().signal;
+    await audio.prepare(signal);
+    const captured = audio.capture(signal);
+    audio.finishAtPause();
+    for (let index = 0; index < 4; index++)
+      contexts[0]!.processor.onaudioprocess!({
+        inputBuffer: { getChannelData: () => new Float32Array(4096) },
+      });
+    expect((await captured).audio).toBe("");
+    audio.close();
+  });
   it("orders chunks on the audio clock and cancels every queued chunk on interrupt", async () => {
     const audio = fixture();
     const signal = new AbortController();
