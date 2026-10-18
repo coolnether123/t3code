@@ -7,6 +7,7 @@ import type {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import { isRetryableVoiceError, VoiceRequestError } from "./errors.ts";
 
 const now = () => DateTime.formatIso(Effect.runSync(DateTime.now));
 
@@ -51,7 +52,8 @@ export interface VoiceDependencies {
   speechEvent?(
     event:
       | { type: "sentence"; messageId: string; start: number; end: number }
-      | { type: "audio"; speechId: string },
+      | { type: "audio"; speechId: string }
+      | { type: "retry"; action: CallRequest["action"]; attempt: number },
   ): void;
   request(
     input: CallRequest,
@@ -134,11 +136,11 @@ export class ThreadVoiceSession {
     signal = this.abort.signal,
     onAudio?: (chunk: { audio: string; sampleRate: number }) => void,
   ) {
-    const response = await this.deps.request(
-      { ...input, callId: this.saved!.callId },
-      signal,
-      ...(onAudio ? ([onAudio] as const) : []),
-    );
+    const request = { ...input, callId: this.saved!.callId };
+    const send = () => this.deps.request(request, signal, ...(onAudio ? ([onAudio] as const) : []));
+    // A synthesis retry owns its audio nodes; control requests never cancel playback.
+    const response =
+      input.action === "call.speak" ? await send() : await this.retry(input.action, signal, send);
     if (response.call) {
       this.status = response.call;
       if (
@@ -155,19 +157,40 @@ export class ThreadVoiceSession {
     }
     return response;
   }
+  private async retry<A>(
+    action: CallRequest["action"],
+    signal: AbortSignal,
+    send: () => Promise<A>,
+  ): Promise<A> {
+    let attempt = 0;
+    for (;;) {
+      signal.throwIfAborted();
+      try {
+        const result = await send();
+        if (attempt && this.active) this.change(this.state);
+        return result;
+      } catch (error) {
+        if (!this.active || signal.aborted || !isRetryableVoiceError(error)) throw error;
+        attempt++;
+        this.deps.speechEvent?.({ type: "retry", action, attempt });
+        this.change(
+          this.state,
+          "Connection interrupted. Retrying automatically; speech is still queued.",
+        );
+        await Effect.runPromise(
+          Effect.sleep(Math.min(10_000, 250 * 2 ** Math.min(attempt - 1, 6))),
+          { signal },
+        );
+      }
+    }
+  }
   private failed(error: unknown) {
     if (!this.active) return;
     this.recovering = true;
     this.deps.audio.finish();
     this.playback.abort();
     this.watching.abort();
-    const recoverable =
-      error instanceof TypeError ||
-      (error instanceof Error && "recoverable" in error && error.recoverable === true) ||
-      (error instanceof Error &&
-        "_tag" in error &&
-        (error._tag === "RemoteEnvironmentAuthFetchError" ||
-          error._tag === "RemoteEnvironmentAuthTimeoutError"));
+    const recoverable = isRetryableVoiceError(error);
     this.change(
       recoverable ? "reconnecting" : "error",
       `${error instanceof Error ? error.message : "Voice request failed."} Check the message above, then retry saved speech. Queued audio without a PC acknowledgment remains on this device.`,
@@ -212,6 +235,8 @@ export class ThreadVoiceSession {
   }
   async resume() {
     if (!this.active || this.busy || !this.saved) return;
+    // An online event must not replace controllers owned by active request retries.
+    if (!this.recovering && this.state !== "preparing") return;
     this.busy = true;
     try {
       this.playback = new AbortController();
@@ -543,33 +568,9 @@ export class ThreadVoiceSession {
           signal.throwIfAborted();
           this.change("speaking");
           if (!this.status?.played.includes(id)) {
-            const chunks: Promise<void>[] = [];
-            const result = await this.request(
-              {
-                action: "call.speak",
-                speechId: id,
-                text: item.text.replace(/[#*_]/g, ""),
-                streamAudio: true,
-              },
-              signal,
-              (chunk) => {
-                signal.throwIfAborted();
-                this.deps.speechEvent?.({ type: "audio", speechId: id });
-                const played = this.deps.audio.play(chunk.audio, chunk.sampleRate, signal);
-                chunks.push(played);
-                void played.catch((error) => {
-                  if (!signal.aborted) this.failed(error);
-                });
-              },
-            );
-            signal.throwIfAborted();
-            if (!result.played && !chunks.length && (!result.audio || !result.sampleRate))
-              throw new Error("Speech service returned no audio.");
-            if (!result.played && !chunks.length)
-              await this.deps.audio.play(result.audio!, result.sampleRate!, signal);
-            await Promise.all(chunks);
-            signal.throwIfAborted();
-            await this.request({ action: "call.played", speechId: id });
+            await this.playSentence(id, item.text.replace(/[#*_]/g, ""), signal);
+            // Retry the acknowledgment separately, without replaying audio already heard.
+            await this.request({ action: "call.played", speechId: id }, signal);
           }
           if (item.messageId) {
             this.saved!.offsets[item.messageId] = item.end!;
@@ -588,6 +589,44 @@ export class ThreadVoiceSession {
     })();
     await this.playbackTask;
     if (this.active && this.state === "ready") void this.listen();
+  }
+  private async playSentence(id: string, text: string, signal: AbortSignal) {
+    await this.retry("call.speak", signal, async () => {
+      const attempt = new AbortController();
+      const audioSignal = AbortSignal.any([signal, attempt.signal]);
+      const chunks: Promise<void>[] = [];
+      try {
+        this.change("speaking");
+        const result = await this.request(
+          { action: "call.speak", speechId: id, text, streamAudio: true },
+          audioSignal,
+          (chunk) => {
+            audioSignal.throwIfAborted();
+            this.deps.speechEvent?.({ type: "audio", speechId: id });
+            const played = this.deps.audio.play(chunk.audio, chunk.sampleRate, audioSignal);
+            chunks.push(played);
+            void played.catch((error) => attempt.abort(error));
+          },
+        );
+        audioSignal.throwIfAborted();
+        if (!result.played && !chunks.length && (!result.audio || !result.sampleRate))
+          throw new Error("Speech service returned no audio.");
+        if (!result.played && !chunks.length)
+          await this.deps.audio.play(result.audio!, result.sampleRate!, audioSignal);
+        await Promise.all(chunks);
+        audioSignal.throwIfAborted();
+      } catch (error) {
+        if (attempt.signal.aborted && !signal.aborted)
+          throw new VoiceRequestError(
+            "Audio playback failed. Check the audio device, then retry.",
+            false,
+          );
+        throw error;
+      } finally {
+        attempt.abort();
+        await Promise.allSettled(chunks);
+      }
+    });
   }
   async interrupt() {
     if (!this.active) return;

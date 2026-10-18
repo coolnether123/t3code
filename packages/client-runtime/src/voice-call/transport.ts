@@ -13,18 +13,12 @@ import * as Schema from "effect/Schema";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import type { HttpClient } from "effect/unstable/http";
 import type { Atom } from "effect/unstable/reactivity";
+import { VoiceRequestError, voiceRequestError } from "./errors.ts";
+export { VoiceRequestError } from "./errors.ts";
 
 const decode = Schema.decodeUnknownSync(Schema.fromJsonString(SpeechResponse));
 const encode = Schema.encodeSync(Schema.fromJsonString(SpeechRequest));
 const encodeResponse = Schema.encodeSync(Schema.fromJsonString(SpeechResponse));
-export class VoiceRequestError extends Error {
-  readonly recoverable: boolean;
-  constructor(message: string, recoverable: boolean) {
-    super(message);
-    this.recoverable = recoverable;
-  }
-}
-
 /** Reuse cookie, desktop bearer and refreshed request-bound relay authorization. */
 export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(function* (input: {
   onAudio?: (chunk: { audio: string; sampleRate: number }) => void;
@@ -75,15 +69,22 @@ export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(
                 for (const line of lines) {
                   if (!line.trim()) continue;
                   const frame = decode(line);
-                  if (frame.error) throw new Error(frame.error);
-                  if (frame.audio && frame.sampleRate)
-                    input.onAudio({ audio: frame.audio, sampleRate: frame.sampleRate });
-                  else Object.assign(result, frame);
+                  if (frame.error) throw new VoiceRequestError(frame.error, true);
+                  if (frame.audio && frame.sampleRate) {
+                    try {
+                      input.onAudio({ audio: frame.audio, sampleRate: frame.sampleRate });
+                    } catch {
+                      throw new VoiceRequestError(
+                        "Audio playback could not start. Check the audio device, then retry.",
+                        false,
+                      );
+                    }
+                  } else Object.assign(result, frame);
                 }
                 if (chunk.done) break;
               }
               if (partial.trim() || !result.complete)
-                throw new Error("Speech stream ended before completion.");
+                throw new VoiceRequestError("Speech stream ended before completion.", true);
             } finally {
               await reader.cancel().catch(() => {});
               reader.releaseLock();
@@ -96,13 +97,18 @@ export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(
           return { status: response.status, text: await response.text() };
         },
         catch: (cause) =>
-          new RemoteEnvironmentAuthFetchError({
-            message: "Cannot reach this chat's environment. Speech remains queued on this device.",
-            cause,
-          }),
+          cause instanceof VoiceRequestError
+            ? cause
+            : cause instanceof SyntaxError || Schema.isSchemaError(cause)
+              ? new VoiceRequestError("Speech service returned invalid audio frames.", false)
+              : new RemoteEnvironmentAuthFetchError({
+                  message:
+                    "Cannot reach this chat's environment. Speech remains queued on this device.",
+                  cause,
+                }),
       }),
     isUnauthorizedResponse: (response) => response.status === 401,
-  });
+  }).pipe(Effect.mapError(voiceRequestError));
   return yield* Effect.try({
     try: () => {
       if (result.status < 200 || result.status >= 300)
@@ -110,7 +116,7 @@ export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(
           result.status === 404
             ? "This environment needs the voice update."
             : result.text.slice(0, 600) || "Voice request failed.",
-          result.status === 503 || result.status >= 500,
+          result.status === 408 || result.status === 429 || result.status >= 500,
         );
       return decode(result.text);
     },

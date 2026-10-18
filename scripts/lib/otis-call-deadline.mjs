@@ -2,7 +2,15 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 /** Bound the entire acceptance run, including setup and evidence cleanup. */
-export async function runAcceptanceWithDeadline({ output, report, timeoutMs, run, close }) {
+export async function runAcceptanceWithDeadline({
+  output,
+  report,
+  timeoutMs,
+  run,
+  close,
+  captureFailure,
+  evidenceTimeoutMs = 2000,
+}) {
   NodeFS.mkdirSync(output, { recursive: true });
   const checkpoint = () =>
     NodeFS.writeFileSync(NodePath.join(output, "report.json"), JSON.stringify(report, null, 2));
@@ -27,6 +35,26 @@ export async function runAcceptanceWithDeadline({ output, report, timeoutMs, run
         : "Acceptance setup or evidence cleanup failed. Retain the isolated chat and logs.";
     // Save before asking the browser to close. Closing can itself be the stuck operation.
     checkpoint();
+    if (captureFailure) {
+      let evidenceTimer;
+      try {
+        await Promise.race([
+          Promise.resolve().then(captureFailure),
+          new Promise((_, reject) => {
+            evidenceTimer = setTimeout(
+              () => reject(new Error("Failure evidence deadline expired")),
+              evidenceTimeoutMs,
+            );
+          }),
+        ]);
+      } catch (error) {
+        report.failureEvidenceError =
+          error instanceof Error ? error.message : "Failure evidence unavailable";
+      } finally {
+        clearTimeout(evidenceTimer);
+        checkpoint();
+      }
+    }
     void Promise.resolve()
       .then(close)
       .catch(() => {});

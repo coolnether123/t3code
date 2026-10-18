@@ -1,17 +1,17 @@
 # Otis Call phase 2 handoff
 
 Task `agenda-task:515bbc54cb61482681e950e524421ce4`.
-Fix base `fd058b5131`, branch `work/otis-call-20261018`, upstream
+Recovery fix base `9f38fad19c`, branch `work/otis-call-20261018`, upstream
 `origin/work/otis-call-20261018`. Changes remain uncommitted as requested.
 Observation date: 18 October 2026, America/Chicago, CDT.
 
-The parent committed and pushed the split as `fd058b5131`. A real isolated
-390 px call with Claude Haiku 5.5 medium for voice and Codex GPT-6.1-Sol
-medium for background work reached voice playback and an attributed operator
-result. Renewal and result speech failed in that run. The uncommitted fixes
-below need the same live acceptance repeated. No live T3 or router changes,
-restarts or subagents were used for these fixes. Implementation host model and
-effort attestation remain unknown.
+The parent committed the first follow-up as `9f38fad19c` and verified real
+60-second lease renewal. The remaining failure stopped queued speech after a
+transient voice request error. This follow-up adds independent request retries,
+playback recovery and failure screenshots. Changes remain uncommitted. No live
+T3, router or dev launcher was changed or restarted. The dev T3 on 7300/15340
+belongs to the parent, who will restart it and repeat acceptance. No subagents
+were used. Implementation host model and effort attestation remain unknown.
 
 Claude supports tool-free voice. Other voice adapters still reject that mode.
 The original requirement to use every provider for voice remains unmet.
@@ -52,118 +52,134 @@ during microphone activity. Silence-only capture does not become another request
 Routine progress stays in chat; terminal results and questions can be spoken at
 a pause. Interrupted results stay unheard. Speak/hold/defer remains future scope.
 
-## Parent observations and follow-up fixes
+## Latest parent observations
 
-Parent acceptance of `fd058b5131`, 18 October, 12:34 to 12:41 CDT, used chat
-`4534e364-4419-4991-9c3b-2169cafdbdee`. These are parent measurements, not
-reproductions in this sandbox. Router evidence is
-`H:/AI/QwenRouter/logs/router-backend/router.log`.
+The parent ran `9f38fad19c` at 390 px with Claude Haiku 5.5 medium for voice
+and Codex GPT-6.1-Sol medium for background work. Router speech fix `f3f15fe`
+was already live, engines were prewarmed, and the T3 home was isolated.
+Chat `5ceaef84-d385-4d49-91f4-164a9b664ad9`, call
+`ea34b08a-da07-49c4-a974-8026f4eac90f`, 18 October, 17:48 to 18:00 CDT.
 
-- The lease was acquired at 12:39:25, never renewed and expired at 12:41:25.
-- Whisper finished at 12:39:46 after 9.3 seconds in the router. Voice audio
-  played by 12:39:56; Breeze synthesis took 4.1 seconds. Exact speech end and
-  acoustic onset are unavailable, so acknowledgment latency remains null.
-- The voice turn completed at 12:39:53 CDT. The background GPT-6.1-Sol medium
-  session ran attributed Otis tools and handled one approval in the same chat.
-  Its typed done result arrived at 12:40:26 CDT. It was not spoken.
-- The helper waited past its deadline and the host killed it after 30 minutes.
-  No report was saved. This run did not pass final acceptance.
+Exact supplied evidence:
 
-The fixes address three source-established lifecycle gaps:
+- `A:/Dev/Artifacts/agent-packets/otis-call-20261018/phase2-live-3-report.json`
+- `H:/AI/QwenRouter/logs/router-backend/router.log`, parent-observed time range above.
+- `.logs/otis-call/dev-stdout.log`, read without changing the running server.
 
-1. Renewal belongs to the active call, with an abort controller that survives
-   voice completion, background waits and call error presentation. Hang-up and
-   detach cancel it. The existing 60-second Effect loop remains, without an
-   extra scheduler yield between iterations that already sleep and await HTTP.
-   An attached status watch also renews a valid lease with at most 60 seconds
-   left. Its existing 25-second heartbeat supplies a second renewal path.
-   Watch and explicit renewals share an operation lock, separate from engine work.
-2. Silence-only microphone completion now removes its partial journal and leaves
-   `listening` before queued speech runs. Previously `speak()` refused that state.
-   Pending results take priority over reopening the microphone after playback.
-   Every ready call response can advance the pause queue, including a renewal
-   response if the watch is delayed. Terminal update prompts request a short
-   natural result or question; routine progress remains silent. Heard acknowledgment
-   still requires the completed voice reply to finish playing.
-3. `scripts/lib/otis-call-deadline.mjs` supervises setup, receipt waits, heard
-   acknowledgment and cleanup under one deadline. It writes an initial report,
-   saves a partial report before cleanup, and checkpoints failure synchronously
-   before requesting browser close. It is the sole report writer. CLI preflight
-   is asynchronous and bounded by the remaining deadline. The helper exits after
-   the supervisor returns, so abandoned promises cannot retain the host. A timed
-   out report sets `deadlineExpired: true`. Missing observations stay null.
+The report and router observations establish:
 
-The precise browser event that stopped the parent's first renewal is not
-reproduced here. The source gaps and synthetic regressions above are verified
-separately from that live failure. Repeat acceptance to establish the runtime fix.
+| Observation                         | Result                                                                                           |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Lease renewal                       | Every 60 seconds, 17:49:10 to 17:59:11 CDT. The prior lease defect passed.                       |
+| Speech end to first scheduled audio | 16,484 ms. This is scheduled playback, not acoustic onset.                                       |
+| Delivery to first text              | 4,130 ms.                                                                                        |
+| First text to first scheduled audio | 842 ms.                                                                                          |
+| Speech end to transcript            | 11,250 ms; the router measured about 11.1 seconds. Router warmup is parent-owned.                |
+| First sentence                      | Played acknowledgment at 17:48:43.584 CDT.                                                       |
+| Second sentence                     | Queued at 17:48:37.085 CDT, zero synthesis attempts.                                             |
+| Background result                   | Tool completed at 17:49:13; successful typed result at 17:49:15 CDT. Unheard.                    |
+| Failure evidence                    | Endpoint-fetch alert, no non-200 voice responses recorded, deadline expired, screenshot missing. |
 
-## Offline verification of the fixes
+These are parent live observations of the base. No live measurements of the
+uncommitted recovery fixes were made here.
 
-Check receipts are in ignored
-`.logs/otis-call/phase2-fixes-direct/check-results-final.json`,
-`check-results-server-final.json` and `check-results-final-correction.json`.
-The latter receipts supersede the intermediate server failure. Full logs stay
-beside that receipt. The first intermediate run exposed a timer diagnostic and
-sandbox denial of child-process test fixtures. Production code retains Effect
-scheduling. Deadline tests now exercise hung setup, heard acknowledgment and
-cleanup in-process with a deterministic clock. No existing test contract was weakened.
+## Root cause and recovery changes
 
-The final focused suite passed 280 tests across 11 files, exit 0. The Node
-evidence/deadline suite passed 17 tests, exit 0. The focused suite covers call
-protocols and storage, delegation, hang-up continuation, both adapters' recovery
-contracts, the voice controller, browser speech, model defaults, composer
-lifecycle, authenticated transport and wire schemas. Syntax, help, affected lint
-and affected source formatting passed, exit 0. The only lint warning in an
-affected file is the pre-existing iterable spread in `CallOperator.drain`.
-Contracts, client-runtime and web typechecks passed with exit 0. The server
-check passed too; the final rerun after the fixture's clock correction is saved
-in `check-results-final-correction.json`. The earlier check exposed the real
-clock-access diagnostic in the new fixture. It now reads the Effect clock
-without starting a test runtime or changing production time semantics.
-The actual acceptance entry point also returned expected exit 1 for a missing
-synthetic WAV and saved a failed report before any CLI or browser launch.
-Three standalone synthetic deadline probes also returned expected exit 1 and
-retained `operatorResult` in failed reports with `deadlineExpired: true`. They
-covered stuck setup, heard acknowledgment and cleanup, including a close callback
-that never resolves. Their private evidence is `deadline-{setup,heard,cleanup}`
-under the direct log directory. They do not launch Chromium or contact T3.
-No live latency, renewed router lease or spoken operator result is claimed here.
+The original browser fetch trigger cannot be identified from the supplied report.
+It lacks the failed action, browser request-failure code and nested exception.
+`rpc/http.ts` wraps a failed fetch/read in `RemoteEnvironmentAuthFetchError`;
+`voice-call/transport.ts` also wraps exceptions from streamed response handling.
+The endpoint label alone does not prove a server outage, an auth refresh race,
+a concurrency limit or a shared request abort. No such cause is claimed.
+The T3 command scheduler defaults to parallel execution and request signals
+are separate. A synthetic concurrent-watch/stream test verifies abort isolation.
 
-To repeat the changed behavior checks independently of the queued launcher:
+The confirmed failure escalation is in
+`packages/client-runtime/src/voice-call/session.ts`: `failed()` aborted both
+playback and the status watch, set recovery state and offered manual retry.
+`ThreadVoiceControls.tsx` only resumed automatically on an `online` event.
+A transient failure while the browser remained online therefore left sentence 2
+and later operator results queued indefinitely. The prior renewal fix kept the
+lease alive independently, matching the parent's log.
+
+The call now retries transient fetch, timeout and temporary HTTP failures at
+the operation boundary, starting at 250 ms and backing off to at most 10 seconds.
+Retries keep the same call, utterance and sentence identifiers. They resolve the
+current environment credentials through the existing T3 command on each attempt.
+A status-watch failure does not abort playback or block another request.
+Configuration and permission failures remain visible and are not retried.
+Malformed audio frames and playback callback failures now retain a permanent
+speech error through the environment HTTP wrappers, rather than being mislabeled
+as a retryable endpoint outage. An incomplete stream can retry.
+
+Synthesis owns its playback attempts. Before retrying a failed partial sentence,
+it cancels that attempt's pending audio nodes. It may repeat the partially heard
+sentence after a stream reset. A failed played acknowledgment retries separately
+and does not resynthesize a sentence whose audio already finished. Hang-up,
+detach and interrupt cancel pending retries. An online event leaves active retry
+controllers intact; full preparation resumes only a call already in recovery.
+No operator interrupt was added.
+Done and needs-Jared updates still wait for a microphone pause and are marked
+heard only after their voice reply finishes. Regression tests exercise both
+terminal statuses through a failed synthesis and successful recovery.
+
+The screenshot was placed after asynchronous response and receipt drains.
+The first speech response never recorded completion in the supplied report;
+waiting for every observation could prevent capture. Failure capture now runs
+before those waits and before browser close. Streaming `response.finished()`
+observations are not gates. A total-deadline failure gets a bounded, two-second
+evidence attempt before exit. Screenshot itself has a 1.5-second timeout and
+state readback has a 400 ms limit. If Chromium cannot capture, the report records
+`screenshotSaved: false` with `screenshotError` or `failureEvidenceError`.
+A browser that cannot respond cannot yield a guaranteed image.
+
+The helper also records bounded `voiceRequestFailures` with action, speech ID,
+time and browser error code, plus `voiceRetries` with action and attempt.
+These fields do not copy audio, transcripts, auth headers, credentials or
+arbitrary exception messages. Successful streaming observation is still distinct
+from played acknowledgment and heard operator status.
+
+## Offline verification of recovery
+
+Current receipts and logs are under `.logs/otis-call/phase2-recovery-direct`.
+The exact commands are in `check-results-final.json` and `check-results-current.json`;
+source hashes and final check summaries are in `final-evidence.json`.
+The final focused run passed 292 tests across 11 files, exit 0. The
+contracts, server, client-runtime and web typechecks passed, exit 0. Client-runtime
+and web were rerun after the final retry-policy changes. The evidence/deadline
+suite passed 20 tests, exit 0. Affected lint, source and Markdown formatting,
+acceptance syntax/help and diff whitespace passed, exit 0. Synthetic screenshot
+fixtures prove capture-before-close and deadline behavior, not browser rendering.
+Three standalone deadline probes for stuck setup, heard acknowledgment and cleanup
+returned expected exit 1 with partial reports and synthetic evidence files. The
+actual helper also returned expected exit 1 for an unavailable synthetic WAV,
+with its report saved before any browser or T3 CLI launch. No real phone
+screenshot or audible recovery was reproduced here.
+
+Focused regressions cover a failing watch during streaming, retained sentence 2,
+a lost played acknowledgment without duplicate audio, partial-stream restart,
+retry cancellation on hang-up/detach/interrupt, permanent failures and both
+terminal operator status types recovering to heard acknowledgment. Existing
+provider, protocol, storage, auth, schema and composer checks remain in the suite.
+
+To repeat the changed behavior checks:
 
 ```powershell
-& $callNode node_modules/vite-plus/bin/vp test run apps/web/src/voice/session.test.ts apps/server/src/speech/callService.test.ts apps/server/src/speech/callOperator.test.ts --configLoader native --pool threads --maxWorkers 1 --cache=false --reporter dot
+& $callNode node_modules/vite-plus/bin/vp test run apps/web/src/voice/session.test.ts packages/client-runtime/src/voice-call/transport.test.ts --configLoader native --pool threads --maxWorkers 1 --cache=false --reporter dot
 & $callNode --test --test-isolation=none --test-reporter spec scripts/lib/otis-call-evidence.test.mjs scripts/lib/otis-call-deadline.test.mjs
 ```
 
 Use Node `A:/Dev/Tooling/t3-node-v24.19.0/node.exe`, put its directory first on
-PATH, and set `GOMAXPROCS=2` for package typechecks. The exact eleven-file focused
+PATH and use `GOMAXPROCS=2` for package typechecks. The exact eleven-file focused
 command and four `tsgo --noEmit -p <package>/tsconfig.json` commands are retained
-in the check receipts. Production behavior changes are limited to the call
-controller, lease watch and terminal-update prompt. UI layout, model selectors,
-wire schemas and environment authorization are unchanged by this follow-up.
+in the receipts. No live T3 API requests or browser runs belong to these checks.
 
-The owner queue was also submitted the exact verification command:
-
-```powershell
-& A:/Dev/Tooling/t3-node-v24.19.0/node.exe .logs/otis-call/phase2-fixes/verify.mjs
-```
-
-Job `59927031-94ef-44cd-ae6a-c4420e6623c3` returned still-running after a
-ten-minute owner wait. Its next receipt showed blocked at position 16,
-`waiting-for-earlier-command`, with no admission, logs or exit code. The direct
-fallback uses a separate output directory and Node 24 first on PATH. The queued
-job is not passing evidence and was not cancelled or reconciled here.
-
-The earlier broad orchestration checks remain a separate host gate. Both baseline
-and candidate ingestion probes failed at Git spawn with `EPERM` during phase 2.
-The earlier owner integration job `e543a158-d160-46d4-801b-bba96adb619a` also lacked
-an exit receipt in the prior handoff. No new claim is made about its current state.
-Parent rerun of those two owner suites:
-
-```powershell
-& $callNode node_modules/vite-plus/bin/vp test run apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts apps/server/src/orchestration/Layers/ProviderRuntimeIngestion.test.ts --configLoader native --pool threads --maxWorkers 1 --reporter dot
-```
+Owner queue job `de93ca1d-3b57-4142-89f6-0b75fa590e66` had no admission, logs
+or exit code after its ten-minute owner wait. Its next receipt remained queued
+at position 17. Direct verification uses a separate output directory. Queue
+submission is not passing evidence; no queue state or unrelated job was changed.
+The previous broad orchestration suites remain a separate parent host gate:
+baseline and candidate probes previously failed at Git spawn with `EPERM`.
 
 ## Parent acceptance
 
@@ -206,7 +222,7 @@ $callArgs = @(
   '--wav', $callWav, '--browser', $callBrowser, '--expect-tool', 'get_task',
   '--width', '390', '--timeout-ms', '900000'
 )
-& $callNode @callArgs --output .logs/otis-call/phase2-fixes-live
+& $callNode @callArgs --output .logs/otis-call/phase2-recovery-live
 ```
 
 The helper saves the exact pair through the authenticated route, reloads the real
@@ -215,13 +231,18 @@ the expected approval in the ordinary T3 panel; nothing is auto-approved. Repeat
 on fresh chats with `--width 375` and `--hang-up-after-delivery`, each with a new
 output directory. Early hang-up must precede the operator completion receipt.
 Normal split runs also wait for the result's heard acknowledgment before closing.
-For this fix, keep the normal call open past two minutes and confirm router
-renewal while the operator is waiting and after voice completion. Confirm the
-terminal result is spoken at the next pause and `operator.heard` is true in the
-report. `deadlineExpired` must be false. Repeat with speech underway as the
-result arrives, then pause. The visible unheard list must clear only after playback.
-The total helper deadline includes setup and cleanup; a failed run must leave
-`report.json`, even when heard acknowledgment never arrives.
+Lease renewal already passed on the base. For this fix, verify sentence 2 is
+requested and played, then the terminal result is spoken at a pause and
+`operator.heard` is true. `deadlineExpired` must be false. Inspect
+`voiceRequestFailures` and `voiceRetries` if the endpoint fails again. Confirm a
+brief failure recovers without a browser online transition or a manual retry.
+Use the helper's `--disconnect-at speech` case on another fresh chat to discard
+one accepted synthesis response and prove the queued sentence recovers.
+Repeat with speech underway when the result arrives, then pause. The unheard
+list clears only after playback. A failed run should retain `phone-call.png`
+and its report; unavailable capture must have a named error. The acceptance
+deadline includes setup and cleanup, followed only by the bounded two-second
+failure-evidence attempt.
 Use the operator arguments in this packet for phase 2 acceptance.
 
 Also verify both model/effort pickers mid-call, next-turn application, reload and
@@ -261,15 +282,26 @@ Exclude `.logs`, recordings, local state and temporary gate configuration. No
 production release or router action belongs to this handoff.
 The requested task remains incomplete because generic tool-free voice support,
 integrated owner checks and acceptance of these fixes remain outstanding.
-The earlier implementation checkpoint is
-`.logs/otis-call/phase2/final-source-manifest.json`. Current fix receipts are
-under `.logs/otis-call/phase2-fixes-direct`.
-The current source hashes and consolidated check results are in
-`.logs/otis-call/phase2-fixes-direct/final-evidence.json`.
+Current recovery evidence is
+`.logs/otis-call/phase2-recovery-direct/final-evidence.json`.
+Earlier phase 2 and lease-fix receipts remain under `.logs/otis-call/phase2`
+and `.logs/otis-call/phase2-fixes-direct`.
 
-Retain `runAcceptanceWithDeadline`, a new single-caller helper, as the report and
+Retain `runAcceptanceWithDeadline` as the report and
 process deadline boundary. Inlining it would tie its hung-cleanup tests to real
 providers and a browser. The local `checkpoint` closure is intentionally shared
 by initial, pre-cleanup and failure writes. `hasUnannouncedUpdates` has multiple
 callers and keeps one terminal-status eligibility rule. No new agent system,
 model catalog, transport or UI entry point was added.
+
+Retain the new single-caller `playSentence` helper as the audio-attempt boundary;
+it keeps cancellation and partial-stream retry out of queue management.
+`retry` is shared by request and synthesis operations. The new `errors.ts`
+module keeps retry classification shared with transport error construction.
+`captureFailure` is shared by normal failure cleanup and the outer deadline
+supervisor. None should be inlined into UI rendering or provider orchestration.
+
+Retain the single-caller `voiceRequestError` normalizer as the environment HTTP
+adapter boundary. It unwraps the known fetch-error wrappers to preserve a speech
+error's retry policy. Inlining it into the transport generator would mix wrapper
+handling with streamed PCM parsing.

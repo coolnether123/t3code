@@ -154,18 +154,68 @@ const report = {
   closeError: null,
   rawVerificationError: null,
   failedVoiceRequests: [],
+  voiceRequestFailures: [],
+  voiceRetries: [],
+  screenshotSaved: false,
+  screenshotError: null,
   callId: null,
   utteranceId: null,
   status: "failed",
   error: null,
 };
 let browser;
+let page;
+let captureTask;
+const captureFailure = () => {
+  captureTask ??= (async () => {
+    if (!page || page.isClosed()) {
+      report.screenshotError = "page-unavailable";
+      return;
+    }
+    try {
+      await page.screenshot({
+        path: NodePath.join(output, "phone-call.png"),
+        fullPage: true,
+        timeout: 1500,
+      });
+      report.screenshotSaved = true;
+    } catch (error) {
+      report.screenshotError = error instanceof Error ? error.name : "UnknownError";
+    }
+    let evidenceTimer;
+    const evidence = await Promise.race([
+      page
+        .evaluate(() => {
+          const call = document.querySelector("[data-voice-state]");
+          return {
+            state: call?.getAttribute("data-voice-state") ?? null,
+            alert: call?.querySelector('[role="alert"]')?.textContent ?? null,
+            timing: window.__otisCallEvidence,
+          };
+        })
+        .catch(() => null),
+      new Promise((resolve) => {
+        evidenceTimer = setTimeout(() => resolve(null), 400);
+      }),
+    ]).finally(() => clearTimeout(evidenceTimer));
+    report.callState = evidence?.state ?? report.callState;
+    report.voiceStates = evidence?.timing?.voiceStates ?? report.voiceStates;
+    report.callAlert ??= evidence?.alert ?? null;
+    if (evidence?.timing?.firstTextAt != null)
+      report.stages.firstRenderedText ??= evidence.timing.firstTextAt;
+    if (evidence?.timing?.firstAudioAt != null)
+      report.stages.firstScheduledAudio ??= evidence.timing.firstAudioAt;
+    report.timingsMs = callTimings(report.stages);
+  })();
+  return captureTask;
+};
 const deadlineAt = Date.now() + timeout;
 const accepted = await runAcceptanceWithDeadline({
   output,
   report,
   timeoutMs: timeout,
   close: () => browser?.close(),
+  captureFailure,
   run: async (expired, checkpoint) => {
     report.wavFormat = validatePcmWav(await NodeFSP.readFile(wav));
     async function cli(...args) {
@@ -224,7 +274,7 @@ const accepted = await runAcceptanceWithDeadline({
     });
     const context = await browser.newContext({ viewport: { width, height: 844 } });
     await context.grantPermissions(["microphone"], { origin: origin.origin });
-    const page = await context.newPage();
+    page = await context.newPage();
     page.setDefaultTimeout(timeout);
 
     let uploaded;
@@ -242,7 +292,6 @@ const accepted = await runAcceptanceWithDeadline({
     const deliveredReceipt = new Promise((resolve) => {
       resolveDelivered = resolve;
     });
-    const responseTasks = new Set();
     const mark = (name, at = Date.now()) => {
       report.stages[name] ??= at;
       report.timingsMs = callTimings(report.stages);
@@ -273,6 +322,11 @@ const accepted = await runAcceptanceWithDeadline({
       return sentenceRecords.get(id);
     };
     await page.exposeFunction("__otisCallSpeech", (event, at) => {
+      if (event.type === "retry") {
+        if (report.voiceRetries.length < 100)
+          report.voiceRetries.push({ action: event.action, attempt: event.attempt, at });
+        return;
+      }
       if (event.type === "sentence") {
         const record = sentenceRecord(sentenceSpeechId(event));
         record.queuedAt ??= at;
@@ -336,17 +390,33 @@ const accepted = await runAcceptanceWithDeadline({
       await browser.close();
       throw error;
     });
+    page.on("requestfailed", (request) => {
+      if (new URL(request.url()).pathname !== "/api/voice") return;
+      const input = request.postDataJSON();
+      if (report.voiceRequestFailures.length < 100)
+        report.voiceRequestFailures.push({
+          action: input?.action ?? null,
+          speechId: input?.speechId ?? null,
+          at: Date.now(),
+          errorCode: request.failure()?.errorText?.match(/^net::[A-Z_]+$/)?.[0] ?? "request-failed",
+        });
+    });
     page.on("response", (response) => {
       if (new URL(response.url()).pathname !== "/api/voice") return;
-      const task = (async () => {
+      void (async () => {
         const input = response.request().postDataJSON();
         if (input.action === "call.speak") {
           const record = sentenceRecord(input.speechId);
           record.responseStatus = response.status();
           if (!response.ok())
             report.failedVoiceRequests.push({ action: input.action, status: response.status() });
-          const failure = await response.finished();
-          if (!failure) record.synthesisCompletedAt = Date.now();
+          // CDP completion is observational and must not block acceptance or failure evidence.
+          void response
+            .finished()
+            .then((failure) => {
+              if (!failure) record.synthesisCompletedAt = Date.now();
+            })
+            .catch(() => {});
           return;
         }
         if (input.action === "call.played" && response.ok())
@@ -393,11 +463,9 @@ const accepted = await runAcceptanceWithDeadline({
           report.closedAcknowledged = true;
           mark("closed");
         }
-      })().catch((error) => {
-        report.error = error.message;
+      })().catch(() => {
+        if (report.status === "running") report.error ??= "Voice response observation failed.";
       });
-      responseTasks.add(task);
-      void task.finally(() => responseTasks.delete(task));
     });
     await page.route("**/api/voice", async (route) => {
       const input = route.request().postDataJSON();
@@ -576,8 +644,6 @@ const accepted = await runAcceptanceWithDeadline({
       await page.getByRole("button", { name: "Call Otis", exact: true }).waitFor();
       await instrument();
       await start();
-      if (disconnectAt)
-        await page.getByRole("button", { name: "Retry saved speech", exact: true }).click();
       if (values["reload-after-save"]) {
         await Promise.race([uploadedReceipt, expired]);
         await page.reload();
@@ -594,6 +660,8 @@ const accepted = await runAcceptanceWithDeadline({
         .getByRole("alert");
       const attentionFailure = attention.waitFor().then(async () => {
         report.callAlert = await attention.innerText();
+        await captureFailure();
+        checkpoint();
         throw new Error("Call displayed an alert. See callAlert and phone-call.png.");
       });
       await Promise.race([receipts.completion, attentionFailure, expired]);
@@ -630,7 +698,6 @@ const accepted = await runAcceptanceWithDeadline({
         report.playbackDrained = true;
       }
       await page.screenshot({ path: NodePath.join(output, "phone-call.png"), fullPage: true });
-      await Promise.all(responseTasks);
       NodeAssert.ok(
         uploaded && delivered?.deliveredAt,
         "Raw or delivery acknowledgment is missing.",
@@ -719,30 +786,11 @@ const accepted = await runAcceptanceWithDeadline({
     } finally {
       // Preserve observations even if a response, screenshot or hang-up never settles.
       checkpoint();
-      await Promise.all(responseTasks);
+      await captureFailure();
+      checkpoint();
       await receipts.drain().catch(() => {});
       receipts.close();
       await rawCheck;
-      const evidence = await page
-        .evaluate(() => {
-          const call = document.querySelector("[data-voice-state]");
-          return {
-            state: call?.getAttribute("data-voice-state") ?? null,
-            alert: call?.querySelector('[role="alert"]')?.textContent ?? null,
-            timing: window.__otisCallEvidence,
-          };
-        })
-        .catch(() => null);
-      report.callState = evidence?.state ?? report.callState;
-      report.voiceStates = evidence?.timing?.voiceStates ?? [];
-      report.callAlert ??= evidence?.alert ?? null;
-      if (evidence?.timing?.firstTextAt != null)
-        mark("firstRenderedText", evidence.timing.firstTextAt);
-      if (evidence?.timing?.firstAudioAt != null)
-        mark("firstScheduledAudio", evidence.timing.firstAudioAt);
-      await page
-        .screenshot({ path: NodePath.join(output, "phone-call.png"), fullPage: true })
-        .catch(() => {});
       if (delivered) {
         const count = await page
           .evaluate(
@@ -767,7 +815,6 @@ const accepted = await runAcceptanceWithDeadline({
           report.error ??= "Hang-up was not acknowledged. Retain the isolated data.";
           process.exitCode = 1;
         });
-      await Promise.all(responseTasks);
       report.timingsMs = callTimings(report.stages);
       report.sentences = report.sentences.map((record) => ({
         ...record,

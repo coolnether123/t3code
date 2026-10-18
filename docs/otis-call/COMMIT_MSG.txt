@@ -1,7 +1,7 @@
-fix(voice): keep calls ready and speak background results
+fix(voice): recover queued speech after transient request failures
 
-Keep the speech lease alive throughout the call and release queued speech at
-microphone pauses. Bound acceptance setup, result waits and cleanup with one
-deadline and save partial reports before cleanup.
+Retry voice requests without cancelling unrelated playback. Keep sentence
+acknowledgments separate from synthesis retries and preserve failure screenshots
+before acceptance cleanup.
 
 Otis-Task: agenda-task:515bbc54cb61482681e950e524421ce4

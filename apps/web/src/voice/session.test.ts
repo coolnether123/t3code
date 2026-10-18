@@ -20,6 +20,7 @@ function fixture(initial?: SavedCall) {
   const transcript = deferred<SpeechResponse>();
   const waiting = deferred<void>();
   const failed = deferred<void>();
+  const retrying = deferred<void>();
   let saved = initial ? structuredClone(initial) : undefined;
   let captureCount = 0;
   let currentRecording = recording;
@@ -74,6 +75,9 @@ function fixture(initial?: SavedCall) {
     if (state === "reconnecting" || state === "error") failed.resolve();
   });
   const session = new ThreadVoiceSession({
+    speechEvent: (event) => {
+      if (event.type === "retry") retrying.resolve();
+    },
     request,
     audio,
     persistence,
@@ -91,6 +95,7 @@ function fixture(initial?: SavedCall) {
     transcript,
     waiting,
     failed,
+    retrying,
     saved: () => saved,
   };
 }
@@ -100,6 +105,159 @@ afterEach(async () => {
 });
 
 describe("durable thread voice session", () => {
+  it("keeps a permanent speech error visible instead of retrying it", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (input, signal, onAudio) => {
+      if (input.action === "call.speak") throw new Error("Synthetic invalid speech configuration");
+      return original(input, signal, onAudio);
+    });
+    await f.session.start(options, []);
+    f.session.observe([{ id: "reply", role: "assistant", text: "Done.", streaming: false }], true);
+    f.recording.resolve({ audio: "", sampleRate: 16000 });
+    await f.failed.promise;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(f.request.mock.calls.filter(([input]) => input.action === "call.speak")).toHaveLength(1);
+    expect(f.change.mock.calls.at(-1)?.[0]).toBe("error");
+  });
+  it("retries a failed status watch without aborting streaming playback or dropping the next sentence", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const failWatch = deferred<void>();
+    const playing = deferred<void>();
+    const playbackEnd = deferred<void>();
+    const secondPlayed = deferred<void>();
+    const original = f.request.getMockImplementation()!;
+    let watchAttempt = 0;
+    let played = 0;
+    f.request.mockImplementation(async (input, signal, onAudio) => {
+      if (input.action === "call.watch" && watchAttempt++ === 0) {
+        await failWatch.promise;
+        throw Object.assign(new Error("Synthetic endpoint failure"), {
+          _tag: "RemoteEnvironmentAuthFetchError",
+        });
+      }
+      if (input.action === "call.speak") {
+        onAudio!({ audio: "AAA=", sampleRate: 24000 });
+        return { complete: true };
+      }
+      if (input.action === "call.played" && ++played === 2) secondPlayed.resolve();
+      return original(input, signal, onAudio);
+    });
+    let playbackSignal: AbortSignal | undefined;
+    f.audio.play.mockImplementation(async (_audio, _rate, signal) => {
+      if (playbackSignal) return;
+      playbackSignal = signal;
+      playing.resolve();
+      await playbackEnd.promise;
+    });
+    await f.session.start(options, []);
+    f.session.observe(
+      [{ id: "reply", role: "assistant", text: "First. Second.", streaming: false }],
+      true,
+    );
+    f.recording.resolve({ audio: "", sampleRate: 16000 });
+    await playing.promise;
+    failWatch.resolve();
+    await f.retrying.promise;
+    expect(playbackSignal!.aborted).toBe(false);
+    expect(
+      f.change.mock.calls.some(([state]) => state === "error" || state === "reconnecting"),
+    ).toBe(false);
+    playbackEnd.resolve();
+    await vi.advanceTimersByTimeAsync(250);
+    await secondPlayed.promise;
+    expect(
+      f.request.mock.calls
+        .filter(([input]) => input.action === "call.speak")
+        .map(([input]) => input.text),
+    ).toEqual(["First. ", "Second."]);
+    expect(watchAttempt).toBe(2);
+  });
+  it("retries a lost played acknowledgment without synthesizing or playing the sentence twice", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const acknowledged = deferred<void>();
+    const original = f.request.getMockImplementation()!;
+    let attempts = 0;
+    f.request.mockImplementation(async (input, signal, onAudio) => {
+      if (input.action === "call.played") {
+        if (++attempts === 1) throw new TypeError("Synthetic acknowledgment reset");
+        acknowledged.resolve();
+      }
+      return original(input, signal, onAudio);
+    });
+    await f.session.start(options, []);
+    f.session.observe([{ id: "reply", role: "assistant", text: "Done.", streaming: false }], true);
+    f.recording.resolve({ audio: "", sampleRate: 16000 });
+    await f.retrying.promise;
+    await vi.advanceTimersByTimeAsync(250);
+    await acknowledged.promise;
+    expect(f.audio.play).toHaveBeenCalledTimes(1);
+    expect(f.request.mock.calls.filter(([input]) => input.action === "call.speak")).toHaveLength(1);
+  });
+  it("cancels partial playback before retrying the same failed synthesis", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const acknowledged = deferred<void>();
+    const original = f.request.getMockImplementation()!;
+    let attempts = 0;
+    let partial: AbortSignal | undefined;
+    f.audio.play.mockImplementation(async (_audio, _rate, signal) => {
+      if (partial) return;
+      partial = signal;
+      await new Promise<void>((_resolve, reject) =>
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true }),
+      );
+    });
+    f.request.mockImplementation(async (input, signal, onAudio) => {
+      if (input.action === "call.speak" && ++attempts === 1) {
+        onAudio!({ audio: "AAA=", sampleRate: 24000 });
+        throw new TypeError("Synthetic stream reset");
+      }
+      if (input.action === "call.played") acknowledged.resolve();
+      return original(input, signal, onAudio);
+    });
+    await f.session.start(options, []);
+    f.session.observe([{ id: "reply", role: "assistant", text: "Done.", streaming: false }], true);
+    f.recording.resolve({ audio: "", sampleRate: 16000 });
+    await f.retrying.promise;
+    expect(partial!.aborted).toBe(true);
+    await vi.advanceTimersByTimeAsync(250);
+    await acknowledged.promise;
+    const requests = f.request.mock.calls.filter(([input]) => input.action === "call.speak");
+    expect(requests).toHaveLength(2);
+    expect(requests[0]![0].speechId).toBe(requests[1]![0].speechId);
+  });
+  it.each(["stop", "detach", "interrupt"] as const)(
+    "cancels pending speech retries on %s even after an online event",
+    async (action) => {
+      vi.useFakeTimers();
+      const f = fixture();
+      const original = f.request.getMockImplementation()!;
+      f.request.mockImplementation(async (input, signal, onAudio) => {
+        if (input.action === "call.speak") throw new TypeError("Synthetic offline endpoint");
+        return original(input, signal, onAudio);
+      });
+      await f.session.start(options, []);
+      f.session.observe(
+        [{ id: "reply", role: "assistant", text: "Done.", streaming: false }],
+        true,
+      );
+      f.recording.resolve({ audio: "", sampleRate: 16000 });
+      await f.retrying.promise;
+      await f.session.resume();
+      expect(
+        f.request.mock.calls.filter(([input]) => input.action === "call.prepare"),
+      ).toHaveLength(1);
+      await f.session[action]();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(f.request.mock.calls.filter(([input]) => input.action === "call.speak")).toHaveLength(
+        1,
+      );
+    },
+  );
   it("announces a result arriving during acknowledgment playback before reopening the microphone", async () => {
     const f = fixture();
     const watch = deferred<SpeechResponse>();
@@ -179,10 +337,13 @@ describe("durable thread voice session", () => {
     });
     f.transcript.resolve({});
     await vi.advanceTimersByTimeAsync(60_000);
-    await f.failed.promise;
+    await f.retrying.promise;
     f.request.mockImplementation(original);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(f.request.mock.calls.filter(([input]) => input.action === "call.renew")).toHaveLength(4);
+    expect(
+      f.change.mock.calls.some(([state]) => state === "error" || state === "reconnecting"),
+    ).toBe(false);
     await f.session.stop();
     await vi.advanceTimersByTimeAsync(120_000);
     expect(f.request.mock.calls.filter(([input]) => input.action === "call.renew")).toHaveLength(4);
@@ -224,8 +385,9 @@ describe("durable thread voice session", () => {
     expect(f.request.mock.calls.some(([input]) => input.action === "call.upload")).toBe(false);
   });
   it.each(["done", "needs-Jared"] as const)(
-    "holds an operator %s during speech and marks it heard only after the voice reply plays",
+    "holds an operator %s during speech, retries its voice reply and acknowledges it only after playback",
     async (updateStatus) => {
+      vi.useFakeTimers();
       const f = fixture();
       const watch = deferred<SpeechResponse>();
       const pause = deferred<void>();
@@ -237,6 +399,7 @@ describe("durable thread voice session", () => {
       });
       const original = f.request.getMockImplementation()!;
       let watching = false;
+      let synthesisFailed = false;
       const update = {
         id: "result",
         jobId: "job",
@@ -257,6 +420,10 @@ describe("durable thread voice session", () => {
         operatorUpdates: [update],
       });
       f.request.mockImplementation(async (input, signal, onAudio) => {
+        if (input.action === "call.speak" && !synthesisFailed) {
+          synthesisFailed = true;
+          throw new TypeError("Synthetic fetch failure");
+        }
         if (input.action === "call.watch" && !watching) {
           watching = true;
           return watch.promise;
@@ -292,6 +459,8 @@ describe("durable thread voice session", () => {
         turnId: "update-turn",
       };
       f.session.observe([reply], true, "update-turn");
+      await f.retrying.promise;
+      await vi.advanceTimersByTimeAsync(250);
       await played.promise;
       expect(f.request.mock.calls.some(([input]) => input.action === "call.heard")).toBe(false);
       f.session.observe([reply], false, "update-turn");
