@@ -1,4 +1,4 @@
-import { SpeechResponse, SpeechRequest } from "@t3tools/contracts";
+import { CALL_PREPARE_TIMEOUT_MS, SpeechResponse, SpeechRequest } from "@t3tools/contracts";
 import type { PreparedConnection } from "../connection/model.ts";
 import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
@@ -37,7 +37,10 @@ export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(
     ...input,
     group: "orchestration",
     method: "POST",
-    timeoutMs: 100_000,
+    timeoutMs:
+      input.request.action === "call.prepare" || input.request.action === "acquire"
+        ? CALL_PREPARE_TIMEOUT_MS + 60_000
+        : 100_000,
     url: (base) => new URL("/api/voice", base).toString(),
     request: ({ headers, url }) =>
       Effect.tryPromise({

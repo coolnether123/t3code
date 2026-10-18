@@ -31,3 +31,9 @@ since the last completed local save can be lost if the device or page is killed.
 
 The native mobile app's microphone still provides draft dictation. Use the phone
 browser for calls. Native mobile calls are not available yet.
+
+The phone browser keeps Call Otis and the model selector visible when the text
+composer is collapsed. Starting cold voice engines can take about 3 to 5 minutes;
+the call waits for their readiness. You can end the call while it prepares.
+After a call ends, the same chat can start a new call from any device. Saved audio
+from an ended call finishes uploading before a fresh call starts.

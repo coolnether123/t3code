@@ -26,6 +26,7 @@ const { values } = NodeUtil.parseArgs({
         "effort",
         "expect-tool",
         "timeout-ms",
+        "width",
         "disconnect-at",
       ].map((name) => [name, { type: "string" }]),
     ),
@@ -39,7 +40,7 @@ const { values } = NodeUtil.parseArgs({
 });
 if (values.help) {
   console.log(
-    "Use a fresh isolated chat. Select the model and effort in T3, then pass --base-dir --origin --thread-url --thread-id --instance --wav --browser --expect-tool. Optional: --model --effort --disconnect-at upload|delivery|speech --reload-after-save --hang-up-after-delivery --output. See docs/otis-call/handoff-phase1.md.",
+    "Use a fresh approval-required isolated chat. Select the model and effort in T3, then pass --base-dir --origin --thread-url --thread-id --instance --wav --browser --expect-tool. Optional: --model --effort --width 375|390 --timeout-ms (default 900000) --disconnect-at upload|delivery|speech --reload-after-save --hang-up-after-delivery --output. Progress goes to stderr. See docs/otis-call/handoff-phase1.md for tool approvals.",
   );
   process.exit(0);
 }
@@ -81,8 +82,11 @@ NodeAssert.ok(
 await NodeFSP.mkdir(output, { recursive: true });
 const wav = NodePath.resolve(values.wav);
 const wavFormat = validatePcmWav(await NodeFSP.readFile(wav));
-const timeout = Number(values["timeout-ms"] ?? 600000);
+// Router startup alone may take 600 seconds. Leave time for speech, tools and playback.
+const timeout = Number(values["timeout-ms"] ?? 900000);
 NodeAssert.ok(Number.isFinite(timeout) && timeout > 0, "Invalid acceptance timeout.");
+const width = Number(values.width ?? 390);
+NodeAssert.ok([375, 390].includes(width), "Use --width 375 or 390.");
 const model = values.model ?? "claude-haiku-5-5";
 const effort = values.effort ?? "medium";
 const disconnectAt = values["disconnect-at"] ?? (values.disconnect ? "upload" : null);
@@ -111,6 +115,13 @@ function cli(...args) {
     throw new Error("Isolated dev CLI request failed. Authentication output was withheld.");
   }
 }
+const progressStages = new Set();
+const progress = (name) => {
+  if (progressStages.has(name)) return;
+  progressStages.add(name);
+  process.stderr.write(`[Otis Call] ${name}\n`);
+};
+progress("pair");
 const baseline = JSON.parse(cli("agent", "snapshot", "--thread", values["thread-id"]));
 NodeAssert.ok(
   baseline.thread && baseline.thread.latestTurn == null,
@@ -132,7 +143,7 @@ const browser = await chromium.launch({
     `--use-file-for-fake-audio-capture=${wav}%noloop`,
   ],
 });
-const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+const context = await browser.newContext({ viewport: { width, height: 844 } });
 await context.grantPermissions(["microphone"], { origin: origin.origin });
 const page = await context.newPage();
 page.setDefaultTimeout(timeout);
@@ -140,6 +151,7 @@ const report = {
   source: "parent-run recorded microphone, real local speech and ordinary T3 provider",
   requestedModel: model,
   requestedEffort: effort,
+  viewport: { width, height: 844 },
   wavFormat,
   disconnectAt,
   responseDropped: false,
@@ -182,7 +194,13 @@ const deliveredReceipt = new Promise((resolve) => {
 const responseTasks = new Set();
 const mark = (name, at = Date.now()) => {
   report.stages[name] ??= at;
+  const label = {
+    firstRenderedText: "first text",
+    firstScheduledAudio: "first audio",
+  }[name];
+  if (label) progress(label);
 };
+await page.exposeFunction("__otisCallMark", (name, at) => mark(name, at));
 const segment = toSafeThreadAttachmentSegment(values["thread-id"]);
 NodeAssert.ok(segment, "Invalid disposable thread ID.");
 const log = NodePath.join(home, "userdata/logs/provider", `events.${segment}.log`);
@@ -224,6 +242,7 @@ page.on("response", (response) => {
   const task = (async () => {
     const input = response.request().postDataJSON();
     if (!response.ok()) return;
+    if (input.action === "call.prepare" && (await response.json()).call?.ready) progress("ready");
     if (input.action === "call.open") {
       NodeAssert.equal(
         input.options.modelSelection.instanceId,
@@ -265,6 +284,15 @@ page.on("response", (response) => {
 });
 await page.route("**/api/voice", async (route) => {
   const input = route.request().postDataJSON();
+  const stage = {
+    "call.open": "call open",
+    "call.prepare": "prepare",
+    "call.upload": "upload",
+    "call.transcribe": "transcript",
+    "call.deliver": "delivery",
+    "call.close": "close",
+  }[input.action];
+  if (stage) progress(stage);
   if (input.action === "call.open") {
     const selection = input.options?.modelSelection;
     if (
@@ -305,7 +333,10 @@ async function instrument() {
     window.__otisCallEvidence = { firstTextAt: null, firstAudioAt: null };
     const original = AudioBufferSourceNode.prototype.start;
     AudioBufferSourceNode.prototype.start = function (...args) {
-      window.__otisCallEvidence.firstAudioAt ??= Date.now();
+      if (window.__otisCallEvidence.firstAudioAt === null) {
+        window.__otisCallEvidence.firstAudioAt = Date.now();
+        void window.__otisCallMark("firstScheduledAudio", window.__otisCallEvidence.firstAudioAt);
+      }
       return original.apply(this, args);
     };
     new MutationObserver(() => {
@@ -313,8 +344,12 @@ async function instrument() {
         if (
           !existing.has(row.getAttribute("data-message-id")) &&
           row.querySelector("[data-assistant-message-body]")?.textContent.trim()
-        )
-          window.__otisCallEvidence.firstTextAt ??= Date.now();
+        ) {
+          if (window.__otisCallEvidence.firstTextAt === null) {
+            window.__otisCallEvidence.firstTextAt = Date.now();
+            void window.__otisCallMark("firstRenderedText", window.__otisCallEvidence.firstTextAt);
+          }
+        }
     }).observe(document.body, { subtree: true, childList: true, characterData: true });
   });
 }
@@ -343,7 +378,9 @@ const expired = new Promise((_, reject) => {
 try {
   await page.goto(pairing);
   await page.waitForURL((url) => url.pathname !== "/pair");
+  progress("thread open");
   await page.goto(threadUrl.href);
+  await page.getByRole("button", { name: "Choose model", exact: true }).waitFor();
   await page.getByRole("button", { name: "Call Otis", exact: true }).waitFor();
   await instrument();
   await start();

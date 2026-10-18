@@ -1,4 +1,33 @@
-import type { SpeechTransportRequest, SpeechResponse } from "@t3tools/contracts";
+// @effect-diagnostics nodeBuiltinImport:off - The cold-start request needs an explicit HTTP deadline.
+import * as NodeHttp from "node:http";
+import {
+  CALL_PREPARE_TIMEOUT_MS,
+  type SpeechTransportRequest,
+  type SpeechResponse,
+} from "@t3tools/contracts";
+
+/** Node fetch has a shorter headers deadline than the router's cold-start budget. */
+const acquireSpeechLease = (url: string, init: RequestInit): Promise<Response> =>
+  new Promise((resolve, reject) => {
+    const request = NodeHttp.request(
+      url,
+      {
+        method: init.method,
+        headers: { "content-type": "application/json" },
+        signal: init.signal ?? undefined,
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.on("error", reject);
+        response.on("end", () =>
+          resolve(new Response(Buffer.concat(chunks), { status: response.statusCode! })),
+        );
+      },
+    );
+    request.on("error", reject);
+    request.end(init.body);
+  });
 
 export class SpeechUnavailableError extends Error {}
 
@@ -6,7 +35,7 @@ export class SpeechUnavailableError extends Error {}
 export async function proxySpeech(
   input: SpeechTransportRequest,
   signal: AbortSignal,
-  fetcher: typeof fetch = fetch,
+  fetcher?: typeof fetch,
 ): Promise<SpeechResponse> {
   const sessionId = input.sessionId;
   if (input.action !== "acquire" && (!sessionId || !/^[\w-]{1,128}$/.test(sessionId))) {
@@ -56,7 +85,8 @@ export async function proxySpeech(
       });
       break;
   }
-  const response = await fetcher(`http://127.0.0.1:8085${path}`, {
+  const request = fetcher ?? (input.action === "acquire" ? acquireSpeechLease : fetch);
+  const response = await request(`http://127.0.0.1:8085${path}`, {
     method,
     headers: {
       "content-type": contentType,
@@ -64,7 +94,10 @@ export async function proxySpeech(
     },
     body,
     redirect: "error",
-    signal: AbortSignal.any([signal, AbortSignal.timeout(90_000)]),
+    signal: AbortSignal.any([
+      signal,
+      AbortSignal.timeout(input.action === "acquire" ? CALL_PREPARE_TIMEOUT_MS : 90_000),
+    ]),
   });
   if (input.action === "release" && response.status === 404) return {};
   if (!response.ok)
@@ -90,7 +123,10 @@ export async function proxySpeech(
     /^[\w-]{1,128}$/.test(result.sessionId)
   ) {
     if (input.action === "renew") {
-      const health = await fetcher("http://127.0.0.1:8085/health", { signal, redirect: "error" });
+      const health = await (fetcher ?? fetch)("http://127.0.0.1:8085/health", {
+        signal,
+        redirect: "error",
+      });
       const snapshot: unknown = await health.json();
       const speech =
         snapshot && typeof snapshot === "object" && "speech" in snapshot

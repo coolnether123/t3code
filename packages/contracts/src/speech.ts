@@ -1,6 +1,9 @@
 import * as Schema from "effect/Schema";
 import { ModelSelection } from "./orchestration.ts";
 
+// Router startup allows 600 seconds. Leave time to return the granted lease.
+export const CALL_PREPARE_TIMEOUT_MS = 660_000;
+
 /** Local speech transport only. Conversation commands use the existing thread API. */
 export const SpeechTransportRequest = Schema.Struct({
   action: Schema.Literals(["acquire", "renew", "release", "transcribe", "speak"]),

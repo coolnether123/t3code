@@ -80,6 +80,43 @@ async function fixture() {
 }
 
 describe("durable calls", () => {
+  it("waits through the router's full cold-start budget", async () => {
+    const f = await fixture();
+    const record = await f.store.require("call-1");
+    delete record.lease;
+    await f.store.changed(record);
+    const entered = deferred<void>();
+    const engine = deferred<Awaited<ReturnType<CallPorts["speech"]>>>();
+    let acquisitionSignal: AbortSignal | undefined;
+    f.ports.speech = vi.fn(async (_input, signal) => {
+      acquisitionSignal = signal;
+      entered.resolve();
+      return engine.promise;
+    });
+    vi.useFakeTimers();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation((ms) => {
+      const controller = new AbortController();
+      // @effect-diagnostics-next-line globalTimers:off - Exercise native AbortSignal deadlines with Vitest's fake clock.
+      setTimeout(() => controller.abort(new Error("timeout")), ms);
+      return controller.signal;
+    });
+    try {
+      const preparing = f.request({ action: "call.prepare" });
+      await entered.promise;
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(acquisitionSignal?.aborted).toBe(false);
+      engine.resolve({
+        sessionId: "cold",
+        tenants: ["stt", "tts"],
+        expiresAt: "2099-10-18T00:00:00Z",
+      });
+      await preparing;
+      expect((await f.service.status("call-1")).ready).toBe(true);
+    } finally {
+      timeout.mockRestore();
+      vi.useRealTimers();
+    }
+  });
   it("acknowledges an empty transcript without starting a chat turn", async () => {
     const f = await fixture();
     f.ports.speech = vi.fn(async () => ({ text: "  " }));
@@ -210,6 +247,26 @@ describe("durable calls", () => {
     expect(await f.store.read("_threads", `${sha256(options.threadId)}.json`)).toEqual({
       callId: "call-1",
     });
+  });
+  it("starts a new call from another device after close, including a stale closed binding", async () => {
+    const f = await fixture();
+    const binding = `${sha256(options.threadId)}.json`;
+    await f.request({ action: "call.close" });
+    expect(await f.store.read("_threads", binding)).toBeUndefined();
+    // A pre-fix server or interrupted cleanup may have left this index behind.
+    await f.store.write("_threads", binding, { callId: "call-1" });
+    const restarted = new CallService(new CallStore(f.directory), f.ports);
+    const signal = new AbortController().signal;
+    const opened = await restarted.handle(
+      { action: "call.open", callId: "other-device", options },
+      signal,
+    );
+    expect(opened.call?.closed).toBe(false);
+    await restarted.handle({ action: "call.prepare", callId: "other-device" }, signal);
+    expect((await restarted.status("other-device")).ready).toBe(true);
+    // A retry closing the old archive must preserve the new binding.
+    await f.request({ action: "call.close" });
+    expect(await f.store.read("_threads", binding)).toEqual({ callId: "other-device" });
   });
   it("can reopen a closed archive to drain raw audio without preparing speech", async () => {
     const f = await fixture();

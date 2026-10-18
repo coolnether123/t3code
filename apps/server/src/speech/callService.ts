@@ -7,6 +7,7 @@ import * as Schema from "effect/Schema";
 import * as NodePath from "node:path";
 import {
   CommandId,
+  CALL_PREPARE_TIMEOUT_MS,
   MessageId,
   ThreadId,
   ValidCallRequest,
@@ -153,8 +154,11 @@ export class CallService {
     if (input.action === "call.close") {
       const sessionId = await this.store.serial(input.callId, async () => {
         const record = await this.store.require(input.callId);
-        record.closed = true;
-        await this.store.changed(record);
+        await this.store.serial(`thread:${record.threadId}`, async () => {
+          record.closed = true;
+          await this.store.changed(record);
+          await this.store.unbind(record.threadId, record.callId);
+        });
         return record.lease;
       });
       if (sessionId) {
@@ -254,7 +258,11 @@ export class CallService {
     }
     signal.throwIfAborted();
     active(await this.store.require(callId));
-    const result = await this.ports.speech({ action: "acquire" }, AbortSignal.timeout(90_000));
+    // Keep receiving after HTTP cancellation so a late grant can be released below.
+    const result = await this.ports.speech(
+      { action: "acquire" },
+      AbortSignal.timeout(CALL_PREPARE_TIMEOUT_MS),
+    );
     if (!result.sessionId) throw new Error("The router did not grant a speech lease.");
     if (!this.ports.tenants.every((id) => result.tenants?.includes(id))) {
       await this.ports.speech(

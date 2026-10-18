@@ -158,7 +158,7 @@ describe("durable thread voice session", () => {
     );
     expect(reloaded.saved()?.recordings).toEqual([]);
   });
-  it("drains a closed call without opening the microphone or delivering new work", async () => {
+  it("drains a closed call as raw only, then starts a fresh call in the same action", async () => {
     const f = fixture({
       callId: "closed",
       options,
@@ -169,13 +169,45 @@ describe("durable thread voice session", () => {
       ],
     });
     await f.session.start(options, []);
-    expect(f.audio.prepare).not.toHaveBeenCalled();
-    expect(f.request.mock.calls.map(([input]) => input.action)).toEqual([
+    expect(f.audio.prepare).toHaveBeenCalledOnce();
+    expect(f.request.mock.calls.slice(0, 5).map(([input]) => input.action)).toEqual([
       "call.open",
       "call.upload",
       "call.close",
+      "call.open",
+      "call.prepare",
     ]);
-    expect(f.saved()).toBeUndefined();
+    expect(f.saved()?.callId).not.toBe("closed");
+    expect(f.saved()?.recordings).toEqual([]);
+    expect(f.request.mock.calls.some(([input]) => input.action === "call.deliver")).toBe(false);
+  });
+  it("replaces a locally open call that another device has closed", async () => {
+    const f = fixture({ callId: "old-device", options, offsets: {}, recordings: [] });
+    const original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (input, signal) => {
+      if (input.action === "call.open" && input.callId === "old-device")
+        return {
+          call: {
+            callId: input.callId,
+            threadId: options.threadId,
+            version: "closed",
+            closed: true,
+            ready: false,
+            modelSelection: options.modelSelection,
+            steps: [],
+            utterances: [],
+            played: [],
+          },
+        };
+      return original(input, signal);
+    });
+    await f.session.start(options, []);
+    expect(f.saved()?.callId).not.toBe("old-device");
+    expect(f.request).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "call.prepare", callId: f.saved()?.callId }),
+      expect.any(AbortSignal),
+    );
+    expect(f.audio.capture).toHaveBeenCalledOnce();
   });
   it("retains a late transcript without delivering it after hang-up", async () => {
     const f = fixture();

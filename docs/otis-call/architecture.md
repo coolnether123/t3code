@@ -1,7 +1,7 @@
 # Otis Call architecture
 
 Task `agenda-task:515bbc54cb61482681e950e524421ce4`.
-Candidate follows baseline `5a791b842b` on `work/otis-call-20261018`.
+Candidate follows baseline `3c3b69d714` on `work/otis-call-20261018`.
 Updated 18 October 2026, America/Chicago, CDT.
 
 Jared's correction packet at
@@ -43,7 +43,10 @@ change is needed. The cloud chat model does not need the local 27B resident.
 `stateDir/voice/calls/<callId>` contains `call.json`, plus utterance `.upload.json`,
 `.pcm`, `.raw.json`, `.transcript.json`, `.dispatch.json` and `.delivery.json`
 records. Output uses `.speech.json` and `.played.json`. `_threads/<hash>.json`
-is a repairable binding; active call records are authoritative during open.
+is a repairable binding; active call records are authoritative during open. Closing
+removes only that call's binding under the thread lock. A closed archive may drain
+raw audio but is never recovered as an active call. The same Start action then
+creates a fresh call, including after another device has closed the old one.
 IDs are validated at request and file boundaries. Conflicting identities and
 corrupt records fail visibly without overwriting PCM.
 
@@ -52,6 +55,11 @@ interrupt and close can proceed during stalled STT/TTS. State updates reread the
 current record so an older operation cannot resurrect a lease or reopen a closed
 call. Status returns bounded recent records; full recovery addresses individual
 utterance and speech IDs. Raw archives have no utterance-count cap.
+
+Acquisition waits through the router's 600-second startup budget with a 660-second
+server deadline and 720-second browser deadline. Node HTTP avoids fetch's shorter
+headers deadline. Cancellation still receives a late lease grant and releases it.
+The phone toolbar stays mounted through collapsed composer and tool approvals.
 
 The server must exclusively own its T3 home. File data is fsynced and POSIX
 directory entries are flushed. Windows power-loss durability of replacement is

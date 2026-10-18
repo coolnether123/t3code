@@ -1,7 +1,64 @@
+// @effect-diagnostics nodeBuiltinImport:off - Mock the Node HTTP boundary used for cold acquisition.
 import { describe, expect, it, vi } from "vite-plus/test";
+import * as NodeHttp from "node:http";
+import * as NodeEvents from "node:events";
+import * as NodeStream from "node:stream";
 import { proxySpeech } from "./proxy.ts";
 
+vi.mock("node:http", () => ({ request: vi.fn() }));
+
 describe("local speech proxy", () => {
+  it("uses Node HTTP for acquisition without fetch's five-minute headers deadline", async () => {
+    const response = Object.assign(new NodeStream.PassThrough(), { statusCode: 200 });
+    const request = Object.assign(new NodeEvents.EventEmitter(), {
+      end: vi.fn((_body: unknown) => response.end(JSON.stringify({ sessionId: "cold" }))),
+    });
+    vi.mocked(NodeHttp.request).mockImplementation((_url, _options, receive) => {
+      receive!(response as unknown as NodeHttp.IncomingMessage);
+      return request as unknown as NodeHttp.ClientRequest;
+    });
+    expect(await proxySpeech({ action: "acquire" }, new AbortController().signal)).toEqual({
+      sessionId: "cold",
+    });
+    expect(NodeHttp.request).toHaveBeenCalledWith(
+      "http://127.0.0.1:8085/v1/voice/sessions",
+      expect.objectContaining({ method: "POST", signal: expect.any(AbortSignal) }),
+      expect.any(Function),
+    );
+    expect(JSON.parse(String(request.end.mock.calls[0]?.[0]))).toEqual({
+      client: "t3-code",
+      ttlSeconds: 120,
+    });
+  });
+  it("keeps acquisition connected past five minutes until the router finishes", async () => {
+    vi.useFakeTimers();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation((ms) => {
+      const controller = new AbortController();
+      // @effect-diagnostics-next-line globalTimers:off - Exercise native AbortSignal deadlines with Vitest's fake clock.
+      setTimeout(() => controller.abort(new Error("timeout")), ms);
+      return controller.signal;
+    });
+    let complete!: (response: Response) => void;
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(
+      (_url, init) =>
+        new Promise((resolve, reject) => {
+          complete = resolve;
+          init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), {
+            once: true,
+          });
+        }),
+    );
+    try {
+      const acquiring = proxySpeech({ action: "acquire" }, new AbortController().signal, fetcher);
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(fetcher.mock.calls[0]?.[1]?.signal?.aborted).toBe(false);
+      complete(Response.json({ sessionId: "cold" }));
+      expect(await acquiring).toEqual({ sessionId: "cold" });
+    } finally {
+      timeout.mockRestore();
+      vi.useRealTimers();
+    }
+  });
   it("retains router expiry and verifies tenant health when renewing", async () => {
     const fetcher = vi
       .fn<typeof fetch>()

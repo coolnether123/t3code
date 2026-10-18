@@ -489,7 +489,7 @@ const ComposerSubagentBackendControl = memo(function ComposerSubagentBackendCont
 });
 
 const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(props: {
-  voiceControls?: ReactNode;
+  hasVoiceControls: boolean;
   compact: boolean;
   activeContextWindow: ReturnType<typeof deriveLatestContextWindowSnapshot>;
   activeThreadModelDisplayName: string | null;
@@ -532,9 +532,8 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
       {props.isPreparingWorktree ? (
         <span className="text-secondary-label text-xs">Preparing worktree...</span>
       ) : null}
-      {props.voiceControls}
       {!(
-        props.voiceControls &&
+        props.hasVoiceControls &&
         !props.isRunning &&
         !props.hasSendableContent &&
         !props.pendingAction &&
@@ -3424,139 +3423,136 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               message={providerInputSubmissionError ?? composerSubmissionError}
             />
 
-            {/* Bottom toolbar */}
-            {isComposerCollapsedMobile || isComposerApprovalState ? null : (
+            {/* Keep voice mounted through mobile collapse and tool approvals. */}
+            <div
+              data-chat-composer-footer="true"
+              data-chat-composer-footer-compact={isComposerFooterCompact ? "true" : "false"}
+              className={cn(
+                "flex min-w-0 flex-nowrap items-center justify-between gap-2 overflow-visible px-3 pb-3 sm:px-4 sm:pb-4",
+                pendingUserInputs.length > 0 && "pt-2",
+                isComposerFooterCompact ? "gap-1.5" : "gap-2 sm:gap-0",
+              )}
+            >
               <div
-                data-chat-composer-footer="true"
-                data-chat-composer-footer-compact={isComposerFooterCompact ? "true" : "false"}
                 className={cn(
-                  "flex min-w-0 flex-nowrap items-center justify-between gap-2 overflow-visible px-3 pb-3 sm:px-4 sm:pb-4",
-                  pendingUserInputs.length > 0 && "pt-2",
-                  isComposerFooterCompact ? "gap-1.5" : "gap-2 sm:gap-0",
-                  showMobilePendingAnswerActions && "hidden sm:flex",
+                  "-m-1 -ms-3.5 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto p-1 ps-3.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+                  isComposerApprovalState && "hidden",
                 )}
               >
-                <div className="-m-1 -ms-3.5 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto p-1 ps-3.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-                  <ComposerImagePicker
-                    busy={imagePickerBusy}
-                    disabled={imagePickerDisabled}
-                    onFiles={(files) => void addComposerImages(files)}
+                <ComposerImagePicker
+                  busy={imagePickerBusy}
+                  disabled={imagePickerDisabled}
+                  onFiles={(files) => void addComposerImages(files)}
+                />
+                {noProviderAvailable ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    disabled
+                    data-chat-provider-unavailable="true"
+                    className="shrink-0 gap-2 px-2 text-secondary-label sm:px-3"
+                  >
+                    <CircleAlertIcon className="size-4" />
+                    No provider available
+                  </Button>
+                ) : (
+                  <ProviderModelPicker
+                    triggerAriaLabel="Choose model"
+                    compact={isComposerFooterCompact}
+                    activeInstanceId={selectedInstanceId}
+                    model={selectedModelForPickerWithCustomFallback}
+                    lockedProvider={lockedProvider}
+                    lockedContinuationGroupKey={lockedContinuationGroupKey}
+                    instanceEntries={providerInstanceEntries}
+                    keybindings={keybindings}
+                    modelOptionsByInstance={modelOptionsByInstance}
+                    triggerClassName="-ms-2.5"
+                    terminalOpen={terminalOpen}
+                    open={isComposerModelPickerOpen}
+                    {...(composerProviderState.modelPickerIconClassName
+                      ? {
+                          activeProviderIconClassName:
+                            composerProviderState.modelPickerIconClassName,
+                        }
+                      : {})}
+                    onOpenChange={(open) => {
+                      setIsComposerModelPickerOpen(open);
+                    }}
+                    getModelDisabledReason={getModelDisabledReason}
+                    onInstanceModelChange={onProviderModelSelect}
                   />
-                  {noProviderAvailable ? (
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      disabled
-                      data-chat-provider-unavailable="true"
-                      className="shrink-0 gap-2 px-2 text-secondary-label sm:px-3"
-                    >
-                      <CircleAlertIcon className="size-4" />
-                      No provider available
-                    </Button>
-                  ) : (
-                    <ProviderModelPicker
-                      compact={isComposerFooterCompact}
-                      activeInstanceId={selectedInstanceId}
-                      model={selectedModelForPickerWithCustomFallback}
-                      lockedProvider={lockedProvider}
-                      lockedContinuationGroupKey={lockedContinuationGroupKey}
-                      instanceEntries={providerInstanceEntries}
-                      keybindings={keybindings}
-                      modelOptionsByInstance={modelOptionsByInstance}
-                      triggerClassName="-ms-2.5"
-                      terminalOpen={terminalOpen}
-                      open={isComposerModelPickerOpen}
-                      {...(composerProviderState.modelPickerIconClassName
-                        ? {
-                            activeProviderIconClassName:
-                              composerProviderState.modelPickerIconClassName,
-                          }
-                        : {})}
-                      onOpenChange={(open) => {
-                        setIsComposerModelPickerOpen(open);
-                      }}
-                      getModelDisabledReason={getModelDisabledReason}
-                      onInstanceModelChange={onProviderModelSelect}
-                    />
-                  )}
+                )}
 
-                  {isComposerFooterCompact ? (
-                    <CompactComposerControlsMenu
+                {isComposerFooterCompact ? (
+                  <CompactComposerControlsMenu
+                    interactionMode={interactionMode}
+                    runtimeMode={runtimeMode}
+                    subagentBackend={subagentBackend}
+                    subagentBackendOptions={subagentBackendOptions}
+                    showInteractionModeToggle={composerProviderControls.showInteractionModeToggle}
+                    traitsMenuContent={providerTraitsMenuContent}
+                    onToggleInteractionMode={toggleInteractionMode}
+                    onRuntimeModeChange={handleRuntimeModeChange}
+                    onSubagentBackendChange={handleSubagentBackendChange}
+                  />
+                ) : (
+                  <>
+                    {providerTraitsPicker ? (
+                      <>
+                        <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
+                        {providerTraitsPicker}
+                      </>
+                    ) : null}
+                    <ComposerFooterModeControls
+                      showInteractionModeToggle={composerProviderControls.showInteractionModeToggle}
                       interactionMode={interactionMode}
                       runtimeMode={runtimeMode}
-                      subagentBackend={subagentBackend}
-                      subagentBackendOptions={subagentBackendOptions}
-                      showInteractionModeToggle={composerProviderControls.showInteractionModeToggle}
-                      traitsMenuContent={providerTraitsMenuContent}
                       onToggleInteractionMode={toggleInteractionMode}
                       onRuntimeModeChange={handleRuntimeModeChange}
-                      onSubagentBackendChange={handleSubagentBackendChange}
                     />
-                  ) : (
-                    <>
-                      {providerTraitsPicker ? (
-                        <>
-                          <Separator
-                            orientation="vertical"
-                            className="mx-0.5 hidden h-4 sm:block"
-                          />
-                          {providerTraitsPicker}
-                        </>
-                      ) : null}
-                      <ComposerFooterModeControls
-                        showInteractionModeToggle={
-                          composerProviderControls.showInteractionModeToggle
-                        }
-                        interactionMode={interactionMode}
-                        runtimeMode={runtimeMode}
-                        onToggleInteractionMode={toggleInteractionMode}
-                        onRuntimeModeChange={handleRuntimeModeChange}
-                      />
-                    </>
-                  )}
-                  {isComposerFooterCompact ? null : (
-                    <ComposerSubagentBackendControl
-                      subagentBackend={subagentBackend}
-                      subagentBackendOptions={subagentBackendOptions}
-                      onSubagentBackendChange={handleSubagentBackendChange}
-                    />
-                  )}
-                </div>
+                  </>
+                )}
+                {isComposerFooterCompact ? null : (
+                  <ComposerSubagentBackendControl
+                    subagentBackend={subagentBackend}
+                    subagentBackendOptions={subagentBackendOptions}
+                    onSubagentBackendChange={handleSubagentBackendChange}
+                  />
+                )}
+              </div>
 
-                {/* Right side: send / stop button */}
-                <div
-                  data-chat-composer-actions="right"
-                  data-chat-composer-primary-actions-compact={
-                    isComposerPrimaryActionsCompact ? "true" : "false"
-                  }
-                  className="flex shrink-0 flex-nowrap items-center justify-end gap-2"
-                >
-                  {showMobilePendingAnswerActions ? null : inlineTasksBadge}
-                  {showMobilePendingAnswerActions ? null : inlineStashBadge}
-                  <ComposerFooterPrimaryActions
-                    voiceControls={
-                      activeThread && !showPlanFollowUpPrompt ? (
-                        <ThreadVoiceControls
-                          key={`${environmentId}:${activeThread.id}`}
-                          ref={voiceRef}
-                          thread={activeThread}
-                          running={phase === "running" || isSendBusy}
-                          enabled={
-                            !isConnecting &&
-                            !noProviderAvailable &&
-                            !projectSelectionRequired &&
-                            environmentUnavailable === null &&
-                            !composerSendState.hasSendableContent &&
-                            pendingApprovals.length === 0 &&
-                            pendingUserInputs.length === 0
-                          }
-                          environmentId={environmentId}
-                          modelSelection={selectedModelSelection}
-                          connected={environmentUnavailable === null && !isConnecting}
-                        />
-                      ) : undefined
+              {/* Right side: send / stop button */}
+              <div
+                data-chat-composer-actions="right"
+                data-chat-composer-primary-actions-compact={
+                  isComposerPrimaryActionsCompact ? "true" : "false"
+                }
+                className="flex shrink-0 flex-nowrap items-center justify-end gap-2"
+              >
+                {showMobilePendingAnswerActions ? null : inlineTasksBadge}
+                {showMobilePendingAnswerActions ? null : inlineStashBadge}
+                {activeThread ? (
+                  <ThreadVoiceControls
+                    key={`${environmentId}:${activeThread.id}`}
+                    ref={voiceRef}
+                    thread={activeThread}
+                    running={phase === "running" || isSendBusy}
+                    enabled={
+                      !isConnecting &&
+                      !noProviderAvailable &&
+                      !projectSelectionRequired &&
+                      environmentUnavailable === null &&
+                      !composerSendState.hasSendableContent
                     }
+                    environmentId={environmentId}
+                    modelSelection={selectedModelSelection}
+                    connected={environmentUnavailable === null && !isConnecting}
+                  />
+                ) : null}
+                {!isComposerApprovalState ? (
+                  <ComposerFooterPrimaryActions
+                    hasVoiceControls={activeThread !== null}
                     compact={isComposerPrimaryActionsCompact}
                     activeContextWindow={activeContextWindow}
                     activeThreadModelDisplayName={activeThreadModelDisplayName}
@@ -3598,9 +3594,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     onInterrupt={handleInterruptPrimaryAction}
                     onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryAction}
                   />
-                </div>
+                ) : null}
               </div>
-            )}
+            </div>
           </div>
         </div>
       </div>

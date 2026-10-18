@@ -174,6 +174,12 @@ export class CallStore {
       if (record?.threadId === threadId && !record.closed) return record;
     }
   }
+  /** Called under the thread lock; closing an old archive cannot unbind a newer call. */
+  async unbind(threadId: string, callId: string) {
+    const name = `${sha256(threadId)}.json`;
+    if ((await this.read<{ callId: string }>("_threads", name))?.callId === callId)
+      await NodeFSP.rm(NodePath.join(this.directory("_threads"), name), { force: true });
+  }
   async changed(record: CallRecord) {
     record.version = NodeCrypto.randomUUID();
     await this.write(record.callId, "call.json", record);

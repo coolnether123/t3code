@@ -2,6 +2,8 @@ import { describe, expect, it } from "@effect/vitest";
 import { EnvironmentId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Fiber from "effect/Fiber";
+import * as TestClock from "effect/testing/TestClock";
 import {
   PrimaryConnectionTarget,
   RelayConnectionTarget,
@@ -36,6 +38,31 @@ const input = {
 };
 
 describe("voice environment transport", () => {
+  it.effect("allows a cold prepare to finish after the router's 600 second startup window", () =>
+    Effect.gen(function* () {
+      let enter!: () => void;
+      let complete!: (response: Response) => void;
+      const entered = new Promise<void>((resolve) => {
+        enter = resolve;
+      });
+      const response = new Promise<Response>((resolve) => {
+        complete = resolve;
+      });
+      const fetcher: typeof fetch = async () => {
+        enter();
+        return response;
+      };
+      const request = yield* fetchEnvironmentSpeech({
+        ...input,
+        request: { action: "call.prepare", callId: "synthetic" },
+        fetcher,
+      }).pipe(Effect.provide(remoteHttpClientLayer(fetcher)), Effect.forkChild);
+      yield* Effect.promise(() => entered);
+      yield* TestClock.adjust("601 seconds");
+      complete(Response.json({}));
+      expect(yield* Fiber.join(request)).toEqual({});
+    }),
+  );
   it.effect.each([null, { _tag: "Bearer", token: "synthetic-bearer" }] satisfies
     | PreparedHttpAuthorization[]
     | (PreparedHttpAuthorization | null)[])(

@@ -1,11 +1,12 @@
-feat(voice): add durable voice calls to ordinary chats
+fix(voice): keep phone calls available through startup and recovery
 
-Retain audio before transcription and dispatch ordinary chat turns with stable
-delivery identities. Recover interrupted uploads, transcripts and dispatches,
-and separate speech hang-up from chat interruption.
+Keep phone call controls and the normal model selector reachable when the
+composer collapses. Preserve calls while ordinary tool approvals are shown.
+Wait through cold speech startup and release grants received after cancellation.
+Clear ended call bindings and start a fresh call after draining saved audio.
 
-Use the normal model selector and environment authentication without a voice
-confirmation gate. Include focused recovery checks and a parent-run acceptance
-helper. Real audio and client acceptance remain pending; nothing is deployed.
+Add acceptance stage output, a cold-start budget, phone-width checks and exact
+approval-required acceptance instructions. Offline evidence is in the phase 1
+handoff. Live acceptance remains with the parent; nothing is deployed.
 
 Otis-Task: agenda-task:515bbc54cb61482681e950e524421ce4

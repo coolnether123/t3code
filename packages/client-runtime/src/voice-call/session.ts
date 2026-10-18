@@ -73,7 +73,7 @@ export interface VoiceDependencies {
 /** Transport failures retain the outbox; only a server delivery acknowledgment removes it. */
 export class ThreadVoiceSession {
   private saved: SavedCall | undefined;
-  private status?: CallStatus;
+  private status: CallStatus | undefined;
   private abort = new AbortController();
   private playback = new AbortController();
   private watching = new AbortController();
@@ -154,14 +154,7 @@ export class ThreadVoiceSession {
       this.saved = await this.deps.persistence.read();
       if (!this.active) return;
       if (!this.saved) {
-        this.saved = {
-          callId: this.deps.id(),
-          options,
-          recordings: [],
-          offsets: Object.fromEntries(
-            messages.map((message) => [message.id, this.speechText(message).length]),
-          ),
-        };
+        this.saved = this.newCall(options);
         await this.persist();
       }
       if (this.saved.options.threadId !== options.threadId)
@@ -172,6 +165,17 @@ export class ThreadVoiceSession {
     } catch (error) {
       this.failed(error);
     }
+  }
+  private newCall(options: CallOptions): SavedCall {
+    this.status = undefined;
+    return {
+      callId: this.deps.id(),
+      options,
+      recordings: [],
+      offsets: Object.fromEntries(
+        this.messages.map((message) => [message.id, this.speechText(message).length]),
+      ),
+    };
   }
   async resume() {
     if (!this.active || this.busy || !this.saved) return;
@@ -186,11 +190,19 @@ export class ThreadVoiceSession {
         await this.flush(false);
         await this.request({ action: "call.close" });
         await this.deps.persistence.clear();
-        this.active = false;
-        this.change("idle", "Previous call saved and ended. Start a new call.");
-        return;
+        if (!this.active) return;
+        this.saved = this.newCall({
+          ...this.saved.options,
+          modelSelection: this.modelSelection ?? this.saved.options.modelSelection,
+        });
+        await this.persist();
+        await this.request({ action: "call.open", options: this.saved.options });
+        if (!this.active) return;
       }
-      this.change("preparing", "Waiting for the router's speech profile");
+      this.change(
+        "preparing",
+        "Starting voice engines, about 3–5 minutes on a cold start. Waiting for the router to confirm they are ready.",
+      );
       await this.request({
         action: "call.prepare",
         modelSelection: this.modelSelection ?? this.saved.options.modelSelection,
