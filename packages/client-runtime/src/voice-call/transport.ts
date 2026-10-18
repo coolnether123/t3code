@@ -16,6 +16,7 @@ import type { Atom } from "effect/unstable/reactivity";
 
 const decode = Schema.decodeUnknownSync(Schema.fromJsonString(SpeechResponse));
 const encode = Schema.encodeSync(Schema.fromJsonString(SpeechRequest));
+const encodeResponse = Schema.encodeSync(Schema.fromJsonString(SpeechResponse));
 export class VoiceRequestError extends Error {
   readonly recoverable: boolean;
   constructor(message: string, recoverable: boolean) {
@@ -26,6 +27,7 @@ export class VoiceRequestError extends Error {
 
 /** Reuse cookie, desktop bearer and refreshed request-bound relay authorization. */
 export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(function* (input: {
+  onAudio?: (chunk: { audio: string; sampleRate: number }) => void;
   prepared: PreparedConnection;
   signer: Option.Option<ManagedRelayDpopSigner["Service"]>;
   remoteAuthorization?: Option.Option<RemoteEnvironmentAuthorization["Service"]>;
@@ -40,7 +42,9 @@ export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(
     timeoutMs:
       input.request.action === "call.prepare" || input.request.action === "acquire"
         ? CALL_PREPARE_TIMEOUT_MS + 60_000
-        : 100_000,
+        : input.request.action === "call.speak" && input.request.streamAudio
+          ? 330_000
+          : 100_000,
     url: (base) => new URL("/api/voice", base).toString(),
     request: ({ headers, url }) =>
       Effect.tryPromise({
@@ -53,6 +57,42 @@ export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(
             signal: AbortSignal.any([signal, input.signal]),
             body: encode(input.request),
           });
+          if (
+            response.ok &&
+            input.onAudio &&
+            response.headers.get("content-type")?.includes("application/x-ndjson")
+          ) {
+            const reader = response.body!.getReader();
+            const decoder = new TextDecoder();
+            let partial = "";
+            const result: typeof SpeechResponse.Type = {};
+            try {
+              for (;;) {
+                const chunk = await reader.read();
+                partial += decoder.decode(chunk.value, { stream: !chunk.done });
+                const lines = partial.split("\n");
+                partial = lines.pop()!;
+                for (const line of lines) {
+                  if (!line.trim()) continue;
+                  const frame = decode(line);
+                  if (frame.error) throw new Error(frame.error);
+                  if (frame.audio && frame.sampleRate)
+                    input.onAudio({ audio: frame.audio, sampleRate: frame.sampleRate });
+                  else Object.assign(result, frame);
+                }
+                if (chunk.done) break;
+              }
+              if (partial.trim() || !result.complete)
+                throw new Error("Speech stream ended before completion.");
+            } finally {
+              await reader.cancel().catch(() => {});
+              reader.releaseLock();
+            }
+            return {
+              status: response.status,
+              text: encodeResponse(result),
+            };
+          }
           return { status: response.status, text: await response.text() };
         },
         catch: (cause) =>
@@ -89,7 +129,11 @@ export function createVoiceRequestCommand<R, E>(
 ) {
   return createEnvironmentCommand(runtime, {
     label: "voice-request",
-    execute: (input: { request: SpeechRequest; signal: AbortSignal }) =>
+    execute: (input: {
+      request: SpeechRequest;
+      signal: AbortSignal;
+      onAudio?: (chunk: { audio: string; sampleRate: number }) => void;
+    }) =>
       Effect.gen(function* () {
         const supervisor = yield* EnvironmentSupervisor;
         const prepared = yield* SubscriptionRef.get(supervisor.prepared);

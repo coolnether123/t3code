@@ -42,7 +42,10 @@ export function ThreadVoiceControls({
   const sessionRef = useRef<ThreadVoiceSession | null>(null);
   useLayoutEffect(() => {
     const session = new ThreadVoiceSession({
-      request: (input, signal) => requestSpeech(props.environmentId, input, signal),
+      speechEvent: (event) =>
+        window.dispatchEvent(new CustomEvent("t3-voice-speech", { detail: event })),
+      request: (input, signal, onAudio) =>
+        requestSpeech(props.environmentId, input, signal, onAudio),
       audio: createBrowserAudio(),
       id: randomUUID,
       persistence: callPersistence(`${props.environmentId}:${props.thread.id}`),

@@ -22,6 +22,7 @@ export const CallOptions = Schema.Struct({
 });
 export type CallOptions = typeof CallOptions.Type;
 export const CallRequest = Schema.Struct({
+  streamAudio: Schema.optional(Schema.Boolean),
   action: Schema.Literals([
     "call.open",
     "call.prepare",
@@ -108,6 +109,8 @@ export const CallStatus = Schema.Struct({
 export type CallStatus = typeof CallStatus.Type;
 
 export const SpeechResponse = Schema.Struct({
+  complete: Schema.optional(Schema.Boolean),
+  error: Schema.optional(Schema.String),
   played: Schema.optional(Schema.Boolean),
   sessionId: Schema.optional(Schema.String),
   expiresAt: Schema.optional(Schema.String),

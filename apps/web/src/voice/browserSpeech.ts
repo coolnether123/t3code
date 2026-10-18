@@ -9,10 +9,11 @@ export async function requestSpeech(
   environmentId: EnvironmentId,
   input: SpeechRequest,
   signal: AbortSignal,
+  onAudio?: (chunk: { audio: string; sampleRate: number }) => void,
 ) {
   const result = await speechRequest.run(appAtomRegistry, {
     environmentId,
-    input: { request: input, signal },
+    input: { request: input, signal, ...(onAudio ? { onAudio } : {}) },
   });
   if (result._tag === "Failure") throw Cause.squash(result.cause);
   return result.value;
@@ -23,6 +24,7 @@ export function createBrowserAudio() {
   let context: AudioContext | undefined;
   let finishCapture: (() => void) | undefined;
   let preparedStream: MediaStream | undefined;
+  let playbackUntil = 0;
   return {
     unlock() {
       if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
@@ -75,6 +77,7 @@ export function createBrowserAudio() {
       }
     },
     close() {
+      playbackUntil = 0;
       finishCapture = undefined;
       preparedStream?.getTracks().forEach((track) => track.stop());
       preparedStream = undefined;
@@ -182,6 +185,7 @@ export function createBrowserAudio() {
       source.connect(audioContext.destination);
       await new Promise<void>((resolve, reject) => {
         const abort = () => {
+          playbackUntil = 0;
           source.stop();
           reject(new DOMException("Cancelled", "AbortError"));
         };
@@ -195,7 +199,9 @@ export function createBrowserAudio() {
           },
           { once: true },
         );
-        source.start();
+        const startAt = Math.max(audioContext.currentTime + 0.02, playbackUntil);
+        playbackUntil = startAt + buffer.duration;
+        source.start(startAt);
       });
     },
   };

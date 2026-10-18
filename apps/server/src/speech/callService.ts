@@ -30,6 +30,10 @@ export interface CallPorts {
   ): Promise<{ runtimeMode: RuntimeMode; interactionMode: ProviderInteractionMode }>;
   dispatch(command: OrchestrationCommand): Promise<unknown>;
   speech(request: SpeechTransportRequest, signal: AbortSignal): Promise<SpeechResponse>;
+  speechStream?(
+    request: SpeechTransportRequest,
+    signal: AbortSignal,
+  ): AsyncIterable<SpeechResponse>;
   tenants: readonly [string, string];
   ttsModel: string;
 }
@@ -475,18 +479,40 @@ export class CallService {
     input: CallRequest,
     signal: AbortSignal,
   ): Promise<SpeechResponse> {
+    const request = await this.prepareSpeech(record, input);
+    return request ? this.ports.speech(request, signal) : { played: true };
+  }
+  async *speakStream(input: CallRequest, signal: AbortSignal): AsyncGenerator<SpeechResponse> {
+    decodeCallRequest(input);
+    if (input.action !== "call.speak") throw new Error("A speech request is required.");
+    callIdentifier(input.callId);
+    const request = await this.store.serial(
+      `call.speak:${input.callId}:${callIdentifier(input.speechId)}`,
+      async () => this.prepareSpeech(await this.store.require(input.callId), input),
+    );
+    if (!request) yield { played: true };
+    else if (this.ports.speechStream) yield* this.ports.speechStream(request, signal);
+    else yield await this.ports.speech(request, signal);
+    yield { complete: true };
+  }
+  private async prepareSpeech(
+    record: CallRecord,
+    input: CallRequest,
+  ): Promise<SpeechTransportRequest | undefined> {
     const id = callIdentifier(input.speechId);
     if (!input.text?.trim() || input.text.length > 1600) throw new Error("Invalid speech text.");
     const existing = await this.store.read<{ text: string }>(record.callId, `${id}.speech.json`);
     if (existing && existing.text !== input.text)
       throw new Error("Speech ID already belongs to different text.");
-    if (await this.store.read(record.callId, `${id}.played.json`)) return { played: true };
+    if (await this.store.read(record.callId, `${id}.played.json`)) return undefined;
     if (!existing)
       await this.store.write(record.callId, `${id}.speech.json`, { text: input.text, at: now() });
-    return this.ports.speech(
-      { action: "speak", sessionId: lease(record), model: this.ports.ttsModel, text: input.text },
-      signal,
-    );
+    return {
+      action: "speak",
+      sessionId: lease(record),
+      model: this.ports.ttsModel,
+      text: input.text,
+    };
   }
   private async interrupt(record: CallRecord, id: string) {
     await this.ports.dispatch({

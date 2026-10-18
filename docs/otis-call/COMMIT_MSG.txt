@@ -1,12 +1,14 @@
-fix(voice): play queued replies and retain partial acceptance evidence
+perf(voice): stream sentence audio and request conversational replies
 
-Finish microphone capture before playing an assistant reply, retain its audio,
-and deliver queued input after playback and chat work finish. Use durable turn
-state while the provider starts or waits on an ordinary approval.
+Forward PCM chunks through the existing authenticated call route and schedule
+them as they arrive. Keep a short ordered sentence queue, preserve played
+acknowledgments and cancel pending audio on interrupt.
 
-Match successful named Otis MCP receipts, verify raw uploads independently,
-and calculate timings even when acceptance fails. Preserve call alerts, state
-and screenshots for diagnosis. Offline checks are recorded in the handoff;
-real speech acceptance remains with the parent. Nothing is deployed.
+Add conversational brevity to ordinary voice turn input without changing saved
+transcripts or harness permissions. Record sentence availability and TTS timing,
+and provide supported low-versus-medium acceptance commands.
+
+Offline evidence is in the phase 1 handoff. Live speed comparison remains with
+the parent. Changes are uncommitted and not deployed.
 
 Otis-Task: agenda-task:515bbc54cb61482681e950e524421ce4

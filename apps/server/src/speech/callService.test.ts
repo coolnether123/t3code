@@ -80,6 +80,34 @@ async function fixture() {
 }
 
 describe("durable calls", () => {
+  it("streams a sentence before its final chunk and preserves played acknowledgment", async () => {
+    const f = await fixture();
+    const end = deferred<void>();
+    f.ports.speechStream = vi.fn(async function* () {
+      yield { audio: "AAA=", sampleRate: 24000 };
+      await end.promise;
+      yield { audio: "AQA=", sampleRate: 24000 };
+    });
+    const input = {
+      callId: "call-1",
+      action: "call.speak" as const,
+      speechId: "sentence",
+      text: "The work is saved.",
+      streamAudio: true,
+    };
+    const response = f.service.speakStream(input, new AbortController().signal);
+    expect((await response.next()).value).toEqual({ audio: "AAA=", sampleRate: 24000 });
+    expect(await f.store.read("call-1", "sentence.played.json")).toBeUndefined();
+    end.resolve();
+    expect((await response.next()).value).toEqual({ audio: "AQA=", sampleRate: 24000 });
+    expect((await response.next()).value).toEqual({ complete: true });
+    await f.request({ action: "call.played", speechId: "sentence" });
+    const replay = [];
+    for await (const frame of f.service.speakStream(input, new AbortController().signal))
+      replay.push(frame);
+    expect(replay).toEqual([{ played: true }, { complete: true }]);
+    expect(f.ports.speechStream).toHaveBeenCalledOnce();
+  });
   it("waits through the router's full cold-start budget", async () => {
     const f = await fixture();
     const record = await f.store.require("call-1");
@@ -506,6 +534,32 @@ describe("exact call model", () => {
   };
   it("accepts a configured 5.5 model and medium without replacing either", () => {
     expect(() => verifyCallModel(options, [provider])).not.toThrow();
+  });
+  it("accepts low effort only when the selected model advertises it", () => {
+    const low = {
+      ...options,
+      modelSelection: { ...options.modelSelection, options: [{ id: "effort", value: "low" }] },
+    };
+    expect(() => verifyCallModel(low, [provider])).toThrow("silently dropped");
+    const supported = {
+      ...provider,
+      models: [
+        {
+          ...provider.models[0]!,
+          capabilities: {
+            optionDescriptors: [
+              {
+                id: "effort",
+                type: "select" as const,
+                label: "Thinking",
+                options: [{ id: "low", label: "Low" }],
+              },
+            ],
+          },
+        },
+      ],
+    };
+    expect(() => verifyCallModel(low, [supported])).not.toThrow();
   });
   it.each(["codex", "claudeAgent", "cursor", "grok", "opencode"])(
     "uses the advertised selection with the ordinary %s adapter",

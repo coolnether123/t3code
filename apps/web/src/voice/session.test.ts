@@ -98,6 +98,72 @@ afterEach(async () => {
 });
 
 describe("durable thread voice session", () => {
+  it("plays streamed PCM before synthesis ends and drops queued sentences on interrupt", async () => {
+    const f = fixture();
+    await f.session.start(options, []);
+    f.session.finish();
+    f.transcript.resolve({ text: "Go" });
+    await f.waiting.promise;
+    const synthesized = deferred<void>();
+    const playing = deferred<void>();
+    const original = f.request.getMockImplementation()!;
+    let sendChunk: ((chunk: { audio: string; sampleRate: number }) => void) | undefined;
+    f.audio.play.mockImplementation(async () => {
+      playing.resolve();
+    });
+    f.request.mockImplementation(async (input, signal, onAudio) => {
+      if (input.action !== "call.speak") return original(input, signal, onAudio);
+      sendChunk = onAudio;
+      onAudio!({ audio: "AAA=", sampleRate: 24000 });
+      await synthesized.promise;
+      return { complete: true };
+    });
+    const message = {
+      id: "reply",
+      role: "assistant",
+      text: "First sentence. Second sentence. Third sentence. Fourth sentence.",
+      streaming: true,
+      turnId: "turn",
+    };
+    f.session.observe([message], true, "turn");
+    await playing.promise;
+    expect(
+      f.request.mock.calls
+        .filter(([input]) => input.action === "call.speak")
+        .map(([input]) => input.text),
+    ).toEqual(["First sentence. "]);
+    const interrupt = f.session.interrupt();
+    expect(() => sendChunk!({ audio: "AAA=", sampleRate: 24000 })).toThrow();
+    synthesized.resolve();
+    await interrupt;
+    f.session.observe([{ ...message, streaming: false }], false, "turn");
+    expect(f.request.mock.calls.filter(([input]) => input.action === "call.speak")).toHaveLength(1);
+  });
+  it("refills the short ordered sentence queue without dropping the rest of a completed reply", async () => {
+    const f = fixture();
+    await f.session.start(options, []);
+    f.session.finish();
+    f.transcript.resolve({ text: "Go" });
+    await f.waiting.promise;
+    const done = deferred<void>();
+    const original = f.request.getMockImplementation()!;
+    let count = 0;
+    f.request.mockImplementation(async (input, signal, onAudio) => {
+      const response = await original(input, signal, onAudio);
+      if (input.action === "call.played" && ++count === 5) done.resolve();
+      return response;
+    });
+    f.session.observe(
+      [{ id: "reply", role: "assistant", text: "One. Two. Three. Four. Five.", streaming: false }],
+      true,
+    );
+    await done.promise;
+    expect(
+      f.request.mock.calls
+        .filter(([input]) => input.action === "call.speak")
+        .map(([input]) => input.text),
+    ).toEqual(["One. ", "Two. ", "Three. ", "Four. ", "Five."]);
+  });
   it("delivers microphone input retained during a reply after playback and turn completion", async () => {
     const f = fixture();
     const playing = deferred<void>();
@@ -165,6 +231,7 @@ describe("durable thread voice session", () => {
       expect(f.request).toHaveBeenCalledWith(
         expect.objectContaining({ action: "call.speak", text: "The call task is open. " }),
         expect.any(AbortSignal),
+        expect.any(Function),
       );
     },
   );

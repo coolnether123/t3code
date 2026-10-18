@@ -7,6 +7,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import {
   HttpRouter,
   HttpServerRequest,
@@ -14,7 +15,7 @@ import {
   HttpServerRespondable,
 } from "effect/unstable/http";
 import { authenticateRawRouteWithScope } from "../http.ts";
-import { proxySpeech, SpeechUnavailableError } from "./proxy.ts";
+import { proxySpeech, streamSpeech, SpeechUnavailableError } from "./proxy.ts";
 import { ServerConfig } from "../config.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -61,12 +62,34 @@ export const speechRouteLayer = HttpRouter.add(
       },
       dispatch: (command) => Effect.runPromise(engine.dispatch(command)),
       speech: proxySpeech,
+      speechStream: streamSpeech,
       tenants: [
         process.env.T3_CALL_STT_TENANT ?? "whisper-large-v3-turbo",
         process.env.T3_CALL_TTS_TENANT ?? "breeze-tts-2",
       ],
       ttsModel: process.env.T3_CALL_TTS_MODEL ?? "breeze-tts-2",
     });
+    if ("callId" in input && input.action === "call.speak" && input.streamAudio) {
+      const controller = new AbortController();
+      const body = Stream.fromAsyncIterable(
+        calls.speakStream(input, controller.signal),
+        () => new Error("Speech stream interrupted."),
+      ).pipe(
+        Stream.catch(() =>
+          Stream.succeed({ error: "Speech stream interrupted. Saved speech is retained." }),
+        ),
+        Stream.map((chunk) => new TextEncoder().encode(`${JSON.stringify(chunk)}\n`)),
+        Stream.ensuring(Effect.sync(() => controller.abort())),
+      );
+      return HttpServerResponse.stream(body, {
+        headers: {
+          "content-type": "application/x-ndjson",
+          "content-encoding": "identity",
+          "cache-control": "no-store, no-transform",
+          "x-accel-buffering": "no",
+        },
+      });
+    }
     return yield* Effect.tryPromise({
       try: (signal) =>
         "callId" in input ? calls.handle(input as CallRequest, signal) : proxySpeech(input, signal),

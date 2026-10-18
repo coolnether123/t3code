@@ -48,7 +48,16 @@ export interface SavedCall {
   silencedMessages?: string[];
 }
 export interface VoiceDependencies {
-  request(input: CallRequest, signal: AbortSignal): Promise<SpeechResponse>;
+  speechEvent?(
+    event:
+      | { type: "sentence"; messageId: string; start: number; end: number }
+      | { type: "audio"; speechId: string },
+  ): void;
+  request(
+    input: CallRequest,
+    signal: AbortSignal,
+    onAudio?: (chunk: { audio: string; sampleRate: number }) => void,
+  ): Promise<SpeechResponse>;
   persistence: {
     read(): Promise<SavedCall | undefined>;
     write(call: SavedCall): Promise<void>;
@@ -117,8 +126,16 @@ export class ThreadVoiceSession {
       .then(() => this.deps.persistence.write(snapshot));
     return this.persistenceTail;
   }
-  private async request(input: Omit<CallRequest, "callId">, signal = this.abort.signal) {
-    const response = await this.deps.request({ ...input, callId: this.saved!.callId }, signal);
+  private async request(
+    input: Omit<CallRequest, "callId">,
+    signal = this.abort.signal,
+    onAudio?: (chunk: { audio: string; sampleRate: number }) => void,
+  ) {
+    const response = await this.deps.request(
+      { ...input, callId: this.saved!.callId },
+      signal,
+      ...(onAudio ? ([onAudio] as const) : []),
+    );
     if (response.call) this.status = response.call;
     return response;
   }
@@ -380,14 +397,15 @@ export class ThreadVoiceSession {
       let offset = this.saved.offsets[message.id] ?? 0;
       const queued = this.queue.filter((entry) => entry.messageId === message.id);
       if (queued.length) offset = Math.max(offset, ...queued.map((entry) => entry.end ?? 0));
-      while (offset < spoken.length) {
+      while (offset < spoken.length && this.queue.length < 3) {
         const rest = spoken.slice(offset);
         const text =
-          rest.match(/^[\s\S]{1,1200}?[.!?](?:\s|$)/)?.[0] ??
+          rest.match(/^[\s\S]{1,1200}?[.!?]["')\]]*(?:\s|$)/)?.[0] ??
           (!message.streaming || rest.length >= 1200 ? rest.slice(0, 1200) : "");
         if (!text) break;
         const end = offset + text.length;
         this.queue.push({ text, messageId: message.id, start: offset, end });
+        this.deps.speechEvent?.({ type: "sentence", messageId: message.id, start: offset, end });
         offset = end;
       }
     }
@@ -421,15 +439,31 @@ export class ThreadVoiceSession {
           signal.throwIfAborted();
           this.change("speaking");
           if (!this.status?.played.includes(id)) {
+            const chunks: Promise<void>[] = [];
             const result = await this.request(
-              { action: "call.speak", speechId: id, text: item.text.replace(/[#*_]/g, "") },
+              {
+                action: "call.speak",
+                speechId: id,
+                text: item.text.replace(/[#*_]/g, ""),
+                streamAudio: true,
+              },
               signal,
+              (chunk) => {
+                signal.throwIfAborted();
+                this.deps.speechEvent?.({ type: "audio", speechId: id });
+                const played = this.deps.audio.play(chunk.audio, chunk.sampleRate, signal);
+                chunks.push(played);
+                void played.catch((error) => {
+                  if (!signal.aborted) this.failed(error);
+                });
+              },
             );
             signal.throwIfAborted();
-            if (!result.played && (!result.audio || !result.sampleRate))
+            if (!result.played && !chunks.length && (!result.audio || !result.sampleRate))
               throw new Error("Speech service returned no audio.");
-            if (!result.played)
+            if (!result.played && !chunks.length)
               await this.deps.audio.play(result.audio!, result.sampleRate!, signal);
+            await Promise.all(chunks);
             signal.throwIfAborted();
             await this.request({ action: "call.played", speechId: id });
           }
@@ -438,6 +472,7 @@ export class ThreadVoiceSession {
             await this.persist();
           }
           this.queue.shift();
+          this.observe(this.messages, this.running, this.turnId, this.modelSelection);
         }
         if (this.active && !signal.aborted) this.change(this.running ? "waiting" : "ready");
       } catch (error) {

@@ -4,6 +4,29 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeCrypto from "node:crypto";
 
+export function sentenceSpeechId({ messageId, start, end }) {
+  return `s-${NodeCrypto.createHash("sha256")
+    .update(JSON.stringify([messageId, start, end]))
+    .digest("hex")}`;
+}
+
+export function sentenceTimings(sentence) {
+  const elapsed = (from, to) =>
+    Number.isFinite(sentence[from]) && Number.isFinite(sentence[to])
+      ? sentence[to] - sentence[from]
+      : null;
+  return {
+    ttsMs: elapsed("requestedAt", "synthesisCompletedAt"),
+    requestToFirstAudioMs: elapsed("requestedAt", "firstScheduledAudioAt"),
+    queuedToFirstAudioMs: elapsed("queuedAt", "firstScheduledAudioAt"),
+    streamedBeforeSynthesisCompleted:
+      Number.isFinite(sentence.firstScheduledAudioAt) &&
+      Number.isFinite(sentence.synthesisCompletedAt)
+        ? sentence.firstScheduledAudioAt < sentence.synthesisCompletedAt
+        : null,
+  };
+}
+
 /** Claude's canonical MCP receipt identifies the server and tool in data.toolName. */
 export function completedOtisTool(event, expected) {
   const payload = event.payload;
@@ -34,6 +57,7 @@ export function callTimings(stages) {
     transcriptToDelivery: elapsed("transcript", "delivery"),
     deliveryToFirstText: elapsed("delivery", "firstRenderedText"),
     firstTextToFirstAudio: elapsed("firstRenderedText", "firstScheduledAudio"),
+    firstSentenceToFirstAudio: elapsed("firstSentence", "firstScheduledAudio"),
   };
 }
 

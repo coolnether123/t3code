@@ -9,8 +9,39 @@ import {
   completedOtisTool,
   callTimings,
   verifyCallRaw,
+  sentenceSpeechId,
+  sentenceTimings,
 } from "./otis-call-evidence.mjs";
 import * as NodeCrypto from "node:crypto";
+
+NodeTest.test(
+  "measures each sentence without treating missing or cancelled audio as zero latency",
+  () => {
+    NodeAssert.deepEqual(
+      sentenceTimings({
+        queuedAt: 1000,
+        requestedAt: 1200,
+        firstScheduledAudioAt: 1400,
+        synthesisCompletedAt: 4000,
+      }),
+      {
+        ttsMs: 2800,
+        requestToFirstAudioMs: 200,
+        queuedToFirstAudioMs: 400,
+        streamedBeforeSynthesisCompleted: true,
+      },
+    );
+    NodeAssert.equal(sentenceTimings({ requestedAt: 1200 }).ttsMs, null);
+    NodeAssert.equal(
+      callTimings({ firstSentence: 1000, firstScheduledAudio: 1400 }).firstSentenceToFirstAudio,
+      400,
+    );
+    NodeAssert.equal(
+      sentenceSpeechId({ messageId: "message", start: 0, end: 12 }),
+      "s-15b4f38ed1ffbd5fc94b80c410faaefc1b6c41cc62d6c3fab915b6f04e3efd40",
+    );
+  },
+);
 
 NodeTest.test(
   "matches successful canonical Claude Otis MCP receipts by exact server and tool",
@@ -56,6 +87,7 @@ NodeTest.test(
       transcriptToDelivery: 150,
       deliveryToFirstText: 1250,
       firstTextToFirstAudio: null,
+      firstSentenceToFirstAudio: null,
     });
     NodeAssert.equal(
       callTimings({ ...stages, firstScheduledAudio: 12000 }).firstTextToFirstAudio,

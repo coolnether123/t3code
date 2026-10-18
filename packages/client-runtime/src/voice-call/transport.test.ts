@@ -38,6 +38,46 @@ const input = {
 };
 
 describe("voice environment transport", () => {
+  it.effect("passes streamed audio to playback before the response ends", () =>
+    Effect.gen(function* () {
+      let source!: ReadableStreamDefaultController<Uint8Array>;
+      let received!: () => void;
+      const first = new Promise<void>((resolve) => {
+        received = resolve;
+      });
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          source = controller;
+        },
+      });
+      const fetcher: typeof fetch = async () =>
+        new Response(body, { headers: { "content-type": "application/x-ndjson" } });
+      const chunks: string[] = [];
+      const request = yield* fetchEnvironmentSpeech({
+        ...input,
+        request: {
+          action: "call.speak",
+          callId: "synthetic",
+          speechId: "sentence",
+          text: "First.",
+          streamAudio: true,
+        },
+        fetcher,
+        onAudio: (chunk) => {
+          chunks.push(chunk.audio);
+          received();
+        },
+      }).pipe(Effect.provide(remoteHttpClientLayer(fetcher)), Effect.forkChild);
+      const bytes = new TextEncoder();
+      source.enqueue(bytes.encode('{"audio":"AA'));
+      source.enqueue(bytes.encode('A=","sampleRate":24000}\n'));
+      yield* Effect.promise(() => first);
+      expect(chunks).toEqual(["AAA="]);
+      source.enqueue(bytes.encode('{"complete":true}\n'));
+      source.close();
+      expect(yield* Fiber.join(request)).toEqual({ complete: true });
+    }),
+  );
   it.effect("allows a cold prepare to finish after the router's 600 second startup window", () =>
     Effect.gen(function* () {
       let enter!: () => void;

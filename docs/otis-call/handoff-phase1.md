@@ -1,22 +1,22 @@
 # Otis Call phase 1 handoff
 
 Task `agenda-task:515bbc54cb61482681e950e524421ce4`.
-Branch `work/otis-call-20261018`, baseline HEAD `d96f549d66`, upstream
+Branch `work/otis-call-20261018`, baseline HEAD `e01c37875e`, upstream
 `origin/work/otis-call-20261018`. Changes are uncommitted, as requested.
 Observation date: 18 October 2026, America/Chicago, CDT. Exact check times and
-commands for this revision are in ignored `.logs/otis-call/speech-reply-fixes` evidence.
+commands for this revision are in ignored `.logs/otis-call/latency` evidence.
 The host did not expose independent runtime model and reasoning-effort
 attestation. No subagents were used.
 
 ## Evidence rungs
 
-| Rung                    | State                                                                                                                                                                                            |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Built                   | Reply capture/playback gating and independent acceptance reporting repaired in source. No distributable server/web bundle was produced here.                                                     |
-| Tested offline          | Focused behavior, auth and contract tests; real T3 engine/SQLite delivery recovery with synthetic speech; acceptance parser/watcher tests. Exact final counts and exits follow below.            |
-| Needs parent acceptance | Repeat real spoken reply and helper acceptance on this candidate. Parent already observed phone controls, transcription, one message, Haiku 5.5 medium and completed Otis tools at the baseline. |
-| Committed/pushed        | These changes are neither committed nor pushed. The baseline was already pushed. Parent publication is required.                                                                                 |
-| Not deployed            | No live T3 restart, deployment, router restart, engine download or Otis-side change occurred.                                                                                                    |
+| Rung                    | State                                                                                                                                                                                 |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Built                   | Sentence queue, streamed PCM delivery, per-turn brevity guidance and sentence measurements implemented. No distributable server/web bundle was produced here.                         |
+| Tested offline          | Focused behavior, auth and contract tests; real T3 engine/SQLite delivery recovery with synthetic speech; acceptance parser/watcher tests. Exact final counts and exits follow below. |
+| Needs parent acceptance | Compare fresh warm medium and supported low-effort runs. Parent accepted real phone controls, transcript, named Otis tool, Breeze playback and clean close at the baseline.           |
+| Committed/pushed        | These changes are neither committed nor pushed. The baseline was already pushed. Parent publication is required.                                                                      |
+| Not deployed            | No live T3 restart, deployment, router restart, engine download or Otis-side change occurred.                                                                                         |
 
 The voice gate and Claude hook are deleted. Calls use ordinary T3 turns and the
 thread's existing permissions. Hang-up does not send an interrupt. The normal
@@ -31,72 +31,85 @@ retry and hang-up, journals capture locally, cancels the ready cue, and silences
 late output from interrupted turns. Environment transport reuses cookie, desktop
 bearer and refreshed DPoP authorization.
 
-## Spoken reply and evidence follow-up
+## Latency follow-up
 
-The parent committed the preceding fixes as `d96f549d66`. Its isolated 390 px
-run reached first text, but scheduled no reply audio. The retained report is
-`.logs/otis-call/medium-baseline/report.json`. The source and offline evidence
-for this follow-up are separate from that real run.
+The parent accepted `e01c37875e` with the real 390 px run at
+`.logs/otis-call/medium-baseline-2`. It verified raw audio, one message,
+Haiku 5.5 with SDK effort medium, a named Otis tool, turn completion, Breeze
+playback and clean close. Its screenshot showed Speaking, Interrupt and End.
+Those are parent observations of the baseline, not measurements of this candidate.
 
-- `packages/client-runtime/src/voice-call/session.ts` reproduced a playback
-  gate: an active microphone capture keeps a queued assistant sentence from
-  reaching `call.speak`. New replies now finish microphone capture, retain its
-  raw bytes on PC, and play the reply. Retained input waits until playback and
-  the current turn finish before normal transcription/delivery. Streaming
-  sentences and completed replies have regression coverage. JSON/code filtering
-  stays in place; the reproduced failure is queue/capture state, not that filter.
-- `apps/web/src/components/chat/ChatComposer.tsx` also uses the durable latest
-  turn's running state when supplying call state. Provider session startup and
-  approval transitions must not falsely tell voice that chat work is idle.
-- `scripts/lib/otis-call-evidence.mjs` matches Claude's actual canonical
-  `item.completed` receipt with `itemType=mcp_tool_call`, `status=completed`
-  and exact `data.toolName=mcp__otis__get_task` for `--expect-tool get_task`.
-  Failed calls, other tools, other servers and generic tool titles do not count.
-- `scripts/otis-call-acceptance.mjs` verifies raw PCM immediately after upload
-  acknowledgment. Provider completion is collected independently after a voice
-  failure; the final drain reads appended receipts before closing the watcher.
-  Timings derive from stage stamps on every update and in finalization. Alert
-  text, call state and its transitions, error kind/detail, failed voice action/status and a screenshot
-  are retained on failure. A screenshot is taken before attempting hang-up.
+| Parent baseline interval                         | Milliseconds |
+| ------------------------------------------------ | -----------: |
+| Speech end to transcript                         |         3673 |
+| Transcript to delivery                           |          314 |
+| Delivery to first text, including tool approvals |        32566 |
+| First text to first scheduled audio              |        32355 |
+| Speech end to first scheduled audio              |        68908 |
 
-The original suffix matcher already accepts the retained successful receipt.
-The old report stopped before completion and did not preserve enough failure
-context to assign the missing receipt to a matcher defect. The new matcher is
-stricter and tested against the observed event shape. The completed `get_task`
-receipt is at 5:36:08.562 AM CDT and turn completion at 5:36:12.647 AM CDT.
-The call's router activity in the requested interval contains acquisition,
-transcription and renewal, with no TTS request.
+The archive's TTS input was one long sentence, roughly 300 characters. Sentence
+extraction already existed; the main proven delay was the full PCM response
+being buffered in T3 before playback. Conversational guidance also addresses
+that long opening sentence. No new speedup measurement is claimed here.
 
-The original alert is unknown. No screenshot or alert text survived that run;
-its generic `Acceptance stopped` error does not prove an alert appeared.
-The source-reproduced capture gate explains a way to suppress `call.speak`,
-but the exact old browser state cannot be recovered. A live rerun must confirm
-that this was the remaining speech failure. No live UI or router probe ran here.
+### Source and behavior
 
-The actual raw layout already matches the helper:
-`userdata/voice/calls/<callId>/<utteranceId>.raw.json` and adjacent `.pcm`.
-The false raw flag came from running verification only after all audio/provider
-checks. An offline read of the retained archive verifies 1,024,000 PCM bytes and
-the metadata hash. The audit is local at
-`.logs/otis-call/speech-reply-fixes/parent-evidence-audit.json`; it contains no
-transcript, tool arguments or audio payload.
+- `packages/client-runtime/src/voice-call/session.ts` sends the first complete
+  natural-language sentence while the reply streams. It keeps at most three
+  sentences ready and refills from the complete retained chat text. That bounds
+  lookahead, not answer length. Incomplete trailing text waits for punctuation
+  or message completion. Code and JSON stay silent. Each sentence retains its
+  message/range identity and is acknowledged played only after all its PCM ends.
+  Interrupt aborts the active request and queued audio, drops pending sentences,
+  and silences later deltas from that interrupted turn.
+- `apps/server/src/speech/proxy.ts`, `callService.ts`, `http.ts` and
+  `packages/client-runtime/src/voice-call/transport.ts` carry PCM incrementally
+  through the existing authenticated voice route. A `call.speak` request with
+  `streamAudio:true` returns newline-delimited SpeechResponse frames, followed
+  by `complete:true`. A stream error is an error frame, never spoken text.
+  Incomplete PCM, missing completion and malformed frames fail visibly. Legacy
+  buffered responses remain supported. No separate authority or conversation exists.
+- `apps/web/src/voice/browserSpeech.ts` schedules successive PCM chunks on the
+  AudioContext clock as they arrive, with 20 ms initial scheduling headroom.
+  Cancel stops all queued nodes and resets the cursor. Closing also resets it
+  before a later call creates a new audio clock. The stream has a 300-second
+  server deadline matching the router request budget, and a 330-second client
+  deadline. Legacy operations keep their existing deadlines.
+- `apps/server/src/speech/turnInput.ts` adds a short conversational instruction
+  to the normal provider input for a durable `voice:<call>:<utterance>` message.
+  `ProviderCommandReactor.ts` uses it for that turn only. The saved transcript
+  remains exact. Typed messages, model selection, tools, permissions and chat work
+  follow the ordinary harness. The instruction asks for a short answer first and
+  offers detail; it imposes no output or work limit.
+- `scripts/otis-call-acceptance.mjs` records `stages.firstSentence`,
+  `timingsMs.firstSentenceToFirstAudio` and a `sentences` list with queued,
+  requested, first-chunk, first-scheduled-audio, synthesis-complete and played
+  timestamps. `scripts/lib/otis-call-evidence.mjs` derives per-sentence
+  `ttsMs`, `requestToFirstAudioMs`, `queuedToFirstAudioMs` and
+  `streamedBeforeSynthesisCompleted`. Metadata contains IDs and offsets, no
+  sentence text. Normal acceptance waits for the playback queue to drain before
+  closing, retaining a speaking screenshot separately as `phone-call-speaking.png`.
+  `playbackDrained` stays false for the intentional early-hang-up case.
+  Missing observations remain null. Retry counts are retained;
+  elapsed times with retries include the retry interval.
 
-Recovered timing from the parent's recorded stages:
+### Read-only streaming evidence
 
-| Interval                            | Measured milliseconds |
-| ----------------------------------- | --------------------: |
-| Speech end to upload acknowledgment |                   140 |
-| Speech end to transcript            |                  8710 |
-| Transcript to delivery              |                   135 |
-| Delivery to first text              |                 69465 |
-| Speech end to first text            |                 78310 |
-| First text to first audio           |                  null |
+Checked on 18 October 2026, America/Chicago, CDT:
 
-These are one parent-run sample, not a performance recommendation. Whisper is
-unchanged. New timing fields include `speechEndToTranscript`,
-`transcriptToDelivery`, `deliveryToFirstText` and `firstTextToFirstAudio`.
-Existing cumulative fields remain elapsed from `stages.speechEnded`. A failed
-run keeps known measurements and leaves genuinely missing observations null.
+- Router repository `A:/Dev/Projects/qwen-local-bench`, HEAD `96411a411dc5`,
+  `qwen_profile_router.py` around lines 5450 to 5475. Its speech proxy forwards
+  response headers, uses `read1(65536)` and flushes every chunk to the client.
+  `test_router_speech_tenants.py` has a first-chunk-before-completion case.
+- Voice repository `A:/Dev/Projects/otis-voice`, HEAD `ecec50d218b6`,
+  `services/tts_breeze/server.py` around lines 130 to 161 returns a
+  StreamingResponse. `synthesizer.py` around lines 228 to 240 yields PCM from
+  `iter_audio_chunks`; `streaming.py` aligns PCM16 without coalescing it.
+
+These are source observations, not a new router runtime probe. Neither repository
+was edited or restarted. No Otis release dependency or engine download is needed.
+The parent must verify actual first-chunk timing, uninterrupted sound and remote
+proxy behavior on this candidate. Scheduled playback is not acoustic onset.
 
 ## Offline checks
 
@@ -114,7 +127,7 @@ $callTsgo = (Get-ChildItem 'node_modules/.pnpm/@typescript+native-preview-win32-
 & $callTsgo --noEmit -p apps/web/tsconfig.json
 & $callTsgo --noEmit -p apps/server/tsconfig.json
 
-node node_modules/vite-plus/bin/vp test run apps/server/src/speech/proxy.test.ts apps/server/src/speech/callService.test.ts apps/web/src/voice/session.test.ts apps/web/src/components/chat/ChatComposerVoice.test.tsx packages/client-runtime/src/voice-call/transport.test.ts packages/client-runtime/src/state/environmentHttpAuth.test.ts packages/contracts/src/speech.test.ts --configLoader native --pool threads --maxWorkers 1 --reporter dot
+node node_modules/vite-plus/bin/vp test run apps/server/src/speech/proxy.test.ts apps/server/src/speech/turnInput.test.ts apps/server/src/orchestration/Layers/ProviderCommandReactor.test.ts apps/server/src/speech/callService.test.ts apps/web/src/voice/session.test.ts apps/web/src/voice/browserSpeech.test.ts apps/web/src/components/chat/ChatComposerVoice.test.tsx packages/client-runtime/src/voice-call/transport.test.ts packages/client-runtime/src/state/environmentHttpAuth.test.ts packages/contracts/src/speech.test.ts --configLoader native --pool threads --maxWorkers 1 --reporter dot
 node node_modules/vite-plus/bin/vp test run apps/server/src/orchestration/Layers/OrchestrationEngine.test.ts --testNamePattern 'delivers a saved voice' --configLoader native --pool threads --maxWorkers 1 --reporter dot
 node --test --test-isolation=none --test-reporter spec scripts/lib/otis-call-evidence.test.mjs
 node --check scripts/otis-call-acceptance.mjs
@@ -124,24 +137,24 @@ git diff --check
 
 Final checks on 18 October 2026, America/Chicago, CDT. Exact times are in the local receipts:
 
-| Check                                                       | Exit and count                                  | Local evidence                                |
-| ----------------------------------------------------------- | ----------------------------------------------- | --------------------------------------------- |
-| Contracts typecheck                                         | 0                                               | `typecheck-packages-contracts-final.log`      |
-| Client-runtime typecheck                                    | 0                                               | `typecheck-packages-client-runtime-final.log` |
-| Web typecheck                                               | 0                                               | `typecheck-apps-web-final.log`                |
-| Server typecheck                                            | 0                                               | `typecheck-apps-server-final.log`             |
-| Focused regressions, contracts, auth and composer lifecycle | 0; 100 passed in 7 files                        | `tests.log`                                   |
-| Engine/SQLite delivery recovery                             | 0; 1 passed, 29 excluded by name filter         | `integration.log`                             |
-| Acceptance WAV/parser and receipt watcher                   | 0; 6 passed                                     | `helper-tests.log`                            |
-| Acceptance syntax and help                                  | 0 each                                          | `helper-syntax.log`, `helper-help.log`        |
-| Affected source lint                                        | 0; no errors; 24 existing ChatComposer warnings | `lint-final.log`                              |
-| Affected source format                                      | 0                                               | `format-check.log`                            |
-| Two affected Markdown documents                             | 0                                               | `docs-check.log`                              |
-| Diff whitespace                                             | 0                                               | `diff-check.log`                              |
+| Check                                                       | Exit and count                          | Local evidence                                |
+| ----------------------------------------------------------- | --------------------------------------- | --------------------------------------------- |
+| Contracts typecheck                                         | 0                                       | `typecheck-packages-contracts-final.log`      |
+| Client-runtime typecheck                                    | 0                                       | `typecheck-packages-client-runtime-final.log` |
+| Web typecheck                                               | 0                                       | `typecheck-apps-web-final.log`                |
+| Server typecheck                                            | 0                                       | `typecheck-apps-server-final.log`             |
+| Focused regressions, contracts, auth and composer lifecycle | 0; 174 passed in 10 files               | `tests.log`                                   |
+| Engine/SQLite delivery recovery                             | 0; 1 passed, 29 excluded by name filter | `integration.log`                             |
+| Acceptance WAV/parser and receipt watcher                   | 0; 7 passed                             | `helper-tests-final.log`                      |
+| Acceptance syntax and help                                  | 0 each                                  | `helper-syntax.log`, `helper-help.log`        |
+| Affected source lint                                        | 0; no errors or warnings                | `lint-final.log`                              |
+| Affected source format                                      | 0                                       | `format-check.log`                            |
+| Two affected Markdown documents                             | 0                                       | `docs-check.log`                              |
+| Diff whitespace                                             | 0                                       | `diff-check.log`                              |
 
-The final test job is `45ff0b10-ea24-4ba8-9f55-af2fc1340044`, succeeded with
-exit 0. Its command is the headless PowerShell launcher for the retained
-`.logs/otis-call/speech-reply-fixes/tests.ps1`; that script sets the required Node
+The final test job is `a4bb0543-9f7a-4e0e-928a-c73330470cb7`, succeeded with
+exit 0. Final timing/identity fixtures were rechecked by job `fd0bd858-a2c1-42cd-a932-1fbb87d53e61`, also exit 0 with 7 passed. Its exact command is the Node test command above. The primary job command is the headless PowerShell launcher for the retained
+`.logs/otis-call/latency/tests.ps1`; that script sets the required Node
 PATH and runs the exact test commands above. Typecheck commands and individual
 exits are in `typecheck-results-final.json`. The launcher supplies the required Node PATH for Vite+ child processes.
 The 4 GiB queue limit from the earlier phase remains the reason for direct,
@@ -152,12 +165,8 @@ Exact affected lint and format commands, after loading the unchanged repository
 configuration with `.logs/otis-call/gate-config.mjs`:
 
 ```powershell
-$callSourceFiles = @(
-  'packages/client-runtime/src/voice-call/session.ts',
-  'apps/web/src/components/chat/ChatComposer.tsx', 'apps/web/src/voice/session.test.ts',
-  'scripts/otis-call-acceptance.mjs', 'scripts/lib/otis-call-evidence.mjs',
-  'scripts/lib/otis-call-evidence.test.mjs'
-)
+$callSourceFiles = @(git diff --name-only) | Where-Object { $_ -match '\.(ts|tsx|mjs)$' }
+$callSourceFiles += @('apps/server/src/speech/turnInput.ts', 'apps/server/src/speech/turnInput.test.ts', 'apps/web/src/voice/browserSpeech.test.ts')
 node .logs/otis-call/native-gates.mjs lint @callSourceFiles
 node .logs/otis-call/native-gates.mjs fmt --check @callSourceFiles
 $env:CALL_FORMAT_CHECK = '1'
@@ -169,11 +178,12 @@ The gate scope excludes the parent-owned server package edit. Remove the tempora
 The bundled Node fetch source records a 300000 ms headers default in
 `node-fetch-deadline-source.log`, which is why acquisition uses Node HTTP.
 
-Logs and exact command receipts are under `.logs/otis-call/speech-reply-fixes`.
+Logs and exact command receipts are under `.logs/otis-call/latency`.
 Tests use synthetic speech and disposable storage. The integration case retains
 real T3 engine, SQLite receipts, projections and restart, while substituting
 speech and repository discovery. It proves one persisted message and turn,
 not live provider execution. The composer lifecycle test checks source structure, not rendered viewport behavior.
+The new audio-clock tests use a fake AudioContext; they do not attest audible sound.
 Native HTTP acquisition has a mocked request-stream
 test, not a live socket test. Timer tests simulate 600 seconds without waiting.
 
@@ -307,6 +317,47 @@ Require `status: accepted`. If a response fails, inspect current request evidenc
 before removing its ID from the set and retrying. Do not auto-approve unrelated
 requests. No authentication material belongs in this packet or its output.
 
+For the speed comparison, keep the same WAV and warmed engines. Create a new
+approval-required thread for each run. The helper checks the selected model's
+live T3 option descriptors before opening the microphone; unsupported effort
+fails explicitly. Do not edit the catalog to make the check pass.
+
+```powershell
+# Observe support before the low run. This is a read-only CLI command.
+$callCatalog = & $callNode apps/server/src/bin.ts agent providers --base-dir $callHome --instance $callInstance | ConvertFrom-Json
+$callSelected = $callCatalog.providers | Where-Object { $_.instanceId -eq $callInstance }
+$callSelectedModel = $callSelected.models | Where-Object { $_.slug -eq 'claude-haiku-5-5' }
+$callEffort = $callSelectedModel.capabilities.optionDescriptors | Where-Object { $_.id -eq 'effort' }
+if (-not ($callEffort.options | Where-Object { $_.id -eq 'low' })) { throw 'Selected T3 model does not advertise low effort' }
+
+foreach ($callRunEffort in @('medium', 'low')) {
+  $callThreadId = [guid]::NewGuid().ToString()
+  $callSnapshot = & $callNode apps/server/src/bin.ts agent snapshot --base-dir $callHome | ConvertFrom-Json
+  $callCreate.runtime = $callSnapshot.runtime
+  $callCreate.command = @{
+    type = 'thread.create'; commandId = [guid]::NewGuid().ToString()
+    threadId = $callThreadId; projectId = $callProjectId; title = "Call speed $callRunEffort"
+    modelSelection = @{ instanceId = $callInstance; model = 'claude-haiku-5-5'; options = @(@{ id = 'effort'; value = $callRunEffort }) }
+    runtimeMode = 'approval-required'; interactionMode = 'default'; branch = $null; worktreePath = $null
+    createdAt = [DateTime]::UtcNow.ToString('o')
+  }
+  [IO.File]::WriteAllText($callActionPath, ($callCreate | ConvertTo-Json -Depth 20))
+  & $callNode apps/server/src/bin.ts agent act --base-dir $callHome --file $callActionPath --confirm
+  if ($LASTEXITCODE -ne 0) { throw 'Thread creation failed' }
+  # Require status: accepted. Answer its expected tool approvals from the second terminal.
+  Write-Host "Approval thread: $callThreadId; requested effort: $callRunEffort"
+  & $callNode scripts/otis-call-acceptance.mjs --base-dir $callHome --origin $callOrigin --thread-url "$callOrigin/$($callSnapshot.environmentId)/$callThreadId" --thread-id $callThreadId --instance $callInstance --model claude-haiku-5-5 --effort $callRunEffort --wav $callWav --browser $callBrowser --expect-tool get_task --width 390 --output ".logs/otis-call/speed-$callRunEffort"
+  if ($LASTEXITCODE -ne 0) { throw "Acceptance failed for $callRunEffort; retain its report" }
+}
+```
+
+The SDK must report the requested low or medium effort, and the provider must
+attest Haiku 5.5. Missing provider effort attestation remains null. Compare
+`firstSentenceToFirstAudio`, per-sentence `ttsMs` and streamed-before-complete
+flags. Keep approval waits visible in delivery-to-first-text time. Repeat with
+fresh threads for sample counts and medians before recommending an effort change.
+No real medium-versus-low result exists for this candidate yet.
+
 For each following command, create a fresh chat and update the thread ID/URL
 inside `$callArgs`. Retain the same WAV and warmed engines:
 
@@ -337,7 +388,7 @@ An early-hang-up run requires the provider's own completion timestamp to follow
 the close acknowledgment. If the read finished sooner, repeat with a longer
 read-only operation. The helper never requires a stopped chat after hang-up.
 
-The earlier phone, cold-start and cross-device gates still apply. For this revision, first rerun the fresh-chat helper and verify a successful named Otis tool, audible natural reply and populated raw/timing fields. Then verify the failure report on a disposable synthetic speech failure, including its alert or explicit absence. No simulated failure against the router is authorized here. Remaining parent acceptance gates:
+The earlier phone, cold-start and cross-device gates still apply. For this revision, first rerun the fresh-chat helper and verify first audio before TTS response completion, an early short sentence, a successful named Otis tool, and per-sentence timings. Interrupt mid-sentence and between queued sentences, then confirm no later queued speech plays. Then verify the failure report on a disposable synthetic speech failure, including its alert or explicit absence. No simulated failure against the router is authorized here. Remaining parent acceptance gates:
 
 1. Run the helper with `--width 375` and `--width 390` on fresh chats.
    Check the collapsed composer, model picker, call state, interruption and End.
@@ -362,7 +413,7 @@ The parent should restart only its captured isolated process through its owner
 launcher, preserving the isolated home, then resume the same call/outbox. No live
 release or router restart is part of this acceptance helper.
 
-Repeat baseline with supported low/default effort and fresh chats. Keep raw
+Use the supported low-versus-medium commands above with fresh chats. Keep raw
 samples and sample counts, then compare medians. Every live latency and thinking
 overhead measurement from this implementation chat is null. There is no measured
 recommendation to replace Jared's medium starting point.
@@ -374,7 +425,7 @@ entry or hidden voice authority. End, resume and explicit interrupt are present.
 Native mobile retains its old draft dictation. Native calls remain an unfulfilled
 surface requirement for the parent to resolve; the phone browser is implemented.
 
-Retain the new single-caller `verifyCallRaw` and `completedOtisTool` as archive-verification and provider-receipt boundaries. Their focused fixture tests guard those external formats. `callTimings` is shared by live updates and finalization. Earlier single-caller helpers remain intentional boundaries. The preceding fix introduced `acquireSpeechLease`, which owns the Node HTTP cold-start transport and `unbind` owns guarded thread-index cleanup. Inlining either would mix transport or storage lifecycle into its caller. `newCall` has two callers and shares fresh-call initialization. Earlier boundaries remain: `activeCall` owns
+Retain the new single-caller `voiceTurnInput` as the per-turn prompt boundary, `streamSpeech` as the router stream boundary, and `sentenceSpeechId` and `sentenceTimings` as acceptance identity and timing boundaries. Inlining would mix protocol or prompt decisions into orchestration and browser reporting. Retain `verifyCallRaw` and `completedOtisTool` as archive-verification and provider-receipt boundaries. Their focused fixture tests guard those external formats. `callTimings` is shared by live updates and finalization. Earlier single-caller helpers remain intentional boundaries. The preceding fix introduced `acquireSpeechLease`, which owns the Node HTTP cold-start transport and `unbind` owns guarded thread-index cleanup. Inlining either would mix transport or storage lifecycle into its caller. `newCall` has two callers and shares fresh-call initialization. Earlier boundaries remain: `activeCall` owns
 binding recovery; `speechIdentifier` owns bounded replay identity; `startRenewal`
 owns the renewal fiber; `fetchEnvironmentSpeech` and `createVoiceRequestCommand`
 own environment auth adaptation; `validatePcmWav` and `watchCallReceipts` own CLI
@@ -382,7 +433,7 @@ preflight and receipt parsing; `spokenMessageText` owns speech sanitization behi
 the per-message cache. Their behavior crosses storage, lifecycle or
 transport seams. Inlining would mix those responsibilities into their callers.
 
-Parent review should compare this dirty candidate with `d96f549d66`, include new
+Parent review should compare this dirty candidate with `e01c37875e`, include new
 source/test files. Preserve the parent-owned `apps/server/package.json` no-watch edit and exclude it from this commit. Exclude `.logs`, recordings, the isolated home and temporary
 gate configuration, and use `COMMIT_MSG.txt`. Git metadata is outside this
 sandbox's write authority, so no commit or push was attempted.

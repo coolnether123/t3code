@@ -1,7 +1,7 @@
 # Otis Call architecture
 
 Task `agenda-task:515bbc54cb61482681e950e524421ce4`.
-Candidate follows baseline `d96f549d66` on `work/otis-call-20261018`.
+Candidate follows baseline `e01c37875e` on `work/otis-call-20261018`.
 Updated 18 October 2026, America/Chicago, CDT.
 
 Jared's correction packet at
@@ -40,6 +40,22 @@ work-in-progress even during provider startup.
 The router owns speech process startup and GPU admission. Breeze TTS 2 and Whisper
 large-v3-turbo are installed according to the parent. No download or router
 change is needed. The cloud chat model does not need the local 27B resident.
+
+## Incremental replies
+
+The controller extracts complete natural sentences during streaming, keeps three
+in lookahead and refills without truncating the retained answer. The ordinary
+provider turn input adds user-level brevity guidance for durable voice message
+IDs; saved transcript and permissions stay unchanged.
+
+For `call.speak` with `streamAudio:true`, the existing authenticated HTTP route
+returns newline-delimited SpeechResponse PCM frames and a final `complete:true`.
+The router proxy preserves PCM16 sample boundaries and does not buffer the whole
+response. The browser schedules chunks on its audio clock as they arrive and
+acknowledges the sentence only after playback ends. Interrupt cancels the request,
+all scheduled nodes and remaining sentences. Buffered legacy responses still work.
+The acceptance helper reports sentence availability, TTS duration and first audio
+separately. Real latency and audio quality remain parent-run acceptance.
 
 ## Archive and recovery
 

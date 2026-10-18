@@ -31,6 +31,60 @@ const acquireSpeechLease = (url: string, init: RequestInit): Promise<Response> =
 
 export class SpeechUnavailableError extends Error {}
 
+/** Preserve router PCM chunks, including sample boundaries split by HTTP transport. */
+export async function* streamSpeech(
+  input: SpeechTransportRequest,
+  signal: AbortSignal,
+  fetcher: typeof fetch = fetch,
+): AsyncGenerator<SpeechResponse> {
+  if (
+    input.action !== "speak" ||
+    !input.sessionId ||
+    !/^[\w-]{1,128}$/.test(input.sessionId) ||
+    !input.text?.trim() ||
+    input.text.length > 1600
+  )
+    throw new Error("Invalid speech request.");
+  const response = await fetcher("http://127.0.0.1:8085/v1/audio/speech", {
+    method: "POST",
+    redirect: "error",
+    signal: AbortSignal.any([signal, AbortSignal.timeout(300_000)]),
+    headers: { "content-type": "application/json", "X-Voice-Session-Id": input.sessionId },
+    body: JSON.stringify({
+      model: input.model ?? "breeze-tts-2",
+      input: input.text,
+      voice: "otis",
+      response_format: "pcm",
+      stream: true,
+    }),
+  });
+  if (!response.ok)
+    throw new SpeechUnavailableError(`Local speech service unavailable (${response.status}).`);
+  const sampleRate = Number(response.headers.get("x-sample-rate"));
+  if (!response.body || !Number.isInteger(sampleRate) || sampleRate < 8000 || sampleRate > 96000)
+    throw new Error("Speech service returned an invalid stream.");
+  const reader = response.body.getReader();
+  let carry = Buffer.alloc(0);
+  let bytes = 0;
+  try {
+    for (;;) {
+      signal.throwIfAborted();
+      const result = await reader.read();
+      if (result.done) break;
+      const chunk = Buffer.concat([carry, result.value]);
+      bytes += result.value.length;
+      if (bytes > 24_000_000) throw new Error("Speech service returned too much PCM audio.");
+      const length = chunk.length & ~1;
+      carry = chunk.subarray(length);
+      if (length) yield { audio: chunk.subarray(0, length).toString("base64"), sampleRate };
+    }
+    if (!bytes || carry.length) throw new Error("Speech service returned incomplete PCM audio.");
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
 /** Fixed loopback destination: microphone audio never follows client-supplied URLs. */
 export async function proxySpeech(
   input: SpeechTransportRequest,

@@ -3,11 +3,49 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import * as NodeHttp from "node:http";
 import * as NodeEvents from "node:events";
 import * as NodeStream from "node:stream";
-import { proxySpeech } from "./proxy.ts";
+import { proxySpeech, streamSpeech } from "./proxy.ts";
 
 vi.mock("node:http", () => ({ request: vi.fn() }));
 
 describe("local speech proxy", () => {
+  it("returns the first aligned PCM chunk before synthesis finishes and cancels on consumer exit", async () => {
+    let source!: ReadableStreamDefaultController<Uint8Array>;
+    const cancelled = vi.fn();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        source = controller;
+      },
+      cancel: cancelled,
+    });
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(body, { headers: { "x-sample-rate": "24000" } }));
+    const audio = streamSpeech(
+      { action: "speak", sessionId: "lease", text: "First sentence." },
+      new AbortController().signal,
+      fetcher,
+    );
+    const first = audio.next();
+    source.enqueue(new Uint8Array([1, 0, 2]));
+    expect((await first).value).toEqual({ audio: "AQA=", sampleRate: 24000 });
+    source.enqueue(new Uint8Array([0]));
+    expect((await audio.next()).value).toEqual({ audio: "AgA=", sampleRate: 24000 });
+    await audio.return(undefined);
+    expect(cancelled).toHaveBeenCalledOnce();
+  });
+  it("rejects a stream ending with a partial PCM sample", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(new Uint8Array([1]), { headers: { "x-sample-rate": "24000" } }),
+      );
+    const audio = streamSpeech(
+      { action: "speak", sessionId: "lease", text: "First." },
+      new AbortController().signal,
+      fetcher,
+    );
+    await expect(audio.next()).rejects.toThrow("incomplete PCM");
+  });
   it("uses Node HTTP for acquisition without fetch's five-minute headers deadline", async () => {
     const response = Object.assign(new NodeStream.PassThrough(), { statusCode: 200 });
     const request = Object.assign(new NodeEvents.EventEmitter(), {

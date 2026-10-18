@@ -13,6 +13,8 @@ import {
   completedOtisTool,
   callTimings,
   verifyCallRaw,
+  sentenceSpeechId,
+  sentenceTimings,
 } from "./lib/otis-call-evidence.mjs";
 
 const { values } = NodeUtil.parseArgs({
@@ -128,6 +130,21 @@ const progress = (name) => {
 };
 progress("pair");
 const baseline = JSON.parse(cli("agent", "snapshot", "--thread", values["thread-id"]));
+if (effort !== "default") {
+  const catalog = JSON.parse(cli("agent", "providers", "--instance", values.instance));
+  const selected = catalog.providers
+    ?.find((provider) => provider.instanceId === values.instance)
+    ?.models?.find((entry) => entry.slug === model);
+  NodeAssert.ok(
+    selected?.capabilities?.optionDescriptors?.some(
+      (option) =>
+        option.id === "effort" &&
+        option.type === "select" &&
+        option.options.some((entry) => entry.id === effort),
+    ),
+    `Select a model that advertises effort=${effort} in T3. No effort fallback was selected.`,
+  );
+}
 NodeAssert.ok(
   baseline.thread && baseline.thread.latestTurn == null,
   "Use a fresh disposable chat for each run.",
@@ -171,9 +188,11 @@ const report = {
   otisToolCompleted: false,
   turnCompleted: false,
   closedAcknowledged: false,
+  playbackDrained: false,
   reloaded: false,
   chatCompletedAfterHangUp: false,
   stages: {},
+  sentences: [],
   timingsMs: callTimings({}),
   callAlert: null,
   callState: null,
@@ -210,6 +229,33 @@ const mark = (name, at = Date.now()) => {
   if (label) progress(label);
 };
 await page.exposeFunction("__otisCallMark", (name, at) => mark(name, at));
+const sentenceRecords = new Map();
+const sentenceRecord = (id) => {
+  if (!sentenceRecords.has(id)) {
+    const record = {
+      speechId: id,
+      ordinal: sentenceRecords.size + 1,
+      queuedAt: null,
+      requestedAt: null,
+      firstChunkAt: null,
+      firstScheduledAudioAt: null,
+      synthesisCompletedAt: null,
+      playedAt: null,
+      attempts: 0,
+    };
+    sentenceRecords.set(id, record);
+    report.sentences.push(record);
+  }
+  return sentenceRecords.get(id);
+};
+await page.exposeFunction("__otisCallSpeech", (event, at) => {
+  if (event.type === "sentence") {
+    const record = sentenceRecord(sentenceSpeechId(event));
+    record.queuedAt ??= at;
+    mark("firstSentence", at);
+  } else if (event.type === "audio") sentenceRecord(event.speechId).firstChunkAt ??= at;
+  else if (event.type === "scheduled") sentenceRecord(event.speechId).firstScheduledAudioAt ??= at;
+});
 const segment = toSafeThreadAttachmentSegment(values["thread-id"]);
 NodeAssert.ok(segment, "Invalid disposable thread ID.");
 const log = NodePath.join(home, "userdata/logs/provider", `events.${segment}.log`);
@@ -244,6 +290,17 @@ page.on("response", (response) => {
   if (new URL(response.url()).pathname !== "/api/voice") return;
   const task = (async () => {
     const input = response.request().postDataJSON();
+    if (input.action === "call.speak") {
+      const record = sentenceRecord(input.speechId);
+      record.responseStatus = response.status();
+      if (!response.ok())
+        report.failedVoiceRequests.push({ action: input.action, status: response.status() });
+      const failure = await response.finished();
+      if (!failure) record.synthesisCompletedAt = Date.now();
+      return;
+    }
+    if (input.action === "call.played" && response.ok())
+      sentenceRecord(input.speechId).playedAt = Date.now();
     if (!response.ok()) {
       report.failedVoiceRequests.push({ action: input.action, status: response.status() });
       return;
@@ -295,6 +352,12 @@ page.on("response", (response) => {
 });
 await page.route("**/api/voice", async (route) => {
   const input = route.request().postDataJSON();
+  if (input.action === "call.speak") {
+    const record = sentenceRecord(input.speechId);
+    record.requestedAt ??= Date.now();
+    record.attempts++;
+    record.streaming = input.streamAudio === true;
+  }
   const stage = {
     "call.open": "call open",
     "call.prepare": "prepare",
@@ -343,12 +406,22 @@ async function instrument() {
       ),
     );
     window.__otisCallEvidence = { firstTextAt: null, firstAudioAt: null, voiceStates: [] };
+    window.addEventListener("t3-voice-speech", (event) => {
+      if (event.detail.type === "audio")
+        window.__otisCallEvidence.activeSpeechId = event.detail.speechId;
+      void window.__otisCallSpeech(event.detail, Date.now());
+    });
     const original = AudioBufferSourceNode.prototype.start;
     AudioBufferSourceNode.prototype.start = function (...args) {
       if (window.__otisCallEvidence.firstAudioAt === null) {
         window.__otisCallEvidence.firstAudioAt = Date.now();
         void window.__otisCallMark("firstScheduledAudio", window.__otisCallEvidence.firstAudioAt);
       }
+      if (window.__otisCallEvidence.activeSpeechId)
+        void window.__otisCallSpeech(
+          { type: "scheduled", speechId: window.__otisCallEvidence.activeSpeechId },
+          Date.now(),
+        );
       return original.apply(this, args);
     };
     new MutationObserver(() => {
@@ -438,6 +511,25 @@ try {
         { polling: "raf", timeout },
       ),
     ]);
+  if (!values["hang-up-after-delivery"]) {
+    await page.screenshot({
+      path: NodePath.join(output, "phone-call-speaking.png"),
+      fullPage: true,
+    });
+    await Promise.race([
+      attentionFailure,
+      expired,
+      page.waitForFunction(
+        () =>
+          ["ready", "listening"].includes(
+            document.querySelector("[data-voice-state]")?.getAttribute("data-voice-state"),
+          ),
+        null,
+        { timeout },
+      ),
+    ]);
+    report.playbackDrained = true;
+  }
   await page.screenshot({ path: NodePath.join(output, "phone-call.png"), fullPage: true });
   await Promise.all(responseTasks);
   NodeAssert.ok(uploaded && delivered?.deliveredAt, "Raw or delivery acknowledgment is missing.");
@@ -564,6 +656,7 @@ try {
     });
   await Promise.all(responseTasks);
   report.timingsMs = callTimings(report.stages);
+  report.sentences = report.sentences.map((record) => ({ ...record, ...sentenceTimings(record) }));
   await NodeFSP.writeFile(NodePath.join(output, "report.json"), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
   await browser.close();
