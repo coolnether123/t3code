@@ -1,0 +1,10 @@
+feat(voice): lay groundwork for durable chat calls
+
+Add call storage, delivery identities, browser call controls and provider hooks.
+Document the unfinished integration, corrected chat semantics and remaining checks.
+Include an isolated acceptance helper for parent-run verification.
+
+The foundation is not yet accepted or deployed. Remaining lifecycle, model
+selection and optional confirmation work is detailed in the architecture handoff.
+
+Otis-Task: agenda-task:515bbc54cb61482681e950e524421ce4

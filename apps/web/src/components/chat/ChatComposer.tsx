@@ -3558,25 +3558,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                             pendingApprovals.length === 0 &&
                             pendingUserInputs.length === 0
                           }
-                          cancel={
-                            composerSendState.hasSendableContent ||
-                            environmentUnavailable !== null ||
-                            pendingApprovals.length > 0 ||
-                            pendingUserInputs.length > 0
-                          }
-                          submit={(text) => {
-                            if (
-                              promptRef.current.trim() ||
-                              phase === "running" ||
-                              isSendBusy ||
-                              environmentUnavailable !== null
-                            )
-                              return false;
-                            promptRef.current = text;
-                            setComposerDraftPrompt(composerDraftTarget, text);
-                            submitComposer();
-                            return !providerInputRejectedRef.current;
-                          }}
+                          environmentId={environmentId}
+                          modelSelection={selectedModelSelection}
+                          connected={environmentUnavailable === null && !isConnecting}
                         />
                       ) : undefined
                     }

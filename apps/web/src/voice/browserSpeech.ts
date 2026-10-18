@@ -24,7 +24,7 @@ export async function requestSpeech(input: SpeechRequest, signal: AbortSignal) {
     throw new Error(
       response.status === 404
         ? "This server needs the voice integration update."
-        : `Local speech unavailable (${response.status}).`,
+        : (await response.text()).slice(0, 600) || `Local speech unavailable (${response.status}).`,
     );
   return decodeSpeechResponse(await response.json());
 }
@@ -33,6 +33,7 @@ export async function requestSpeech(input: SpeechRequest, signal: AbortSignal) {
 export function createBrowserAudio() {
   let context: AudioContext | undefined;
   let finishCapture: (() => void) | undefined;
+  let preparedStream: MediaStream | undefined;
   return {
     unlock() {
       if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
@@ -44,14 +45,36 @@ export function createBrowserAudio() {
     finish() {
       finishCapture?.();
     },
+    async prepare(signal: AbortSignal) {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+      if (signal.aborted) { stream.getTracks().forEach((track) => track.stop()); signal.throwIfAborted(); }
+      preparedStream?.getTracks().forEach((track) => track.stop());
+      preparedStream = stream;
+      await context!.resume();
+    },
+    async ready() {
+      const audio = context!;
+      const tone = audio.createOscillator();
+      const gain = audio.createGain();
+      tone.frequency.value = 660;
+      gain.gain.setValueAtTime(0.08, audio.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + 0.2);
+      tone.connect(gain); gain.connect(audio.destination);
+      await new Promise<void>((resolve) => {
+        tone.onended = () => { tone.disconnect(); gain.disconnect(); resolve(); };
+        tone.start(); tone.stop(audio.currentTime + 0.22);
+      });
+    },
     close() {
       finishCapture = undefined;
+      preparedStream?.getTracks().forEach((track) => track.stop());
+      preparedStream = undefined;
       void context?.close();
       context = undefined;
     },
     async capture(signal: AbortSignal): Promise<{ audio: string; sampleRate: number }> {
       const audioContext = context!;
-      const stream = await navigator.mediaDevices.getUserMedia({
+      const stream = preparedStream ?? await navigator.mediaDevices.getUserMedia({
         audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
       });
       if (signal.aborted) {
@@ -64,6 +87,8 @@ export function createBrowserAudio() {
       mute.gain.value = 0;
       const chunks: Float32Array[] = [];
       let length = 0;
+      let speechSeen = false;
+      let silenceSamples = 0;
       try {
         await new Promise<void>((resolve, reject) => {
           const abort = () => reject(new DOMException("Cancelled", "AbortError"));
@@ -76,6 +101,10 @@ export function createBrowserAudio() {
             const chunk = new Float32Array(event.inputBuffer.getChannelData(0));
             chunks.push(chunk);
             length += chunk.length;
+            const rms = Math.sqrt(chunk.reduce((sum, sample) => sum + sample * sample, 0) / chunk.length);
+            if (rms > 0.015) { speechSeen = true; silenceSamples = 0; }
+            else silenceSamples += chunk.length;
+            if (speechSeen && silenceSamples > audioContext.sampleRate * 0.9) finishCapture?.();
             if (length >= audioContext.sampleRate * 59) finishCapture?.();
           };
           source.connect(processor);
@@ -102,7 +131,7 @@ export function createBrowserAudio() {
         source.disconnect();
         processor.disconnect();
         mute.disconnect();
-        stream.getTracks().forEach((track) => track.stop());
+        if (stream !== preparedStream) stream.getTracks().forEach((track) => track.stop());
       }
     },
     async play(audio: string, sampleRate: number, signal: AbortSignal) {

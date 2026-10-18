@@ -1395,7 +1395,17 @@ const ThreadContextCompactionMessageStatusSetCommand = Schema.Struct({
   updatedAt: IsoDateTime,
 });
 
+const ThreadVoiceTranscriptCommand = Schema.Struct({
+  type: Schema.Literal("thread.voice.transcript"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  messageId: MessageId,
+  text: Schema.String,
+  createdAt: IsoDateTime,
+});
+
 const InternalOrchestrationCommand = Schema.Union([
+  ThreadVoiceTranscriptCommand,
   ThreadAutoSettleCommand,
   ThreadSessionSetCommand,
   ThreadMessageAssistantDeltaCommand,

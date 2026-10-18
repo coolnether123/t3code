@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./voice-call": {
+      "types": "./src/voice-call/session.ts",
+      "default": "./src/voice-call/session.ts"
+    },
     "./usageRefresh": {
       "types": "./src/usageRefresh.ts",
       "default": "./src/usageRefresh.ts"

@@ -1,151 +1,77 @@
 import { useLayoutEffect, useRef, useState, useImperativeHandle, type Ref } from "react";
+import type { CallPolicy, CallStatus, ModelSelection } from "@t3tools/contracts";
 import type { Thread } from "../../types";
 import { createBrowserAudio, requestSpeech } from "../../voice/browserSpeech";
+import { callPersistence } from "../../voice/callPersistence";
 import { ThreadVoiceSession, type VoiceState } from "../../voice/session";
 import { Button } from "../ui/button";
 
-export interface ThreadVoiceHandle {
-  stop(): void;
-}
+export interface ThreadVoiceHandle { stop(): void; }
 const labels: Record<VoiceState, string> = {
-  idle: "Start voice",
-  starting: "Starting voice",
-  listening: "Listening",
-  transcribing: "Transcribing",
-  waiting: "Waiting for reply",
-  speaking: "Otis is speaking",
-  ready: "Voice ready",
-  error: "Voice unavailable",
+  idle: "Call Otis", preparing: "Preparing", listening: "Listening", saving: "Saving on PC",
+  transcribing: "Transcribing", waiting: "Otis is thinking", speaking: "Otis is speaking",
+  ready: "Ready", reconnecting: "Connection interrupted", error: "Call needs attention",
 };
 
-export function ThreadVoiceControls({
-  ref,
-  ...props
-}: {
-  ref: Ref<ThreadVoiceHandle>;
-  thread: Thread;
-  enabled: boolean;
-  cancel: boolean;
-  running: boolean;
-  submit(text: string): boolean;
+export function ThreadVoiceControls(props: {
+  ref: Ref<ThreadVoiceHandle>; thread: Thread; environmentId: string;
+  modelSelection: ModelSelection; enabled: boolean; running: boolean; connected: boolean;
 }) {
   const [state, setState] = useState<VoiceState>("idle");
-  const [error, setError] = useState<string>();
-  const latest = useRef(props);
+  const [detail, setDetail] = useState<string>();
+  const [call, setCall] = useState<CallStatus>();
+  const [expanded, setExpanded] = useState(false);
+  const [model, setModel] = useState("claude-haiku-5-5");
+  const [effort, setEffort] = useState("medium");
+  const [policy, setPolicy] = useState<CallPolicy>("confirm-actions");
   const sessionRef = useRef<ThreadVoiceSession | null>(null);
   useLayoutEffect(() => {
-    latest.current = props;
-  });
-  useLayoutEffect(() => {
     const session = new ThreadVoiceSession({
-      request: requestSpeech,
-      audio: createBrowserAudio(),
-      submit: (text) => latest.current.enabled && latest.current.submit(text),
-      change: (next, message) => {
-        setState(next);
-        setError(message);
-      },
+      request: requestSpeech, audio: createBrowserAudio(), id: () => crypto.randomUUID(),
+      persistence: callPersistence(`${props.environmentId}:${props.thread.id}`),
+      change: (next, message, status) => { setState(next); setDetail(message); setCall(status); },
     });
     sessionRef.current = session;
+    const reconnect = () => { void session.resume(); };
+    window.addEventListener("online", reconnect);
     return () => {
-      session.stop();
+      window.removeEventListener("online", reconnect);
+      void session.stop();
       sessionRef.current = null;
     };
-  }, []);
-  useImperativeHandle(ref, () => ({ stop: () => sessionRef.current?.stop() }), []);
+  }, [props.environmentId, props.thread.id]);
+  useImperativeHandle(props.ref, () => ({ stop: () => { void sessionRef.current?.stop(); } }), []);
   useLayoutEffect(() => {
-    if (props.cancel || props.thread.latestTurn?.state === "interrupted")
-      sessionRef.current?.stop();
-    else sessionRef.current?.observe(props.thread.messages, props.thread.activities, props.running);
-  }, [
-    props.cancel,
-    props.thread.messages,
-    props.thread.activities,
-    props.thread.latestTurn?.state,
-    props.running,
-  ]);
-  const active = state !== "idle" && state !== "error";
-  if (!active && !props.enabled && !error) return null;
+    sessionRef.current?.observe(props.thread.messages, props.running);
+  }, [props.thread.messages, props.running]);
+  const active = !["idle", "error"].includes(state);
   return (
-    <div className="relative flex items-center gap-2" data-voice-state={state}>
-      {active ? (
-        <>
-          <svg
-            viewBox="0 0 40 40"
-            className="size-8 shrink-0 text-message-action"
-            role="img"
-            aria-label="Otis"
-          >
-            <rect x="5" y="4" width="30" height="32" rx="10" fill="currentColor" opacity="0.16" />
-            <g
-              fill="currentColor"
-              className="transition-transform duration-150 motion-reduce:transition-none"
-              style={{ transform: state === "listening" ? "translateY(-1px)" : undefined }}
-            >
-              <circle cx="14" cy="16" r="2.5" />
-              <circle cx="26" cy="16" r="2.5" />
-              <rect x="14" y="25" width="12" height={state === "speaking" ? 6 : 2} rx="2" />
-            </g>
-          </svg>
-          <span className="sr-only" role="status">
-            {labels[state]}
-          </span>
-          {state === "listening" ? (
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => sessionRef.current?.finish()}
-            >
-              Send speech
-            </Button>
-          ) : state === "ready" && props.enabled ? (
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              onClick={() => void sessionRef.current?.listen()}
-            >
-              Speak
-            </Button>
-          ) : (
-            <span className="max-w-24 text-xs text-muted-foreground">{labels[state]}</span>
-          )}
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            onClick={() => sessionRef.current?.stop()}
-            aria-label="Stop voice"
-          >
-            Stop voice
-          </Button>
-        </>
-      ) : (
-        <Button
-          type="button"
-          size="sm"
-          className="rounded-full bg-message-action text-message-action-foreground hover:bg-message-action-hover"
-          disabled={!props.enabled}
-          title="Use your microphone. Audio is transcribed by this environment's local speech service."
-          onClick={() =>
-            void sessionRef.current?.start(props.thread.messages, props.thread.activities)
-          }
-        >
-          Start voice
-        </Button>
-      )}
-      {error ? (
-        <div
-          role="alert"
-          className="absolute bottom-full right-0 mb-2 w-64 rounded-lg border bg-popover p-3 text-xs text-popover-foreground"
-        >
-          {error}
-          <Button type="button" size="sm" variant="ghost" onClick={() => setError(undefined)}>
-            Dismiss
-          </Button>
-        </div>
+    <div className="relative" data-voice-state={state}>
+      {!active ? <Button type="button" size="sm" variant="outline" onClick={() => setExpanded(!expanded)}>Call Otis</Button> : null}
+      {active || expanded || detail ? (
+        <section aria-label="Otis call" className="absolute bottom-full right-0 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-xl border bg-popover p-3 text-popover-foreground shadow-lg">
+          <p role="status" className="text-sm font-medium">{labels[state]}</p>
+          {detail ? <p role={state === "error" || state === "reconnecting" ? "alert" : undefined} className="mt-2 text-xs">{detail}</p> : null}
+          {!active ? <div className="mt-3 grid gap-2 text-xs">
+            <label>Claude model<input aria-label="Call model" className="mt-1 w-full rounded border bg-background p-2" value={model} onChange={(event) => setModel(event.target.value)} /></label>
+            <label>Thinking<select aria-label="Call thinking" className="ml-2 rounded border bg-background p-1" value={effort} onChange={(event) => setEffort(event.target.value)}><option value="medium">Medium</option><option value="low">Low</option><option value="high">High</option><option value="">Model default</option></select></label>
+            <label>Confirm commands<select aria-label="Call confirmation policy" className="mt-1 w-full rounded border bg-background p-1" value={policy} onChange={(event) => setPolicy(event.target.value as CallPolicy)}><option value="confirm-actions">Actions, with reads immediate</option><option value="confirm-all">Every tool</option><option value="off">Use ordinary chat permissions</option></select></label>
+            <p>Audio and transcripts stay saved on your PC. The selected Claude provider handles the chat. An unavailable model will show an error.</p>
+            <Button type="button" size="sm" disabled={!props.enabled} onClick={() => void sessionRef.current?.start({ threadId: props.thread.id, modelSelection: { ...props.modelSelection, model: model.trim(), options: effort ? [{ id: "effort", value: effort }] : [] }, policy }, props.thread.messages)}>Start call or recover saved call</Button>
+          </div> : null}
+          {state === "preparing" ? <ul className="mt-2 space-y-1 text-xs">{call?.steps.map((step) => <li key={step}>✓ {step}</li>)}</ul> : null}
+          {call?.pending[0] ? <div className="mt-2 rounded border p-2 text-xs"><p>{call.pending[0].summary}</p><div className="mt-2 flex gap-2"><Button type="button" size="sm" onClick={() => void sessionRef.current?.confirm("yes")}>Yes, run it</Button><Button type="button" size="sm" variant="outline" onClick={() => void sessionRef.current?.confirm("no")}>No</Button></div></div> : null}
+          {active ? <div className="mt-3 flex flex-wrap gap-2">
+            {state === "listening" ? <Button type="button" size="sm" onClick={() => sessionRef.current?.finish()}>Send speech</Button> : null}
+            {state === "speaking" || state === "waiting" ? <Button type="button" size="sm" onClick={() => void sessionRef.current?.interrupt()}>Interrupt and speak</Button> : null}
+            {state === "ready" ? <Button type="button" size="sm" onClick={() => void sessionRef.current?.listen()}>Speak</Button> : null}
+            {state === "reconnecting" ? <Button type="button" size="sm" onClick={() => void sessionRef.current?.resume()}>Retry saved speech</Button> : null}
+            <Button type="button" size="sm" variant="outline" onClick={() => void sessionRef.current?.stop()}>End call</Button>
+          </div> : null}
+          {!props.connected && active ? <p className="mt-2 text-xs">Chat connection lost. Keep this page open; recorded speech stays queued.</p> : null}
+        </section>
       ) : null}
+      {active ? <Button type="button" size="sm" variant="outline" onClick={() => void sessionRef.current?.stop()}>End call</Button> : null}
     </div>
   );
 }

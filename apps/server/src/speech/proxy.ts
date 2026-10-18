@@ -1,8 +1,8 @@
-import type { SpeechRequest, SpeechResponse } from "@t3tools/contracts";
+import type { SpeechTransportRequest, SpeechResponse } from "@t3tools/contracts";
 
 /** Fixed loopback destination: microphone audio never follows client-supplied URLs. */
 export async function proxySpeech(
-  input: SpeechRequest,
+  input: SpeechTransportRequest,
   signal: AbortSignal,
   fetcher: typeof fetch = fetch,
 ): Promise<SpeechResponse> {
@@ -46,7 +46,7 @@ export async function proxySpeech(
       }
       path = "/v1/audio/speech";
       body = JSON.stringify({
-        model: "breeze-tts-2",
+        model: input.model ?? "breeze-tts-2",
         input: input.text,
         voice: "otis",
         response_format: "pcm",
@@ -85,7 +85,11 @@ export async function proxySpeech(
     typeof result.sessionId === "string" &&
     /^[\w-]{1,128}$/.test(result.sessionId)
   ) {
-    return { sessionId: result.sessionId };
+    return {
+      sessionId: result.sessionId,
+      ...("tenants" in result && Array.isArray(result.tenants) && result.tenants.every((id) => typeof id === "string")
+        ? { tenants: result.tenants as string[] } : {}),
+    };
   }
   if (input.action === "transcribe" && "text" in result && typeof result.text === "string") {
     return { text: result.text };

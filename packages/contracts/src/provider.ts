@@ -69,6 +69,8 @@ export type ProviderSessionStartInput = typeof ProviderSessionStartInput.Type;
 
 export const ProviderSendTurnInput = Schema.Struct({
   threadId: ThreadId,
+  /** Original chat message identity, retained through provider dispatch and recovery. */
+  messageId: Schema.optional(TrimmedNonEmptyString),
   /** Explicit Codex steering. Must match the active provider turn. */
   expectedTurnId: Schema.optional(TurnId),
   /** Internal recovery signal for provider sessions resumed after a restart. */
