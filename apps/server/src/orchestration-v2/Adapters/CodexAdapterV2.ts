@@ -15,10 +15,7 @@ import {
   codexMcpDisableOverride,
 } from "../../provider/CodexMcpPreflight.ts";
 import { recoverCodexDenyReadAclState } from "../../provider/CodexSandboxRecovery.ts";
-import {
-  codexIsolatedHomePath,
-  migrateCodexResumeRollout,
-} from "../../provider/Drivers/CodexHomeLayout.ts";
+import { migrateCodexResumeRollout } from "../../provider/Drivers/CodexHomeLayout.ts";
 import { revertCodexThread } from "../../provider/CodexThreadRevert.ts";
 import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudget";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
@@ -1668,18 +1665,9 @@ export const createCodexAdapterV2 = (
     const hostEnvironment = yield* HostProcess.Environment;
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
     const serverConfig = yield* ServerConfig;
-    const homeLayout = yield* resolveCodexHomeLayout(
-      config,
-      config.useDesktopAppDaemon
-        ? undefined
-        : {
-            isolatedHomePath: codexIsolatedHomePath(
-              yield* Path.Path,
-              serverConfig.baseDir,
-              instanceId,
-            ),
-          },
-    );
+    // Use the configured Codex home directly, as upstream does. A T3-owned isolated home kept a
+    // one-time copy of auth.json that went stale once the shared login rotated its token.
+    const homeLayout = yield* resolveCodexHomeLayout(config);
 
     yield* materializeCodexShadowHome(homeLayout).pipe(
       Effect.mapError(

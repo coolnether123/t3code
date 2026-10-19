@@ -59,7 +59,6 @@ import * as SynchronizedRef from "effect/SynchronizedRef";
 import * as ServerConfig from "../config.ts";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
-import { codexIsolatedHomePath } from "../provider/Drivers/CodexHomeLayout.ts";
 import { makeClaudeEnvironment } from "../provider/Drivers/ClaudeHome.ts";
 import { deriveProviderInstanceConfigMap } from "../provider/ProviderInstanceRegistryHydration.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -1377,15 +1376,9 @@ export const resolveProviderInstanceTerminalEnvironment = Effect.fn(
   if (instance.driver === "codex") {
     const config = decodeCodexSettings(instance.config ?? {});
     if (Option.isSome(config)) {
-      const isolatedHomePath =
-        input.baseDir !== undefined &&
-        !config.value.useDesktopAppDaemon &&
-        config.value.shadowHomePath.trim() === ""
-          ? codexIsolatedHomePath(input.path, input.baseDir, String(providerInstanceId))
-          : undefined;
-      const layout = yield* resolveCodexHomeLayout(config.value, {
-        ...(isolatedHomePath ? { isolatedHomePath } : {}),
-      }).pipe(Effect.provideService(Path.Path, input.path));
+      const layout = yield* resolveCodexHomeLayout(config.value).pipe(
+        Effect.provideService(Path.Path, input.path),
+      );
       if (layout.effectiveHomePath)
         resolved = { ...resolved, CODEX_HOME: layout.effectiveHomePath };
     }
