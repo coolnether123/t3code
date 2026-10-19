@@ -1,3 +1,5 @@
+import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
+import * as ServerConfig from "../config.ts";
 import {
   AuthSessionId,
   type AuthEnvironmentScope,
@@ -130,6 +132,14 @@ it.effect("exports full history with size, scope, and missing-thread checks", ()
     });
     const routes = HttpApiBuilder.layer(TranscriptTestApi).pipe(
       Layer.provide(OrchestrationHttp.layer),
+      Layer.provide(
+        Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({
+          enqueueCommand: (effect) => effect,
+        }),
+      ),
+      Layer.provide(
+        ServerConfig.layerTest(process.cwd(), { prefix: "t3-orchestration-http-test-" }),
+      ),
       Layer.provide(
         Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
           getEnvironmentId: Effect.succeed(environmentId),

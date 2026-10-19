@@ -1,3 +1,5 @@
+import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
+import * as ServerConfig from "../config.ts";
 import { assert, describe, it } from "@effect/vitest";
 import {
   AuthOrchestrationReadScope,
@@ -239,6 +241,14 @@ const withHttp = <A>(use: (get: (path: string) => Promise<Response>) => Promise<
     const context = yield* Effect.context<Layer.Success<typeof TestLayer>>();
     const appLayer = HttpApiBuilder.layer(OrchestrationApi).pipe(
       Layer.provide(OrchestrationHttp.layer),
+      Layer.provide(
+        Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({
+          enqueueCommand: (effect) => effect,
+        }),
+      ),
+      Layer.provide(
+        ServerConfig.layerTest(process.cwd(), { prefix: "t3-orchestration-http-test-" }),
+      ),
       Layer.provide(auth),
       Layer.provide(Layer.succeedContext(context)),
       Layer.provide(NodeHttpPlatform.layer),

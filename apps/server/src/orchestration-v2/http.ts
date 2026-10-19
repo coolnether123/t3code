@@ -1,3 +1,5 @@
+import * as FileSystem from "effect/FileSystem";
+import * as ServerConfig from "../config.ts";
 import * as ThreadMessageIntake from "./ThreadMessageIntake.ts";
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import {
@@ -54,6 +56,11 @@ export const layer = HttpApiBuilder.group(
   "orchestration",
   Effect.fnUntraced(function* (handlers) {
     const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
+    const dispatchContext = yield* Effect.context<
+      | FileSystem.FileSystem
+      | ServerConfig.ServerConfig
+      | ThreadManagementService.ThreadManagementService
+    >();
     const sql = yield* SqlClient.SqlClient;
     const environment = yield* ServerEnvironment.ServerEnvironmentIdentity;
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
@@ -165,7 +172,7 @@ export const layer = HttpApiBuilder.group(
                   createdBy: "agent",
                   creationSource: "server",
                 }),
-              ),
+              ).pipe(Effect.provide(dispatchContext)),
             )
             .pipe(Effect.catch((cause) => failEnvironmentInternal("internal_error", cause)));
           return { sequence: result.sequence };
