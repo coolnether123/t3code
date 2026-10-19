@@ -106,11 +106,18 @@ const parseConfigOverride = (
   if (rawKey.length === 0) {
     return { _tag: "failure", reason: "the key is empty" };
   }
+  // The daemon config map treats simple quoted IDs as literal quotes. CLI
+  // flags need TOML quoting for IDs such as browser@openai-bundled; their
+  // request-scoped JSON paths need the decoded ID instead.
+  const daemonKey = rawKey.replace(
+    /^(mcp_servers|plugins)\."([^".\\]+)"\.(.+)$/u,
+    "$1.$2.$3",
+  );
   const parsed = parseConfigValue(rawOverride.slice(separator + 1));
   if (parsed._tag === "failure") return parsed;
   return {
     _tag: "success",
-    key: rawKey === "use_legacy_landlock" ? "features.use_legacy_landlock" : rawKey,
+    key: daemonKey === "use_legacy_landlock" ? "features.use_legacy_landlock" : daemonKey,
     value: parsed.value,
   };
 };
