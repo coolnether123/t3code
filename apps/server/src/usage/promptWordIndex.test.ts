@@ -4,7 +4,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
-import migration from "./usagePromptIndexLegacy.fixture.ts";
+import migration from "./usagePromptIndexLegacy.test.fixture.ts";
 import { readPromptWordIndex, warmPromptWordIndexBatch } from "./promptWordIndex.ts";
 import { normalizePromptKeyword, promptWords } from "./promptWords.ts";
 
@@ -17,10 +17,10 @@ const input: UsageReportInput = {
 const now = "2026-10-09T13:00:00.000Z";
 const readIndexed = (sql: SqlClient.SqlClient, query: UsageReportInput, at: string) =>
   Effect.gen(function* () {
-    while ((yield* warmPromptWordIndexBatch(sql)) > 0) {
+    while ((yield* warmPromptWordIndexBatch(sql, "projection_thread_messages")) > 0) {
       /* Drain synthetic fixture. */
     }
-    return yield* readPromptWordIndex(sql, query, at);
+    return yield* readPromptWordIndex(sql, query, at, "projection_thread_messages");
   });
 const decodeReport = Schema.decodeUnknownEffect(UsageReport);
 const layer = it.layer(NodeSqliteClient.layer({ filename: ":memory:" }));
@@ -85,7 +85,7 @@ layer("derived prompt word index", (it) => {
         }));
         for (let offset = 0; offset < many.length; offset += 200)
           yield* sql`INSERT INTO projection_thread_messages ${sql.insert(many.slice(offset, offset + 200))}`;
-        const warming = yield* readPromptWordIndex(sql, input, now);
+        const warming = yield* readPromptWordIndex(sql, input, now, "projection_thread_messages");
         assert.include(warming.coverage.reasons, "index-warming");
         assert.isNull(warming.totals.averageWordsPerPrompt);
         let complete = warming;

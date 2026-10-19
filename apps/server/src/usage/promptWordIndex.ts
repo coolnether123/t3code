@@ -15,7 +15,7 @@ const BATCH_MESSAGES = 32;
 /** Each committed message is its own durable checkpoint. Parsing holds no write lease. */
 export const warmPromptWordIndexBatch = (
   sql: SqlClient.SqlClient,
-  sourceTable = "projection_thread_messages",
+  sourceTable = "usage_prompt_messages_v2",
 ) =>
   Effect.gen(function* () {
     const started = yield* Clock.currentTimeMillis;
@@ -111,7 +111,7 @@ export const warmPromptWordIndexBatch = (
 /** One service-scoped worker resumes persisted pending IDs after every restart. */
 export const runPromptWordIndexer = (
   sql: SqlClient.SqlClient,
-  sourceTable = "projection_thread_messages",
+  sourceTable = "usage_prompt_messages_v2",
 ) =>
   Effect.gen(function* () {
     while (true) {
@@ -132,7 +132,7 @@ export const readPromptWordIndex = (
   sql: SqlClient.SqlClient,
   input: UsageReportInput,
   readAt: string,
-  sourceTable = "projection_thread_messages",
+  sourceTable = "usage_prompt_messages_v2",
 ) =>
   sql
     .withTransaction(

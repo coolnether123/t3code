@@ -1,7 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
-/** Historical V1 schema used only by index recovery fixtures. */
+/** Historical V1 schema used only by index recovery tests. */
 export default Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* sql`CREATE TABLE usage_prompt_words_v1 (

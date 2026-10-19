@@ -20,32 +20,23 @@ it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))("V2 prompt word index
       const at = "2026-10-19T06:00:00.000Z";
       yield* sql`INSERT INTO orchestration_v2_projection_messages VALUES ('prompt', 'thread', 'user', ${at}, ${at}, '{"text":"build build"}')`;
       yield* sql`INSERT INTO orchestration_v2_projection_messages VALUES ('notice', 'thread', 'user', ${at}, ${at}, '{"text":"private notice", "notification":{"summary":"notice"}}')`;
-      assert.strictEqual(yield* warmPromptWordIndexBatch(sql, "usage_prompt_messages_v2"), 1);
+      assert.strictEqual(yield* warmPromptWordIndexBatch(sql), 1);
       const input = {
         mode: "prompts" as const,
         sinceDay: UsageDay.make("2026-10-19"),
         untilDay: UsageDay.make("2026-10-19"),
         timeZone: "UTC",
       };
-      const report = yield* readPromptWordIndex(sql, input, at, "usage_prompt_messages_v2");
+      const report = yield* readPromptWordIndex(sql, input, at);
       assert.strictEqual(report.totals.prompts, 1);
       assert.strictEqual(report.totals.words, 2);
       yield* setupUsagePromptIndex;
-      assert.strictEqual(
-        (yield* readPromptWordIndex(sql, input, at, "usage_prompt_messages_v2")).totals.words,
-        2,
-      );
+      assert.strictEqual((yield* readPromptWordIndex(sql, input, at)).totals.words, 2);
       yield* sql`UPDATE orchestration_v2_projection_messages SET payload_json = '{"text":"updated"}' WHERE message_id = 'prompt'`;
-      assert.strictEqual(yield* warmPromptWordIndexBatch(sql, "usage_prompt_messages_v2"), 1);
-      assert.strictEqual(
-        (yield* readPromptWordIndex(sql, input, at, "usage_prompt_messages_v2")).totals.words,
-        1,
-      );
+      assert.strictEqual(yield* warmPromptWordIndexBatch(sql), 1);
+      assert.strictEqual((yield* readPromptWordIndex(sql, input, at)).totals.words, 1);
       yield* sql`DELETE FROM orchestration_v2_projection_messages WHERE message_id = 'prompt'`;
-      assert.strictEqual(
-        (yield* readPromptWordIndex(sql, input, at, "usage_prompt_messages_v2")).totals.prompts,
-        0,
-      );
+      assert.strictEqual((yield* readPromptWordIndex(sql, input, at)).totals.prompts, 0);
     }),
   );
 });

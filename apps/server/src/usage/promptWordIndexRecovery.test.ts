@@ -12,7 +12,7 @@ import * as Fiber from "effect/Fiber";
 import * as TestClock from "effect/testing/TestClock";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
-import migration from "./usagePromptIndexLegacy.fixture.ts";
+import migration from "./usagePromptIndexLegacy.test.fixture.ts";
 import {
   readPromptWordIndex,
   warmPromptWordIndexBatch,
@@ -67,7 +67,7 @@ it.effect(
             );
             yield* migration;
             const started = NodePerfHooks.performance.now();
-            const cold = yield* readPromptWordIndex(sql, input, now);
+            const cold = yield* readPromptWordIndex(sql, input, now, "projection_thread_messages");
             const coldMs = NodePerfHooks.performance.now() - started;
             assert.strictEqual(cold.coverage.status, "partial");
             assert.strictEqual(cold.coverage.sourceMessages, 5001);
@@ -79,10 +79,15 @@ it.effect(
               count: number;
             }>`SELECT count(*) AS count FROM usage_prompt_pending_v1`)[0]!.count;
             assert.strictEqual(pending, 5001);
-            const processed = yield* warmPromptWordIndexBatch(sql);
+            const processed = yield* warmPromptWordIndexBatch(sql, "projection_thread_messages");
             assert.isAbove(processed, 0);
             assert.isAtMost(processed, 32);
-            const partial = yield* readPromptWordIndex(sql, input, now);
+            const partial = yield* readPromptWordIndex(
+              sql,
+              input,
+              now,
+              "projection_thread_messages",
+            );
             assert.strictEqual(partial.coverage.examinedMessages, processed);
             assert.strictEqual(partial.keyword?.count, processed * 2);
             yield* Effect.logInfo(
@@ -97,13 +102,23 @@ it.effect(
           Effect.gen(function* () {
             const sql = yield* SqlClient.SqlClient;
             yield* sql`PRAGMA journal_mode = WAL`;
-            const reopened = yield* readPromptWordIndex(sql, input, now);
+            const reopened = yield* readPromptWordIndex(
+              sql,
+              input,
+              now,
+              "projection_thread_messages",
+            );
             assert.strictEqual(reopened.coverage.examinedMessages, checkpoint);
-            while ((yield* warmPromptWordIndexBatch(sql)) > 0) {
+            while ((yield* warmPromptWordIndexBatch(sql, "projection_thread_messages")) > 0) {
               /* Drain persisted work. */
             }
             const started = NodePerfHooks.performance.now();
-            const complete = yield* readPromptWordIndex(sql, input, now);
+            const complete = yield* readPromptWordIndex(
+              sql,
+              input,
+              now,
+              "projection_thread_messages",
+            );
             assert.strictEqual(complete.coverage.status, "complete");
             assert.strictEqual(complete.totals.prompts, 5001);
             assert.strictEqual(complete.totals.words, 15003);
@@ -111,7 +126,10 @@ it.effect(
             assert.strictEqual(complete.daily[0]?.words, 15003);
             assert.deepStrictEqual(complete.words, [{ word: "build", count: 10002 }]);
             assert.isBelow(NodePerfHooks.performance.now() - started, 3000);
-            assert.strictEqual(yield* warmPromptWordIndexBatch(sql), 0);
+            assert.strictEqual(
+              yield* warmPromptWordIndexBatch(sql, "projection_thread_messages"),
+              0,
+            );
             assert.strictEqual(
               (yield* sql<{
                 count: number;
@@ -143,7 +161,7 @@ it.effect(
           yield* sql`PRAGMA busy_timeout = 5000`;
           yield* migration;
           yield* sql`INSERT INTO projection_thread_messages VALUES ('first', 'thread', 'user', 'build', ${now}, ${now})`;
-          yield* warmPromptWordIndexBatch(sql);
+          yield* warmPromptWordIndexBatch(sql, "projection_thread_messages");
           yield* sql`INSERT INTO projection_thread_messages VALUES ('second', 'thread', 'user', 'build build', ${now}, ${now})`;
           const blocker = yield* Effect.acquireRelease(
             Effect.sync(() => new NodeSqlite.DatabaseSync(filename)),
@@ -152,19 +170,33 @@ it.effect(
           blocker.exec("BEGIN IMMEDIATE");
           yield* Effect.gen(function* () {
             const started = NodePerfHooks.performance.now();
-            assert.isTrue(Exit.isFailure(yield* Effect.exit(warmPromptWordIndexBatch(sql))));
+            assert.isTrue(
+              Exit.isFailure(
+                yield* Effect.exit(warmPromptWordIndexBatch(sql, "projection_thread_messages")),
+              ),
+            );
             assert.isBelow(NodePerfHooks.performance.now() - started, 1000);
             assert.strictEqual(
               (yield* sql<{ timeout: number }>`PRAGMA busy_timeout`)[0]!.timeout,
               5000,
             );
-            const partial = yield* readPromptWordIndex(sql, input, now);
+            const partial = yield* readPromptWordIndex(
+              sql,
+              input,
+              now,
+              "projection_thread_messages",
+            );
             assert.strictEqual(partial.coverage.status, "partial");
             assert.strictEqual(partial.keyword?.count, 1);
             assert.strictEqual(partial.coverage.sourceMessages, 2);
           }).pipe(Effect.ensuring(Effect.sync(() => blocker.exec("ROLLBACK"))));
-          assert.strictEqual(yield* warmPromptWordIndexBatch(sql), 1);
-          const complete = yield* readPromptWordIndex(sql, input, now);
+          assert.strictEqual(yield* warmPromptWordIndexBatch(sql, "projection_thread_messages"), 1);
+          const complete = yield* readPromptWordIndex(
+            sql,
+            input,
+            now,
+            "projection_thread_messages",
+          );
           assert.strictEqual(complete.coverage.status, "complete");
           assert.strictEqual(complete.keyword?.count, 3);
         }).pipe(Effect.provide(NodeSqliteClient.layer({ filename, readerWorker: true })));
@@ -181,7 +213,7 @@ it.effect("prompt checkpoints roll back with their caller transaction", () =>
     const exit = yield* Effect.exit(
       sql.withTransaction(
         Effect.gen(function* () {
-          assert.strictEqual(yield* warmPromptWordIndexBatch(sql), 1);
+          assert.strictEqual(yield* warmPromptWordIndexBatch(sql, "projection_thread_messages"), 1);
           return yield* Effect.fail("synthetic rollback");
         }),
       ),
@@ -197,7 +229,7 @@ it.effect("prompt checkpoints roll back with their caller transaction", () =>
         .count,
       1,
     );
-    assert.strictEqual(yield* warmPromptWordIndexBatch(sql), 1);
+    assert.strictEqual(yield* warmPromptWordIndexBatch(sql, "projection_thread_messages"), 1);
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );
 
@@ -211,7 +243,9 @@ it.effect("the background worker progresses without reads and is interrupted wit
       INSERT INTO projection_thread_messages SELECT 'synthetic-' || n, 'thread', 'user', 'build', ${now}, ${now} FROM ids`;
       const worker = yield* Effect.scoped(
         Effect.gen(function* () {
-          const fiber = yield* Effect.forkScoped(runPromptWordIndexer(sql));
+          const fiber = yield* Effect.forkScoped(
+            runPromptWordIndexer(sql, "projection_thread_messages"),
+          );
           // Synthetic clock drains sleeping batches. No request wakes or owns the worker.
           while (
             (yield* sql<{
@@ -229,7 +263,10 @@ it.effect("the background worker progresses without reads and is interrupted wit
         }),
       );
       assert.isTrue(Exit.isFailure(yield* Fiber.await(worker)));
-      assert.strictEqual((yield* readPromptWordIndex(sql, input, now)).keyword?.count, 65);
+      assert.strictEqual(
+        (yield* readPromptWordIndex(sql, input, now, "projection_thread_messages")).keyword?.count,
+        65,
+      );
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   ),
 );
@@ -245,25 +282,34 @@ it.effect(
         setPromptIndexCutover(true);
         yield* Effect.addFinalizer(() => Effect.sync(() => setPromptIndexCutover(false)));
         yield* sql`INSERT INTO projection_thread_messages VALUES ('first', 'thread', 'user', 'build', ${now}, ${now})`;
-        yield* Effect.forkScoped(runPromptWordIndexer(sql));
+        yield* Effect.forkScoped(runPromptWordIndexer(sql, "projection_thread_messages"));
         yield* TestClock.adjust(1000);
-        const paused = yield* readPromptWordIndex(sql, input, now);
+        const paused = yield* readPromptWordIndex(sql, input, now, "projection_thread_messages");
         assert.strictEqual(paused.coverage.status, "partial");
         assert.strictEqual(paused.coverage.examinedMessages, 0);
         assert.strictEqual(paused.coverage.sourceMessages, 1);
         yield* requestLocalPromptIndex;
         yield* TestClock.adjust(1000);
-        assert.strictEqual((yield* readPromptWordIndex(sql, input, now)).keyword?.count, 1);
+        assert.strictEqual(
+          (yield* readPromptWordIndex(sql, input, now, "projection_thread_messages")).keyword
+            ?.count,
+          1,
+        );
         yield* TestClock.adjust(61000);
         yield* sql`UPDATE projection_thread_messages SET text = 'build build' WHERE message_id = 'first'`;
         yield* TestClock.adjust(1000);
         assert.strictEqual(
-          (yield* readPromptWordIndex(sql, input, now)).coverage.status,
+          (yield* readPromptWordIndex(sql, input, now, "projection_thread_messages")).coverage
+            .status,
           "partial",
         );
         setPromptIndexCutover(false);
         yield* TestClock.adjust(1000);
-        assert.strictEqual((yield* readPromptWordIndex(sql, input, now)).keyword?.count, 2);
+        assert.strictEqual(
+          (yield* readPromptWordIndex(sql, input, now, "projection_thread_messages")).keyword
+            ?.count,
+          2,
+        );
         assert.strictEqual(
           (yield* sql`SELECT message_id FROM projection_thread_messages`).length,
           1,
@@ -290,8 +336,12 @@ it.effect("migration is additive and a pre-migration backup remains restorable",
         Effect.gen(function* () {
           const sql = yield* SqlClient.SqlClient;
           yield* migration;
-          yield* warmPromptWordIndexBatch(sql);
-          assert.strictEqual((yield* readPromptWordIndex(sql, input, now)).totals.words, 1);
+          yield* warmPromptWordIndexBatch(sql, "projection_thread_messages");
+          assert.strictEqual(
+            (yield* readPromptWordIndex(sql, input, now, "projection_thread_messages")).totals
+              .words,
+            1,
+          );
         }).pipe(Effect.provide(NodeSqliteClient.layer({ filename }))),
       );
       // Restore only this disposable, closed fixture, never the live T3 home.
@@ -310,7 +360,8 @@ it.effect("migration is additive and a pre-migration backup remains restorable",
           );
           yield* migration;
           assert.strictEqual(
-            (yield* readPromptWordIndex(sql, input, now)).coverage.sourceMessages,
+            (yield* readPromptWordIndex(sql, input, now, "projection_thread_messages")).coverage
+              .sourceMessages,
             1,
           );
         }).pipe(Effect.provide(NodeSqliteClient.layer({ filename }))),
@@ -332,16 +383,23 @@ it.effect(
       ('bad', 'thread', 'user', 'build build', ${now}, ${now})`;
       yield* sql`CREATE TRIGGER synthetic_failed_message BEFORE INSERT ON usage_prompt_terms_v1
       WHEN NEW.message_id = 'bad' BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END`;
-      assert.isTrue(Exit.isFailure(yield* Effect.exit(warmPromptWordIndexBatch(sql))));
+      assert.isTrue(
+        Exit.isFailure(
+          yield* Effect.exit(warmPromptWordIndexBatch(sql, "projection_thread_messages")),
+        ),
+      );
       assert.strictEqual((yield* sql<{ timeout: number }>`PRAGMA busy_timeout`)[0]!.timeout, 5000);
-      const partial = yield* readPromptWordIndex(sql, input, now);
+      const partial = yield* readPromptWordIndex(sql, input, now, "projection_thread_messages");
       assert.strictEqual(partial.totals.prompts, 1);
       assert.strictEqual(partial.keyword?.count, 1);
       assert.deepStrictEqual(yield* sql`SELECT message_id FROM usage_prompt_pending_v1`, [
         { message_id: "bad" },
       ]);
       yield* sql`DROP TRIGGER synthetic_failed_message`;
-      assert.strictEqual(yield* warmPromptWordIndexBatch(sql), 1);
-      assert.strictEqual((yield* readPromptWordIndex(sql, input, now)).keyword?.count, 3);
+      assert.strictEqual(yield* warmPromptWordIndexBatch(sql, "projection_thread_messages"), 1);
+      assert.strictEqual(
+        (yield* readPromptWordIndex(sql, input, now, "projection_thread_messages")).keyword?.count,
+        3,
+      );
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );
