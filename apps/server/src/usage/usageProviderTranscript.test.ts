@@ -1,16 +1,18 @@
 // @effect-diagnostics nodeBuiltinImport:off - Exercises the Promise-based transcript reader with disposable native files.
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
-import * as path from "node:path";
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import { expect, it } from "vite-plus/test";
 import { piUsageFormat } from "@t3tools/provider-pi/server/usage";
 import { readTranscriptRecords as readProviderTranscriptRecords } from "./usageProviderTranscriptReader.ts";
 
 it("feeds metadata and usage to the provider-owned parser", async () => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "usage-provider-fixture-"));
+  const directory = await NodeFSP.mkdtemp(
+    NodePath.join(NodeOS.tmpdir(), "usage-provider-fixture-"),
+  );
   try {
-    const file = path.join(directory, "pi.jsonl");
-    await fs.writeFile(
+    const file = NodePath.join(directory, "pi.jsonl");
+    await NodeFSP.writeFile(
       file,
       [
         JSON.stringify({ type: "session", id: "synthetic-session" }),
@@ -33,9 +35,9 @@ it("feeds metadata and usage to the provider-owned parser", async () => {
       totals: { uncachedInputTokens: 10, outputTokens: 5, cachedInputTokens: 3 },
     });
     expect(
-      await readProviderTranscriptRecords(path.join(directory, "missing.jsonl"), piUsageFormat),
+      await readProviderTranscriptRecords(NodePath.join(directory, "missing.jsonl"), piUsageFormat),
     ).toBeNull();
   } finally {
-    await fs.rm(directory, { recursive: true, force: true });
+    await NodeFSP.rm(directory, { recursive: true, force: true });
   }
 });

@@ -88,8 +88,9 @@ beforeEach(() => {
 });
 
 describe("incremental scan integration", () => {
-  for (const includeQuotaHistory of [false, true]) {
-    it.effect(`bounds stalled settings with quota history ${includeQuotaHistory}`, () =>
+  it.effect.each([false, true])(
+    "bounds stalled settings with quota history %s",
+    (includeQuotaHistory) =>
       Effect.gen(function* () {
         const settings = yield* ServerSettings.ServerSettingsService;
         const started = yield* Deferred.make<void>();
@@ -127,8 +128,7 @@ describe("incremental scan integration", () => {
           expect(encodeJson(completed)).toContain("before source coverage could be established");
         }
       }).pipe(Effect.scoped, Effect.provide(Layer.merge(testLayer, TestClock.layer()))),
-    );
-  }
+  );
 
   it.effect("keeps a shared wait inside each caller's original deadline", () =>
     Effect.gen(function* () {

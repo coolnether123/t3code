@@ -1,5 +1,5 @@
 import { mapUsageModel } from "./usageAggregation.ts";
-import * as NodeOS from "node:os";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Crypto from "effect/Crypto";
 
 import * as DateTime from "effect/DateTime";
@@ -105,19 +105,16 @@ export const readQuotaHistory = Effect.fn("UsageQuotaHistory.read")(
   function* (override: string | null | undefined) {
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
+    const environment = yield* HostProcess.Environment;
+    const platform = yield* HostProcess.Platform;
+    const home = yield* HostProcess.HomeDirectory;
     const filePath =
       override === undefined
-        ? process.env.T3CODE_QUOTA_HISTORY_PATH ||
-          (process.env.LOCALAPPDATA
-            ? path.join(process.env.LOCALAPPDATA, "CodexLimits", "state.json")
-            : process.platform === "darwin"
-              ? path.join(
-                  NodeOS.homedir(),
-                  "Library",
-                  "Application Support",
-                  "CodexLimits",
-                  "state.json",
-                )
+        ? environment.T3CODE_QUOTA_HISTORY_PATH ||
+          (environment.LOCALAPPDATA
+            ? path.join(environment.LOCALAPPDATA, "CodexLimits", "state.json")
+            : platform === "darwin"
+              ? path.join(home, "Library", "Application Support", "CodexLimits", "state.json")
               : null)
         : override;
     const missing: UsageQuotaHistory = {
