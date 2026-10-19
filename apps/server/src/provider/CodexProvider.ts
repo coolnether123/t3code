@@ -579,14 +579,35 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
     } satisfies CodexAppServerProviderSnapshot;
   }
 
+  const modelsRequest = input.useDesktopAppDaemon
+    ? Effect.gen(function* () {
+        // Connecting a proxy does not restart the daemon or refresh its in-memory
+        // catalog. Use the installed CLI and the daemon's home for discovery so
+        // an older running daemon cannot hide newly available account models.
+        const catalogSpawnedAtMs = DateTime.toEpochMillis(yield* DateTime.now);
+        const catalog = yield* withCodexAppServerClient({
+          ...input,
+          useDesktopAppDaemon: false,
+          homePath: initialize.codexHome,
+        });
+        return yield* accountResponse.account?.type === "chatgpt"
+          ? requestCodexChatGptModels({
+              client: catalog.client,
+              codexHome: catalog.initialize.codexHome,
+              spawnedAtMs: catalogSpawnedAtMs,
+            })
+          : requestAllCodexModels(catalog.client);
+      }).pipe(Effect.scoped)
+    : accountResponse.account?.type === "chatgpt"
+      ? requestCodexChatGptModels({ client, codexHome: initialize.codexHome, spawnedAtMs })
+      : requestAllCodexModels(client);
+
   const [skillsResponse, models, rateLimits] = yield* Effect.all(
     [
       client.request("skills/list", {
         cwds: [input.cwd],
       }),
-      accountResponse.account?.type === "chatgpt"
-        ? requestCodexChatGptModels({ client, codexHome: initialize.codexHome, spawnedAtMs })
-        : requestAllCodexModels(client),
+      modelsRequest,
       input.skipNativeUsage
         ? Effect.succeed(undefined)
         : client.request("account/rateLimits/read", null).pipe(
