@@ -83,6 +83,49 @@ async function fixture() {
 }
 
 describe("durable calls", () => {
+  it("does not acknowledge a rejected provider send and retries it on the next delivery", async () => {
+    const f = await fixture();
+    const operator = new CallOperator(f.store);
+    await operator.configure(options.threadId, {
+      voice: options.modelSelection,
+      operator: { instanceId: ProviderInstanceId.make("codex"), model: "synthetic-operator" },
+    });
+    const send = vi.fn(async () => ({})).mockRejectedValueOnce(new Error("Provider rejected send"));
+    operator.bind({
+      context: async () => ({
+        cwd: f.directory,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+      }),
+      start: async () => ({}),
+      sessions: async () => [],
+      send,
+      dispatch: f.ports.dispatch,
+    });
+    vi.mocked(f.ports.dispatch).mockImplementation(async (command) => {
+      if (command.type !== "thread.turn.start") return {};
+      return operator.voice({
+        threadId: command.threadId,
+        messageId: command.message.messageId,
+        text: command.message.text,
+        selection: command.modelSelection,
+      });
+    });
+    await f.service.handle(upload, new AbortController().signal);
+    await f.request({ action: "call.transcribe", utteranceId: "utterance-1" });
+    const service = new CallService(f.store, f.ports, operator);
+    const deliver = () =>
+      service.handle(
+        { action: "call.deliver", callId: "call-1", utteranceId: "utterance-1" },
+        new AbortController().signal,
+      );
+    await expect(deliver()).rejects.toThrow("Provider rejected send");
+    expect((await f.store.utterance("call-1", "utterance-1")).deliveredAt).toBeUndefined();
+    expect((await deliver()).utterance?.deliveredAt).toBeDefined();
+    expect(send).toHaveBeenCalledTimes(2);
+    await deliver();
+    expect(send).toHaveBeenCalledTimes(2);
+  });
   it("returns saved call defaults separately from remembered thread models", async () => {
     const f = await fixture();
     const operator = new CallOperator(f.store);

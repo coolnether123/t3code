@@ -146,6 +146,7 @@ export interface ProviderSessionManagerV2Shape {
   readonly shutdown: Effect.Effect<void>;
   readonly open: (input: {
     readonly threadId: ThreadId;
+    readonly owningThreadId?: ThreadId;
     readonly providerSessionId: ProviderSessionId;
     readonly modelSelection: ModelSelection;
     readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
@@ -436,6 +437,7 @@ export const layerWithOptions = (
         threadId: ThreadId,
         providerInstanceId: ProviderInstanceId,
         metadata?: {
+          readonly owningThreadId?: ThreadId;
           readonly modelSelection?: ModelSelection;
           readonly runtimePolicy?: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
         },
@@ -454,7 +456,7 @@ export const layerWithOptions = (
                 // re-attaches across a workspace handoff must come back to the
                 // same token or the process's tool calls fail auth.
                 const { browser: browserToolsAvailable, device: deviceToolsAvailable } =
-                  yield* agentAccessSettings(threadId);
+                  yield* agentAccessSettings(metadata?.owningThreadId ?? threadId);
                 const capabilities = new Set<
                   import("../mcp/McpInvocationContext.ts").McpCapability
                 >(["orchestration", "worktree", "pull-requests"]);
@@ -2199,7 +2201,10 @@ export const layerWithOptions = (
               const exposedRuntime = decorateRuntime(runtime, eventSubscribers);
               const now = yield* Clock.currentTimeMillis;
               const entry: LiveSessionEntry = {
-                attachedThreadIds: new Set([input.threadId]),
+                attachedThreadIds: new Set([
+                  input.threadId,
+                  ...(input.owningThreadId ? [input.owningThreadId] : []),
+                ]),
                 loadedProviderThreadKeyByThread: new Map(),
                 mcpCredentialIdByThread:
                   mcpCredentialId === undefined
@@ -2230,7 +2235,7 @@ export const layerWithOptions = (
                 input.providerSessionId,
                 writeProviderSessionEvents({
                   runtime,
-                  threadIds: [input.threadId],
+                  threadIds: entry.attachedThreadIds,
                   type: "provider-session.attached",
                   payload: runtime.providerSession,
                 }),

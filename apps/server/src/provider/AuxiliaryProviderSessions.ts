@@ -57,6 +57,7 @@ export class AuxiliaryProviderSessions extends Context.Service<
     readonly startSession: (
       threadId: ThreadId,
       input: ProviderSessionStartInput,
+      owningThreadId?: ThreadId,
     ) => Effect.Effect<ProviderSession, AuxiliarySessionError>;
     readonly sendTurn: (
       input: ProviderSendTurnInput,
@@ -248,7 +249,7 @@ const make = Effect.gen(function* () {
     listSessions: () =>
       Effect.sync(() => [...sessions].map(([id, session]) => sessionView(id, session))),
     stopSession,
-    startSession: (threadId, input) =>
+    startSession: (threadId, input, owningThreadId) =>
       lock.withPermit(
         Effect.gen(function* () {
           yield* stopSession({ threadId });
@@ -276,6 +277,7 @@ const make = Effect.gen(function* () {
           };
           const runtime = yield* manager.open({
             threadId,
+            ...(owningThreadId === undefined ? {} : { owningThreadId }),
             providerSessionId: ProviderSessionId.make(yield* uuid),
             modelSelection,
             runtimePolicy,
@@ -375,28 +377,39 @@ const make = Effect.gen(function* () {
         };
         const pending = yield* Deferred.make<TurnId, AuxiliarySessionError>();
         session.pending = pending;
+        session.turnId = undefined;
         session.status = "running";
         session.ordinal += 1;
         session.runId = RunId.make(yield* uuid);
-        yield* session.runtime.startTurn({
-          threadId: input.threadId,
-          appThread,
-          runId: session.runId,
-          runOrdinal: session.ordinal,
-          providerTurnOrdinal: session.ordinal,
-          attemptId: RunAttemptId.make(yield* uuid),
-          rootNodeId: NodeId.make(yield* uuid),
-          providerThread: session.providerThread,
-          modelSelection,
-          runtimePolicy: session.runtimePolicy,
-          message: {
-            messageId: MessageId.make(input.messageId ?? (yield* uuid)),
-            text: input.input ?? "",
-            attachments: [],
-            createdBy: "system",
-            creationSource: "server",
-          },
-        });
+        yield* session.runtime
+          .startTurn({
+            threadId: input.threadId,
+            appThread,
+            runId: session.runId,
+            runOrdinal: session.ordinal,
+            providerTurnOrdinal: session.ordinal,
+            attemptId: RunAttemptId.make(yield* uuid),
+            rootNodeId: NodeId.make(yield* uuid),
+            providerThread: session.providerThread,
+            modelSelection,
+            runtimePolicy: session.runtimePolicy,
+            message: {
+              messageId: MessageId.make(input.messageId ?? (yield* uuid)),
+              text: input.input ?? "",
+              attachments: [],
+              createdBy: "system",
+              creationSource: "server",
+            },
+          })
+          .pipe(
+            Effect.onError(() =>
+              Effect.sync(() => {
+                if (session.pending !== pending) return;
+                session.pending = undefined;
+                session.status = "ready";
+              }),
+            ),
+          );
         const turnId = yield* Deferred.await(pending);
         return {
           threadId: input.threadId,

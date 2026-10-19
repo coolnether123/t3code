@@ -39,6 +39,7 @@ export const OperatorChat = Schema.Struct({
       operator: ModelSelection,
       context: Schema.optional(Schema.String),
       finished: Schema.Boolean,
+      accepted: Schema.optional(Schema.Boolean),
       turnId: Schema.optional(Schema.String),
     }),
   ),

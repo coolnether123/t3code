@@ -1,6 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
+import { ThreadId } from "@t3tools/contracts";
 import * as ServerConfig from "../config.ts";
 import * as Auxiliary from "../provider/AuxiliaryProviderSessions.ts";
 import * as VoiceThreadService from "./VoiceThreadService.ts";
@@ -16,7 +17,17 @@ export const layer = Layer.effectDiscard(
     const replies = new CallReplyBuffer();
     calls.bind({
       context: (threadId) => Effect.runPromise(threads.context(threadId)),
-      start: (input) => Effect.runPromise(sessions.startSession(input.threadId, input)),
+      start: (input) =>
+        Effect.runPromise(
+          Effect.gen(function* () {
+            const link = yield* Effect.promise(() => calls.findLink(input.threadId));
+            return yield* sessions.startSession(
+              input.threadId,
+              input,
+              link?.role === "operator" ? ThreadId.make(link.threadId) : undefined,
+            );
+          }),
+        ),
       send: (input) => Effect.runPromise(sessions.sendTurn(input)),
       sessions: () => Effect.runPromise(sessions.listSessions()),
       dispatch: (command) => Effect.runPromise(threads.dispatch(command)),
@@ -28,8 +39,8 @@ export const layer = Layer.effectDiscard(
           const link = yield* Effect.tryPromise(() => calls.event(event, reply.raw));
           if (
             link?.role === "voice" &&
-            reply.raw &&
-            (event.type === "content.delta" ||
+            (event.type === "turn.started" ||
+              event.type === "content.delta" ||
               event.type === "item.completed" ||
               event.type === "turn.completed")
           )

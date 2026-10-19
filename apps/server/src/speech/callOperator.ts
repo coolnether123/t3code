@@ -179,9 +179,20 @@ export class CallOperator {
     text: string;
     selection: ModelSelection;
   }) {
+    return this.store.serial(`voice:${input.threadId}`, () => this.sendVoice(input));
+  }
+  private async sendVoice(input: {
+    threadId: string;
+    messageId: string;
+    text: string;
+    selection: ModelSelection;
+  }) {
     const chat = await this.read(input.threadId);
     if (!chat) return false;
-    if (chat.voices.some((voice) => voice.id === input.messageId)) return true;
+    const existing = chat.voices.find((voice) => voice.id === input.messageId);
+    if (existing?.accepted || existing?.turnId) return true;
+    if (chat.voices.some((voice) => voice.id !== input.messageId && !voice.finished))
+      throw new Error("The previous voice turn is still active. Retry after it finishes.");
     const announcement = input.messageId.startsWith("voice-update:")
       ? chat.updates.filter((update) => update.announcementId === input.messageId)
       : undefined;
@@ -194,21 +205,36 @@ export class CallOperator {
     await this.ensure(link);
     const context = await this.requirePorts().context(input.threadId);
     await this.change(input.threadId, (current) => {
-      current.voices.push({
+      const pending = {
         id: input.messageId,
         exactWords: input.text,
         sessionId: link.sessionId,
         operator: current.models.operator,
         ...(context.conversation ? { context: context.conversation } : {}),
         finished: false,
+        accepted: false,
+      };
+      const previous = current.voices.find((voice) => voice.id === input.messageId);
+      if (previous) Object.assign(previous, pending);
+      else current.voices.push(pending);
+    });
+    try {
+      await this.requirePorts().send({
+        threadId: ThreadId.make(link.sessionId),
+        messageId: input.messageId,
+        modelSelection: link.selection,
+        input: `${VOICE_ROLE_PROMPT}\n\nRecent conversation:\n${context.conversation ?? ""}\n\nOperator receipts:\n${JSON.stringify(chat.updates.slice(-20).map(({ status, text }) => ({ status, text })))}\n\n${announcement ? "Operator update at this pause" : "Jared's message"}:\n${text}`,
       });
-    });
-    await this.requirePorts().send({
-      threadId: ThreadId.make(link.sessionId),
-      messageId: input.messageId,
-      modelSelection: link.selection,
-      input: `${VOICE_ROLE_PROMPT}\n\nRecent conversation:\n${context.conversation ?? ""}\n\nOperator receipts:\n${JSON.stringify(chat.updates.slice(-20).map(({ status, text }) => ({ status, text })))}\n\n${announcement ? "Operator update at this pause" : "Jared's message"}:\n${text}`,
-    });
+      await this.change(input.threadId, (current) => {
+        current.voices.find((voice) => voice.id === input.messageId)!.accepted = true;
+      });
+    } catch (error) {
+      await this.change(input.threadId, (current) => {
+        const voice = current.voices.find((voice) => voice.id === input.messageId)!;
+        if (!voice.accepted && !voice.turnId) voice.finished = true;
+      });
+      throw error;
+    }
     return true;
   }
   async requestSession(threadId: string, requestId: string) {
@@ -265,6 +291,7 @@ export class CallOperator {
       if (voice && !voice.turnId)
         await this.change(link.threadId, (current) => {
           current.voices.find((entry) => entry.id === voice.id)!.turnId = event.turnId;
+          current.voices.find((entry) => entry.id === voice.id)!.accepted = true;
           for (const update of current.updates)
             if (update.announcementId === voice.id) update.announcementTurnId = event.turnId;
         });
@@ -551,7 +578,7 @@ export class CallOperator {
           !update.announcementId &&
           (update.status === "done" || update.status === "needs-Jared"),
       ) ?? [];
-    if (!chat || !updates.length) return false;
+    if (!chat || !updates.length || chat.voices.some((voice) => !voice.finished)) return false;
     const id = `voice-update:${callId}:${sha256(updates.map((update) => update.id).join()).slice(0, 24)}`;
     const context = await this.requirePorts().context(threadId);
     if (context.running) return false;
@@ -559,21 +586,34 @@ export class CallOperator {
       for (const update of current.updates)
         if (updates.some((entry) => entry.id === update.id)) update.announcementId = id;
     });
-    await this.requirePorts().dispatch({
-      type: "thread.turn.start",
-      commandId: CommandId.make(id),
-      threadId: ThreadId.make(threadId),
-      message: {
-        messageId: MessageId.make(id),
-        role: "user",
-        text: "Background update ready.",
-        attachments: [],
-      },
-      modelSelection: chat.models.voice,
-      runtimeMode: context.runtimeMode,
-      interactionMode: "default",
-      createdAt: now(),
-    });
+    try {
+      await this.requirePorts().dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make(id),
+        threadId: ThreadId.make(threadId),
+        message: {
+          messageId: MessageId.make(id),
+          role: "user",
+          text: "Background update ready.",
+          attachments: [],
+        },
+        modelSelection: chat.models.voice,
+        runtimeMode: context.runtimeMode,
+        interactionMode: "default",
+        createdAt: now(),
+      });
+    } catch (error) {
+      await this.change(threadId, (current) => {
+        const voice = current.voices.find((voice) => voice.id === id);
+        if (voice?.accepted || voice?.turnId) return;
+        for (const update of current.updates) {
+          if (update.announcementId !== id) continue;
+          delete update.announcementId;
+          delete update.announcementTurnId;
+        }
+      });
+      throw error;
+    }
     return true;
   }
   async reopen(threadId: string, callId: string) {

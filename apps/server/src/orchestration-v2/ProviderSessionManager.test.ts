@@ -631,6 +631,7 @@ function makeBrowserAccessProject(projectId: ProjectId): Project {
 }
 
 function runBrowserAccessScenario(input: {
+  readonly callOperator?: boolean;
   readonly enableAgentBrowserAccess: boolean;
   readonly projectOverride: boolean;
   readonly deviceOverride?: boolean;
@@ -668,7 +669,13 @@ function runBrowserAccessScenario(input: {
         });
       }
       yield* manager
-        .open({ threadId, providerSessionId, modelSelection, runtimePolicy })
+        .open({
+          threadId: input.callOperator ? ThreadId.make("t3-call-operator-synthetic") : threadId,
+          ...(input.callOperator ? { owningThreadId: threadId } : {}),
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        })
         .pipe(Effect.ignore);
     }).pipe(
       Effect.provide(
@@ -1960,6 +1967,20 @@ it.effect("ProviderSessionManagerV2 honors a project browser-access opt-in", () 
     });
     assert.isDefined(captured);
     assert.equal(captured?.browserToolsAvailable, true);
+  }),
+);
+
+it.effect("call operators inherit browser and device access while keeping their MCP identity", () =>
+  Effect.gen(function* () {
+    const captured = yield* runBrowserAccessScenario({
+      enableAgentBrowserAccess: false,
+      projectOverride: true,
+      deviceOverride: true,
+      callOperator: true,
+    });
+    assert.equal(captured?.threadId, "t3-call-operator-synthetic");
+    assert.equal(captured?.browserToolsAvailable, true);
+    assert.equal(captured?.capabilities?.has("device"), true);
   }),
 );
 

@@ -3,6 +3,7 @@ import {
   CommandId,
   EventId,
   MessageId,
+  RunId,
   ThreadId,
   TurnItemId,
   type OrchestrationV2DomainEvent,
@@ -53,6 +54,7 @@ const make = Effect.gen(function* () {
     readonly role: "user" | "assistant";
     readonly text: string;
     readonly streaming: boolean;
+    readonly turnId?: string;
   }) {
     const threadId = ThreadId.make(input.threadId);
     return yield* executor.withLock(
@@ -64,6 +66,7 @@ const make = Effect.gen(function* () {
         const previous = projection.messages.find((message) => message.id === messageId);
         const id = TurnItemId.make(input.messageId);
         const item = projection.turnItems.find((item) => item.id === id);
+        const runId = input.turnId ? RunId.make(input.turnId) : null;
         const message = {
           ...(input.messageId.startsWith("voice-update:")
             ? {
@@ -79,7 +82,7 @@ const make = Effect.gen(function* () {
           role: input.role,
           text: input.text,
           streaming: input.streaming,
-          runId: null,
+          runId,
           nodeId: null,
           attachments: [],
           createdBy: input.role === "user" ? ("user" as const) : ("agent" as const),
@@ -90,7 +93,7 @@ const make = Effect.gen(function* () {
         const base = {
           id,
           threadId,
-          runId: null,
+          runId,
           nodeId: null,
           providerThreadId: null,
           providerTurnId: null,
@@ -266,20 +269,26 @@ const make = Effect.gen(function* () {
         .slice(-30)
         .map((message) => `${message.role}: ${message.text}`)
         .join("\n"),
-      running: projection.runs.some((run) =>
-        ["running", "waiting", "starting"].includes(run.status),
-      ),
+      running:
+        !!(yield* Effect.promise(() => calls.voiceSession(threadId))) ||
+        projection.runs.some((run) => ["running", "waiting", "starting"].includes(run.status)),
     };
   });
-  const recordVoiceEvent = (link: OperatorLink, event: ProviderRuntimeEvent, text: string) =>
-    recordMessage({
+  const recordVoiceEvent = Effect.fn("VoiceThreadService.recordVoiceEvent")(function* (
+    link: OperatorLink,
+    event: ProviderRuntimeEvent,
+    text: string,
+  ) {
+    return yield* recordMessage({
       commandId: event.eventId,
       threadId: link.threadId,
       messageId: `voice-reply:${link.sessionId}:${event.turnId ?? "pending"}`,
       role: "assistant",
       text: withoutCallControl(text),
       streaming: event.type !== "turn.completed",
+      ...(event.turnId ? { turnId: event.turnId } : {}),
     });
+  });
   const recordOperatorEvent = Effect.fn("VoiceThreadService.recordOperatorEvent")(function* (
     link: OperatorLink,
     event: ProviderAdapter.ProviderAdapterV2Event,

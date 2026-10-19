@@ -97,6 +97,58 @@ async function fixture() {
 }
 
 describe("call delegation", () => {
+  it("retries a saved voice request after a rejected send and acknowledges only acceptance", async () => {
+    const f = await fixture();
+    vi.mocked(f.ports.send).mockRejectedValueOnce(new Error("Provider send failed"));
+    const input = {
+      threadId: "chat",
+      messageId: "failed-voice",
+      text: "Hello",
+      selection: models.voice,
+    };
+    await expect(f.operator.voice(input)).rejects.toThrow("Provider send failed");
+    expect((await f.operator.read("chat"))!.voices).toMatchObject([
+      { accepted: false, finished: true },
+    ]);
+    await expect(f.operator.voice(input)).resolves.toBe(true);
+    await expect(f.operator.voice(input)).resolves.toBe(true);
+    expect(f.ports.send).toHaveBeenCalledTimes(2);
+    expect((await f.operator.read("chat"))!.voices).toMatchObject([
+      { accepted: true, finished: false },
+    ]);
+  });
+  it("keeps failed announcements retryable and waits for the active voice turn", async () => {
+    const f = await fixture();
+    await f.operator.update("chat", "job", "done", "done", "Build passed");
+    vi.mocked(f.ports.dispatch).mockImplementationOnce(async () => {
+      throw new Error("Dispatch failed");
+    });
+    await expect(f.operator.announce("chat", "call")).rejects.toThrow("Dispatch failed");
+    expect((await f.operator.read("chat"))!.updates[0]?.announcementId).toBeUndefined();
+    await expect(f.operator.announce("chat", "call")).resolves.toBe(true);
+    const voice = await f.startVoice();
+    await f.operator.update("chat", "next-job", "next-result", "done", "Another result");
+    await expect(f.operator.announce("chat", "call")).resolves.toBe(false);
+    await expect(
+      f.operator.voice({
+        threadId: "chat",
+        messageId: "another",
+        text: "Next",
+        selection: models.voice,
+      }),
+    ).rejects.toThrow("still active");
+    await f.operator.event(
+      f.event(voice.sessionId, "turn.completed", "voice:call:utterance", { state: "completed" }),
+    );
+    await expect(
+      f.operator.voice({
+        threadId: "chat",
+        messageId: "another",
+        text: "Next",
+        selection: models.voice,
+      }),
+    ).resolves.toBe(true);
+  });
   it.each([
     "Selected model is at capacity. Please try a different model.",
     "Provider rejected the request.",
