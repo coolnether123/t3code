@@ -21,7 +21,8 @@ class Source extends EventTarget {
   }
 }
 const contexts: FakeAudio[] = [];
-class FakeAudio {
+class FakeAudio extends EventTarget {
+  state = "running";
   sampleRate = 16000;
   processor = {
     onaudioprocess: null as
@@ -34,6 +35,7 @@ class FakeAudio {
   destination = {};
   sources: Source[] = [];
   constructor() {
+    super();
     contexts.push(this);
   }
   resume = vi.fn(async () => {});
@@ -56,11 +58,11 @@ class FakeAudio {
     return { gain: { value: 0 }, connect: vi.fn(), disconnect: vi.fn() };
   }
 }
-function fixture() {
+function fixture(onInterrupted?: () => void) {
   vi.stubGlobal("window", { isSecureContext: true });
   vi.stubGlobal("navigator", { mediaDevices: { getUserMedia: vi.fn() } });
   vi.stubGlobal("AudioContext", FakeAudio);
-  const audio = createBrowserAudio();
+  const audio = createBrowserAudio(onInterrupted);
   audio.unlock();
   return audio;
 }
@@ -71,10 +73,40 @@ afterEach(() => {
 });
 
 describe("streamed browser PCM scheduling", () => {
+  it.each(["audio context", "microphone"])(
+    "reports an interrupted %s once and reacquires the microphone",
+    async (cause) => {
+      const interrupted = vi.fn();
+      const audio = fixture(interrupted);
+      const track = Object.assign(new EventTarget(), { stop: vi.fn() });
+      vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue({
+        getTracks: () => [track],
+        getAudioTracks: () => [track],
+      } as unknown as MediaStream);
+      const signal = new AbortController().signal;
+      await audio.prepare(signal);
+      if (cause === "microphone") {
+        track.dispatchEvent(new Event("ended"));
+      } else {
+        contexts[0]!.state = "interrupted";
+        contexts[0]!.dispatchEvent(new Event("statechange"));
+        contexts[0]!.dispatchEvent(new Event("statechange"));
+      }
+      expect(interrupted).toHaveBeenCalledOnce();
+      audio.unlock();
+      await audio.prepare(signal);
+      expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledTimes(2);
+      expect(track.stop).toHaveBeenCalledOnce();
+      audio.close();
+      contexts[0]!.dispatchEvent(new Event("statechange"));
+      expect(interrupted).toHaveBeenCalledOnce();
+    },
+  );
   it("holds pending speech through microphone activity and ends capture at a pause", async () => {
     const audio = fixture();
     vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue({
       getTracks: () => [{ stop: vi.fn() }],
+      getAudioTracks: () => [],
     } as unknown as MediaStream);
     const signal = new AbortController().signal;
     await audio.prepare(signal);
@@ -97,6 +129,7 @@ describe("streamed browser PCM scheduling", () => {
     const audio = fixture();
     vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue({
       getTracks: () => [{ stop: vi.fn() }],
+      getAudioTracks: () => [],
     } as unknown as MediaStream);
     const signal = new AbortController().signal;
     await audio.prepare(signal);

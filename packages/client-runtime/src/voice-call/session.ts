@@ -97,6 +97,7 @@ export class ThreadVoiceSession {
   private busy = false;
   private detached = false;
   private recovering = false;
+  private audioNeedsTap = false;
   private recording = false;
   private recordingId: string | undefined;
   private filler: TurnFiller;
@@ -202,6 +203,16 @@ export class ThreadVoiceSession {
       `${error instanceof Error ? error.message : "Voice request failed."} Check the message above, then retry saved speech. Queued audio without a PC acknowledgment remains on this device.`,
     );
   }
+  audioInterrupted() {
+    this.audioNeedsTap = true;
+    if (this.recovering) return;
+    this.failed(
+      new VoiceRequestError(
+        "Audio was interrupted. Tap Retry saved speech to resume audio and the microphone.",
+        false,
+      ),
+    );
+  }
   async start(options: CallOptions, messages: readonly Message[]) {
     if (this.active) return;
     this.active = true;
@@ -241,12 +252,23 @@ export class ThreadVoiceSession {
       ),
     };
   }
-  async resume() {
+  async resume(userInitiated = true) {
+    if (this.audioNeedsTap && !userInitiated) return;
+    if (!this.active && this.saved?.closed && !this.detached) {
+      await this.stop();
+      return;
+    }
     if (!this.active || this.busy || !this.saved) return;
     // An online event must not replace controllers owned by active request retries.
     if (!this.recovering && this.state !== "preparing") return;
     this.busy = true;
     try {
+      if (this.recovering) {
+        this.deps.audio.unlock();
+        await this.capture;
+        await this.playbackTask;
+        if (!this.active) return;
+      }
       this.playback = new AbortController();
       this.change("preparing", "Opening call log and checking the selected chat model");
       await this.request({ action: "call.open", options: this.saved.options });
@@ -279,6 +301,7 @@ export class ThreadVoiceSession {
       this.startRenewal();
       this.change("preparing", "Checking microphone");
       await this.deps.audio.prepare(this.abort.signal);
+      this.audioNeedsTap = false;
       if (!this.active) return;
       await this.flush();
       if (!this.active || this.recovering) return;
@@ -744,7 +767,7 @@ export class ThreadVoiceSession {
     } catch {
       this.change(
         "error",
-        "Call ended on this device. Reopen Call Otis to finish saving and close the PC session. Speech stays queued here.",
+        "Call ended on this device. Retry saved speech to finish saving and close the PC session. Speech stays queued here.",
       );
     } finally {
       this.abort.abort();

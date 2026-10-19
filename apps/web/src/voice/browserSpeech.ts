@@ -20,19 +20,35 @@ export async function requestSpeech(
 }
 
 /** Owns microphone tracks and playback nodes for one visible voice session. */
-export function createBrowserAudio() {
+export function createBrowserAudio(onInterrupted?: () => void) {
   let context: AudioContext | undefined;
   let finishCapture: (() => void) | undefined;
   let preparedStream: MediaStream | undefined;
   let playbackUntil = 0;
   let finishAtPause = false;
+  let interrupted = false;
+  let wasRunning = false;
+  const interrupt = () => {
+    if (interrupted || !context) return;
+    interrupted = true;
+    finishCapture?.();
+    onInterrupted?.();
+  };
+  const stateChanged = () => {
+    if (context?.state === "running") wasRunning = true;
+    else if (wasRunning && context?.state !== "closed") interrupt();
+  };
   return {
     unlock() {
       if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
         throw new Error("Microphone access needs HTTPS or localhost.");
       }
-      context ??= new AudioContext();
-      void context.resume();
+      if (!context) {
+        context = new AudioContext();
+        wasRunning = context.state === "running";
+        context.addEventListener("statechange", stateChanged);
+      }
+      void context.resume().catch(interrupt);
     },
     finish() {
       finishCapture?.();
@@ -50,7 +66,10 @@ export function createBrowserAudio() {
       }
       preparedStream?.getTracks().forEach((track) => track.stop());
       preparedStream = stream;
+      for (const track of stream.getAudioTracks())
+        track.addEventListener("ended", interrupt, { once: true });
       await context!.resume();
+      interrupted = false;
     },
     async ready(signal: AbortSignal) {
       signal.throwIfAborted();
@@ -83,9 +102,14 @@ export function createBrowserAudio() {
     close() {
       playbackUntil = 0;
       finishCapture = undefined;
+      interrupted = false;
+      wasRunning = false;
       preparedStream?.getTracks().forEach((track) => track.stop());
       preparedStream = undefined;
-      void context?.close();
+      if (context) {
+        context.removeEventListener("statechange", stateChanged);
+        void context.close();
+      }
       context = undefined;
     },
     async capture(

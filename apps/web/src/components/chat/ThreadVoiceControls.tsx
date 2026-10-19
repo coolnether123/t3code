@@ -111,7 +111,12 @@ export function ThreadVoiceControls({
     streaming: message.streaming,
     turnId: message.runId,
   }));
-  const latestTurnId = projection?.runs.at(-1)?.id ?? null;
+  const voiceReply = messages.findLast((message) => message.id.startsWith("voice-reply:"));
+  const voiceRunning = voiceReply?.streaming === true;
+  const latestTurnId =
+    (props.running
+      ? projection?.runs.at(-1)?.id
+      : (voiceReply?.turnId ?? projection?.runs.at(-1)?.id)) ?? null;
   // The operator announces finished background work with a `voice-update:` message, so a new one
   // means the saved operator updates changed.
   const lastOperatorActivity = messages.findLast((message) =>
@@ -208,7 +213,7 @@ export function ThreadVoiceControls({
         window.dispatchEvent(new CustomEvent("t3-voice-speech", { detail: event })),
       request: (input, signal, onAudio) =>
         requestSpeech(props.environmentId, input, signal, onAudio),
-      audio: createBrowserAudio(),
+      audio: createBrowserAudio(() => session.audioInterrupted()),
       id: randomUUID,
       persistence: callPersistence(`${props.environmentId}:${props.threadId}`),
       change: (next, message, status) => {
@@ -221,7 +226,7 @@ export function ThreadVoiceControls({
     });
     sessionRef.current = session;
     const reconnect = () => {
-      void session.resume();
+      void session.resume(false);
     };
     window.addEventListener("online", reconnect);
     return () => {
@@ -243,12 +248,12 @@ export function ThreadVoiceControls({
   useLayoutEffect(() => {
     sessionRef.current?.observe(
       messages,
-      props.running,
+      props.running || voiceRunning,
       latestTurnId ?? undefined,
       models.voice,
       models.operator,
     );
-  }, [messages, props.running, latestTurnId, models]);
+  }, [messages, props.running, voiceRunning, latestTurnId, models]);
   const active = state !== "idle";
   const panelOpen = active || expanded || !!detail;
   // The phone composer collapses on blur, which would hide the panel's anchor mid-call.

@@ -106,6 +106,56 @@ afterEach(async () => {
 });
 
 describe("durable thread voice session", () => {
+  it("keeps interrupted microphone speech and resumes audio in the retry tap", async () => {
+    const f = fixture();
+    const retained = deferred<void>();
+    const write = f.persistence.write;
+    f.persistence.write = async (call) => {
+      await write(call);
+      if (call.recordings.some((recording) => !recording.capturing)) retained.resolve();
+    };
+    await f.session.start(options, []);
+    f.session.audioInterrupted();
+    await retained.promise;
+    expect(f.saved()?.recordings).toHaveLength(1);
+    expect(f.change).toHaveBeenLastCalledWith(
+      "error",
+      expect.stringContaining("Audio was interrupted"),
+      undefined,
+    );
+    f.transcript.resolve({ text: "Go" });
+    await f.session.resume(false);
+    expect(f.audio.prepare).toHaveBeenCalledOnce();
+    const resume = f.session.resume();
+    expect(f.audio.unlock).toHaveBeenCalledTimes(2);
+    await resume;
+    expect(f.saved()?.recordings).toEqual([]);
+    expect(f.audio.prepare).toHaveBeenCalledTimes(2);
+  });
+  it("retries a failed hang-up from the saved-speech action without reopening the call", async () => {
+    const f = fixture();
+    await f.session.start(options, []);
+    f.recording.resolve({ audio: "", sampleRate: 16000 });
+    const request = f.request.getMockImplementation()!;
+    let failClose = true;
+    f.request.mockImplementation(async (input, signal, onAudio) => {
+      if (input.action === "call.close" && failClose) throw new Error("Close rejected");
+      return request(input, signal, onAudio);
+    });
+    await f.session.stop();
+    expect(f.saved()?.closed).toBe(true);
+    expect(f.change).toHaveBeenLastCalledWith(
+      "error",
+      expect.stringContaining("Retry saved speech"),
+      undefined,
+    );
+    failClose = false;
+    await f.session.resume();
+    expect(f.saved()).toBeUndefined();
+    expect(f.change).toHaveBeenLastCalledWith("idle", undefined, undefined);
+    expect(f.request.mock.calls.filter(([input]) => input.action === "call.open")).toHaveLength(1);
+    expect(f.audio.capture).toHaveBeenCalledOnce();
+  });
   it("unlocks audio in the tap and waits for thread creation before opening with both models", async () => {
     const created = deferred<void>();
     const ensureThread = vi.fn(() => created.promise);
