@@ -371,8 +371,10 @@ export const findInstalledChrome = Effect.fn("ChromeAutomation.findInstalledChro
   const platform = yield* HostProcessPlatform;
   const env = yield* HostProcessEnvironment;
   for (const candidate of chromePathCandidates(platform, env)) {
-    const resolved = yield* resolveCommandPath(candidate, { env }).pipe(Effect.option);
-    if (resolved._tag === "Some") return resolved.value;
+    const resolved = yield* resolveCommandPath(candidate, { env }).pipe(
+      Effect.orElseSucceed(() => null),
+    );
+    if (resolved !== null) return resolved;
   }
   return undefined;
 });

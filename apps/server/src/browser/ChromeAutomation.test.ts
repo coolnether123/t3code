@@ -104,7 +104,7 @@ const makeFakePage = (input: {
       documentVersion += 1;
       title = `Title for ${nextUrl}`;
     },
-    snapshot: async ({ includeDom } = {}) => {
+    snapshot: async ({ includeDom }: { readonly includeDom?: boolean } = {}) => {
       input.beforeSnapshot?.();
       const error = input.snapshotErrors?.[snapshotCount++];
       if (error !== undefined) throw error;
@@ -215,7 +215,10 @@ const provideTestServices = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
     return yield* effect.pipe(
       Effect.provideService(Crypto.Crypto, {
         ...crypto,
-        randomUUIDv4: Effect.succeed("test"),
+        randomUUIDv4: ((options?: { readonly format?: "hex" | "bytes" }) =>
+          options?.format === "bytes"
+            ? crypto.randomUUIDv4(options)
+            : Effect.succeed("test")) as Crypto.Crypto["randomUUIDv4"],
       }),
     );
   }).pipe(
@@ -884,7 +887,10 @@ it.effect("does not reuse tab identities across server service lifetimes", () =>
       let instance = 0;
       const cryptoWithFreshIds = {
         ...crypto,
-        randomUUIDv4: Effect.sync(() => `instance-${++instance}`),
+        randomUUIDv4: ((options?: { readonly format?: "hex" | "bytes" }) =>
+          options?.format === "bytes"
+            ? crypto.randomUUIDv4(options)
+            : Effect.sync(() => `instance-${++instance}`)) as Crypto.Crypto["randomUUIDv4"],
       };
       const page = makeFakePage({
         url: "https://form.test",

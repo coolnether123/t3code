@@ -406,6 +406,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
         Effect.as([removed.disconnected, removed.state] as const),
       );
     });
+    yield* closeConnection(queue, disconnected, completeStream);
   });
 
   const acquireConnection = Effect.fn("PreviewAutomationBroker.acquireConnection")(function* (
@@ -560,8 +561,12 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
                 )
                 .sort(
                   (left, right) =>
+                    Number(input.tabId !== undefined && ownsTargetTab(right)) -
+                      Number(input.tabId !== undefined && ownsTargetTab(left)) ||
+                    Number(right.preferred) - Number(left.preferred) ||
+                    Number(ownsTargetTab(right, true)) - Number(ownsTargetTab(left, true)) ||
+                    Number(ownsTargetTab(right)) - Number(ownsTargetTab(left)) ||
                     Number(supportsBrowser(right)) - Number(supportsBrowser(left)) ||
-                    right.supportedOperations.size - left.supportedOperations.size ||
                     Number(right.focused) - Number(left.focused) ||
                     right.focusOrder - left.focusOrder,
                 )[0];

@@ -1,3 +1,5 @@
+import * as ChromeAutomation from "../../../browser/ChromeAutomation.ts";
+import * as ExternalLauncher from "../../../process/externalLauncher.ts";
 import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../../../orchestration-v2/ProjectionStore.ts";
 import * as DeviceService from "../../../device/DeviceService.ts";
@@ -36,6 +38,8 @@ import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as PreviewBrowser from "../../../preview/PreviewBrowser.ts";
 
 const layerStubServices = Layer.mergeAll(
+  Layer.mock(ChromeAutomation.ChromeAutomation)({}),
+  Layer.mock(ExternalLauncher.ExternalLauncher)({}),
   Layer.mock(Orchestrator.OrchestratorV2)({}),
   Layer.mock(ProjectionStore.ProjectionStoreV2)({}),
   Layer.mock(DeviceService.DeviceService)({}),

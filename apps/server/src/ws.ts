@@ -2878,7 +2878,10 @@ const layerWsRpc = (
         [WS_METHODS.previewAdjust]: (input) => previewManager.adjust(input),
         [WS_METHODS.previewRefresh]: (input) => previewManager.refresh(input),
         [WS_METHODS.previewClose]: (input) => previewManager.close(input),
-        [WS_METHODS.previewAutomationConnect]: (input) => previewAutomationBroker.connect(input),
+        [WS_METHODS.previewAutomationConnect]: (input) =>
+          previewAutomationBroker
+            .connect(input)
+            .pipe(Effect.flatMap((stream) => Stream.toQueue(stream, { capacity: "unbounded" }))),
         [WS_METHODS.previewAutomationRespond]: (input) => previewAutomationBroker.respond(input),
         [WS_METHODS.previewAutomationFocusHost]: (input) =>
           previewAutomationBroker.focusHost(input),

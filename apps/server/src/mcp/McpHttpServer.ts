@@ -987,6 +987,7 @@ const registerComputerScreenshot = Effect.fn("McpHttpServer.registerComputerScre
   function* () {
     const server = yield* McpServer.McpServer;
     const automation = yield* ChromeAutomation.ChromeAutomation;
+    const threads = yield* ThreadManagementService.ThreadManagementService;
     const storeScreenshot = yield* makeChromeScreenshotStore();
     const built = yield* decodeAsAdvertised(ComputerScreenshotToolkit);
     const tool = ComputerScreenshotTool;
@@ -1021,6 +1022,7 @@ const registerComputerScreenshot = Effect.fn("McpHttpServer.registerComputerScre
               ).pipe(Effect.map((screenshot) => ({ encodedResult, screenshot }))),
             ),
             Effect.provideService(ChromeAutomation.ChromeAutomation, automation),
+            Effect.provideService(ThreadManagementService.ThreadManagementService, threads),
             Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
             Effect.matchCauseEffect({
               onFailure: (cause) =>

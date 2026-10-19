@@ -2,7 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
-  PREVIEW_AUTOMATION_OPERATIONS,
+  PREVIEW_AUTOMATION_V1_OPERATIONS,
   PreviewAutomationClientDisconnectedError,
   PreviewAutomationInvalidSelectorError,
   PreviewAutomationMalformedResponseError,
@@ -175,7 +175,7 @@ it.effect("pins new browser sessions to a core-complete host before a larger par
       makeHost({ clientId: "complete" }),
       makeHost({
         clientId: "partial",
-        supportedOperations: PREVIEW_AUTOMATION_OPERATIONS.filter(
+        supportedOperations: PREVIEW_AUTOMATION_V1_OPERATIONS.filter(
           (operation) => operation !== "click",
         ),
       }),

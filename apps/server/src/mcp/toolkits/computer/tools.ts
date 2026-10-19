@@ -1,9 +1,9 @@
+import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
 import { OrchestratorMcpFailure } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import {
   ComputerChromeActionResult,
   ComputerChromeAutomationError,
-  ComputerChromeEmptyInput,
   ComputerChromeNavigateInput,
   ComputerChromeSelectTabInput,
   ComputerChromeSnapshot,
@@ -29,6 +29,7 @@ import * as ExternalLauncher from "../../../process/externalLauncher.ts";
 const chromeDependencies = [
   McpInvocationContext.McpInvocationContext,
   ChromeAutomation.ChromeAutomation,
+  ThreadManagementService.ThreadManagementService,
 ];
 
 const chromeFailure = Schema.Union([
@@ -72,7 +73,7 @@ export const ComputerStartTool = computerTool(
     Tool.make("computer_start", {
       description:
         "Start T3's persistent, user-visible Chrome session and select its first tab. This is idempotent and does not create a new profile.",
-      parameters: ComputerChromeEmptyInput,
+      parameters: Tool.EmptyParams,
       success: ComputerChromeStatus,
       failure: chromeFailure,
       dependencies: chromeDependencies,
@@ -84,7 +85,7 @@ export const ComputerStatusTool = computerTool(
   readOnlyChromeTool(
     Tool.make("computer_status", {
       description: "Report the lifecycle and selected-tab state of T3's managed Chrome session.",
-      parameters: ComputerChromeEmptyInput,
+      parameters: Tool.EmptyParams,
       success: ComputerChromeStatus,
       failure: chromeFailure,
       dependencies: chromeDependencies,
@@ -97,7 +98,7 @@ export const ComputerTabsTool = computerTool(
     Tool.make("computer_tabs", {
       description:
         "List the readable IDs, URLs, titles, and selection state of managed Chrome tabs.",
-      parameters: ComputerChromeEmptyInput,
+      parameters: Tool.EmptyParams,
       success: Schema.Array(ComputerChromeTab),
       failure: chromeFailure,
       dependencies: chromeDependencies,
@@ -211,7 +212,7 @@ export const ComputerCloseTool = computerTool(
   mutatingChromeTool(
     Tool.make("computer_close", {
       description: "Close T3's managed Chrome session and release its browser process.",
-      parameters: ComputerChromeEmptyInput,
+      parameters: Tool.EmptyParams,
       success: ComputerChromeStatus,
       failure: chromeFailure,
       dependencies: chromeDependencies,
@@ -230,7 +231,11 @@ export const ComputerOpenUrlTool = computerTool(
       ComputerControlUnavailableError,
       ComputerOpenUrlFailedError,
     ]),
-    dependencies: [McpInvocationContext.McpInvocationContext, ExternalLauncher.ExternalLauncher],
+    dependencies: [
+      McpInvocationContext.McpInvocationContext,
+      ExternalLauncher.ExternalLauncher,
+      ThreadManagementService.ThreadManagementService,
+    ],
   })
     .annotate(Tool.Title, "Open URL in Google Chrome")
     .annotate(Tool.OpenWorld, true)

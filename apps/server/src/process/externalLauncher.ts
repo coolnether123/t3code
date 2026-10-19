@@ -16,6 +16,7 @@ import { resolveEditorCommand } from "@t3tools/shared/editor";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
   isCommandAvailable,
+  resolveCommandPath,
   resolveSpawnCommand,
   withPathDirectoryListings,
 } from "@t3tools/shared/shell";
@@ -110,17 +111,8 @@ const compactEnv = (input: Record<string, Option.Option<string>>): NodeJS.Proces
   );
 
 const BrowserLaunchEnvConfig = Config.all({
-  SYSTEMROOT: Config.string("SYSTEMROOT").pipe(Config.option),
-  windir: Config.string("windir").pipe(Config.option),
-  WSL_DISTRO_NAME: Config.string("WSL_DISTRO_NAME").pipe(Config.option),
-  WSL_INTEROP: Config.string("WSL_INTEROP").pipe(Config.option),
-  SSH_CONNECTION: Config.string("SSH_CONNECTION").pipe(Config.option),
-  SSH_TTY: Config.string("SSH_TTY").pipe(Config.option),
-  container: Config.string("container").pipe(Config.option),
-  DISPLAY: Config.string("DISPLAY").pipe(Config.option),
-  WAYLAND_DISPLAY: Config.string("WAYLAND_DISPLAY").pipe(Config.option),
-  "ProgramFiles(x86)": Config.string("ProgramFiles(x86)").pipe(Config.option),
-  ProgramFiles: Config.string("ProgramFiles").pipe(Config.option),
+  "ProgramFiles(x86)": Config.String("ProgramFiles(x86)").pipe(Config.option),
+  ProgramFiles: Config.String("ProgramFiles").pipe(Config.option),
   SYSTEMROOT: Config.String("SYSTEMROOT").pipe(Config.option),
   windir: Config.String("windir").pipe(Config.option),
   WSL_DISTRO_NAME: Config.String("WSL_DISTRO_NAME").pipe(Config.option),
@@ -490,12 +482,17 @@ const resolveBrowserLaunch = Effect.fn("externalLauncher.resolveBrowserLaunch")(
         }
       }
     } else {
-      const command = yield* resolveAvailableCommand(
-        ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"],
-        { ...env, ...(yield* readCommandLookupEnv) },
-      );
-      if (Option.isSome(command)) {
-        return { command: command.value, args: [target], options: DETACHED_IGNORE_STDIO_OPTIONS };
+      const lookupEnv = { ...env, ...(yield* readCommandLookupEnv) };
+      for (const candidate of [
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+      ]) {
+        const command = yield* resolveCommandPath(candidate, { env: lookupEnv });
+        if (command !== null) {
+          return { command, args: [target], options: DETACHED_IGNORE_STDIO_OPTIONS };
+        }
       }
     }
     return yield* new ExternalLauncherBrowserNotFoundError({ browser: "Google Chrome" });
