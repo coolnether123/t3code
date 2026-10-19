@@ -195,7 +195,7 @@ it.layer(NodeServices.layer)("effect-codex-app-server client", (it) => {
       assert.equal(processError.stderrTruncated, true);
       assert.equal(processError.stderr?.length, CODEX_APP_SERVER_STDERR_MAX_CHARS);
       assert.notInclude(processError.message, secret);
-      assert.include(processError.message, "api_key=[REDACTED]");
+      assert.include(processError.stderr ?? "", "api_key=[REDACTED]");
     }),
   );
 });

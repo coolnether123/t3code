@@ -2357,8 +2357,24 @@ export type ServerNotification__DynamicToolCallOutputContentItem =
   | { readonly audioUrl: string; readonly type: "inputAudio" };
 export const ServerNotification__DynamicToolCallOutputContentItem = Schema.Union(
   [
-    Schema.Literals(["auto", "concise", "detailed"]),
-    Schema.Literal("none").annotate({ description: "Option to disable reasoning summaries." }),
+    Schema.Struct({
+      text: Schema.String,
+      type: Schema.Literal("inputText").annotate({
+        title: "InputTextDynamicToolCallOutputContentItemType",
+      }),
+    }).annotate({ title: "InputTextDynamicToolCallOutputContentItem" }),
+    Schema.Struct({
+      imageUrl: Schema.String,
+      type: Schema.Literal("inputImage").annotate({
+        title: "InputImageDynamicToolCallOutputContentItemType",
+      }),
+    }).annotate({ title: "InputImageDynamicToolCallOutputContentItem" }),
+    Schema.Struct({
+      audioUrl: Schema.String,
+      type: Schema.Literal("inputAudio").annotate({
+        title: "InputAudioDynamicToolCallOutputContentItemType",
+      }),
+    }).annotate({ title: "InputAudioDynamicToolCallOutputContentItem" }),
   ],
   { mode: "oneOf" },
 ).annotate({ identifier: "ServerNotification__DynamicToolCallOutputContentItem" });
@@ -33954,9 +33970,10 @@ export type V2ItemCompletedNotification__ThreadItem =
       readonly type: "commandExecution";
     }
   | {
-      readonly detail?: V2ItemCompletedNotification__ImageDetail | null;
-      readonly path: string;
-      readonly type: "localImage";
+      readonly changes: ReadonlyArray<V2ItemCompletedNotification__FileUpdateChange>;
+      readonly id: string;
+      readonly status: V2ItemCompletedNotification__PatchApplyStatus;
+      readonly type: "fileChange";
     }
   | {
       readonly appContext?: V2ItemCompletedNotification__McpToolCallAppContext | null;
@@ -34283,8 +34300,17 @@ export const V2ItemCompletedNotification__ThreadItem = Schema.Union(
       }),
     }).annotate({ title: "CollabAgentToolCallThreadItem" }),
     Schema.Struct({
-      detail: Schema.optionalKey(
-        Schema.Union([V2ItemCompletedNotification__ImageDetail, Schema.Null]),
+      agentPath: Schema.String,
+      agentThreadId: Schema.String,
+      id: Schema.String,
+      kind: V2ItemCompletedNotification__SubAgentActivityKind,
+      type: Schema.Literal("subAgentActivity").annotate({
+        title: "SubAgentActivityThreadItemType",
+      }),
+    }).annotate({ title: "SubAgentActivityThreadItem" }),
+    Schema.Struct({
+      action: Schema.optionalKey(
+        Schema.Union([V2ItemCompletedNotification__WebSearchAction, Schema.Null]),
       ),
       id: Schema.String,
       query: Schema.String,
@@ -34297,13 +34323,13 @@ export const V2ItemCompletedNotification__ThreadItem = Schema.Union(
           Schema.Null,
         ]),
       ),
-      path: Schema.String,
-      type: Schema.Literal("localImage").annotate({ title: "LocalImageUserInputType" }),
-    }).annotate({ title: "LocalImageUserInput" }),
+      type: Schema.Literal("webSearch").annotate({ title: "WebSearchThreadItemType" }),
+    }).annotate({ title: "WebSearchThreadItem" }),
     Schema.Struct({
-      type: Schema.Literal("audio").annotate({ title: "AudioUserInputType" }),
-      url: Schema.String,
-    }).annotate({ title: "AudioUserInput" }),
+      id: Schema.String,
+      path: V2ItemCompletedNotification__LegacyAppPathString,
+      type: Schema.Literal("imageView").annotate({ title: "ImageViewThreadItemType" }),
+    }).annotate({ title: "ImageViewThreadItem" }),
     Schema.Struct({
       durationMs: Schema.Number.annotate({ format: "uint64" })
         .check(Schema.isInt().annotate({ expected: "an integer" }))
@@ -34333,10 +34359,25 @@ export const V2ItemCompletedNotification__ThreadItem = Schema.Union(
       type: Schema.Literal("imageGeneration").annotate({ title: "ImageGenerationThreadItemType" }),
     }).annotate({ title: "ImageGenerationThreadItem" }),
     Schema.Struct({
-      name: Schema.String,
-      path: Schema.String,
-      type: Schema.Literal("mention").annotate({ title: "MentionUserInputType" }),
-    }).annotate({ title: "MentionUserInput" }),
+      id: Schema.String,
+      review: Schema.String,
+      type: Schema.Literal("enteredReviewMode").annotate({
+        title: "EnteredReviewModeThreadItemType",
+      }),
+    }).annotate({ title: "EnteredReviewModeThreadItem" }),
+    Schema.Struct({
+      id: Schema.String,
+      review: Schema.String,
+      type: Schema.Literal("exitedReviewMode").annotate({
+        title: "ExitedReviewModeThreadItemType",
+      }),
+    }).annotate({ title: "ExitedReviewModeThreadItem" }),
+    Schema.Struct({
+      id: Schema.String,
+      type: Schema.Literal("contextCompaction").annotate({
+        title: "ContextCompactionThreadItemType",
+      }),
+    }).annotate({ title: "ContextCompactionThreadItem" }),
   ],
   { mode: "oneOf" },
 ).annotate({ identifier: "V2ItemCompletedNotification__ThreadItem" });
@@ -34365,7 +34406,7 @@ export const V2ItemGuardianApprovalReviewStartedNotification__FileSystemSandboxE
     identifier: "V2ItemGuardianApprovalReviewStartedNotification__FileSystemSandboxEntry",
   });
 
-export type V2ItemStartedNotification__UserInput =
+export type V2ItemStartedNotification__ThreadItem =
   | {
       readonly clientId?: string | null;
       readonly content: ReadonlyArray<V2ItemStartedNotification__UserInput>;
@@ -34416,9 +34457,10 @@ export type V2ItemStartedNotification__UserInput =
       readonly type: "commandExecution";
     }
   | {
-      readonly detail?: V2ItemStartedNotification__ImageDetail | null;
-      readonly path: string;
-      readonly type: "localImage";
+      readonly changes: ReadonlyArray<V2ItemStartedNotification__FileUpdateChange>;
+      readonly id: string;
+      readonly status: V2ItemStartedNotification__PatchApplyStatus;
+      readonly type: "fileChange";
     }
   | {
       readonly appContext?: V2ItemStartedNotification__McpToolCallAppContext | null;
@@ -34743,396 +34785,6 @@ export const V2ItemStartedNotification__ThreadItem = Schema.Union(
       }),
     }).annotate({ title: "CollabAgentToolCallThreadItem" }),
     Schema.Struct({
-      detail: Schema.optionalKey(
-        Schema.Union([V2ItemStartedNotification__ImageDetail, Schema.Null]),
-      ),
-      id: Schema.String,
-      query: Schema.String,
-      results: Schema.optionalKey(
-        Schema.Union([
-          Schema.Array(Schema.Json.annotate({ expected: "JSON value" })).annotate({
-            description:
-              "Structured search results returned out-of-band by standalone web search.\n\nThese stay as opaque JSON at the extension/app-server boundary so new result fields and result types can pass through without a Codex release.",
-          }),
-          Schema.Null,
-        ]),
-      ),
-      path: Schema.String,
-      type: Schema.Literal("localImage").annotate({ title: "LocalImageUserInputType" }),
-    }).annotate({ title: "LocalImageUserInput" }),
-    Schema.Struct({
-      type: Schema.Literal("audio").annotate({ title: "AudioUserInputType" }),
-      url: Schema.String,
-    }).annotate({ title: "AudioUserInput" }),
-    Schema.Struct({
-      durationMs: Schema.Number.annotate({ format: "uint64" })
-        .check(Schema.isInt().annotate({ expected: "an integer" }))
-        .check(
-          Schema.isGreaterThanOrEqualTo(0).annotate({
-            expected: "a value greater than or equal to 0",
-          }),
-        ),
-      id: Schema.String,
-      type: Schema.Literal("sleep").annotate({ title: "SleepThreadItemType" }),
-    }).annotate({
-      title: "SleepThreadItem",
-      description: "Display item emitted by the interruptible `clock.sleep` tool.",
-    }),
-    Schema.Struct({
-      failure: Schema.optionalKey(
-        Schema.Union([V2ItemStartedNotification__ImageGenerationFailure, Schema.Null]),
-      ),
-      id: Schema.String,
-      result: Schema.String,
-      revisedPrompt: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-      savedPath: Schema.optionalKey(
-        Schema.Union([V2ItemStartedNotification__AbsolutePathBuf, Schema.Null]),
-      ),
-      status: Schema.String,
-      transparentBackground: Schema.optionalKey(Schema.Union([Schema.Boolean, Schema.Null])),
-      type: Schema.Literal("imageGeneration").annotate({ title: "ImageGenerationThreadItemType" }),
-    }).annotate({ title: "ImageGenerationThreadItem" }),
-    Schema.Struct({
-      name: Schema.String,
-      path: Schema.String,
-      type: Schema.Literal("mention").annotate({ title: "MentionUserInputType" }),
-    }).annotate({ title: "MentionUserInput" }),
-  ],
-  { mode: "oneOf" },
-).annotate({ identifier: "V2ItemStartedNotification__ThreadItem" });
-
-export type V2ItemStartedNotification__ThreadItem =
-  | {
-      readonly clientId?: string | null;
-      readonly content: ReadonlyArray<V2ItemStartedNotification__UserInput>;
-      readonly id: string;
-      readonly type: "userMessage";
-    }
-  | {
-      readonly fragments: ReadonlyArray<V2ItemStartedNotification__HookPromptFragment>;
-      readonly id: string;
-      readonly type: "hookPrompt";
-    }
-  | {
-      readonly id: string;
-      readonly memoryCitation?: V2ItemStartedNotification__MemoryCitation | null;
-      readonly phase?: V2ItemStartedNotification__MessagePhase | null;
-      readonly text: string;
-      readonly type: "agentMessage";
-    }
-  | { readonly id: string; readonly text: string; readonly type: "plan" }
-  | {
-      readonly content?: ReadonlyArray<string>;
-      readonly id: string;
-      readonly summary?: ReadonlyArray<string>;
-      readonly type: "reasoning";
-    }
-  | {
-      readonly aggregatedOutput?: string | null;
-      readonly command: string;
-      readonly commandActions: ReadonlyArray<V2ItemStartedNotification__CommandAction>;
-      readonly cwd: V2ItemStartedNotification__LegacyAppPathString;
-      readonly durationMs?: number | null;
-      readonly exitCode?: number | null;
-      readonly id: string;
-      readonly processId?: string | null;
-      readonly source?: V2ItemStartedNotification__CommandExecutionSource;
-      readonly status: V2ItemStartedNotification__CommandExecutionStatus;
-      readonly type: "commandExecution";
-    }
-  | {
-      readonly changes: ReadonlyArray<V2ItemStartedNotification__FileUpdateChange>;
-      readonly id: string;
-      readonly status: V2ItemStartedNotification__PatchApplyStatus;
-      readonly type: "fileChange";
-    }
-  | {
-      readonly appContext?: V2ItemStartedNotification__McpToolCallAppContext | null;
-      readonly arguments: Schema.Json;
-      readonly durationMs?: number | null;
-      readonly error?: V2ItemStartedNotification__McpToolCallError | null;
-      readonly id: string;
-      readonly mcpAppResourceUri?: string | null;
-      readonly pluginId?: string | null;
-      readonly result?: V2ItemStartedNotification__McpToolCallResult | null;
-      readonly server: string;
-      readonly status: V2ItemStartedNotification__McpToolCallStatus;
-      readonly tool: string;
-      readonly type: "mcpToolCall";
-    }
-  | {
-      readonly arguments: Schema.Json;
-      readonly contentItems?: ReadonlyArray<V2ItemStartedNotification__DynamicToolCallOutputContentItem> | null;
-      readonly durationMs?: number | null;
-      readonly id: string;
-      readonly namespace?: string | null;
-      readonly status: V2ItemStartedNotification__DynamicToolCallStatus;
-      readonly success?: boolean | null;
-      readonly tool: string;
-      readonly type: "dynamicToolCall";
-    }
-  | {
-      readonly agentsStates: { readonly [x: string]: V2ItemStartedNotification__CollabAgentState };
-      readonly id: string;
-      readonly model?: string | null;
-      readonly prompt?: string | null;
-      readonly reasoningEffort?: V2ItemStartedNotification__ReasoningEffort | null;
-      readonly receiverThreadIds: ReadonlyArray<string>;
-      readonly senderThreadId: string;
-      readonly status: V2ItemStartedNotification__CollabAgentToolCallStatus;
-      readonly tool: V2ItemStartedNotification__CollabAgentTool;
-      readonly type: "collabAgentToolCall";
-    }
-  | {
-      readonly agentPath: string;
-      readonly agentThreadId: string;
-      readonly id: string;
-      readonly kind: V2ItemStartedNotification__SubAgentActivityKind;
-      readonly type: "subAgentActivity";
-    }
-  | {
-      readonly action?: V2ItemStartedNotification__WebSearchAction | null;
-      readonly id: string;
-      readonly query: string;
-      readonly results?: ReadonlyArray<Schema.Json> | null;
-      readonly type: "webSearch";
-    }
-  | {
-      readonly id: string;
-      readonly path: V2ItemStartedNotification__LegacyAppPathString;
-      readonly type: "imageView";
-    }
-  | { readonly durationMs: number; readonly id: string; readonly type: "sleep" }
-  | {
-      readonly id: string;
-      readonly result: string;
-      readonly revisedPrompt?: string | null;
-      readonly savedPath?: V2ItemStartedNotification__AbsolutePathBuf | null;
-      readonly status: string;
-      readonly type: "imageGeneration";
-    }
-  | { readonly id: string; readonly review: string; readonly type: "enteredReviewMode" }
-  | { readonly id: string; readonly review: string; readonly type: "exitedReviewMode" }
-  | { readonly id: string; readonly type: "contextCompaction" };
-export const V2ItemStartedNotification__ThreadItem = Schema.Union(
-  [
-    Schema.Struct({
-      clientId: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-      content: Schema.Array(V2ItemStartedNotification__UserInput),
-      id: Schema.String,
-      type: Schema.Literal("userMessage").annotate({ title: "UserMessageThreadItemType" }),
-    }).annotate({ title: "UserMessageThreadItem" }),
-    Schema.Struct({
-      fragments: Schema.Array(V2ItemStartedNotification__HookPromptFragment),
-      id: Schema.String,
-      type: Schema.Literal("hookPrompt").annotate({ title: "HookPromptThreadItemType" }),
-    }).annotate({ title: "HookPromptThreadItem" }),
-    Schema.Struct({
-      delivery: Schema.optionalKey(Schema.Union([Schema.Literal("async"), Schema.Null])),
-      questions: Schema.optionalKey(
-        Schema.Union([
-          Schema.Array(
-            Schema.Struct({
-              title: Schema.String,
-              options: Schema.optionalKey(Schema.Union([Schema.Array(Schema.String), Schema.Null])),
-            }),
-          ),
-          Schema.Null,
-        ]),
-      ),
-      id: Schema.String,
-      memoryCitation: Schema.optionalKey(
-        Schema.Union([V2ItemStartedNotification__MemoryCitation, Schema.Null]),
-      ),
-      phase: Schema.optionalKey(
-        Schema.Union([V2ItemStartedNotification__MessagePhase, Schema.Null]),
-      ),
-      text: Schema.String,
-      type: Schema.Literal("agentMessage").annotate({ title: "AgentMessageThreadItemType" }),
-    }).annotate({ title: "AgentMessageThreadItem" }),
-    Schema.Struct({
-      id: Schema.String,
-      text: Schema.String,
-      type: Schema.Literal("plan").annotate({ title: "PlanThreadItemType" }),
-    }).annotate({
-      title: "PlanThreadItem",
-      description:
-        "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
-    }),
-    Schema.Struct({
-      content: Schema.optionalKey(Schema.Array(Schema.String).annotate({ default: [] })),
-      id: Schema.String,
-      summary: Schema.optionalKey(Schema.Array(Schema.String).annotate({ default: [] })),
-      type: Schema.Literal("reasoning").annotate({ title: "ReasoningThreadItemType" }),
-    }).annotate({ title: "ReasoningThreadItem" }),
-    Schema.Struct({
-      aggregatedOutput: Schema.optionalKey(
-        Schema.Union([
-          Schema.String.annotate({
-            description: "The command's output, aggregated from stdout and stderr.",
-          }),
-          Schema.Null,
-        ]),
-      ),
-      command: Schema.String.annotate({ description: "The command to be executed." }),
-      commandActions: Schema.Array(V2ItemStartedNotification__CommandAction).annotate({
-        description:
-          "A best-effort parsing of the command to understand the action(s) it will perform. This returns a list of CommandAction objects because a single shell command may be composed of many commands piped together.",
-      }),
-      cwd: Schema.suspend(
-        (): Schema.Codec<V2ItemStartedNotification__LegacyAppPathString> =>
-          V2ItemStartedNotification__LegacyAppPathString,
-      ).annotate({ description: "The command's working directory." }),
-      durationMs: Schema.optionalKey(
-        Schema.Union([
-          Schema.Number.annotate({
-            description: "The duration of the command execution in milliseconds.",
-            format: "int64",
-          }).check(Schema.isInt().annotate({ expected: "an integer" })),
-          Schema.Null,
-        ]),
-      ),
-      exitCode: Schema.optionalKey(
-        Schema.Union([
-          Schema.Number.annotate({
-            description: "The command's exit code.",
-            format: "int32",
-          }).check(Schema.isInt().annotate({ expected: "an integer" })),
-          Schema.Null,
-        ]),
-      ),
-      id: Schema.String,
-      processId: Schema.optionalKey(
-        Schema.Union([
-          Schema.String.annotate({
-            description: "Identifier for the underlying PTY process (when available).",
-          }),
-          Schema.Null,
-        ]),
-      ),
-      source: Schema.optionalKey(
-        Schema.suspend(
-          (): Schema.Codec<V2ItemStartedNotification__CommandExecutionSource> =>
-            V2ItemStartedNotification__CommandExecutionSource,
-        ).annotate({ default: "agent" }),
-      ),
-      status: V2ItemStartedNotification__CommandExecutionStatus,
-      type: Schema.Literal("commandExecution").annotate({
-        title: "CommandExecutionThreadItemType",
-      }),
-    }).annotate({ title: "CommandExecutionThreadItem" }),
-    Schema.Struct({
-      changes: Schema.Array(V2ItemStartedNotification__FileUpdateChange),
-      id: Schema.String,
-      status: V2ItemStartedNotification__PatchApplyStatus,
-      type: Schema.Literal("fileChange").annotate({ title: "FileChangeThreadItemType" }),
-    }).annotate({ title: "FileChangeThreadItem" }),
-    Schema.Struct({
-      appContext: Schema.optionalKey(
-        Schema.Union([V2ItemStartedNotification__McpToolCallAppContext, Schema.Null]),
-      ),
-      arguments: Schema.Json.annotate({ expected: "JSON value" }),
-      durationMs: Schema.optionalKey(
-        Schema.Union([
-          Schema.Number.annotate({
-            description: "The duration of the MCP tool call in milliseconds.",
-            format: "int64",
-          }).check(Schema.isInt().annotate({ expected: "an integer" })),
-          Schema.Null,
-        ]),
-      ),
-      error: Schema.optionalKey(
-        Schema.Union([V2ItemStartedNotification__McpToolCallError, Schema.Null]),
-      ),
-      id: Schema.String,
-      mcpAppResourceUri: Schema.optionalKey(
-        Schema.Union([
-          Schema.String.annotate({
-            description: "Deprecated: use `appContext.resourceUri` instead.",
-          }),
-          Schema.Null,
-        ]),
-      ),
-      pluginId: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-      result: Schema.optionalKey(
-        Schema.Union([V2ItemStartedNotification__McpToolCallResult, Schema.Null]),
-      ),
-      server: Schema.String,
-      status: V2ItemStartedNotification__McpToolCallStatus,
-      tool: Schema.String,
-      type: Schema.Literal("mcpToolCall").annotate({ title: "McpToolCallThreadItemType" }),
-    }).annotate({ title: "McpToolCallThreadItem" }),
-    Schema.Struct({
-      arguments: Schema.Json.annotate({ expected: "JSON value" }),
-      contentItems: Schema.optionalKey(
-        Schema.Union([
-          Schema.Array(V2ItemStartedNotification__DynamicToolCallOutputContentItem),
-          Schema.Null,
-        ]),
-      ),
-      durationMs: Schema.optionalKey(
-        Schema.Union([
-          Schema.Number.annotate({
-            description: "The duration of the dynamic tool call in milliseconds.",
-            format: "int64",
-          }).check(Schema.isInt().annotate({ expected: "an integer" })),
-          Schema.Null,
-        ]),
-      ),
-      id: Schema.String,
-      namespace: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
-      status: V2ItemStartedNotification__DynamicToolCallStatus,
-      success: Schema.optionalKey(Schema.Union([Schema.Boolean, Schema.Null])),
-      tool: Schema.String,
-      type: Schema.Literal("dynamicToolCall").annotate({ title: "DynamicToolCallThreadItemType" }),
-    }).annotate({ title: "DynamicToolCallThreadItem" }),
-    Schema.Struct({
-      agentsStates: Schema.Record(
-        Schema.String,
-        V2ItemStartedNotification__CollabAgentState,
-      ).annotate({ description: "Last known status of the target agents, when available." }),
-      id: Schema.String.annotate({ description: "Unique identifier for this collab tool call." }),
-      model: Schema.optionalKey(
-        Schema.Union([
-          Schema.String.annotate({
-            description: "Model requested for the spawned agent, when applicable.",
-          }),
-          Schema.Null,
-        ]),
-      ),
-      prompt: Schema.optionalKey(
-        Schema.Union([
-          Schema.String.annotate({
-            description: "Prompt text sent as part of the collab tool call, when available.",
-          }),
-          Schema.Null,
-        ]),
-      ),
-      reasoningEffort: Schema.optionalKey(
-        Schema.Union([V2ItemStartedNotification__ReasoningEffort, Schema.Null]).annotate({
-          description: "Reasoning effort requested for the spawned agent, when applicable.",
-        }),
-      ),
-      receiverThreadIds: Schema.Array(Schema.String).annotate({
-        description:
-          "Thread ID of the receiving agent, when applicable. In case of spawn operation, this corresponds to the newly spawned agent.",
-      }),
-      senderThreadId: Schema.String.annotate({
-        description: "Thread ID of the agent issuing the collab request.",
-      }),
-      status: Schema.suspend(
-        (): Schema.Codec<V2ItemStartedNotification__CollabAgentToolCallStatus> =>
-          V2ItemStartedNotification__CollabAgentToolCallStatus,
-      ).annotate({ description: "Current status of the collab tool call." }),
-      tool: Schema.suspend(
-        (): Schema.Codec<V2ItemStartedNotification__CollabAgentTool> =>
-          V2ItemStartedNotification__CollabAgentTool,
-      ).annotate({ description: "Name of the collab tool that was invoked." }),
-      type: Schema.Literal("collabAgentToolCall").annotate({
-        title: "CollabAgentToolCallThreadItemType",
-      }),
-    }).annotate({ title: "CollabAgentToolCallThreadItem" }),
-    Schema.Struct({
       agentPath: Schema.String,
       agentThreadId: Schema.String,
       id: Schema.String,
@@ -35178,6 +34830,9 @@ export const V2ItemStartedNotification__ThreadItem = Schema.Union(
       description: "Display item emitted by the interruptible `clock.sleep` tool.",
     }),
     Schema.Struct({
+      failure: Schema.optionalKey(
+        Schema.Union([V2ItemStartedNotification__ImageGenerationFailure, Schema.Null]),
+      ),
       id: Schema.String,
       result: Schema.String,
       revisedPrompt: Schema.optionalKey(Schema.Union([Schema.String, Schema.Null])),
@@ -35185,6 +34840,7 @@ export const V2ItemStartedNotification__ThreadItem = Schema.Union(
         Schema.Union([V2ItemStartedNotification__AbsolutePathBuf, Schema.Null]),
       ),
       status: Schema.String,
+      transparentBackground: Schema.optionalKey(Schema.Union([Schema.Boolean, Schema.Null])),
       type: Schema.Literal("imageGeneration").annotate({ title: "ImageGenerationThreadItemType" }),
     }).annotate({ title: "ImageGenerationThreadItem" }),
     Schema.Struct({
