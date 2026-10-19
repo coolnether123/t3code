@@ -1,10 +1,10 @@
-fix(voice): retry busy background turns and preserve delivery evidence
+feat(voice): fill speech waits with a short recorded acknowledgment
 
-Retry confirmed capacity failures three times with bounded backoff and the
-original model selection. Ignore late failed-attempt receipts and discard
-unverified results before retrying.
+Play one varied clip a second after speech is sent if reply audio has not
+started. Finish a playing clip before scheduling reply audio, and cancel
+pending filler on interruption or hang-up. Status updates do not arm it.
 
-Read back the delivered message before waiting for background completion.
-Retain that evidence through failed cleanup and label missing readback unknown.
+Bundle the six supplied recordings losslessly with shared call playback.
+Cover timing, cancellation, repeat prevention and reply scheduling offline.
 
 Otis-Task: agenda-task:515bbc54cb61482681e950e524421ce4
