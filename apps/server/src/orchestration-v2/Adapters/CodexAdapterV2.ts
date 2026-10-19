@@ -1631,7 +1631,18 @@ export const layerAppServerClientFactory: Layer.Layer<
           return yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
             Effect.provide(context),
           );
-        }),
+        }).pipe(
+          Effect.catchTags({
+            CodexAppServerTransportError: (cause) =>
+              Effect.fail(
+                new ProviderAdapter.ProviderAdapterOpenSessionError({
+                  driver: CODEX_PROVIDER,
+                  providerSessionId: input.providerSessionId,
+                  cause,
+                }),
+              ),
+          }),
+        ),
     });
   }),
 );
@@ -1718,6 +1729,7 @@ const layer: Layer.Layer<
   | FileSystem.FileSystem
   | IdAllocator.IdAllocatorV2
   | McpProviderSessions.McpProviderSessions
+  | Path.Path
   | ServerConfig
 > = Layer.effect(
   ProviderAdapter.ProviderAdapterV2,
@@ -1770,6 +1782,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
   adapterOptions: CodexAdapterV2Options,
 ) {
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+  const path = yield* Path.Path;
   const readMcpSession = (threadId: ThreadId | null) =>
     threadId === null ? Effect.succeed(undefined) : mcpSessions.read(threadId);
   const { clientFactory, crypto, fileSystem, idAllocator, serverConfig } = adapterOptions;
@@ -1801,12 +1814,14 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             ...adapterOptions.settings,
             homePath: "",
             shadowHomePath: "",
-          });
+          }).pipe(Effect.provideService(Path.Path, path));
           yield* migrateCodexResumeRollout({
             sharedHomePath: configured.sharedHomePath,
             effectiveHomePath: adapterOptions.settings.homePath,
             resumeThreadId: input.initialNativeThreadId,
           }).pipe(
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.provideService(Path.Path, path),
             Effect.mapError(
               (cause) =>
                 new ProviderAdapter.ProviderAdapterOpenSessionError({
@@ -1894,7 +1909,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               );
             yield* client.notify("initialized", undefined);
             if (adapterOptions.settings.useDesktopAppDaemon)
-              yield* attachCodexDesktopPluginSkills(client, adapterOptions.environment);
+              yield* attachCodexDesktopPluginSkills(client, adapterOptions.environment).pipe(
+                Effect.provideService(FileSystem.FileSystem, fileSystem),
+                Effect.provideService(Path.Path, path),
+              );
             yield* Ref.set(initialized, true);
           }),
         );

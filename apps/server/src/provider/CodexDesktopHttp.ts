@@ -1,3 +1,4 @@
+import { codexDesktopSettings } from "./codexDesktopSettings.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 // @effect-diagnostics globalDateInEffect:off
 /** HTTP adapter for the native Codex desktop store and coordinator mailbox. */
@@ -107,6 +108,7 @@ export const codexDesktopRouteLayer = Layer.unwrap(
           const config = yield* ServerConfig.ServerConfig;
           const settingsService = yield* ServerSettings.ServerSettingsService;
           const settings = yield* settingsService.getSettings;
+          const desktopSettings = codexDesktopSettings(settings);
           const layout = createCodexDesktopMailboxLayout(
             NodePath.join(config.baseDir, "codex-desktop-bridge"),
           );
@@ -114,13 +116,10 @@ export const codexDesktopRouteLayer = Layer.unwrap(
           const status: CodexDesktopStatusResponse = isCodexDesktopCoordinatorLeaseFresh(lease)
             ? { status: "ready", hostId: lease?.hostId ?? null, error: null }
             : {
-                status:
-                  lease === undefined && settings.providers.codex.enabled
-                    ? "starting"
-                    : "unavailable",
+                status: lease === undefined && desktopSettings.enabled ? "starting" : "unavailable",
                 hostId: lease?.hostId ?? null,
                 error:
-                  settings.providers.codex.enabled && lease === undefined
+                  desktopSettings.enabled && lease === undefined
                     ? null
                     : "Codex desktop coordinator is unavailable.",
               };

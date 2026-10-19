@@ -1,16 +1,14 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { buildCodexDeveloperInstructions } from "./CodexDeveloperInstructions.ts";
+import { buildCodexAdditionalContext } from "./CodexDeveloperInstructions.ts";
 
 const runtime = { model: "gpt-5.6-sol", reasoningEffort: "high" } as const;
 
 describe("Codex browser provider instructions", () => {
   it("does not infer a managed browser from the selected mode", () => {
     for (const computerControlMode of ["chrome", "desktop"] as const) {
-      const instructions = buildCodexDeveloperInstructions(
-        "default",
-        { ...runtime, computerControlMode },
-        false,
+      const instructions = JSON.stringify(
+        buildCodexAdditionalContext({ ...runtime, computerControlMode }, false),
       );
       expect(instructions).not.toContain("computer_start");
       expect(instructions).not.toContain("preview_status");
@@ -21,15 +19,16 @@ describe("Codex browser provider instructions", () => {
   });
 
   it("gives desktop-backed Windows threads managed Chrome guidance when the daemon lends no app tools", () => {
-    const instructions = buildCodexDeveloperInstructions(
-      "default",
-      {
-        ...runtime,
-        useDesktopAppDaemon: true,
-        computerControlMode: "chrome",
-        computerControlAvailable: true,
-      },
-      true,
+    const instructions = JSON.stringify(
+      buildCodexAdditionalContext(
+        {
+          ...runtime,
+          useDesktopAppDaemon: true,
+          computerControlMode: "chrome",
+          computerControlAvailable: true,
+        },
+        true,
+      ),
     );
 
     expect(instructions).toMatch(/computer_start.*computer_navigate.*computer_snapshot/s);
@@ -40,15 +39,16 @@ describe("Codex browser provider instructions", () => {
   });
 
   it("describes the host Codex desktop tools without managed Chrome fallback guidance", () => {
-    const instructions = buildCodexDeveloperInstructions(
-      "default",
-      {
-        ...runtime,
-        useDesktopAppDaemon: true,
-        computerControlMode: "chrome",
-        computerControlAvailable: false,
-      },
-      true,
+    const instructions = JSON.stringify(
+      buildCodexAdditionalContext(
+        {
+          ...runtime,
+          useDesktopAppDaemon: true,
+          computerControlMode: "chrome",
+          computerControlAvailable: false,
+        },
+        true,
+      ),
     );
 
     expect(instructions).toContain("host's Codex desktop installation");
@@ -61,10 +61,11 @@ describe("Codex browser provider instructions", () => {
   });
 
   it("describes only the discovered managed Chrome tools and their separate profile", () => {
-    const instructions = buildCodexDeveloperInstructions(
-      "default",
-      { ...runtime, computerControlMode: "chrome", computerControlAvailable: true },
-      false,
+    const instructions = JSON.stringify(
+      buildCodexAdditionalContext(
+        { ...runtime, computerControlMode: "chrome", computerControlAvailable: true },
+        false,
+      ),
     );
     expect(instructions).toMatch(
       /computer_start.*computer_status.*computer_tabs.*computer_select_tab/s,
@@ -78,10 +79,11 @@ describe("Codex browser provider instructions", () => {
   });
 
   it("makes the saved desktop preference's browser-only fallback explicit", () => {
-    const instructions = buildCodexDeveloperInstructions(
-      "default",
-      { ...runtime, computerControlMode: "desktop", computerControlAvailable: true },
-      false,
+    const instructions = JSON.stringify(
+      buildCodexAdditionalContext(
+        { ...runtime, computerControlMode: "desktop", computerControlAvailable: true },
+        false,
+      ),
     );
     expect(instructions).toContain("does not attach Codex desktop Computer Use to T3");
     expect(instructions).toContain("browser-only fallback");
@@ -90,10 +92,11 @@ describe("Codex browser provider instructions", () => {
   });
 
   it("keeps preview mode independent from managed Chrome availability", () => {
-    const instructions = buildCodexDeveloperInstructions(
-      "default",
-      { ...runtime, computerControlMode: "preview", computerControlAvailable: true },
-      true,
+    const instructions = JSON.stringify(
+      buildCodexAdditionalContext(
+        { ...runtime, computerControlMode: "preview", computerControlAvailable: true },
+        true,
+      ),
     );
     expect(instructions).toContain("preview_status");
     expect(instructions).not.toContain("computer_start");
@@ -101,10 +104,11 @@ describe("Codex browser provider instructions", () => {
   });
 
   it("does not describe managed tools when capability discovery reports them absent", () => {
-    const instructions = buildCodexDeveloperInstructions(
-      "plan",
-      { ...runtime, computerControlMode: "chrome", computerControlAvailable: false },
-      true,
+    const instructions = JSON.stringify(
+      buildCodexAdditionalContext(
+        { ...runtime, computerControlMode: "chrome", computerControlAvailable: false },
+        true,
+      ),
     );
     expect(instructions).toContain("preview_status");
     expect(instructions).not.toContain("computer_start");
@@ -112,10 +116,11 @@ describe("Codex browser provider instructions", () => {
 
   it("allows the documented configured Windows skill route independently of browser preference", () => {
     for (const computerControlMode of ["preview", "chrome", "desktop"] as const) {
-      const instructions = buildCodexDeveloperInstructions(
-        "default",
-        { ...runtime, computerControlMode, computerControlAvailable: false },
-        false,
+      const instructions = JSON.stringify(
+        buildCodexAdditionalContext(
+          { ...runtime, computerControlMode, computerControlAvailable: false },
+          false,
+        ),
       );
       expect(instructions).toContain(
         "does not disable independently configured MCP tools or skills",
@@ -137,10 +142,11 @@ describe("Codex browser provider instructions", () => {
   });
 
   it("does not treat a managed Chrome limitation as a denial of a requested configured provider", () => {
-    const instructions = buildCodexDeveloperInstructions(
-      "default",
-      { ...runtime, computerControlMode: "chrome", computerControlAvailable: true },
-      false,
+    const instructions = JSON.stringify(
+      buildCodexAdditionalContext(
+        { ...runtime, computerControlMode: "chrome", computerControlAvailable: true },
+        false,
+      ),
     );
     expect(instructions).toContain("check its installed skill and configured tools");
     expect(instructions).toContain(

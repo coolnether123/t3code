@@ -1,28 +1,54 @@
-import { describe, expect, it } from "vite-plus/test";
-import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts";
-
+import { expect, it } from "@effect/vitest";
+import { DEFAULT_SERVER_SETTINGS, type ServerSettings } from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
+import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import {
   haveProviderSnapshotSettingsChanged,
-  makeProviderSnapshotSettings,
-} from "./providerUpdateSettings.ts";
+  makeProviderSnapshotSettingsSource,
+} from "@t3tools/provider-core/server/snapshotSettings";
 
-describe("provider snapshot settings", () => {
-  it("refreshes browser choices when Preview access changes", () => {
-    const enabled = makeProviderSnapshotSettings(
-      {},
-      { ...DEFAULT_UNIFIED_SETTINGS, enableAgentBrowserAccess: true },
-    );
-    const disabled = makeProviderSnapshotSettings(
-      {},
-      { ...DEFAULT_UNIFIED_SETTINGS, enableAgentBrowserAccess: false },
-    );
+const readSnapshot = (settings: ServerSettings) =>
+  makeProviderSnapshotSettingsSource({}).pipe(
+    Effect.flatMap((source) => source.getSettings),
+    Effect.provide(
+      Layer.mock(ProviderHost.ProviderHost)({
+        paths: {
+          cwd: "/synthetic",
+          baseDir: "/synthetic",
+          stateDir: "/synthetic",
+          providerStatusCacheDir: "/synthetic",
+          attachmentsDir: "/synthetic",
+        },
+        resolveAttachmentPath: () => null,
+        settings: {
+          get: Effect.succeed(settings),
+          changes: Stream.empty,
+          subscribe: Effect.succeed(Stream.empty),
+          withSnapshot: (use) => use(settings),
+        },
+      }),
+    ),
+  );
+
+it.effect("refreshes provider snapshots when browser access changes", () =>
+  Effect.gen(function* () {
+    const enabled = yield* readSnapshot({
+      ...DEFAULT_SERVER_SETTINGS,
+      enableAgentBrowserAccess: true,
+    });
+    const disabled = yield* readSnapshot({
+      ...DEFAULT_SERVER_SETTINGS,
+      enableAgentBrowserAccess: false,
+    });
     expect(haveProviderSnapshotSettingsChanged(enabled, disabled)).toBe(true);
     expect(haveProviderSnapshotSettingsChanged(disabled, enabled)).toBe(true);
-  });
-
-  it("does not refresh for unchanged browser availability settings", () => {
-    const previous = makeProviderSnapshotSettings({}, DEFAULT_UNIFIED_SETTINGS);
-    const next = makeProviderSnapshotSettings({}, DEFAULT_UNIFIED_SETTINGS);
-    expect(haveProviderSnapshotSettingsChanged(previous, next)).toBe(false);
-  });
-});
+    expect(
+      haveProviderSnapshotSettingsChanged(
+        enabled,
+        yield* readSnapshot({ ...DEFAULT_SERVER_SETTINGS, enableAgentBrowserAccess: true }),
+      ),
+    ).toBe(false);
+  }),
+);

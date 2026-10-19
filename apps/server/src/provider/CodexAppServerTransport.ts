@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - The desktop daemon socket requires a Node duplex transport.
 import * as NodeOS from "node:os";
 import * as NodeNet from "node:net";
 import * as NodeStream from "node:stream";

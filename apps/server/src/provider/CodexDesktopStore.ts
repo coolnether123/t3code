@@ -1,3 +1,4 @@
+import { codexDesktopSettings } from "./codexDesktopSettings.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 // @effect-diagnostics globalDate:off
 // @effect-diagnostics unsafeEffectTypeAssertion:off
@@ -254,7 +255,7 @@ export const make = (options?: { readonly homePath?: string }) =>
     const desktopHome = Effect.fn("CodexDesktopStore.desktopHome")(function* () {
       if (options?.homePath !== undefined) return options.homePath;
       const settings = yield* settingsService!.getSettings;
-      const layout = yield* resolveCodexHomeLayout(settings.providers.codex);
+      const layout = yield* resolveCodexHomeLayout(codexDesktopSettings(settings));
       return layout.sharedHomePath;
     });
 

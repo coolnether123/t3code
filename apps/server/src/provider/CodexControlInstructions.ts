@@ -83,10 +83,10 @@ The selected Codex app-server model runtime controls the callable sub-agent tool
  * the only browser automation it still has.
  */
 export interface CodexControlRuntime {
-  readonly useDesktopAppDaemon?: boolean;
-  readonly computerControlAvailable?: boolean;
-  readonly computerControlMode?: CodexComputerControlMode;
-  readonly subagentBackend?: SubagentBackend;
+  readonly useDesktopAppDaemon?: boolean | undefined;
+  readonly computerControlAvailable?: boolean | undefined;
+  readonly computerControlMode?: CodexComputerControlMode | undefined;
+  readonly subagentBackend?: SubagentBackend | undefined;
 }
 export function buildCodexControlInstructions(
   runtime: CodexControlRuntime,
