@@ -2,28 +2,29 @@ import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 import {
   EnvironmentProviderStatus,
-  OrchestrationShellSnapshot,
-  OrchestrationThreadDetailSnapshot,
-  ProviderInstanceId,
+  OrchestrationV2ThreadDetailSnapshot,
+  OrchestrationV2ShellSnapshot,
+  OrchestrationV2ThreadShell,
+  OrchestrationV2TurnItem,
+  OrchestrationV2RuntimeRequest,
   type EnvironmentProviderSnapshotResult,
 } from "@t3tools/contracts";
 import {
+  AGENT_OUTPUT_MAX_BYTES,
+  AGENT_RECEIPT_METADATA_MAX_BYTES,
   AGENT_REQUEST_MAX_BYTES,
   compactAgentProviders,
+  compactAgentSnapshot,
   decodeAgentAction,
   decodeAgentRequest,
-  validateAgentAction,
-  compactAgentSnapshot,
-  validateAgentOrigin,
   encodeAgentOutput,
+  validateAgentAction,
+  validateAgentOrigin,
   validateAgentReceiptMetadata,
-  AGENT_RECEIPT_METADATA_MAX_BYTES,
-  AGENT_OUTPUT_MAX_BYTES,
 } from "./agentProtocol.ts";
 
 const decodeEnvironmentProviderStatus = Schema.decodeUnknownSync(EnvironmentProviderStatus);
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
-
 const now = "2026-08-31T04:00:00.000Z";
 const runtime = { pid: 123, startedAt: now };
 const identity = { environmentId: "env-a", runtime };
@@ -31,130 +32,141 @@ const thread = {
   id: "thread-a",
   projectId: "project-a",
   title: "Scratch",
+  createdBy: "user",
+  creationSource: "web",
+  providerInstanceId: "codex",
   modelSelection: { instanceId: "codex", model: "gpt-5" },
   runtimeMode: "approval-required",
   interactionMode: "default",
   branch: null,
   worktreePath: null,
-  latestTurn: {
-    turnId: "turn-a",
-    state: "running",
-    requestedAt: now,
-    startedAt: now,
-    completedAt: null,
-    assistantMessageId: null,
-  },
+  activeProviderThreadId: null,
+  lineage: { rootThreadId: "thread-a", parentThreadId: null, relationshipToParent: null },
+  forkedFrom: null,
   createdAt: now,
   updatedAt: now,
+  archivedAt: null,
   deletedAt: null,
-  messages: [],
-  activities: [],
-  checkpoints: [],
-  session: {
-    threadId: "thread-a",
-    status: "running",
-    providerName: "codex",
-    runtimeMode: "approval-required",
-    activeTurnId: "turn-a",
-    lastError: null,
-    updatedAt: now,
-  },
 };
-const decodeDetail = Schema.decodeUnknownSync(OrchestrationThreadDetailSnapshot);
-const decodeShell = Schema.decodeUnknownSync(OrchestrationShellSnapshot);
+const run = {
+  id: "run-a",
+  threadId: "thread-a",
+  ordinal: 1,
+  providerInstanceId: "codex",
+  modelSelection: thread.modelSelection,
+  providerThreadId: null,
+  userMessageId: "message-a",
+  rootNodeId: null,
+  activeAttemptId: null,
+  status: "running",
+  requestedAt: now,
+  startedAt: now,
+  completedAt: null,
+  checkpointId: null,
+  contextHandoffId: null,
+};
+const decodeDetail = Schema.decodeUnknownSync(
+  Schema.toCodecJson(OrchestrationV2ThreadDetailSnapshot),
+);
 const detail = decodeDetail({
   snapshotSequence: 12,
-  thread,
-  page: { beforeCursor: "older", hasMore: true, snapshotSequence: 12 },
+  historyCursor: "older",
+  hasMoreHistory: true,
+  projection: {
+    thread,
+    runs: [run],
+    attempts: [],
+    nodes: [],
+    subagents: [],
+    providerSessions: [],
+    providerThreads: [],
+    providerTurns: [],
+    runtimeRequests: [],
+    messages: [],
+    plans: [],
+    turnItems: [],
+    checkpointScopes: [],
+    checkpoints: [],
+    contextHandoffs: [],
+    contextTransfers: [],
+    visibleTurnItems: [],
+    updatedAt: now,
+  },
 });
-const shell = decodeShell({
+const shellThread = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2ThreadShell))({
+  ...thread,
+  latestRunId: "run-a",
+  activeRunId: "run-a",
+  status: "running",
+  pendingRuntimeRequest: null,
+  latestVisibleMessage: null,
+  latestUserMessageAt: now,
+  hasActionableProposedPlan: false,
+  itemCount: 0,
+  visibleItemCount: 0,
+  settledOverride: null,
+  settledAt: null,
+});
+const shell = Schema.decodeUnknownSync(OrchestrationV2ShellSnapshot)({
+  schemaVersion: 2,
   snapshotSequence: 12,
   projects: [],
-  threads: [
-    {
-      ...thread,
-      latestUserMessageAt: now,
-      hasPendingApprovals: false,
-      hasPendingUserInput: false,
-      hasActionableProposedPlan: false,
-    },
-  ],
-  updatedAt: now,
+  threads: [shellThread],
+  archivedThreads: [],
 });
 const envelope = (command: unknown) => encodeJson({ ...identity, command });
 const interrupt = {
-  type: "thread.turn.interrupt",
+  type: "run.interrupt",
   commandId: "command-a",
   threadId: "thread-a",
-  turnId: "turn-a",
-  createdAt: now,
+  runId: "run-a",
 };
+const request = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2RuntimeRequest))({
+  id: "request-a",
+  nodeId: "node-a",
+  providerTurnId: null,
+  nativeRequestRef: null,
+  kind: "user_input",
+  status: "pending",
+  responseCapability: { type: "message" },
+  createdAt: now,
+  resolvedAt: null,
+});
+const item = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2TurnItem))({
+  id: "item-a",
+  threadId: "thread-a",
+  runId: "run-a",
+  nodeId: "node-a",
+  providerThreadId: null,
+  providerTurnId: null,
+  nativeItemRef: null,
+  parentItemId: null,
+  ordinal: 0,
+  status: "running",
+  title: "Pick",
+  startedAt: now,
+  completedAt: null,
+  updatedAt: now,
+  type: "user_input_request",
+  requestId: "request-a",
+  questions: [
+    {
+      id: "q-a",
+      header: "Pick",
+      question: "Pick one",
+      options: [{ label: "One", description: "First" }],
+      isOther: false,
+      isSecret: false,
+    },
+  ],
+});
 
 describe("agent action boundary", () => {
-  it("decodes an existing command with explicit environment and runtime identity", () => {
-    expect(decodeAgentAction(envelope(interrupt)).command).toEqual(interrupt);
-  });
-  it("rejects unknown fields, oversized input and destructive commands", () => {
-    expect(() => decodeAgentAction(envelope({ ...interrupt, typo: true }))).toThrow();
-    expect(() => decodeAgentAction(" ".repeat(262145))).toThrow();
-    expect(() =>
-      decodeAgentAction(envelope({ type: "thread.delete", commandId: "x", threadId: "thread-a" })),
-    ).toThrow();
-  });
-  it("strictly decodes one bounded request object and preserves action confirmation", () => {
-    expect(decodeAgentRequest('{"kind":"capabilities"}')).toEqual({ kind: "capabilities" });
-    expect(() => decodeAgentRequest("{invalid")).toThrow();
-    expect(() => decodeAgentRequest('{"kind":"snapshot"} {}')).toThrow();
-    expect(() => decodeAgentRequest('{"kind":"unknown"}')).toThrow();
-    expect(() => decodeAgentRequest(encodeJson({ kind: "capabilities", extra: true }))).toThrow();
-    expect(() =>
-      decodeAgentRequest(
-        encodeJson({ kind: "capabilities", padding: "x".repeat(AGENT_REQUEST_MAX_BYTES) }),
-      ),
-    ).toThrow();
-    expect(() =>
-      decodeAgentRequest(encodeJson({ kind: "act", ...identity, command: interrupt })),
-    ).toThrow();
-    expect(() =>
-      decodeAgentRequest(
-        encodeJson({
-          kind: "act",
-          confirm: true,
-          ...identity,
-          command: { ...interrupt, extra: true },
-        }),
-      ),
-    ).toThrow();
-
-    expect(
-      decodeAgentRequest(
-        encodeJson({ kind: "act", confirm: true, ...identity, command: interrupt }),
-      ),
-    ).toMatchObject({ kind: "act", action: { command: interrupt } });
-  });
-  it("validates request options against the CLI flag bounds", () => {
-    expect(
-      decodeAgentRequest(
-        encodeJson({
-          kind: "snapshot",
-          thread: "thread-a",
-          turnLimit: 5,
-          offset: 1_000_000,
-          beforeCursor: "cursor-a",
-        }),
-      ),
-    ).toMatchObject({ kind: "snapshot", threadId: "thread-a", turnLimit: 5, offset: 1_000_000 });
-    expect(() => decodeAgentRequest('{"kind":"snapshot","turnLimit":6}')).toThrow();
-    expect(() => decodeAgentRequest('{"kind":"snapshot","beforeCursor":"older"}')).toThrow();
-    expect(() => decodeAgentRequest('{"kind":"providers","instance":"bad id"}')).toThrow();
-    expect(decodeAgentRequest('{"kind":"providers","instance":"codex_work"}')).toEqual({
-      kind: "providers",
-      instanceId: ProviderInstanceId.make("codex_work"),
-    });
-  });
-  it("refuses missing or stale turn IDs and wrong environments before dispatch", () => {
-    expect(() => decodeAgentAction(envelope({ ...interrupt, turnId: undefined }))).toThrow();
+  it("requires the current environment, runtime and active run before interrupting", () => {
     const action = decodeAgentAction(envelope(interrupt));
+    expect(action.command).toEqual(interrupt);
+    expect(() => validateAgentAction(action, identity, shell, detail)).not.toThrow();
+    expect(() => decodeAgentAction(envelope({ ...interrupt, runId: undefined }))).toThrow();
     expect(() =>
       validateAgentAction(action, { ...identity, environmentId: "env-b" }, shell, detail),
     ).toThrow();
@@ -168,257 +180,167 @@ describe("agent action boundary", () => {
     ).toThrow();
     expect(() =>
       validateAgentAction(
-        decodeAgentAction(envelope({ ...interrupt, turnId: "old" })),
+        decodeAgentAction(envelope({ ...interrupt, runId: "old" })),
         identity,
         shell,
         detail,
       ),
     ).toThrow();
-    expect(() => validateAgentAction(action, identity, shell, detail)).not.toThrow();
   });
-  it("rejects bootstrap and permission weakening", () => {
-    const start = {
-      type: "thread.turn.start",
-      commandId: "send-a",
-      threadId: "thread-a",
-      message: { messageId: "message-a", role: "user", text: "hello", attachments: [] },
-      runtimeMode: "approval-required",
-      interactionMode: "default",
-      createdAt: now,
-    };
-    expect(() => decodeAgentAction(envelope({ ...start, bootstrap: {} }))).toThrow();
+  it("rejects unknown fields, oversized input and destructive commands", () => {
+    expect(() => decodeAgentAction(envelope({ ...interrupt, typo: true }))).toThrow();
+    expect(() => decodeAgentAction(" ".repeat(262145))).toThrow();
     expect(() =>
-      validateAgentAction(
-        decodeAgentAction(envelope({ ...start, runtimeMode: "full-access" })),
-        identity,
-        shell,
-        detail,
+      decodeAgentAction(envelope({ type: "thread.delete", commandId: "x", threadId: "thread-a" })),
+    ).toThrow();
+  });
+  it("requires explicit action confirmation in a single bounded request", () => {
+    expect(decodeAgentRequest('{"kind":"capabilities"}')).toEqual({ kind: "capabilities" });
+    expect(
+      decodeAgentRequest(
+        encodeJson({ kind: "act", confirm: true, ...identity, command: interrupt }),
+      ),
+    ).toMatchObject({ kind: "act" });
+    for (const json of [
+      "{invalid",
+      '{"kind":"snapshot"} {}',
+      '{"kind":"unknown"}',
+      encodeJson({ kind: "capabilities", extra: true }),
+      encodeJson({ kind: "act", action: { ...identity, command: interrupt } }),
+      " ".repeat(AGENT_REQUEST_MAX_BYTES + 1),
+    ]) {
+      expect(() => decodeAgentRequest(json)).toThrow();
+    }
+  });
+  it("validates history and list bounds", () => {
+    expect(decodeAgentRequest('{"kind":"snapshot"}')).toEqual({
+      kind: "snapshot",
+      turnLimit: 3,
+      offset: 0,
+    });
+    for (const turnLimit of [0, 6, 1.5, "3"])
+      expect(() => decodeAgentRequest(encodeJson({ kind: "snapshot", turnLimit }))).toThrow();
+    for (const offset of [-1, 1.5, 1000001])
+      expect(() => decodeAgentRequest(encodeJson({ kind: "snapshot", offset }))).toThrow();
+  });
+  it("does not expose session-wide approval or checkout mutation", () => {
+    expect(() =>
+      decodeAgentAction(
+        envelope({
+          type: "runtime-request.respond",
+          commandId: "c",
+          threadId: "thread-a",
+          requestId: "request-a",
+          decision: "acceptForSession",
+        }),
+      ),
+    ).toThrow();
+    expect(() =>
+      decodeAgentAction(
+        envelope({
+          type: "thread.metadata.update",
+          commandId: "c",
+          threadId: "thread-a",
+          worktreePath: "/other",
+        }),
       ),
     ).toThrow();
   });
-  it("allows only bare loopback origins, never credential-bearing or redirected URLs", () => {
+  it("requires pending request evidence before a response", () => {
+    const action = decodeAgentAction(
+      envelope({
+        type: "runtime-request.respond",
+        commandId: "c",
+        threadId: "thread-a",
+        requestId: "request-a",
+        answers: { "q-a": "One" },
+      }),
+    );
+    expect(() => validateAgentAction(action, identity, shell, detail)).toThrow();
+    expect(() =>
+      validateAgentAction(action, identity, shell, {
+        ...detail,
+        projection: { ...detail.projection, runtimeRequests: [request] },
+      }),
+    ).not.toThrow();
+  });
+  it("allows only bare loopback origins", () => {
     expect(validateAgentOrigin("http://127.0.0.1:8282")).toBe("http://127.0.0.1:8282");
     for (const url of [
       "http://example.com",
       "http://user:secret@localhost:8282",
       "http://localhost:8282/path",
       "http://localhost:8282?token=x",
-    ]) {
+    ])
       expect(() => validateAgentOrigin(url)).toThrow();
-    }
   });
 });
 
 describe("agent snapshot", () => {
-  it("budgets complete encoded receipt metadata and leaves room for fallback output", () => {
+  it("keeps pending request details outside the bounded activity tail", () => {
+    const selected = {
+      ...detail,
+      projection: {
+        ...detail.projection,
+        runtimeRequests: [request],
+        turnItems: [
+          item,
+          ...Array.from({ length: 30 }, (_, i) => ({
+            ...item,
+            id: item.id,
+            requestId: `other-${i}` as typeof request.id,
+          })),
+        ],
+      },
+    };
+    const snapshot = compactAgentSnapshot(identity, shell, selected);
+    expect(snapshot.requests).toMatchObject([
+      { id: "request-a", detail: { questions: [{ id: "q-a", options: [{ label: "One" }] }] } },
+    ]);
+    expect(snapshot.activity).toHaveLength(20);
+    expect(snapshot.historyCursor).toBe("older");
+    expect(snapshot.hasMoreHistory).toBe(true);
+    const closed = compactAgentSnapshot(identity, shell, {
+      ...selected,
+      projection: { ...selected.projection, runtimeRequests: [{ ...request, status: "resolved" }] },
+    });
+    expect(closed.requests).toEqual([]);
+  });
+  it("pages lists without skipping entries", () => {
+    const many = {
+      ...shell,
+      threads: Array.from({ length: 52 }, (_, i) => ({
+        ...shellThread,
+        id: `thread-${i}` as typeof shellThread.id,
+      })),
+    };
+    expect(compactAgentSnapshot(identity, many).listPage.nextOffset).toBe(25);
+    expect(compactAgentSnapshot(identity, many, undefined, 25).threads[0]?.id).toBe("thread-25");
+    expect(compactAgentSnapshot(identity, many, undefined, 25).listPage.nextOffset).toBe(50);
+    expect(compactAgentSnapshot(identity, many, undefined, 50).listPage.nextOffset).toBeNull();
+  });
+  it("preserves accepted and uncertain receipts when readback is oversized", () => {
     const metadata = {
       ...identity,
-      origin: "http://127.0.0.1:8282",
       commandId: "i".repeat(AGENT_RECEIPT_METADATA_MAX_BYTES - 1000),
-      commandType: "thread.turn.steer",
-      target: { threadId: "thread-a", turnId: "turn-a", messageId: "message-a" },
+      commandType: "message.dispatch",
     };
     expect(() => validateAgentReceiptMetadata(metadata)).not.toThrow();
     expect(() =>
-      validateAgentReceiptMetadata({ ...metadata, environmentId: "界".repeat(40000) }),
-    ).toThrow();
-    expect(() =>
-      validateAgentReceiptMetadata({
-        ...metadata,
-        commandId: "normal",
-        target: { projectId: "\u0000".repeat(20000) },
-      }),
+      validateAgentReceiptMetadata({ ...metadata, environmentId: "?".repeat(40000) }),
     ).toThrow();
     for (const status of ["accepted", "unknown"]) {
       const output = encodeAgentOutput({
         ...metadata,
         status,
         sequence: 13,
-        providerCompletion: "not-confirmed",
-        projectionObserved: false,
         readback: "x".repeat(AGENT_OUTPUT_MAX_BYTES),
       });
-      expect(Buffer.byteLength(output, "utf8")).toBeLessThanOrEqual(AGENT_OUTPUT_MAX_BYTES);
-      expect(output).toContain(metadata.commandId);
       expect(output).toContain(`"status":"${status}"`);
+      expect(output).toContain('"sequence":13');
+      expect(output).toContain("Readback omitted");
+      expect(Buffer.byteLength(output)).toBeLessThanOrEqual(AGENT_OUTPUT_MAX_BYTES);
     }
-  });
-  it("keeps IDs, pagination and old approval evidence outside the activity tail", () => {
-    const approval = {
-      id: "approval-event",
-      tone: "approval",
-      kind: "approval.requested",
-      summary: "Approve command",
-      payload: { requestId: "approval-a", requestKind: "command", detail: "echo ok" },
-      turnId: "turn-a",
-      createdAt: now,
-    };
-    const large = decodeDetail({
-      ...detail,
-      thread: {
-        ...thread,
-        activities: [
-          approval,
-          ...Array.from({ length: 50 }, (_, i) => ({
-            ...approval,
-            id: `event-${i}`,
-            kind: "tool.updated",
-            payload: { image: "x".repeat(10000) },
-          })),
-        ],
-      },
-    });
-    const result = compactAgentSnapshot(identity, shell, large);
-    expect(result.thread?.id).toBe("thread-a");
-    expect(result.thread?.requests[0]?.requestId).toBe("approval-a");
-    expect(result.thread?.page?.hasMore).toBe(true);
-    expect(result.thread?.activities.length).toBeLessThanOrEqual(20);
-    expect(Buffer.byteLength(encodeAgentOutput(result), "utf8")).toBeLessThan(40_000);
-  });
-  it("pages both lists without skipping entries and bounds error/output text", () => {
-    const many = decodeShell({
-      ...shell,
-      threads: Array.from({ length: 52 }, (_, i) => ({ ...shell.threads[0], id: `thread-${i}` })),
-    });
-    expect(compactAgentSnapshot(identity, many).listPage.nextOffset).toBe(25);
-    const second = compactAgentSnapshot(identity, many, undefined, 25);
-    expect(second.threads[0]?.id).toBe("thread-25");
-    expect(second.listPage.nextOffset).toBe(50);
-    expect(compactAgentSnapshot(identity, many, undefined, 50).listPage.nextOffset).toBeNull();
-    const failed = decodeDetail({
-      ...detail,
-      thread: { ...thread, session: { ...thread.session, lastError: "error".repeat(10000) } },
-    });
-    expect(
-      compactAgentSnapshot(identity, shell, failed).thread?.session?.lastError?.length,
-    ).toBeLessThan(2100);
-    const receipt = encodeAgentOutput({
-      status: "accepted",
-      commandId: "command-a",
-      sequence: 13,
-      readback: "x".repeat(200000),
-    });
-    expect(receipt).toContain('"sequence":13');
-    expect(receipt).toContain("Readback omitted");
-    expect(Buffer.byteLength(receipt)).toBeLessThan(192 * 1024);
-  });
-  it("retains user-input choices and removes resolved request evidence", () => {
-    const requested = {
-      id: "event-a",
-      tone: "approval",
-      kind: "user-input.requested",
-      summary: "Pick",
-      payload: {
-        requestId: "request-a",
-        questions: [
-          { id: "q-a", question: "Pick one", options: [{ label: "One", description: "First" }] },
-        ],
-      },
-      turnId: "turn-a",
-      createdAt: now,
-      sequence: 1,
-    };
-    const open = decodeDetail({ ...detail, thread: { ...thread, activities: [requested] } });
-    expect(
-      compactAgentSnapshot(identity, shell, open).thread?.requests[0]?.questions,
-    ).toMatchObject([{ id: "q-a", options: [{ label: "One" }] }]);
-    const closed = decodeDetail({
-      ...detail,
-      thread: {
-        ...thread,
-        activities: [
-          requested,
-          { ...requested, id: "event-b", kind: "user-input.resolved", sequence: 2 },
-        ],
-      },
-    });
-    expect(compactAgentSnapshot(identity, shell, closed).thread?.requests).toEqual([]);
-    const manyChoices = decodeDetail({
-      ...detail,
-      thread: {
-        ...thread,
-        activities: [
-          {
-            ...requested,
-            payload: {
-              ...requested.payload,
-              questions: [
-                {
-                  id: "q-a",
-                  question: "Pick one",
-                  options: Array.from({ length: 12 }, (_, i) => ({
-                    label: `Choice ${i}`,
-                    description: "Details",
-                  })),
-                },
-              ],
-            },
-          },
-        ],
-      },
-    });
-    expect(
-      compactAgentSnapshot(identity, shell, manyChoices).thread?.requests[0]?.questionsTruncated,
-    ).toBe(true);
-  });
-  it("retains session identity and the newest generic session-info activities", () => {
-    const activities = [
-      {
-        id: "inventory-event",
-        tone: "info",
-        kind: "session.tool-inventory",
-        summary: "Tool inventory observed",
-        payload: {
-          inventory: ["node_repl", "cua_repl"],
-          accessToken: "fake-provider-session-token",
-          inputTokens: 42,
-        },
-        turnId: null,
-        sequence: 1,
-        createdAt: now,
-      },
-      ...Array.from({ length: 30 }, (_, index) => ({
-        id: `tool-${index}`,
-        tone: "tool",
-        kind: "tool.updated",
-        summary: `Tool ${index}`,
-        payload: { name: `tool-${index}` },
-        turnId: "turn-a",
-        sequence: index + 2,
-        createdAt: now,
-      })),
-    ];
-    const selected = decodeDetail({
-      ...detail,
-      thread: {
-        ...thread,
-        session: {
-          ...thread.session,
-          providerInstanceId: "codex_work",
-          lastError: "transport stopped",
-        },
-        activities,
-      },
-    });
-    const snapshot = compactAgentSnapshot(identity, shell, selected);
-    expect(snapshot.thread?.session).toMatchObject({
-      providerInstanceId: "codex_work",
-      status: "running",
-      lastError: "transport stopped",
-    });
-    expect(snapshot.thread?.latestTurn).toMatchObject({ state: "running", turnId: "turn-a" });
-    expect(snapshot.thread?.activities).toHaveLength(20);
-    expect(snapshot.thread?.recentSessionInfoActivities).toMatchObject([
-      {
-        kind: "session.tool-inventory",
-        payload: {
-          inventory: ["node_repl", "cua_repl"],
-          accessToken: "[redacted]",
-          inputTokens: 42,
-        },
-      },
-    ]);
-    expect(snapshot.thread?.sessionInfoActivitiesOmitted).toBe(0);
   });
 });
 

@@ -193,7 +193,7 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
         const headers = {
           authorization: `Bearer ${token}`,
           [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT,
-        };
+        } as const;
         const context = {
           environmentId: target.environmentId,
           runtime: target.runtime,
@@ -321,12 +321,28 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
         };
         yield* checked(() => validateAgentReceiptMetadata(receiptMetadata));
         const receipt = yield* Effect.result(
-          (command.type === "project.create" ||
-          command.type === "project.update" ||
-          command.type === "project.delete"
-            ? client.projects.mutate({ headers, payload: command })
-            : client.orchestration.dispatch({ headers, payload: command })
-          ).pipe(Effect.timeout(Duration.seconds(10))),
+          Effect.gen(function* () {
+            switch (command.type) {
+              case "project.create":
+                yield* client.projects.mutate({ headers, payload: command });
+                return { sequence: null };
+              case "project.update":
+                yield* client.projects.mutate({ headers, payload: command });
+                return { sequence: null };
+              case "project.delete":
+                yield* client.projects.mutate({ headers, payload: command });
+                return { sequence: null };
+              default:
+                // The client distributes command variants across overloads; schema decoding owns validation.
+                return yield* client.orchestration.dispatch({
+                  headers,
+                  payload: command,
+                  responseMode: "decoded-only",
+                } as Parameters<typeof client.orchestration.dispatch>[0] & {
+                  readonly responseMode: "decoded-only";
+                });
+            }
+          }).pipe(Effect.timeout(Duration.seconds(10))),
         );
         if (receipt._tag === "Failure" && isDispatchRejection(receipt.failure))
           return {
@@ -358,7 +374,7 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
           providerCompletion: "not-confirmed",
           projectionObserved:
             readback._tag === "Success" &&
-            "sequence" in receipt.success &&
+            receipt.success.sequence !== null &&
             readback.success.snapshotSequence >= receipt.success.sequence,
           readback: readback._tag === "Success" ? readback.success : undefined,
           readbackError:
@@ -443,7 +459,7 @@ const runAgent = Effect.fn("runAgent")(
       const auth = yield* EnvironmentAuth.EnvironmentAuth;
       return yield* executeAgentRequest(target, request, auth);
     }).pipe(
-      Effect.provide(EnvironmentAuth.runtimeLayer.pipe(Layer.provide(ServerConfig.layer(config)))),
+      Effect.provide(EnvironmentAuth.layerRuntime.pipe(Layer.provide(ServerConfig.layer(config)))),
     );
     yield* printOutput(result);
   },
@@ -474,12 +490,12 @@ const capabilitiesCommand = Command.make("capabilities", {
 const snapshotCommand = Command.make("snapshot", {
   baseDir: baseDirFlag,
   thread: threadFlag,
-  turnLimit: Flag.Integer("turn-limit").pipe(
+  turnLimit: Flag.Int("turn-limit").pipe(
     Flag.withSchema(AGENT_TURN_LIMIT_SCHEMA),
     Flag.withDefault(3),
   ),
   beforeCursor: Flag.String("before-cursor").pipe(Flag.optional),
-  offset: Flag.Integer("offset").pipe(
+  offset: Flag.Int("offset").pipe(
     Flag.withSchema(AGENT_OFFSET_SCHEMA),
     Flag.withDefault(0),
     Flag.withDescription(

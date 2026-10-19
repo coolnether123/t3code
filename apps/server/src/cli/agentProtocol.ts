@@ -422,6 +422,12 @@ export function compactAgentSnapshot(
     })),
     projectsOmitted: Math.max(0, shell.projects.length - offset - 25),
     threadsOmitted: Math.max(0, shell.threads.length - offset - 25),
+    listPage: {
+      offset,
+      limit: 25,
+      nextOffset:
+        Math.max(shell.projects.length, shell.threads.length) > offset + 25 ? offset + 25 : null,
+    },
     ...(projection === undefined
       ? {}
       : {
@@ -435,8 +441,40 @@ export function compactAgentSnapshot(
           })),
           requests: projection.runtimeRequests
             .filter((request) => request.status === "pending")
-            .slice(-25),
-          activity: projection.turnItems.slice(-20).map((item) => compactValue(item)),
+            .slice(-25)
+            .map((request) => {
+              const item = projection.turnItems.find(
+                (item) =>
+                  (item.type === "user_input_request" || item.type === "approval_request") &&
+                  item.requestId === request.id,
+              );
+              const detail =
+                item?.type === "user_input_request"
+                  ? { questions: item.questions }
+                  : item?.type === "approval_request"
+                    ? { requestKind: item.requestKind, prompt: item.prompt, options: item.options }
+                    : undefined;
+              return {
+                ...request,
+                detail: compactValue(detail, 0, { characters: 4000, truncated: false }, 5),
+              };
+            }),
+          activity: projection.turnItems.slice(-20).map((item) =>
+            compactValue(
+              {
+                id: item.id,
+                type: item.type,
+                status: item.status,
+                title: item.title,
+                ...("text" in item ? { text: item.text } : {}),
+                ...("message" in item ? { message: item.message } : {}),
+                ...("activity" in item ? { activity: item.activity } : {}),
+              },
+              0,
+              { characters: 1500, truncated: false },
+              4,
+            ),
+          ),
           historyCursor: detail?.historyCursor ?? null,
           hasMoreHistory: detail?.hasMoreHistory ?? false,
         }),

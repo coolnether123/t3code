@@ -52,6 +52,7 @@ const project = {
   scripts: [],
   createdAt: now,
   updatedAt: now,
+  deletedAt: null,
 };
 const json = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const fs = FileSystem.layerNoop({
@@ -282,7 +283,7 @@ describe("agent HTTP action receipt", () => {
   );
   it("generates schema discovery from existing command definitions", () => {
     expect(json(agentCommandSchema("thread.create"))).toContain("runtimeMode");
-    expect(json(agentCommandSchema("thread.turn.steer"))).toContain("expectedTurnId");
+    expect(json(agentCommandSchema("message.dispatch"))).toContain("targetRunId");
     expect(() => agentCommandSchema("thread.delete")).toThrow();
   });
   it.effect("keeps accepted receipts when readback fails without retrying", () =>
