@@ -1,3 +1,4 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off - UUIDv5 request IDs must stay synchronous and byte-compatible across retries.
 import * as NodeCrypto from "node:crypto";
 
 import {
@@ -9,12 +10,13 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import { HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http";
 
-import { codexRateLimitsToLimits } from "../provider/Layers/codexUsageLimits.ts";
-import { claudeUsageResponseToLimits } from "../provider/Layers/claudeUsageLimits.ts";
-import { makeUnavailableUsageLimits } from "../provider/providerUsageLimits.ts";
+import { codexRateLimitsToLimits } from "../provider/codexUsageLimits.ts";
+import { claudeUsageResponseToLimits } from "../provider/claudeUsageLimits.ts";
+import { makeUnavailableUsageLimits } from "@t3tools/provider-core/server/usageLimits";
 
 function codexPlanLabel(planType: string | null | undefined): string | undefined {
   switch (planType) {
@@ -154,7 +156,13 @@ export const makeCliproxyApi = Effect.gen(function* () {
     body?: unknown,
   ) {
     const url = yield* Effect.try({
-      try: () => new URL(`/v0/management/${path}`, config.url).toString(),
+      try: () => {
+        const base = new URL(config.url);
+        base.pathname = `${base.pathname.replace(/\/+$/, "")}/v0/management/${path}`;
+        base.search = "";
+        base.hash = "";
+        return base.toString();
+      },
       catch: () => new UsageLimitSourceError({ detail: "The hub URL is not valid." }),
     });
     const request = (
@@ -166,9 +174,35 @@ export const makeCliproxyApi = Effect.gen(function* () {
         Effect.flatMap(HttpClientResponse.filterStatusOk),
         Effect.flatMap((response) => response.json),
         Effect.timeout("15 seconds"),
-        Effect.mapError(
-          () => new UsageLimitSourceError({ detail: "The hub management request failed." }),
-        ),
+        Effect.mapError((error) => {
+          if (error._tag === "TimeoutError") {
+            return new UsageLimitSourceError({
+              detail: "The hub did not answer within 15 seconds.",
+            });
+          }
+          if (HttpClientError.isHttpClientError(error)) {
+            if (error.reason._tag === "StatusCodeError") {
+              return new UsageLimitSourceError({
+                detail: `The hub refused the management request (HTTP ${error.reason.response.status}).`,
+              });
+            }
+            if (error.reason._tag === "TransportError") {
+              let cause: unknown = error.reason.cause;
+              for (let depth = 0; depth < 5 && Predicate.isObject(cause); depth++) {
+                const code = Predicate.hasProperty(cause, "code") ? cause.code : undefined;
+                if (typeof code === "string" && /^[A-Z][A-Z0-9_]{1,63}$/.test(code)) {
+                  return new UsageLimitSourceError({
+                    detail: /CERT|TLS|SSL/.test(code)
+                      ? `The hub certificate could not be verified (${code}). Configure NODE_EXTRA_CA_CERTS with the trusted certificate authority.`
+                      : `The hub management request failed (${code}).`,
+                  });
+                }
+                cause = Predicate.hasProperty(cause, "cause") ? cause.cause : undefined;
+              }
+            }
+          }
+          return new UsageLimitSourceError({ detail: "The hub management request failed." });
+        }),
       );
     return response;
   });
@@ -329,8 +363,10 @@ export const makeCliproxyApi = Effect.gen(function* () {
     config: UsageLimitSourceConfig,
   ): Effect.fn.Return<ReadonlyArray<UsageLimitSourceAccount>, UsageLimitSourceError> {
     const accounts = yield* authFiles(config).pipe(
-      Effect.mapError(
-        () => new UsageLimitSourceError({ detail: "The hub could not list accounts." }),
+      Effect.mapError((error) =>
+        isUsageLimitSourceError(error)
+          ? error
+          : new UsageLimitSourceError({ detail: "The hub could not list accounts." }),
       ),
     );
     return yield* Effect.forEach(

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
-import * as NodeCrypto from "node:crypto";
+import * as Crypto from "effect/Crypto";
 import * as Schema from "effect/Schema";
 import {
   decodeQuotaHistory,
@@ -106,7 +106,8 @@ describe("saved quota history", () => {
       const archiveDir = `${file}.archive`;
       yield* fs.makeDirectory(archiveDir);
       const archiveText = `${encodeJson({ Samples: [archived, sample] })}\n`;
-      const name = `${NodeCrypto.createHash("sha256").update(archiveText).digest("hex")}.json`;
+      const crypto = yield* Crypto.Crypto;
+      const name = `${Buffer.from(yield* crypto.digest("SHA-256", Buffer.from(archiveText))).toString("hex")}.json`;
       yield* fs.writeFileString(path.join(archiveDir, name), archiveText);
       expect((yield* readQuotaHistory(file)).samples.map((row) => row.observedAt)).toEqual([
         "2026-07-20T17:00:00.000Z",
@@ -126,7 +127,8 @@ describe("saved quota history", () => {
       const archiveDir = `${file}.archive`;
       yield* fs.makeDirectory(archiveDir);
       const archiveText = encodeJson({ Samples: [{ ...sample, RemainingPercent: 11 }] });
-      const name = `${NodeCrypto.createHash("sha256").update(archiveText).digest("hex")}.json`;
+      const crypto = yield* Crypto.Crypto;
+      const name = `${Buffer.from(yield* crypto.digest("SHA-256", Buffer.from(archiveText))).toString("hex")}.json`;
       yield* fs.writeFileString(path.join(archiveDir, name), archiveText);
       expect((yield* readQuotaHistory(file)).status).toBe("invalid");
       yield* fs.writeFileString(path.join(archiveDir, name), " ".repeat(256 * 1024 + 1));

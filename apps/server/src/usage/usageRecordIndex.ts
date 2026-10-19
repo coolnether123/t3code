@@ -100,6 +100,10 @@ export function lowerBound(timestamps: Float64Array, timeMs: number): number {
 /** Sums of one group's records in positions `[start, end)`. */
 export interface GroupRange {
   readonly totals: UsageTokenTotals;
+  readonly categoryCostUsd: UsageCategoryCost | null;
+  readonly fastCostUsd: number;
+  readonly ultrafastCostUsd: number;
+  readonly speedPremiumUsd: number;
   readonly costUsd: number;
   readonly cacheSavingsUsd: number;
   readonly records: number;

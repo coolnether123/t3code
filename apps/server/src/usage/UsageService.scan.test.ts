@@ -4,7 +4,7 @@ import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsag
 import * as NodeSqlite from "node:sqlite";
 import * as Path from "effect/Path";
 import { describe, expect, it } from "@effect/vitest";
-import { vi } from "vite-plus/test";
+import { beforeEach, vi } from "vite-plus/test";
 import * as Effect from "effect/Effect";
 import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
@@ -79,6 +79,14 @@ const testLayer = Layer.mergeAll(
   ServerConfig.layerTest(process.cwd(), { prefix: "t3-scan-budget-test-" }),
 ).pipe(Layer.provideMerge(NodeServices.layer));
 
+beforeEach(() => {
+  inventoryComplete = true;
+  vi.mocked(listTranscriptFilesBounded).mockReset();
+  vi.mocked(readTranscriptRecords).mockReset();
+  vi.mocked(readRepeatedInputRecords).mockReset();
+  vi.mocked(transcriptCursorIsLineBoundary).mockReset();
+});
+
 describe("incremental scan integration", () => {
   for (const includeQuotaHistory of [false, true]) {
     it.effect(`bounds stalled settings with quota history ${includeQuotaHistory}`, () =>
@@ -145,12 +153,11 @@ describe("incremental scan integration", () => {
         Effect.provideService(FileSystem.FileSystem, {
           ...fs,
           exists: () => Effect.succeed(true),
-          readFileString: (path, ...args) =>
+          realPath: (path) => Effect.succeed(path),
+          readFileString: (path) =>
             path.endsWith("usage-scan-cache.json")
               ? Deferred.succeed(cacheStarted, undefined).pipe(Effect.andThen(Effect.never))
-              : path.endsWith("usage-imports.json")
-                ? Effect.succeed("")
-                : fs.readFileString(path, ...args),
+              : Effect.succeed(""),
         }),
         Effect.provideService(
           HttpClient.HttpClient,
@@ -1026,7 +1033,7 @@ describe("incremental scan integration", () => {
           ]),
         ),
       );
-      const oldCache = encodeJson({ ...encodedCache, version: 6 });
+      const oldCache = encodeJson(encodedCache);
       vi.mocked(readTranscriptRecords).mockClear();
       vi.mocked(readRepeatedInputRecords).mockClear();
       const service = yield* make.pipe(

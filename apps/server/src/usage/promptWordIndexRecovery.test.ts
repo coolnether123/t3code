@@ -167,9 +167,38 @@ it.effect(
           const complete = yield* readPromptWordIndex(sql, input, now);
           assert.strictEqual(complete.coverage.status, "complete");
           assert.strictEqual(complete.keyword?.count, 3);
-        }).pipe(Effect.provide(NodeSqliteClient.layer({ filename })));
+        }).pipe(Effect.provide(NodeSqliteClient.layer({ filename, readerWorker: true })));
       }),
     ),
+);
+
+it.effect("prompt checkpoints roll back with their caller transaction", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* createSource(sql);
+    yield* migration;
+    yield* sql`INSERT INTO projection_thread_messages VALUES ('nested', 'thread', 'user', 'build', ${now}, ${now})`;
+    const exit = yield* Effect.exit(
+      sql.withTransaction(
+        Effect.gen(function* () {
+          assert.strictEqual(yield* warmPromptWordIndexBatch(sql), 1);
+          return yield* Effect.fail("synthetic rollback");
+        }),
+      ),
+    );
+    assert.isTrue(Exit.isFailure(exit));
+    assert.strictEqual(
+      (yield* sql<{ count: number }>`SELECT count(*) AS count FROM usage_prompt_words_v1`)[0]!
+        .count,
+      0,
+    );
+    assert.strictEqual(
+      (yield* sql<{ count: number }>`SELECT count(*) AS count FROM usage_prompt_pending_v1`)[0]!
+        .count,
+      1,
+    );
+    assert.strictEqual(yield* warmPromptWordIndexBatch(sql), 1);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );
 
 it.effect("the background worker progresses without reads and is interrupted with its scope", () =>
@@ -201,7 +230,7 @@ it.effect("the background worker progresses without reads and is interrupted wit
       );
       assert.isTrue(Exit.isFailure(yield* Fiber.await(worker)));
       assert.strictEqual((yield* readPromptWordIndex(sql, input, now)).keyword?.count, 65);
-    }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   ),
 );
 
@@ -239,7 +268,7 @@ it.effect(
           (yield* sql`SELECT message_id FROM projection_thread_messages`).length,
           1,
         );
-      }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
+      }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
     ),
 );
 
@@ -314,5 +343,5 @@ it.effect(
       yield* sql`DROP TRIGGER synthetic_failed_message`;
       assert.strictEqual(yield* warmPromptWordIndexBatch(sql), 1);
       assert.strictEqual((yield* readPromptWordIndex(sql, input, now)).keyword?.count, 3);
-    }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );

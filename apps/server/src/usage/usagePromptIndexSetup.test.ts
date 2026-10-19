@@ -6,7 +6,7 @@ import { UsageDay } from "@t3tools/contracts";
 import { setupUsagePromptIndex } from "./usagePromptIndexSetup.ts";
 import { readPromptWordIndex, warmPromptWordIndexBatch } from "./promptWordIndex.ts";
 
-it.layer(NodeSqliteClient.layerMemory())("V2 prompt word index", (it) => {
+it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))("V2 prompt word index", (it) => {
   it.effect("indexes real prompts and updates or deletes their derived words", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;

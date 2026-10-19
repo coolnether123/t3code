@@ -23,7 +23,7 @@ const readIndexed = (sql: SqlClient.SqlClient, query: UsageReportInput, at: stri
     return yield* readPromptWordIndex(sql, query, at);
   });
 const decodeReport = Schema.decodeUnknownEffect(UsageReport);
-const layer = it.layer(NodeSqliteClient.layerMemory());
+const layer = it.layer(NodeSqliteClient.layer({ filename: ":memory:" }));
 
 layer("derived prompt word index", (it) => {
   it.effect(

@@ -4,7 +4,7 @@ import * as Schema from "effect/Schema";
 
 import type { UsageQuotaCostSnapshot } from "@t3tools/contracts";
 import { UsageQuotaCost, UsageSourceFingerprint } from "@t3tools/contracts";
-import { writeFileStringAtomically } from "../atomicWrite.ts";
+import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 
 export const QUOTA_COST_LEDGER_VERSION = 1 as const;
 export const MAX_QUOTA_COST_LEDGER_ROWS = 256;

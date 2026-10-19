@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import { ResetCheckFinding } from "@t3tools/contracts";
-import { toJsonSchemaObject } from "../textGeneration/TextGenerationUtils.ts";
+import { toJsonSchemaObject } from "@t3tools/provider-core/server/textGenerationUtils";
 import { resetCheckArgs, resetCheckPrompt, validateResetFinding } from "./resetCheckResearch.ts";
 import { ResetPublicFeed, validateResearchFinding } from "./resetCheckResearch.ts";
 import * as Schema from "effect/Schema";

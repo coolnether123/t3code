@@ -20,13 +20,15 @@ const routes = Layer.unwrap(
       WS_RPC_SERVER_OPTIONS,
     ).pipe(
       Effect.provide(
-        LegacyUsageRpcGroup.toLayer({
-          [WS_METHODS.serverGetUsageSummary]: (input) => usage.readSummary(input),
-          [WS_METHODS.serverGetUsageReport]: (input) => usage.readReport(input),
-        }),
+        Layer.mergeAll(
+          LegacyUsageRpcGroup.toLayer({
+            [WS_METHODS.serverGetUsageSummary]: (input) => usage.readSummary(input),
+            [WS_METHODS.serverGetUsageReport]: (input) => usage.readReport(input),
+          }),
+          RpcAuthorization.layer([AuthOrchestrationReadScope]),
+          RpcSerialization.layerJson,
+        ),
       ),
-      Effect.provide(RpcAuthorization.layer([AuthOrchestrationReadScope])),
-      Effect.provide(RpcSerialization.layerJson),
     );
     return HttpRouter.add("GET", "/ws", websocket);
   }),

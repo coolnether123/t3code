@@ -2,6 +2,8 @@ import { UsageDay, type UsageReportInput, type UsageReportPrompts } from "@t3too
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
 import * as Clock from "effect/Clock";
+import * as Option from "effect/Option";
+import { readOnly } from "@t3tools/shared/nodeSqliteClient";
 import type * as SqlClient from "effect/sql/SqlClient";
 import { isFrequentPromptWord, normalizePromptKeyword, promptWords } from "./promptWords.ts";
 import { promptUsageTimeBounds } from "./usagePromptReport.ts";
@@ -60,8 +62,16 @@ export const warmPromptWordIndexBatch = (
         occurrences,
         frequent: isFrequentPromptWord(word) ? 1 : 0,
       }));
-      const committed = yield* sql.withTransaction(
+      const committed = yield* Effect.scoped(
         Effect.gen(function* () {
+          // BEGIN IMMEDIATE runs before withTransaction's body. Reserve the writer
+          // so its busy timeout covers lock acquisition and cannot affect another caller.
+          const active = yield* Effect.serviceOption(sql.transactionService);
+          // The reserved connection has not begun a transaction yet. Its first
+          // withTransaction call must start at depth zero and install the semaphore.
+          const transaction = Option.isSome(active)
+            ? active.value
+            : ([yield* sql.reserve, -1] as const);
           return yield* Effect.acquireUseRelease(
             Effect.gen(function* () {
               const timeout = (yield* sql<{ timeout: number }>`PRAGMA busy_timeout`)[0]!.timeout;
@@ -69,26 +79,28 @@ export const warmPromptWordIndexBatch = (
               return timeout;
             }),
             () =>
-              Effect.gen(function* () {
-                // An edit or delete during parsing must not publish stale counts. This also
-                // handles delete/reinsert identity reuse without trusting updated_at.
-                const current = yield* sql`SELECT 1 FROM usage_prompt_pending_v1 q
+              sql.withTransaction(
+                Effect.gen(function* () {
+                  // An edit or delete during parsing must not publish stale counts. This also
+                  // handles delete/reinsert identity reuse without trusting updated_at.
+                  const current = yield* sql`SELECT 1 FROM usage_prompt_pending_v1 q
           JOIN ${sql(sourceTable)} m ON m.message_id = q.message_id
           WHERE q.message_id = ${row.messageId} AND q.generation = ${row.generation}
             AND m.role = 'user' AND m.thread_id = ${row.threadId} AND m.created_at = ${row.createdAt}
             AND length(m.text) = ${row.characters}
             AND substr(m.text, 1, ${MAX_MESSAGE_CHARACTERS}) = ${row.text}`;
-                if (current.length === 0) return false;
-                yield* sql`INSERT INTO usage_prompt_words_v1 (message_id, thread_id, created_at, words, characters)
+                  if (current.length === 0) return false;
+                  yield* sql`INSERT INTO usage_prompt_words_v1 (message_id, thread_id, created_at, words, characters)
           VALUES (${row.messageId}, ${row.threadId}, ${row.createdAt}, ${complete ? words.length : null}, ${row.characters})`;
-                for (let offset = 0; offset < entries.length; offset += 200) {
-                  yield* sql`INSERT INTO usage_prompt_terms_v1 ${sql.insert(entries.slice(offset, offset + 200))}`;
-                }
-                yield* sql`DELETE FROM usage_prompt_pending_v1 WHERE message_id = ${row.messageId}`;
-                return true;
-              }),
+                  for (let offset = 0; offset < entries.length; offset += 200) {
+                    yield* sql`INSERT INTO usage_prompt_terms_v1 ${sql.insert(entries.slice(offset, offset + 200))}`;
+                  }
+                  yield* sql`DELETE FROM usage_prompt_pending_v1 WHERE message_id = ${row.messageId}`;
+                  return true;
+                }),
+              ),
             (timeout) => sql.unsafe(`PRAGMA busy_timeout = ${timeout}`),
-          );
+          ).pipe(Effect.provideService(sql.transactionService, transaction));
         }),
       );
       if (committed) processed++;
@@ -122,102 +134,104 @@ export const readPromptWordIndex = (
   readAt: string,
   sourceTable = "projection_thread_messages",
 ) =>
-  sql.withTransaction(
-    Effect.gen(function* () {
-      const { sinceTime, untilTime } = promptUsageTimeBounds(input);
-      const keyword =
-        input.keyword === undefined ? undefined : normalizePromptKeyword(input.keyword);
-      const source = yield* sql<{ prompts: number }>`SELECT count(*) AS prompts
+  sql
+    .withTransaction(
+      Effect.gen(function* () {
+        const { sinceTime, untilTime } = promptUsageTimeBounds(input);
+        const keyword =
+          input.keyword === undefined ? undefined : normalizePromptKeyword(input.keyword);
+        const source = yield* sql<{ prompts: number }>`SELECT count(*) AS prompts
       FROM ${sql(sourceTable)} WHERE role = 'user'
         AND created_at >= ${sinceTime} AND created_at < ${untilTime}`;
-      const totals = (yield* sql<{
-        prompts: number;
-        words: number;
-        characters: number;
-        threads: number;
-        truncated: number;
-      }>`SELECT count(*) AS prompts, coalesce(sum(words), 0) AS words,
+        const totals = (yield* sql<{
+          prompts: number;
+          words: number;
+          characters: number;
+          threads: number;
+          truncated: number;
+        }>`SELECT count(*) AS prompts, coalesce(sum(words), 0) AS words,
       coalesce(sum(characters), 0) AS characters, count(DISTINCT thread_id) AS threads,
       coalesce(sum(words IS NULL), 0) AS truncated FROM usage_prompt_words_v1
       WHERE created_at >= ${sinceTime} AND created_at < ${untilTime}`)[0]!;
-      const daily = new Map<string, { prompts: number; words: number }>();
-      // At most 366 indexed range sums, without hydrating message timestamps.
-      for (
-        let dayTime = Date.parse(input.sinceDay);
-        dayTime <= Date.parse(input.untilDay);
-        dayTime += 86400000
-      ) {
-        const day = UsageDay.make(DateTime.formatIso(DateTime.makeUnsafe(dayTime)).slice(0, 10));
-        const bounds = promptUsageTimeBounds({ ...input, sinceDay: day, untilDay: day });
-        if (bounds.sinceTime >= bounds.untilTime) continue;
-        const row = (yield* sql<{ prompts: number; words: number }>`SELECT count(*) AS prompts,
+        const daily = new Map<string, { prompts: number; words: number }>();
+        // At most 366 indexed range sums, without hydrating message timestamps.
+        for (
+          let dayTime = Date.parse(input.sinceDay);
+          dayTime <= Date.parse(input.untilDay);
+          dayTime += 86400000
+        ) {
+          const day = UsageDay.make(DateTime.formatIso(DateTime.makeUnsafe(dayTime)).slice(0, 10));
+          const bounds = promptUsageTimeBounds({ ...input, sinceDay: day, untilDay: day });
+          if (bounds.sinceTime >= bounds.untilTime) continue;
+          const row = (yield* sql<{ prompts: number; words: number }>`SELECT count(*) AS prompts,
         coalesce(sum(words), 0) AS words FROM usage_prompt_words_v1
         WHERE created_at >= ${bounds.sinceTime} AND created_at < ${bounds.untilTime}`)[0]!;
-        if (row.prompts) daily.set(day, row);
-      }
-      const vocabulary = (yield* sql<{ words: number }>`SELECT count(DISTINCT t.word) AS words
+          if (row.prompts) daily.set(day, row);
+        }
+        const vocabulary = (yield* sql<{ words: number }>`SELECT count(DISTINCT t.word) AS words
       FROM usage_prompt_terms_v1 t JOIN usage_prompt_words_v1 w ON w.message_id = t.message_id
       WHERE w.created_at >= ${sinceTime} AND w.created_at < ${untilTime} AND t.frequent = 1`)[0]!
-        .words;
-      const ranked = yield* sql<{
-        word: string;
-        count: number;
-      }>`SELECT t.word, sum(t.occurrences) AS count
+          .words;
+        const ranked = yield* sql<{
+          word: string;
+          count: number;
+        }>`SELECT t.word, sum(t.occurrences) AS count
       FROM usage_prompt_terms_v1 t JOIN usage_prompt_words_v1 w ON w.message_id = t.message_id
       WHERE w.created_at >= ${sinceTime} AND w.created_at < ${untilTime} AND t.frequent = 1
       GROUP BY t.word ORDER BY count DESC, t.word LIMIT ${input.limit ?? 20}`;
-      const search =
-        keyword === undefined
-          ? undefined
-          : (yield* sql<{ count: number; prompts: number }>`
+        const search =
+          keyword === undefined
+            ? undefined
+            : (yield* sql<{ count: number; prompts: number }>`
       SELECT coalesce(sum(t.occurrences), 0) AS count, count(*) AS prompts
       FROM usage_prompt_terms_v1 t JOIN usage_prompt_words_v1 w ON w.message_id = t.message_id
       WHERE t.word = ${keyword} AND w.created_at >= ${sinceTime} AND w.created_at < ${untilTime}`)[0]!;
-      const reasons = [];
-      if (totals.prompts < source[0]!.prompts) reasons.push("index-warming");
-      if (totals.truncated > 0) reasons.push("message-text-limit");
-      const report: UsageReportPrompts = {
-        contractVersion: 1,
-        mode: "prompts",
-        readAt,
-        sinceDay: input.sinceDay,
-        untilDay: input.untilDay,
-        timeZone: input.timeZone,
-        scope: "t3UserMessages",
-        coverage: {
-          status: reasons.length ? "partial" : "complete",
-          examinedMessages: totals.prompts,
-          countedMessages: totals.prompts,
-          sourceMessages: source[0]!.prompts,
-          truncatedMessages: totals.truncated,
-          reasons,
-        },
-        totals: {
-          prompts: totals.prompts,
-          words: totals.words,
-          characters: totals.characters,
-          threads: totals.threads,
-          activeDays: daily.size,
-          averageWordsPerPrompt:
-            reasons.length || !totals.prompts ? null : totals.words / totals.prompts,
-        },
-        daily: [...daily]
-          .sort(([a], [b]) => a.localeCompare(b))
-          .map(([day, value]) => ({ day: UsageDay.make(day), ...value })),
-        words: ranked,
-        countedDistinctWords: vocabulary,
-        wordsTruncated: vocabulary > ranked.length,
-        ...(search === undefined ? {} : { keyword: { word: keyword!, ...search } }),
-        countingPolicy:
-          "Stored T3 user-message IDs only; not an author-verified personal archive. " +
-          "Assistant/tool/system text and attachment contents are excluded. Inline quotations and pasted text count. " +
-          "Mirrors reusing an ID count once; identical text with different IDs counts separately, including voice copies and retries without shared provenance. " +
-          "Words are NFKC-normalized Unicode letter/number runs with combining marks; punctuation splits words, emoji do not count. " +
-          "Keyword search is a lowercase whole-word match, includes stopwords and digits, and uses the same normalization as totals. " +
-          "Frequent words omit common English words, digit-bearing runs and runs outside 2–64 UTF-16 units. " +
-          "Characters count Unicode code points. Counts are not tokens or estimates. Local days are inclusive; exact instants are half-open. " +
-          "Rebuildable index unicode-runs-nfkc-v1; partial means unindexed or oversized messages, not complete history. Import omissions are unknown.",
-      };
-      return report;
-    }),
-  );
+        const reasons = [];
+        if (totals.prompts < source[0]!.prompts) reasons.push("index-warming");
+        if (totals.truncated > 0) reasons.push("message-text-limit");
+        const report: UsageReportPrompts = {
+          contractVersion: 1,
+          mode: "prompts",
+          readAt,
+          sinceDay: input.sinceDay,
+          untilDay: input.untilDay,
+          timeZone: input.timeZone,
+          scope: "t3UserMessages",
+          coverage: {
+            status: reasons.length ? "partial" : "complete",
+            examinedMessages: totals.prompts,
+            countedMessages: totals.prompts,
+            sourceMessages: source[0]!.prompts,
+            truncatedMessages: totals.truncated,
+            reasons,
+          },
+          totals: {
+            prompts: totals.prompts,
+            words: totals.words,
+            characters: totals.characters,
+            threads: totals.threads,
+            activeDays: daily.size,
+            averageWordsPerPrompt:
+              reasons.length || !totals.prompts ? null : totals.words / totals.prompts,
+          },
+          daily: [...daily]
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([day, value]) => ({ day: UsageDay.make(day), ...value })),
+          words: ranked,
+          countedDistinctWords: vocabulary,
+          wordsTruncated: vocabulary > ranked.length,
+          ...(search === undefined ? {} : { keyword: { word: keyword!, ...search } }),
+          countingPolicy:
+            "Stored T3 user-message IDs only; not an author-verified personal archive. " +
+            "Assistant/tool/system text and attachment contents are excluded. Inline quotations and pasted text count. " +
+            "Mirrors reusing an ID count once; identical text with different IDs counts separately, including voice copies and retries without shared provenance. " +
+            "Words are NFKC-normalized Unicode letter/number runs with combining marks; punctuation splits words, emoji do not count. " +
+            "Keyword search is a lowercase whole-word match, includes stopwords and digits, and uses the same normalization as totals. " +
+            "Frequent words omit common English words, digit-bearing runs and runs outside 2–64 UTF-16 units. " +
+            "Characters count Unicode code points. Counts are not tokens or estimates. Local days are inclusive; exact instants are half-open. " +
+            "Rebuildable index unicode-runs-nfkc-v1; partial means unindexed or oversized messages, not complete history. Import omissions are unknown.",
+        };
+        return report;
+      }),
+    )
+    .pipe(readOnly);

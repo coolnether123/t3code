@@ -211,7 +211,7 @@ describe("UsageService", () => {
           untilDay: UsageDay.make("2026-08-01"),
           timeZone: "UTC",
         };
-        const producer = yield* service.readReport(input).pipe(
+        const producer = yield* service.readReport({ ...input, promptSource: "t3" }).pipe(
           Effect.provideService(UsageProjection.UsageProjection, {
             getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 1 }),
             listPromptUsageMessages: () =>
@@ -677,19 +677,16 @@ describe("UsageService", () => {
       yield* Effect.promise(() => NodeFSP.writeFile(skillPath, skillText));
       yield* Effect.promise(() => NodeFSP.writeFile(unusedSkillPath, "# Never used\n"));
       const transcript = [
-        // @effect-diagnostics-next-line preferSchemaOverJson:off - Transcript fixture is JSONL.
         JSON.stringify({
           type: "session_meta",
           timestamp: "2026-08-01T10:00:00Z",
           payload: { type: "session_meta", id: "repeated-session", cwd: "C:/project" },
         }),
-        // @effect-diagnostics-next-line preferSchemaOverJson:off - Transcript fixture is JSONL.
         JSON.stringify({
           type: "turn_context",
           timestamp: "2026-08-01T10:00:01Z",
           payload: { type: "turn_context", model: "gpt-5.6-sol", turn_id: "repeated-turn" },
         }),
-        // @effect-diagnostics-next-line preferSchemaOverJson:off - Transcript fixture is JSONL.
         JSON.stringify({
           type: "event_msg",
           timestamp: "2026-08-01T10:00:02Z",
@@ -706,7 +703,6 @@ describe("UsageService", () => {
             },
           },
         }),
-        // @effect-diagnostics-next-line preferSchemaOverJson:off - Transcript fixture is JSONL.
         JSON.stringify({
           type: "response_item",
           timestamp: "2026-08-01T10:00:03Z",
@@ -972,7 +968,7 @@ describe("UsageService", () => {
     }).pipe(Effect.scoped),
   );
 
-  it.live("shares one scan between concurrent identical requests", () =>
+  it.live("shares pricing across concurrent reads and sees later transcript usage", () =>
     Effect.gen(function* () {
       const { transcript, settings, home } = yield* setup;
       yield* Effect.promise(() => NodeFSP.writeFile(transcript, claudeLine(1, 5)));
@@ -984,6 +980,9 @@ describe("UsageService", () => {
             prefix: "usage-service-flight-test",
             home,
             settings,
+            ratesDocument: {
+              "claude-fable-5": { input_cost_per_token: 1e-5, output_cost_per_token: 5e-5 },
+            },
             onRatesFetch: () => {
               ratesFetches += 1;
             },
@@ -991,16 +990,19 @@ describe("UsageService", () => {
         ),
       );
 
+      yield* service.refreshRates;
       const [first, second] = yield* Effect.all(
         [service.readSummary(WINDOW), service.readSummary(WINDOW)],
         { concurrency: 2 },
       );
-      assert.deepStrictEqual(first, second);
+      assert.deepStrictEqual(first.buckets, second.buckets);
       assert.strictEqual(ratesFetches, 1);
 
-      // A later request is fresh work again, not a stale cached answer.
-      yield* service.readSummary(WINDOW);
-      assert.strictEqual(ratesFetches, 2);
+      assert.strictEqual(totalOutputTokens(first), 5);
+      yield* Effect.promise(() => NodeFSP.appendFile(transcript, claudeLine(2, 7)));
+      const later = yield* service.readSummary({ ...WINDOW, refresh: true });
+      assert.strictEqual(totalOutputTokens(later), 12);
+      assert.strictEqual(ratesFetches, 1);
     }).pipe(Effect.scoped),
   );
 

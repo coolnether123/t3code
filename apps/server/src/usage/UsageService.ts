@@ -15,7 +15,6 @@ import { makeProviderUsageReader } from "./usageProviderReaders.ts";
  *
  * @module UsageService
  */
-import * as NodeCrypto from "node:crypto";
 import * as NodeOS from "node:os";
 
 import {
@@ -43,6 +42,7 @@ import {
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
@@ -487,7 +487,7 @@ const EMPTY_PRICING: UsagePricing = {
 };
 
 const emptyUsageSummary = (input: {
-  readonly clientContractVersion?: number;
+  readonly clientContractVersion?: number | undefined;
   readonly timeZone: string;
   readonly sinceDay: UsageDay;
   readonly untilDay: UsageDay;
@@ -526,6 +526,7 @@ export const layerTest = Layer.succeed(
 );
 
 export const make = Effect.gen(function* () {
+  const crypto = yield* Crypto.Crypto;
   const fileSystem = yield* FileSystem.FileSystem;
   setPromptIndexCutover(yield* promptCutoverEnabled(process.env, fileSystem));
   const path = yield* Path.Path;
@@ -630,7 +631,9 @@ export const make = Effect.gen(function* () {
     if (parsed.size === 0) return;
     rates = parsed;
     const revisionDocument = encodeRateDocument(fromDisk.document);
-    ratesRevision = NodeCrypto.createHash("sha256").update(revisionDocument).digest("hex");
+    ratesRevision = Buffer.from(
+      yield* crypto.digest("SHA-256", Buffer.from(revisionDocument)).pipe(Effect.orDie),
+    ).toString("hex");
     ratesFetchedAtMs = fromDisk.fetchedAtMs;
     ratesStatus = "cached";
   });
@@ -678,7 +681,9 @@ export const make = Effect.gen(function* () {
             rates = fetched.parsed;
             ratesLastFailedAtMs = null;
             const revisionDocument = encodeRateDocument(fetched.document);
-            ratesRevision = NodeCrypto.createHash("sha256").update(revisionDocument).digest("hex");
+            ratesRevision = Buffer.from(
+              yield* crypto.digest("SHA-256", Buffer.from(revisionDocument)).pipe(Effect.orDie),
+            ).toString("hex");
             ratesFetchedAtMs = now;
             ratesStatus = "fresh";
 
@@ -760,7 +765,9 @@ export const make = Effect.gen(function* () {
     ) {
       yield* addCodexHome(
         "codex",
-        Schema.decodeUnknownSync(CodexSettings)({ homePath: hostEnvironment.CODEX_HOME ?? "" }),
+        yield* decodeCodexSettings({ homePath: hostEnvironment.CODEX_HOME ?? "" }).pipe(
+          Effect.orDie,
+        ),
       );
     }
     for (const [instanceId, instance] of Object.entries(settings.providerInstances)) {
@@ -1111,6 +1118,7 @@ export const make = Effect.gen(function* () {
     const quotaHistory =
       input.includeQuotaHistory || input.quotaHistoryOnly || input.quotaIntervals !== undefined
         ? yield* readQuotaHistory(undefined).pipe(
+            Effect.provideService(Crypto.Crypto, crypto),
             Effect.provideService(FileSystem.FileSystem, fileSystem),
             Effect.provideService(Path.Path, path),
           )

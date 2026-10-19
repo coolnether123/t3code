@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - Exercises the Promise-based transcript reader with disposable native files.
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";

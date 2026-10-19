@@ -6,7 +6,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as UsageProjection from "./UsageProjection.ts";
 
-it.layer(NodeSqliteClient.layerMemory())("V2 usage projection", (it) => {
+it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))("V2 usage projection", (it) => {
   it.effect("maps exact native sessions and preserves ambiguous matches", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;

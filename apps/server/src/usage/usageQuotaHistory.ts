@@ -1,6 +1,6 @@
 import { mapUsageModel } from "./usageAggregation.ts";
 import * as NodeOS from "node:os";
-import * as NodeCrypto from "node:crypto";
+import * as Crypto from "effect/Crypto";
 
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -151,7 +151,11 @@ export const readQuotaHistory = Effect.fn("UsageQuotaHistory.read")(
       const archiveText = yield* fileSystem.readFileString(archivePath);
       if (Buffer.byteLength(archiveText, "utf8") > MAX_ARCHIVE_BYTES)
         return decodeQuotaHistory(null);
-      if (`${NodeCrypto.createHash("sha256").update(archiveText).digest("hex")}.json` !== name) {
+      const crypto = yield* Crypto.Crypto;
+      const digest = Buffer.from(
+        yield* crypto.digest("SHA-256", Buffer.from(archiveText)),
+      ).toString("hex");
+      if (`${digest}.json` !== name) {
         return decodeQuotaHistory(null);
       }
       const archive = yield* decodeHistoryJson(archiveText);
