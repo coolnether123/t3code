@@ -35,7 +35,8 @@ export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(
       new VoiceRequestError("Local voice request validation failed. This is a client bug.", false),
   });
   // The voice route streams NDJSON outside the typed HTTP API, so it is signed and fetched by URL.
-  const voiceUrl = new URL("/api/voice", input.prepared.httpBaseUrl).toString();
+  // A refreshed relay credential can move the environment, so each attempt resolves it again.
+  let voiceUrl = "";
   const result = yield* executeAuthenticatedEnvironmentHttpRequest({
     ...input,
     group: "orchestration",
@@ -46,7 +47,10 @@ export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(
         : input.request.action === "call.speak" && input.request.streamAudio
           ? 330_000
           : 100_000,
-    url: () => voiceUrl,
+    url: (urls) => {
+      voiceUrl = new URL("/api/voice", urls.shellSnapshot()).toString();
+      return voiceUrl;
+    },
     request: ({ headers }) =>
       Effect.tryPromise({
         try: async (signal) => {
