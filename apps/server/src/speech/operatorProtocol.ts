@@ -1,4 +1,5 @@
 import * as Schema from "effect/Schema";
+import * as Option from "effect/Option";
 import { CallModels, OperatorUpdate, VoiceDelegation, ModelSelection } from "@t3tools/contracts";
 import type { ProviderRuntimeEvent } from "@t3tools/contracts";
 
@@ -15,7 +16,9 @@ export const OperatorJob = Schema.Struct({
   intent: Schema.String,
   context: Schema.optional(Schema.String),
   selection: ModelSelection,
-  phase: Schema.Literals(["queued", "sending", "running", "done", "uncertain"]),
+  phase: Schema.Literals(["queued", "sending", "running", "retrying", "done", "uncertain"]),
+  retryCount: Schema.optional(Schema.Number),
+  retiredTurnIds: Schema.optional(Schema.Array(Schema.String)),
   sessionId: Schema.optional(Schema.String),
   turnId: Schema.optional(Schema.String),
   result: Schema.optional(Schema.String),
@@ -42,6 +45,34 @@ export const OperatorChat = Schema.Struct({
   requests: Schema.Record(Schema.String, Schema.String),
 });
 export type OperatorChat = typeof OperatorChat.Type;
+
+const decodeProviderFailure = Schema.decodeUnknownOption(
+  Schema.Struct({
+    error: Schema.Struct({ codexErrorInfo: Schema.optional(Schema.String) }),
+    willRetry: Schema.optional(Schema.Boolean),
+  }),
+);
+/** Capacity is a confirmed provider rejection, unlike uncertain transport delivery. */
+export function operatorCapacityFailure(
+  event: Extract<ProviderRuntimeEvent, { type: "runtime.error" | "turn.completed" }>,
+) {
+  const detail =
+    event.type === "runtime.error" ? decodeProviderFailure(event.payload.detail) : Option.none();
+  if (Option.isSome(detail) && detail.value.willRetry) return false;
+  if (
+    event.type === "runtime.error" &&
+    event.payload.class &&
+    event.payload.class !== "provider_error"
+  )
+    return false;
+  if (event.type === "turn.completed" && event.payload.state !== "failed") return false;
+  return (
+    (Option.isSome(detail) && detail.value.error.codexErrorInfo === "serverOverloaded") ||
+    /\boverloaded\b|\bat capacity\b|\bcapacity (?:exceeded|unavailable)\b/i.test(
+      event.type === "runtime.error" ? event.payload.message : (event.payload.errorMessage ?? ""),
+    )
+  );
+}
 
 const decodeDelegation = Schema.decodeUnknownSync(VoiceDelegation);
 const decodeUpdate = Schema.decodeUnknownSync(

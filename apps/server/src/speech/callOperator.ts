@@ -21,11 +21,13 @@ import {
   type OperatorLink,
   operatorPrompt,
   operatorUpdates,
+  operatorCapacityFailure,
   voiceDelegation,
   VOICE_ROLE_PROMPT,
 } from "./operatorProtocol.ts";
 
 const now = () => DateTime.formatIso(Effect.runSync(DateTime.now));
+const operatorRetryDelays = [1000, 2000, 4000] as const;
 export const isCallLinkedSession = (id: string) => id.startsWith("t3-call-");
 export interface OperatorPorts {
   context(threadId: string): Promise<{
@@ -46,8 +48,13 @@ export class CallOperator {
   private ports: OperatorPorts | undefined;
   private tasks = new Set<Promise<unknown>>();
   private store: CallStore;
-  constructor(store: CallStore) {
+  private wait: (milliseconds: number) => Promise<void>;
+  constructor(
+    store: CallStore,
+    wait = (milliseconds: number) => Effect.runPromise(Effect.sleep(milliseconds)),
+  ) {
     this.store = store;
+    this.wait = wait;
   }
   bind(ports: OperatorPorts) {
     this.ports = ports;
@@ -300,6 +307,16 @@ export class CallOperator {
     return link;
   }
   private async operatorEvent(link: OperatorLink, chat: OperatorChat, event: ProviderRuntimeEvent) {
+    if (
+      event.turnId &&
+      chat.jobs.some(
+        (entry) =>
+          entry.sessionId === link.sessionId &&
+          (entry.retiredTurnIds?.includes(event.turnId!) ||
+            (entry.phase === "done" && entry.turnId === event.turnId)),
+      )
+    )
+      return link;
     const job = chat.jobs.find(
       (entry) =>
         entry.sessionId === link.sessionId &&
@@ -378,7 +395,50 @@ export class CallOperator {
   ) {
     const latest = await this.read(link.threadId);
     const completedJob = latest?.jobs.find((entry) => entry.id === job.id);
+    if (
+      !completedJob ||
+      !["running", "sending", "uncertain"].includes(completedJob.phase) ||
+      (completedJob.retryCount ?? 0) !== (job.retryCount ?? 0)
+    )
+      return;
     const succeeded = event.type === "turn.completed" && event.payload.state === "completed";
+    const capacityFailure = operatorCapacityFailure(event);
+    const retryCount = completedJob?.retryCount ?? 0;
+    const delay = operatorRetryDelays[retryCount];
+    if (capacityFailure && delay !== undefined) {
+      let claimed = false;
+      await this.change(link.threadId, (current) => {
+        const entry = current.jobs.find((entry) => entry.id === job.id)!;
+        if (
+          !["running", "sending", "uncertain"].includes(entry.phase) ||
+          (entry.retryCount ?? 0) !== (job.retryCount ?? 0)
+        )
+          return;
+        entry.phase = "retrying";
+        entry.retryCount = retryCount + 1;
+        entry.retiredTurnIds = [
+          ...new Set([
+            ...(entry.retiredTurnIds ?? []),
+            ...(event.turnId ? [event.turnId] : []),
+            ...(entry.turnId ? [entry.turnId] : []),
+          ]),
+        ];
+        delete entry.turnId;
+        delete entry.result;
+        claimed = true;
+      });
+      if (claimed) {
+        await this.update(
+          link.threadId,
+          job.id,
+          `${job.id}:retry:${retryCount + 1}`,
+          "progress",
+          `The selected model is busy. Retrying in ${delay / 1000} ${delay === 1000 ? "second" : "seconds"}, retry ${retryCount + 1} of ${operatorRetryDelays.length}.`,
+        );
+        this.background(this.retryOperator(link.threadId, job.id, retryCount + 1, delay));
+      }
+      return;
+    }
     if (succeeded && completedJob?.result)
       await this.update(
         link.threadId,
@@ -396,7 +456,9 @@ export class CallOperator {
         job.id,
         `${event.eventId}:result`,
         "needs-Jared",
-        "The background turn ended without a verified result. Check its activity.",
+        capacityFailure
+          ? "The selected model is still at capacity after three retries. Try again later or choose a different background model."
+          : "The background turn ended without a verified result. Check its activity.",
       );
     }
     await this.change(link.threadId, (current) => {
@@ -404,12 +466,24 @@ export class CallOperator {
     });
     this.background(this.kick(link.threadId));
   }
+  private async retryOperator(threadId: string, jobId: string, retryCount: number, delay: number) {
+    await this.wait(delay);
+    await this.change(threadId, (current) => {
+      const entry = current.jobs.find((entry) => entry.id === jobId)!;
+      if (entry.phase === "retrying" && entry.retryCount === retryCount) entry.phase = "queued";
+    });
+    await this.kick(threadId);
+  }
   async kick(threadId: string) {
     const chat = await this.read(threadId);
     if (
       !chat ||
       chat.jobs.some(
-        (job) => job.phase === "running" || job.phase === "sending" || job.phase === "uncertain",
+        (job) =>
+          job.phase === "running" ||
+          job.phase === "sending" ||
+          job.phase === "uncertain" ||
+          job.phase === "retrying",
       )
     )
       return;
@@ -418,7 +492,11 @@ export class CallOperator {
     const link = await this.link(threadId, "operator", job.selection);
     let claimed = false;
     await this.change(threadId, (current) => {
-      if (current.jobs.some((entry) => ["running", "sending", "uncertain"].includes(entry.phase)))
+      if (
+        current.jobs.some((entry) =>
+          ["running", "sending", "uncertain", "retrying"].includes(entry.phase),
+        )
+      )
         return;
       const entry = current.jobs.find((entry) => entry.id === job.id)!;
       entry.phase = "sending";
@@ -430,7 +508,7 @@ export class CallOperator {
       await this.ensure(link);
       await this.requirePorts().send({
         threadId: ThreadId.make(link.sessionId),
-        messageId: job.id,
+        messageId: job.retryCount ? `${job.id}:retry:${job.retryCount}` : job.id,
         modelSelection: job.selection,
         input: operatorPrompt(job),
       });
@@ -446,9 +524,15 @@ export class CallOperator {
         "The background agent received the request.",
       );
     } catch {
+      let uncertain = false;
       await this.change(threadId, (current) => {
-        current.jobs.find((entry) => entry.id === job.id)!.phase = "uncertain";
+        const entry = current.jobs.find((entry) => entry.id === job.id)!;
+        if (entry.phase === "sending" && (entry.retryCount ?? 0) === (job.retryCount ?? 0)) {
+          entry.phase = "uncertain";
+          uncertain = true;
+        }
       });
+      if (!uncertain) return;
       await this.update(
         threadId,
         job.id,

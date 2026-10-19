@@ -1,9 +1,109 @@
 # Otis Call phase 2 handoff
 
 Task `agenda-task:515bbc54cb61482681e950e524421ce4`.
-Handoff visibility and phone panel fixes base `75381552b7`, branch `work/otis-call-20261018`, upstream
+Capacity retry and delivery evidence fixes base `36e4e2bd2d`, branch `work/otis-call-20261018`, upstream
 `origin/work/otis-call-20261018`. Changes remain uncommitted as requested.
 Observation date: 18 October 2026, America/Chicago, CDT.
+
+## Current follow-up after live-6
+
+The parent committed the handoff and panel fixes as `36e4e2bd2d` and accepted
+the 375 px panel in `.logs/otis-call/phase2-live-6`. The voice picker and footer
+actions fit, no JSON appeared, and the voice spoke the operator failure
+naturally. That is parent evidence for the base, not a live run of this patch.
+No new browser launch or live T3/router change was performed here. Preserve
+the parent's pre-existing `apps/server/package.json` edit; it is unrelated.
+
+The linked operator log at 20:01:27 CDT contains `runtime.error` with
+`codexErrorInfo: serverOverloaded`, `willRetry: false`, and the selected-model
+capacity message. A failed `turn.completed` follows ten milliseconds later.
+`CallOperator` previously treated either terminal receipt as final and asked
+Jared immediately. The canonical event pairs are in the retained
+`events.t3-call-operator-b2172a27db5322062a6fab0474ab14f2bc9a1bf47990be35.log`
+under the isolated acceptance home's provider logs.
+
+`apps/server/src/speech/operatorProtocol.ts` now classifies confirmed capacity
+rejections by the structured overload code or the capacity/overload message.
+`callOperator.ts` retries three times after 1, 2 and 4 seconds. Each retry keeps
+the job's exact model, provider instance and effort, reuses its existing linked
+session and uses a distinct attempt message ID. Changing the selector applies
+to later work; it does not substitute a model during this retry sequence.
+The typed `progress` update says "Retrying" and includes its delay and retry
+count. Routine progress remains available to the voice model when Jared asks.
+After the fourth rejected turn, a `needs-Jared` result explains the capacity
+failure. Quota, permission, transport and interrupted failures are not retried
+as capacity errors. Provider-owned retries remain provider-owned.
+
+The internal job schema adds optional retry count and retired turn IDs plus a
+`retrying` phase. Older saved jobs remain readable. Claims are serialized;
+retired/error-completed turns cannot finish a later retry or another job in
+that session. Unverified done text is cleared before retrying. The existing
+uncertain-delivery path remains for unconfirmed sends. The backoff belongs to
+operator work and continues after hang-up. T3-process restart recovery retains
+the previously documented limitations; no live restart was tested.
+
+The generic "Background update ready." record remains internal server turn
+input. `projectConversationThread` already removes its `voice-update:` user
+message at all shared client-state boundaries. The web chat reads that state
+through `useThreadDetail`; both snapshot/cache and streamed-update regressions
+assert that the plain announcement and old raw prompts are absent while the
+voice reply and activity remain. The parent screenshot was inspected; it does
+not provide a full uncovered view of the thread. This patch changes no UI
+filter or renderer, and does not claim a new live rendering measurement.
+
+The helper was already counting the delivered message ID, so extra internal
+turns could not increase that count. The live-6 report instead reached its
+deadline while waiting for the successful operator result. The normal count
+assignment follows that wait, while the report initialized it to false and
+cleanup could overwrite it with false after unavailable readback. That false
+was not evidence of a duplicate user message.
+
+`scripts/otis-call-acceptance.mjs` now starts readback at delivery acknowledgment
+and checkpoints it before the operator wait. `verifyCallDelivery` in
+`scripts/lib/otis-call-evidence.mjs` counts only that delivery ID, preserves a
+known count if cleanup readback fails and leaves unavailable counts null.
+`deliveredMessageCount` and `chatMessageReadbackError` distinguish duplicates
+from missing evidence. Operator completion timing now records a successful
+attempt; failed attempts are counted separately and cannot carry an old typed
+result into a later attempt.
+
+Retain the single-caller `operatorCapacityFailure` classifier as the protocol
+boundary and `retryOperator` as the backoff/queue boundary. `verifyCallDelivery`
+is the readback evidence boundary; the `readDelivery` closure is reused at
+delivery, final validation and cleanup. No new agent system, provider, model
+catalog or wire status type was introduced.
+
+Current receipts and full logs belong under
+`.logs/otis-call/phase2-capacity-retry`. Exact commands and final source hashes
+are in its final evidence manifest. The earlier sync-fixture failures remain
+documented below; their tests were not changed. Parent acceptance should use
+a fresh 375 px call with output `.logs/otis-call/phase2-capacity-retry-live`:
+verify a real capacity rejection produces a retry status without immediate
+needs-Jared, keeps the selected model, then speaks/hears the recovered result
+or bounded exhaustion. Confirm `exactlyOneChatMessage: true` and no internal
+announcement bubble. An unavailable readback must report null with its named
+error.
+
+Final offline checks passed 117 tests across four focused files and 22 helper
+tests, exit 0. These cover capacity recovery and exhaustion, the pinned model
+and effort, hang-up during backoff, duplicate/late failure receipts, clearing
+an unverified old done claim, unrelated failures, shared-state announcement
+filtering, delivery proof and deadline behavior. Server, client-runtime and
+web typechecks passed, exit 0. Affected lint, source/Markdown formatting,
+acceptance syntax and diff whitespace checks passed, exit 0. The two lint
+warnings are unchanged schema compilation and Promise.all spread. No new live
+provider run occurred. Exact command receipts are in
+`.logs/otis-call/phase2-capacity-retry/final/check-results.json`.
+
+Owner job `d78d0450-8f4e-4100-9ea8-515bbc54ab02` remained queued after the
+ten-minute owner wait. Its readback position was 3, with no admission, logs or
+exit code. The direct offline receipts above are separate; queued submission
+is not passing evidence. No queue or unrelated job was changed. The manifest
+`.logs/otis-call/phase2-capacity-retry/final-evidence.json` binds the current
+owned sources to those receipts. Live retry recovery and the updated helper
+report remain parent acceptance gates.
+
+## Prior implementation and evidence
 
 The parent accepted `75381552b7` in `.logs/otis-call/phase2-live-5/report.json`:
 seven sentences played, the operator result was heard and hang-up acknowledged.

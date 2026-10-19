@@ -38,6 +38,7 @@ async function fixture() {
   directories.push(directory);
   const store = new CallStore(directory);
   const sessions: { threadId: string }[] = [];
+  const waits: { milliseconds: number; resolve(): void }[] = [];
   const ports: OperatorPorts = {
     context: vi.fn(async () => ({
       cwd: directory,
@@ -52,7 +53,13 @@ async function fixture() {
     sessions: async () => sessions,
     dispatch: vi.fn(async () => ({})),
   };
-  const operator = new CallOperator(store);
+  const operator = new CallOperator(
+    store,
+    (milliseconds) =>
+      new Promise<void>((resolve) => {
+        waits.push({ milliseconds, resolve });
+      }),
+  );
   operator.bind(ports);
   await operator.configure("chat", models);
   const event = (sessionId: string, type: string, turnId: string, payload: unknown = {}) =>
@@ -74,10 +81,195 @@ async function fixture() {
     await operator.event(event(link.sessionId, "turn.started", id));
     return link;
   };
-  return { store, ports, operator, event, startVoice };
+  const startOperator = async () => {
+    const link = await startVoice();
+    await operator.event(
+      event(link.sessionId, "turn.completed", "voice:call:utterance", { state: "completed" }),
+      '<otis-delegate>{"intent":"Check the build"}</otis-delegate>',
+    );
+    await operator.drain();
+    const job = (await operator.read("chat"))!.jobs[0]!;
+    await operator.event(event(job.sessionId!, "turn.started", "operator-0"));
+    return job;
+  };
+  return { store, ports, operator, event, startVoice, startOperator, waits };
 }
 
 describe("call delegation", () => {
+  it.each([
+    "Selected model is at capacity. Please try a different model.",
+    "Provider rejected the request.",
+  ])(
+    "retries serverOverloaded on the pinned model and ignores late receipts: %s",
+    async (message) => {
+      const f = await fixture();
+      const job = await f.startOperator();
+      const failure = f.event(job.sessionId!, "runtime.error", "operator-0", {
+        class: "provider_error",
+        message,
+        detail: { error: { codexErrorInfo: "serverOverloaded" }, willRetry: false },
+      });
+      await f.operator.event(failure);
+      await f.operator.event(failure);
+      expect(f.waits.map((wait) => wait.milliseconds)).toEqual([1000]);
+      expect((await f.operator.read("chat"))!.updates.at(-1)).toMatchObject({
+        status: "progress",
+        text: expect.stringContaining("Retrying"),
+      });
+      expect(
+        (await f.operator.read("chat"))!.updates.some((update) => update.status === "needs-Jared"),
+      ).toBe(false);
+      const call = new CallService(
+        f.store,
+        {
+          verify: async () => ({ runtimeMode: "approval-required", interactionMode: "default" }),
+          dispatch: f.ports.dispatch,
+          speech: async () => ({}),
+          tenants: ["stt", "tts"],
+          ttsModel: "synthetic-tts",
+        },
+        f.operator,
+      );
+      await call.handle(
+        {
+          action: "call.open",
+          callId: "retry-call",
+          options: {
+            threadId: "chat",
+            modelSelection: models.voice,
+            operatorSelection: models.operator,
+          },
+        },
+        new AbortController().signal,
+      );
+      await call.handle(
+        { action: "call.close", callId: "retry-call" },
+        new AbortController().signal,
+      );
+      await f.operator.event(
+        f.event(job.sessionId!, "turn.completed", "operator-0", { state: "failed" }),
+      );
+      await f.operator.configure("chat", {
+        ...models,
+        operator: { ...models.operator, model: "next-selection" },
+      });
+      f.waits[0]!.resolve();
+      await f.operator.drain();
+      expect(f.ports.send).toHaveBeenCalledTimes(3);
+      expect(f.ports.send).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          modelSelection: models.operator,
+          messageId: `${job.id}:retry:1`,
+          input: expect.stringContaining(job.exactWords),
+        }),
+      );
+      expect(f.ports.start).toHaveBeenCalledTimes(2);
+      await f.operator.event(failure);
+      await f.operator.event(
+        f.event(job.sessionId!, "turn.completed", "operator-0", { state: "failed" }),
+      );
+      expect((await f.operator.read("chat"))!.jobs[0]?.phase).toBe("running");
+      await f.operator.event(f.event(job.sessionId!, "turn.started", "operator-1"));
+      await f.operator.event(
+        f.event(job.sessionId!, "item.completed", "operator-1", {
+          itemType: "assistant_message",
+          status: "completed",
+          detail: '<otis-status>{"status":"done","text":"Build passed."}</otis-status>',
+        }),
+      );
+      await f.operator.event(
+        f.event(job.sessionId!, "turn.completed", "operator-1", { state: "completed" }),
+      );
+      await f.operator.drain();
+      expect(
+        (await f.operator.read("chat"))!.updates.filter((update) => update.status === "done"),
+      ).toHaveLength(1);
+      expect((await f.operator.read("chat"))!.updates.at(-1)?.text).toBe("Build passed.");
+    },
+  );
+  it("does not reuse a done claim from a rejected attempt", async () => {
+    const f = await fixture();
+    const job = await f.startOperator();
+    await f.operator.event(
+      f.event(job.sessionId!, "item.completed", "operator-0", {
+        itemType: "assistant_message",
+        status: "completed",
+        detail: '<otis-status>{"status":"done","text":"Not verified."}</otis-status>',
+      }),
+    );
+    await f.operator.event(
+      f.event(job.sessionId!, "runtime.error", "operator-0", {
+        class: "provider_error",
+        message: "Server overloaded.",
+      }),
+    );
+    f.waits[0]!.resolve();
+    await f.operator.drain();
+    await f.operator.event(f.event(job.sessionId!, "turn.started", "operator-1"));
+    await f.operator.event(
+      f.event(job.sessionId!, "turn.completed", "operator-1", { state: "completed" }),
+    );
+    await f.operator.drain();
+    const updates = (await f.operator.read("chat"))!.updates;
+    expect(updates.some((update) => update.status === "done")).toBe(false);
+    expect(updates.at(-1)?.status).toBe("needs-Jared");
+  });
+  it("backs off three times for failed capacity turns, then asks Jared without changing models", async () => {
+    const f = await fixture();
+    const job = await f.startOperator();
+    for (let attempt = 0; attempt < 4; attempt++) {
+      await f.operator.event(
+        f.event(job.sessionId!, "turn.completed", `operator-${attempt}`, {
+          state: "failed",
+          errorMessage: "Selected model is at capacity.",
+        }),
+      );
+      if (attempt < 3) {
+        expect(
+          (await f.operator.read("chat"))!.updates.some(
+            (update) => update.status === "needs-Jared",
+          ),
+        ).toBe(false);
+        f.waits[attempt]!.resolve();
+        await f.operator.drain();
+        await f.operator.event(f.event(job.sessionId!, "turn.started", `operator-${attempt + 1}`));
+      }
+    }
+    await f.operator.drain();
+    expect(f.waits.map((wait) => wait.milliseconds)).toEqual([1000, 2000, 4000]);
+    const requests = vi
+      .mocked(f.ports.send)
+      .mock.calls.slice(1)
+      .map(([input]) => input);
+    expect(requests).toHaveLength(4);
+    for (const input of requests) expect(input.modelSelection).toEqual(models.operator);
+    expect(new Set(requests.map((input) => input.messageId)).size).toBe(4);
+    expect(
+      (await f.operator.read("chat"))!.updates.filter((update) => update.status === "needs-Jared"),
+    ).toHaveLength(1);
+    expect((await f.operator.read("chat"))!.updates.at(-1)?.text).toContain("after three retries");
+  });
+  it.each([
+    {
+      type: "runtime.error",
+      payload: { class: "provider_error", message: "Usage limit exceeded." },
+    },
+    { type: "runtime.error", payload: { class: "transport_error", message: "Server overloaded." } },
+    {
+      type: "turn.completed",
+      payload: { state: "interrupted", errorMessage: "Selected model is at capacity." },
+    },
+  ])(
+    "does not capacity-retry unrelated or interrupted failures: $type $payload",
+    async ({ type, payload }) => {
+      const f = await fixture();
+      const job = await f.startOperator();
+      await f.operator.event(f.event(job.sessionId!, type, "operator-0", payload));
+      await f.operator.drain();
+      expect(f.waits).toHaveLength(0);
+      expect((await f.operator.read("chat"))!.updates.at(-1)?.status).toBe("needs-Jared");
+    },
+  );
   it("parses bounded typed control and keeps partial control out of speech", () => {
     expect(
       voiceDelegation('On it. <otis-delegate>{"intent":"Read the build status"}</otis-delegate>'),

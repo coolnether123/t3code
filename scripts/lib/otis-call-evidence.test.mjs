@@ -14,8 +14,62 @@ import {
   sentenceSpeechId,
   sentenceTimings,
   assertCallSelection,
+  verifyCallDelivery,
 } from "./otis-call-evidence.mjs";
 import * as NodeCrypto from "node:crypto";
+
+NodeTest.test(
+  "counts the delivered utterance independently of internal announcement turns",
+  async () => {
+    const report = { exactlyOneChatMessage: null, deliveredMessageCount: null };
+    const message = { id: "voice:synthetic-call:utterance", role: "user", text: "Check the task." };
+    const snapshot = {
+      thread: {
+        messages: [
+          message,
+          {
+            id: "voice-update:synthetic-call:result",
+            role: "user",
+            text: "Background update ready.",
+          },
+          { id: "reply", role: "assistant", text: "The task is open." },
+        ],
+      },
+    };
+    await verifyCallDelivery(report, async () => snapshot, message.id);
+    NodeAssert.equal(report.exactlyOneChatMessage, true);
+    NodeAssert.equal(report.deliveredMessageCount, 1);
+    await verifyCallDelivery(
+      report,
+      async () => {
+        throw Error("Browser closed after a deadline");
+      },
+      message.id,
+    );
+    NodeAssert.equal(report.exactlyOneChatMessage, true);
+    NodeAssert.equal(report.deliveredMessageCount, 1);
+    NodeAssert.match(report.chatMessageReadbackError, /unavailable/);
+    snapshot.thread.messages.push(message);
+    await verifyCallDelivery(report, async () => snapshot, message.id);
+    NodeAssert.equal(report.exactlyOneChatMessage, false);
+    NodeAssert.equal(report.deliveredMessageCount, 2);
+  },
+);
+NodeTest.test(
+  "keeps missing readback unknown instead of claiming a duplicate user message",
+  async () => {
+    const report = { exactlyOneChatMessage: null, deliveredMessageCount: null };
+    await verifyCallDelivery(
+      report,
+      async () => {
+        throw Error("Timed out");
+      },
+      "voice:call:utterance",
+    );
+    NodeAssert.equal(report.exactlyOneChatMessage, null);
+    NodeAssert.equal(report.deliveredMessageCount, null);
+  },
+);
 
 NodeTest.test("preflights medium and low from the CLI thread snapshot model selection", () => {
   for (const effort of ["medium", "low"]) {

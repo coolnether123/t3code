@@ -16,6 +16,7 @@ import {
   hasOperatorResult,
   callTimings,
   verifyCallRaw,
+  verifyCallDelivery,
   sentenceSpeechId,
   sentenceTimings,
   assertCallSelection,
@@ -122,7 +123,8 @@ const report = {
   rawVerified: false,
   rawSha256: null,
   rawBytes: null,
-  exactlyOneChatMessage: false,
+  exactlyOneChatMessage: null,
+  deliveredMessageCount: null,
   requestedSelectionVerified: false,
   actualModel: null,
   sdkConfiguredEffort: null,
@@ -136,6 +138,7 @@ const report = {
     turnCompleted: false,
     typedResult: false,
     heard: false,
+    failedAttempts: 0,
   },
   otisToolCompleted: false,
   turnCompleted: false,
@@ -279,6 +282,24 @@ const accepted = await runAcceptanceWithDeadline({
 
     let uploaded;
     let delivered;
+    let deliveryReadback;
+    const readDelivery = async () => {
+      if (!delivered) return;
+      await verifyCallDelivery(
+        report,
+        () =>
+          page.evaluate(async (threadId) => {
+            const response = await fetch(
+              `/api/orchestration/threads/${encodeURIComponent(threadId)}?turnLimit=20`,
+              { credentials: "include" },
+            );
+            if (!response.ok) throw new Error("Readback failed");
+            return response.json();
+          }, values["thread-id"]),
+        delivered.messageId,
+      );
+      checkpoint();
+    };
     let rawCheck;
     let resolveUploaded;
     let resolveDelivered;
@@ -351,10 +372,15 @@ const accepted = await runAcceptanceWithDeadline({
           report.otisToolCompleted = true;
           mark("otisToolCompleted", Date.parse(event.createdAt));
         }
+        if (event.type === "turn.started") report.operator.typedResult = false;
         if (hasOperatorResult(event)) report.operator.typedResult = true;
         if (event.type === "turn.completed") {
           report.operator.turnCompleted = payload.state === "completed";
-          mark("operatorCompleted", Date.parse(event.createdAt));
+          if (report.operator.turnCompleted) mark("operatorCompleted", Date.parse(event.createdAt));
+          else {
+            report.operator.failedAttempts = (report.operator.failedAttempts ?? 0) + 1;
+            report.operator.typedResult = false;
+          }
           if (report.operator.turnCompleted && report.operator.typedResult)
             mark("operatorResult", Date.parse(event.createdAt));
         }
@@ -457,6 +483,7 @@ const accepted = await runAcceptanceWithDeadline({
         if (input.action === "call.deliver" && !delivered) {
           delivered = (await response.json()).utterance;
           mark("delivery");
+          deliveryReadback = readDelivery();
           resolveDelivered();
         }
         if (input.action === "call.close") {
@@ -667,6 +694,7 @@ const accepted = await runAcceptanceWithDeadline({
       await Promise.race([receipts.completion, attentionFailure, expired]);
       await receipts.drain();
       await Promise.race([deliveredReceipt, expired]);
+      await Promise.race([deliveryReadback, expired]);
       if (!values["hang-up-after-delivery"])
         await Promise.race([
           attentionFailure,
@@ -712,17 +740,7 @@ const accepted = await runAcceptanceWithDeadline({
       NodeAssert.ok(transcript.text === delivered.text, "Saved transcript and delivery disagree.");
       await rawCheck;
       NodeAssert.ok(report.rawVerified, "PC raw verification failed.");
-      const snapshot = await page.evaluate(async (threadId) => {
-        const response = await fetch(
-          `/api/orchestration/threads/${encodeURIComponent(threadId)}?turnLimit=20`,
-          { credentials: "include" },
-        );
-        if (!response.ok) throw new Error("Readback failed");
-        return response.json();
-      }, values["thread-id"]);
-      report.exactlyOneChatMessage =
-        snapshot.thread.messages.filter((message) => message.id === delivered.messageId).length ===
-        1;
+      await Promise.race([readDelivery(), expired]);
       if (split)
         NodeAssert.ok(
           report.operator.turnCompleted && report.operator.typedResult,
@@ -792,21 +810,7 @@ const accepted = await runAcceptanceWithDeadline({
       receipts.close();
       await rawCheck;
       if (delivered) {
-        const count = await page
-          .evaluate(
-            async ({ threadId, messageId }) => {
-              const response = await fetch(
-                `/api/orchestration/threads/${encodeURIComponent(threadId)}?turnLimit=20`,
-                { credentials: "include" },
-              );
-              if (!response.ok) throw new Error("Readback failed");
-              const snapshot = await response.json();
-              return snapshot.thread.messages.filter((message) => message.id === messageId).length;
-            },
-            { threadId: values["thread-id"], messageId: delivered.messageId },
-          )
-          .catch(() => null);
-        report.exactlyOneChatMessage = count === 1;
+        await Promise.race([readDelivery(), expired]).catch(() => {});
       }
       if (!report.closedAcknowledged)
         await close().catch((error) => {

@@ -4,6 +4,22 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeCrypto from "node:crypto";
 
+/** Preserve delivery evidence when a later operator wait or browser cleanup fails. */
+export async function verifyCallDelivery(report, loadSnapshot, messageId) {
+  try {
+    NodeAssert.ok(typeof messageId === "string" && messageId.length, "Missing delivery ID.");
+    const snapshot = await loadSnapshot();
+    NodeAssert.ok(Array.isArray(snapshot?.thread?.messages), "Missing thread messages.");
+    const count = snapshot.thread.messages.filter((message) => message.id === messageId).length;
+    report.deliveredMessageCount = count;
+    report.exactlyOneChatMessage = count === 1;
+    delete report.chatMessageReadbackError;
+  } catch {
+    report.chatMessageReadbackError =
+      "Chat delivery readback was unavailable. Earlier evidence is retained.";
+  }
+}
+
 export function assertCallSelection(selection, expected) {
   NodeAssert.equal(
     selection?.instanceId,

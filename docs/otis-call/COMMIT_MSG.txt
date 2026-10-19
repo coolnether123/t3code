@@ -1,11 +1,10 @@
-fix(voice): hide internal handoffs and fit phone call controls
+fix(voice): retry busy background turns and preserve delivery evidence
 
-Build announcement prompts from saved updates inside the linked voice session.
-Hide internal announcement messages in shared client conversation state,
-including old call history, while retaining status activity and spoken replies.
+Retry confirmed capacity failures three times with bounded backoff and the
+original model selection. Ignore late failed-attempt receipts and discard
+unverified results before retrying.
 
-Position the call panel within the visible viewport using the existing popover.
-Scroll settings and updates inside a dynamic viewport bound while keeping
-primary call actions in a separate footer.
+Read back the delivered message before waiting for background completion.
+Retain that evidence through failed cleanup and label missing readback unknown.
 
 Otis-Task: agenda-task:515bbc54cb61482681e950e524421ce4
