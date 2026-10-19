@@ -21,6 +21,7 @@ import {
   parseArgs,
   parseLsofListeners,
   renderLaunchAgentPlist,
+  localEnvironment,
   renderWrapper,
   recoverFailedDeployment,
   validateCandidate,
@@ -512,5 +513,28 @@ describe("deploy-macos-backend guards", () => {
     expect(options.dryRun).toBe(true);
     expect(options.port).toBe(3773);
     expect(DeploymentGuardError).toBeDefined();
+  });
+});
+
+
+describe("live launch environment", () => {
+  it("keeps the admitted browser binding through environment selection and plist rendering", () => {
+    const selected = localEnvironment({
+      HOME: "/Users/millie", PATH: "/usr/bin:/bin",
+      CODEX_APP_SERVER_TRANSPORT: "fixture-native-transport",
+      T3_WORK_BROWSER_BINDING: "/private/fixture/browser-binding.mjs",
+      T3_WORK_BROWSER_MACHINE: "millie",
+      UNRELATED_SYNTHETIC_SECRET: "must-not-be-forwarded",
+    });
+    expect(selected.T3_WORK_BROWSER_BINDING).toBe("/private/fixture/browser-binding.mjs");
+    expect(selected.T3_WORK_BROWSER_MACHINE).toBe("millie");
+    expect(selected.CODEX_APP_SERVER_TRANSPORT).toBe("fixture-native-transport");
+    expect(selected.UNRELATED_SYNTHETIC_SECRET).toBeUndefined();
+    const plist = renderLaunchAgentPlist({label: "com.fixture.backend", commit,
+      wrapperPath: "/fixture/t3", baseDir: "/fixture/home", port: 3773, environment: selected});
+    expect(plist).toContain("<key>T3_WORK_BROWSER_BINDING</key>");
+    expect(plist).toContain("<string>/private/fixture/browser-binding.mjs</string>");
+    expect(plist).toContain("<key>T3_WORK_BROWSER_MACHINE</key>");
+    expect(plist).not.toContain("UNRELATED_SYNTHETIC_SECRET");
   });
 });

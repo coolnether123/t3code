@@ -1051,7 +1051,7 @@ const backupPath = async (path: string, destination: string): Promise<void> => {
   await copyIfPresent(path, destination);
 };
 
-const localEnvironment = (): Record<string, string> => {
+export const localEnvironment = (environment: NodeJS.ProcessEnv = process.env): Record<string, string> => {
   const result: Record<string, string> = {};
   for (const key of [
     "HOME",
@@ -1060,8 +1060,10 @@ const localEnvironment = (): Record<string, string> => {
     "CODEX_BIN",
     "CODEX_APP_SERVER_TRANSPORT",
     "CODEX_APP_SERVER_BIN",
+    "T3_WORK_BROWSER_BINDING",
+    "T3_WORK_BROWSER_MACHINE",
   ]) {
-    const value = process.env[key];
+    const value = environment[key];
     if (value !== undefined && value !== "") result[key] = value;
   }
   const inheritedPath = result.PATH ?? "";
