@@ -679,13 +679,10 @@ export const migrateCodexResumeRollout = Effect.fn("migrateCodexResumeRollout")(
     );
     return;
   }
-  return yield* new CodexResumeRolloutMigrationError({
-    sharedHomePath,
-    effectiveHomePath,
+  // Nothing to copy: Codex reports a missing rollout itself when the thread resumes,
+  // the same as an upstream install that never had a shared home.
+  yield* Effect.logWarning("Codex resume rollout not found in the shared home; resuming as is", {
     threadId: input.resumeThreadId,
-    operation: "readDirectory",
-    path: sharedHomePath,
-    cause: new Error("The persisted Codex resume rollout was not found."),
   });
 });
 
