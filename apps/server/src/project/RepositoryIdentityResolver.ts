@@ -244,10 +244,10 @@ export const make = Effect.fn("RepositoryIdentityResolver.make")(function* (
   const resolve: RepositoryIdentityResolver["Service"]["resolve"] = Effect.fnUntraced(
     function* (cwd, options) {
       if (options?.refresh) yield* Cache.invalidate(repositoryRootCache, cwd);
-      const cacheKey = yield* Cache.get(repositoryRootCache, cwd);
+      const cacheKey = yield* getRepositoryCacheValue(repositoryRootCache, cwd);
       if (cacheKey === null) return null;
       if (options?.refresh) yield* Cache.invalidate(repositoryIdentityCache, cacheKey);
-      return yield* Cache.get(repositoryIdentityCache, cacheKey);
+      return yield* getRepositoryCacheValue(repositoryIdentityCache, cacheKey);
     },
   );
 
