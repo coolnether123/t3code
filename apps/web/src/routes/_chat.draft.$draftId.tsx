@@ -1,5 +1,5 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import ChatView from "../components/ChatView";
 import { resolveDraftPromotionNavigationTarget } from "../components/ChatView.logic";
 import {
@@ -14,6 +14,7 @@ import { buildThreadRouteParams } from "../threadRoutes";
 import { useThread, useThreadRefs } from "../state/entities";
 
 function DraftChatThreadRouteView() {
+  const [voiceCallActive, setVoiceCallActive] = useState(false);
   const navigate = useNavigate();
   const { draftId: rawDraftId } = Route.useParams();
   const draftId = DraftId.make(rawDraftId);
@@ -33,6 +34,7 @@ function DraftChatThreadRouteView() {
     serverThreadRef,
     serverThread,
     backgroundSubmissionPending,
+    voiceCallActive,
   });
 
   useEffect(() => {
@@ -78,6 +80,7 @@ function DraftChatThreadRouteView() {
   return (
     <SidebarInset className="h-svh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground md:h-dvh">
       <ChatView
+        onVoiceActiveChange={setVoiceCallActive}
         draftId={draftId}
         environmentId={draftSession.environmentId}
         threadId={draftSession.threadId}

@@ -1,11 +1,112 @@
 # Otis Call phase 2 handoff
 
 Task `agenda-task:515bbc54cb61482681e950e524421ce4`.
-Speech filler follow-up base `c84b1fec28`, branch `work/otis-call-20261018`, upstream
+Draft call follow-up base `6cec35da12`, branch `work/otis-call-20261018`, upstream
 `origin/work/otis-call-20261018`. Changes remain uncommitted as requested.
 Observation dates: 18 and 19 October 2026, America/Chicago, CDT.
 
-## Current follow-up: speech fillers
+## Current follow-up: calls from a new chat
+
+Jared reported the mobile Call Otis flow broken around 00:00 CDT on 19 October 2026. The parent reproduced a draft route sending a local thread ID to
+`call.open`, which rejected it before creating a call archive or contacting
+the speech router. Live T3 remains at the parent-reported `c84b1fec28`.
+This candidate is uncommitted and changes no running server or router.
+The parent's `apps/server/package.json` edit is preserved. No subagents or
+computer use were used.
+
+`ChatView.tsx` now supplies the call controller with an `ensureThread`
+callback. It uses the existing `threadEnvironment.create` command, the draft's
+preallocated thread ID, project, branch, worktree, runtime permissions and
+interaction mode, and the picked voice model/options. The controller unlocks
+audio in the original tap, then waits for thread creation before `call.open`.
+The open carries both voice and operator selections through the existing call
+configuration path. Picker changes on an uncreated draft stay local until open.
+Saving an environment default becomes available after creation.
+
+The draft route defers its automatic promotion while the call is active.
+The first voice turn can therefore start without unmounting the microphone
+and playback controller. Hang-up permits ordinary route promotion and leaves
+operator work running. Leaving the route explicitly still detaches the call.
+
+`CallService` accepts closing a missing archive as an idempotent no-op. A
+rejected open with no capture can clear its local journal and reach idle.
+The controls collapse their expanded panel at idle. Existing archives still
+close and release their leases; retained audio, corrupt archives, identity
+mismatches and failed close requests keep their existing recovery behavior.
+
+`SpeechResponse.defaultModels` is optional and returns the saved environment
+call default separately from remembered per-thread models. Both pickers use
+the same visible catalog as the normal T3 picker. A hidden remembered or
+composer selection falls back to that role's visible saved call default,
+then visible `defaultModelSelection`, then the first visible model. Fallback
+preserves the chosen selection's options, including medium effort. A catalog
+with no visible model disables Start instead of selecting a hidden model.
+Initial voice preference remains Haiku 5.5 medium when visible.
+
+Retain the new single-caller `buildVoiceThreadCreateInput` helper as the
+ordinary thread-command mapping boundary. Its focused check verifies draft
+identity, project, permissions and the picked model without mounting the full
+chat view. `ensureVoiceThread` is the command receipt boundary. No new
+provider, execution path, permission gate or chat was added.
+
+Owner checks and full logs are under `.logs/otis-call/phase2-draft`. Run:
+
+```powershell
+& 'A:/Dev/Tooling/t3-node-v24.19.0/node.exe' `
+  .logs/otis-call/phase2-draft/verify.mjs `
+  .logs/otis-call/phase2-draft/owner
+```
+
+Final offline receipts are in `phase2-draft/direct-final/check-results.json`.
+All gates returned exit 0. The focused selection passed 274 tests across 11
+files, including draft command mapping and create-before-open ordering, audio
+unlock in the tap, first-turn route retention, creation failure dismissal,
+empty rejected-open close, both hidden-model fallback chains, response schema
+compatibility and the existing operator, playback, filler and auth checks.
+The separate acceptance evidence/deadline helpers passed 22 tests. Contracts,
+server, client-runtime and web typechecks, targeted lint, formatting,
+acceptance-helper syntax and diff whitespace checks passed. Lint reports 46
+warnings in the existing React effect sites. No lint rule was disabled.
+`source-before.json`, `source-after.json` and `complete.json` establish that
+production and test sources stayed unchanged during the final run, completed
+19 October at 00:38:50 CDT.
+
+The first run passed 273 of 274 tests. Its rejected-open fixture already had
+an active call in the same thread and hit that guard instead. The fixture now
+uses a separate synthetic draft ID. The web typecheck also caught optional
+callback typing, an incorrectly referenced prop and fixture typing errors;
+all are fixed. Markdown formatting initially failed because the CLI could
+not spawn its worker. `.logs/otis-call/format-api.mjs` now calls the same
+installed oxfmt API with the repository's unchanged formatting options.
+It checks all 19 affected source and Markdown files without spawning that
+worker. The wrapper and source manifests are ignored local evidence.
+
+The selection tool has no registered non-.NET policy for this repository, so
+the repository and handoff own this check selection. Queue jobs
+`c97bb64a-2519-452b-a011-17e14cffc5b6` and
+`f2e550aa-d020-44c1-a4cf-18adb6f0d1de` each remained unadmitted after their
+ten-minute owner wait. Readback reports `blocked`, waiting for the working
+directory or output owner, positions 4 and 5, with null exit codes. The
+direct runs use separate output directories. Queue state, other jobs and
+running servers were left intact. Queue submission is not passing evidence.
+
+The parent still needs a real iPhone Safari call over Tailscale from a fresh
+New thread draft. Confirm the draft project, both selected models and medium
+effort, one visible conversation, natural speech, no JSON, and continued
+operator work after hang-up. Verify the first voice turn keeps audio attached
+and the route promotes after hang-up. Reproduce a rejected open with no audio,
+tap End call and confirm the panel disappears with no Retry saved speech.
+With GPT-5.6-Sol hidden, exercise visible saved defaults, hidden saved defaults
+falling back to GPT-6.1-Sol medium, then first-visible fallback, for both roles.
+Repeat the existing saved-call recovery and mid-call picker checks.
+
+Web, Electron and phone Safari share these controls. Local, remote and relay
+requests still use the selected environment's existing transport. Native
+mobile calls and non-Claude tool-free voice adapters remain the earlier
+unimplemented gates. This patch does not establish live browser, audio,
+provider-model or network acceptance.
+
+## Previous follow-up: speech fillers
 
 The parent reports `c84b1fec28` passed live acceptance and went live at 21:01
 CDT. This follow-up remains uncommitted. It changes no running T3 or router,

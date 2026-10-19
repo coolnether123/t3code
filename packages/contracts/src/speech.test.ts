@@ -1,9 +1,20 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
-import { SpeechRequest } from "./speech.ts";
+import { SpeechRequest, SpeechResponse } from "./speech.ts";
 
 const valid = Schema.is(SpeechRequest);
+const decodeResponse = Schema.decodeUnknownSync(SpeechResponse);
+const validResponse = Schema.is(SpeechResponse);
 describe("voice request validation", () => {
+  it("retains separate remembered and default call models across the response boundary", () => {
+    const pair = (model: string) => ({
+      voice: { instanceId: "claudeAgent", model },
+      operator: { instanceId: "codex", model },
+    });
+    const response = { models: pair("remembered"), defaultModels: pair("default") };
+    expect(decodeResponse(response)).toEqual(response);
+    expect(validResponse({})).toBe(true);
+  });
   it.each([
     "call.open",
     "call.upload",

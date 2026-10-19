@@ -3,7 +3,15 @@
 import { act, createRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
-import { EnvironmentId, ThreadId, ProviderInstanceId, type CallStatus } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ThreadId,
+  ProviderInstanceId,
+  ProviderDriverKind,
+  type CallStatus,
+  type SpeechResponse,
+} from "@t3tools/contracts";
+import { deriveProviderInstanceEntries } from "../../providerInstances";
 import type { VoiceState } from "../../voice/session";
 import type { Thread } from "../../types";
 import { ThreadVoiceControls, type ThreadVoiceHandle } from "./ThreadVoiceControls";
@@ -18,6 +26,9 @@ const controller = vi.hoisted(() => ({
   resume: vi.fn(),
   observe: vi.fn(),
   detach: vi.fn(),
+  request: vi.fn<() => Promise<SpeechResponse>>(async () => ({})),
+  ensureThread: vi.fn(async () => {}),
+  onActiveChange: vi.fn(),
 }));
 vi.mock("../../voice/session", () => ({
   ThreadVoiceSession: class {
@@ -34,7 +45,7 @@ vi.mock("../../voice/session", () => ({
 }));
 vi.mock("../../voice/browserSpeech", () => ({
   createBrowserAudio: () => ({}),
-  requestSpeech: async () => ({}),
+  requestSpeech: controller.request,
 }));
 vi.mock("../../voice/callPersistence", () => ({ callPersistence: () => ({}) }));
 vi.mock("./CallModelSelectors", () => ({
@@ -45,6 +56,20 @@ let root: Root;
 let container: HTMLDivElement;
 beforeEach(async () => {
   vi.clearAllMocks();
+  const selection = {
+    instanceId: ProviderInstanceId.make("synthetic-provider"),
+    model: "synthetic-model",
+    options: [{ id: "reasoningEffort", value: "medium" }],
+  };
+  const hidden = {
+    ...selection,
+    model: "hidden-remembered-model",
+    options: [{ id: "reasoningEffort", value: "low" }],
+  };
+  controller.request.mockResolvedValue({
+    models: { voice: hidden, operator: hidden },
+    defaultModels: { voice: selection, operator: selection },
+  });
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -52,6 +77,9 @@ beforeEach(async () => {
     root.render(
       <ThreadVoiceControls
         ref={createRef<ThreadVoiceHandle>()}
+        ensureThread={controller.ensureThread}
+        onActiveChange={controller.onActiveChange}
+        isDraft
         thread={
           {
             id: ThreadId.make("synthetic-chat"),
@@ -65,8 +93,33 @@ beforeEach(async () => {
           instanceId: ProviderInstanceId.make("synthetic-provider"),
           model: "synthetic-model",
         }}
-        instanceEntries={[]}
-        modelOptionsByInstance={new Map()}
+        instanceEntries={deriveProviderInstanceEntries([
+          {
+            instanceId: ProviderInstanceId.make("synthetic-provider"),
+            driver: ProviderDriverKind.make("codex"),
+            displayName: "Synthetic",
+            enabled: true,
+            installed: true,
+            version: "synthetic",
+            status: "ready",
+            availability: "available",
+            auth: { status: "authenticated" },
+            checkedAt: "2026-10-19T00:00:00.000Z",
+            slashCommands: [],
+            skills: [],
+            models: [
+              { slug: "synthetic-model", name: "Synthetic", isCustom: false, capabilities: {} },
+            ],
+          },
+        ])}
+        modelOptionsByInstance={
+          new Map([
+            [
+              ProviderInstanceId.make("synthetic-provider"),
+              [{ slug: "synthetic-model", name: "Synthetic" }],
+            ],
+          ])
+        }
         enabled
         running={false}
         connected
@@ -80,7 +133,7 @@ afterEach(async () => {
 });
 
 describe("call panel action boundary", () => {
-  it("portals the panel outside the composer and starts the call from its separate footer", async () => {
+  it("portals the panel and starts with visible saved defaults when remembered models are hidden", async () => {
     const trigger = [...container.querySelectorAll("button")].find(
       (button) => button.textContent === "Call Otis",
     )!;
@@ -98,6 +151,32 @@ describe("call panel action boundary", () => {
     expect(panel.querySelector('[data-slot="call-panel-scroll"]')?.contains(start)).toBe(false);
     await act(async () => start.click());
     expect(controller.start).toHaveBeenCalledTimes(1);
+    expect(controller.start).toHaveBeenCalledWith(
+      {
+        threadId: "synthetic-chat",
+        modelSelection: {
+          instanceId: "synthetic-provider",
+          model: "synthetic-model",
+          options: [{ id: "reasoningEffort", value: "medium" }],
+        },
+        operatorSelection: {
+          instanceId: "synthetic-provider",
+          model: "synthetic-model",
+          options: [{ id: "reasoningEffort", value: "medium" }],
+        },
+      },
+      [],
+    );
+  });
+  it("dismisses the expanded failed-open panel when hang-up reaches idle", async () => {
+    await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
+    await act(async () =>
+      controller.change?.("error", "Open an existing chat before starting a call."),
+    );
+    await act(async () => controller.change?.("idle"));
+    expect(document.querySelector('section[aria-label="Otis call"]')).toBeNull();
+    expect(controller.onActiveChange).toHaveBeenLastCalledWith(false);
+    expect(container.textContent).toBe("Call Otis");
   });
   it.each(["listening", "error"] as const)(
     "keeps %s actions outside the scroll area",

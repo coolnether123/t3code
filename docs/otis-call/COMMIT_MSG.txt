@@ -1,10 +1,7 @@
-feat(voice): fill speech waits with a short recorded acknowledgment
+fix(voice): start calls from new chats and honor visible models
 
-Play one varied clip a second after speech is sent if reply audio has not
-started. Finish a playing clip before scheduling reply audio, and cancel
-pending filler on interruption or hang-up. Status updates do not arm it.
-
-Bundle the six supplied recordings losslessly with shared call playback.
-Cover timing, cancellation, repeat prevention and reply scheduling offline.
+Create draft threads through the existing command before opening a call.
+Keep audio mounted through the first turn, dismiss empty rejected opens on
+hang-up, and resolve hidden model choices through visible saved defaults.
 
 Otis-Task: agenda-task:515bbc54cb61482681e950e524421ce4

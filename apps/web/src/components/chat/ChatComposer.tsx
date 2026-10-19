@@ -2,6 +2,7 @@ import type {
   ApprovalRequestId,
   EnvironmentId,
   ModelSelection,
+  CallOptions,
   PreviewAnnotationPayload,
   ProviderApprovalDecision,
   ProviderInteractionMode,
@@ -615,6 +616,8 @@ export interface ChatComposerHandle {
 // --------------------------------------------------------------------------
 
 export interface ChatComposerProps {
+  ensureVoiceThread(options: CallOptions): Promise<void>;
+  onVoiceActiveChange?: ((active: boolean) => void) | undefined;
   composerDraftTarget: ScopedThreadRef | DraftId;
   environmentId: EnvironmentId;
   routeKind: "server" | "draft";
@@ -3534,6 +3537,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 {showMobilePendingAnswerActions ? null : inlineStashBadge}
                 {activeThread ? (
                   <ThreadVoiceControls
+                    ensureThread={props.ensureVoiceThread}
+                    isDraft={!props.isServerThread}
+                    onActiveChange={props.onVoiceActiveChange}
+                    defaultModelSelection={settings.defaultModelSelection}
                     instanceEntries={providerInstanceEntries}
                     modelOptionsByInstance={modelOptionsByInstance}
                     key={`${environmentId}:${activeThread.id}`}

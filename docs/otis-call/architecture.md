@@ -2,7 +2,7 @@
 
 Task `agenda-task:515bbc54cb61482681e950e524421ce4`.
 Phase 2 candidate follows baseline `6f18caa404` on `work/otis-call-20261018`.
-Updated 18 October 2026, America/Chicago, CDT.
+Updated 19 October 2026, America/Chicago, CDT.
 
 Jared's correction packet at
 `A:/Dev/Artifacts/agent-packets/otis-call-20261018/jared-corrections-20261018.md`
@@ -29,6 +29,19 @@ activity and the voice model's natural reply stay visible in the same thread.
 The web call panel uses T3's existing popover portal and collision positioning.
 Dynamic viewport and safe-area limits bound its height. Settings and updates
 scroll separately from the status header and primary call actions.
+
+Starting from a new-chat draft first uses T3's ordinary create-thread command
+with the draft's project and picked voice model. Audio unlock happens in the
+tap, before waiting for creation. Both role selections then travel through
+`call.open`. The draft route holds automatic promotion during the call so its
+first turn cannot unmount audio. Hang-up allows promotion and leaves work
+running. Closing an absent call archive is idempotent, allowing an empty
+rejected open to dismiss the panel.
+
+Both model pickers validate remembered selections against T3's visible catalog.
+Hidden choices fall back to the saved call default, T3's default selection,
+then the first visible model. The optional response `defaultModels` keeps the
+saved call default available even when a thread remembers hidden models.
 
 ## Owners and flow
 

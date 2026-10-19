@@ -8,6 +8,8 @@ import {
   ProjectId,
   type MessageId,
   type ModelSelection,
+  type CallOptions,
+  type RuntimeMode,
   type ProviderInteractionMode,
   ProviderDriverKind,
   type ProviderInstanceId,
@@ -64,6 +66,31 @@ export const MAX_HIDDEN_MOUNTED_PREVIEW_THREADS = 3;
 export const ENVIRONMENT_RECONNECT_WARNING_GRACE_MS = 2_000;
 
 export const LastInvokedScriptByProjectSchema = Schema.Record(ProjectId, Schema.String);
+
+/** Reuse the ordinary create command with the draft's identity and call voice selection. */
+export function buildVoiceThreadCreateInput(input: {
+  thread: Thread;
+  projectId: ProjectId;
+  options: CallOptions;
+  runtimeMode: RuntimeMode;
+  interactionMode: ProviderInteractionMode;
+  branch: string | null;
+}) {
+  return {
+    environmentId: input.thread.environmentId,
+    input: {
+      threadId: input.thread.id,
+      projectId: input.projectId,
+      title: input.thread.title,
+      modelSelection: input.options.modelSelection,
+      runtimeMode: input.runtimeMode,
+      interactionMode: input.interactionMode,
+      branch: input.branch,
+      worktreePath: input.thread.worktreePath,
+      createdAt: input.thread.createdAt,
+    },
+  };
+}
 
 export function agentControlledBrowserCloseConfirmation(
   surfaces: readonly RightPanelSurface[],
@@ -322,8 +349,9 @@ export function resolveDraftPromotionNavigationTarget(input: {
   serverThreadRef: ScopedThreadRef | null;
   serverThread: Pick<Thread, "latestTurn" | "session"> | null | undefined;
   backgroundSubmissionPending: boolean;
+  voiceCallActive?: boolean;
 }): ScopedThreadRef | null {
-  if (input.backgroundSubmissionPending) {
+  if (input.backgroundSubmissionPending || input.voiceCallActive) {
     return null;
   }
   const sessionStatus = input.serverThread?.session?.status;

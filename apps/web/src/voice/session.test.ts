@@ -15,7 +15,7 @@ const options: CallOptions = {
   modelSelection: { instanceId: ProviderInstanceId.make("claudeAgent"), model: "synthetic" },
 };
 const sessions: ThreadVoiceSession[] = [];
-function fixture(initial?: SavedCall) {
+function fixture(initial?: SavedCall, ensureThread?: VoiceDependencies["ensureThread"]) {
   const recording = deferred<{ audio: string; sampleRate: number }>();
   const transcript = deferred<SpeechResponse>();
   const waiting = deferred<void>();
@@ -75,6 +75,7 @@ function fixture(initial?: SavedCall) {
     if (state === "reconnecting" || state === "error") failed.resolve();
   });
   const session = new ThreadVoiceSession({
+    ...(ensureThread ? { ensureThread } : {}),
     speechEvent: (event) => {
       if (event.type === "retry") retrying.resolve();
     },
@@ -105,6 +106,60 @@ afterEach(async () => {
 });
 
 describe("durable thread voice session", () => {
+  it("unlocks audio in the tap and waits for thread creation before opening with both models", async () => {
+    const created = deferred<void>();
+    const ensureThread = vi.fn(() => created.promise);
+    const f = fixture(undefined, ensureThread);
+    const callOptions = {
+      ...options,
+      operatorSelection: {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-6.1-sol",
+        options: [{ id: "reasoningEffort", value: "medium" }],
+      },
+    };
+    const start = f.session.start(callOptions, []);
+    expect(f.audio.unlock).toHaveBeenCalledOnce();
+    expect(ensureThread).toHaveBeenCalledWith(callOptions);
+    expect(f.request).not.toHaveBeenCalled();
+    created.resolve();
+    await start;
+    expect(f.request.mock.calls[0]?.[0]).toMatchObject({
+      action: "call.open",
+      options: callOptions,
+    });
+  });
+  it("closes after thread creation fails without opening a call or retaining recovery UI", async () => {
+    const f = fixture(undefined, async () => {
+      throw new Error("Thread creation failed.");
+    });
+    await f.session.start(options, []);
+    expect(f.change).toHaveBeenLastCalledWith(
+      "error",
+      expect.stringContaining("Thread creation failed."),
+      undefined,
+    );
+    await f.session.stop();
+    expect(f.change).toHaveBeenLastCalledWith("idle", undefined, undefined);
+    expect(f.request).not.toHaveBeenCalled();
+  });
+  it("clears an empty rejected open after idempotent server close", async () => {
+    const f = fixture();
+    f.request.mockImplementation(async (input) => {
+      if (input.action === "call.open")
+        throw new Error("Open an existing chat before starting a call.");
+      if (input.action === "call.close") return {};
+      throw new Error("Unexpected call action");
+    });
+    await f.session.start(options, []);
+    await f.session.stop();
+    expect(f.saved()).toBeUndefined();
+    expect(f.change).toHaveBeenLastCalledWith("idle", undefined, undefined);
+    expect(f.request.mock.calls.map(([input]) => input.action)).toEqual([
+      "call.open",
+      "call.close",
+    ]);
+  });
   it("plays one filler a second after Send speech while transcription is still pending", async () => {
     vi.useFakeTimers();
     const f = fixture();

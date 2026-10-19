@@ -5,6 +5,7 @@ import {
   type EnvironmentId,
   type MessageId,
   type ModelSelection,
+  type CallOptions,
   type ProjectScript,
   type ProjectId,
   type ProviderApprovalDecision,
@@ -358,6 +359,7 @@ import {
   buildExpiredTerminalContextToastCopy,
   buildLocalDraftThread,
   buildLoadingThreadFromShell,
+  buildVoiceThreadCreateInput,
   buildThreadTurnInterruptInput,
   collectUserMessageBlobPreviewUrls,
   createLocalDispatchSnapshot,
@@ -615,6 +617,7 @@ type ChatViewProps =
       threadSyncPhase?: never;
       routeKind: "draft";
       draftId: DraftId;
+      onVoiceActiveChange?(active: boolean): void;
     };
 
 interface TerminalLaunchContext {
@@ -6671,6 +6674,34 @@ function ChatViewContent(props: ChatViewProps) {
     ],
   );
 
+  const ensureVoiceThread = useCallback(
+    async (options: CallOptions) => {
+      if (isServerThread) return;
+      if (!activeThread || !activeProject || options.threadId !== activeThread.id)
+        throw new Error("Choose an available project before starting a call.");
+      const result = await createThread(
+        buildVoiceThreadCreateInput({
+          thread: activeThread,
+          projectId: activeProject.id,
+          options,
+          runtimeMode,
+          interactionMode,
+          branch: activeThreadBranch,
+        }),
+      );
+      if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+    },
+    [
+      isServerThread,
+      activeThread,
+      activeProject,
+      createThread,
+      runtimeMode,
+      interactionMode,
+      activeThreadBranch,
+    ],
+  );
+
   const onImplementPlanInNewThread = useCallback(async () => {
     if (
       !activeThread ||
@@ -7581,6 +7612,10 @@ function ChatViewContent(props: ChatViewProps) {
                       <div className="chat-composer-glass-host relative z-10 w-full rounded-[22px]">
                         <div ref={attachDraftHeroComposerAnchorRef} className="relative z-10">
                           <ChatComposer
+                            ensureVoiceThread={ensureVoiceThread}
+                            onVoiceActiveChange={
+                              props.routeKind === "draft" ? props.onVoiceActiveChange : undefined
+                            }
                             composerRef={composerRef}
                             composerDraftTarget={composerDraftTarget}
                             environmentId={environmentId}

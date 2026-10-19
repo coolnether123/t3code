@@ -50,6 +50,7 @@ export interface SavedCall {
   silencedMessages?: string[];
 }
 export interface VoiceDependencies {
+  ensureThread?(options: CallOptions): Promise<void>;
   speechEvent?(
     event:
       | { type: "sentence"; messageId: string; start: number; end: number }
@@ -212,6 +213,8 @@ export class ThreadVoiceSession {
     try {
       this.deps.audio.unlock();
       this.change("preparing", "Checking microphone and saved call");
+      await this.deps.ensureThread?.(options);
+      if (!this.active) return;
       this.saved = await this.deps.persistence.read();
       if (!this.active) return;
       if (!this.saved) {
@@ -735,6 +738,8 @@ export class ThreadVoiceSession {
       await this.flush(false, new AbortController().signal);
       await this.request({ action: "call.close" }, new AbortController().signal);
       await this.deps.persistence.clear();
+      this.saved = undefined;
+      this.status = undefined;
       this.change("idle");
     } catch {
       this.change(

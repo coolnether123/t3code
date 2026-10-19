@@ -1,9 +1,18 @@
-import { useEffect, useLayoutEffect, useRef, useState, useImperativeHandle, type Ref } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useImperativeHandle,
+  type Ref,
+} from "react";
 import type {
   CallModels,
   CallStatus,
   EnvironmentId,
   ModelSelection,
+  CallOptions,
   OperatorUpdate,
 } from "@t3tools/contracts";
 import type { Thread } from "../../types";
@@ -40,6 +49,10 @@ export function ThreadVoiceControls({
   thread: Thread;
   environmentId: EnvironmentId;
   modelSelection: ModelSelection;
+  defaultModelSelection?: ModelSelection | null;
+  ensureThread(options: CallOptions): Promise<void>;
+  isDraft: boolean;
+  onActiveChange?: ((active: boolean) => void) | undefined;
   enabled: boolean;
   running: boolean;
   connected: boolean;
@@ -48,12 +61,38 @@ export function ThreadVoiceControls({
   const [detail, setDetail] = useState<string>();
   const [call, setCall] = useState<CallStatus>();
   const [expanded, setExpanded] = useState(false);
-  const [models, setModels] = useState<CallModels>(() =>
+  const [preferences, setModels] = useState<CallModels>(() =>
     initialCallModels(
       props.instanceEntries.map((entry) => entry.snapshot),
       props.modelSelection,
+      props,
+      props.defaultModelSelection,
     ),
   );
+  const [savedDefaults, setSavedDefaults] = useState<CallModels>();
+  const catalog = useMemo(
+    () => ({
+      instanceEntries: props.instanceEntries,
+      modelOptionsByInstance: props.modelOptionsByInstance,
+    }),
+    [props.instanceEntries, props.modelOptionsByInstance],
+  );
+  const models = useMemo(
+    () =>
+      initialCallModels(
+        catalog.instanceEntries.map((entry) => entry.snapshot),
+        props.modelSelection,
+        catalog,
+        props.defaultModelSelection,
+        preferences,
+        savedDefaults,
+      ),
+    [catalog, props.modelSelection, props.defaultModelSelection, preferences, savedDefaults],
+  );
+  const callbacks = useRef(props);
+  useLayoutEffect(() => {
+    callbacks.current = props;
+  });
   const [configurationError, setConfigurationError] = useState<string>();
   const [configurationReady, setConfigurationReady] = useState(false);
   const [updates, setUpdates] = useState<readonly OperatorUpdate[]>([]);
@@ -78,7 +117,19 @@ export function ThreadVoiceControls({
     )
       .then((response) => {
         if (abort.signal.aborted) return;
-        if (response.models && version === configurationVersion.current) setModels(response.models);
+        const current = callbacks.current;
+        setSavedDefaults(response.defaultModels);
+        if (version === configurationVersion.current)
+          setModels(
+            initialCallModels(
+              current.instanceEntries.map((entry) => entry.snapshot),
+              current.modelSelection,
+              current,
+              current.defaultModelSelection,
+              response.models,
+              response.defaultModels,
+            ),
+          );
         setUpdates(response.operatorUpdates ?? []);
         if (version === configurationVersion.current) setConfigurationReady(true);
       })
@@ -89,13 +140,18 @@ export function ThreadVoiceControls({
           );
       });
     return () => abort.abort();
-  }, [props.environmentId, props.thread.id, lastOperatorActivity]);
+  }, [props.environmentId, props.thread.id, props.modelSelection, lastOperatorActivity]);
   useEffect(() => {
     if (call?.operatorUpdates) setUpdates(call.operatorUpdates);
   }, [call?.operatorUpdates]);
   const configure = async (next: CallModels, saveDefault = false) => {
     const version = ++configurationVersion.current;
     setModels(next);
+    if (props.isDraft && !saveDefault) {
+      setConfigurationError(undefined);
+      setConfigurationReady(true);
+      return;
+    }
     setConfigurationReady(false);
     try {
       const task = configurationTail.current
@@ -131,6 +187,7 @@ export function ThreadVoiceControls({
   };
   useLayoutEffect(() => {
     const session = new ThreadVoiceSession({
+      ensureThread: (options) => callbacks.current.ensureThread(options),
       speechEvent: (event) =>
         window.dispatchEvent(new CustomEvent("t3-voice-speech", { detail: event })),
       request: (input, signal, onAudio) =>
@@ -142,6 +199,8 @@ export function ThreadVoiceControls({
         setState(next);
         setDetail(message);
         setCall(status);
+        if (next === "idle") setExpanded(false);
+        callbacks.current.onActiveChange?.(next !== "idle");
       },
     });
     sessionRef.current = session;
@@ -152,6 +211,7 @@ export function ThreadVoiceControls({
     return () => {
       window.removeEventListener("online", reconnect);
       void session.detach();
+      callbacks.current.onActiveChange?.(false);
       sessionRef.current = null;
     };
   }, [props.environmentId, props.thread.id]);
@@ -221,7 +281,12 @@ export function ThreadVoiceControls({
                   type="button"
                   size="sm"
                   variant="outline"
-                  disabled={!configurationReady}
+                  disabled={
+                    !configurationReady ||
+                    props.isDraft ||
+                    !models.voice.model ||
+                    !models.operator.model
+                  }
                   onClick={() => void configure(models, true)}
                 >
                   Use these models by default
@@ -289,7 +354,12 @@ export function ThreadVoiceControls({
                     type="button"
                     size="sm"
                     className="h-auto min-h-8 w-full whitespace-normal"
-                    disabled={!props.enabled || !configurationReady}
+                    disabled={
+                      !props.enabled ||
+                      !configurationReady ||
+                      !models.voice.model ||
+                      !models.operator.model
+                    }
                     onClick={() =>
                       void sessionRef.current?.start(
                         {

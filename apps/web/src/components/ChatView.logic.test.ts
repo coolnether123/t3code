@@ -32,6 +32,7 @@ import {
   branchMismatchKey,
   buildExpiredTerminalContextToastCopy,
   buildLoadingThreadFromShell,
+  buildVoiceThreadCreateInput,
   buildThreadTurnInterruptInput,
   createLocalDispatchSnapshot,
   deriveComposerSendState,
@@ -874,6 +875,19 @@ describe("draft promotion during worktree setup", () => {
       }),
     ).toEqual(serverThreadRef);
   });
+  it("keeps an active voice call mounted across the first turn, then allows promotion after hang-up", () => {
+    const input = {
+      serverThreadRef,
+      serverThread: makeThread({
+        latestTurn: { ...completedTurn, state: "running" as const, completedAt: null },
+      }),
+      backgroundSubmissionPending: false,
+    };
+    expect(resolveDraftPromotionNavigationTarget({ ...input, voiceCallActive: true })).toBeNull();
+    expect(resolveDraftPromotionNavigationTarget({ ...input, voiceCallActive: false })).toEqual(
+      serverThreadRef,
+    );
+  });
 
   it.each(["error", "stopped", "interrupted"] as const)(
     "promotes a startup that ends as %s before a turn starts",
@@ -887,6 +901,44 @@ describe("draft promotion during worktree setup", () => {
       ).toEqual(serverThreadRef);
     },
   );
+});
+
+describe("voice thread creation", () => {
+  it("uses the draft's project and identity with the picked voice model in the ordinary create command", () => {
+    const thread = makeThread({ worktreePath: "A:/synthetic/worktree", branch: "draft-branch" });
+    const voice = {
+      instanceId: ProviderInstanceId.make("claudeAgent"),
+      model: "claude-haiku-5-5",
+      options: [{ id: "effort", value: "medium" }],
+    };
+    expect(
+      buildVoiceThreadCreateInput({
+        thread,
+        projectId,
+        options: {
+          threadId: thread.id,
+          modelSelection: voice,
+          operatorSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-6.1-sol" },
+        },
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        branch: "draft-branch",
+      }),
+    ).toEqual({
+      environmentId,
+      input: {
+        threadId: thread.id,
+        projectId,
+        title: thread.title,
+        modelSelection: voice,
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        branch: "draft-branch",
+        worktreePath: "A:/synthetic/worktree",
+        createdAt: thread.createdAt,
+      },
+    });
+  });
 });
 
 describe("buildLoadingThreadFromShell", () => {
