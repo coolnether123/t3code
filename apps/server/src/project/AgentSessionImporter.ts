@@ -131,8 +131,10 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
   const threads = scanner.recentThreads(
     workspaceRoot,
     completedSources.map((entry) => entry.source),
+    input.providerSessionIds,
   );
   const importedThreadIds = new Set<ThreadId>();
+  const importedSessionIds = new Set<string>();
   let importedCount = 0;
   let skippedCount = 0;
 
@@ -148,6 +150,7 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
         );
         if (outcome._tag === "AlreadyImported") {
           importedThreadIds.add(threadId);
+          importedSessionIds.add(outcome.source.providerSessionId);
           importedCount += 1;
         } else if (importedThreadIds.has(threadId)) {
           const recorded = yield* directory
@@ -286,6 +289,7 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
 
       if (imported) {
         importedThreadIds.add(threadId);
+        importedSessionIds.add(thread.providerSessionId);
         importedCount += 1;
       } else {
         skippedCount += 1;
@@ -293,5 +297,15 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
     }),
   );
 
-  return { importedCount, skippedCount } satisfies AgentSessionImportResult;
+  return {
+    importedCount,
+    skippedCount,
+    ...(input.providerSessionIds === undefined
+      ? {}
+      : {
+          missingProviderSessionIds: input.providerSessionIds.filter(
+            (id) => !importedSessionIds.has(id),
+          ),
+        }),
+  } satisfies AgentSessionImportResult;
 });

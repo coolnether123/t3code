@@ -16,6 +16,7 @@ const descriptor = {
 describe("ExecutionEnvironmentDescriptor", () => {
   it("leaves computer appearance unsupported on older servers", () => {
     expect(decodeDescriptor(descriptor).capabilities.computerAppearance).toBeUndefined();
+    expect(decodeDescriptor(descriptor).capabilities.selectedAgentSessionImport).toBeUndefined();
   });
 
   it.each([true, false])("preserves computer appearance capability %s", (computerAppearance) => {

@@ -58,6 +58,10 @@ export type AgentSessionScanResult = typeof AgentSessionScanResult.Type;
 export const AgentSessionImportInput = Schema.Struct({
   projectId: ProjectId,
   expectedWorkspaceRoot: Schema.optional(TrimmedNonEmptyString),
+  /** Import these existing sessions, including older history, with their original resume cursors. */
+  providerSessionIds: Schema.optionalKey(
+    Schema.Array(TrimmedNonEmptyString).check(Schema.isMinLength(1), Schema.isMaxLength(100)),
+  ),
 });
 export type AgentSessionImportInput = typeof AgentSessionImportInput.Type;
 
@@ -82,6 +86,7 @@ export class AgentSessionImportProjectChangedError extends Schema.TaggedErrorCla
 export const AgentSessionImportResult = Schema.Struct({
   importedCount: NonNegativeInt,
   skippedCount: NonNegativeInt,
+  missingProviderSessionIds: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
 });
 export type AgentSessionImportResult = typeof AgentSessionImportResult.Type;
 

@@ -219,6 +219,7 @@ export const make = Effect.gen(function* () {
       pullRequests: true,
       threadSettlement: true,
       sidebarSections: true,
+      selectedAgentSessionImport: true,
       threadAutoSettlement: true,
       threadRestartContinuation: true,
       threadSnooze: true,

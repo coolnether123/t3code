@@ -1255,6 +1255,84 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
   });
 
   describe("recentThreads", () => {
+    it.effect(
+      "imports selected original sessions beyond the recent window and newest-first limit",
+      () =>
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+          yield* TestClock.setTime(nowMs);
+          const claudeHomePath = yield* makeTempDir("t3-selected-claude-");
+          const codexHomePath = yield* makeTempDir("t3-selected-codex-");
+          const workspace = yield* makeTempDir("t3-selected-project-");
+          const otherWorkspace = yield* makeTempDir("t3-selected-other-");
+          for (let index = 0; index < 105; index++) {
+            const id = `session-${index}`;
+            yield* writeTranscript({
+              filePath: path.join(
+                codexHomePath,
+                "sessions",
+                "2026",
+                "08",
+                "24",
+                `rollout-${id}.jsonl`,
+              ),
+              contents: [
+                encodeTranscriptRecord({ type: "session_meta", payload: { id, cwd: workspace } }),
+                encodeTranscriptRecord({
+                  type: "event_msg",
+                  payload: { type: "user_message", message: `Prompt ${index}` },
+                }),
+              ].join("\n"),
+              mtimeMs: index === 104 ? nowMs - 40 * 24 * 60 * 60 * 1000 : nowMs - index * 1000,
+            });
+          }
+          for (const [filename, id, cwd] of [
+            ["mismatched", "different-session", workspace],
+            ["other-project", "other-project", otherWorkspace],
+          ]) {
+            yield* writeTranscript({
+              filePath: path.join(
+                codexHomePath,
+                "sessions",
+                "2026",
+                "08",
+                "24",
+                `rollout-${filename}.jsonl`,
+              ),
+              contents: [
+                encodeTranscriptRecord({ type: "session_meta", payload: { id, cwd } }),
+                encodeTranscriptRecord({
+                  type: "event_msg",
+                  payload: { type: "user_message", message: "Must stay out" },
+                }),
+              ].join("\n"),
+              mtimeMs: nowMs,
+            });
+          }
+          const outcomes = yield* Effect.gen(function* () {
+            const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+            return yield* scanner
+              .recentThreads(
+                workspace,
+                [],
+                ["session-104", "mismatched", "other-project", "missing"],
+              )
+              .pipe(Stream.runCollect);
+          }).pipe(Effect.provide(makeScannerTestLayer({ claudeHomePath, codexHomePath })));
+          const imported = outcomes.flatMap((outcome) =>
+            outcome._tag === "Importable" ? [outcome] : [],
+          );
+          expect(imported.map((outcome) => outcome.thread.providerSessionId)).toEqual([
+            "session-104",
+          ]);
+          expect(imported[0]?.source.providerSessionId).toBe("session-104");
+          expect(imported[0]?.thread.messages.map((message) => message.text)).toEqual([
+            "Prompt 104",
+          ]);
+        }),
+    );
+
     it.effect.each([false, true])(
       "counts terminal newlines correctly with record overflow=%s",
       (overflow) =>

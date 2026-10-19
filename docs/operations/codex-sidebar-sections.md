@@ -29,3 +29,24 @@ Use the guarded owner install route. Check all running turns, physical idle,
 pending-request fingerprints and the exact live source before stopping. Keep
 code rollback and original data. Verify an existing long thread through a
 read-only client after deployment. Do not submit a test turn in a live account.
+
+## Recover sections whose conversations are still in Codex
+
+The section import does not import conversations. A section with unmatched
+references can be empty even when T3 has other chats in the same project.
+
+For an authorized recovery, call `agentSessions.import` for the owning project
+with `expectedWorkspaceRoot` and `providerSessionIds`. The explicit selection
+accepts 1 to 100 existing session IDs. It includes older history and selects
+files before the import budget is reserved. The decoded session ID and project
+directory must still match. Existing file, message and record limits apply.
+Require the `selectedAgentSessionImport` environment capability before sending
+the selection. Older servers do not understand that field and import recent
+history instead.
+
+An imported conversation retains the original provider resume cursor. This
+operation imports history and never starts a provider turn or forks a session.
+Inspect `missingProviderSessionIds` and read back the runtime bindings before
+claiming recovery. Then repeat the exact section mapping against those bindings
+and save the reviewed metadata through `server.updateSettings`, preserving
+unrelated settings and any grouping the user has changed.

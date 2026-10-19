@@ -186,6 +186,7 @@ export class AgentSessionScanner extends Context.Service<
     readonly recentThreads: (
       workspaceRoot: string,
       completedSources?: ReadonlyArray<AgentSessionImportSource>,
+      providerSessionIds?: ReadonlyArray<string>,
     ) => Stream.Stream<AgentSessionRecentThread, AgentSessionScanError>;
   }
 >()("t3/project/AgentSessionScanner") {}
@@ -1255,7 +1256,9 @@ export const make = Effect.gen(function* () {
   const prepareRecentThreads = Effect.fn("AgentSessionScanner.prepareRecentThreads")(function* (
     workspaceRoot: string,
     completedSources: ReadonlyArray<AgentSessionImportSource>,
+    providerSessionIds: ReadonlyArray<string> | undefined,
   ) {
+    const selectedSessions = providerSessionIds === undefined ? null : new Set(providerSessionIds);
     const root = path.resolve(expandHomePath(workspaceRoot));
     const realRoot = yield* fileSystem.realPath(root).pipe(Effect.orElseSucceed(() => root));
     if (isExcludedProjectPath(root) || isExcludedProjectPath(realRoot)) return Stream.empty;
@@ -1277,9 +1280,20 @@ export const make = Effect.gen(function* () {
       if ((yield* directoryIdentity(resolved)) !== rootIdentity) continue;
 
       for (const transcript of candidate.transcripts) {
+        // Native filenames carry the session ID. Select before reserving the
+        // import budget, then verify the decoded ID before importing history.
+        if (
+          selectedSessions !== null &&
+          !Array.from(selectedSessions).some((id) => {
+            const name = path.basename(transcript.filePath);
+            return name === `${id}.jsonl` || name.endsWith(`-${id}.jsonl`);
+          })
+        ) {
+          continue;
+        }
         if (
           transcript.mtimeMs === null ||
-          transcript.mtimeMs < cutoffMs ||
+          (selectedSessions === null && transcript.mtimeMs < cutoffMs) ||
           transcript.mtimeMs > nowMs
         ) {
           continue;
@@ -1325,7 +1339,9 @@ export const make = Effect.gen(function* () {
           const identity = transcriptIdentity(transcript.filePath, stats.value);
           const completedSource = completed?.find(
             (source) =>
-              source.provider === candidate.source && sameTranscriptIdentity(source, identity),
+              source.provider === candidate.source &&
+              (selectedSessions === null || selectedSessions.has(source.providerSessionId)) &&
+              sameTranscriptIdentity(source, identity),
           );
           if (completedSource !== undefined) {
             const sessionKey = `${completedSource.providerInstanceId}\0${completedSource.providerSessionId}`;
@@ -1384,7 +1400,10 @@ export const make = Effect.gen(function* () {
             },
             snapshot.records,
           );
-          if (parsedThread === null) {
+          if (
+            parsedThread === null ||
+            (selectedSessions !== null && !selectedSessions.has(parsedThread.providerSessionId))
+          ) {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
           }
 
@@ -1414,7 +1433,8 @@ export const make = Effect.gen(function* () {
   const recentThreads: AgentSessionScanner["Service"]["recentThreads"] = (
     workspaceRoot,
     completedSources = [],
-  ) => Stream.unwrap(prepareRecentThreads(workspaceRoot, completedSources));
+    providerSessionIds,
+  ) => Stream.unwrap(prepareRecentThreads(workspaceRoot, completedSources, providerSessionIds));
 
   return AgentSessionScanner.of({ scan, recentThreads });
 });

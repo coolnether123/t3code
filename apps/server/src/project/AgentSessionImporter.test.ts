@@ -183,9 +183,13 @@ const runImport = (input: {
   readonly directory: ProviderSessionDirectory.ProviderSessionDirectory["Service"];
   readonly snapshots: ReturnType<typeof makeSnapshotsLayer>;
   readonly expectedWorkspaceRoot?: string;
+  readonly providerSessionIds?: ReadonlyArray<string>;
 }) =>
   importRecentAgentThreads({
     projectId: PROJECT_ID,
+    ...(input.providerSessionIds === undefined
+      ? {}
+      : { providerSessionIds: input.providerSessionIds }),
     ...(input.expectedWorkspaceRoot === undefined
       ? {}
       : { expectedWorkspaceRoot: input.expectedWorkspaceRoot }),
@@ -198,6 +202,53 @@ const runImport = (input: {
 
 it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
   describe("importRecentAgentThreads", () => {
+    it.effect(
+      "preserves the selected session cursor and reports missing sessions without starting a turn",
+      () =>
+        Effect.gen(function* () {
+          const commands: OrchestrationCommand[] = [];
+          const bindings: ProviderSessionDirectory.ProviderRuntimeBinding[] = [];
+          const result = yield* runImport({
+            providerSessionIds: ["codex-session", "missing-session"],
+            scanner: AgentSessionScanner.AgentSessionScanner.of({
+              scan: Effect.die("unused"),
+              recentThreads: (_root, _completed, selected) => {
+                expect(selected).toEqual(["codex-session", "missing-session"]);
+                return Stream.succeed(makeThreadOutcome(makeThread("codex")));
+              },
+            }),
+            engine: OrchestrationEngine.OrchestrationEngineService.of({
+              dispatch: (command) => Effect.sync(() => ({ sequence: commands.push(command) })),
+              readEvents: () => Stream.empty,
+              readThreadEvents: () => Stream.empty,
+              getThreadReplayStats: () => Effect.die("unused"),
+              streamDomainEvents: Stream.empty,
+              subscribeDomainEvents: Effect.succeed(Stream.empty),
+              latestSequence: Effect.succeed(0),
+            }),
+            directory: ProviderSessionDirectory.ProviderSessionDirectory.of({
+              upsert: (binding) => Effect.sync(() => void bindings.push(binding)),
+              getProvider: () => Effect.die("unused"),
+              recordImportedTranscript: () => Effect.void,
+              getBinding: () => Effect.succeed(Option.none()),
+              listThreadIds: () => Effect.die("unused"),
+              listBindings: () => Effect.die("unused"),
+            }),
+            snapshots: makeSnapshotsLayer({ project: makeProject() }),
+          });
+          expect(result).toEqual({
+            importedCount: 1,
+            skippedCount: 0,
+            missingProviderSessionIds: ["missing-session"],
+          });
+          expect(commands.map((command) => command.type)).toEqual([
+            "thread.create",
+            "thread.history.import",
+          ]);
+          expect(bindings[0]?.resumeCursor).toEqual({ threadId: "codex-session" });
+        }),
+    );
+
     it.effect("uses the project root and stores provider-specific resume cursors", () =>
       Effect.gen(function* () {
         const commands: Array<OrchestrationCommand> = [];
