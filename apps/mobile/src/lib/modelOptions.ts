@@ -1,9 +1,12 @@
-import {
-  ProviderInstanceId,
-  type ModelCapabilities,
-  type ModelSelection,
-  type ServerConfig as T3ServerConfig,
+import type { MenuAction } from "@react-native-menu/menu";
+import type {
+  ModelCapabilities,
+  ModelSelection,
+  ProjectId,
+  RuntimeMode,
+  ServerConfig as T3ServerConfig,
 } from "@t3tools/contracts";
+import { resolveProjectProviderInstanceEnabled } from "@t3tools/contracts";
 import {
   buildExplicitProviderOptionSelectionsFromDescriptors,
   getProviderOptionDescriptors,
@@ -16,20 +19,28 @@ export type ModelOption = {
   readonly providerKey: string;
   readonly providerLabel: string;
   readonly providerDriver: string;
+  readonly supportedRuntimeModes?: ReadonlyArray<RuntimeMode>;
+  readonly providerIconUrl?: string | undefined;
   readonly isDefault: boolean;
   readonly isLegacy: boolean;
   readonly isUnavailable?: boolean;
-  readonly providerStatusMessage?: string;
+  readonly isHidden?: boolean;
+  readonly canHide?: boolean;
   readonly capabilities: ModelCapabilities | null;
   readonly selection: ModelSelection;
+  readonly providerUpdateRequired?: ProviderUpdateRequired;
 };
+
+type ProviderUpdateRequired = Pick<
+  T3ServerConfig["providers"][number],
+  "driver" | "updateRequiredModels"
+>;
 
 export type ProviderGroup = {
   readonly providerKey: string;
   readonly providerLabel: string;
-  readonly providerDriver?: string;
-  readonly statusMessage?: string;
   readonly models: ReadonlyArray<ModelOption>;
+  readonly updateRequired?: ProviderUpdateRequired;
 };
 
 function providerDisplayLabel(provider: {
@@ -40,63 +51,51 @@ function providerDisplayLabel(provider: {
   if (provider.displayName) return provider.displayName;
   if (provider.driver === "codex") return "Codex";
   if (provider.driver === "claudeAgent") return "Claude";
+  if (provider.driver === "pi") return "Pi";
   return provider.instanceId;
 }
 
-function isDesktopBackedCodexInstance(
+function isProviderEnabledForProject(
   config: T3ServerConfig | null | undefined,
-  instanceId: string,
+  provider:
+    | { readonly instanceId: ModelSelection["instanceId"]; readonly enabled: boolean }
+    | undefined,
+  projectId: ProjectId | null,
 ): boolean {
-  const configuredInstance =
-    config?.settings?.providerInstances[ProviderInstanceId.make(instanceId)];
-  if (configuredInstance) {
-    const instanceConfig = configuredInstance.config;
-    return (
-      configuredInstance.driver === "codex" &&
-      instanceConfig !== null &&
-      typeof instanceConfig === "object" &&
-      !Array.isArray(instanceConfig) &&
-      (instanceConfig as { readonly useDesktopAppDaemon?: unknown }).useDesktopAppDaemon === true
-    );
+  if (!provider) {
+    return false;
   }
-  return instanceId === "codex" && config?.settings?.providers.codex.useDesktopAppDaemon === true;
+  return config?.settings
+    ? resolveProjectProviderInstanceEnabled(config.settings, projectId, provider.instanceId)
+    : provider.enabled;
 }
 
-export function codexThreadRuntimeLabel(
+function isProjectDisabledOverride(
   config: T3ServerConfig | null | undefined,
-  instanceId: string,
-): string | null {
-  const provider = config?.providers.find((candidate) => candidate.instanceId === instanceId);
-  if (provider?.driver !== "codex") return null;
-  return isDesktopBackedCodexInstance(config, instanceId) ? "Codex desktop" : "Codex CLI";
-}
-export function getDesktopBackedProviderStatusMessage(
-  config: T3ServerConfig | null | undefined,
-  instanceId: string,
-  provider = config?.providers.find((candidate) => candidate.instanceId === instanceId),
-): string | null {
-  if (!isDesktopBackedCodexInstance(config, instanceId)) return null;
-  if (
-    provider?.enabled &&
-    provider.installed &&
-    provider.status === "ready" &&
-    provider.auth.status !== "unauthenticated" &&
-    provider.availability !== "unavailable"
-  ) {
-    return null;
+  instanceId: ModelSelection["instanceId"],
+  projectId: ProjectId | null,
+): boolean {
+  if (!projectId || !config?.settings) {
+    return false;
   }
   return (
-    provider?.message?.trim() ||
-    `${provider ? providerDisplayLabel(provider) : "Codex desktop"} is unavailable on this environment.`
+    config.settings.projectSettingsOverrides[projectId]?.providerInstances?.[instanceId]
+      ?.enabled === false
   );
 }
 
-export function getModelSelectionUnavailableMessage(
+function isDisabledForProject(
   config: T3ServerConfig | null | undefined,
-  selection: ModelSelection | null | undefined,
-): string | null {
-  if (!selection) return null;
-  return getDesktopBackedProviderStatusMessage(config, selection.instanceId);
+  provider:
+    | { readonly instanceId: ModelSelection["instanceId"]; readonly enabled: boolean }
+    | undefined,
+  instanceId: ModelSelection["instanceId"],
+  projectId: ProjectId | null,
+): boolean {
+  if (isProjectDisabledOverride(config, instanceId, projectId)) {
+    return true;
+  }
+  return provider !== undefined && !isProviderEnabledForProject(config, provider, projectId);
 }
 
 function normalizeSelectionOptions(
@@ -105,6 +104,9 @@ function normalizeSelectionOptions(
 ): ModelSelection {
   if (!capabilities) {
     return selection;
+  }
+  if (!selection.options?.length) {
+    return { instanceId: selection.instanceId, model: selection.model };
   }
   const options = buildExplicitProviderOptionSelectionsFromDescriptors(
     getProviderOptionDescriptors({
@@ -121,10 +123,15 @@ function normalizeSelectionOptions(
       };
 }
 
-/** Whether a known Antigravity selection needs setup or a different model. */
+/**
+ * `projectId` has no default: a caller that forgets it would silently check only the
+ * machine-wide state and miss a project that turned this instance off. Pass `null` explicitly
+ * outside a project's scope.
+ */
 export function isModelSelectionUnavailable(
   config: T3ServerConfig | null | undefined,
   selection: ModelSelection | null | undefined,
+  projectId: ProjectId | null,
 ): boolean {
   if (!config || !selection) {
     return false;
@@ -132,23 +139,14 @@ export function isModelSelectionUnavailable(
   const provider = config.providers.find(
     (candidate) => candidate.instanceId === selection.instanceId,
   );
-  if (isDesktopBackedCodexInstance(config, selection.instanceId)) {
-    return (
-      !provider ||
-      !provider.enabled ||
-      !provider.installed ||
-      provider.status !== "ready" ||
-      provider.auth.status === "unauthenticated" ||
-      provider.availability === "unavailable" ||
-      !provider.models.some((model) => model.slug === selection.model)
-    );
+  if (isDisabledForProject(config, provider, selection.instanceId, projectId)) {
+    return true;
   }
   const driver =
     provider?.driver ?? config.settings?.providerInstances[selection.instanceId]?.driver;
   return (
     driver === "antigravity" &&
     (!provider ||
-      !provider.enabled ||
       !provider.installed ||
       provider.auth.status === "unauthenticated" ||
       provider.availability === "unavailable" ||
@@ -156,15 +154,29 @@ export function isModelSelectionUnavailable(
   );
 }
 
-/**
- * Keep Antigravity and desktop-backed Codex selections when setup or catalog
- * changes make them unavailable. Other providers fall through to the server
- * default when disabled, missing, or signed out. Without config, keep stored
- * selections.
- */
+export function describeUnavailableModelSelection(
+  config: T3ServerConfig | null | undefined,
+  selection: ModelSelection,
+  projectId: ProjectId | null,
+): { readonly title: string; readonly detail: string } {
+  const provider = config?.providers.find(
+    (candidate) => candidate.instanceId === selection.instanceId,
+  );
+  return isDisabledForProject(config, provider, selection.instanceId, projectId)
+    ? {
+        title: "Model turned off for this project",
+        detail: "Turn it back on from web or desktop, or choose another model.",
+      }
+    : {
+        title: "Antigravity model unavailable",
+        detail: "Set up Antigravity on web or desktop, or choose another model.",
+      };
+}
+
 export function resolveSelectableModelSelection(
   config: T3ServerConfig | null | undefined,
   selection: ModelSelection | null,
+  projectId: ProjectId | null,
 ): ModelSelection | null {
   if (!selection || !config) {
     return selection;
@@ -174,37 +186,29 @@ export function resolveSelectableModelSelection(
   );
   const driver =
     provider?.driver ?? config.settings?.providerInstances[selection.instanceId]?.driver;
-  if (driver === "antigravity" || isDesktopBackedCodexInstance(config, selection.instanceId)) {
-    return selection;
+  if (driver === "antigravity") {
+    return isProjectDisabledOverride(config, selection.instanceId, projectId) ? null : selection;
   }
   return provider &&
-    provider.enabled &&
+    isProviderEnabledForProject(config, provider, projectId) &&
     provider.installed &&
     provider.auth.status !== "unauthenticated"
     ? selection
     : null;
 }
 
-/**
- * Reject legacy models for implicit defaults, except Antigravity selections,
- * which must not silently change after a catalog update. Explicit picks in
- * the settings sheet are unaffected.
- */
 export function resolveDefaultableModelSelection(
   config: T3ServerConfig | null | undefined,
   selection: ModelSelection | null,
+  projectId: ProjectId | null,
 ): ModelSelection | null {
-  const usable = resolveSelectableModelSelection(config, selection);
+  const usable = resolveSelectableModelSelection(config, selection, projectId);
   if (!usable || !config) {
     return usable;
   }
   const provider = config.providers.find((candidate) => candidate.instanceId === usable.instanceId);
   const model = provider?.models.find((candidate) => candidate.slug === usable.model);
-  return provider?.driver !== "antigravity" &&
-    !isDesktopBackedCodexInstance(config, usable.instanceId) &&
-    model?.isLegacy === true
-    ? null
-    : usable;
+  return provider?.driver !== "antigravity" && model?.isLegacy === true ? null : usable;
 }
 
 export function resolveNewTaskModelSelection(input: {
@@ -226,12 +230,16 @@ export function resolveNewTaskModelSelection(input: {
 export function buildModelOptions(
   config: T3ServerConfig | null | undefined,
   fallbackModelSelection: ModelSelection | null,
+  providerInstanceId: ModelSelection["instanceId"] | undefined,
+  projectId: ProjectId | null,
+  includeHidden = false,
 ): ReadonlyArray<ModelOption> {
   const options = new Map<string, ModelOption>();
 
   for (const provider of config?.providers ?? []) {
     if (
-      !provider.enabled ||
+      (providerInstanceId !== undefined && provider.instanceId !== providerInstanceId) ||
+      !isProviderEnabledForProject(config, provider, projectId) ||
       !provider.installed ||
       provider.auth.status === "unauthenticated" ||
       (provider.driver === "antigravity" && provider.availability === "unavailable")
@@ -240,12 +248,18 @@ export function buildModelOptions(
     }
 
     const providerLabel = providerDisplayLabel(provider);
-    const providerStatusMessage = getDesktopBackedProviderStatusMessage(
-      config,
-      provider.instanceId,
-      provider,
+    const updateRequired = provider.updateRequiredModels?.length
+      ? { driver: provider.driver, updateRequiredModels: provider.updateRequiredModels }
+      : undefined;
+    const preferences = config?.settings?.providerModelPreferences?.[provider.instanceId];
+    const hiddenModels = new Set(preferences?.hiddenModels ?? []);
+    const order = new Map((preferences?.modelOrder ?? []).map((slug, index) => [slug, index]));
+    const models = provider.models.filter(
+      (model) => includeHidden || model.isCustom || !hiddenModels.has(model.slug),
     );
-    for (const model of provider.models) {
+    if (order.size > 0)
+      models.sort((a, b) => (order.get(a.slug) ?? Infinity) - (order.get(b.slug) ?? Infinity));
+    for (const model of models) {
       const key = `${provider.instanceId}:${model.slug}`;
       options.set(key, {
         key,
@@ -254,9 +268,15 @@ export function buildModelOptions(
         providerKey: provider.instanceId,
         providerLabel,
         providerDriver: provider.driver,
+        ...(provider.supportedRuntimeModes === undefined
+          ? {}
+          : { supportedRuntimeModes: provider.supportedRuntimeModes }),
+        ...(provider.iconUrl ? { providerIconUrl: provider.iconUrl } : {}),
+        isHidden: !model.isCustom && hiddenModels.has(model.slug),
+        canHide: !model.isCustom,
         isDefault: model.isDefault === true,
         isLegacy: model.isLegacy === true,
-        ...(providerStatusMessage !== null ? { isUnavailable: true, providerStatusMessage } : {}),
+        ...(updateRequired ? { providerUpdateRequired: updateRequired } : {}),
         capabilities: model.capabilities,
         selection: normalizeSelectionOptions(
           {
@@ -269,7 +289,17 @@ export function buildModelOptions(
     }
   }
 
-  if (fallbackModelSelection) {
+  if (
+    fallbackModelSelection &&
+    (providerInstanceId === undefined ||
+      fallbackModelSelection.instanceId === providerInstanceId) &&
+    (!config?.settings?.providerModelPreferences?.[
+      fallbackModelSelection.instanceId
+    ]?.hiddenModels.includes(fallbackModelSelection.model) ||
+      config?.providers
+        .find((provider) => provider.instanceId === fallbackModelSelection.instanceId)
+        ?.models.find((model) => model.slug === fallbackModelSelection.model)?.isCustom)
+  ) {
     const key = `${fallbackModelSelection.instanceId}:${fallbackModelSelection.model}`;
     const existing = options.get(key);
     if (existing) {
@@ -295,11 +325,6 @@ export function buildModelOptions(
         displayName: provider?.displayName ?? instanceConfig?.displayName,
         instanceId: fallbackModelSelection.instanceId,
       });
-      const providerStatusMessage = getDesktopBackedProviderStatusMessage(
-        config,
-        fallbackModelSelection.instanceId,
-        provider,
-      );
       options.set(key, {
         key,
         label: model?.name ?? fallbackModelSelection.model,
@@ -309,11 +334,10 @@ export function buildModelOptions(
         providerDriver,
         isDefault: false,
         isLegacy: model?.isLegacy === true,
-        ...(isModelSelectionUnavailable(config, fallbackModelSelection)
-          ? {
-              isUnavailable: true,
-              ...(providerStatusMessage !== null ? { providerStatusMessage } : {}),
-            }
+        ...(isModelSelectionUnavailable(config, fallbackModelSelection, projectId) ||
+        (provider !== undefined && !isProviderEnabledForProject(config, provider, projectId)) ||
+        provider?.updateRequiredModels?.some((gated) => gated.slug === fallbackModelSelection.model)
+          ? { isUnavailable: true }
           : {}),
         capabilities: model?.capabilities ?? null,
         selection: fallbackModelSelection,
@@ -324,48 +348,25 @@ export function buildModelOptions(
   return [...options.values()];
 }
 
-export function groupByProvider(
-  options: ReadonlyArray<ModelOption>,
-  config?: T3ServerConfig | null,
-): ReadonlyArray<ProviderGroup> {
+export function groupByProvider(options: ReadonlyArray<ModelOption>): ReadonlyArray<ProviderGroup> {
   const groups = new Map<
     string,
     {
       providerLabel: string;
-      providerDriver?: string;
-      statusMessage?: string;
       models: ModelOption[];
+      updateRequired: ProviderUpdateRequired | undefined;
     }
   >();
   for (const option of options) {
     const existing = groups.get(option.providerKey);
     if (existing) {
       existing.models.push(option);
+      existing.updateRequired ??= option.providerUpdateRequired;
     } else {
       groups.set(option.providerKey, {
         providerLabel: option.providerLabel,
-        providerDriver: option.providerDriver,
         models: [option],
-      });
-    }
-  }
-
-  for (const provider of config?.providers ?? []) {
-    const statusMessage = getDesktopBackedProviderStatusMessage(
-      config,
-      provider.instanceId,
-      provider,
-    );
-    if (statusMessage === null) continue;
-    const existing = groups.get(provider.instanceId);
-    if (existing) {
-      existing.statusMessage = statusMessage;
-    } else {
-      groups.set(provider.instanceId, {
-        providerLabel: providerDisplayLabel(provider),
-        providerDriver: provider.driver,
-        statusMessage,
-        models: [],
+        updateRequired: option.providerUpdateRequired,
       });
     }
   }
@@ -373,10 +374,57 @@ export function groupByProvider(
   return [...groups.entries()].map(([providerKey, group]) => ({
     providerKey,
     providerLabel: group.providerLabel,
-    ...(group.models.length === 0 && group.providerDriver
-      ? { providerDriver: group.providerDriver }
-      : {}),
-    ...(group.statusMessage ? { statusMessage: group.statusMessage } : {}),
     models: group.models,
+    ...(group.updateRequired ? { updateRequired: group.updateRequired } : {}),
   }));
+}
+
+function modelMenuAction(option: ModelOption, selectedModel: ModelSelection | null): MenuAction {
+  return {
+    id: `model:${option.key}`,
+    title: option.label,
+    state:
+      option.selection.instanceId === selectedModel?.instanceId &&
+      option.selection.model === selectedModel.model
+        ? "on"
+        : undefined,
+  };
+}
+
+export function buildModelMenuActions(
+  groups: ReadonlyArray<ProviderGroup>,
+  selectedModel: ModelSelection | null,
+): MenuAction[] {
+  return groups.flatMap((group) => {
+    const currentModels = group.models.filter((model) => !model.isLegacy);
+    const legacyModels = group.models.filter((model) => model.isLegacy);
+    const selected = group.models.find(
+      (model) =>
+        model.selection.instanceId === selectedModel?.instanceId &&
+        model.selection.model === selectedModel.model,
+    );
+
+    return [
+      ...(currentModels.length > 0
+        ? [
+            {
+              id: `provider:${group.providerKey}`,
+              title: group.providerLabel,
+              subtitle: selected && !selected.isLegacy ? selected.label : undefined,
+              subactions: currentModels.map((option) => modelMenuAction(option, selectedModel)),
+            },
+          ]
+        : []),
+      ...(legacyModels.length > 0
+        ? [
+            {
+              id: `legacy-models:${group.providerKey}`,
+              title: `${group.providerLabel} legacy models`,
+              subtitle: selected?.isLegacy ? selected.label : undefined,
+              subactions: legacyModels.map((option) => modelMenuAction(option, selectedModel)),
+            },
+          ]
+        : []),
+    ];
+  });
 }

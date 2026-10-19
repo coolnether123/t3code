@@ -1,7 +1,6 @@
-import { ProviderInteractionMode, RuntimeMode, type SubagentBackend } from "@t3tools/contracts";
+import { ProviderInteractionMode, RuntimeMode } from "@t3tools/contracts";
 import { memo, type ReactNode } from "react";
 import { EllipsisIcon } from "lucide-react";
-import { Button } from "../ui/button";
 import {
   Menu,
   MenuPopup,
@@ -10,39 +9,50 @@ import {
   MenuSeparator as MenuDivider,
   MenuTrigger,
 } from "../ui/menu";
+import { ComposerControl, ComposerControlIcon } from "./ComposerControl";
+import { useComposerMenuProps } from "./composerEventScope";
+import { useComposerMenuState } from "./useComposerMenuState";
 
 export const CompactComposerControlsMenu = memo(function CompactComposerControlsMenu(props: {
   interactionMode: ProviderInteractionMode;
   runtimeMode: RuntimeMode;
-  subagentBackend: SubagentBackend | null;
-  subagentBackendOptions: ReadonlyArray<{
-    readonly value: SubagentBackend;
+  runtimeModeOptions: ReadonlyArray<{
+    readonly mode: RuntimeMode;
     readonly label: string;
-    readonly description: string;
-    readonly supported: boolean;
-    readonly reason: string;
   }>;
   showInteractionModeToggle: boolean;
   traitsMenuContent?: ReactNode;
+  size?: "sm" | "xs";
+  /**
+   * The resting strip keeps this menu mounted out of flow while every block
+   * fits inline. Its portaled popup would outlive that transition, so an
+   * open menu closes when its trigger hides.
+   */
+  hidden?: boolean;
   onToggleInteractionMode: () => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
-  onSubagentBackendChange: (backend: SubagentBackend) => void;
 }) {
+  const composerFloatingLayerProps = useComposerMenuProps();
+  const size = props.size ?? "sm";
+  const [open, setOpen] = useComposerMenuState(props.hidden);
+
   return (
-    <Menu>
+    <Menu open={open} onOpenChange={setOpen}>
       <MenuTrigger
         render={
-          <Button
-            size="sm"
-            variant="ghost"
-            className="shrink-0 px-2 text-muted-foreground/70 hover:text-foreground/80"
+          <ComposerControl
+            size={size}
+            className="shrink-0"
             aria-label="More composer controls"
+            data-composer-shortcut={
+              props.traitsMenuContent ? "composer.mode composer.effort" : "composer.mode"
+            }
           />
         }
       >
-        <EllipsisIcon aria-hidden="true" className="size-4" />
+        <ComposerControlIcon icon={EllipsisIcon} size={size} />
       </MenuTrigger>
-      <MenuPopup align="start">
+      <MenuPopup align="start" {...composerFloatingLayerProps}>
         {props.traitsMenuContent ? (
           <>
             {props.traitsMenuContent}
@@ -73,36 +83,9 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
             props.onRuntimeModeChange(value as RuntimeMode);
           }}
         >
-          <MenuRadioItem value="approval-required">Supervised</MenuRadioItem>
-          <MenuRadioItem value="auto-accept-edits">Auto-accept edits</MenuRadioItem>
-          <MenuRadioItem value="auto">Auto</MenuRadioItem>
-          <MenuRadioItem value="full-access">Full access</MenuRadioItem>
-        </MenuRadioGroup>
-        <MenuDivider />
-        <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">Sub-agents</div>
-        <MenuRadioGroup
-          value={props.subagentBackend ?? ""}
-          onValueChange={(value) => {
-            if (!value || value === props.subagentBackend) return;
-            const option = props.subagentBackendOptions.find(
-              (candidate) => candidate.value === value,
-            );
-            if (option?.supported) props.onSubagentBackendChange(option.value);
-          }}
-        >
-          {props.subagentBackendOptions.map((option) => (
-            <MenuRadioItem
-              key={option.value}
-              value={option.value}
-              disabled={!option.supported}
-              title={option.supported ? undefined : option.reason}
-            >
-              <span className="flex min-w-0 flex-col">
-                <span>{option.label}</span>
-                <span className="text-muted-foreground text-[11px] leading-4">
-                  {option.supported ? option.description : option.reason}
-                </span>
-              </span>
+          {props.runtimeModeOptions.map((option) => (
+            <MenuRadioItem key={option.mode} value={option.mode}>
+              {option.label}
             </MenuRadioItem>
           ))}
         </MenuRadioGroup>

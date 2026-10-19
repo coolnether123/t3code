@@ -1,3 +1,7 @@
+import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
+import { makeProviderUsageReader } from "./usageProviderReaders.ts";
 /**
  * UsageService - scans provider transcripts and returns priced usage buckets.
  *
@@ -17,6 +21,7 @@ import * as NodeOS from "node:os";
 import {
   USAGE_CONTRACT_VERSION,
   CodexSettings,
+  ClaudeSettings,
   type UsageProviderKind,
   type UsageRepeatedInputCoverageGap,
   type UsageRepeatedInputCatalogItem,
@@ -52,17 +57,17 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Scope from "effect/Scope";
-import { HttpClient, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientResponse } from "effect/http";
 
 import { ServerConfig } from "../config.ts";
-import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as UsageProjection from "./UsageProjection.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
 import {
   codexIsolatedHomePath,
   resolveCodexHomeLayout,
 } from "../provider/Drivers/CodexHomeLayout.ts";
-import { makeDayFormatter, UsageAggregator } from "./usageAggregation.ts";
+import { makeDayFormatter, resolveModelAliases, UsageAggregator } from "./usageAggregation.ts";
 import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
 import { UsageSummaryCache, usageSummaryCacheKey } from "./usageSummaryCache.ts";
 import { makeUsageReportCalculation, projectUsageReport } from "./usageReport.ts";
@@ -148,6 +153,9 @@ const LITELLM_RATES_URL =
   "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 
 /** Rates move rarely; a day-old table keeps the page working offline. */
+const LITELLM_RATES_API_URL =
+  "https://api.github.com/repos/BerriAI/litellm/contents/model_prices_and_context_window.json?ref=main";
+
 const RATES_TTL_MS = 24 * 60 * 60 * 1000;
 /** An explicit refresh ignores the TTL, but not a table fetched this recently. */
 const RATES_REFRESH_FLOOR_MS = 60 * 1000;
@@ -479,11 +487,15 @@ const EMPTY_PRICING: UsagePricing = {
 };
 
 const emptyUsageSummary = (input: {
+  readonly clientContractVersion?: number;
   readonly timeZone: string;
   readonly sinceDay: UsageDay;
   readonly untilDay: UsageDay;
 }): UsageSummary => ({
-  contractVersion: USAGE_CONTRACT_VERSION,
+  contractVersion: Math.min(
+    input.clientContractVersion ?? USAGE_CONTRACT_VERSION,
+    USAGE_CONTRACT_VERSION,
+  ),
   readAt: "1970-01-01T00:00:00.000Z",
   timeZone: input.timeZone,
   sinceDay: input.sinceDay,
@@ -518,8 +530,10 @@ export const make = Effect.gen(function* () {
   setPromptIndexCutover(yield* promptCutoverEnabled(process.env, fileSystem));
   const path = yield* Path.Path;
   const config = yield* ServerConfig;
+  const hostEnvironment = yield* HostProcess.Environment;
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const httpClient = yield* HttpClient.HttpClient;
+  const readProviderUsage = yield* makeProviderUsageReader;
   const serviceScope = yield* Scope.make("sequential");
   const scanSemaphore = yield* Semaphore.make(1);
 
@@ -587,6 +601,7 @@ export const make = Effect.gen(function* () {
   let rates: RateTable = new Map();
   let ratesRevision: string | null = null;
   let ratesFetchedAtMs: number | null = null;
+  let ratesLastFailedAtMs: number | null = null;
   let ratesStatus: UsageSummary["pricing"]["status"] = "unavailable";
   const ratesLock = yield* Semaphore.make(1);
   let cachedRatesLoaded = false;
@@ -636,31 +651,43 @@ export const make = Effect.gen(function* () {
             const maxAgeMs = force ? RATES_REFRESH_FLOOR_MS : RATES_TTL_MS;
             if (ratesFetchedAtMs !== null && now - ratesFetchedAtMs < maxAgeMs) return;
 
-            const fetched = yield* httpClient.get(LITELLM_RATES_URL).pipe(
-              Effect.flatMap(HttpClientResponse.filterStatusOk),
-              Effect.flatMap((response) => response.json),
-              Effect.timeout(10_000),
-              Effect.catchCause(() => Effect.succeed(null)),
-            );
+            if (ratesLastFailedAtMs !== null && now - ratesLastFailedAtMs < RATES_REFRESH_FLOOR_MS)
+              return;
+            const fetchRates = (url: string, accept = "application/json") =>
+              httpClient.get(url, { headers: { accept } }).pipe(
+                Effect.flatMap(HttpClientResponse.filterStatusOk),
+                Effect.flatMap((response) => response.json),
+                Effect.map((document) => {
+                  const parsed = parseRateTable(document);
+                  return parsed.size > 0 ? { document, parsed } : null;
+                }),
+                Effect.timeout(10_000),
+                Effect.catchCause(() => Effect.succeed(null)),
+              );
+            let fetched = yield* fetchRates(LITELLM_RATES_URL);
+            if (fetched === null)
+              fetched = yield* fetchRates(LITELLM_RATES_API_URL, "application/vnd.github.raw+json");
             if (fetched === null) {
+              ratesLastFailedAtMs = yield* Clock.currentTimeMillis;
               // The refresh failed; whatever we are serving is now past its TTL and
               // must not keep claiming to be fresh.
               if (rates.size > 0) ratesStatus = "cached";
               return;
             }
 
-            const parsed = parseRateTable(fetched);
-            if (parsed.size === 0) return;
-
-            rates = parsed;
-            const revisionDocument = encodeRateDocument(fetched);
+            rates = fetched.parsed;
+            ratesLastFailedAtMs = null;
+            const revisionDocument = encodeRateDocument(fetched.document);
             ratesRevision = NodeCrypto.createHash("sha256").update(revisionDocument).digest("hex");
             ratesFetchedAtMs = now;
             ratesStatus = "fresh";
 
-            yield* encodeRatesCache({ fetchedAtMs: now, document: fetched }).pipe(
+            yield* encodeRatesCache({ fetchedAtMs: now, document: fetched.document }).pipe(
               Effect.flatMap((serialized) =>
-                fileSystem.writeFileString(ratesCachePath, serialized),
+                writeFileStringAtomically({ filePath: ratesCachePath, contents: serialized }).pipe(
+                  Effect.provideService(FileSystem.FileSystem, fileSystem),
+                  Effect.provideService(Path.Path, path),
+                ),
               ),
               Effect.catchCause(() => Effect.void),
             );
@@ -695,8 +722,26 @@ export const make = Effect.gen(function* () {
   const resolveTranscriptDirs = Effect.fn("UsageService.resolveTranscriptDirs")(function* (
     settings: ServerSettingsValue,
   ) {
-    const claudeHome = yield* resolveClaudeHomePath(settings.providers.claudeAgent);
-    const claudeDir = yield* resolveClaudeTranscriptDir(claudeHome);
+    const claudeInstances = Object.values(settings.providerInstances).filter(
+      (instance) => instance.driver === "claudeAgent",
+    );
+    const claudeConfigs =
+      claudeInstances.length === 0 ? [{ config: {}, environment: undefined }] : claudeInstances;
+    const claudeDirs = yield* Effect.forEach(
+      claudeConfigs,
+      Effect.fnUntraced(function* (raw) {
+        const config = yield* Schema.decodeUnknownEffect(ClaudeSettings)(raw.config ?? {}).pipe(
+          Effect.orElseSucceed(() => Schema.decodeUnknownSync(ClaudeSettings)({})),
+        );
+        const environment = yield* mergeProviderInstanceEnvironment(
+          raw.environment,
+          hostEnvironment,
+        );
+        return yield* resolveClaudeHomePath(config, environment).pipe(
+          Effect.flatMap(resolveClaudeTranscriptDir),
+        );
+      }),
+    );
     const codexHomes = new Set<string>();
     const addCodexHome = Effect.fn("UsageService.addCodexHome")(function* (
       instanceId: string,
@@ -710,34 +755,65 @@ export const make = Effect.gen(function* () {
         codexHomes.add(codexIsolatedHomePath(path, config.baseDir, instanceId));
       }
     });
-    yield* addCodexHome("codex", settings.providers.codex);
+    if (
+      !Object.values(settings.providerInstances).some((instance) => instance.driver === "codex")
+    ) {
+      yield* addCodexHome(
+        "codex",
+        Schema.decodeUnknownSync(CodexSettings)({ homePath: hostEnvironment.CODEX_HOME ?? "" }),
+      );
+    }
     for (const [instanceId, instance] of Object.entries(settings.providerInstances)) {
       if (String(instance.driver) !== "codex") continue;
       const codexConfig = yield* decodeCodexSettings(instance.config ?? {}).pipe(
         Effect.orElseSucceed(() => null),
       );
-      if (codexConfig !== null) yield* addCodexHome(instanceId, codexConfig);
+      if (codexConfig !== null) {
+        const environment = yield* mergeProviderInstanceEnvironment(
+          instance.environment,
+          hostEnvironment,
+        );
+        yield* addCodexHome(
+          instanceId,
+          codexConfig.homePath.trim().length === 0 && environment.CODEX_HOME
+            ? { ...codexConfig, homePath: environment.CODEX_HOME }
+            : codexConfig,
+        );
+      }
     }
     const geminiHome = path.join(NodeOS.homedir(), ".gemini");
-    const openCodeHome = path.join(NodeOS.homedir(), ".local", "share", "opencode");
+
     const imports = yield* fileSystem.readFileString(usageImportsPath).pipe(
       Effect.flatMap((raw) => decodeUsageImports(raw)),
       Effect.orElseSucceed(() => null),
     );
 
-    return [
-      { provider: "claude" as const, dir: claudeDir },
+    const directories = [
+      ...[...new Set(claudeDirs)].map((dir) => ({ provider: "claude" as const, dir })),
       ...[...codexHomes].flatMap((codexHome) => [
         { provider: "codex" as const, dir: path.join(codexHome, "sessions") },
         { provider: "codex" as const, dir: path.join(codexHome, "archived_sessions") },
       ]),
       { provider: "gemini" as const, dir: path.join(geminiHome, "tmp") },
       { provider: "gemini" as const, dir: path.join(geminiHome, "antigravity", "brain") },
-      { provider: "opencode" as const, dir: openCodeHome },
+
       ...(imports?.sources ?? [])
         .filter((source) => source.path.trim().length > 0)
         .map((source) => ({ provider: source.provider, dir: path.resolve(source.path) })),
     ];
+    const seen = new Set<string>();
+    const resolved = yield* Effect.forEach(directories, ({ provider, dir }) =>
+      fileSystem.realPath(dir).pipe(
+        Effect.orElseSucceed(() => dir),
+        Effect.map((dir) => ({ provider, dir })),
+      ),
+    );
+    return resolved.filter(({ provider, dir }) => {
+      const key = provider + "\0" + dir;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   });
 
   type UsageReadContext = {
@@ -1055,7 +1131,10 @@ export const make = Effect.gen(function* () {
     if (input.quotaHistoryOnly) {
       const finishedAtMs = yield* Clock.currentTimeMillis;
       return {
-        contractVersion: USAGE_CONTRACT_VERSION,
+        contractVersion: Math.min(
+          input.clientContractVersion ?? USAGE_CONTRACT_VERSION,
+          USAGE_CONTRACT_VERSION,
+        ),
         readAt: DateTime.formatIso(DateTime.makeUnsafe(finishedAtMs)),
         timeZone: input.timeZone,
         sinceDay: input.sinceDay,
@@ -1178,6 +1257,7 @@ export const make = Effect.gen(function* () {
       resolution: input.resolution ?? "day",
       ...hourlyWindow,
       rates: scanRates,
+      modelAliases: resolveModelAliases(settings.usageModelAliases),
       priceOverrides: createOverrideRateTable(settings.usagePriceOverrides),
       ...(input.providers === undefined ? {} : { providers: input.providers }),
       ...(input.runIds === undefined ? {} : { runIds: input.runIds }),
@@ -1192,7 +1272,7 @@ export const make = Effect.gen(function* () {
     const indexRevision = transcriptIndexRevisionOf(
       ratesRevision,
       scanRates.size,
-      settings.usagePriceOverrides,
+      [settings.usagePriceOverrides, settings.usageModelAliases],
       tierJournal,
       fastWindowText,
     );
@@ -1211,9 +1291,20 @@ export const make = Effect.gen(function* () {
       records: readonly UsageRecord[],
       complete: boolean,
     ): TranscriptUsageIndex => {
+      const sourcePath = dirs
+        .filter(
+          (source) =>
+            source.provider === provider &&
+            (filePath.startsWith(source.dir + path.sep) || filePath === source.dir),
+        )
+        .sort((a, b) => b.dir.length - a.dir.length)[0]?.dir;
       const index = buildTranscriptUsageIndex(
         records,
-        (record) => aggregator.price(applyCodexServiceTier(record, tiers, fastWindows)),
+        (record) =>
+          aggregator.price({
+            ...applyCodexServiceTier(record, tiers, fastWindows),
+            ...(sourcePath === undefined ? {} : { sourcePath }),
+          }),
         (keyHash) => dedupeKeys.isShared(keyHash, filePath),
       );
       for (const stale of dedupeKeys.register(filePath, index.keyHashes)) {
@@ -1321,6 +1412,7 @@ export const make = Effect.gen(function* () {
           scanRates,
           createOverrideRateTable(settings.usagePriceOverrides),
           quotaProvider,
+          resolveModelAliases(settings.usageModelAliases),
         );
         for (const [, entry] of retainedFiles) {
           if (entry.records.length > 0) scannedFiles += 1;
@@ -1330,7 +1422,7 @@ export const make = Effect.gen(function* () {
           }
           for (const rawRecord of entry.records) {
             const record = applyCodexServiceTier(rawRecord, tiers, fastWindows);
-            if (aggregator.add(record)) {
+            if (aggregator.add({ ...record, sourcePath: dir })) {
               if (record.sessionId.length > 0) sessionIds.add(record.sessionId);
               if (quotaIntervals.length > 0) quota.add(record);
             }
@@ -1501,6 +1593,7 @@ export const make = Effect.gen(function* () {
         scanRates,
         createOverrideRateTable(settings.usagePriceOverrides),
         quotaProvider,
+        resolveModelAliases(settings.usageModelAliases),
       );
       const indexed: {
         readonly file: (typeof selection.files)[number];
@@ -1649,7 +1742,7 @@ export const make = Effect.gen(function* () {
           const record = applyCodexServiceTier(rawRecord, tiers, fastWindows);
           // Only sessions that contributed in-window count: the mtime slack
           // admits boundary files whose records fall outside the range.
-          if (aggregator.add(record)) {
+          if (aggregator.add({ ...record, sourcePath: dir })) {
             if (record.sessionId.length > 0) sessionIds.add(record.sessionId);
             if (quotaIntervals.length > 0) quota.add(record);
           }
@@ -1796,6 +1889,50 @@ export const make = Effect.gen(function* () {
     // making the response wait for the write.
     if (quotaCostLedgerDirty) yield* Queue.offer(persistQueue, undefined);
 
+    const legacyVersion = input.clientContractVersion ?? 5;
+    const additionalProviders =
+      input.quotaIntervals !== undefined
+        ? []
+        : (input.providers ??
+          (legacyVersion < 8
+            ? (["grok", ...(legacyVersion >= 6 ? ["opencode"] : [])] as UsageProviderKind[])
+            : undefined));
+    const providerScans = yield* readProviderUsage({
+      settings,
+      windowStartMs,
+      retentionCutoffMs: startedAtMs - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+      awaitRefresh: input.awaitRefresh === true,
+      ...(additionalProviders === undefined ? {} : { providers: additionalProviders }),
+    });
+    for (const scan of providerScans) {
+      if (input.quotaIntervals !== undefined && scan.provider !== (input.quotaProvider ?? "codex"))
+        continue;
+      const sessions = new Set<string>();
+      for (const file of scan.files ?? []) {
+        for (const record of file.records) {
+          if (
+            aggregator.add({ ...record, nativeSessionId: record.sessionId, sourcePath: scan.dir })
+          )
+            sessions.add(record.sessionId);
+        }
+      }
+      sources.push({
+        fingerprint: {
+          hostId: scan.hostId ?? hostId,
+          provider: scan.provider,
+          resolvedHomePath: scan.dir,
+          volumeId: scan.volumeId ?? (yield* Effect.promise(() => readDirectoryVolumeId(scan.dir))),
+        },
+        status: scan.status ?? (scan.files === null ? "missing" : "ok"),
+        scannedFiles: scan.files?.length ?? 0,
+        skippedFiles: 0,
+        malformedRecords: 0,
+        distinctSessions: sessions.size,
+        message: scan.message ?? null,
+        ...(scan.action === undefined ? {} : { action: scan.action }),
+        ...(scan.refreshing === undefined ? {} : { refreshing: scan.refreshing }),
+      });
+    }
     const aggregated = aggregator.finish();
     const readAt = yield* DateTime.now;
     const finishedAtMs = yield* Clock.currentTimeMillis;
@@ -1838,10 +1975,15 @@ export const make = Effect.gen(function* () {
     const supportsImports = clientContractVersion >= 7;
     const supportsProvider = (provider: UsageProviderKind) =>
       (provider !== "opencode" || supportsOpenCode) &&
-      ((provider !== "chatgpt" && provider !== "aistudio") || supportsImports);
+      ((provider !== "chatgpt" && provider !== "aistudio") || supportsImports) &&
+      (!["cursor", "antigravity", "pi"].includes(provider) || clientContractVersion >= 8);
 
     return {
-      contractVersion: supportsImports ? USAGE_CONTRACT_VERSION : supportsOpenCode ? 6 : 5,
+      contractVersion: supportsImports
+        ? Math.min(clientContractVersion, USAGE_CONTRACT_VERSION)
+        : supportsOpenCode
+          ? 6
+          : 5,
       readAt: DateTime.formatIso(readAt),
       timeZone: input.timeZone,
       sinceDay: input.sinceDay,
@@ -1870,9 +2012,10 @@ export const make = Effect.gen(function* () {
   const repeatedAwareSummaryCacheKey = (
     input: UsageSummaryInput,
     priceOverrides: Readonly<Record<string, unknown>> | undefined,
+    modelAliases: Readonly<Record<string, string>>,
   ): string => {
     const base = usageSummaryCacheKey(input, priceOverrides);
-    return JSON.stringify([base, ratesRevision, includeRepeatedInput(input)]);
+    return JSON.stringify([base, modelAliases, ratesRevision, includeRepeatedInput(input)]);
   };
 
   const partialSummaryAtDeadline = Effect.fn("UsageService.partialSummaryAtDeadline")(function* (
@@ -1923,10 +2066,15 @@ export const make = Effect.gen(function* () {
     const supportsImports = clientContractVersion >= 7;
     const supportsProvider = (provider: UsageProviderKind) =>
       (provider !== "opencode" || supportsOpenCode) &&
-      ((provider !== "chatgpt" && provider !== "aistudio") || supportsImports);
+      ((provider !== "chatgpt" && provider !== "aistudio") || supportsImports) &&
+      (!["cursor", "antigravity", "pi"].includes(provider) || clientContractVersion >= 8);
     const buckets = progress.aggregator?.finish().buckets ?? [];
     return {
-      contractVersion: supportsImports ? USAGE_CONTRACT_VERSION : supportsOpenCode ? 6 : 5,
+      contractVersion: supportsImports
+        ? Math.min(clientContractVersion, USAGE_CONTRACT_VERSION)
+        : supportsOpenCode
+          ? 6
+          : 5,
       readAt: DateTime.formatIso(DateTime.makeUnsafe(finishedAtMs)),
       timeZone: input.timeZone,
       sinceDay: input.sinceDay,
@@ -2009,7 +2157,11 @@ export const make = Effect.gen(function* () {
             { concurrency: 8 },
           );
           progress.pendingSources.push(...sources);
-          const key = repeatedAwareSummaryCacheKey(input, context.settings.usagePriceOverrides);
+          const key = repeatedAwareSummaryCacheKey(
+            input,
+            context.settings.usagePriceOverrides,
+            context.settings.usageModelAliases,
+          );
           if (!input.refresh) {
             const cached = summaryCache.get(key, yield* Clock.currentTimeMillis);
             if (cached !== undefined) return cached;
@@ -2087,9 +2239,7 @@ export const make = Effect.gen(function* () {
       yield* requestLocalPromptIndex;
       const local = yield* Effect.gen(function* () {
         const accumulator = new PromptUsageAccumulator(input);
-        const projection = yield* Effect.serviceOption(
-          ProjectionSnapshotQuery.ProjectionSnapshotQuery,
-        );
+        const projection = yield* Effect.serviceOption(UsageProjection.UsageProjection);
         if (Option.isSome(projection) && projection.value.readPromptWordIndex !== undefined) {
           return yield* projection.value
             .readPromptWordIndex(input, DateTime.formatIso(yield* DateTime.now))
@@ -2224,7 +2374,7 @@ export const make = Effect.gen(function* () {
     if (report.mode !== "runs" || (report.runs.length === 0 && report.dailyRuns.length === 0))
       return report;
 
-    const projection = yield* Effect.serviceOption(ProjectionSnapshotQuery.ProjectionSnapshotQuery);
+    const projection = yield* Effect.serviceOption(UsageProjection.UsageProjection);
     if (
       Option.isNone(projection) ||
       projection.value.findThreadMappingsByProviderSessionIds === undefined

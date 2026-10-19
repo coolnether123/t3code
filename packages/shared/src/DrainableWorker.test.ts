@@ -1,62 +1,84 @@
 import { it } from "@effect/vitest";
 import { describe, expect } from "vite-plus/test";
+import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
+import * as Logger from "effect/Logger";
 import * as Scope from "effect/Scope";
 
 import { makeDrainableWorker } from "./DrainableWorker.ts";
 
+const captureErrorLogs = () => {
+  const loggedErrors: Array<unknown> = [];
+  const logger = Logger.make(({ logLevel, cause }) => {
+    if (logLevel === "Error") loggedErrors.push(Cause.squash(cause));
+  });
+  return { loggedErrors, loggerLayer: Logger.layer([logger], { mergeWithExisting: false }) };
+};
+
 describe("makeDrainableWorker", () => {
-  it.live("cancels active processing and stops intake when its scope closes", () =>
-    Effect.scoped(
+  it.effect("logs a failed or defective item and keeps processing later items", () => {
+    const { loggedErrors, loggerLayer } = captureErrorLogs();
+
+    return Effect.scoped(
       Effect.gen(function* () {
-        const scope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
-          Scope.close(scope, Exit.void),
-        );
-        const started = yield* Deferred.make<void>();
-        const cancelled = yield* Deferred.make<void>();
         const processed: string[] = [];
+        const workerFiber = yield* Deferred.make<Fiber.Fiber<unknown, unknown>>();
         const worker = yield* makeDrainableWorker((item: string) =>
           Effect.gen(function* () {
+            yield* Deferred.succeed(workerFiber, yield* Effect.fiber);
+            if (item === "fail") return yield* Effect.fail("typed failure");
+            if (item === "die") return yield* Effect.die("defect");
+            if (item === "interrupt") return yield* Effect.interrupt;
             processed.push(item);
-            yield* Deferred.succeed(started, undefined);
-            yield* Effect.never;
-          }).pipe(Effect.ensuring(Deferred.succeed(cancelled, undefined))),
-        ).pipe(Scope.provide(scope));
-        yield* worker.enqueue("first");
-        yield* Deferred.await(started);
-        yield* worker.enqueue("second");
-        yield* Scope.close(scope, Exit.void);
-        expect(yield* Deferred.isDone(cancelled)).toBe(true);
-        expect(processed).toEqual(["first"]);
-      }),
-    ),
-  );
+          }),
+        );
 
-  it.live.each(["interrupt", "failure", "defect"] as const)(
-    "keeps consuming after an item exits with %s",
-    (failure) =>
-      Effect.scoped(
+        yield* worker.enqueue("fail");
+        yield* worker.enqueue("die");
+        yield* worker.enqueue("interrupt");
+        yield* worker.enqueue("ok");
+
+        yield* Effect.raceFirst(worker.drain, Fiber.await(yield* Deferred.await(workerFiber)));
+
+        expect(processed).toEqual(["ok"]);
+        expect(loggedErrors).toEqual(["typed failure", "defect"]);
+      }),
+    ).pipe(Effect.provide(loggerLayer));
+  });
+
+  it.effect("stops quietly when its scope closes during an item", () => {
+    const { loggedErrors, loggerLayer } = captureErrorLogs();
+
+    return Effect.gen(function* () {
+      const scope = yield* Scope.make();
+      const processed: string[] = [];
+      const workerFiber = yield* Deferred.make<Fiber.Fiber<unknown, unknown>>();
+      const worker = yield* makeDrainableWorker((item: string) =>
         Effect.gen(function* () {
-          const processed: string[] = [];
-          const worker = yield* makeDrainableWorker((item: string) => {
-            if (item === "first") {
-              if (failure === "interrupt") return Effect.interrupt;
-              if (failure === "failure") return Effect.fail("item failed");
-              return Effect.die("item defect");
-            }
-            return Effect.sync(() => {
-              processed.push(item);
-            });
-          });
-          yield* worker.enqueue("first");
-          yield* worker.enqueue("second");
-          yield* worker.drain;
-          expect(processed).toEqual(["second"]);
+          processed.push(item);
+          yield* Deferred.succeed(workerFiber, yield* Effect.fiber);
+          return yield* Effect.never;
         }),
-      ),
-  );
+      ).pipe(Scope.provide(scope));
+
+      yield* worker.enqueue("block");
+      yield* worker.enqueue("later");
+      const fiber = yield* Deferred.await(workerFiber);
+      yield* Scope.close(scope, Exit.void);
+
+      expect(Exit.hasInterrupts(yield* Fiber.await(fiber))).toBe(true);
+      expect(processed).toEqual(["block"]);
+      expect(loggedErrors).toEqual([]);
+
+      yield* worker.enqueue("after close");
+      const drained = yield* Effect.forkChild(worker.drain, { startImmediately: true });
+      expect(drained.pollUnsafe()).toEqual(Exit.void);
+      expect(processed).toEqual(["block"]);
+    }).pipe(Effect.provide(loggerLayer));
+  });
 
   it.live("waits for work enqueued during active processing before draining", () =>
     Effect.scoped(

@@ -1,4 +1,4 @@
-import { buildCodexDesktopCoordinatorInstructions } from "../src/worker/CodexDesktopCoordinatorInstructions.ts";
+import { buildCodexDesktopCoordinatorInstructions } from "../src/provider/CodexDesktopCoordinatorInstructions.ts";
 
 const mailboxRoot = process.argv[2]?.trim();
 if (!mailboxRoot) {

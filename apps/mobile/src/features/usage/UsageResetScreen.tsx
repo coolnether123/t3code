@@ -32,7 +32,7 @@ import {
   retainQuotaValueSnapshots,
   type QuotaValueSnapshot,
 } from "@t3tools/shared/usageQuota";
-import { AppText as Text } from "../../components/AppText";
+import { AppText as Text } from "../../components/ui/AppText";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { useUsage } from "../../state/usage";
 
@@ -288,7 +288,7 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
             No saved quota observations yet. Start the background collector on a connected computer.
           </Text>
         ) : null}
-        {current && last ? (
+        {tracker && current && last ? (
           <>
             <UsagePaceChart
               samples={rawSamples ?? samples}

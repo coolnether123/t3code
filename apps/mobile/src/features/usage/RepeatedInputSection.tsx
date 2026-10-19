@@ -11,7 +11,7 @@ import type {
   UsageRepeatedInputBreakdown,
 } from "@t3tools/contracts";
 
-import { AppText as Text, AppTextInput as TextInput } from "../../components/AppText";
+import { AppText as Text, AppTextInput as TextInput } from "../../components/ui/AppText";
 import { formatCount, formatTokens, formatUsd } from "@t3tools/shared/usageFormat";
 import { SettingsSection } from "../settings/components/SettingsSection";
 
@@ -895,7 +895,7 @@ export function RepeatedInputSection({
   const directTotal = totalTokens(view.direct);
   return (
     <View className="gap-5">
-      <SettingsSection title="Attribution overview" card>
+      <SettingsSection title="Attribution overview">
         <View className="gap-4 p-4">
           <Text className="text-sm leading-5 text-foreground-muted">
             Current skills stay separate from historical observed revisions. Only metadata and token
@@ -974,7 +974,7 @@ export function RepeatedInputSection({
           <GroupList title="By date" groups={view.dates} />
         </View>
       </SettingsSection>
-      <SettingsSection title="Current skill catalog" card>
+      <SettingsSection title="Current skill catalog">
         <View className="px-4">
           {view.catalogAvailable ? (
             <RepeatedInputList
@@ -991,7 +991,7 @@ export function RepeatedInputSection({
           )}
         </View>
       </SettingsSection>
-      <SettingsSection title="Historical observed revisions" card>
+      <SettingsSection title="Historical observed revisions">
         <View className="px-4">
           <RepeatedInputList
             catalog={false}

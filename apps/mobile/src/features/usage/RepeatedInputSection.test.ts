@@ -6,7 +6,7 @@ import {
 } from "@t3tools/contracts";
 
 vi.mock("react-native", () => ({ Pressable: "Pressable", View: "View" }));
-vi.mock("../../components/AppText", () => ({ AppText: "Text", AppTextInput: "TextInput" }));
+vi.mock("../../components/ui/AppText", () => ({ AppText: "Text", AppTextInput: "TextInput" }));
 vi.mock("../settings/components/SettingsSection", () => ({ SettingsSection: "Section" }));
 
 import {

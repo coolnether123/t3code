@@ -15,12 +15,16 @@ import { computerHandlers } from "./handlers.ts";
 
 const invocation = (
   capabilities: ReadonlySet<McpInvocationContext.McpCapability>,
-): McpInvocationContext.McpInvocationScope => ({
+): McpInvocationContext.McpThreadInvocationScope => ({
   environmentId: EnvironmentId.make("environment-1"),
+  requestNamespace: "provider-session-1",
+  client: undefined,
+  thread: {
   threadId: ThreadId.make("thread-1"),
   providerSessionId: "provider-session-1",
   providerInstanceId: ProviderInstanceId.make("codex"),
   runtimeMode: "full-access",
+  },
   capabilities,
   issuedAt: 1,
 });

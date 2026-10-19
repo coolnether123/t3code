@@ -1,3 +1,5 @@
+import * as AntigravityUsage from "../provider/Drivers/AntigravityUsage.ts";
+import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeSqlite from "node:sqlite";
 import * as Path from "effect/Path";
@@ -13,7 +15,7 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { HttpClient } from "effect/unstable/http";
+import { HttpClient } from "effect/http";
 import { UsageDay, type UsageSummary } from "@t3tools/contracts";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -71,6 +73,8 @@ const storedFiles = (stateDir: string) => {
 };
 
 const testLayer = Layer.mergeAll(
+  Layer.mock(AntigravityUsage.AntigravityUsage)({}),
+  Layer.mock(CursorUsageAccounts.CursorUsageAccounts)({}),
   ServerSettings.layerTest(),
   ServerConfig.layerTest(process.cwd(), { prefix: "t3-scan-budget-test-" }),
 ).pipe(Layer.provideMerge(NodeServices.layer));
@@ -1113,4 +1117,9 @@ describe("incremental scan integration", () => {
       );
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
+});
+
+vi.mock("./usageProviderReaders.ts", async () => {
+  const Effect = await import("effect/Effect");
+  return { makeProviderUsageReader: Effect.succeed(() => Effect.succeed([])) };
 });

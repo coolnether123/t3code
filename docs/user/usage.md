@@ -51,10 +51,12 @@ history remain unknown.
 
 For a birthday palette and tap effects on these screens, see [Celebrate your birthday](birthday-theme.md).
 
-The Usage page combines Codex, Claude Code, Gemini, OpenCode, and configured chat archives from
+The Usage page combines Codex, Claude Code, Gemini, Grok, Cursor, OpenCode, Antigravity, Pi, and configured chat archives from
 your connected environments. It reads local history and shows API-equivalent token cost, processed
 tokens, cache savings, provider shares, and model breakdowns. Subscription billing is separate from
 the raw token cost shown here.
+
+Choose **Limits** for subscription windows and banked resets, or **Cost** and **Tokens** for local history. The provider filter controls the providers included in the charts and totals. Cost and token breakdowns show input, cache reads, cache writes and output. Speed costs show standard, fast and ultrafast usage when the provider records that information.
 
 Use **Past 24h** for an hourly chart covering the exact rolling 24-hour period. The **7 days**,
 **30 days**, **90 days**, **120 days**, and **1 year** ranges use daily resolution. Cost and token

@@ -4,7 +4,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as CodexErrors from "effect-codex-app-server/errors";
 
-import { expandHomePath } from "../pathExpansion.ts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 interface PluginConfig {
   readonly source: string | undefined;
@@ -71,7 +71,7 @@ export const resolveCodexDesktopPluginSkillRoots = Effect.fn("resolveCodexDeskto
   function* (environment: NodeJS.ProcessEnv) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const codexHome = environment.CODEX_HOME ?? path.join(expandHomePath("~"), ".codex");
+    const codexHome = environment.CODEX_HOME ?? path.join(yield* HostProcess.HomeDirectory, ".codex");
     const configPath = path.join(codexHome, "config.toml");
     const configText = yield* fs
       .readFileString(configPath)

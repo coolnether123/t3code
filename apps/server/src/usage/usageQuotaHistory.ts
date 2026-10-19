@@ -1,3 +1,4 @@
+import { mapUsageModel } from "./usageAggregation.ts";
 import * as NodeOS from "node:os";
 import * as NodeCrypto from "node:crypto";
 
@@ -9,7 +10,7 @@ import * as Schema from "effect/Schema";
 
 import type { UsageQuotaHistory, UsageQuotaInterval, UsageQuotaSample } from "@t3tools/contracts";
 
-import { priceUsage, type RateTable } from "./usagePricing.ts";
+import { priceUsageRecord, type RateTable } from "./usagePricing.ts";
 import {
   lowerBound,
   readGroupRange,
@@ -212,15 +213,18 @@ export class QuotaCostAccumulator {
   readonly rates: RateTable;
   readonly overrides: RateTable | undefined;
   readonly provider: "codex" | "claude";
+  readonly modelAliases: ReadonlyMap<string, string> | undefined;
   constructor(
     intervals: readonly UsageQuotaInterval[],
     rates: RateTable,
     overrides?: RateTable,
     provider: "codex" | "claude" = "codex",
+    modelAliases?: ReadonlyMap<string, string>,
   ) {
     this.rates = rates;
     this.overrides = overrides;
     this.provider = provider;
+    this.modelAliases = modelAliases;
     this.rows = intervals.map((interval) => ({
       intervalId: interval.id,
       start: Date.parse(interval.sinceTime),
@@ -238,16 +242,10 @@ export class QuotaCostAccumulator {
     }));
   }
 
-  add(record: UsageRecord): void {
+  add(input: UsageRecord): void {
+    const record = mapUsageModel(input, this.modelAliases);
     if (!this.#counts(record)) return;
-    const priced = priceUsage(
-      this.rates,
-      record.model,
-      record.totals,
-      record.reportedCostUsd,
-      record.serviceTier,
-      this.overrides,
-    );
+    const priced = priceUsageRecord(this.rates, record, this.overrides);
     this.addPriced({ record, costUsd: priced.costUsd, costSource: priced.costSource });
   }
 

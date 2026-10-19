@@ -12,10 +12,16 @@
  *
  * @module usageAggregation
  */
-import type { UsageBucket, UsageDay, UsageResolution, UsageTokenTotals } from "@t3tools/contracts";
+import type {
+  UsageBucket,
+  UsageCategoryCost,
+  UsageDay,
+  UsageResolution,
+  UsageTokenTotals,
+} from "@t3tools/contracts";
 
 import { addTotals, EMPTY_TOTALS, type UsageRecord } from "./usageTranscripts.ts";
-import { cacheSavingsUsd, priceUsage, type RateTable } from "./usagePricing.ts";
+import { priceUsageRecord, type RateTable } from "./usagePricing.ts";
 import {
   lowerBound,
   readGroupRange,
@@ -28,6 +34,7 @@ import {
 type BucketDimensions = Pick<
   UsageRecord,
   | "provider"
+  | "sourcePath"
   | "model"
   | "sessionId"
   | "nativeSessionId"
@@ -159,6 +166,10 @@ interface MutableBucket {
   totals: UsageTokenTotals;
   costUsd: number;
   cacheSavingsUsd: number;
+  categoryCostUsd: { -readonly [K in keyof UsageCategoryCost]: UsageCategoryCost[K] };
+  fastCostUsd: number;
+  ultrafastCostUsd: number;
+  speedPremiumUsd: number;
   records: number;
   unpricedRecords: number;
   providerReportedRecords: number;
@@ -180,7 +191,24 @@ export interface AggregateOptions {
   readonly sessionIds?: readonly string[];
   readonly runIds?: readonly string[];
   readonly turnIds?: readonly string[];
+  readonly modelAliases?: ReadonlyMap<string, string>;
   readonly groupBy?: "model" | "session" | "turn" | "run";
+}
+
+export function resolveModelAliases(
+  aliases: Readonly<Record<string, string>>,
+): ReadonlyMap<string, string> {
+  const resolved = new Map<string, string>();
+  for (const model of Object.keys(aliases)) {
+    const seen = new Set([model]);
+    let target = aliases[model]!;
+    while (Object.hasOwn(aliases, target) && !seen.has(target)) {
+      seen.add(target);
+      target = aliases[target]!;
+    }
+    if (!Object.hasOwn(aliases, target)) resolved.set(model, target);
+  }
+  return resolved;
 }
 
 export interface AggregateResult {
@@ -235,26 +263,23 @@ export class UsageAggregator {
   }
 
   /** Prices a record with this aggregation's rates, as `add` does. */
-  price(record: UsageRecord): PricedRecord {
-    const priced = priceUsage(
-      this.#options.rates,
-      record.model,
-      record.totals,
-      record.reportedCostUsd,
-      record.serviceTier,
-      this.#options.priceOverrides,
-    );
+  price(input: UsageRecord): PricedRecord {
+    const record = mapUsageModel(input, this.#options.modelAliases);
+    const priced = priceUsageRecord(this.#options.rates, record, this.#options.priceOverrides);
     return {
       record,
       costUsd: priced.costUsd,
       costSource: priced.costSource,
-      cacheSavingsUsd: cacheSavingsUsd(
-        this.#options.rates,
-        record.model,
-        record.totals,
-        record.serviceTier,
-        this.#options.priceOverrides,
-      ),
+      categoryCostUsd: priced.categoryCostUsd,
+      fastCostUsd:
+        record.speed === "fast" ||
+        record.serviceTier === "priority" ||
+        record.serviceTier === "fast"
+          ? priced.costUsd
+          : 0,
+      ultrafastCostUsd: record.speed === "ultrafast" ? priced.costUsd : 0,
+      speedPremiumUsd: priced.speedPremiumUsd,
+      cacheSavingsUsd: priced.cacheSavingsUsd,
     };
   }
 
@@ -309,6 +334,10 @@ export class UsageAggregator {
       totals: record.totals,
       costUsd: priced.costUsd,
       cacheSavingsUsd: priced.cacheSavingsUsd,
+      categoryCostUsd: priced.categoryCostUsd,
+      fastCostUsd: priced.fastCostUsd,
+      ultrafastCostUsd: priced.ultrafastCostUsd,
+      speedPremiumUsd: priced.speedPremiumUsd,
       records: 1,
       unpricedRecords: priced.costSource === "unpriced" ? 1 : 0,
       providerReportedRecords: priced.costSource === "providerReported" ? 1 : 0,
@@ -387,12 +416,16 @@ export class UsageAggregator {
       this.#options.groupBy === "session" || this.#options.groupBy === "turn" ? safeSessionId : "";
     const turnId = this.#options.groupBy === "turn" ? (record.turnId ?? "") : "";
     const runId = this.#options.groupBy === "run" ? safeRunId : "";
-    const key = `${day}\u0000${hourStart}\u0000${record.provider}\u0000${record.model}\u0000${record.serviceTier ?? "unknown"}\u0000${record.serviceTierSource ?? "unknown"}\u0000${sessionId}\u0000${turnId}\u0000${runId}`;
+    const key = `${day}\u0000${hourStart}\u0000${record.provider}\u0000${record.model}\u0000${record.serviceTier ?? "unknown"}\u0000${record.serviceTierSource ?? "unknown"}\u0000${sessionId}\u0000${turnId}\u0000${runId}\u0000${record.sourcePath ?? ""}`;
     let bucket = this.#buckets.get(key);
     if (bucket === undefined) {
       bucket = {
         totals: EMPTY_TOTALS,
         costUsd: 0,
+        categoryCostUsd: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 },
+        fastCostUsd: 0,
+        ultrafastCostUsd: 0,
+        speedPremiumUsd: 0,
         cacheSavingsUsd: 0,
         records: 0,
         unpricedRecords: 0,
@@ -411,6 +444,11 @@ export class UsageAggregator {
   #accumulate(bucket: MutableBucket, range: GroupRange): void {
     bucket.totals = addTotals(bucket.totals, range.totals);
     bucket.costUsd += range.costUsd;
+    for (const category of ["input", "cacheRead", "cacheWrite", "output"] as const)
+      bucket.categoryCostUsd[category] += range.categoryCostUsd?.[category] ?? 0;
+    bucket.fastCostUsd += range.fastCostUsd ?? 0;
+    bucket.ultrafastCostUsd += range.ultrafastCostUsd ?? 0;
+    bucket.speedPremiumUsd += range.speedPremiumUsd ?? 0;
     bucket.cacheSavingsUsd += range.cacheSavingsUsd;
     bucket.records += range.records;
     bucket.firstActivityAtMs = Math.min(bucket.firstActivityAtMs, range.firstMs);
@@ -432,6 +470,7 @@ export class UsageAggregator {
         sessionId = "",
         turnId = "",
         runId = "",
+        sourcePath = "",
       ] = key.split("\u0000");
       buckets.push({
         day: day as UsageDay,
@@ -453,6 +492,11 @@ export class UsageAggregator {
               serviceTierSource: serviceTierSource as UsageBucket["serviceTierSource"],
             }
           : {}),
+        ...(sourcePath === "" ? {} : { sourcePath }),
+        categoryCostUsd: bucket.categoryCostUsd,
+        fastCostUsd: bucket.fastCostUsd,
+        ultrafastCostUsd: bucket.ultrafastCostUsd,
+        speedPremiumUsd: bucket.speedPremiumUsd,
         totals: bucket.totals,
         costUsd: bucket.costUsd,
         cacheSavingsUsd: bucket.cacheSavingsUsd,
@@ -488,4 +532,14 @@ function resolveCostSource(bucket: MutableBucket): UsageBucket["costSource"] {
   if (bucket.unpricedRecords === bucket.records) return "unpriced";
   if (bucket.providerReportedRecords === bucket.records) return "providerReported";
   return "modelPriced";
+}
+
+export function mapUsageModel(
+  record: UsageRecord,
+  aliases?: ReadonlyMap<string, string>,
+): UsageRecord {
+  const model = aliases?.get(record.model);
+  if (model === undefined) return record;
+  const { rateModel: _rateModel, ...rest } = record;
+  return { ...rest, model };
 }

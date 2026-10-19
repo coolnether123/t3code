@@ -3,6 +3,8 @@
   "short_name": "T3 Code",
   "description": "Control coding agents running in your T3 Code environments.",
   "id": "/",
+  "name": "T3 Code",
+  "short_name": "T3 Code",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

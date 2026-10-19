@@ -20,6 +20,8 @@ export function usageSummaryCacheKey(
     input.includeQuotaHistory ?? false,
     input.quotaHistoryOnly ?? false,
     input.quotaIntervals ?? null,
+    input.quotaProvider ?? "codex",
+    input.awaitRefresh === true,
     priceOverrides ?? null,
   ]);
 }

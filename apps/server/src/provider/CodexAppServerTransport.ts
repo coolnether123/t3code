@@ -4,7 +4,7 @@ import * as NodeStream from "node:stream";
 
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import type { CodexSettings } from "@t3tools/contracts";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { Platform as HostProcessPlatform } from "@t3tools/shared/HostProcess";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -16,10 +16,10 @@ import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
 import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import * as CodexErrors from "effect-codex-app-server/errors";
-import { expandHomePathWith } from "../pathExpansion.ts";
+import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 
 export type CodexAppServerTransport = "stdio" | "desktop-daemon";
 
@@ -571,7 +571,7 @@ export const resolveCodexBinaryPath = Effect.fn("resolveCodexBinaryPath")(functi
       ([name]) => name.toUpperCase() === "CODEX_HOME",
     )?.[1];
     const codexHome = configuredCodexHome
-      ? expandHomePathWith(configuredCodexHome, path)
+      ? expandHomePath(configuredCodexHome, NodeOS.homedir())
       : path.join(NodeOS.homedir(), ".codex");
     candidates = [yield* codexManagedCliPath(codexHome, platform)];
   } else {

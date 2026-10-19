@@ -1,35 +1,66 @@
 import {
-  type EnvironmentId,
-  ComputerControlUnavailableError,
+  type AuthMcpClientAccess,
   type ModelSelection,
+  type ProviderDriverKind,
+  type TurnId,
+  ComputerControlUnavailableError,
+  type EnvironmentId,
+  McpCapabilityUnavailableError,
+  OrchestratorMcpFailure,
   PreviewAutomationUnavailableError,
   type ProviderInstanceId,
-  type ProviderDriverKind,
   type RuntimeMode,
   type ThreadId,
-  type TurnId,
-  WorkerDisabledError,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 
-export type McpCapability = "computer" | "preview" | "workers";
+const ALL_MCP_CAPABILITIES = [
+  "computer",
+  "preview",
+  "orchestration",
+  "worktree",
+  "device",
+  "pull-requests",
+] as const;
+export type McpCapability = (typeof ALL_MCP_CAPABILITIES)[number];
 
-export interface McpInvocationScope {
-  readonly environmentId: EnvironmentId;
+export interface McpThreadCaller {
   readonly threadId: ThreadId;
   readonly providerSessionId: string;
   readonly providerInstanceId: ProviderInstanceId;
   readonly providerDriverKind?: ProviderDriverKind | undefined;
-  /** Canonical selection used by the parent turn that owns this credential. */
   readonly parentModelSelection?: ModelSelection | undefined;
-  /** Active canonical parent turn. Worker creation is bound to this lineage. */
   readonly parentTurnId?: TurnId | undefined;
-  /** Always set by issued credentials. Missing legacy/test scopes fail closed. */
   readonly runtimeMode?: RuntimeMode | undefined;
   readonly workingDirectory?: string | undefined;
+}
+
+export interface McpClientCaller {
+  readonly sessionId: string;
+  readonly label: string;
+  readonly access: AuthMcpClientAccess;
+}
+
+/**
+ * A read-only client never reaches a write (`McpToolAccess` refuses it first),
+ * so it maps to the lowest mode rather than to nothing.
+ */
+export const clientRuntimeModeCeiling = (client: McpClientCaller | undefined): RuntimeMode =>
+  client === undefined || client.access === "read-only" ? "approval-required" : client.access;
+
+/**
+ * A thread caller's omitted target falls back to its own thread; a client
+ * caller has no own thread, so tools that act as the caller (delegate_task,
+ * preview, worktree handoff) need `thread`.
+ */
+export interface McpInvocationScope {
+  readonly environmentId: EnvironmentId;
   readonly capabilities: ReadonlySet<McpCapability>;
   readonly issuedAt: number;
+  readonly requestNamespace: string;
+  readonly thread: McpThreadCaller | undefined;
+  readonly client: McpClientCaller | undefined;
 }
 
 export class McpInvocationContext extends Context.Service<
@@ -37,32 +68,63 @@ export class McpInvocationContext extends Context.Service<
   McpInvocationScope
 >()("t3/mcp/McpInvocationContext") {}
 
-export function requireMcpCapability(
-  capability: "preview",
-): Effect.Effect<McpInvocationScope, PreviewAutomationUnavailableError, McpInvocationContext>;
-export function requireMcpCapability(
-  capability: "workers",
-): Effect.Effect<McpInvocationScope, WorkerDisabledError, McpInvocationContext>;
-export function requireMcpCapability(
-  capability: "computer",
-): Effect.Effect<McpInvocationScope, ComputerControlUnavailableError, McpInvocationContext>;
-export function requireMcpCapability(capability: McpCapability) {
-  return Effect.gen(function* () {
-    const invocation = yield* McpInvocationContext;
-    if (invocation.capabilities.has(capability)) return invocation;
-    if (capability === "workers") return yield* new WorkerDisabledError({});
-    if (capability === "computer") {
-      return yield* new ComputerControlUnavailableError({
-        message:
-          "Full Chrome or Full desktop control is not active for this provider turn. Select one of those computer-control modes and start a new turn.",
-      });
-    }
-    return yield* new PreviewAutomationUnavailableError({
-      capability,
-      environmentId: invocation.environmentId,
-      threadId: invocation.threadId,
-      providerSessionId: invocation.providerSessionId,
-      providerInstanceId: invocation.providerInstanceId,
-    });
+export type McpCapabilityError<C extends McpCapability> = C extends "preview"
+  ? PreviewAutomationUnavailableError
+  : C extends "computer" ? ComputerControlUnavailableError
+  : McpCapabilityUnavailableError;
+
+const missingCapability = (
+  invocation: McpInvocationScope,
+  capability: McpCapability,
+): PreviewAutomationUnavailableError | McpCapabilityUnavailableError | ComputerControlUnavailableError => {
+  if (capability === "computer") return new ComputerControlUnavailableError({ message: "Full Chrome or Full desktop control is not active for this provider turn. Select one of those modes and start a new turn." });
+  const fields = {
+    environmentId: invocation.environmentId,
+    ...(invocation.thread === undefined
+      ? {}
+      : {
+          threadId: invocation.thread.threadId,
+          providerSessionId: invocation.thread.providerSessionId,
+          providerInstanceId: invocation.thread.providerInstanceId,
+        }),
+  };
+  return capability === "preview"
+    ? new PreviewAutomationUnavailableError({ capability, ...fields })
+    : new McpCapabilityUnavailableError({ capability, ...fields });
+};
+
+export const requireMcpCapability = <const C extends McpCapability>(
+  capability: C,
+): Effect.Effect<McpInvocationScope, McpCapabilityError<C>, McpInvocationContext> =>
+  McpInvocationContext.pipe(
+    Effect.filterOrFail(
+      (invocation) => invocation.capabilities.has(capability),
+      (invocation) => missingCapability(invocation, capability) as McpCapabilityError<C>,
+    ),
+    Effect.withSpan("mcp.requireCapability"),
+  );
+
+export const requireThreadMcpCapability = <const C extends "preview" | "device" | "computer">(
+  capability: C,
+): Effect.Effect<McpThreadInvocationScope, McpCapabilityError<C>, McpInvocationContext> =>
+  McpInvocationContext.pipe(
+    Effect.filterOrFail(
+      (invocation): invocation is McpThreadInvocationScope =>
+        invocation.capabilities.has(capability) && invocation.thread !== undefined,
+      (invocation) => missingCapability(invocation, capability) as McpCapabilityError<C>,
+    ),
+    Effect.withSpan("mcp.requireCapability"),
+  );
+
+const threadCallerRequired = (operation: string) =>
+  new OrchestratorMcpFailure({
+    code: "thread_credential_required",
+    message: `${operation} acts as the calling T3 thread, so it needs an agent running inside T3 Code. This MCP client signed in from outside a thread.`,
   });
-}
+
+export type McpThreadInvocationScope = McpInvocationScope & { readonly thread: McpThreadCaller };
+
+export const requireThreadScope = (scope: McpInvocationScope, operation: string) =>
+  scope.thread === undefined
+    ? Effect.fail(threadCallerRequired(operation))
+    : Effect.succeed(scope as McpThreadInvocationScope);

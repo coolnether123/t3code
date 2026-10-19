@@ -172,21 +172,21 @@ export const ComputerOpenUrlResult = Schema.Struct({
 });
 export type ComputerOpenUrlResult = typeof ComputerOpenUrlResult.Type;
 
-export class ComputerControlUnavailableError extends Schema.TaggedErrorClass<ComputerControlUnavailableError>()(
+export class ComputerControlUnavailableError extends Schema.TaggedError<ComputerControlUnavailableError>()(
   "ComputerControlUnavailableError",
   {
     message: Schema.String,
   },
 ) {}
 
-export class ComputerOpenUrlFailedError extends Schema.TaggedErrorClass<ComputerOpenUrlFailedError>()(
+export class ComputerOpenUrlFailedError extends Schema.TaggedError<ComputerOpenUrlFailedError>()(
   "ComputerOpenUrlFailedError",
   {
     message: Schema.String,
   },
 ) {}
 
-export class ComputerChromeAutomationError extends Schema.TaggedErrorClass<ComputerChromeAutomationError>()(
+export class ComputerChromeAutomationError extends Schema.TaggedError<ComputerChromeAutomationError>()(
   "ComputerChromeAutomationError",
   {
     operation: Schema.String,

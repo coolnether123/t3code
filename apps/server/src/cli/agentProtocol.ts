@@ -1,5 +1,6 @@
 import {
-  ClientOrchestrationCommand,
+  OrchestrationV2Command,
+  ProjectMutation,
   ENVIRONMENT_PROVIDER_MESSAGE_MAX_LENGTH,
   ENVIRONMENT_PROVIDER_SNAPSHOT_LIMIT,
   EnvironmentId,
@@ -8,9 +9,8 @@ import {
   ThreadId,
   type ExecutionEnvironmentDescriptor,
   type EnvironmentProviderSnapshotResult,
-  type OrchestrationShellSnapshot,
-  type OrchestrationThreadDetailSnapshot,
-  type OrchestrationThreadActivity,
+  type OrchestrationV2ShellSnapshot as OrchestrationShellSnapshot,
+  type OrchestrationV2ThreadDetailSnapshot as OrchestrationThreadDetailSnapshot,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
@@ -28,22 +28,13 @@ const isAgentThreadId = Schema.is(ThreadId);
 const isAgentTurnLimit = Schema.is(AGENT_TURN_LIMIT_SCHEMA);
 const isAgentOffset = Schema.is(AGENT_OFFSET_SCHEMA);
 const isAgentProviderInstanceId = Schema.is(ProviderInstanceId);
+const ClientOrchestrationCommand = Schema.Union([...OrchestrationV2Command.members, ...ProjectMutation.members]);
+
 export const AGENT_COMMAND_TYPES = [
-  "project.create",
-  "project.meta.update",
-  "thread.create",
-  "thread.meta.update",
-  "thread.pin",
-  "thread.unpin",
-  "thread.settle",
-  "thread.unsettle",
-  "thread.archive",
-  "thread.unarchive",
-  "thread.turn.start",
-  "thread.turn.steer",
-  "thread.turn.interrupt",
-  "thread.approval.respond",
-  "thread.user-input.respond",
+  "project.create", "project.update",
+  "thread.create", "thread.metadata.update", "thread.pin", "thread.unpin",
+  "thread.settle", "thread.unsettle", "thread.archive", "thread.unarchive",
+  "message.dispatch", "run.interrupt", "runtime-request.respond",
 ] as const;
 export type AgentCommandType = (typeof AGENT_COMMAND_TYPES)[number];
 
@@ -59,7 +50,7 @@ export type AgentRequest =
   | { readonly kind: "providers"; readonly instanceId?: ProviderInstanceId }
   | { readonly kind: "act"; readonly action: AgentAction };
 
-export class AgentCliError extends Schema.TaggedErrorClass<AgentCliError>()("AgentCliError", {
+export class AgentCliError extends Schema.TaggedError<AgentCliError>()("AgentCliError", {
   message: Schema.String,
 }) {}
 
@@ -109,44 +100,15 @@ export function decodeAgentAction(json: string): AgentAction {
     );
   }
   const command = action.command;
-  if (!AGENT_COMMAND_TYPES.some((type) => type === command.type))
-    reject("Command is not exposed by t3 agent.");
-  if (command.type === "thread.turn.interrupt" && !command.turnId)
-    reject("Interrupt requires the observed active turnId.");
-  if (command.type === "thread.turn.start" && command.bootstrap !== undefined)
-    reject("HTTP agent commands do not support bootstrap. Create a thread separately.");
-  if (
-    command.type === "thread.create" &&
-    (command.runtimeMode !== "approval-required" ||
-      command.branch !== null ||
-      command.worktreePath !== null)
-  ) {
-    reject(
-      "New agent CLI threads require approval-required mode and the project's existing checkout.",
-    );
-  }
-  if (command.type === "thread.approval.respond" && command.decision === "acceptForSession")
+  if (!AGENT_COMMAND_TYPES.some((type) => type === command.type)) reject("Command is not exposed by t3 agent.");
+  if (command.type === "project.update" && (command.workspaceRoot !== undefined || command.scripts !== undefined || command.defaultModelSelection !== undefined || command.defaultThreadEnvMode !== undefined || command.faviconPath !== undefined || command.projectIcon !== undefined || command.autoPull !== undefined)) reject("Agent project metadata updates are limited to titles.");
+  if (command.type === "project.create" && command.createWorkspaceRootIfMissing === true) reject("Agent project creation requires an existing directory.");
+  if (command.type === "thread.create" && (command.runtimeMode !== "approval-required" || command.branch !== null || command.worktreePath !== null))
+    reject("New agent CLI threads require approval-required mode and the project's existing checkout.");
+  if (command.type === "runtime-request.respond" && command.decision === "acceptForSession")
     reject("Session-wide approval is not exposed by t3 agent. Respond to one request.");
-  if (
-    command.type === "thread.meta.update" &&
-    (command.modelSelection !== undefined ||
-      command.branch !== undefined ||
-      command.worktreePath !== undefined)
-  ) {
+  if (command.type === "thread.metadata.update" && (command.branch !== undefined || command.worktreePath !== undefined))
     reject("Agent thread metadata updates are limited to titles.");
-  }
-  if (
-    command.type === "project.meta.update" &&
-    (command.workspaceRoot !== undefined ||
-      command.scripts !== undefined ||
-      command.defaultThreadEnvMode !== undefined ||
-      command.defaultModelSelection !== undefined ||
-      command.faviconPath !== undefined)
-  ) {
-    reject("Agent project metadata updates are limited to titles.");
-  }
-  if (command.type === "project.create" && command.createWorkspaceRootIfMissing === true)
-    reject("Agent project creation requires an existing directory.");
   return action;
 }
 
@@ -283,90 +245,43 @@ export function validateAgentIdentity(expected: AgentIdentity, actual: AgentIden
 }
 
 export function validateAgentAction(
-  action: AgentAction,
-  identity: AgentIdentity,
-  shell: OrchestrationShellSnapshot,
+  action: AgentAction, identity: AgentIdentity, shell: OrchestrationShellSnapshot,
   detail?: OrchestrationThreadDetailSnapshot,
   capabilities?: ExecutionEnvironmentDescriptor["capabilities"],
 ): void {
   validateAgentIdentity(action, identity);
   const command = action.command;
-  if (
-    (command.type === "thread.pin" || command.type === "thread.unpin") &&
-    capabilities?.threadPinning !== true
-  )
+  if ((command.type === "thread.pin" || command.type === "thread.unpin") && capabilities?.threadPinning !== true)
     reject("Server has not advertised thread pinning.");
-  if (
-    command.type === "thread.pin" &&
-    command.orderKey !== undefined &&
-    capabilities?.threadPinReorder !== true
-  )
-    reject("Server has not advertised pin ordering.");
-  if (
-    (command.type === "thread.settle" || command.type === "thread.unsettle") &&
-    capabilities?.threadSettlement !== true
-  )
+  if ((command.type === "thread.settle" || command.type === "thread.unsettle") && capabilities?.threadSettlement !== true)
     reject("Server has not advertised thread settlement.");
-  if (
-    command.type === "thread.meta.update" &&
-    command.regenerateTitle &&
-    capabilities?.threadTitleRegeneration !== true
-  )
-    reject("Server has not advertised title regeneration.");
   if (command.type === "project.create") {
-    if (shell.projects.some((project) => project.id === command.projectId))
-      reject("Project ID already exists.");
+    if (shell.projects.some((project) => project.id === command.projectId)) reject("Project ID already exists.");
     return;
   }
-  if (command.type === "project.meta.update" || command.type === "thread.create") {
-    if (!shell.projects.some((project) => project.id === command.projectId))
-      reject("Project ID is not present in this environment.");
-    if (
-      command.type === "thread.create" &&
-      shell.threads.some((thread) => thread.id === command.threadId)
-    )
-      reject("Thread ID already exists.");
+  if (command.type === "project.update") {
+    if (!shell.projects.some((project) => project.id === command.projectId)) reject("Project ID is not present in this environment.");
     return;
   }
-  if (
-    !("threadId" in command) ||
-    !detail ||
-    detail.thread.id !== command.threadId ||
-    detail.thread.deletedAt !== null
-  )
+  if (command.type === "thread.create") {
+    if (!shell.projects.some((project) => project.id === command.projectId)) reject("Project ID is not present in this environment.");
+    if (shell.threads.some((thread) => thread.id === command.threadId)) reject("Thread ID already exists.");
+    return;
+  }
+  if (!("threadId" in command) || detail?.projection.thread?.id !== command.threadId || detail.projection.thread.deletedAt !== null)
     reject("Thread must be read from this environment before acting.");
-  const thread = detail.thread;
-  const activeTurnId = thread.session?.activeTurnId;
-  if (command.type === "thread.turn.steer" || command.type === "thread.turn.interrupt") {
-    const turnId = command.type === "thread.turn.steer" ? command.expectedTurnId : command.turnId;
-    if (
-      !activeTurnId ||
-      activeTurnId !== turnId ||
-      thread.latestTurn?.turnId !== turnId ||
-      thread.latestTurn.state !== "running"
-    )
-      reject("Observed active turn no longer matches the command target.");
+  const projection = detail.projection;
+  const active = projection.runs.find((run) => ["running", "waiting", "starting"].includes(run.status));
+  if (command.type === "run.interrupt" && active?.id !== command.runId)
+    reject("Observed active run no longer matches the command target.");
+  if (command.type === "message.dispatch") {
+    if ((command.dispatchMode.type === "steer_active" || command.dispatchMode.type === "restart_active") && active?.id !== command.dispatchMode.targetRunId)
+      reject("Observed active run no longer matches the command target.");
+    if (command.dispatchMode.type === "start_immediately" && active !== undefined)
+      reject("Thread is already running. Queue or explicitly steer its active run.");
   }
-  if (command.type === "thread.turn.start") {
-    if (command.runtimeMode !== thread.runtimeMode)
-      reject("Send must preserve the thread runtime mode.");
-    if (
-      activeTurnId ||
-      thread.latestTurn?.state === "running" ||
-      thread.session?.status === "starting"
-    )
-      reject("Thread is already running. Use steer with its active turn ID.");
-  }
-  if (command.type === "thread.approval.respond" || command.type === "thread.user-input.respond") {
-    const kind =
-      command.type === "thread.approval.respond" ? "approval.requested" : "user-input.requested";
-    if (
-      !requestEvidence(thread.activities).some(
-        (request) => request.kind === kind && request.requestId === command.requestId,
-      )
-    )
-      reject("Request ID has no open request evidence in the current thread snapshot.");
-  }
+  if (command.type === "runtime-request.respond" && !projection.runtimeRequests.some((request) => request.id === command.requestId && request.status === "pending"))
+    reject("Request ID has no open request evidence in the current thread snapshot.");
 }
 
 const clip = (value: string, limit = 1000) =>
@@ -377,52 +292,6 @@ const record = (value: unknown): Record<string, unknown> | undefined =>
     : undefined;
 const textField = (value: unknown, max = 1000) =>
   typeof value === "string" ? clip(value, max) : undefined;
-
-/** Request evidence is retained separately from the recent tool/activity tail. */
-function requestEvidence(activities: ReadonlyArray<OrchestrationThreadActivity>) {
-  const open = new Map<
-    string,
-    {
-      requestId: string;
-      kind: string;
-      detail: string | undefined;
-      requestKind: string | undefined;
-      questions: unknown;
-      questionsTruncated: boolean;
-      createdAt: string;
-    }
-  >();
-  for (const activity of [...activities].sort(
-    (a, b) => (a.sequence ?? 0) - (b.sequence ?? 0) || a.createdAt.localeCompare(b.createdAt),
-  )) {
-    const payload = record(activity.payload);
-    const requestId = payload?.requestId;
-    if (typeof requestId !== "string") continue;
-    if (activity.kind === "approval.requested" || activity.kind === "user-input.requested") {
-      const questionBudget = { characters: 4000, truncated: false };
-      const questions = compactValue(payload?.questions, 0, questionBudget, 4);
-      open.set(requestId, {
-        requestId,
-        kind: activity.kind,
-        createdAt: activity.createdAt,
-        detail: textField(payload?.detail, 2000),
-        requestKind: textField(payload?.requestKind),
-        questions,
-        questionsTruncated: questionBudget.truncated,
-      });
-    } else if (activity.kind === "approval.resolved" || activity.kind === "user-input.resolved") {
-      open.delete(requestId);
-    } else if (
-      (activity.kind === "provider.approval.respond.failed" ||
-        activity.kind === "provider.user-input.respond.failed") &&
-      typeof payload?.detail === "string" &&
-      /(?:stale|unknown) pending.*request/i.test(payload.detail)
-    ) {
-      open.delete(requestId);
-    }
-  }
-  return [...open.values()];
-}
 
 function compactValue(
   value: unknown,
@@ -469,103 +338,24 @@ function compactValue(
 }
 
 export function compactAgentSnapshot(
-  identity: AgentIdentity,
-  shell: OrchestrationShellSnapshot,
-  detail?: OrchestrationThreadDetailSnapshot,
-  offset = 0,
+  identity: AgentIdentity, shell: OrchestrationShellSnapshot,
+  detail?: OrchestrationThreadDetailSnapshot, offset = 0,
 ) {
-  const selected = detail?.thread;
-  const requests = selected ? requestEvidence(selected.activities) : [];
-  const activities = selected
-    ? [...selected.activities].sort(
-        (a, b) => (a.sequence ?? 0) - (b.sequence ?? 0) || a.createdAt.localeCompare(b.createdAt),
-      )
-    : [];
-  const compactActivity = (activity: OrchestrationThreadActivity) => ({
-    id: activity.id,
-    kind: activity.kind,
-    tone: activity.tone,
-    summary: clip(activity.summary, 500),
-    turnId: activity.turnId,
-    sequence: activity.sequence,
-    createdAt: activity.createdAt,
-    payload: compactValue(activity.payload),
-  });
-  const sessionInfoActivities = activities.filter(
-    (activity) => activity.turnId === null && activity.tone === "info",
-  );
+  const projection = detail?.projection;
   return {
-    environmentId: identity.environmentId,
-    runtime: identity.runtime,
+    environmentId: identity.environmentId, runtime: identity.runtime,
     snapshotSequence: detail?.snapshotSequence ?? shell.snapshotSequence,
     shellSequence: shell.snapshotSequence,
-    projects: shell.projects.slice(offset, offset + 25).map((project) => ({
-      id: project.id,
-      title: clip(project.title, 300),
-      workspaceRoot: clip(project.workspaceRoot, 1000),
-      defaultModelSelection: project.defaultModelSelection,
-    })),
-    projectCount: shell.projects.length,
-    projectsTruncated: offset > 0 || shell.projects.length > offset + 25,
-    threads: shell.threads.slice(offset, offset + 25).map((thread) => ({
-      id: thread.id,
-      projectId: thread.projectId,
-      title: clip(thread.title, 300),
-      latestTurn: thread.latestTurn,
-      sessionStatus: thread.session?.status,
-      activeTurnId: thread.session?.activeTurnId,
-      hasPendingApprovals: thread.hasPendingApprovals,
-      hasPendingUserInput: thread.hasPendingUserInput,
-      archivedAt: thread.archivedAt,
-      pinnedAt: thread.pinnedAt,
-      settledAt: thread.settledAt,
-      backgroundLiveness: thread.backgroundLiveness,
-    })),
-    threadCount: shell.threads.length,
-    threadsTruncated: offset > 0 || shell.threads.length > offset + 25,
-    listPage: {
-      offset,
-      size: 25,
-      nextOffset:
-        offset + 25 < Math.max(shell.projects.length, shell.threads.length) ? offset + 25 : null,
-      consistency: "nontransactional; compare shellSequence between pages",
-    },
-    thread: selected
-      ? {
-          id: selected.id,
-          projectId: selected.projectId,
-          title: clip(selected.title, 300),
-          modelSelection: selected.modelSelection,
-          runtimeMode: selected.runtimeMode,
-          interactionMode: selected.interactionMode,
-          latestTurn: selected.latestTurn,
-          session: selected.session
-            ? {
-                ...selected.session,
-                lastError:
-                  selected.session.lastError === null
-                    ? null
-                    : clip(selected.session.lastError, 2000),
-              }
-            : null,
-          messages: selected.messages.slice(-8).map((message) => ({
-            id: message.id,
-            role: message.role,
-            text: clip(message.text, 4000),
-            createdAt: message.createdAt,
-          })),
-          messagesOmitted: Math.max(0, selected.messages.length - 8),
-          activities: activities.slice(-20).map(compactActivity),
-          activitiesOmitted: Math.max(0, selected.activities.length - 20),
-          recentSessionInfoActivities: sessionInfoActivities.slice(-10).map(compactActivity),
-          sessionInfoActivitiesOmitted: Math.max(0, sessionInfoActivities.length - 10),
-          requests: requests.slice(0, 20),
-          requestsOmitted: Math.max(0, requests.length - 20),
-          requestEvidenceOnly: true,
-          page: detail.page,
-        }
-      : undefined,
-    navigation: "client-local; this command does not select a visible tab",
+    projects: shell.projects.slice(offset, offset + 25).map((project) => ({ id: project.id, title: clip(project.title,300), workspaceRoot: project.workspaceRoot })),
+    threads: shell.threads.slice(offset, offset + 25).map((thread) => ({ id: thread.id, title: clip(thread.title,300), projectId: thread.projectId })),
+    projectsOmitted: Math.max(0,shell.projects.length-offset-25), threadsOmitted: Math.max(0,shell.threads.length-offset-25),
+    ...(projection === undefined ? {} : { thread: projection.thread,
+      runs: projection.runs.slice(-5),
+      messages: projection.messages.slice(-20).map((message) => ({ id:message.id, role:message.role, text:clip(message.text,2000), streaming:message.streaming })),
+      requests: projection.runtimeRequests.filter((request) => request.status === "pending").slice(-25),
+      activity: projection.turnItems.slice(-20).map((item) => compactValue(item)),
+      historyCursor: detail?.historyCursor ?? null, hasMoreHistory: detail?.hasMoreHistory ?? false,
+    }),
   };
 }
 

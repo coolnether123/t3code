@@ -1,4 +1,9 @@
-import { CommunityCheckFinding, CommunityCheckState, ResetCheckState } from "@t3tools/contracts";
+import {
+  CommunityCheckFinding,
+  CommunityCheckState,
+  ResetCheckState,
+  CodexSettings,
+} from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Data from "effect/Data";
@@ -12,13 +17,13 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
-import { FetchHttpClient, HttpClient } from "effect/unstable/http";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
+import { FetchHttpClient, HttpClient } from "effect/http";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { ServerConfig } from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
-import { toJsonSchemaObject } from "../textGeneration/TextGenerationUtils.ts";
+import { toJsonSchemaObject } from "@t3tools/provider-core/server/textGenerationUtils";
 import {
   resetCheckArgs,
   resetCheckPrompt,
@@ -61,7 +66,13 @@ const makeLunaResearch = Effect.gen(function* () {
   }) =>
     (now: string) =>
       Effect.gen(function* () {
-        const config = (yield* settings.getSettings).providers.codex;
+        const instances = Object.values((yield* settings.getSettings).providerInstances);
+        const instance = instances.find(
+          (instance) => instance.driver === "codex" && instance.enabled !== false,
+        );
+        const config = yield* Schema.decodeUnknownEffect(CodexSettings)(
+          instance?.config ?? {},
+        ).pipe(Effect.mapError(() => new ResetResearchFailed({ stage: "config" })));
         const homeLayout = yield* resolveCodexHomeLayout(
           config.useDesktopAppDaemon ? { ...config, shadowHomePath: "" } : config,
         ).pipe(Effect.provideService(Path.Path, path));

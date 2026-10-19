@@ -1,3 +1,4 @@
+import type { CallCommand as OrchestrationCommand } from "./commands.ts";
 import {
   CommandId,
   EventId,
@@ -6,7 +7,6 @@ import {
   type CallModels,
   type ModelSelection,
   type OperatorUpdate,
-  type OrchestrationCommand,
   type ProviderRuntimeEvent,
   type ProviderSessionStartInput,
   type ProviderSendTurnInput,

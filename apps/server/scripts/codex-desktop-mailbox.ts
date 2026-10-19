@@ -18,7 +18,7 @@ import {
   readCodexDesktopResult,
   readCodexDesktopStatus,
   renewCodexDesktopCoordinatorLease,
-} from "../src/worker/CodexDesktopMailbox.ts";
+} from "../src/provider/CodexDesktopMailbox.ts";
 
 const [command, mailboxRoot, argument] = process.argv.slice(2);
 if (!command || !mailboxRoot) {

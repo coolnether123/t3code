@@ -8,6 +8,7 @@
  * @module usagePricing
  */
 import type {
+  UsageCategoryCost,
   UsageCostSource,
   UsageModelPriceOverride,
   UsageTokenTotals,
@@ -27,6 +28,8 @@ export interface ModelRate {
   readonly above200kTokens?: ModelRate;
   readonly above272kTokens?: ModelRate;
   readonly priority?: ModelRate;
+  readonly fast?: ModelRate;
+  readonly ultrafast?: ModelRate;
   readonly flex?: ModelRate;
 }
 
@@ -175,13 +178,71 @@ export function parseRateTable(document: unknown): RateTable {
       tiers[tier] = {
         inputCostPerToken: tierInput,
         outputCostPerToken: tierOutput,
-        cacheReadCostPerToken: finiteNumber(entry[`cache_read_input_token_cost_${tier}`]),
-        cacheCreationCostPerToken: finiteNumber(entry[`cache_creation_input_token_cost_${tier}`]),
+        cacheReadCostPerToken:
+          finiteNumber(entry[`cache_read_input_token_cost_${tier}`]) ??
+          (rate.cacheReadCostPerToken !== null && rate.inputCostPerToken > 0
+            ? (rate.cacheReadCostPerToken / rate.inputCostPerToken) * tierInput
+            : null),
+        cacheCreationCostPerToken:
+          finiteNumber(entry[`cache_creation_input_token_cost_${tier}`]) ??
+          (rate.cacheCreationCostPerToken !== null && rate.inputCostPerToken > 0
+            ? (rate.cacheCreationCostPerToken / rate.inputCostPerToken) * tierInput
+            : null),
         ...contexts,
       };
     }
-    table.set(normalizeModelName(name), { ...rate, ...tiers });
+    const fastMultiple =
+      typeof entry.provider_specific_entry === "object" && entry.provider_specific_entry !== null
+        ? finiteNumber((entry.provider_specific_entry as Record<string, unknown>).fast)
+        : null;
+    const scaled = (multiple: number): ModelRate => ({
+      inputCostPerToken: rate.inputCostPerToken * multiple,
+      outputCostPerToken: rate.outputCostPerToken * multiple,
+      cacheReadCostPerToken:
+        rate.cacheReadCostPerToken === null ? null : rate.cacheReadCostPerToken * multiple,
+      cacheCreationCostPerToken:
+        rate.cacheCreationCostPerToken === null ? null : rate.cacheCreationCostPerToken * multiple,
+    });
+    const ultraInput = finiteNumber(entry.input_cost_per_token_ultrafast);
+    const ultraOutput = finiteNumber(entry.output_cost_per_token_ultrafast);
+    table.set(normalizeModelName(name), {
+      ...rate,
+      ...tiers,
+      ...(fastMultiple !== null && fastMultiple > 0 ? { fast: scaled(fastMultiple) } : {}),
+      ...(ultraInput !== null && ultraOutput !== null
+        ? {
+            ultrafast: {
+              inputCostPerToken: ultraInput,
+              outputCostPerToken: ultraOutput,
+              cacheReadCostPerToken:
+                finiteNumber(entry.cache_read_input_token_cost_ultrafast) ??
+                (rate.inputCostPerToken > 0
+                  ? ((rate.cacheReadCostPerToken ?? rate.inputCostPerToken) /
+                      rate.inputCostPerToken) *
+                    ultraInput
+                  : ultraInput),
+              cacheCreationCostPerToken:
+                finiteNumber(entry.cache_creation_input_token_cost_ultrafast) ?? ultraInput,
+            },
+          }
+        : {}),
+    });
   }
+  const aliases = new Map<string, ModelRate | null>();
+  for (const [key, rate] of table) {
+    const alias = key.slice(key.lastIndexOf("/") + 1);
+    if (alias === key || table.has(alias)) continue;
+    const previous = aliases.get(alias);
+    aliases.set(
+      alias,
+      previous === undefined
+        ? rate
+        : previous !== null && JSON.stringify(previous) === JSON.stringify(rate)
+          ? previous
+          : null,
+    );
+  }
+  for (const [alias, rate] of aliases) if (rate !== null) table.set(alias, rate);
   return table;
 }
 
@@ -259,6 +320,8 @@ function rateForTotals(
   totals: UsageTokenTotals,
   serviceTier?: string,
 ): ModelRate | null {
+  if (serviceTier === "ultrafast") return base.ultrafast ?? null;
+  if (serviceTier === "fast" && base.fast !== undefined) return base.fast;
   const tier = serviceTier === "fast" ? "priority" : serviceTier;
   const rate =
     tier === undefined || tier === "default"
@@ -333,4 +396,60 @@ export function cacheSavingsUsd(
   const rate = rateForTotals(baseRate, totals, serviceTier);
   if (rate === null || rate.cacheReadCostPerToken === null) return 0;
   return totals.cachedInputTokens * (rate.inputCostPerToken - rate.cacheReadCostPerToken);
+}
+
+/** Allocates reported costs proportionally without changing the provider's total. */
+export function priceUsageRecord(
+  table: RateTable,
+  record: import("./usageTranscripts.ts").UsageRecord,
+  overrides?: RateTable,
+) {
+  const override = overrides?.get(record.model.trim());
+  const model = override === undefined ? (record.rateModel ?? record.model) : record.model;
+  const speedTier = record.speed === "standard" ? undefined : record.speed;
+  const base = override ?? lookupRate(table, model);
+  const tier =
+    override !== undefined
+      ? undefined
+      : (record.serviceTier ??
+        (speedTier === "fast" && base?.priority === undefined && base?.fast === undefined
+          ? undefined
+          : speedTier === "ultrafast" && base?.ultrafast === undefined
+            ? undefined
+            : speedTier));
+  const priced =
+    override === undefined
+      ? priceUsage(table, model, record.totals, record.reportedCostUsd, tier)
+      : priceUsage(new Map([[normalizeModelName(model), override]]), model, record.totals, null);
+  const rate = base === null ? null : rateForTotals(base, record.totals, tier);
+  const cacheSavingsUsd =
+    rate === null || rate.cacheReadCostPerToken === null
+      ? 0
+      : record.totals.cachedInputTokens * (rate.inputCostPerToken - rate.cacheReadCostPerToken);
+  const unsplit = { ...priced, cacheSavingsUsd, categoryCostUsd: null, speedPremiumUsd: 0 };
+  if (rate === null || priced.costSource === "unpriced") return unsplit;
+  const categories = (r: ModelRate): UsageCategoryCost => ({
+    input: record.totals.uncachedInputTokens * r.inputCostPerToken,
+    cacheRead: record.totals.cachedInputTokens * (r.cacheReadCostPerToken ?? r.inputCostPerToken),
+    cacheWrite:
+      record.totals.cacheCreationTokens * (r.cacheCreationCostPerToken ?? r.inputCostPerToken),
+    output: record.totals.outputTokens * r.outputCostPerToken,
+  });
+  const sum = (c: UsageCategoryCost) => c.input + c.cacheRead + c.cacheWrite + c.output;
+  const list = categories(rate),
+    total = sum(list);
+  if (total <= 0) return unsplit;
+  const scale = priced.costUsd / total;
+  const standardRate = base === null ? null : rateForTotals(base, record.totals);
+  return {
+    ...priced,
+    cacheSavingsUsd,
+    categoryCostUsd: {
+      input: list.input * scale,
+      cacheRead: list.cacheRead * scale,
+      cacheWrite: list.cacheWrite * scale,
+      output: list.output * scale,
+    },
+    speedPremiumUsd: standardRate === null ? 0 : (total - sum(categories(standardRate))) * scale,
+  };
 }

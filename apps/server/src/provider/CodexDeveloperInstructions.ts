@@ -1,115 +1,51 @@
-import type { ProviderInteractionMode, SubagentBackend } from "@t3tools/contracts";
+import { buildCodexControlInstructions, type CodexControlRuntime } from "./CodexControlInstructions.ts";
+import type { ProviderInteractionMode } from "@t3tools/contracts";
+import type { V2TurnStartParams__AdditionalContextEntry } from "effect-codex-app-server/schema";
+import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
 
 import {
-  type CodexComputerControlMode,
-  DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
-} from "./CodexComputerControl.ts";
-
-export {
-  CODEX_COMPUTER_CONTROL_MODES,
-  CODEX_COMPUTER_CONTROL_OPTION_ID,
-  DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
-  normalizeCodexComputerControlMode,
-  type CodexComputerControlMode,
-} from "./CodexComputerControl.ts";
-
-const T3_CODE_BROWSER_TOOL_INSTRUCTIONS = `
-
-## T3 Code collaborative browser
-
-You are running inside T3 Code. The \`t3-code\` MCP server is the product-native collaborative browser shared with the user. When it exposes \`preview_*\` tools, prefer those tools for browser navigation, inspection, interaction, screenshots, and recordings.
-
-For browser work, first call \`preview_status\`. If no automation-capable preview is attached, call \`preview_open\` before concluding that the browser is unavailable. Then use \`preview_navigate\`, \`preview_snapshot\`, and the focused interaction tools. Prefer snapshot-provided locators over coordinates.
-
-Do not switch to global browser skills, Chrome, Node REPL browser automation, standalone Playwright, or agent-browser merely because the preview is initially closed or a first call fails. Use an alternative browser system only when the T3 preview tools are absent, the user explicitly requests another browser, or \`preview_open\` returns an explicit unsupported/unavailable error. A failed T3 preview tool call should be inspected and retried with corrected arguments when the error is actionable.
-`;
-
-const T3_CODE_CHROME_TOOL_INSTRUCTIONS = `
-
-## T3 managed Chrome
-
-The \`t3-code\` MCP server exposes managed Chrome tools. For browser work in this provider, call \`computer_start\` or \`computer_status\`, use \`computer_tabs\` and \`computer_select_tab\` when choosing a tab, then \`computer_navigate\`, \`computer_snapshot\`, \`computer_click\`, \`computer_fill\`, and \`computer_type\`. Use refs from the latest \`computer_snapshot\` for interaction, and call \`computer_close\` when the browser session is no longer needed.
-
-These tools operate T3's separate persistent Chrome profile. They do not control the user's regular Chrome profile, the Codex Chrome extension, the Codex built-in browser, or Windows desktop applications. If the user explicitly requests one of those targets, check its installed skill and configured tools. Explain this toolkit's limitation before proposing a different provider or profile; do not treat it as proof that the requested provider is unavailable.
-
-Tool availability is not an approval. Follow the task's sandbox, tool approvals, and confirmation requirements. A browser-provider selection does not authorize new sites, uploads, purchases, account changes, or other consequential actions beyond the user's request. Inspect tool errors and report missing authentication or unavailable runtime controls without inventing access.
-
-If \`computer_open_url\` is listed, it can open a URL in the user's Chrome browser. Opening a URL does not provide observation or input control over that browser. Do not claim that it does.
-`;
-
-const CODEX_DESKTOP_APP_INSTRUCTIONS = `
-
-## Codex desktop browser and computer tools
-
-This thread runs through the host's Codex desktop installation. When a user requests Chrome or mentions @Chrome, use the Codex Chrome browser-extension route and follow its installed skill and the host's site permissions and action-time confirmations. The Chrome extension is distinct from Windows Computer Use through Sky via node_repl. Do not substitute Sky, the built-in browser, T3 managed Chrome, or T3 Preview for a requested Chrome extension. If Chrome extension tools are not exposed in this session, report that instead of switching browsers. T3 managed Chrome and T3 Preview are separate tools, not fallbacks for the host extension.
-`;
-
-const CODEX_DESKTOP_CONTROL_LIMITATION = `
-
-## Desktop control availability
-
-The saved desktop-control preference alone does not attach Codex desktop Computer Use to T3. T3's managed Chrome is a browser-only fallback with its own profile. Do not claim access to Windows input, screenshots, or Codex app browser sessions from this preference, a plugin name, or a remote-control connection.
-
-An independently configured MCP server may provide desktop tools, including a JavaScript runtime used by the installed Computer Use skill. Check that route through its documented API before reporting desktop control unavailable.
-`;
-
-const CONFIGURED_COMPUTER_USE_INSTRUCTIONS = `
-
-## Configured Windows Computer Use
-
-The Browser provider preference selects T3's browser toolkit; it does not disable independently configured MCP tools or skills. For a Windows app task, inspect the installed Computer Use skill and the current turn's tools before claiming Computer Use is unavailable.
-
-When the task permits Windows automation and that skill and its configured JavaScript tool are available, read the skill and its runtime, API, and confirmation guidance. Use the documented package entry point through the existing runtime. Start with the skill's lightweight host check in the current session. A callable JavaScript tool alone does not prove that the host is connected. Do not install a bridge, spawn a helper, use private endpoints, or bypass a failed connection.
-
-Host reachability is not app approval or permission to act. Select exactly one target window from returned app/window objects, follow host app approvals and the skill's action-time confirmations, and retain its prohibited targets and actions. Windows input uses the active desktop, so coordinate foreground ownership with the user. Observe the selected window before acting, refresh after each action, and stop on cancellation or a locked desktop. Do not reuse stale window state after an error or runtime reset.
-`;
-
-function computerControlInstructions(
-  mode: CodexComputerControlMode,
-  browserToolsAvailable: boolean,
-  computerControlAvailable: boolean,
-): string {
-  if (mode === "preview") return browserToolInstructions(browserToolsAvailable);
-  const browserInstructions = computerControlAvailable
-    ? T3_CODE_CHROME_TOOL_INSTRUCTIONS
-    : browserToolInstructions(browserToolsAvailable);
-  return `${browserInstructions}${mode === "desktop" ? CODEX_DESKTOP_CONTROL_LIMITATION : ""}`;
-}
-
-const T3_CODE_WORKER_PARENT_INSTRUCTIONS = `
-
-## T3 Workers
-
-T3 Workers are enabled for this parent thread. Use the T3-owned Worker tools for bounded background assignments: \`worker_start\`, \`worker_list\`, \`worker_wait\`, \`worker_status\`, \`worker_observe\`, \`worker_send\`, \`worker_interrupt\`, \`worker_close\`, and \`worker_approval_respond\`.
-When an assignment needs Codex Desktop's native browser or Windows app tools, set \`backendPreference: "codex-desktop"\` on \`worker_start\`. T3 keeps the parent Worker identity separate while the configured Desktop coordinator creates and manages the native child automatically; do not ask the user to choose a second interface.
-
-Use these tools instead of Codex-native collaboration tools. The user creates only this parent thread; the parent agent is the only actor that may create or control Workers. Do not ask the user to create, start, steer, or configure a Worker. Do not call the V2 tools \`spawn_agent\`, \`send_message\`, \`followup_task\`, \`interrupt_agent\`, \`list_agents\`, or \`wait_agent\`, and do not call namespaced \`multi_agent_v1\` tools. Workers are single-level: never give a Worker instructions to spawn, create, resume, message, or delegate to another Worker or native subagent. Pass explicit context because Workers do not inherit this conversation. Use \`worker_wait\` instead of polling. Use \`worker_status\` before interrupting, and use \`worker_observe\` when mechanical status does not answer the question. A completed Worker remains resumable until you explicitly close it.
-
-Parent agents should follow the Worker tools' assignment and telemetry guidance throughout the handoff and wait lifecycle.
-
-After every successful \`worker_start\`, immediately emit a concise user-visible handoff report. Name the Worker, state its bounded assignment, name the expected deliverable, and state what the parent will do next. If useful independent parent work remains, say that you will do it before waiting. If you say that you are waiting now, the next tool call must be one long, bounded \`worker_wait\`, using the configured relevant wake reasons or timeout. Do not silently start a Worker and continue with generic thinking. While that lease is active, do not poll with \`worker_status\` or \`worker_observe\`, and do not replace it with short repeated waits. A wait wakes only for its configured relevant event or timeout; if an interim relevant event wakes it and the Worker continues, report only useful progress and re-enter the same logical long wait session. Clear the wait state when the call wakes, fails, times out, or the Worker finishes. Keep all Worker interaction parent-driven and never create nested Workers.
-`;
-
-const CODEX_NATIVE_SUBAGENT_PARENT_INSTRUCTIONS = `
-
-## Codex native sub-agents
-
-The selected Codex app-server model runtime controls the callable sub-agent tools for this turn. The user creates only the parent thread. The parent agent creates and controls its sub-agents; do not ask the user to create, start, steer, or configure one. Keep delegation single-level unless the selected runtime contract and an explicit policy allow recursion. Do not instruct a child agent to create another child.
-`;
+  T3_CODE_BROWSER_TOOL_INSTRUCTIONS,
+  T3_CODE_ORCHESTRATION_SECTIONS,
+} from "@t3tools/provider-core/server/orchestrationInstructions";
 
 /**
- * The browser block is omitted entirely when the preview tools aren't attached.
- * Describing `preview_*` tools that aren't in the turn's tool list would be
- * worse than saying nothing: the instructions actively steer the model away
- * from Playwright and agent-browser, so leaving them in would talk it out of
- * the only browser automation it still has.
+ * Codex cuts the middle out of any `additionalContext` value over 1,000 tokens,
+ * which it counts as UTF-8 bytes divided by four. It does this silently, so
+ * every value built here has to fit.
  */
-const browserToolInstructions = (browserToolsAvailable: boolean): string =>
-  browserToolsAvailable ? T3_CODE_BROWSER_TOOL_INSTRUCTIONS : "";
+export const CODEX_ADDITIONAL_CONTEXT_VALUE_MAX_BYTES = 4_000;
 
-export const codexPlanModeDeveloperInstructions = (
-  _browserToolsAvailable: boolean,
-): string => `<collaboration_mode># Plan Mode (Conversational)
+const T3_CODE_DEVICE_TOOL_INSTRUCTIONS = `## T3 Code devices
+
+The \`t3-code\` MCP server also exposes \`device_*\` tools for iOS Simulators and Android Emulators on this environment. For mobile verification, call \`device_list\`, then \`device_open\` so the user can watch the device in their Device panel; its result explains how to drive the device. Driving happens through the \`agent-device\` CLI, using the exact launcher path returned by \`device_open\`. Keep the host config and session flags returned by \`device_open\` on every command so concurrent devices stay independent: prefer \`agent-device snapshot -i\` refs over coordinates, and use \`device_screenshot\` when you need to see the screen. Prefer these tools and \`agent-device\` for opening and driving devices. Platform tools such as \`xcrun simctl\` and \`adb\` remain available for anything they do not cover, such as builds, logs, or port forwarding. If \`device_list\` reports a platform as unavailable, say so.`;
+
+export interface T3CodeToolAvailability {
+  readonly browser: boolean;
+  readonly device: boolean;
+}
+
+const normalizeAvailability = (
+  availability: boolean | T3CodeToolAvailability,
+): T3CodeToolAvailability =>
+  typeof availability === "boolean" ? { browser: availability, device: false } : availability;
+
+/**
+ * Describing `preview_*` or `device_*` tools that aren't in the turn's tool list would be worse
+ * than saying nothing: the instructions actively steer the model away from Playwright,
+ * agent-browser, and raw simctl/adb, so leaving them in would talk it out of the only automation
+ * it still has.
+ */
+const toolInstructions = (availability: boolean | T3CodeToolAvailability): string => {
+  const tools = normalizeAvailability(availability);
+  return [
+    tools.browser ? T3_CODE_BROWSER_TOOL_INSTRUCTIONS : "",
+    tools.device ? T3_CODE_DEVICE_TOOL_INSTRUCTIONS : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+};
+
+const CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS = `<collaboration_mode># Plan Mode (Conversational)
 
 You work in 3 phases, and you should *chat your way* to a great plan before finalizing it. A great plan is very detailed-intent- and implementation-wise-so that it can be handed to another engineer or agent to be implemented right away. It must be **decision complete**, where the implementer does not need to make any decisions.
 
@@ -239,9 +175,7 @@ Only produce at most one \`<proposed_plan>\` block per turn, and only when you a
 If the user stays in Plan mode and asks for revisions after a prior \`<proposed_plan>\`, any new \`<proposed_plan>\` must be a complete replacement. If the user indicates that the prior plan is not acceptable but does not provide enough information to produce a complete replacement, address the concern and continue planning without producing a \`<proposed_plan>\` block. If the follow-up neither requires changes nor calls the plan into question (e.g. clarifying question), answer it before the block, then reproduce the prior \`<proposed_plan>\` unchanged.
 </collaboration_mode>`;
 
-export const codexDefaultModeDeveloperInstructions = (
-  _browserToolsAvailable: boolean,
-): string => `<collaboration_mode># Collaboration Mode: Default
+const CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS = `<collaboration_mode># Collaboration Mode: Default
 
 You are now in Default mode. Any previous instructions for other modes (e.g. Plan mode) are no longer active.
 
@@ -254,60 +188,43 @@ Use the \`request_user_input\` tool only when it is listed in the available tool
 In Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.
 </collaboration_mode>`;
 
-export const CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS = codexPlanModeDeveloperInstructions(true);
-export const CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS =
-  codexDefaultModeDeveloperInstructions(true);
-
-export interface CodexRuntimeInfo {
+export interface CodexRuntimeInfo extends CodexControlRuntime {
   readonly model: string;
+  readonly modelName?: string | undefined;
   readonly reasoningEffort: string;
-  readonly useDesktopAppDaemon?: boolean;
-  readonly enableT3Workers?: boolean;
-  readonly computerControlMode?: CodexComputerControlMode;
-  /** The thread's MCP inventory contains the complete T3 managed Chrome toolkit. */
-  readonly computerControlAvailable?: boolean;
-  readonly subagentBackend?: SubagentBackend;
 }
 
-// Values come from trusted config, but keep the block single-line regardless.
-function toSingleLine(value: string): string {
-  return value.replaceAll(/\s+/g, " ").trim();
+export function buildCodexDeveloperInstructions(interactionMode: ProviderInteractionMode): string {
+  return interactionMode === "plan"
+    ? CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS
+    : CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS;
 }
 
-export function buildCodexDeveloperInstructions(
-  interactionMode: ProviderInteractionMode,
+/**
+ * This must stay out of the collaboration mode: when the model catalog ships
+ * its own text for a mode, as newer models do, Codex uses that text and drops
+ * the client's `developer_instructions` entirely.
+ */
+export function buildCodexAdditionalContext(
   runtime: CodexRuntimeInfo,
-  /**
-   * Whether the `t3-code` MCP server is attached to this turn. Callers derive
-   * it from the session's actual MCP configuration rather than re-reading the
-   * setting, so the prompt cannot claim tools the turn doesn't have.
-   */
-  browserToolsAvailable = true,
-): string {
-  const base =
-    interactionMode === "plan"
-      ? codexPlanModeDeveloperInstructions(browserToolsAvailable)
-      : codexDefaultModeDeveloperInstructions(browserToolsAvailable);
-  const workerInstructions = runtime.enableT3Workers ? T3_CODE_WORKER_PARENT_INSTRUCTIONS : "";
-  // A desktop-backed thread that still received T3 managed Chrome runs on a
-  // host whose desktop app does not lend its tools to the daemon (Windows), so
-  // it gets the ordinary browser guidance instead of the host-extension route.
-  const desktopAppTools = runtime.useDesktopAppDaemon && !runtime.computerControlAvailable;
-  const controlInstructions = desktopAppTools
-    ? CODEX_DESKTOP_APP_INSTRUCTIONS
-    : computerControlInstructions(
-        runtime.computerControlMode ?? DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
-        browserToolsAvailable,
-        runtime.computerControlAvailable ?? false,
-      );
-  const configuredComputerUseInstructions = desktopAppTools
-    ? ""
-    : CONFIGURED_COMPUTER_USE_INSTRUCTIONS;
-  const nativeSubagentInstructions =
-    runtime.subagentBackend === "v1" || runtime.subagentBackend === "v2"
-      ? CODEX_NATIVE_SUBAGENT_PARENT_INSTRUCTIONS
-      : "";
-  return `${base}${controlInstructions}${configuredComputerUseInstructions}${workerInstructions}${nativeSubagentInstructions}
-
-<runtime_info>In case you're asked: you are running in T3 Code through the Codex harness, as ${toSingleLine(runtime.model)} with ${toSingleLine(runtime.reasoningEffort)} reasoning effort. No need to mention this otherwise.</runtime_info>`;
+  toolsAvailable: boolean | T3CodeToolAvailability = true,
+): Record<string, V2TurnStartParams__AdditionalContextEntry> {
+  const tools = toolInstructions(toolsAvailable);
+  const controls = buildCodexControlInstructions(runtime, typeof toolsAvailable === "boolean" ? toolsAvailable : toolsAvailable.browser);
+  // Separate keys keep each value under Codex's per-entry cap. Codex emits
+  // entries in key order, so the numbering preserves the authored order.
+  return {
+    ...Object.fromEntries(
+      T3_CODE_ORCHESTRATION_SECTIONS.map((section, index) => [
+        `t3_code_orchestration_${String(index + 1).padStart(2, "0")}`,
+        { kind: "application" as const, value: section },
+      ]),
+    ),
+    t3_code_runtime: {
+      kind: "application",
+      value: buildRuntimeInstructions({ harness: "Codex", ...runtime }),
+    },
+    ...(tools ? { t3_code_tools: { kind: "application", value: tools } } : {}),
+    ...(controls ? { t3_code_control: { kind: "application", value: controls } } : {}),
+  };
 }

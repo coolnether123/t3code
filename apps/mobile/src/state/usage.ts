@@ -1,3 +1,6 @@
+import { needsCursorKeychainAccess } from "@t3tools/client-runtime/state/usage";
+import { resolveUsageAccess } from "@t3tools/client-runtime/state/usage-access";
+import { environmentSession } from "./session";
 /**
  * Multi-environment usage state.
  *
@@ -15,12 +18,13 @@ import { usageQueryInput } from "@t3tools/client-runtime/usageRefresh";
 import {
   USAGE_CONTRACT_VERSION,
   type EnvironmentId,
+  type UsageProviderKind,
   type UsageSummary,
   type UsageSummaryInput,
 } from "@t3tools/contracts";
 import { mergeUsage, type EnvironmentUsage, type MergedUsage } from "@t3tools/shared/usageMerge";
 import * as Option from "effect/Option";
-import { AsyncResult, Atom } from "effect/unstable/reactivity";
+import { AsyncResult, Atom } from "effect/reactivity";
 import { useCallback, useEffect, useMemo } from "react";
 
 import { appAtomRegistry } from "./atom-registry";
@@ -30,6 +34,9 @@ import { serverEnvironment } from "./server";
 export interface EnvironmentUsageStatus {
   readonly environmentId: EnvironmentId;
   readonly label: string;
+  readonly canReadDiagnostics: boolean;
+  readonly isConnected: boolean;
+  readonly needsCursorKeychainAccess: boolean;
   readonly isPending: boolean;
   readonly error: string | null;
   readonly summary: UsageSummary | null;
@@ -49,13 +56,37 @@ const usageByWindowAtom = Atom.family((windowKey: string) =>
 
     const statuses: EnvironmentUsageStatus[] = [];
     for (const [environmentId, presentation] of presentations) {
+      const sessionResult = get(environmentSession.sessionStateAtom(environmentId));
+      const access = resolveUsageAccess({
+        connectionPhase: presentation.connection.phase,
+        session: Option.getOrNull(AsyncResult.value(sessionResult)),
+        hasSessionError: sessionResult._tag === "Failure",
+      });
+      if (!access.canReadDiagnostics) {
+        statuses.push({
+          environmentId,
+          label: presentation.entry.target.label,
+          isConnected: presentation.connection.phase === "connected",
+          ...access,
+          summary: null,
+          needsCursorKeychainAccess: false,
+        });
+        continue;
+      }
       const result = get(serverEnvironment.usageSummary({ environmentId, input }));
+      const summary = Option.getOrNull(AsyncResult.value(result));
       statuses.push({
         environmentId,
         label: presentation.entry.target.label,
         isPending: result.waiting,
+        isConnected: presentation.connection.phase === "connected",
+        canReadDiagnostics: true,
         error: result._tag === "Failure" ? "This environment could not report usage." : null,
-        summary: Option.getOrNull(AsyncResult.value(result)),
+        summary,
+        needsCursorKeychainAccess: needsCursorKeychainAccess(
+          summary,
+          get(serverEnvironment.providersValueAtom(environmentId)),
+        ),
       });
     }
     return statuses;
@@ -65,6 +96,7 @@ const usageByWindowAtom = Atom.family((windowKey: string) =>
 export interface UsageView {
   readonly merged: MergedUsage;
   readonly environments: readonly EnvironmentUsageStatus[];
+  readonly selectedEnvironments: readonly EnvironmentUsageStatus[];
   /** True until at least one environment has answered. */
   readonly isPending: boolean;
   /**
@@ -76,7 +108,11 @@ export interface UsageView {
   readonly refresh: (input?: UsageSummaryInput) => Promise<readonly EnvironmentUsageStatus[]>;
 }
 
-export function useUsage(input: UsageSummaryInput): UsageView {
+export function useUsage(
+  input: UsageSummaryInput,
+  selectedEnvironmentIds: ReadonlySet<EnvironmentId> | null = null,
+  providers?: readonly UsageProviderKind[],
+): UsageView {
   const windowKey = useMemo(
     () => JSON.stringify(usageQueryInput(input, USAGE_CONTRACT_VERSION)),
     [
@@ -95,6 +131,10 @@ export function useUsage(input: UsageSummaryInput): UsageView {
   );
   const atom = usageByWindowAtom(windowKey);
   const environments = useAtomValue(atom);
+  const selectedEnvironments =
+    selectedEnvironmentIds === null
+      ? environments
+      : environments.filter((entry) => selectedEnvironmentIds.has(entry.environmentId));
 
   // Refreshing only the derived atom would re-read the per-environment SWR
   // queries within their stale window and change nothing. Refresh each
@@ -124,19 +164,30 @@ export function useUsage(input: UsageSummaryInput): UsageView {
   );
 
   const merged = useMemo(() => {
-    const answered: EnvironmentUsage[] = environments.flatMap((environment) =>
+    const answered: EnvironmentUsage[] = selectedEnvironments.flatMap((environment) =>
       environment.summary === null
         ? []
         : [
             {
               environmentId: environment.environmentId,
               label: environment.label,
-              summary: environment.summary,
+              summary:
+                providers === undefined
+                  ? environment.summary
+                  : {
+                      ...environment.summary,
+                      buckets: environment.summary.buckets.filter((bucket) =>
+                        providers.includes(bucket.provider),
+                      ),
+                      sources: environment.summary.sources.filter((source) =>
+                        providers.includes(source.fingerprint.provider),
+                      ),
+                    },
             },
           ],
     );
     return mergeUsage(answered, USAGE_CONTRACT_VERSION);
-  }, [environments]);
+  }, [environments, providers, selectedEnvironmentIds]);
 
   const hasDeferredTranscripts = environments.some((environment) =>
     environment.summary?.sources.some((source) => source.status === "partial"),
@@ -156,6 +207,7 @@ export function useUsage(input: UsageSummaryInput): UsageView {
   return {
     merged,
     environments,
+    selectedEnvironments,
     isPending: answeredCount === 0 && stillReporting > 0,
     isPartial: answeredCount > 0 && stillReporting > 0,
     refresh,

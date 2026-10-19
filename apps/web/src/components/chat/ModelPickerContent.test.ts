@@ -8,7 +8,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { deriveProviderInstanceEntries } from "../../providerInstances";
 import {
-  getDesktopBackedProviderStatusMessage,
+  adjacentModelPickerProvider,
   resolveModelPickerSelectedModel,
   shouldIncludeModelPickerOption,
   shouldOfferModelPickerSetup,
@@ -33,34 +33,6 @@ function entry(status: ServerProvider["status"], driver = "opencode") {
 }
 
 describe("shouldIncludeModelPickerOption", () => {
-  it("keeps the selected desktop-backed Codex model visible as unavailable", () => {
-    const providerEntry = {
-      ...entry("error", "codex"),
-      useDesktopAppDaemon: true,
-      snapshot: {
-        ...entry("error", "codex").snapshot,
-        message: "Codex desktop daemon is not running on this Mac.",
-      },
-    };
-    const option = {
-      slug: "gpt-5.6-sol",
-      name: "GPT-5.6 Sol",
-      isUnavailable: true,
-    };
-
-    expect(
-      shouldIncludeModelPickerOption({
-        entry: providerEntry,
-        option,
-        activeInstanceId: providerEntry.instanceId,
-        activeModel: option.slug,
-      }),
-    ).toBe(true);
-    expect(getDesktopBackedProviderStatusMessage(providerEntry)).toBe(
-      "Codex desktop daemon is not running on this Mac.",
-    );
-  });
-
   it.each(["ready", "error"] as const)(
     "never offers the internal Antigravity default marker as a model when %s",
     (status) => {
@@ -240,5 +212,76 @@ describe("shouldOfferModelPickerSetup", () => {
         [],
       ),
     ).toBe(true);
+  });
+});
+
+describe("adjacentModelPickerProvider", () => {
+  const codex = entry("ready", "codex");
+  const claude = entry("ready", "claudeAgent");
+  const unavailable = entry("error");
+  const input = {
+    entries: [codex, unavailable, claude],
+    disabledInstanceIds: undefined,
+    selectableUnavailableInstanceIds: undefined,
+  };
+
+  it("wraps through favorites and ready instances, skipping unavailable providers", () => {
+    expect(
+      adjacentModelPickerProvider({ ...input, selectedInstanceId: codex.instanceId, direction: 1 }),
+    ).toBe(claude.instanceId);
+    expect(
+      adjacentModelPickerProvider({ ...input, selectedInstanceId: "favorites", direction: -1 }),
+    ).toBe(claude.instanceId);
+    expect(
+      adjacentModelPickerProvider({
+        ...input,
+        selectedInstanceId: claude.instanceId,
+        direction: 1,
+      }),
+    ).toBe("favorites");
+  });
+
+  it("keeps thread locks and the selected unavailable catalog", () => {
+    expect(
+      adjacentModelPickerProvider({
+        ...input,
+        disabledInstanceIds: new Set([claude.instanceId]),
+        selectedInstanceId: codex.instanceId,
+        direction: 1,
+      }),
+    ).toBe("favorites");
+    expect(
+      adjacentModelPickerProvider({
+        ...input,
+        selectableUnavailableInstanceIds: new Set([unavailable.instanceId]),
+        selectedInstanceId: codex.instanceId,
+        direction: 1,
+      }),
+    ).toBe(unavailable.instanceId);
+  });
+
+  it("handles an empty catalog and a removed selection in either direction", () => {
+    expect(
+      adjacentModelPickerProvider({
+        ...input,
+        entries: [],
+        selectedInstanceId: codex.instanceId,
+        direction: -1,
+      }),
+    ).toBe("favorites");
+    expect(
+      adjacentModelPickerProvider({
+        ...input,
+        selectedInstanceId: unavailable.instanceId,
+        direction: 1,
+      }),
+    ).toBe("favorites");
+    expect(
+      adjacentModelPickerProvider({
+        ...input,
+        selectedInstanceId: unavailable.instanceId,
+        direction: -1,
+      }),
+    ).toBe(claude.instanceId);
   });
 });

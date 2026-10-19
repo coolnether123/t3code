@@ -1,6 +1,6 @@
 import * as NodePath from "@effect/platform-node/NodePath";
 import { assert, it } from "@effect/vitest";
-import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { Environment as HostProcessEnvironment, Platform as HostProcessPlatform } from "@t3tools/shared/HostProcess";
 import { CommandResolutionCache } from "@t3tools/shared/shell";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";

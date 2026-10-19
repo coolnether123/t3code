@@ -10,7 +10,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
 import { codexRateLimitsToLimits } from "../provider/Layers/codexUsageLimits.ts";
 import { claudeUsageResponseToLimits } from "../provider/Layers/claudeUsageLimits.ts";

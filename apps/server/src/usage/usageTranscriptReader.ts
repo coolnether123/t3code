@@ -38,10 +38,8 @@ import {
   initialRepeatedInputParserState,
   parseCodexRepeatedInputLineDetailed,
   type ParseCodexRepeatedInputOptions,
-  type RepeatedInputCatalog,
   type RepeatedInputObservation,
   type RepeatedInputParserState,
-  type RepeatedInputTokenizer,
 } from "./usageRepeatedInput.ts";
 
 export interface TranscriptFile {

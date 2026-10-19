@@ -13,21 +13,21 @@ import {
   HttpServerRequest,
   HttpServerResponse,
   HttpServerRespondable,
-} from "effect/unstable/http";
+} from "effect/http";
 import { authenticateRawRouteWithScope } from "../http.ts";
 import { proxySpeech, streamSpeech, SpeechUnavailableError } from "./proxy.ts";
 import { ServerConfig } from "../config.ts";
-import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
-import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
+import { VoiceThreadService } from "./VoiceThreadService.ts";
+
+import { ProviderRegistry } from "../provider/ProviderRegistry.ts";
 import { CallService, verifyCallModel } from "./callService.ts";
 import { callStore } from "./callStore.ts";
 import { callOperator } from "./callOperator.ts";
-import { ProviderService } from "../provider/Services/ProviderService.ts";
+import { AuxiliaryProviderSessions } from "../provider/AuxiliaryProviderSessions.ts";
 
 const decodeSpeechRequest = Schema.decodeUnknownEffect(Schema.fromJsonString(SpeechRequest));
 
-class SpeechServiceError extends Schema.TaggedErrorClass<SpeechServiceError>()(
+class SpeechServiceError extends Schema.TaggedError<SpeechServiceError>()(
   "SpeechServiceError",
   {
     message: Schema.String,
@@ -46,31 +46,30 @@ export const speechRouteLayer = HttpRouter.add(
       return HttpServerResponse.text("Recording too large.", { status: 413 });
     const input = yield* decodeSpeechRequest(text);
     const config = yield* ServerConfig;
-    const engine = yield* OrchestrationEngineService;
-    const projections = yield* ProjectionSnapshotQuery;
+    const engine = yield* VoiceThreadService;
     const providers = yield* ProviderRegistry;
-    const providerService = yield* ProviderService;
+    const providerService = yield* AuxiliaryProviderSessions;
     const calls = new CallService(
       callStore(config.stateDir),
       {
         verify: async (options) => {
           const snapshot = await Effect.runPromise(
-            projections.getThreadDetailSnapshot(ThreadId.make(options.threadId), { turnLimit: 1 }),
+            engine.snapshot(options.threadId),
           );
-          if (Option.isNone(snapshot) || snapshot.value.thread.archivedAt)
+          if (!snapshot.projection.thread || snapshot.projection.thread.archivedAt)
             throw new Error("Open an existing chat before starting a call.");
           verifyCallModel(options, await Effect.runPromise(providers.getProviders));
           return {
-            runtimeMode: snapshot.value.thread.runtimeMode,
-            interactionMode: snapshot.value.thread.interactionMode,
+            runtimeMode: snapshot.projection.thread.runtimeMode,
+            interactionMode: snapshot.projection.thread.interactionMode,
           };
         },
         dispatch: (command) => Effect.runPromise(engine.dispatch(command)),
         verifyVoice: async (selection) => {
           const caps = await Effect.runPromise(
-            providerService.getCapabilities(selection.instanceId),
+            providerService.getInstanceInfo(selection.instanceId),
           );
-          if (!caps.toolFreeConversation)
+          if (caps.driverKind !== "claudeAgent")
             throw new Error(
               "This provider does not support tool-free voice sessions. It can still run as the background agent.",
             );

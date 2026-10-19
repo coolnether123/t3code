@@ -34,6 +34,8 @@ describe("usageSummaryCacheKey", () => {
     expect(usageSummaryCacheKey({ ...input, includeQuotaHistory: true })).not.toBe(plain);
     expect(usageSummaryCacheKey({ ...input, quotaHistoryOnly: true })).not.toBe(plain);
     expect(usageSummaryCacheKey({ ...input, quotaIntervals: [] })).not.toBe(plain);
+    expect(usageSummaryCacheKey({ ...input, quotaProvider: "claude" })).not.toBe(plain);
+    expect(usageSummaryCacheKey({ ...input, awaitRefresh: true })).not.toBe(plain);
     const request = {
       ...input,
       quotaIntervals: [

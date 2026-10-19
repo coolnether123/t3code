@@ -127,6 +127,7 @@ type SerializedRecord = readonly [
   serviceTier?: string | null,
   turnId?: string | null,
   nativeSessionIndex?: number | null,
+  speed?: "standard" | "fast" | "ultrafast" | null,
 ];
 
 type SerializedRepeatedInput = readonly [
@@ -318,6 +319,7 @@ export function encodeScanCache(
         record.nativeSessionId === undefined
           ? null
           : intern(sessions, sessionIndex, record.nativeSessionId),
+        record.speed ?? null,
       ]),
     };
   }
@@ -595,6 +597,9 @@ function decodeSerializedFile(
         : {}),
       ...(typeof turnId === "string" ? { turnId } : {}),
       ...(nativeSessionId === undefined ? {} : { nativeSessionId }),
+      ...(row[13] === "fast" || row[13] === "ultrafast" || row[13] === "standard"
+        ? { speed: row[13] }
+        : {}),
       dedupeKey: typeof dedupeKey === "string" ? dedupeKey : null,
     });
   }

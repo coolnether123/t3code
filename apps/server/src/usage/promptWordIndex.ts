@@ -2,7 +2,7 @@ import { UsageDay, type UsageReportInput, type UsageReportPrompts } from "@t3too
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
 import * as Clock from "effect/Clock";
-import type * as SqlClient from "effect/unstable/sql/SqlClient";
+import type * as SqlClient from "effect/sql/SqlClient";
 import { isFrequentPromptWord, normalizePromptKeyword, promptWords } from "./promptWords.ts";
 import { promptUsageTimeBounds } from "./usagePromptReport.ts";
 import { promptIndexCutoverEnabled, localPromptFallbackActive } from "./promptSubscriberState.ts";
@@ -11,7 +11,10 @@ const MAX_MESSAGE_CHARACTERS = 262144;
 const BATCH_MESSAGES = 32;
 
 /** Each committed message is its own durable checkpoint. Parsing holds no write lease. */
-export const warmPromptWordIndexBatch = (sql: SqlClient.SqlClient) =>
+export const warmPromptWordIndexBatch = (
+  sql: SqlClient.SqlClient,
+  sourceTable = "projection_thread_messages",
+) =>
   Effect.gen(function* () {
     const started = yield* Clock.currentTimeMillis;
     const pending = yield* sql<{ messageId: string; generation: number }>`
@@ -35,7 +38,7 @@ export const warmPromptWordIndexBatch = (sql: SqlClient.SqlClient) =>
       }>`SELECT m.message_id AS messageId, m.thread_id AS threadId, m.created_at AS createdAt,
       substr(m.text, 1, ${MAX_MESSAGE_CHARACTERS}) AS text, length(m.text) AS characters,
       q.generation AS generation
-      FROM usage_prompt_pending_v1 q JOIN projection_thread_messages m ON m.message_id = q.message_id
+      FROM usage_prompt_pending_v1 q JOIN ${sql(sourceTable)} m ON m.message_id = q.message_id
       WHERE q.message_id = ${item.messageId} AND q.generation = ${item.generation}`)[0];
       if (row === undefined) continue;
       if (
@@ -70,7 +73,7 @@ export const warmPromptWordIndexBatch = (sql: SqlClient.SqlClient) =>
                 // An edit or delete during parsing must not publish stale counts. This also
                 // handles delete/reinsert identity reuse without trusting updated_at.
                 const current = yield* sql`SELECT 1 FROM usage_prompt_pending_v1 q
-          JOIN projection_thread_messages m ON m.message_id = q.message_id
+          JOIN ${sql(sourceTable)} m ON m.message_id = q.message_id
           WHERE q.message_id = ${row.messageId} AND q.generation = ${row.generation}
             AND m.role = 'user' AND m.thread_id = ${row.threadId} AND m.created_at = ${row.createdAt}
             AND length(m.text) = ${row.characters}
@@ -94,14 +97,17 @@ export const warmPromptWordIndexBatch = (sql: SqlClient.SqlClient) =>
   });
 
 /** One service-scoped worker resumes persisted pending IDs after every restart. */
-export const runPromptWordIndexer = (sql: SqlClient.SqlClient) =>
+export const runPromptWordIndexer = (
+  sql: SqlClient.SqlClient,
+  sourceTable = "projection_thread_messages",
+) =>
   Effect.gen(function* () {
     while (true) {
       if (promptIndexCutoverEnabled() && !(yield* localPromptFallbackActive)) {
         yield* Effect.sleep(1000);
         continue;
       }
-      const processed = yield* warmPromptWordIndexBatch(sql).pipe(
+      const processed = yield* warmPromptWordIndexBatch(sql, sourceTable).pipe(
         Effect.catchCause(() => Effect.succeed(0)),
       );
       // Yield to projection writers and readers, and retry lock contention later.
@@ -114,6 +120,7 @@ export const readPromptWordIndex = (
   sql: SqlClient.SqlClient,
   input: UsageReportInput,
   readAt: string,
+  sourceTable = "projection_thread_messages",
 ) =>
   sql.withTransaction(
     Effect.gen(function* () {
@@ -121,7 +128,7 @@ export const readPromptWordIndex = (
       const keyword =
         input.keyword === undefined ? undefined : normalizePromptKeyword(input.keyword);
       const source = yield* sql<{ prompts: number }>`SELECT count(*) AS prompts
-      FROM projection_thread_messages WHERE role = 'user'
+      FROM ${sql(sourceTable)} WHERE role = 'user'
         AND created_at >= ${sinceTime} AND created_at < ${untilTime}`;
       const totals = (yield* sql<{
         prompts: number;

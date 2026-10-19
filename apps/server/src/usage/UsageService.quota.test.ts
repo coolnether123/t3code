@@ -1,10 +1,12 @@
+import * as AntigravityUsage from "../provider/Drivers/AntigravityUsage.ts";
+import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
 import { describe, expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { HttpClient } from "effect/unstable/http";
+import { HttpClient } from "effect/http";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { make } from "./UsageService.ts";
@@ -12,6 +14,8 @@ import { UsageDay } from "@t3tools/contracts";
 import { readQuotaHistory } from "./usageQuotaHistory.ts";
 
 const testLayer = Layer.mergeAll(
+  Layer.mock(AntigravityUsage.AntigravityUsage)({}),
+  Layer.mock(CursorUsageAccounts.CursorUsageAccounts)({}),
   ServerSettings.layerTest(),
   ServerConfig.layerTest(process.cwd(), { prefix: "t3-quota-service-test-" }),
 ).pipe(Layer.provideMerge(NodeServices.layer));
@@ -139,4 +143,9 @@ describe("history-only usage requests", () => {
       expect(result.sources.every((source) => source.fingerprint.provider === "codex")).toBe(true);
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
+});
+
+vi.mock("./usageProviderReaders.ts", async () => {
+  const Effect = await import("effect/Effect");
+  return { makeProviderUsageReader: Effect.succeed(() => Effect.succeed([])) };
 });

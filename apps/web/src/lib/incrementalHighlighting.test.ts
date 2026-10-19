@@ -41,21 +41,23 @@ describe("incremental code highlighting", () => {
     },
   );
 
-  it("resets after edits, truncation, and blank-line changes", async () => {
+  it("resets after edits and truncation, including edits to a completed line", async () => {
     const highlighter = await highlighterPromise;
     const highlight = createIncrementalHighlightedDocument(
       highlighter,
       "typescript",
       "pierre-dark",
     );
-    for (const text of [
+    const inputs = [
       "/* open\ncomment\n",
       "/* open\ncomment\n*/\nconst x = 1;",
+      "const edited = 2;\nconst x = 1;",
       "const edited = 2;\nconst x = 10;",
       "const edited = 2;\n",
       "",
       "\n\n\nconst fresh = true;\n",
-    ]) {
+    ];
+    for (const text of inputs) {
       expect(toHtml(highlight(text))).toBe(
         highlighter.codeToHtml(text, { lang: "typescript", theme: "pierre-dark" }),
       );
@@ -63,7 +65,7 @@ describe("incremental code highlighting", () => {
   });
 
   it.each(["text", "plaintext", "plain", "txt", "ansi"])(
-    "preserves %s through the full highlighter path",
+    "preserves %s without requesting grammar state",
     async (language) => {
       const highlighter = await highlighterPromise;
       const highlight = createIncrementalHighlightedDocument(highlighter, language, "pierre-dark");

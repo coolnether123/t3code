@@ -1,3 +1,4 @@
+import type { CallCommand as OrchestrationCommand } from "./commands.ts";
 // @effect-diagnostics nodeBuiltinImport:off - Disposable archive fault injection uses real Node files.
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";

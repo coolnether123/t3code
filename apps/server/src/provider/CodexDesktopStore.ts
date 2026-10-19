@@ -28,7 +28,7 @@ const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 200;
 const MAX_LEGACY_ROLLOUT_BYTES = 8_000_000;
 
-export class CodexDesktopStoreError extends Schema.TaggedErrorClass<CodexDesktopStoreError>()(
+export class CodexDesktopStoreError extends Schema.TaggedError<CodexDesktopStoreError>()(
   "CodexDesktopStoreError",
   {
     operation: Schema.Literals(["open", "query", "decode", "path"]),

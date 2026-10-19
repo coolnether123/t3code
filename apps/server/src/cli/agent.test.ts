@@ -6,7 +6,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
-import { FetchHttpClient } from "effect/unstable/http";
+import { FetchHttpClient } from "effect/http";
 import {
   AuthSessionId,
   AuthOrchestrationReadScope,
@@ -37,7 +37,8 @@ const descriptor = {
   serverVersion: "0.0.33",
   capabilities: { repositoryIdentity: true, threadPinning: true, threadSettlement: true },
 };
-const shell = { snapshotSequence: 12, projects: [], threads: [], updatedAt: now };
+const shell = { schemaVersion: 2, snapshotSequence: 12, projects: [], threads: [], archivedThreads: [] };
+const project = { id: "project-a", title: "Scratch", workspaceRoot: "/scratch", defaultModelSelection: null, scripts: [], createdAt: now, updatedAt: now };
 const json = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const fs = FileSystem.layerNoop({
   readFileString: (path) =>
@@ -143,7 +144,6 @@ describe("agent HTTP action receipt", () => {
             projectId: "project-a",
             title: "Scratch",
             workspaceRoot: "/scratch",
-            createdAt: now,
           },
         }),
       );
@@ -163,9 +163,9 @@ describe("agent HTTP action receipt", () => {
           Effect.provideService(
             FetchHttpClient.Fetch,
             mockFetch(async (url) => {
-              if (String(url).endsWith("/dispatch")) {
+              if (String(url).endsWith("/mutate")) {
                 dispatches++;
-                return Response.json({ sequence: 13 });
+                return Response.json(project);
               }
               return Response.json(String(url).includes("/.well-known/") ? descriptor : shell);
             }),
@@ -190,7 +190,6 @@ describe("agent HTTP action receipt", () => {
             projectId: "project-a",
             title: "Scratch",
             workspaceRoot: "/scratch",
-            createdAt: now,
           },
         }),
       );
@@ -202,7 +201,7 @@ describe("agent HTTP action receipt", () => {
         Effect.provideService(
           FetchHttpClient.Fetch,
           mockFetch(async (url) => {
-            if (String(url).endsWith("/dispatch"))
+            if (String(url).endsWith("/mutate"))
               return Response.json(
                 new EnvironmentAuthInvalidError({
                   code: "auth_invalid",
@@ -237,7 +236,6 @@ describe("agent HTTP action receipt", () => {
             projectId: "project-a",
             title: "Scratch",
             workspaceRoot: "/scratch",
-            createdAt: now,
           },
         }),
       );
@@ -250,7 +248,7 @@ describe("agent HTTP action receipt", () => {
         Effect.provideService(
           FetchHttpClient.Fetch,
           mockFetch(async (url) => {
-            if (String(url).endsWith("/dispatch")) {
+            if (String(url).endsWith("/mutate")) {
               dispatchCount++;
               throw new Error("private-test-token transport failure");
             }
@@ -287,7 +285,6 @@ describe("agent HTTP action receipt", () => {
             projectId: "project-a",
             title: "Scratch",
             workspaceRoot: "/scratch",
-            createdAt: now,
           },
         }),
       );
@@ -300,9 +297,9 @@ describe("agent HTTP action receipt", () => {
           FetchHttpClient.Fetch,
           mockFetch(async (url) => {
             if (String(url).includes("/.well-known/")) return Response.json(descriptor);
-            if (String(url).endsWith("/dispatch")) {
+            if (String(url).endsWith("/mutate")) {
               dispatches++;
-              return Response.json({ sequence: 13 });
+              return Response.json(project);
             }
             if (dispatches > 0) throw new Error("readback unavailable");
             return Response.json(shell);
@@ -312,7 +309,7 @@ describe("agent HTTP action receipt", () => {
       expect(result).toMatchObject({
         status: "accepted",
         commandId: "command-accepted",
-        sequence: 13,
+        sequence: null,
         providerCompletion: "not-confirmed",
         projectionObserved: false,
         readbackError: "Receipt accepted; subsequent readback failed.",
@@ -393,7 +390,6 @@ describe("agent request mode", () => {
             projectId: "project-a",
             title: "Scratch",
             workspaceRoot: "/scratch",
-            createdAt: now,
           },
         }),
       );
@@ -408,9 +404,9 @@ describe("agent request mode", () => {
             mockFetch(async (url) => {
               const address = String(url);
               if (address.includes("/.well-known/")) return Response.json(descriptor);
-              if (address.endsWith("/dispatch")) {
+              if (address.endsWith("/mutate")) {
                 dispatches++;
-                return Response.json({ sequence: 13 });
+                return Response.json(project);
               }
               return Response.json(shell);
             }),

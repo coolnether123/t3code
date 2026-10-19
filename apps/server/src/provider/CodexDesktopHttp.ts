@@ -20,7 +20,7 @@ import {
   HttpServerRequest,
   HttpServerResponse,
   HttpServerRespondable,
-} from "effect/unstable/http";
+} from "effect/http";
 
 import * as ServerConfig from "../config.ts";
 import { authenticateRawRouteWithScope } from "../http.ts";
@@ -34,7 +34,7 @@ import {
   readCodexDesktopResult,
   type CodexDesktopCoordinatorStatus,
   type CodexDesktopCoordinatorResult,
-} from "../worker/CodexDesktopMailbox.ts";
+} from "./CodexDesktopMailbox.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as CodexDesktopStore from "./CodexDesktopStore.ts";
 

@@ -9,6 +9,10 @@ import {
   EnvironmentScopeRequiredError,
   ProviderInstanceId,
   ThreadId,
+  requiredScopesForProjectMutation,
+  type AuthEnvironmentScope,
+  ORCHESTRATION_PROTOCOL_HEADER,
+  ORCHESTRATION_PROTOCOL_VERSION_TEXT,
 } from "@t3tools/contracts";
 import * as Console from "effect/Console";
 import * as Duration from "effect/Duration";
@@ -18,9 +22,9 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
-import { Command, Flag, GlobalFlag } from "effect/unstable/cli";
-import { FetchHttpClient } from "effect/unstable/http";
-import * as HttpApiClient from "effect/unstable/httpapi/HttpApiClient";
+import { Command, Flag, GlobalFlag } from "effect/cli";
+import { FetchHttpClient } from "effect/http";
+import * as HttpApiClient from "effect/http-api/HttpApiClient";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerConfig from "../config.ts";
@@ -137,7 +141,7 @@ type AgentTarget = Effect.Success<ReturnType<typeof resolveAgentTarget>>;
 
 export const withAgentSession = <A, E, R>(
   auth: Pick<EnvironmentAuth.EnvironmentAuth["Service"], "issueSession" | "revokeSession">,
-  operate: boolean,
+  operate: boolean | ReadonlyArray<AuthEnvironmentScope>,
   run: (token: string) => Effect.Effect<A, E, R>,
 ) =>
   Effect.acquireUseRelease(
@@ -145,9 +149,9 @@ export const withAgentSession = <A, E, R>(
       .issueSession({
         ttl: Duration.minutes(2),
         label: "t3 agent cli",
-        scopes: operate
-          ? [AuthOrchestrationReadScope, AuthOrchestrationOperateScope]
-          : [AuthOrchestrationReadScope],
+        scopes: typeof operate === "boolean"
+          ? operate ? [AuthOrchestrationReadScope, AuthOrchestrationOperateScope] : [AuthOrchestrationReadScope]
+          : [...new Set([AuthOrchestrationReadScope, ...operate])],
       })
       .pipe(
         Effect.mapError(
@@ -174,9 +178,10 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
   auth: Pick<EnvironmentAuth.EnvironmentAuth["Service"], "issueSession" | "revokeSession">,
 ) {
   const client = yield* HttpApiClient.make(EnvironmentHttpApi, { baseUrl: target.origin });
-  return yield* withAgentSession(auth, request.kind === "act", (token) =>
+  return yield* withAgentSession(auth, request.kind === "act" && (request.action.command.type === "project.create" || request.action.command.type === "project.update")
+    ? requiredScopesForProjectMutation(request.action.command) : request.kind === "act", (token) =>
     Effect.gen(function* () {
-      const headers = { authorization: `Bearer ${token}` };
+      const headers = { authorization: `Bearer ${token}`, [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT };
       const context = {
         environmentId: target.environmentId,
         runtime: target.runtime,
@@ -249,12 +254,12 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
             ? request.action.command.threadId
             : undefined;
       // GET query fields are the endpoint's payload, including its optional history cursor.
-      const loadThread = (id: ThreadId, turnLimit = 3, beforeCursor?: string) =>
+      const loadThread = (id: ThreadId, _turnLimit = 3, _beforeCursor?: string) =>
         boundedHttp(
-          client.orchestration.threadSnapshot({
+          client.orchestration.threadBoundedSnapshot({
             headers,
             params: { threadId: id },
-            payload: { turnLimit, ...(beforeCursor ? { beforeCursor } : {}) },
+            query: {},
           }),
         );
       const detail = threadId
@@ -290,11 +295,8 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
       const commandTarget = {
         ...("threadId" in command ? { threadId: command.threadId } : {}),
         ...("projectId" in command ? { projectId: command.projectId } : {}),
-        ...(command.type === "thread.turn.start" ? { messageId: command.message.messageId } : {}),
-        ...(command.type === "thread.turn.steer"
-          ? { turnId: command.expectedTurnId, messageId: command.messageId }
-          : {}),
-        ...(command.type === "thread.turn.interrupt" ? { turnId: command.turnId } : {}),
+        ...("messageId" in command ? { messageId: command.messageId } : {}),
+        ...("runId" in command ? { runId: command.runId } : {}),
         ...("requestId" in command ? { requestId: command.requestId } : {}),
       };
       const receiptMetadata = {
@@ -305,11 +307,10 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
       };
       yield* checked(() => validateAgentReceiptMetadata(receiptMetadata));
       const receipt = yield* Effect.result(
-        client.orchestration
-          .dispatch({ headers, payload: command } as Parameters<
-            typeof client.orchestration.dispatch
-          >[0])
-          .pipe(Effect.timeout(Duration.seconds(10))),
+        (command.type === "project.create" || command.type === "project.update" || command.type === "project.delete"
+          ? client.projects.mutate({ headers, payload: command })
+          : client.orchestration.dispatch({ headers, payload: command })
+        ).pipe(Effect.timeout(Duration.seconds(10))),
       );
       if (receipt._tag === "Failure" && isDispatchRejection(receipt.failure))
         return {
@@ -337,11 +338,11 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
       return {
         ...receiptMetadata,
         status: "accepted",
-        sequence: receipt.success.sequence,
+        sequence: "sequence" in receipt.success ? receipt.success.sequence : null,
         providerCompletion: "not-confirmed",
         projectionObserved:
           readback._tag === "Success" &&
-          readback.success.snapshotSequence >= receipt.success.sequence,
+          "sequence" in receipt.success && readback.success.snapshotSequence >= receipt.success.sequence,
         readback: readback._tag === "Success" ? readback.success : undefined,
         readbackError:
           readback._tag === "Failure" ? "Receipt accepted; subsequent readback failed." : undefined,
@@ -431,17 +432,17 @@ const runAgent = Effect.fn("runAgent")(
   Effect.provideService(FetchHttpClient.RequestInit, { redirect: "error", credentials: "omit" }),
 );
 
-const baseDirFlag = Flag.string("base-dir").pipe(
+const baseDirFlag = Flag.String("base-dir").pipe(
   Flag.withDescription("Required absolute T3 data directory for the running local environment."),
 );
-const threadFlag = Flag.string("thread").pipe(Flag.withSchema(ThreadId), Flag.optional);
-const instanceFlag = Flag.string("instance").pipe(
+const threadFlag = Flag.String("thread").pipe(Flag.withSchema(ThreadId), Flag.optional);
+const instanceFlag = Flag.String("instance").pipe(
   Flag.withSchema(ProviderInstanceId),
   Flag.optional,
 );
 const capabilitiesCommand = Command.make("capabilities", {
   baseDir: baseDirFlag,
-  command: Flag.choice("command", AGENT_COMMAND_TYPES).pipe(Flag.optional),
+  command: Flag.Literals("command", AGENT_COMMAND_TYPES).pipe(Flag.optional),
 }).pipe(
   Command.withDescription("Show live semantic actions and optional existing command JSON Schema."),
   Command.withHandler((flags) =>
@@ -454,12 +455,12 @@ const capabilitiesCommand = Command.make("capabilities", {
 const snapshotCommand = Command.make("snapshot", {
   baseDir: baseDirFlag,
   thread: threadFlag,
-  turnLimit: Flag.integer("turn-limit").pipe(
+  turnLimit: Flag.Integer("turn-limit").pipe(
     Flag.withSchema(AGENT_TURN_LIMIT_SCHEMA),
     Flag.withDefault(3),
   ),
-  beforeCursor: Flag.string("before-cursor").pipe(Flag.optional),
-  offset: Flag.integer("offset").pipe(
+  beforeCursor: Flag.String("before-cursor").pipe(Flag.optional),
+  offset: Flag.Integer("offset").pipe(
     Flag.withSchema(AGENT_OFFSET_SCHEMA),
     Flag.withDefault(0),
     Flag.withDescription(
@@ -500,8 +501,8 @@ const providersCommand = Command.make("providers", {
 );
 const actCommand = Command.make("act", {
   baseDir: baseDirFlag,
-  file: Flag.string("file"),
-  confirm: Flag.boolean("confirm"),
+  file: Flag.String("file"),
+  confirm: Flag.Boolean("confirm"),
 }).pipe(
   Command.withDescription(
     "Dispatch one confirmed typed action, then read back its target. Never retries.",

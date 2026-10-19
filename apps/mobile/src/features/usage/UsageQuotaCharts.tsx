@@ -4,7 +4,7 @@ import { quotaHistoryPoints, type QuotaPeriod, type QuotaValue } from "@t3tools/
 import { useMemo, useState } from "react";
 import { Pressable, View } from "react-native";
 import Svg, { Line, Path } from "react-native-svg";
-import { AppText as Text } from "../../components/AppText";
+import { AppText as Text } from "../../components/ui/AppText";
 import { useProviderColors } from "./usageProviders";
 
 export function UsageQuotaCharts({

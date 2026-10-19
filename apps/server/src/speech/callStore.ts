@@ -5,7 +5,7 @@ import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { Platform as HostProcessPlatform } from "@t3tools/shared/HostProcess";
 import { CallOptions, CallUtterance, ThreadTurnStartCommand } from "@t3tools/contracts";
 import { CallModels } from "@t3tools/contracts";
 import { OperatorChat, OperatorLink } from "./operatorProtocol.ts";

@@ -1,12 +1,14 @@
 import { useEffect, useLayoutEffect, useRef, useState, useImperativeHandle, type Ref } from "react";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type {
   CallModels,
   CallStatus,
   EnvironmentId,
   ModelSelection,
   OperatorUpdate,
+  ThreadId,
 } from "@t3tools/contracts";
-import type { Thread } from "../../types";
+import { useThreadProjection } from "../../state/entities";
 import { createBrowserAudio, requestSpeech } from "../../voice/browserSpeech";
 import { callPersistence } from "../../voice/callPersistence";
 import { ThreadVoiceSession, type VoiceState } from "../../voice/session";
@@ -37,7 +39,7 @@ export function ThreadVoiceControls({
   ...props
 }: CallSelectorCatalog & {
   ref: Ref<ThreadVoiceHandle>;
-  thread: Thread;
+  threadId: ThreadId;
   environmentId: EnvironmentId;
   modelSelection: ModelSelection;
   enabled: boolean;
@@ -59,8 +61,20 @@ export function ThreadVoiceControls({
   const [updates, setUpdates] = useState<readonly OperatorUpdate[]>([]);
   const configurationVersion = useRef(0);
   const configurationTail = useRef<Promise<unknown>>(Promise.resolve());
-  const lastOperatorActivity = props.thread.activities.findLast((activity) =>
-    activity.kind.startsWith("call.operator."),
+  const projection =
+    useThreadProjection(scopeThreadRef(props.environmentId, props.threadId))?.projection ?? null;
+  const messages = (projection?.messages ?? []).map((message) => ({
+    id: message.id,
+    role: message.role,
+    text: message.text,
+    streaming: message.streaming,
+    turnId: message.runId,
+  }));
+  const latestTurnId = projection?.runs.at(-1)?.id ?? null;
+  // The operator announces finished background work with a `voice-update:` message, so a new one
+  // means the saved operator updates changed.
+  const lastOperatorActivity = messages.findLast((message) =>
+    message.id.startsWith("voice-update:"),
   )?.id;
   const sessionRef = useRef<ThreadVoiceSession | null>(null);
   const anchorRef = useRef<HTMLDivElement>(null);
@@ -72,7 +86,7 @@ export function ThreadVoiceControls({
       {
         action: "call.configure",
         callId: "settings",
-        options: { threadId: props.thread.id, modelSelection: props.modelSelection },
+        options: { threadId: props.threadId, modelSelection: props.modelSelection },
       },
       abort.signal,
     )
@@ -89,7 +103,7 @@ export function ThreadVoiceControls({
           );
       });
     return () => abort.abort();
-  }, [props.environmentId, props.thread.id, lastOperatorActivity]);
+  }, [props.environmentId, props.threadId, lastOperatorActivity]);
   useEffect(() => {
     if (call?.operatorUpdates) setUpdates(call.operatorUpdates);
   }, [call?.operatorUpdates]);
@@ -107,7 +121,7 @@ export function ThreadVoiceControls({
               action: "call.configure",
               callId: "settings",
               options: {
-                threadId: props.thread.id,
+                threadId: props.threadId,
                 modelSelection: next.voice,
                 operatorSelection: next.operator,
               },
@@ -137,7 +151,7 @@ export function ThreadVoiceControls({
         requestSpeech(props.environmentId, input, signal, onAudio),
       audio: createBrowserAudio(),
       id: randomUUID,
-      persistence: callPersistence(`${props.environmentId}:${props.thread.id}`),
+      persistence: callPersistence(`${props.environmentId}:${props.threadId}`),
       change: (next, message, status) => {
         setState(next);
         setDetail(message);
@@ -154,7 +168,7 @@ export function ThreadVoiceControls({
       void session.detach();
       sessionRef.current = null;
     };
-  }, [props.environmentId, props.thread.id]);
+  }, [props.environmentId, props.threadId]);
   useImperativeHandle(
     ref,
     () => ({
@@ -166,13 +180,13 @@ export function ThreadVoiceControls({
   );
   useLayoutEffect(() => {
     sessionRef.current?.observe(
-      props.thread.messages,
+      messages,
       props.running,
-      props.thread.latestTurn?.turnId,
+      latestTurnId,
       models.voice,
       models.operator,
     );
-  }, [props.thread.messages, props.running, props.thread.latestTurn?.turnId, models]);
+  }, [messages, props.running, latestTurnId, models]);
   const active = state !== "idle";
   const selection = models.voice;
   const unheard = updates.filter(
@@ -293,11 +307,11 @@ export function ThreadVoiceControls({
                     onClick={() =>
                       void sessionRef.current?.start(
                         {
-                          threadId: props.thread.id,
+                          threadId: props.threadId,
                           modelSelection: models.voice,
                           operatorSelection: models.operator,
                         },
-                        props.thread.messages,
+                        messages,
                       )
                     }
                   >

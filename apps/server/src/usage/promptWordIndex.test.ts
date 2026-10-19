@@ -2,9 +2,9 @@ import { UsageDay, UsageReport, type UsageReportInput } from "@t3tools/contracts
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
-import migration from "../persistence/Migrations/055_PromptWordIndex.ts";
+import migration from "./usagePromptIndexLegacy.fixture.ts";
 import { readPromptWordIndex, warmPromptWordIndexBatch } from "./promptWordIndex.ts";
 import { normalizePromptKeyword, promptWords } from "./promptWords.ts";
 

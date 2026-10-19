@@ -1,3 +1,4 @@
+import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as Effect from "effect/Effect";
 import {
   ComputerChromeAutomationError,
@@ -16,7 +17,7 @@ const withChromeAutomation = Effect.fn("ComputerToolkit.withChromeAutomation")(f
     automation: ChromeAutomation.ChromeAutomation["Service"],
   ) => Effect.Effect<A, ChromeAutomation.ChromeAutomationError>,
 ) {
-  yield* McpInvocationContext.requireMcpCapability("computer");
+  yield* McpInvocationContext.requireThreadMcpCapability("computer");
   const automation = yield* ChromeAutomation.ChromeAutomation;
   return yield* use(automation).pipe(
     Effect.mapError(
@@ -78,7 +79,7 @@ export const computerHandlers = {
       Effect.map(compactStatus),
     ),
   computer_open_url: Effect.fn("ComputerToolkit.computer_open_url")(function* ({ url }) {
-    yield* McpInvocationContext.requireMcpCapability("computer");
+    yield* McpInvocationContext.requireThreadMcpCapability("computer");
     const launcher = yield* ExternalLauncher.ExternalLauncher;
     yield* launcher.launchBrowser(url, { application: "chrome" }).pipe(
       Effect.tapError((cause) =>
@@ -98,10 +99,24 @@ export const computerHandlers = {
   }),
 } satisfies Parameters<typeof ComputerToolkit.toLayer>[0];
 
-export const ComputerToolkitHandlersLive = ComputerToolkit.toLayer(computerHandlers);
-const { computer_screenshot, ...standardHandlers } = computerHandlers;
+const declarations = {
+  computer_start: McpToolAccess.actsAsCaller(computerHandlers.computer_start),
+  computer_status: McpToolAccess.readsAsCaller(computerHandlers.computer_status),
+  computer_tabs: McpToolAccess.readsAsCaller(computerHandlers.computer_tabs),
+  computer_select_tab: McpToolAccess.actsAsCaller(computerHandlers.computer_select_tab),
+  computer_navigate: McpToolAccess.actsAsCaller(computerHandlers.computer_navigate),
+  computer_snapshot: McpToolAccess.readsAsCaller(computerHandlers.computer_snapshot),
+  computer_screenshot: McpToolAccess.readsAsCaller(computerHandlers.computer_screenshot),
+  computer_click: McpToolAccess.actsAsCaller(computerHandlers.computer_click),
+  computer_fill: McpToolAccess.actsAsCaller(computerHandlers.computer_fill),
+  computer_type: McpToolAccess.actsAsCaller(computerHandlers.computer_type),
+  computer_close: McpToolAccess.actsAsCaller(computerHandlers.computer_close),
+  computer_open_url: McpToolAccess.actsAsCaller(computerHandlers.computer_open_url),
+};
+export const ComputerToolkitHandlersLive = McpToolAccess.toLayer(ComputerToolkit, declarations);
+const { computer_screenshot, ...standardHandlers } = declarations;
 export const ComputerStandardToolkitHandlersLive =
-  ComputerStandardToolkit.toLayer(standardHandlers);
-export const ComputerScreenshotToolkitHandlersLive = ComputerScreenshotToolkit.toLayer({
+  McpToolAccess.toLayer(ComputerStandardToolkit, standardHandlers);
+export const ComputerScreenshotToolkitHandlersLive = McpToolAccess.toLayer(ComputerScreenshotToolkit, {
   computer_screenshot,
 });

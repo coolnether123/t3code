@@ -10,12 +10,11 @@ function codeChildren(root: ReturnType<DiffsHighlighter["codeToHast"]>) {
   return code.children;
 }
 
-/** Resume grammar state after complete lines, then re-highlight the current line. */
 export function createIncrementalHighlightedDocument(
   highlighter: DiffsHighlighter,
   language: string,
   theme: DiffThemeName,
-) {
+): (code: string) => ReturnType<DiffsHighlighter["codeToHast"]> {
   const options = { lang: language, theme };
   const newline = { type: "text" as const, value: "\n" };
   let cached:
@@ -27,6 +26,8 @@ export function createIncrementalHighlightedDocument(
     | undefined;
 
   return (code: string) => {
+    // Plain text and ANSI do not have a TextMate grammar state. A CR at the end
+    // of a chunk can still become a CRLF, so keep that input on the full path.
     if (
       !language ||
       ["text", "plaintext", "plain", "txt", "ansi"].includes(language) ||
@@ -37,7 +38,8 @@ export function createIncrementalHighlightedDocument(
     if (cached && !code.startsWith(cached.prefix)) cached = undefined;
     const end = code.lastIndexOf("\n") + 1;
     if (end > (cached?.prefix.length ?? 0)) {
-      // Don't tokenize a trailing empty line twice as the stream continues.
+      // Omit the final newline: Shiki would tokenize an extra empty line and
+      // advance the grammar state twice before we process the following line.
       const root = highlighter.codeToHast(code.slice(cached?.prefix.length ?? 0, end - 1), {
         ...options,
         ...(cached ? { grammarState: cached.state } : {}),

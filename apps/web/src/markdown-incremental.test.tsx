@@ -1,16 +1,15 @@
+import { CHAT_MARKDOWN_REHYPE_PLUGINS } from "@t3tools/shared/markdownPipeline";
 import type { Root } from "mdast";
 import { renderToStaticMarkup } from "react-dom/server";
 import ReactMarkdown from "react-markdown";
-import rehypeRaw from "rehype-raw";
-import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import type { Plugin } from "unified";
 import { describe, expect, it } from "vite-plus/test";
 
-import { remarkCodexDirectives } from "@t3tools/client-runtime/codex-markdown-directives";
-import { remarkGithubAlerts } from "./markdown-github-alerts";
+import { remarkCodexDirectives } from "@t3tools/shared/codexMarkdownDirectives";
+import { remarkGithubAlerts } from "@t3tools/shared/markdownGithubAlerts";
 import { createIncrementalMarkdownPlugin } from "./markdown-incremental";
-import { remarkNormalizeListItemIndentation } from "./markdown-list-indentation";
+import { remarkNormalizeListItemIndentation } from "@t3tools/shared/markdownListIndentation";
 
 function render(source: string, incremental?: Plugin<[], Root>, parsedSources?: string[]) {
   let tree: Root | undefined;
@@ -37,7 +36,7 @@ function render(source: string, incremental?: Plugin<[], Root>, parsedSources?: 
         remarkCodexDirectives,
         ...(incremental ? [incremental] : []),
       ]}
-      rehypePlugins={[rehypeRaw, rehypeSanitize]}
+      rehypePlugins={CHAT_MARKDOWN_REHYPE_PLUGINS}
     >
       {source}
     </ReactMarkdown>,
@@ -48,13 +47,18 @@ function render(source: string, incremental?: Plugin<[], Root>, parsedSources?: 
 const prefix = "# Before\n\n```ts\nconst values = [1, 2];\n```\n\n";
 
 describe("incremental Markdown parsing", () => {
-  it("reuses completed fenced-code prefixes", () => {
+  it("keeps the document prefix cached when list recovery parses contain fences", () => {
+    const source =
+      prefix +
+      "-       first block\n\n        ```ts\n        const nested = 1;\n        ```\n\n        tail";
     const incremental = createIncrementalMarkdownPlugin();
-    const parsed: string[] = [];
-    expect(render(prefix, incremental, parsed)).toEqual(render(prefix));
-    parsed.length = 0;
-    expect(render(prefix + "next", incremental, parsed)).toEqual(render(prefix + "next"));
-    expect(parsed).not.toContain(prefix + "next");
+    const parsedSources: string[] = [];
+    expect(render(source, incremental, parsedSources)).toEqual(render(source));
+    parsedSources.length = 0;
+    const next = source + " more";
+    expect(render(next, incremental, parsedSources)).toEqual(render(next));
+    expect(parsedSources).not.toContain(next);
+    expect(parsedSources.some((text) => text.startsWith("t3-markdown-inline-prefix:"))).toBe(true);
   });
 
   it.each([
@@ -66,8 +70,11 @@ describe("incremental Markdown parsing", () => {
     "a[^x]\n\n[^x]: note",
     "a | b\n--|--\na | b\n",
     "```\na\n```\n\nnext\n\n~~~\nb\n~~~\n\nmore",
+    "\n\n\tcode\n\nmore",
+    "text <https://example.com> *bold*",
     "> [!NOTE]\n> alert\n\n- [ ] task",
-  ])("matches full parsing for streaming prefix %j", (tail) => {
+    "\uFEFFtext after a byte-order mark",
+  ])("preserves the parse tree, positions, and HTML while streaming %j", (tail) => {
     const source = prefix + tail;
     const incremental = createIncrementalMarkdownPlugin();
     for (let end = 0; end <= source.length; end++) {
@@ -76,7 +83,7 @@ describe("incremental Markdown parsing", () => {
     }
   });
 
-  it.each(["\r\n", "\r"])("matches partial %j line endings", (newline) => {
+  it.each(["\r\n", "\r"])("preserves partial %j line endings", (newline) => {
     const source = (prefix + "next\n\n```\nlast\n```\n\nend").replaceAll("\n", newline);
     const incremental = createIncrementalMarkdownPlugin();
     for (let end = 0; end <= source.length; end++) {
@@ -85,15 +92,44 @@ describe("incremental Markdown parsing", () => {
     }
   });
 
-  it("reparses when a document-wide definition arrives and invalidates edits", () => {
+  it("updates earlier references when definitions arrive after the cached prefix", () => {
+    const before = "[later] and footnote[^note]\n\n" + prefix;
     const incremental = createIncrementalMarkdownPlugin();
-    for (const text of [
-      "[later]\n\n" + prefix + "plain",
-      "[later]\n\n" + prefix + "[later]: /target",
-      prefix + "plain",
-      "replacement",
-    ]) {
-      expect(render(text, incremental)).toEqual(render(text));
+    for (const tail of ["text", "[later]: /target", "[later]: /target\n\n[^note]: a note"]) {
+      expect(render(before + tail, incremental)).toEqual(render(before + tail));
+    }
+  });
+
+  it("handles edits, replacements, and repeated renders without leaking transformed nodes", () => {
+    const incremental = createIncrementalMarkdownPlugin();
+    const documents = [
+      prefix + "- first\n - second",
+      prefix + "> [!NOTE]\n> transformed alert",
+      prefix + "plain text",
+      "replacement without fences",
+      prefix.replace("Before", "Edited") + "edited prefix",
+      prefix + "plain text",
+      prefix + "plain text",
+    ];
+    for (const document of documents) {
+      expect(render(document, incremental)).toEqual(render(document));
+    }
+  });
+
+  it("does not freeze unclosed, nested, indented, or mismatched fences", () => {
+    const prefixes = [
+      "```\nopen\n\n",
+      "````\n```\n\n",
+      "> ```\n> code\n> ```\n\n",
+      "- ```\n  code\n  ```\n\n",
+      "    ```\n    code\n    ```\n\n",
+      "<script>\n```\ncode\n```\n\n",
+    ];
+    for (const start of prefixes) {
+      const incremental = createIncrementalMarkdownPlugin();
+      for (const tail of ["", "text", "\n```\n", "\n```\n\nnext"]) {
+        expect(render(start + tail, incremental)).toEqual(render(start + tail));
+      }
     }
   });
 });

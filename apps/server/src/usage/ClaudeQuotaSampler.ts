@@ -28,10 +28,10 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 
-import { writeFileStringAtomically } from "../atomicWrite.ts";
+import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../config.ts";
-import { readClaudeSubscriptionWindows } from "../provider/Layers/ClaudeProvider.ts";
+import { readClaudeSubscriptionWindows } from "../provider/ClaudeProvider.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import {
   appendClaudeQuotaReadings,
@@ -89,7 +89,7 @@ const claudeSettingsFor = (settings: ServerSettings) =>
       );
       if (decoded !== null) return decoded;
     }
-    return settings.providers.claudeAgent;
+    return yield* decodeClaudeSettings({});
   });
 
 export const make = Effect.gen(function* () {

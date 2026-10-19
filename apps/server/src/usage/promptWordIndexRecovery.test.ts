@@ -10,10 +10,9 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as TestClock from "effect/testing/TestClock";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
-import migration from "../persistence/Migrations/055_PromptWordIndex.ts";
-import { runMigrations } from "../persistence/Migrations.ts";
+import migration from "./usagePromptIndexLegacy.fixture.ts";
 import {
   readPromptWordIndex,
   warmPromptWordIndexBatch,
@@ -315,25 +314,5 @@ it.effect(
       yield* sql`DROP TRIGGER synthetic_failed_message`;
       assert.strictEqual(yield* warmPromptWordIndexBatch(sql), 1);
       assert.strictEqual((yield* readPromptWordIndex(sql, input, now)).keyword?.count, 3);
-    }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
-);
-
-it.effect(
-  "the accepted migration-054 loader accepts the additive 055 database without rewinding it",
-  () =>
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations({ toMigrationInclusive: 54 });
-      assert.deepStrictEqual(yield* runMigrations(), [[55, "PromptWordIndex"]]);
-      assert.deepStrictEqual(yield* runMigrations({ toMigrationInclusive: 54 }), []);
-      assert.strictEqual(
-        (yield* sql<{ id: number }>`SELECT max(migration_id) AS id FROM effect_sql_migrations`)[0]!
-          .id,
-        55,
-      );
-      assert.strictEqual(
-        (yield* sql`SELECT name FROM sqlite_master WHERE name = 'usage_prompt_words_v1'`).length,
-        1,
-      );
     }).pipe(Effect.provide(NodeSqliteClient.layerMemory())),
 );

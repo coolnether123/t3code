@@ -1,3 +1,6 @@
+import { needsCursorKeychainAccess } from "@t3tools/client-runtime/state/usage";
+import { resolveUsageAccess } from "@t3tools/client-runtime/state/usage-access";
+import { environmentSession } from "./session";
 /**
  * Multi-environment usage state.
  *
@@ -13,11 +16,13 @@ import { usageQueryInput } from "@t3tools/client-runtime/usageRefresh";
 import {
   USAGE_CONTRACT_VERSION,
   type EnvironmentId,
+  type UsageBucket,
+  type UsageProviderKind,
   type UsageSummary,
   type UsageSummaryInput,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
-import { AsyncResult, Atom } from "effect/unstable/reactivity";
+import { AsyncResult, Atom } from "effect/reactivity";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { mergeUsage, type EnvironmentUsage, type MergedUsage } from "@t3tools/shared/usageMerge";
@@ -39,6 +44,9 @@ export interface EnvironmentUsageStatus {
   readonly environmentId: EnvironmentId;
   readonly label: string;
   readonly connection: EnvironmentConnectionPresentation;
+  readonly canReadDiagnostics: boolean;
+  readonly isConnected: boolean;
+  readonly needsCursorKeychainAccess: boolean;
   readonly isPending: boolean;
   readonly error: string | null;
   readonly summary: UsageSummary | null;
@@ -58,14 +66,40 @@ const usageByWindowAtom = Atom.family((windowKey: string) =>
 
     const statuses: EnvironmentUsageStatus[] = [];
     for (const [environmentId, presentation] of presentations) {
+      const isConnected = presentation.connection.phase === "connected";
+      const sessionResult = get(environmentSession.sessionStateAtom(environmentId));
+      const access = resolveUsageAccess({
+        connectionPhase: presentation.connection.phase,
+        session: Option.getOrNull(AsyncResult.value(sessionResult)),
+        hasSessionError: sessionResult._tag === "Failure",
+      });
+      if (!access.canReadDiagnostics) {
+        statuses.push({
+          environmentId,
+          label: presentation.entry.target.label,
+          connection: presentation.connection,
+          isConnected,
+          ...access,
+          summary: null,
+          needsCursorKeychainAccess: false,
+        });
+        continue;
+      }
       const result = get(serverEnvironment.usageSummary({ environmentId, input }));
+      const summary = Option.getOrNull(AsyncResult.value(result));
       statuses.push({
         environmentId,
         label: presentation.entry.target.label,
         connection: presentation.connection,
         isPending: result.waiting,
+        canReadDiagnostics: true,
+        isConnected,
         error: result._tag === "Failure" ? "This environment could not report usage." : null,
-        summary: Option.getOrNull(AsyncResult.value(result)),
+        summary,
+        needsCursorKeychainAccess: needsCursorKeychainAccess(
+          summary,
+          get(serverEnvironment.providersValueAtom(environmentId)),
+        ),
       });
     }
     return statuses;
@@ -74,6 +108,7 @@ const usageByWindowAtom = Atom.family((windowKey: string) =>
 
 export interface UsageView {
   readonly merged: MergedUsage;
+  readonly shown: { readonly window: UsageSummaryInput; readonly merged: MergedUsage } | null;
   readonly environments: readonly EnvironmentUsageStatus[];
   readonly selectedEnvironments: readonly EnvironmentUsageStatus[];
   /** True until at least one environment has answered. */
@@ -90,6 +125,7 @@ export interface UsageView {
 export function useUsage(
   input: UsageSummaryInput,
   selectedEnvironmentIds: ReadonlySet<EnvironmentId> | null = null,
+  hiddenProviders: ReadonlySet<UsageProviderKind> = NO_HIDDEN_PROVIDERS,
 ): UsageView {
   const windowKey = useMemo(
     () => JSON.stringify(usageQueryInput(input, USAGE_CONTRACT_VERSION)),
@@ -315,20 +351,14 @@ export function useUsage(
     };
   }, [windowKey]);
 
-  const merged = useMemo(() => {
-    const answered: EnvironmentUsage[] = selectedEnvironments.flatMap((environment) =>
-      environment.summary === null
-        ? []
-        : [
-            {
-              environmentId: environment.environmentId,
-              label: environment.label,
-              summary: environment.summary,
-            },
-          ],
-    );
-    return mergeUsage(answered, USAGE_CONTRACT_VERSION);
-  }, [selectedEnvironments]);
+  const hiddenProviderKey = JSON.stringify([...hiddenProviders].sort());
+  const selectionKey = JSON.stringify(
+    selectedEnvironmentIds === null ? null : [...selectedEnvironmentIds].sort(),
+  );
+  const merged = useMemo(
+    () => mergeAnsweredUsage(withoutProviders(selectedEnvironments, hiddenProviders)),
+    [selectedEnvironments, hiddenProviderKey],
+  );
 
   const hasDeferredTranscripts = selectedEnvironments.some((environment) =>
     environment.summary?.sources.some(isDeferredTranscriptSource),
@@ -401,12 +431,78 @@ export function useUsage(
     (environment) => environment.summary === null && environment.error === null,
   ).length;
 
+  const [lastAnswered, setLastAnswered] = useState<{
+    readonly window: UsageSummaryInput;
+    readonly merged: MergedUsage;
+    readonly selectionKey: string;
+    readonly hiddenProviderKey: string;
+  } | null>(null);
+  if (
+    answeredCount > 0 &&
+    (lastAnswered?.merged !== merged ||
+      lastAnswered.selectionKey !== selectionKey ||
+      lastAnswered.hiddenProviderKey !== hiddenProviderKey)
+  ) {
+    setLastAnswered({ window: input, merged, selectionKey, hiddenProviderKey });
+  }
   return {
     merged,
+    shown:
+      answeredCount === 0 &&
+      lastAnswered?.selectionKey === selectionKey &&
+      lastAnswered.hiddenProviderKey === hiddenProviderKey
+        ? lastAnswered
+        : null,
     environments,
     selectedEnvironments,
     isPending: answeredCount === 0 && stillReporting > 0,
     isPartial: answeredCount > 0 && stillReporting > 0,
     refresh,
   };
+}
+
+export function mergeAnsweredUsage(
+  environments: readonly EnvironmentUsageStatus[],
+  keepBucket?: (bucket: UsageBucket) => boolean,
+): MergedUsage {
+  const answered: EnvironmentUsage[] = environments.flatMap(({ environmentId, label, summary }) =>
+    summary === null
+      ? []
+      : [
+          {
+            environmentId,
+            label,
+            summary:
+              keepBucket === undefined
+                ? summary
+                : { ...summary, buckets: summary.buckets.filter(keepBucket) },
+          },
+        ],
+  );
+  return mergeUsage(answered, USAGE_CONTRACT_VERSION);
+}
+
+const NO_HIDDEN_PROVIDERS: ReadonlySet<UsageProviderKind> = new Set();
+
+function withoutProviders(
+  environments: readonly EnvironmentUsageStatus[],
+  hiddenProviders: ReadonlySet<UsageProviderKind>,
+): readonly EnvironmentUsageStatus[] {
+  if (hiddenProviders.size === 0) return environments;
+  return environments.map((environment) =>
+    environment.summary === null
+      ? environment
+      : {
+          ...environment,
+          summary: {
+            ...environment.summary,
+            buckets: environment.summary.buckets.filter(
+              (bucket) => !hiddenProviders.has(bucket.provider),
+            ),
+            sources: environment.summary.sources.filter(
+              (source) => !hiddenProviders.has(source.fingerprint.provider),
+            ),
+          },
+        },
+  );
 }

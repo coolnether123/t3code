@@ -16,7 +16,7 @@
  *
  * @module usageRecordIndex
  */
-import type { UsageTokenTotals } from "@t3tools/contracts";
+import type { UsageTokenTotals, UsageCategoryCost } from "@t3tools/contracts";
 
 import type { PricedUsage } from "./usagePricing.ts";
 import type { UsageRecord } from "./usageTranscripts.ts";
@@ -27,10 +27,14 @@ export interface PricedRecord {
   readonly costUsd: number;
   readonly costSource: PricedUsage["costSource"];
   readonly cacheSavingsUsd: number;
+  readonly categoryCostUsd?: UsageCategoryCost | null;
+  readonly fastCostUsd?: number;
+  readonly ultrafastCostUsd?: number;
+  readonly speedPremiumUsd?: number;
 }
 
 /** Prefix-sum columns, in this order, `INDEX_FIELDS` values per position. */
-export const INDEX_FIELDS = 9;
+export const INDEX_FIELDS = 16;
 const UNCACHED = 0;
 const CACHED = 1;
 const CREATION = 2;
@@ -45,6 +49,7 @@ const PROVIDER_REPORTED = 8;
 export interface IndexedGroup {
   readonly provider: UsageRecord["provider"];
   readonly model: string;
+  readonly sourcePath?: string;
   readonly sessionId: string;
   readonly nativeSessionId?: string;
   readonly turnId?: string;
@@ -117,6 +122,15 @@ export function readGroupRange(group: IndexedGroup, start: number, end: number):
       outputTokens: column(OUTPUT),
       reasoningTokens: column(REASONING),
     },
+    categoryCostUsd: {
+      input: column(9),
+      cacheRead: column(10),
+      cacheWrite: column(11),
+      output: column(12),
+    },
+    fastCostUsd: column(13),
+    ultrafastCostUsd: column(14),
+    speedPremiumUsd: column(15),
     costUsd: column(COST),
     cacheSavingsUsd: column(SAVINGS),
     records: end - start,
@@ -130,6 +144,7 @@ export function readGroupRange(group: IndexedGroup, start: number, end: number):
 const groupKey = (record: UsageRecord) =>
   [
     record.provider,
+    record.sourcePath ?? "",
     record.model,
     record.sessionId,
     record.nativeSessionId ?? "",
@@ -188,9 +203,22 @@ export function buildTranscriptUsageIndex(
     const sums = new Float64Array((members.length + 1) * INDEX_FIELDS);
     for (let index = 0; index < members.length; index++) {
       const { record, costUsd, costSource, cacheSavingsUsd } = members[index]!;
+      const priced = members[index]!;
       timestamps[index] = record.timestampMs;
       const previous = index * INDEX_FIELDS;
       const next = previous + INDEX_FIELDS;
+      const extra = [
+        priced.categoryCostUsd?.input ?? 0,
+        priced.categoryCostUsd?.cacheRead ?? 0,
+        priced.categoryCostUsd?.cacheWrite ?? 0,
+        priced.categoryCostUsd?.output ?? 0,
+        priced.fastCostUsd ?? 0,
+        priced.ultrafastCostUsd ?? 0,
+        priced.speedPremiumUsd ?? 0,
+      ];
+      extra.forEach((value, field) => {
+        sums[next + 9 + field] = sums[previous + 9 + field]! + value;
+      });
       sums[next + UNCACHED] = sums[previous + UNCACHED]! + record.totals.uncachedInputTokens;
       sums[next + CACHED] = sums[previous + CACHED]! + record.totals.cachedInputTokens;
       sums[next + CREATION] = sums[previous + CREATION]! + record.totals.cacheCreationTokens;
@@ -204,6 +232,7 @@ export function buildTranscriptUsageIndex(
     }
     groups.push({
       provider: first.provider,
+      ...(first.sourcePath === undefined ? {} : { sourcePath: first.sourcePath }),
       model: first.model,
       sessionId: first.sessionId,
       ...(first.nativeSessionId === undefined ? {} : { nativeSessionId: first.nativeSessionId }),

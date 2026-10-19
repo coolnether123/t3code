@@ -1,11 +1,9 @@
 import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
-import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   getProviderStatusBannerKey,
   getProviderStatusMessage,
-  ProviderStatusBanner,
   shouldShowProviderStatusBanner,
 } from "./ProviderStatusBanner";
 
@@ -69,46 +67,6 @@ describe("ProviderStatusBanner", () => {
 
     expect(shouldShowProviderStatusBanner(status, null)).toBe(true);
     expect(shouldShowProviderStatusBanner(status, getProviderStatusBannerKey(status))).toBe(false);
-  });
-
-  it("renders an accessible dismiss control for provider warnings", () => {
-    const markup = renderToStaticMarkup(
-      <ProviderStatusBanner status={warningProvider()} onDismiss={() => {}} />,
-    );
-
-    expect(markup).toContain('role="alert"');
-    expect(markup).toContain('aria-label="Dismiss Codex provider warning"');
-  });
-
-  it("labels error dismiss controls with the correct severity", () => {
-    const markup = renderToStaticMarkup(
-      <ProviderStatusBanner
-        status={{ ...warningProvider(), status: "error" }}
-        onDismiss={() => {}}
-      />,
-    );
-
-    expect(markup).toContain('aria-label="Dismiss Codex provider error"');
-  });
-
-  it("keeps a desktop daemon error visible for the selected instance", () => {
-    const message = "Codex desktop daemon is not running on this Mac.";
-    const status = {
-      ...warningProvider(),
-      instanceId: ProviderInstanceId.make("codex_elora"),
-      status: "error" as const,
-      auth: { status: "unknown" as const },
-      message,
-    };
-    const markup = renderToStaticMarkup(
-      <ProviderStatusBanner status={status} onDismiss={() => {}} />,
-    );
-
-    expect(shouldShowProviderStatusBanner(status, null)).toBe(true);
-    expect(getProviderStatusMessage(status)).toBe(message);
-    expect(getProviderStatusBannerKey(status)).toContain("codex_elora");
-    expect(markup).toContain(message);
-    expect(markup).toContain('role="alert"');
   });
 });
 

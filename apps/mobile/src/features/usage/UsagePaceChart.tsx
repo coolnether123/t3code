@@ -11,7 +11,7 @@ import {
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Linking, Pressable, Switch, View } from "react-native";
 import Svg, { Circle, Line, Path } from "react-native-svg";
-import { AppText as Text } from "../../components/AppText";
+import { AppText as Text } from "../../components/ui/AppText";
 import { useProviderColors } from "./usageProviders";
 
 export function UsagePaceChart({

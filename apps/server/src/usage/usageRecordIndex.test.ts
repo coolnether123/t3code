@@ -183,7 +183,22 @@ function expectSameUsage(
   const buckets = (result: ReturnType<typeof byRecords>["result"]) =>
     result.buckets
       .map((bucket) =>
-        round({ ...bucket, cacheSavingsUsd: Math.round(bucket.cacheSavingsUsd * 1e9) }),
+        round({
+          ...bucket,
+          cacheSavingsUsd: Math.round(bucket.cacheSavingsUsd * 1e9),
+          categoryCostUsd:
+            bucket.categoryCostUsd === undefined
+              ? undefined
+              : {
+                  input: Math.round(bucket.categoryCostUsd.input * 1e9),
+                  cacheRead: Math.round(bucket.categoryCostUsd.cacheRead * 1e9),
+                  cacheWrite: Math.round(bucket.categoryCostUsd.cacheWrite * 1e9),
+                  output: Math.round(bucket.categoryCostUsd.output * 1e9),
+                },
+          fastCostUsd: Math.round((bucket.fastCostUsd ?? 0) * 1e9),
+          ultrafastCostUsd: Math.round((bucket.ultrafastCostUsd ?? 0) * 1e9),
+          speedPremiumUsd: Math.round((bucket.speedPremiumUsd ?? 0) * 1e9),
+        }),
       )
       .sort((a, b) =>
         [a.day, a.hourStart, a.provider, a.model, a.serviceTier, a.sessionId, a.turnId, a.runId]

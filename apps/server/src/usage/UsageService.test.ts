@@ -1,3 +1,5 @@
+import * as AntigravityUsage from "../provider/Drivers/AntigravityUsage.ts";
+import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
 // @effect-diagnostics nodeBuiltinImport:off - the suite seeds and grows real
 // transcript trees on disk, outside the service's Effect FileSystem.
 import * as NodeFSP from "node:fs/promises";
@@ -6,9 +8,15 @@ import * as NodePath from "node:path";
 
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
+import {
+  Environment as HostProcessEnvironment,
+  HomeDirectory as HostHomeDirectory,
+} from "@t3tools/shared/HostProcess";
 import {
   UsageDay,
+  UsageSummary as UsageSummarySchema,
+  UsageReport as UsageReportSchema,
+  ProviderDriverKind,
   type UsageReportInput,
   type UsageSummary,
   type UsageSummaryInput,
@@ -23,10 +31,10 @@ import * as Layer from "effect/Layer";
 import * as Scheduler from "effect/Scheduler";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
-import { HttpClient, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientResponse } from "effect/http";
 
 import * as ServerConfig from "../config.ts";
-import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as UsageProjection from "./UsageProjection.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { vi } from "vite-plus/test";
 import * as UsageService from "./UsageService.ts";
@@ -107,9 +115,15 @@ const setup = Effect.gen(function* () {
     home,
     transcript: NodePath.join(transcriptDir, "session.jsonl"),
     settings: {
-      providers: {
-        claudeAgent: { homePath: NodePath.join(home, "claude") },
-        codex: { homePath: NodePath.join(home, "codex") },
+      providerInstances: {
+        claudeAgent: {
+          driver: ProviderDriverKind.make("claudeAgent"),
+          config: { homePath: NodePath.join(home, "claude") },
+        },
+        codex: {
+          driver: ProviderDriverKind.make("codex"),
+          config: { homePath: NodePath.join(home, "codex") },
+        },
       },
     },
   };
@@ -122,11 +136,14 @@ const serviceLayers = (input: {
   readonly settings: Parameters<typeof ServerSettings.layerTest>[0];
   readonly onRatesFetch?: () => void;
   readonly neverRates?: boolean;
-  /** Defaults to an unparsable document so every scan retries the fetch. */
+  /** Defaults to an unavailable price document. */
   readonly ratesDocument?: unknown;
 }) =>
   ServerConfig.layerTest(process.cwd(), input.configBaseDir ?? { prefix: input.prefix }).pipe(
     Layer.provideMerge(NodeServices.layer),
+    Layer.provideMerge(Layer.succeed(HostHomeDirectory, input.home)),
+    Layer.provideMerge(Layer.mock(AntigravityUsage.AntigravityUsage)({})),
+    Layer.provideMerge(Layer.mock(CursorUsageAccounts.CursorUsageAccounts)({})),
     Layer.provideMerge(ServerSettings.layerTest(input.settings)),
     Layer.provideMerge(
       Layer.succeed(
@@ -134,8 +151,6 @@ const serviceLayers = (input: {
         HttpClient.make((request) =>
           Effect.sync(() => {
             input.onRatesFetch?.();
-            // Unparsable rates: every scan retries the fetch, which makes the
-            // fetch count a boundary-level observation of how many scans ran.
             return HttpClientResponse.fromWeb(request, Response.json(input.ratesDocument ?? {}));
           }).pipe(
             Effect.flatMap((response) =>
@@ -155,6 +170,33 @@ function totalOutputTokens(summary: { buckets: readonly { totals: { outputTokens
 }
 
 describe("UsageService", () => {
+  it.live("keeps the contract-7 request and response consumed by Otis", () =>
+    Effect.gen(function* () {
+      const { home, settings, transcript } = yield* setup;
+      yield* Effect.promise(() => NodeFSP.writeFile(transcript, claudeLine(1, 5)));
+      const service = yield* UsageService.make.pipe(
+        Effect.provide(serviceLayers({ prefix: "usage-contract-seven", home, settings })),
+      );
+      const summary = yield* service.readSummary({
+        ...WINDOW,
+        clientContractVersion: 7,
+        resolution: "day",
+        groupBy: "model",
+        includeQuotaHistory: false,
+        includeRepeatedInput: false,
+      });
+      assert.strictEqual(summary.contractVersion, 7);
+      assert.strictEqual(Schema.is(UsageSummarySchema)(summary), true);
+      assert.strictEqual(
+        summary.buckets.some((bucket) => bucket.provider === "claude"),
+        true,
+      );
+      const report = yield* service.readReport({ ...WINDOW, mode: "overview", refresh: false });
+      assert.strictEqual(report.mode, "overview");
+      assert.strictEqual(Schema.is(UsageReportSchema)(report), true);
+    }).pipe(Effect.scoped),
+  );
+
   it.live(
     "dual-reads prompts, admits a receipt-gated subscriber and independently falls back",
     () =>
@@ -170,7 +212,7 @@ describe("UsageService", () => {
           timeZone: "UTC",
         };
         const producer = yield* service.readReport(input).pipe(
-          Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+          Effect.provideService(UsageProjection.UsageProjection, {
             getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 1 }),
             listPromptUsageMessages: () =>
               Effect.succeed([
@@ -217,7 +259,7 @@ describe("UsageService", () => {
         let localReads = 0;
         const read = (forced = false) =>
           service.readReport({ ...input, ...(forced ? { promptSource: "t3" as const } : {}) }).pipe(
-            Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+            Effect.provideService(UsageProjection.UsageProjection, {
               readPromptWordIndex: () => {
                 localReads++;
                 return Effect.succeed(producer);
@@ -278,7 +320,7 @@ describe("UsageService", () => {
       assert.strictEqual(missing.coverage.status, "missing");
       let queries = 0;
       const report = yield* service.readReport(input).pipe(
-        Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+        Effect.provideService(UsageProjection.UsageProjection, {
           getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 1 }),
           listPromptUsageMessages: (bounds: { sinceTime: string; untilTime: string }) => {
             queries++;
@@ -303,7 +345,7 @@ describe("UsageService", () => {
       assert.strictEqual(ratesFetches, 0);
       let indexedReads = 0;
       const indexed = yield* service.readReport({ ...input, keyword: "build" }).pipe(
-        Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+        Effect.provideService(UsageProjection.UsageProjection, {
           readPromptWordIndex: (request: UsageReportInput) => {
             indexedReads++;
             assert.strictEqual(request.keyword, "build");
@@ -316,7 +358,7 @@ describe("UsageService", () => {
       assert.strictEqual(indexedReads, 1);
       assert.strictEqual(indexed.keyword?.count, 2);
       const indexFailure = yield* service.readReport({ ...input, keyword: "build" }).pipe(
-        Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+        Effect.provideService(UsageProjection.UsageProjection, {
           readPromptWordIndex: () => Effect.die("Fixture index unavailable"),
         } as never),
       );
@@ -325,7 +367,7 @@ describe("UsageService", () => {
       assert.include(indexFailure.coverage.reasons, "projection-read-failed");
       let sequence = 1;
       const changing = yield* service.readReport(input).pipe(
-        Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+        Effect.provideService(UsageProjection.UsageProjection, {
           getSnapshotSequence: () => Effect.succeed({ snapshotSequence: sequence++ }),
           listPromptUsageMessages: () => Effect.succeed([]),
         } as never),
@@ -568,7 +610,7 @@ describe("UsageService", () => {
 
       const allRuns = { ...input, runIds: undefined };
       const mapped = yield* service.readReport(allRuns).pipe(
-        Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+        Effect.provideService(UsageProjection.UsageProjection, {
           findThreadMappingsByProviderSessionIds: (ids: readonly string[]) => {
             assert.deepStrictEqual([...ids].sort(), ["missing-run", "other-run", "selected-run"]);
             return Effect.succeed([
@@ -605,7 +647,7 @@ describe("UsageService", () => {
       ]);
 
       const failed = yield* service.readReport(allRuns).pipe(
-        Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+        Effect.provideService(UsageProjection.UsageProjection, {
           findThreadMappingsByProviderSessionIds: () => Effect.die("fixture lookup failure"),
         } as never),
       );
@@ -1086,4 +1128,9 @@ describe("UsageService", () => {
       );
     }).pipe(Effect.scoped),
   );
+});
+
+vi.mock("./usageProviderReaders.ts", async () => {
+  const Effect = await import("effect/Effect");
+  return { makeProviderUsageReader: Effect.succeed(() => Effect.succeed([])) };
 });

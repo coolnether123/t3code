@@ -1,4 +1,4 @@
-import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import { Environment as HostProcessEnvironment, Platform as HostProcessPlatform } from "@t3tools/shared/HostProcess";
 import { resolveCommandPath } from "@t3tools/shared/shell";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -549,7 +549,7 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
   const path = yield* Path.Path;
   const mutex = yield* Semaphore.make(1);
   const crypto = yield* Crypto.Crypto;
-  const sessionId = yield* crypto.randomUUIDv4.pipe(Effect.orDie);
+  const sessionId = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
   const profileDir = path.join(config.stateDir, PROFILE_DIRECTORY);
   const adapter = options.adapter ?? makePlaywrightAdapter();
   const shouldDiscoverExecutable =

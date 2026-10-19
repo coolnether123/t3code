@@ -13,6 +13,9 @@ export interface UsageRecord {
   readonly provider: UsageProviderKind;
   readonly timestampMs: number;
   readonly model: string;
+  readonly rateModel?: string;
+  readonly speed?: "standard" | "fast" | "ultrafast";
+  readonly sourcePath?: string;
   /** Internal aggregation/dedupe identity; may be synthetic for imported chats. */
   readonly sessionId: string;
   /** Exact provider-native run/session ID, absent when the source has none. */
@@ -135,6 +138,7 @@ export function parseClaudeLine(line: string): UsageRecord | null {
 
   return {
     provider: "claude",
+    speed: usageRecord["speed"] === "fast" ? "fast" : "standard",
     timestampMs,
     model,
     sessionId,

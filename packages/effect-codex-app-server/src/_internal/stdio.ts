@@ -7,7 +7,7 @@ import * as Sink from "effect/Sink";
 import * as Scope from "effect/Scope";
 import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 
 import * as CodexError from "../errors.ts";
 import {

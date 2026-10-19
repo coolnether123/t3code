@@ -1,3 +1,4 @@
+import type { CallCommand as OrchestrationCommand } from "./commands.ts";
 // @effect-diagnostics nodeBuiltinImport:off - Read the retained PCM archive through the Node storage boundary.
 import * as NodeFSP from "node:fs/promises";
 import * as Clock from "effect/Clock";
@@ -15,7 +16,6 @@ import {
   type CallRequest,
   type CallStatus,
   type CallUtterance,
-  type OrchestrationCommand,
   type SpeechResponse,
   type SpeechTransportRequest,
   type ServerProvider,
