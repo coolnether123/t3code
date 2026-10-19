@@ -374,6 +374,8 @@ export const renderLaunchAgentPlist = (input: {
     "CODEX_BIN",
     "CODEX_APP_SERVER_TRANSPORT",
     "CODEX_APP_SERVER_BIN",
+    "T3_WORK_BROWSER_BINDING",
+    "T3_WORK_BROWSER_MACHINE",
   ]) {
     const value = input.environment[key];
     if (value !== undefined && value !== "") safeEnvironment[key] = value;

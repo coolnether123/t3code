@@ -11,6 +11,7 @@ export interface WorkBrowserRunBinding {
 
 export async function loadWorkBrowserRunBinding(
   environment: NodeJS.ProcessEnv = process.env,
+  threadId?: string,
 ): Promise<WorkBrowserRunBinding | undefined> {
   const path = environment.T3_WORK_BROWSER_BINDING;
   if (!path) return undefined;
@@ -28,7 +29,10 @@ export async function loadWorkBrowserRunBinding(
   const binding: unknown = await module.createT3RunBinding({
     machine: environment.T3_WORK_BROWSER_MACHINE,
     deckTask: environment.T3_WORK_BROWSER_DECK_TASK,
+    threadId,
   });
+  // An external owner may leave an unadmitted thread on its existing route.
+  if (binding === undefined) return undefined;
   if (
     !binding ||
     typeof binding !== "object" ||

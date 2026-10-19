@@ -18,6 +18,7 @@ const decodeEvent = Schema.decodeSync(
   Schema.fromJsonString(
     Schema.Struct({
       operation: Schema.String,
+      threadId: Schema.optional(Schema.String),
       runId: Schema.optional(Schema.String),
       outcome: Schema.optional(Schema.String),
     }),
@@ -41,7 +42,7 @@ describe("T3 owns the primary turn browser lifecycle", () => {
             "const record = row => appendFileSync(" +
               encode(journal) +
               ', JSON.stringify(row)+"\\\\n");',
-            "export async function createT3RunBinding() { return {appServerArgs: [],",
+            'export async function createT3RunBinding({threadId}) { record({operation:"configure",threadId}); return {appServerArgs: [],',
             'async begin(runId) {record({operation:"begin",runId});},',
             'async end(runId,outcome) {record({operation:"end",runId,outcome});},',
             'close() {record({operation:"close"});} };}',
@@ -98,6 +99,10 @@ describe("T3 owns the primary turn browser lifecycle", () => {
           .trim()
           .split("\n")
           .map((line) => decodeEvent(line));
+        assert.deepEqual(
+          events.filter((event) => event.operation === "configure"),
+          [{ operation: "configure", threadId: "browser-binding-fixture" }],
+        );
         assert.deepEqual(
           events.filter((event) => event.operation === "begin"),
           [{ operation: "begin", runId: "owned-turn" }],

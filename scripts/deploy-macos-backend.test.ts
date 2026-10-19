@@ -362,6 +362,9 @@ describe("deploy-macos-backend guards", () => {
       environment: {
         HOME: "/Users/millie",
         CODEX_HOME: "/Users/millie/.codex",
+        T3_WORK_BROWSER_BINDING: "/fixture/work-browser/t3_binding.mjs",
+        T3_WORK_BROWSER_MACHINE: "millie",
+        T3_WORK_BROWSER_DECK_TASK: "unrelated-global-task",
         SECRET_SHOULD_NOT_BE_COPIED: "never",
       },
     });
@@ -376,6 +379,11 @@ describe("deploy-macos-backend guards", () => {
     expect(plist).toContain(DEPLOYMENT_MARKER);
     expect(isOwnedPlist(plist, "com.christinesmith.t3-fork.backend")).toBe(true);
     expect(plist).not.toContain("SECRET_SHOULD_NOT_BE_COPIED");
+    expect(plist).toContain(
+      "<key>T3_WORK_BROWSER_BINDING</key>\n    <string>/fixture/work-browser/t3_binding.mjs</string>",
+    );
+    expect(plist).toContain("<key>T3_WORK_BROWSER_MACHINE</key>\n    <string>millie</string>");
+    expect(plist).not.toContain("T3_WORK_BROWSER_DECK_TASK");
   });
 
   it("routes SSH production starts through launchd without starting another runtime", async () => {

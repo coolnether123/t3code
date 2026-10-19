@@ -1594,7 +1594,7 @@ export const makeCodexSessionRuntime = (
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const runtimeScope = yield* Scope.Scope;
     const browserRunBinding = yield* Effect.tryPromise(() =>
-      loadWorkBrowserRunBinding(options.environment ?? process.env),
+      loadWorkBrowserRunBinding(options.environment ?? process.env, options.threadId),
     ).pipe(
       Effect.mapError(
         (cause) =>

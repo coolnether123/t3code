@@ -26,6 +26,21 @@ describe("optional work-browser run binding", () => {
   it("leaves an unconfigured provider unchanged", async () => {
     expect(await loadWorkBrowserRunBinding({})).toBeUndefined();
   });
+  it("passes host thread identity and preserves an unadmitted thread's route", async () => {
+    const path = await moduleFile(
+      [
+        "export async function createT3RunBinding({threadId}) {",
+        'if (threadId !== "host-thread") throw new Error("Wrong host thread");',
+        "return undefined;}",
+      ].join("\n"),
+    );
+    expect(
+      await loadWorkBrowserRunBinding({ T3_WORK_BROWSER_BINDING: path }, "host-thread"),
+    ).toBeUndefined();
+    await expect(
+      loadWorkBrowserRunBinding({ T3_WORK_BROWSER_BINDING: path }, "other-thread"),
+    ).rejects.toThrow("Wrong host thread");
+  });
   it("rejects relative paths and malformed owner contracts", async () => {
     await expect(
       loadWorkBrowserRunBinding({ T3_WORK_BROWSER_BINDING: "./relative.mjs" }),
