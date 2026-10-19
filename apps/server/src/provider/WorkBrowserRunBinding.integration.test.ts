@@ -19,6 +19,7 @@ const decodeEvent = Schema.decodeSync(
     Schema.Struct({
       operation: Schema.String,
       threadId: Schema.optional(Schema.String),
+      pid: Schema.optional(Schema.Number),
       runId: Schema.optional(Schema.String),
       outcome: Schema.optional(Schema.String),
     }),
@@ -43,6 +44,7 @@ describe("T3 owns the primary turn browser lifecycle", () => {
               encode(journal) +
               ', JSON.stringify(row)+"\\\\n");',
             'export async function createT3RunBinding({threadId}) { record({operation:"configure",threadId}); return {appServerArgs: [],',
+            'async providerSpawned(pid) {record({operation:"provider_spawned",pid});},',
             'async begin(runId) {record({operation:"begin",runId});},',
             'async end(runId,outcome) {record({operation:"end",runId,outcome});},',
             'close() {record({operation:"close"});} };}',
@@ -102,6 +104,13 @@ describe("T3 owns the primary turn browser lifecycle", () => {
         assert.deepEqual(
           events.filter((event) => event.operation === "configure"),
           [{ operation: "configure", threadId: "browser-binding-fixture" }],
+        );
+        const spawned = events.filter((event) => event.operation === "provider_spawned");
+        assert.equal(spawned.length, 1);
+        assert.isTrue(Number.isInteger(spawned[0]?.pid) && (spawned[0]?.pid ?? 0) > 1);
+        assert.isTrue(
+          events.findIndex((event) => event.operation === "provider_spawned") <
+            events.findIndex((event) => event.operation === "begin"),
         );
         assert.deepEqual(
           events.filter((event) => event.operation === "begin"),

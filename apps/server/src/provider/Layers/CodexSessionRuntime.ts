@@ -1680,6 +1680,10 @@ export const makeCodexSessionRuntime = (
         ),
       );
 
+    // Capture the actual owned relay at spawn. External owners can retain this
+    // receipt for scoped failure proofs without rediscovering processes by name.
+    yield* browserRunEvent(() => browserRunBinding?.providerSpawned?.(Number(child.pid)));
+
     const daemonSecrets = options.daemonMcpServer
       ? [
           options.daemonMcpServer.authorizationHeader,

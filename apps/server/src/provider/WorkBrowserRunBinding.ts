@@ -4,6 +4,7 @@ import * as NodeURL from "node:url";
 
 export interface WorkBrowserRunBinding {
   readonly appServerArgs: ReadonlyArray<string>;
+  readonly providerSpawned?: (pid: number) => Promise<unknown>;
   readonly begin: (runId: string) => Promise<unknown>;
   readonly end: (runId: string, outcome: string) => Promise<unknown>;
   readonly close: () => void;
@@ -39,6 +40,7 @@ export async function loadWorkBrowserRunBinding(
     !("appServerArgs" in binding) ||
     !Array.isArray(binding.appServerArgs) ||
     !binding.appServerArgs.every((value: unknown) => typeof value === "string") ||
+    ("providerSpawned" in binding && typeof binding.providerSpawned !== "function") ||
     !("begin" in binding) ||
     typeof binding.begin !== "function" ||
     !("end" in binding) ||

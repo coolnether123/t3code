@@ -50,3 +50,12 @@ The deployment-helper change passed job2265: 17 targeted tests, zero failures
 or skips, targeted lint zero warnings/errors. The candidate remains undeployed.
 Millie's observed18.7GiB free was below the guarded20GiB reserve; no guard
 was bypassed and no user data was removed to activate it.
+
+An external binding may implement optional providerSpawned(pid). The runtime
+calls it immediately after its own provider/desktop-relay spawn, before protocol
+initialization or turn start. This is the captured child PID, not a process-name
+search. A private operator receipt can pin that child's start time and command
+hash for an authorized killed-run proof. The callback grants no stop authority,
+exports no command arguments or credentials, and does not alter unbound threads.
+Receipt callback failures use the existing binding-error log path. Operators
+must refuse destructive proof actions when the spawn receipt is unavailable.

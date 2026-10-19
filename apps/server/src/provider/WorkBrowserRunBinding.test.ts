@@ -50,6 +50,14 @@ describe("optional work-browser run binding", () => {
       "invalid lifecycle",
     );
   });
+  it("rejects a non-callable provider spawn receipt hook", async () => {
+    const path = await moduleFile(
+      "export const createT3RunBinding = async () => ({appServerArgs:[],providerSpawned:7,async begin(){},async end(){},close(){}});",
+    );
+    await expect(loadWorkBrowserRunBinding({ T3_WORK_BROWSER_BINDING: path })).rejects.toThrow(
+      "invalid lifecycle",
+    );
+  });
   it.effect("binds the same MCP override to desktop-daemon thread configuration", () =>
     Effect.gen(function* () {
       const path = yield* Effect.promise(() =>
