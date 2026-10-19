@@ -5,7 +5,6 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { EnvironmentId, ThreadId, ProviderInstanceId, type CallStatus } from "@t3tools/contracts";
 import type { VoiceState } from "../../voice/session";
-import type { Thread } from "../../types";
 import { ThreadVoiceControls, type ThreadVoiceHandle } from "./ThreadVoiceControls";
 
 const controller = vi.hoisted(() => ({
@@ -37,6 +36,7 @@ vi.mock("../../voice/browserSpeech", () => ({
   requestSpeech: async () => ({}),
 }));
 vi.mock("../../voice/callPersistence", () => ({ callPersistence: () => ({}) }));
+vi.mock("../../state/entities", () => ({ useThreadProjection: () => null }));
 vi.mock("./CallModelSelectors", () => ({
   CallModelSelectors: () => <div>Voice model and background agent</div>,
 }));
@@ -52,14 +52,7 @@ beforeEach(async () => {
     root.render(
       <ThreadVoiceControls
         ref={createRef<ThreadVoiceHandle>()}
-        thread={
-          {
-            id: ThreadId.make("synthetic-chat"),
-            activities: [],
-            messages: [],
-            latestTurn: null,
-          } as unknown as Thread
-        }
+        threadId={ThreadId.make("synthetic-chat")}
         environmentId={EnvironmentId.make("synthetic-environment")}
         modelSelection={{
           instanceId: ProviderInstanceId.make("synthetic-provider"),

@@ -1,4 +1,9 @@
-import type { CallModels, ModelSelection, ProviderInstanceId } from "@t3tools/contracts";
+import type {
+  CallModels,
+  EnvironmentId,
+  ModelSelection,
+  ProviderInstanceId,
+} from "@t3tools/contracts";
 import { ProviderModelPicker } from "./ProviderModelPicker";
 import { TraitsPicker } from "./TraitsPicker";
 import type { ProviderInstanceEntry } from "../../providerInstances";
@@ -10,6 +15,7 @@ export interface CallSelectorCatalog {
 }
 export function CallModelSelectors(
   props: CallSelectorCatalog & {
+    environmentId: EnvironmentId;
     models: CallModels;
     onChange(models: CallModels): void;
     disabled?: boolean;
@@ -30,6 +36,7 @@ export function CallModelSelectors(
               {role === "voice" ? "Voice model" : "Background agent"}
             </span>
             <ProviderModelPicker
+              environmentId={props.environmentId}
               activeInstanceId={selection.instanceId}
               model={selection.model}
               lockedProvider={null}

@@ -12,7 +12,7 @@ import {
 } from "../connection/model.ts";
 import { ManagedRelayDpopSigner } from "../relay/managedRelay.ts";
 import { RemoteEnvironmentAuthorization } from "../authorization/service.ts";
-import { remoteHttpClientLayer } from "../rpc/http.ts";
+import { layerRemoteHttpClient } from "../rpc/http.ts";
 import { fetchEnvironmentSpeech } from "./transport.ts";
 
 const environmentId = EnvironmentId.make("selected-environment");
@@ -57,7 +57,7 @@ describe("voice environment transport", () => {
             streamAudio: true,
           },
           fetcher,
-        }).pipe(Effect.provide(remoteHttpClientLayer(fetcher)), Effect.flip);
+        }).pipe(Effect.provide(layerRemoteHttpClient(fetcher)), Effect.flip);
         expect(calls).toBe(0);
         expect(error).toMatchObject({
           message: "Local voice request validation failed. This is a client bug.",
@@ -89,7 +89,7 @@ describe("voice environment transport", () => {
           onAudio: () => {
             throw new TypeError("Synthetic playback failure");
           },
-        }).pipe(Effect.provide(remoteHttpClientLayer(fetcher)), Effect.flip);
+        }).pipe(Effect.provide(layerRemoteHttpClient(fetcher)), Effect.flip);
         expect(error).toMatchObject({ recoverable: false });
         expect(error.message).not.toContain("Failed to fetch");
       }),
@@ -129,7 +129,7 @@ describe("voice environment transport", () => {
         signal: watchSignal.signal,
         request: { action: "call.watch", callId: "synthetic" },
         fetcher,
-      }).pipe(Effect.provide(remoteHttpClientLayer(fetcher)), Effect.result, Effect.forkChild);
+      }).pipe(Effect.provide(layerRemoteHttpClient(fetcher)), Effect.result, Effect.forkChild);
       const speech = yield* fetchEnvironmentSpeech({
         ...input,
         signal: streamSignal.signal,
@@ -142,7 +142,7 @@ describe("voice environment transport", () => {
         },
         fetcher,
         onAudio: () => received(),
-      }).pipe(Effect.provide(remoteHttpClientLayer(fetcher)), Effect.forkChild);
+      }).pipe(Effect.provide(layerRemoteHttpClient(fetcher)), Effect.forkChild);
       source.enqueue(new TextEncoder().encode('{"audio":"AAA=","sampleRate":24000}\n'));
       yield* Effect.promise(() => firstChunk);
       yield* Effect.promise(() => watchEntered);
@@ -183,7 +183,7 @@ describe("voice environment transport", () => {
           chunks.push(chunk.audio);
           received();
         },
-      }).pipe(Effect.provide(remoteHttpClientLayer(fetcher)), Effect.forkChild);
+      }).pipe(Effect.provide(layerRemoteHttpClient(fetcher)), Effect.forkChild);
       const bytes = new TextEncoder();
       source.enqueue(bytes.encode('{"audio":"AA'));
       source.enqueue(bytes.encode('A=","sampleRate":24000}\n'));
@@ -212,7 +212,7 @@ describe("voice environment transport", () => {
         ...input,
         request: { action: "call.prepare", callId: "synthetic" },
         fetcher,
-      }).pipe(Effect.provide(remoteHttpClientLayer(fetcher)), Effect.forkChild);
+      }).pipe(Effect.provide(layerRemoteHttpClient(fetcher)), Effect.forkChild);
       yield* Effect.promise(() => entered);
       yield* TestClock.adjust("601 seconds");
       complete(Response.json({}));
@@ -234,7 +234,7 @@ describe("voice environment transport", () => {
           ...input,
           prepared: { ...prepared, httpAuthorization: authorization },
           fetcher,
-        }).pipe(Effect.provide(remoteHttpClientLayer(fetcher)));
+        }).pipe(Effect.provide(layerRemoteHttpClient(fetcher)));
         expect(calls[0]?.url).toBe("https://selected.example/api/voice");
         expect(new Headers(calls[0]?.init?.headers).get("authorization")).toBe(
           authorization ? "Bearer synthetic-bearer" : null,
@@ -285,7 +285,7 @@ describe("voice environment transport", () => {
         signer: Option.some(signer),
         remoteAuthorization: Option.some(remoteAuthorization),
         fetcher,
-      }).pipe(Effect.provide(remoteHttpClientLayer(fetcher)));
+      }).pipe(Effect.provide(layerRemoteHttpClient(fetcher)));
       expect(calls.map((call) => call.url)).toEqual([
         "https://current.example/api/voice",
         "https://renewed.example/api/voice",
@@ -303,7 +303,7 @@ describe("voice environment transport", () => {
       Effect.gen(function* () {
         const fetcher: typeof fetch = async () => new Response("Synthetic failure", { status });
         const error = yield* fetchEnvironmentSpeech({ ...input, fetcher }).pipe(
-          Effect.provide(remoteHttpClientLayer(fetcher)),
+          Effect.provide(layerRemoteHttpClient(fetcher)),
           Effect.flip,
         );
         expect(error).toMatchObject({ message: "Synthetic failure", recoverable: status !== 409 });

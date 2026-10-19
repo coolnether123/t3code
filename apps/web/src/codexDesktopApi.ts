@@ -7,10 +7,10 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { HttpBody, HttpClient, HttpClientRequest } from "effect/unstable/http";
+import { HttpBody, HttpClient, HttpClientRequest } from "effect/http";
 
 import { resolvePrimaryEnvironmentHttpUrl } from "./environments/primary";
-import { primaryEnvironmentHttpLayer } from "./environments/primary/httpLayer";
+import * as PrimaryEnvironmentHttp from "./environments/primary/httpLayer";
 
 export class CodexDesktopApiError extends Error {
   readonly status: number | null;
@@ -69,7 +69,7 @@ const primaryEnvironmentFetch: FetchLike = async (input, init) => {
         status: response.status,
         json: async () => payload,
       } as Response;
-    }).pipe(Effect.provide(primaryEnvironmentHttpLayer)),
+    }).pipe(Effect.provide(PrimaryEnvironmentHttp.layer)),
   );
 };
 

@@ -11,8 +11,8 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SubscriptionRef from "effect/SubscriptionRef";
-import type { HttpClient } from "effect/unstable/http";
-import type { Atom } from "effect/unstable/reactivity";
+import type { HttpClient } from "effect/http";
+import type { Atom } from "effect/reactivity";
 import { VoiceRequestError, voiceRequestError } from "./errors.ts";
 export { VoiceRequestError } from "./errors.ts";
 
@@ -34,6 +34,8 @@ export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(
     catch: () =>
       new VoiceRequestError("Local voice request validation failed. This is a client bug.", false),
   });
+  // The voice route streams NDJSON outside the typed HTTP API, so it is signed and fetched by URL.
+  const voiceUrl = new URL("/api/voice", input.prepared.httpBaseUrl).toString();
   const result = yield* executeAuthenticatedEnvironmentHttpRequest({
     ...input,
     group: "orchestration",
@@ -44,11 +46,11 @@ export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(
         : input.request.action === "call.speak" && input.request.streamAudio
           ? 330_000
           : 100_000,
-    url: (base) => new URL("/api/voice", base).toString(),
-    request: ({ headers, url }) =>
+    url: () => voiceUrl,
+    request: ({ headers }) =>
       Effect.tryPromise({
         try: async (signal) => {
-          const response = await (input.fetcher ?? fetch)(url, {
+          const response = await (input.fetcher ?? fetch)(voiceUrl, {
             method: "POST",
             headers: { ...headers, "content-type": "application/json" },
             credentials: headers.authorization ? "omit" : "include",

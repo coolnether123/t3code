@@ -182,7 +182,7 @@ export function ThreadVoiceControls({
     sessionRef.current?.observe(
       messages,
       props.running,
-      latestTurnId,
+      latestTurnId ?? undefined,
       models.voice,
       models.operator,
     );
@@ -209,12 +209,12 @@ export function ThreadVoiceControls({
             sideOffset={8}
             initialFocus={false}
             finalFocus={false}
-            className="w-80 max-w-[calc(100dvw-1.5rem)] overflow-hidden rounded-xl border bg-popover"
-            viewportClassName="flex max-h-[min(var(--available-height),calc(100dvh-env(safe-area-inset-top)-env(safe-area-inset-bottom)-1.5rem))] min-h-0 flex-col overflow-hidden p-0 not-data-transitioning:overflow-hidden"
+            padding="none"
+            className="w-80 max-w-[calc(100dvw-1.5rem)]"
           >
             <section
               aria-label="Otis call"
-              className="flex max-h-[inherit] min-h-0 flex-col text-popover-foreground"
+              className="flex max-h-[min(var(--available-height),calc(100dvh-env(safe-area-inset-top)-env(safe-area-inset-bottom)-1.5rem))] min-h-0 w-full flex-col"
             >
               <p role="status" className="shrink-0 px-3 pt-3 pb-2 text-sm font-medium">
                 {labels[state]}
@@ -224,6 +224,7 @@ export function ThreadVoiceControls({
                 className="min-h-0 overflow-y-auto overscroll-contain px-3 pb-3 wrap-anywhere"
               >
                 <CallModelSelectors
+                  environmentId={props.environmentId}
                   models={models}
                   instanceEntries={props.instanceEntries}
                   modelOptionsByInstance={props.modelOptionsByInstance}

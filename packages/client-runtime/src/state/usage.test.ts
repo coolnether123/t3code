@@ -98,6 +98,8 @@ function harness(ids = ["a"]) {
         get(environmentId).query,
       refreshUsageRates: {
         label: "test:rates",
+        requiredScopes: () => [],
+        permissionAtom: () => Atom.make(true),
         run: (
           _registry: AtomRegistry.AtomRegistry,
           { environmentId }: { environmentId: EnvironmentId },
