@@ -4,6 +4,10 @@ Open a chat on your phone's browser and select its model and thinking setting as
 usual. Choose **Call Otis**, then **Start call or recover saved call**. Allow
 microphone access. Wait for the ready sound before speaking.
 
+You can start from **New thread**. Choose a project and the call's models;
+starting the call creates the chat first. If opening fails before any speech
+is captured, **End call** closes the panel without leaving a recording to retry.
+
 Speech pauses send your recording automatically. **Send speech** sends it sooner.
 Your words appear as a normal message in the same chat. New assistant prose is
 spoken as it arrives. Code and structured data stay in the chat.

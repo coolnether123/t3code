@@ -8,6 +8,7 @@ import type {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import { isRetryableVoiceError, VoiceRequestError } from "./errors.ts";
+import { TurnFiller } from "./filler.ts";
 
 const now = () => DateTime.formatIso(Effect.runSync(DateTime.now));
 
@@ -49,6 +50,7 @@ export interface SavedCall {
   silencedMessages?: string[];
 }
 export interface VoiceDependencies {
+  ensureThread?(options: CallOptions): Promise<void>;
   speechEvent?(
     event:
       | { type: "sentence"; messageId: string; start: number; end: number }
@@ -96,6 +98,8 @@ export class ThreadVoiceSession {
   private detached = false;
   private recovering = false;
   private recording = false;
+  private recordingId: string | undefined;
+  private filler: TurnFiller;
   private stopTask: Promise<void> | undefined;
   private capture: Promise<void> | undefined;
   private playbackTask: Promise<void> | undefined;
@@ -111,6 +115,7 @@ export class ThreadVoiceSession {
   private deps: VoiceDependencies;
   constructor(deps: VoiceDependencies) {
     this.deps = deps;
+    this.filler = new TurnFiller((audio, rate, signal) => deps.audio.play(audio, rate, signal));
   }
   private change(state: VoiceState, detail?: string) {
     this.state = state;
@@ -187,6 +192,7 @@ export class ThreadVoiceSession {
   private failed(error: unknown) {
     if (!this.active) return;
     this.recovering = true;
+    this.filler.cancel();
     this.deps.audio.finish();
     this.playback.abort();
     this.watching.abort();
@@ -207,6 +213,8 @@ export class ThreadVoiceSession {
     try {
       this.deps.audio.unlock();
       this.change("preparing", "Checking microphone and saved call");
+      await this.deps.ensureThread?.(options);
+      if (!this.active) return;
       this.saved = await this.deps.persistence.read();
       if (!this.active) return;
       if (!this.saved) {
@@ -274,6 +282,8 @@ export class ThreadVoiceSession {
       if (!this.active) return;
       await this.flush();
       if (!this.active || this.recovering) return;
+      await this.filler.prepare();
+      if (!this.active || this.recovering) return;
       await this.deps.audio.ready(this.abort.signal);
       if (!this.active || this.recovering) return;
       this.change("ready", "Speech is ready");
@@ -340,6 +350,7 @@ export class ThreadVoiceSession {
       !this.active ||
       this.busy ||
       this.announcing ||
+      this.filler.isPlaying ||
       this.capture ||
       !["ready", "waiting"].includes(this.state)
     )
@@ -383,13 +394,16 @@ export class ThreadVoiceSession {
           await this.persist();
         };
         this.recording = true;
+        this.recordingId = id;
         const audio = await this.deps.audio.capture(this.abort.signal, journal);
         this.recording = false;
         if (!audio.audio) {
+          this.filler.cancel();
           this.saved!.recordings = this.saved!.recordings.filter((entry) => entry.id !== id);
           await this.persist();
           return;
         }
+        this.scheduleFiller(id);
         const recording: Recording = {
           ...audio,
           id,
@@ -409,6 +423,7 @@ export class ThreadVoiceSession {
         this.failed(error);
       } finally {
         this.recording = false;
+        this.recordingId = undefined;
         this.capture = undefined;
         if (this.active && !["reconnecting", "error"].includes(this.state)) {
           this.change(this.running ? "waiting" : "ready");
@@ -441,7 +456,14 @@ export class ThreadVoiceSession {
     }
   }
   finish() {
+    if (this.recordingId) this.scheduleFiller(this.recordingId);
     this.deps.audio.finish();
+  }
+  private scheduleFiller(id: string) {
+    if (!this.active || this.recovering) return;
+    void this.filler.arm(id, this.playback.signal).then(() => {
+      if (this.active && this.state === "ready") void this.listen();
+    });
   }
   observe(
     messages: readonly Message[],
@@ -609,8 +631,9 @@ export class ThreadVoiceSession {
           audioSignal,
           (chunk) => {
             audioSignal.throwIfAborted();
-            this.deps.speechEvent?.({ type: "audio", speechId: id });
-            const played = this.deps.audio.play(chunk.audio, chunk.sampleRate, audioSignal);
+            const played = this.filler.play(chunk.audio, chunk.sampleRate, audioSignal, () =>
+              this.deps.speechEvent?.({ type: "audio", speechId: id }),
+            );
             chunks.push(played);
             void played.catch((error) => attempt.abort(error));
           },
@@ -619,7 +642,9 @@ export class ThreadVoiceSession {
         if (!result.played && !chunks.length && (!result.audio || !result.sampleRate))
           throw new Error("Speech service returned no audio.");
         if (!result.played && !chunks.length)
-          await this.deps.audio.play(result.audio!, result.sampleRate!, audioSignal);
+          await this.filler.play(result.audio!, result.sampleRate!, audioSignal, () =>
+            this.deps.speechEvent?.({ type: "audio", speechId: id }),
+          );
         await Promise.all(chunks);
         audioSignal.throwIfAborted();
       } catch (error) {
@@ -637,6 +662,7 @@ export class ThreadVoiceSession {
   }
   async interrupt() {
     if (!this.active) return;
+    this.filler.cancel();
     this.playback.abort();
     this.queue = [];
     this.saved!.silencedTurns = [
@@ -672,6 +698,7 @@ export class ThreadVoiceSession {
   async detach() {
     this.detached = true;
     this.active = false;
+    this.filler.cancel();
     this.playback.abort();
     this.watching.abort();
     this.stopRenewal();
@@ -690,6 +717,7 @@ export class ThreadVoiceSession {
   }
   private async hangUp() {
     this.active = false;
+    this.filler.cancel();
     this.stopRenewal();
     this.playback.abort();
     this.watching.abort();
@@ -710,6 +738,8 @@ export class ThreadVoiceSession {
       await this.flush(false, new AbortController().signal);
       await this.request({ action: "call.close" }, new AbortController().signal);
       await this.deps.persistence.clear();
+      this.saved = undefined;
+      this.status = undefined;
       this.change("idle");
     } catch {
       this.change(

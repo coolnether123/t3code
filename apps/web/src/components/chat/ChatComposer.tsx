@@ -30,6 +30,7 @@ import type {
   ModelSelection,
   ProjectId,
   PullRequestListInput,
+  CallOptions,
   PreviewAnnotationPayload,
   ProviderApprovalDecision,
   ThreadContextRecord,
@@ -1489,6 +1490,7 @@ export interface ChatComposerHandle {
 }
 
 export interface ChatComposerProps {
+  ensureVoiceThread(options: CallOptions): Promise<void>;
   composerDraftTarget: ScopedThreadRef | DraftId;
   environmentId: EnvironmentId;
   canOperateThread: boolean;
@@ -7254,6 +7256,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       instanceEntries={providerInstanceEntries}
                       modelOptionsByInstance={modelOptionsByInstance}
                       threadId={activeThread.id}
+                      ensureThread={props.ensureVoiceThread}
+                      isDraft={!props.isServerThread}
+                      defaultModelSelection={settings.defaultModelSelection}
                       environmentId={environmentId}
                       modelSelection={selectedModelSelection}
                       running={

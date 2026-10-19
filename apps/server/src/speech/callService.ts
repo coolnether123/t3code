@@ -138,6 +138,7 @@ export class CallService {
       if (!input.options.operatorSelection)
         return {
           ...((existing?.models ?? defaults) ? { models: existing?.models ?? defaults! } : {}),
+          ...(defaults ? { defaultModels: defaults } : {}),
           operatorUpdates: existing?.updates ?? [],
         };
       const models = {
@@ -204,8 +205,13 @@ export class CallService {
       );
     }
     if (input.action === "call.close") {
+      let found = false;
       const sessionId = await this.store.serial(input.callId, async () => {
-        const record = await this.store.require(input.callId);
+        const record = await this.store.read<CallRecord>(input.callId, "call.json");
+        if (!record) return;
+        if (record.callId !== input.callId)
+          throw new Error("Saved call identity does not match its archive.");
+        found = true;
         await this.store.serial(`thread:${record.threadId}`, async () => {
           record.closed = true;
           await this.store.changed(record);
@@ -224,7 +230,7 @@ export class CallService {
           }
         });
       }
-      return { call: await this.status(input.callId) };
+      return found ? { call: await this.status(input.callId) } : {};
     }
     return this.store.serial(input.callId, async () => {
       if (input.action === "call.open")

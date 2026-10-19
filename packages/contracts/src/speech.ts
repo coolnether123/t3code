@@ -158,6 +158,7 @@ export const SpeechResponse = Schema.Struct({
   call: Schema.optional(CallStatus),
   utterance: Schema.optional(CallUtterance),
   models: Schema.optional(CallModels),
+  defaultModels: Schema.optional(CallModels),
   announced: Schema.optional(Schema.Boolean),
   operatorUpdates: Schema.optional(Schema.Array(OperatorUpdate)),
 });

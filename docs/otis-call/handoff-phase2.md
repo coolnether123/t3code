@@ -1,11 +1,206 @@
 # Otis Call phase 2 handoff
 
 Task `agenda-task:515bbc54cb61482681e950e524421ce4`.
-Capacity retry and delivery evidence fixes base `36e4e2bd2d`, branch `work/otis-call-20261018`, upstream
+Draft call follow-up base `6cec35da12`, branch `work/otis-call-20261018`, upstream
 `origin/work/otis-call-20261018`. Changes remain uncommitted as requested.
-Observation date: 18 October 2026, America/Chicago, CDT.
+Observation dates: 18 and 19 October 2026, America/Chicago, CDT.
 
-## Current follow-up after live-6
+## Current follow-up: calls from a new chat
+
+Jared reported the mobile Call Otis flow broken around 00:00 CDT on 19 October 2026. The parent reproduced a draft route sending a local thread ID to
+`call.open`, which rejected it before creating a call archive or contacting
+the speech router. Live T3 remains at the parent-reported `c84b1fec28`.
+This candidate is uncommitted and changes no running server or router.
+The parent's `apps/server/package.json` edit is preserved. No subagents or
+computer use were used.
+
+`ChatView.tsx` now supplies the call controller with an `ensureThread`
+callback. It uses the existing `threadEnvironment.create` command, the draft's
+preallocated thread ID, project, branch, worktree, runtime permissions and
+interaction mode, and the picked voice model/options. The controller unlocks
+audio in the original tap, then waits for thread creation before `call.open`.
+The open carries both voice and operator selections through the existing call
+configuration path. Picker changes on an uncreated draft stay local until open.
+Saving an environment default becomes available after creation.
+
+The draft route defers its automatic promotion while the call is active.
+The first voice turn can therefore start without unmounting the microphone
+and playback controller. Hang-up permits ordinary route promotion and leaves
+operator work running. Leaving the route explicitly still detaches the call.
+
+`CallService` accepts closing a missing archive as an idempotent no-op. A
+rejected open with no capture can clear its local journal and reach idle.
+The controls collapse their expanded panel at idle. Existing archives still
+close and release their leases; retained audio, corrupt archives, identity
+mismatches and failed close requests keep their existing recovery behavior.
+
+`SpeechResponse.defaultModels` is optional and returns the saved environment
+call default separately from remembered per-thread models. Both pickers use
+the same visible catalog as the normal T3 picker. A hidden remembered or
+composer selection falls back to that role's visible saved call default,
+then visible `defaultModelSelection`, then the first visible model. Fallback
+preserves the chosen selection's options, including medium effort. A catalog
+with no visible model disables Start instead of selecting a hidden model.
+Initial voice preference remains Haiku 5.5 medium when visible.
+
+Retain the new single-caller `buildVoiceThreadCreateInput` helper as the
+ordinary thread-command mapping boundary. Its focused check verifies draft
+identity, project, permissions and the picked model without mounting the full
+chat view. `ensureVoiceThread` is the command receipt boundary. No new
+provider, execution path, permission gate or chat was added.
+
+Owner checks and full logs are under `.logs/otis-call/phase2-draft`. Run:
+
+```powershell
+& 'A:/Dev/Tooling/t3-node-v24.19.0/node.exe' `
+  .logs/otis-call/phase2-draft/verify.mjs `
+  .logs/otis-call/phase2-draft/owner
+```
+
+Final offline receipts are in `phase2-draft/direct-final/check-results.json`.
+All gates returned exit 0. The focused selection passed 274 tests across 11
+files, including draft command mapping and create-before-open ordering, audio
+unlock in the tap, first-turn route retention, creation failure dismissal,
+empty rejected-open close, both hidden-model fallback chains, response schema
+compatibility and the existing operator, playback, filler and auth checks.
+The separate acceptance evidence/deadline helpers passed 22 tests. Contracts,
+server, client-runtime and web typechecks, targeted lint, formatting,
+acceptance-helper syntax and diff whitespace checks passed. Lint reports 46
+warnings in the existing React effect sites. No lint rule was disabled.
+`source-before.json`, `source-after.json` and `complete.json` establish that
+production and test sources stayed unchanged during the final run, completed
+19 October at 00:38:50 CDT.
+
+The first run passed 273 of 274 tests. Its rejected-open fixture already had
+an active call in the same thread and hit that guard instead. The fixture now
+uses a separate synthetic draft ID. The web typecheck also caught optional
+callback typing, an incorrectly referenced prop and fixture typing errors;
+all are fixed. Markdown formatting initially failed because the CLI could
+not spawn its worker. `.logs/otis-call/format-api.mjs` now calls the same
+installed oxfmt API with the repository's unchanged formatting options.
+It checks all 19 affected source and Markdown files without spawning that
+worker. The wrapper and source manifests are ignored local evidence.
+
+The selection tool has no registered non-.NET policy for this repository, so
+the repository and handoff own this check selection. Queue jobs
+`c97bb64a-2519-452b-a011-17e14cffc5b6` and
+`f2e550aa-d020-44c1-a4cf-18adb6f0d1de` each remained unadmitted after their
+ten-minute owner wait. Readback reports `blocked`, waiting for the working
+directory or output owner, positions 4 and 5, with null exit codes. The
+direct runs use separate output directories. Queue state, other jobs and
+running servers were left intact. Queue submission is not passing evidence.
+
+The parent still needs a real iPhone Safari call over Tailscale from a fresh
+New thread draft. Confirm the draft project, both selected models and medium
+effort, one visible conversation, natural speech, no JSON, and continued
+operator work after hang-up. Verify the first voice turn keeps audio attached
+and the route promotes after hang-up. Reproduce a rejected open with no audio,
+tap End call and confirm the panel disappears with no Retry saved speech.
+With GPT-5.6-Sol hidden, exercise visible saved defaults, hidden saved defaults
+falling back to GPT-6.1-Sol medium, then first-visible fallback, for both roles.
+Repeat the existing saved-call recovery and mid-call picker checks.
+
+Web, Electron and phone Safari share these controls. Local, remote and relay
+requests still use the selected environment's existing transport. Native
+mobile calls and non-Claude tool-free voice adapters remain the earlier
+unimplemented gates. This patch does not establish live browser, audio,
+provider-model or network acceptance.
+
+## Previous follow-up: speech fillers
+
+The parent reports `c84b1fec28` passed live acceptance and went live at 21:01
+CDT. This follow-up remains uncommitted. It changes no running T3 or router,
+starts no provider turn and preserves the parent's `apps/server/package.json`
+edit. No subagents were used.
+
+Jared requested: "The pre filler should be after a second or so to be natural
+to start saying." `FILLER_DELAY_MS` is 1,000 ms in shared
+`packages/client-runtime/src/voice-call/filler.ts`. Send speech arms it before
+waiting for recording persistence, upload, transcription or delivery. Automatic
+speech submission also arms it. The recording ID prevents repeat presses,
+capture completion and retries from adding another filler for the same turn.
+Empty capture cancels it. Status updates and announcement turns never arm it.
+
+`TurnFiller` owns the timer and the playback barrier. Real reply audio cancels
+a pending filler. If the clip has started, all incoming reply chunks wait for
+its playback promise, then use the existing platform PCM player. The clip's
+signal belongs to the call, so reply arrival cannot cut it off. Explicit
+interrupt, hang-up, detach and failure retain their existing cancellation
+behavior. Clip failures are optional and cannot prevent real replies. Reply
+audio measurements fire after this barrier; filler does not count as the
+voice model's first audio. Microphone capture does not start during a filler.
+
+The six supplied recordings from
+`A:/Dev/Artifacts/otis-voice-clips-20261018/fixed/filler-*.wav` are bundled
+losslessly as PCM16 base64 in `fillerClips.ts`. The WAV headers are removed;
+all 518,400 audio bytes remain unchanged at mono 24 kHz. The separate dynamic
+import completes during call preparation, before Ready, and adds
+no router request. Source hashes, durations and PCM hashes are in ignored
+`.logs/otis-call/phase2-fillers/asset-manifest.json`. The next choice excludes
+the last clip. No additional network authentication or platform asset loader
+is needed.
+
+`TurnFiller` has one production caller, `ThreadVoiceSession`. Retain it as the
+timing and audio scheduling boundary shared by clients. It has no browser or
+native APIs. Web and desktop use the current browser PCM adapter, including
+mobile Safari. The native app currently implements dictation, not
+`ThreadVoiceSession` or a call PCM playback adapter. This change supplies the
+shared behavior for that adapter; it does not claim an implemented native call
+screen or measured native playback. Native call integration remains a separate
+project gate.
+
+The initial offline run caught a preload race: the one-second timer could
+expire before the lazy bundle resolved. Preparation now waits for that bundle
+before the Ready cue. The current candidate passes 66 focused tests across
+`filler.test.ts`, `session.test.ts`, `browserSpeech.test.ts` and
+`transport.test.ts`. Their synthetic playback receipts cover 999/1,000 ms,
+real audio winning the timer, a reply arriving during filler, ordered reply
+chunks, duplicate sends, automatic submission, no filler for silence/status,
+no immediate repeats, optional playback failure, interruption and hang-up.
+All six packaged PCM hashes match the supplied recordings. The source module
+is 691,847 bytes, 372,813 bytes with gzip, measured offline rather than on a
+deployed HTTP response.
+
+Both affected typechecks, targeted lint and formatting pass with exit 0.
+
+The exact offline owner command is:
+
+```powershell
+& 'A:/Dev/Tooling/t3-node-v24.19.0/node.exe' `
+  .logs/otis-call/phase2-fillers/verify.mjs `
+  .logs/otis-call/phase2-fillers/parent
+```
+
+It runs the four focused test files with the summary reporter, shared-runtime
+and web typechecks, then the unchanged repository lint and formatter rules.
+Full local logs and exit receipts are under
+`.logs/otis-call/phase2-fillers/final/`; asset evidence and the final source
+manifest are in its parent folder. The wrapper is ignored local evidence,
+not a product dependency. The queued owner command remained unadmitted after
+the ten-minute owner wait, so the same checks ran locally with separate log
+ownership. A queued job is not counted as a pass. No gate was killed or
+truncated.
+
+For parent acceptance, reuse the exact isolated setup and `$callArgs` in
+"Parent acceptance" below, then run:
+
+```powershell
+& $callNode @callArgs --output .logs/otis-call/phase2-filler-live
+```
+
+On the already prepared call, tap Send speech and listen for one clip about
+one second later. Repeat on fresh turns and check that adjacent clips differ.
+Confirm no clip when a real reply starts before the delay. Confirm real audio
+waits until a playing clip finishes, with no clipped word or overlap. Let an
+operator result arrive without new user speech and confirm it adds no filler.
+Hang up before the delay and confirm no later clip. Repeat in iPhone Safari
+and desktop. The helper's existing first-audio stage still measures the real
+reply; it does not measure filler onset. Listening and a recording of Send
+speech are needed for that measurement. No live filler timing or listening
+quality measurement was made in this sandbox. Native call playback remains
+the separate integration gate described above.
+
+## Previous follow-up after live-6
 
 The parent committed the handoff and panel fixes as `36e4e2bd2d` and accepted
 the 375 px panel in `.logs/otis-call/phase2-live-6`. The voice picker and footer

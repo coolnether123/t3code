@@ -1,10 +1,7 @@
-fix(voice): retry busy background turns and preserve delivery evidence
+fix(voice): start calls from new chats and honor visible models
 
-Retry confirmed capacity failures three times with bounded backoff and the
-original model selection. Ignore late failed-attempt receipts and discard
-unverified results before retrying.
-
-Read back the delivered message before waiting for background completion.
-Retain that evidence through failed cleanup and label missing readback unknown.
+Create draft threads through the existing command before opening a call.
+Keep audio mounted through the first turn, dismiss empty rejected opens on
+hang-up, and resolve hidden model choices through visible saved defaults.
 
 Otis-Task: agenda-task:515bbc54cb61482681e950e524421ce4

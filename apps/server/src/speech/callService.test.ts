@@ -14,6 +14,7 @@ import {
   type SpeechTransportRequest,
 } from "@t3tools/contracts";
 import { CallStore, sha256 } from "./callStore.ts";
+import { CallOperator } from "./callOperator.ts";
 import { CallService, verifyCallModel, type CallPorts } from "./callService.ts";
 
 const directories: string[] = [];
@@ -82,6 +83,48 @@ async function fixture() {
 }
 
 describe("durable calls", () => {
+  it("returns saved call defaults separately from remembered thread models", async () => {
+    const f = await fixture();
+    const operator = new CallOperator(f.store);
+    const defaults = {
+      voice: options.modelSelection,
+      operator: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-6.1-sol" },
+    };
+    const remembered = { ...defaults, operator: { ...defaults.operator, model: "gpt-5.6-sol" } };
+    await operator.configure(options.threadId, defaults, true);
+    await operator.configure(options.threadId, remembered);
+    const service = new CallService(f.store, f.ports, operator);
+    expect(
+      await service.handle(
+        { action: "call.configure", callId: "settings", options },
+        new AbortController().signal,
+      ),
+    ).toMatchObject({ models: remembered, defaultModels: defaults });
+  });
+  it("ends an empty rejected open without creating an archive or starting speech", async () => {
+    const f = await fixture();
+    vi.mocked(f.ports.verify).mockRejectedValueOnce(
+      new Error("Open an existing chat before starting a call."),
+    );
+    const signal = new AbortController().signal;
+    const before = vi.mocked(f.ports.speech).mock.calls.length;
+    await expect(
+      f.service.handle(
+        {
+          action: "call.open",
+          callId: "rejected-call",
+          options: { ...options, threadId: "synthetic-draft" },
+        },
+        signal,
+      ),
+    ).rejects.toThrow("Open an existing chat");
+    expect(await f.store.read("rejected-call", "call.json")).toBeUndefined();
+    await expect(
+      f.service.handle({ action: "call.close", callId: "rejected-call" }, signal),
+    ).resolves.toEqual({});
+    expect(vi.mocked(f.ports.speech).mock.calls).toHaveLength(before);
+    expect(await f.store.read("rejected-call", "call.json")).toBeUndefined();
+  });
   it("renews an attached idle call through its status watch and stops after hang-up", async () => {
     const f = await fixture();
     const record = await f.store.require("call-1");

@@ -66,6 +66,7 @@ import {
   type EnvironmentId,
   type MessageId,
   type ModelSelection,
+  type CallOptions,
   type ProjectScript,
   type PreviewAnnotationPayload,
   ProviderInstanceId,
@@ -482,6 +483,7 @@ import {
   branchMismatchKey,
   buildExpiredTerminalContextToastCopy,
   buildLocalDraftThread,
+  buildVoiceThreadCreateInput,
   collectUserMessageBlobPreviewUrls,
   createLocalDispatchSnapshot,
   deriveCommittedServerUserMessageIds,
@@ -7292,6 +7294,23 @@ export default function ChatView(props: ChatViewProps) {
     return false;
   }
 
+  const ensureVoiceThread = async (options: CallOptions) => {
+    if (isServerThread) return;
+    if (!activeThread || !activeProject || options.threadId !== activeThread.id)
+      throw new Error("Choose an available project before starting a call.");
+    const result = await createThread(
+      buildVoiceThreadCreateInput({
+        thread: activeThread,
+        projectId: activeProject.id,
+        options,
+        runtimeMode,
+        interactionMode,
+        branch: activeThreadBranch,
+      }),
+    );
+    if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+  };
+
   const onImplementPlanInNewThread = async () => {
     if (
       !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope) ||
@@ -8167,6 +8186,7 @@ export default function ChatView(props: ChatViewProps) {
                           ) : null}
                           {!composerMounted ? null : (
                             <ChatComposer
+                              ensureVoiceThread={ensureVoiceThread}
                               canOperateThread={canOperateThread}
                               reportedModelSelection={reportedModelSelection}
                               multipleModelSelections={multipleModelSelections}
