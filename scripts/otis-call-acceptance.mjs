@@ -208,7 +208,9 @@ const captureFailure = () => {
       report.stages.firstRenderedText ??= evidence.timing.firstTextAt;
     if (evidence?.timing?.firstAudioAt != null)
       report.stages.firstScheduledAudio ??= evidence.timing.firstAudioAt;
-    report.timingsMs = callTimings(report.stages);
+    if (evidence?.timing?.firstFillerAudioAt != null)
+      report.stages.firstFillerAudio ??= evidence.timing.firstFillerAudioAt;
+    report.timingsMs = callTimings(report.stages, report.sentences);
   })();
   return captureTask;
 };
@@ -315,7 +317,7 @@ const accepted = await runAcceptanceWithDeadline({
     });
     const mark = (name, at = Date.now()) => {
       report.stages[name] ??= at;
-      report.timingsMs = callTimings(report.stages);
+      report.timingsMs = callTimings(report.stages, report.sentences);
       const label = {
         firstRenderedText: "first text",
         firstScheduledAudio: "first audio",
@@ -353,8 +355,12 @@ const accepted = await runAcceptanceWithDeadline({
         record.queuedAt ??= at;
         mark("firstSentence", at);
       } else if (event.type === "audio") sentenceRecord(event.speechId).firstChunkAt ??= at;
-      else if (event.type === "scheduled")
-        sentenceRecord(event.speechId).firstScheduledAudioAt ??= at;
+      else if (event.type === "scheduled") {
+        if (event.speechId) {
+          sentenceRecord(event.speechId).firstScheduledAudioAt ??= at;
+          mark("firstScheduledAudio", at);
+        } else mark("firstFillerAudio", at);
+      }
     });
     const segment = toSafeThreadAttachmentSegment(values["thread-id"]);
     NodeAssert.ok(segment, "Invalid disposable thread ID.");
@@ -550,7 +556,12 @@ const accepted = await runAcceptanceWithDeadline({
             node.getAttribute("data-message-id"),
           ),
         );
-        window.__otisCallEvidence = { firstTextAt: null, firstAudioAt: null, voiceStates: [] };
+        window.__otisCallEvidence = {
+          firstTextAt: null,
+          firstAudioAt: null,
+          firstFillerAudioAt: null,
+          voiceStates: [],
+        };
         window.addEventListener("t3-voice-speech", (event) => {
           if (event.detail.type === "audio")
             window.__otisCallEvidence.activeSpeechId = event.detail.speechId;
@@ -558,19 +569,15 @@ const accepted = await runAcceptanceWithDeadline({
         });
         const original = AudioBufferSourceNode.prototype.start;
         AudioBufferSourceNode.prototype.start = function (...args) {
-          if (window.__otisCallEvidence.firstAudioAt === null) {
-            window.__otisCallEvidence.firstAudioAt = Date.now();
-            void window.__otisCallMark(
-              "firstScheduledAudio",
-              window.__otisCallEvidence.firstAudioAt,
-            );
-          }
-          if (window.__otisCallEvidence.activeSpeechId)
-            void window.__otisCallSpeech(
-              { type: "scheduled", speechId: window.__otisCallEvidence.activeSpeechId },
-              Date.now(),
-            );
-          return original.apply(this, args);
+          const result = original.apply(this, args);
+          const evidence = window.__otisCallEvidence;
+          const speechId = evidence.activeSpeechId;
+          const at = Date.now();
+          if (speechId) evidence.firstAudioAt ??= at;
+          else evidence.firstFillerAudioAt ??= at;
+          evidence.activeSpeechId = undefined;
+          void window.__otisCallSpeech({ type: "scheduled", speechId }, at);
+          return result;
         };
         new MutationObserver(() => {
           const state = document
@@ -818,7 +825,7 @@ const accepted = await runAcceptanceWithDeadline({
           report.error ??= "Hang-up was not acknowledged. Retain the isolated data.";
           process.exitCode = 1;
         });
-      report.timingsMs = callTimings(report.stages);
+      report.timingsMs = callTimings(report.stages, report.sentences);
       report.sentences = report.sentences.map((record) => ({
         ...record,
         ...sentenceTimings(record),

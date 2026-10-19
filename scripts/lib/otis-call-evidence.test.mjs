@@ -233,6 +233,7 @@ NodeTest.test(
       delivery: 8750,
       firstRenderedText: 10000,
       firstScheduledAudio: null,
+      firstFillerAudio: null,
       speechEndToTranscript: 8600,
       transcriptToDelivery: 150,
       deliveryToFirstText: 1250,
@@ -252,6 +253,30 @@ NodeTest.test(
       1000,
     );
     NodeAssert.equal(callTimings({ speechEnded: 1000, operatorResult: 9000 }).operatorResult, 8000);
+    const withFiller = callTimings({
+      speechEnded: 1000,
+      firstFillerAudio: 1200,
+      firstScheduledAudio: 3000,
+    });
+    NodeAssert.equal(withFiller.firstFillerAudio, 200);
+    NodeAssert.equal(withFiller.voiceAckLatency, 2000);
+    NodeAssert.equal(
+      callTimings({ speechEnded: 1000, firstFillerAudio: 1200 }).voiceAckLatency,
+      null,
+    );
+    NodeAssert.equal(
+      callTimings({ speechEnded: 1000, firstScheduledAudio: 1200 }, [
+        { firstScheduledAudioAt: 1200 },
+        { speechId: "answer", firstScheduledAudioAt: 3000 },
+      ]).voiceAckLatency,
+      2000,
+    );
+    NodeAssert.equal(
+      callTimings({ speechEnded: 1000, firstScheduledAudio: 1200 }, [
+        { firstScheduledAudioAt: 1200 },
+      ]).voiceAckLatency,
+      null,
+    );
   },
 );
 NodeTest.test(

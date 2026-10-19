@@ -98,7 +98,13 @@ export function hasOperatorResult(event) {
   );
 }
 
-export function callTimings(stages) {
+export function callTimings(stages, sentences) {
+  if (sentences) {
+    const scheduled = sentences
+      .filter((sentence) => sentence.speechId && Number.isFinite(sentence.firstScheduledAudioAt))
+      .map((sentence) => sentence.firstScheduledAudioAt);
+    stages = { ...stages, firstScheduledAudio: scheduled.length ? Math.min(...scheduled) : null };
+  }
   const elapsed = (from, to) =>
     Number.isFinite(stages[from]) && Number.isFinite(stages[to]) ? stages[to] - stages[from] : null;
   return {
@@ -109,6 +115,7 @@ export function callTimings(stages) {
         "delivery",
         "firstRenderedText",
         "firstScheduledAudio",
+        "firstFillerAudio",
       ].map((name) => [name, elapsed("speechEnded", name)]),
     ),
     speechEndToTranscript: elapsed("speechEnded", "transcript"),
