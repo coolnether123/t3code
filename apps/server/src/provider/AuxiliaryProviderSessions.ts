@@ -48,8 +48,9 @@ export class AuxiliarySessionError extends Schema.TaggedError<AuxiliarySessionEr
   }
 }
 
-// Workers and calls have their own durable records. Their provider processes
-// still use the same V2 adapters, without creating a second orchestration engine.
+const isAuxiliarySessionError = Schema.is(AuxiliarySessionError);
+
+// Calls retain their own durable records while using the shared V2 adapters.
 export class AuxiliaryProviderSessions extends Context.Service<
   AuxiliaryProviderSessions,
   {
@@ -72,7 +73,7 @@ export class AuxiliaryProviderSessions extends Context.Service<
       instanceId: ProviderInstanceId,
     ) => Effect.Effect<
       { readonly driverKind: ProviderAdapter.ProviderAdapterV2["Service"]["driver"] },
-      unknown
+      ProviderAdapterRegistry.ProviderAdapterRegistryV2Error
     >;
     readonly streamEvents: Stream.Stream<ProviderRuntimeEvent>;
     readonly streamAdapterEvents: Stream.Stream<{
@@ -84,7 +85,7 @@ export class AuxiliaryProviderSessions extends Context.Service<
 
 interface Session {
   readonly runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
-  readonly scope: Scope.Scope;
+  readonly scope: Scope.Closeable;
   readonly input: ProviderSessionStartInput;
   readonly modelSelection: ModelSelection;
   readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
@@ -111,7 +112,7 @@ const make = Effect.gen(function* () {
   const sessions = new Map<ThreadId, Session>();
   const lock = yield* Semaphore.make(1);
   const uuid = crypto.randomUUIDv4().pipe(Effect.orDie);
-  const decodeEvent = Schema.decodeUnknownSync(ProviderRuntimeEvent);
+  const decodeEvent = Schema.decodeUnknownEffect(ProviderRuntimeEvent);
   const sessionView = (threadId: ThreadId, session: Session): ProviderSession => ({
     provider: session.runtime.driver,
     providerInstanceId: session.runtime.instanceId,
@@ -136,7 +137,7 @@ const make = Effect.gen(function* () {
     session: Session,
     body: Readonly<Record<string, unknown>>,
   ) {
-    const event = decodeEvent({
+    const event = yield* decodeEvent({
       eventId: EventId.make(yield* uuid),
       threadId,
       provider: session.runtime.driver,
@@ -144,7 +145,7 @@ const make = Effect.gen(function* () {
       createdAt: DateTime.formatIso(yield* DateTime.now),
       ...(session.turnId === undefined ? {} : { turnId: session.turnId }),
       ...body,
-    });
+    }).pipe(Effect.orDie);
     yield* PubSub.publish(events, event);
   });
   const ingest = Effect.fn("AuxiliaryProviderSessions.ingest")(function* (
@@ -198,7 +199,7 @@ const make = Effect.gen(function* () {
           ? "tool_user_input"
           : request.kind === "file-change"
             ? "file_change_approval"
-            : request.kind === "permissions"
+            : request.kind === "permission"
               ? "permission_approval"
               : "command_execution_approval";
       yield* emit(threadId, session, {
@@ -329,7 +330,7 @@ const make = Effect.gen(function* () {
           return sessionView(threadId, session);
         }).pipe(
           Effect.mapError((cause) =>
-            cause instanceof AuxiliarySessionError
+            isAuxiliarySessionError(cause)
               ? cause
               : new AuxiliarySessionError({ operation: "open", threadId, cause }),
           ),
@@ -404,7 +405,7 @@ const make = Effect.gen(function* () {
         };
       }).pipe(
         Effect.mapError((cause) =>
-          cause instanceof AuxiliarySessionError
+          isAuxiliarySessionError(cause)
             ? cause
             : new AuxiliarySessionError({
                 operation: "start a turn in",

@@ -1,3 +1,4 @@
+import * as Schema from "effect/Schema";
 import {
   CommandId,
   EventId,
@@ -25,6 +26,15 @@ import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import { notificationTurnItem } from "@t3tools/provider-core/server/notification";
 import type { CallCommand } from "./commands.ts";
+
+class VoiceProjectUnavailableError extends Schema.TaggedError<VoiceProjectUnavailableError>()(
+  "VoiceProjectUnavailableError",
+  { threadId: Schema.String },
+) {
+  override get message() {
+    return "Call project is unavailable.";
+  }
+}
 
 const make = Effect.gen(function* () {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -247,7 +257,7 @@ const make = Effect.gen(function* () {
     const { projection } = yield* projections.getThreadSnapshot(ThreadId.make(threadId));
     const project = yield* projects.getShell(projection.thread.projectId);
     if (Option.isNone(project))
-      return yield* Effect.fail(new Error("Call project is unavailable."));
+      return yield* Effect.fail(new VoiceProjectUnavailableError({ threadId }));
     return {
       cwd: projection.thread.worktreePath ?? project.value.workspaceRoot,
       runtimeMode: projection.thread.runtimeMode,

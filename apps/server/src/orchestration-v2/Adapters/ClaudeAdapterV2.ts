@@ -8526,7 +8526,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             attachmentsDir,
             settings: adapterOptions.settings,
             environment: adapterOptions.environment,
-            tools: queryPolicy.tools ?? CLAUDE_CODE_PRESET_TOOLS,
+            tools:
+              turnInput.runtimePolicy.toolMode === "none"
+                ? []
+                : (queryPolicy.tools ?? CLAUDE_CODE_PRESET_TOOLS),
             ...(mcpOverrides.allowedTools === undefined
               ? {}
               : { allowedTools: mcpOverrides.allowedTools }),
@@ -8544,7 +8547,6 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             supportedDialogKinds: ["resume_return"],
           });
           if (turnInput.runtimePolicy.toolMode === "none") {
-            queryOptions.tools = [];
             queryOptions.allowedTools = [];
             queryOptions.mcpServers = {};
             queryOptions.strictMcpConfig = true;

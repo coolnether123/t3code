@@ -42,7 +42,7 @@ export type CallCommand =
         readonly id: EventId;
         readonly kind: string;
         readonly summary: string;
-        readonly tone: "info" | "error" | "warning" | "tool";
+        readonly tone: "info" | "error" | "warning" | "tool" | "approval";
         readonly payload?: unknown;
         readonly turnId: TurnId | null;
         readonly createdAt: string;

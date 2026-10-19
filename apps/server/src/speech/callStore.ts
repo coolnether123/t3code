@@ -6,9 +6,34 @@ import * as Schema from "effect/Schema";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import { Platform as HostProcessPlatform } from "@t3tools/shared/HostProcess";
-import { CallOptions, CallUtterance, ThreadTurnStartCommand } from "@t3tools/contracts";
+import {
+  CallOptions,
+  CallUtterance,
+  CommandId,
+  ThreadId,
+  MessageId,
+  ModelSelection,
+  RuntimeMode,
+  ProviderInteractionMode,
+} from "@t3tools/contracts";
 import { CallModels } from "@t3tools/contracts";
 import { OperatorChat, OperatorLink } from "./operatorProtocol.ts";
+
+const ThreadTurnStartCommand = Schema.Struct({
+  type: Schema.Literal("thread.turn.start"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  message: Schema.Struct({
+    messageId: MessageId,
+    role: Schema.Literal("user"),
+    text: Schema.String,
+    attachments: Schema.Array(Schema.Never),
+  }),
+  modelSelection: ModelSelection,
+  runtimeMode: RuntimeMode,
+  interactionMode: ProviderInteractionMode,
+  createdAt: Schema.String,
+});
 
 const callRecord = Schema.Struct({
   ...CallOptions.fields,

@@ -146,7 +146,7 @@ export async function proxySpeech(
       "content-type": contentType,
       ...(sessionId ? { "X-Voice-Session-Id": sessionId } : {}),
     },
-    body,
+    ...(body === undefined ? {} : { body: typeof body === "string" ? body : new Uint8Array(body) }),
     redirect: "error",
     signal: AbortSignal.any([
       signal,
