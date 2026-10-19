@@ -1070,7 +1070,9 @@ export const BirthdayCelebrationPreference = Schema.Struct({
 export type BirthdayCelebrationPreference = typeof BirthdayCelebrationPreference.Type;
 
 export const ServerSettings = Schema.Struct({
-  birthdayCelebration: Schema.NullOr(BirthdayCelebrationPreference).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
+  birthdayCelebration: Schema.NullOr(BirthdayCelebrationPreference).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   // Null means no client has migrated this preference yet; an empty value is
   // authoritative so another device cannot resurrect cleared preferences.
   favorites: Schema.NullOr(ModelFavorites).pipe(Schema.withDecodingDefault(Effect.succeed(null))),

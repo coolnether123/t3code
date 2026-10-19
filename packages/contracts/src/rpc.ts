@@ -1,7 +1,13 @@
 import { UsageReportInput, UsageReport } from "./usage.ts";
 import { ResetCheckState } from "./resetCheck.ts";
 import { CommunityCheckState } from "./communityCheck.ts";
-import { PreviewAutomationHost, PreviewAutomationStreamEvent, PreviewAutomationError, PreviewAutomationResponse, PreviewAutomationHostFocus } from "./previewAutomation.ts";
+import {
+  PreviewAutomationHost,
+  PreviewAutomationStreamEvent,
+  PreviewAutomationError,
+  PreviewAutomationResponse,
+  PreviewAutomationHostFocus,
+} from "./previewAutomation.ts";
 import {
   OrchestrationV2SearchThreadError,
   OrchestrationV2SearchThreadInput,
@@ -1908,17 +1914,6 @@ export const WsServerCancelCommunityCheckRpc = Rpc.make(WS_METHODS.serverCancelC
   error: EnvironmentAuthorizationError,
 });
 
-
-
-
-
-
-
-
-
-
-
-
 export const WsPreviewAutomationConnectRpc = Rpc.make(WS_METHODS.previewAutomationConnect, {
   payload: PreviewAutomationHost,
   success: PreviewAutomationStreamEvent,
@@ -1937,7 +1932,8 @@ export const WsPreviewAutomationFocusHostRpc = Rpc.make(WS_METHODS.previewAutoma
 });
 
 export const LegacyUsageRpcGroup = RpcGroup.make(
-  WsServerGetUsageSummaryRpc, WsServerGetUsageReportRpc,
+  WsServerGetUsageSummaryRpc,
+  WsServerGetUsageReportRpc,
 ).middleware(RpcScopeAuthorization);
 
 export const WsRpcGroup = RpcGroup.make(

@@ -435,7 +435,10 @@ export const layerWithOptions = (
       const prepareMcpSession = (
         threadId: ThreadId,
         providerInstanceId: ProviderInstanceId,
-        metadata?: { readonly modelSelection?: ModelSelection; readonly runtimePolicy?: ProviderAdapter.ProviderAdapterV2RuntimePolicy },
+        metadata?: {
+          readonly modelSelection?: ModelSelection;
+          readonly runtimePolicy?: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
+        },
       ): Effect.Effect<PreparedMcpCredential> =>
         options.configureMcp === false
           ? mcpSessions
@@ -489,8 +492,15 @@ export const layerWithOptions = (
                 const credential = yield* mcpSessionRegistry.issue({
                   threadId,
                   providerInstanceId,
-                  ...(metadata?.modelSelection === undefined ? {} : { modelSelection: metadata.modelSelection }),
-                  ...(metadata?.runtimePolicy === undefined ? {} : { runtimeMode: metadata.runtimePolicy.runtimeMode, workingDirectory: metadata.runtimePolicy.cwd ?? undefined }),
+                  ...(metadata?.modelSelection === undefined
+                    ? {}
+                    : { modelSelection: metadata.modelSelection }),
+                  ...(metadata?.runtimePolicy === undefined
+                    ? {}
+                    : {
+                        runtimeMode: metadata.runtimePolicy.runtimeMode,
+                        workingDirectory: metadata.runtimePolicy.cwd ?? undefined,
+                      }),
                   browserToolsAvailable,
                   capabilities,
                 });
@@ -1365,7 +1375,11 @@ export const layerWithOptions = (
               Effect.uninterruptible,
             );
             if (attached !== undefined) {
-              const prepared = yield* prepareMcpSession(input.threadId, input.providerInstanceId, input);
+              const prepared = yield* prepareMcpSession(
+                input.threadId,
+                input.providerInstanceId,
+                input,
+              );
               preparedForCleanup = prepared;
               if (prepared.mcpCredentialId !== undefined) {
                 const mcpCredentialId = prepared.mcpCredentialId;

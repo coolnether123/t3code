@@ -134,24 +134,22 @@ export const make = Effect.gen(function* () {
         { concurrency: 2 },
       ).pipe(
         Effect.mapError(fail("getChangeRequest")),
-        Effect.map(
-          ([mergeRequest, mergeCapabilities]): ProviderChangeRequestDetail => ({
-            ...mergeRequest,
-            mergeCapabilities,
-            viewerPermissions: gitLabViewerPermissions(mergeRequest),
-            // A GitLab too old to count the divergence says nothing here rather than "up to
-            // date": the banner is worth missing, and a wrong all-clear is not worth showing.
-            baseComparison:
-              mergeRequest.divergedCommits === undefined
-                ? "unknown"
-                : mergeRequest.divergedCommits > 0
-                  ? "behind"
-                  : "up-to-date",
-            ...(mergeRequest.divergedCommits === undefined
-              ? {}
-              : { behindBy: mergeRequest.divergedCommits }),
-          }),
-        ),
+        Effect.map(([mergeRequest, mergeCapabilities]): ProviderChangeRequestDetail => ({
+          ...mergeRequest,
+          mergeCapabilities,
+          viewerPermissions: gitLabViewerPermissions(mergeRequest),
+          // A GitLab too old to count the divergence says nothing here rather than "up to
+          // date": the banner is worth missing, and a wrong all-clear is not worth showing.
+          baseComparison:
+            mergeRequest.divergedCommits === undefined
+              ? "unknown"
+              : mergeRequest.divergedCommits > 0
+                ? "behind"
+                : "up-to-date",
+          ...(mergeRequest.divergedCommits === undefined
+            ? {}
+            : { behindBy: mergeRequest.divergedCommits }),
+        })),
       ),
 
     getChangeRequestActivity: (input) =>

@@ -1,5 +1,8 @@
 import { type SubagentBackend } from "@t3tools/contracts";
-import { type CodexComputerControlMode, DEFAULT_CODEX_COMPUTER_CONTROL_MODE } from "./CodexComputerControl.ts";
+import {
+  type CodexComputerControlMode,
+  DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
+} from "./CodexComputerControl.ts";
 const T3_CODE_BROWSER_TOOL_INSTRUCTIONS = `
 
 ## T3 Code collaborative browser
@@ -59,10 +62,11 @@ function computerControlInstructions(
   if (mode === "preview") return browserToolsAvailable ? T3_CODE_BROWSER_TOOL_INSTRUCTIONS : "";
   const browserInstructions = computerControlAvailable
     ? T3_CODE_CHROME_TOOL_INSTRUCTIONS
-    : browserToolsAvailable ? T3_CODE_BROWSER_TOOL_INSTRUCTIONS : "";
+    : browserToolsAvailable
+      ? T3_CODE_BROWSER_TOOL_INSTRUCTIONS
+      : "";
   return `${browserInstructions}${mode === "desktop" ? CODEX_DESKTOP_CONTROL_LIMITATION : ""}`;
 }
-
 
 const CODEX_NATIVE_SUBAGENT_PARENT_INSTRUCTIONS = `
 
@@ -84,11 +88,24 @@ export interface CodexControlRuntime {
   readonly computerControlMode?: CodexComputerControlMode;
   readonly subagentBackend?: SubagentBackend;
 }
-export function buildCodexControlInstructions(runtime: CodexControlRuntime, browserToolsAvailable: boolean): string {
+export function buildCodexControlInstructions(
+  runtime: CodexControlRuntime,
+  browserToolsAvailable: boolean,
+): string {
   const desktopAppTools = runtime.useDesktopAppDaemon && !runtime.computerControlAvailable;
   return [
-    desktopAppTools ? CODEX_DESKTOP_APP_INSTRUCTIONS : computerControlInstructions(runtime.computerControlMode ?? DEFAULT_CODEX_COMPUTER_CONTROL_MODE, browserToolsAvailable, runtime.computerControlAvailable ?? false),
+    desktopAppTools
+      ? CODEX_DESKTOP_APP_INSTRUCTIONS
+      : computerControlInstructions(
+          runtime.computerControlMode ?? DEFAULT_CODEX_COMPUTER_CONTROL_MODE,
+          browserToolsAvailable,
+          runtime.computerControlAvailable ?? false,
+        ),
     desktopAppTools ? "" : CONFIGURED_COMPUTER_USE_INSTRUCTIONS,
-    runtime.subagentBackend === "v1" || runtime.subagentBackend === "v2" ? CODEX_NATIVE_SUBAGENT_PARENT_INSTRUCTIONS : "",
-  ].filter(Boolean).join("\n\n");
+    runtime.subagentBackend === "v1" || runtime.subagentBackend === "v2"
+      ? CODEX_NATIVE_SUBAGENT_PARENT_INSTRUCTIONS
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }

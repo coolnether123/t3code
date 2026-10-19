@@ -1448,7 +1448,9 @@ export const OrchestrationV2TurnItem = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
     type: Schema.Literal("system_notice"),
-    activity: Schema.optional(Schema.Struct({ kind: Schema.String, payload: Schema.optional(Schema.Unknown) })),
+    activity: Schema.optional(
+      Schema.Struct({ kind: Schema.String, payload: Schema.optional(Schema.Unknown) }),
+    ),
     message: Schema.String,
   }),
   Schema.Struct({
@@ -2205,7 +2207,9 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
     type: Schema.Literal("system_notice"),
-    activity: Schema.optional(Schema.Struct({ kind: Schema.String, payload: Schema.optional(Schema.Unknown) })),
+    activity: Schema.optional(
+      Schema.Struct({ kind: Schema.String, payload: Schema.optional(Schema.Unknown) }),
+    ),
     message: Schema.String,
   }),
   Schema.Struct({

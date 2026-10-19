@@ -27,13 +27,10 @@ import { AuxiliaryProviderSessions } from "../provider/AuxiliaryProviderSessions
 
 const decodeSpeechRequest = Schema.decodeUnknownEffect(Schema.fromJsonString(SpeechRequest));
 
-class SpeechServiceError extends Schema.TaggedError<SpeechServiceError>()(
-  "SpeechServiceError",
-  {
-    message: Schema.String,
-    recoverable: Schema.Boolean,
-  },
-) {}
+class SpeechServiceError extends Schema.TaggedError<SpeechServiceError>()("SpeechServiceError", {
+  message: Schema.String,
+  recoverable: Schema.Boolean,
+}) {}
 
 export const speechRouteLayer = HttpRouter.add(
   "POST",
@@ -53,9 +50,7 @@ export const speechRouteLayer = HttpRouter.add(
       callStore(config.stateDir),
       {
         verify: async (options) => {
-          const snapshot = await Effect.runPromise(
-            engine.snapshot(options.threadId),
-          );
+          const snapshot = await Effect.runPromise(engine.snapshot(options.threadId));
           if (!snapshot.projection.thread || snapshot.projection.thread.archivedAt)
             throw new Error("Open an existing chat before starting a call.");
           verifyCallModel(options, await Effect.runPromise(providers.getProviders));

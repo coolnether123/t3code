@@ -2701,7 +2701,10 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
 });
 
 function SidebarEnvironmentScopePicker(props: {
-  readonly environments: ReadonlyArray<{ readonly environmentId: EnvironmentId; readonly label: string }>;
+  readonly environments: ReadonlyArray<{
+    readonly environmentId: EnvironmentId;
+    readonly label: string;
+  }>;
   readonly selectedEnvironmentId: EnvironmentId | null;
   readonly onSelect: (environmentId: string) => void;
 }) {
@@ -2954,7 +2957,8 @@ export default function Sidebar() {
           scopeProjectRefs
             .filter(
               (projectRef) =>
-                selectedEnvironmentId === null || projectRef.environmentId === selectedEnvironmentId,
+                selectedEnvironmentId === null ||
+                projectRef.environmentId === selectedEnvironmentId,
             )
             .map((projectRef) => `${projectRef.environmentId}:${projectRef.projectId}`),
         );

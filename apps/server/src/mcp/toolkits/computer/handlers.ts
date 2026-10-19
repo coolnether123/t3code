@@ -115,8 +115,13 @@ const declarations = {
 };
 export const ComputerToolkitHandlersLive = McpToolAccess.toLayer(ComputerToolkit, declarations);
 const { computer_screenshot, ...standardHandlers } = declarations;
-export const ComputerStandardToolkitHandlersLive =
-  McpToolAccess.toLayer(ComputerStandardToolkit, standardHandlers);
-export const ComputerScreenshotToolkitHandlersLive = McpToolAccess.toLayer(ComputerScreenshotToolkit, {
-  computer_screenshot,
-});
+export const ComputerStandardToolkitHandlersLive = McpToolAccess.toLayer(
+  ComputerStandardToolkit,
+  standardHandlers,
+);
+export const ComputerScreenshotToolkitHandlersLive = McpToolAccess.toLayer(
+  ComputerScreenshotToolkit,
+  {
+    computer_screenshot,
+  },
+);

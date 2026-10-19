@@ -470,7 +470,10 @@ function useSortedProjectGroups(environmentLabelById: ReadonlyMap<EnvironmentId,
     ],
   });
   const unsortedProjectGroups = buildSidebarProjectSnapshots({
-    projects: (clientSettings.sidebarProjectSortOrder === "manual" ? orderedProjects : projects).filter(
+    projects: (clientSettings.sidebarProjectSortOrder === "manual"
+      ? orderedProjects
+      : projects
+    ).filter(
       (project) =>
         selectedEnvironmentId === null || project.environmentId === selectedEnvironmentId,
     ),

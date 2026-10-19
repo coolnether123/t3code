@@ -1,6 +1,12 @@
 import type {
-  CommandId, EventId, MessageId, ModelSelection, ProviderInteractionMode,
-  RuntimeMode, ThreadId, TurnId,
+  CommandId,
+  EventId,
+  MessageId,
+  ModelSelection,
+  ProviderInteractionMode,
+  RuntimeMode,
+  ThreadId,
+  TurnId,
 } from "@t3tools/contracts";
 
 // These records are already stored in durable call delivery files. Keep their
@@ -10,7 +16,12 @@ export type CallCommand =
       readonly type: "thread.turn.start";
       readonly commandId: CommandId;
       readonly threadId: ThreadId;
-      readonly message: { readonly messageId: MessageId; readonly role: "user"; readonly text: string; readonly attachments: readonly [] };
+      readonly message: {
+        readonly messageId: MessageId;
+        readonly role: "user";
+        readonly text: string;
+        readonly attachments: readonly [];
+      };
       readonly modelSelection: ModelSelection;
       readonly runtimeMode: RuntimeMode;
       readonly interactionMode: ProviderInteractionMode;

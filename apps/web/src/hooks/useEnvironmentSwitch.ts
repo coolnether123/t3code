@@ -6,7 +6,11 @@ import { useEffect, useState } from "react";
 import { sortScopedProjectsForSidebar } from "../components/Sidebar.logic";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
-import { useAllEnvironmentShellsBootstrapped, useProjects, useThreadShells } from "../state/entities";
+import {
+  useAllEnvironmentShellsBootstrapped,
+  useProjects,
+  useThreadShells,
+} from "../state/entities";
 import { buildThreadRouteParams } from "../threadRoutes";
 import {
   ALL_ENVIRONMENTS_CHAT_LOCATION_SCOPE,
@@ -82,7 +86,10 @@ export function useEnvironmentSwitch() {
         void router.navigate({
           to: "/$environmentId/$threadId",
           params: buildThreadRouteParams(
-            scopeThreadRef(EnvironmentId.make(target.environmentId), ThreadId.make(target.threadId)),
+            scopeThreadRef(
+              EnvironmentId.make(target.environmentId),
+              ThreadId.make(target.threadId),
+            ),
           ),
         });
         return;

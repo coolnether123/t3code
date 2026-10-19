@@ -654,11 +654,14 @@ const EnvironmentOrchestrationThreadHistoryErrors = [
 ] as const;
 
 class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestration")
-  .add(HttpApiEndpoint.post("dispatch", "/api/orchestration/dispatch", {
-    headers: OrchestrationProtocolHeaders, payload: OrchestrationV2Command,
-    success: OrchestrationV2DispatchCommandResult,
-    error: [EnvironmentRequestInvalidError, ...EnvironmentOrchestrationSnapshotErrors],
-  }).middleware(EnvironmentAuthenticatedAuth))
+  .add(
+    HttpApiEndpoint.post("dispatch", "/api/orchestration/dispatch", {
+      headers: OrchestrationProtocolHeaders,
+      payload: OrchestrationV2Command,
+      success: OrchestrationV2DispatchCommandResult,
+      error: [EnvironmentRequestInvalidError, ...EnvironmentOrchestrationSnapshotErrors],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
   .add(
     HttpApiEndpoint.get("shellSnapshot", "/api/orchestration/shell", {
       headers: OrchestrationProtocolHeaders,

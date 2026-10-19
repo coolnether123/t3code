@@ -225,7 +225,11 @@ export const ComputerOpenUrlTool = computerTool(
       "Open an exact absolute HTTP or HTTPS URL in the user's Google Chrome session. Use this when the Chrome extension is unavailable or Windows Computer Use cannot reliably focus the address bar. This tool has no domain allowlist and supports long authentication or relay URLs. It only navigates; continue with Chrome or Windows Computer Use to inspect and interact with the page.",
     parameters: ComputerOpenUrlInput,
     success: ComputerOpenUrlResult,
-    failure: Schema.Union([OrchestratorMcpFailure, ComputerControlUnavailableError, ComputerOpenUrlFailedError]),
+    failure: Schema.Union([
+      OrchestratorMcpFailure,
+      ComputerControlUnavailableError,
+      ComputerOpenUrlFailedError,
+    ]),
     dependencies: [McpInvocationContext.McpInvocationContext, ExternalLauncher.ExternalLauncher],
   })
     .annotate(Tool.Title, "Open URL in Google Chrome")

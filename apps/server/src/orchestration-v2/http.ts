@@ -153,14 +153,24 @@ export const layer = HttpApiBuilder.group(
     );
 
     return handlers
-      .handle("dispatch", Effect.fn("environment.orchestration.dispatch")(function* (args) {
-        yield* annotateEnvironmentRequest(args.endpoint.name);
-        yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
-        const result = yield* startup.enqueueCommand(ThreadMessageIntake.dispatchCommand(
-          ThreadManagementService.withCreationProvenance(args.payload, { createdBy: "agent", creationSource: "server" }),
-        )).pipe(Effect.catch((cause) => failEnvironmentInternal("internal_error", cause)));
-        return { sequence: result.sequence };
-      }))
+      .handle(
+        "dispatch",
+        Effect.fn("environment.orchestration.dispatch")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
+          const result = yield* startup
+            .enqueueCommand(
+              ThreadMessageIntake.dispatchCommand(
+                ThreadManagementService.withCreationProvenance(args.payload, {
+                  createdBy: "agent",
+                  creationSource: "server",
+                }),
+              ),
+            )
+            .pipe(Effect.catch((cause) => failEnvironmentInternal("internal_error", cause)));
+          return { sequence: result.sequence };
+        }),
+      )
       .handle(
         "shellSnapshot",
         Effect.fn("environment.orchestration.shellSnapshot")(function* (args) {

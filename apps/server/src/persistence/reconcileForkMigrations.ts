@@ -49,12 +49,15 @@ export const reconcileForkMigrations = Effect.fn("reconcileForkMigrations")(func
       if (
         divergent.some((row) => forkNames.get(row.migration_id) !== row.name) ||
         history.some((row) => row.migration_id > 55) ||
-        !history.some((row) => row.migration_id === 42 && row.name === "AuthSessionClientConnection") ||
+        !history.some(
+          (row) => row.migration_id === 42 && row.name === "AuthSessionClientConnection",
+        ) ||
         tables.some((table) => table.name === "orchestration_v2_events")
       ) {
         return yield* new Migrator.MigrationError({
           kind: "BadState",
-          message: "Cannot upgrade an unrecognized fork migration history. The database was left unchanged.",
+          message:
+            "Cannot upgrade an unrecognized fork migration history. The database was left unchanged.",
         });
       }
 

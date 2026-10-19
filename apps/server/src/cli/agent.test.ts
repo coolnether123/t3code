@@ -37,8 +37,22 @@ const descriptor = {
   serverVersion: "0.0.33",
   capabilities: { repositoryIdentity: true, threadPinning: true, threadSettlement: true },
 };
-const shell = { schemaVersion: 2, snapshotSequence: 12, projects: [], threads: [], archivedThreads: [] };
-const project = { id: "project-a", title: "Scratch", workspaceRoot: "/scratch", defaultModelSelection: null, scripts: [], createdAt: now, updatedAt: now };
+const shell = {
+  schemaVersion: 2,
+  snapshotSequence: 12,
+  projects: [],
+  threads: [],
+  archivedThreads: [],
+};
+const project = {
+  id: "project-a",
+  title: "Scratch",
+  workspaceRoot: "/scratch",
+  defaultModelSelection: null,
+  scripts: [],
+  createdAt: now,
+  updatedAt: now,
+};
 const json = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const fs = FileSystem.layerNoop({
   readFileString: (path) =>

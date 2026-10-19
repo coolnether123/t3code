@@ -267,7 +267,11 @@ const layerBackground = BackgroundPolicy.layer.pipe(
   Layer.provideMerge(layerServerSettings),
 );
 
-const layerUsage = Layer.mergeAll(UsageService.layer, UsageResetCheck.layer, UsageResetCheck.communityLayer).pipe(
+const layerUsage = Layer.mergeAll(
+  UsageService.layer,
+  UsageResetCheck.layer,
+  UsageResetCheck.communityLayer,
+).pipe(
   Layer.provide(UsageProjection.layer),
   Layer.provide(
     Layer.mergeAll(
@@ -661,7 +665,9 @@ const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
   ),
 );
 
-const layerAuxiliarySessions = AuxiliaryProviderSessions.layer.pipe(Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry));
+const layerAuxiliarySessions = AuxiliaryProviderSessions.layer.pipe(
+  Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
+);
 const layerRuntimeDependencies = VoiceRuntime.layer.pipe(
   Layer.provideMerge(VoiceThreadService.layer),
   Layer.provideMerge(layerAuxiliarySessions),

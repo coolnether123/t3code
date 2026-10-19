@@ -28,13 +28,25 @@ const isAgentThreadId = Schema.is(ThreadId);
 const isAgentTurnLimit = Schema.is(AGENT_TURN_LIMIT_SCHEMA);
 const isAgentOffset = Schema.is(AGENT_OFFSET_SCHEMA);
 const isAgentProviderInstanceId = Schema.is(ProviderInstanceId);
-const ClientOrchestrationCommand = Schema.Union([...OrchestrationV2Command.members, ...ProjectMutation.members]);
+const ClientOrchestrationCommand = Schema.Union([
+  ...OrchestrationV2Command.members,
+  ...ProjectMutation.members,
+]);
 
 export const AGENT_COMMAND_TYPES = [
-  "project.create", "project.update",
-  "thread.create", "thread.metadata.update", "thread.pin", "thread.unpin",
-  "thread.settle", "thread.unsettle", "thread.archive", "thread.unarchive",
-  "message.dispatch", "run.interrupt", "runtime-request.respond",
+  "project.create",
+  "project.update",
+  "thread.create",
+  "thread.metadata.update",
+  "thread.pin",
+  "thread.unpin",
+  "thread.settle",
+  "thread.unsettle",
+  "thread.archive",
+  "thread.unarchive",
+  "message.dispatch",
+  "run.interrupt",
+  "runtime-request.respond",
 ] as const;
 export type AgentCommandType = (typeof AGENT_COMMAND_TYPES)[number];
 
@@ -100,14 +112,36 @@ export function decodeAgentAction(json: string): AgentAction {
     );
   }
   const command = action.command;
-  if (!AGENT_COMMAND_TYPES.some((type) => type === command.type)) reject("Command is not exposed by t3 agent.");
-  if (command.type === "project.update" && (command.workspaceRoot !== undefined || command.scripts !== undefined || command.defaultModelSelection !== undefined || command.defaultThreadEnvMode !== undefined || command.faviconPath !== undefined || command.projectIcon !== undefined || command.autoPull !== undefined)) reject("Agent project metadata updates are limited to titles.");
-  if (command.type === "project.create" && command.createWorkspaceRootIfMissing === true) reject("Agent project creation requires an existing directory.");
-  if (command.type === "thread.create" && (command.runtimeMode !== "approval-required" || command.branch !== null || command.worktreePath !== null))
-    reject("New agent CLI threads require approval-required mode and the project's existing checkout.");
+  if (!AGENT_COMMAND_TYPES.some((type) => type === command.type))
+    reject("Command is not exposed by t3 agent.");
+  if (
+    command.type === "project.update" &&
+    (command.workspaceRoot !== undefined ||
+      command.scripts !== undefined ||
+      command.defaultModelSelection !== undefined ||
+      command.defaultThreadEnvMode !== undefined ||
+      command.faviconPath !== undefined ||
+      command.projectIcon !== undefined ||
+      command.autoPull !== undefined)
+  )
+    reject("Agent project metadata updates are limited to titles.");
+  if (command.type === "project.create" && command.createWorkspaceRootIfMissing === true)
+    reject("Agent project creation requires an existing directory.");
+  if (
+    command.type === "thread.create" &&
+    (command.runtimeMode !== "approval-required" ||
+      command.branch !== null ||
+      command.worktreePath !== null)
+  )
+    reject(
+      "New agent CLI threads require approval-required mode and the project's existing checkout.",
+    );
   if (command.type === "runtime-request.respond" && command.decision === "acceptForSession")
     reject("Session-wide approval is not exposed by t3 agent. Respond to one request.");
-  if (command.type === "thread.metadata.update" && (command.branch !== undefined || command.worktreePath !== undefined))
+  if (
+    command.type === "thread.metadata.update" &&
+    (command.branch !== undefined || command.worktreePath !== undefined)
+  )
     reject("Agent thread metadata updates are limited to titles.");
   return action;
 }
@@ -245,42 +279,69 @@ export function validateAgentIdentity(expected: AgentIdentity, actual: AgentIden
 }
 
 export function validateAgentAction(
-  action: AgentAction, identity: AgentIdentity, shell: OrchestrationShellSnapshot,
+  action: AgentAction,
+  identity: AgentIdentity,
+  shell: OrchestrationShellSnapshot,
   detail?: OrchestrationThreadDetailSnapshot,
   capabilities?: ExecutionEnvironmentDescriptor["capabilities"],
 ): void {
   validateAgentIdentity(action, identity);
   const command = action.command;
-  if ((command.type === "thread.pin" || command.type === "thread.unpin") && capabilities?.threadPinning !== true)
+  if (
+    (command.type === "thread.pin" || command.type === "thread.unpin") &&
+    capabilities?.threadPinning !== true
+  )
     reject("Server has not advertised thread pinning.");
-  if ((command.type === "thread.settle" || command.type === "thread.unsettle") && capabilities?.threadSettlement !== true)
+  if (
+    (command.type === "thread.settle" || command.type === "thread.unsettle") &&
+    capabilities?.threadSettlement !== true
+  )
     reject("Server has not advertised thread settlement.");
   if (command.type === "project.create") {
-    if (shell.projects.some((project) => project.id === command.projectId)) reject("Project ID already exists.");
+    if (shell.projects.some((project) => project.id === command.projectId))
+      reject("Project ID already exists.");
     return;
   }
   if (command.type === "project.update") {
-    if (!shell.projects.some((project) => project.id === command.projectId)) reject("Project ID is not present in this environment.");
+    if (!shell.projects.some((project) => project.id === command.projectId))
+      reject("Project ID is not present in this environment.");
     return;
   }
   if (command.type === "thread.create") {
-    if (!shell.projects.some((project) => project.id === command.projectId)) reject("Project ID is not present in this environment.");
-    if (shell.threads.some((thread) => thread.id === command.threadId)) reject("Thread ID already exists.");
+    if (!shell.projects.some((project) => project.id === command.projectId))
+      reject("Project ID is not present in this environment.");
+    if (shell.threads.some((thread) => thread.id === command.threadId))
+      reject("Thread ID already exists.");
     return;
   }
-  if (!("threadId" in command) || detail?.projection.thread?.id !== command.threadId || detail.projection.thread.deletedAt !== null)
+  if (
+    !("threadId" in command) ||
+    detail?.projection.thread?.id !== command.threadId ||
+    detail.projection.thread.deletedAt !== null
+  )
     reject("Thread must be read from this environment before acting.");
   const projection = detail.projection;
-  const active = projection.runs.find((run) => ["running", "waiting", "starting"].includes(run.status));
+  const active = projection.runs.find((run) =>
+    ["running", "waiting", "starting"].includes(run.status),
+  );
   if (command.type === "run.interrupt" && active?.id !== command.runId)
     reject("Observed active run no longer matches the command target.");
   if (command.type === "message.dispatch") {
-    if ((command.dispatchMode.type === "steer_active" || command.dispatchMode.type === "restart_active") && active?.id !== command.dispatchMode.targetRunId)
+    if (
+      (command.dispatchMode.type === "steer_active" ||
+        command.dispatchMode.type === "restart_active") &&
+      active?.id !== command.dispatchMode.targetRunId
+    )
       reject("Observed active run no longer matches the command target.");
     if (command.dispatchMode.type === "start_immediately" && active !== undefined)
       reject("Thread is already running. Queue or explicitly steer its active run.");
   }
-  if (command.type === "runtime-request.respond" && !projection.runtimeRequests.some((request) => request.id === command.requestId && request.status === "pending"))
+  if (
+    command.type === "runtime-request.respond" &&
+    !projection.runtimeRequests.some(
+      (request) => request.id === command.requestId && request.status === "pending",
+    )
+  )
     reject("Request ID has no open request evidence in the current thread snapshot.");
 }
 
@@ -338,24 +399,47 @@ function compactValue(
 }
 
 export function compactAgentSnapshot(
-  identity: AgentIdentity, shell: OrchestrationShellSnapshot,
-  detail?: OrchestrationThreadDetailSnapshot, offset = 0,
+  identity: AgentIdentity,
+  shell: OrchestrationShellSnapshot,
+  detail?: OrchestrationThreadDetailSnapshot,
+  offset = 0,
 ) {
   const projection = detail?.projection;
   return {
-    environmentId: identity.environmentId, runtime: identity.runtime,
+    environmentId: identity.environmentId,
+    runtime: identity.runtime,
     snapshotSequence: detail?.snapshotSequence ?? shell.snapshotSequence,
     shellSequence: shell.snapshotSequence,
-    projects: shell.projects.slice(offset, offset + 25).map((project) => ({ id: project.id, title: clip(project.title,300), workspaceRoot: project.workspaceRoot })),
-    threads: shell.threads.slice(offset, offset + 25).map((thread) => ({ id: thread.id, title: clip(thread.title,300), projectId: thread.projectId })),
-    projectsOmitted: Math.max(0,shell.projects.length-offset-25), threadsOmitted: Math.max(0,shell.threads.length-offset-25),
-    ...(projection === undefined ? {} : { thread: projection.thread,
-      runs: projection.runs.slice(-5),
-      messages: projection.messages.slice(-20).map((message) => ({ id:message.id, role:message.role, text:clip(message.text,2000), streaming:message.streaming })),
-      requests: projection.runtimeRequests.filter((request) => request.status === "pending").slice(-25),
-      activity: projection.turnItems.slice(-20).map((item) => compactValue(item)),
-      historyCursor: detail?.historyCursor ?? null, hasMoreHistory: detail?.hasMoreHistory ?? false,
-    }),
+    projects: shell.projects.slice(offset, offset + 25).map((project) => ({
+      id: project.id,
+      title: clip(project.title, 300),
+      workspaceRoot: project.workspaceRoot,
+    })),
+    threads: shell.threads.slice(offset, offset + 25).map((thread) => ({
+      id: thread.id,
+      title: clip(thread.title, 300),
+      projectId: thread.projectId,
+    })),
+    projectsOmitted: Math.max(0, shell.projects.length - offset - 25),
+    threadsOmitted: Math.max(0, shell.threads.length - offset - 25),
+    ...(projection === undefined
+      ? {}
+      : {
+          thread: projection.thread,
+          runs: projection.runs.slice(-5),
+          messages: projection.messages.slice(-20).map((message) => ({
+            id: message.id,
+            role: message.role,
+            text: clip(message.text, 2000),
+            streaming: message.streaming,
+          })),
+          requests: projection.runtimeRequests
+            .filter((request) => request.status === "pending")
+            .slice(-25),
+          activity: projection.turnItems.slice(-20).map((item) => compactValue(item)),
+          historyCursor: detail?.historyCursor ?? null,
+          hasMoreHistory: detail?.hasMoreHistory ?? false,
+        }),
   };
 }
 

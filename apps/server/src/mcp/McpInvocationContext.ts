@@ -70,14 +70,22 @@ export class McpInvocationContext extends Context.Service<
 
 export type McpCapabilityError<C extends McpCapability> = C extends "preview"
   ? PreviewAutomationUnavailableError
-  : C extends "computer" ? ComputerControlUnavailableError
-  : McpCapabilityUnavailableError;
+  : C extends "computer"
+    ? ComputerControlUnavailableError
+    : McpCapabilityUnavailableError;
 
 const missingCapability = (
   invocation: McpInvocationScope,
   capability: McpCapability,
-): PreviewAutomationUnavailableError | McpCapabilityUnavailableError | ComputerControlUnavailableError => {
-  if (capability === "computer") return new ComputerControlUnavailableError({ message: "Full Chrome or Full desktop control is not active for this provider turn. Select one of those modes and start a new turn." });
+):
+  | PreviewAutomationUnavailableError
+  | McpCapabilityUnavailableError
+  | ComputerControlUnavailableError => {
+  if (capability === "computer")
+    return new ComputerControlUnavailableError({
+      message:
+        "Full Chrome or Full desktop control is not active for this provider turn. Select one of those modes and start a new turn.",
+    });
   const fields = {
     environmentId: invocation.environmentId,
     ...(invocation.thread === undefined

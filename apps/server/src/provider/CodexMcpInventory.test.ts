@@ -62,5 +62,4 @@ describe("Codex desktop MCP inventory", () => {
     expect(diagnostic).not.toContain("Bearer");
     expect(diagnostic).not.toMatch(/[\u0000-\u001f\u007f]/u);
   });
-
 });

@@ -71,7 +71,8 @@ export const resolveCodexDesktopPluginSkillRoots = Effect.fn("resolveCodexDeskto
   function* (environment: NodeJS.ProcessEnv) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const codexHome = environment.CODEX_HOME ?? path.join(yield* HostProcess.HomeDirectory, ".codex");
+    const codexHome =
+      environment.CODEX_HOME ?? path.join(yield* HostProcess.HomeDirectory, ".codex");
     const configPath = path.join(codexHome, "config.toml");
     const configText = yield* fs
       .readFileString(configPath)

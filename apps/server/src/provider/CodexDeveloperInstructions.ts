@@ -1,4 +1,7 @@
-import { buildCodexControlInstructions, type CodexControlRuntime } from "./CodexControlInstructions.ts";
+import {
+  buildCodexControlInstructions,
+  type CodexControlRuntime,
+} from "./CodexControlInstructions.ts";
 import type { ProviderInteractionMode } from "@t3tools/contracts";
 import type { V2TurnStartParams__AdditionalContextEntry } from "effect-codex-app-server/schema";
 import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
@@ -210,7 +213,10 @@ export function buildCodexAdditionalContext(
   toolsAvailable: boolean | T3CodeToolAvailability = true,
 ): Record<string, V2TurnStartParams__AdditionalContextEntry> {
   const tools = toolInstructions(toolsAvailable);
-  const controls = buildCodexControlInstructions(runtime, typeof toolsAvailable === "boolean" ? toolsAvailable : toolsAvailable.browser);
+  const controls = buildCodexControlInstructions(
+    runtime,
+    typeof toolsAvailable === "boolean" ? toolsAvailable : toolsAvailable.browser,
+  );
   // Separate keys keep each value under Codex's per-entry cap. Codex emits
   // entries in key order, so the numbering preserves the authored order.
   return {

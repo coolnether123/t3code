@@ -1,11 +1,24 @@
 import { makeCodexFileChangeApprovalContext } from "../../provider/CodexFileChangeApprovalContext.ts";
-import { CODEX_COMPUTER_CONTROL_OPTION_ID, normalizeCodexComputerControlMode } from "../../provider/CodexComputerControl.ts";
+import {
+  CODEX_COMPUTER_CONTROL_OPTION_ID,
+  normalizeCodexComputerControlMode,
+} from "../../provider/CodexComputerControl.ts";
 import { buildCodexAppServerCommandArgs } from "../../provider/CodexSubagentPolicy.ts";
-import { codexDesktopDaemonEnvironment, makeCodexDesktopDaemonStdio, resolveCodexBinaryPath } from "../../provider/CodexAppServerTransport.ts";
+import {
+  codexDesktopDaemonEnvironment,
+  makeCodexDesktopDaemonStdio,
+  resolveCodexBinaryPath,
+} from "../../provider/CodexAppServerTransport.ts";
 import { attachCodexDesktopPluginSkills } from "../../provider/CodexDesktopPluginSkills.ts";
-import { preflightCodexMcpServers, codexMcpDisableOverride } from "../../provider/CodexMcpPreflight.ts";
+import {
+  preflightCodexMcpServers,
+  codexMcpDisableOverride,
+} from "../../provider/CodexMcpPreflight.ts";
 import { recoverCodexDenyReadAclState } from "../../provider/CodexSandboxRecovery.ts";
-import { codexIsolatedHomePath, migrateCodexResumeRollout } from "../../provider/Drivers/CodexHomeLayout.ts";
+import {
+  codexIsolatedHomePath,
+  migrateCodexResumeRollout,
+} from "../../provider/Drivers/CodexHomeLayout.ts";
 import { revertCodexThread } from "../../provider/CodexThreadRevert.ts";
 import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudget";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
@@ -770,10 +783,18 @@ export function buildCodexTurnStartParams(input: {
     const t3Context =
       input.hasT3Mcp === true
         ? buildCodexAdditionalContext(
-            { model: input.modelSelection.model, reasoningEffort: effort ?? "medium",
-              useDesktopAppDaemon: input.useDesktopAppDaemon, computerControlAvailable: input.computerControlAvailable,
+            {
+              model: input.modelSelection.model,
+              reasoningEffort: effort ?? "medium",
+              useDesktopAppDaemon: input.useDesktopAppDaemon,
+              computerControlAvailable: input.computerControlAvailable,
               subagentBackend: input.runtimePolicy.subagentBackend,
-              computerControlMode: normalizeCodexComputerControlMode(getModelSelectionStringOptionValue(input.modelSelection, CODEX_COMPUTER_CONTROL_OPTION_ID)),
+              computerControlMode: normalizeCodexComputerControlMode(
+                getModelSelectionStringOptionValue(
+                  input.modelSelection,
+                  CODEX_COMPUTER_CONTROL_OPTION_ID,
+                ),
+              ),
             },
             {
               browser: input.browserToolsAvailable ?? true,
@@ -1325,11 +1346,16 @@ export function codexThreadRuntimeParams(input: {
     ...(input.modelSelection === undefined ? {} : { model: input.modelSelection.model }),
     config: {
       ...CODEX_THREAD_CONFIG,
-      ...(input.runtimePolicy?.subagentBackend !== "v1" && input.runtimePolicy?.subagentBackend !== "v2" ? {} : {
-        "agents.enabled": input.runtimePolicy?.subagentBackend === "v1" || input.runtimePolicy?.subagentBackend === "v2",
-        "features.multi_agent": input.runtimePolicy?.subagentBackend === "v1",
-        "features.multi_agent_v2": input.runtimePolicy?.subagentBackend === "v2",
-      }),
+      ...(input.runtimePolicy?.subagentBackend !== "v1" &&
+      input.runtimePolicy?.subagentBackend !== "v2"
+        ? {}
+        : {
+            "agents.enabled":
+              input.runtimePolicy?.subagentBackend === "v1" ||
+              input.runtimePolicy?.subagentBackend === "v2",
+            "features.multi_agent": input.runtimePolicy?.subagentBackend === "v1",
+            "features.multi_agent_v2": input.runtimePolicy?.subagentBackend === "v2",
+          }),
       ...(mcpSession === undefined
         ? {}
         : {
@@ -1529,25 +1555,43 @@ export const layerAppServerClientFactory: Layer.Layer<
       open: (input) =>
         Effect.gen(function* () {
           const scope = yield* Scope.Scope;
-          yield* recoverCodexDenyReadAclState().pipe(Effect.mapError((cause) => new ProviderAdapter.ProviderAdapterOpenSessionError({
-            driver: CODEX_PROVIDER, providerSessionId: input.providerSessionId, cause,
-          })));
+          yield* recoverCodexDenyReadAclState().pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterOpenSessionError({
+                  driver: CODEX_PROVIDER,
+                  providerSessionId: input.providerSessionId,
+                  cause,
+                }),
+            ),
+          );
           const desktopDaemon = input.settings.useDesktopAppDaemon;
-          const environment = desktopDaemon ? codexDesktopDaemonEnvironment(input.environment) : {
-            ...codexAppServerEnvironment(input.environment),
-            ...(input.settings.homePath ? { CODEX_HOME: input.settings.homePath } : {}),
-          };
-          const preflight = yield* Effect.promise(() => preflightCodexMcpServers({
-            homePath: input.settings.homePath, environment,
-            ...(input.runtimePolicy.cwd === null ? {} : { cwd: input.runtimePolicy.cwd }),
-          }));
-          const mcpArgs = preflight.disabledServerNames.flatMap((name) => ["-c", codexMcpDisableOverride(name)]);
+          const environment = desktopDaemon
+            ? codexDesktopDaemonEnvironment(input.environment)
+            : {
+                ...codexAppServerEnvironment(input.environment),
+                ...(input.settings.homePath ? { CODEX_HOME: input.settings.homePath } : {}),
+              };
+          const preflight = yield* Effect.promise(() =>
+            preflightCodexMcpServers({
+              homePath: input.settings.homePath,
+              environment,
+              ...(input.runtimePolicy.cwd === null ? {} : { cwd: input.runtimePolicy.cwd }),
+            }),
+          );
+          const mcpArgs = preflight.disabledServerNames.flatMap((name) => [
+            "-c",
+            codexMcpDisableOverride(name),
+          ]);
           const command = yield* makeCodexAppServerSpawnCommand({
             command: input.settings.binaryPath || "codex",
             args: buildCodexAppServerCommandArgs({
               appServerTransport: desktopDaemon ? "desktop-daemon" : "stdio",
-              launchArgs: resolveCodexLaunchArgs(input.settings.launchArgs, input.environment), appServerArgs: mcpArgs,
-              ...(input.runtimePolicy.subagentBackend === undefined ? {} : { subagentBackend: input.runtimePolicy.subagentBackend }),
+              launchArgs: resolveCodexLaunchArgs(input.settings.launchArgs, input.environment),
+              appServerArgs: mcpArgs,
+              ...(input.runtimePolicy.subagentBackend === undefined
+                ? {}
+                : { subagentBackend: input.runtimePolicy.subagentBackend }),
             }),
             env: environment,
             threadId: input.threadId,
@@ -1577,7 +1621,11 @@ export const layerAppServerClientFactory: Layer.Layer<
                   logger: protocolLogger,
                 };
           const transportLayer = desktopDaemon
-            ? CodexClient.layerChildProcessStdio(handle, yield* makeCodexDesktopDaemonStdio(handle), clientOptions)
+            ? CodexClient.layerChildProcessStdio(
+                handle,
+                yield* makeCodexDesktopDaemonStdio(handle),
+                clientOptions,
+              )
             : CodexClient.layerChildProcess(handle, clientOptions);
           const context = yield* Layer.build(transportLayer);
           return yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
@@ -1609,9 +1657,18 @@ export const createCodexAdapterV2 = (
     const hostEnvironment = yield* HostProcess.Environment;
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
     const serverConfig = yield* ServerConfig;
-    const homeLayout = yield* resolveCodexHomeLayout(config, config.useDesktopAppDaemon ? undefined : {
-      isolatedHomePath: codexIsolatedHomePath(yield* Path.Path, serverConfig.baseDir, instanceId),
-    });
+    const homeLayout = yield* resolveCodexHomeLayout(
+      config,
+      config.useDesktopAppDaemon
+        ? undefined
+        : {
+            isolatedHomePath: codexIsolatedHomePath(
+              yield* Path.Path,
+              serverConfig.baseDir,
+              instanceId,
+            ),
+          },
+    );
 
     yield* materializeCodexShadowHome(homeLayout).pipe(
       Effect.mapError(
@@ -1629,7 +1686,7 @@ export const createCodexAdapterV2 = (
       ...config,
       enabled,
       binaryPath: yield* resolveCodexBinaryPath(config, hostEnvironment),
-      homePath: config.useDesktopAppDaemon ? "" : homeLayout.effectiveHomePath ?? "",
+      homePath: config.useDesktopAppDaemon ? "" : (homeLayout.effectiveHomePath ?? ""),
     } satisfies CodexSettings;
 
     return yield* makeCodexAdapterV2({
@@ -1740,10 +1797,25 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 ),
               );
         if (!adapterOptions.settings.useDesktopAppDaemon && adapterOptions.settings.homePath) {
-          const configured = yield* resolveCodexHomeLayout({ ...adapterOptions.settings, homePath: "", shadowHomePath: "" });
-          yield* migrateCodexResumeRollout({ sharedHomePath: configured.sharedHomePath,
-            effectiveHomePath: adapterOptions.settings.homePath, resumeThreadId: input.initialNativeThreadId,
-          }).pipe(Effect.mapError((cause) => new ProviderAdapter.ProviderAdapterOpenSessionError({ driver: CODEX_PROVIDER, providerSessionId: input.providerSessionId, cause })));
+          const configured = yield* resolveCodexHomeLayout({
+            ...adapterOptions.settings,
+            homePath: "",
+            shadowHomePath: "",
+          });
+          yield* migrateCodexResumeRollout({
+            sharedHomePath: configured.sharedHomePath,
+            effectiveHomePath: adapterOptions.settings.homePath,
+            resumeThreadId: input.initialNativeThreadId,
+          }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterOpenSessionError({
+                  driver: CODEX_PROVIDER,
+                  providerSessionId: input.providerSessionId,
+                  cause,
+                }),
+            ),
+          );
         }
         const client = yield* clientFactory.open({
           instanceId: adapterOptions.instanceId,
@@ -1821,7 +1893,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 }),
               );
             yield* client.notify("initialized", undefined);
-            if (adapterOptions.settings.useDesktopAppDaemon) yield* attachCodexDesktopPluginSkills(client, adapterOptions.environment);
+            if (adapterOptions.settings.useDesktopAppDaemon)
+              yield* attachCodexDesktopPluginSkills(client, adapterOptions.environment);
             yield* Ref.set(initialized, true);
           }),
         );
@@ -4655,7 +4728,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
 
         yield* client.handleServerNotification("item/started", (payload) =>
           Effect.gen(function* () {
-            if (payload.item.type === "fileChange") fileChangeApprovalContext.remember({ threadId: payload.threadId, turnId: payload.turnId, itemId: payload.item.id }, payload.item.changes);
+            if (payload.item.type === "fileChange")
+              fileChangeApprovalContext.remember(
+                { threadId: payload.threadId, turnId: payload.turnId, itemId: payload.item.id },
+                payload.item.changes,
+              );
             const context = yield* awaitActiveTurn(payload.turnId);
             if (context === undefined) {
               return;
@@ -5166,7 +5243,14 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               nativeItemId: payload.itemId,
               nativeRequestId: payload.itemId,
               requestKind: "file-change",
-              prompt: fileChangeApprovalContext.take({ threadId: payload.threadId, turnId: payload.turnId, itemId: payload.itemId }) ?? codexFileChangeApprovalPrompt(payload) ?? null,
+              prompt:
+                fileChangeApprovalContext.take({
+                  threadId: payload.threadId,
+                  turnId: payload.turnId,
+                  itemId: payload.itemId,
+                }) ??
+                codexFileChangeApprovalPrompt(payload) ??
+                null,
             });
             const decision = yield* Deferred.make<ProviderApprovalDecision, never>();
             yield* Ref.update(pendingRuntimeRequests, (current) => {

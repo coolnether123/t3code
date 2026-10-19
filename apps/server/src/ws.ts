@@ -2880,7 +2880,8 @@ const layerWsRpc = (
         [WS_METHODS.previewClose]: (input) => previewManager.close(input),
         [WS_METHODS.previewAutomationConnect]: (input) => previewAutomationBroker.connect(input),
         [WS_METHODS.previewAutomationRespond]: (input) => previewAutomationBroker.respond(input),
-        [WS_METHODS.previewAutomationFocusHost]: (input) => previewAutomationBroker.focusHost(input),
+        [WS_METHODS.previewAutomationFocusHost]: (input) =>
+          previewAutomationBroker.focusHost(input),
         [WS_METHODS.previewList]: (input) => previewManager.list(input),
         [WS_METHODS.previewClearProfile]: (input) => serverBrowser.clearProfile(input.profileId),
         [WS_METHODS.previewReportProfiles]: (input) => serverBrowser.reportProfiles(input),
@@ -3119,7 +3120,10 @@ export const layer = Layer.unwrap(
         const request = yield* HttpServerRequest.HttpServerRequest;
         const requestUrl = HttpServerRequest.toURL(request);
         const legacyUsage = Option.isSome(requestUrl) && isLegacyUsageProtocol(requestUrl.value);
-        if (Option.isNone(requestUrl) || (!legacyUsage && !hasCompatibleOrchestrationProtocol(requestUrl.value))) {
+        if (
+          Option.isNone(requestUrl) ||
+          (!legacyUsage && !hasCompatibleOrchestrationProtocol(requestUrl.value))
+        ) {
           return HttpServerResponse.jsonUnsafe(
             {
               code: "orchestration_protocol_incompatible",
@@ -3149,7 +3153,11 @@ export const layer = Layer.unwrap(
         yield* analytics.record("client.connected", clientAnalyticsProps);
         const rpcWebSocketHttpEffect = yield* Effect.gen(function* () {
           const { protocol, httpEffect } = yield* RpcServer.makeProtocolWithHttpEffectWebsocket;
-          yield* (legacyUsage ? RpcServer.make(ServerUsageRpcGroup, WS_RPC_SERVER_OPTIONS) : RpcServer.make(ServerWsRpcGroup, WS_RPC_SERVER_OPTIONS)).pipe(
+          yield* (
+            legacyUsage
+              ? RpcServer.make(ServerUsageRpcGroup, WS_RPC_SERVER_OPTIONS)
+              : RpcServer.make(ServerWsRpcGroup, WS_RPC_SERVER_OPTIONS)
+          ).pipe(
             Effect.provideService(RpcServer.Protocol, withTerminalOutputWindow(protocol)),
             Effect.provide(
               Layer.merge(

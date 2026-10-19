@@ -1,6 +1,11 @@
 import {
-  ProviderInstanceId, ThreadId, type ModelSelection, type ProviderDriverKind,
-  type RuntimeMode, type TurnId, type ServerSettings as ServerSettingsContract,
+  ProviderInstanceId,
+  ThreadId,
+  type ModelSelection,
+  type ProviderDriverKind,
+  type RuntimeMode,
+  type TurnId,
+  type ServerSettings as ServerSettingsContract,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Option from "effect/Option";
@@ -43,7 +48,11 @@ export interface McpSessionRegistryShape {
   readonly resolve: (
     rawToken: string,
   ) => Effect.Effect<McpInvocationContext.McpThreadInvocationScope | undefined>;
-  readonly touch: (threadId: ThreadId, modelSelection?: ModelSelection, parentTurnId?: TurnId) => Effect.Effect<void>;
+  readonly touch: (
+    threadId: ThreadId,
+    modelSelection?: ModelSelection,
+    parentTurnId?: TurnId,
+  ) => Effect.Effect<void>;
   readonly revokeProviderSession: (providerSessionId: string) => Effect.Effect<void>;
   readonly revokeThread: (threadId: ThreadId) => Effect.Effect<void>;
   readonly revokeAll: Effect.Effect<void>;
@@ -179,12 +188,19 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
       const issuedAt = yield* currentTimeMillis;
       const settingsService = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
       const settings = Option.isSome(settingsService)
-        ? yield* settingsService.value.getSettings.pipe(Effect.catch(() => Effect.succeed(undefined)))
+        ? yield* settingsService.value.getSettings.pipe(
+            Effect.catch(() => Effect.succeed(undefined)),
+          )
         : undefined;
       const extraCapabilities = resolveMcpCapabilities(
         { enableAgentBrowserAccess: false },
-        request.threadId, request.modelSelection, request.providerDriverKind, request.providerInstanceId,
-        settings === undefined ? false : isDesktopBackedCodexInstance(settings, request.providerInstanceId),
+        request.threadId,
+        request.modelSelection,
+        request.providerDriverKind,
+        request.providerInstanceId,
+        settings === undefined
+          ? false
+          : isDesktopBackedCodexInstance(settings, request.providerInstanceId),
       );
       const providerSessionId = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
       const rawToken = yield* crypto.randomBytes(32).pipe(Effect.map(tokenFromBytes), Effect.orDie);
@@ -256,10 +272,18 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         const next = new Map(current);
         for (const [tokenHash, record] of current) {
           if (record.scope.thread.threadId === threadId) {
-            next.set(tokenHash, { ...record, lastAliveAt: timestamp, scope: { ...record.scope, thread: { ...record.scope.thread,
-              ...(modelSelection === undefined ? {} : { parentModelSelection: modelSelection }),
-              ...(parentTurnId === undefined ? {} : { parentTurnId }),
-            } } });
+            next.set(tokenHash, {
+              ...record,
+              lastAliveAt: timestamp,
+              scope: {
+                ...record.scope,
+                thread: {
+                  ...record.scope.thread,
+                  ...(modelSelection === undefined ? {} : { parentModelSelection: modelSelection }),
+                  ...(parentTurnId === undefined ? {} : { parentTurnId }),
+                },
+              },
+            });
           }
         }
         return { records: next };
@@ -317,8 +341,14 @@ export const issueActiveMcpCredential = (
         .pipe(Effect.andThen(activeMcpSessionRegistry.issue(request)))
     : Effect.undefined;
 
-export const touchActiveMcpThread = (threadId: ThreadId, modelSelection?: ModelSelection, parentTurnId?: TurnId): Effect.Effect<void> =>
-  activeMcpSessionRegistry ? activeMcpSessionRegistry.touch(threadId, modelSelection, parentTurnId) : Effect.void;
+export const touchActiveMcpThread = (
+  threadId: ThreadId,
+  modelSelection?: ModelSelection,
+  parentTurnId?: TurnId,
+): Effect.Effect<void> =>
+  activeMcpSessionRegistry
+    ? activeMcpSessionRegistry.touch(threadId, modelSelection, parentTurnId)
+    : Effect.void;
 
 const revokeActiveMcpThread = (threadId: ThreadId): Effect.Effect<void> =>
   activeMcpSessionRegistry ? activeMcpSessionRegistry.revokeThread(threadId) : Effect.void;

@@ -256,12 +256,10 @@ export const AntigravityDriver: ProviderDriver<
             runtime
               .start()
               .pipe(
-                Effect.tapError(
-                  (cause): Effect.Effect<void> =>
-                    input.onAuthorizationUrl === undefined &&
-                    isAntigravitySignInRequiredError(cause)
-                      ? provider.onAuthRequired
-                      : Effect.void,
+                Effect.tapError((cause): Effect.Effect<void> =>
+                  input.onAuthorizationUrl === undefined && isAntigravitySignInRequiredError(cause)
+                    ? provider.onAuthRequired
+                    : Effect.void,
                 ),
               ),
         };

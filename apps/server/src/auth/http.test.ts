@@ -135,9 +135,13 @@ it.effect("sets the selected browser session cookies through the HTTP route", ()
           expect(accessResponse.status).toBe(200);
           const access = (await accessResponse.json()) as { access_token: string };
           const ticketResponse = await environmentA.handler(
-            postJson("/api/auth/websocket-ticket", {}, {
-              authorization: `Bearer ${access.access_token}`,
-            }),
+            postJson(
+              "/api/auth/websocket-ticket",
+              {},
+              {
+                authorization: `Bearer ${access.access_token}`,
+              },
+            ),
             requestContext,
           );
           expect(ticketResponse.status).toBe(200);

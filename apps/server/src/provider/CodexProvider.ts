@@ -1,8 +1,27 @@
 import { type ProviderOptionChoice } from "@t3tools/contracts";
-import { CODEX_COMPUTER_CONTROL_OPTION_ID, codexDesktopDaemonHasAppTools } from "./CodexComputerControl.ts";
-import { type CodexMcpToolInventory, T3_MANAGED_CHROME_TOOLS, T3_PREVIEW_BROWSER_TOOLS, hasT3PreviewBrowserTools, resolveCodexBrowserCapabilities } from "./CodexBrowserCapabilities.ts";
-const registeredBrowserTools: ReadonlyArray<CodexMcpToolInventory> = [{ name: "t3-code", tools: Object.fromEntries([...T3_MANAGED_CHROME_TOOLS, ...T3_PREVIEW_BROWSER_TOOLS].map((name) => [name, {}])) }];
-import { codexDesktopDaemonEnvironment, makeCodexDesktopDaemonStdio } from "./CodexAppServerTransport.ts";
+import {
+  CODEX_COMPUTER_CONTROL_OPTION_ID,
+  codexDesktopDaemonHasAppTools,
+} from "./CodexComputerControl.ts";
+import {
+  type CodexMcpToolInventory,
+  T3_MANAGED_CHROME_TOOLS,
+  T3_PREVIEW_BROWSER_TOOLS,
+  hasT3PreviewBrowserTools,
+  resolveCodexBrowserCapabilities,
+} from "./CodexBrowserCapabilities.ts";
+const registeredBrowserTools: ReadonlyArray<CodexMcpToolInventory> = [
+  {
+    name: "t3-code",
+    tools: Object.fromEntries(
+      [...T3_MANAGED_CHROME_TOOLS, ...T3_PREVIEW_BROWSER_TOOLS].map((name) => [name, {}]),
+    ),
+  },
+];
+import {
+  codexDesktopDaemonEnvironment,
+  makeCodexDesktopDaemonStdio,
+} from "./CodexAppServerTransport.ts";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -216,8 +235,6 @@ export function mapCodexModelCapabilities(
     return `The live Codex model catalog advertises '${multiAgentVersion}', not ${requested}.`;
   };
 
-
-
   if (reasoningOptions.length > 0) {
     optionDescriptors.push({
       id: "reasoningEffort",
@@ -305,7 +322,6 @@ export function mapCodexModelCapabilities(
     },
   });
 }
-
 
 function parseCodexModelListResponse(
   response: CodexSchema.V2ModelListResponse,
@@ -494,10 +510,12 @@ export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(fu
     ? expandHomePath(input.homePath, yield* HostProcess.HomeDirectory)
     : undefined;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const environment = input.useDesktopAppDaemon ? codexDesktopDaemonEnvironment(input.environment) : {
-    ...codexAppServerEnvironment(input.environment),
-    ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
-  };
+  const environment = input.useDesktopAppDaemon
+    ? codexDesktopDaemonEnvironment(input.environment)
+    : {
+        ...codexAppServerEnvironment(input.environment),
+        ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
+      };
   const spawnCommand = yield* resolveSpawnCommand(
     input.binaryPath,
     input.useDesktopAppDaemon ? ["app-server", "proxy"] : codexAppServerArgs(input.launchArgs),
@@ -522,9 +540,11 @@ export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(fu
           }),
       ),
     );
-  const clientContext = yield* Layer.build(input.useDesktopAppDaemon
-    ? CodexClient.layerChildProcessStdio(child, yield* makeCodexDesktopDaemonStdio(child))
-    : CodexClient.layerChildProcess(child));
+  const clientContext = yield* Layer.build(
+    input.useDesktopAppDaemon
+      ? CodexClient.layerChildProcessStdio(child, yield* makeCodexDesktopDaemonStdio(child))
+      : CodexClient.layerChildProcess(child),
+  );
   const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
     Effect.provide(clientContext),
   );

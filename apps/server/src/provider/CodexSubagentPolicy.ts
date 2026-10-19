@@ -1,5 +1,8 @@
 import { type SubagentBackend } from "@t3tools/contracts";
-import { codexAppServerCommandArgs, type CodexAppServerTransport } from "./CodexAppServerTransport.ts";
+import {
+  codexAppServerCommandArgs,
+  type CodexAppServerTransport,
+} from "./CodexAppServerTransport.ts";
 import { codexAppServerArgs } from "./codexLaunchArgs.ts";
 export function codexSubagentBackendAppServerArgs(input: {
   readonly subagentBackend?: SubagentBackend;
@@ -34,7 +37,8 @@ export function buildCodexAppServerCommandArgs(options: {
   readonly subagentBackend?: SubagentBackend;
 }): ReadonlyArray<string> {
   return codexAppServerCommandArgs(options.appServerTransport ?? "stdio", [
-    ...codexAppServerArgs(options.launchArgs).slice(1), ...(options.appServerArgs ?? []),
+    ...codexAppServerArgs(options.launchArgs).slice(1),
+    ...(options.appServerArgs ?? []),
     ...codexSubagentBackendAppServerArgs(options),
   ]);
 }

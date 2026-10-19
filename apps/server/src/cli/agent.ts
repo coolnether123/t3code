@@ -149,9 +149,12 @@ export const withAgentSession = <A, E, R>(
       .issueSession({
         ttl: Duration.minutes(2),
         label: "t3 agent cli",
-        scopes: typeof operate === "boolean"
-          ? operate ? [AuthOrchestrationReadScope, AuthOrchestrationOperateScope] : [AuthOrchestrationReadScope]
-          : [...new Set([AuthOrchestrationReadScope, ...operate])],
+        scopes:
+          typeof operate === "boolean"
+            ? operate
+              ? [AuthOrchestrationReadScope, AuthOrchestrationOperateScope]
+              : [AuthOrchestrationReadScope]
+            : [...new Set([AuthOrchestrationReadScope, ...operate])],
       })
       .pipe(
         Effect.mapError(
@@ -178,176 +181,192 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
   auth: Pick<EnvironmentAuth.EnvironmentAuth["Service"], "issueSession" | "revokeSession">,
 ) {
   const client = yield* HttpApiClient.make(EnvironmentHttpApi, { baseUrl: target.origin });
-  return yield* withAgentSession(auth, request.kind === "act" && (request.action.command.type === "project.create" || request.action.command.type === "project.update")
-    ? requiredScopesForProjectMutation(request.action.command) : request.kind === "act", (token) =>
-    Effect.gen(function* () {
-      const headers = { authorization: `Bearer ${token}`, [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT };
-      const context = {
-        environmentId: target.environmentId,
-        runtime: target.runtime,
-        origin: target.origin,
-      };
-      if (request.kind === "capabilities") {
-        const shell = yield* boundedHttp(client.orchestration.shellSnapshot({ headers }));
-        const capabilities = target.descriptor.capabilities;
-        const commands = AGENT_COMMAND_TYPES.filter((type) => {
-          if (type === "thread.pin" || type === "thread.unpin")
-            return capabilities.threadPinning === true;
-          if (type === "thread.settle" || type === "thread.unsettle")
-            return capabilities.threadSettlement === true;
-          return true;
-        });
-        if (request.command !== undefined && !commands.some((type) => type === request.command))
-          return yield* fail("Command is not advertised by this running server.");
-        return {
-          ...context,
-          serverVersion: target.descriptor.serverVersion,
-          snapshotSequence: shell.snapshotSequence,
-          commands,
-          commandSchema: request.command
-            ? yield* checked(() => agentCommandSchema(request.command!))
-            : undefined,
-          actionEnvelope: {
-            environmentId: target.environmentId,
-            runtime: target.runtime,
-            command: "Use capabilities --command <type> for its existing JSON Schema.",
-          },
-          authentication: {
-            scopes: [AuthOrchestrationReadScope, AuthOrchestrationOperateScope],
-            scopeBoundary: "environment-wide, not thread-bound",
-            ttlSeconds: 120,
-            cleanup: "session revoked on exit",
-          },
-          limits: {
-            actionBytes: AGENT_ACTION_MAX_BYTES,
-            outputBytes: AGENT_OUTPUT_MAX_BYTES,
-            receiptMetadataBytes: AGENT_RECEIPT_METADATA_MAX_BYTES,
-            turnLimit: 5,
-          },
-          restrictions: [
-            "--confirm required for act",
-            "Unique commandId for each distinct payload; never automatically retry an action",
-            "New threads use approval-required mode and the project's existing checkout",
-            "No bootstrap, deletes, checkpoint rewinds, runtime mode changes, or session-wide approval",
-            "Metadata updates change titles only",
-            "Send preserves existing runtimeMode; steer/interrupt require the observed active turn ID",
-            "Receipt confirms persisted acceptance, not provider execution or completion",
-            "Local preflight identity checks are not atomic server-side concurrency guards",
-            "No visible browser navigation or subscription-based wait",
-          ],
+  return yield* withAgentSession(
+    auth,
+    request.kind === "act" &&
+      (request.action.command.type === "project.create" ||
+        request.action.command.type === "project.update")
+      ? requiredScopesForProjectMutation(request.action.command)
+      : request.kind === "act",
+    (token) =>
+      Effect.gen(function* () {
+        const headers = {
+          authorization: `Bearer ${token}`,
+          [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT,
         };
-      }
-      if (request.kind === "providers") {
-        const providerSnapshot = yield* boundedHttp(
-          client.providers.snapshot({
-            headers,
-            payload: request.instanceId === undefined ? {} : { instanceId: request.instanceId },
-          }),
-        );
-        return compactAgentProviders(target, providerSnapshot);
-      }
-      const shell = yield* boundedHttp(client.orchestration.shellSnapshot({ headers }));
-      const threadId =
-        request.kind === "snapshot"
-          ? request.threadId
-          : "threadId" in request.action.command && request.action.command.type !== "thread.create"
-            ? request.action.command.threadId
-            : undefined;
-      // GET query fields are the endpoint's payload, including its optional history cursor.
-      const loadThread = (id: ThreadId, _turnLimit = 3, _beforeCursor?: string) =>
-        boundedHttp(
-          client.orchestration.threadBoundedSnapshot({
-            headers,
-            params: { threadId: id },
-            query: {},
-          }),
-        );
-      const detail = threadId
-        ? yield* loadThread(
-            threadId,
-            request.kind === "snapshot" ? request.turnLimit : 3,
-            request.kind === "snapshot" ? request.beforeCursor : undefined,
-          )
-        : undefined;
-      if (request.kind === "snapshot")
-        return { ...context, ...compactAgentSnapshot(target, shell, detail, request.offset) };
-      const { action } = request;
-      yield* checked(() =>
-        validateAgentAction(action, target, shell, detail, target.descriptor.capabilities),
-      );
-      const runtimeNow = yield* readPersistedServerRuntimeState(target.runtimeStatePath).pipe(
-        Effect.mapError(
-          () => new AgentCliError({ message: "Runtime state cannot be checked before dispatch." }),
-        ),
-      );
-      if (Option.isNone(runtimeNow))
-        return yield* fail("Server runtime disappeared before dispatch.");
-      yield* checked(() =>
-        validateAgentIdentity(action, {
+        const context = {
           environmentId: target.environmentId,
-          runtime: runtimeNow.value,
-        }),
-      );
-      const descriptorNow = yield* boundedHttp(client.metadata.descriptor());
-      if (descriptorNow.environmentId !== action.environmentId)
-        return yield* fail("Server identity changed before dispatch.");
-      const command = action.command;
-      const commandTarget = {
-        ...("threadId" in command ? { threadId: command.threadId } : {}),
-        ...("projectId" in command ? { projectId: command.projectId } : {}),
-        ...("messageId" in command ? { messageId: command.messageId } : {}),
-        ...("runId" in command ? { runId: command.runId } : {}),
-        ...("requestId" in command ? { requestId: command.requestId } : {}),
-      };
-      const receiptMetadata = {
-        ...context,
-        commandId: command.commandId,
-        commandType: command.type,
-        target: commandTarget,
-      };
-      yield* checked(() => validateAgentReceiptMetadata(receiptMetadata));
-      const receipt = yield* Effect.result(
-        (command.type === "project.create" || command.type === "project.update" || command.type === "project.delete"
-          ? client.projects.mutate({ headers, payload: command })
-          : client.orchestration.dispatch({ headers, payload: command })
-        ).pipe(Effect.timeout(Duration.seconds(10))),
-      );
-      if (receipt._tag === "Failure" && isDispatchRejection(receipt.failure))
+          runtime: target.runtime,
+          origin: target.origin,
+        };
+        if (request.kind === "capabilities") {
+          const shell = yield* boundedHttp(client.orchestration.shellSnapshot({ headers }));
+          const capabilities = target.descriptor.capabilities;
+          const commands = AGENT_COMMAND_TYPES.filter((type) => {
+            if (type === "thread.pin" || type === "thread.unpin")
+              return capabilities.threadPinning === true;
+            if (type === "thread.settle" || type === "thread.unsettle")
+              return capabilities.threadSettlement === true;
+            return true;
+          });
+          if (request.command !== undefined && !commands.some((type) => type === request.command))
+            return yield* fail("Command is not advertised by this running server.");
+          return {
+            ...context,
+            serverVersion: target.descriptor.serverVersion,
+            snapshotSequence: shell.snapshotSequence,
+            commands,
+            commandSchema: request.command
+              ? yield* checked(() => agentCommandSchema(request.command!))
+              : undefined,
+            actionEnvelope: {
+              environmentId: target.environmentId,
+              runtime: target.runtime,
+              command: "Use capabilities --command <type> for its existing JSON Schema.",
+            },
+            authentication: {
+              scopes: [AuthOrchestrationReadScope, AuthOrchestrationOperateScope],
+              scopeBoundary: "environment-wide, not thread-bound",
+              ttlSeconds: 120,
+              cleanup: "session revoked on exit",
+            },
+            limits: {
+              actionBytes: AGENT_ACTION_MAX_BYTES,
+              outputBytes: AGENT_OUTPUT_MAX_BYTES,
+              receiptMetadataBytes: AGENT_RECEIPT_METADATA_MAX_BYTES,
+              turnLimit: 5,
+            },
+            restrictions: [
+              "--confirm required for act",
+              "Unique commandId for each distinct payload; never automatically retry an action",
+              "New threads use approval-required mode and the project's existing checkout",
+              "No bootstrap, deletes, checkpoint rewinds, runtime mode changes, or session-wide approval",
+              "Metadata updates change titles only",
+              "Send preserves existing runtimeMode; steer/interrupt require the observed active turn ID",
+              "Receipt confirms persisted acceptance, not provider execution or completion",
+              "Local preflight identity checks are not atomic server-side concurrency guards",
+              "No visible browser navigation or subscription-based wait",
+            ],
+          };
+        }
+        if (request.kind === "providers") {
+          const providerSnapshot = yield* boundedHttp(
+            client.providers.snapshot({
+              headers,
+              payload: request.instanceId === undefined ? {} : { instanceId: request.instanceId },
+            }),
+          );
+          return compactAgentProviders(target, providerSnapshot);
+        }
+        const shell = yield* boundedHttp(client.orchestration.shellSnapshot({ headers }));
+        const threadId =
+          request.kind === "snapshot"
+            ? request.threadId
+            : "threadId" in request.action.command &&
+                request.action.command.type !== "thread.create"
+              ? request.action.command.threadId
+              : undefined;
+        // GET query fields are the endpoint's payload, including its optional history cursor.
+        const loadThread = (id: ThreadId, _turnLimit = 3, _beforeCursor?: string) =>
+          boundedHttp(
+            client.orchestration.threadBoundedSnapshot({
+              headers,
+              params: { threadId: id },
+              query: {},
+            }),
+          );
+        const detail = threadId
+          ? yield* loadThread(
+              threadId,
+              request.kind === "snapshot" ? request.turnLimit : 3,
+              request.kind === "snapshot" ? request.beforeCursor : undefined,
+            )
+          : undefined;
+        if (request.kind === "snapshot")
+          return { ...context, ...compactAgentSnapshot(target, shell, detail, request.offset) };
+        const { action } = request;
+        yield* checked(() =>
+          validateAgentAction(action, target, shell, detail, target.descriptor.capabilities),
+        );
+        const runtimeNow = yield* readPersistedServerRuntimeState(target.runtimeStatePath).pipe(
+          Effect.mapError(
+            () =>
+              new AgentCliError({ message: "Runtime state cannot be checked before dispatch." }),
+          ),
+        );
+        if (Option.isNone(runtimeNow))
+          return yield* fail("Server runtime disappeared before dispatch.");
+        yield* checked(() =>
+          validateAgentIdentity(action, {
+            environmentId: target.environmentId,
+            runtime: runtimeNow.value,
+          }),
+        );
+        const descriptorNow = yield* boundedHttp(client.metadata.descriptor());
+        if (descriptorNow.environmentId !== action.environmentId)
+          return yield* fail("Server identity changed before dispatch.");
+        const command = action.command;
+        const commandTarget = {
+          ...("threadId" in command ? { threadId: command.threadId } : {}),
+          ...("projectId" in command ? { projectId: command.projectId } : {}),
+          ...("messageId" in command ? { messageId: command.messageId } : {}),
+          ...("runId" in command ? { runId: command.runId } : {}),
+          ...("requestId" in command ? { requestId: command.requestId } : {}),
+        };
+        const receiptMetadata = {
+          ...context,
+          commandId: command.commandId,
+          commandType: command.type,
+          target: commandTarget,
+        };
+        yield* checked(() => validateAgentReceiptMetadata(receiptMetadata));
+        const receipt = yield* Effect.result(
+          (command.type === "project.create" ||
+          command.type === "project.update" ||
+          command.type === "project.delete"
+            ? client.projects.mutate({ headers, payload: command })
+            : client.orchestration.dispatch({ headers, payload: command })
+          ).pipe(Effect.timeout(Duration.seconds(10))),
+        );
+        if (receipt._tag === "Failure" && isDispatchRejection(receipt.failure))
+          return {
+            ...receiptMetadata,
+            status: "rejected",
+            rejection: { code: receipt.failure.code, traceId: receipt.failure.traceId },
+            message:
+              "The server rejected the request before orchestration dispatch. No action was retried.",
+          };
+        if (receipt._tag === "Failure")
+          return {
+            ...receiptMetadata,
+            status: "unknown",
+            message:
+              "Dispatch did not return a receipt. It may have been accepted. Inspect the target before any further action; this CLI did not retry.",
+          };
+        const readback = yield* Effect.result(
+          Effect.gen(function* () {
+            const nextShell = yield* boundedHttp(client.orchestration.shellSnapshot({ headers }));
+            const nextDetail =
+              "threadId" in command ? yield* loadThread(command.threadId) : undefined;
+            return compactAgentSnapshot(target, nextShell, nextDetail);
+          }),
+        );
         return {
           ...receiptMetadata,
-          status: "rejected",
-          rejection: { code: receipt.failure.code, traceId: receipt.failure.traceId },
-          message:
-            "The server rejected the request before orchestration dispatch. No action was retried.",
+          status: "accepted",
+          sequence: "sequence" in receipt.success ? receipt.success.sequence : null,
+          providerCompletion: "not-confirmed",
+          projectionObserved:
+            readback._tag === "Success" &&
+            "sequence" in receipt.success &&
+            readback.success.snapshotSequence >= receipt.success.sequence,
+          readback: readback._tag === "Success" ? readback.success : undefined,
+          readbackError:
+            readback._tag === "Failure"
+              ? "Receipt accepted; subsequent readback failed."
+              : undefined,
         };
-      if (receipt._tag === "Failure")
-        return {
-          ...receiptMetadata,
-          status: "unknown",
-          message:
-            "Dispatch did not return a receipt. It may have been accepted. Inspect the target before any further action; this CLI did not retry.",
-        };
-      const readback = yield* Effect.result(
-        Effect.gen(function* () {
-          const nextShell = yield* boundedHttp(client.orchestration.shellSnapshot({ headers }));
-          const nextDetail =
-            "threadId" in command ? yield* loadThread(command.threadId) : undefined;
-          return compactAgentSnapshot(target, nextShell, nextDetail);
-        }),
-      );
-      return {
-        ...receiptMetadata,
-        status: "accepted",
-        sequence: "sequence" in receipt.success ? receipt.success.sequence : null,
-        providerCompletion: "not-confirmed",
-        projectionObserved:
-          readback._tag === "Success" &&
-          "sequence" in receipt.success && readback.success.snapshotSequence >= receipt.success.sequence,
-        readback: readback._tag === "Success" ? readback.success : undefined,
-        readbackError:
-          readback._tag === "Failure" ? "Receipt accepted; subsequent readback failed." : undefined,
-      };
-    }),
+      }),
   );
 });
 

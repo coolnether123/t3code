@@ -1,7 +1,6 @@
 import * as Schema from "effect/Schema";
 import { ModelSelection } from "./modelSelection.ts";
 
-
 // Router startup allows 600 seconds. Leave time to return the granted lease.
 export const CALL_PREPARE_TIMEOUT_MS = 660_000;
 

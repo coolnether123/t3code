@@ -1,6 +1,10 @@
 import * as ServerSettings from "../serverSettings.ts";
 import { type ComputerChromeScreenshot } from "@t3tools/contracts";
-import { ComputerStandardToolkit, ComputerScreenshotToolkit, ComputerScreenshotTool } from "./toolkits/computer/tools.ts";
+import {
+  ComputerStandardToolkit,
+  ComputerScreenshotToolkit,
+  ComputerScreenshotTool,
+} from "./toolkits/computer/tools.ts";
 import * as ComputerHandlers from "./toolkits/computer/handlers.ts";
 import * as ChromeAutomation from "../browser/ChromeAutomation.ts";
 import { makeChromeScreenshotStore } from "../browser/ChromeScreenshotStore.ts";
@@ -1011,14 +1015,20 @@ const registerComputerScreenshot = Effect.fn("McpHttpServer.registerComputerScre
             Stream.run(Sink.last()),
             Effect.flatMap(Effect.fromOption),
             Effect.flatMap(({ encodedResult }) =>
-              storeScreenshot(invocation.thread!.threadId, encodedResult as ComputerChromeScreenshot).pipe(
-                Effect.map((screenshot) => ({ encodedResult, screenshot })),
-              ),
+              storeScreenshot(
+                invocation.thread!.threadId,
+                encodedResult as ComputerChromeScreenshot,
+              ).pipe(Effect.map((screenshot) => ({ encodedResult, screenshot }))),
             ),
             Effect.provideService(ChromeAutomation.ChromeAutomation, automation),
             Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
             Effect.matchCauseEffect({
-              onFailure: (cause) => imageToolFailure("computer_screenshot", "screenshot", "Chrome screenshot failed.")(cause),
+              onFailure: (cause) =>
+                imageToolFailure(
+                  "computer_screenshot",
+                  "screenshot",
+                  "Chrome screenshot failed.",
+                )(cause),
               onSuccess: ({ encodedResult, screenshot }) => {
                 const { data, ...captureMetadata } = encodedResult as ComputerChromeScreenshot;
                 const metadata = { ...captureMetadata, screenshot };
@@ -1045,8 +1055,14 @@ const registerComputerScreenshot = Effect.fn("McpHttpServer.registerComputerScre
 );
 
 const layerComputerToolkit = Layer.mergeAll(
-  toolkitRegistration(ComputerStandardToolkit, ComputerHandlers.ComputerStandardToolkitHandlersLive),
-  imageToolRegistration(registerComputerScreenshot(), ComputerHandlers.ComputerScreenshotToolkitHandlersLive),
+  toolkitRegistration(
+    ComputerStandardToolkit,
+    ComputerHandlers.ComputerStandardToolkitHandlersLive,
+  ),
+  imageToolRegistration(
+    registerComputerScreenshot(),
+    ComputerHandlers.ComputerScreenshotToolkitHandlersLive,
+  ),
 );
 
 export const layerHtmlToolkit = Layer.mergeAll(

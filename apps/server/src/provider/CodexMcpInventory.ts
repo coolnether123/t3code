@@ -144,4 +144,3 @@ export function formatCodexAppServerReadFailure(
     .replace(CODEX_INVENTORY_CONTROL_CHARS, " ")
     .slice(0, 240);
 }
-

@@ -519,15 +519,13 @@ export async function preflightCodexMcpServers(
           return await withAbort(
             probe(server.url, timeoutMs, { signal: controller.signal, pinnedAddress }),
             controller.signal,
-          ).catch(
-            (error: unknown): ProbeResult => ({
-              reachable: false,
-              reason:
-                error instanceof Error && error.name === "AbortError"
-                  ? "timeout"
-                  : "connection-failed",
-            }),
-          );
+          ).catch((error: unknown): ProbeResult => ({
+            reachable: false,
+            reason:
+              error instanceof Error && error.name === "AbortError"
+                ? "timeout"
+                : "connection-failed",
+          }));
         } finally {
           clearTimeout(timeout);
         }

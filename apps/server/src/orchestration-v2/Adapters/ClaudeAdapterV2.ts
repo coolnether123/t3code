@@ -8549,7 +8549,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             queryOptions.mcpServers = {};
             queryOptions.strictMcpConfig = true;
             queryOptions.settingSources = [];
-            queryOptions.settings = { ...(typeof queryOptions.settings === "object" ? queryOptions.settings : {}), disableAllHooks: true };
+            queryOptions.settings = {
+              ...(typeof queryOptions.settings === "object" ? queryOptions.settings : {}),
+              disableAllHooks: true,
+            };
             queryOptions.env = { ...queryOptions.env, ENABLE_CLAUDEAI_MCP_SERVERS: "false" };
           }
           const querySession = yield* queryRunner

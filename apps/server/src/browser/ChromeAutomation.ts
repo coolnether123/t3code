@@ -1,4 +1,7 @@
-import { Environment as HostProcessEnvironment, Platform as HostProcessPlatform } from "@t3tools/shared/HostProcess";
+import {
+  Environment as HostProcessEnvironment,
+  Platform as HostProcessPlatform,
+} from "@t3tools/shared/HostProcess";
 import { resolveCommandPath } from "@t3tools/shared/shell";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
