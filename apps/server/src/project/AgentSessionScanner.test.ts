@@ -1,5 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeOS from "node:os";
+import * as NodeZlib from "node:zlib";
 import { describe, expect, it } from "@effect/vitest";
 import {
   type OrchestrationProjectShell,
@@ -1330,6 +1331,69 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
           expect(imported[0]?.thread.messages.map((message) => message.text)).toEqual([
             "Prompt 104",
           ]);
+        }),
+    );
+
+    it.effect.each(["valid", "truncated", "oversized"] as const)(
+      "reads compressed native history without changing the source: %s",
+      (variant) =>
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          const fs = yield* FileSystem.FileSystem;
+          const nowMs = Date.parse("2026-08-24T12:00:00.000Z");
+          yield* TestClock.setTime(nowMs);
+          const claudeHomePath = yield* makeTempDir("t3-zstd-claude-");
+          const codexHomePath = yield* makeTempDir("t3-zstd-codex-");
+          const workspace = yield* makeTempDir("t3-zstd-project-");
+          const directory = path.join(codexHomePath, "sessions", "2026", "08", "24");
+          yield* fs.makeDirectory(directory, { recursive: true });
+          const filePath = path.join(directory, "rollout-compressed.jsonl.zst");
+          const contents = [
+            encodeTranscriptRecord({
+              type: "session_meta",
+              payload: { id: "compressed", cwd: workspace },
+            }),
+            encodeTranscriptRecord({
+              type: "event_msg",
+              payload: {
+                type: "user_message",
+                message:
+                  variant === "oversized"
+                    ? "x".repeat(33 * 1024 * 1024)
+                    : "Synthetic compressed question",
+              },
+            }),
+            encodeTranscriptRecord({
+              type: "response_item",
+              payload: {
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "Synthetic answer" }],
+              },
+            }),
+          ].join("\n");
+          const compressed = NodeZlib.zstdCompressSync(Buffer.from(contents));
+          const bytes =
+            variant === "truncated" ? compressed.subarray(0, compressed.length - 1) : compressed;
+          yield* fs.writeFile(filePath, bytes);
+          yield* fs.utimes(filePath, nowMs / 1_000, nowMs / 1_000);
+          const outcomes = yield* Effect.gen(function* () {
+            const scanner = yield* AgentSessionScanner.AgentSessionScanner;
+            return yield* scanner
+              .recentThreads(workspace, [], ["compressed"])
+              .pipe(Stream.runCollect);
+          }).pipe(Effect.provide(makeScannerTestLayer({ claudeHomePath, codexHomePath })));
+          const imported = outcomes.flatMap((outcome) =>
+            outcome._tag === "Importable" ? [outcome] : [],
+          );
+          if (variant === "valid") {
+            expect(imported.map((item) => item.thread.providerSessionId)).toEqual(["compressed"]);
+            expect(imported[0]?.thread.messages.map((message) => message.text)).toEqual([
+              "Synthetic compressed question",
+              "Synthetic answer",
+            ]);
+          } else expect(imported).toEqual([]);
+          expect(Array.from(yield* fs.readFile(filePath))).toEqual(Array.from(bytes));
         }),
     );
 

@@ -44,6 +44,11 @@ Require the `selectedAgentSessionImport` environment capability before sending
 the selection. Older servers do not understand that field and import recent
 history instead.
 
+Codex `.jsonl.zst` histories are decoded as a stream without rewriting the
+source. Stored and expanded bytes each have a 4 GiB request budget. The same
+32 MiB selected-history limit applies after decompression. A damaged or
+over-budget transcript is skipped before any messages are imported.
+
 An imported conversation retains the original provider resume cursor. This
 operation imports history and never starts a provider turn or forks a session.
 Inspect `missingProviderSessionIds` and read back the runtime bindings before

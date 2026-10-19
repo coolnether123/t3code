@@ -14,6 +14,8 @@
  * @module project/AgentSessionScanner
  */
 import * as NodeOS from "node:os";
+import * as NodeZlib from "node:zlib";
+import * as NodeStream from "@effect/platform-node/NodeStream";
 
 import {
   AgentSessionScanError,
@@ -644,6 +646,46 @@ export const make = Effect.gen(function* () {
   const statOption = (target: string) =>
     fileSystem.stat(target).pipe(Effect.map(Option.some), Effect.orElseSucceed(Option.none));
 
+  const openTranscript = Effect.fn("AgentSessionScanner.openTranscript")(function* (
+    filePath: string,
+  ) {
+    const file = yield* fileSystem.open(filePath, { flag: "r" });
+    if (!filePath.endsWith(".jsonl.zst")) return file;
+    // Decode from the same open file whose identity the scanner checks.
+    const chunks = Stream.unfold(null, () =>
+      file
+        .readAlloc(TRANSCRIPT_PREFIX_BYTES)
+        .pipe(
+          Effect.map((chunk) =>
+            Option.isSome(chunk) ? ([chunk.value, null] as const) : undefined,
+          ),
+        ),
+    ).pipe(NodeStream.pipeThroughDuplex({ evaluate: () => NodeZlib.createZstdDecompress() }));
+    const readable = yield* NodeStream.toReadable(chunks);
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => {
+        readable.destroy();
+      }),
+    );
+    const iterator: AsyncIterator<Uint8Array> = readable[Symbol.asyncIterator]();
+    let pending: Uint8Array = new Uint8Array(0);
+    return {
+      stat: file.stat,
+      readAlloc: (size: FileSystem.SizeInput) =>
+        Effect.tryPromise(async () => {
+          if (pending.byteLength === 0) {
+            const next = await iterator.next();
+            if (next.done) return Option.none<Uint8Array>();
+            pending = next.value;
+          }
+          const count = Math.min(Number(size), pending.byteLength);
+          const bytes = pending.subarray(0, count);
+          pending = pending.subarray(count);
+          return Option.some(bytes);
+        }),
+    };
+  });
+
   /** Match directory aliases without assuming the host volume is case-insensitive. */
   const directoryIdentity = Effect.fn("AgentSessionScanner.directoryIdentity")(function* (
     target: string,
@@ -682,14 +724,16 @@ export const make = Effect.gen(function* () {
     }
     budget.operationsRemaining -= 1;
     return yield* Effect.scoped(
-      fileSystem.open(transcript.filePath, { flag: "r" }).pipe(
+      openTranscript(transcript.filePath).pipe(
         Effect.flatMap((file) =>
           Effect.gen(function* () {
             const decoder = new TextDecoder();
             let remaining = "";
             let bytesRead = 0;
             let recordsRead = 0;
-            const maxBytes = Math.min(MAX_TRANSCRIPT_SCAN_BYTES, transcript.size);
+            const maxBytes = transcript.filePath.endsWith(".jsonl.zst")
+              ? MAX_TRANSCRIPT_SCAN_BYTES
+              : Math.min(MAX_TRANSCRIPT_SCAN_BYTES, transcript.size);
             const reserveRecord = () => {
               if (
                 recordsRead === MAX_METADATA_RECORDS_PER_TRANSCRIPT ||
@@ -736,7 +780,7 @@ export const make = Effect.gen(function* () {
               }
             }
 
-            if (bytesRead < transcript.size) {
+            if (transcript.filePath.endsWith(".jsonl.zst") || bytesRead < transcript.size) {
               budget.truncated = true;
               return null;
             }
@@ -757,11 +801,12 @@ export const make = Effect.gen(function* () {
     expected: ReturnType<typeof transcriptIdentity>,
     recordLimit: number,
     source: AgentSessionSource,
+    expandedBudget: { bytesRemaining: number },
   ) {
     if (expected.size > MAX_IMPORTED_TRANSCRIPT_BYTES) return null;
 
     return yield* Effect.scoped(
-      fileSystem.open(filePath, { flag: "r" }).pipe(
+      openTranscript(filePath).pipe(
         Effect.flatMap((file) =>
           Effect.gen(function* () {
             if (!sameTranscriptIdentity(expected, transcriptIdentity(filePath, yield* file.stat))) {
@@ -800,15 +845,24 @@ export const make = Effect.gen(function* () {
               return true;
             };
 
-            while (bytesRead < expected.size) {
+            const compressed = filePath.endsWith(".jsonl.zst");
+            while (compressed || bytesRead < expected.size) {
               const next = yield* file.readAlloc(
-                Math.min(TRANSCRIPT_PREFIX_BYTES, expected.size - bytesRead),
+                compressed
+                  ? TRANSCRIPT_PREFIX_BYTES
+                  : Math.min(TRANSCRIPT_PREFIX_BYTES, expected.size - bytesRead),
               );
               if (Option.isNone(next)) {
+                if (compressed) break;
                 return null;
               }
 
               bytesRead += next.value.byteLength;
+              if (next.value.byteLength > expandedBudget.bytesRemaining) {
+                expandedBudget.bytesRemaining = 0;
+                return null;
+              }
+              expandedBudget.bytesRemaining -= next.value.byteLength;
               const withinBudget = yield* Effect.try(() => {
                 let start = 0;
                 while (start < next.value.byteLength) {
@@ -949,7 +1003,11 @@ export const make = Effect.gen(function* () {
             }
             const directory = path.join(sessionsDir, year, month, day);
             for (const entry of (yield* readDirectory(directory)).toSorted().toReversed()) {
-              if (!entry.startsWith("rollout-") || !entry.endsWith(".jsonl")) continue;
+              if (
+                !entry.startsWith("rollout-") ||
+                !(entry.endsWith(".jsonl") || entry.endsWith(".jsonl.zst"))
+              )
+                continue;
               if (operationsRemaining <= 0) {
                 truncated = true;
                 break;
@@ -1285,7 +1343,7 @@ export const make = Effect.gen(function* () {
         if (
           selectedSessions !== null &&
           !Array.from(selectedSessions).some((id) => {
-            const name = path.basename(transcript.filePath);
+            const name = path.basename(transcript.filePath).replace(/\.zst$/, "");
             return name === `${id}.jsonl` || name.endsWith(`-${id}.jsonl`);
           })
         ) {
@@ -1318,6 +1376,7 @@ export const make = Effect.gen(function* () {
     );
     const importedSessions = new Set<string>();
     let bytesRemaining = MAX_IMPORT_BYTES;
+    const expandedBudget = { bytesRemaining: MAX_IMPORT_BYTES };
     let transcriptsRemaining = MAX_IMPORT_TRANSCRIPTS;
     let recordsRemaining = MAX_IMPORT_RECORDS;
     return Stream.fromIteratorSucceed(eligibleTranscripts.values(), 1).pipe(
@@ -1328,7 +1387,10 @@ export const make = Effect.gen(function* () {
           );
           if (
             completed === undefined &&
-            (transcriptsRemaining === 0 || bytesRemaining === 0 || recordsRemaining === 0)
+            (transcriptsRemaining === 0 ||
+              bytesRemaining === 0 ||
+              expandedBudget.bytesRemaining === 0 ||
+              recordsRemaining === 0)
           ) {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
           }
@@ -1355,6 +1417,7 @@ export const make = Effect.gen(function* () {
           if (
             transcriptsRemaining === 0 ||
             recordsRemaining === 0 ||
+            expandedBudget.bytesRemaining === 0 ||
             identity.size > MAX_IMPORTED_TRANSCRIPT_BYTES ||
             identity.size > bytesRemaining
           ) {
@@ -1368,6 +1431,7 @@ export const make = Effect.gen(function* () {
             identity,
             recordsRemaining,
             candidate.source,
+            expandedBudget,
           );
           if (snapshot === null) {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
