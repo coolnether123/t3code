@@ -1696,7 +1696,10 @@ export const createCodexAdapterV2 = (
     const settings = {
       ...config,
       enabled,
-      binaryPath: yield* resolveCodexBinaryPath(config, hostEnvironment),
+      binaryPath: expandHomePath(
+        yield* resolveCodexBinaryPath(config, hostEnvironment),
+        yield* HostProcess.HomeDirectory,
+      ),
       homePath: config.useDesktopAppDaemon ? "" : (homeLayout.effectiveHomePath ?? ""),
     } satisfies CodexSettings;
 
