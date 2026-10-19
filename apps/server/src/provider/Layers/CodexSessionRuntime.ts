@@ -1,3 +1,4 @@
+import { loadWorkBrowserRunBinding } from "../WorkBrowserRunBinding.ts";
 import {
   ApprovalRequestId,
   DEFAULT_MODEL,
@@ -1592,6 +1593,32 @@ export const makeCodexSessionRuntime = (
     yield* recoverCodexDenyReadAclState();
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const runtimeScope = yield* Scope.Scope;
+    const browserRunBinding = yield* Effect.tryPromise(() =>
+      loadWorkBrowserRunBinding(options.environment ?? process.env),
+    ).pipe(
+      Effect.mapError(
+        (cause) =>
+          new CodexErrors.CodexAppServerSpawnError({
+            command: "work-browser run owner",
+            cause,
+          }),
+      ),
+    );
+    if (browserRunBinding) {
+      options = {
+        ...options,
+        appServerArgs: [...(options.appServerArgs ?? []), ...browserRunBinding.appServerArgs],
+      };
+      yield* Effect.addFinalizer(() => Effect.sync(() => browserRunBinding.close()));
+    }
+    const browserRunEvent = (operation: () => Promise<unknown> | undefined) =>
+      Effect.tryPromise(async () => {
+        await operation();
+      }).pipe(
+        Effect.catch((cause) =>
+          Effect.logError("Work-browser run cleanup or binding failed", { cause }),
+        ),
+      );
     const daemonThreadConfig = desktopDaemon
       ? yield* buildCodexDaemonThreadConfig(
           buildCodexAppServerConfigArgs(options),
@@ -2260,10 +2287,14 @@ export const makeCodexSessionRuntime = (
           if (!providerThreadId || payload.threadId !== providerThreadId) {
             return Effect.void;
           }
-          return updateSession(sessionRef, {
-            status: "running",
-            activeTurnId: TurnId.make(payload.turn.id),
-          });
+          return browserRunEvent(() => browserRunBinding?.begin(payload.turn.id)).pipe(
+            Effect.andThen(
+              updateSession(sessionRef, {
+                status: "running",
+                activeTurnId: TurnId.make(payload.turn.id),
+              }),
+            ),
+          );
         }),
       ),
     );
@@ -2278,11 +2309,17 @@ export const makeCodexSessionRuntime = (
             payload.turn.status === "failed" && "error" in payload.turn && payload.turn.error
               ? payload.turn.error.message
               : undefined;
-          return updateSession(sessionRef, {
-            status: payload.turn.status === "failed" ? "error" : "ready",
-            activeTurnId: undefined,
-            ...(lastError ? { lastError } : {}),
-          });
+          return browserRunEvent(() =>
+            browserRunBinding?.end(payload.turn.id, payload.turn.status),
+          ).pipe(
+            Effect.andThen(
+              updateSession(sessionRef, {
+                status: payload.turn.status === "failed" ? "error" : "ready",
+                activeTurnId: undefined,
+                ...(lastError ? { lastError } : {}),
+              }),
+            ),
+          );
         }),
       ),
     );
@@ -2296,9 +2333,16 @@ export const makeCodexSessionRuntime = (
           }
           const errorMessage = payload.error.message;
           const willRetry = payload.willRetry;
-          return updateSession(sessionRef, {
-            status: willRetry ? "running" : "error",
-            ...(errorMessage ? { lastError: errorMessage } : {}),
+          return Effect.gen(function* () {
+            const session = yield* Ref.get(sessionRef);
+            const runId = session.activeTurnId;
+            if (!willRetry && runId) {
+              yield* browserRunEvent(() => browserRunBinding?.end(runId, "failed"));
+            }
+            yield* updateSession(sessionRef, {
+              status: willRetry ? "running" : "error",
+              ...(errorMessage ? { lastError: errorMessage } : {}),
+            });
           });
         }),
       ),
@@ -2721,6 +2765,7 @@ export const makeCodexSessionRuntime = (
             if (closed) {
               return Effect.void;
             }
+            browserRunBinding?.close();
             const nextStatus = desktopDaemon ? "error" : exitCode === 0 ? "closed" : "error";
             return updateSession(sessionRef, {
               status: nextStatus,
@@ -2856,6 +2901,12 @@ export const makeCodexSessionRuntime = (
       if (alreadyClosed) {
         return;
       }
+      const browserSession = yield* Ref.get(sessionRef);
+      const browserRunId = browserSession.activeTurnId;
+      if (browserRunId) {
+        yield* browserRunEvent(() => browserRunBinding?.end(browserRunId, "cancelled"));
+      }
+      browserRunBinding?.close();
       yield* settlePendingApprovals("cancel");
       yield* settlePendingUserInputs({});
       yield* updateSession(sessionRef, {
@@ -3069,6 +3120,7 @@ export const makeCodexSessionRuntime = (
             threadId: providerThreadId,
             turnId: effectiveTurnId,
           });
+          yield* browserRunEvent(() => browserRunBinding?.end(effectiveTurnId, "cancelled"));
         }),
       readThread: Effect.gen(function* () {
         const providerThreadId = yield* readProviderThreadId;
