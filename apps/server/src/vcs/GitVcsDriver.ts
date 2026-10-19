@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off - Git checkpoint names require native path handling and a synchronous content digest.
+import * as NodePath from "node:path";
+import * as NodeCrypto from "node:crypto";
 import * as NodeBuffer from "node:buffer";
 
 import * as Context from "effect/Context";
@@ -1311,8 +1314,8 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
       // On Windows the same clean can remove './' and exit 0.
       yield* recreateWorkspace;
 
-      if ("restored" in restoreResult) {
-        return restoreResult;
+      if (yield* hasHeadCommit(input.cwd)) {
+        yield* execute({ operation, cwd: input.cwd, args: ["reset", "--quiet", "--", "."] });
       }
 
       return { restored: true, commitOid };

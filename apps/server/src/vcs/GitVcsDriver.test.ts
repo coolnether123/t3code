@@ -1064,11 +1064,11 @@ it.effect("restores empty checkpoints without changing paths outside the workspa
         yield* fileSystem.writeFileString(addedPath, "new\n");
         if (staged) yield* runGit(cwd, ["add", "added.txt"]);
         assert.isTrue(
-          yield* driver.checkpoints.restoreCheckpoint({
+          (yield* driver.checkpoints.restoreCheckpoint({
             cwd,
             checkpointRef,
             fallbackToHead: false,
-          }),
+          })).restored,
         );
         assert.isTrue(yield* fileSystem.exists(cwd));
         assert.isFalse(yield* fileSystem.exists(addedPath));
@@ -1081,7 +1081,8 @@ it.effect("restores empty checkpoints without changing paths outside the workspa
       yield* fileSystem.makeDirectory(path.join(cwd, "untracked"));
       yield* fileSystem.writeFileString(path.join(cwd, "untracked", "file.txt"), "remove\n");
       assert.isTrue(
-        yield* driver.checkpoints.restoreCheckpoint({ cwd, checkpointRef, fallbackToHead: false }),
+        (yield* driver.checkpoints.restoreCheckpoint({ cwd, checkpointRef, fallbackToHead: false }))
+          .restored,
       );
       assert.strictEqual(yield* fileSystem.readFileString(path.join(cwd, "ignored.txt")), "keep\n");
       assert.isFalse(yield* fileSystem.exists(path.join(cwd, "untracked")));
