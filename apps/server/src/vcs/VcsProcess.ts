@@ -267,9 +267,7 @@ export const make = Effect.gen(function* () {
         baseError,
         {
           exitCode: result.code,
-          stdout: result.stdout,
           stderr: result.stderr,
-          stdoutTruncated: result.stdoutTruncated,
           stderrTruncated: result.stderrTruncated,
         },
         failureKind,
