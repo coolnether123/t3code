@@ -667,7 +667,6 @@ const accepted = await runAcceptanceWithDeadline({
         // Reload so the real controls read the persisted per-chat selection.
         await page.reload();
       }
-      await page.getByRole("button", { name: "Choose model", exact: true }).waitFor();
       await page.getByRole("button", { name: "Call Otis", exact: true }).waitFor();
       await instrument();
       await start();

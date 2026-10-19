@@ -55,6 +55,8 @@ export function ThreadVoiceControls({
   ensureThread(options: CallOptions): Promise<void>;
   isDraft: boolean;
   onActiveChange?: ((active: boolean) => void) | undefined;
+  onPanelOpenChange?: ((open: boolean) => void) | undefined;
+  defaultOpen?: boolean | undefined;
   enabled: boolean;
   running: boolean;
   connected: boolean;
@@ -62,7 +64,7 @@ export function ThreadVoiceControls({
   const [state, setState] = useState<VoiceState>("idle");
   const [detail, setDetail] = useState<string>();
   const [call, setCall] = useState<CallStatus>();
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(props.defaultOpen ?? false);
   const [preferences, setModels] = useState<CallModels>(() =>
     initialCallModels(
       props.instanceEntries.map((entry) => entry.snapshot),
@@ -248,19 +250,25 @@ export function ThreadVoiceControls({
     );
   }, [messages, props.running, latestTurnId, models]);
   const active = state !== "idle";
+  const panelOpen = active || expanded || !!detail;
+  // The phone composer collapses on blur, which would hide the panel's anchor mid-call.
+  useEffect(() => {
+    callbacks.current.onPanelOpenChange?.(panelOpen);
+  }, [panelOpen]);
+  useEffect(() => () => callbacks.current.onPanelOpenChange?.(false), []);
   const selection = models.voice;
   const unheard = updates.filter(
     (update) => !update.heardAt && (update.status === "done" || update.status === "needs-Jared"),
   );
   return (
-    <Popover open={active || expanded || !!detail} onOpenChange={setExpanded}>
+    <Popover open={panelOpen} onOpenChange={setExpanded}>
       <div ref={anchorRef} className="relative" data-voice-state={state}>
         {!active ? (
           <Button type="button" size="sm" variant="outline" onClick={() => setExpanded(!expanded)}>
             Call Otis
           </Button>
         ) : null}
-        {active || expanded || detail ? (
+        {panelOpen ? (
           <PopoverPopup
             aria-label="Otis call controls"
             anchor={anchorRef}

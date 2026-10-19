@@ -2439,13 +2439,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     key: 0,
     active: false,
   });
+  const [isVoicePanelOpen, setIsVoicePanelOpen] = useState(false);
   // A pending question stays expanded: its card moves into the banner dock,
-  // so collapsing would leave the surface empty and squashed beneath it.
+  // so collapsing would leave the surface empty and squashed beneath it. An open
+  // call panel is anchored inside the expanded footer, so it keeps it shown too.
   const isComposerCollapsedMobile =
     isMobileViewport &&
     !forceExpandedOnMobile &&
     !isComposerFocused &&
     !hasMultilinePrompt &&
+    !isVoicePanelOpen &&
     pendingUserInputs.length === 0;
 
   const composerEditorRef = useRef<ComposerPromptEditorHandle>(null);
@@ -6561,6 +6564,22 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     (showProviderUnavailable ? "Enable a provider in Settings" : "Ask anything...")}
                 </button>
                 {collapsedComposerImagePreviews}
+                {activeThread ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="shrink-0"
+                    onPointerDown={(event) => event.preventDefault()}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      // Expands the footer, which mounts the call controls with their panel open.
+                      setIsVoicePanelOpen(true);
+                    }}
+                  >
+                    Call Otis
+                  </Button>
+                ) : null}
                 <button
                   type="button"
                   data-chat-composer-transition-actions="true"
@@ -7253,6 +7272,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     <ThreadVoiceControls
                       key={`${environmentId}:${activeThread.id}`}
                       ref={voiceRef}
+                      onPanelOpenChange={setIsVoicePanelOpen}
+                      defaultOpen={isVoicePanelOpen}
                       instanceEntries={providerInstanceEntries}
                       modelOptionsByInstance={modelOptionsByInstance}
                       threadId={activeThread.id}
