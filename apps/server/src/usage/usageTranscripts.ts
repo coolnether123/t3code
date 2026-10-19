@@ -7,6 +7,7 @@
  * @module usageTranscripts
  */
 import type { UsageProviderKind, UsageTokenTotals } from "@t3tools/contracts";
+import { CLAUDE_SYNTHETIC_MODEL } from "../provider/Drivers/claudeUsage.ts";
 import { normalizeServiceTier } from "./codexServiceTier.ts";
 
 export interface UsageRecord {
@@ -123,7 +124,7 @@ export function parseClaudeLine(line: string): UsageRecord | null {
   if (timestampMs === null) return null;
 
   const model = typeof messageRecord["model"] === "string" ? messageRecord["model"] : "";
-  if (model.length === 0) return null;
+  if (model.length === 0 || model === CLAUDE_SYNTHETIC_MODEL) return null;
 
   const messageId = typeof messageRecord["id"] === "string" ? messageRecord["id"] : null;
   const requestId = typeof record["requestId"] === "string" ? record["requestId"] : null;

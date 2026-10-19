@@ -21,6 +21,7 @@ import type {
   UsageRepeatedInputSourceKind,
 } from "@t3tools/contracts";
 
+import { CLAUDE_SYNTHETIC_MODEL } from "../provider/Drivers/claudeUsage.ts";
 import type { CodexScanState, UsageRecord } from "./usageTranscripts.ts";
 import {
   REPEATED_INPUT_CACHE_VERSION,
@@ -578,6 +579,10 @@ function decodeSerializedFile(
       corrupt = true;
       break;
     }
+
+    // Unchanged and deleted transcripts may only exist in the cache, so the
+    // parser cannot remove their previously saved local placeholders.
+    if (provider === "claude" && model === CLAUDE_SYNTHETIC_MODEL) continue;
 
     records.push({
       provider,
