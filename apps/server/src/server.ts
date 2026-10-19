@@ -1,6 +1,7 @@
 import * as VoiceRuntime from "./speech/VoiceRuntime.ts";
 import * as AuxiliaryProviderSessions from "./provider/AuxiliaryProviderSessions.ts";
 import * as VoiceThreadService from "./speech/VoiceThreadService.ts";
+import * as ThreadCommandExecutor from "./orchestration-v2/ThreadCommandExecutor.ts";
 import { speechRouteLayer } from "./speech/http.ts";
 import { codexDesktopRouteLayer } from "./provider/CodexDesktopHttp.ts";
 import * as ChromeAutomation from "./browser/ChromeAutomation.ts";
@@ -669,7 +670,17 @@ const layerAuxiliarySessions = AuxiliaryProviderSessions.layer.pipe(
   Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
 );
 const layerRuntimeDependencies = VoiceRuntime.layer.pipe(
-  Layer.provideMerge(VoiceThreadService.layer),
+  Layer.provideMerge(
+    VoiceThreadService.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          RuntimeLayer.layerEventSink,
+          ProjectionStoreV2.layer,
+          ThreadCommandExecutor.layer,
+        ),
+      ),
+    ),
+  ),
   Layer.provideMerge(layerAuxiliarySessions),
   Layer.provideMerge(layerRuntimeCoreDependencies),
   Layer.provideMerge(layerUsage),

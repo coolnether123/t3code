@@ -17,6 +17,7 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
+import type * as Scope from "effect/Scope";
 import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
 import { rpcInitialItems } from "./rpcInitialItems.ts";
@@ -109,7 +110,7 @@ import {
   HttpServerRespondable,
   HttpServerResponse,
 } from "effect/http";
-import { RpcSerialization, RpcServer } from "effect/rpc";
+import { RpcSerialization, RpcServer, type Rpc, type RpcGroup } from "effect/rpc";
 
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as ServerConfig from "./config.ts";
@@ -546,6 +547,28 @@ const PROVIDER_STATUS_DEBOUNCE_MS = 200;
 
 // Middleware added later wraps middleware added earlier, so instrumentation wraps authorization.
 const ServerWsRpcGroup = WsRpcGroup.middleware(RpcInstrumentation);
+// Concrete handler signatures prevent service extraction from recursively
+// expanding every inferred response in this large RPC group.
+type ServerWsHandlers = {
+  readonly [Current in RpcGroup.Rpcs<typeof ServerWsRpcGroup> as Current["_tag"]]: Rpc.ToHandlerFn<
+    Current,
+    | Scope.Scope
+    | Crypto.Crypto
+    | FileSystem.FileSystem
+    | Path.Path
+    | ServerConfig.ServerConfig
+    | Orchestrator.OrchestratorV2
+    | OrchestrationEventStore.OrchestrationEventStore
+    | ProjectEnrichmentService.ProjectEnrichmentService
+    | ProjectService.ProjectService
+    | ProjectStore.ProjectStoreV2
+    | SqlClient.SqlClient
+    | ThreadManagementService.ThreadManagementService
+    | TraceDiagnostics.TraceDiagnostics
+    | Effect.Services<ReturnType<typeof issueAssetUrl>>
+    | Effect.Services<ReturnType<typeof issueAttachmentUploadUrl>>
+  >;
+};
 const ServerUsageRpcGroup = LegacyUsageRpcGroup.middleware(RpcInstrumentation);
 // Replaying each intervening event costs a shell refetch; past this gap a
 // single O(active-threads) snapshot is cheaper and bounded.
@@ -1797,7 +1820,7 @@ const layerWsRpc = (
         return result;
       });
 
-      const handlers = ServerWsRpcGroup.of({
+      const handlers: ServerWsHandlers = {
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
           Effect.annotateCurrentSpan({
             "orchestration_v2.command_id": command.commandId,
@@ -3096,7 +3119,7 @@ const layerWsRpc = (
               Stream.concat(Stream.make(latest), changes),
             ),
           ),
-      });
+      };
       return handlers;
     }),
   );
