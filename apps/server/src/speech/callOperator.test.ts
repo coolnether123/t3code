@@ -169,6 +169,50 @@ describe("call delegation", () => {
     expect((await f.operator.read("chat"))!.jobs).toEqual([]);
     expect(f.ports.send).toHaveBeenCalledTimes(1);
   });
+  it.each(["done", "needs-Jared"] as const)(
+    "keeps a %s handoff private while sending its saved context to the voice model",
+    async (status) => {
+      const f = await fixture();
+      const text = status === "done" ? "The build passed." : "Which branch should I check?";
+      await f.operator.update("chat", "job", "result", status, text);
+      await f.operator.announce("chat", "call");
+      const command = vi.mocked(f.ports.dispatch).mock.calls.at(-1)![0];
+      expect(command.type).toBe("thread.turn.start");
+      if (command.type !== "thread.turn.start") throw new Error("Expected an announcement turn.");
+      expect(command.message.text).toBe("Background update ready.");
+      expect(command.message.text).not.toContain(text);
+
+      // A later receipt must wait for its own announcement.
+      await f.operator.update("chat", "later-job", "later", "done", "Another result.");
+      const reopened = new CallOperator(f.store);
+      reopened.bind(f.ports);
+      await reopened.voice({
+        threadId: "chat",
+        messageId: command.message.messageId,
+        text: command.message.text,
+        selection: models.voice,
+      });
+      const voice = (await reopened.read("chat"))!.links.find((link) => link.role === "voice")!;
+      await reopened.event(f.event(voice.sessionId, "turn.started", command.message.messageId));
+      const providerInput = vi.mocked(f.ports.send).mock.calls.at(-1)![0].input;
+      const announcement = providerInput?.split("Operator update at this pause:\n")[1];
+      expect(announcement).toContain(JSON.stringify([{ status, text }]));
+      expect(announcement).toContain("Do not delegate these updates back to the operator.");
+      expect(announcement).not.toContain("Another result.");
+      expect(providerInput).toContain("The build in this workspace.");
+      await reopened.event(
+        f.event(voice.sessionId, "turn.completed", command.message.messageId, {
+          state: "completed",
+        }),
+        '<otis-delegate>{"intent":"Must not delegate announcements"}</otis-delegate>',
+      );
+      await reopened.drain();
+      expect((await reopened.read("chat"))!.jobs).toHaveLength(0);
+      expect((await reopened.read("chat"))!.updates[0]?.announcementTurnId).toBe(
+        command.message.messageId,
+      );
+    },
+  );
   it("pins each delegated selection and applies a model change on the next voice turn", async () => {
     const f = await fixture();
     const link = await f.startVoice();

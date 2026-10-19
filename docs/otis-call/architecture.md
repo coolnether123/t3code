@@ -21,6 +21,15 @@ and requests a voice announcement at a pause. See `handoff-phase2.md` for checks
 and explicit compatibility limits. The remaining sections describe the phase 1
 speech/archive foundation.
 
+Announcement prompts are built from saved operator updates inside the linked
+voice session. Shared client conversation state omits their internal
+`voice-update:` user messages, including cached history. Background status
+activity and the voice model's natural reply stay visible in the same thread.
+
+The web call panel uses T3's existing popover portal and collision positioning.
+Dynamic viewport and safe-area limits bound its height. Settings and updates
+scroll separately from the status header and primary call actions.
+
 ## Owners and flow
 
 | Owner                                                 | Responsibility                                                                                                     |

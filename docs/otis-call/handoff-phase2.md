@@ -1,19 +1,181 @@
 # Otis Call phase 2 handoff
 
 Task `agenda-task:515bbc54cb61482681e950e524421ce4`.
-Empty-speech fix base `bd62911144`, branch `work/otis-call-20261018`, upstream
+Handoff visibility and phone panel fixes base `75381552b7`, branch `work/otis-call-20261018`, upstream
 `origin/work/otis-call-20261018`. Changes remain uncommitted as requested.
 Observation date: 18 October 2026, America/Chicago, CDT.
 
-The parent committed request recovery as `bd62911144`. Live acceptance then
-identified a local empty-text request as the cause of both prior speech alerts.
-This small follow-up skips silent fragments and separates request validation
-from response decoding. Changes remain uncommitted. No live T3, router or
-launcher changes, restarts or subagents were used. The parent owns restart,
-real call acceptance and publication.
+The parent accepted `75381552b7` in `.logs/otis-call/phase2-live-5/report.json`:
+seven sentences played, the operator result was heard and hang-up acknowledged.
+The report records Claude Haiku 5.5 with SDK effort medium and requests
+GPT-6.1-Sol medium for the operator. It does not independently attest the
+operator model or effort. These are parent-run results for the base revision.
+The saved 390 px screenshot shows the remaining defect: an internal announcement
+prompt and its JSON displayed as a user message.
+
+This follow-up keeps that handoff out of the visible conversation. No live T3,
+router or launcher changes, restarts or subagents were used. Changes remain
+uncommitted. The parent owns publication and visual acceptance of this fix.
+
+The parent then reported Jared's 19:24 CDT iPhone Safari observation over
+Tailscale. The saved screenshot is
+`A:/Dev/Artifacts/agent-packets/otis-call-20261018/jared-phone-panel-cutoff.png`.
+Its call panel extends above the visible page. The model settings at the top
+cannot be reached. The second fix is in the same uncommitted change set.
+The parent's separate live provider/model visibility settings are untouched.
+
+## Phone panel viewport follow-up
+
+`apps/web/src/components/chat/ThreadVoiceControls.tsx` previously positioned
+the panel absolutely above the composer and limited its height to `70dvh`.
+That limit did not account for how little space remained above the composer;
+ancestor clipping could also hide it. All content, including actions, used
+one scroll container.
+
+The panel now uses the existing `Popover` / `PopoverPopup`, anchored to the
+same composer control. Its portal avoids ancestor clipping and its existing
+collision positioning supplies `--available-height`. The content is bounded
+by that space and `100dvh`, less safe-area insets and margin; width uses
+`100dvw`. The status header and primary action footer do not shrink or scroll.
+Only settings, errors, preparation steps and unheard updates scroll inside
+the panel. Start, Send speech, Retry and End call keep the existing controller
+callbacks. Opening the panel does not move keyboard focus.
+
+No new production helper or generic popover behavior was added. Web and
+Electron share this panel; native mobile still has no Otis Call controls.
+The callback tests cover before-call, Listening and Call needs attention,
+including portal placement outside the composer and separate action routing.
+They do not measure CSS layout.
+
+The ignored report folder `.logs/otis-call/phase2-phone-panel` contains the
+isolated fixture and browser runner. It builds the actual controls, selectors,
+popover and production stylesheet with synthetic call ports and a composer.
+It makes no live T3, provider, microphone or router requests. The planned checks
+use 375x560 and 390x600 visible viewports, before-call, Listening and attention,
+top/bottom scroll screenshots, action clicks and a live shrink to 420 px high.
+The installed WebKit cache requires an explicit executable path with the
+current Playwright package; the runner records that choice. No browser was
+downloaded.
+
+Both WebKit and installed Edge failed at process launch with `spawn EPERM`.
+Their complete attempts are retained in `browser-probe-3` and
+`browser-probe-4`, with the final failure in `report.json`. No screenshot was
+captured and no viewport case ran. The advertised tool metadata and selected
+Otis capability catalog expose no browser control route. The implementation is
+checkpointed; the requested screenshots and visual proof remain blocked on a
+headless browser capability. No connected phone or desktop window was used.
+
+Parent browser commands, after supplying a permitted headless browser launch:
+
+```powershell
+& 'A:/Dev/Tooling/t3-node-v24.19.0/node.exe' .logs/otis-call/phase2-phone-panel/browser-check.mjs
+# If only the installed Chromium engine is available:
+$env:CALL_PANEL_ENGINE = 'chromium'
+& 'A:/Dev/Tooling/t3-node-v24.19.0/node.exe' .logs/otis-call/phase2-phone-panel/browser-check.mjs
+```
+
+That runner must pass before treating the panel layout as verified. Inspect
+the generated `375-before-call.png`, `375-listening.png`,
+`375-needs-attention.png` and corresponding `390-*.png`, plus their scrolled
+versions. Then repeat the real Safari call with its toolbars visible, change
+orientation, scroll back to Voice model, and activate the footer actions.
+The local fixture cannot attest iPhone Safari chrome or the Tailscale path.
+
+Final offline receipts are under `phase2-phone-panel/final`: 123 tests passed
+across seven files, exit 0. Web and client-runtime typechecks, affected lint,
+source and Markdown formatting and whitespace checks passed, exit 0. The
+server source is unchanged from the prior passing server typecheck. Lint has
+four warnings on unchanged schema compilation, iterable spread and effect
+dependencies/state synchronization. Full logs are retained. The earlier
+expanded sync-fixture failures are still documented below and were not hidden
+by changing those tests.
+
+Owner job `27b5e239-25a7-471c-8e6a-515bbc54abc5` remained queued at position 9
+after its ten-minute owner wait, without admission, process logs or exit code.
+The direct offline receipts use a separate output directory. The job and queue
+were left intact. No deployment, restart, live configuration change or subagent
+was used.
+
+`phase2-phone-panel/final-evidence.json` binds both uncommitted fixes and their
+documentation to source hashes. `phase2-phone-panel/report.json` is a failure
+report with zero executed viewport cases, not successful screenshot evidence.
+The bounded implementation remains checkpointed for an added browser
+capability and the requested screenshots.
 
 Claude supports tool-free voice. Other voice adapters still reject that mode.
 The original requirement to use every provider for voice remains unmet.
+
+## Internal handoff visibility
+
+`CallOperator.announce` still starts an ordinary durable turn with its existing
+`voice-update:` identity, but stores only "Background update ready." as its
+message text. `CallOperator.voice` builds the detailed model input from the
+saved updates matching that announcement ID. The model receives the same
+result/question instructions, typed status, exact result text and recent
+conversation. Later receipts stay outside that announcement's batch. Existing
+turn mapping, heard acknowledgment and no-delegation behavior remain in place.
+
+`packages/client-runtime/src/state/threadState.ts` projects the conversation
+without user messages with the reserved announcement identity. `threads.ts`
+applies it to disk and retained cache, snapshots, streamed updates and older
+history pages, including old raw prompts already stored by earlier calls.
+Ordinary user messages and assistant replies remain visible. The existing
+natural-language `call.operator.status` activity supplies the small background
+status row; no second row or chat is added.
+
+Web, Electron and the native thread feed all read this shared thread state.
+Server event history and provider routing retain their durable turn identity.
+There is no wire schema, permission, selector or provider adapter change and no
+new helper with one caller. Retain `projectConversationThread` as the shared
+projection at those cache and stream boundaries. The source and tests establish view behavior;
+this change has not been checked in a running browser or a real call here.
+
+Parent acceptance: reuse the commands below on a fresh chat with output
+`.logs/otis-call/phase2-private-handoff-live`. At 390 px, verify no user bubble
+contains the internal instruction, JSON or "Background update ready." The
+background activity and natural voice reply should remain visible. Confirm
+`operator.heard`, playback drain and hang-up acknowledgment. Reload the existing
+live-5 chat to check that its old internal prompt also disappears.
+
+## Offline verification of handoff visibility
+
+Receipts and full logs are in `.logs/otis-call/phase2-private-handoff-final`.
+The final focused owner selection passed 118 tests in five files, exit 0;
+its exact command and summary are under `owned/check-results.json` and
+`owned/focused-owned.log`. It covers `callOperator.test.ts`,
+`threads-atoms.test.ts`, `threads-pagination.test.ts`, `threadReducer.test.ts`
+and `apps/web/src/voice/session.test.ts`.
+The six-file expanded run finished with 137 passing tests and five timeouts in
+the unchanged `threads-sync.test.ts`. All new handoff, snapshot/cache, live
+update and older-page regressions passed, as did the existing playback,
+hang-up, heard acknowledgment, reducer and pagination checks.
+
+Server, client-runtime and web typechecks passed, exit 0. Affected source lint
+and formatting passed, exit 0. The lint warnings refer to unchanged schema
+compilation in the fixture and an existing Promise.all spread.
+
+The five sync fixtures load cached sequence 7, then send snapshots/events at
+sequence 1 or 2. The existing dedupe rule correctly ignores them; the tests
+wait for states those events cannot produce. No fixture contract was changed
+to hide these failures. A separate baseline probe and its exact command are
+recorded in `baseline-sync-probe.json` and `baseline-sync-probe.log`.
+That probe reproduced the first timeout against the untouched `75381552b7`
+thread implementation, exit 1, with 23 unrelated tests skipped. The other four
+timeouts share the stale fixture sequence pattern by source inspection; they
+were not separately reproduced against the base. The sync fixture repair
+remains outside this change.
+The new synthetic regressions do not prove browser rendering or real speech.
+
+To repeat the focused selection:
+
+```powershell
+& 'A:/Dev/Tooling/t3-node-v24.19.0/node.exe' node_modules/vite-plus/bin/vp test run apps/server/src/speech/callOperator.test.ts packages/client-runtime/src/state/threads-atoms.test.ts packages/client-runtime/src/state/threads-pagination.test.ts packages/client-runtime/src/state/threadReducer.test.ts apps/web/src/voice/session.test.ts --configLoader native --pool threads --maxWorkers 1 --cache=false --reporter dot
+```
+
+Owner job `acd8b6d5-422a-4b9d-b9f4-515bbc54abcd` remained queued at position 8
+after the ten-minute owner wait, without admission, process logs or an exit
+code. Separate direct offline checks supplied the receipts above. The queue
+and unrelated jobs were not changed. Queue submission is not passing evidence.
 
 ## Implementation
 
@@ -139,9 +301,9 @@ Affected lint, formatting and whitespace checks apply as well.
 Owner queue job `bbd4ead5-0a13-4545-aaeb-1f81a3e86b36` returned still-running
 after ten minutes. The subsequent receipt remained queued at position 21, with
 no admission, process logs or exit code. Direct checks use a separate output
-directory. Queue submission is not passing evidence. Parent acceptance still needs a real call with a trailing
-newline reply, sentence 1 played, no silent second synthesis and the operator
-result eventually spoken with `heard: true`.
+directory. Queue submission is not passing evidence. The parent's subsequent
+live-5 run accepted the empty-speech fix, with seven sentences played and
+`operator.heard: true`. Visual acceptance of the handoff visibility fix remains.
 
 ## Previous recovery verification
 
@@ -226,7 +388,7 @@ $callArgs = @(
   '--wav', $callWav, '--browser', $callBrowser, '--expect-tool', 'get_task',
   '--width', '390', '--timeout-ms', '900000'
 )
-& $callNode @callArgs --output .logs/otis-call/phase2-empty-speech-live
+& $callNode @callArgs --output .logs/otis-call/phase2-private-handoff-live
 ```
 
 The helper saves the exact pair through the authenticated route, reloads the real
@@ -284,9 +446,10 @@ responsibilities into HTTP routing or event ingestion.
 The parent owns acceptance, commit/push and any later release. Use `COMMIT_MSG.txt`.
 Exclude `.logs`, recordings, local state and temporary gate configuration. No
 production release or router action belongs to this handoff.
-The requested task remains incomplete because generic tool-free voice support,
-integrated owner checks and acceptance of these fixes remain outstanding.
-Current empty-speech evidence is
+The overall task still has generic tool-free voice support and integrated owner
+checks outstanding. The default provider pair passed the parent's live-5 call.
+This follow-up still needs the visual acceptance described above.
+Previous empty-speech evidence is
 `.logs/otis-call/phase2-empty-speech-direct/final-evidence.json`.
 Previous recovery evidence is
 `.logs/otis-call/phase2-recovery-direct/final-evidence.json`.

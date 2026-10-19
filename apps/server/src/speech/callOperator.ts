@@ -175,6 +175,14 @@ export class CallOperator {
     const chat = await this.read(input.threadId);
     if (!chat) return false;
     if (chat.voices.some((voice) => voice.id === input.messageId)) return true;
+    const announcement = input.messageId.startsWith("voice-update:")
+      ? chat.updates.filter((update) => update.announcementId === input.messageId)
+      : undefined;
+    if (announcement && !announcement.length)
+      throw new Error("The voice announcement has no saved operator updates.");
+    const text = announcement
+      ? `At this pause, tell Jared these completed results or questions in one short natural reply. For needs-Jared, ask the question or explain what is needed. Do not delegate these updates back to the operator.\n${JSON.stringify(announcement.map(({ status, text }) => ({ status, text })))}`
+      : input.text;
     const link = await this.link(input.threadId, "voice", input.selection);
     await this.ensure(link);
     const context = await this.requirePorts().context(input.threadId);
@@ -192,7 +200,7 @@ export class CallOperator {
       threadId: ThreadId.make(link.sessionId),
       messageId: input.messageId,
       modelSelection: link.selection,
-      input: `${VOICE_ROLE_PROMPT}\n\nRecent conversation:\n${context.conversation ?? ""}\n\nOperator receipts:\n${JSON.stringify(chat.updates.slice(-20).map(({ status, text }) => ({ status, text })))}\n\n${input.messageId.startsWith("voice-update:") ? "Operator update at this pause" : "Jared's message"}:\n${input.text}`,
+      input: `${VOICE_ROLE_PROMPT}\n\nRecent conversation:\n${context.conversation ?? ""}\n\nOperator receipts:\n${JSON.stringify(chat.updates.slice(-20).map(({ status, text }) => ({ status, text })))}\n\n${announcement ? "Operator update at this pause" : "Jared's message"}:\n${text}`,
     });
     return true;
   }
@@ -474,7 +482,7 @@ export class CallOperator {
       message: {
         messageId: MessageId.make(id),
         role: "user",
-        text: `At this pause, tell Jared these completed results or questions in one short natural reply. For needs-Jared, ask the question or explain what is needed. Do not delegate these updates back to the operator.\n${JSON.stringify(updates.map(({ status, text }) => ({ status, text })))}`,
+        text: "Background update ready.",
         attachments: [],
       },
       modelSelection: chat.models.voice,

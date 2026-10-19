@@ -1,7 +1,11 @@
-fix(voice): skip empty speech fragments
+fix(voice): hide internal handoffs and fit phone call controls
 
-Handle whitespace and markdown-only fragments without synthesis, preserving
-spoken offsets. Validate requests before the fetch error boundary so local
-encoding errors keep their correct label.
+Build announcement prompts from saved updates inside the linked voice session.
+Hide internal announcement messages in shared client conversation state,
+including old call history, while retaining status activity and spoken replies.
+
+Position the call panel within the visible viewport using the existing popover.
+Scroll settings and updates inside a dynamic viewport bound while keeping
+primary call actions in a separate footer.
 
 Otis-Task: agenda-task:515bbc54cb61482681e950e524421ce4

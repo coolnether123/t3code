@@ -92,6 +92,7 @@ const CONNECTED_STATE: SupervisorConnectionState = {
 
 const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?: {
   readonly snapshot?: OrchestrationThreadDetailSnapshot;
+  readonly cachedSnapshot?: OrchestrationThreadDetailSnapshot;
   readonly connected?: boolean;
   readonly httpNone?: boolean;
   readonly initialLoad?: Effect.Effect<Option.Option<OrchestrationThreadDetailSnapshot>>;
@@ -202,7 +203,7 @@ const makeHarness = Effect.fn("TestThreadAtoms.makeHarness")(function* (options?
           loadThread: () =>
             Effect.sync(() => {
               diskLoads += 1;
-              return Option.none();
+              return Option.fromUndefinedOr(options?.cachedSnapshot);
             }),
           saveThread: () => Effect.void,
           removeThread: () => Effect.void,
@@ -616,6 +617,92 @@ describe("createEnvironmentThreadStateAtoms", () => {
       yield* Deferred.await(first.closed);
       expect(h.counts().active).toBe(0);
     }),
+  );
+
+  it.effect.each(["cache", "snapshot"] as const)(
+    "omits internal call handoffs from $0 and live conversation updates",
+    (source) =>
+      Effect.gen(function* () {
+        const message = (id: string, role: "user" | "assistant", text: string) => ({
+          id: MessageId.make(id),
+          role,
+          text,
+          turnId: null,
+          streaming: false,
+          createdAt: THREAD.createdAt,
+          updatedAt: THREAD.createdAt,
+        });
+        const user = message("voice:call:request", "user", "What finished?");
+        const answer = message("reply", "assistant", "The build passed.");
+        const activity = {
+          id: EventId.make("result"),
+          kind: "call.operator.status",
+          summary: "Background agent finished: the build passed.",
+          payload: { status: "done", text: "The build passed." },
+          tone: "info" as const,
+          turnId: null,
+          createdAt: THREAD.createdAt,
+        };
+        const snapshot = {
+          ...SNAPSHOT,
+          thread: {
+            ...THREAD,
+            messages: [
+              user,
+              message(
+                "voice-update:old-call:result",
+                "user",
+                'Internal prompt\n[{"status":"done"}]',
+              ),
+              answer,
+            ],
+            activities: [activity],
+          },
+        };
+        const h = yield* makeHarness({
+          snapshot,
+          ...(source === "cache" ? { cachedSnapshot: snapshot, httpNone: true } : {}),
+        });
+        const unmount = h.registry.mount(h.details.detailAtom(h.ref));
+        const first = yield* Queue.take(h.subscriptions);
+        expect(h.registry.get(h.details.messagesAtom(h.ref))).toEqual([user, answer]);
+        expect(h.registry.get(h.details.activitiesAtom(h.ref))).toEqual([activity]);
+
+        const nextAnswer = message("next-reply", "assistant", "Which branch should I check?");
+        const incoming = [
+          message("voice-update:call:question", "user", "Background update ready."),
+          nextAnswer,
+        ];
+        for (const [index, entry] of incoming.entries())
+          yield* Queue.offer(first.events, {
+            kind: "event",
+            event: {
+              type: "thread.message-sent",
+              sequence: 8 + index,
+              eventId: EventId.make(`call-message-${index}`),
+              aggregateKind: "thread",
+              aggregateId: THREAD_ID,
+              occurredAt: THREAD.createdAt,
+              commandId: null,
+              causationEventId: null,
+              correlationId: null,
+              metadata: {},
+              payload: { ...entry, threadId: THREAD_ID, messageId: entry.id },
+            },
+          });
+        yield* Queue.offer(first.events, { kind: "synchronized" });
+        yield* observeState(h.registry, h.stateAtom, (state) => state.status === "live");
+        expect(currentThread(h.registry, h.stateAtom).messages).toEqual([user, answer, nextAnswer]);
+        expect(h.registry.get(h.details.detailAtom(h.ref))?.messages).toEqual([
+          user,
+          answer,
+          nextAnswer,
+        ]);
+        expect(h.registry.get(h.details.messagesAtom(h.ref))).toEqual([user, answer, nextAnswer]);
+        expect(h.registry.get(h.details.activitiesAtom(h.ref))).toEqual([activity]);
+        unmount();
+        yield* Deferred.await(first.closed);
+      }),
   );
 
   it.effect.each([1, 16, 500])("publishes each replay batch once (batch size: %i)", (batchSize) =>

@@ -31,6 +31,7 @@ import { THREAD_SNAPSHOT_IDLE_TTL_MS } from "./threadRetention.ts";
 import { followStreamInEnvironment } from "./runtime.ts";
 import {
   EMPTY_ENVIRONMENT_THREAD_STATE,
+  projectConversationThread,
   type EnvironmentThreadPageState,
   type EnvironmentThreadState,
   type EnvironmentThreadStatus,
@@ -166,6 +167,7 @@ function matchesThreadSnapshot(
 function cachedThreadState(value: EnvironmentThreadState): EnvironmentThreadState {
   return {
     ...value,
+    data: Option.map(value.data, projectConversationThread),
     status:
       value.status === "deleted" || (value.status === "live" && Option.isSome(value.data))
         ? value.status
@@ -202,7 +204,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
           ),
         )
       : Option.none<OrchestrationThreadDetailSnapshot>();
-  const cachedThread = Option.map(cached, (snapshot) => snapshot.thread);
+  const cachedThread = Option.map(cached, (snapshot) => projectConversationThread(snapshot.thread));
   const initialState: EnvironmentThreadState = retained
     ? cachedThreadState(retained.state)
     : {
@@ -380,6 +382,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     // recent turns); a snapshot or merged page passes its own page state.
     page: Option.Option<EnvironmentThreadPageState> | "keep",
   ) {
+    thread = projectConversationThread(thread);
     const waiting = yield* Ref.get(awaitingCompletion);
     yield* SubscriptionRef.update(state, (current) => ({
       data: Option.some(thread),
@@ -589,7 +592,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
         return value;
       }
       const loaded = value.data.value;
-      const older = snapshot.thread;
+      const older = projectConversationThread(snapshot.thread);
       const mergeById = <T extends { readonly id: string }>(
         olderRows: ReadonlyArray<T>,
         loadedRows: ReadonlyArray<T>,

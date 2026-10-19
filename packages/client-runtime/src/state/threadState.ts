@@ -31,6 +31,14 @@ export const EMPTY_ENVIRONMENT_THREAD_STATE: EnvironmentThreadState = {
   page: Option.none(),
 };
 
+/** Internal announcement input is represented by its status activity and reply. */
+export function projectConversationThread(thread: OrchestrationThread): OrchestrationThread {
+  const messages = thread.messages.filter(
+    (message) => message.role !== "user" || !message.id.startsWith("voice-update:"),
+  );
+  return messages.length === thread.messages.length ? thread : { ...thread, messages };
+}
+
 /** Whether the thread has older turns that can be loaded with more pages. */
 export function threadHasOlderTurns(state: EnvironmentThreadState): boolean {
   return Option.match(state.page, {

@@ -1,6 +1,7 @@
 import {
   EnvironmentId,
   EventId,
+  MessageId,
   ORCHESTRATION_WS_METHODS,
   ProjectId,
   ProviderInstanceId,
@@ -337,6 +338,34 @@ describe("thread pagination state", () => {
         hasMore: false,
         loadingOlder: false,
       });
+    }),
+  );
+
+  it.effect("omits old internal call prompts when loading earlier turns", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ initialResponse: Option.some(WINDOWED_SNAPSHOT) });
+      yield* harness.awaitState((value) => Option.isSome(value.page));
+      expect(requestOlderThreadTurns(TARGET.environmentId, THREAD_ID)).toBe(true);
+      yield* harness.resolveNextPage(
+        Option.some({
+          ...OLDER_PAGE,
+          thread: {
+            ...OLDER_PAGE.thread,
+            messages: [
+              {
+                ...OLDER_MESSAGE,
+                id: MessageId.make("voice-update:old-call:result"),
+                role: "user",
+                text: 'Internal prompt\n[{"status":"done"}]',
+              },
+              OLDER_MESSAGE,
+            ],
+          },
+        }),
+      );
+      const state = yield* harness.awaitState((value) => hasMessage(value, "message-old"));
+      expect(Option.getOrThrow(state.data).messages).toEqual([OLDER_MESSAGE, RECENT_MESSAGE]);
+      expect(Option.getOrThrow(state.page).hasMore).toBe(false);
     }),
   );
 
