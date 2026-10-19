@@ -38,6 +38,33 @@ const input = {
 };
 
 describe("voice environment transport", () => {
+  it.effect(
+    "rejects a locally invalid speech request before fetch without calling it a network or audio response failure",
+    () =>
+      Effect.gen(function* () {
+        let calls = 0;
+        const fetcher: typeof fetch = async () => {
+          calls++;
+          return Response.json({});
+        };
+        const error = yield* fetchEnvironmentSpeech({
+          ...input,
+          request: {
+            action: "call.speak",
+            callId: "synthetic",
+            speechId: "sentence",
+            text: " \n ",
+            streamAudio: true,
+          },
+          fetcher,
+        }).pipe(Effect.provide(remoteHttpClientLayer(fetcher)), Effect.flip);
+        expect(calls).toBe(0);
+        expect(error).toMatchObject({
+          message: "Local voice request validation failed. This is a client bug.",
+          recoverable: false,
+        });
+      }),
+  );
   it.effect.each(["malformed frames", "playback callback"] as const)(
     "does not mislabel %s as a retryable endpoint failure",
     (failure) =>

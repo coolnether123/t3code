@@ -29,6 +29,11 @@ export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(
   signal: AbortSignal;
   fetcher?: typeof fetch;
 }) {
+  const body = yield* Effect.try({
+    try: () => encode(input.request),
+    catch: () =>
+      new VoiceRequestError("Local voice request validation failed. This is a client bug.", false),
+  });
   const result = yield* executeAuthenticatedEnvironmentHttpRequest({
     ...input,
     group: "orchestration",
@@ -49,7 +54,7 @@ export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(
             credentials: headers.authorization ? "omit" : "include",
             redirect: "error",
             signal: AbortSignal.any([signal, input.signal]),
-            body: encode(input.request),
+            body,
           });
           if (
             response.ok &&

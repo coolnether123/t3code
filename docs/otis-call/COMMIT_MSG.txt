@@ -1,7 +1,7 @@
-fix(voice): recover queued speech after transient request failures
+fix(voice): skip empty speech fragments
 
-Retry voice requests without cancelling unrelated playback. Keep sentence
-acknowledgments separate from synthesis retries and preserve failure screenshots
-before acceptance cleanup.
+Handle whitespace and markdown-only fragments without synthesis, preserving
+spoken offsets. Validate requests before the fetch error boundary so local
+encoding errors keep their correct label.
 
 Otis-Task: agenda-task:515bbc54cb61482681e950e524421ce4

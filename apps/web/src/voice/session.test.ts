@@ -105,6 +105,76 @@ afterEach(async () => {
 });
 
 describe("durable thread voice session", () => {
+  it.each(["\n\n", "\n\n#_*"])(
+    "handles a silent trailing fragment %j without another synthesis or an incomplete heard acknowledgment",
+    async (suffix) => {
+      const f = fixture();
+      const text = `The task is open.${suffix}`;
+      const playing = deferred<void>();
+      const finishPlayback = deferred<void>();
+      const heard = deferred<void>();
+      const persisted = deferred<void>();
+      const originalWrite = vi.mocked(f.persistence.write).getMockImplementation()!;
+      vi.mocked(f.persistence.write).mockImplementation(async (call) => {
+        await originalWrite(call);
+        if (call.offsets.reply === text.length) persisted.resolve();
+      });
+      f.audio.play.mockImplementation(async () => {
+        playing.resolve();
+        await finishPlayback.promise;
+      });
+      const original = f.request.getMockImplementation()!;
+      f.request.mockImplementation(async (input, signal, onAudio) => {
+        if (input.action === "call.prepare")
+          return {
+            call: {
+              callId: f.saved()!.callId,
+              threadId: options.threadId,
+              version: "result",
+              ready: true,
+              closed: false,
+              modelSelection: options.modelSelection,
+              steps: [],
+              utterances: [],
+              played: [],
+              operatorUpdates: [
+                {
+                  id: "result",
+                  jobId: "job",
+                  status: "done",
+                  text: "The task is open.",
+                  createdAt: "2026-10-18T00:00:00Z",
+                  announcementId: "announcement",
+                  announcementTurnId: "result-turn",
+                },
+              ],
+            },
+          };
+        if (input.action === "call.heard") heard.resolve();
+        return original(input, signal, onAudio);
+      });
+      await f.session.start(options, []);
+      f.session.observe(
+        [{ id: "reply", role: "assistant", text, streaming: false, turnId: "result-turn" }],
+        false,
+        "result-turn",
+      );
+      f.recording.resolve({ audio: "", sampleRate: 16000 });
+      await playing.promise;
+      expect(f.saved()!.offsets.reply ?? 0).toBe(0);
+      expect(f.request.mock.calls.some(([input]) => input.action === "call.heard")).toBe(false);
+      finishPlayback.resolve();
+      await heard.promise;
+      await persisted.promise;
+      const requests = f.request.mock.calls.filter(([input]) => input.action === "call.speak");
+      expect(requests).toHaveLength(1);
+      expect(requests[0]![0].text?.trim()).toBe("The task is open.");
+      expect(f.saved()!.offsets.reply).toBe(text.length);
+      expect(
+        f.change.mock.calls.some(([state]) => state === "error" || state === "reconnecting"),
+      ).toBe(false);
+    },
+  );
   it("keeps a permanent speech error visible instead of retrying it", async () => {
     vi.useFakeTimers();
     const f = fixture();

@@ -475,8 +475,15 @@ export class ThreadVoiceSession {
           (!message.streaming || rest.length >= 1200 ? rest.slice(0, 1200) : "");
         if (!text) break;
         const end = offset + text.length;
-        this.queue.push({ text, messageId: message.id, start: offset, end });
-        this.deps.speechEvent?.({ type: "sentence", messageId: message.id, start: offset, end });
+        const cleaned = text.replace(/[#*_]/g, "");
+        if (cleaned.trim()) {
+          this.queue.push({ text: cleaned, messageId: message.id, start: offset, end });
+          this.deps.speechEvent?.({ type: "sentence", messageId: message.id, start: offset, end });
+        } else if (!this.queue.some((entry) => entry.messageId === message.id)) {
+          // Do not advance past earlier speech that still needs to play.
+          this.saved.offsets[message.id] = end;
+          void this.persist().catch((error) => this.failed(error));
+        }
         offset = end;
       }
     }
@@ -568,7 +575,7 @@ export class ThreadVoiceSession {
           signal.throwIfAborted();
           this.change("speaking");
           if (!this.status?.played.includes(id)) {
-            await this.playSentence(id, item.text.replace(/[#*_]/g, ""), signal);
+            await this.playSentence(id, item.text, signal);
             // Retry the acknowledgment separately, without replaying audio already heard.
             await this.request({ action: "call.played", speechId: id }, signal);
           }

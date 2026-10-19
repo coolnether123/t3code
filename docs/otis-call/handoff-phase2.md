@@ -1,17 +1,16 @@
 # Otis Call phase 2 handoff
 
 Task `agenda-task:515bbc54cb61482681e950e524421ce4`.
-Recovery fix base `9f38fad19c`, branch `work/otis-call-20261018`, upstream
+Empty-speech fix base `bd62911144`, branch `work/otis-call-20261018`, upstream
 `origin/work/otis-call-20261018`. Changes remain uncommitted as requested.
 Observation date: 18 October 2026, America/Chicago, CDT.
 
-The parent committed the first follow-up as `9f38fad19c` and verified real
-60-second lease renewal. The remaining failure stopped queued speech after a
-transient voice request error. This follow-up adds independent request retries,
-playback recovery and failure screenshots. Changes remain uncommitted. No live
-T3, router or dev launcher was changed or restarted. The dev T3 on 7300/15340
-belongs to the parent, who will restart it and repeat acceptance. No subagents
-were used. Implementation host model and effort attestation remain unknown.
+The parent committed request recovery as `bd62911144`. Live acceptance then
+identified a local empty-text request as the cause of both prior speech alerts.
+This small follow-up skips silent fragments and separates request validation
+from response decoding. Changes remain uncommitted. No live T3, router or
+launcher changes, restarts or subagents were used. The parent owns restart,
+real call acceptance and publication.
 
 Claude supports tool-free voice. Other voice adapters still reject that mode.
 The original requirement to use every provider for voice remains unmet.
@@ -52,7 +51,7 @@ during microphone activity. Silence-only capture does not become another request
 Routine progress stays in chat; terminal results and questions can be spoken at
 a pause. Interrupted results stay unheard. Speak/hold/defer remains future scope.
 
-## Latest parent observations
+## Previous live-3 measurements
 
 The parent ran `9f38fad19c` at 390 px with Claude Haiku 5.5 medium for voice
 and Codex GPT-6.1-Sol medium for background work. Router speech fix `f3f15fe`
@@ -83,65 +82,70 @@ The report and router observations establish:
 These are parent live observations of the base. No live measurements of the
 uncommitted recovery fixes were made here.
 
-## Root cause and recovery changes
+## Confirmed empty-text cause and correction
 
-The original browser fetch trigger cannot be identified from the supplied report.
-It lacks the failed action, browser request-failure code and nested exception.
-`rpc/http.ts` wraps a failed fetch/read in `RemoteEnvironmentAuthFetchError`;
-`voice-call/transport.ts` also wraps exceptions from streamed response handling.
-The endpoint label alone does not prove a server outage, an auth refresh race,
-a concurrency limit or a shared request abort. No such cause is claimed.
-The T3 command scheduler defaults to parallel execution and request signals
-are separate. A synthetic concurrent-watch/stream test verifies abort isolation.
+Parent live acceptance of `bd62911144` used chat
+`6d3d0595-4289-4df2-a509-7e6eb7623bd8`. Evidence is
+`.logs/otis-call/phase2-live-4/report.json` and its `phone-call.png`.
+Failure capture now works. Sentence 1 played, sentence 2 had zero fetch attempts,
+and the call reported invalid audio frames. The parent read the exact voice
+reply through `agent snapshot` and verified that it ended with two newlines.
 
-The confirmed failure escalation is in
-`packages/client-runtime/src/voice-call/session.ts`: `failed()` aborted both
-playback and the status watch, set recovery state and offered manual retry.
-`ThreadVoiceControls.tsx` only resumed automatically on an `online` event.
-A transient failure while the browser remained online therefore left sentence 2
-and later operator results queued indefinitely. The prior renewal fix kept the
-lease alive independently, matching the parent's log.
+The sentence extractor queued the trailing whitespace. `speak()` removed
+markdown markers and passed the empty fragment to `call.speak`.
+`encode(input.request)` ran inside the fetch try block; `ValidCallRequest`
+rejected the text with "Speech requires an ID and text." That local SchemaError
+was mislabeled as invalid audio frames, and previously as an endpoint fetch
+failure. The local encoding error explains both runs without an HTTP request
+for sentence 2. The earlier report lacked that local failure classification.
 
-The call now retries transient fetch, timeout and temporary HTTP failures at
-the operation boundary, starting at 250 ms and backing off to at most 10 seconds.
-Retries keep the same call, utterance and sentence identifiers. They resolve the
-current environment credentials through the existing T3 command on each attempt.
-A status-watch failure does not abort playback or block another request.
-Configuration and permission failures remain visible and are not retried.
-Malformed audio frames and playback callback failures now retain a permanent
-speech error through the environment HTTP wrappers, rather than being mislabeled
-as a retryable endpoint outage. An incomplete stream can retry.
+`packages/client-runtime/src/voice-call/session.ts` now cleans markdown before
+queueing and skips fragments whose cleaned text is whitespace-only. It advances
+their offsets as handled once no earlier speech from that message remains
+queued. This preserves playback ordering and allows the whole reply to count as
+handled for heard acknowledgment. Silent fragments produce no sentence event,
+synthesis or played request. Nonempty speech keeps its original message ranges.
 
-Synthesis owns its playback attempts. Before retrying a failed partial sentence,
-it cancels that attempt's pending audio nodes. It may repeat the partially heard
-sentence after a stream reset. A failed played acknowledgment retries separately
-and does not resynthesize a sentence whose audio already finished. Hang-up,
-detach and interrupt cancel pending retries. An online event leaves active retry
-controllers intact; full preparation resumes only a call already in recovery.
-No operator interrupt was added.
-Done and needs-Jared updates still wait for a microphone pause and are marked
-heard only after their voice reply finishes. Regression tests exercise both
-terminal statuses through a failed synthesis and successful recovery.
+`packages/client-runtime/src/voice-call/transport.ts` now encodes the request
+before entering the authenticated fetch/response error boundary. A failure is
+labeled "Local voice request validation failed. This is a client bug." It is
+not mislabeled as network or response data and does not invoke fetch. The queue
+filter prevents these silent fragments from reaching that validation at all.
+No new helper, wire contract or provider behavior was introduced.
 
-The screenshot was placed after asynchronous response and receipt drains.
-The first speech response never recorded completion in the supplied report;
-waiting for every observation could prevent capture. Failure capture now runs
-before those waits and before browser close. Streaming `response.finished()`
-observations are not gates. A total-deadline failure gets a bounded, two-second
-evidence attempt before exit. Screenshot itself has a 1.5-second timeout and
-state readback has a 400 ms limit. If Chromium cannot capture, the report records
-`screenshotSaved: false` with `screenshotError` or `failureEvidenceError`.
-A browser that cannot respond cannot yield a guaranteed image.
+Existing request retries, independent acknowledgment retries, partial-audio
+cancellation and failure screenshot capture remain in place. Their prior
+synthetic checks and history are under `.logs/otis-call/phase2-recovery-direct`.
 
-The helper also records bounded `voiceRequestFailures` with action, speech ID,
-time and browser error code, plus `voiceRetries` with action and attempt.
-These fields do not copy audio, transcripts, auth headers, credentials or
-arbitrary exception messages. Successful streaming observation is still distinct
-from played acknowledgment and heard operator status.
+## Offline verification of the empty-speech fix
 
-## Offline verification of recovery
+Current focused check receipts and logs are under
+`.logs/otis-call/phase2-empty-speech-direct`. The exact commands are in
+`check-results-current.json` and source hashes are in `final-evidence.json`.
+The focused run passed 47 tests across two files, exit 0. Client-runtime and
+web typechecks passed, exit 0. Affected lint, formatting and diff whitespace
+checks passed, exit 0. No live browser or speech run was performed here. New regressions use a valid first sentence followed by two newlines or
+a markdown-only fragment. Each must synthesize only the first sentence, leave
+its offset unadvanced while playback is pending, persist the complete handled
+offset afterward and acknowledge the operator update without an error.
+The transport regression sends an invalid whitespace-only request directly and
+verifies that fetch is never called and the error is explicitly local.
 
-Current receipts and logs are under `.logs/otis-call/phase2-recovery-direct`.
+The focused owner command covers `apps/web/src/voice/session.test.ts` and
+`packages/client-runtime/src/voice-call/transport.test.ts`, followed by
+client-runtime and web typechecks. No server or contract schema changed.
+Affected lint, formatting and whitespace checks apply as well.
+
+Owner queue job `bbd4ead5-0a13-4545-aaeb-1f81a3e86b36` returned still-running
+after ten minutes. The subsequent receipt remained queued at position 21, with
+no admission, process logs or exit code. Direct checks use a separate output
+directory. Queue submission is not passing evidence. Parent acceptance still needs a real call with a trailing
+newline reply, sentence 1 played, no silent second synthesis and the operator
+result eventually spoken with `heard: true`.
+
+## Previous recovery verification
+
+Previous recovery receipts and logs are under `.logs/otis-call/phase2-recovery-direct`.
 The exact commands are in `check-results-final.json` and `check-results-current.json`;
 source hashes and final check summaries are in `final-evidence.json`.
 The final focused run passed 292 tests across 11 files, exit 0. The
@@ -222,7 +226,7 @@ $callArgs = @(
   '--wav', $callWav, '--browser', $callBrowser, '--expect-tool', 'get_task',
   '--width', '390', '--timeout-ms', '900000'
 )
-& $callNode @callArgs --output .logs/otis-call/phase2-recovery-live
+& $callNode @callArgs --output .logs/otis-call/phase2-empty-speech-live
 ```
 
 The helper saves the exact pair through the authenticated route, reloads the real
@@ -282,7 +286,9 @@ Exclude `.logs`, recordings, local state and temporary gate configuration. No
 production release or router action belongs to this handoff.
 The requested task remains incomplete because generic tool-free voice support,
 integrated owner checks and acceptance of these fixes remain outstanding.
-Current recovery evidence is
+Current empty-speech evidence is
+`.logs/otis-call/phase2-empty-speech-direct/final-evidence.json`.
+Previous recovery evidence is
 `.logs/otis-call/phase2-recovery-direct/final-evidence.json`.
 Earlier phase 2 and lease-fix receipts remain under `.logs/otis-call/phase2`
 and `.logs/otis-call/phase2-fixes-direct`.
@@ -294,9 +300,9 @@ by initial, pre-cleanup and failure writes. `hasUnannouncedUpdates` has multiple
 callers and keeps one terminal-status eligibility rule. No new agent system,
 model catalog, transport or UI entry point was added.
 
-Retain the new single-caller `playSentence` helper as the audio-attempt boundary;
+Retain the single-caller `playSentence` helper as the audio-attempt boundary;
 it keeps cancellation and partial-stream retry out of queue management.
-`retry` is shared by request and synthesis operations. The new `errors.ts`
+`retry` is shared by request and synthesis operations. The shared `errors.ts`
 module keeps retry classification shared with transport error construction.
 `captureFailure` is shared by normal failure cleanup and the outer deadline
 supervisor. None should be inlined into UI rendering or provider orchestration.
