@@ -472,7 +472,7 @@ it.effect("saves the snapshot PNG on request and reports its path", () =>
       );
       expect(Buffer.from(yield* fileSystem.readFile(screenshotPath!)).toString()).toBe("png");
       const [, text] = snapshot.content;
-      expect(text?.type === "text" ? text.text : "").toContain(screenshotPath);
+      expect(text?.type === "text" ? text.text : "").toContain(JSON.stringify(screenshotPath));
 
       const unsaved = yield* callSnapshot({});
       expect(unsaved.structuredContent).not.toHaveProperty("screenshotPath");

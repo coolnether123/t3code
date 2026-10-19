@@ -3,35 +3,38 @@ import { assert, it } from "@effect/vitest";
 import { applyPreferredCodexDefaultModel, mapCodexModelCapabilities } from "./CodexProvider.ts";
 
 it("maps current Codex model capability fields", () => {
-  const capabilities = mapCodexModelCapabilities({
-    additionalSpeedTiers: [],
-    defaultReasoningEffort: "super-high",
-    description: "Test model",
-    displayName: "GPT Test",
-    hidden: false,
-    id: "gpt-test",
-    isDefault: true,
-    model: "gpt-test",
-    defaultServiceTier: "flex",
-    serviceTiers: [
-      {
-        id: "priority",
-        name: "Fast",
-        description: "Lower latency responses.",
-      },
-      {
-        id: "flex",
-        name: "Flex",
-        description: "Lower-cost asynchronous routing.",
-      },
-    ],
-    supportedReasoningEfforts: [
-      {
-        description: "Maximum reasoning",
-        reasoningEffort: "super-high",
-      },
-    ],
-  });
+  const capabilities = mapCodexModelCapabilities(
+    {
+      additionalSpeedTiers: [],
+      defaultReasoningEffort: "super-high",
+      description: "Test model",
+      displayName: "GPT Test",
+      hidden: false,
+      id: "gpt-test",
+      isDefault: true,
+      model: "gpt-test",
+      defaultServiceTier: "flex",
+      serviceTiers: [
+        {
+          id: "priority",
+          name: "Fast",
+          description: "Lower latency responses.",
+        },
+        {
+          id: "flex",
+          name: "Flex",
+          description: "Lower-cost asynchronous routing.",
+        },
+      ],
+      supportedReasoningEfforts: [
+        {
+          description: "Maximum reasoning",
+          reasoningEffort: "super-high",
+        },
+      ],
+    },
+    [],
+  );
 
   assert.deepStrictEqual(capabilities.optionDescriptors, [
     {
@@ -65,30 +68,33 @@ it("maps current Codex model capability fields", () => {
 });
 
 it("uses standard routing when the catalog has no default service tier", () => {
-  const capabilities = mapCodexModelCapabilities({
-    additionalSpeedTiers: ["fast"],
-    defaultReasoningEffort: "medium",
-    defaultServiceTier: null,
-    description: "Test model",
-    displayName: "GPT Test",
-    hidden: false,
-    id: "gpt-test",
-    isDefault: true,
-    model: "gpt-test",
-    serviceTiers: [
-      {
-        id: "priority",
-        name: "Fast",
-        description: "1.5x speed, increased usage",
-      },
-      {
-        id: "ultrafast",
-        name: "Ultrafast",
-        description: "The fastest available responses for latency-sensitive work.",
-      },
-    ],
-    supportedReasoningEfforts: [],
-  });
+  const capabilities = mapCodexModelCapabilities(
+    {
+      additionalSpeedTiers: ["fast"],
+      defaultReasoningEffort: "medium",
+      defaultServiceTier: null,
+      description: "Test model",
+      displayName: "GPT Test",
+      hidden: false,
+      id: "gpt-test",
+      isDefault: true,
+      model: "gpt-test",
+      serviceTiers: [
+        {
+          id: "priority",
+          name: "Fast",
+          description: "1.5x speed, increased usage",
+        },
+        {
+          id: "ultrafast",
+          name: "Ultrafast",
+          description: "The fastest available responses for latency-sensitive work.",
+        },
+      ],
+      supportedReasoningEfforts: [],
+    },
+    [],
+  );
 
   assert.deepStrictEqual(capabilities.optionDescriptors, [
     {

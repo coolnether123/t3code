@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { CodexSettings } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -57,8 +58,16 @@ const solServiceTiers = Effect.fn("solServiceTiers")(function* (ultrafastEntitle
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-codex-catalog-" });
-  const binaryPath = path.join(dir, "codex");
-  yield* fs.writeFileString(binaryPath, FAKE_CODEX_APP_SERVER);
+  const platform = yield* HostProcess.Platform;
+  const binaryPath = path.join(dir, platform === "win32" ? "codex.cmd" : "codex");
+  if (platform === "win32") {
+    const scriptPath = path.join(dir, "codex.cjs");
+    const node = yield* HostProcess.ExecutablePath;
+    yield* fs.writeFileString(scriptPath, FAKE_CODEX_APP_SERVER);
+    yield* fs.writeFileString(binaryPath, `@echo off\r\n"${node}" "${scriptPath}" %*\r\n`);
+  } else {
+    yield* fs.writeFileString(binaryPath, FAKE_CODEX_APP_SERVER);
+  }
   yield* fs.chmod(binaryPath, 0o755);
 
   yield* fs.writeFileString(
