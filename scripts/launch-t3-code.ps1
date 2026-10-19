@@ -910,7 +910,6 @@ try {
         }
         Invoke-ProjectCommand "web build" @("build", "--logLevel", "error") $commandLogPath (Join-Path $deployRoot "apps\web")
         Invoke-ProjectCommand "server bundle" @("pack", "--logLevel", "error") $commandLogPath (Join-Path $deployRoot "apps\server")
-        Invoke-ProjectCommand "server service-launcher bundle" @("pack", "src/service-launcher.ts", "--out-dir", "dist", "--no-clean", "--logLevel", "error") $commandLogPath (Join-Path $deployRoot "apps\server")
         Invoke-ProjectCommand "desktop bundle" @("pack", "--logLevel", "error") $commandLogPath (Join-Path $deployRoot "apps\desktop")
         Invoke-ProjectCommand "desktop Electron runtime" @("run", "--filter", "@t3tools/desktop", "ensure:electron") $commandLogPath
     }
@@ -1047,9 +1046,9 @@ try {
         $projection = Get-ProjectionIdentity $sourceRoot $finalSourceFiles $finalSourceMap
         $artifacts = Get-BuildArtifactIdentity $deployRoot @(
             "apps\server\dist\bin.mjs",
-            "apps\server\dist\service-launcher.mjs",
             "apps\web\dist\index.html",
             "apps\desktop\dist-electron\main.cjs",
+            "apps\desktop\dist-electron\boot.cjs",
             "apps\desktop\dist-electron\preload.cjs"
         )
         $deploymentManifestPath = Join-Path $verificationDir "t3-deployment-$stamp.json"
