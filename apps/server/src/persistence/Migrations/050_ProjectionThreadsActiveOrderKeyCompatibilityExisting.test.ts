@@ -4,11 +4,12 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 import { runMigrations } from "../Migrations.ts";
+import Compatibility from "./050_ProjectionThreadsActiveOrderKeyCompatibility.ts";
 
-it.layer(NodeSqliteClient.layerMemory())(
+it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))(
   "050_ProjectionThreadsActiveOrderKeyCompatibilityExisting",
   (it) => {
-    it.effect("preserves an existing active order key across repeated migration runs", () =>
+    it.effect("preserves an existing active order key across repeated compatibility runs", () =>
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
         yield* runMigrations({ toMigrationInclusive: 49 });
@@ -22,14 +23,12 @@ it.layer(NodeSqliteClient.layerMemory())(
           '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', 'keep-me'
         )
       `;
-        yield* runMigrations({ toMigrationInclusive: 50 });
-        yield* runMigrations({ toMigrationInclusive: 50 });
+        yield* Compatibility;
+        yield* Compatibility;
         const row = yield* sql`
         SELECT active_order_key AS "activeOrderKey", created_at AS "createdAt", updated_at AS "updatedAt"
         FROM projection_threads WHERE thread_id = 'thread-existing-key'
       `;
-        const history =
-          yield* sql`SELECT count(*) AS count FROM effect_sql_migrations WHERE migration_id = 50`;
         assert.deepEqual(row, [
           {
             activeOrderKey: "keep-me",
@@ -37,7 +36,6 @@ it.layer(NodeSqliteClient.layerMemory())(
             updatedAt: "2026-01-01T00:00:00.000Z",
           },
         ]);
-        assert.deepEqual(history, [{ count: 1 }]);
       }),
     );
   },

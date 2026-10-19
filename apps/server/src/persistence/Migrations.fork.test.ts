@@ -48,7 +48,7 @@ describe("fork migration compatibility", () => {
       `;
       assert.deepStrictEqual(
         names.map((row) => [row.migration_id, row.name]),
-        migrationManifest,
+        migrationManifest.map(([id, name]) => [id, name]),
       );
       const audit = yield* sql<{
         readonly name: string;

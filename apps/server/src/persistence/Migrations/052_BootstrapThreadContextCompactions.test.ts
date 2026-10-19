@@ -7,7 +7,7 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { runMigrations } from "../Migrations.ts";
 import bootstrapThreadContextCompactions from "./052_BootstrapThreadContextCompactions.ts";
 
-const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
+const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })));
 
 layer("052_BootstrapThreadContextCompactions", (it) => {
   it.effect("fast-forwards only when no compaction events need replay", () =>
