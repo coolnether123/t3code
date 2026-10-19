@@ -4,6 +4,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
@@ -85,7 +86,7 @@ const runSetup = (host: {
     Effect.provideService(HostProcess.UserId, host.root ? 0 : 1000),
     // Root through sudo from a regular user, so setup reports ready instead of the root warning.
     Effect.provideService(HostProcess.Environment, host.root ? { SUDO_USER: "alice" } : {}),
-    Effect.provide(Layer.mergeAll(NodeServices.layer, TestConsole.layer)),
+    Effect.provide(Layer.mergeAll(NodeServices.layer, TestConsole.layer, Path.layer)),
   );
 };
 

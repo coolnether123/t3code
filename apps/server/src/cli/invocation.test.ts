@@ -118,9 +118,9 @@ it.layer(NodeServices.layer)("root CLI commands", (it) => {
   const pathWithT3 = Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const bin = yield* fs.makeTempDirectoryScoped();
+    const bin = yield* fs.makeTempDirectoryScoped({ directory: ".", prefix: ".test-cli-path-" });
     yield* fs.writeFileString(path.join(bin, "t3"), "#!/bin/sh\n", { mode: 0o755 });
-    return bin;
+    return path.relative(path.resolve("."), path.resolve(bin));
   });
 
   it.effect("keeps a user-installed Node reachable when the command runs under sudo", () =>

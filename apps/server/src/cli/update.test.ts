@@ -76,11 +76,12 @@ it.layer(NodeServices.layer)("t3 update launcher", (it) => {
       const launcher = path.join(root, "bin/t3");
       yield* fs.makeDirectory(path.dirname(launcher), { recursive: true });
       yield* fs.writeFileString(launcher, "");
+      const pathSeparator = (yield* HostProcess.Platform) === "win32" ? ";" : ":";
 
       const bare = yield* resolveLauncherPath.pipe(
         Effect.provideService(HostProcess.InvokedAs, "t3"),
         Effect.provideService(HostProcess.Environment, {
-          PATH: `${path.join(root, "missing")}:${path.join(root, "bin")}`,
+          PATH: [path.join(root, "missing"), path.join(root, "bin")].join(pathSeparator),
         }),
         Effect.provideService(HostProcess.WorkingDirectory, root),
       );
@@ -98,6 +99,6 @@ it.layer(NodeServices.layer)("t3 update launcher", (it) => {
       assert.equal(bare, launcher);
       assert.equal(relative, launcher);
       assert.equal(absent, undefined);
-    }).pipe(Effect.scoped, Effect.provideService(HostProcess.Platform, "linux")),
+    }).pipe(Effect.scoped),
   );
 });
