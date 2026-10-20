@@ -4,7 +4,12 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as Schema from "effect/Schema";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
-import { ProviderRuntimeEvent, ProviderInstanceId, type CallModels } from "@t3tools/contracts";
+import {
+  ProviderRuntimeEvent,
+  ProviderInstanceId,
+  RuntimeRequestId,
+  type CallModels,
+} from "@t3tools/contracts";
 import { CallStore } from "./callStore.ts";
 import { CallService } from "./callService.ts";
 import { CallOperator, type OperatorPorts } from "./callOperator.ts";
@@ -630,5 +635,31 @@ describe("call delegation", () => {
     expect(
       (await reopened.read("chat"))!.updates.find((update) => update.status === "done")?.heardAt,
     ).toBeDefined();
+  });
+});
+
+describe("quiet call notices", () => {
+  it("keeps setup, started, progress, done and heard receipts out of chat", async () => {
+    const f = await fixture();
+    await f.operator.configure("chat", { ...models, voice: { ...models.voice, model: "other" } });
+    for (const status of ["started", "progress", "done"] as const)
+      await f.operator.update("chat", "job", status, status, "Build passed");
+    await f.operator.heard("chat", ["done"]);
+    expect(f.ports.dispatch).not.toHaveBeenCalled();
+    expect((await f.operator.read("chat"))?.updates.at(-1)?.heardAt).toBeDefined();
+  });
+  it("names the pending approval and asks for approval in chat", async () => {
+    const f = await fixture();
+    const job = await f.startOperator();
+    await f.operator.event({
+      ...f.event(job.sessionId!, "request.opened", "operator-0", {
+        requestType: "command_execution_approval",
+        detail: "Run vp test run speech",
+      }),
+      requestId: RuntimeRequestId.make("approval-1"),
+    });
+    expect((await f.operator.read("chat"))?.updates.at(-1)?.text).toBe(
+      "Run vp test run speech. Approve in the chat.",
+    );
   });
 });

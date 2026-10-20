@@ -42,6 +42,7 @@ import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecuto
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as Auxiliary from "../provider/AuxiliaryProviderSessions.ts";
 import * as VoiceThreadService from "./VoiceThreadService.ts";
+import { callOperator } from "./callOperator.ts";
 
 const decodeRuntimeEvent = Schema.decodeUnknownSync(ProviderRuntimeEvent);
 const now = "2026-10-19T06:00:00.000Z";
@@ -631,5 +632,40 @@ it.effect("records call activity once with its durable metadata", () =>
       message: "Call started",
       activity: { kind: "call.started", payload: { callId: "synthetic-call" } },
     });
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("announces saved results without adding an internal update-ready chat item", () =>
+  Effect.gen(function* () {
+    const service = yield* seed;
+    const config = yield* ServerConfig.ServerConfig;
+    const calls = callOperator(config.stateDir);
+    const announcements: Parameters<typeof service.dispatch>[0][] = [];
+    yield* Effect.promise(async () => {
+      await calls.configure(thread.id, {
+        voice: thread.modelSelection,
+        operator: thread.modelSelection,
+      });
+      calls.bind({
+        context: async () => ({
+          cwd: process.cwd(),
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+        }),
+        start: async () => ({}),
+        send: async () => ({}),
+        sessions: async () => [],
+        dispatch: async (command) => {
+          announcements.push(command);
+        },
+      });
+      await calls.update(thread.id, "job", "finished", "done", "Build passed.");
+      await calls.announce(thread.id, "synthetic-call");
+    });
+    expect(announcements).toHaveLength(1);
+    yield* service.dispatch(announcements[0]!);
+    const { projection } = yield* service.snapshot(thread.id);
+    expect(projection.messages).toEqual([]);
+    expect(projection.turnItems).toEqual([]);
   }).pipe(Effect.provide(layer)),
 );

@@ -94,25 +94,6 @@ export class CallOperator {
       );
       if (saveDefault) await this.store.write("_operators", "default.models.json", models);
     });
-    if (revision && this.ports) {
-      const at = now();
-      const id = `call-models:${sha256(threadId)}:${revision}`;
-      await this.ports.dispatch({
-        type: "thread.activity.append",
-        commandId: CommandId.make(id),
-        threadId: ThreadId.make(threadId),
-        activity: {
-          id: EventId.make(id),
-          kind: "call.models.changed",
-          summary: `Voice: ${models.voice.model}. Background agent: ${models.operator.model}.`,
-          tone: "info",
-          payload: { models },
-          turnId: null,
-          createdAt: at,
-        },
-        createdAt: at,
-      });
-    }
     return models;
   }
   private async change(
@@ -263,6 +244,7 @@ export class CallOperator {
     await this.change(threadId, (chat) => {
       if (!chat.updates.some((entry) => entry.id === id)) chat.updates.push(update);
     });
+    if (status !== "needs-Jared") return;
     await this.requirePorts().dispatch({
       type: "thread.activity.append",
       commandId: CommandId.make(`call-status:${id}`),
@@ -270,8 +252,8 @@ export class CallOperator {
       activity: {
         id: EventId.make(`call-status:${id}`),
         kind: "call.operator.status",
-        summary: `Background agent: ${status}. ${text}`,
-        tone: status === "needs-Jared" ? "approval" : "info",
+        summary: `Needs you: ${text}`,
+        tone: "approval",
         payload: { ...update, source: "operator" },
         turnId: null,
         createdAt: update.createdAt,
@@ -390,7 +372,9 @@ export class CallOperator {
         job.id,
         `${event.eventId}:waiting`,
         "needs-Jared",
-        "The background agent needs a response in this chat.",
+        event.type === "request.opened"
+          ? `${event.payload.detail ?? event.payload.appName ?? event.payload.requestType}. Approve in the chat.`
+          : `${event.payload.questions.map((question) => question.question).join(" ")} Answer in the chat.`,
       );
     }
     if (
@@ -652,23 +636,6 @@ export class CallOperator {
   async heard(threadId: string, ids: readonly string[]) {
     await this.change(threadId, (chat) => {
       for (const update of chat.updates) if (ids.includes(update.id)) update.heardAt = now();
-    });
-    const at = now();
-    const id = `call-heard:${sha256(JSON.stringify(ids))}`;
-    await this.requirePorts().dispatch({
-      type: "thread.activity.append",
-      commandId: CommandId.make(id),
-      threadId: ThreadId.make(threadId),
-      activity: {
-        id: EventId.make(id),
-        kind: "call.operator.heard",
-        summary: "Operator update heard",
-        tone: "info",
-        payload: { updateIds: ids },
-        turnId: null,
-        createdAt: at,
-      },
-      createdAt: at,
     });
   }
 }

@@ -7,6 +7,8 @@ import {
   ProviderTurnId,
   NodeId,
   ThreadId,
+  TurnItemId,
+  RuntimeRequestId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -141,6 +143,40 @@ it.effect.each([true, false])(
         expect((yield* send()).turnId).toBe("accepted-turn");
         expect((yield* Effect.exit(send()))._tag).toBe("Failure");
         expect(attempts).toBe(2);
+        const approvals = yield* sessions.streamEvents.pipe(
+          Stream.filter((event) => event.type === "request.opened"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        yield* Queue.offer(events, {
+          type: "turn_item.updated",
+          driver,
+          turnItem: {
+            type: "approval_request",
+            id: TurnItemId.make("approval-item"),
+            threadId,
+            runId: null,
+            nodeId: NodeId.make("approval-node"),
+            providerThreadId: providerThread.id,
+            providerTurnId: ProviderTurnId.make("accepted-turn"),
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 1,
+            status: "waiting",
+            title: "Run tests",
+            startedAt: now,
+            completedAt: null,
+            updatedAt: now,
+            requestId: RuntimeRequestId.make("approval-request"),
+            requestKind: "command",
+            prompt: "Run vp test run speech",
+          },
+        });
+        expect((yield* Fiber.join(approvals))[0]?.payload).toMatchObject({
+          detail: "Run vp test run speech",
+        });
+
         const failed = yield* sessions.streamEvents.pipe(
           Stream.filter((event) => event.type === "runtime.error"),
           Stream.take(1),

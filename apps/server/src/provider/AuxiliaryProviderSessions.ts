@@ -190,24 +190,34 @@ const make = Effect.gen(function* () {
           },
         });
       }
-    } else if (
-      event.type === "runtime_request.updated" &&
-      event.runtimeRequest.status === "pending"
-    ) {
-      const request = event.runtimeRequest;
-      const requestType =
-        request.kind === "user_input"
-          ? "tool_user_input"
-          : request.kind === "file-change"
-            ? "file_change_approval"
-            : request.kind === "permission"
-              ? "permission_approval"
-              : "command_execution_approval";
-      yield* emit(threadId, session, {
-        type: "request.opened",
-        requestId: request.id,
-        payload: { requestType },
-      });
+    } else if (event.type === "turn_item.updated" && event.turnItem.status === "waiting") {
+      const item = event.turnItem;
+      if (item.type === "approval_request") {
+        yield* emit(threadId, session, {
+          type: "request.opened",
+          requestId: item.requestId,
+          payload: {
+            requestType:
+              item.requestKind === "file-change"
+                ? "file_change_approval"
+                : item.requestKind === "permission"
+                  ? "permission_approval"
+                  : "command_execution_approval",
+            detail: item.prompt || item.title || `Approve ${item.appName || item.requestKind}`,
+            ...(item.appName ? { appName: item.appName } : {}),
+            ...(item.options ? { options: item.options } : {}),
+          },
+        });
+      } else if (item.type === "user_input_request") {
+        yield* emit(threadId, session, {
+          type: "user-input.requested",
+          requestId: item.requestId,
+          payload: {
+            questions: item.questions,
+            ...(item.responseMode ? { responseMode: item.responseMode } : {}),
+          },
+        });
+      }
     } else if (event.type === "turn.terminal") {
       session.status = "ready";
       session.turnId = TurnId.make(event.providerTurnId);

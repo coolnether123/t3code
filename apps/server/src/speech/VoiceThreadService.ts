@@ -160,14 +160,16 @@ const make = Effect.gen(function* () {
   const dispatch = Effect.fn("VoiceThreadService.dispatch")(function* (command: CallCommand) {
     if (command.type === "thread.turn.start") {
       if (yield* Effect.promise(() => calls.read(command.threadId))) {
-        const recorded = yield* recordMessage({
-          commandId: `${command.commandId}:utterance`,
-          threadId: command.threadId,
-          messageId: command.message.messageId,
-          role: "user",
-          text: command.message.text,
-          streaming: false,
-        });
+        const recorded = command.message.messageId.startsWith("voice-update:")
+          ? undefined
+          : yield* recordMessage({
+              commandId: `${command.commandId}:utterance`,
+              threadId: command.threadId,
+              messageId: command.message.messageId,
+              role: "user",
+              text: command.message.text,
+              streaming: false,
+            });
         yield* Effect.tryPromise(() =>
           calls.voice({
             threadId: command.threadId,
