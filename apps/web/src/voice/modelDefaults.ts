@@ -52,11 +52,28 @@ export function initialCallModels(
         : {}),
     };
   };
-  const resolve = (role: keyof CallModels, seed: ModelSelection) =>
-    [remembered?.[role] ?? seed, savedDefaults?.[role], defaultSelection, first].find(visible) ??
+  // Only Claude runs tool-free voice turns. Before the provider list loads, a chat-model
+  // fallback would start the call with a voice the server rejects and save it for retries.
+  const voiceCapable = (
+    selection: ModelSelection | null | undefined,
+  ): selection is ModelSelection =>
+    visible(selection) &&
+    catalog.instanceEntries.some(
+      (entry) => entry.instanceId === selection.instanceId && entry.driverKind === "claudeAgent",
+    );
+  const resolve = (
+    role: keyof CallModels,
+    seed: ModelSelection | undefined,
+    accepts: (selection: ModelSelection | null | undefined) => selection is ModelSelection,
+  ) =>
+    [remembered?.[role] ?? seed, savedDefaults?.[role], defaultSelection, first].find(accepts) ??
     NO_PROVIDER_MODEL_SELECTION;
   return {
-    voice: resolve("voice", choose("claudeAgent", "claude-haiku-5-5", "effort") ?? current),
-    operator: resolve("operator", current),
+    voice: resolve(
+      "voice",
+      choose("claudeAgent", "claude-haiku-5-5", "effort") ?? current,
+      voiceCapable,
+    ),
+    operator: resolve("operator", current, visible),
   };
 }

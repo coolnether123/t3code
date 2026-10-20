@@ -82,7 +82,10 @@ describe("initial call model preferences", () => {
   it.each(["voice", "operator"] as const)(
     "resolves a hidden %s through saved defaults, global default, then visible catalog",
     (role) => {
-      const base = provider("codex", "codex", "gpt-6.1-sol");
+      const base =
+        role === "voice"
+          ? provider("claude", "claudeAgent", "gpt-6.1-sol")
+          : provider("codex", "codex", "gpt-6.1-sol");
       const luna = { ...base.models[0]!, slug: "gpt-6-luna" };
       const entry = { ...base, models: [...base.models, luna, { ...luna, slug: "gpt-5.6-sol" }] };
       const visible = catalog([entry], ["gpt-5.6-sol"]);
@@ -115,6 +118,18 @@ describe("initial call model preferences", () => {
       ).toEqual(saved);
     },
   );
+  it("never falls back to a voice model that cannot run tool-free", () => {
+    const voice = provider("voice", "claudeAgent", "claude-haiku-5-5");
+    const operator = provider("codex", "codex", "gpt-6.1-sol");
+    const sol = { instanceId: operator.instanceId, model: "gpt-6.1-sol" };
+    // Provider list not loaded yet while the chat is on Codex.
+    expect(initialCallModels([], sol, catalog([operator])).voice.model).toBe("");
+    expect(initialCallModels([voice, operator], sol, catalog([voice, operator])).voice).toEqual({
+      instanceId: voice.instanceId,
+      model: "claude-haiku-5-5",
+      options: [{ id: "effort", value: "medium" }],
+    });
+  });
   it("does not select hidden preferred voice models or an empty catalog", () => {
     const voice = provider("voice", "claudeAgent", "claude-haiku-5-5");
     const operator = provider("codex", "codex", "gpt-6.1-sol");
@@ -124,8 +139,8 @@ describe("initial call model preferences", () => {
         [voice, operator],
         current,
         catalog([voice, operator], ["claude-haiku-5-5"]),
-      ).voice,
-    ).toEqual({ instanceId: operator.instanceId, model: "gpt-6.1-sol" });
+      ).voice.model,
+    ).toBe("");
     expect(
       initialCallModels([voice], current, catalog([voice], ["claude-haiku-5-5"])).voice.model,
     ).toBe("");
