@@ -293,7 +293,8 @@ const accepted = await runAcceptanceWithDeadline({
           page.evaluate(async (threadId) => {
             const response = await fetch(
               `/api/orchestration/threads/${encodeURIComponent(threadId)}?turnLimit=20`,
-              { credentials: "include" },
+              // The server rejects orchestration reads without the protocol version header.
+              { credentials: "include", headers: { "x-t3-orchestration-protocol": "2" } },
             );
             if (!response.ok) throw new Error("Readback failed");
             return response.json();
