@@ -318,6 +318,7 @@ export class CallOperator {
           if (
             event.type === "turn.completed" &&
             event.payload.state === "completed" &&
+            !/<otis-hold\s*\/?[>\s]/.test(assistantText ?? "") &&
             !voice.id.startsWith("voice-update:")
           )
             intent = voiceDelegation(assistantText ?? "")?.intent;

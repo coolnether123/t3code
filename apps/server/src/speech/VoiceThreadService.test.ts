@@ -502,6 +502,33 @@ it.effect("updates one durable voice reply and removes call-control markup", () 
   }).pipe(Effect.provide(layer)),
 );
 
+it.effect("records a silent hold as completed without speaking its control marker", () =>
+  Effect.gen(function* () {
+    const service = yield* seed;
+    yield* service.recordVoiceEvent(
+      {
+        sessionId: "silent-voice",
+        threadId: thread.id,
+        role: "voice",
+        selection: thread.modelSelection,
+      },
+      decodeRuntimeEvent({
+        type: "turn.completed",
+        eventId: "hold-completed",
+        provider: "codex",
+        threadId: thread.id,
+        turnId: "hold-turn",
+        createdAt: now,
+        payload: { state: "completed" },
+      }),
+      "<otis-hold/>",
+    );
+    const { projection } = yield* service.snapshot(thread.id);
+    expect(projection.messages[0]).toMatchObject({ text: "", streaming: false });
+    expect(projection.turnItems[0]).toMatchObject({ status: "completed", text: "" });
+  }).pipe(Effect.provide(layer)),
+);
+
 it.effect("shows an active voice reply before text arrives and clears it after failure", () =>
   Effect.gen(function* () {
     const service = yield* seed;

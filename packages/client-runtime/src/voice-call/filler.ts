@@ -31,7 +31,7 @@ export class TurnFiller {
     return this.playback !== undefined;
   }
 
-  async arm(turn: string, signal: AbortSignal) {
+  async arm(turn: string, signal: AbortSignal, elapsedMs = 0) {
     if (this.turn === turn) return;
     this.cancel();
     this.turn = turn;
@@ -40,7 +40,9 @@ export class TurnFiller {
     this.timer = timer;
     const pending = AbortSignal.any([signal, timer.signal]);
     try {
-      await Effect.runPromise(Effect.sleep(FILLER_DELAY_MS), { signal: pending });
+      await Effect.runPromise(Effect.sleep(Math.max(0, FILLER_DELAY_MS - elapsedMs)), {
+        signal: pending,
+      });
       const clips = (await this.prepare()).filter((clip) => clip.id !== this.lastClip);
       if (pending.aborted || this.realAudio || this.playback || !clips.length) return;
       const clip = clips[Effect.runSync(Random.nextIntBetween(0, clips.length - 1))]!;

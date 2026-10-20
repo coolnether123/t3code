@@ -1,4 +1,3 @@
-import type { CallCommand as OrchestrationCommand } from "./commands.ts";
 // @effect-diagnostics nodeBuiltinImport:off - Synthetic call archives exercise durable boundaries.
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
@@ -15,7 +14,20 @@ import {
   operatorUpdates,
   voiceDelegation,
   withoutCallControl,
+  VOICE_ROLE_PROMPT,
 } from "./operatorProtocol.ts";
+
+describe("silent call control", () => {
+  it("keeps hold markers and their partial prefixes out of spoken prose", () => {
+    expect(withoutCallControl("<otis-hold/>")).toBe("");
+    expect(withoutCallControl("<otis-ho")).toBe("");
+    expect(withoutCallControl("It is < 5.")).toBe("It is < 5.");
+    expect(withoutCallControl('Hello. <otis-delegate>{"intent":"Check"}</otis-delegate>')).toBe(
+      "Hello. ",
+    );
+    expect(VOICE_ROLE_PROMPT).toContain("<otis-hold/>");
+  });
+});
 
 const models: CallModels = {
   voice: {
@@ -97,6 +109,18 @@ async function fixture() {
 }
 
 describe("call delegation", () => {
+  it("finishes a hold turn without delegation and accepts the next voice message", async () => {
+    const f = await fixture();
+    const link = await f.startVoice("hold-turn", "Hang on, let me think.");
+    await f.operator.event(
+      f.event(link.sessionId, "turn.completed", "hold-turn", { state: "completed" }),
+      "<otis-hold/>",
+    );
+    const chat = (await f.operator.read("chat"))!;
+    expect(chat.voices[0]?.finished).toBe(true);
+    expect(chat.jobs).toEqual([]);
+    await expect(f.startVoice("after-hold", "What did I ask earlier?")).resolves.toEqual(link);
+  });
   it.each(["error", "closed"] as const)(
     "settles a failed voice turn and recreates a %s session for the next utterance",
     async (status) => {

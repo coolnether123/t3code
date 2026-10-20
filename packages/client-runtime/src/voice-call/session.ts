@@ -6,11 +6,13 @@ import type {
   ModelSelection,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import { isRetryableVoiceError, VoiceRequestError } from "./errors.ts";
 import { TurnFiller } from "./filler.ts";
 
 const now = () => DateTime.formatIso(Effect.runSync(DateTime.now));
+const time = () => Effect.runSync(Clock.currentTimeMillis);
 
 export type VoiceState =
   | "idle"
@@ -101,6 +103,7 @@ export class ThreadVoiceSession {
   private recording = false;
   private recordingId: string | undefined;
   private filler: TurnFiller;
+  private pendingFiller: { id: string; endedAt: number } | undefined;
   private stopTask: Promise<void> | undefined;
   private closeRetry = new AbortController();
   private capture: Promise<void> | undefined;
@@ -195,6 +198,7 @@ export class ThreadVoiceSession {
     if (!this.active) return;
     this.recovering = true;
     this.filler.cancel();
+    this.pendingFiller = undefined;
     this.deps.audio.finish();
     this.playback.abort();
     this.watching.abort();
@@ -425,6 +429,7 @@ export class ThreadVoiceSession {
         this.recording = false;
         if (!audio.audio) {
           this.filler.cancel();
+          this.pendingFiller = undefined;
           this.saved!.recordings = this.saved!.recordings.filter((entry) => entry.id !== id);
           await this.persist();
           return;
@@ -487,9 +492,7 @@ export class ThreadVoiceSession {
   }
   private scheduleFiller(id: string) {
     if (!this.active || this.recovering) return;
-    void this.filler.arm(id, this.playback.signal).then(() => {
-      if (this.active && this.state === "ready") void this.listen();
-    });
+    this.pendingFiller ??= { id, endedAt: time() };
   }
   observe(
     messages: readonly Message[],
@@ -514,6 +517,12 @@ export class ThreadVoiceSession {
         continue;
       const spoken = this.speechText(message);
       let offset = this.saved.offsets[message.id] ?? 0;
+      // Prose establishes the model's decision to speak. Hold turns never arm filler.
+      if (spoken.slice(offset).trim() && this.pendingFiller) {
+        const pending = this.pendingFiller;
+        this.pendingFiller = undefined;
+        void this.filler.arm(pending.id, this.playback.signal, time() - pending.endedAt);
+      }
       const queued = this.queue.filter((entry) => entry.messageId === message.id);
       if (queued.length) offset = Math.max(offset, ...queued.map((entry) => entry.end ?? 0));
       while (offset < spoken.length && this.queue.length < 3) {
@@ -540,6 +549,8 @@ export class ThreadVoiceSession {
     }
     if (!this.capture && !this.busy) void this.speak();
     if (!running && !this.queue.length && !this.capture && !this.busy) {
+      this.pendingFiller = undefined;
+      this.filler.cancel();
       void this.acknowledgeUpdates().catch((error) => this.failed(error));
       void this.announceAtPause();
     }
@@ -689,6 +700,7 @@ export class ThreadVoiceSession {
   async interrupt() {
     if (!this.active) return;
     this.filler.cancel();
+    this.pendingFiller = undefined;
     this.playback.abort();
     this.queue = [];
     this.saved!.silencedTurns = [
@@ -725,6 +737,7 @@ export class ThreadVoiceSession {
     this.detached = true;
     this.active = false;
     this.filler.cancel();
+    this.pendingFiller = undefined;
     this.playback.abort();
     this.watching.abort();
     this.stopRenewal();
@@ -745,6 +758,7 @@ export class ThreadVoiceSession {
   private async hangUp() {
     this.active = false;
     this.filler.cancel();
+    this.pendingFiller = undefined;
     this.stopRenewal();
     this.playback.abort();
     this.watching.abort();
@@ -799,8 +813,10 @@ export async function speechIdentifier(value: string, start: number, end: number
 }
 
 function spokenMessageText(value: string, streaming = false) {
+  if (!value.trim() || /<otis-hold\s*\/?[>\s]/.test(value)) return "";
   const text = value
     .replace(/<otis-(?:delegate|status)>[\s\S]*?(?:<\/otis-(?:delegate|status)>|$)/g, "")
+    .replace(/<(?:o(?:t(?:i(?:s(?:-[a-z-]*)?)?)?)?)?$/g, "")
     .replace(/```[\s\S]*?(?:```|$)/g, "")
     .replace(/`[^`]*(?:`|$)/g, "")
     .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");

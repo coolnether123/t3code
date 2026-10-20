@@ -273,35 +273,37 @@ describe("durable thread voice session", () => {
       "call.close",
     ]);
   });
-  it("plays one filler a second after Send speech while transcription is still pending", async () => {
+  it("keeps a slow undecided turn silent until the model starts a spoken reply", async () => {
     vi.useFakeTimers();
     const f = fixture();
     await f.session.start(options, []);
     f.session.finish();
     f.session.finish();
-    await vi.advanceTimersByTimeAsync(999);
-    const before = f.audio.play.mock.calls.length;
-    await vi.advanceTimersByTimeAsync(1);
-    const after = f.audio.play.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(1_800);
     f.transcript.resolve({});
     await f.waiting.promise;
-    expect(before).toBe(0);
-    expect(after).toBe(1);
-    expect(f.audio.play).toHaveBeenCalledTimes(1);
+    expect(f.audio.play).not.toHaveBeenCalled();
     expect(f.request.mock.calls.some(([input]) => input.action === "call.speak")).toBe(false);
     await vi.advanceTimersByTimeAsync(5_000);
-    expect(f.audio.play).toHaveBeenCalledTimes(1);
+    expect(f.audio.play).not.toHaveBeenCalled();
   });
 
-  it("also arms filler after automatic speech submission", async () => {
+  it("does not play filler for an automatically submitted hold turn", async () => {
     vi.useFakeTimers();
     const f = fixture();
     await f.session.start(options, []);
     f.recording.resolve({ audio: "AAA=", sampleRate: 16_000 });
-    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1_800);
     f.transcript.resolve({});
     await f.waiting.promise;
-    expect(f.audio.play).toHaveBeenCalledTimes(1);
+    f.session.observe(
+      [{ id: "hold", role: "assistant", text: "<otis-hold/>", streaming: false }],
+      false,
+    );
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(f.audio.play).not.toHaveBeenCalled();
+    expect(f.request.mock.calls.some(([input]) => input.action === "call.speak")).toBe(false);
+    expect(f.change.mock.calls.at(-1)?.[0]).toBe("listening");
   });
 
   it("waits for the filler before playing the voice reply in the same call", async () => {
@@ -315,24 +317,30 @@ describe("durable thread voice session", () => {
       replyPlaying.resolve();
     });
     const original = f.request.getMockImplementation()!;
+    const allowSynthesis = deferred<void>();
     f.request.mockImplementation(async (input, signal, onAudio) => {
-      if (input.action === "call.speak") synthesis.resolve();
+      if (input.action === "call.speak") {
+        synthesis.resolve();
+        await allowSynthesis.promise;
+      }
       return original(input, signal, onAudio);
     });
     await f.session.start(options, []);
     f.transcript.resolve({});
     f.session.finish();
     await f.waiting.promise;
-    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(1_800);
     f.session.observe(
       [{ id: "reply", role: "assistant", text: "Checking your task.", streaming: false }],
       true,
       "voice-turn",
     );
     await synthesis.promise;
+    await vi.advanceTimersByTimeAsync(0);
     expect(f.audio.play).toHaveBeenCalledTimes(1);
     expect(f.audio.play.mock.calls[0]![2].aborted).toBe(false);
     finishFiller.resolve();
+    allowSynthesis.resolve();
     await replyPlaying.promise;
     expect(f.audio.play).toHaveBeenCalledTimes(2);
     expect(f.audio.play.mock.calls[1]![0]).toBe("AAA=");
