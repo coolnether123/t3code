@@ -125,6 +125,16 @@ export class CallService {
         : {}),
     };
   }
+  private scheduleExpiry(callId: string, until: number) {
+    this.store.scheduleExpiry(callId, until, () =>
+      this.store.serial(`renew:${callId}`, async () => {
+        const record = await this.store.require(callId);
+        if (record.closed || (record.leaseUntil ?? 0) <= time())
+          await this.handle({ action: "call.close", callId }, new AbortController().signal);
+        else this.scheduleExpiry(callId, record.leaseUntil!);
+      }),
+    );
+  }
   async handle(input: CallRequest, signal: AbortSignal): Promise<SpeechResponse> {
     for (const id of [input.callId, input.utteranceId, input.speechId])
       if (id !== undefined) callIdentifier(id);
@@ -362,6 +372,7 @@ export class CallService {
           "Router granted the call profile; speech tenants ready",
         ];
         await this.store.changed(current);
+        this.scheduleExpiry(callId, current.leaseUntil!);
       });
     } catch (error) {
       await this.ports.speech(
@@ -392,6 +403,7 @@ export class CallService {
       if (!current.closed && current.lease === sessionId) {
         current.leaseUntil = until;
         await this.store.changed(current);
+        this.scheduleExpiry(callId, until);
       }
     });
   }

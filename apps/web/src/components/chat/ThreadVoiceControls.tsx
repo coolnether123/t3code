@@ -358,9 +358,21 @@ export function ThreadVoiceControls({
             </ComposerBanner.Root>
           </section>
         ) : (
-          <Button type="button" size="sm" variant="outline" onClick={() => setExpanded(!expanded)}>
-            Call Otis
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => setExpanded(!expanded)}
+            >
+              Call Otis
+            </Button>
+            {detail?.startsWith("Call ended") ? (
+              <span role="status" className="text-xs text-muted-foreground">
+                Call ended.
+              </span>
+            ) : null}
+          </div>
         )}
         {expanded ? (
           <PopoverPopup

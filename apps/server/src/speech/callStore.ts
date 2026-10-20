@@ -5,6 +5,8 @@ import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
+import * as NodeTimers from "node:timers";
+import * as Clock from "effect/Clock";
 import { Platform as HostProcessPlatform } from "@t3tools/shared/HostProcess";
 import {
   CallOptions,
@@ -110,6 +112,7 @@ export interface CallRecord extends CallOptions {
 }
 export const sha256 = (value: string | Uint8Array) =>
   NodeCrypto.createHash("sha256").update(value).digest("hex");
+const time = () => Effect.runSync(Clock.currentTimeMillis);
 export function callIdentifier(value: string | undefined): string {
   if (!value || !/^[a-zA-Z0-9_-]{1,100}$/.test(value)) throw new Error("Invalid call record ID.");
   return value;
@@ -117,13 +120,33 @@ export function callIdentifier(value: string | undefined): string {
 
 /** One writer per key within the server that owns this T3 home. */
 export class CallStore {
+  private expirations = new Map<string, ReturnType<typeof NodeTimers.setTimeout>>();
   private locks = new Map<string, Promise<unknown>>();
   private listeners = new Map<string, Set<() => void>>();
   readonly root: string;
   private platform: NodeJS.Platform;
-  constructor(root: string, platform = HostProcessPlatform.defaultValue()) {
+  private timers: Pick<typeof NodeTimers, "setTimeout" | "clearTimeout">;
+  constructor(
+    root: string,
+    platform = HostProcessPlatform.defaultValue(),
+    timers: Pick<typeof NodeTimers, "setTimeout" | "clearTimeout"> = NodeTimers,
+  ) {
     this.platform = platform;
     this.root = root;
+    this.timers = timers;
+  }
+  scheduleExpiry(callId: string, until: number, expire: () => Promise<void>) {
+    this.timers.clearTimeout(this.expirations.get(callId));
+    // Archive cleanup must not keep the server process alive during shutdown.
+    const timer = this.timers.setTimeout(
+      () => {
+        this.expirations.delete(callId);
+        void expire().catch(() => this.scheduleExpiry(callId, time() + 5_000, expire));
+      },
+      Math.max(0, Math.min(2_147_483_647, until - time())),
+    );
+    timer.unref();
+    this.expirations.set(callId, timer);
   }
 
   directory(callId: string) {

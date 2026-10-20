@@ -106,6 +106,49 @@ afterEach(async () => {
 });
 
 describe("durable thread voice session", () => {
+  it("ends local audio and sends close even when an upload ignores cancellation", async () => {
+    const f = fixture();
+    const uploading = deferred<void>();
+    const release = deferred<SpeechResponse>();
+    const closed = deferred<void>();
+    const original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (input, signal, onAudio) => {
+      if (input.action === "call.upload") {
+        uploading.resolve();
+        return release.promise;
+      }
+      if (input.action === "call.close") closed.resolve();
+      return original(input, signal, onAudio);
+    });
+    await f.session.start(options, []);
+    f.session.finish();
+    await uploading.promise;
+    const stopping = f.session.stop();
+    expect(f.audio.close).toHaveBeenCalled();
+    expect(f.change.mock.calls.at(-1)?.[0]).toBe("idle");
+    await closed.promise;
+    expect(f.saved()?.closed).toBe(true);
+    release.resolve({});
+    await stopping;
+    expect(f.request.mock.calls.some(([input]) => input.action === "call.transcribe")).toBe(false);
+  });
+  it("retries an offline close automatically while remaining ended on the phone", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const original = f.request.getMockImplementation()!;
+    let closeCount = 0;
+    f.request.mockImplementation(async (input, signal, onAudio) => {
+      if (input.action === "call.close" && ++closeCount === 1) throw new TypeError("offline");
+      return original(input, signal, onAudio);
+    });
+    await f.session.start(options, []);
+    await f.session.stop();
+    expect(f.saved()?.closed).toBe(true);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(closeCount).toBe(2);
+    expect(f.saved()).toBeUndefined();
+    expect(f.change.mock.calls.at(-1)?.[0]).toBe("idle");
+  });
   it("releases recovery after an interruption during the ready cue", async () => {
     const f = fixture();
     const entered = deferred<void>();
@@ -165,14 +208,14 @@ describe("durable thread voice session", () => {
     await f.session.stop();
     expect(f.saved()?.closed).toBe(true);
     expect(f.change).toHaveBeenLastCalledWith(
-      "error",
-      expect.stringContaining("Retry saved speech"),
+      "idle",
+      expect.stringContaining("Call ended"),
       undefined,
     );
     failClose = false;
     await f.session.resume();
     expect(f.saved()).toBeUndefined();
-    expect(f.change).toHaveBeenLastCalledWith("idle", undefined, undefined);
+    expect(f.change).toHaveBeenLastCalledWith("idle", "Call ended.", undefined);
     expect(f.request.mock.calls.filter(([input]) => input.action === "call.open")).toHaveLength(1);
     expect(f.audio.capture).toHaveBeenCalledOnce();
   });
@@ -210,7 +253,7 @@ describe("durable thread voice session", () => {
       undefined,
     );
     await f.session.stop();
-    expect(f.change).toHaveBeenLastCalledWith("idle", undefined, undefined);
+    expect(f.change).toHaveBeenLastCalledWith("idle", "Call ended.", undefined);
     expect(f.request).not.toHaveBeenCalled();
   });
   it("clears an empty rejected open after idempotent server close", async () => {
@@ -224,7 +267,7 @@ describe("durable thread voice session", () => {
     await f.session.start(options, []);
     await f.session.stop();
     expect(f.saved()).toBeUndefined();
-    expect(f.change).toHaveBeenLastCalledWith("idle", undefined, undefined);
+    expect(f.change).toHaveBeenLastCalledWith("idle", "Call ended.", undefined);
     expect(f.request.mock.calls.map(([input]) => input.action)).toEqual([
       "call.open",
       "call.close",
@@ -909,7 +952,7 @@ describe("durable thread voice session", () => {
     cue.resolve();
     await start;
     expect(f.audio.capture).not.toHaveBeenCalled();
-    expect(f.change).toHaveBeenLastCalledWith("idle", undefined, undefined);
+    expect(f.change).toHaveBeenLastCalledWith("idle", "Call ended.", undefined);
   });
   it("takes the next recording's model from the normal selector and retains it for retries", async () => {
     const f = fixture();

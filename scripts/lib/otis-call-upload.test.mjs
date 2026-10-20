@@ -1,13 +1,18 @@
-import { test } from "node:test";
-import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import * as NodeTest from "node:test";
+import * as NodeAssert from "node:assert/strict";
+import * as NodeChildProcess from "node:child_process";
 
-test("long recording crosses the real client encoder and server upload with a small stack", () => {
-  const result = spawnSync(process.execPath, ["--stack-size=120", "--input-type=module"], {
-    cwd: new URL("../../", import.meta.url),
-    encoding: "utf8",
-    timeout: 30_000,
-    input: `
+NodeTest.test(
+  "long recording crosses the real client encoder and server upload with a small stack",
+  () => {
+    const result = NodeChildProcess.spawnSync(
+      process.execPath,
+      ["--stack-size=120", "--input-type=module"],
+      {
+        cwd: new URL("../../", import.meta.url),
+        encoding: "utf8",
+        timeout: 30_000,
+        input: `
       import { createRequire } from 'node:module';
       import { mkdtemp, rm } from 'node:fs/promises';
       import { tmpdir } from 'node:os';
@@ -39,7 +44,9 @@ test("long recording crosses the real client encoder and server upload with a sm
         console.log('60 second upload saved');
       } finally { await rm(directory, {recursive:true,force:true}); }
     `,
-  });
-  assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.match(result.stdout, /60 second upload saved/);
-});
+      },
+    );
+    NodeAssert.equal(result.status, 0, result.stderr || result.stdout);
+    NodeAssert.match(result.stdout, /60 second upload saved/);
+  },
+);

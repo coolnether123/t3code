@@ -1,4 +1,3 @@
-import type { CallCommand as OrchestrationCommand } from "./commands.ts";
 // @effect-diagnostics nodeBuiltinImport:off - Disposable archive fault injection uses real Node files.
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
@@ -83,6 +82,61 @@ async function fixture() {
 }
 
 describe("durable calls", () => {
+  it("runs lease expiry at its deadline and replaces an earlier deadline on renewal", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = new CallStore("synthetic-unused-directory", undefined, {
+        setTimeout: globalThis.setTimeout,
+        clearTimeout: globalThis.clearTimeout,
+      });
+      const expired = vi.fn(async () => {});
+      store.scheduleExpiry(
+        "test",
+        Clock.Clock.defaultValue().currentTimeMillisUnsafe() + 120_000,
+        expired,
+      );
+      await vi.advanceTimersByTimeAsync(60_000);
+      store.scheduleExpiry(
+        "test",
+        Clock.Clock.defaultValue().currentTimeMillisUnsafe() + 120_000,
+        expired,
+      );
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(expired).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(expired).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("closes an abandoned call and releases speech when its lease deadline arrives", async () => {
+    const f = await fixture();
+    const scheduled = vi.spyOn(f.store, "scheduleExpiry");
+    await f.request({ action: "call.renew" });
+    const expire = scheduled.mock.calls.at(-1)![2];
+    const record = await f.store.require("call-1");
+    record.leaseUntil = 0;
+    await f.store.changed(record);
+    await expire();
+    expect((await f.service.status("call-1")).closed).toBe(true);
+    expect((await f.store.require("call-1")).lease).toBeUndefined();
+    expect(f.ports.speech).toHaveBeenCalledWith(
+      { action: "release", sessionId: "lease-1" },
+      expect.any(AbortSignal),
+    );
+    expect(await f.store.activeCall(options.threadId, "")).toBeUndefined();
+  });
+  it("does not close a call whose lease was extended before an older deadline", async () => {
+    const f = await fixture();
+    const scheduled = vi.spyOn(f.store, "scheduleExpiry");
+    await f.request({ action: "call.renew" });
+    await scheduled.mock.calls.at(-1)![2]();
+    expect((await f.service.status("call-1")).closed).toBe(false);
+    expect(f.ports.speech).not.toHaveBeenCalledWith(
+      { action: "release", sessionId: "lease-1" },
+      expect.any(AbortSignal),
+    );
+  });
   it("saves a full minute of 48 kHz PCM without exhausting the validation stack", async () => {
     const f = await fixture();
     const audio = Buffer.alloc(48_000 * 2 * 60, 1);

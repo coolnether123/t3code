@@ -102,6 +102,7 @@ export class ThreadVoiceSession {
   private recordingId: string | undefined;
   private filler: TurnFiller;
   private stopTask: Promise<void> | undefined;
+  private closeRetry = new AbortController();
   private capture: Promise<void> | undefined;
   private playbackTask: Promise<void> | undefined;
   private running = false;
@@ -215,6 +216,8 @@ export class ThreadVoiceSession {
   }
   async start(options: CallOptions, messages: readonly Message[]) {
     if (this.active) return;
+    if (this.stopTask) await this.stopTask;
+    this.closeRetry.abort();
     this.active = true;
     this.modelSelection = options.modelSelection;
     this.operatorSelection = options.operatorSelection;
@@ -438,7 +441,7 @@ export class ThreadVoiceSession {
         this.saved!.recordings = this.saved!.recordings.filter((entry) => entry.id !== id);
         this.saved!.recordings.push(recording);
         await this.persist();
-        if (!this.recovering) this.change("saving", "Saving raw audio on the PC");
+        if (this.active && !this.recovering) this.change("saving", "Saving raw audio on the PC");
         if (this.active && !this.detached && !this.recovering)
           await this.flush(this.queue.length === 0);
         if (this.active && !this.recovering) this.change("waiting");
@@ -726,6 +729,7 @@ export class ThreadVoiceSession {
     this.watching.abort();
     this.stopRenewal();
     this.deps.audio.finish();
+    this.deps.audio.close();
     if (!this.recording) this.abort.abort();
     await this.capture;
     this.abort.abort();
@@ -744,31 +748,36 @@ export class ThreadVoiceSession {
     this.stopRenewal();
     this.playback.abort();
     this.watching.abort();
-    if (!this.recording) this.abort.abort();
+    this.deps.audio.finish();
+    this.deps.audio.close();
+    this.queue = [];
+    this.change("idle", "Call ended.");
+    this.abort.abort();
     if (!this.saved) {
-      this.deps.audio.close();
-      this.change("idle");
       return;
     }
-    this.active = false;
-    this.playback.abort();
-    this.deps.audio.finish();
-    await this.capture;
-    this.abort.abort();
     try {
       this.saved.closed = true;
+      for (const recording of this.saved.recordings) delete recording.capturing;
       await this.persist();
-      await this.flush(false, new AbortController().signal);
-      await this.request({ action: "call.close" }, new AbortController().signal);
+      // Close has its own request so a stalled raw upload cannot keep the PC call open.
+      const close = this.request({ action: "call.close" }, AbortSignal.timeout(15_000));
+      await Promise.all([close, this.capture]);
+      await this.flush(false, AbortSignal.timeout(30_000));
       await this.deps.persistence.clear();
       this.saved = undefined;
       this.status = undefined;
-      this.change("idle");
+      this.change("idle", "Call ended.");
     } catch {
       this.change(
-        "error",
-        "Call ended on this device. Retry saved speech to finish saving and close the PC session. Speech stays queued here.",
+        "idle",
+        "Call ended. Saving queued speech and closing the PC session in the background.",
       );
+      this.closeRetry.abort();
+      this.closeRetry = new AbortController();
+      void Effect.runPromise(Effect.sleep(5_000), { signal: this.closeRetry.signal })
+        .then(() => this.stop())
+        .catch(() => {});
     } finally {
       this.abort.abort();
       this.watching.abort();

@@ -195,7 +195,7 @@ export function createBrowserAudio(onInterrupted?: () => void) {
           mute.connect(audioContext.destination);
         });
         await journalTask;
-        signal.throwIfAborted();
+        // Finish captures the final buffer even when hang-up cancels network work immediately.
         return speechSeen ? recording() : { audio: "", sampleRate: audioContext.sampleRate };
       } finally {
         finishCapture = undefined;

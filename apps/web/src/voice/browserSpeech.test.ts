@@ -85,6 +85,25 @@ afterEach(() => {
 });
 
 describe("streamed browser PCM scheduling", () => {
+  it("retains the final speech buffer when hang-up stops audio and cancels network work", async () => {
+    const audio = fixture();
+    const stop = vi.fn();
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue({
+      getTracks: () => [{ stop }],
+      getAudioTracks: () => [],
+    } as unknown as MediaStream);
+    const controller = new AbortController();
+    await audio.prepare(controller.signal);
+    const captured = audio.capture(controller.signal);
+    contexts[0]!.processor.onaudioprocess!({
+      inputBuffer: { getChannelData: () => new Float32Array(4096).fill(0.1) },
+    });
+    audio.finish();
+    audio.close();
+    controller.abort();
+    expect(stop).toHaveBeenCalled();
+    expect((await captured).audio).not.toBe("");
+  });
   it("cancels a readiness tone when its audio context is interrupted", async () => {
     const interrupted = vi.fn();
     const audio = fixture(interrupted);
