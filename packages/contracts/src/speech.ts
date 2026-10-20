@@ -58,6 +58,7 @@ export const CallRequest = Schema.Struct({
     "call.upload",
     "call.transcribe",
     "call.deliver",
+    "call.say",
     "call.status",
     "call.watch",
     "call.speak",
@@ -103,6 +104,10 @@ export const ValidCallRequest = CallRequest.check(
       case "call.deliver":
       case "call.interrupt":
         return !!input.utteranceId || "An utterance or operation ID is required.";
+      case "call.say":
+        return (
+          (!!input.utteranceId && !!input.text?.trim()) || "Typed speech requires an ID and text."
+        );
       case "call.speak":
         return (!!input.speechId && !!input.text?.trim()) || "Speech requires an ID and text.";
       case "call.played":
@@ -117,6 +122,7 @@ export type SpeechRequest = typeof SpeechRequest.Type;
 
 export const CallUtterance = Schema.Struct({
   id: CallId,
+  source: Schema.optional(Schema.Literal("typed")),
   sha256: Schema.String,
   bytes: Schema.Number,
   sampleRate: Schema.Number,
@@ -141,6 +147,8 @@ export const CallStatus = Schema.Struct({
   steps: Schema.Array(Schema.String),
   utterances: Schema.Array(CallUtterance),
   played: Schema.Array(Schema.String),
+  voiceRunning: Schema.optional(Schema.Boolean),
+  operatorWorking: Schema.optional(Schema.Boolean),
   operatorUpdates: Schema.optional(Schema.Array(OperatorUpdate)),
 });
 export type CallStatus = typeof CallStatus.Type;

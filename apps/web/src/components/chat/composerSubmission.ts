@@ -34,6 +34,7 @@ export function submitComposerDraft(
   options: ComposerSubmissionInput & {
     event: ComposerSubmitEvent | undefined;
     onSend: (event?: ComposerSubmitEvent) => boolean | void;
+    onCallSend?: ((text: string) => void) | undefined;
   },
 ): { validationMessage: string | null; didDispatch: boolean } {
   const validationMessage = getComposerSubmissionValidationMessage(options);
@@ -42,6 +43,12 @@ export function submitComposerDraft(
     return { validationMessage, didDispatch: false };
   }
 
+  if (options.onCallSend) {
+    options.event?.preventDefault();
+    if (!options.prompt.trim()) return { validationMessage: null, didDispatch: false };
+    options.onCallSend(options.prompt);
+    return { validationMessage: null, didDispatch: true };
+  }
   if (options.onSend(options.event) === false) {
     options.event?.preventDefault();
     return { validationMessage: null, didDispatch: false };

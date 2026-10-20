@@ -108,6 +108,7 @@ export class CallService {
 
   async status(callId: string): Promise<CallStatus> {
     const record = await this.store.require(callId);
+    const operator = await this.operator?.read(record.threadId);
     return {
       callId,
       threadId: record.threadId,
@@ -121,7 +122,11 @@ export class CallService {
       ),
       played: record.recentPlayed ?? [],
       ...(this.operator
-        ? { operatorUpdates: (await this.operator.read(record.threadId))?.updates ?? [] }
+        ? {
+            operatorUpdates: operator?.updates ?? [],
+            voiceRunning: operator?.voices.some((voice) => !voice.finished) ?? false,
+            operatorWorking: operator?.jobs.some((job) => job.phase !== "done") ?? false,
+          }
         : {}),
     };
   }
@@ -185,6 +190,46 @@ export class CallService {
           await this.renewLease(input.callId, signal);
       });
       return { call: await this.status(input.callId) };
+    }
+    if (input.action === "call.say") {
+      const id = callIdentifier(input.utteranceId);
+      return this.store.serial(`call.deliver:${input.callId}:${id}`, async () => {
+        const record = await this.store.require(input.callId);
+        const text = input.text!.trim();
+        const previous = await this.store.read<CallUtterance>(input.callId, `${id}.typed.json`);
+        if (await this.store.read(input.callId, `${id}.raw.json`))
+          throw new Error("This utterance ID already belongs to a recording.");
+        if (previous && previous.text !== text)
+          throw new Error("Typed utterance identity does not match its saved text.");
+        if (!previous) {
+          const at = now();
+          await this.store.write(input.callId, `${id}.typed.json`, {
+            id,
+            source: "typed",
+            text,
+            sha256: sha256(text),
+            bytes: Buffer.byteLength(text),
+            sampleRate: 0,
+            startedAt: at,
+            endedAt: at,
+            savedAt: at,
+            transcribedAt: at,
+            modelSelection: input.modelSelection ?? record.modelSelection,
+            ...(input.operatorSelection ? { operatorSelection: input.operatorSelection } : {}),
+          });
+          await this.store.serial(input.callId, async () => {
+            const current = await this.store.require(input.callId);
+            current.recentUtterances = [
+              ...new Set([...(current.recentUtterances ?? []), id]),
+            ].slice(-64);
+            await this.store.changed(current);
+          });
+        }
+        const utterance = record.closed
+          ? await this.store.utterance(input.callId, id)
+          : await this.deliver(record, id);
+        return { utterance, call: await this.status(input.callId) };
+      });
     }
     // Engine work owns an operation lock, never the call's short state lock.
     if (input.action === "call.prepare") {
@@ -408,6 +453,8 @@ export class CallService {
     });
   }
   private async upload(record: CallRecord, input: CallRequest) {
+    if (await this.store.read(record.callId, `${callIdentifier(input.utteranceId)}.typed.json`))
+      throw new Error("This utterance ID already belongs to a typed turn.");
     // Upload remains available after hang-up, so a disconnected phone can save
     // its final recording. Closed calls never transcribe or deliver new work.
     const id = callIdentifier(input.utteranceId);

@@ -68,7 +68,9 @@ function validateRecord(name: string, value: unknown) {
         ? CallModels
         : name === "call.json"
           ? callRecord
-          : name.endsWith(".raw.json") || name.endsWith(".upload.json")
+          : name.endsWith(".raw.json") ||
+              name.endsWith(".upload.json") ||
+              name.endsWith(".typed.json")
             ? CallUtterance
             : name.endsWith(".transcript.json")
               ? transcriptRecord
@@ -89,10 +91,18 @@ function validateRecord(name: string, value: unknown) {
       !/^[a-f0-9]{64}$/.test(raw.sha256) ||
       !Number.isInteger(raw.bytes) ||
       raw.bytes <= 0 ||
-      raw.bytes % 2 ||
-      !Number.isInteger(raw.sampleRate) ||
-      raw.sampleRate < 8000 ||
-      raw.sampleRate > 96000 ||
+      (name.endsWith(".typed.json")
+        ? raw.source !== "typed" ||
+          !raw.text?.trim() ||
+          raw.sampleRate !== 0 ||
+          raw.bytes !== Buffer.byteLength(raw.text) ||
+          raw.sha256 !== sha256(raw.text) ||
+          !Number.isFinite(Date.parse(raw.transcribedAt ?? ""))
+        : raw.source === "typed" ||
+          raw.bytes % 2 !== 0 ||
+          !Number.isInteger(raw.sampleRate) ||
+          raw.sampleRate < 8000 ||
+          raw.sampleRate > 96000) ||
       ![raw.startedAt, raw.endedAt, raw.savedAt].every((at) => Number.isFinite(Date.parse(at)))
     )
       throw new Error(`Invalid saved call record: ${name}. Retain the archive for recovery.`);
@@ -262,7 +272,9 @@ export class CallStore {
     signal.throwIfAborted();
   }
   async utterance(callId: string, id: string): Promise<CallUtterance> {
-    const raw = await this.read<CallUtterance>(callId, `${callIdentifier(id)}.raw.json`);
+    const raw =
+      (await this.read<CallUtterance>(callId, `${callIdentifier(id)}.typed.json`)) ??
+      (await this.read<CallUtterance>(callId, `${id}.raw.json`));
     if (!raw) throw new Error("Upload and acknowledge raw audio before transcribing.");
     const transcript = await this.read<Partial<CallUtterance>>(callId, `${id}.transcript.json`);
     const delivery = await this.read<Partial<CallUtterance>>(callId, `${id}.delivery.json`);

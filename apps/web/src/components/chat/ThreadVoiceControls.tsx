@@ -23,6 +23,7 @@ import { ComposerBanner } from "./ComposerBanner";
 
 export interface ThreadVoiceHandle {
   stop(): void;
+  say(text: string): Promise<void>;
 }
 const labels: Record<VoiceState, string> = {
   idle: "Call Otis",
@@ -219,6 +220,10 @@ export function ThreadVoiceControls({
   useImperativeHandle(
     ref,
     () => ({
+      say: async (text) => {
+        if (!sessionRef.current) throw new Error("Call is unavailable.");
+        await sessionRef.current.say(text);
+      },
       stop: () => {
         void sessionRef.current?.stop();
       },

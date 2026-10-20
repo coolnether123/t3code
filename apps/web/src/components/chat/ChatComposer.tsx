@@ -2448,6 +2448,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   });
   const [isVoicePanelOpen, setIsVoicePanelOpen] = useState(false);
   const [isVoiceActive, setIsVoiceActive] = useState(false);
+  const callSendPending = useRef(false);
   // A pending question stays expanded: its card moves into the banner dock,
   // so collapsing would leave the surface empty and squashed beneath it. An open
   // call keeps its controls mounted in the expanded footer too.
@@ -4006,8 +4007,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     submissionIntent?: ComposerSubmissionIntent,
   ) => {
     if (
-      noProviderAvailable ||
-      isSendDisabled ||
+      callSendPending.current ||
+      (!isVoiceActive && (noProviderAvailable || isSendDisabled)) ||
       !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)
     ) {
       event?.preventDefault();
@@ -4038,6 +4039,27 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       prompt: promptRef.current,
       submissionTarget: activePendingProgress ? "pending-user-input" : "provider-turn",
       event,
+      onCallSend: isVoiceActive
+        ? (text) => {
+            callSendPending.current = true;
+            void voiceRef.current
+              ?.say(text)
+              .then(() => {
+                if (promptRef.current === text) {
+                  promptRef.current = "";
+                  setComposerDraftPrompt(composerDraftTarget, "");
+                }
+              })
+              .finally(() => {
+                callSendPending.current = false;
+              })
+              .catch((error: unknown) =>
+                setComposerSubmissionError(
+                  error instanceof Error ? error.message : "Could not save the typed call turn.",
+                ),
+              );
+          }
+        : undefined,
       onSend: (sendEvent) => {
         providerInputRejectedRef.current = false;
         onSend(
@@ -7175,28 +7197,31 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     onCitationDraftSave={saveCitationDraftToPromptStable}
                     onPaste={onComposerPasteStable}
                     placeholder={
-                      isComposerApprovalState
-                        ? "Resolve this approval request to continue"
-                        : activePendingProgress
-                          ? isChoiceOnlyPendingQuestion
-                            ? "Choose an option above"
-                            : "Type your own answer, or leave this blank to use the selected option"
-                          : showPlanFollowUpPrompt && activeProposedPlan
-                            ? "Add feedback to refine the plan, or leave this blank to implement it"
-                            : projectSelectionRequired
-                              ? "Choose a project above to start a thread"
-                              : showProviderUnavailable
-                                ? "Enable a provider in Settings to send a message"
-                                : phase === "disconnected"
-                                  ? DISCONNECTED_COMPOSER_PLACEHOLDER
-                                  : "Ask anything, @tag files/folders, $use skills, or / for commands"
+                      isVoiceActive
+                        ? "Type to Otis while you wait"
+                        : isComposerApprovalState
+                          ? "Resolve this approval request to continue"
+                          : activePendingProgress
+                            ? isChoiceOnlyPendingQuestion
+                              ? "Choose an option above"
+                              : "Type your own answer, or leave this blank to use the selected option"
+                            : showPlanFollowUpPrompt && activeProposedPlan
+                              ? "Add feedback to refine the plan, or leave this blank to implement it"
+                              : projectSelectionRequired
+                                ? "Choose a project above to start a thread"
+                                : showProviderUnavailable
+                                  ? "Enable a provider in Settings to send a message"
+                                  : phase === "disconnected"
+                                    ? DISCONNECTED_COMPOSER_PLACEHOLDER
+                                    : "Ask anything, @tag files/folders, $use skills, or / for commands"
                     }
                     disabled={
-                      isConnecting ||
-                      isComposerApprovalState ||
-                      projectSelectionRequired ||
-                      isChoiceOnlyPendingQuestion ||
-                      activePendingIsResponding
+                      !isVoiceActive &&
+                      (isConnecting ||
+                        isComposerApprovalState ||
+                        projectSelectionRequired ||
+                        isChoiceOnlyPendingQuestion ||
+                        activePendingIsResponding)
                     }
                   />
                 </ComposerContextActionsContext>
@@ -7352,7 +7377,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       />
                     ) : null}
                   </div>
-                  {!isComposerApprovalState ? (
+                  {!isComposerApprovalState || isVoiceActive ? (
                     <ComposerFooterPrimaryActions
                       compact={isComposerResting || isComposerPrimaryActionsCompact}
                       canOperateThread={canOperateThread}
@@ -7361,8 +7386,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       }
                       reserveContextWindowMeter={reserveContextWindowMeter}
                       activeThreadModelDisplayName={activeThreadModelDisplayName}
-                      pendingAction={pendingPrimaryAction}
-                      isRunning={phase === "running"}
+                      pendingAction={isVoiceActive ? null : pendingPrimaryAction}
+                      isRunning={!isVoiceActive && phase === "running"}
                       canInterrupt={canInterrupt}
                       followUpBehavior={settings.followUpBehavior}
                       canSteer={!isCompacting}
@@ -7382,19 +7407,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                         },
                       )}
                       showPlanFollowUpPrompt={
-                        pendingUserInputs.length === 0 && showPlanFollowUpPrompt
+                        !isVoiceActive && pendingUserInputs.length === 0 && showPlanFollowUpPrompt
                       }
                       promptHasText={prompt.trim().length > 0}
-                      isSendBusy={isSendBusy}
-                      sendDisabledReason={sendDisabledReason}
-                      isConnecting={isConnecting}
+                      isSendBusy={!isVoiceActive && isSendBusy}
+                      sendDisabledReason={isVoiceActive ? null : sendDisabledReason}
+                      isConnecting={!isVoiceActive && isConnecting}
                       isEnvironmentUnavailable={
-                        environmentUnavailable !== null ||
-                        noProviderAvailable ||
-                        projectSelectionRequired
+                        !isVoiceActive &&
+                        (environmentUnavailable !== null ||
+                          noProviderAvailable ||
+                          projectSelectionRequired)
                       }
-                      isPreparingWorktree={isPreparingWorktree}
-                      hasSendableContent={composerSendState.hasSendableContent}
+                      isPreparingWorktree={!isVoiceActive && isPreparingWorktree}
+                      hasSendableContent={
+                        isVoiceActive
+                          ? prompt.trim().length > 0
+                          : composerSendState.hasSendableContent
+                      }
                       canResume={showResumeAction}
                       preserveComposerFocusOnPointerDown={isMobileViewport || isComposerResting}
                       isEditingQueuedMessage={isEditingQueuedMessage}

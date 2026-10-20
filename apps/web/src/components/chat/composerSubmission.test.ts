@@ -292,3 +292,19 @@ describe("submitComposerDraft", () => {
     expect(onSend).toHaveBeenCalledOnce();
   });
 });
+
+it("routes a typed call turn to the call and preserves ordinary chat sends outside it", () => {
+  const onSend = vi.fn();
+  const onCallSend = vi.fn();
+  const input = {
+    prompt: "Prepare this",
+    submissionTarget: "provider-turn" as const,
+    event: undefined,
+    onSend,
+  };
+  expect(submitComposerDraft({ ...input, onCallSend }).didDispatch).toBe(true);
+  expect(onCallSend).toHaveBeenCalledWith("Prepare this");
+  expect(onSend).not.toHaveBeenCalled();
+  expect(submitComposerDraft(input).didDispatch).toBe(true);
+  expect(onSend).toHaveBeenCalledOnce();
+});

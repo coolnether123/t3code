@@ -20,6 +20,7 @@ describe("voice request validation", () => {
     "call.upload",
     "call.transcribe",
     "call.deliver",
+    "call.say",
     "call.interrupt",
     "call.speak",
     "call.played",
@@ -41,4 +42,13 @@ describe("voice request validation", () => {
     expect(valid({ action: "call.status", callId: "synthetic" })).toBe(true);
     expect(valid({ action: "call.close", callId: "synthetic" })).toBe(true);
   });
+});
+
+it("validates typed call input while keeping recording metadata optional", () => {
+  expect(valid({ action: "call.say", callId: "call", utteranceId: "typed", text: "Hello" })).toBe(
+    true,
+  );
+  expect(valid({ action: "call.say", callId: "call", utteranceId: "typed", text: "  " })).toBe(
+    false,
+  );
 });

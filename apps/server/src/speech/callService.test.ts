@@ -759,3 +759,62 @@ describe("exact call model", () => {
     ).toThrow("silently dropped");
   });
 });
+
+describe("typed call turns", () => {
+  it("skips STT, uses voice delivery once across recovery, and synthesizes a reply", async () => {
+    const f = await fixture();
+    const say = {
+      action: "call.say" as const,
+      callId: "call-1",
+      utteranceId: "typed-1",
+      text: "Prepare the build",
+    };
+    const first = await f.service.handle(say, new AbortController().signal);
+    const recovered = new CallService(f.store, f.ports);
+    const second = await recovered.handle(say, new AbortController().signal);
+    expect(second.utterance).toEqual(first.utterance);
+    expect(f.ports.dispatch).toHaveBeenCalledOnce();
+    expect(f.ports.dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        commandId: "voice:call-1:typed-1",
+        message: expect.objectContaining({ text: "Prepare the build" }),
+      }),
+    );
+    expect(
+      vi.mocked(f.ports.speech).mock.calls.some(([input]) => input.action === "transcribe"),
+    ).toBe(false);
+    const reply = await f.request({
+      action: "call.speak",
+      speechId: "typed-reply",
+      text: "I'm ready.",
+    });
+    expect(reply.audio).toBe(pcm.toString("base64"));
+    await expect(f.request({ ...say, text: "Different words" })).rejects.toThrow("identity");
+  });
+  it("accepts typing while the speech lease is still preparing", async () => {
+    const f = await fixture();
+    await f.request({ action: "call.close" });
+    await f.service.handle(
+      { action: "call.open", callId: "cold-call", options },
+      new AbortController().signal,
+    );
+    const result = await f.service.handle(
+      { action: "call.say", callId: "cold-call", utteranceId: "cold-typed", text: "Hello" },
+      new AbortController().signal,
+    );
+    expect(result.utterance?.deliveredAt).toBeDefined();
+  });
+});
+
+it("archives queued typing after hang-up without starting a new turn", async () => {
+  const f = await fixture();
+  await f.request({ action: "call.close" });
+  const archived = await f.request({
+    action: "call.say",
+    utteranceId: "closed-typed",
+    text: "Keep these words",
+  });
+  expect(archived.utterance).toMatchObject({ source: "typed", text: "Keep these words" });
+  expect(archived.utterance?.deliveredAt).toBeUndefined();
+  expect(f.ports.dispatch).not.toHaveBeenCalled();
+});
