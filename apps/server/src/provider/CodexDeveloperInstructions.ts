@@ -194,7 +194,7 @@ In Default mode, strongly prefer making reasonable assumptions and executing the
 export interface CodexRuntimeInfo extends CodexControlRuntime {
   readonly model: string;
   readonly modelName?: string | undefined;
-  readonly reasoningEffort: string;
+  readonly reasoningEffort?: string | undefined;
 }
 
 export function buildCodexDeveloperInstructions(interactionMode: ProviderInteractionMode): string {
