@@ -7236,7 +7236,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               message={providerInputSubmissionError ?? composerSubmissionError}
             />
 
-            {isComposerCollapsedMobile || isComposerApprovalState ? null : (
+            {/* The footer hosts the call controls; unmounting it for an approval would end the call. */}
+            {isComposerCollapsedMobile || (isComposerApprovalState && !isVoicePanelOpen) ? null : (
               <div
                 data-chat-composer-footer="true"
                 data-chat-composer-footer-compact={isComposerFooterCompact ? "true" : "false"}
