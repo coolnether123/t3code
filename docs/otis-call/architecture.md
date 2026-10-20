@@ -26,9 +26,10 @@ voice session. Shared client conversation state omits their internal
 `voice-update:` user messages, including cached history. Background status
 activity and the voice model's natural reply stay visible in the same thread.
 
-The web call panel uses T3's existing popover portal and collision positioning.
-Dynamic viewport and safe-area limits bound its height. Settings and updates
-scroll separately from the status header and primary call actions.
+The active web call stays in a compact bar beside the conversation. Settings use
+T3's existing popover portal and collision positioning, with dynamic viewport
+and safe-area limits. Ending a call closes local microphone and playback before
+network cleanup; the closed outbox retains raw speech until the PC saves it.
 
 Starting from a new-chat draft first uses T3's ordinary create-thread command
 with the draft's project and picked voice model. Audio unlock happens in the
@@ -106,6 +107,11 @@ interrupt and close can proceed during stalled STT/TTS. State updates reread the
 current record so an older operation cannot resurrect a lease or reopen a closed
 call. Status returns bounded recent records; full recovery addresses individual
 utterance and speech IDs. Raw archives have no utterance-count cap.
+
+The server owns a deadline for each acquired speech lease. Renewal replaces the
+deadline, and expiry closes the call, removes its thread binding and releases
+speech. A lost phone connection therefore cannot leave a call open indefinitely
+in the running server. This deadline does not interrupt provider work.
 
 Acquisition waits through the router's 600-second startup budget with a 660-second
 server deadline and 720-second browser deadline. Node HTTP avoids fetch's shorter

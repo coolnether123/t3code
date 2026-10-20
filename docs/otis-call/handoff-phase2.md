@@ -1,11 +1,57 @@
 # Otis Call phase 2 handoff
 
 Task `agenda-task:515bbc54cb61482681e950e524421ce4`.
-Draft call follow-up base `6cec35da12`, branch `work/otis-call-20261018`, upstream
-`origin/work/otis-call-20261018`. Changes remain uncommitted as requested.
-Observation dates: 18 and 19 October 2026, America/Chicago, CDT.
+Natural-call follow-up base `befd85b245`, branch `work/otis-call-fixes-20261019`,
+upstream `origin/work/otis-call-fixes-20261019`. No deployment is authorized.
+Observed 19 October 2026, America/Chicago, CDT. Earlier sections retain their
+historical evidence and acceptance limits.
 
-## Current follow-up: calls from a new chat
+## Current follow-up: the first real phone call
+
+Jared's 22:49 CDT phone call exposed a long-recording failure and hang-up that
+waited for the network. The base64 regexp in the server upload exhausted its
+stack. `scripts/lib/otis-call-upload.test.mjs` sends a synthetic minute of
+48 kHz PCM through the real client encoder and server upload at
+`node --stack-size=120`. It fails against `befd85b245` and passes with the fix
+in `f25f94ccce`. Client encoding alone also accepts a synthetic 90-second
+payload; the server's existing one-minute recording limit is preserved.
+
+Hang-up stops local audio and shows Call ended before network cleanup. Close
+runs independently of raw upload, with closed outbox data retained for automatic
+retry. The server schedules closure and speech release at the lease deadline;
+renewal replaces that deadline. Provider work continues after hang-up.
+
+Capture uses an audio timeline, with 1.85 seconds for short starts or trailing
+fragments and 1.05 seconds for sustained speech. No partial transcription service
+is used. Word-specific intent remains an audio heuristic during capture; the
+voice prompt also allows a completed `<otis-hold/>` response for thinking aloud
+or an update needing no reply. Hold is stripped before projection and playback,
+and completed silent replies return the phone to listening.
+
+The pure `shouldEndTurn` helper is an intentional test boundary. Keep it separate
+from microphone ownership so its timing decisions can be tested without audio
+devices. The compact bar and the acceptance helper's button and region names
+are preserved. Web and Electron share this path. Native mobile still has only
+its earlier dictation path.
+
+Direct check receipts and complete logs are in
+`.logs/otis-call/natural/final/checks-complete.json`. The parent owns isolated
+browser and real-call acceptance. No dev server, browser, live T3 write,
+restart or deployment was performed. The only router session generated the
+filler assets below and was released.
+
+Offline checks passed 188 tests across the focused web voice, client-runtime
+voice-call and server speech suites, plus 15 evidence/upload tests. Web,
+client-runtime and server typechecks, changed-file lint and formatting returned
+exit 0. The final call-control prefix correction also passed its 70-test rerun.
+
+Listen for a pause after "Well, um", a short question with no filler, a silent
+"hang on", and ordered sentences on a longer reply. End the call during upload
+and with the PC unreachable. Confirm the microphone and playback stop at once,
+the phone remains ended, and raw speech eventually reaches the closed archive.
+Also verify 375/390 px Safari and answering an approval with the bar visible.
+
+## Previous follow-up: calls from a new chat
 
 Jared reported the mobile Call Otis flow broken around 00:00 CDT on 19 October 2026. The parent reproduced a draft route sending a local thread ID to
 `call.open`, which rejected it before creating a call archive or contacting
@@ -106,99 +152,31 @@ mobile calls and non-Claude tool-free voice adapters remain the earlier
 unimplemented gates. This patch does not establish live browser, audio,
 provider-model or network acceptance.
 
-## Previous follow-up: speech fillers
+## Speech fillers
 
-The parent reports `c84b1fec28` passed live acceptance and went live at 21:01
-CDT. This follow-up remains uncommitted. It changes no running T3 or router,
-starts no provider turn and preserves the parent's `apps/server/package.json`
-edit. No subagents were used.
+The shared filler delay is 1,800 ms after submission. The timer is eligible only
+after the voice emits prose, which establishes a decision to speak. This avoids
+playing an acknowledgment for a later hold decision. If that decision arrives
+after the delay, filler may begin then while sentence synthesis is pending.
+Real audio cancels the timer; an already playing filler finishes before reply
+audio is scheduled. Reply audio still streams per sentence.
 
-Jared requested: "The pre filler should be after a second or so to be natural
-to start saying." `FILLER_DELAY_MS` is 1,000 ms in shared
-`packages/client-runtime/src/voice-call/filler.ts`. Send speech arms it before
-waiting for recording persistence, upload, transcription or delivery. Automatic
-speech submission also arms it. The recording ID prevents repeat presses,
-capture completion and retries from adding another filler for the same turn.
-Empty capture cancels it. Status updates and announcement turns never arm it.
+The lazy `fillerClips.ts` chunk contains 24 mono PCM16 clips at 24 kHz. It is
+2,270,028 source bytes, or 1,280,887 gzip bytes, with 1,701,120 PCM bytes. Clips last
+0.72 to 2.72 seconds. Selection excludes the last four clips. Ordinary chat
+does not import this chunk. There is no router request for filler during a call.
 
-`TurnFiller` owns the timer and the playback barrier. Real reply audio cancels
-a pending filler. If the clip has started, all incoming reply chunks wait for
-its playback promise, then use the existing platform PCM player. The clip's
-signal belongs to the call, so reply arrival cannot cut it off. Explicit
-interrupt, hang-up, detach and failure retain their existing cancellation
-behavior. Clip failures are optional and cannot prevent real replies. Reply
-audio measurements fire after this barrier; filler does not count as the
-voice model's first audio. Microphone capture does not start during a filler.
+WAVs and the text/duration manifest are local at
+`A:/Dev/Artifacts/otis-voice-clips-20261019/fillers/`. Generation checked the
+live call archives for a recently changed unclosed call before opening a session
+and before each clip. One router voice session generated the clips using
+`breeze-tts-2` and `otis`, then returned HTTP 200 on release. No live T3
+data was written. Only PCM is bundled; WAV headers and the private manifest stay
+outside Git.
 
-The six supplied recordings from
-`A:/Dev/Artifacts/otis-voice-clips-20261018/fixed/filler-*.wav` are bundled
-losslessly as PCM16 base64 in `fillerClips.ts`. The WAV headers are removed;
-all 518,400 audio bytes remain unchanged at mono 24 kHz. The separate dynamic
-import completes during call preparation, before Ready, and adds
-no router request. Source hashes, durations and PCM hashes are in ignored
-`.logs/otis-call/phase2-fillers/asset-manifest.json`. The next choice excludes
-the last clip. No additional network authentication or platform asset loader
-is needed.
-
-`TurnFiller` has one production caller, `ThreadVoiceSession`. Retain it as the
-timing and audio scheduling boundary shared by clients. It has no browser or
-native APIs. Web and desktop use the current browser PCM adapter, including
-mobile Safari. The native app currently implements dictation, not
-`ThreadVoiceSession` or a call PCM playback adapter. This change supplies the
-shared behavior for that adapter; it does not claim an implemented native call
-screen or measured native playback. Native call integration remains a separate
-project gate.
-
-The initial offline run caught a preload race: the one-second timer could
-expire before the lazy bundle resolved. Preparation now waits for that bundle
-before the Ready cue. The current candidate passes 66 focused tests across
-`filler.test.ts`, `session.test.ts`, `browserSpeech.test.ts` and
-`transport.test.ts`. Their synthetic playback receipts cover 999/1,000 ms,
-real audio winning the timer, a reply arriving during filler, ordered reply
-chunks, duplicate sends, automatic submission, no filler for silence/status,
-no immediate repeats, optional playback failure, interruption and hang-up.
-All six packaged PCM hashes match the supplied recordings. The source module
-is 691,847 bytes, 372,813 bytes with gzip, measured offline rather than on a
-deployed HTTP response.
-
-Both affected typechecks, targeted lint and formatting pass with exit 0.
-
-The exact offline owner command is:
-
-```powershell
-& 'A:/Dev/Tooling/t3-node-v24.19.0/node.exe' `
-  .logs/otis-call/phase2-fillers/verify.mjs `
-  .logs/otis-call/phase2-fillers/parent
-```
-
-It runs the four focused test files with the summary reporter, shared-runtime
-and web typechecks, then the unchanged repository lint and formatter rules.
-Full local logs and exit receipts are under
-`.logs/otis-call/phase2-fillers/final/`; asset evidence and the final source
-manifest are in its parent folder. The wrapper is ignored local evidence,
-not a product dependency. The queued owner command remained unadmitted after
-the ten-minute owner wait, so the same checks ran locally with separate log
-ownership. A queued job is not counted as a pass. No gate was killed or
-truncated.
-
-For parent acceptance, reuse the exact isolated setup and `$callArgs` in
-"Parent acceptance" below, then run:
-
-```powershell
-& $callNode @callArgs --output .logs/otis-call/phase2-filler-live
-```
-
-On the already prepared call, tap Send speech and listen for one clip about
-one second later. Repeat on fresh turns and check that adjacent clips differ.
-Confirm no clip when a real reply starts before the delay. Confirm real audio
-waits until a playing clip finishes, with no clipped word or overlap. Let an
-operator result arrive without new user speech and confirm it adds no filler.
-Hang up before the delay and confirm no later clip. Repeat in iPhone Safari
-and desktop. The helper's existing first-audio stage still measures the real
-reply; it does not measure filler onset. Listening and a recording of Send
-speech are needed for that measurement. No live filler timing or listening
-quality measurement was made in this sandbox. Native call playback remains
-the separate integration gate described above.
+Keep `TurnFiller` as the shared timing and playback boundary. Tests cover the
+delay, real audio winning the timer, hold suppression, clip rotation and ordered
+playback. The parent still owns audible quality and Safari acceptance.
 
 ## Previous follow-up after live-6
 
@@ -506,7 +484,8 @@ Model pairs persist per chat, with an environment-local default. These are T3
 preferences, not changes to the providers' global configuration. Updates queue
 during microphone activity. Silence-only capture does not become another request.
 Routine progress stays in chat; terminal results and questions can be spoken at
-a pause. Interrupted results stay unheard. Speak/hold/defer remains future scope.
+a pause. Interrupted results stay unheard. The voice can hold silently; timed
+deferral remains future scope.
 
 ## Previous live-3 measurements
 
