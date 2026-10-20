@@ -162,7 +162,7 @@ describe("streamed browser PCM scheduling", () => {
     audio.finishAtPause();
     frame(0.1);
     expect(processor.onaudioprocess).not.toBeNull();
-    for (let index = 0; index < 4; index++) frame(0);
+    for (let index = 0; index < 8; index++) frame(0);
     expect((await captured).audio.length).toBeGreaterThan(0);
     expect(processor.onaudioprocess).toBeNull();
     audio.close();
@@ -177,7 +177,7 @@ describe("streamed browser PCM scheduling", () => {
     await audio.prepare(signal);
     const captured = audio.capture(signal);
     audio.finishAtPause();
-    for (let index = 0; index < 4; index++)
+    for (let index = 0; index < 5; index++)
       contexts[0]!.processor.onaudioprocess!({
         inputBuffer: { getChannelData: () => new Float32Array(4096) },
       });

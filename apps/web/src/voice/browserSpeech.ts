@@ -3,6 +3,7 @@ import { createVoiceRequestCommand } from "@t3tools/client-runtime/voice-call/tr
 import * as Cause from "effect/Cause";
 import { connectionAtomRuntime } from "../connection/runtime";
 import { appAtomRegistry } from "../rpc/atomRegistry";
+import { shouldEndTurn } from "./turnEnding";
 
 const speechRequest = createVoiceRequestCommand(connectionAtomRuntime);
 export async function requestSpeech(
@@ -140,6 +141,9 @@ export function createBrowserAudio(onInterrupted?: () => void) {
       let length = 0;
       let speechSeen = false;
       let silenceSamples = 0;
+      let speechSamples = 0;
+      let burstSamples = 0;
+      let lastBurstSamples = 0;
       let journalTask: Promise<void> | undefined;
       let journalLength = 0;
       const recording = () => {
@@ -184,9 +188,22 @@ export function createBrowserAudio(onInterrupted?: () => void) {
             );
             if (rms > 0.015) {
               speechSeen = true;
+              speechSamples += chunk.length;
+              burstSamples += chunk.length;
+              lastBurstSamples = burstSamples;
               silenceSamples = 0;
-            } else silenceSamples += chunk.length;
-            if ((speechSeen || finishAtPause) && silenceSamples > audioContext.sampleRate * 0.9)
+            } else {
+              silenceSamples += chunk.length;
+              burstSamples = 0;
+            }
+            if (
+              shouldEndTurn({
+                speechMs: (speechSamples / audioContext.sampleRate) * 1_000,
+                lastBurstMs: (lastBurstSamples / audioContext.sampleRate) * 1_000,
+                silenceMs: (silenceSamples / audioContext.sampleRate) * 1_000,
+                finishAtPause,
+              })
+            )
               finishCapture?.();
             if (length >= audioContext.sampleRate * 59) finishCapture?.();
           };
