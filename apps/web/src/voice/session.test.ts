@@ -183,7 +183,7 @@ describe("durable thread voice session", () => {
     expect(f.saved()?.recordings).toHaveLength(1);
     expect(f.change).toHaveBeenLastCalledWith(
       "error",
-      expect.stringContaining("Audio was interrupted"),
+      "Audio paused by the phone. Stop other audio, then tap Retry.",
       undefined,
     );
     f.transcript.resolve({ text: "Go" });
@@ -194,6 +194,22 @@ describe("durable thread voice session", () => {
     await resume;
     expect(f.saved()?.recordings).toEqual([]);
     expect(f.audio.prepare).toHaveBeenCalledTimes(2);
+    expect(f.request.mock.calls.filter(([input]) => input.action === "call.upload")).toHaveLength(
+      1,
+    );
+  });
+  it("returns to listening when Retry restores an interrupted idle microphone", async () => {
+    const f = fixture();
+    f.audio.finish.mockImplementationOnce(() =>
+      f.recording.resolve({ audio: "", sampleRate: 16000 }),
+    );
+    await f.session.start(options, []);
+    f.session.audioInterrupted();
+    await f.session.resume();
+    expect(f.audio.prepare).toHaveBeenCalledTimes(2);
+    expect(f.audio.capture).toHaveBeenCalledTimes(2);
+    expect(f.change.mock.calls.at(-1)?.[0]).toBe("listening");
+    expect(f.request.mock.calls.some(([input]) => input.action === "call.upload")).toBe(false);
   });
   it("retries a failed hang-up from the saved-speech action without reopening the call", async () => {
     const f = fixture();

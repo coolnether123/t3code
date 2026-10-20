@@ -208,17 +208,16 @@ export class ThreadVoiceSession {
     const recoverable = isRetryableVoiceError(error);
     this.change(
       recoverable ? "reconnecting" : "error",
-      `${error instanceof Error ? error.message : "Voice request failed."} Check the message above, then retry saved speech. Queued audio without a PC acknowledgment remains on this device.`,
+      this.audioNeedsTap
+        ? "Audio paused by the phone. Stop other audio, then tap Retry."
+        : `${error instanceof Error ? error.message : "Voice request failed."} Check the message above, then retry saved speech. Queued audio without a PC acknowledgment remains on this device.`,
     );
   }
   audioInterrupted() {
     this.audioNeedsTap = true;
     if (this.recovering) return;
     this.failed(
-      new VoiceRequestError(
-        "Audio was interrupted. Tap Retry saved speech to resume audio and the microphone.",
-        false,
-      ),
+      new VoiceRequestError("Audio paused by the phone. Stop other audio, then tap Retry.", false),
     );
   }
   async start(options: CallOptions, messages: readonly Message[]) {

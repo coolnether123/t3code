@@ -28,30 +28,75 @@ export function createBrowserAudio(onInterrupted?: () => void) {
   let playbackUntil = 0;
   let finishAtPause = false;
   let interrupted = false;
-  let wasRunning = false;
   let cancelReady: (() => void) | undefined;
+  let reconnectCapture: ((stream: MediaStream) => void) | undefined;
+  let recoveryTimer: ReturnType<typeof setInterval> | undefined;
+  let recoveryDeadline: ReturnType<typeof setTimeout> | undefined;
+  let microphoneDeadline: ReturnType<typeof setTimeout> | undefined;
+  const clearRecovery = () => {
+    clearInterval(recoveryTimer);
+    clearTimeout(recoveryDeadline);
+    recoveryTimer = undefined;
+    recoveryDeadline = undefined;
+  };
   const interrupt = () => {
     if (interrupted || !context) return;
+    clearRecovery();
+    clearTimeout(microphoneDeadline);
+    microphoneDeadline = undefined;
     interrupted = true;
     cancelReady?.();
     finishCapture?.();
     onInterrupted?.();
   };
+  const resumeContext = () => {
+    const audio = context;
+    if (!audio || interrupted) return;
+    void audio
+      .resume()
+      .then(() => {
+        if (context === audio && audio.state === "running") clearRecovery();
+      })
+      .catch(() => {});
+  };
   const stateChanged = () => {
-    if (context?.state === "running") wasRunning = true;
-    else if (wasRunning && context?.state !== "closed") interrupt();
+    if (!context || interrupted) return;
+    if (context.state === "running") {
+      clearRecovery();
+      return;
+    }
+    if (context.state === "closed") {
+      interrupt();
+      return;
+    }
+    if (recoveryDeadline) return;
+    recoveryTimer = setInterval(resumeContext, 500);
+    recoveryDeadline = setTimeout(() => {
+      if (context?.state === "running") clearRecovery();
+      else interrupt();
+    }, 3_000);
+    resumeContext();
+  };
+  const foreground = () => {
+    if (document.visibilityState === "visible") {
+      stateChanged();
+      if (recoveryDeadline) resumeContext();
+    }
   };
   return {
     unlock() {
       if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
         throw new Error("Microphone access needs HTTPS or localhost.");
       }
+      if (interrupted || context?.state === "closed") this.close();
       if (!context) {
         context = new AudioContext();
-        wasRunning = context.state === "running";
         context.addEventListener("statechange", stateChanged);
+        document.addEventListener("visibilitychange", foreground);
+        window.addEventListener("pageshow", foreground);
       }
-      void context.resume().catch(interrupt);
+      resumeContext();
+      stateChanged();
     },
     finish() {
       finishCapture?.();
@@ -69,10 +114,55 @@ export function createBrowserAudio(onInterrupted?: () => void) {
       }
       preparedStream?.getTracks().forEach((track) => track.stop());
       preparedStream = stream;
-      for (const track of stream.getAudioTracks())
-        track.addEventListener("ended", interrupt, { once: true });
-      await context!.resume();
-      interrupted = false;
+      const audio = context!;
+      let reacquired = false;
+      const watch = (watched: MediaStream) => {
+        for (const track of watched.getAudioTracks())
+          track.addEventListener(
+            "ended",
+            () => {
+              if (context !== audio || preparedStream !== watched || signal.aborted || interrupted)
+                return;
+              if (reacquired) {
+                interrupt();
+                return;
+              }
+              reacquired = true;
+              microphoneDeadline = setTimeout(interrupt, 3_000);
+              void navigator.mediaDevices
+                .getUserMedia({
+                  audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+                })
+                .then((replacement) => {
+                  if (
+                    context !== audio ||
+                    preparedStream !== watched ||
+                    signal.aborted ||
+                    interrupted
+                  ) {
+                    replacement.getTracks().forEach((item) => item.stop());
+                    return;
+                  }
+                  preparedStream = replacement;
+                  clearTimeout(microphoneDeadline);
+                  microphoneDeadline = undefined;
+                  reconnectCapture?.(replacement);
+                  watched.getTracks().forEach((item) => item.stop());
+                  watch(replacement);
+                  resumeContext();
+                })
+                .catch(() => {
+                  if (context === audio && preparedStream === watched && !signal.aborted)
+                    interrupt();
+                });
+            },
+            { once: true },
+          );
+      };
+      watch(stream);
+      // iOS may pause the audio clock while getUserMedia changes the audio session.
+      resumeContext();
+      stateChanged();
     },
     async ready(signal: AbortSignal) {
       signal.throwIfAborted();
@@ -105,11 +195,16 @@ export function createBrowserAudio(onInterrupted?: () => void) {
       }
     },
     close() {
+      clearRecovery();
+      clearTimeout(microphoneDeadline);
+      microphoneDeadline = undefined;
+      document.removeEventListener("visibilitychange", foreground);
+      window.removeEventListener("pageshow", foreground);
       cancelReady?.();
       playbackUntil = 0;
       finishCapture = undefined;
       interrupted = false;
-      wasRunning = false;
+      reconnectCapture = undefined;
       preparedStream?.getTracks().forEach((track) => track.stop());
       preparedStream = undefined;
       if (context) {
@@ -124,7 +219,7 @@ export function createBrowserAudio(onInterrupted?: () => void) {
     ): Promise<{ audio: string; sampleRate: number }> {
       const audioContext = context!;
       finishAtPause = false;
-      const stream =
+      let stream =
         preparedStream ??
         (await navigator.mediaDevices.getUserMedia({
           audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
@@ -133,8 +228,14 @@ export function createBrowserAudio(onInterrupted?: () => void) {
         stream.getTracks().forEach((track) => track.stop());
         signal.throwIfAborted();
       }
-      const source = audioContext.createMediaStreamSource(stream);
+      let source = audioContext.createMediaStreamSource(stream);
       const processor = audioContext.createScriptProcessor(4096, 1, 1);
+      reconnectCapture = (replacement) => {
+        source.disconnect();
+        stream = replacement;
+        source = audioContext.createMediaStreamSource(stream);
+        source.connect(processor);
+      };
       const mute = audioContext.createGain();
       mute.gain.value = 0;
       const chunks: Float32Array[] = [];
@@ -170,6 +271,7 @@ export function createBrowserAudio(onInterrupted?: () => void) {
             resolve();
           };
           processor.onaudioprocess = (event) => {
+            if (audioContext.state !== "running" || microphoneDeadline || interrupted) return;
             const chunk = new Float32Array(event.inputBuffer.getChannelData(0));
             chunks.push(chunk);
             length += chunk.length;
@@ -215,6 +317,7 @@ export function createBrowserAudio(onInterrupted?: () => void) {
         // Finish captures the final buffer even when hang-up cancels network work immediately.
         return speechSeen ? recording() : { audio: "", sampleRate: audioContext.sampleRate };
       } finally {
+        reconnectCapture = undefined;
         finishCapture = undefined;
         processor.onaudioprocess = null;
         source.disconnect();

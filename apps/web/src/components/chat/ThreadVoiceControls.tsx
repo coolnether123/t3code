@@ -298,7 +298,7 @@ export function ThreadVoiceControls({
                       type="button"
                       size="compact"
                       variant="outline"
-                      aria-label="Retry saved speech"
+                      aria-label="Retry"
                       onClick={() => void sessionRef.current?.resume()}
                     >
                       Retry

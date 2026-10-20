@@ -184,7 +184,7 @@ describe("call panel action boundary", () => {
       expect(container.contains(panel)).toBe(true);
       expect(document.querySelector('[data-slot="popover-popup"]')).toBeNull();
       const action = panel.querySelector<HTMLButtonElement>(
-        `[aria-label="${state === "listening" ? "Send speech" : "Retry saved speech"}"]`,
+        `[aria-label="${state === "listening" ? "Send speech" : "Retry"}"]`,
       )!;
       if (state === "error")
         expect(panel.querySelector('[role="alert"]')?.textContent).toBe("Speech remains queued.");

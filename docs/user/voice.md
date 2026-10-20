@@ -17,7 +17,7 @@ spoken as it arrives. Code and structured data stay in the chat.
 The chat's own stop button still interrupts its work.
 
 Recordings save on this device, then on your PC before transcription. If the
-connection fails, **Retry saved speech** resumes delivery using the same recording.
+connection fails, **Retry** resumes delivery using the same recording.
 Audio without a PC acknowledgment remains queued on this device. Keep the page
 open when a save fails. Reopening the same chat can recover saved speech after
 a reload. Ending an offline call retains its final recording for later PC upload,
