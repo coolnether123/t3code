@@ -2447,15 +2447,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     active: false,
   });
   const [isVoicePanelOpen, setIsVoicePanelOpen] = useState(false);
+  const [isVoiceActive, setIsVoiceActive] = useState(false);
   // A pending question stays expanded: its card moves into the banner dock,
   // so collapsing would leave the surface empty and squashed beneath it. An open
-  // call panel is anchored inside the expanded footer, so it keeps it shown too.
+  // call keeps its controls mounted in the expanded footer too.
   const isComposerCollapsedMobile =
     isMobileViewport &&
     !forceExpandedOnMobile &&
     !isComposerFocused &&
     !hasMultilinePrompt &&
     !isVoicePanelOpen &&
+    !isVoiceActive &&
     pendingUserInputs.length === 0;
 
   const composerEditorRef = useRef<ComposerPromptEditorHandle>(null);
@@ -4851,7 +4853,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     isExistingThread: routeKind === "server" && activeThreadId !== null,
     isMobileViewport,
     isScrollCollapsed: isComposerScrollCollapsed,
-    hasExpandedChrome: composerHasExpandedChrome,
+    hasExpandedChrome: composerHasExpandedChrome || isVoicePanelOpen || isVoiceActive,
     hasMultilinePrompt,
     timelineOverflows,
   });
@@ -7237,15 +7239,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             />
 
             {/* The footer hosts the call controls; unmounting it for an approval would end the call. */}
-            {isComposerCollapsedMobile || (isComposerApprovalState && !isVoicePanelOpen) ? null : (
+            {isComposerCollapsedMobile ||
+            (isComposerApprovalState && !isVoicePanelOpen && !isVoiceActive) ? null : (
               <div
                 data-chat-composer-footer="true"
                 data-chat-composer-footer-compact={isComposerFooterCompact ? "true" : "false"}
                 className={cn(
                   "flex min-w-0 flex-nowrap items-center justify-between gap-2 overflow-visible px-3 pb-3 sm:px-4 sm:pb-4",
                   pendingUserInputs.length > 0 && "pt-2",
+                  isVoiceActive && "flex-wrap",
                   isComposerFooterCompact ? "gap-1.5" : "gap-2 sm:gap-0",
-                  showMobilePendingAnswerActions && "hidden sm:flex",
+                  showMobilePendingAnswerActions &&
+                    !isVoicePanelOpen &&
+                    !isVoiceActive &&
+                    "hidden sm:flex",
                   isComposerResting &&
                     "absolute right-px z-10 h-12 w-auto gap-0 py-0 sm:gap-0 sm:py-0",
                   isComposerResting &&
@@ -7271,7 +7278,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   data-chat-composer-primary-actions-compact={
                     isComposerPrimaryActionsCompact ? "true" : "false"
                   }
-                  className="flex shrink-0 flex-nowrap items-center justify-end gap-2"
+                  className={cn(
+                    "flex shrink-0 flex-nowrap items-center justify-end gap-2",
+                    isVoiceActive && "contents",
+                  )}
                 >
                   {showComposerAttachAction ? (
                     <>
@@ -7310,96 +7320,101 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       </Tooltip>
                     </>
                   ) : null}
-                  {activeThread ? (
-                    <ThreadVoiceControls
-                      key={`${environmentId}:${activeThread.id}`}
-                      ref={voiceRef}
-                      onPanelOpenChange={setIsVoicePanelOpen}
-                      defaultOpen={isVoicePanelOpen}
-                      instanceEntries={providerInstanceEntries}
-                      modelOptionsByInstance={modelOptionsByInstance}
-                      threadId={activeThread.id}
-                      ensureThread={props.ensureVoiceThread}
-                      isDraft={!props.isServerThread}
-                      defaultModelSelection={settings.defaultModelSelection}
-                      environmentId={environmentId}
-                      modelSelection={selectedModelSelection}
-                      running={
-                        phase === "running" ||
-                        isSendBusy ||
-                        activeThread.latestRun?.status === "running"
+                  <div className={cn("min-w-0", isVoiceActive && "order-first w-full")}>
+                    {activeThread ? (
+                      <ThreadVoiceControls
+                        key={`${environmentId}:${activeThread.id}`}
+                        ref={voiceRef}
+                        onPanelOpenChange={setIsVoicePanelOpen}
+                        onActiveChange={setIsVoiceActive}
+                        defaultOpen={isVoicePanelOpen}
+                        instanceEntries={providerInstanceEntries}
+                        modelOptionsByInstance={modelOptionsByInstance}
+                        threadId={activeThread.id}
+                        ensureThread={props.ensureVoiceThread}
+                        isDraft={!props.isServerThread}
+                        defaultModelSelection={settings.defaultModelSelection}
+                        environmentId={environmentId}
+                        modelSelection={selectedModelSelection}
+                        running={
+                          phase === "running" ||
+                          isSendBusy ||
+                          activeThread.latestRun?.status === "running"
+                        }
+                        enabled={
+                          !isConnecting &&
+                          !noProviderAvailable &&
+                          !projectSelectionRequired &&
+                          environmentUnavailable === null &&
+                          !composerSendState.hasSendableContent
+                        }
+                        connected={environmentUnavailable === null && !isConnecting}
+                      />
+                    ) : null}
+                  </div>
+                  {!isComposerApprovalState ? (
+                    <ComposerFooterPrimaryActions
+                      compact={isComposerResting || isComposerPrimaryActionsCompact}
+                      canOperateThread={canOperateThread}
+                      activeContextWindow={
+                        settings.contextWindowMeterEnabled ? activeContextWindow : null
                       }
-                      enabled={
-                        !isConnecting &&
-                        !noProviderAvailable &&
-                        !projectSelectionRequired &&
-                        environmentUnavailable === null &&
-                        !composerSendState.hasSendableContent
+                      reserveContextWindowMeter={reserveContextWindowMeter}
+                      activeThreadModelDisplayName={activeThreadModelDisplayName}
+                      pendingAction={pendingPrimaryAction}
+                      isRunning={phase === "running"}
+                      canInterrupt={canInterrupt}
+                      followUpBehavior={settings.followUpBehavior}
+                      canSteer={!isCompacting}
+                      alternateShortcutLabel={shortcutLabelForCommand(
+                        keybindings,
+                        "composer.sendAlternate",
+                        {
+                          context: {
+                            composerFocus: true,
+                            draftThreadRoute: routeKind === "draft",
+                            turnRunning: true,
+                            composerRequiresModifier: composerRequiresModifier(
+                              settings.sendShortcut,
+                              prompt,
+                            ),
+                          },
+                        },
+                      )}
+                      showPlanFollowUpPrompt={
+                        pendingUserInputs.length === 0 && showPlanFollowUpPrompt
                       }
-                      connected={environmentUnavailable === null && !isConnecting}
+                      promptHasText={prompt.trim().length > 0}
+                      isSendBusy={isSendBusy}
+                      sendDisabledReason={sendDisabledReason}
+                      isConnecting={isConnecting}
+                      isEnvironmentUnavailable={
+                        environmentUnavailable !== null ||
+                        noProviderAvailable ||
+                        projectSelectionRequired
+                      }
+                      isPreparingWorktree={isPreparingWorktree}
+                      hasSendableContent={composerSendState.hasSendableContent}
+                      canResume={showResumeAction}
+                      preserveComposerFocusOnPointerDown={isMobileViewport || isComposerResting}
+                      isEditingQueuedMessage={isEditingQueuedMessage}
+                      onSubmitMessage={handleSubmitMessageStable}
+                      onResume={onResume}
+                      onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
+                      onInterrupt={handleInterruptPrimaryActionStable}
+                      onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryActionStable}
+                      compactBeforeSendTokens={props.resumeCompactionTokens}
+                      keepFullHistory={props.keepFullHistory}
+                      onToggleKeepFullHistory={props.onToggleKeepFullHistory}
+                      compactDisabled={
+                        compactDisabled || noProviderAvailable || isSendBusy || isConnecting
+                      }
+                      compactDisabledReason={resolvedCompactDisabledReason}
+                      {...(compactCommandAvailable
+                        ? { onCompactContext: compactThreadContextStable }
+                        : {})}
                     />
                   ) : null}
-                  <ComposerFooterPrimaryActions
-                    compact={isComposerResting || isComposerPrimaryActionsCompact}
-                    canOperateThread={canOperateThread}
-                    activeContextWindow={
-                      settings.contextWindowMeterEnabled ? activeContextWindow : null
-                    }
-                    reserveContextWindowMeter={reserveContextWindowMeter}
-                    activeThreadModelDisplayName={activeThreadModelDisplayName}
-                    pendingAction={pendingPrimaryAction}
-                    isRunning={phase === "running"}
-                    canInterrupt={canInterrupt}
-                    followUpBehavior={settings.followUpBehavior}
-                    canSteer={!isCompacting}
-                    alternateShortcutLabel={shortcutLabelForCommand(
-                      keybindings,
-                      "composer.sendAlternate",
-                      {
-                        context: {
-                          composerFocus: true,
-                          draftThreadRoute: routeKind === "draft",
-                          turnRunning: true,
-                          composerRequiresModifier: composerRequiresModifier(
-                            settings.sendShortcut,
-                            prompt,
-                          ),
-                        },
-                      },
-                    )}
-                    showPlanFollowUpPrompt={
-                      pendingUserInputs.length === 0 && showPlanFollowUpPrompt
-                    }
-                    promptHasText={prompt.trim().length > 0}
-                    isSendBusy={isSendBusy}
-                    sendDisabledReason={sendDisabledReason}
-                    isConnecting={isConnecting}
-                    isEnvironmentUnavailable={
-                      environmentUnavailable !== null ||
-                      noProviderAvailable ||
-                      projectSelectionRequired
-                    }
-                    isPreparingWorktree={isPreparingWorktree}
-                    hasSendableContent={composerSendState.hasSendableContent}
-                    canResume={showResumeAction}
-                    preserveComposerFocusOnPointerDown={isMobileViewport || isComposerResting}
-                    isEditingQueuedMessage={isEditingQueuedMessage}
-                    onSubmitMessage={handleSubmitMessageStable}
-                    onResume={onResume}
-                    onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
-                    onInterrupt={handleInterruptPrimaryActionStable}
-                    onImplementPlanInNewThread={handleImplementPlanInNewThreadPrimaryActionStable}
-                    compactBeforeSendTokens={props.resumeCompactionTokens}
-                    keepFullHistory={props.keepFullHistory}
-                    onToggleKeepFullHistory={props.onToggleKeepFullHistory}
-                    compactDisabled={
-                      compactDisabled || noProviderAvailable || isSendBusy || isConnecting
-                    }
-                    compactDisabledReason={resolvedCompactDisabledReason}
-                    {...(compactCommandAvailable
-                      ? { onCompactContext: compactThreadContextStable }
-                      : {})}
-                  />
                 </div>
               </div>
             )}

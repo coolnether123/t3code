@@ -1,12 +1,5 @@
-import {
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-  useImperativeHandle,
-  type Ref,
-} from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useImperativeHandle, type Ref } from "react";
+import { MicIcon, SendIcon, Settings2Icon, SquareIcon, XIcon } from "lucide-react";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type {
   CallModels,
@@ -26,6 +19,7 @@ import { Button } from "../ui/button";
 import { Popover, PopoverPopup } from "../ui/popover";
 import { CallModelSelectors, type CallSelectorCatalog } from "./CallModelSelectors";
 import { initialCallModels } from "../../voice/modelDefaults";
+import { ComposerBanner } from "./ComposerBanner";
 
 export interface ThreadVoiceHandle {
   stop(): void;
@@ -39,7 +33,7 @@ const labels: Record<VoiceState, string> = {
   waiting: "Waiting for the chat",
   speaking: "Speaking",
   ready: "Ready",
-  reconnecting: "Connection interrupted",
+  reconnecting: "Reconnecting",
   error: "Call needs attention",
 };
 
@@ -74,24 +68,17 @@ export function ThreadVoiceControls({
     ),
   );
   const [savedDefaults, setSavedDefaults] = useState<CallModels>();
-  const catalog = useMemo(
-    () => ({
-      instanceEntries: props.instanceEntries,
-      modelOptionsByInstance: props.modelOptionsByInstance,
-    }),
-    [props.instanceEntries, props.modelOptionsByInstance],
-  );
-  const models = useMemo(
-    () =>
-      initialCallModels(
-        catalog.instanceEntries.map((entry) => entry.snapshot),
-        props.modelSelection,
-        catalog,
-        props.defaultModelSelection,
-        preferences,
-        savedDefaults,
-      ),
-    [catalog, props.modelSelection, props.defaultModelSelection, preferences, savedDefaults],
+  const catalog = {
+    instanceEntries: props.instanceEntries,
+    modelOptionsByInstance: props.modelOptionsByInstance,
+  };
+  const models = initialCallModels(
+    catalog.instanceEntries.map((entry) => entry.snapshot),
+    props.modelSelection,
+    catalog,
+    props.defaultModelSelection,
+    preferences,
+    savedDefaults,
   );
   const callbacks = useRef(props);
   useLayoutEffect(() => {
@@ -117,11 +104,6 @@ export function ThreadVoiceControls({
     (props.running
       ? projection?.runs.at(-1)?.id
       : (voiceReply?.turnId ?? projection?.runs.at(-1)?.id)) ?? null;
-  // The operator announces finished background work with a `voice-update:` message, so a new one
-  // means the saved operator updates changed.
-  const lastOperatorActivity = messages.findLast((message) =>
-    message.id.startsWith("voice-update:"),
-  )?.id;
   const sessionRef = useRef<ThreadVoiceSession | null>(null);
   const anchorRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -161,10 +143,7 @@ export function ThreadVoiceControls({
           );
       });
     return () => abort.abort();
-  }, [props.environmentId, props.threadId, props.modelSelection, lastOperatorActivity]);
-  useEffect(() => {
-    if (call?.operatorUpdates) setUpdates(call.operatorUpdates);
-  }, [call?.operatorUpdates]);
+  }, [props.environmentId, props.threadId, props.modelSelection]);
   const configure = async (next: CallModels, saveDefault = false) => {
     const version = ++configurationVersion.current;
     setModels(next);
@@ -220,7 +199,7 @@ export function ThreadVoiceControls({
         setState(next);
         setDetail(message);
         setCall(status);
-        if (next === "idle") setExpanded(false);
+        if (next === "idle" || next === "preparing" || next === "error") setExpanded(false);
         callbacks.current.onActiveChange?.(next !== "idle");
       },
     });
@@ -255,25 +234,135 @@ export function ThreadVoiceControls({
     );
   }, [messages, props.running, voiceRunning, latestTurnId, models]);
   const active = state !== "idle";
-  const panelOpen = active || expanded || !!detail;
-  // The phone composer collapses on blur, which would hide the panel's anchor mid-call.
+  const panelOpen = active || expanded;
+  // Keep the session mounted when the phone composer blurs or an approval arrives.
   useEffect(() => {
     callbacks.current.onPanelOpenChange?.(panelOpen);
   }, [panelOpen]);
   useEffect(() => () => callbacks.current.onPanelOpenChange?.(false), []);
-  const selection = models.voice;
-  const unheard = updates.filter(
+  const unheard = (call?.operatorUpdates ?? updates).filter(
     (update) => !update.heardAt && (update.status === "done" || update.status === "needs-Jared"),
   );
   return (
-    <Popover open={panelOpen} onOpenChange={setExpanded}>
-      <div ref={anchorRef} className="relative" data-voice-state={state}>
-        {!active ? (
+    <Popover open={expanded} onOpenChange={setExpanded}>
+      <div ref={anchorRef} className="relative min-w-0 w-full" data-voice-state={state}>
+        {active ? (
+          <section aria-label="Otis call">
+            <ComposerBanner.Root
+              placement="floating"
+              variant={state === "error" ? "error" : "default"}
+            >
+              <ComposerBanner.Row>
+                <ComposerBanner.Content>
+                  <span role="status" className="min-w-0 wrap-anywhere">
+                    {labels[state]}
+                  </span>
+                </ComposerBanner.Content>
+                <ComposerBanner.Actions>
+                  {state === "listening" ? (
+                    <Button
+                      type="button"
+                      size="icon-sm"
+                      variant="ghost"
+                      aria-label="Send speech"
+                      onClick={() => sessionRef.current?.finish()}
+                    >
+                      <SendIcon />
+                    </Button>
+                  ) : null}
+                  {state === "speaking" || state === "waiting" ? (
+                    <Button
+                      type="button"
+                      size="icon-sm"
+                      variant="ghost"
+                      aria-label="Interrupt and speak"
+                      onClick={() => void sessionRef.current?.interrupt()}
+                    >
+                      <SquareIcon />
+                    </Button>
+                  ) : null}
+                  {state === "ready" ? (
+                    <Button
+                      type="button"
+                      size="icon-sm"
+                      variant="ghost"
+                      aria-label="Speak"
+                      onClick={() => void sessionRef.current?.listen()}
+                    >
+                      <MicIcon />
+                    </Button>
+                  ) : null}
+                  {state === "reconnecting" || state === "error" ? (
+                    <Button
+                      type="button"
+                      size="compact"
+                      variant="outline"
+                      aria-label="Retry saved speech"
+                      onClick={() => void sessionRef.current?.resume()}
+                    >
+                      Retry
+                    </Button>
+                  ) : null}
+                  <Button
+                    type="button"
+                    size="icon-sm"
+                    variant="ghost"
+                    aria-label="Call settings"
+                    aria-expanded={expanded}
+                    onClick={() => setExpanded(!expanded)}
+                  >
+                    <Settings2Icon />
+                  </Button>
+                  <Button
+                    type="button"
+                    size="compact"
+                    variant="outline"
+                    onClick={() => void sessionRef.current?.stop()}
+                  >
+                    End call
+                  </Button>
+                </ComposerBanner.Actions>
+              </ComposerBanner.Row>
+              {detail &&
+              (state === "error" || state === "reconnecting" || state === "preparing") ? (
+                <p
+                  role={state === "preparing" ? undefined : "alert"}
+                  className="px-2 pt-1 text-xs wrap-anywhere"
+                >
+                  {detail}
+                </p>
+              ) : null}
+              {configurationError ? (
+                <p role="alert" className="px-2 pt-1 text-xs wrap-anywhere">
+                  {configurationError}
+                </p>
+              ) : null}
+              {!props.connected ? (
+                <p className="px-2 pt-1 text-xs wrap-anywhere">
+                  Chat disconnected. Speech stays queued on this device until the PC acknowledges
+                  it.
+                </p>
+              ) : null}
+              {unheard.length ? (
+                <details className="px-2 pt-1 text-xs">
+                  <summary>Unheard updates ({unheard.length})</summary>
+                  <ul className="max-h-24 overflow-y-auto overscroll-contain wrap-anywhere">
+                    {unheard.map((update) => (
+                      <li key={update.id} className="mt-1">
+                        {update.text}
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              ) : null}
+            </ComposerBanner.Root>
+          </section>
+        ) : (
           <Button type="button" size="sm" variant="outline" onClick={() => setExpanded(!expanded)}>
             Call Otis
           </Button>
-        ) : null}
-        {panelOpen ? (
+        )}
+        {expanded ? (
           <PopoverPopup
             aria-label="Otis call controls"
             anchor={anchorRef}
@@ -283,15 +372,24 @@ export function ThreadVoiceControls({
             initialFocus={false}
             finalFocus={false}
             padding="none"
-            className="w-80 max-w-[calc(100dvw-1.5rem)]"
+            width="md"
           >
             <section
-              aria-label="Otis call"
+              aria-label={active ? "Otis call settings" : "Otis call"}
               className="flex max-h-[min(var(--available-height),calc(100dvh-env(safe-area-inset-top)-env(safe-area-inset-bottom)-1.5rem))] min-h-0 w-full flex-col"
             >
-              <p role="status" className="shrink-0 px-3 pt-3 pb-2 text-sm font-medium">
-                {labels[state]}
-              </p>
+              <div className="flex shrink-0 items-center justify-between gap-2 px-3 pt-3 pb-2">
+                <p className="text-sm font-medium">Call settings</p>
+                <Button
+                  type="button"
+                  size="icon-sm"
+                  variant="ghost"
+                  aria-label="Close call settings"
+                  onClick={() => setExpanded(false)}
+                >
+                  <XIcon />
+                </Button>
+              </div>
               <div
                 data-slot="call-panel-scroll"
                 className="min-h-0 overflow-y-auto overscroll-contain px-3 pb-3 wrap-anywhere"
@@ -307,7 +405,7 @@ export function ThreadVoiceControls({
                 <p className="mt-1 text-xs">Changes apply to the next turn.</p>
                 <Button
                   type="button"
-                  size="sm"
+                  size="sm-multiline"
                   variant="outline"
                   disabled={
                     !configurationReady ||
@@ -319,69 +417,25 @@ export function ThreadVoiceControls({
                 >
                   Use these models by default
                 </Button>
-                {configurationError ? (
+                {configurationError && !active ? (
                   <p role="alert" className="mt-2 text-xs">
                     {configurationError}
                   </p>
                 ) : null}
-                {unheard.length ? (
-                  <details className="mt-2 text-xs">
-                    <summary>Unheard updates ({unheard.length})</summary>
-                    <ul>
-                      {unheard.map((update) => (
-                        <li key={update.id} className="mt-1">
-                          {update.text}
-                        </li>
-                      ))}
-                    </ul>
-                  </details>
-                ) : null}
-                <p className="mt-2 text-xs">
-                  {selection.model}
-                  {selection.options
-                    ?.map((option) => ` · ${option.id}: ${String(option.value)}`)
-                    .join("")}
-                </p>
-                {detail ? (
-                  <p
-                    role={state === "error" || state === "reconnecting" ? "alert" : undefined}
-                    className="mt-2 text-xs"
-                  >
-                    {detail}
-                  </p>
-                ) : null}
                 {!active ? (
-                  <div className="mt-3 text-xs">
-                    <p>
-                      The voice model handles conversation while the background agent works with
-                      this chat's permissions. Recordings save on this device, then on your PC
-                      before transcription. Ending the call leaves the chat working.
-                    </p>
-                  </div>
-                ) : null}
-                {state === "preparing" ? (
-                  <ul className="mt-2 space-y-1 text-xs">
-                    {call?.steps.map((step) => (
-                      <li key={step}>{step}</li>
-                    ))}
-                  </ul>
-                ) : null}
-                {!props.connected && active ? (
-                  <p className="mt-2 text-xs">
-                    Chat connection lost. Speech saved only on this device stays queued until the PC
-                    acknowledges it.
+                  <p className="mt-3 text-xs">
+                    The voice model handles conversation while the background agent works with this
+                    chat's permissions. Recordings save on this device, then on your PC before
+                    transcription. Ending the call leaves the chat working.
                   </p>
                 ) : null}
               </div>
-              <div
-                data-slot="call-panel-actions"
-                className="flex shrink-0 flex-wrap gap-2 border-t p-3"
-              >
-                {!active ? (
+              {!active ? (
+                <div data-slot="call-panel-actions" className="flex shrink-0 border-t p-3">
                   <Button
                     type="button"
-                    size="sm"
-                    className="h-auto min-h-8 w-full whitespace-normal"
+                    size="sm-multiline"
+                    className="w-full"
                     disabled={
                       !props.enabled ||
                       !configurationReady ||
@@ -401,64 +455,10 @@ export function ThreadVoiceControls({
                   >
                     Start call or recover saved call
                   </Button>
-                ) : null}
-                {active ? (
-                  <>
-                    {state === "listening" ? (
-                      <Button type="button" size="sm" onClick={() => sessionRef.current?.finish()}>
-                        Send speech
-                      </Button>
-                    ) : null}
-                    {state === "speaking" || state === "waiting" ? (
-                      <Button
-                        type="button"
-                        size="sm"
-                        onClick={() => void sessionRef.current?.interrupt()}
-                      >
-                        Interrupt and speak
-                      </Button>
-                    ) : null}
-                    {state === "ready" ? (
-                      <Button
-                        type="button"
-                        size="sm"
-                        onClick={() => void sessionRef.current?.listen()}
-                      >
-                        Speak
-                      </Button>
-                    ) : null}
-                    {state === "reconnecting" || state === "error" ? (
-                      <Button
-                        type="button"
-                        size="sm"
-                        onClick={() => void sessionRef.current?.resume()}
-                      >
-                        Retry saved speech
-                      </Button>
-                    ) : null}
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      onClick={() => void sessionRef.current?.stop()}
-                    >
-                      End call
-                    </Button>
-                  </>
-                ) : null}
-              </div>
+                </div>
+              ) : null}
             </section>
           </PopoverPopup>
-        ) : null}
-        {active ? (
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            onClick={() => void sessionRef.current?.stop()}
-          >
-            End call
-          </Button>
         ) : null}
       </div>
     </Popover>

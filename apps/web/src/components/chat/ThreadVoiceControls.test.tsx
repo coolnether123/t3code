@@ -1,3 +1,4 @@
+/* oxlint-disable t3code/no-dom-test-environment -- The mocked call controller gate must run without launching a browser. */
 /** @vitest-environment happy-dom */
 
 import { act, createRef } from "react";
@@ -28,6 +29,7 @@ const controller = vi.hoisted(() => ({
   request: vi.fn<() => Promise<SpeechResponse>>(async () => ({})),
   ensureThread: vi.fn(async () => {}),
   onActiveChange: vi.fn(),
+  onPanelOpenChange: vi.fn(),
 }));
 vi.mock("../../voice/session", () => ({
   ThreadVoiceSession: class {
@@ -79,6 +81,7 @@ beforeEach(async () => {
         ref={createRef<ThreadVoiceHandle>()}
         ensureThread={controller.ensureThread}
         onActiveChange={controller.onActiveChange}
+        onPanelOpenChange={controller.onPanelOpenChange}
         isDraft
         threadId={ThreadId.make("synthetic-chat")}
         environmentId={EnvironmentId.make("synthetic-environment")}
@@ -89,7 +92,7 @@ beforeEach(async () => {
         instanceEntries={deriveProviderInstanceEntries([
           {
             instanceId: ProviderInstanceId.make("synthetic-provider"),
-            driver: ProviderDriverKind.make("codex"),
+            driver: ProviderDriverKind.make("claudeAgent"),
             displayName: "Synthetic",
             enabled: true,
             installed: true,
@@ -172,25 +175,90 @@ describe("call panel action boundary", () => {
     expect(container.textContent).toBe("Call Otis");
   });
   it.each(["listening", "error"] as const)(
-    "keeps %s actions outside the scroll area",
+    "keeps %s controls and errors in the composer with settings closed",
     async (state) => {
       await act(async () =>
         controller.change?.(state, state === "error" ? "Speech remains queued." : undefined),
       );
       const panel = document.querySelector<HTMLElement>('section[aria-label="Otis call"]')!;
-      const footer = panel.querySelector<HTMLElement>('[data-slot="call-panel-actions"]')!;
-      const action = footer.querySelector<HTMLButtonElement>("button")!;
-      expect(action.textContent).toBe(state === "listening" ? "Send speech" : "Retry saved speech");
-      expect(panel.querySelector('[data-slot="call-panel-scroll"]')?.contains(footer)).toBe(false);
+      expect(container.contains(panel)).toBe(true);
+      expect(document.querySelector('[data-slot="popover-popup"]')).toBeNull();
+      const action = panel.querySelector<HTMLButtonElement>(
+        `[aria-label="${state === "listening" ? "Send speech" : "Retry saved speech"}"]`,
+      )!;
+      if (state === "error")
+        expect(panel.querySelector('[role="alert"]')?.textContent).toBe("Speech remains queued.");
       await act(async () => action.click());
       expect(state === "listening" ? controller.finish : controller.resume).toHaveBeenCalledTimes(
         1,
       );
-      const end = [...footer.querySelectorAll("button")].find(
+      const end = [...panel.querySelectorAll("button")].find(
         (button) => button.textContent === "End call",
       )!;
       await act(async () => end.click());
       expect(controller.stop).toHaveBeenCalledTimes(1);
     },
   );
+  it("closes setup on call start and lets settings close without detaching the session", async () => {
+    await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
+    await act(async () => controller.change?.("preparing", "Checking microphone"));
+    expect(document.querySelector('[data-slot="popover-popup"]')).toBeNull();
+    await act(async () => controller.change?.("listening"));
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[aria-label="Call settings"]')!.click(),
+    );
+    expect(
+      document.querySelector('section[aria-label="Otis call settings"]')?.textContent,
+    ).toContain("Voice model");
+    await act(async () =>
+      document.querySelector<HTMLButtonElement>('[aria-label="Close call settings"]')!.click(),
+    );
+    expect(document.querySelector('[data-slot="popover-popup"]')).toBeNull();
+    expect(controller.onPanelOpenChange).toHaveBeenLastCalledWith(true);
+    expect(controller.detach).not.toHaveBeenCalled();
+    expect(controller.stop).not.toHaveBeenCalled();
+    expect(container.querySelector('[role="status"]')?.textContent).toBe("Listening");
+  });
+  it("shows unheard updates behind an expandable count in the call bar", async () => {
+    await act(async () =>
+      controller.change?.("waiting", undefined, {
+        callId: "synthetic",
+        threadId: "synthetic-chat",
+        version: "1",
+        ready: true,
+        closed: false,
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("synthetic-provider"),
+          model: "synthetic-model",
+        },
+        steps: [],
+        utterances: [],
+        played: [],
+        operatorUpdates: [
+          {
+            id: "update-1",
+            jobId: "job",
+            status: "done",
+            text: "The work is ready.",
+            createdAt: "now",
+          },
+          {
+            id: "update-2",
+            jobId: "job",
+            status: "done",
+            text: "Already heard.",
+            createdAt: "now",
+            heardAt: "now",
+          },
+        ],
+      }),
+    );
+    const updates = container.querySelector("details")!;
+    expect(updates.open).toBe(false);
+    expect(updates.querySelector("summary")?.textContent).toBe("Unheard updates (1)");
+    expect(updates.textContent).toContain("The work is ready.");
+    expect(updates.textContent).not.toContain("Already heard.");
+    await act(async () => updates.querySelector("summary")!.click());
+    expect(updates.open).toBe(true);
+  });
 });

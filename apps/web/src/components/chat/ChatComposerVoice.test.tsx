@@ -7,7 +7,6 @@ describe("composer voice lifecycle boundary", () => {
   it("keeps the toolbar outside the mobile collapsed and approval branches", () => {
     expect(source).not.toContain("isComposerCollapsedMobile || isComposerApprovalState ? null : (");
     expect(source).not.toContain('showMobilePendingAnswerActions && "hidden sm:flex"');
-    expect(source).toContain('triggerAriaLabel="Choose model"');
     const voice = source.indexOf("<ThreadVoiceControls");
     const textActions = source.indexOf("<ComposerFooterPrimaryActions", voice);
     expect(voice).toBeGreaterThan(0);
