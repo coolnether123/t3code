@@ -83,6 +83,17 @@ async function fixture() {
 }
 
 describe("durable calls", () => {
+  it("saves a full minute of 48 kHz PCM without exhausting the validation stack", async () => {
+    const f = await fixture();
+    const audio = Buffer.alloc(48_000 * 2 * 60, 1);
+    const result = await f.request({
+      ...upload,
+      audio: audio.toString("base64"),
+      sampleRate: 48_000,
+    });
+    expect(result.utterance?.bytes).toBe(audio.length);
+    expect(result.utterance?.sha256).toBe(sha256(audio));
+  });
   it("does not acknowledge a rejected provider send and retries it on the next delivery", async () => {
     const f = await fixture();
     const operator = new CallOperator(f.store);

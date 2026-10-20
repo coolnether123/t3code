@@ -153,8 +153,8 @@ export function createBrowserAudio(onInterrupted?: () => void) {
             index += 2;
           }
         let binary = "";
-        for (let offset = 0; offset < bytes.length; offset += 8192)
-          binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+        for (let offset = 0; offset < bytes.length; offset += 512)
+          binary += String.fromCharCode(...bytes.subarray(offset, offset + 512));
         return { audio: btoa(binary), sampleRate: audioContext.sampleRate };
       };
       try {

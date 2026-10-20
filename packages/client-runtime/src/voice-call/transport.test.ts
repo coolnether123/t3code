@@ -38,6 +38,30 @@ const input = {
 };
 
 describe("voice environment transport", () => {
+  it.effect("encodes and uploads a large PCM recording without changing its bytes", () =>
+    Effect.gen(function* () {
+      const audio = btoa("\0".repeat(48_000 * 2 * 90));
+      let received = "";
+      const fetcher: typeof fetch = async (_url, init) => {
+        received = JSON.parse(String(init?.body)).audio;
+        return Response.json({});
+      };
+      yield* fetchEnvironmentSpeech({
+        ...input,
+        request: {
+          action: "call.upload",
+          callId: "synthetic",
+          utteranceId: "long",
+          audio,
+          sampleRate: 48_000,
+          startedAt: "2026-10-19T00:00:00Z",
+          endedAt: "2026-10-19T00:01:30Z",
+        },
+        fetcher,
+      }).pipe(Effect.provide(layerRemoteHttpClient(fetcher)));
+      expect(received).toBe(audio);
+    }),
+  );
   it.effect(
     "rejects a locally invalid speech request before fetch without calling it a network or audio response failure",
     () =>

@@ -406,10 +406,12 @@ export class CallService {
       rate < 8000 ||
       rate > 96000 ||
       !input.audio ||
-      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(input.audio)
+      input.audio.length > Math.ceil((rate * 2 * 60) / 3) * 4
     )
       throw new Error("Invalid PCM recording.");
     const audio = Buffer.from(input.audio, "base64");
+    // Repeated base64 groups in a regexp exhaust the engine stack on long recordings.
+    if (audio.toString("base64") !== input.audio) throw new Error("Invalid PCM recording.");
     if (!audio.length || audio.length % 2 || audio.length > rate * 2 * 60)
       throw new Error("Record up to one minute of speech per utterance.");
     const started = Date.parse(input.startedAt ?? "");
