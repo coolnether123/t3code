@@ -13,6 +13,7 @@ import {
   verifyCallRaw,
   sentenceSpeechId,
   sentenceTimings,
+  isCallReplySpeech,
   assertCallSelection,
   verifyCallDelivery,
 } from "./otis-call-evidence.mjs";
@@ -448,5 +449,19 @@ NodeTest.test(
       receipts.close();
       await NodeFSP.rm(directory, { recursive: true, force: true });
     }
+  },
+);
+
+NodeTest.test(
+  "keeps the slow-start ready cue out of reply latency and speech fault injection",
+  () => {
+    NodeAssert.equal(isCallReplySpeech("call-ready"), false);
+    NodeAssert.equal(isCallReplySpeech(undefined), false);
+    NodeAssert.equal(isCallReplySpeech("s-reply"), true);
+    const timings = callTimings({ speechEnded: 50 }, [
+      { speechId: "call-ready", firstScheduledAudioAt: 10 },
+      { speechId: "s-reply", firstScheduledAudioAt: 150 },
+    ]);
+    NodeAssert.equal(timings.firstScheduledAudio, 100);
   },
 );

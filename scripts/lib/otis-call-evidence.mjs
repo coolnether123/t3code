@@ -40,6 +40,10 @@ export function sentenceSpeechId({ messageId, start, end }) {
     .digest("hex")}`;
 }
 
+export function isCallReplySpeech(speechId) {
+  return typeof speechId === "string" && speechId.length > 0 && speechId !== "call-ready";
+}
+
 export function sentenceTimings(sentence) {
   const elapsed = (from, to) =>
     Number.isFinite(sentence[from]) && Number.isFinite(sentence[to])
@@ -101,7 +105,10 @@ export function hasOperatorResult(event) {
 export function callTimings(stages, sentences) {
   if (sentences) {
     const scheduled = sentences
-      .filter((sentence) => sentence.speechId && Number.isFinite(sentence.firstScheduledAudioAt))
+      .filter(
+        (sentence) =>
+          isCallReplySpeech(sentence.speechId) && Number.isFinite(sentence.firstScheduledAudioAt),
+      )
       .map((sentence) => sentence.firstScheduledAudioAt);
     stages = { ...stages, firstScheduledAudio: scheduled.length ? Math.min(...scheduled) : null };
   }

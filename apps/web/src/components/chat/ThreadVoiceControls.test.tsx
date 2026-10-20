@@ -262,3 +262,27 @@ describe("call panel action boundary", () => {
     expect(updates.open).toBe(true);
   });
 });
+
+it("shows friendly phases and adds a quiet elapsed counter after five seconds", async () => {
+  vi.useFakeTimers();
+  try {
+    await act(async () => controller.change?.("transcribing"));
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      "Got it, writing that down",
+    );
+    expect(container.textContent).not.toContain("5s");
+    await act(async () => vi.advanceTimersByTime(5000));
+    expect(container.textContent).toContain("5s");
+    await act(async () => controller.change?.("waiting"));
+    expect(container.querySelector('[role="status"]')?.textContent).toBe("Otis is thinking");
+    expect(container.textContent).not.toContain("5s");
+    await act(async () => controller.change?.("speaking"));
+    expect(container.querySelector('[role="status"]')?.textContent).toBe("Otis is talking");
+    await act(async () => controller.change?.("preparing"));
+    expect(container.querySelector('[role="status"]')?.textContent).toContain(
+      "You can type to Otis meanwhile",
+    );
+  } finally {
+    vi.useRealTimers();
+  }
+});

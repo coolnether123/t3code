@@ -19,6 +19,7 @@ import {
   verifyCallDelivery,
   sentenceSpeechId,
   sentenceTimings,
+  isCallReplySpeech,
   assertCallSelection,
 } from "./lib/otis-call-evidence.mjs";
 
@@ -355,12 +356,13 @@ const accepted = await runAcceptanceWithDeadline({
         const record = sentenceRecord(sentenceSpeechId(event));
         record.queuedAt ??= at;
         mark("firstSentence", at);
-      } else if (event.type === "audio") sentenceRecord(event.speechId).firstChunkAt ??= at;
+      } else if (event.type === "audio" && isCallReplySpeech(event.speechId))
+        sentenceRecord(event.speechId).firstChunkAt ??= at;
       else if (event.type === "scheduled") {
-        if (event.speechId) {
+        if (isCallReplySpeech(event.speechId)) {
           sentenceRecord(event.speechId).firstScheduledAudioAt ??= at;
           mark("firstScheduledAudio", at);
-        } else mark("firstFillerAudio", at);
+        } else if (!event.speechId) mark("firstFillerAudio", at);
       }
     });
     const segment = toSafeThreadAttachmentSegment(values["thread-id"]);
@@ -438,7 +440,7 @@ const accepted = await runAcceptanceWithDeadline({
       if (new URL(response.url()).pathname !== "/api/voice") return;
       void (async () => {
         const input = response.request().postDataJSON();
-        if (input.action === "call.speak") {
+        if (input.action === "call.speak" && isCallReplySpeech(input.speechId)) {
           const record = sentenceRecord(input.speechId);
           record.responseStatus = response.status();
           if (!response.ok())
@@ -503,7 +505,7 @@ const accepted = await runAcceptanceWithDeadline({
     });
     await page.route("**/api/voice", async (route) => {
       const input = route.request().postDataJSON();
-      if (input.action === "call.speak") {
+      if (input.action === "call.speak" && isCallReplySpeech(input.speechId)) {
         const record = sentenceRecord(input.speechId);
         record.requestedAt ??= Date.now();
         record.attempts++;
@@ -541,7 +543,11 @@ const accepted = await runAcceptanceWithDeadline({
       const target = { upload: "call.upload", delivery: "call.deliver", speech: "call.speak" }[
         disconnectAt
       ];
-      if (input.action === target && !report.responseDropped) {
+      if (
+        input.action === target &&
+        !report.responseDropped &&
+        (target !== "call.speak" || isCallReplySpeech(input.speechId))
+      ) {
         report.responseDropped = true;
         const saved = await route.fetch();
         NodeAssert.ok(saved.ok(), "Server must accept the stage before its response is discarded.");
@@ -574,7 +580,7 @@ const accepted = await runAcceptanceWithDeadline({
           const evidence = window.__otisCallEvidence;
           const speechId = evidence.activeSpeechId;
           const at = Date.now();
-          if (speechId) evidence.firstAudioAt ??= at;
+          if (speechId && speechId !== "call-ready") evidence.firstAudioAt ??= at;
           else evidence.firstFillerAudioAt ??= at;
           evidence.activeSpeechId = undefined;
           void window.__otisCallSpeech({ type: "scheduled", speechId }, at);

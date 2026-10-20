@@ -21,10 +21,11 @@ and requests a voice announcement at a pause. See `handoff-phase2.md` for checks
 and explicit compatibility limits. The remaining sections describe the phase 1
 speech/archive foundation.
 
-Announcement prompts are built from saved operator updates inside the linked
-voice session. Shared client conversation state omits their internal
-`voice-update:` user messages, including cached history. Background status
-activity and the voice model's natural reply stay visible in the same thread.
+Announcement prompts use saved operator updates inside the linked voice session.
+Their internal triggers add no chat messages or notification items. Background
+progress stays in the compact call bar and durable call-store updates. Only
+questions that ask Jared to act enter chat as attention notices. Heard receipts
+stay in the call store; natural voice replies stay visible in the conversation.
 
 The active web call stays in a compact bar beside the conversation. Settings use
 T3's existing popover portal and collision positioning, with dynamic viewport
@@ -59,6 +60,11 @@ saved call default available even when a thread remembers hidden models.
 | `apps/server/src/speech/proxy.ts`                     | Fixed loopback router APIs, actual expiry, renewal health and idempotent release.                                  |
 | Existing T3 engine and provider adapters              | Persisted message/turn, durable command receipt, tool permissions and provider execution. No voice execution hook. |
 | `scripts/otis-call-acceptance.mjs`                    | Parent-run browser, real-engine and provider receipt checks in an isolated home.                                   |
+
+Typed messages use the same durable outbox and stable voice-message delivery IDs
+as transcripts, skipping recording and STT. They can dispatch while speech engines
+prepare; replies wait for audio readiness. A slow start speaks one short ready
+line per call. Native clients can use the shared protocol but still lack call UI.
 
 The browser saves capture locally before uploading. The PC saves an immutable
 upload identity, raw PCM, transcript and dispatch command in that order. The

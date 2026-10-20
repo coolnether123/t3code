@@ -19,24 +19,38 @@ import { Button } from "../ui/button";
 import { Popover, PopoverPopup } from "../ui/popover";
 import { CallModelSelectors, type CallSelectorCatalog } from "./CallModelSelectors";
 import { initialCallModels } from "../../voice/modelDefaults";
+import { callStatusLabel, callElapsedLabel } from "../../voice/callStatus";
 import { ComposerBanner } from "./ComposerBanner";
 
 export interface ThreadVoiceHandle {
   stop(): void;
   say(text: string): Promise<void>;
 }
-const labels: Record<VoiceState, string> = {
-  idle: "Call Otis",
-  preparing: "Preparing",
-  listening: "Listening",
-  saving: "Saving on PC",
-  transcribing: "Transcribing",
-  waiting: "Waiting for the chat",
-  speaking: "Speaking",
-  ready: "Ready",
-  reconnecting: "Reconnecting",
-  error: "Call needs attention",
-};
+function CallStatusLine({ label }: { label: string }) {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const started = Date.now();
+    const timer = setInterval(() => setSeconds(Math.floor((Date.now() - started) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  return (
+    <span className="flex min-w-0 items-center gap-2">
+      <span
+        role="status"
+        className={
+          label.startsWith("Background agent working:")
+            ? "min-w-0 truncate"
+            : "min-w-0 wrap-anywhere"
+        }
+      >
+        {label}
+      </span>
+      {callElapsedLabel(seconds) ? (
+        <span className="shrink-0 text-xs text-muted-foreground">{callElapsedLabel(seconds)}</span>
+      ) : null}
+    </span>
+  );
+}
 
 export function ThreadVoiceControls({
   ref,
@@ -260,9 +274,10 @@ export function ThreadVoiceControls({
             >
               <ComposerBanner.Row>
                 <ComposerBanner.Content>
-                  <span role="status" className="min-w-0 wrap-anywhere">
-                    {labels[state]}
-                  </span>
+                  <CallStatusLine
+                    key={`${state}:${call?.operatorWorking ?? false}`}
+                    label={callStatusLabel(state, call)}
+                  />
                 </ComposerBanner.Content>
                 <ComposerBanner.Actions>
                   {state === "listening" ? (
