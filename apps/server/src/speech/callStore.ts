@@ -132,6 +132,7 @@ export function callIdentifier(value: string | undefined): string {
 
 /** One writer per key within the server that owns this T3 home. */
 export class CallStore {
+  private recovery: Promise<void> | undefined;
   private expirations = new Map<string, ReturnType<typeof NodeTimers.setTimeout>>();
   private locks = new Map<string, Promise<unknown>>();
   private listeners = new Map<string, Set<() => void>>();
@@ -159,6 +160,22 @@ export class CallStore {
     );
     timer.unref();
     this.expirations.set(callId, timer);
+  }
+
+  recoverExpirations(restore: (callId: string, until: number) => Promise<void>) {
+    // HTTP constructs a service per request, but recovery belongs to this store's lifetime.
+    return (this.recovery ??= (async () => {
+      await NodeFSP.mkdir(this.root, { recursive: true });
+      for (const entry of await NodeFSP.readdir(this.root, { withFileTypes: true })) {
+        if (!entry.isDirectory() || entry.name.startsWith("_")) continue;
+        const record = await this.require(entry.name);
+        if (!record.closed && record.leaseUntil !== undefined)
+          await restore(record.callId, record.leaseUntil);
+      }
+    })().catch((error: unknown) => {
+      this.recovery = undefined;
+      throw error;
+    }));
   }
 
   directory(callId: string) {

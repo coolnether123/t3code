@@ -108,6 +108,7 @@ export class CallService {
   }
 
   async status(callId: string): Promise<CallStatus> {
+    await this.recoverExpirations();
     const record = await this.store.require(callId);
     const operator = await this.operator?.read(record.threadId);
     return {
@@ -132,6 +133,12 @@ export class CallService {
         : {}),
     };
   }
+  private recoverExpirations() {
+    return this.store.recoverExpirations(async (callId, until) => {
+      if (until <= time()) await this.close(callId);
+      else this.scheduleExpiry(callId, until);
+    });
+  }
   private scheduleExpiry(callId: string, until: number) {
     this.store.scheduleExpiry(callId, until, () =>
       this.store.serial(`renew:${callId}`, async () => {
@@ -147,6 +154,7 @@ export class CallService {
       if (id !== undefined) callIdentifier(id);
     decodeCallRequest(input);
     callIdentifier(input.callId);
+    await this.recoverExpirations();
     if (input.action === "call.configure") {
       if (!this.operator || !input.options)
         throw new Error("Call model configuration is unavailable.");
@@ -262,32 +270,7 @@ export class CallService {
       );
     }
     if (input.action === "call.close") {
-      let found = false;
-      const sessionId = await this.store.serial(input.callId, async () => {
-        const record = await this.store.read<CallRecord>(input.callId, "call.json");
-        if (!record) return;
-        if (record.callId !== input.callId)
-          throw new Error("Saved call identity does not match its archive.");
-        found = true;
-        await this.store.serial(`thread:${record.threadId}`, async () => {
-          record.closed = true;
-          await this.store.changed(record);
-          await this.store.unbind(record.threadId, record.callId);
-        });
-        return record.lease;
-      });
-      if (sessionId) {
-        await this.ports.speech({ action: "release", sessionId }, AbortSignal.timeout(90_000));
-        await this.store.serial(input.callId, async () => {
-          const record = await this.store.require(input.callId);
-          if (record.lease === sessionId) {
-            delete record.lease;
-            delete record.leaseUntil;
-            await this.store.changed(record);
-          }
-        });
-      }
-      return found ? { call: await this.status(input.callId) } : {};
+      return (await this.close(input.callId)) ? { call: await this.status(input.callId) } : {};
     }
     return this.store.serial(input.callId, async () => {
       if (input.action === "call.open")
@@ -315,6 +298,37 @@ export class CallService {
       }
       return { call: await this.status(input.callId) };
     });
+  }
+  private async close(callId: string) {
+    let found = false;
+    const sessionId = await this.store.serial(callId, async () => {
+      const record = await this.store.read<CallRecord>(callId, "call.json");
+      if (!record) return;
+      if (record.callId !== callId)
+        throw new Error("Saved call identity does not match its archive.");
+      found = true;
+      await this.store.serial(`thread:${record.threadId}`, async () => {
+        record.closed = true;
+        await this.store.changed(record);
+        await this.store.unbind(record.threadId, record.callId);
+      });
+      return record.lease;
+    });
+    if (sessionId) {
+      // Expired or missing router leases must not prevent local call cleanup.
+      await this.ports
+        .speech({ action: "release", sessionId }, AbortSignal.timeout(90_000))
+        .catch(() => {});
+      await this.store.serial(callId, async () => {
+        const record = await this.store.require(callId);
+        if (record.lease === sessionId) {
+          delete record.lease;
+          delete record.leaseUntil;
+          await this.store.changed(record);
+        }
+      });
+    }
+    return found;
   }
   private async open(input: CallRequest): Promise<SpeechResponse> {
     if (!input.options) throw new Error("Call options are required.");
@@ -649,6 +663,7 @@ export class CallService {
     return request ? this.ports.speech(request, signal) : { played: true };
   }
   async *speakStream(input: CallRequest, signal: AbortSignal): AsyncGenerator<SpeechResponse> {
+    await this.recoverExpirations();
     decodeCallRequest(input);
     if (input.action !== "call.speak") throw new Error("A speech request is required.");
     callIdentifier(input.callId);

@@ -82,6 +82,74 @@ async function fixture() {
 }
 
 describe("durable calls", () => {
+  it("closes every expired open call after restart through the normal close path", async () => {
+    const f = await fixture();
+    const record = await f.store.require("call-1");
+    record.leaseUntil = 0;
+    await f.store.changed(record);
+    const other = { ...record, callId: "call-2", threadId: "other-thread", lease: "lease-2" };
+    await f.store.changed(other);
+    await f.store.write("_threads", `${sha256(other.threadId)}.json`, { callId: other.callId });
+    const store = new CallStore(f.directory);
+    const restarted = new CallService(store, f.ports);
+    vi.mocked(f.ports.speech).mockClear();
+    const result = await restarted.handle(
+      { action: "call.status", callId: "call-1" },
+      new AbortController().signal,
+    );
+    expect(result.call?.closed).toBe(true);
+    for (const call of [record, other]) {
+      expect(await store.require(call.callId)).toMatchObject({ closed: true });
+      expect((await store.require(call.callId)).lease).toBeUndefined();
+      expect(await store.read("_threads", `${sha256(call.threadId)}.json`)).toBeUndefined();
+      expect(f.ports.speech).toHaveBeenCalledWith(
+        { action: "release", sessionId: call.lease },
+        expect.any(AbortSignal),
+      );
+    }
+  });
+  it("re-arms a live lease once after restart and closes it at the restored deadline", async () => {
+    const f = await fixture();
+    const store = new CallStore(f.directory);
+    const scheduled = vi.spyOn(store, "scheduleExpiry");
+    const restarted = new CallService(store, f.ports);
+    expect(await restarted.status("call-1")).toMatchObject({ closed: false, ready: true });
+    const record = await store.require("call-1");
+    expect(scheduled).toHaveBeenCalledExactlyOnceWith(
+      "call-1",
+      record.leaseUntil,
+      expect.any(Function),
+    );
+    await new CallService(store, f.ports).status("call-1");
+    expect(scheduled).toHaveBeenCalledTimes(1);
+    record.leaseUntil = 0;
+    await store.changed(record);
+    await scheduled.mock.calls[0]![2]();
+    expect(await restarted.status("call-1")).toMatchObject({ closed: true, ready: false });
+  });
+  it.each(["Lease not found (404)", "Lease expired", "Router unavailable"])(
+    "finishes closing after restart when release fails: %s",
+    async (message) => {
+      const f = await fixture();
+      const record = await f.store.require("call-1");
+      record.leaseUntil = 0;
+      await f.store.changed(record);
+      vi.mocked(f.ports.speech).mockRejectedValue(new Error(message));
+      const store = new CallStore(f.directory);
+      const restarted = new CallService(store, f.ports);
+      expect(await restarted.status("call-1")).toMatchObject({ closed: true, ready: false });
+      expect((await store.require("call-1")).lease).toBeUndefined();
+      expect((await store.require("call-1")).leaseUntil).toBeUndefined();
+      expect(await store.activeCall(options.threadId, "")).toBeUndefined();
+      expect(await store.read("_threads", `${sha256(options.threadId)}.json`)).toBeUndefined();
+    },
+  );
+  it("finishes an explicit close when releasing speech fails", async () => {
+    const f = await fixture();
+    vi.mocked(f.ports.speech).mockRejectedValue(new Error("Lease not found (404)"));
+    expect((await f.request({ action: "call.close" })).call?.closed).toBe(true);
+    expect((await f.store.require("call-1")).lease).toBeUndefined();
+  });
   it("replaces a PC lease with TTS-only in device mode and retains the mode across reload", async () => {
     const f = await fixture();
     f.ports.inputMode = async () => "device";
