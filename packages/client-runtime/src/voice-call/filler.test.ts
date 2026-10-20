@@ -124,8 +124,8 @@ describe("speech turn filler playback", () => {
     expect(f.started).not.toHaveBeenCalled();
   });
 
-  it("ships six short playable mono PCM16 clips", () => {
-    expect(fillerClips).toHaveLength(6);
+  it("ships 24 short playable mono PCM16 clips", () => {
+    expect(fillerClips).toHaveLength(24);
     for (const clip of fillerClips) {
       const bytes = atob(clip.audio).length;
       expect(clip.sampleRate).toBe(24_000);
