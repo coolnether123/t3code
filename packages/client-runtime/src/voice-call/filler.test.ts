@@ -22,7 +22,7 @@ function fixture() {
 afterEach(() => vi.useRealTimers());
 
 describe("speech turn filler playback", () => {
-  it("waits one second, plays once, and ignores duplicate sends for that turn", async () => {
+  it("waits 1.8 seconds, plays once, and ignores duplicate sends for that turn", async () => {
     const f = fixture();
     const pending = f.filler.arm("utterance", f.signal.signal);
     await vi.advanceTimersByTimeAsync(FILLER_DELAY_MS - 1);
@@ -39,7 +39,7 @@ describe("speech turn filler playback", () => {
   it("suppresses filler when real audio wins the timer", async () => {
     const f = fixture();
     const pending = f.filler.arm("utterance", f.signal.signal);
-    await vi.advanceTimersByTimeAsync(999);
+    await vi.advanceTimersByTimeAsync(FILLER_DELAY_MS - 1);
     await f.filler.play("reply", 24_000, f.signal.signal, f.started);
     await vi.advanceTimersByTimeAsync(10_000);
     await pending;
@@ -85,7 +85,7 @@ describe("speech turn filler playback", () => {
     expect(f.play).not.toHaveBeenCalled();
   });
 
-  it("varies clips across turns without repeating the last one", async () => {
+  it("varies clips across turns without repeating the last four", async () => {
     const f = fixture();
     for (let turn = 0; turn < 20; turn++) {
       const pending = f.filler.arm(String(turn), f.signal.signal);
@@ -94,7 +94,8 @@ describe("speech turn filler playback", () => {
     }
     const clips = f.play.mock.calls.map(([audio]) => audio);
     expect(clips).toHaveLength(20);
-    for (let i = 1; i < clips.length; i++) expect(clips[i]).not.toBe(clips[i - 1]);
+    for (let i = 1; i < clips.length; i++)
+      expect(clips.slice(Math.max(0, i - 4), i)).not.toContain(clips[i]);
   });
 
   it("keeps replies playable after optional filler playback fails", async () => {
@@ -123,7 +124,7 @@ describe("speech turn filler playback", () => {
     expect(f.started).not.toHaveBeenCalled();
   });
 
-  it("ships all six playable mono PCM16 clips with their original durations", () => {
+  it("ships six short playable mono PCM16 clips", () => {
     expect(fillerClips).toHaveLength(6);
     for (const clip of fillerClips) {
       const bytes = atob(clip.audio).length;

@@ -1,7 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Random from "effect/Random";
 
-export const FILLER_DELAY_MS = 1_000;
+export const FILLER_DELAY_MS = 1_800;
 
 type Clip = { id: string; audio: string; sampleRate: number };
 type Play = (audio: string, sampleRate: number, signal: AbortSignal) => Promise<void>;
@@ -10,7 +10,7 @@ type Play = (audio: string, sampleRate: number, signal: AbortSignal) => Promise<
 export class TurnFiller {
   private timer = new AbortController();
   private turn: string | undefined;
-  private lastClip: string | undefined;
+  private recentClips: string[] = [];
   private realAudio = false;
   private playback: Promise<void> | undefined;
   private clips: Promise<readonly Clip[]> | undefined;
@@ -43,10 +43,12 @@ export class TurnFiller {
       await Effect.runPromise(Effect.sleep(Math.max(0, FILLER_DELAY_MS - elapsedMs)), {
         signal: pending,
       });
-      const clips = (await this.prepare()).filter((clip) => clip.id !== this.lastClip);
+      const all = await this.prepare();
+      const avoid = new Set(this.recentClips.slice(-Math.min(4, all.length - 1)));
+      const clips = all.filter((clip) => !avoid.has(clip.id));
       if (pending.aborted || this.realAudio || this.playback || !clips.length) return;
       const clip = clips[Effect.runSync(Random.nextIntBetween(0, clips.length - 1))]!;
-      this.lastClip = clip.id;
+      this.recentClips = [...this.recentClips, clip.id].slice(-4);
       // Only the call's playback signal can stop a started clip. Reply arrival cancels
       // the timer, then waits for this clip's final audio frame.
       const playback = this.playAudio(clip.audio, clip.sampleRate, signal);
