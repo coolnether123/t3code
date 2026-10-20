@@ -106,6 +106,135 @@ afterEach(async () => {
 });
 
 describe("durable thread voice session", () => {
+  it("archives recognized device words on hang-up before clearing the outbox", async () => {
+    const f = fixture();
+    const original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (input, signal, onAudio) =>
+      input.action === "call.prepare"
+        ? {
+            call: {
+              callId: "phone",
+              threadId: "synthetic",
+              version: "1",
+              ready: true,
+              closed: false,
+              inputMode: "device",
+              modelSelection: options.modelSelection,
+              steps: [],
+              utterances: [],
+              played: [],
+            },
+          }
+        : original(input, signal, onAudio),
+    );
+    const captured = deferred<string | null>();
+    Object.assign(f.audio, { captureText: () => captured.promise });
+    f.audio.close.mockImplementation(() => captured.resolve("Keep these words."));
+    await f.session.start(options, []);
+    await f.session.stop();
+    const actions = f.request.mock.calls.map(([input]) => input.action);
+    expect(actions.indexOf("call.close")).toBeLessThan(actions.indexOf("call.say"));
+    expect(f.request.mock.calls.find(([input]) => input.action === "call.say")?.[0].text).toBe(
+      "Keep these words.",
+    );
+    expect(f.saved()).toBeUndefined();
+  });
+  it("delivers device text once through call.say, pauses for the reply, then listens again", async () => {
+    const f = fixture();
+    const original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (input, signal, onAudio) =>
+      input.action === "call.prepare"
+        ? {
+            call: {
+              callId: "phone",
+              threadId: "synthetic",
+              version: "1",
+              ready: true,
+              closed: false,
+              inputMode: "device",
+              modelSelection: options.modelSelection,
+              steps: [],
+              utterances: [],
+              played: [],
+            },
+          }
+        : original(input, signal, onAudio),
+    );
+    let captured = deferred<string | null>();
+    const captureText = vi.fn(() => captured.promise);
+    Object.assign(f.audio, { captureText });
+    f.audio.finish.mockImplementation(() => captured.resolve(""));
+    f.audio.close.mockImplementation(() => captured.resolve(""));
+    await f.session.start(options, []);
+    expect(f.audio.prepare).toHaveBeenCalledWith(expect.any(AbortSignal), "device");
+    expect(f.audio.capture).not.toHaveBeenCalled();
+    captured.resolve("Read my agenda.");
+    await f.waiting.promise;
+    expect(f.request.mock.calls.filter(([input]) => input.action === "call.say")).toHaveLength(1);
+    expect(f.request.mock.calls.find(([input]) => input.action === "call.say")?.[0].text).toBe(
+      "Read my agenda.",
+    );
+    const playback = deferred<void>();
+    const talking = deferred<void>();
+    const listening = deferred<void>();
+    f.audio.play.mockImplementation(() => {
+      talking.resolve();
+      return playback.promise;
+    });
+    captured = deferred();
+    captureText.mockImplementation(() => {
+      listening.resolve();
+      return captured.promise;
+    });
+    f.session.observe(
+      [{ id: "reply", role: "assistant", text: "Here is your agenda.", streaming: false }],
+      false,
+    );
+    await talking.promise;
+    expect(captureText).toHaveBeenCalledTimes(1);
+    playback.resolve();
+    await listening.promise;
+    expect(captureText).toHaveBeenCalledTimes(2);
+    expect(
+      f.request.mock.calls.some(
+        ([input]) => input.action === "call.upload" || input.action === "call.transcribe",
+      ),
+    ).toBe(false);
+  });
+  it("keeps typing available when device recognition is unsupported", async () => {
+    const f = fixture();
+    const original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (input, signal, onAudio) =>
+      input.action === "call.prepare"
+        ? {
+            call: {
+              callId: "phone",
+              threadId: "synthetic",
+              version: "1",
+              ready: true,
+              closed: false,
+              inputMode: "device",
+              modelSelection: options.modelSelection,
+              steps: [],
+              utterances: [],
+              played: [],
+            },
+          }
+        : original(input, signal, onAudio),
+    );
+    Object.assign(f.audio, { captureText: vi.fn(async () => null) });
+    await f.session.start(options, []);
+    expect(f.change).toHaveBeenCalledWith(
+      "ready",
+      "Voice input is unavailable right now. Type to Otis instead.",
+      expect.any(Object),
+    );
+    await f.session.say("Keep working.");
+    await f.waiting.promise;
+    expect(f.request.mock.calls.find(([input]) => input.action === "call.say")?.[0].text).toBe(
+      "Keep working.",
+    );
+  });
   it("ends local audio and sends close even when an upload ignores cancellation", async () => {
     const f = fixture();
     const uploading = deferred<void>();

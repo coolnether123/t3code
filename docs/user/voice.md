@@ -16,7 +16,7 @@ spoken as it arrives. Code and structured data stay in the chat.
 **End call** stops voice and releases the microphone. The chat keeps working.
 The chat's own stop button still interrupts its work.
 
-Recordings save on this device, then on your PC before transcription. If the
+With PC recognition, recordings save on this device, then on your PC before transcription. If the
 connection fails, **Retry** resumes delivery using the same recording.
 Audio without a PC acknowledgment remains queued on this device. Keep the page
 open when a save fails. Reopening the same chat can recover saved speech after
@@ -29,8 +29,11 @@ it. Changing the normal model selector applies to your next recording. Queued
 recordings retain the model selected when they were recorded.
 
 Voice needs HTTPS or localhost microphone access and the environment's local
-speech service. It uses the chat's normal permissions and provider. There is no
-cloud speech-recognition fallback. Browser suspension can pause recording; samples
+speech service. It uses the chat's normal permissions and provider.
+Phone recognition uses your device's speech service instead when PC recognition is unavailable.
+On iPhone, audio goes to Apple. Phone recognition saves transcripts, without raw recordings.
+Otis pauses phone recognition while speaking. If voice input is unavailable, type in the chat.
+Browser suspension can pause recording; samples
 since the last completed local save can be lost if the device or page is killed.
 
 The native mobile app's microphone still provides draft dictation. Use the phone

@@ -345,9 +345,12 @@ export function ThreadVoiceControls({
                 </ComposerBanner.Actions>
               </ComposerBanner.Row>
               {detail &&
-              (state === "error" || state === "reconnecting" || state === "preparing") ? (
+              (state === "error" ||
+                state === "reconnecting" ||
+                state === "preparing" ||
+                state === "ready") ? (
                 <p
-                  role={state === "preparing" ? undefined : "alert"}
+                  role={state === "preparing" || state === "ready" ? undefined : "alert"}
                   className="px-2 pt-1 text-xs wrap-anywhere"
                 >
                   {detail}
@@ -436,6 +439,9 @@ export function ThreadVoiceControls({
                   disabled={!configurationReady && !configurationError}
                 />
                 <p className="mt-1 text-xs">Changes apply to the next turn.</p>
+                <p className="mt-1 text-xs">
+                  Phone speech uses your device's speech service. On iPhone, audio goes to Apple.
+                </p>
                 <Button
                   type="button"
                   size="sm-multiline"
@@ -458,8 +464,8 @@ export function ThreadVoiceControls({
                 {!active ? (
                   <p className="mt-3 text-xs">
                     The voice model handles conversation while the background agent works with this
-                    chat's permissions. Recordings save on this device, then on your PC before
-                    transcription. Ending the call leaves the chat working.
+                    chat's permissions. PC recognition saves recordings before transcription. Phone
+                    recognition saves the transcript. Ending the call leaves the chat working.
                   </p>
                 ) : null}
               </div>

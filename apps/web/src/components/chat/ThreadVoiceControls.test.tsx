@@ -199,6 +199,17 @@ describe("call panel action boundary", () => {
       expect(controller.stop).toHaveBeenCalledTimes(1);
     },
   );
+  it("shows unavailable device input quietly while keeping End call available", async () => {
+    await act(async () =>
+      controller.change?.("ready", "Voice input is unavailable right now. Type to Otis instead."),
+    );
+    const panel = document.querySelector<HTMLElement>('section[aria-label="Otis call"]')!;
+    expect(panel.textContent).toContain(
+      "Voice input is unavailable right now. Type to Otis instead.",
+    );
+    expect(panel.querySelector('[role="alert"]')).toBeNull();
+    expect(panel.textContent).toContain("End call");
+  });
   it("closes setup on call start and lets settings close without detaching the session", async () => {
     await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
     await act(async () => controller.change?.("preparing", "Checking microphone"));

@@ -4,6 +4,7 @@ import * as Cause from "effect/Cause";
 import { connectionAtomRuntime } from "../connection/runtime";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { shouldEndTurn } from "./turnEnding";
+import { createDeviceSpeech } from "./deviceSpeech";
 
 const speechRequest = createVoiceRequestCommand(connectionAtomRuntime);
 export async function requestSpeech(
@@ -22,6 +23,7 @@ export async function requestSpeech(
 
 /** Owns microphone tracks and playback nodes for one visible voice session. */
 export function createBrowserAudio(onInterrupted?: () => void) {
+  const deviceSpeech = createDeviceSpeech();
   let context: AudioContext | undefined;
   let finishCapture: (() => void) | undefined;
   let preparedStream: MediaStream | undefined;
@@ -85,7 +87,7 @@ export function createBrowserAudio(onInterrupted?: () => void) {
   };
   return {
     unlock() {
-      if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+      if (!window.isSecureContext) {
         throw new Error("Microphone access needs HTTPS or localhost.");
       }
       if (interrupted || context?.state === "closed") this.close();
@@ -99,12 +101,20 @@ export function createBrowserAudio(onInterrupted?: () => void) {
       stateChanged();
     },
     finish() {
+      deviceSpeech.finish();
       finishCapture?.();
     },
     finishAtPause() {
+      deviceSpeech.finishAtPause();
       finishAtPause = true;
     },
-    async prepare(signal: AbortSignal) {
+    captureText: deviceSpeech.capture,
+    async prepare(signal: AbortSignal, inputMode?: "pc" | "device") {
+      if (inputMode === "device") {
+        preparedStream?.getTracks().forEach((track) => track.stop());
+        preparedStream = undefined;
+        return;
+      }
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
       });
@@ -195,6 +205,7 @@ export function createBrowserAudio(onInterrupted?: () => void) {
       }
     },
     close() {
+      deviceSpeech.close();
       clearRecovery();
       clearTimeout(microphoneDeadline);
       microphoneDeadline = undefined;

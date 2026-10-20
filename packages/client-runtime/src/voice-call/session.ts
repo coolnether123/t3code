@@ -80,7 +80,8 @@ export interface VoiceDependencies {
   };
   audio: {
     unlock(): void;
-    prepare(signal: AbortSignal): Promise<void>;
+    prepare(signal: AbortSignal, inputMode?: "pc" | "device"): Promise<void>;
+    captureText?(signal: AbortSignal): Promise<string | null>;
     ready(signal: AbortSignal): Promise<void>;
     close(): void;
     finish(): void;
@@ -115,6 +116,7 @@ export class ThreadVoiceSession {
   private recovering = false;
   private audioNeedsTap = false;
   private recording = false;
+  private deviceUnavailable = false;
   private recordingId: string | undefined;
   private filler: TurnFiller;
   private pendingFiller: { id: string; endedAt: number } | undefined;
@@ -139,7 +141,14 @@ export class ThreadVoiceSession {
   }
   private change(state: VoiceState, detail?: string) {
     this.state = state;
-    this.deps.change(state, detail, this.status);
+    this.deps.change(
+      state,
+      detail ??
+        (state === "ready" && this.deviceUnavailable
+          ? "Voice input is unavailable right now. Type to Otis instead."
+          : undefined),
+      this.status,
+    );
   }
   private speechText(message: Message) {
     const cached = this.spokenText.get(message.id);
@@ -237,6 +246,7 @@ export class ThreadVoiceSession {
     if (this.stopTask) await this.stopTask;
     this.closeRetry.abort();
     this.active = true;
+    this.deviceUnavailable = false;
     this.opened = false;
     this.preparingAt = time();
     this.initialized = new Promise<void>((resolve) => {
@@ -332,7 +342,7 @@ export class ThreadVoiceSession {
       this.recovering = false;
       this.startRenewal();
       this.change("preparing", "Checking microphone");
-      await this.deps.audio.prepare(this.abort.signal);
+      await this.deps.audio.prepare(this.abort.signal, this.status?.inputMode);
       this.audioNeedsTap = false;
       if (!this.active) return;
       await this.flush();
@@ -365,15 +375,20 @@ export class ThreadVoiceSession {
     await this.initialized;
     if (!this.active || !this.saved || this.saved.closed)
       throw new Error("The call could not open. Retry the call, then send again.");
-    (this.saved.typed ??= []).push({
-      id: this.deps.id(),
-      text: text.trim(),
-      modelSelection: this.modelSelection ?? this.saved.options.modelSelection,
-      ...(this.operatorSelection ? { operatorSelection: this.operatorSelection } : {}),
-    });
-    await this.persist();
+    await this.queueTyped(text);
     if (this.capture) this.deps.audio.finishAtPause();
     void this.flushTyped().catch((error) => this.failed(error));
+  }
+  private async queueTyped(text: string) {
+    const item = {
+      id: this.deps.id(),
+      text: text.trim(),
+      modelSelection: this.modelSelection ?? this.saved!.options.modelSelection,
+      ...(this.operatorSelection ? { operatorSelection: this.operatorSelection } : {}),
+    };
+    (this.saved!.typed ??= []).push(item);
+    await this.persist();
+    return item.id;
   }
   private async flushTyped() {
     if (
@@ -382,7 +397,8 @@ export class ThreadVoiceSession {
       this.running ||
       !this.active ||
       this.saved?.closed ||
-      this.saved?.recordings.some((recording) => !recording.capturing) ||
+      (this.status?.inputMode !== "device" &&
+        this.saved?.recordings.some((recording) => !recording.capturing)) ||
       this.capture ||
       this.queue.length ||
       this.playbackTask ||
@@ -459,7 +475,10 @@ export class ThreadVoiceSession {
       !["ready", "waiting"].includes(this.state)
     )
       return;
-    if (this.saved!.recordings.some((recording) => !recording.capturing)) {
+    if (
+      this.status?.inputMode !== "device" &&
+      this.saved!.recordings.some((recording) => !recording.capturing)
+    ) {
       this.busy = true;
       try {
         await this.flush();
@@ -477,6 +496,7 @@ export class ThreadVoiceSession {
       await this.announceAtPause();
       if (!this.active || this.running || this.announcing || this.recovering) return;
     }
+    if (this.status?.inputMode === "device") return this.listenDevice();
     const startedAt = now();
     this.change("listening");
     const capture = (async () => {
@@ -541,6 +561,43 @@ export class ThreadVoiceSession {
     this.capture = capture;
     return capture;
   }
+  private async listenDevice() {
+    if (!this.deps.audio.captureText) {
+      this.deviceUnavailable = true;
+      this.change("ready", "Voice input is unavailable right now. Type to Otis instead.");
+      return;
+    }
+    this.change("listening");
+    const capture = (async () => {
+      let text: string | null = null;
+      try {
+        text = await this.deps.audio.captureText!(this.abort.signal);
+        this.deviceUnavailable = text === null;
+        if (text?.trim()) {
+          const id = await this.queueTyped(text);
+          this.scheduleFiller(id);
+        }
+      } catch (error) {
+        this.failed(error);
+      } finally {
+        this.capture = undefined;
+      }
+      if (!this.active || this.recovering) return;
+      if (text === null) {
+        this.change("ready", "Voice input is unavailable right now. Type to Otis instead.");
+        return;
+      }
+      this.change(this.running ? "waiting" : "ready");
+      await this.flushTyped();
+      if (this.queue.length) void this.speak();
+      else if (!this.running) {
+        await this.announceAtPause();
+        if (!this.running && !this.announcing) void this.listen();
+      }
+    })();
+    this.capture = capture;
+    return capture;
+  }
   private async flush(deliver = true, signal = this.abort.signal) {
     if (!deliver && this.saved!.closed) {
       for (const item of this.saved!.typed ?? []) {
@@ -559,7 +616,14 @@ export class ThreadVoiceSession {
         { action: "call.upload", utteranceId: recording.id, ...recording },
         signal,
       );
-      if (!deliver || !this.active || this.saved!.closed || this.recovering) continue;
+      if (
+        !deliver ||
+        this.status?.inputMode === "device" ||
+        !this.active ||
+        this.saved!.closed ||
+        this.recovering
+      )
+        continue;
       this.change("transcribing");
       await this.request({ action: "call.transcribe", utteranceId: recording.id }, signal);
       if (!this.active || this.saved!.closed || this.recovering || this.running) continue;

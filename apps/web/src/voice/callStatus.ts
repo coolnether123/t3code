@@ -15,7 +15,7 @@ const labels: Record<VoiceState, string> = {
 };
 export function callStatusLabel(
   state: VoiceState,
-  call?: Pick<CallStatus, "operatorWorking" | "operatorUpdates">,
+  call?: Pick<CallStatus, "operatorWorking" | "operatorUpdates" | "inputMode">,
 ) {
   if (["preparing", "reconnecting", "error", "speaking", "saving", "transcribing"].includes(state))
     return labels[state];
@@ -24,7 +24,9 @@ export function callStatusLabel(
   if (latest?.status === "needs-Jared" && !latest.heardAt) return `Needs you: ${text}`;
   if (call?.operatorWorking)
     return `Background agent working: ${text && latest?.status === "progress" ? text : "Working on your request"}`;
-  return labels[state];
+  return call?.inputMode === "device" && (state === "listening" || state === "ready")
+    ? "Listening (phone)"
+    : labels[state];
 }
 export function callElapsedLabel(seconds: number) {
   return seconds >= 5 ? `${seconds}s` : "";

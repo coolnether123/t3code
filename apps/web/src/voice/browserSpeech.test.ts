@@ -89,6 +89,22 @@ afterEach(() => {
 });
 
 describe("streamed browser PCM scheduling", () => {
+  it("releases PC microphone tracks and never requests getUserMedia for device recognition", async () => {
+    const audio = fixture();
+    const track = Object.assign(new EventTarget(), { stop: vi.fn() });
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue({
+      getTracks: () => [track],
+      getAudioTracks: () => [track],
+    } as unknown as MediaStream);
+    const signal = new AbortController().signal;
+    await audio.prepare(signal, "device");
+    expect(navigator.mediaDevices.getUserMedia).not.toHaveBeenCalled();
+    await audio.prepare(signal, "pc");
+    await audio.prepare(signal, "device");
+    expect(track.stop).toHaveBeenCalledOnce();
+    expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledOnce();
+    audio.close();
+  });
   it("keeps the call listening after a brief interruption and restores listening on Retry after a lasting one", async () => {
     vi.useFakeTimers();
     const audio = fixture(() => session.audioInterrupted());

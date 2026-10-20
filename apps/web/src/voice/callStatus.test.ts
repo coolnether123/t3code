@@ -3,6 +3,10 @@ import type { CallStatus } from "@t3tools/contracts";
 import { callStatusLabel, callElapsedLabel } from "./callStatus";
 
 describe("compact call status", () => {
+  it("quietly identifies phone listening", () => {
+    expect(callStatusLabel("listening", { inputMode: "device" })).toBe("Listening (phone)");
+    expect(callStatusLabel("speaking", { inputMode: "device" })).toBe("Otis is talking");
+  });
   it.each([
     ["listening", "Listening"],
     ["transcribing", "Got it, writing that down"],
