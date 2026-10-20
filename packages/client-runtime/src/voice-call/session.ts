@@ -9,7 +9,7 @@ import * as DateTime from "effect/DateTime";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import { isRetryableVoiceError, VoiceRequestError } from "./errors.ts";
-import { TurnFiller } from "./filler.ts";
+import { FILLER_DELAY_MS, TurnFiller } from "./filler.ts";
 
 const now = () => DateTime.formatIso(Effect.runSync(DateTime.now));
 const time = () => Effect.runSync(Clock.currentTimeMillis);
@@ -31,6 +31,7 @@ type Message = {
   text: string;
   streaming: boolean;
   turnId?: string | null;
+  voiceDelegation?: boolean;
 };
 export interface Recording {
   id: string;
@@ -50,6 +51,7 @@ export interface SavedCall {
   closed?: boolean;
   silencedTurns?: string[];
   silencedMessages?: string[];
+  acknowledgedDelegations?: string[];
 }
 export interface VoiceDependencies {
   ensureThread?(options: CallOptions): Promise<void>;
@@ -104,6 +106,7 @@ export class ThreadVoiceSession {
   private recordingId: string | undefined;
   private filler: TurnFiller;
   private pendingFiller: { id: string; endedAt: number } | undefined;
+  private acknowledgment: Promise<void> | undefined;
   private stopTask: Promise<void> | undefined;
   private closeRetry = new AbortController();
   private capture: Promise<void> | undefined;
@@ -254,6 +257,7 @@ export class ThreadVoiceSession {
       callId: this.deps.id(),
       options,
       recordings: [],
+      acknowledgedDelegations: this.messages.map((message) => message.id),
       offsets: Object.fromEntries(
         this.messages.map((message) => [message.id, this.speechText(message).length]),
       ),
@@ -381,6 +385,7 @@ export class ThreadVoiceSession {
       this.busy ||
       this.announcing ||
       this.filler.isPlaying ||
+      this.acknowledgment ||
       this.capture ||
       !["ready", "waiting"].includes(this.state)
     )
@@ -517,11 +522,30 @@ export class ThreadVoiceSession {
         continue;
       const spoken = this.speechText(message);
       let offset = this.saved.offsets[message.id] ?? 0;
-      // Prose establishes the model's decision to speak. Hold turns never arm filler.
-      if (spoken.slice(offset).trim() && this.pendingFiller) {
+      const delegated =
+        message.voiceDelegation || /<otis-delegate>[\s\S]*?<\/otis-delegate>/.test(message.text);
+      const needsAcknowledgment =
+        delegated &&
+        !message.streaming &&
+        !spoken.trim() &&
+        !this.saved.acknowledgedDelegations?.includes(message.id);
+      if ((spoken.slice(offset).trim() || needsAcknowledgment) && this.pendingFiller) {
         const pending = this.pendingFiller;
         this.pendingFiller = undefined;
-        void this.filler.arm(pending.id, this.playback.signal, time() - pending.endedAt);
+        const filler = this.filler.arm(
+          pending.id,
+          this.playback.signal,
+          needsAcknowledgment ? FILLER_DELAY_MS : time() - pending.endedAt,
+        );
+        if (needsAcknowledgment) {
+          (this.saved.acknowledgedDelegations ??= []).push(message.id);
+          void this.persist().catch((error) => this.failed(error));
+          this.acknowledgment = filler;
+          void filler.finally(() => {
+            if (this.acknowledgment === filler) this.acknowledgment = undefined;
+            if (this.active && !this.running) void this.listen();
+          });
+        }
       }
       const queued = this.queue.filter((entry) => entry.messageId === message.id);
       if (queued.length) offset = Math.max(offset, ...queued.map((entry) => entry.end ?? 0));
@@ -550,7 +574,7 @@ export class ThreadVoiceSession {
     if (!this.capture && !this.busy) void this.speak();
     if (!running && !this.queue.length && !this.capture && !this.busy) {
       this.pendingFiller = undefined;
-      this.filler.cancel();
+      if (!this.acknowledgment) this.filler.cancel();
       void this.acknowledgeUpdates().catch((error) => this.failed(error));
       void this.announceAtPause();
     }
@@ -813,8 +837,10 @@ export async function speechIdentifier(value: string, start: number, end: number
 }
 
 function spokenMessageText(value: string, streaming = false) {
-  if (!value.trim() || /<otis-hold\s*\/?[>\s]/.test(value)) return "";
+  const delegated = /<otis-delegate>[\s\S]*?<\/otis-delegate>/.test(value);
+  if (!value.trim() || (/<otis-hold\s*\/?[>\s]/.test(value) && !delegated)) return "";
   const text = value
+    .replace(/<otis-hold\s*\/?\s*>/g, "")
     .replace(/<otis-(?:delegate|status)>[\s\S]*?(?:<\/otis-(?:delegate|status)>|$)/g, "")
     .replace(/<(?:o(?:t(?:i(?:s(?:-[a-z-]*)?)?)?)?)?$/g, "")
     .replace(/```[\s\S]*?(?:```|$)/g, "")
@@ -842,5 +868,7 @@ function spokenMessageText(value: string, streaming = false) {
     if (!quoted && (char === "{" || char === "[")) depth++;
     if (!quoted && (char === "}" || char === "]")) depth--;
   }
-  return output.trim() || streaming || !value.trim() ? output : "I've put the details in the chat.";
+  return output.trim() || streaming || !value.trim() || delegated
+    ? output
+    : "I've put the details in the chat.";
 }

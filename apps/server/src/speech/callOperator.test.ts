@@ -109,6 +109,16 @@ async function fixture() {
 }
 
 describe("call delegation", () => {
+  it("delegates even when the voice also emits a hold marker", async () => {
+    const f = await fixture();
+    const link = await f.startVoice();
+    await f.operator.event(
+      f.event(link.sessionId, "turn.completed", "voice:call:utterance", { state: "completed" }),
+      '<otis-hold/><otis-delegate>{"intent":"Check the build"}</otis-delegate>',
+    );
+    expect((await f.operator.read("chat"))!.jobs).toMatchObject([{ intent: "Check the build" }]);
+  });
+
   it("finishes a hold turn without delegation and accepts the next voice message", async () => {
     const f = await fixture();
     const link = await f.startVoice("hold-turn", "Hang on, let me think.");

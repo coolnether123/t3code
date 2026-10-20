@@ -55,6 +55,7 @@ const make = Effect.gen(function* () {
     readonly text: string;
     readonly streaming: boolean;
     readonly turnId?: string;
+    readonly voiceDelegation?: boolean;
   }) {
     const threadId = ThreadId.make(input.threadId);
     return yield* executor.withLock(
@@ -81,6 +82,7 @@ const make = Effect.gen(function* () {
           threadId,
           role: input.role,
           text: input.text,
+          ...(input.voiceDelegation ? { voiceDelegation: true } : {}),
           streaming: input.streaming,
           runId,
           nodeId: null,
@@ -285,6 +287,10 @@ const make = Effect.gen(function* () {
       messageId: `voice-reply:${link.sessionId}:${event.turnId ?? "pending"}`,
       role: "assistant",
       text: withoutCallControl(text),
+      voiceDelegation:
+        event.type === "turn.completed" &&
+        event.payload.state === "completed" &&
+        /<otis-delegate>[\s\S]*?<\/otis-delegate>/.test(text),
       streaming: event.type !== "turn.completed" && event.type !== "runtime.error",
       ...(event.turnId ? { turnId: event.turnId } : {}),
     });

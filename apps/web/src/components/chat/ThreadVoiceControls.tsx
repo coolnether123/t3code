@@ -97,6 +97,7 @@ export function ThreadVoiceControls({
     text: message.text,
     streaming: message.streaming,
     turnId: message.runId,
+    voiceDelegation: message.voiceDelegation === true,
   }));
   const voiceReply = messages.findLast((message) => message.id.startsWith("voice-reply:"));
   const voiceRunning = voiceReply?.streaming === true;

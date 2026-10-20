@@ -154,12 +154,25 @@ provider-model or network acceptance.
 
 ## Speech fillers
 
-The shared filler delay is 1,800 ms after submission. The timer is eligible only
-after the voice emits prose, which establishes a decision to speak. This avoids
-playing an acknowledgment for a later hold decision. If that decision arrives
-after the delay, filler may begin then while sentence synthesis is pending.
+The shared filler delay is 1,800 ms after submission for spoken replies.
+A completed delegation without prose plays an existing acknowledgment clip
+immediately, even if the model also emits a hold marker. The server preserves
+this decision as `voiceDelegation` on the conversation message while stripping
+control text. Delegation takes precedence over hold. A true hold stays silent,
+and quick spoken replies cancel filler before it starts. If prose arrives
+after the delay, filler may begin while sentence synthesis is pending.
 Real audio cancels the timer; an already playing filler finishes before reply
 audio is scheduled. Reply audio still streams per sentence.
+
+The follow-up from `7914a0db87` has direct checks and full logs under
+`.logs/otis-call/delegate-ack/`. Focused voice/UI tests passed 194 tests and
+the evidence suite passed 14, all exit 0. Web, client-runtime and server
+typechecks, changed-file lint and formatting passed with exit 0.
+It changes the shared call session, server voice
+projection and prompt, and web/Electron message mapping. Native calls remain
+outside the implemented mobile path. No new transport origin, provider adapter,
+entry point, server restart or deployment is involved. The parent still owns
+the isolated real-call acceptance for this follow-up.
 
 The lazy `fillerClips.ts` chunk contains 24 mono PCM16 clips at 24 kHz. It is
 2,270,028 source bytes, or 1,280,887 gzip bytes, with 1,701,120 PCM bytes. Clips last

@@ -40,9 +40,8 @@ export class TurnFiller {
     this.timer = timer;
     const pending = AbortSignal.any([signal, timer.signal]);
     try {
-      await Effect.runPromise(Effect.sleep(Math.max(0, FILLER_DELAY_MS - elapsedMs)), {
-        signal: pending,
-      });
+      if (elapsedMs < FILLER_DELAY_MS)
+        await Effect.runPromise(Effect.sleep(FILLER_DELAY_MS - elapsedMs), { signal: pending });
       const all = await this.prepare();
       const avoid = new Set(this.recentClips.slice(-Math.min(4, all.length - 1)));
       const clips = all.filter((clip) => !avoid.has(clip.id));

@@ -306,6 +306,55 @@ describe("durable thread voice session", () => {
     expect(f.change.mock.calls.at(-1)?.[0]).toBe("listening");
   });
 
+  it.each([
+    { text: '<otis-delegate>{"intent":"Check"}</otis-delegate>' },
+    { text: '<otis-hold/><otis-delegate>{"intent":"Check"}</otis-delegate>' },
+    { text: "", voiceDelegation: true },
+  ])("immediately acknowledges a delegation without prose: %j", async (reply) => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const ended = deferred<void>();
+    f.audio.play.mockImplementationOnce(() => ended.promise);
+    await f.session.start(options, []);
+    f.transcript.resolve({});
+    f.session.finish();
+    await f.waiting.promise;
+    const messages = [{ id: "delegate", role: "assistant", streaming: false, ...reply }];
+    f.session.observe(messages, false);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.audio.play).toHaveBeenCalledTimes(1);
+    expect(f.request.mock.calls.some(([input]) => input.action === "call.speak")).toBe(false);
+    expect(f.audio.capture).toHaveBeenCalledTimes(1);
+    f.session.observe(messages, false);
+    ended.resolve();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.audio.capture).toHaveBeenCalledTimes(2);
+    f.session.finish();
+    await vi.advanceTimersByTimeAsync(0);
+    f.session.observe(messages, false);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(f.audio.play).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a quick spoken reply filler-free", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const playing = deferred<void>();
+    f.audio.play.mockImplementationOnce(async () => playing.resolve());
+    await f.session.start(options, []);
+    f.transcript.resolve({});
+    f.session.finish();
+    await f.waiting.promise;
+    f.session.observe(
+      [{ id: "quick", role: "assistant", text: "The task is open.", streaming: false }],
+      false,
+    );
+    await playing.promise;
+    expect(f.audio.play.mock.calls.map(([audio]) => audio)).toEqual(["AAA="]);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(f.audio.play).toHaveBeenCalledTimes(1);
+  });
+
   it("waits for the filler before playing the voice reply in the same call", async () => {
     vi.useFakeTimers();
     const f = fixture();

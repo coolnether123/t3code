@@ -1085,6 +1085,7 @@ export const OrchestrationV2Notification = Schema.Struct({
 export type OrchestrationV2Notification = typeof OrchestrationV2Notification.Type;
 
 export const OrchestrationV2ConversationMessage = Schema.Struct({
+  voiceDelegation: Schema.optional(Schema.Boolean),
   notification: Schema.optional(OrchestrationV2Notification),
   ...OrchestrationV2CreationFields,
   scheduledTaskId: Schema.optional(ScheduledTaskId),

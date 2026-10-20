@@ -502,6 +502,37 @@ it.effect("updates one durable voice reply and removes call-control markup", () 
   }).pipe(Effect.provide(layer)),
 );
 
+it.effect("preserves delegation intent for the client without exposing control blocks", () =>
+  Effect.gen(function* () {
+    const service = yield* seed;
+    yield* service.recordVoiceEvent(
+      {
+        sessionId: "delegating-voice",
+        threadId: thread.id,
+        role: "voice",
+        selection: thread.modelSelection,
+      },
+      decodeRuntimeEvent({
+        type: "turn.completed",
+        eventId: "delegate-completed",
+        provider: "codex",
+        threadId: thread.id,
+        turnId: "delegate-turn",
+        createdAt: now,
+        payload: { state: "completed" },
+      }),
+      '<otis-hold/><otis-delegate>{"intent":"Check"}</otis-delegate>',
+    );
+    const { projection } = yield* service.snapshot(thread.id);
+    expect(projection.messages[0]).toMatchObject({
+      text: "",
+      streaming: false,
+      voiceDelegation: true,
+    });
+    expect(projection.turnItems[0]).toMatchObject({ status: "completed", text: "" });
+  }).pipe(Effect.provide(layer)),
+);
+
 it.effect("records a silent hold as completed without speaking its control marker", () =>
   Effect.gen(function* () {
     const service = yield* seed;
