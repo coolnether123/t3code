@@ -2709,6 +2709,7 @@ function AssistantForkButton({
   });
   const canFork = canForkProjectedAssistantItem({
     projectedItem,
+    run: support.run,
     capabilities: support.providerSession?.capabilities,
   });
 

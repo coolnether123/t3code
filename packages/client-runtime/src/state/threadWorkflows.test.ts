@@ -9,6 +9,8 @@ import {
   threadSupportsProviderHandoff,
 } from "./threadWorkflows.ts";
 
+const forkableRun = { id: "run", status: "completed" } as never;
+
 const capabilities = (input?: {
   readonly queued?: boolean;
   readonly steer?: boolean;
@@ -352,9 +354,13 @@ describe("thread workflows", () => {
 
     expect(queue.canReorder).toBe(false);
     expect(queue.canPromoteToSteer).toBe(false);
-    expect(canForkProjectedAssistantItem({ projectedItem, capabilities: capabilities() })).toBe(
-      false,
-    );
+    expect(
+      canForkProjectedAssistantItem({
+        projectedItem,
+        run: forkableRun,
+        capabilities: capabilities(),
+      }),
+    ).toBe(false);
     expect(canDetachThreadProviderSession(projection)).toBe(true);
   });
 
@@ -366,21 +372,37 @@ describe("thread workflows", () => {
     expect(
       canForkProjectedAssistantItem({
         projectedItem,
+        run: forkableRun,
         capabilities: capabilities({ nativeFork: true }),
       }),
     ).toBe(true);
     expect(
       canForkProjectedAssistantItem({
         projectedItem,
+        run: forkableRun,
         capabilities: capabilities({ portableFork: true }),
       }),
     ).toBe(true);
-    expect(canForkProjectedAssistantItem({ projectedItem })).toBe(true);
+    expect(canForkProjectedAssistantItem({ projectedItem, run: forkableRun })).toBe(true);
+    expect(canForkProjectedAssistantItem({ projectedItem, run: null })).toBe(false);
+    expect(
+      canForkProjectedAssistantItem({
+        projectedItem,
+        run: { id: "different-run", status: "completed" } as never,
+      }),
+    ).toBe(false);
+    expect(
+      canForkProjectedAssistantItem({
+        projectedItem,
+        run: { id: "run", status: "running" } as never,
+      }),
+    ).toBe(false);
     expect(
       canForkProjectedAssistantItem({
         projectedItem: {
           item: { type: "assistant_message", runId: "run", status: "running" },
         } as never,
+        run: forkableRun,
       }),
     ).toBe(false);
   });

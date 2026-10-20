@@ -51,7 +51,7 @@ function fixture(initial?: SavedCall, ensureThread?: VoiceDependencies["ensureTh
   const audio = {
     unlock: vi.fn(),
     prepare: vi.fn(async () => {}),
-    ready: vi.fn(async () => {}),
+    ready: vi.fn<VoiceDependencies["audio"]["ready"]>(async () => {}),
     close: vi.fn(),
     finish: vi.fn(() => currentRecording.resolve({ audio: "AAA=", sampleRate: 16000 })),
     finishAtPause: vi.fn(),
@@ -106,6 +106,26 @@ afterEach(async () => {
 });
 
 describe("durable thread voice session", () => {
+  it("releases recovery after an interruption during the ready cue", async () => {
+    const f = fixture();
+    const entered = deferred<void>();
+    f.audio.ready.mockImplementationOnce(
+      (signal: AbortSignal) =>
+        new Promise<void>((_, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+          entered.resolve();
+        }),
+    );
+    const start = f.session.start(options, []);
+    await entered.promise;
+    f.session.audioInterrupted();
+    await start;
+    await f.session.resume();
+    expect(f.audio.ready).toHaveBeenCalledTimes(2);
+    expect(f.audio.capture).toHaveBeenCalledOnce();
+    f.recording.resolve({ audio: "", sampleRate: 16000 });
+    await f.session.stop();
+  });
   it("keeps interrupted microphone speech and resumes audio in the retry tap", async () => {
     const f = fixture();
     const retained = deferred<void>();

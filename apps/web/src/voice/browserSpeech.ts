@@ -28,9 +28,11 @@ export function createBrowserAudio(onInterrupted?: () => void) {
   let finishAtPause = false;
   let interrupted = false;
   let wasRunning = false;
+  let cancelReady: (() => void) | undefined;
   const interrupt = () => {
     if (interrupted || !context) return;
     interrupted = true;
+    cancelReady?.();
     finishCapture?.();
     onInterrupted?.();
   };
@@ -85,9 +87,10 @@ export function createBrowserAudio(onInterrupted?: () => void) {
       try {
         await new Promise<void>((resolve, reject) => {
           cancel = () => {
+            reject(signal.reason ?? new DOMException("Audio was interrupted", "AbortError"));
             tone.stop();
-            reject(signal.reason);
           };
+          cancelReady = cancel;
           signal.addEventListener("abort", cancel, { once: true });
           tone.addEventListener("ended", () => resolve(), { once: true });
           tone.start();
@@ -95,11 +98,13 @@ export function createBrowserAudio(onInterrupted?: () => void) {
         });
       } finally {
         signal.removeEventListener("abort", cancel!);
+        cancelReady = undefined;
         tone.disconnect();
         gain.disconnect();
       }
     },
     close() {
+      cancelReady?.();
       playbackUntil = 0;
       finishCapture = undefined;
       interrupted = false;

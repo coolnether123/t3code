@@ -12,7 +12,9 @@ class Source extends EventTarget {
   startedAt = -1;
   connect = vi.fn();
   disconnect = vi.fn();
-  stop = vi.fn(() => this.dispatchEvent(new Event("ended")));
+  stop = vi.fn((at?: number) => {
+    if (at === undefined) this.dispatchEvent(new Event("ended"));
+  });
   start(at: number) {
     this.startedAt = at;
   }
@@ -34,6 +36,7 @@ class FakeAudio extends EventTarget {
   currentTime = 0;
   destination = {};
   sources: Source[] = [];
+  tones: Array<Source & { frequency: { value: number } }> = [];
   constructor() {
     super();
     contexts.push(this);
@@ -55,7 +58,16 @@ class FakeAudio extends EventTarget {
     return this.processor;
   }
   createGain() {
-    return { gain: { value: 0 }, connect: vi.fn(), disconnect: vi.fn() };
+    return {
+      gain: { value: 0, setValueAtTime: vi.fn(), exponentialRampToValueAtTime: vi.fn() },
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+    };
+  }
+  createOscillator() {
+    const tone = Object.assign(new Source(), { frequency: { value: 0 } });
+    this.tones.push(tone);
+    return tone;
   }
 }
 function fixture(onInterrupted?: () => void) {
@@ -73,6 +85,17 @@ afterEach(() => {
 });
 
 describe("streamed browser PCM scheduling", () => {
+  it("cancels a readiness tone when its audio context is interrupted", async () => {
+    const interrupted = vi.fn();
+    const audio = fixture(interrupted);
+    const ready = audio.ready(new AbortController().signal);
+    contexts[0]!.state = "interrupted";
+    contexts[0]!.dispatchEvent(new Event("statechange"));
+    await expect(ready).rejects.toThrow("Audio was interrupted");
+    expect(contexts[0]!.tones[0]!.disconnect).toHaveBeenCalledOnce();
+    expect(interrupted).toHaveBeenCalledOnce();
+    audio.close();
+  });
   it.each(["audio context", "microphone"])(
     "reports an interrupted %s once and reacquires the microphone",
     async (cause) => {

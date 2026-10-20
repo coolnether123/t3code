@@ -307,7 +307,7 @@ export class ThreadVoiceSession {
       if (!this.active || this.recovering) return;
       await this.filler.prepare();
       if (!this.active || this.recovering) return;
-      await this.deps.audio.ready(this.abort.signal);
+      await this.deps.audio.ready(this.playback.signal);
       if (!this.active || this.recovering) return;
       this.change("ready", "Speech is ready");
       this.watching.abort();
