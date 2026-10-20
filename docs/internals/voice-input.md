@@ -49,11 +49,15 @@ refreshed DPoP credentials and a proof bound to the actual method and URL. The
 typed HTTP wrapper now supplies that URL to raw request callbacks. It retains
 the existing single refresh on a rejected relay credential.
 
-Speech uses only router APIs on loopback port 8085. Acquire waits for healthy
-speech tenants. Renewal checks `/health` and preserves the router's actual
+Speech uses only router APIs on loopback port 8085. Preparation reads `/health`
+without starting Whisper. If the configured STT tenant is absent, stopped or
+unhealthy, it requests only the configured TTS tenant and selects device
+recognition. `T3_CALL_FORCE_DEVICE_STT=1` forces that choice on the server.
+The router must support explicit tenant selection; a grant containing STT in
+device mode is released and rejected. Renewal checks `/health` and preserves the router's actual
 `expiresAt`; failures invalidate readiness. Releasing an expired lease is
-idempotent. The speech profile gives the GPU to Whisper large-v3-turbo and Breeze
-TTS 2 while the selected cloud provider runs the chat. T3 never starts an engine
+idempotent. The PC speech profile uses Whisper large-v3-turbo and Breeze TTS 2;
+device mode uses Breeze alone while the selected cloud provider runs the chat. T3 never starts an engine
 directly or restarts the router.
 
 Assistant prose is queued at sentence boundaries. Code and structured JSON stay

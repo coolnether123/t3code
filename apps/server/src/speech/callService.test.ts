@@ -82,6 +82,44 @@ async function fixture() {
 }
 
 describe("durable calls", () => {
+  it("replaces a PC lease with TTS-only in device mode and retains the mode across reload", async () => {
+    const f = await fixture();
+    f.ports.inputMode = async () => "device";
+    vi.mocked(f.ports.speech).mockImplementation(async (input) =>
+      input.action === "acquire"
+        ? { sessionId: "tts-only", tenants: ["tts"], expiresAt: "2099-10-18T00:00:00.000Z" }
+        : {},
+    );
+    await f.request({ action: "call.prepare" });
+    expect(f.ports.speech).toHaveBeenLastCalledWith(
+      { action: "acquire", tenants: ["tts"] },
+      expect.any(AbortSignal),
+    );
+    const restarted = new CallService(new CallStore(f.directory), f.ports);
+    expect(await restarted.status("call-1")).toMatchObject({ ready: true, inputMode: "device" });
+  });
+  it("stops when the router grants STT despite a TTS-only request", async () => {
+    const f = await fixture();
+    f.ports.inputMode = async () => "device";
+    await expect(f.request({ action: "call.prepare" })).rejects.toThrow("cannot grant a TTS-only");
+    expect(f.ports.speech).toHaveBeenLastCalledWith(
+      { action: "release", sessionId: "lease-1" },
+      expect.any(AbortSignal),
+    );
+  });
+  it("retains old recordings without invoking STT in device mode", async () => {
+    const f = await fixture();
+    await f.service.handle(upload, new AbortController().signal);
+    const record = await f.store.require("call-1");
+    record.inputMode = "device";
+    await f.store.changed(record);
+    vi.mocked(f.ports.speech).mockClear();
+    await expect(
+      f.request({ action: "call.transcribe", utteranceId: upload.utteranceId }),
+    ).rejects.toThrow("PC recognition is unavailable");
+    expect(f.ports.speech).not.toHaveBeenCalled();
+    expect((await f.store.utterance("call-1", upload.utteranceId!)).transcribedAt).toBeUndefined();
+  });
   it("runs lease expiry at its deadline and replaces an earlier deadline on renewal", async () => {
     vi.useFakeTimers();
     try {

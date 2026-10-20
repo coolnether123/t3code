@@ -31,6 +31,48 @@ const acquireSpeechLease = (url: string, init: RequestInit): Promise<Response> =
 
 export class SpeechUnavailableError extends Error {}
 
+/** An absent or unhealthy recognizer must never be started as a readiness probe. */
+export async function speechInputMode(
+  signal: AbortSignal,
+  sttTenant: string,
+  forceDevice = false,
+  fetcher: typeof fetch = fetch,
+): Promise<"pc" | "device"> {
+  if (forceDevice) return "device";
+  try {
+    const response = await fetcher("http://127.0.0.1:8085/health", {
+      method: "GET",
+      redirect: "error",
+      signal: AbortSignal.any([signal, AbortSignal.timeout(5_000)]),
+    });
+    const snapshot: unknown = await response.json();
+    const speech =
+      snapshot && typeof snapshot === "object" && "speech" in snapshot
+        ? snapshot.speech
+        : undefined;
+    const tenants =
+      speech && typeof speech === "object" && "tenants" in speech ? speech.tenants : undefined;
+    return response.ok &&
+      Array.isArray(tenants) &&
+      tenants.some(
+        (tenant: unknown) =>
+          tenant &&
+          typeof tenant === "object" &&
+          "id" in tenant &&
+          tenant.id === sttTenant &&
+          "running" in tenant &&
+          tenant.running === true &&
+          "healthy" in tenant &&
+          tenant.healthy === true,
+      )
+      ? "pc"
+      : "device";
+  } catch {
+    signal.throwIfAborted();
+    return "device";
+  }
+}
+
 /** Preserve router PCM chunks, including sample boundaries split by HTTP transport. */
 export async function* streamSpeech(
   input: SpeechTransportRequest,
@@ -102,7 +144,11 @@ export async function proxySpeech(
   switch (input.action) {
     case "acquire":
       path = "/v1/voice/sessions";
-      body = JSON.stringify({ client: "t3-code", ttlSeconds: 120 });
+      body = JSON.stringify({
+        client: "t3-code",
+        ttlSeconds: 120,
+        ...(input.tenants ? { tenants: input.tenants } : {}),
+      });
       break;
     case "renew":
       path = `/v1/voice/sessions/${sessionId}/renew`;

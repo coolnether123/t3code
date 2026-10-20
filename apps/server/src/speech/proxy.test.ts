@@ -3,11 +3,68 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import * as NodeHttp from "node:http";
 import * as NodeEvents from "node:events";
 import * as NodeStream from "node:stream";
-import { proxySpeech, streamSpeech } from "./proxy.ts";
+import { proxySpeech, streamSpeech, speechInputMode } from "./proxy.ts";
 
 vi.mock("node:http", () => ({ request: vi.fn() }));
 
 describe("local speech proxy", () => {
+  it.each([
+    [true, true, "pc"],
+    [false, true, "device"],
+    [true, false, "device"],
+  ] as const)(
+    "chooses input from running=%s and healthy=%s without acquiring",
+    async (running, healthy, expected) => {
+      const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+        Response.json({
+          speech: {
+            tenants: [{ id: "whisper", running, healthy }],
+          },
+        }),
+      );
+      expect(await speechInputMode(new AbortController().signal, "whisper", false, fetcher)).toBe(
+        expected,
+      );
+      expect(fetcher).toHaveBeenCalledExactlyOnceWith(
+        "http://127.0.0.1:8085/health",
+        expect.objectContaining({ method: "GET" }),
+      );
+    },
+  );
+  it("forces device input without probing or acquiring whisper", async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    expect(await speechInputMode(new AbortController().signal, "whisper", true, fetcher)).toBe(
+      "device",
+    );
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it("uses device input when health is missing or unavailable", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json({}))
+      .mockRejectedValueOnce(new TypeError("offline"));
+    expect(await speechInputMode(new AbortController().signal, "whisper", false, fetcher)).toBe(
+      "device",
+    );
+    expect(await speechInputMode(new AbortController().signal, "whisper", false, fetcher)).toBe(
+      "device",
+    );
+  });
+  it("requests exactly the TTS tenant for device calls", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(Response.json({ sessionId: "tts-only", tenants: ["breeze"] }));
+    await proxySpeech(
+      { action: "acquire", tenants: ["breeze"] },
+      new AbortController().signal,
+      fetcher,
+    );
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({
+      client: "t3-code",
+      ttlSeconds: 120,
+      tenants: ["breeze"],
+    });
+  });
   it("returns the first aligned PCM chunk before synthesis finishes and cancels on consumer exit", async () => {
     let source!: ReadableStreamDefaultController<Uint8Array>;
     const cancelled = vi.fn();

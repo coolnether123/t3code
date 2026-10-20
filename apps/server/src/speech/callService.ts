@@ -37,6 +37,7 @@ export interface CallPorts {
   ): AsyncIterable<SpeechResponse>;
   tenants: readonly [string, string];
   ttsModel: string;
+  inputMode?(signal: AbortSignal): Promise<"pc" | "device">;
   verifyVoice?(selection: CallOptions["modelSelection"]): Promise<void>;
 }
 
@@ -114,6 +115,7 @@ export class CallService {
       threadId: record.threadId,
       version: record.version,
       ready: !record.closed && !!record.lease && (record.leaseUntil ?? 0) > time(),
+      inputMode: record.inputMode ?? "pc",
       closed: record.closed,
       modelSelection: record.modelSelection,
       steps: record.steps,
@@ -370,7 +372,13 @@ export class CallService {
       await this.ports.verify({ ...record, modelSelection: operatorSelection });
       await this.operator.configure(record.threadId, { voice, operator: operatorSelection });
     }
-    if (record.lease && (record.leaseUntil ?? 0) > time()) {
+    const inputMode = (await this.ports.inputMode?.(signal)) ?? "pc";
+    const tenants = inputMode === "device" ? [this.ports.tenants[1]] : [...this.ports.tenants];
+    if (
+      record.lease &&
+      (record.leaseUntil ?? 0) > time() &&
+      (record.inputMode ?? "pc") === inputMode
+    ) {
       await this.renewLease(callId, signal);
       return;
     }
@@ -392,17 +400,22 @@ export class CallService {
     active(await this.store.require(callId));
     // Keep receiving after HTTP cancellation so a late grant can be released below.
     const result = await this.ports.speech(
-      { action: "acquire" },
+      { action: "acquire", tenants },
       AbortSignal.timeout(CALL_PREPARE_TIMEOUT_MS),
     );
     if (!result.sessionId) throw new Error("The router did not grant a speech lease.");
-    if (!this.ports.tenants.every((id) => result.tenants?.includes(id))) {
+    if (
+      !tenants.every((id) => result.tenants?.includes(id)) ||
+      (inputMode === "device" && result.tenants?.some((id) => !tenants.includes(id)))
+    ) {
       await this.ports.speech(
         { action: "release", sessionId: result.sessionId },
         AbortSignal.timeout(90_000),
       );
       throw new Error(
-        "Router speech tenants do not match the configured call profile. Ask the router owner to configure the STT and TTS tenants.",
+        inputMode === "device"
+          ? "The router cannot grant a TTS-only speech profile. Device voice input is unavailable until the router supports it."
+          : "Router speech tenants do not match the configured call profile. Ask the router owner to configure the STT and TTS tenants.",
       );
     }
     try {
@@ -412,6 +425,7 @@ export class CallService {
         signal.throwIfAborted();
         current.lease = result.sessionId!;
         current.leaseUntil = expiry(result);
+        current.inputMode = inputMode;
         current.steps = [
           ...current.steps.slice(0, 2),
           "Router granted the call profile; speech tenants ready",
@@ -536,6 +550,10 @@ export class CallService {
   private async transcribe(record: CallRecord, id: string) {
     const raw = await this.store.utterance(record.callId, id);
     if (raw.transcribedAt) return raw;
+    if (record.inputMode === "device")
+      throw new Error(
+        "PC recognition is unavailable. Saved recordings are retained; use phone recognition or type to Otis.",
+      );
     const audio = await NodeFSP.readFile(
       NodePath.join(this.store.directory(record.callId), `${id}.pcm`),
     );

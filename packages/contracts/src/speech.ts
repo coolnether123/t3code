@@ -12,6 +12,7 @@ export const SpeechTransportRequest = Schema.Struct({
   sampleRate: Schema.optional(Schema.Number),
   text: Schema.optional(Schema.String),
   model: Schema.optional(Schema.String),
+  tenants: Schema.optional(Schema.Array(Schema.String)),
 });
 export type SpeechTransportRequest = typeof SpeechTransportRequest.Type;
 
@@ -142,6 +143,7 @@ export const CallStatus = Schema.Struct({
   threadId: Schema.String,
   version: Schema.String,
   ready: Schema.Boolean,
+  inputMode: Schema.optional(Schema.Literals(["pc", "device"])),
   closed: Schema.Boolean,
   modelSelection: ModelSelection,
   steps: Schema.Array(Schema.String),

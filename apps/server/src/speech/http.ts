@@ -1,11 +1,5 @@
-import {
-  AuthOrchestrationOperateScope,
-  SpeechRequest,
-  ThreadId,
-  type CallRequest,
-} from "@t3tools/contracts";
+import { AuthOrchestrationOperateScope, SpeechRequest, type CallRequest } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import {
@@ -15,7 +9,7 @@ import {
   HttpServerRespondable,
 } from "effect/http";
 import { authenticateRawRouteWithScope } from "../http.ts";
-import { proxySpeech, streamSpeech, SpeechUnavailableError } from "./proxy.ts";
+import { proxySpeech, streamSpeech, speechInputMode, SpeechUnavailableError } from "./proxy.ts";
 import { ServerConfig } from "../config.ts";
 import { VoiceThreadService } from "./VoiceThreadService.ts";
 
@@ -70,6 +64,12 @@ export const speechRouteLayer = HttpRouter.add(
             );
         },
         speech: proxySpeech,
+        inputMode: (signal) =>
+          speechInputMode(
+            signal,
+            process.env.T3_CALL_STT_TENANT ?? "whisper-large-v3-turbo",
+            process.env.T3_CALL_FORCE_DEVICE_STT === "1",
+          ),
         speechStream: streamSpeech,
         tenants: [
           process.env.T3_CALL_STT_TENANT ?? "whisper-large-v3-turbo",

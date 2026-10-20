@@ -45,6 +45,7 @@ const callRecord = Schema.Struct({
   closed: Schema.Boolean,
   lease: Schema.optional(Schema.String),
   leaseUntil: Schema.optional(Schema.Number),
+  inputMode: Schema.optional(Schema.Literals(["pc", "device"])),
   steps: Schema.Array(Schema.String),
   recentUtterances: Schema.optional(Schema.Array(Schema.String)),
   recentPlayed: Schema.optional(Schema.Array(Schema.String)),
@@ -116,6 +117,7 @@ export interface CallRecord extends CallOptions {
   closed: boolean;
   lease?: string;
   leaseUntil?: number;
+  inputMode?: "pc" | "device";
   steps: string[];
   recentUtterances?: string[];
   recentPlayed?: string[];
