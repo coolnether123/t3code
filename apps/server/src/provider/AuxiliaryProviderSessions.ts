@@ -247,7 +247,13 @@ const make = Effect.gen(function* () {
     getInstanceInfo: (instanceId) =>
       registry.get(instanceId).pipe(Effect.map((adapter) => ({ driverKind: adapter.driver }))),
     listSessions: () =>
-      Effect.sync(() => [...sessions].map(([id, session]) => sessionView(id, session))),
+      Effect.forEach([...sessions], ([id, session]) =>
+        Effect.gen(function* () {
+          if (!(yield* manager.isLive(session.runtime.providerSessionId)))
+            session.status = "closed";
+          return sessionView(id, session);
+        }),
+      ),
     stopSession,
     startSession: (threadId, input, owningThreadId) =>
       lock.withPermit(
@@ -312,6 +318,9 @@ const make = Effect.gen(function* () {
             );
           yield* (subscription?.events ?? runtime.events).pipe(
             Stream.runForEach((event) => ingest(threadId, session, event)),
+            Effect.andThen(
+              Effect.fail(new AuxiliarySessionError({ operation: "read events from", threadId })),
+            ),
             Effect.catch((cause) =>
               Effect.gen(function* () {
                 session.status = "error";
@@ -321,6 +330,7 @@ const make = Effect.gen(function* () {
                   cause,
                 });
                 if (session.pending !== undefined) yield* Deferred.fail(session.pending, error);
+                session.pending = undefined;
                 yield* emit(threadId, session, {
                   type: "runtime.error",
                   payload: { message: error.message },
@@ -341,9 +351,9 @@ const make = Effect.gen(function* () {
     sendTurn: (input) =>
       Effect.gen(function* () {
         const session = yield* requireSession(input.threadId, "start a turn in");
-        if (session.status === "running")
+        if (session.status !== "ready")
           return yield* new AuxiliarySessionError({
-            operation: "start a second active turn in",
+            operation: "start a turn in an unavailable",
             threadId: input.threadId,
           });
         const modelSelection = input.modelSelection ?? session.modelSelection;

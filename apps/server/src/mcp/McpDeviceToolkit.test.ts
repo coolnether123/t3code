@@ -13,6 +13,7 @@ import { McpSchema, McpServer } from "effect/ai";
 
 import * as ServerConfig from "../config.ts";
 import * as DeviceService from "../device/DeviceService.ts";
+import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpToolAccessTestkit from "./McpToolAccess.testkit.ts";
@@ -116,12 +117,70 @@ const layerDeviceServiceMock = Layer.mock(DeviceService.DeviceService)({
   agentTarget: () => Effect.succeed(["--config", "/host.json", "--session", "thread-device"]),
 });
 
-const layerTest = McpHttpServer.layerDeviceToolkit.pipe(
-  Layer.provideMerge(McpServer.McpServer.layer),
-  Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
-  Layer.provideMerge(layerDeviceServiceMock),
-  Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-device-toolkit-test-" })),
-  Layer.provide(NodeServices.layer),
+const layerTestWithThreads = (
+  threads: Layer.Layer<ThreadManagement.ThreadManagementService> = McpToolAccessTestkit.liveThreadsLayer,
+  devices: Layer.Layer<DeviceService.DeviceService> = layerDeviceServiceMock,
+) =>
+  McpHttpServer.layerDeviceToolkit.pipe(
+    Layer.provideMerge(McpServer.McpServer.layer),
+    Layer.provideMerge(threads),
+    Layer.provideMerge(devices),
+    Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-device-toolkit-test-" })),
+    Layer.provide(NodeServices.layer),
+  );
+const layerTest = layerTestWithThreads();
+
+it.effect("opens and reads the visible owner's device for a live operator", () =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const scope = invocation(["device"]);
+    for (const name of ["device_open", "device_screenshot"]) {
+      const result = yield* server
+        .callTool({
+          name,
+          arguments: name === "device_open" ? { platform: "ios" } : { deviceId: "UDID-1" },
+        })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, {
+            ...scope,
+            thread: { ...scope.thread, threadId: ThreadId.make("t3-call-operator-device") },
+          }),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+      expect(result.isError).toBe(false);
+    }
+  }).pipe(
+    Effect.provide(
+      layerTestWithThreads(
+        Layer.mock(ThreadManagement.ThreadManagementService)({
+          getAuxiliaryOwner: () => Effect.succeed(threadId),
+          getThreadShell: (id) =>
+            Effect.succeed(
+              id === threadId
+                ? McpToolAccessTestkit.liveThreadShell(threadId, { activeRunId: null })
+                : null,
+            ),
+        }),
+        Layer.effect(
+          DeviceService.DeviceService,
+          Effect.gen(function* () {
+            const devices = yield* DeviceService.DeviceService;
+            return DeviceService.DeviceService.of({
+              ...devices,
+              open: (input) => {
+                expect(input.threadId).toBe(threadId);
+                return devices.open(input);
+              },
+              agentTarget: (input) => {
+                expect(input.threadId).toBe(threadId);
+                return devices.agentTarget(input);
+              },
+            });
+          }),
+        ).pipe(Layer.provide(layerDeviceServiceMock)),
+      ),
+    ),
+  ),
 );
 
 it.effect("registers the device tools and returns the screenshot as image content", () =>

@@ -130,7 +130,7 @@ export class CallReplyBuffer {
       this.turns.set(key, parts);
     }
     const raw = [...parts.values()].join("\n");
-    if (event.type === "turn.completed") this.turns.delete(key);
+    if (event.type === "turn.completed" || event.type === "runtime.error") this.turns.delete(key);
     return { raw, delta };
   }
 }

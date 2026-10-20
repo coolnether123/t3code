@@ -674,9 +674,29 @@ function runBrowserAccessScenario(input: {
           ...(input.callOperator ? { owningThreadId: threadId } : {}),
           providerSessionId,
           modelSelection,
-          runtimePolicy,
+          runtimePolicy: { ...runtimePolicy, ...(input.callOperator ? { isolated: true } : {}) },
         })
         .pipe(Effect.ignore);
+      if (input.callOperator) {
+        const captured = (yield* Ref.get(mcpConfigs))[0]!;
+        const caller = {
+          threadId: captured.threadId,
+          mcpCredentialId: captured.providerSessionId,
+          providerInstanceId: captured.providerInstanceId,
+        };
+        assert.equal(yield* manager.getAuxiliaryOwner(caller), threadId);
+        assert.isUndefined(
+          yield* manager.getAuxiliaryOwner({ ...caller, mcpCredentialId: "expired-credential" }),
+        );
+        assert.isUndefined(
+          yield* manager.getAuxiliaryOwner({
+            ...caller,
+            providerInstanceId: ProviderInstanceId.make("other"),
+          }),
+        );
+        yield* manager.close(providerSessionId);
+        assert.isUndefined(yield* manager.getAuxiliaryOwner(caller));
+      }
     }).pipe(
       Effect.provide(
         layerTest({

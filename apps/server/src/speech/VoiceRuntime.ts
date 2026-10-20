@@ -42,7 +42,8 @@ export const layer = Layer.effectDiscard(
             (event.type === "turn.started" ||
               event.type === "content.delta" ||
               event.type === "item.completed" ||
-              event.type === "turn.completed")
+              event.type === "turn.completed" ||
+              event.type === "runtime.error")
           )
             yield* threads.recordVoiceEvent(link, event, reply.raw);
         }).pipe(Effect.catch((cause) => Effect.logError("Voice session event failed", cause))),

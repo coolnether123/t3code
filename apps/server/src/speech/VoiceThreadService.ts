@@ -285,7 +285,7 @@ const make = Effect.gen(function* () {
       messageId: `voice-reply:${link.sessionId}:${event.turnId ?? "pending"}`,
       role: "assistant",
       text: withoutCallControl(text),
-      streaming: event.type !== "turn.completed",
+      streaming: event.type !== "turn.completed" && event.type !== "runtime.error",
       ...(event.turnId ? { turnId: event.turnId } : {}),
     });
   });
@@ -293,6 +293,19 @@ const make = Effect.gen(function* () {
     link: OperatorLink,
     event: ProviderAdapter.ProviderAdapterV2Event,
   ) {
+    // The session pump persists these before subscribers exist. Replaying a
+    // pending request here could overwrite a response already accepted in chat.
+    if (
+      (event.type === "runtime_request.updated" && event.runtimeRequest.providerTurnId === null) ||
+      (event.type === "node.updated" &&
+        event.node.runId === null &&
+        event.node.runtimeRequestId !== null) ||
+      (event.type === "turn_item.updated" &&
+        event.turnItem.runId === null &&
+        (event.turnItem.type === "approval_request" ||
+          event.turnItem.type === "user_input_request"))
+    )
+      return;
     const threadId = ThreadId.make(link.threadId);
     return yield* executor.withLock(
       threadId,
@@ -306,7 +319,8 @@ const make = Effect.gen(function* () {
             domain = {
               ...base,
               type: "provider-thread.updated",
-              payload: { ...event.providerThread, appThreadId: threadId },
+              // Auxiliary history must not become the chat's typed conversation.
+              payload: { ...event.providerThread, appThreadId: ThreadId.make(link.sessionId) },
             };
             break;
           case "provider_turn.updated":

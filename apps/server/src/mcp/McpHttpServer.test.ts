@@ -1,5 +1,6 @@
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import { expect, it } from "@effect/vitest";
 import { NodeHttpServer } from "@effect/platform-node";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -68,13 +69,19 @@ const client = McpSchema.McpServerClient.of({
   },
   getClient: Effect.die("unused"),
 });
-const layerTest = McpHttpServer.layerPreviewToolkit.pipe(
-  Layer.provideMerge(McpServer.McpServer.layer),
-  Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
-  Layer.provideMerge(PreviewAutomationBroker.layer),
-  Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-http-server-test-" })),
-  Layer.provideMerge(NodeServices.layer),
-);
+const layerTestWithThreads = (
+  threads: Layer.Layer<ThreadManagement.ThreadManagementService> = McpToolAccessTestkit.liveThreadsLayer,
+) =>
+  McpHttpServer.layerPreviewToolkit.pipe(
+    Layer.provideMerge(McpServer.McpServer.layer),
+    Layer.provideMerge(threads),
+    Layer.provideMerge(PreviewAutomationBroker.layer),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-http-server-test-" }),
+    ),
+    Layer.provideMerge(NodeServices.layer),
+  );
+const layerTest = layerTestWithThreads();
 const layerPullRequestsTest = McpHttpServer.layerPullRequestsToolkit.pipe(
   Layer.provideMerge(McpServer.McpServer.layer),
   Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
@@ -140,6 +147,68 @@ const callTool = (name: string, args: Record<string, unknown>) =>
   });
 
 const callSnapshot = (args: Record<string, unknown>) => callTool("preview_snapshot", args);
+
+it.effect.each([true, false])(
+  "operator preview uses its visible owner only while its session is live: %s",
+  (live) =>
+    Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+      const connected = yield* Deferred.make<void>();
+      const requests: Array<string> = [];
+      const events = yield* broker.connect({ clientId: "operator-preview", environmentId });
+      yield* Stream.runForEach(events, (event) => {
+        if (event.type === "connected") return Deferred.succeed(connected, undefined);
+        requests.push(event.request.threadId);
+        return broker.respond({
+          clientId: "operator-preview",
+          connectionId: event.connectionId,
+          requestId: event.request.requestId,
+          ok: true,
+          result: {
+            available: true,
+            visible: true,
+            loading: false,
+            tabId,
+            url: "http://example.test/",
+            title: "Example",
+          },
+        });
+      }).pipe(Effect.forkScoped);
+      yield* Deferred.await(connected);
+      const syntheticThread = ThreadId.make("t3-call-operator-preview");
+      const result = yield* server.callTool({ name: "preview_open", arguments: {} }).pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, {
+          ...invocation,
+          thread: { ...invocation.thread, threadId: syntheticThread },
+        }),
+        Effect.provideService(McpSchema.McpServerClient, client),
+      );
+      expect(requests).toEqual(live ? [threadId] : []);
+      expect(result.isError).toBe(!live);
+    }).pipe(
+      Effect.provide(
+        layerTestWithThreads(
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            getThreadShell: (id) =>
+              Effect.succeed(
+                id === threadId
+                  ? McpToolAccessTestkit.liveThreadShell(threadId, { activeRunId: null })
+                  : null,
+              ),
+            getAuxiliaryOwner: (input) => {
+              expect(input).toEqual({
+                threadId: ThreadId.make("t3-call-operator-preview"),
+                mcpCredentialId: invocation.thread.providerSessionId,
+                providerInstanceId: invocation.thread.providerInstanceId,
+              });
+              return Effect.succeed(live ? threadId : undefined);
+            },
+          }),
+        ),
+      ),
+    ),
+);
 
 // Real tool definitions with handlers that record what they decoded.
 const layerRecordingTools = (calls: Array<unknown>) => {

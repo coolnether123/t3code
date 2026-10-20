@@ -10,6 +10,7 @@ import {
   type ProviderRuntimeEvent,
   type ProviderSessionStartInput,
   type ProviderSendTurnInput,
+  type ProviderSession,
 } from "@t3tools/contracts";
 import { isToolLifecycleItemType } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -39,7 +40,7 @@ export interface OperatorPorts {
   }>;
   start(input: ProviderSessionStartInput): Promise<unknown>;
   send(input: ProviderSendTurnInput): Promise<unknown>;
-  sessions(): Promise<readonly { threadId: string }[]>;
+  sessions(): Promise<readonly { threadId: string; status?: ProviderSession["status"] }[]>;
   dispatch(command: OrchestrationCommand): Promise<unknown>;
 }
 
@@ -162,7 +163,15 @@ export class CallOperator {
   }
   private async ensure(link: OperatorLink) {
     const ports = this.requirePorts();
-    if ((await ports.sessions()).some((session) => session.threadId === link.sessionId)) return;
+    if (
+      (await ports.sessions()).some(
+        (session) =>
+          session.threadId === link.sessionId &&
+          session.status !== "error" &&
+          session.status !== "closed",
+      )
+    )
+      return;
     const context = await ports.context(link.threadId);
     await ports.start({
       threadId: ThreadId.make(link.sessionId),
@@ -296,15 +305,21 @@ export class CallOperator {
             if (update.announcementId === voice.id) update.announcementTurnId = event.turnId;
         });
     }
-    if (event.type === "turn.completed") {
+    if (event.type === "turn.completed" || event.type === "runtime.error") {
       const voice = chat.voices.find(
         (entry) =>
-          entry.sessionId === link.sessionId && !entry.finished && entry.turnId === event.turnId,
+          entry.sessionId === link.sessionId &&
+          !entry.finished &&
+          (event.turnId === undefined || entry.turnId === event.turnId),
       );
       if (voice) {
         let intent: string | undefined;
         try {
-          if (event.payload.state === "completed" && !voice.id.startsWith("voice-update:"))
+          if (
+            event.type === "turn.completed" &&
+            event.payload.state === "completed" &&
+            !voice.id.startsWith("voice-update:")
+          )
             intent = voiceDelegation(assistantText ?? "")?.intent;
         } catch {
           await this.update(

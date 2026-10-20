@@ -17,6 +17,7 @@ import {
 } from "../orchestration-v2/DispatchModeLimit.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import { resolveInteractionMode, resolveRuntimeMode } from "./OrchestratorMcpService.ts";
+import { isCallLinkedSession } from "../speech/callOperator.ts";
 import {
   assertFullAccess,
   assertLiveCaller,
@@ -104,13 +105,34 @@ export const reads = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>)
   declare((params: P) => handle(params));
 
 export const readsAsCaller = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>) =>
-  declare((params: P) => requireThreadCaller.pipe(Effect.flatMap(() => handle(params))));
+  declare((params: P) =>
+    requireThreadCaller.pipe(
+      Effect.flatMap((scope) =>
+        isCallLinkedSession(scope.thread.threadId)
+          ? loadCaller().pipe(
+              Effect.tap(assertLiveCaller),
+              Effect.flatMap((caller) => withCallerScope(caller, handle(params))),
+            )
+          : handle(params),
+      ),
+    ),
+  );
+
+const withCallerScope = <A, E, R>(caller: Caller, effect: Effect.Effect<A, E, R>) =>
+  caller.auxiliary && caller.caller && caller.scope.thread
+    ? effect.pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, {
+          ...caller.scope,
+          auxiliaryOwnerThreadId: caller.caller.id,
+        }),
+      )
+    : effect;
 
 export const actsAsCaller = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>) =>
   declare((params: P) =>
     requireThreadCaller.pipe(
       Effect.flatMap(() => writingCaller),
-      Effect.flatMap(() => handle(params)),
+      Effect.flatMap((caller) => withCallerScope(caller, handle(params))),
     ),
   );
 

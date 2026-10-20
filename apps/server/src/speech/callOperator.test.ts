@@ -97,6 +97,27 @@ async function fixture() {
 }
 
 describe("call delegation", () => {
+  it.each(["error", "closed"] as const)(
+    "settles a failed voice turn and recreates a %s session for the next utterance",
+    async (status) => {
+      const f = await fixture();
+      const link = await f.startVoice();
+      f.ports.sessions = async () => [{ threadId: link.sessionId, status }];
+      await f.operator.event(
+        f.event(link.sessionId, "runtime.error", "voice:call:utterance", {
+          message: "Synthetic stream failure",
+        }),
+      );
+      expect((await f.operator.read("chat"))!.voices[0]?.finished).toBe(true);
+      expect(await f.startVoice("next-utterance", "Hello again")).toEqual(link);
+      expect(f.ports.start).toHaveBeenCalledTimes(2);
+      await f.operator.event(
+        f.event(link.sessionId, "turn.completed", "next-utterance", { state: "completed" }),
+        "Hello",
+      );
+      expect((await f.operator.read("chat"))!.voices.every((voice) => voice.finished)).toBe(true);
+    },
+  );
   it("retries a saved voice request after a rejected send and acknowledges only acceptance", async () => {
     const f = await fixture();
     vi.mocked(f.ports.send).mockRejectedValueOnce(new Error("Provider send failed"));

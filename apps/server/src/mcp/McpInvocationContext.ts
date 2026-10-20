@@ -55,6 +55,7 @@ export const clientRuntimeModeCeiling = (client: McpClientCaller | undefined): R
  * preview, worktree handoff) need `thread`.
  */
 export interface McpInvocationScope {
+  readonly auxiliaryOwnerThreadId?: ThreadId;
   readonly environmentId: EnvironmentId;
   readonly capabilities: ReadonlySet<McpCapability>;
   readonly issuedAt: number;
@@ -120,6 +121,14 @@ export const requireThreadMcpCapability = <const C extends "preview" | "device" 
       (invocation): invocation is McpThreadInvocationScope =>
         invocation.capabilities.has(capability) && invocation.thread !== undefined,
       (invocation) => missingCapability(invocation, capability) as McpCapabilityError<C>,
+    ),
+    Effect.map((invocation) =>
+      invocation.auxiliaryOwnerThreadId === undefined
+        ? invocation
+        : {
+            ...invocation,
+            thread: { ...invocation.thread, threadId: invocation.auxiliaryOwnerThreadId },
+          },
     ),
     Effect.withSpan("mcp.requireCapability"),
   );
