@@ -82,10 +82,94 @@ async function fixture() {
 }
 
 describe("durable calls", () => {
-  it("closes every expired open call after restart through the normal close path", async () => {
+  it("re-acquires TTS only and delivers after the lease lapses during a stalled watch", async () => {
+    const f = await fixture();
+    const entered = deferred<void>();
+    const stalled = deferred<void>();
+    vi.spyOn(f.store, "wait").mockImplementation(async () => {
+      entered.resolve();
+      await stalled.promise;
+    });
+    const scheduled = vi.spyOn(f.store, "scheduleExpiry");
+    const record = await f.store.require("call-1");
+    record.inputMode = "device";
+    await f.store.changed(record);
+    f.ports.inputMode = vi.fn<NonNullable<CallPorts["inputMode"]>>(async () => "pc");
+    const watch = f.request({ action: "call.watch", version: record.version });
+    await entered.promise;
+    const expired = await f.store.require("call-1");
+    expired.leaseUntil = 0;
+    await f.store.changed(expired);
+    await scheduled.mock.calls.at(-1)![2]();
+    expect(await f.service.status("call-1")).toMatchObject({ closed: false, ready: false });
+    vi.mocked(f.ports.speech).mockClear();
+    vi.mocked(f.ports.speech).mockImplementation(async (input) =>
+      input.action === "acquire"
+        ? { sessionId: "tts-recovered", tenants: ["tts"], expiresAt: "2099-10-18T00:00:00Z" }
+        : {},
+    );
+    const delivered = await f.request({
+      action: "call.say",
+      utteranceId: "after-stall",
+      text: "Still here",
+    });
+    expect(delivered.utterance?.deliveredAt).toBeDefined();
+    expect(delivered.call).toMatchObject({
+      callId: "call-1",
+      closed: false,
+      ready: true,
+      inputMode: "device",
+    });
+    expect(f.ports.speech).toHaveBeenCalledExactlyOnceWith(
+      { action: "acquire", tenants: ["tts"] },
+      expect.any(AbortSignal),
+    );
+    expect(f.ports.inputMode).not.toHaveBeenCalled();
+    expect(f.ports.dispatch).toHaveBeenCalledOnce();
+    stalled.resolve();
+    await watch;
+  });
+  it("renews from typed activity without requiring a watch", async () => {
+    const f = await fixture();
+    const record = await f.store.require("call-1");
+    record.leaseUntil = Clock.Clock.defaultValue().currentTimeMillisUnsafe() + 30_000;
+    record.lastClientAt = Clock.Clock.defaultValue().currentTimeMillisUnsafe() - 500_000;
+    await f.store.changed(record);
+    await f.request({ action: "call.say", utteranceId: "renewed-typed", text: "Hello" });
+    expect(f.ports.speech).toHaveBeenCalledWith(
+      { action: "renew", sessionId: "lease-1" },
+      expect.any(AbortSignal),
+    );
+    expect((await f.store.require("call-1")).lastClientAt).toBeGreaterThan(record.lastClientAt);
+  });
+  it("recovers a recently used legacy archive without treating its expired lease as abandonment", async () => {
+    const f = await fixture();
+    const record = await f.store.require("call-1");
+    delete record.lastClientAt;
+    record.createdAt = "2026-01-01T00:00:00Z";
+    record.leaseUntil = 0;
+    await f.store.changed(record);
+    const restarted = new CallService(new CallStore(f.directory), f.ports);
+    expect(await restarted.status("call-1")).toMatchObject({ closed: false, ready: false });
+    expect((await restarted.store.require("call-1")).lastClientAt).toBeGreaterThan(
+      Date.parse(record.createdAt),
+    );
+  });
+  it("keeps a recently contacted call open when only an expired lease timestamp remains", async () => {
+    const f = await fixture();
+    const record = await f.store.require("call-1");
+    delete record.lease;
+    record.leaseUntil = 1;
+    await f.store.changed(record);
+    const restarted = new CallService(new CallStore(f.directory), f.ports);
+    expect(await restarted.status("call-1")).toMatchObject({ closed: false, ready: false });
+    expect((await restarted.store.require("call-1")).leaseUntil).toBeUndefined();
+  });
+  it("closes truly abandoned calls after restart through the normal close path", async () => {
     const f = await fixture();
     const record = await f.store.require("call-1");
     record.leaseUntil = 0;
+    record.lastClientAt = Clock.Clock.defaultValue().currentTimeMillisUnsafe() - 600_001;
     await f.store.changed(record);
     const other = { ...record, callId: "call-2", threadId: "other-thread", lease: "lease-2" };
     await f.store.changed(other);
@@ -108,7 +192,7 @@ describe("durable calls", () => {
       );
     }
   });
-  it("re-arms a live lease once after restart and closes it at the restored deadline", async () => {
+  it("re-arms cleanup once after restart and keeps a recently contacted call open after lease expiry", async () => {
     const f = await fixture();
     const store = new CallStore(f.directory);
     const scheduled = vi.spyOn(store, "scheduleExpiry");
@@ -117,7 +201,7 @@ describe("durable calls", () => {
     const record = await store.require("call-1");
     expect(scheduled).toHaveBeenCalledExactlyOnceWith(
       "call-1",
-      record.leaseUntil,
+      record.lastClientAt! + 600_000,
       expect.any(Function),
     );
     await new CallService(store, f.ports).status("call-1");
@@ -125,7 +209,7 @@ describe("durable calls", () => {
     record.leaseUntil = 0;
     await store.changed(record);
     await scheduled.mock.calls[0]![2]();
-    expect(await restarted.status("call-1")).toMatchObject({ closed: true, ready: false });
+    expect(await restarted.status("call-1")).toMatchObject({ closed: false, ready: false });
   });
   it.each(["Lease not found (404)", "Lease expired", "Router unavailable"])(
     "finishes closing after restart when release fails: %s",
@@ -133,6 +217,7 @@ describe("durable calls", () => {
       const f = await fixture();
       const record = await f.store.require("call-1");
       record.leaseUntil = 0;
+      record.lastClientAt = Clock.Clock.defaultValue().currentTimeMillisUnsafe() - 600_001;
       await f.store.changed(record);
       vi.mocked(f.ports.speech).mockRejectedValue(new Error(message));
       const store = new CallStore(f.directory);
@@ -165,6 +250,20 @@ describe("durable calls", () => {
     );
     const restarted = new CallService(new CallStore(f.directory), f.ports);
     expect(await restarted.status("call-1")).toMatchObject({ ready: true, inputMode: "device" });
+    const record = await restarted.store.require("call-1");
+    record.leaseUntil = 0;
+    await restarted.store.changed(record);
+    f.ports.inputMode = vi.fn<NonNullable<CallPorts["inputMode"]>>(async () => "pc");
+    vi.mocked(f.ports.speech).mockClear();
+    await restarted.handle(
+      { action: "call.prepare", callId: "call-1" },
+      new AbortController().signal,
+    );
+    expect(f.ports.speech).toHaveBeenCalledWith(
+      { action: "acquire", tenants: ["tts"] },
+      expect.any(AbortSignal),
+    );
+    expect(f.ports.inputMode).not.toHaveBeenCalled();
   });
   it("stops when the router grants STT despite a TTS-only request", async () => {
     const f = await fixture();
@@ -215,13 +314,14 @@ describe("durable calls", () => {
       vi.useRealTimers();
     }
   });
-  it("closes an abandoned call and releases speech when its lease deadline arrives", async () => {
+  it("closes an abandoned call after ten minutes without client contact", async () => {
     const f = await fixture();
     const scheduled = vi.spyOn(f.store, "scheduleExpiry");
     await f.request({ action: "call.renew" });
     const expire = scheduled.mock.calls.at(-1)![2];
     const record = await f.store.require("call-1");
     record.leaseUntil = 0;
+    record.lastClientAt = Clock.Clock.defaultValue().currentTimeMillisUnsafe() - 600_001;
     await f.store.changed(record);
     await expire();
     expect((await f.service.status("call-1")).closed).toBe(true);
@@ -867,6 +967,50 @@ describe("exact call model", () => {
 });
 
 describe("typed call turns", () => {
+  it.each([true, false])(
+    "delivers a migrated typed turn once when the original delivery acknowledgment exists: %s",
+    async (delivered) => {
+      const f = await fixture();
+      if (delivered)
+        await f.request({
+          action: "call.say",
+          utteranceId: "original-typed",
+          text: "Keep my words",
+        });
+      await f.request({ action: "call.close" });
+      const request = (input: Omit<CallRequest, "callId">) =>
+        f.service.handle({ ...input, callId: "replacement" }, new AbortController().signal);
+      await request({ action: "call.open", options });
+      const retryOf = { callId: "call-1", utteranceId: "original-typed" };
+      const response = await request({
+        action: "call.say",
+        utteranceId: "new-typed",
+        retryOf,
+        text: "Keep my words",
+      });
+      expect(response.utterance?.deliveredAt).toBeDefined();
+      expect(response.utterance?.id).toBe("new-typed");
+      await request({
+        action: "call.say",
+        utteranceId: "another-retry",
+        retryOf,
+        text: "Keep my words",
+      });
+      expect(f.ports.dispatch).toHaveBeenCalledOnce();
+      expect(f.ports.dispatch).toHaveBeenCalledWith(
+        expect.objectContaining({ commandId: "voice:call-1:original-typed" }),
+      );
+    },
+  );
+  it("rejects delivery on a closed call even when the utterance was delivered before close", async () => {
+    const f = await fixture();
+    await f.request({ action: "call.say", utteranceId: "before-close", text: "Hello" });
+    await f.request({ action: "call.close" });
+    await expect(
+      f.request({ action: "call.deliver", utteranceId: "before-close" }),
+    ).rejects.toThrow("This call has ended");
+    expect(f.ports.dispatch).toHaveBeenCalledOnce();
+  });
   it("skips STT, uses voice delivery once across recovery, and synthesizes a reply", async () => {
     const f = await fixture();
     const say = {
@@ -912,15 +1056,16 @@ describe("typed call turns", () => {
   });
 });
 
-it("archives queued typing after hang-up without starting a new turn", async () => {
+it("rejects typing after hang-up without acknowledging or dispatching it", async () => {
   const f = await fixture();
   await f.request({ action: "call.close" });
-  const archived = await f.request({
-    action: "call.say",
-    utteranceId: "closed-typed",
-    text: "Keep these words",
-  });
-  expect(archived.utterance).toMatchObject({ source: "typed", text: "Keep these words" });
-  expect(archived.utterance?.deliveredAt).toBeUndefined();
+  await expect(
+    f.request({
+      action: "call.say",
+      utteranceId: "closed-typed",
+      text: "Keep these words",
+    }),
+  ).rejects.toThrow("This call has ended");
+  expect(await f.store.read("call-1", "closed-typed.typed.json")).toBeUndefined();
   expect(f.ports.dispatch).not.toHaveBeenCalled();
 });

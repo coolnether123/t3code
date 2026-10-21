@@ -43,6 +43,7 @@ const callRecord = Schema.Struct({
   createdAt: Schema.String,
   version: Schema.String,
   closed: Schema.Boolean,
+  lastClientAt: Schema.optional(Schema.Number),
   lease: Schema.optional(Schema.String),
   leaseUntil: Schema.optional(Schema.Number),
   inputMode: Schema.optional(Schema.Literals(["pc", "device"])),
@@ -115,6 +116,7 @@ export interface CallRecord extends CallOptions {
   createdAt: string;
   version: string;
   closed: boolean;
+  lastClientAt?: number;
   lease?: string;
   leaseUntil?: number;
   inputMode?: "pc" | "device";
@@ -162,15 +164,23 @@ export class CallStore {
     this.expirations.set(callId, timer);
   }
 
-  recoverExpirations(restore: (callId: string, until: number) => Promise<void>) {
+  recoverExpirations(restore: (callId: string) => Promise<void>) {
     // HTTP constructs a service per request, but recovery belongs to this store's lifetime.
     return (this.recovery ??= (async () => {
       await NodeFSP.mkdir(this.root, { recursive: true });
       for (const entry of await NodeFSP.readdir(this.root, { withFileTypes: true })) {
         if (!entry.isDirectory() || entry.name.startsWith("_")) continue;
         const record = await this.require(entry.name);
-        if (!record.closed && record.leaseUntil !== undefined)
-          await restore(record.callId, record.leaseUntil);
+        if (!record.closed) {
+          if (record.lastClientAt === undefined) {
+            // Older archives have no contact clock. Their last write is the conservative fallback.
+            record.lastClientAt = (
+              await NodeFSP.stat(NodePath.join(this.directory(record.callId), "call.json"))
+            ).mtimeMs;
+            await this.write(record.callId, "call.json", record);
+          }
+          await restore(record.callId);
+        }
       }
     })().catch((error: unknown) => {
       this.recovery = undefined;

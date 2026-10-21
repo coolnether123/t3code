@@ -50,6 +50,7 @@ export const CallOptions = Schema.Struct({
   operatorSelection: Schema.optional(ModelSelection),
 });
 export type CallOptions = typeof CallOptions.Type;
+const CallTurnOrigin = Schema.Struct({ callId: CallId, utteranceId: CallId });
 export const CallRequest = Schema.Struct({
   streamAudio: Schema.optional(Schema.Boolean),
   action: Schema.Literals([
@@ -77,6 +78,7 @@ export const CallRequest = Schema.Struct({
   saveDefault: Schema.optional(Schema.Boolean),
   updateIds: Schema.optional(Schema.Array(Schema.String)),
   utteranceId: Schema.optional(CallId),
+  retryOf: Schema.optional(CallTurnOrigin),
   audio: Schema.optional(Schema.String),
   sampleRate: Schema.optional(Schema.Number),
   startedAt: Schema.optional(Schema.String),
@@ -123,6 +125,7 @@ export type SpeechRequest = typeof SpeechRequest.Type;
 
 export const CallUtterance = Schema.Struct({
   id: CallId,
+  retryOf: Schema.optional(CallTurnOrigin),
   source: Schema.optional(Schema.Literal("typed")),
   sha256: Schema.String,
   bytes: Schema.Number,

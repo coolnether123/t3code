@@ -81,6 +81,7 @@ export function verifyCallModel(options: CallOptions, providers: readonly Server
 const decodeCallRequest = Schema.decodeUnknownSync(ValidCallRequest);
 const now = () => DateTime.formatIso(Effect.runSync(DateTime.now));
 const time = () => Effect.runSync(Clock.currentTimeMillis);
+const ABANDONED_CALL_MS = 600_000;
 const expiry = (response: SpeechResponse) => {
   const until = Date.parse(response.expiresAt ?? "");
   if (!Number.isFinite(until) || until <= time())
@@ -134,20 +135,76 @@ export class CallService {
     };
   }
   private recoverExpirations() {
-    return this.store.recoverExpirations(async (callId, until) => {
-      if (until <= time()) await this.close(callId);
-      else this.scheduleExpiry(callId, until);
-    });
+    return this.store.recoverExpirations((callId) => this.expire(callId));
   }
   private scheduleExpiry(callId: string, until: number) {
-    this.store.scheduleExpiry(callId, until, () =>
-      this.store.serial(`renew:${callId}`, async () => {
+    this.store.scheduleExpiry(callId, until, () => this.expire(callId));
+  }
+  private expire(callId: string) {
+    return this.store.serial(`renew:${callId}`, async () => {
+      let deadline = 0;
+      let abandoned = false;
+      await this.store.serial(callId, async () => {
         const record = await this.store.require(callId);
-        if (record.closed || (record.leaseUntil ?? 0) <= time())
-          await this.handle({ action: "call.close", callId }, new AbortController().signal);
-        else this.scheduleExpiry(callId, record.leaseUntil!);
-      }),
-    );
+        if (record.closed) return;
+        deadline = (record.lastClientAt ?? Date.parse(record.createdAt)) + ABANDONED_CALL_MS;
+        if (deadline <= time()) {
+          abandoned = true;
+          return;
+        }
+        if (
+          (record.lease || record.leaseUntil !== undefined) &&
+          (record.leaseUntil ?? 0) <= time()
+        ) {
+          delete record.lease;
+          delete record.leaseUntil;
+          await this.store.changed(record);
+        }
+        if (record.lease && record.leaseUntil) deadline = Math.min(deadline, record.leaseUntil);
+      });
+      if (!deadline) return;
+      if (abandoned) await this.close(callId);
+      else this.scheduleExpiry(callId, deadline);
+    });
+  }
+  private async contact(
+    callId: string,
+    signal: AbortSignal,
+    ensureSpeech = true,
+    forceRenew = false,
+  ) {
+    const record = await this.store.serial(callId, async () => {
+      const current = await this.store.require(callId);
+      if (!current.closed) {
+        current.lastClientAt = time();
+        // Contact must not wake its own long-poll or change the watched version.
+        await this.store.write(callId, "call.json", current);
+        this.scheduleExpiry(
+          callId,
+          Math.min(
+            current.leaseUntil && current.leaseUntil > time() ? current.leaseUntil : Infinity,
+            current.lastClientAt + ABANDONED_CALL_MS,
+          ),
+        );
+      }
+      return current;
+    });
+    if (record.closed || !ensureSpeech) return;
+    if (!forceRenew && record.lease && (record.leaseUntil ?? 0) - time() > 60_000) return;
+    return this.store.serial(`renew:${callId}`, async () => {
+      const record = await this.store.require(callId);
+      if (record.closed) return;
+      if (!forceRenew && record.lease && (record.leaseUntil ?? 0) - time() > 60_000) return;
+      if (record.lease && (record.leaseUntil ?? 0) > time()) {
+        try {
+          await this.renewLease(callId, signal);
+          return;
+        } catch {
+          signal.throwIfAborted();
+        }
+      }
+      await this.prepare(callId, signal, undefined, undefined, true);
+    });
   }
   async handle(input: CallRequest, signal: AbortSignal): Promise<SpeechResponse> {
     for (const id of [input.callId, input.utteranceId, input.speechId])
@@ -155,6 +212,13 @@ export class CallService {
     decodeCallRequest(input);
     callIdentifier(input.callId);
     await this.recoverExpirations();
+    if (!["call.open", "call.close", "call.configure"].includes(input.action))
+      await this.contact(
+        input.callId,
+        signal,
+        input.action !== "call.prepare",
+        input.action === "call.renew",
+      );
     if (input.action === "call.configure") {
       if (!this.operator || !input.options)
         throw new Error("Call model configuration is unavailable.");
@@ -192,30 +256,40 @@ export class CallService {
     }
     if (input.action === "call.watch") {
       await this.store.wait(input.callId, input.version, signal);
-      await this.store.serial(`renew:${input.callId}`, async () => {
-        const record = await this.store.require(input.callId);
-        const remaining = (record.leaseUntil ?? 0) - time();
-        // An attached call keeps speech ready while both provider sessions are quiet.
-        if (!record.closed && record.lease && remaining > 0 && remaining <= 60_000)
-          await this.renewLease(input.callId, signal);
-      });
+      await this.contact(input.callId, signal);
       return { call: await this.status(input.callId) };
     }
     if (input.action === "call.say") {
       const id = callIdentifier(input.utteranceId);
-      return this.store.serial(`call.deliver:${input.callId}:${id}`, async () => {
+      const origin = input.retryOf ?? { callId: input.callId, utteranceId: id };
+      return this.store.serial(`call.deliver:${origin.callId}:${origin.utteranceId}`, async () => {
         const record = await this.store.require(input.callId);
+        active(record);
         const text = input.text!.trim();
+        if (input.retryOf) {
+          const source = await this.store.require(origin.callId);
+          const original = await this.store.read<CallUtterance>(
+            origin.callId,
+            `${origin.utteranceId}.typed.json`,
+          );
+          if (source.threadId !== record.threadId || (original && original.text !== text))
+            throw new Error("Recovered typed turn does not match its original chat and text.");
+        }
         const previous = await this.store.read<CallUtterance>(input.callId, `${id}.typed.json`);
         if (await this.store.read(input.callId, `${id}.raw.json`))
           throw new Error("This utterance ID already belongs to a recording.");
-        if (previous && previous.text !== text)
+        if (
+          previous &&
+          (previous.text !== text ||
+            JSON.stringify(previous.retryOf) !== JSON.stringify(input.retryOf))
+        )
           throw new Error("Typed utterance identity does not match its saved text.");
         if (!previous) {
           const at = now();
           await this.store.write(input.callId, `${id}.typed.json`, {
             id,
             source: "typed",
+            ...(input.retryOf ? { retryOf: input.retryOf } : {}),
             text,
             sha256: sha256(text),
             bytes: Buffer.byteLength(text),
@@ -235,21 +309,18 @@ export class CallService {
             await this.store.changed(current);
           });
         }
-        const utterance = record.closed
-          ? await this.store.utterance(input.callId, id)
-          : await this.deliver(record, id);
+        const utterance = await this.deliver(record, id);
         return { utterance, call: await this.status(input.callId) };
       });
     }
     // Engine work owns an operation lock, never the call's short state lock.
     if (input.action === "call.prepare") {
-      await this.store.serial(`prepare:${input.callId}`, () =>
+      await this.store.serial(`renew:${input.callId}`, () =>
         this.prepare(input.callId, signal, input.modelSelection, input.operatorSelection),
       );
       return { call: await this.status(input.callId) };
     }
     if (input.action === "call.renew") {
-      await this.store.serial(`renew:${input.callId}`, () => this.renewLease(input.callId, signal));
       return { call: await this.status(input.callId) };
     }
     if (
@@ -344,6 +415,17 @@ export class CallService {
         throw new Error("Call ID already belongs to different options.");
       if (!previous.closed)
         await this.store.write("_threads", bindingName, { callId: input.callId });
+      if (!previous.closed) {
+        previous.lastClientAt = time();
+        await this.store.write(input.callId, "call.json", previous);
+        this.scheduleExpiry(
+          input.callId,
+          Math.min(
+            previous.leaseUntil && previous.leaseUntil > time() ? previous.leaseUntil : Infinity,
+            previous.lastClientAt + ABANDONED_CALL_MS,
+          ),
+        );
+      }
       return { call: await this.status(input.callId) };
     }
     await this.ports.verify(input.options);
@@ -362,12 +444,14 @@ export class CallService {
       ...input.options,
       callId: input.callId,
       createdAt: now(),
+      lastClientAt: time(),
       version: "",
       closed: false,
       steps: ["Call log saved on PC", "Selected chat model and options configured"],
     };
     await this.store.write("_threads", bindingName, { callId: input.callId });
     await this.store.changed(record);
+    this.scheduleExpiry(record.callId, record.lastClientAt! + ABANDONED_CALL_MS);
     await this.operator?.reopen(record.threadId, record.callId);
     return { call: await this.status(input.callId) };
   }
@@ -376,6 +460,7 @@ export class CallService {
     signal: AbortSignal,
     modelSelection?: CallOptions["modelSelection"],
     operatorSelection?: CallOptions["modelSelection"],
+    preserveInputMode = false,
   ) {
     const record = await this.store.require(callId);
     active(record);
@@ -386,7 +471,10 @@ export class CallService {
       await this.ports.verify({ ...record, modelSelection: operatorSelection });
       await this.operator.configure(record.threadId, { voice, operator: operatorSelection });
     }
-    const inputMode = (await this.ports.inputMode?.(signal)) ?? "pc";
+    const inputMode =
+      record.inputMode === "device" || (preserveInputMode && record.inputMode)
+        ? record.inputMode!
+        : ((await this.ports.inputMode?.(signal)) ?? "pc");
     const tenants = inputMode === "device" ? [this.ports.tenants[1]] : [...this.ports.tenants];
     if (
       record.lease &&
@@ -397,10 +485,9 @@ export class CallService {
       return;
     }
     if (record.lease) {
-      await this.ports.speech(
-        { action: "release", sessionId: record.lease },
-        AbortSignal.timeout(90_000),
-      );
+      await this.ports
+        .speech({ action: "release", sessionId: record.lease }, AbortSignal.timeout(90_000))
+        .catch(() => {});
       await this.store.serial(callId, async () => {
         const current = await this.store.require(callId);
         if (current.lease === record.lease) {
@@ -445,7 +532,10 @@ export class CallService {
           "Router granted the call profile; speech tenants ready",
         ];
         await this.store.changed(current);
-        this.scheduleExpiry(callId, current.leaseUntil!);
+        this.scheduleExpiry(
+          callId,
+          Math.min(current.leaseUntil!, (current.lastClientAt ?? time()) + ABANDONED_CALL_MS),
+        );
       });
     } catch (error) {
       await this.ports.speech(
@@ -476,7 +566,10 @@ export class CallService {
       if (!current.closed && current.lease === sessionId) {
         current.leaseUntil = until;
         await this.store.changed(current);
-        this.scheduleExpiry(callId, until);
+        this.scheduleExpiry(
+          callId,
+          Math.min(until, (current.lastClientAt ?? time()) + ABANDONED_CALL_MS),
+        );
       }
     });
   }
@@ -594,12 +687,27 @@ export class CallService {
     return this.store.utterance(record.callId, id);
   }
   private async deliver(record: CallRecord, id: string) {
+    active(await this.store.require(record.callId));
     const utterance = await this.store.utterance(record.callId, id);
     if (utterance.deliveredAt) return utterance;
+    if (utterance.retryOf) {
+      const original = await this.store.read<{ deliveredAt?: string; messageId: string }>(
+        utterance.retryOf.callId,
+        `${utterance.retryOf.utteranceId}.delivery.json`,
+      );
+      if (original?.deliveredAt && original.messageId) {
+        await this.store.write(record.callId, `${id}.delivery.json`, {
+          deliveredAt: original.deliveredAt,
+          messageId: original.messageId,
+        });
+        return this.store.utterance(record.callId, id);
+      }
+    }
     active(record);
     if (!utterance.transcribedAt || utterance.text === undefined)
       throw new Error("Save the transcript before delivery.");
-    const messageId = `voice:${record.callId}:${id}`;
+    // Recovery changes the call and utterance IDs, but keeps the provider's deduplication identity.
+    const messageId = `voice:${utterance.retryOf?.callId ?? record.callId}:${utterance.retryOf?.utteranceId ?? id}`;
     await this.store.write(record.callId, `${id}.delivery.json`, { messageId, preparedAt: now() });
     if (utterance.text.trim()) {
       let command = await this.store.read<
@@ -648,7 +756,14 @@ export class CallService {
         throw new Error("Saved voice delivery identity does not match its transcript.");
       await this.ports.dispatch(command);
     }
-    await this.store.write(record.callId, `${id}.delivery.json`, { deliveredAt: now(), messageId });
+    const receipt = { deliveredAt: now(), messageId };
+    if (utterance.retryOf)
+      await this.store.write(
+        utterance.retryOf.callId,
+        `${utterance.retryOf.utteranceId}.delivery.json`,
+        receipt,
+      );
+    await this.store.write(record.callId, `${id}.delivery.json`, receipt);
     await this.store.serial(record.callId, async () =>
       this.store.changed(await this.store.require(record.callId)),
     );
@@ -667,6 +782,7 @@ export class CallService {
     decodeCallRequest(input);
     if (input.action !== "call.speak") throw new Error("A speech request is required.");
     callIdentifier(input.callId);
+    await this.contact(input.callId, signal);
     const request = await this.store.serial(
       `call.speak:${input.callId}:${callIdentifier(input.speechId)}`,
       async () => this.prepareSpeech(await this.store.require(input.callId), input),
