@@ -79,6 +79,33 @@ describe("isProviderInstancePickerReady", () => {
 
     expect(entry && isProviderInstancePickerReady(entry)).toBe(true);
   });
+
+  it("keeps cached models selectable while an installed provider has a probe warning", () => {
+    const degraded = {
+      ...provider({
+        provider: ProviderDriverKind.make("codex"),
+        instanceId: "codex",
+        status: "warning",
+        models: [model("cached-codex")],
+      }),
+      auth: { status: "unknown" },
+    } as const satisfies ServerProvider;
+    const [entry] = deriveProviderInstanceEntries([degraded]);
+    expect(entry && isProviderInstancePickerReady(entry)).toBe(true);
+
+    for (const unavailable of [
+      { ...degraded, enabled: false },
+      { ...degraded, installed: false },
+      { ...degraded, availability: "unavailable" as const },
+      { ...degraded, auth: { status: "unauthenticated" as const } },
+      { ...degraded, models: [] },
+      { ...degraded, models: [model("custom-only", true)] },
+      { ...degraded, status: "error" as const },
+    ]) {
+      const [unavailableEntry] = deriveProviderInstanceEntries([unavailable]);
+      expect(unavailableEntry && isProviderInstancePickerReady(unavailableEntry)).toBe(false);
+    }
+  });
 });
 
 describe("resolveProviderCatalogAvailability", () => {

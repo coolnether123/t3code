@@ -266,24 +266,46 @@ export const mergeProviderSnapshot = (
   if (!previousProvider) {
     return nextProvider;
   }
+  const models = mergeProviderModels(nextProvider, previousProvider.models, nextProvider.models);
+  const useLastKnownCatalog =
+    nextProvider.enabled &&
+    nextProvider.installed &&
+    nextProvider.status === "error" &&
+    nextProvider.auth.status === "unknown" &&
+    nextProvider.models.every((model) => model.isCustom) &&
+    previousProvider.enabled &&
+    previousProvider.auth.status !== "unauthenticated" &&
+    models.some((model) => !model.isCustom);
+  const isPendingProbe =
+    nextProvider.enabled &&
+    !nextProvider.installed &&
+    nextProvider.status === "warning" &&
+    nextProvider.auth.status === "unknown" &&
+    models.some((model) => !model.isCustom);
   const savedAccount = carrySavedAntigravityAccount(previousProvider, nextProvider);
   const { message: _uncheckedMessage, ...nextWithoutMessage } = nextProvider;
   return {
     ...(savedAccount?.status === "ready" ? nextWithoutMessage : nextProvider),
     ...savedAccount,
-    models: mergeProviderModels(nextProvider, previousProvider.models, nextProvider.models),
+    models,
     ...(nextProvider.workspaceSnapshots !== undefined
       ? { workspaceSnapshots: nextProvider.workspaceSnapshots }
       : previousProvider.workspaceSnapshots !== undefined
         ? { workspaceSnapshots: previousProvider.workspaceSnapshots }
         : {}),
-    ...(shouldRetainMissingOpenCodeMetadata(nextProvider)
+    ...(shouldRetainMissingOpenCodeMetadata(nextProvider) || useLastKnownCatalog || isPendingProbe
       ? {
           slashCommands:
             nextProvider.slashCommands.length === 0
               ? previousProvider.slashCommands
               : nextProvider.slashCommands,
           skills: nextProvider.skills.length === 0 ? previousProvider.skills : nextProvider.skills,
+        }
+      : {}),
+    ...(useLastKnownCatalog
+      ? {
+          status: "warning" as const,
+          message: `${nextProvider.displayName ?? nextProvider.driver} status check failed; showing the last known models.`,
         }
       : {}),
   };

@@ -33,6 +33,24 @@ function entry(status: ServerProvider["status"], driver = "opencode") {
 }
 
 describe("shouldIncludeModelPickerOption", () => {
+  it("offers cached Codex models while its status probe is degraded", () => {
+    const cachedModel = {
+      slug: "cached-codex",
+      name: "Cached Codex",
+      isCustom: false,
+      capabilities: null,
+    };
+    const providerEntry = { ...entry("warning", "codex"), models: [cachedModel] };
+    expect(
+      shouldIncludeModelPickerOption({
+        entry: providerEntry,
+        option: cachedModel,
+        activeInstanceId: providerEntry.instanceId,
+        activeModel: "another-model",
+      }),
+    ).toBe(true);
+  });
+
   it.each(["ready", "error"] as const)(
     "never offers the internal Antigravity default marker as a model when %s",
     (status) => {

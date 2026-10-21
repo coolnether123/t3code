@@ -92,7 +92,15 @@ export function resolveProviderCatalogAvailability(input: {
  * status can remain in the streamed snapshot until reconciliation.
  */
 export function isProviderInstancePickerReady(entry: ProviderInstanceEntry): boolean {
-  return entry.enabled && entry.isAvailable && entry.status === "ready";
+  return (
+    entry.enabled &&
+    entry.isAvailable &&
+    (entry.status === "ready" ||
+      (entry.status === "warning" &&
+        entry.installed &&
+        entry.snapshot.auth.status !== "unauthenticated" &&
+        entry.models.some((model) => !model.isCustom)))
+  );
 }
 
 export function isProviderInstancePickerVisible(entry: ProviderInstanceEntry): boolean {
@@ -277,6 +285,7 @@ export function resolveSelectableProviderInstanceEntry(
     }
   }
   return (
+    entries.find((entry) => entry.status === "ready" && isProviderInstancePickerReady(entry)) ??
     entries.find(isProviderInstancePickerReady) ??
     entries.find((entry) => isSelectableProviderInstanceEntry(entry) && entry.status !== "error")
   );

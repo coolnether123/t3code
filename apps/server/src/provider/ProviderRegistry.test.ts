@@ -609,7 +609,107 @@ it.layer(
         }),
     );
 
-    it.effect("closes the app-server probe scope when provider status times out", () =>
+    it.effect(
+      "keeps the last successful Codex catalog and skills after repeated probe timeouts",
+      () =>
+        Effect.gen(function* () {
+          const identity = {
+            instanceId: ProviderInstanceId.make("codex"),
+            driver: ProviderDriverKind.make("codex"),
+          };
+          const successful = {
+            ...identity,
+            ...(yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+              Effect.succeed(
+                makeCodexProbeSnapshot({
+                  skills: [
+                    {
+                      name: "typescript",
+                      description: "TypeScript help",
+                      path: "/skills/typescript/SKILL.md",
+                      enabled: true,
+                    },
+                  ],
+                }),
+              ),
+            )),
+          };
+          // The same merge consumes both in-memory and persisted provider snapshots.
+          const cached = decodeServerProvider(encodeServerProvider(successful));
+          const statusFiber = yield* checkCodexProviderStatus(
+            defaultCodexSettings,
+            () => Effect.never,
+          ).pipe(Effect.forkChild);
+          yield* Effect.yieldNow;
+          yield* TestClock.adjust("21 seconds");
+          const timedOut = { ...identity, ...(yield* Fiber.join(statusFiber)) };
+          assert.deepStrictEqual(timedOut.models, []);
+          const transientFailure = {
+            ...identity,
+            ...(yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+              Effect.fail(
+                new CodexErrors.CodexAppServerTransportError({
+                  operation: "read-input-stream",
+                  cause: new Error("connection closed"),
+                }),
+              ),
+            )),
+          };
+
+          const pending = ProviderRegistry.mergeProviderSnapshot(cached, {
+            ...timedOut,
+            status: "warning",
+            installed: false,
+          });
+          assert.deepStrictEqual(pending.skills, successful.skills);
+          for (const previous of [
+            successful,
+            cached,
+            pending,
+            { ...cached, status: "error" as const },
+          ]) {
+            const retained = ProviderRegistry.mergeProviderSnapshot(previous, timedOut);
+            const repeated = ProviderRegistry.mergeProviderSnapshot(retained, timedOut);
+            const failed = ProviderRegistry.mergeProviderSnapshot(repeated, transientFailure);
+            for (const provider of [retained, repeated, failed]) {
+              assert.deepStrictEqual(provider.models, successful.models);
+              assert.deepStrictEqual(provider.skills, successful.skills);
+              assert.deepStrictEqual(provider.slashCommands, successful.slashCommands);
+              assert.strictEqual(provider.status, "warning");
+              assert.include(provider.message, "showing the last known models");
+            }
+            assert.strictEqual(retained.checkedAt, timedOut.checkedAt);
+            assert.strictEqual(failed.checkedAt, transientFailure.checkedAt);
+            const recovered = ProviderRegistry.mergeProviderSnapshot(repeated, {
+              ...successful,
+              skills: [],
+            });
+            assert.strictEqual(recovered.status, "ready");
+            assert.strictEqual(recovered.message, undefined);
+            assert.deepStrictEqual(recovered.skills, []);
+
+            const missing = {
+              ...identity,
+              ...(yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+                Effect.fail(
+                  new CodexErrors.CodexAppServerSpawnError({
+                    command: "codex app-server",
+                    cause: new Error("spawn ENOENT"),
+                  }),
+                ),
+              )),
+            };
+            const unavailable = ProviderRegistry.mergeProviderSnapshot(repeated, missing);
+            assert.strictEqual(unavailable.status, "error");
+            assert.strictEqual(unavailable.installed, false);
+            assert.deepStrictEqual(unavailable.models, []);
+            assert.deepStrictEqual(unavailable.skills, []);
+            assert.include(unavailable.message, "Binary path on the server");
+          }
+        }),
+    );
+
+    it.effect("closes the probe and keeps an empty catalog on timeout without prior success", () =>
       Effect.gen(function* () {
         const killCalls = yield* Ref.make(0);
         const statusFiber = yield* checkCodexProviderStatus(defaultCodexSettings).pipe(
@@ -623,6 +723,16 @@ it.layer(
 
         const status = yield* Fiber.join(statusFiber);
         assert.strictEqual(status.status, "error");
+        assert.deepStrictEqual(status.models, []);
+        assert.deepStrictEqual(status.skills, []);
+        assert.deepStrictEqual(
+          ProviderRegistry.mergeProviderSnapshot(undefined, {
+            ...status,
+            instanceId: ProviderInstanceId.make("codex"),
+            driver: ProviderDriverKind.make("codex"),
+          }).models,
+          [],
+        );
         assert.strictEqual(
           status.message,
           "Timed out while checking Codex app-server provider status.",
@@ -633,6 +743,55 @@ it.layer(
   });
 
   describe("ProviderRegistry.layer", () => {
+    it.each([
+      "claudeAgent",
+      "cursor",
+      "grok",
+      "opencode",
+      "pi",
+      "antigravity",
+      "acpRegistry",
+      "muse",
+    ])("retains the catalog and skills when an installed %s inventory probe fails", (driver) => {
+      const previous = {
+        instanceId: ProviderInstanceId.make(driver),
+        driver: ProviderDriverKind.make(driver),
+        displayName: driver,
+        status: "ready",
+        enabled: true,
+        installed: true,
+        auth: { status: "authenticated" },
+        checkedAt: "2026-10-21T07:00:00.000Z",
+        version: "1.0.0",
+        models: [{ slug: "discovered", name: "Discovered", isCustom: false, capabilities: null }],
+        skills: [{ name: "test", description: "Test skill", path: "/skills/test", enabled: true }],
+        slashCommands: [],
+      } as const satisfies ServerProvider;
+      const failed = {
+        ...previous,
+        status: "error",
+        auth: { status: "unknown" },
+        models: [],
+        skills: [],
+        message: "Provider probe timed out.",
+      } as const satisfies ServerProvider;
+      const retained = ProviderRegistry.mergeProviderSnapshot(previous, failed);
+      assert.deepStrictEqual(retained.models, previous.models);
+      assert.deepStrictEqual(retained.skills, previous.skills);
+      assert.strictEqual(retained.status, "warning");
+      assert.include(retained.message, "showing the last known models");
+
+      for (const unavailable of [
+        { ...failed, installed: false },
+        { ...failed, enabled: false, status: "disabled" as const },
+        { ...failed, auth: { status: "unauthenticated" as const } },
+      ]) {
+        const merged = ProviderRegistry.mergeProviderSnapshot(previous, unavailable);
+        assert.strictEqual(merged.status, unavailable.status);
+        assert.strictEqual(merged.message, unavailable.message);
+      }
+    });
+
     it("stores workspace skills, commands and options without changing machine metadata", () => {
       const provider = {
         instanceId: ProviderInstanceId.make("codex"),
@@ -1712,6 +1871,7 @@ it.layer(
       const signedIn = {
         instanceId: ProviderInstanceId.make("antigravity-personal"),
         driver: ProviderDriverKind.make("antigravity"),
+        displayName: "Antigravity",
         status: "ready",
         enabled: true,
         installed: true,
@@ -1776,6 +1936,8 @@ it.layer(
         } satisfies ServerProvider;
         assert.deepStrictEqual(ProviderRegistry.mergeProviderSnapshot(signedIn, failed), {
           ...failed,
+          status: "warning",
+          message: "Antigravity status check failed; showing the last known models.",
           auth: signedIn.auth,
           models: signedIn.models,
         });
