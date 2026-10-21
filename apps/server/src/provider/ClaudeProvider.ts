@@ -578,6 +578,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   }
 
   if (Option.isNone(versionProbe.success)) {
+    // A slow version probe on a loaded machine is transient; hiding every model for it strands the picker.
     return buildServerProvider({
       presentation: CLAUDE_PRESENTATION,
       enabled: claudeSettings.enabled,
@@ -586,10 +587,9 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       probe: {
         installed: true,
         version: null,
-        status: "error",
+        status: "warning",
         auth: { status: "unknown" },
-        message:
-          "Claude Agent CLI is installed but failed to run. Timed out while running command.",
+        message: "Claude Agent CLI was slow to respond; showing the known models.",
       },
     });
   }

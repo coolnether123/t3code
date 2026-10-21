@@ -3834,6 +3834,21 @@ it.layer(
   });
 
   describe("checkClaudeProviderStatus", () => {
+    it.effect("keeps Claude models selectable when the version probe times out", () =>
+      Effect.gen(function* () {
+        const killCalls = yield* Ref.make(0);
+        const fiber = yield* checkClaudeProviderStatus(defaultClaudeSettings).pipe(
+          Effect.provide(layerHangingScopedSpawner(killCalls)),
+          Effect.forkChild,
+        );
+        yield* TestClock.adjust("1 minute");
+        const status = yield* Fiber.join(fiber);
+        assert.strictEqual(status.status, "warning");
+        assert.strictEqual(status.installed, true);
+        assert.ok(status.models.some((model) => !model.isCustom));
+      }),
+    );
+
     it.effect("returns ready when claude is installed and authenticated", () =>
       Effect.gen(function* () {
         const status = yield* checkClaudeProviderStatus(
