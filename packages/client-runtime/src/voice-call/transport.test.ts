@@ -38,6 +38,31 @@ const input = {
 };
 
 describe("voice environment transport", () => {
+  it.effect("aborts a hung watch at 35 seconds with a retryable error", () =>
+    Effect.gen(function* () {
+      let enter!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        enter = resolve;
+      });
+      let fetchSignal: AbortSignal | undefined;
+      const fetcher: typeof fetch = async (_url, init) => {
+        fetchSignal = init!.signal!;
+        enter();
+        return new Promise((_, reject) =>
+          fetchSignal!.addEventListener("abort", () => reject(fetchSignal!.reason), { once: true }),
+        );
+      };
+      const request = yield* fetchEnvironmentSpeech({
+        ...input,
+        request: { action: "call.watch", callId: "synthetic" },
+        fetcher,
+      }).pipe(Effect.provide(layerRemoteHttpClient(fetcher)), Effect.flip, Effect.forkChild);
+      yield* Effect.promise(() => entered);
+      yield* TestClock.adjust("35 seconds");
+      expect(yield* Fiber.join(request)).toMatchObject({ recoverable: true });
+      expect(fetchSignal?.aborted).toBe(true);
+    }),
+  );
   it.effect("encodes and uploads a large PCM recording without changing its bytes", () =>
     Effect.gen(function* () {
       const audio = btoa("\0".repeat(48_000 * 2 * 90));

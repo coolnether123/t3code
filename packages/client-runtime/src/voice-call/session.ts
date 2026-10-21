@@ -10,6 +10,7 @@ import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import { isRetryableVoiceError, VoiceRequestError } from "./errors.ts";
 import { FILLER_DELAY_MS, TurnFiller } from "./filler.ts";
+import { voiceRequestTimeoutMs } from "./timeouts.ts";
 
 const now = () => DateTime.formatIso(Effect.runSync(DateTime.now));
 const time = () => Effect.runSync(Clock.currentTimeMillis);
@@ -50,6 +51,7 @@ export interface SavedCall {
   offsets: Record<string, number>;
   typed?: {
     id: string;
+    retryOf?: { callId: string; utteranceId: string };
     text: string;
     modelSelection: ModelSelection;
     operatorSelection?: ModelSelection;
@@ -171,11 +173,52 @@ export class ThreadVoiceSession {
     onAudio?: (chunk: { audio: string; sampleRate: number }) => void,
   ) {
     const request = { ...input, callId: this.saved!.callId };
-    const send = () => this.deps.request(request, signal, ...(onAudio ? ([onAudio] as const) : []));
+    const send = async () => {
+      if (request.callId !== this.saved?.callId)
+        throw new VoiceRequestError("The call changed. Your words remain queued.", false);
+      const controller = new AbortController();
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      let aborted: (() => void) | undefined;
+      try {
+        return await new Promise<SpeechResponse>((resolve, reject) => {
+          // @effect-diagnostics-next-line globalTimers:off -- Bound transports that may ignore cancellation.
+          timeout = setTimeout(
+            () => {
+              const error = new VoiceRequestError(
+                "Voice request timed out. Retrying; your words are saved.",
+                true,
+              );
+              controller.abort(error);
+              reject(error);
+            },
+            voiceRequestTimeoutMs(input.action, input.streamAudio),
+          );
+          aborted = () => {
+            controller.abort(signal.reason);
+            reject(signal.reason);
+          };
+          signal.addEventListener("abort", aborted, { once: true });
+          if (signal.aborted) aborted();
+          Promise.resolve()
+            .then(() => {
+              controller.signal.throwIfAborted();
+              return this.deps.request(
+                request,
+                controller.signal,
+                ...(onAudio ? ([onAudio] as const) : []),
+              );
+            })
+            .then(resolve, reject);
+        });
+      } finally {
+        clearTimeout(timeout);
+        if (aborted) signal.removeEventListener("abort", aborted);
+      }
+    };
     // A synthesis retry owns its audio nodes; control requests never cancel playback.
     const response =
       input.action === "call.speak" ? await send() : await this.retry(input.action, signal, send);
-    if (response.call) {
+    if (response.call && request.callId === this.saved?.callId) {
       this.status = response.call;
       if (
         this.active &&
@@ -226,12 +269,13 @@ export class ThreadVoiceSession {
     this.deps.audio.finish();
     this.playback.abort();
     this.watching.abort();
+    this.stopRenewal();
     const recoverable = isRetryableVoiceError(error);
     this.change(
       recoverable ? "reconnecting" : "error",
       this.audioNeedsTap
         ? "Audio paused by the phone. Stop other audio, then tap Retry."
-        : `${error instanceof Error ? error.message : "Voice request failed."} Check the message above, then retry saved speech. Queued audio without a PC acknowledgment remains on this device.`,
+        : `${error instanceof Error ? error.message : "Voice request failed."} Your unsent words are saved. Tap Retry.`,
     );
   }
   audioInterrupted() {
@@ -314,15 +358,27 @@ export class ThreadVoiceSession {
       await this.request({ action: "call.open", options: this.saved.options });
       if (!this.active) return;
       if (this.saved.closed || this.status?.closed) {
+        const oldCallId = this.saved.callId;
+        const delivered = new Set(
+          this.status?.utterances.filter((item) => item.deliveredAt).map((item) => item.id),
+        );
+        const pending = (this.saved.typed ?? []).filter((item) => !delivered.has(item.id));
         this.saved.closed = true;
         await this.request({ action: "call.close" });
         await this.flush(false);
-        await this.deps.persistence.clear();
         if (!this.active) return;
         this.saved = this.newCall({
           ...this.saved.options,
           modelSelection: this.modelSelection ?? this.saved.options.modelSelection,
         });
+        this.saved.typed = pending.map((item) => ({
+          ...item,
+          retryOf: item.retryOf ?? { callId: oldCallId, utteranceId: item.id },
+          id: this.deps.id(),
+        }));
+        this.opened = false;
+        this.status = undefined;
+        this.running = false;
         await this.persist();
         await this.request({ action: "call.open", options: this.saved.options });
         if (!this.active) return;
@@ -331,7 +387,7 @@ export class ThreadVoiceSession {
       await this.flushTyped();
       this.change(
         "preparing",
-        "Starting voice engines, about 3–5 minutes on a cold start. Waiting for the router to confirm they are ready.",
+        "Starting voice engines, about 3 to 5 minutes on a cold start. Waiting for the router to confirm they are ready.",
       );
       await this.request({
         action: "call.prepare",
@@ -362,6 +418,8 @@ export class ThreadVoiceSession {
       void this.watch();
     } catch (error) {
       this.failed(error);
+      if (error instanceof Error && /This call has ended/.test(error.message))
+        queueMicrotask(() => void this.resume(false));
     } finally {
       this.busy = false;
     }
@@ -408,15 +466,33 @@ export class ThreadVoiceSession {
     const item = this.saved?.typed?.[0];
     if (!item) return;
     this.typing = true;
+    const callId = this.saved!.callId;
     try {
       const response = await this.request({ action: "call.say", utteranceId: item.id, ...item });
+      if (callId !== this.saved?.callId) return;
+      if (response.call?.closed)
+        throw new Error("This call has ended. Reconnecting with your saved words.");
       if (!response.utterance?.deliveredAt) throw new Error("Typed turn was not acknowledged.");
       this.running = true;
       this.saved!.typed = this.saved!.typed!.filter((entry) => entry.id !== item.id);
       await this.persist();
       if (this.state !== "preparing") this.change("waiting");
+    } catch (error) {
+      if (callId !== this.saved?.callId) return;
+      if (error instanceof Error && /This call has ended/.test(error.message)) {
+        if (this.busy) throw error;
+        this.failed(new Error("Call ended. Reconnecting with your saved words."));
+        // The outbox stays on the old identity until resume reconciles delivery receipts.
+        queueMicrotask(() => void this.resume(false));
+        return;
+      }
+      throw error;
     } finally {
       this.typing = false;
+      if (this.active && callId !== this.saved?.callId) {
+        this.deps.audio.finishAtPause();
+        void this.flushTyped().catch((error) => this.failed(error));
+      }
     }
   }
   private startRenewal() {
@@ -450,7 +526,8 @@ export class ThreadVoiceSession {
         await this.request({ action: "call.watch", version: this.status?.version }, signal);
         if (!this.active) return;
         if (this.status?.closed) {
-          await this.stop();
+          this.failed(new Error("Call ended. Reconnecting with your saved words."));
+          void this.resume(false);
           return;
         }
         if (this.status && !this.status.ready)
@@ -599,17 +676,6 @@ export class ThreadVoiceSession {
     return capture;
   }
   private async flush(deliver = true, signal = this.abort.signal) {
-    if (!deliver && this.saved!.closed) {
-      for (const item of this.saved!.typed ?? []) {
-        const response = await this.request(
-          { action: "call.say", utteranceId: item.id, ...item },
-          signal,
-        );
-        if (!response.utterance) throw new Error("Typed archive was not acknowledged.");
-        this.saved!.typed = this.saved!.typed!.filter((entry) => entry.id !== item.id);
-        await this.persist();
-      }
-    }
     for (const recording of this.saved!.recordings) {
       if (recording.capturing) continue;
       await this.request(
@@ -631,7 +697,8 @@ export class ThreadVoiceSession {
         { action: "call.deliver", utteranceId: recording.id },
         signal,
       );
-      if (response.utterance?.text?.trim()) this.running = true;
+      if (!response.utterance?.deliveredAt) throw new Error("Voice turn was not acknowledged.");
+      if (response.utterance.text?.trim()) this.running = true;
       this.saved!.recordings = this.saved!.recordings.filter((entry) => entry.id !== recording.id);
       await this.persist();
     }
@@ -958,6 +1025,10 @@ export class ThreadVoiceSession {
       const close = this.request({ action: "call.close" }, AbortSignal.timeout(15_000));
       await Promise.all([close, this.capture]);
       await this.flush(false, AbortSignal.timeout(30_000));
+      if (this.saved?.typed?.length) {
+        this.change("idle", "Call ended. Unsent words are saved for your next call.");
+        return;
+      }
       await this.deps.persistence.clear();
       this.saved = undefined;
       this.status = undefined;

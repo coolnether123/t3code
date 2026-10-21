@@ -106,7 +106,100 @@ afterEach(async () => {
 });
 
 describe("durable thread voice session", () => {
-  it("archives recognized device words on hang-up before clearing the outbox", async () => {
+  it("times out a stuck watch after 35 seconds and retries the same call", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const entered = deferred<void>();
+    const retried = deferred<void>();
+    const original = f.request.getMockImplementation()!;
+    let watches = 0;
+    f.request.mockImplementation((input, signal, audio) => {
+      if (input.action === "call.watch") {
+        if (++watches === 1) entered.resolve();
+        else retried.resolve();
+        return new Promise(() => {});
+      }
+      return original(input, signal, audio);
+    });
+    await f.session.start(options, []);
+    await entered.promise;
+    await vi.advanceTimersByTimeAsync(35_000);
+    await f.retrying.promise;
+    await vi.advanceTimersByTimeAsync(250);
+    await retried.promise;
+    const requests = f.request.mock.calls.filter(([input]) => input.action === "call.watch");
+    expect(requests).toHaveLength(2);
+    expect(requests[0]![1].aborted).toBe(true);
+    expect(requests[1]![0].callId).toBe(requests[0]![0].callId);
+    expect(f.request.mock.calls.filter(([input]) => input.action === "call.open")).toHaveLength(1);
+  });
+  it("automatically moves an undelivered typed turn after a closed-call error and switches all request paths", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const original = f.request.getMockImplementation()!;
+    let ended = "";
+    let originalUtterance = "";
+    const delivered = deferred<void>();
+    const switched = deferred<void>();
+    const persist = f.persistence.write;
+    f.persistence.write = async (saved) => {
+      await persist(saved);
+      if (ended && saved.callId !== ended && saved.typed?.length === 0) delivered.resolve();
+    };
+    f.request.mockImplementation(async (input, signal, audio) => {
+      if (input.action === "call.watch" && ended && input.callId !== ended) switched.resolve();
+      if (input.action === "call.open" || input.action === "call.prepare")
+        return {
+          call: {
+            callId: input.callId,
+            threadId: options.threadId,
+            version: "1",
+            ready: input.callId !== ended,
+            closed: input.callId === ended,
+            inputMode: "device",
+            modelSelection: options.modelSelection,
+            steps: [],
+            utterances: [],
+            played: [],
+          },
+        };
+      if (input.action === "call.say" && !ended) {
+        ended = input.callId;
+        originalUtterance = input.utteranceId!;
+        throw new Error("This call has ended. Its saved speech is retained.");
+      }
+      return original(input, signal, audio);
+    });
+    Object.assign(f.audio, { captureText: async () => null });
+    await f.session.start(options, []);
+    await f.session.say("Do not lose this");
+    await delivered.promise;
+    await switched.promise;
+    const sent = f.request.mock.calls.filter(([input]) => input.action === "call.say");
+    expect(sent).toHaveLength(2);
+    expect(sent[1]![0]).toMatchObject({
+      callId: f.saved()?.callId,
+      text: "Do not lose this",
+      retryOf: { callId: ended, utteranceId: originalUtterance },
+    });
+    expect(sent[1]![0].utteranceId).not.toBe(originalUtterance);
+    const rejected = f.change.mock.calls.findIndex(([state]) => state === "error");
+    expect(f.change.mock.calls.slice(0, rejected).some(([state]) => state === "waiting")).toBe(
+      false,
+    );
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(
+      f.request.mock.calls
+        .filter(([input]) => input.action === "call.renew")
+        .every(([input]) => input.callId === f.saved()?.callId),
+    ).toBe(true);
+    expect(f.request.mock.calls.some(([input]) => input.action === "call.renew")).toBe(true);
+    const oldWatch = f.request.mock.calls.find(
+      ([input]) => input.action === "call.watch" && input.callId === ended,
+    );
+    expect(oldWatch?.[1].aborted).toBe(true);
+  });
+  it("retains recognized device words on hang-up for the next call", async () => {
     const f = fixture();
     const original = f.request.getMockImplementation()!;
     f.request.mockImplementation(async (input, signal, onAudio) =>
@@ -132,12 +225,8 @@ describe("durable thread voice session", () => {
     f.audio.close.mockImplementation(() => captured.resolve("Keep these words."));
     await f.session.start(options, []);
     await f.session.stop();
-    const actions = f.request.mock.calls.map(([input]) => input.action);
-    expect(actions.indexOf("call.close")).toBeLessThan(actions.indexOf("call.say"));
-    expect(f.request.mock.calls.find(([input]) => input.action === "call.say")?.[0].text).toBe(
-      "Keep these words.",
-    );
-    expect(f.saved()).toBeUndefined();
+    expect(f.request.mock.calls.some(([input]) => input.action === "call.say")).toBe(false);
+    expect(f.saved()).toMatchObject({ closed: true, typed: [{ text: "Keep these words." }] });
   });
   it("delivers device text once through call.say, pauses for the reply, then listens again", async () => {
     const f = fixture();
@@ -1492,8 +1581,15 @@ it("speaks a slow-start ready line only once within a call", async () => {
       ([input]) => input.action === "call.speak" && input.text === "I'm here.",
     ),
   ).toHaveLength(1);
+  const callId = f.saved()?.callId;
   f.session.audioInterrupted();
   await f.session.resume();
+  expect(f.saved()?.callId).toBe(callId);
+  expect(
+    f.request.mock.calls
+      .filter(([input]) => input.action === "call.prepare")
+      .every(([input]) => input.callId === callId),
+  ).toBe(true);
   expect(
     f.request.mock.calls.filter(
       ([input]) => input.action === "call.speak" && input.text === "I'm here.",
@@ -1501,7 +1597,7 @@ it("speaks a slow-start ready line only once within a call", async () => {
   ).toHaveLength(1);
 });
 
-it("archives queued typed words from a closed call before clearing its outbox", async () => {
+it("moves queued typed words from a closed call and delivers them on the replacement call", async () => {
   const f = fixture({
     callId: "closed-typed",
     closed: true,
@@ -1514,9 +1610,13 @@ it("archives queued typed words from a closed call before clearing its outbox", 
   const actions = f.request.mock.calls.map(([input]) => input.action);
   expect(actions.indexOf("call.close")).toBeLessThan(actions.indexOf("call.say"));
   expect(f.request.mock.calls.find(([input]) => input.action === "call.say")?.[0]).toMatchObject({
-    callId: "closed-typed",
-    utteranceId: "kept-words",
+    callId: f.saved()?.callId,
+    retryOf: { callId: "closed-typed", utteranceId: "kept-words" },
     text: "Keep this",
   });
   expect(f.saved()?.callId).not.toBe("closed-typed");
+  const sent = f.request.mock.calls.filter(([input]) => input.action === "call.say");
+  expect(sent).toHaveLength(1);
+  expect(sent[0]![0].utteranceId).not.toBe("kept-words");
+  expect(f.saved()?.typed).toEqual([]);
 });

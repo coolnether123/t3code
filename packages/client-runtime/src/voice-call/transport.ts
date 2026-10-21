@@ -1,4 +1,4 @@
-import { CALL_PREPARE_TIMEOUT_MS, SpeechResponse, SpeechRequest } from "@t3tools/contracts";
+import { SpeechResponse, SpeechRequest } from "@t3tools/contracts";
 import type { PreparedConnection } from "../connection/model.ts";
 import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import type { EnvironmentRegistry } from "../connection/registry.ts";
@@ -14,6 +14,7 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 import type { HttpClient } from "effect/http";
 import type { Atom } from "effect/reactivity";
 import { VoiceRequestError, voiceRequestError } from "./errors.ts";
+import { voiceRequestTimeoutMs } from "./timeouts.ts";
 export { VoiceRequestError } from "./errors.ts";
 
 const decode = Schema.decodeUnknownSync(Schema.fromJsonString(SpeechResponse));
@@ -41,12 +42,10 @@ export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(
     ...input,
     group: "orchestration",
     method: "POST",
-    timeoutMs:
-      input.request.action === "call.prepare" || input.request.action === "acquire"
-        ? CALL_PREPARE_TIMEOUT_MS + 60_000
-        : input.request.action === "call.speak" && input.request.streamAudio
-          ? 330_000
-          : 100_000,
+    timeoutMs: voiceRequestTimeoutMs(
+      input.request.action,
+      "streamAudio" in input.request && input.request.streamAudio,
+    ),
     url: (urls) => {
       voiceUrl = new URL("/api/voice", urls.shellSnapshot()).toString();
       return voiceUrl;

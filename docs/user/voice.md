@@ -23,6 +23,11 @@ open when a save fails. Reopening the same chat can recover saved speech after
 a reload. Ending an offline call retains its final recording for later PC upload,
 without submitting it as new work.
 
+Typed words and phone transcripts that were not delivered stay on this device,
+even after **End call**. Starting or recovering a call in the same chat sends
+them once. A brief disconnection keeps the current call; calls with no device
+contact for ten minutes end automatically.
+
 Navigating away detaches voice from the page. It does not hang up the saved call
 or stop the chat. Return to the same chat and choose **Call Otis** to resume or end
 it. Changing the normal model selector applies to your next recording. Queued
