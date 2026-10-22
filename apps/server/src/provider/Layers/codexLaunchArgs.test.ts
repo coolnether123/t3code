@@ -107,20 +107,26 @@ describe("parseCodexConfigOverrides", () => {
   });
 });
 
-
 describe("daemon browser isolation keys", () => {
   it("uses native JSON paths for simple quoted plugin and MCP identifiers", () => {
     const parsed = parseCodexConfigOverrides([
-      "-c", 'plugins."browser@openai-bundled".enabled=false',
-      "-c", 'plugins."chrome@openai-bundled".enabled=false',
-      "-c", 'mcp_servers."computer-use".enabled=false',
-      "-c", 'mcp_servers.work_browser.command="/fixture/node"',
+      "-c",
+      'plugins."browser@openai-bundled".enabled=false',
+      "-c",
+      'plugins."chrome@openai-bundled".enabled=false',
+      "-c",
+      'mcp_servers."computer-use".enabled=false',
+      "-c",
+      'mcp_servers.work_browser.command="/fixture/node"',
     ]);
-    NodeAssert.deepEqual(parsed, { _tag: "success", config: {
-      "plugins.browser@openai-bundled.enabled": false,
-      "plugins.chrome@openai-bundled.enabled": false,
-      "mcp_servers.computer-use.enabled": false,
-      "mcp_servers.work_browser.command": "/fixture/node",
-    }});
+    NodeAssert.deepEqual(parsed, {
+      _tag: "success",
+      config: {
+        "plugins.browser@openai-bundled.enabled": false,
+        "plugins.chrome@openai-bundled.enabled": false,
+        "mcp_servers.computer-use.enabled": false,
+        "mcp_servers.work_browser.command": "/fixture/node",
+      },
+    });
   });
 });

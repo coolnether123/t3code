@@ -1051,7 +1051,9 @@ const backupPath = async (path: string, destination: string): Promise<void> => {
   await copyIfPresent(path, destination);
 };
 
-export const localEnvironment = (environment: NodeJS.ProcessEnv = process.env): Record<string, string> => {
+export const localEnvironment = (
+  environment: NodeJS.ProcessEnv = process.env,
+): Record<string, string> => {
   const result: Record<string, string> = {};
   for (const key of [
     "HOME",

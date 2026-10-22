@@ -109,10 +109,7 @@ const parseConfigOverride = (
   // The daemon config map treats simple quoted IDs as literal quotes. CLI
   // flags need TOML quoting for IDs such as browser@openai-bundled; their
   // request-scoped JSON paths need the decoded ID instead.
-  const daemonKey = rawKey.replace(
-    /^(mcp_servers|plugins)\."([^".\\]+)"\.(.+)$/u,
-    "$1.$2.$3",
-  );
+  const daemonKey = rawKey.replace(/^(mcp_servers|plugins)\."([^".\\]+)"\.(.+)$/u, "$1.$2.$3");
   const parsed = parseConfigValue(rawOverride.slice(separator + 1));
   if (parsed._tag === "failure") return parsed;
   return {
