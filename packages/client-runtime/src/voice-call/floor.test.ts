@@ -2,6 +2,16 @@ import { describe, expect, it } from "vite-plus/test";
 import { FloorController, acceptsBargeIn, floorCue } from "./floor.ts";
 
 describe("floor control", () => {
+  it.each(["Check the build.", "I need the build.", "Open the calendar.", "Show me the results."])(
+    "allows continuation when recognition punctuates a brief request: %s",
+    (text) => {
+      const floor = new FloorController();
+      floor.update({ text, revision: 1, final: true }, 0);
+      expect(floor.tick(3000)).toBe(false);
+      floor.activity(3100);
+      expect(floor.tick(3500)).toBe(false);
+    },
+  );
   it("holds a short question for continuation and does not treat negated yields as permission to answer", () => {
     const floor = new FloorController();
     floor.update({ text: "What passed?", revision: 1, final: true }, 0);
@@ -55,7 +65,7 @@ describe("floor control", () => {
     floor.update({ text: "Read it, but", revision: 2, final: false }, 800);
     expect(floor.update({ text: "Read it.", revision: 1, final: true }, 900)).toBe(false);
     expect(floor.tick(4000)).toBe(false);
-    floor.update({ text: "Read it tomorrow.", revision: 3, final: true }, 5000);
+    floor.update({ text: "Please read it tomorrow at noon.", revision: 3, final: true }, 5000);
     expect(floor.tick(5699)).toBe(false);
     expect(floor.tick(5700)).toBe(true);
   });

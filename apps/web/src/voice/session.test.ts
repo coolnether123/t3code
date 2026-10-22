@@ -108,7 +108,7 @@ afterEach(async () => {
 
 describe("durable thread voice session", () => {
   it("keeps unreferenced wait clips out of a duplex microphone", async () => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const f = fixture();
     Object.assign(f.audio, { emittingSpeech: () => [] });
     await f.session.start(options, []);
@@ -354,6 +354,7 @@ describe("durable thread voice session", () => {
     expect(f.audio.prepare).toHaveBeenCalledWith(expect.any(AbortSignal), "device");
     expect(f.audio.capture).not.toHaveBeenCalled();
     captured.resolve("Read my agenda.");
+    captured = deferred();
     await f.waiting.promise;
     expect(f.request.mock.calls.filter(([input]) => input.action === "call.say")).toHaveLength(1);
     expect(f.request.mock.calls.find(([input]) => input.action === "call.say")?.[0].text).toBe(
@@ -361,15 +362,9 @@ describe("durable thread voice session", () => {
     );
     const playback = deferred<void>();
     const talking = deferred<void>();
-    const listening = deferred<void>();
     f.audio.play.mockImplementation(() => {
       talking.resolve();
       return playback.promise;
-    });
-    captured = deferred();
-    captureText.mockImplementation(() => {
-      listening.resolve();
-      return captured.promise;
     });
     f.session.observe(
       [{ id: "reply", role: "assistant", text: "Here is your agenda.", streaming: false }],
@@ -378,7 +373,6 @@ describe("durable thread voice session", () => {
     await talking.promise;
     expect(captureText).toHaveBeenCalledTimes(2);
     playback.resolve();
-    await listening.promise;
     expect(captureText).toHaveBeenCalledTimes(2);
     expect(
       f.request.mock.calls.some(
@@ -1071,11 +1065,18 @@ describe("durable thread voice session", () => {
     expect(f.request.mock.calls.some(([input]) => input.action === "call.renew")).toBe(false);
     expect(f.request.mock.calls.some(([input]) => input.action === "call.interrupt")).toBe(false);
   });
-  it("plays a queued reply at an idle microphone pause and removes journaled silence", async () => {
+  it("plays during microphone capture and removes journaled silence at the next input boundary", async () => {
     const f = fixture();
     const capture = deferred<{ audio: string; sampleRate: number }>();
     const journaled = deferred<void>();
-    f.audio.capture.mockImplementation(async (_signal, journal) => {
+    const nextStarted = deferred<void>();
+    const nextCapture = f.audio.capture.getMockImplementation()!;
+    let captures = 0;
+    f.audio.capture.mockImplementation(async (signal, journal, hooks) => {
+      if (captures++) {
+        nextStarted.resolve();
+        return nextCapture(signal, journal, hooks);
+      }
       await journal!({ audio: "AAA=", sampleRate: 16000 });
       journaled.resolve();
       return capture.promise;
@@ -1092,9 +1093,10 @@ describe("durable thread voice session", () => {
       [{ id: "reply", role: "assistant", text: "The task is open.", streaming: false }],
       true,
     );
-    expect(f.audio.play).not.toHaveBeenCalled();
-    capture.resolve({ audio: "", sampleRate: 16000 });
     await played.promise;
+    expect(f.audio.capture).toHaveBeenCalledOnce();
+    capture.resolve({ audio: "", sampleRate: 16000 });
+    await nextStarted.promise;
     expect(f.saved()!.recordings).toEqual([]);
     expect(f.request.mock.calls.some(([input]) => input.action === "call.upload")).toBe(false);
   });
@@ -1315,11 +1317,11 @@ describe("durable thread voice session", () => {
     finishPlayback.resolve();
     await delivered.promise;
     const actions = f.request.mock.calls.map(([input]) => input.action);
-    expect(actions.indexOf("call.played")).toBeLessThan(actions.indexOf("call.transcribe"));
-    expect(f.audio.capture).toHaveBeenCalledOnce();
+    expect(actions.indexOf("call.played")).toBeLessThan(actions.indexOf("call.deliver"));
+    expect(f.audio.finish).toHaveBeenCalledOnce();
   });
   it.each([true, false])(
-    "queues an incoming reply until the microphone reaches a pause, streaming=%s",
+    "holds an incoming reply while Jared has the floor until manual Send, streaming=%s",
     async (streaming) => {
       const f = fixture();
       const played = deferred<void>();
@@ -1327,6 +1329,9 @@ describe("durable thread voice session", () => {
         played.resolve();
       });
       await f.session.start(options, []);
+      const hooks = f.audio.capture.mock.calls[0]![2]!;
+      hooks.activity!(250);
+      hooks.transcript!({ text: "I was thinking, um...", revision: 1, final: false });
       f.session.observe(
         [
           {
@@ -1340,7 +1345,7 @@ describe("durable thread voice session", () => {
         true,
         "turn",
       );
-      expect(f.audio.finishAtPause).toHaveBeenCalledOnce();
+      expect(f.audio.finishAtPause).not.toHaveBeenCalled();
       expect(f.audio.finish).not.toHaveBeenCalled();
       expect(f.audio.play).not.toHaveBeenCalled();
       f.session.finish();
@@ -1694,6 +1699,7 @@ it("recovers a typed outbox with the same delivery ID", async () => {
 it("speaks a slow-start ready line only once within a call", async () => {
   vi.useFakeTimers();
   const f = fixture();
+  f.audio.finish.mockImplementation(f.idlePause);
   f.session.observe([], true);
   const preparing = deferred<void>();
   const release = deferred<SpeechResponse>();

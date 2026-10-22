@@ -254,7 +254,7 @@ export function createBrowserAudio(onInterrupted?: () => void) {
         signal.throwIfAborted();
       }
       let source = audioContext.createMediaStreamSource(stream);
-      const processor = audioContext.createScriptProcessor(4096, 1, 1);
+      const processor = audioContext.createScriptProcessor(1024, 1, 1);
       reconnectCapture = (replacement) => {
         source.disconnect();
         stream = replacement;
@@ -279,7 +279,24 @@ export function createBrowserAudio(onInterrupted?: () => void) {
       let prefixText = "";
       let latestText = "";
       let speechEpoch = 0;
+      let ended = false;
+      let automatic = false;
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      const partialAbort = new AbortController();
       const floor = hooks?.floor ?? new FloorController();
+      const scheduleEnd = () => {
+        clearTimeout(deadline);
+        if (floor.commitAt === undefined) return;
+        deadline = setTimeout(
+          () => {
+            if (floor.tick(performance.now())) {
+              automatic = true;
+              finishCapture?.();
+            }
+          },
+          Math.max(0, floor.commitAt - performance.now()),
+        );
+      };
       const recording = (from = 0, until = length) => {
         const bytes = new Uint8Array((until - from) * 2);
         const view = new DataView(bytes.buffer);
@@ -307,8 +324,8 @@ export function createBrowserAudio(onInterrupted?: () => void) {
         resetPartial = false;
         partialLength = sentLength;
         try {
-          const value = await hooks.partial(partial, ++revision, reset);
-          if (signal.aborted) return;
+          const value = await hooks.partial(partial, ++revision, reset, partialAbort.signal);
+          if (signal.aborted || ended) return;
           const combined: TranscriptRevision = {
             ...value,
             text: [prefixText, value.text].filter(Boolean).join(" "),
@@ -329,6 +346,7 @@ export function createBrowserAudio(onInterrupted?: () => void) {
           latestText = value.text;
           floor.update(combined, performance.now());
           if (epoch !== speechEpoch) floor.activity(performance.now());
+          scheduleEnd();
           if (sentLength >= audioContext.sampleRate * 45 && hooks.segment) {
             await journalTask;
             await hooks.segment(recording(0, sentLength));
@@ -352,6 +370,11 @@ export function createBrowserAudio(onInterrupted?: () => void) {
           finishCapture = () => {
             signal.removeEventListener("abort", abort);
             processor.onaudioprocess = null;
+            clearTimeout(deadline);
+            if (automatic) {
+              ended = true;
+              partialAbort.abort();
+            }
             resolve();
           };
           processor.onaudioprocess = (event) => {
@@ -384,6 +407,7 @@ export function createBrowserAudio(onInterrupted?: () => void) {
               void journalTask.catch(() => finishCapture?.());
             }
             if (rms > 0.015) {
+              clearTimeout(deadline);
               floor.activity(performance.now());
               hooks?.activity?.((burstSamples / audioContext.sampleRate) * 1000);
             }
@@ -398,7 +422,6 @@ export function createBrowserAudio(onInterrupted?: () => void) {
               });
             }
             if (
-              floor.tick(performance.now()) ||
               shouldEndTurn({
                 speechMs: (speechSamples / audioContext.sampleRate) * 1_000,
                 lastBurstMs: (lastBurstSamples / audioContext.sampleRate) * 1_000,
@@ -418,8 +441,11 @@ export function createBrowserAudio(onInterrupted?: () => void) {
           mute.connect(audioContext.destination);
         });
         await journalTask;
-        await partialTask;
-        if (!signal.aborted) await recognize();
+        // A committed revision is already complete; another network decode would delay yielding.
+        if (!automatic) {
+          await partialTask;
+          if (!signal.aborted) await recognize();
+        }
         // Finish captures the final buffer even when hang-up cancels network work immediately.
         return speechSeen || prefixText
           ? {
@@ -430,6 +456,9 @@ export function createBrowserAudio(onInterrupted?: () => void) {
             }
           : { audio: "", sampleRate: audioContext.sampleRate };
       } finally {
+        ended = true;
+        partialAbort.abort();
+        clearTimeout(deadline);
         reconnectCapture = undefined;
         finishCapture = undefined;
         processor.onaudioprocess = null;

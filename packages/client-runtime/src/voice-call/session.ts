@@ -32,6 +32,7 @@ export interface CaptureHooks {
     audio: { audio: string; sampleRate: number },
     revision: number,
     reset?: boolean,
+    signal?: AbortSignal,
   ): Promise<TranscriptRevision>;
   segment?(audio: { audio: string; sampleRate: number }): Promise<void>;
 }
@@ -673,14 +674,19 @@ export class ThreadVoiceSession {
         let segment = 0;
         const audio = await this.deps.audio.capture(this.abort.signal, journal, {
           ...this.captureHooks(),
-          partial: async (chunk, revision, resetTranscript) => {
-            const result = await this.request({
-              action: "call.partial",
-              utteranceId: id,
-              ...chunk,
-              revision,
-              resetTranscript,
-            });
+          partial: async (chunk, revision, resetTranscript, captureSignal) => {
+            const result = await this.request(
+              {
+                action: "call.partial",
+                utteranceId: id,
+                ...chunk,
+                revision,
+                resetTranscript,
+              },
+              captureSignal
+                ? AbortSignal.any([this.abort.signal, captureSignal])
+                : this.abort.signal,
+            );
             return {
               text: result.text ?? "",
               revision: result.revision ?? revision,
@@ -1031,7 +1037,7 @@ export class ThreadVoiceSession {
     if (!this.busy) void this.speak();
     if (!this.running && !this.queue.length)
       void this.flushTyped().catch((error) => this.failed(error));
-    if (!this.running && !this.queue.length && !this.capture && !this.busy) {
+    if (!this.running && !this.queue.length && !this.busy) {
       this.pendingFiller = undefined;
       if (!this.acknowledgment) this.filler.cancel();
       void this.acknowledgeUpdates().catch((error) => this.failed(error));

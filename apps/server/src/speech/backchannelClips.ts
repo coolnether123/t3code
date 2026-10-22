@@ -7,7 +7,10 @@ import { sha256 } from "./callStore.ts";
 /** Generate neutral clips once per voice/model and retain them outside Git. */
 export class BackchannelClips {
   private pending = new Map<string, Promise<SpeechResponse>>();
-  constructor(private readonly root: string) {}
+  private readonly root: string;
+  constructor(root: string) {
+    this.root = root;
+  }
 
   async record(callId: string, token: string, revision: number, at: string) {
     const path = NodePath.join(this.root, callId, "backchannels.jsonl");
@@ -49,7 +52,7 @@ export class BackchannelClips {
         cached.sampleRate <= 96000
       ) {
         const length = Buffer.from(cached.audio, "base64").length;
-        if (length > 0 && length % 2 === 0 && length <= cached.sampleRate * 2 * 3)
+        if (length > 0 && length % 2 === 0 && length <= cached.sampleRate * 2)
           return { audio: cached.audio, sampleRate: cached.sampleRate };
       }
     } catch (error) {
@@ -59,7 +62,7 @@ export class BackchannelClips {
     if (
       !clip.audio ||
       !clip.sampleRate ||
-      Buffer.from(clip.audio, "base64").length > clip.sampleRate * 2 * 3
+      Buffer.from(clip.audio, "base64").length > clip.sampleRate * 2
     )
       throw new Error("Listening acknowledgment is missing or too long.");
     await NodeFSP.mkdir(NodePath.dirname(path), { recursive: true });

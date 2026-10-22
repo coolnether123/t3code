@@ -57,6 +57,25 @@ export const layer = Layer.effectDiscard(
             replies.accept(next);
             yield* sessions.stopSession({ threadId: event.threadId }).pipe(Effect.forkScoped);
           }
+          if ("pending" in accepted && accepted.pending) {
+            // Wait for the assistant item boundary so a chunked legacy delegation can continue.
+            // A missing boundary must not leave a pure hold streaming until the provider timeout.
+            yield* Effect.gen(function* () {
+              yield* Effect.sleep(5_000);
+              const expired = holds.expire(event);
+              if (!expired) return;
+              const link = yield* Effect.tryPromise(() => calls.event(expired.event, reply.raw));
+              if (link?.role === "voice")
+                yield* threads.recordVoiceEvent(link, expired.event, reply.raw);
+              replies.accept(expired.event);
+              yield* sessions.stopSession({ threadId: event.threadId });
+            }).pipe(
+              Effect.catch((cause) =>
+                Effect.logError("Silent voice hold completion failed", cause),
+              ),
+              Effect.forkScoped,
+            );
+          }
         }).pipe(Effect.catch((cause) => Effect.logError("Voice session event failed", cause))),
       ),
       Effect.forkScoped,

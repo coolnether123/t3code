@@ -89,6 +89,41 @@ afterEach(() => {
 });
 
 describe("streamed browser PCM scheduling", () => {
+  it("commits a delivered explicit yield in 200 ms without another audio frame or decode", async () => {
+    vi.useFakeTimers();
+    const audio = fixture();
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue({
+      getTracks: () => [{ stop: vi.fn() }],
+      getAudioTracks: () => [],
+    } as unknown as MediaStream);
+    const signal = new AbortController().signal;
+    await audio.prepare(signal, "pc");
+    const partial = vi.fn(
+      async (_chunk: { audio: string; sampleRate: number }, revision: number) => ({
+        text: "You have the floor.",
+        revision,
+        final: false,
+      }),
+    );
+    let done = false;
+    const capture = audio.capture(signal, undefined, { partial }).then((value) => {
+      done = true;
+      return value;
+    });
+    for (let index = 0; index < 12; index++) {
+      contexts[0]!.processor.onaudioprocess!({
+        inputBuffer: { getChannelData: () => new Float32Array(1024).fill(0.1) },
+      });
+      await vi.advanceTimersByTimeAsync(64);
+    }
+    await vi.advanceTimersByTimeAsync(135);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(done).toBe(true);
+    expect((await capture).text).toBe("You have the floor.");
+    expect(partial).toHaveBeenCalledOnce();
+    audio.close();
+  });
   it("streams PCM deltas and keeps hesitant speech open until a revised explicit yield", async () => {
     vi.useFakeTimers();
     const audio = fixture();
@@ -123,7 +158,10 @@ describe("streamed browser PCM scheduling", () => {
     expect(done).toBe(false);
     expect(atob(partial.mock.calls[0]![0].audio)).toHaveLength(4096 * 3 * 2);
     hypothesis = "You can speak";
-    for (let i = 0; i < 3; i++) await frame(0.1);
+    for (let i = 0; i < 3; i++) {
+      if (done) break;
+      await frame(0.1);
+    }
     for (let i = 0; i < 4; i++) {
       if (done) break;
       await frame(0);

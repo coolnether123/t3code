@@ -26,8 +26,12 @@ export function floorCommitDelay(text: string) {
   const cue = floorCue(text);
   if (cue === "hold") return undefined;
   if (cue === "yield") return 200;
-  // A short context-dependent question often precedes a second question after a thinking pause.
-  if (/\?["')\]]*\s*$/.test(text) && (text.match(/\p{L}+/gu)?.length ?? 0) <= 3) return 3000;
+  const count = text.match(/\p{L}+/gu)?.length ?? 0;
+  // Recognition can remove a trailing hesitation and invent a full stop. Brief requests and
+  // stated wants need continuation time; punctuation alone is weak completion evidence here.
+  if (count <= 5 && /^(?:i (?:need|want)|check|read|look|open|find|show)\b/i.test(text.trim()))
+    return 3500;
+  if (/\?["')\]]*\s*$/.test(text) && count <= 3) return 3000;
   return 700;
 }
 

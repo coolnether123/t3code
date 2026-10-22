@@ -54,7 +54,7 @@ describe("device call recognition", () => {
     await vi.advanceTimersByTimeAsync(2500);
     expect(delivered).not.toHaveBeenCalled();
     recognitions[1]!.result("read the agenda.");
-    await vi.advanceTimersByTimeAsync(1050);
+    await vi.advanceTimersByTimeAsync(3500);
     await capture;
     expect(delivered).toHaveBeenCalledExactlyOnceWith("Check and read the agenda.");
   });
@@ -75,7 +75,7 @@ describe("device call recognition", () => {
     const capture = speech.capture(new AbortController().signal).then(delivered);
     recognitions[0]!.result("Read my agenda.");
     recognitions[0]!.result("Read my agenda.");
-    await vi.advanceTimersByTimeAsync(1050);
+    await vi.advanceTimersByTimeAsync(3500);
     await capture;
     expect(delivered).toHaveBeenCalledExactlyOnceWith("Read my agenda.");
     expect(recognitions[0]!.stop).toHaveBeenCalledOnce();
@@ -92,7 +92,7 @@ describe("device call recognition", () => {
       recognitions[0]!.onend?.();
       await vi.advanceTimersByTimeAsync(250);
       recognitions[1]!.result("the agenda.");
-      await vi.advanceTimersByTimeAsync(1050);
+      await vi.advanceTimersByTimeAsync(3500);
       await capture;
       expect(delivered).toHaveBeenCalledExactlyOnceWith(`Check ${word} the agenda.`);
     },

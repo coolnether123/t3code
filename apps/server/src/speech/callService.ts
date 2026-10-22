@@ -239,7 +239,13 @@ export class CallService {
       }
       return this.backchannels.get(input.text!, this.ports.ttsModel, () =>
         this.ports.speech(
-          { action: "speak", sessionId, model: this.ports.ttsModel, text: input.text },
+          // Breeze renders the hyphenated spelling as a longer utterance.
+          {
+            action: "speak",
+            sessionId,
+            model: this.ports.ttsModel,
+            text: input.text === "mm-hmm" ? "Mhm." : "mm",
+          },
           signal,
         ),
       );
@@ -438,7 +444,7 @@ export class CallService {
       throw new Error("Invalid incremental PCM chunk.");
     const key = `${input.callId}:${input.utteranceId}`;
     const previous = this.partials.get(key);
-    if (previous?.revision === input.revision) return previous.result;
+    if (previous && previous.revision === input.revision) return previous.result;
     if (previous && (input.revision! < previous.revision || previous.sampleRate !== rate))
       throw new Error("Stale or incompatible transcript revision.");
     if (previous && !input.resetTranscript && input.revision !== previous.revision + 1)

@@ -14,11 +14,36 @@ const delta = (text: string, id = "delta") =>
     createdAt: "2026-10-22T09:00:00Z",
     payload: { streamKind: "assistant_text", delta: text },
   });
+const completed = () =>
+  decodeEvent({
+    ...delta(""),
+    eventId: "item-final",
+    type: "item.completed",
+    payload: { itemType: "assistant_message", detail: "<otis-hold/>" },
+  });
 describe("silent hold completion", () => {
+  it("expires a missing item boundary, but invalidates the fallback on continuation or a new turn", () => {
+    const guard = new HoldTurnGuard();
+    const hold = delta("<otis-hold/>");
+    expect(guard.accept(hold, "<otis-hold/>")?.pending).toBe(true);
+    expect(guard.expire(hold)?.event.type).toBe("turn.completed");
+    expect(guard.expire(hold)).toBeUndefined();
+    const continuing = new HoldTurnGuard();
+    continuing.accept(hold, "<otis-hold/>");
+    continuing.accept(delta("<otis-delegate>"), "<otis-hold/><otis-delegate>");
+    expect(continuing.expire(hold)).toBeUndefined();
+    continuing.accept(hold, "<otis-hold/>");
+    continuing.accept(
+      decodeEvent({ ...hold, type: "turn.started", turnId: "next", payload: {} }),
+      "",
+    );
+    expect(continuing.expire(hold)).toBeUndefined();
+  });
   it("finishes on the complete marker without waiting 30 minutes for a provider terminal", () => {
     const guard = new HoldTurnGuard();
     expect(guard.accept(delta("<otis-ho"), "<otis-ho")?.stop).toBe(false);
-    const result = guard.accept(delta("ld/>", "last"), "<otis-hold/>");
+    expect(guard.accept(delta("ld/>", "last"), "<otis-hold/>")?.stop).toBe(false);
+    const result = guard.accept(completed(), "<otis-hold/>");
     expect(result?.stop).toBe(true);
     expect(result?.event).toMatchObject({
       type: "turn.completed",
@@ -35,6 +60,10 @@ describe("silent hold completion", () => {
         delta("<otis-hold/>"),
         '<otis-hold/><otis-delegate>{"intent":"Check"}</otis-delegate>',
       )?.stop,
+    ).toBe(false);
+    expect(
+      guard.accept(completed(), '<otis-hold/><otis-delegate>{"intent":"Check"}</otis-delegate>')
+        ?.stop,
     ).toBe(false);
   });
 });

@@ -134,6 +134,17 @@ describe("durable calls", () => {
     ).toHaveLength(1);
     expect(f.ports.dispatch).not.toHaveBeenCalled();
   });
+  it("rejects an overlong listening acknowledgment without creating a turn", async () => {
+    const f = await fixture();
+    vi.mocked(f.ports.speech).mockResolvedValue({
+      audio: Buffer.alloc(48_002).toString("base64"),
+      sampleRate: 24_000,
+    });
+    await expect(f.request({ action: "call.backchannel", text: "mm-hmm" })).rejects.toThrow(
+      "too long",
+    );
+    expect(f.ports.dispatch).not.toHaveBeenCalled();
+  });
   it("re-acquires TTS only and delivers after the lease lapses during a stalled watch", async () => {
     const f = await fixture();
     const entered = deferred<void>();
