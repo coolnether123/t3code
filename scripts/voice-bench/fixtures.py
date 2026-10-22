@@ -1,6 +1,7 @@
 """Private, immutable input corpus. Generated pauses have exact sample labels."""
 import hashlib
 import contextlib
+import copy
 import json
 import shutil
 import wave
@@ -33,6 +34,23 @@ def read_wav(path):
     with wave.open(str(path), "rb") as w:
         assert w.getnchannels() == 1 and w.getsampwidth() == 2
         return w.readframes(w.getnframes()), w.getframerate()
+
+
+def refresh_transcripts(root, manifest):
+    result=copy.deepcopy(manifest)
+    with lease(["whisper-large-v3-turbo"]) as (sid,cold):
+        for f in result["fixtures"]:
+            pcm=(root/f["file"]).read_bytes()
+            f["whisper"]=transcribe(sid,pcm,f["sampleRate"])
+            if f["synthetic"]:
+                for s in f["segments"]:
+                    lo,hi=round(s["startS"]*f["sampleRate"])*2,round(s["endS"]*f["sampleRate"])*2
+                    s["whisper"]=transcribe(sid,pcm[lo:hi],f["sampleRate"])
+            else:
+                f["segments"]=[{"startS":0,"endS":len(pcm)/2/f["sampleRate"],"whisper":f["whisper"]}]
+    result["sttLease"]=cold
+    result.pop("transcriptStatus",None)
+    return result
 
 
 def build(root, live_calls, voice, offline=False):
@@ -99,18 +117,6 @@ def build(root, live_calls, voice, offline=False):
     (root/"manifest.pending.json").write_text(json.dumps(pending,indent=2),encoding="utf-8")
     if offline:
         return pending
-    with lease(["whisper-large-v3-turbo"]) as (sid, cold):
-        for f in fixtures:
-            pcm = (root/f["file"]).read_bytes()
-            f["whisper"] = transcribe(sid, pcm, f["sampleRate"])
-            if f["synthetic"]:
-                for s in f["segments"]:
-                    lo, hi = round(s["startS"]*f["sampleRate"])*2, round(s["endS"]*f["sampleRate"])*2
-                    s["whisper"] = transcribe(sid, pcm[lo:hi], f["sampleRate"])
-            else:
-                # No word timestamps in the current PCM endpoint. Do not invent
-                # partial transcripts for the real recordings.
-                f["segments"] = [{"startS": 0, "endS": len(pcm)/2/f["sampleRate"], "whisper": f["whisper"]}]
-    manifest = {"schemaVersion": 1, "syntheticVoice": voice, "sttLease": cold, "fixtures": fixtures}
+    manifest=refresh_transcripts(root,pending)
     manifest_path.write_text(json.dumps(manifest, indent=2),encoding="utf-8")
     return manifest
