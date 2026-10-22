@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Probe Elora's two Millie forwards and record bounded recovery attempts."""
+"""Recover Elora's T3 link to Millie after two missed minute probes."""
 import argparse
 import fcntl
 import getpass
@@ -20,11 +20,8 @@ import urllib.request
 import uuid
 
 T3_LABEL = 'com.t3tools.macos-peer-tunnel'
-DECK_LABEL = 'com.christine.codexdeck.tunnel'
 GUARD_LABEL = 'com.t3tools.macos-peer-health'
 ROOT = Path.home() / '.local/share/t3-peer-health'
-DROP_MESSAGE = "T3's link to Millie dropped; I'm reconnecting it."
-SSH = ['/usr/bin/ssh', '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=4', 'millie-codex']
 LOG = logging.getLogger('t3-peer-health')
 
 
@@ -42,17 +39,6 @@ def advance(state, label, healthy, now):
         item['failures'] = 0
         return True
     return False
-
-
-def provider_alert(state, providers):
-    codex = [v for v in providers if v.get('driver') == 'codex' and v.get('enabled')]
-    errors = sorted(v['instanceId'] for v in codex if v.get('status') == 'error')
-    if errors:
-        entry = state.setdefault('providerError', {'requestKey': 't3-providers-' + str(uuid.uuid4()), 'notified': False})
-        return None if entry['notified'] else entry
-    if codex and all(v.get('status') == 'ready' for v in codex):
-        state.pop('providerError', None)
-    return None
 
 
 def candidate_orphans(rows, proxy):
@@ -86,50 +72,11 @@ def clean_orphans():
 def probe_t3():
     started = time.monotonic()
     try:
-        with urllib.request.urlopen('http://127.0.0.1:13773/api/v1/environment', timeout=5) as response:
+        with urllib.request.urlopen('http://127.0.0.1:13773/.well-known/t3/environment', timeout=5) as response:
             descriptor = json.load(response)
         return time.monotonic() - started <= 5 and descriptor.get('environmentId') == 'bffdc8c2-0b56-43ce-ac20-9ff998298220'
     except (OSError, ValueError):
         return False
-
-
-def probe_reverse_deck():
-    started = time.monotonic()
-    try:
-        reply = subprocess.run(SSH + ['/usr/bin/curl --silent --max-time 4 --output /dev/null --write-out "%{http_code}" http://127.0.0.1:8787/'], capture_output=True, text=True, timeout=5)
-        return reply.returncode == 0 and reply.stdout.strip() in ('200', '302', '401', '403') and time.monotonic() - started <= 5
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-
-
-def deck_note(text, key):
-    token = ''
-    try:
-        token = (Path.home() / '.codexdeck/agent_token').read_text().strip()
-    except OSError:
-        try:
-            token = json.loads((Path.home() / '.codexdeck/token').read_text()).get('agent', '')
-        except (OSError, ValueError):
-            pass
-    if not token:
-        return False
-    request = urllib.request.Request('http://127.0.0.1:8787/api/v1/otis_room/ask', data=json.dumps({'kind': 'note', 'text': text, 'request_key': key}).encode(), headers={'X-Deck-Token': token, 'Content-Type': 'application/json'})
-    try:
-        with urllib.request.urlopen(request, timeout=5) as response:
-            result = json.load(response)
-        return bool(result.get('ok') and result.get('id'))
-    except (OSError, ValueError):
-        return False
-
-
-def read_providers():
-    try:
-        reply = subprocess.run(SSH + ['/Users/millie/.local/bin/t3 agent request --base-dir /Users/millie/.t3'], input='{"kind":"providers"}\n', capture_output=True, text=True, timeout=15)
-        if reply.returncode == 0:
-            return json.loads(reply.stdout).get('providers')
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        pass
-    return None
 
 
 def save_state(state):
@@ -156,31 +103,18 @@ def cycle():
         except FileNotFoundError:
             state = {}
         now = time.time()
-        observations = {T3_LABEL: probe_t3(), DECK_LABEL: probe_reverse_deck()}
+        observations = {T3_LABEL: probe_t3()}
         for label, healthy in observations.items():
             if advance(state, label, healthy, now):
                 # Persist the attempted recovery before issuing a non-idempotent restart.
                 save_state(state)
                 reply = subprocess.run(['/bin/launchctl', 'kickstart', '-k', 'gui/%s/%s' % (os.getuid(), label)], capture_output=True, timeout=8)
                 LOG.warning('tunnel restart label=%s exit=%s', label, reply.returncode)
-        link = state[T3_LABEL]
-        if link['since'] is not None and now - link['since'] >= 300 and not link['notified']:
-            if deck_note(DROP_MESSAGE, link['requestKey']):
-                link['notified'] = True
-                LOG.warning('five minute link outage note delivered')
         clean_orphans()
-        providers = read_providers()
-        if providers is not None:
-            notice = provider_alert(state, providers)
-            if notice:
-                save_state(state)
-                if deck_note("Millie's T3 Codex providers report an error. Otis needs to inspect them.", notice['requestKey']):
-                    notice['notified'] = True
-                    LOG.warning('provider error note delivered to Otis room and retained event stream')
         state['observedAt'] = now
         state['observations'] = observations
         save_state(state)
-        print(json.dumps({'observedAt': now, 't3ForwardHealthy': observations[T3_LABEL], 'deckReverseHealthy': observations[DECK_LABEL], 'providersRead': providers is not None}))
+        print(json.dumps({'observedAt': now, 't3ForwardHealthy': observations[T3_LABEL]}))
 
 
 def install():
