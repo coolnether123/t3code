@@ -20,17 +20,43 @@ import {
   voiceDelegation,
   withoutCallControl,
   VOICE_ROLE_PROMPT,
+  voiceControls,
 } from "./operatorProtocol.ts";
 
 describe("silent call control", () => {
   it("keeps hold markers and their partial prefixes out of spoken prose", () => {
-    expect(withoutCallControl("<otis-hold/>")).toBe("");
-    expect(withoutCallControl("<otis-ho")).toBe("");
+    for (let length = 1; length <= "<otis-hold/>".length; length++)
+      expect(withoutCallControl("<otis-hold/>".slice(0, length))).toBe("");
     expect(withoutCallControl("It is < 5.")).toBe("It is < 5.");
     expect(withoutCallControl('Hello. <otis-delegate>{"intent":"Check"}</otis-delegate>')).toBe(
       "Hello. ",
     );
     expect(VOICE_ROLE_PROMPT).toContain("<otis-hold/>");
+  });
+  it("hides result, memory and lookup controls at every streaming prefix", () => {
+    for (const block of [
+      '<otis-results>{"ids":["receipt"]}</otis-results>',
+      '<otis-memory>{"summary":"A correction","openItems":[]}</otis-memory>',
+      '<otis-lookup>{"tool":"run_status"}</otis-lookup>',
+    ]) {
+      for (let length = 1; length <= block.length; length++)
+        expect(withoutCallControl(`Answer. ${block.slice(0, length)}`)).toBe("Answer. ");
+    }
+    expect(withoutCallControl("Still checking.")).toBe("");
+    expect(withoutCallControl('Checking. <otis-delegate>{"intent":"Read"}</otis-delegate>')).toBe(
+      "Checking. ",
+    );
+  });
+  it("rejects malformed, duplicate and unrestricted lookup requests", () => {
+    expect(() => voiceControls('<otis-lookup>{"tool":"shell"}</otis-lookup>')).toThrow();
+    expect(() => voiceControls('<otis-results>{"ids":[123]}</otis-results>')).toThrow();
+    expect(() => voiceControls("<otis-memory>{")).toThrow();
+    expect(() => voiceControls('<otis-results>{"ids":[]}</otis-results>'.repeat(2))).toThrow();
+    expect(() =>
+      voiceControls(
+        '<otis-lookup>{"tool":"run_status"}</otis-lookup><otis-delegate>{"intent":"Run"}</otis-delegate>',
+      ),
+    ).toThrow();
   });
 });
 
@@ -114,6 +140,278 @@ async function fixture() {
 }
 
 describe("call delegation", () => {
+  it("prepares the selected voice session on call open and shares an in-flight start", async () => {
+    const f = await fixture();
+    let started!: () => void;
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const originalStart = f.ports.start;
+    f.ports.start = vi.fn(async (input) => {
+      started();
+      await pending;
+      return originalStart(input);
+    });
+    await f.operator.reopen("chat", "new-call");
+    await ready;
+    const voice = f.startVoice("first-turn", "Hello");
+    release();
+    await voice;
+    await f.operator.drain();
+    expect(f.ports.start).toHaveBeenCalledTimes(1);
+    const timing = (await f.operator.read("chat"))!.voices[0]!;
+    expect(
+      Date.parse(timing.sessionReadyAt!) - Date.parse(timing.startedAt!),
+    ).toBeGreaterThanOrEqual(0);
+    expect(
+      Date.parse(timing.contextReadyAt!) - Date.parse(timing.sessionReadyAt!),
+    ).toBeGreaterThanOrEqual(0);
+  });
+  it("keeps conversation available while an operator job runs", async () => {
+    const f = await fixture();
+    await f.startOperator();
+    await f.startVoice("another-question", "What did I ask you to do, and which model is running?");
+    expect((await f.operator.read("chat"))!.jobs[0]?.phase).toBe("running");
+    expect(vi.mocked(f.ports.send).mock.calls.at(-1)![0].input).toContain('"phase":"running"');
+  });
+  it("carries an exact owning task and settled context into delegated work", async () => {
+    const f = await fixture();
+    const link = await f.startVoice();
+    const taskId = "agenda-task:3cb18c1dd2084f7798c1d2a9db8dc36a";
+    await f.operator.event(
+      f.event(link.sessionId, "turn.completed", "voice:call:utterance", { state: "completed" }),
+      `<otis-delegate>${JSON.stringify({ intent: "Check each build and write its evidence", taskId })}</otis-delegate>`,
+    );
+    await f.operator.drain();
+    const job = (await f.operator.read("chat"))!.jobs[0]!;
+    expect(job.taskId).toBe(taskId);
+    expect(operatorPrompt(job)).toContain(taskId);
+    expect(operatorPrompt(job)).toContain(
+      "Record results and decisions on the owning Otis agenda task",
+    );
+    expect(operatorPrompt(job)).toContain("The build in this workspace.");
+  });
+  it("looks up saved run status directly with no new operator job", async () => {
+    const f = await fixture();
+    const job = await f.startOperator();
+    const link = await f.startVoice("status-question", "Has the build finished?");
+    await f.operator.event(
+      f.event(link.sessionId, "turn.completed", "status-question", { state: "completed" }),
+      '<otis-lookup>{"tool":"run_status"}</otis-lookup>',
+    );
+    await f.operator.drain();
+    expect((await f.operator.read("chat"))!.jobs).toHaveLength(1);
+    expect(vi.mocked(f.ports.send).mock.calls.at(-1)![0]).toMatchObject({
+      threadId: link.sessionId,
+      modelSelection: models.voice,
+      input: expect.stringContaining(job.id),
+    });
+    await f.operator.event(f.event(link.sessionId, "turn.started", "status-answer"));
+    await f.operator.event(
+      f.event(link.sessionId, "turn.completed", "status-answer", { state: "completed" }),
+      "It is running; no result has arrived.",
+    );
+    expect(await f.operator.voiceSession("chat")).toBeUndefined();
+  });
+  it("enforces one lookup and passes a short abort deadline to agenda reads", async () => {
+    const f = await fixture();
+    f.ports.lookup = vi.fn(async (_input, signal) => {
+      expect(signal.aborted).toBe(false);
+      return { tasks: [], partial: false };
+    });
+    const link = await f.startVoice("lookup", "Find the voice task.");
+    const block = '<otis-lookup>{"tool":"agenda_lookup","query":"voice"}</otis-lookup>';
+    await f.operator.event(
+      f.event(link.sessionId, "turn.completed", "lookup", { state: "completed" }),
+      block,
+    );
+    await f.operator.drain();
+    await f.operator.event(f.event(link.sessionId, "turn.started", "lookup-answer"));
+    await f.operator.event(
+      f.event(link.sessionId, "turn.completed", "lookup-answer", { state: "completed" }),
+      block,
+    );
+    await f.operator.drain();
+    expect(f.ports.lookup).toHaveBeenCalledTimes(1);
+    expect(await f.operator.voiceSession("chat")).toBeUndefined();
+    expect((await f.operator.read("chat"))!.jobs).toHaveLength(0);
+  });
+  it("cancels a pending lookup without waiting for its service or sending a stale answer", async () => {
+    const f = await fixture();
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let lookupSignal: AbortSignal | undefined;
+    f.ports.lookup = vi.fn(async (_input, signal) => {
+      lookupSignal = signal;
+      started();
+      return new Promise<never>(() => {});
+    });
+    const link = await f.startVoice("lookup", "Find the voice task.");
+    await f.operator.event(
+      f.event(link.sessionId, "turn.completed", "lookup", { state: "completed" }),
+      '<otis-lookup>{"tool":"agenda_lookup","query":"voice"}</otis-lookup>',
+    );
+    await ready;
+    await f.operator.interruptVoice("chat");
+    await f.operator.drain();
+    expect(lookupSignal?.aborted).toBe(true);
+    expect(f.ports.send).toHaveBeenCalledTimes(1);
+    await expect(f.startVoice("new-question", "Use the corrected branch.")).resolves.toBeDefined();
+  });
+  it("ends a lookup at the execution deadline without a sleep or service completion", async () => {
+    const f = await fixture();
+    const deadline = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(deadline.signal);
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    f.ports.lookup = async () => {
+      started();
+      return new Promise<never>(() => {});
+    };
+    try {
+      const link = await f.startVoice("lookup", "Find the voice task.");
+      await f.operator.event(
+        f.event(link.sessionId, "turn.completed", "lookup", { state: "completed" }),
+        '<otis-lookup>{"tool":"agenda_lookup","query":"voice"}</otis-lookup>',
+      );
+      await ready;
+      deadline.abort();
+      await f.operator.drain();
+      expect(timeout).toHaveBeenCalledWith(2500);
+      expect(vi.mocked(f.ports.send).mock.calls.at(-1)![0].input).toContain(
+        "Its result is unknown.",
+      );
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+  it("does not delegate an obsolete answer after interruption", async () => {
+    const f = await fixture();
+    const link = await f.startVoice("old-question", "Check the old branch");
+    await f.operator.interruptVoice("chat");
+    await f.startVoice("corrected-question", "I meant the voice branch");
+    await f.operator.event(
+      f.event(link.sessionId, "turn.completed", "old-question", { state: "completed" }),
+      '<otis-delegate>{"intent":"Check the old branch"}</otis-delegate>',
+    );
+    await f.operator.drain();
+    const chat = (await f.operator.read("chat"))!;
+    expect(chat.jobs).toHaveLength(0);
+    expect(chat.voices.at(-1)?.finished).toBe(false);
+  });
+  it("records covered results only, acknowledges playback once and carries summary across calls", async () => {
+    const f = await fixture();
+    await f.operator.update("chat", "job", "result", "done", "Build passed.");
+    await f.operator.update("chat", "other-job", "other", "done", "Deployment pending.");
+    const link = await f.startVoice("ordinary-answer", "Which build and deployment checks passed?");
+    await f.operator.heard("chat", ["result"]);
+    expect((await f.operator.read("chat"))!.updates[0]?.heardAt).toBeUndefined();
+    await f.operator.event(
+      f.event(link.sessionId, "turn.completed", "ordinary-answer", { state: "completed" }),
+      'The build passed. Deployment is pending.<otis-results>{"ids":["result","invented-id"]}</otis-results><otis-memory>{"summary":"Jared chose the voice branch, not main.","openItems":["Verify deployment"]}</otis-memory>',
+    );
+    let chat = (await f.operator.read("chat"))!;
+    expect(chat.updates[0]).toMatchObject({
+      announcementTurnId: "ordinary-answer",
+      offeredAt: expect.any(String),
+    });
+    expect(chat.updates[0]?.heardAt).toBeUndefined();
+    expect(chat.updates[1]?.announcementTurnId).toBeUndefined();
+    await f.operator.heard("chat", ["result", "other"]);
+    chat = (await f.operator.read("chat"))!;
+    expect(chat.updates[0]?.spokenAt).toBe(chat.updates[0]?.heardAt);
+    expect(chat.updates[0]?.heardAt).toBeDefined();
+    expect(chat.updates[1]?.heardAt).toBeUndefined();
+    const reopened = new CallOperator(f.store);
+    reopened.bind(f.ports);
+    await reopened.reopen("chat", "next-call");
+    await reopened.drain();
+    await reopened.voice({
+      threadId: "chat",
+      messageId: "next",
+      text: "Where were we?",
+      selection: models.voice,
+    });
+    expect(vi.mocked(f.ports.send).mock.calls.at(-1)![0].input).toContain(
+      "Jared chose the voice branch, not main.",
+    );
+    expect(vi.mocked(f.ports.send).mock.calls.at(-1)![0].input).toContain("Verify deployment");
+  });
+  it("releases an interrupted result and never counts a hold as spoken", async () => {
+    const f = await fixture();
+    await f.operator.update("chat", "job", "result", "done", "Build passed.");
+    await f.operator.announce("chat", "call");
+    const command = vi.mocked(f.ports.dispatch).mock.calls.at(-1)![0];
+    if (command.type !== "thread.turn.start") throw new Error("Expected announcement");
+    const link = await f.startVoice(command.message.messageId, command.message.text);
+    await f.operator.event(
+      f.event(link.sessionId, "turn.completed", command.message.messageId, {
+        state: "interrupted",
+      }),
+      'Build passed.<otis-results>{"ids":["result"]}</otis-results>',
+    );
+    await f.operator.heard("chat", ["result"]);
+    expect((await f.operator.read("chat"))!.updates[0]?.announcementId).toBeUndefined();
+    expect((await f.operator.read("chat"))!.updates[0]?.heardAt).toBeUndefined();
+    await f.startVoice("hold", "Hang on");
+    await f.operator.event(
+      f.event(link.sessionId, "turn.completed", "hold", { state: "completed" }),
+      '<otis-hold/><otis-results>{"ids":["result"]}</otis-results>',
+    );
+    expect((await f.operator.read("chat"))!.updates[0]?.offeredAt).toBeUndefined();
+    await expect(f.operator.announce("chat", "call")).resolves.toBe(true);
+    const retry = vi.mocked(f.ports.dispatch).mock.calls.at(-1)![0];
+    if (retry.type !== "thread.turn.start") throw new Error("Expected announcement retry");
+    expect(retry.message.messageId).not.toBe(command.message.messageId);
+    await expect(f.startVoice(retry.message.messageId, retry.message.text)).resolves.toBeDefined();
+  });
+  it("releases a completed but unplayed result when playback is interrupted", async () => {
+    const f = await fixture();
+    await f.operator.update("chat", "job", "result", "done", "Build passed.");
+    const link = await f.startVoice("answer", "What happened?");
+    await f.operator.event(
+      f.event(link.sessionId, "turn.completed", "answer", { state: "completed" }),
+      'Build passed.<otis-results>{"ids":["result"]}</otis-results>',
+    );
+    expect((await f.operator.read("chat"))!.updates[0]?.announcementId).toBe("answer");
+    await f.operator.interruptVoice("chat");
+    expect((await f.operator.read("chat"))!.updates[0]?.announcementId).toBeUndefined();
+    await expect(f.operator.announce("chat", "call")).resolves.toBe(true);
+  });
+  it("offers useful findings once while suppressing empty checking and duplicate findings", async () => {
+    const f = await fixture();
+    const job = await f.startOperator();
+    for (const text of [
+      "Still checking.",
+      "The failure is in the speech adapter.",
+      "The failure is in the speech adapter.",
+    ]) {
+      await f.operator.event(
+        f.event(job.sessionId!, "item.completed", "operator-0", {
+          itemType: "assistant_message",
+          status: "completed",
+          detail: `<otis-status>${JSON.stringify({ status: "progress", text })}</otis-status>`,
+        }),
+      );
+    }
+    await expect(f.operator.announce("chat", "call")).resolves.toBe(true);
+    await expect(f.operator.announce("chat", "call")).resolves.toBe(false);
+    const chat = (await f.operator.read("chat"))!;
+    expect(
+      chat.updates.filter((update) => update.text === "The failure is in the speech adapter."),
+    ).toHaveLength(1);
+    expect(
+      chat.updates.find((update) => update.text === "Still checking.")?.announcementId,
+    ).toBeUndefined();
+  });
   it("delegates even when the voice also emits a hold marker", async () => {
     const f = await fixture();
     const link = await f.startVoice();
@@ -501,7 +799,7 @@ describe("call delegation", () => {
       await reopened.event(f.event(voice.sessionId, "turn.started", command.message.messageId));
       const providerInput = vi.mocked(f.ports.send).mock.calls.at(-1)![0].input;
       const announcement = providerInput?.split("Operator update at this pause:\n")[1];
-      expect(announcement).toContain(JSON.stringify([{ status, text }]));
+      expect(announcement).toContain(JSON.stringify([{ id: "result", status, text }]));
       expect(announcement).toContain("Do not delegate these updates back to the operator.");
       expect(announcement).not.toContain("Another result.");
       expect(providerInput).toContain("The build in this workspace.");
@@ -509,7 +807,7 @@ describe("call delegation", () => {
         f.event(voice.sessionId, "turn.completed", command.message.messageId, {
           state: "completed",
         }),
-        '<otis-delegate>{"intent":"Must not delegate announcements"}</otis-delegate>',
+        `${text}<otis-results>{"ids":["result"]}</otis-results>`,
       );
       await reopened.drain();
       expect((await reopened.read("chat"))!.jobs).toHaveLength(0);
@@ -628,6 +926,21 @@ describe("call delegation", () => {
         modelSelection: models.voice,
       }),
     );
+    const command = vi.mocked(f.ports.dispatch).mock.calls.at(-1)![0];
+    if (command.type !== "thread.turn.start") throw new Error("Expected announcement");
+    await reopened.voice({
+      threadId: "chat",
+      messageId: command.message.messageId,
+      text: command.message.text,
+      selection: models.voice,
+    });
+    const voiceLink = (await reopened.read("chat"))!.links.find((entry) => entry.role === "voice")!;
+    await reopened.event(f.event(voiceLink.sessionId, "turn.started", "result-turn"));
+    const ids = updates.filter((update) => update.status === "done").map((update) => update.id);
+    await reopened.event(
+      f.event(voiceLink.sessionId, "turn.completed", "result-turn", { state: "completed" }),
+      `Build passed.<otis-results>${JSON.stringify({ ids })}</otis-results>`,
+    );
     await reopened.heard(
       "chat",
       updates.filter((update) => update.status === "done").map((update) => update.id),
@@ -638,15 +951,50 @@ describe("call delegation", () => {
   });
 });
 
-describe("quiet call notices", () => {
-  it("keeps setup, started, progress, done and heard receipts out of chat", async () => {
+describe("call notices", () => {
+  it("finalizes operator work despite a failed thread write and retries the saved notice on the next call", async () => {
+    const f = await fixture();
+    const job = await f.startOperator();
+    vi.mocked(f.ports.dispatch).mockRejectedValueOnce(new Error("Synthetic thread write failure"));
+    await f.operator.event(
+      f.event(job.sessionId!, "item.completed", "operator-0", {
+        itemType: "assistant_message",
+        status: "completed",
+        detail: '<otis-status>{"status":"done","text":"Build passed."}</otis-status>',
+      }),
+    );
+    await f.operator.event(
+      f.event(job.sessionId!, "turn.completed", "operator-0", { state: "completed" }),
+    );
+    await f.operator.drain();
+    const before = (await f.operator.read("chat"))!;
+    expect(before.jobs[0]?.phase).toBe("done");
+    expect(
+      before.updates.find((update) => update.status === "done")?.threadRecordedAt,
+    ).toBeUndefined();
+    const reopened = new CallOperator(f.store);
+    reopened.bind(f.ports);
+    await reopened.reopen("chat", "next-call");
+    await reopened.drain();
+    const after = (await reopened.read("chat"))!.updates.find((update) => update.status === "done");
+    expect(after?.threadRecordedAt).toBeDefined();
+    expect(after?.heardAt).toBeUndefined();
+    expect(vi.mocked(f.ports.dispatch).mock.calls[1]![0]).toEqual(
+      vi.mocked(f.ports.dispatch).mock.calls[0]![0],
+    );
+  });
+  it("records results in chat and refuses unplayed heard receipts", async () => {
     const f = await fixture();
     await f.operator.configure("chat", { ...models, voice: { ...models.voice, model: "other" } });
     for (const status of ["started", "progress", "done"] as const)
       await f.operator.update("chat", "job", status, status, "Build passed");
     await f.operator.heard("chat", ["done"]);
-    expect(f.ports.dispatch).not.toHaveBeenCalled();
-    expect((await f.operator.read("chat"))?.updates.at(-1)?.heardAt).toBeDefined();
+    expect(f.ports.dispatch).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(f.ports.dispatch).mock.calls[0]![0]).toMatchObject({
+      type: "thread.activity.append",
+      activity: { summary: "Build passed" },
+    });
+    expect((await f.operator.read("chat"))?.updates.at(-1)?.heardAt).toBeUndefined();
   });
   it("names the pending approval and asks for approval in chat", async () => {
     const f = await fixture();

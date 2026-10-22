@@ -441,6 +441,11 @@ export interface ProviderAdapterV2TurnInput {
   readonly appContext?: ReadonlyArray<{ readonly key: string; readonly text: string }>;
 }
 
+export type ProviderAdapterV2PrepareThreadInput = Pick<
+  ProviderAdapterV2TurnInput,
+  "threadId" | "providerThread" | "modelSelection" | "runtimePolicy"
+>;
+
 export interface ProviderAdapterV2SteerInput {
   readonly threadId: ThreadId;
   readonly runId: RunId;
@@ -586,6 +591,10 @@ export interface ProviderAdapterV2SessionRuntime {
   readonly ensureThread: (
     input: ProviderAdapterV2EnsureThreadInput,
   ) => Effect.Effect<OrchestrationV2ProviderThread, ProviderAdapterV2Error>;
+  /** Open an idle provider query without offering a message or creating a turn. */
+  readonly prepareThread?: (
+    input: ProviderAdapterV2PrepareThreadInput,
+  ) => Effect.Effect<void, ProviderAdapterV2Error>;
   readonly resumeThread: (input: {
     readonly providerThread: OrchestrationV2ProviderThread;
     readonly threadId?: ThreadId;

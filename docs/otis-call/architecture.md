@@ -12,7 +12,18 @@ children. Hanging up never stops chat work. Speak natural prose, never tool JSON
 The parent directed complete removal of the additional voice confirmation gate.
 
 Phase 2 adds linked voice and operator sessions behind the same visible thread.
-Voice is tool-free; the operator keeps ordinary harness permissions.
+Native voice tools remain disabled. A server-enforced control protocol admits one
+read of saved run status or the local agenda per turn, with a 2.5 second execution
+deadline and cancellation. Other tool work goes to the operator with ordinary
+harness permissions. This keeps ambient MCP configuration and hooks out of voice
+sessions. Claude admits this isolation; other adapters remain operator-only until
+they can enforce it.
+Opening a call prepares the idle native query without offering a message or
+creating a turn, so CLI initialization overlaps listening. Merely allocating a
+provider thread does not start that query. Tool-free voice text deltas use the
+existing 50 ms coalescer, so prose can reach speech before trailing control
+blocks finish. Completed snapshots keep the same message identity; controls
+still execute only after a successful completed turn.
 `apps/server/src/speech/callOperator.ts` owns durable links, delegation, typed
 updates and heard records. Operator activity projects into the visible chat.
 Hanging up releases speech while provider work continues. Model pairs persist
@@ -23,9 +34,14 @@ speech/archive foundation.
 
 Announcement prompts use saved operator updates inside the linked voice session.
 Their internal triggers add no chat messages or notification items. Background
-progress stays in the compact call bar and durable call-store updates. Only
-questions that ask Jared to act enter chat as attention notices. Heard receipts
-stay in the call store; natural voice replies stay visible in the conversation.
+progress stays in the compact call bar and durable call-store updates. Results
+and useful findings also enter the thread as notices. The model names the receipt
+IDs covered by a reply. Unrecorded thread notices retry from durable receipts with
+the same command identity on the next update, voice turn or call.
+Only the covered IDs become eligible for a full-playback heard
+acknowledgment. Interrupted or omitted results remain unheard. A compact summary
+and open items persist per thread for later calls. Generated text and interrupted
+audio-sample receipts never establish an exact heard word offset.
 
 The active web call stays in a compact bar beside the conversation. Settings use
 T3's existing popover portal and collision positioning, with dynamic viewport

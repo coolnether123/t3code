@@ -2967,6 +2967,7 @@ function buildAssistantArtifacts(input: {
   readonly ordinal: number;
   readonly startedAt: DateTime.Utc;
   readonly completedAt: DateTime.Utc;
+  readonly streaming?: boolean;
 }): {
   readonly node: OrchestrationV2ExecutionNode;
   readonly message: OrchestrationV2ConversationMessage;
@@ -2998,7 +2999,7 @@ function buildAssistantArtifacts(input: {
       parentNodeId: input.turnInput.rootNodeId,
       rootNodeId: input.turnInput.rootNodeId,
       kind: "assistant_message",
-      status: "completed",
+      status: input.streaming ? "running" : "completed",
       countsForRun: false,
       providerThreadId: input.turnInput.providerThread.id,
       providerTurnId: input.providerTurnId,
@@ -3006,7 +3007,7 @@ function buildAssistantArtifacts(input: {
       runtimeRequestId: null,
       checkpointScopeId: null,
       startedAt: input.startedAt,
-      completedAt: input.completedAt,
+      completedAt: input.streaming ? null : input.completedAt,
     },
     message: {
       createdBy: "agent",
@@ -3018,8 +3019,8 @@ function buildAssistantArtifacts(input: {
       role: "assistant",
       text: input.text,
       attachments: [],
-      streaming: false,
-      createdAt: input.completedAt,
+      streaming: input.streaming ?? false,
+      createdAt: input.streaming === undefined ? input.completedAt : input.startedAt,
       updatedAt: input.completedAt,
     },
     turnItem: {
@@ -3032,15 +3033,15 @@ function buildAssistantArtifacts(input: {
       nativeItemRef,
       parentItemId: null,
       ordinal: input.ordinal,
-      status: "completed",
+      status: input.streaming ? "running" : "completed",
       title: null,
       startedAt: input.startedAt,
-      completedAt: input.completedAt,
+      completedAt: input.streaming ? null : input.completedAt,
       updatedAt: input.completedAt,
       type: "assistant_message",
       messageId,
       text: input.text,
-      streaming: false,
+      streaming: input.streaming ?? false,
     },
   };
 }
@@ -3100,6 +3101,10 @@ interface ActiveClaudeTurnContext {
     fallbackText: string;
     fallbackNativeItemId: string;
     emittedNativeItemIds: Set<string>;
+    readonly voiceTextBlocks: Map<
+      string,
+      { readonly messageId: string; readonly startedAt: DateTime.Utc; text: string }
+    >;
     // The CLI repeats a notice that ends a prompt as the turn's result text.
     noticeTexts: Set<string>;
   };
@@ -6134,6 +6139,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           readonly result?: SDKResultMessage;
         }) {
           yield* reasoningDeltas.flushTurn(input.context.nativeTurnId);
+          yield* voiceTextDeltas.flushTurn(input.context.nativeTurnId);
           if (input.context.compaction?.status === "running") {
             yield* emitProviderEvent({
               type: "turn_item.updated",
@@ -6419,11 +6425,14 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           readonly context: ActiveClaudeTurnContext;
           readonly nativeItemId: string;
           readonly text: string;
+          readonly streaming?: boolean;
+          readonly startedAt?: DateTime.Utc;
         }) {
           if (input.context.assistant.emittedNativeItemIds.has(input.nativeItemId)) {
             return;
           }
-          input.context.assistant.emittedNativeItemIds.add(input.nativeItemId);
+          if (!input.streaming)
+            input.context.assistant.emittedNativeItemIds.add(input.nativeItemId);
           const now = yield* DateTime.now;
           const ordinal = yield* resolveItemOrdinal(input.context, input.nativeItemId);
           const artifacts = buildAssistantArtifacts({
@@ -6433,8 +6442,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             nativeItemId: input.nativeItemId,
             text: input.text,
             ordinal,
-            startedAt: now,
+            startedAt: input.startedAt ?? now,
             completedAt: now,
+            ...(input.streaming === undefined ? {} : { streaming: input.streaming }),
           });
           yield* Effect.all(
             [
@@ -6456,6 +6466,24 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             ],
             { concurrency: 1 },
           );
+        });
+
+        const voiceTextDeltas = yield* makeProviderTextDeltaCoalescer({
+          flushIntervalMs: 50,
+          emit: (update) =>
+            Effect.gen(function* () {
+              const context = yield* Ref.get(activeTurn);
+              if (context === null || context.nativeTurnId !== update.turnId) return;
+              const block = context.assistant.voiceTextBlocks.get(update.itemId);
+              if (!block || !update.text) return;
+              yield* emitAssistantTextArtifacts({
+                context,
+                nativeItemId: update.itemId,
+                text: update.text,
+                streaming: !update.completed,
+                startedAt: block.startedAt,
+              });
+            }),
         });
 
         const finalizeActiveTurnAfterQueryExit = Effect.fnUntraced(function* (
@@ -7105,6 +7133,35 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           if (message.type === "stream_event" && !message.parent_tool_use_id) {
             const event = message.event;
             const reasoning = context.reasoning;
+            // Voice can speak prose while its trailing control blocks are still arriving.
+            if (
+              context.input.runtimePolicy.toolMode === "none" &&
+              reasoning.messageId !== null &&
+              ((event.type === "content_block_start" && event.content_block.type === "text") ||
+                (event.type === "content_block_delta" && event.delta.type === "text_delta"))
+            ) {
+              const itemId = `voice-text:${context.nativeTurnId}:${reasoning.messageId}:${event.index}`;
+              let block = context.assistant.voiceTextBlocks.get(itemId);
+              if (!block) {
+                block = {
+                  messageId: reasoning.messageId,
+                  startedAt: yield* DateTime.now,
+                  text: "",
+                };
+                context.assistant.voiceTextBlocks.set(itemId, block);
+              }
+              const delta =
+                event.type === "content_block_start"
+                  ? event.content_block.type === "text"
+                    ? event.content_block.text
+                    : ""
+                  : event.delta.type === "text_delta"
+                    ? event.delta.text
+                    : "";
+              block.text += delta;
+              yield* voiceTextDeltas.append({ turnId: context.nativeTurnId, itemId, delta });
+              return;
+            }
             if (event.type === "message_start") {
               reasoning.messageId = event.message.id;
               reasoning.streamBlocks.clear();
@@ -7934,6 +7991,30 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             return;
           }
           if (assistantText !== null && assistantText.text.length > 0) {
+            if (context.assistant.emittedNativeItemIds.has(assistantText.nativeItemId)) return;
+            // SDK snapshots have a new UUID; keep the streamed block's message identity.
+            const voiceBlocks =
+              message.type === "assistant"
+                ? [...context.assistant.voiceTextBlocks].filter(
+                    ([, block]) => block.messageId === message.message.id,
+                  )
+                : [];
+            const pending = voiceBlocks.filter(
+              ([id]) => !context.assistant.emittedNativeItemIds.has(id),
+            );
+            const streamed =
+              pending.find(([, block]) => block.text === assistantText.text) ??
+              pending[0] ??
+              voiceBlocks.find(([, block]) => block.text === assistantText.text);
+            if (streamed) {
+              context.assistant.emittedNativeItemIds.add(assistantText.nativeItemId);
+              yield* voiceTextDeltas.complete({
+                turnId: context.nativeTurnId,
+                itemId: streamed[0],
+                finalText: assistantText.text,
+              });
+              return;
+            }
             yield* emitAssistantTextArtifacts({
               context,
               nativeItemId: assistantText.nativeItemId,
@@ -8591,7 +8672,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         });
 
         const openQuery = Effect.fnUntraced(function* (
-          turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
+          turnInput: ProviderAdapter.ProviderAdapterV2PrepareThreadInput & {
+            readonly providerTurnOrdinal: number;
+            readonly nativeThreadHasTurns?: boolean;
+            readonly continuation?: boolean;
+          },
           nativeThreadId: string,
         ) {
           const queryPolicy = claudeRuntimeQueryPolicyForRuntimePolicy(turnInput.runtimePolicy);
@@ -8612,7 +8697,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           if (
             existing !== null &&
             existing.nativeThreadId === nativeThreadId &&
-            isClaudeProviderContinuationTurn(turnInput)
+            turnInput.continuation === true
           ) {
             return existing;
           }
@@ -8894,6 +8979,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 fallbackText: "",
                 fallbackNativeItemId: `assistant:${turnInput.runId}`,
                 emittedNativeItemIds: new Set(),
+                voiceTextBlocks: new Map(),
                 noticeTexts: new Set(),
               },
               reasoning: {
@@ -8936,10 +9022,19 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     attachments: turnInput.message.attachments,
                     attachmentsDir,
                     fileSystem,
-                    skillNames: yield* userInvocableSkillNames(turnInput.runtimePolicy.cwd),
+                    skillNames:
+                      turnInput.runtimePolicy.toolMode === "none"
+                        ? new Set<string>()
+                        : yield* userInvocableSkillNames(turnInput.runtimePolicy.cwd),
                     uuid: promptUuid,
                   });
-            const querySession = yield* openQuery(turnInput, nativeThreadId);
+            const querySession = yield* openQuery(
+              {
+                ...turnInput,
+                continuation: isClaudeProviderContinuationTurn(turnInput),
+              },
+              nativeThreadId,
+            );
             const attachTurn = Effect.gen(function* () {
               querySession.lastTurn = context;
               yield* Ref.set(activeTurn, context);
@@ -9424,6 +9519,24 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 nativeThreadId,
                 now: createdAt,
               });
+            },
+            (effect, threadInput) =>
+              effect.pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterEnsureThreadError({
+                      driver: CLAUDE_PROVIDER,
+                      threadId: threadInput.threadId,
+                      cause,
+                    }),
+                ),
+              ),
+          ),
+          prepareThread: Effect.fn("ClaudeAdapterV2.prepareThread")(
+            function* (threadInput: ProviderAdapter.ProviderAdapterV2PrepareThreadInput) {
+              if (threadInput.runtimePolicy.toolMode !== "none") return;
+              const nativeThreadId = yield* getNativeThreadId(threadInput.providerThread);
+              yield* openQuery({ ...threadInput, providerTurnOrdinal: 1 }, nativeThreadId);
             },
             (effect, threadInput) =>
               effect.pipe(

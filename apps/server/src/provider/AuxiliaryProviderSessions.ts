@@ -349,6 +349,15 @@ const make = Effect.gen(function* () {
             ),
             Effect.forkIn(scope),
           );
+          if (input.toolMode === "none" && runtime.prepareThread !== undefined)
+            yield* runtime
+              .prepareThread({
+                threadId,
+                providerThread,
+                modelSelection,
+                runtimePolicy,
+              })
+              .pipe(Effect.onError(() => stopSession({ threadId })));
           return sessionView(threadId, session);
         }).pipe(
           Effect.mapError((cause) =>
