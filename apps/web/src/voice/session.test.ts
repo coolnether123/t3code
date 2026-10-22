@@ -589,7 +589,7 @@ describe("durable thread voice session", () => {
     expect(f.audio.play).toHaveBeenCalledTimes(1);
   });
 
-  it("waits for the filler before playing the voice reply in the same call", async () => {
+  it("cancels filler when real audio arrives without waiting for it to finish", async () => {
     vi.useFakeTimers();
     const f = fixture();
     const finishFiller = deferred<void>();
@@ -622,9 +622,10 @@ describe("durable thread voice session", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(f.audio.play).toHaveBeenCalledTimes(1);
     expect(f.audio.play.mock.calls[0]![2].aborted).toBe(false);
-    finishFiller.resolve();
     allowSynthesis.resolve();
     await replyPlaying.promise;
+    expect(f.audio.play.mock.calls[0]![2].aborted).toBe(true);
+    finishFiller.resolve();
     expect(f.audio.play).toHaveBeenCalledTimes(2);
     expect(f.audio.play.mock.calls[1]![0]).toBe("AAA=");
   });
@@ -770,7 +771,7 @@ describe("durable thread voice session", () => {
     });
     await f.session.start(options, []);
     f.session.observe(
-      [{ id: "reply", role: "assistant", text: "First. Second.", streaming: false }],
+      [{ id: "reply", role: "assistant", text: "First. Second.", streaming: true }],
       true,
     );
     f.recording.resolve({ audio: "", sampleRate: 16000 });
@@ -1128,7 +1129,38 @@ describe("durable thread voice session", () => {
     f.session.observe([{ ...message, streaming: false }], false, "turn");
     expect(f.request.mock.calls.filter(([input]) => input.action === "call.speak")).toHaveLength(1);
   });
-  it("refills the short ordered sentence queue without dropping the rest of a completed reply", async () => {
+  it("prefetches appended speech before current playback or acknowledgment completes", async () => {
+    const f = fixture();
+    await f.session.start(options, []);
+    f.session.finish();
+    f.transcript.resolve({ text: "Go" });
+    await f.waiting.promise;
+    const playing = deferred<void>();
+    const end = deferred<void>();
+    const prefetched = deferred<void>();
+    const done = deferred<void>();
+    f.audio.play.mockImplementationOnce(async () => {
+      playing.resolve();
+      await end.promise;
+    });
+    const original = f.request.getMockImplementation()!;
+    let acknowledged = 0;
+    f.request.mockImplementation(async (input, signal, onAudio) => {
+      if (input.action === "call.speak" && input.text === "Second.") prefetched.resolve();
+      if (input.action === "call.played" && ++acknowledged === 2) done.resolve();
+      return original(input, signal, onAudio);
+    });
+    const message = { id: "reply", role: "assistant", text: "First. ", streaming: true };
+    f.session.observe([message], true);
+    await playing.promise;
+    f.session.observe([{ ...message, text: "First. Second.", streaming: false }], true);
+    await prefetched.promise;
+    expect(acknowledged).toBe(0);
+    end.resolve();
+    await done.promise;
+  });
+
+  it("keeps a completed reply in one synthesis request with full context", async () => {
     const f = fixture();
     await f.session.start(options, []);
     f.session.finish();
@@ -1139,7 +1171,7 @@ describe("durable thread voice session", () => {
     let count = 0;
     f.request.mockImplementation(async (input, signal, onAudio) => {
       const response = await original(input, signal, onAudio);
-      if (input.action === "call.played" && ++count === 5) done.resolve();
+      if (input.action === "call.played" && ++count === 1) done.resolve();
       return response;
     });
     f.session.observe(
@@ -1151,7 +1183,7 @@ describe("durable thread voice session", () => {
       f.request.mock.calls
         .filter(([input]) => input.action === "call.speak")
         .map(([input]) => input.text),
-    ).toEqual(["One. ", "Two. ", "Three. ", "Four. ", "Five."]);
+    ).toEqual(["One. Two. Three. Four. Five."]);
   });
   it("delivers microphone input retained during a reply after playback and turn completion", async () => {
     const f = fixture();
@@ -1223,7 +1255,12 @@ describe("durable thread voice session", () => {
       expect(f.request.mock.calls.some(([input]) => input.action === "call.deliver")).toBe(false);
       expect(f.saved()?.recordings).toHaveLength(1);
       expect(f.request).toHaveBeenCalledWith(
-        expect.objectContaining({ action: "call.speak", text: "The call task is open. " }),
+        expect.objectContaining({
+          action: "call.speak",
+          text: streaming
+            ? "The call task is open. "
+            : "The call task is open. I saved the details in the chat.",
+        }),
         expect.any(AbortSignal),
         expect.any(Function),
       );

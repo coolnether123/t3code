@@ -22,7 +22,12 @@ const encode = Schema.encodeSync(Schema.fromJsonString(SpeechRequest));
 const encodeResponse = Schema.encodeSync(Schema.fromJsonString(SpeechResponse));
 /** Reuse cookie, desktop bearer and refreshed request-bound relay authorization. */
 export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(function* (input: {
-  onAudio?: (chunk: { audio: string; sampleRate: number }) => void;
+  onAudio?: (chunk: {
+    audio: string;
+    sampleRate: number;
+    generation?: string;
+    speechId?: string;
+  }) => void;
   prepared: PreparedConnection;
   signer: Option.Option<ManagedRelayDpopSigner["Service"]>;
   remoteAuthorization?: Option.Option<RemoteEnvironmentAuthorization["Service"]>;
@@ -81,8 +86,30 @@ export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(
                   const frame = decode(line);
                   if (frame.error) throw new VoiceRequestError(frame.error, true);
                   if (frame.audio && frame.sampleRate) {
+                    input.signal.throwIfAborted();
+                    const generation =
+                      "generation" in input.request ? input.request.generation : undefined;
+                    const speechId =
+                      "speechId" in input.request ? input.request.speechId : undefined;
+                    if (generation && frame.generation && frame.generation !== generation)
+                      throw new VoiceRequestError(
+                        "Speech response belongs to another generation.",
+                        false,
+                      );
+                    if (speechId && frame.speechId && frame.speechId !== speechId)
+                      throw new VoiceRequestError(
+                        "Speech response belongs to another utterance.",
+                        false,
+                      );
                     try {
-                      input.onAudio({ audio: frame.audio, sampleRate: frame.sampleRate });
+                      input.onAudio({
+                        audio: frame.audio,
+                        sampleRate: frame.sampleRate,
+                        ...((frame.generation ?? generation)
+                          ? { generation: frame.generation ?? generation }
+                          : {}),
+                        ...(frame.speechId ? { speechId: frame.speechId } : {}),
+                      });
                     } catch {
                       throw new VoiceRequestError(
                         "Audio playback could not start. Check the audio device, then retry.",
@@ -148,7 +175,12 @@ export function createVoiceRequestCommand<R, E>(
     execute: (input: {
       request: SpeechRequest;
       signal: AbortSignal;
-      onAudio?: (chunk: { audio: string; sampleRate: number }) => void;
+      onAudio?: (chunk: {
+        audio: string;
+        sampleRate: number;
+        generation?: string;
+        speechId?: string;
+      }) => void;
     }) =>
       Effect.gen(function* () {
         const supervisor = yield* EnvironmentSupervisor;

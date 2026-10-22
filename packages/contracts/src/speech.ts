@@ -53,6 +53,7 @@ export type CallOptions = typeof CallOptions.Type;
 const CallTurnOrigin = Schema.Struct({ callId: CallId, utteranceId: CallId });
 export const CallRequest = Schema.Struct({
   streamAudio: Schema.optional(Schema.Boolean),
+  generation: Schema.optional(CallId),
   action: Schema.Literals([
     "call.open",
     "call.prepare",
@@ -166,6 +167,8 @@ export const SpeechResponse = Schema.Struct({
   expiresAt: Schema.optional(Schema.String),
   text: Schema.optional(Schema.String),
   audio: Schema.optional(Schema.String),
+  generation: Schema.optional(Schema.String),
+  speechId: Schema.optional(Schema.String),
   sampleRate: Schema.optional(Schema.Number),
   tenants: Schema.optional(Schema.Array(Schema.String)),
   call: Schema.optional(CallStatus),

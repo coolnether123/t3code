@@ -48,9 +48,7 @@ export class TurnFiller {
       if (pending.aborted || this.realAudio || this.playback || !clips.length) return;
       const clip = clips[Effect.runSync(Random.nextIntBetween(0, clips.length - 1))]!;
       this.recentClips = [...this.recentClips, clip.id].slice(-4);
-      // Only the call's playback signal can stop a started clip. Reply arrival cancels
-      // the timer, then waits for this clip's final audio frame.
-      const playback = this.playAudio(clip.audio, clip.sampleRate, signal);
+      const playback = this.playAudio(clip.audio, clip.sampleRate, pending);
       this.playback = playback;
       try {
         await playback;
@@ -66,10 +64,13 @@ export class TurnFiller {
     this.timer.abort();
   }
 
-  async play(audio: string, sampleRate: number, signal: AbortSignal, started: () => void) {
+  startReply() {
     this.realAudio = true;
     this.cancel();
-    await this.playback?.catch(() => {});
+  }
+
+  async play(audio: string, sampleRate: number, signal: AbortSignal, started: () => void) {
+    this.startReply();
     signal.throwIfAborted();
     started();
     await this.playAudio(audio, sampleRate, signal);
