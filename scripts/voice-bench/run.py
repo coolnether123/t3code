@@ -15,7 +15,7 @@ import time
 import wave
 from zoneinfo import ZoneInfo
 from audio_metrics import onset, schedule, summary
-from fixtures import build, read_wav, save_wav
+from fixtures import build, read_wav, save_wav, refresh_transcripts
 from router import lease, synth
 
 REPLIES = [
@@ -155,7 +155,7 @@ def report(data, target):
              "", "## Measurement boundaries", "",
              "Turn replay imports shipped source. PC uses known audio spans with no live partial transcript. Device uses the actual recognition timer with Whisper segment finals arriving at the segment boundary when STT is available. Oracle fallback uses the expected synthetic text and is explicitly labeled in each row. Phone recognition arrival lag is unknown and excluded.",
              "Saved human PCM is preserved; transcription is included only when Whisper succeeds. Human intent labels remain unknown. Its RMS boundaries are estimates and excluded from false-cutoff scoring. Synthetic boundaries are exact for the constructed waveform, including 20 ms trim padding.",
-             "Response latency is a composed proxy using independent offline detection, whole-utterance Whisper finalization when available, direct provider CLI first sentence, router TTS first byte and the browser's 20 ms lead. It excludes T3 transport, storage, call.played acknowledgment, filler blocking, sound-card latency and recognition arrival lag. It is not an observed end-to-end call. An unavailable component keeps the total unknown.",
+             "Response latency is a composed PC/server-STT proxy using independent offline PC detection, whole-utterance Whisper finalization when available, direct provider CLI first sentence, router TTS first byte and the browser's 20 ms lead. It excludes T3 transport, storage, call.played acknowledgment, filler blocking and sound-card latency. Device recognition arrival lag is unknown, so this sum does not describe the phone recognition path. It is not an observed end-to-end call. An unavailable component keeps the total unknown.",
              "The provider proxy includes a new CLI process and its initialization. It cannot isolate model inference time or establish actual T3 voice latency.",
              "Cold and warm: no service is restarted for this bench. Tenant state before lease acquisition and acquisition time are recorded. First observed requests are not claimed cold. Provider cache state is unknown; true cold comparison remains unmeasured.",
              "Interruption uses the real session with fake audio IO. Abort-to-silence measures JavaScript cancellation dispatch, not audible hardware silence. The ad6af572 baseline has no automatic barge-in. This test covers only explicit interruption, including on later candidates.",
@@ -194,6 +194,11 @@ def report(data, target):
     if acquisition:
         was_running=any(t["id"]=="whisper-large-v3-turbo" and t["running"] for t in acquisition["before"]["tenants"])
         lines += ["",f"Whisper lease acquisition: {acquisition['acquireS']:.3f} s, n=1. Tenant running before acquisition: {was_running}."]
+    tts_acquisition=data.get("tts",{}).get("lease")
+    if tts_acquisition:
+        was_running=any(t["id"]=="breeze-tts-2" and t["running"] for t in tts_acquisition["before"]["tenants"])
+        lines += ["",f"Breeze lease acquisition: {tts_acquisition['acquireS']:.3f} s, n=1. Tenant running before acquisition: {was_running}.",
+                  "Lease acquisition includes router admission, tenant transitions and health readiness. It is separate from request timing after readiness, and is not isolated model-load time. One startup sample does not establish a cold-start distribution."]
     models=data.get("model",[])
     lines += ["",f"Provider fixed two-part fact check: {sum(r['answeredBothParts'] for r in models)}/{len(models)}. This is a narrow content check, not conversational understanding acceptance."]
     lines += ["", "## Onset screening", "",
@@ -227,6 +232,7 @@ def main():
     if out.is_relative_to(ROOT):
         raise ValueError("Private artifacts must be outside the repository")
     corpus=(args.fixtures or out/"fixtures").resolve()
+    existing_manifest=(corpus/"manifest.json").exists()
     if corpus.is_relative_to(ROOT):
         raise ValueError("Private fixtures must be outside the repository")
     source_files=["apps/web/src/voice/turnEnding.ts","apps/web/src/voice/deviceSpeech.ts","apps/web/src/voice/browserSpeech.ts","packages/client-runtime/src/voice-call/session.ts"]
@@ -256,15 +262,20 @@ def main():
             return pending
         if args.offline and not (corpus/"manifest.json").exists():
             raise FileNotFoundError("Offline replay requires a prepared fixture manifest")
-        return build(corpus,args.live_calls,args.voice)
+        prepared=build(corpus,args.live_calls,args.voice)
+        if existing_manifest and not args.offline and not args.prepare_fixtures:
+            prepared=refresh_transcripts(corpus,prepared)
+        return prepared
     stage("fixtures",prepare)
     for f in data.get("fixtures",{}).get("fixtures",[]):
         if f["synthetic"] and f.get("whisper"):
             f["transcriptAccuracy"]=word_error(" ".join(s["expectedText"] for s in f["segments"]),f["whisper"]["text"])
+    if data.get("fixtures"):
+        (out/"run-manifest.json").write_text(json.dumps(data["fixtures"],indent=2),encoding="utf-8")
     if args.prepare_fixtures:
         return int(bool(data["failures"]))
     def replay():
-        manifest_path=corpus/"manifest.json"
+        manifest_path=out/"run-manifest.json" if data.get("fixtures") else corpus/"manifest.json"
         if args.allow_oracle and not manifest_path.exists():
             manifest_path=corpus/"manifest.pending.json"
         env={**os.environ,"VOICE_BENCH_MANIFEST":str(manifest_path),"VOICE_BENCH_OUTPUT":str(out/"replay.json")}
@@ -307,12 +318,12 @@ def main():
     data["summary"]["provider first observed process s"]=summary([r["firstSpeakableS"] for r in data.get("model",[]) if r["run"]==0])
     data["summary"]["provider repeat processes s"]=summary([r["firstSpeakableS"] for r in data.get("model",[]) if r["run"]>0])
     # Component medians are descriptive; do not mislabel their sum as an E2E p95.
-    detection=data["summary"]["device end delay ms"]["median"]
+    detection=data["summary"]["pc end delay ms"]["median"]
     parts={"turnDetectionS":detection/1000 if detection is not None else None,
            "sttFinalizationS":summary(stt)["median"],"modelFirstSpeakableS":summary(model)["median"],
            "ttsFirstAudioS":data["summary"]["serial ttfbS"]["median"],"playbackLeadS":.02,
            "leadingSpeechSilenceS":summary([r.get("leadingSilenceMs",0)/1000 for r in data.get("tts",{}).get("clips",[]) if r["mode"]=="serial"])["median"]}
-    data["composedLatencyProxy"]={"components":parts,"sumOfComponentMediansS":sum(parts.values()) if all(v is not None for v in parts.values()) else None,"endToEndObserved":False}
+    data["composedLatencyProxy"]={"scope":"PC/server STT component proxy; excludes device recognition lag","components":parts,"sumOfComponentMediansS":sum(parts.values()) if all(v is not None for v in parts.values()) else None,"endToEndObserved":False}
     data["status"]="failed" if data["failures"] else "offline complete" if args.offline else "complete with measurement limitations"
     if data.get("fixtures",{}).get("transcriptStatus"):
         data["status"]+="; Whisper integration unmeasured, oracle replay only"
