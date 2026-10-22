@@ -1,10 +1,10 @@
-import { spawn } from "node:child_process";
-import { homedir } from "node:os";
-import { createServer } from "node:http";
-import { Duplex } from "node:stream";
-import { createRequire } from "node:module";
-import { join } from "node:path";
-const require = createRequire(import.meta.url);
+import * as NodeChildProcess from "node:child_process";
+import * as NodeOS from "node:os";
+import * as NodeHttp from "node:http";
+import * as NodeStream from "node:stream";
+import * as NodeModule from "node:module";
+import * as NodePath from "node:path";
+const require = NodeModule.createRequire(import.meta.url);
 const { WebSocket, WebSocketServer } = require("./node_modules/ws");
 const known = new Set([
   "free",
@@ -53,7 +53,7 @@ function translate(data) {
     : data;
 }
 function transport(input, output) {
-  const stream = new Duplex({
+  const stream = new NodeStream.Duplex({
     read() {
       input.resume();
     },
@@ -70,9 +70,13 @@ function transport(input, output) {
   stream.on("error", () => {});
   return stream;
 }
-const child = spawn(join(homedir(), ".local/bin/codex"), process.argv.slice(2), {
-  stdio: ["pipe", "pipe", "inherit"],
-});
+const child = NodeChildProcess.spawn(
+  NodePath.join(NodeOS.homedir(), ".local/bin/codex"),
+  process.argv.slice(2),
+  {
+    stdio: ["pipe", "pipe", "inherit"],
+  },
+);
 let client;
 let stopping = false;
 let waitingPong = false;
@@ -117,7 +121,7 @@ remote.on("pong", () => {
 });
 remote.on("error", () => stop(true));
 remote.on("close", () => stop());
-const server = createServer();
+const server = NodeHttp.createServer();
 const socketServer = new WebSocketServer({
   noServer: true,
   perMessageDeflate: false,
