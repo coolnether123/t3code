@@ -1,5 +1,9 @@
 import type { EnvironmentId, SpeechRequest } from "@t3tools/contracts";
 import { createVoiceRequestCommand } from "@t3tools/client-runtime/voice-call/transport";
+import {
+  SpeechPlaybackController,
+  type PlaybackMetadata,
+} from "@t3tools/client-runtime/voice-call/playback";
 import * as Cause from "effect/Cause";
 import { connectionAtomRuntime } from "../connection/runtime";
 import { appAtomRegistry } from "../rpc/atomRegistry";
@@ -29,7 +33,10 @@ export function createBrowserAudio(onInterrupted?: () => void) {
   let context: AudioContext | undefined;
   let finishCapture: (() => void) | undefined;
   let preparedStream: MediaStream | undefined;
-  let playbackUntil = 0;
+  let playback: SpeechPlaybackController | undefined;
+  let playbackGeneration = "legacy";
+  let nextSpeech = 0;
+  const speechIds = new WeakMap<AbortSignal, string>();
   let finishAtPause = false;
   let interrupted = false;
   let cancelReady: (() => void) | undefined;
@@ -95,6 +102,8 @@ export function createBrowserAudio(onInterrupted?: () => void) {
       if (interrupted || context?.state === "closed") this.close();
       if (!context) {
         context = new AudioContext();
+        playback = new SpeechPlaybackController(context);
+        playback.begin(playbackGeneration);
         context.addEventListener("statechange", stateChanged);
         document.addEventListener("visibilitychange", foreground);
         window.addEventListener("pageshow", foreground);
@@ -214,7 +223,9 @@ export function createBrowserAudio(onInterrupted?: () => void) {
       document.removeEventListener("visibilitychange", foreground);
       window.removeEventListener("pageshow", foreground);
       cancelReady?.();
-      playbackUntil = 0;
+      playback?.stop(playbackGeneration);
+      playback = undefined;
+      playbackGeneration = "legacy";
       finishCapture = undefined;
       interrupted = false;
       reconnectCapture = undefined;
@@ -428,38 +439,52 @@ export function createBrowserAudio(onInterrupted?: () => void) {
         if (stream !== preparedStream) stream.getTracks().forEach((track) => track.stop());
       }
     },
-    async play(audio: string, sampleRate: number, signal: AbortSignal) {
+    beginPlayback(generation: string) {
+      playback!.begin(generation);
+      playbackGeneration = generation;
+    },
+    stopPlayback(generation: string) {
+      return playback?.stop(generation) ?? [];
+    },
+    playbackProgress(generation: string) {
+      return playback?.progress(generation) ?? [];
+    },
+    emittingSpeech(generation: string) {
+      return playback?.emitting(generation) ?? [];
+    },
+    cancelShortClips(generation: string) {
+      playback?.cancelShortClips(generation);
+    },
+    async play(
+      audio: string,
+      sampleRate: number,
+      signal: AbortSignal,
+      metadata?: PlaybackMetadata,
+    ) {
+      let speechId = speechIds.get(signal);
+      if (!speechId) {
+        speechId = `clip-${++nextSpeech}`;
+        speechIds.set(signal, speechId);
+      }
+      await playback!.play(
+        audio,
+        sampleRate,
+        signal,
+        metadata ?? {
+          generation: playbackGeneration,
+          speechId,
+        },
+      );
       signal.throwIfAborted();
-      const audioContext = context!;
-      const binary = atob(audio);
-      const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-      const view = new DataView(bytes.buffer);
-      const buffer = audioContext.createBuffer(1, bytes.length / 2, sampleRate);
-      const samples = buffer.getChannelData(0);
-      for (let i = 0; i < samples.length; i++) samples[i] = view.getInt16(i * 2, true) / 32768;
-      const source = audioContext.createBufferSource();
-      source.buffer = buffer;
-      source.connect(audioContext.destination);
-      await new Promise<void>((resolve, reject) => {
-        const abort = () => {
-          playbackUntil = 0;
-          source.stop();
-          reject(new DOMException("Cancelled", "AbortError"));
-        };
-        signal.addEventListener("abort", abort, { once: true });
-        source.addEventListener(
-          "ended",
-          () => {
-            signal.removeEventListener("abort", abort);
-            source.disconnect();
-            resolve();
-          },
-          { once: true },
-        );
-        const startAt = Math.max(audioContext.currentTime + 0.02, playbackUntil);
-        playbackUntil = startAt + buffer.duration;
-        source.start(startAt);
-      });
+    },
+    async playShortClip(
+      audio: string,
+      sampleRate: number,
+      signal: AbortSignal,
+      metadata: PlaybackMetadata,
+    ) {
+      await playback!.play(audio, sampleRate, signal, { ...metadata, channel: "backchannel" });
+      signal.throwIfAborted();
     },
   };
 }

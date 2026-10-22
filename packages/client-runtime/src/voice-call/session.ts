@@ -19,22 +19,10 @@ import {
   type TranscriptRevision,
 } from "./floor.ts";
 import { BackchannelPolicy, type BackchannelCue } from "./backchannel.ts";
-
-type AudioProgress = {
-  generation: string;
-  speechId: string;
-  channel: "reply" | "backchannel";
-  sampleRate: number;
-  playedSamples: number;
-  queuedSamples: number;
-  stopped: boolean;
-};
-type AudioMetadata = {
-  generation: string;
-  speechId: string;
-  channel?: "reply" | "backchannel";
-  onProgress?: (value: AudioProgress) => void;
-};
+import type {
+  PlaybackProgress as AudioProgress,
+  PlaybackMetadata as AudioMetadata,
+} from "./playback.ts";
 
 export interface CaptureHooks {
   floor?: FloorController;
@@ -145,6 +133,12 @@ export interface VoiceDependencies {
       generation: string,
     ): { speechId: string; channel: "reply" | "backchannel"; startedAt: number; endsAt: number }[];
     cancelShortClips?(generation: string): void;
+    playShortClip?(
+      audio: string,
+      sampleRate: number,
+      signal: AbortSignal,
+      metadata: AudioMetadata,
+    ): Promise<void>;
   };
   change(state: VoiceState, detail?: string, call?: CallStatus): void;
   id(): string;
@@ -293,7 +287,14 @@ export class ThreadVoiceSession {
         !["preparing", "reconnecting", "error"].includes(this.state)
       ) {
         this.change(this.state);
-        if (this.capture && this.hasUnannouncedUpdates()) this.deps.audio.finishAtPause();
+        if (
+          this.capture &&
+          this.hasUnannouncedUpdates() &&
+          !this.playbackTask &&
+          !this.acknowledgment &&
+          !this.filler.isPlaying
+        )
+          this.deps.audio.finishAtPause();
         if (!this.capture) void this.announceAtPause();
       }
     }
@@ -468,14 +469,22 @@ export class ThreadVoiceSession {
       if (!this.active) return;
       await this.flush();
       if (!this.active || this.recovering) return;
-      await this.filler.prepare();
+      if (!this.deps.audio.emittingSpeech) await this.filler.prepare();
       if (this.saved.options.backchannels) await this.prepareBackchannels();
       if (!this.active || this.recovering) return;
       await this.deps.audio.ready(this.playback.signal);
       if (time() - this.preparingAt > 4000 && !this.saved.readyAnnounced) {
         this.saved.readyAnnounced = true;
         await this.persist();
-        await this.playSentence("call-ready", "I'm here.", this.playback.signal);
+        const generation = (this.outputGeneration = this.deps.id());
+        this.deps.audio.beginPlayback?.(generation);
+        const ready = await this.playSentence(
+          "call-ready",
+          "I'm here.",
+          this.playback.signal,
+          generation,
+        );
+        await ready.playback;
       }
       if (!this.active || this.recovering) return;
       this.change("ready", "Speech is ready");
@@ -633,9 +642,9 @@ export class ThreadVoiceSession {
       if (this.queue.length) void this.speak();
       if (this.running || this.queue.length) return;
     }
-    if (this.hasUnannouncedUpdates()) {
+    if (this.hasUnannouncedUpdates() && !this.playbackTask && !this.running) {
       await this.announceAtPause();
-      if (!this.active || this.running || this.announcing || this.recovering) return;
+      if (!this.active || this.announcing || this.recovering) return;
     }
     if (this.status?.inputMode === "device") return this.listenDevice();
     const startedAt = now();
@@ -802,7 +811,9 @@ export class ThreadVoiceSession {
                 .filter((item) => item.playedSamples > 0 && item.playedSamples < item.queuedSamples)
                 .map((item) => this.speechTexts.get(item.speechId) ?? "")
                 .join(" ")
-            : this.emittingText;
+            : this.playbackTask
+              ? (this.queue[0]?.text ?? this.emittingText)
+              : this.emittingText;
         if (emitting) this.recentOutput = { text: emitting, at: time() };
         const reference =
           emitting || (time() - this.recentOutput.at < 500 ? this.recentOutput.text : "");
@@ -878,13 +889,16 @@ export class ThreadVoiceSession {
           revision: cue.revision,
           startedAt: now(),
         }).catch(() => {});
-        void this.deps.audio
-          .play(clip.audio, clip.sampleRate, signal, {
-            generation,
-            speechId: `backchannel-${cue.revision}`,
-            channel: "backchannel",
-          })
-          .catch(() => {});
+        const metadata: AudioMetadata = {
+          generation,
+          speechId: `backchannel-${cue.revision}`,
+          channel: "backchannel",
+        };
+        void (
+          this.deps.audio.playShortClip
+            ? this.deps.audio.playShortClip(clip.audio, clip.sampleRate, signal, metadata)
+            : this.deps.audio.play(clip.audio, clip.sampleRate, signal, metadata)
+        ).catch(() => {});
       },
       () => {},
     );
@@ -946,6 +960,8 @@ export class ThreadVoiceSession {
     if (operatorSelection) this.operatorSelection = operatorSelection;
     if (!this.active || !this.saved || ["preparing", "reconnecting", "error"].includes(this.state))
       return;
+    // Legacy clips have no text reference for echo gating. Duplex clients use known backchannel clips.
+    if (this.deps.audio.emittingSpeech) this.pendingFiller = undefined;
     for (const message of messages) {
       if (message.role !== "assistant") continue;
       if (
@@ -984,9 +1000,19 @@ export class ThreadVoiceSession {
       if (queued.length) offset = Math.max(offset, ...queued.map((entry) => entry.end ?? 0));
       while (offset < spoken.length && this.queue.length < 3) {
         const rest = spoken.slice(offset);
+        // Keep available context in one utterance. Streaming text still yields its
+        // first complete sentence immediately; later text is prefetched during playback.
+        const available = rest.slice(0, 1200);
+        const boundaries = [...available.matchAll(/[.!?]["')\]]*(?:\s|$)/g)];
+        const boundary = offset === 0 && message.streaming ? boundaries[0] : boundaries.at(-1);
         const text =
-          rest.match(/^[\s\S]{1,1200}?[.!?]["')\]]*(?:\s|$)/)?.[0] ??
-          (!message.streaming || rest.length >= 1200 ? rest.slice(0, 1200) : "");
+          !message.streaming && rest.length <= 1200
+            ? rest
+            : boundary
+              ? available.slice(0, boundary.index + boundary[0].length)
+              : rest.length >= 1200
+                ? available
+                : "";
         if (!text) break;
         const end = offset + text.length;
         const cleaned = text.replace(/[#*_]/g, "");
@@ -1001,6 +1027,7 @@ export class ThreadVoiceSession {
         offset = end;
       }
     }
+    this.prefetchSpeech?.();
     if (!this.busy) void this.speak();
     if (!this.running && !this.queue.length)
       void this.flushTyped().catch((error) => this.failed(error));
@@ -1051,7 +1078,9 @@ export class ThreadVoiceSession {
       (update) =>
         !update.heardAt &&
         !update.announcementId &&
-        (update.status === "done" || update.status === "needs-Jared"),
+        (update.status === "done" ||
+          update.status === "needs-Jared" ||
+          ("speakable" in update && update.speakable === true)),
     );
   }
   private async acknowledgeUpdates() {
@@ -1078,6 +1107,7 @@ export class ThreadVoiceSession {
         .map((update) => update.id) ?? [];
     if (heard.length) await this.request({ action: "call.heard", updateIds: heard });
   }
+  private prefetchSpeech: (() => void) | undefined;
   private async speak() {
     if (
       this.playbackTask ||
@@ -1088,26 +1118,51 @@ export class ThreadVoiceSession {
     )
       return;
     this.cancelBackchannel();
-    this.outputGeneration = this.deps.id();
-    this.deps.audio.beginPlayback?.(this.outputGeneration);
     this.speechTexts.clear();
-    const signal = this.playback.signal;
+    const pipeline = new AbortController();
+    const signal = AbortSignal.any([this.playback.signal, pipeline.signal]);
+    const generation = (this.outputGeneration = this.deps.id());
+    this.deps.audio.beginPlayback?.(generation);
     this.playbackTask = (async () => {
+      type Item = (typeof this.queue)[number];
+      const prepare = async (item: Item) => {
+        const id = await speechIdentifier(item.messageId, item.start, item.end);
+        signal.throwIfAborted();
+        const audio = this.status?.played.includes(id)
+          ? { playback: Promise.resolve() }
+          : await this.playSentence(id, item.text, signal, generation);
+        return { id, ...audio };
+      };
+      let next: { item: Item; audio: ReturnType<typeof prepare> } | undefined;
+      let generated = false;
+      const prefetch = () => {
+        const item = this.queue[1];
+        if (!generated || next || !item || signal.aborted) return;
+        const audio = prepare(item);
+        next = { item, audio };
+        void audio.catch(() => {});
+      };
+      this.prefetchSpeech = prefetch;
       try {
         while (this.queue.length && this.active && !signal.aborted) {
           const item = this.queue[0]!;
-          const id = await speechIdentifier(item.messageId, item.start, item.end);
+          generated = false;
+          const audio = await (next?.item === item ? next.audio : prepare(item));
+          next = undefined;
+          generated = true;
           signal.throwIfAborted();
           this.change("speaking");
-          if (!this.status?.played.includes(id)) {
-            await this.playSentence(id, item.text, signal);
+          prefetch();
+          await audio.playback;
+          if (!this.status?.played.includes(audio.id)) {
             // Retry the acknowledgment separately, without replaying audio already heard.
-            await this.request({ action: "call.played", speechId: id }, signal);
+            await this.request({ action: "call.played", speechId: audio.id }, signal);
           }
           if (item.messageId) {
             this.saved!.offsets[item.messageId] = item.end!;
             await this.persist();
           }
+          generated = false;
           this.queue.shift();
           this.observe(this.messages, this.running, this.turnId, this.modelSelection);
         }
@@ -1116,7 +1171,12 @@ export class ThreadVoiceSession {
       } catch (error) {
         if (!signal.aborted) this.failed(error);
       } finally {
+        this.prefetchSpeech = undefined;
+        pipeline.abort();
+        await next?.audio.catch(() => {});
         this.playbackTask = undefined;
+        if (this.active && this.capture && this.hasUnannouncedUpdates() && !this.inputHolding)
+          this.deps.audio.finishAtPause();
       }
     })();
     await this.playbackTask;
@@ -1125,30 +1185,35 @@ export class ThreadVoiceSession {
       void this.listen();
     }
   }
-  private async playSentence(id: string, text: string, signal: AbortSignal) {
-    await this.retry("call.speak", signal, async () => {
+  private async playSentence(id: string, text: string, signal: AbortSignal, generation: string) {
+    return this.retry("call.speak", signal, async () => {
       const attempt = new AbortController();
       const audioSignal = AbortSignal.any([signal, attempt.signal]);
+      const attemptId = this.deps.id();
       const chunks: Promise<void>[] = [];
+      const output = this.deps.audio;
+      const play = (chunk: { audio: string; sampleRate: number }) => {
+        audioSignal.throwIfAborted();
+        this.filler.startReply();
+        this.deps.speechEvent?.({ type: "audio", speechId: id });
+        return output.play(chunk.audio, chunk.sampleRate, audioSignal, {
+          generation,
+          speechId: id,
+          attemptId,
+        });
+      };
       try {
         this.change("speaking");
         this.floor.speaking();
         this.emittingText = text;
         this.speechTexts.set(id, text);
-        this.deps.audio.beginPlayback?.((this.outputGeneration ??= this.deps.id()));
         void this.listen();
         const result = await this.request(
-          { action: "call.speak", speechId: id, text, streamAudio: true },
+          { action: "call.speak", speechId: id, text, streamAudio: true, generation },
           audioSignal,
           (chunk) => {
             audioSignal.throwIfAborted();
-            this.filler.cancel();
-            this.deps.speechEvent?.({ type: "audio", speechId: id });
-            const played = this.deps.audio.play(chunk.audio, chunk.sampleRate, audioSignal, {
-              generation: (this.outputGeneration ??= this.deps.id()),
-              speechId: id,
-              channel: "reply",
-            });
+            const played = play(chunk);
             chunks.push(played);
             void played.catch((error) => attempt.abort(error));
           },
@@ -1156,25 +1221,30 @@ export class ThreadVoiceSession {
         audioSignal.throwIfAborted();
         if (!result.played && !chunks.length && (!result.audio || !result.sampleRate))
           throw new Error("Speech service returned no audio.");
-        if (!result.played && !chunks.length)
-          await this.deps.audio.play(result.audio!, result.sampleRate!, audioSignal, {
-            generation: (this.outputGeneration ??= this.deps.id()),
-            speechId: id,
-            channel: "reply",
+        if (!result.played && !chunks.length) {
+          const played = play({ audio: result.audio!, sampleRate: result.sampleRate! });
+          chunks.push(played);
+        }
+        const playback = Promise.all(chunks)
+          .then(() => {
+            audioSignal.throwIfAborted();
+          })
+          .finally(() => {
+            if (this.emittingText === text) this.emittingText = "";
+            attempt.abort();
           });
-        await Promise.all(chunks);
-        audioSignal.throwIfAborted();
+        void playback.catch(() => {});
+        return { playback };
       } catch (error) {
-        if (attempt.signal.aborted && !signal.aborted)
+        const playbackFailed = attempt.signal.aborted;
+        attempt.abort();
+        await Promise.allSettled(chunks);
+        if (playbackFailed && !signal.aborted)
           throw new VoiceRequestError(
             "Audio playback failed. Check the audio device, then retry.",
             false,
           );
         throw error;
-      } finally {
-        this.emittingText = "";
-        attempt.abort();
-        await Promise.allSettled(chunks);
       }
     });
   }

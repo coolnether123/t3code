@@ -2,6 +2,21 @@ import { describe, expect, it } from "vite-plus/test";
 import { FloorController, acceptsBargeIn, floorCue } from "./floor.ts";
 
 describe("floor control", () => {
+  it("holds a short question for continuation and does not treat negated yields as permission to answer", () => {
+    const floor = new FloorController();
+    floor.update({ text: "What passed?", revision: 1, final: true }, 0);
+    expect(floor.tick(2400)).toBe(false);
+    floor.activity(2400);
+    expect(floor.tick(3000)).toBe(false);
+    floor.update(
+      { text: "What passed? And what still needs fixing?", revision: 2, final: true },
+      4000,
+    );
+    expect(floor.tick(4700)).toBe(true);
+    for (const text of ["Don't answer yet.", "Do not speak.", "Can you, can you?"])
+      expect(floorCue(text)).toBe("hold");
+    expect(floorCue("I need to think about the answer")).toBe("hold");
+  });
   it.each([
     "Well, um...",
     "I want to",

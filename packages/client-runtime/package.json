@@ -439,6 +439,10 @@
       "types": "./src/voice-call/transport.ts",
       "default": "./src/voice-call/transport.ts"
     },
+    "./voice-call/playback": {
+      "types": "./src/voice-call/playback.ts",
+      "default": "./src/voice-call/playback.ts"
+    },
     "./voice-call": {
       "types": "./src/voice-call/session.ts",
       "default": "./src/voice-call/session.ts"

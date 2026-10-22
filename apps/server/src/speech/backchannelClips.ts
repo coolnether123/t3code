@@ -13,7 +13,7 @@ export class BackchannelClips {
     const path = NodePath.join(this.root, callId, "backchannels.jsonl");
     await NodeFSP.appendFile(
       path,
-      `${JSON.stringify({ token, revision, at, cue: "completed-clause-pause" })}\n`,
+      `${JSON.stringify({ token, revision, at, cue: "completed-clause-pause", status: "scheduled" })}\n`,
     );
   }
 

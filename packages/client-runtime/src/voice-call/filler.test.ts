@@ -47,7 +47,7 @@ describe("speech turn filler playback", () => {
     expect(f.started).toHaveBeenCalledTimes(1);
   });
 
-  it("finishes the filler before scheduling arriving reply chunks", async () => {
+  it("cancels a started filler and schedules real audio immediately", async () => {
     const f = fixture();
     const ended = deferred();
     f.play.mockImplementationOnce(async () => ended.promise);
@@ -57,9 +57,9 @@ describe("speech turn filler playback", () => {
     const first = f.filler.play("first", 24_000, f.signal.signal, f.started);
     const second = f.filler.play("second", 24_000, f.signal.signal, f.started);
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(f.play).toHaveBeenCalledTimes(1);
-    expect(f.started).not.toHaveBeenCalled();
-    expect(f.play.mock.calls[0]![2].aborted).toBe(false);
+    expect(f.play).toHaveBeenCalledTimes(3);
+    expect(f.started).toHaveBeenCalledTimes(2);
+    expect(f.play.mock.calls[0]![2].aborted).toBe(true);
     ended.resolve();
     await Promise.all([pending, first, second]);
     expect(f.play.mock.calls.slice(1).map(([audio]) => audio)).toEqual(["first", "second"]);
@@ -108,15 +108,15 @@ describe("speech turn filler playback", () => {
     expect(f.play.mock.calls.at(-1)?.[0]).toBe("reply");
   });
 
-  it("does not play a reply that was interrupted while it waited for filler", async () => {
+  it("does not schedule an already interrupted reply", async () => {
     const f = fixture();
     const ended = deferred();
     f.play.mockImplementationOnce(async () => ended.promise);
     const pending = f.filler.arm("utterance", f.signal.signal);
     await vi.advanceTimersByTimeAsync(FILLER_DELAY_MS);
+    f.signal.abort(new Error("Interrupted"));
     const reply = f.filler.play("reply", 24_000, f.signal.signal, f.started);
     const rejected = expect(reply).rejects.toThrow();
-    f.signal.abort(new Error("Interrupted"));
     ended.resolve();
     await pending;
     await rejected;

@@ -88,7 +88,15 @@ export const speechRouteLayer = HttpRouter.add(
         Stream.catch(() =>
           Stream.succeed({ error: "Speech stream interrupted. Saved speech is retained." }),
         ),
-        Stream.map((chunk) => new TextEncoder().encode(`${JSON.stringify(chunk)}\n`)),
+        Stream.map((chunk) =>
+          new TextEncoder().encode(
+            `${JSON.stringify({
+              ...chunk,
+              ...(input.generation ? { generation: input.generation } : {}),
+              speechId: input.speechId,
+            })}\n`,
+          ),
+        ),
         Stream.ensuring(Effect.sync(() => controller.abort())),
       );
       return HttpServerResponse.stream(body, {

@@ -114,6 +114,40 @@ describe("voice environment transport", () => {
         });
       }),
   );
+  it.effect.each([undefined, "generation-1", "obsolete"])(
+    "tags audio with its requesting generation and rejects an explicit mismatch: %s",
+    (generation) =>
+      Effect.gen(function* () {
+        const chunks: unknown[] = [];
+        const fetcher: typeof fetch = async () =>
+          new Response(
+            `${JSON.stringify({ audio: "AAA=", sampleRate: 24000, ...(generation ? { generation } : {}) })}\n{"complete":true}\n`,
+            { headers: { "content-type": "application/x-ndjson" } },
+          );
+        const result = yield* fetchEnvironmentSpeech({
+          ...input,
+          request: {
+            action: "call.speak",
+            callId: "synthetic",
+            speechId: "speech",
+            text: "Hello.",
+            generation: "generation-1",
+            streamAudio: true,
+          },
+          fetcher,
+          onAudio: (chunk) => chunks.push(chunk),
+        }).pipe(Effect.provide(layerRemoteHttpClient(fetcher)), Effect.result);
+        if (generation === "obsolete") {
+          expect(result._tag).toBe("Failure");
+          expect(chunks).toEqual([]);
+        } else {
+          expect(result._tag).toBe("Success");
+          expect(chunks).toEqual([
+            { audio: "AAA=", sampleRate: 24000, generation: "generation-1" },
+          ]);
+        }
+      }),
+  );
   it.effect.each(["malformed frames", "playback callback"] as const)(
     "does not mislabel %s as a retryable endpoint failure",
     (failure) =>
