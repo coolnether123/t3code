@@ -7,6 +7,7 @@ import * as Auxiliary from "../provider/AuxiliaryProviderSessions.ts";
 import * as VoiceThreadService from "./VoiceThreadService.ts";
 import { callOperator } from "./callOperator.ts";
 import { CallReplyBuffer } from "./operatorProtocol.ts";
+import { HoldTurnGuard } from "./hold.ts";
 
 export const layer = Layer.effectDiscard(
   Effect.gen(function* () {
@@ -15,6 +16,7 @@ export const layer = Layer.effectDiscard(
     const threads = yield* VoiceThreadService.VoiceThreadService;
     const calls = callOperator(config.stateDir);
     const replies = new CallReplyBuffer();
+    const holds = new HoldTurnGuard();
     calls.bind({
       context: (threadId) => Effect.runPromise(threads.context(threadId)),
       start: (input) =>
@@ -36,7 +38,12 @@ export const layer = Layer.effectDiscard(
       Stream.runForEach((event) =>
         Effect.gen(function* () {
           const reply = replies.accept(event);
-          const link = yield* Effect.tryPromise(() => calls.event(event, reply.raw));
+          const owner = yield* Effect.promise(() => calls.findLink(event.threadId));
+          const accepted =
+            owner?.role === "voice" ? holds.accept(event, reply.raw) : { event, stop: false };
+          if (!accepted) return;
+          const next = accepted.event;
+          const link = yield* Effect.tryPromise(() => calls.event(next, reply.raw));
           if (
             link?.role === "voice" &&
             (event.type === "turn.started" ||
@@ -45,7 +52,11 @@ export const layer = Layer.effectDiscard(
               event.type === "turn.completed" ||
               event.type === "runtime.error")
           )
-            yield* threads.recordVoiceEvent(link, event, reply.raw);
+            yield* threads.recordVoiceEvent(link, next, reply.raw);
+          if (accepted.stop) {
+            replies.accept(next);
+            yield* sessions.stopSession({ threadId: event.threadId }).pipe(Effect.forkScoped);
+          }
         }).pipe(Effect.catch((cause) => Effect.logError("Voice session event failed", cause))),
       ),
       Effect.forkScoped,

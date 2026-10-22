@@ -7,16 +7,16 @@ describe("speech turn ending", () => {
     (transcript) => {
       const timeline = { speechMs: 1_500, lastBurstMs: 600, silenceMs: 1_100, transcript };
       expect(shouldEndTurn(timeline)).toBe(false);
-      expect(shouldEndTurn({ ...timeline, silenceMs: 1_850 })).toBe(true);
+      expect(shouldEndTurn({ ...timeline, silenceMs: 3_500 })).toBe(false);
     },
   );
-  it("uses audio alone to protect a brief opening or a trailing fragment", () => {
+  it("never commits from audio alone", () => {
     expect(shouldEndTurn({ speechMs: 600, lastBurstMs: 600, silenceMs: 1_100 })).toBe(false);
     expect(shouldEndTurn({ speechMs: 2_000, lastBurstMs: 250, silenceMs: 1_800 })).toBe(false);
-    expect(shouldEndTurn({ speechMs: 2_000, lastBurstMs: 250, silenceMs: 1_850 })).toBe(true);
+    expect(shouldEndTurn({ speechMs: 2_000, lastBurstMs: 250, silenceMs: 30_000 })).toBe(false);
   });
   it("ends sustained speech and a clearly finished question promptly", () => {
-    expect(shouldEndTurn({ speechMs: 1_500, lastBurstMs: 900, silenceMs: 1_050 })).toBe(true);
+    expect(shouldEndTurn({ speechMs: 1_500, lastBurstMs: 900, silenceMs: 1_050 })).toBe(false);
     expect(
       shouldEndTurn({
         speechMs: 600,

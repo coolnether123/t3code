@@ -106,6 +106,85 @@ afterEach(async () => {
 });
 
 describe("durable thread voice session", () => {
+  it("keeps capture open during speech, ignores echo and acknowledgments, and cancels on sustained recognized barge-in", async () => {
+    const f = fixture();
+    const playing = deferred<void>();
+    const interrupted = deferred<void>();
+    const silence = deferred<void>();
+    let late: ((value: { audio: string; sampleRate: number }) => void) | undefined;
+    let metadata: Parameters<VoiceDependencies["audio"]["play"]>[3];
+    const stopPlayback = vi.fn(() => [
+      {
+        generation: metadata!.generation,
+        speechId: metadata!.speechId,
+        channel: "reply" as const,
+        playedSamples: 12000,
+        queuedSamples: 48000,
+        sampleRate: 24000,
+        stopped: true,
+      },
+    ]);
+    Object.assign(f.audio, { stopPlayback });
+    f.audio.play.mockImplementation(async (_audio, _rate, signal, value) => {
+      metadata = value;
+      playing.resolve();
+      await new Promise<void>((resolve) =>
+        signal.addEventListener(
+          "abort",
+          () => {
+            silence.resolve();
+            resolve();
+          },
+          { once: true },
+        ),
+      );
+    });
+    const original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (input, signal, audio) => {
+      if (input.action === "call.interrupt") interrupted.resolve();
+      if (input.action === "call.speak") {
+        late = audio;
+        audio!({ audio: "AAA=", sampleRate: 24000 });
+        return { complete: true };
+      }
+      return original(input, signal, audio);
+    });
+    await f.session.start(options, []);
+    f.session.observe(
+      [
+        {
+          id: "reply",
+          role: "assistant",
+          text: "The old answer continues.",
+          streaming: false,
+          turnId: "old-turn",
+        },
+      ],
+      false,
+      "old-turn",
+    );
+    await playing.promise;
+    const hooks = f.audio.capture.mock.calls[0]![2]!;
+    expect(f.audio.capture).toHaveBeenCalledOnce();
+    expect(f.audio.finish).not.toHaveBeenCalled();
+    hooks.activity!(250);
+    expect(
+      hooks.transcript!({ text: "The old answer continues.", revision: 1, final: false }),
+    ).toBe(false);
+    expect(hooks.transcript!({ text: "yeah", revision: 2, final: true })).toBe(false);
+    expect(f.request.mock.calls.some(([input]) => input.action === "call.interrupt")).toBe(false);
+    expect(
+      hooks.transcript!({ text: "Wait, check tomorrow instead", revision: 3, final: false }),
+    ).toBe(true);
+    await silence.promise;
+    await interrupted.promise;
+    expect(stopPlayback).toHaveBeenCalledOnce();
+    const plays = f.audio.play.mock.calls.length;
+    expect(() => late!({ audio: "AAA=", sampleRate: 24000 })).toThrow();
+    expect(f.audio.play).toHaveBeenCalledTimes(plays);
+    expect(f.saved()!.deliveredAudio?.[0]?.playedSamples).toBe(12000);
+    expect(f.saved()!.offsets.reply ?? 0).toBe(0);
+  });
   it("times out a stuck watch after 35 seconds and retries the same call", async () => {
     vi.useFakeTimers();
     const f = fixture();

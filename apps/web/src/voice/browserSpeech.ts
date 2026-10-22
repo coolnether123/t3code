@@ -5,6 +5,8 @@ import { connectionAtomRuntime } from "../connection/runtime";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { shouldEndTurn } from "./turnEnding";
 import { createDeviceSpeech } from "./deviceSpeech";
+import { FloorController, type TranscriptRevision } from "@t3tools/client-runtime/voice-call/floor";
+import type { CaptureHooks } from "@t3tools/client-runtime/voice-call";
 
 const speechRequest = createVoiceRequestCommand(connectionAtomRuntime);
 export async function requestSpeech(
@@ -227,7 +229,8 @@ export function createBrowserAudio(onInterrupted?: () => void) {
     async capture(
       signal: AbortSignal,
       journal?: (audio: { audio: string; sampleRate: number }) => Promise<void>,
-    ): Promise<{ audio: string; sampleRate: number }> {
+      hooks?: CaptureHooks,
+    ): Promise<{ audio: string; sampleRate: number; text?: string }> {
       const audioContext = context!;
       finishAtPause = false;
       let stream =
@@ -258,12 +261,23 @@ export function createBrowserAudio(onInterrupted?: () => void) {
       let lastBurstSamples = 0;
       let journalTask: Promise<void> | undefined;
       let journalLength = 0;
-      const recording = () => {
-        const bytes = new Uint8Array(length * 2);
+      let partialLength = 0;
+      let partialTask: Promise<void> | undefined;
+      let revision = 0;
+      let resetPartial = false;
+      let prefixText = "";
+      let latestText = "";
+      let speechEpoch = 0;
+      const floor = hooks?.floor ?? new FloorController();
+      const recording = (from = 0, until = length) => {
+        const bytes = new Uint8Array((until - from) * 2);
         const view = new DataView(bytes.buffer);
         let index = 0;
+        let sampleIndex = 0;
         for (const chunk of chunks)
           for (const sample of chunk) {
+            const position = sampleIndex++;
+            if (position < from || position >= until) continue;
             const clipped = Math.max(-1, Math.min(1, sample));
             view.setInt16(index, clipped * (clipped < 0 ? 32768 : 32767), true);
             index += 2;
@@ -273,33 +287,70 @@ export function createBrowserAudio(onInterrupted?: () => void) {
           binary += String.fromCharCode(...bytes.subarray(offset, offset + 512));
         return { audio: btoa(binary), sampleRate: audioContext.sampleRate };
       };
+      const recognize = async () => {
+        if (!hooks?.partial || length <= partialLength) return;
+        const sentLength = length;
+        const epoch = speechEpoch;
+        const partial = recording(partialLength);
+        const reset = resetPartial;
+        resetPartial = false;
+        partialLength = sentLength;
+        try {
+          const value = await hooks.partial(partial, ++revision, reset);
+          if (signal.aborted) return;
+          const combined: TranscriptRevision = {
+            ...value,
+            text: [prefixText, value.text].filter(Boolean).join(" "),
+            final: value.final && epoch === speechEpoch,
+          };
+          if (hooks.transcript?.(combined) === false) {
+            chunks.length = 0;
+            length = partialLength = journalLength = 0;
+            speechSeen = false;
+            latestText = "";
+            resetPartial = true;
+            floor.update(
+              { text: prefixText, revision: value.revision, final: false },
+              performance.now(),
+            );
+            return;
+          }
+          latestText = value.text;
+          floor.update(combined, performance.now());
+          if (epoch !== speechEpoch) floor.activity(performance.now());
+          if (sentLength >= audioContext.sampleRate * 45 && hooks.segment) {
+            await journalTask;
+            await hooks.segment(recording(0, sentLength));
+            let removed = 0;
+            while (chunks.length && removed < sentLength) removed += chunks.shift()!.length;
+            length -= removed;
+            partialLength = journalLength = 0;
+            prefixText = combined.text;
+            latestText = "";
+            resetPartial = true;
+          }
+        } catch {
+          resetPartial = true;
+          partialLength = 0;
+        }
+      };
       try {
         await new Promise<void>((resolve, reject) => {
           const abort = () => reject(new DOMException("Cancelled", "AbortError"));
           signal.addEventListener("abort", abort, { once: true });
           finishCapture = () => {
             signal.removeEventListener("abort", abort);
+            processor.onaudioprocess = null;
             resolve();
           };
           processor.onaudioprocess = (event) => {
             if (audioContext.state !== "running" || microphoneDeadline || interrupted) return;
             const chunk = new Float32Array(event.inputBuffer.getChannelData(0));
-            chunks.push(chunk);
-            length += chunk.length;
-            if (journal && !journalTask && length - journalLength >= audioContext.sampleRate) {
-              journalLength = length;
-              journalTask = journal(recording())
-                .catch(() => {
-                  finishCapture?.();
-                })
-                .finally(() => {
-                  journalTask = undefined;
-                });
-            }
             const rms = Math.sqrt(
               chunk.reduce((sum, sample) => sum + sample * sample, 0) / chunk.length,
             );
             if (rms > 0.015) {
+              speechEpoch++;
               speechSeen = true;
               speechSamples += chunk.length;
               burstSamples += chunk.length;
@@ -309,7 +360,34 @@ export function createBrowserAudio(onInterrupted?: () => void) {
               silenceSamples += chunk.length;
               burstSamples = 0;
             }
+            // Retain speech and short pauses, without growing the recording during an idle call.
+            if (speechSeen && silenceSamples <= audioContext.sampleRate * 2) {
+              chunks.push(chunk);
+              length += chunk.length;
+            }
+            if (journal && !journalTask && length - journalLength >= audioContext.sampleRate) {
+              journalLength = length;
+              journalTask = journal(recording()).finally(() => {
+                journalTask = undefined;
+              });
+              void journalTask.catch(() => finishCapture?.());
+            }
+            if (rms > 0.015) {
+              floor.activity(performance.now());
+              hooks?.activity?.((burstSamples / audioContext.sampleRate) * 1000);
+            }
             if (
+              hooks?.partial &&
+              !partialTask &&
+              speechSeen &&
+              length - partialLength >= audioContext.sampleRate * 0.75
+            ) {
+              partialTask = recognize().finally(() => {
+                partialTask = undefined;
+              });
+            }
+            if (
+              floor.tick(performance.now()) ||
               shouldEndTurn({
                 speechMs: (speechSamples / audioContext.sampleRate) * 1_000,
                 lastBurstMs: (lastBurstSamples / audioContext.sampleRate) * 1_000,
@@ -318,15 +396,28 @@ export function createBrowserAudio(onInterrupted?: () => void) {
               })
             )
               finishCapture?.();
-            if (length >= audioContext.sampleRate * 59) finishCapture?.();
+            // Without a working partial recognizer, retain the bounded recording for manual Send.
+            if (length >= audioContext.sampleRate * 59) {
+              chunks.pop();
+              length -= chunk.length;
+            }
           };
           source.connect(processor);
           processor.connect(mute);
           mute.connect(audioContext.destination);
         });
         await journalTask;
+        await partialTask;
+        if (!signal.aborted) await recognize();
         // Finish captures the final buffer even when hang-up cancels network work immediately.
-        return speechSeen ? recording() : { audio: "", sampleRate: audioContext.sampleRate };
+        return speechSeen || prefixText
+          ? {
+              ...recording(),
+              ...([prefixText, latestText].filter(Boolean).length
+                ? { text: [prefixText, latestText].filter(Boolean).join(" ") }
+                : {}),
+            }
+          : { audio: "", sampleRate: audioContext.sampleRate };
       } finally {
         reconnectCapture = undefined;
         finishCapture = undefined;

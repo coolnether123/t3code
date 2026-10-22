@@ -8,6 +8,25 @@ import { proxySpeech, streamSpeech, speechInputMode } from "./proxy.ts";
 vi.mock("node:http", () => ({ request: vi.fn() }));
 
 describe("local speech proxy", () => {
+  it("carries transcript revision through the fixed router endpoint", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(Response.json({ text: "Actually, tomorrow.", revision: 3, final: false }));
+    expect(
+      await proxySpeech(
+        {
+          action: "transcribe",
+          sessionId: "synthetic",
+          audio: Buffer.from([0, 0]).toString("base64"),
+          sampleRate: 16000,
+          revision: 3,
+        },
+        new AbortController().signal,
+        fetcher,
+      ),
+    ).toEqual({ text: "Actually, tomorrow.", revision: 3, transcriptFinal: false });
+    expect(String(fetcher.mock.calls[0]![0])).toContain("sample_rate=16000&language=en&revision=3");
+  });
   it.each([
     [true, true, "pc"],
     [false, true, "device"],

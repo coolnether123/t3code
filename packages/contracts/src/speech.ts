@@ -13,6 +13,7 @@ export const SpeechTransportRequest = Schema.Struct({
   text: Schema.optional(Schema.String),
   model: Schema.optional(Schema.String),
   tenants: Schema.optional(Schema.Array(Schema.String)),
+  revision: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
 });
 export type SpeechTransportRequest = typeof SpeechTransportRequest.Type;
 
@@ -48,9 +49,15 @@ export const CallOptions = Schema.Struct({
   threadId: Schema.String,
   modelSelection: ModelSelection,
   operatorSelection: Schema.optional(ModelSelection),
+  backchannels: Schema.optional(Schema.Boolean),
 });
 export type CallOptions = typeof CallOptions.Type;
 const CallTurnOrigin = Schema.Struct({ callId: CallId, utteranceId: CallId });
+const DeliveredVoiceAudio = Schema.Struct({
+  speechId: Schema.String,
+  playedSamples: Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
+  sampleRate: Schema.Number.check(Schema.isBetween({ minimum: 8000, maximum: 96000 })),
+});
 export const CallRequest = Schema.Struct({
   streamAudio: Schema.optional(Schema.Boolean),
   action: Schema.Literals([
@@ -59,6 +66,8 @@ export const CallRequest = Schema.Struct({
     "call.renew",
     "call.upload",
     "call.transcribe",
+    "call.partial",
+    "call.backchannel",
     "call.deliver",
     "call.say",
     "call.status",
@@ -86,6 +95,9 @@ export const CallRequest = Schema.Struct({
   text: Schema.optional(Schema.String),
   speechId: Schema.optional(CallId),
   version: Schema.optional(Schema.String),
+  revision: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
+  resetTranscript: Schema.optional(Schema.Boolean),
+  deliveredAudio: Schema.optional(Schema.Array(DeliveredVoiceAudio)),
 });
 export type CallRequest = typeof CallRequest.Type;
 export const ValidCallRequest = CallRequest.check(
@@ -107,6 +119,15 @@ export const ValidCallRequest = CallRequest.check(
       case "call.deliver":
       case "call.interrupt":
         return !!input.utteranceId || "An utterance or operation ID is required.";
+      case "call.partial":
+        return (
+          (!!input.utteranceId && !!input.audio && !!input.sampleRate && !!input.revision) ||
+          "Partial recognition requires PCM, an ID and a revision."
+        );
+      case "call.backchannel":
+        return (
+          input.text === "mm-hmm" || input.text === "mm" || "A neutral listening token is required."
+        );
       case "call.say":
         return (
           (!!input.utteranceId && !!input.text?.trim()) || "Typed speech requires an ID and text."
@@ -159,6 +180,8 @@ export const CallStatus = Schema.Struct({
 export type CallStatus = typeof CallStatus.Type;
 
 export const SpeechResponse = Schema.Struct({
+  transcriptFinal: Schema.optional(Schema.Boolean),
+  revision: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
   complete: Schema.optional(Schema.Boolean),
   error: Schema.optional(Schema.String),
   played: Schema.optional(Schema.Boolean),

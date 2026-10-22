@@ -74,6 +74,7 @@ export function ThreadVoiceControls({
   const [detail, setDetail] = useState<string>();
   const [call, setCall] = useState<CallStatus>();
   const [expanded, setExpanded] = useState(props.defaultOpen ?? false);
+  const [backchannels, setBackchannels] = useState(false);
   const [preferences, setModels] = useState<CallModels>(() =>
     initialCallModels(
       props.instanceEntries.map((entry) => entry.snapshot),
@@ -215,6 +216,7 @@ export function ThreadVoiceControls({
         setState(next);
         setDetail(message);
         setCall(status);
+        if (session.backchannelsEnabled !== undefined) setBackchannels(session.backchannelsEnabled);
         if (next === "idle" || next === "preparing" || next === "error") setExpanded(false);
         callbacks.current.onActiveChange?.(next !== "idle");
       },
@@ -439,6 +441,17 @@ export function ThreadVoiceControls({
                   disabled={!configurationReady && !configurationError}
                 />
                 <p className="mt-1 text-xs">Changes apply to the next turn.</p>
+                <label className="mt-2 flex items-center gap-2 text-xs">
+                  <input
+                    type="checkbox"
+                    checked={backchannels}
+                    onChange={(event) => {
+                      setBackchannels(event.target.checked);
+                      void sessionRef.current?.setBackchannels(event.target.checked);
+                    }}
+                  />
+                  Brief listening acknowledgments
+                </label>
                 <p className="mt-1 text-xs">
                   Phone speech uses your device's speech service. On iPhone, audio goes to Apple.
                 </p>
@@ -487,6 +500,7 @@ export function ThreadVoiceControls({
                           threadId: props.threadId,
                           modelSelection: models.voice,
                           operatorSelection: models.operator,
+                          backchannels,
                         },
                         messages,
                       )

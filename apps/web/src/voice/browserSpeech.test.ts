@@ -89,6 +89,49 @@ afterEach(() => {
 });
 
 describe("streamed browser PCM scheduling", () => {
+  it("streams PCM deltas and keeps hesitant speech open until a revised explicit yield", async () => {
+    vi.useFakeTimers();
+    const audio = fixture();
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue({
+      getTracks: () => [{ stop: vi.fn() }],
+      getAudioTracks: () => [],
+    } as unknown as MediaStream);
+    const signal = new AbortController().signal;
+    await audio.prepare(signal, "pc");
+    let hypothesis = "Well, um...";
+    const partial = vi.fn(
+      async (_chunk: { audio: string; sampleRate: number }, revision: number) => ({
+        text: hypothesis,
+        revision,
+        final: true,
+      }),
+    );
+    const transcript = vi.fn();
+    let done = false;
+    const capture = audio.capture(signal, undefined, { partial, transcript }).then((value) => {
+      done = true;
+      return value;
+    });
+    const frame = async (value: number) => {
+      contexts[0]!.processor.onaudioprocess!({
+        inputBuffer: { getChannelData: () => new Float32Array(4096).fill(value) },
+      });
+      await vi.advanceTimersByTimeAsync(256);
+    };
+    for (let i = 0; i < 4; i++) await frame(0.1);
+    for (let i = 0; i < 16; i++) await frame(0);
+    expect(done).toBe(false);
+    expect(atob(partial.mock.calls[0]![0].audio)).toHaveLength(4096 * 3 * 2);
+    hypothesis = "You can speak";
+    for (let i = 0; i < 3; i++) await frame(0.1);
+    for (let i = 0; i < 4; i++) {
+      if (done) break;
+      await frame(0);
+    }
+    expect((await capture).text).toBe("You can speak");
+    expect(transcript.mock.calls.at(-1)![0].revision).toBeGreaterThan(1);
+    audio.close();
+  });
   it("releases PC microphone tracks and never requests getUserMedia for device recognition", async () => {
     const audio = fixture();
     const track = Object.assign(new EventTarget(), { stop: vi.fn() });
@@ -321,7 +364,7 @@ describe("streamed browser PCM scheduling", () => {
     expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledTimes(2);
     audio.close();
   });
-  it("holds pending speech through microphone activity and ends capture at a pause", async () => {
+  it("holds pending speech through a pause until text evidence or manual Send", async () => {
     const audio = fixture();
     vi.mocked(navigator.mediaDevices.getUserMedia).mockResolvedValue({
       getTracks: () => [{ stop: vi.fn() }],
@@ -340,6 +383,8 @@ describe("streamed browser PCM scheduling", () => {
     frame(0.1);
     expect(processor.onaudioprocess).not.toBeNull();
     for (let index = 0; index < 8; index++) frame(0);
+    expect(processor.onaudioprocess).not.toBeNull();
+    audio.finish();
     expect((await captured).audio.length).toBeGreaterThan(0);
     expect(processor.onaudioprocess).toBeNull();
     audio.close();

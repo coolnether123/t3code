@@ -113,12 +113,37 @@ describe("device call recognition", () => {
     const speech = fixture();
     const delivered = vi.fn();
     const capture = speech.capture(new AbortController().signal).then(delivered);
-    recognitions[0]!.result("Check");
+    recognitions[0]!.result("Check", false);
     recognitions[0]!.result("the agenda", false);
     await vi.advanceTimersByTimeAsync(2000);
     expect(delivered).not.toHaveBeenCalled();
     speech.close();
     await capture;
+  });
+  it("holds trailing hesitation for over three seconds and commits an interim yield in 200 ms", async () => {
+    const speech = fixture();
+    const delivered = vi.fn();
+    const revisions: unknown[] = [];
+    const capture = speech
+      .capture(new AbortController().signal, {
+        transcript: (value) => {
+          revisions.push(value);
+        },
+      })
+      .then(delivered);
+    recognitions[0]!.result("Well, um...", false);
+    await vi.advanceTimersByTimeAsync(3500);
+    expect(delivered).not.toHaveBeenCalled();
+    recognitions[0]!.result("You can speak", false);
+    await vi.advanceTimersByTimeAsync(199);
+    expect(delivered).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await capture;
+    expect(delivered).toHaveBeenCalledExactlyOnceWith("You can speak");
+    expect(revisions).toEqual([
+      { text: "Well, um...", revision: 1, final: false },
+      { text: "You can speak", revision: 2, final: false },
+    ]);
   });
   it("returns unavailable without a recognition API or after denied permission", async () => {
     vi.stubGlobal("window", {});

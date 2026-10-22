@@ -82,6 +82,58 @@ async function fixture() {
 }
 
 describe("durable calls", () => {
+  it("accumulates PCM across request-scoped services, replaces revisions, and never dispatches partial words", async () => {
+    const f = await fixture();
+    const request = {
+      action: "call.partial" as const,
+      callId: "call-1",
+      utteranceId: "partial-1",
+      audio: pcm.toString("base64"),
+      sampleRate: 16000,
+      revision: 1,
+    };
+    const first = await f.service.handle(request, new AbortController().signal);
+    expect(first).toEqual({ text: "Read the build status.", revision: 1, transcriptFinal: false });
+    const nextService = new CallService(f.store, f.ports);
+    const second = await nextService.handle(
+      { ...request, revision: 2 },
+      new AbortController().signal,
+    );
+    expect(second.revision).toBe(2);
+    const recognition = vi
+      .mocked(f.ports.speech)
+      .mock.calls.filter(([input]) => input.action === "transcribe");
+    expect(Buffer.from(recognition[0]![0].audio!, "base64")).toEqual(pcm);
+    expect(Buffer.from(recognition[1]![0].audio!, "base64")).toEqual(Buffer.concat([pcm, pcm]));
+    await nextService.handle({ ...request, revision: 2 }, new AbortController().signal);
+    expect(
+      vi.mocked(f.ports.speech).mock.calls.filter(([input]) => input.action === "transcribe"),
+    ).toHaveLength(2);
+    await expect(nextService.handle(request, new AbortController().signal)).rejects.toThrow(
+      "Stale",
+    );
+    await nextService.handle(
+      { ...request, revision: 3, resetTranscript: true },
+      new AbortController().signal,
+    );
+    const last = vi.mocked(f.ports.speech).mock.calls.at(-1)![0];
+    expect(Buffer.from(last.audio!, "base64")).toEqual(pcm);
+    expect(f.ports.dispatch).not.toHaveBeenCalled();
+  });
+  it("caches neutral clips across calls without recording a conversation turn", async () => {
+    const f = await fixture();
+    const one = await f.request({ action: "call.backchannel", text: "mm" });
+    expect(one.audio).toBeTruthy();
+    const service = new CallService(f.store, f.ports);
+    await service.handle(
+      { action: "call.backchannel", callId: "call-1", text: "mm" },
+      new AbortController().signal,
+    );
+    expect(
+      vi.mocked(f.ports.speech).mock.calls.filter(([input]) => input.action === "speak"),
+    ).toHaveLength(1);
+    expect(f.ports.dispatch).not.toHaveBeenCalled();
+  });
   it("re-acquires TTS only and delivers after the lease lapses during a stalled watch", async () => {
     const f = await fixture();
     const entered = deferred<void>();

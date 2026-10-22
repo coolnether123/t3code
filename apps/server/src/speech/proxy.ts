@@ -167,7 +167,7 @@ export async function proxySpeech(
       if (body.length === 0 || body.length % 2 !== 0 || body.length > rate * 2 * 60) {
         throw new Error("Record up to one minute of speech.");
       }
-      path = `/v1/audio/transcriptions/pcm?sample_rate=${rate}&language=en`;
+      path = `/v1/audio/transcriptions/pcm?sample_rate=${rate}&language=en${input.revision ? `&revision=${input.revision}` : ""}`;
       contentType = "application/octet-stream";
       break;
     }
@@ -269,7 +269,12 @@ export async function proxySpeech(
     };
   }
   if (input.action === "transcribe" && "text" in result && typeof result.text === "string") {
-    return { text: result.text };
+    return {
+      text: result.text,
+      ...(input.revision
+        ? { revision: input.revision, transcriptFinal: "final" in result && result.final === true }
+        : {}),
+    };
   }
   throw new Error("Invalid speech response.");
 }

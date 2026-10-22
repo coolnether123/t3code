@@ -1,5 +1,11 @@
 /* oxlint-disable unicorn/prefer-add-event-listener -- Each recognizer has one owner; cleanup clears its callback slots before abort. */
-import { shouldEndTurn } from "./turnEnding";
+import { FloorController, type TranscriptRevision } from "@t3tools/client-runtime/voice-call/floor";
+
+export interface RecognitionHooks {
+  floor?: FloorController;
+  transcript?(value: TranscriptRevision): boolean | void;
+  activity?(voicedMs: number): void;
+}
 
 interface RecognitionResult {
   isFinal: boolean;
@@ -36,7 +42,7 @@ export function createDeviceSpeech() {
     close() {
       cancel?.();
     },
-    capture(signal: AbortSignal): Promise<string | null> {
+    capture(signal: AbortSignal, hooks?: RecognitionHooks): Promise<string | null> {
       const browser = window as unknown as {
         SpeechRecognition?: RecognitionConstructor;
         webkitSpeechRecognition?: RecognitionConstructor;
@@ -51,6 +57,9 @@ export function createDeviceSpeech() {
         let ending = false;
         let settled = false;
         let interim = false;
+        let revision = 0;
+        let speechStartedAt: number | undefined;
+        const floor = hooks?.floor ?? new FloorController();
         const done = (value: string | null) => {
           if (settled) return;
           settled = true;
@@ -71,6 +80,7 @@ export function createDeviceSpeech() {
         };
         const abort = () => done(text.trim());
         finish = () => {
+          floor.manual();
           ending = true;
           clearTimeout(restart);
           if (recognition) recognition.stop();
@@ -84,6 +94,8 @@ export function createDeviceSpeech() {
           if (settled || ending || signal.aborted) return;
           const current = new Recognition();
           const received = new Set<number>();
+          const segments = new Map<number, { text: string; final: boolean }>();
+          const prefix = text;
           recognition = current;
           current.continuous = true;
           current.interimResults = true;
@@ -91,34 +103,51 @@ export function createDeviceSpeech() {
           current.onspeechstart = () => {
             clearTimeout(quiet);
             interim = true;
+            speechStartedAt = performance.now();
+            floor.activity(speechStartedAt);
+            hooks?.activity?.(0);
           };
           current.onresult = (event) => {
             if (settled || recognition !== current) return;
-            let changed = false;
             interim = false;
+            let changed = false;
             for (let index = event.resultIndex; index < event.results.length; index++) {
               const result = event.results[index]!;
-              if (!result.isFinal) {
-                interim = true;
-                continue;
-              }
               if (received.has(index)) continue;
-              received.add(index);
-              text += ` ${result[0].transcript.trim()}`;
-              changed = true;
+              const previous = segments.get(index);
+              changed ||=
+                previous?.text !== result[0].transcript.trim() ||
+                previous?.final !== result.isFinal;
+              segments.set(index, { text: result[0].transcript.trim(), final: result.isFinal });
+              if (result.isFinal) received.add(index);
             }
-            if (ending || (!changed && !interim)) return;
+            if (!changed) return;
+            const ordered = [...segments.entries()]
+              .sort(([a], [b]) => a - b)
+              .map(([, value]) => value);
+            interim = ordered.some((value) => !value.final);
+            text = [prefix, ...ordered.map((value) => value.text)].filter(Boolean).join(" ").trim();
+            const value = { text, revision: ++revision, final: !interim };
+            hooks?.activity?.(
+              speechStartedAt === undefined ? 0 : Math.max(0, performance.now() - speechStartedAt),
+            );
+            const accepted = hooks?.transcript?.(value) !== false;
             clearTimeout(quiet);
-            if (interim || !text.trim()) return;
-            const delay = shouldEndTurn({
-              speechMs: 1500,
-              lastBurstMs: 500,
-              silenceMs: 1050,
-              transcript: text,
-            })
-              ? 1050
-              : 1850;
-            quiet = setTimeout(() => finish?.(), delay);
+            if (!accepted) {
+              text = prefix;
+              segments.clear();
+              return;
+            }
+            if (ending) return;
+            floor.update(value, performance.now());
+            const deadline = floor.commitAt;
+            if (deadline !== undefined)
+              quiet = setTimeout(
+                () => {
+                  if (floor.tick(performance.now())) finish?.();
+                },
+                Math.max(0, deadline - performance.now()),
+              );
           };
           current.onerror = (event) => {
             if (event.error !== "no-speech" && event.error !== "aborted") done(null);

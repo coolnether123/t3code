@@ -8,6 +8,7 @@ import * as Schema from "effect/Schema";
 import * as NodePath from "node:path";
 import {
   CommandId,
+  EventId,
   CALL_PREPARE_TIMEOUT_MS,
   MessageId,
   ThreadId,
@@ -24,6 +25,7 @@ import {
 } from "@t3tools/contracts";
 import { callIdentifier, type CallStore, type CallRecord, sha256 } from "./callStore.ts";
 import type { CallOperator } from "./callOperator.ts";
+import { BackchannelClips } from "./backchannelClips.ts";
 
 export interface CallPorts {
   verify(
@@ -91,6 +93,12 @@ const expiry = (response: SpeechResponse) => {
 const active = (record: CallRecord) => {
   if (record.closed) throw new Error("This call has ended. Its saved speech is retained.");
 };
+type PartialWindow = {
+  revision: number;
+  sampleRate: number;
+  pcm: Buffer;
+  result: Promise<SpeechResponse>;
+};
 const lease = (record: CallRecord) => {
   active(record);
   if (!record.lease || (record.leaseUntil ?? 0) <= time())
@@ -99,13 +107,22 @@ const lease = (record: CallRecord) => {
 };
 
 export class CallService {
+  private static recognition = new WeakMap<CallStore, Map<string, PartialWindow>>();
+  private static clips = new WeakMap<CallStore, BackchannelClips>();
+  private partials: Map<string, PartialWindow>;
   readonly store: CallStore;
   private ports: CallPorts;
   private operator: CallOperator | undefined;
+  private backchannels: BackchannelClips;
   constructor(store: CallStore, ports: CallPorts, operator?: CallOperator) {
     this.store = store;
+    // HTTP constructs a service per request; capture windows belong to the retained store.
+    this.partials = CallService.recognition.get(store) ?? new Map();
+    CallService.recognition.set(store, this.partials);
     this.ports = ports;
     this.operator = operator;
+    this.backchannels = CallService.clips.get(store) ?? new BackchannelClips(store.root);
+    CallService.clips.set(store, this.backchannels);
   }
 
   async status(callId: string): Promise<CallStatus> {
@@ -212,6 +229,21 @@ export class CallService {
     decodeCallRequest(input);
     callIdentifier(input.callId);
     await this.recoverExpirations();
+    if (input.action === "call.partial") return this.partial(input, signal);
+    if (input.action === "call.backchannel") {
+      const record = await this.store.require(input.callId);
+      const sessionId = lease(record);
+      if (input.revision && input.startedAt) {
+        await this.backchannels.record(input.callId, input.text!, input.revision, input.startedAt);
+        return {};
+      }
+      return this.backchannels.get(input.text!, this.ports.ttsModel, () =>
+        this.ports.speech(
+          { action: "speak", sessionId, model: this.ports.ttsModel, text: input.text },
+          signal,
+        ),
+      );
+    }
     if (!["call.open", "call.close", "call.configure"].includes(input.action))
       await this.contact(
         input.callId,
@@ -351,6 +383,7 @@ export class CallService {
         case "call.status":
           return { call: await this.status(input.callId) };
         case "call.upload":
+          this.partials.delete(`${input.callId}:${input.utteranceId}`);
           return { utterance: await this.upload(record, input) };
         case "call.played":
           await this.store.write(record.callId, `${callIdentifier(input.speechId)}.played.json`, {
@@ -365,12 +398,82 @@ export class CallService {
           break;
         case "call.interrupt":
           await this.interrupt(record, callIdentifier(input.utteranceId));
+          if (input.deliveredAudio) {
+            await this.ports.dispatch({
+              type: "thread.activity.append",
+              commandId: CommandId.make(`voice-heard:${record.callId}:${input.utteranceId}`),
+              threadId: ThreadId.make(record.threadId),
+              createdAt: now(),
+              activity: {
+                id: EventId.make(`voice-heard:${record.callId}:${input.utteranceId}`),
+                kind: "call.playback.interrupted",
+                summary:
+                  "Voice reply interrupted. Only the recorded audio offsets were played; remaining text was not delivered.",
+                tone: "info",
+                payload: { callId: record.callId, deliveredAudio: input.deliveredAudio },
+                turnId: null,
+                createdAt: now(),
+              },
+            });
+          }
           break;
       }
       return { call: await this.status(input.callId) };
     });
   }
+  private async partial(input: CallRequest, signal: AbortSignal): Promise<SpeechResponse> {
+    const record = await this.store.require(input.callId);
+    const sessionId = lease(record);
+    if (record.inputMode === "device") throw new Error("PC recognition is unavailable.");
+    const rate = input.sampleRate!;
+    const chunk = Buffer.from(input.audio!, "base64");
+    if (
+      !Number.isInteger(rate) ||
+      rate < 8000 ||
+      rate > 96000 ||
+      !chunk.length ||
+      chunk.length % 2 ||
+      chunk.length > rate * 2 * 60
+    )
+      throw new Error("Invalid incremental PCM chunk.");
+    const key = `${input.callId}:${input.utteranceId}`;
+    const previous = this.partials.get(key);
+    if (previous?.revision === input.revision) return previous.result;
+    if (previous && (input.revision! < previous.revision || previous.sampleRate !== rate))
+      throw new Error("Stale or incompatible transcript revision.");
+    if (previous && !input.resetTranscript && input.revision !== previous.revision + 1)
+      throw new Error("Missing incremental PCM chunk.");
+    const pcm = Buffer.concat([
+      input.resetTranscript ? Buffer.alloc(0) : (previous?.pcm ?? Buffer.alloc(0)),
+      chunk,
+    ]);
+    if (pcm.length > rate * 2 * 60) throw new Error("Incremental recording exceeds one minute.");
+    const result = this.ports
+      .speech(
+        {
+          action: "transcribe",
+          sessionId,
+          audio: pcm.toString("base64"),
+          sampleRate: rate,
+          revision: input.revision,
+        },
+        signal,
+      )
+      .then((result) => {
+        if (typeof result.text !== "string")
+          throw new Error("Recognition returned no partial transcript.");
+        return {
+          text: result.text,
+          revision: input.revision,
+          transcriptFinal: result.transcriptFinal === true,
+        };
+      });
+    this.partials.set(key, { revision: input.revision!, sampleRate: rate, pcm, result });
+    return result;
+  }
   private async close(callId: string) {
+    for (const key of this.partials.keys())
+      if (key.startsWith(`${callId}:`)) this.partials.delete(key);
     let found = false;
     const sessionId = await this.store.serial(callId, async () => {
       const record = await this.store.read<CallRecord>(callId, "call.json");
@@ -655,6 +758,7 @@ export class CallService {
     return raw;
   }
   private async transcribe(record: CallRecord, id: string) {
+    this.partials.delete(`${record.callId}:${id}`);
     const raw = await this.store.utterance(record.callId, id);
     if (raw.transcribedAt) return raw;
     if (record.inputMode === "device")

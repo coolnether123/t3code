@@ -431,6 +431,10 @@
       "types": "./src/pullRequestQuery.ts",
       "default": "./src/pullRequestQuery.ts"
     },
+    "./voice-call/floor": {
+      "types": "./src/voice-call/floor.ts",
+      "default": "./src/voice-call/floor.ts"
+    },
     "./voice-call/transport": {
       "types": "./src/voice-call/transport.ts",
       "default": "./src/voice-call/transport.ts"
