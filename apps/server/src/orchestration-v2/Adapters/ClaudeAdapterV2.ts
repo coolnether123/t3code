@@ -8591,7 +8591,11 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         });
 
         const openQuery = Effect.fnUntraced(function* (
-          turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
+          turnInput: ProviderAdapter.ProviderAdapterV2PrepareThreadInput & {
+            readonly providerTurnOrdinal: number;
+            readonly nativeThreadHasTurns?: boolean;
+            readonly continuation?: boolean;
+          },
           nativeThreadId: string,
         ) {
           const queryPolicy = claudeRuntimeQueryPolicyForRuntimePolicy(turnInput.runtimePolicy);
@@ -8612,7 +8616,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           if (
             existing !== null &&
             existing.nativeThreadId === nativeThreadId &&
-            isClaudeProviderContinuationTurn(turnInput)
+            turnInput.continuation === true
           ) {
             return existing;
           }
@@ -8936,10 +8940,19 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                     attachments: turnInput.message.attachments,
                     attachmentsDir,
                     fileSystem,
-                    skillNames: yield* userInvocableSkillNames(turnInput.runtimePolicy.cwd),
+                    skillNames:
+                      turnInput.runtimePolicy.toolMode === "none"
+                        ? new Set<string>()
+                        : yield* userInvocableSkillNames(turnInput.runtimePolicy.cwd),
                     uuid: promptUuid,
                   });
-            const querySession = yield* openQuery(turnInput, nativeThreadId);
+            const querySession = yield* openQuery(
+              {
+                ...turnInput,
+                continuation: isClaudeProviderContinuationTurn(turnInput),
+              },
+              nativeThreadId,
+            );
             const attachTurn = Effect.gen(function* () {
               querySession.lastTurn = context;
               yield* Ref.set(activeTurn, context);
@@ -9424,6 +9437,24 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                 nativeThreadId,
                 now: createdAt,
               });
+            },
+            (effect, threadInput) =>
+              effect.pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterEnsureThreadError({
+                      driver: CLAUDE_PROVIDER,
+                      threadId: threadInput.threadId,
+                      cause,
+                    }),
+                ),
+              ),
+          ),
+          prepareThread: Effect.fn("ClaudeAdapterV2.prepareThread")(
+            function* (threadInput: ProviderAdapter.ProviderAdapterV2PrepareThreadInput) {
+              if (threadInput.runtimePolicy.toolMode !== "none") return;
+              const nativeThreadId = yield* getNativeThreadId(threadInput.providerThread);
+              yield* openQuery({ ...threadInput, providerTurnOrdinal: 1 }, nativeThreadId);
             },
             (effect, threadInput) =>
               effect.pipe(

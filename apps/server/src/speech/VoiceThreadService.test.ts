@@ -86,6 +86,28 @@ const layer = VoiceThreadService.layer.pipe(
 );
 const seed = Effect.gen(function* () {
   const sink = yield* EventSink.EventSinkV2;
+  const projects = yield* ProjectStore.ProjectStoreV2;
+  yield* projects.apply({
+    sequence: 1,
+    eventId: EventId.make("synthetic-project-create"),
+    aggregateKind: "project",
+    aggregateId: thread.projectId,
+    occurredAt: now,
+    commandId: null,
+    causationEventId: null,
+    correlationId: null,
+    metadata: {},
+    type: "project.created",
+    payload: {
+      projectId: thread.projectId,
+      title: "Synthetic voice project",
+      workspaceRoot: process.cwd(),
+      defaultModelSelection: thread.modelSelection,
+      scripts: [],
+      createdAt: now,
+      updatedAt: now,
+    },
+  });
   yield* sink.write({
     events: [
       {
@@ -662,10 +684,39 @@ it.effect("announces saved results without adding an internal update-ready chat 
       await calls.update(thread.id, "job", "finished", "done", "Build passed.");
       await calls.announce(thread.id, "synthetic-call");
     });
-    expect(announcements).toHaveLength(1);
-    yield* service.dispatch(announcements[0]!);
+    const announcement = announcements.find((command) => command.type === "thread.turn.start");
+    expect(announcement).toBeDefined();
+    yield* service.dispatch(announcement!);
     const { projection } = yield* service.snapshot(thread.id);
     expect(projection.messages).toEqual([]);
     expect(projection.turnItems).toEqual([]);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("carries delivered audio evidence without claiming generated words were heard", () =>
+  Effect.gen(function* () {
+    const service = yield* seed;
+    yield* service.dispatch({
+      type: "thread.activity.append",
+      commandId: CommandId.make("playback-interrupted"),
+      threadId: thread.id,
+      createdAt: now,
+      activity: {
+        id: EventId.make("playback-interrupted"),
+        kind: "call.playback.interrupted",
+        summary: "Playback interrupted",
+        tone: "info",
+        payload: {
+          deliveredAudio: [{ speechId: "speech-one", playedSamples: 24000, sampleRate: 24000 }],
+        },
+        turnId: null,
+        createdAt: now,
+      },
+    });
+    const context = yield* service.context(thread.id);
+    expect(context.conversation).toContain('"playedSamples":24000');
+    expect(context.conversation).toContain('"speechId":"speech-one"');
+    expect(context.conversation).toContain("not proof Jared heard them");
+    expect(context.conversation).toContain("Do not infer an exact heard word offset");
   }).pipe(Effect.provide(layer)),
 );

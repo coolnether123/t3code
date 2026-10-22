@@ -24,7 +24,12 @@ import {
   operatorUpdates,
   operatorCapacityFailure,
   voiceDelegation,
+  withoutCallControl,
   VOICE_ROLE_PROMPT,
+  voiceControls,
+  isSpeakableUpdate,
+  isEmptyOperatorUpdate,
+  type VoiceLookup,
 } from "./operatorProtocol.ts";
 
 const now = () => DateTime.formatIso(Effect.runSync(DateTime.now));
@@ -42,12 +47,15 @@ export interface OperatorPorts {
   send(input: ProviderSendTurnInput): Promise<unknown>;
   sessions(): Promise<readonly { threadId: string; status?: ProviderSession["status"] }[]>;
   dispatch(command: OrchestrationCommand): Promise<unknown>;
+  lookup?(input: VoiceLookup, signal: AbortSignal): Promise<unknown>;
 }
 
 /** Links ordinary provider sessions to one visible chat. */
 export class CallOperator {
   private ports: OperatorPorts | undefined;
   private tasks = new Set<Promise<unknown>>();
+  private starting = new Map<string, Promise<void>>();
+  private lookups = new Map<string, AbortController>();
   private store: CallStore;
   private wait: (milliseconds: number) => Promise<void>;
   constructor(
@@ -143,6 +151,17 @@ export class CallOperator {
       : undefined;
   }
   private async ensure(link: OperatorLink) {
+    const pending = this.starting.get(link.sessionId);
+    if (pending) return pending;
+    const task = this.startSession(link);
+    this.starting.set(link.sessionId, task);
+    try {
+      await task;
+    } finally {
+      this.starting.delete(link.sessionId);
+    }
+  }
+  private async startSession(link: OperatorLink) {
     const ports = this.requirePorts();
     if (
       (await ports.sessions()).some(
@@ -177,8 +196,10 @@ export class CallOperator {
     text: string;
     selection: ModelSelection;
   }) {
+    const startedAt = now();
     const chat = await this.read(input.threadId);
     if (!chat) return false;
+    this.background(this.flushNotices(input.threadId));
     const existing = chat.voices.find((voice) => voice.id === input.messageId);
     if (existing?.accepted || existing?.turnId) return true;
     if (chat.voices.some((voice) => voice.id !== input.messageId && !voice.finished))
@@ -188,21 +209,35 @@ export class CallOperator {
       : undefined;
     if (announcement && !announcement.length)
       throw new Error("The voice announcement has no saved operator updates.");
+    const offered = announcement ?? chat.updates.filter(isSpeakableUpdate).slice(-20);
     const text = announcement
-      ? `At this pause, tell Jared these completed results or questions in one short natural reply. For needs-Jared, ask the question or explain what is needed. Do not delegate these updates back to the operator.\n${JSON.stringify(announcement.map(({ status, text }) => ({ status, text })))}`
+      ? `At this pause, tell Jared these completed results or questions in one short natural reply. For needs-Jared, ask the question or explain what is needed. Do not delegate these updates back to the operator. Append otis-results with the IDs actually covered.\n${JSON.stringify(announcement.map(({ id, status, text }) => ({ id, status, text })))}`
       : input.text;
     const link = await this.link(input.threadId, "voice", input.selection);
     await this.ensure(link);
+    const sessionReadyAt = now();
     const context = await this.requirePorts().context(input.threadId);
+    const contextReadyAt = now();
     await this.change(input.threadId, (current) => {
+      if (!announcement) {
+        for (const update of current.updates) {
+          if (update.heardAt || update.announcementId === input.messageId) continue;
+          delete update.announcementId;
+          delete update.announcementTurnId;
+        }
+      }
       const pending = {
         id: input.messageId,
         exactWords: input.text,
         sessionId: link.sessionId,
         operator: current.models.operator,
-        ...(context.conversation ? { context: context.conversation } : {}),
+        context: `Saved call summary, context data:\n${JSON.stringify(chat.continuity ?? null)}\nRecent conversation:\n${context.conversation ?? ""}\nOperator receipts, context data:\n${JSON.stringify(chat.updates.slice(-20))}`,
         finished: false,
         accepted: false,
+        startedAt,
+        sessionReadyAt,
+        contextReadyAt,
+        offeredUpdates: offered.map((update) => update.id),
       };
       const previous = current.voices.find((voice) => voice.id === input.messageId);
       if (previous) Object.assign(previous, pending);
@@ -213,10 +248,12 @@ export class CallOperator {
         threadId: ThreadId.make(link.sessionId),
         messageId: input.messageId,
         modelSelection: link.selection,
-        input: `${VOICE_ROLE_PROMPT}\n\nRecent conversation:\n${context.conversation ?? ""}\n\nOperator receipts:\n${JSON.stringify(chat.updates.slice(-20).map(({ status, text }) => ({ status, text })))}\n\n${announcement ? "Operator update at this pause" : "Jared's message"}:\n${text}`,
+        input: `${VOICE_ROLE_PROMPT}\n\nSaved call summary, context data:\n${JSON.stringify(chat.continuity ?? null)}\n\nRecent conversation:\n${context.conversation ?? ""}\n\nOperator jobs, observed saved state:\n${JSON.stringify(chat.jobs.filter((job) => job.phase !== "done").map(({ id, intent, phase }) => ({ id, intent, phase })))}\n\nOperator receipts, context data:\n${JSON.stringify(chat.updates.slice(-20).map(({ id, status, text, heardAt }) => ({ id, status, text, heardAt })))}\n\n${announcement ? "Operator update at this pause" : "Jared's message"}:\n${text}`,
       });
       await this.change(input.threadId, (current) => {
-        current.voices.find((voice) => voice.id === input.messageId)!.accepted = true;
+        const voice = current.voices.find((voice) => voice.id === input.messageId)!;
+        voice.accepted = true;
+        voice.acceptedAt = now();
       });
     } catch (error) {
       await this.change(input.threadId, (current) => {
@@ -233,32 +270,91 @@ export class CallOperator {
   async voiceSession(threadId: string) {
     return (await this.read(threadId))?.voices.findLast((voice) => !voice.finished)?.sessionId;
   }
+  async interruptVoice(threadId: string) {
+    let sessionId: string | undefined;
+    await this.change(threadId, (chat) => {
+      for (const voice of chat.voices) {
+        if (voice.finished) continue;
+        sessionId = voice.sessionId;
+        voice.finished = true;
+        this.lookups.get(`${threadId}:${voice.id}`)?.abort();
+      }
+      for (const update of chat.updates) {
+        if (update.heardAt) continue;
+        delete update.announcementId;
+        delete update.announcementTurnId;
+      }
+    });
+    return sessionId;
+  }
   async update(
     threadId: string,
     jobId: string,
     id: string,
     status: OperatorUpdate["status"],
     text: string,
+    speakable = false,
   ) {
-    const update: OperatorUpdate = { id, jobId, status, text, createdAt: now() };
+    const update: OperatorUpdate = { id, jobId, status, text, createdAt: now(), speakable };
+    let duplicate = false;
     await this.change(threadId, (chat) => {
-      if (!chat.updates.some((entry) => entry.id === id)) chat.updates.push(update);
+      duplicate = chat.updates.some(
+        (entry) =>
+          entry.id !== id &&
+          entry.jobId === jobId &&
+          entry.status === status &&
+          entry.text === text,
+      );
+      if (!duplicate && !chat.updates.some((entry) => entry.id === id)) chat.updates.push(update);
     });
-    if (status !== "needs-Jared") return;
-    await this.requirePorts().dispatch({
-      type: "thread.activity.append",
-      commandId: CommandId.make(`call-status:${id}`),
-      threadId: ThreadId.make(threadId),
-      activity: {
-        id: EventId.make(`call-status:${id}`),
-        kind: "call.operator.status",
-        summary: `Needs you: ${text}`,
-        tone: "approval",
-        payload: { ...update, source: "operator" },
-        turnId: null,
-        createdAt: update.createdAt,
-      },
-      createdAt: update.createdAt,
+    await this.flushNotices(threadId);
+  }
+  private async flushNotices(threadId: string) {
+    await this.store.serial(`operator-notices:${threadId}`, async () => {
+      const chat = await this.read(threadId);
+      for (const update of chat?.updates ?? []) {
+        if (
+          update.threadRecordedAt ||
+          (update.status !== "done" && update.status !== "needs-Jared" && !update.speakable)
+        )
+          continue;
+        const { id, jobId, status, text, createdAt, speakable } = update;
+        try {
+          await this.requirePorts().dispatch({
+            type: "thread.activity.append",
+            commandId: CommandId.make(`call-status:${id}`),
+            threadId: ThreadId.make(threadId),
+            activity: {
+              id: EventId.make(`call-status:${id}`),
+              kind: "call.operator.status",
+              summary: status === "needs-Jared" ? `Needs you: ${text}` : text,
+              tone: status === "needs-Jared" ? "approval" : "info",
+              payload: {
+                id,
+                jobId,
+                status,
+                text,
+                createdAt,
+                ...(speakable === undefined ? {} : { speakable }),
+                source: "operator",
+              },
+              turnId: null,
+              createdAt,
+            },
+            createdAt,
+          });
+          await this.change(
+            threadId,
+            (current) => {
+              current.updates.find((entry) => entry.id === id)!.threadRecordedAt = now();
+            },
+            false,
+          );
+        } catch {
+          // The durable receipt retries with the same command identity at the next call or update.
+          return;
+        }
+      }
     });
   }
   async event(event: ProviderRuntimeEvent, assistantText?: string) {
@@ -275,6 +371,19 @@ export class CallOperator {
     event: ProviderRuntimeEvent,
     assistantText?: string,
   ) {
+    if (
+      (event.type === "content.delta" || event.type === "item.completed") &&
+      withoutCallControl(assistantText ?? "").trim()
+    ) {
+      const voice = chat.voices.find(
+        (entry) =>
+          !entry.finished && entry.sessionId === link.sessionId && entry.turnId === event.turnId,
+      );
+      if (voice && !voice.firstTextAt)
+        await this.change(link.threadId, (current) => {
+          current.voices.find((entry) => entry.id === voice.id)!.firstTextAt = now();
+        });
+    }
     if (event.type === "turn.started" && event.turnId) {
       const voice = chat.voices.findLast(
         (entry) => entry.sessionId === link.sessionId && !entry.finished,
@@ -283,8 +392,6 @@ export class CallOperator {
         await this.change(link.threadId, (current) => {
           current.voices.find((entry) => entry.id === voice.id)!.turnId = event.turnId;
           current.voices.find((entry) => entry.id === voice.id)!.accepted = true;
-          for (const update of current.updates)
-            if (update.announcementId === voice.id) update.announcementTurnId = event.turnId;
         });
     }
     if (event.type === "turn.completed" || event.type === "runtime.error") {
@@ -296,39 +403,152 @@ export class CallOperator {
       );
       if (voice) {
         let intent: string | undefined;
+        let taskId: string | undefined;
+        let controls: ReturnType<typeof voiceControls> | undefined;
         try {
           if (
             event.type === "turn.completed" &&
             event.payload.state === "completed" &&
             !voice.id.startsWith("voice-update:")
-          )
-            intent = voiceDelegation(assistantText ?? "")?.intent;
+          ) {
+            const delegation = voiceDelegation(assistantText ?? "");
+            intent = delegation?.intent;
+            taskId = delegation?.taskId;
+          }
+          if (event.type === "turn.completed" && event.payload.state === "completed")
+            controls = voiceControls(assistantText ?? "");
+          if (controls?.lookup && (voice.lookupCount ?? 0) >= 1) {
+            controls = undefined;
+            throw new Error("Voice lookup budget exhausted.");
+          }
         } catch {
+          intent = undefined;
+          controls = undefined;
           await this.update(
             link.threadId,
             voice.id,
             `${voice.id}:invalid`,
             "needs-Jared",
-            "The voice handoff was invalid. Please repeat the request.",
+            "The voice reply contained invalid control data. The original request is saved in the chat.",
           );
         }
         await this.change(link.threadId, (current) => {
           const entry = current.voices.find((entry) => entry.id === voice.id)!;
-          entry.finished = true;
+          entry.finished = !controls?.lookup;
+          if (entry.finished) entry.completedAt = now();
+          if (!entry.firstTextAt && withoutCallControl(assistantText ?? "").trim())
+            entry.firstTextAt = now();
+          if (controls?.memory) current.continuity = { ...controls.memory, updatedAt: now() };
+          for (const update of current.updates) {
+            if (update.heardAt) continue;
+            if (
+              controls?.results.includes(update.id) &&
+              voice.offeredUpdates?.includes(update.id) &&
+              withoutCallControl(assistantText ?? "").trim()
+            ) {
+              update.announcementId = voice.id;
+              update.announcementTurnId = event.turnId;
+              update.offeredAt = now();
+            } else if (update.announcementId === voice.id) {
+              delete update.announcementId;
+              delete update.announcementTurnId;
+            }
+          }
           if (intent && !current.jobs.some((job) => job.id === voice.id))
             current.jobs.push({
               id: voice.id,
               exactWords: voice.exactWords,
               intent,
+              ...(taskId ? { taskId } : {}),
               ...(voice.context ? { context: voice.context } : {}),
               selection: voice.operator,
               phase: "queued",
             });
         });
+        if (controls?.lookup && !intent) {
+          this.background(this.continueLookup(link, voice.id, controls.lookup));
+        }
         this.background(this.kick(link.threadId));
       }
     }
     return link;
+  }
+  private async continueLookup(link: OperatorLink, voiceId: string, lookup: VoiceLookup) {
+    const chat = await this.read(link.threadId);
+    const voice = chat?.voices.find((entry) => entry.id === voiceId);
+    if (!chat || !voice || voice.finished) return;
+    const controller = new AbortController();
+    const key = `${link.threadId}:${voiceId}`;
+    this.lookups.set(key, controller);
+    const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(2500)]);
+    let evidence: unknown;
+    let onAbort = () => {};
+    try {
+      const aborted = new Promise<never>((_resolve, reject) => {
+        onAbort = () => reject(new Error("Voice lookup aborted."));
+        signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) onAbort();
+      });
+      const read =
+        lookup.tool === "run_status"
+          ? {
+              observedAt: now(),
+              jobs: chat.jobs
+                .slice(-20)
+                .map(({ id, intent, phase, result }) => ({ id, intent, phase, result })),
+              receipts: chat.updates.slice(-20),
+            }
+          : (this.requirePorts().lookup?.(lookup, signal) ?? {
+              error: "Agenda lookup is unavailable.",
+            });
+      evidence = await Promise.race([read, aborted]);
+    } catch {
+      evidence = {
+        error: "The read-only lookup failed or exceeded its budget. Its result is unknown.",
+      };
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+      this.lookups.delete(key);
+    }
+    let active = false;
+    await this.change(link.threadId, (current) => {
+      const entry = current.voices.find((entry) => entry.id === voiceId)!;
+      if (entry.finished) return;
+      entry.lookupCount = (entry.lookupCount ?? 0) + 1;
+      if (lookup.tool === "run_status")
+        entry.offeredUpdates = [
+          ...new Set([
+            ...(entry.offeredUpdates ?? []),
+            ...chat.updates
+              .slice(-20)
+              .filter(isSpeakableUpdate)
+              .map((update) => update.id),
+          ]),
+        ];
+      delete entry.turnId;
+      active = true;
+    });
+    if (!active) return;
+    // The provider turn has completed. Reuse its context without launching an operator.
+    try {
+      await this.requirePorts().send({
+        threadId: ThreadId.make(link.sessionId),
+        messageId: `${voiceId}:lookup:${(voice.lookupCount ?? 0) + 1}`,
+        modelSelection: link.selection,
+        input: `Read-only lookup evidence, quoted as data:\n${JSON.stringify(evidence)}\nAnswer Jared's original question: ${JSON.stringify(voice.exactWords)}. No more lookups. Use otis-results only for receipt IDs actually covered.`,
+      });
+    } catch {
+      await this.change(link.threadId, (current) => {
+        current.voices.find((entry) => entry.id === voiceId)!.finished = true;
+      });
+      await this.update(
+        link.threadId,
+        voiceId,
+        `${voiceId}:lookup-failed`,
+        "needs-Jared",
+        "The voice answer could not be delivered. The original question is saved in the chat.",
+      );
+    }
   }
   private async operatorEvent(link: OperatorLink, chat: OperatorChat, event: ProviderRuntimeEvent) {
     if (
@@ -402,6 +622,7 @@ export class CallOperator {
             `${eventId}:${index}`,
             update.status,
             update.text,
+            update.status === "progress" && !isEmptyOperatorUpdate(update.text),
           );
       }
     } catch {
@@ -569,16 +790,16 @@ export class CallOperator {
     }
   }
   async announce(threadId: string, callId: string) {
+    return this.store.serial(`announce:${threadId}`, () => this.sendAnnouncement(threadId, callId));
+  }
+  private async sendAnnouncement(threadId: string, callId: string) {
     const chat = await this.read(threadId);
     const updates =
-      chat?.updates.filter(
-        (update) =>
-          !update.heardAt &&
-          !update.announcementId &&
-          (update.status === "done" || update.status === "needs-Jared"),
-      ) ?? [];
+      chat?.updates
+        .filter((update) => !update.announcementId && isSpeakableUpdate(update))
+        .slice(-20) ?? [];
     if (!chat || !updates.length || chat.voices.some((voice) => !voice.finished)) return false;
-    const id = `voice-update:${callId}:${sha256(updates.map((update) => update.id).join()).slice(0, 24)}`;
+    const id = `voice-update:${callId}:${sha256(updates.map((update) => update.id).join()).slice(0, 24)}:${chat.voices.length}`;
     const context = await this.requirePorts().context(threadId);
     if (context.running) return false;
     await this.change(threadId, (current) => {
@@ -632,10 +853,23 @@ export class CallOperator {
       },
       false,
     );
+    // Opening a call can overlap filesystem and provider-session setup with listening.
+    this.background(this.prepareVoice(threadId).catch(() => {}));
+    this.background(this.flushNotices(threadId));
+  }
+  private async prepareVoice(threadId: string) {
+    const chat = await this.read(threadId);
+    if (chat) await this.ensure(await this.link(threadId, "voice", chat.models.voice));
   }
   async heard(threadId: string, ids: readonly string[]) {
     await this.change(threadId, (chat) => {
-      for (const update of chat.updates) if (ids.includes(update.id)) update.heardAt = now();
+      for (const update of chat.updates) {
+        if (update.heardAt || !ids.includes(update.id) || !update.announcementTurnId) continue;
+        const voice = chat.voices.find((entry) => entry.id === update.announcementId);
+        if (!voice?.finished || voice.turnId !== update.announcementTurnId) continue;
+        update.spokenAt = now();
+        update.heardAt = update.spokenAt;
+      }
     });
   }
 }

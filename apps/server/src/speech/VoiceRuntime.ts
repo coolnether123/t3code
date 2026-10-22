@@ -7,6 +7,7 @@ import * as Auxiliary from "../provider/AuxiliaryProviderSessions.ts";
 import * as VoiceThreadService from "./VoiceThreadService.ts";
 import { callOperator } from "./callOperator.ts";
 import { CallReplyBuffer } from "./operatorProtocol.ts";
+import { lookupVoiceAgenda } from "./voiceLookups.ts";
 
 export const layer = Layer.effectDiscard(
   Effect.gen(function* () {
@@ -31,6 +32,7 @@ export const layer = Layer.effectDiscard(
       send: (input) => Effect.runPromise(sessions.sendTurn(input)),
       sessions: () => Effect.runPromise(sessions.listSessions()),
       dispatch: (command) => Effect.runPromise(threads.dispatch(command)),
+      lookup: lookupVoiceAgenda,
     });
     yield* sessions.streamEvents.pipe(
       Stream.runForEach((event) =>

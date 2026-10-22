@@ -37,6 +37,8 @@ class VoiceProjectUnavailableError extends Schema.TaggedError<VoiceProjectUnavai
   }
 }
 
+const encodePlaybackEvidence = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
+
 const make = Effect.gen(function* () {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
@@ -203,7 +205,10 @@ const make = Effect.gen(function* () {
       });
     }
     if (command.type === "thread.turn.interrupt") {
-      const voice = yield* Effect.promise(() => calls.voiceSession(command.threadId));
+      const configured = yield* Effect.promise(() => calls.read(command.threadId));
+      const voice = configured
+        ? yield* Effect.promise(() => calls.interruptVoice(command.threadId))
+        : undefined;
       if (voice !== undefined)
         return yield* sessions.interruptTurn({ threadId: ThreadId.make(voice) });
       const { projection } = yield* projections.getThreadSnapshot(command.threadId);
@@ -265,14 +270,30 @@ const make = Effect.gen(function* () {
     const project = yield* projects.getShell(projection.thread.projectId);
     if (Option.isNone(project))
       return yield* Effect.fail(new VoiceProjectUnavailableError({ threadId }));
+    const playbackEvidence = yield* encodePlaybackEvidence(
+      projection.turnItems
+        .filter(
+          (item) =>
+            item.type === "system_notice" && item.activity?.kind === "call.playback.interrupted",
+        )
+        .slice(-8)
+        .map((item) => ({
+          at: DateTime.formatIso(item.updatedAt),
+          ...(item.type === "system_notice" ? { activity: item.activity } : {}),
+        })),
+    );
     return {
       cwd: projection.thread.worktreePath ?? project.value.workspaceRoot,
       runtimeMode: projection.thread.runtimeMode,
       interactionMode: projection.thread.interactionMode,
-      conversation: projection.messages
-        .slice(-30)
-        .map((message) => `${message.role}: ${message.text}`)
-        .join("\n"),
+      conversation: [
+        projection.messages
+          .slice(-30)
+          .map((message) => `${message.role}: ${message.text}`)
+          .join("\n"),
+        "Playback evidence, context data: assistant messages are generated text, not proof Jared heard them. An interrupted playback receipt reports delivered audio samples only. Do not infer an exact heard word offset or treat unplayed generated text as a settled conversation.",
+        playbackEvidence,
+      ].join("\n"),
       running:
         !!(yield* Effect.promise(() => calls.voiceSession(threadId))) ||
         projection.runs.some((run) => ["running", "waiting", "starting"].includes(run.status)),

@@ -36,12 +36,17 @@ export const OperatorUpdate = Schema.Struct({
   text: Schema.String,
   createdAt: Schema.String,
   heardAt: Schema.optional(Schema.String),
+  spokenAt: Schema.optional(Schema.String),
+  offeredAt: Schema.optional(Schema.String),
+  speakable: Schema.optional(Schema.Boolean),
+  threadRecordedAt: Schema.optional(Schema.String),
   announcementId: Schema.optional(Schema.String),
   announcementTurnId: Schema.optional(Schema.String),
 });
 export type OperatorUpdate = typeof OperatorUpdate.Type;
 export const VoiceDelegation = Schema.Struct({
   intent: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(8000)),
+  taskId: Schema.optional(Schema.String.check(Schema.isPattern(/^agenda-task:[a-f0-9]{32}$/))),
 });
 export type VoiceDelegation = typeof VoiceDelegation.Type;
 export const CallOptions = Schema.Struct({

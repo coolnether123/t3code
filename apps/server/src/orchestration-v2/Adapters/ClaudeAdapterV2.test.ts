@@ -2201,7 +2201,11 @@ describe("ClaudeAdapterV2 MCP credential channel", () => {
 });
 
 describe("ClaudeAdapterV2 native session identity", () => {
-  const openTurnWithOrdinal = (providerTurnOrdinal: number, nativeThreadHasTurns?: boolean) =>
+  const openTurnWithOrdinal = (
+    providerTurnOrdinal: number,
+    nativeThreadHasTurns?: boolean,
+    prepare = false,
+  ) =>
     Effect.scoped(
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
@@ -2210,6 +2214,7 @@ describe("ClaudeAdapterV2 native session identity", () => {
           prefix: "t3-claude-v2-session-identity-",
         });
         const openedQueries: Array<ClaudeAdapterV2.ClaudeAgentSdkQueryOpenInput> = [];
+        let offers = 0;
         const adapter = yield* ClaudeAdapterV2.makeClaudeAdapterV2({
           instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
           settings: DEFAULT_CLAUDE_SETTINGS,
@@ -2225,8 +2230,11 @@ describe("ClaudeAdapterV2 native session identity", () => {
               Effect.sync(() => {
                 openedQueries.push(input);
                 return {
-                  messages: Stream.empty,
-                  offer: () => Effect.void,
+                  messages: prepare ? Stream.never : Stream.empty,
+                  offer: () =>
+                    Effect.sync(() => {
+                      offers += 1;
+                    }),
                   setModel: () => Effect.void,
                   applyFlagSettings: () => Effect.void,
                   setPermissionMode: () => Effect.void,
@@ -2243,17 +2251,35 @@ describe("ClaudeAdapterV2 native session identity", () => {
         });
         const threadId = ThreadId.make("thread-claude-session-identity");
         const providerSessionId = ProviderSessionId.make("provider-session-claude-identity");
+        const runtimePolicy = prepare
+          ? { ...CLAUDE_TEST_RUNTIME_POLICY, toolMode: "none" as const }
+          : CLAUDE_TEST_RUNTIME_POLICY;
         const runtime = yield* adapter.openSession({
           threadId,
           providerSessionId,
           modelSelection: CLAUDE_TEST_MODEL_SELECTION,
-          runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+          runtimePolicy,
         });
         const providerThread = yield* runtime.ensureThread({
           threadId,
           modelSelection: CLAUDE_TEST_MODEL_SELECTION,
-          runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+          runtimePolicy,
         });
+        if (prepare) {
+          assert.isDefined(runtime.prepareThread);
+          yield* runtime.prepareThread!({
+            threadId,
+            providerThread,
+            modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+            runtimePolicy,
+          });
+          assert.equal(openedQueries.length, 1);
+          assert.equal(offers, 0);
+          assert.deepEqual(openedQueries[0]?.options.tools, []);
+          assert.deepEqual(openedQueries[0]?.options.allowedTools, []);
+          assert.deepEqual(openedQueries[0]?.options.mcpServers, {});
+          assert.deepEqual(openedQueries[0]?.options.settingSources, []);
+        }
         const now = yield* DateTime.now;
         yield* runtime.startTurn(
           makeClaudeTestTurnInput({
@@ -2264,9 +2290,11 @@ describe("ClaudeAdapterV2 native session identity", () => {
             text: "Respond with identity ok",
             attachments: [],
             providerTurnOrdinal,
+            runtimePolicy,
             ...(nativeThreadHasTurns === undefined ? {} : { nativeThreadHasTurns }),
           }),
         );
+        if (prepare) assert.equal(offers, 1);
         return openedQueries;
       }).pipe(
         Effect.provide(
@@ -2282,6 +2310,16 @@ describe("ClaudeAdapterV2 native session identity", () => {
       assert.equal(openedQueries[0]?.options.sessionId, "native-session-identity");
       assert.equal(openedQueries[0]?.options.resume, undefined);
     }),
+  );
+
+  it.effect(
+    "prepares an idle tool-free query without a prompt and reuses it for the first voice turn",
+    () =>
+      Effect.gen(function* () {
+        const openedQueries = yield* openTurnWithOrdinal(1, false, true);
+        assert.equal(openedQueries.length, 1);
+        assert.equal(openedQueries[0]?.options.sessionId, "native-session-identity");
+      }),
   );
 
   it.effect(
