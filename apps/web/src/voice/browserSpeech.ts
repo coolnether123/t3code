@@ -31,7 +31,7 @@ export async function requestSpeech(
 export function createBrowserAudio(onInterrupted?: () => void) {
   const deviceSpeech = createDeviceSpeech();
   let context: AudioContext | undefined;
-  let finishCapture: (() => void) | undefined;
+  let finishCapture: ((manual?: boolean) => void) | undefined;
   let preparedStream: MediaStream | undefined;
   let playback: SpeechPlaybackController | undefined;
   let playbackGeneration = "legacy";
@@ -113,7 +113,7 @@ export function createBrowserAudio(onInterrupted?: () => void) {
     },
     finish() {
       deviceSpeech.finish();
-      finishCapture?.();
+      finishCapture?.(true);
     },
     finishAtPause() {
       deviceSpeech.finishAtPause();
@@ -367,7 +367,8 @@ export function createBrowserAudio(onInterrupted?: () => void) {
         await new Promise<void>((resolve, reject) => {
           const abort = () => reject(new DOMException("Cancelled", "AbortError"));
           signal.addEventListener("abort", abort, { once: true });
-          finishCapture = () => {
+          finishCapture = (manual = false) => {
+            if (manual) floor.manual();
             signal.removeEventListener("abort", abort);
             processor.onaudioprocess = null;
             clearTimeout(deadline);

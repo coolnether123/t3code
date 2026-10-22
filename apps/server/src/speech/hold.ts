@@ -32,6 +32,7 @@ export class HoldTurnGuard {
     raw: string,
   ): { event: ProviderRuntimeEvent; stop: boolean; pending?: boolean } | undefined {
     const key = `${event.threadId}:${event.turnId ?? "pending"}`;
+    if (event.type === "turn.started") this.closed.delete(`${event.threadId}:pending`);
     if (this.closed.has(key)) return undefined;
     if (event.type === "turn.started")
       for (const [pendingKey, pending] of this.pending)

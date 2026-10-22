@@ -22,6 +22,17 @@ const completed = () =>
     payload: { itemType: "assistant_message", detail: "<otis-hold/>" },
   });
 describe("silent hold completion", () => {
+  it("does not poison later unnumbered events after a new turn starts", () => {
+    const guard = new HoldTurnGuard();
+    const { turnId: _turnId, ...anonymous } = delta("<otis-hold/>");
+    guard.accept(anonymous, "<otis-hold/>");
+    expect(guard.expire(anonymous)?.stop).toBe(true);
+    guard.accept(
+      decodeEvent({ ...delta(""), type: "turn.started", turnId: "next", payload: {} }),
+      "",
+    );
+    expect(guard.accept(anonymous, "Hello.")?.event.type).toBe("content.delta");
+  });
   it("expires a missing item boundary, but invalidates the fallback on continuation or a new turn", () => {
     const guard = new HoldTurnGuard();
     const hold = delta("<otis-hold/>");

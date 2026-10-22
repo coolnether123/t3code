@@ -8,6 +8,7 @@ vi.mock("../rpc/atomRegistry", () => ({ appAtomRegistry: {} }));
 import { createBrowserAudio } from "./browserSpeech";
 import { ThreadVoiceSession } from "./session";
 import { ProviderInstanceId } from "@t3tools/contracts";
+import { FloorController } from "@t3tools/client-runtime/voice-call/floor";
 
 class Source extends EventTarget {
   buffer: { duration: number } | undefined;
@@ -410,7 +411,8 @@ describe("streamed browser PCM scheduling", () => {
     } as unknown as MediaStream);
     const signal = new AbortController().signal;
     await audio.prepare(signal);
-    const captured = audio.capture(signal);
+    const floor = new FloorController();
+    const captured = audio.capture(signal, undefined, { floor });
     const processor = contexts[0]!.processor;
     const frame = (value: number) =>
       processor.onaudioprocess!({
@@ -423,6 +425,7 @@ describe("streamed browser PCM scheduling", () => {
     for (let index = 0; index < 8; index++) frame(0);
     expect(processor.onaudioprocess).not.toBeNull();
     audio.finish();
+    expect(floor.state).toBe("committed");
     expect((await captured).audio.length).toBeGreaterThan(0);
     expect(processor.onaudioprocess).toBeNull();
     audio.close();
