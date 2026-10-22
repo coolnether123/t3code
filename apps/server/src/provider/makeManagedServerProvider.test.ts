@@ -223,6 +223,41 @@ describe("makeManagedServerProvider", () => {
     ).pipe(Effect.provide(Layer.mergeAll(NeverRunTestLayer, TestClock.layer()))),
   );
 
+  it.effect("recovers a failed provider even without a foreground watcher", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const checkCalls = yield* Ref.make(0);
+        const initialCheckDone = yield* Deferred.make<void>();
+        const recoveryDone = yield* Deferred.make<void>();
+        yield* makeManagedServerProvider<TestSettings>({
+          resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+          initialSnapshot: () => Effect.succeed(initialSnapshot),
+          checkProvider: Ref.updateAndGet(checkCalls, (count) => count + 1).pipe(
+            Effect.flatMap((count) =>
+              count === 1
+                ? Deferred.succeed(initialCheckDone, undefined).pipe(
+                    Effect.as({
+                      ...refreshedSnapshot,
+                      status: "error" as const,
+                      auth: { status: "unknown" as const },
+                    }),
+                  )
+                : Deferred.succeed(recoveryDone, undefined).pipe(Effect.as(refreshedSnapshot)),
+            ),
+          ),
+          refreshInterval: "1 second",
+        });
+        yield* Deferred.await(initialCheckDone);
+        yield* TestClock.adjust("1 second");
+        yield* Deferred.await(recoveryDone);
+        assert.strictEqual(yield* Ref.get(checkCalls), 2);
+      }),
+    ).pipe(Effect.provide(Layer.mergeAll(NeverRunTestLayer, TestClock.layer()))),
+  );
+
   it.effect("disables periodic provider refreshes when the explicit interval is zero", () =>
     Effect.scoped(
       Effect.gen(function* () {

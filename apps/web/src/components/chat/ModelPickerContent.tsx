@@ -112,7 +112,7 @@ export function getDesktopBackedProviderStatusMessage(
   ) {
     return null;
   }
-  return entry.snapshot.message?.trim() || getProviderStatusMessage(entry.snapshot);
+  return getProviderStatusMessage(entry.snapshot);
 }
 
 export function shouldOfferModelPickerSetup(

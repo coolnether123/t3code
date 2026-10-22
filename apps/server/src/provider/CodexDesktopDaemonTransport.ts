@@ -10,6 +10,7 @@ import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import WebSocket, { type RawData } from "ws";
+import { retryConnection } from "./connectionRetry.ts";
 
 export type CodexDesktopDaemonEnvironment =
   | NodeJS.ProcessEnv
@@ -148,6 +149,8 @@ export const makeCodexDesktopDaemonStdio = Effect.fn("makeCodexDesktopDaemonStdi
         }),
       ),
     ),
+    // No protocol request has been sent during a failed handshake.
+    retryConnection,
   );
 
   socket.on("message", (data: RawData) => {

@@ -145,7 +145,7 @@ it.effect("accepts history frames within a caller-supplied payload limit", () =>
   }),
 );
 
-it.effect("fails promptly for a missing daemon socket", () =>
+it.live("fails after bounded retries for a missing daemon socket", () =>
   Effect.gen(function* () {
     const homePath = yield* Effect.promise(() => NodeFSP.mkdtemp("/tmp/t3-codex-missing-"));
     try {
@@ -212,15 +212,17 @@ it.effect("forwards malformed frames and completes the input stream on disconnec
   }),
 );
 
-it.effect("cleans up a stalled handshake when acquisition is interrupted", () =>
+it.live("cleans up each stalled handshake after bounded retries", () =>
   Effect.gen(function* () {
     const homePath = yield* Effect.promise(() => NodeFSP.mkdtemp("/tmp/t3-codex-stalled-"));
     const socketPath = NodePath.join(homePath, "app-server-control", "app-server-control.sock");
     yield* Effect.promise(() => NodeFSP.mkdir(NodePath.dirname(socketPath), { recursive: true }));
     const scope = yield* Scope.make();
     const sockets = new Set<NodeNet.Socket>();
+    let acceptedCount = 0;
     let acceptedSocket: NodeNet.Socket | undefined;
     const server = NodeNet.createServer((socket) => {
+      acceptedCount++;
       sockets.add(socket);
       acceptedSocket = socket;
       socket.once("close", () => sockets.delete(socket));
@@ -239,6 +241,7 @@ it.effect("cleans up a stalled handshake when acquisition is interrupted", () =>
       // client-side Unix socket. Destroy the peer in teardown as well because
       // a stalled HTTP upgrade intentionally never completes its close event.
       assert.exists(acceptedSocket);
+      assert.equal(acceptedCount, 3);
     } finally {
       yield* Scope.close(scope, Exit.void);
       for (const socket of sockets) socket.destroy();

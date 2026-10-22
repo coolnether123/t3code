@@ -4,6 +4,7 @@ import { SparklesIcon, StarIcon } from "lucide-react";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
+import { getProviderStatusMessage } from "./ProviderStatusBanner";
 import {
   isProviderInstancePickerReady,
   shouldShowInstanceBadge,
@@ -25,7 +26,7 @@ function describeUnavailableInstance(entry: ProviderInstanceEntry): string {
   }
   const kind =
     entry.status === "error" ? "Unavailable" : entry.status === "warning" ? "Limited" : "Not ready";
-  const msg = entry.snapshot.message?.trim();
+  const msg = getProviderStatusMessage(entry.snapshot);
   return msg ? `${label} — ${kind}. ${msg}` : `${label} — ${kind}.`;
 }
 

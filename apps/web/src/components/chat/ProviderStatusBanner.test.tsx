@@ -105,7 +105,9 @@ describe("ProviderStatusBanner", () => {
     );
 
     expect(shouldShowProviderStatusBanner(status, null)).toBe(true);
-    expect(getProviderStatusMessage(status)).toBe(message);
+    expect(getProviderStatusMessage(status)).toBe(
+      "The assistant isn't connected yet. T3 will check again.",
+    );
     expect(getProviderStatusBannerKey(status)).toContain("codex_elora");
     expect(markup).toContain(message);
     expect(markup).toContain('role="alert"');
@@ -113,7 +115,7 @@ describe("ProviderStatusBanner", () => {
 });
 
 describe("getProviderStatusMessage", () => {
-  it("preserves the environment's authentication error", () => {
+  it("explains an account restriction in plain words", () => {
     const message = "SUBSCRIPTION_REQUIRED: This Google account cannot use Antigravity.";
     expect(
       getProviderStatusMessage({
@@ -123,7 +125,7 @@ describe("getProviderStatusMessage", () => {
         auth: { status: "unauthenticated" },
         message,
       }),
-    ).toBe(message);
+    ).toBe("This account can't use that assistant. Choose a different assistant.");
   });
 
   it("points a signed-out Antigravity account to Google sign-in without a CLI command", () => {
@@ -160,6 +162,6 @@ describe("getProviderStatusMessage", () => {
         auth: { status: "unauthenticated" },
         message: "",
       }),
-    ).toBe("Sign in via the CLI to authenticate again.");
+    ).toBe("Open Codex on this computer and sign in again.");
   });
 });

@@ -23,10 +23,7 @@ import {
   type SubagentBackend,
   TerminalOpenInput,
 } from "@t3tools/contracts";
-import {
-  connectionStatusTitle,
-  type EnvironmentConnectionPresentation,
-} from "@t3tools/client-runtime/connection";
+import { type EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import { isCapacityRetryWaiting } from "@t3tools/client-runtime/capacityRetry";
 import { wasBootstrapThreadDeleted } from "@t3tools/client-runtime/errors";
 import {
@@ -258,7 +255,6 @@ import {
 } from "../lib/elementContext";
 import { appendPreviewAnnotationPrompt } from "../lib/previewAnnotation";
 import { appendReviewCommentsToPrompt, type ReviewCommentContext } from "../reviewCommentContext";
-import { environmentCatalog } from "../connection/catalog";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useKnownTerminalSessions, useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { projectEnvironment } from "../state/projects";
@@ -1357,7 +1353,6 @@ function ChatViewContent(props: ChatViewProps) {
   const closePreview = useAtomCommand(previewEnvironment.close, "preview close");
   const { environments } = useEnvironments();
   const primaryEnvironment = usePrimaryEnvironment();
-  const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
   const environmentById = useMemo(
     () => new Map(environments.map((environment) => [environment.environmentId, environment])),
     [environments],
@@ -2046,22 +2041,6 @@ function ChatViewContent(props: ChatViewProps) {
       connection: activeEnvironment.connection,
     };
   }, [activeEnvironment, activeEnvironmentUnavailable, activeEnvironmentUnavailableLabel]);
-  const handleReconnectActiveEnvironment = useCallback(
-    async (environmentId: EnvironmentId) => {
-      const result = await retryEnvironment(environmentId);
-      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-        const error = squashAtomCommandFailure(result);
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Could not reconnect environment",
-            description: error instanceof Error ? error.message : "Failed to reconnect.",
-          }),
-        );
-      }
-    },
-    [retryEnvironment],
-  );
   const logicalProjectEnvironments = useMemo(() => {
     if (!activeProject) return [];
     const logicalKey = deriveLogicalProjectKeyFromSettings(activeProject, projectGroupingSettings);
@@ -2365,31 +2344,26 @@ function ChatViewContent(props: ChatViewProps) {
           id: `environment-unavailable:${activeEnvironmentUnavailableState.environmentId}`,
           variant: unavailableConnection.phase === "error" ? "error" : "warning",
           icon: <WifiOffIcon />,
-          title: `${activeEnvironmentUnavailableState.label}: ${connectionStatusTitle(unavailableConnection)}`,
-          description:
-            unavailableConnection.error ??
-            "Reconnect this environment before sending messages or running actions.",
-          actions: (
-            <>
-              <Button
-                size="xs"
-                disabled={environmentReconnecting}
-                onClick={() =>
-                  void handleReconnectActiveEnvironment(
-                    activeEnvironmentUnavailableState.environmentId,
-                  )
-                }
-              >
-                {environmentReconnecting ? "Reconnecting..." : "Reconnect"}
-              </Button>
-              <Button
-                size="xs"
-                variant="outline"
-                onClick={() => void navigate({ to: "/settings/connections" })}
-              >
-                Connections
-              </Button>
-            </>
+          title: environmentReconnecting
+            ? `Connecting to ${activeEnvironmentUnavailableState.label}...`
+            : `${activeEnvironmentUnavailableState.label} is disconnected`,
+          description: environmentReconnecting
+            ? "T3 is trying again. Your chats are saved."
+            : "Open Connections to reconnect this computer.",
+          children: unavailableConnection.error ? (
+            <details>
+              <summary>Details</summary>
+              <p className="whitespace-pre-wrap break-words">{unavailableConnection.error}</p>
+            </details>
+          ) : undefined,
+          actions: environmentReconnecting ? undefined : (
+            <Button
+              size="xs"
+              variant="outline"
+              onClick={() => void navigate({ to: "/settings/connections" })}
+            >
+              Connections
+            </Button>
           ),
         });
       }
@@ -2472,7 +2446,6 @@ function ChatViewContent(props: ChatViewProps) {
   }, [
     activeEnvironmentUnavailableState,
     reconnectWarningGraceElapsed,
-    handleReconnectActiveEnvironment,
     navigate,
     setDismissedVersionMismatchKey,
     showVersionMismatchBanner,

@@ -5,6 +5,7 @@ import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
 import { formatProviderDriverKindLabel } from "../../providerModels";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { plainError } from "../../lib/plainError";
 
 export function getProviderStatusBannerKey(status: ServerProvider | null): string | null {
   if (!status || status.status === "ready" || status.status === "disabled") return null;
@@ -39,9 +40,8 @@ export function hasProviderSetup(status: ServerProvider): boolean {
   );
 }
 
-/** Keep the environment's error intact in both the banner and model picker. */
 export function getProviderStatusMessage(status: ServerProvider): string {
-  if (status.message) return status.message;
+  if (status.message) return plainError(status.message, "provider");
   const providerName = status.displayName?.trim() || formatProviderDriverKindLabel(status.driver);
   if (!status.installed && hasProviderSetup(status)) {
     return `Open provider setup to install ${formatProviderDriverKindLabel(status.driver)} on this environment.`;
@@ -52,7 +52,7 @@ export function getProviderStatusMessage(status: ServerProvider): string {
         ? "Open provider setup to sign in with Google."
         : "Open provider setup to sign in.";
     }
-    return "Sign in via the CLI to authenticate again.";
+    return `Open ${formatProviderDriverKindLabel(status.driver)} on this computer and sign in again.`;
   }
   return status.status === "ready"
     ? "No models are available for this provider."
@@ -77,8 +77,8 @@ export const ProviderStatusBanner = memo(function ProviderStatusBanner({
   const providerName = status.displayName?.trim() || formatProviderDriverKindLabel(status.driver);
   const isUnauthenticated = status.status === "error" && status.auth.status === "unauthenticated";
   const title = isUnauthenticated
-    ? `${providerName} is unauthenticated`
-    : `${providerName} provider status`;
+    ? `Sign in to ${providerName}`
+    : `${providerName} needs attention`;
   const message = getProviderStatusMessage(status);
 
   return (
@@ -104,6 +104,12 @@ export const ProviderStatusBanner = memo(function ProviderStatusBanner({
               {message}
             </TooltipPopup>
           </Tooltip>
+          {status.message && status.message !== message ? (
+            <details>
+              <summary>Details</summary>
+              <p className="whitespace-pre-wrap break-words">{status.message}</p>
+            </details>
+          ) : null}
           {onOpenProviderSetup && hasProviderSetup(status) ? (
             <Button
               className="self-start px-0 text-foreground"

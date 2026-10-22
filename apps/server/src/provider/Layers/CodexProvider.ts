@@ -56,6 +56,7 @@ import { withCodexSandboxStartupRecovery } from "./CodexSandboxRecovery.ts";
 import { attachCodexDesktopPluginSkills } from "../CodexDesktopPluginSkills.ts";
 import { codexMcpDisableOverride, preflightCodexMcpServers } from "./CodexMcpPreflight.ts";
 import packageJson from "../../../package.json" with { type: "json" };
+import { retryConnection } from "../connectionRetry.ts";
 const isCodexAppServerSpawnError = Schema.is(CodexErrors.CodexAppServerSpawnError);
 
 const CODEX_APP_SERVER_PROBE_FORCE_KILL_AFTER = "2 seconds" as const;
@@ -720,6 +721,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     desktopBacked: codexSettings.useDesktopAppDaemon,
   }).pipe(
     Effect.scoped,
+    retryConnection,
     Effect.timeoutOption(Duration.millis(AUTH_PROBE_TIMEOUT_MS)),
     Effect.result,
   );

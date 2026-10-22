@@ -426,7 +426,7 @@ it.effect("passes detected browser readiness through the provider catalog probe"
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
-it.effect("reports a missing desktop daemon socket as an actionable provider error", () =>
+it.live("reports a missing desktop daemon socket after bounded connection retries", () =>
   Effect.gen(function* () {
     let observedTransport: string | undefined;
     const status = yield* checkCodexProviderStatus(desktopDaemonSettings, (input) => {

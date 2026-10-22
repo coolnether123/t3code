@@ -23,13 +23,12 @@ inference from the provider status alone.
 `scripts/guard_macos_peer_tunnels.py --install` installs an Elora-only
 LaunchAgent that runs every minute. Two consecutive failed or slow probes
 restart only the affected tunnel. Recovery attempts, local state and logs live
-under `~/.local/share/t3-peer-health`. An outage lasting five minutes posts one
-informational Deck note, with no recovery announcement. Codex provider failures
-post an Otis-room note which is retained in the Mac event stream. These notes
-do not impersonate Christine, start model calls or grant recovery authority.
+under `~/.local/share/t3-peer-health`. It probes the T3 environment descriptor
+on port 13773 and verifies Millie's environment identity. It does not change
+CodexDeck or send messages.
 The guard terminates only proxy processes whose parent is gone and whose PID,
 start time and full command still match a second observation.
 
 To uninstall the guard, boot out `gui/UID/com.t3tools.macos-peer-health` and
-remove only its owned plist from `~/Library/LaunchAgents`. This leaves the two
+remove only its owned plist from `~/Library/LaunchAgents`. This leaves the
 tunnel LaunchAgents and the provider compatibility setting intact.
