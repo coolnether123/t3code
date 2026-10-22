@@ -107,6 +107,31 @@ afterEach(async () => {
 });
 
 describe("durable thread voice session", () => {
+  it("rejects delayed playback echo even when recognition first reports it after output ends", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const persisted = deferred<void>();
+    const write = vi.mocked(f.persistence.write).getMockImplementation()!;
+    vi.mocked(f.persistence.write).mockImplementation(async (call) => {
+      await write(call);
+      if (call.offsets.reply) persisted.resolve();
+    });
+    await f.session.start(options, []);
+    const hooks = f.audio.capture.mock.calls[0]![2]!;
+    f.session.observe(
+      [{ id: "reply", role: "assistant", text: "The task is finished.", streaming: false }],
+      false,
+    );
+    await persisted.promise;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(hooks.transcript!({ text: "The task is finished.", revision: 1, final: true })).toBe(
+      false,
+    );
+    expect(hooks.transcript!({ text: "Check tomorrow instead", revision: 2, final: false })).toBe(
+      true,
+    );
+    expect(f.request.mock.calls.some(([input]) => input.action === "call.say")).toBe(false);
+  });
   it("keeps unreferenced wait clips out of a duplex microphone", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const f = fixture();

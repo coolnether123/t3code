@@ -822,7 +822,7 @@ export class ThreadVoiceSession {
               : this.emittingText;
         if (emitting) this.recentOutput = { text: emitting, at: time() };
         const reference =
-          emitting || (time() - this.recentOutput.at < 500 ? this.recentOutput.text : "");
+          emitting || (time() - this.recentOutput.at < 2000 ? this.recentOutput.text : "");
         if (reference && isPlaybackEcho(value.text, reference)) return false;
         if (
           !this.playbackTask &&
@@ -1244,6 +1244,8 @@ export class ThreadVoiceSession {
         const playback = Promise.all(chunks)
           .then(() => {
             audioSignal.throwIfAborted();
+            // Recognition can deliver speaker echo after the final audio node has ended.
+            this.recentOutput = { text, at: time() };
           })
           .finally(() => {
             if (this.emittingText === text) this.emittingText = "";
