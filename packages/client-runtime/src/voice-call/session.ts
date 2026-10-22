@@ -11,6 +11,7 @@ import * as Effect from "effect/Effect";
 import { isRetryableVoiceError, VoiceRequestError } from "./errors.ts";
 import { FILLER_DELAY_MS, TurnFiller } from "./filler.ts";
 import { voiceRequestTimeoutMs } from "./timeouts.ts";
+import { SpeechBoundaryTrimmer } from "./speechBoundary.ts";
 
 const now = () => DateTime.formatIso(Effect.runSync(DateTime.now));
 const time = () => Effect.runSync(Clock.currentTimeMillis);
@@ -894,7 +895,15 @@ export class ThreadVoiceSession {
         signal.throwIfAborted();
         const audio = this.status?.played.includes(id)
           ? { playback: Promise.resolve() }
-          : await this.playSentence(id, item.text, signal, generation);
+          : await this.playSentence(id, item.text, signal, generation, {
+              start: (item.start ?? 0) > 0,
+              end: () =>
+                this.messages.some(
+                  (message) =>
+                    message.id === item.messageId &&
+                    this.speechText(message).slice(item.end).trim().length > 0,
+                ),
+            });
         return { id, ...audio };
       };
       let next: { item: Item; audio: ReturnType<typeof prepare> } | undefined;
@@ -947,7 +956,13 @@ export class ThreadVoiceSession {
       void this.listen();
     }
   }
-  private async playSentence(id: string, text: string, signal: AbortSignal, generation?: string) {
+  private async playSentence(
+    id: string,
+    text: string,
+    signal: AbortSignal,
+    generation?: string,
+    boundary?: { start: boolean; end: () => boolean },
+  ) {
     const pipelined = generation !== undefined;
     const responseGeneration = generation ?? this.deps.id();
     const output = this.deps.audio as VoiceDependencies["audio"] &
@@ -958,6 +973,8 @@ export class ThreadVoiceSession {
       const audioSignal = AbortSignal.any([signal, attempt.signal]);
       const attemptId = this.deps.id();
       const chunks: Promise<void>[] = [];
+      let trimmer: SpeechBoundaryTrimmer | undefined;
+      let sampleRate: number | undefined;
       const play = (chunk: { audio: string; sampleRate: number }) => {
         audioSignal.throwIfAborted();
         this.filler.startReply();
@@ -981,12 +998,28 @@ export class ThreadVoiceSession {
           audioSignal,
           (chunk) => {
             audioSignal.throwIfAborted();
-            const played = play(chunk);
+            if (sampleRate !== undefined && sampleRate !== chunk.sampleRate)
+              throw new Error("Speech sample rate changed during synthesis.");
+            sampleRate = chunk.sampleRate;
+            if (boundary && (trimmer || boundary.start || boundary.end()))
+              trimmer ??= new SpeechBoundaryTrimmer(chunk.sampleRate, boundary.start);
+            const audio = trimmer ? trimmer.push(chunk.audio) : chunk.audio;
+            if (!audio) return;
+            const played = play({ audio, sampleRate: chunk.sampleRate });
             chunks.push(played);
             void played.catch((error) => attempt.abort(error));
           },
         );
         audioSignal.throwIfAborted();
+        if (trimmer && sampleRate !== undefined) {
+          const { audio, trimSamples } = trimmer.finish(boundary?.end() ?? false);
+          if (audio) {
+            const played = play({ audio, sampleRate });
+            chunks.push(played);
+            void played.catch((error) => attempt.abort(error));
+          }
+          if (trimSamples) output.trimPlaybackTail?.(responseGeneration, id, trimSamples);
+        }
         if (!result.played && !chunks.length && (!result.audio || !result.sampleRate))
           throw new Error("Speech service returned no audio.");
         if (!result.played && !chunks.length) {

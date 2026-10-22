@@ -20,6 +20,7 @@ export type SpeechPlaybackAudio = {
   beginPlayback(generation: string): void;
   stopPlayback(generation: string): PlaybackProgress[];
   playbackProgress(generation: string): PlaybackProgress[];
+  trimPlaybackTail(generation: string, speechId: string, samples: number): number;
   emittingSpeech(generation: string): EmittingSpeech[];
   cancelShortClips(generation: string): void;
   play(
@@ -143,6 +144,40 @@ export class SpeechPlaybackController {
         ),
       ),
     );
+  }
+
+  trimTail(generation: string, speechId: string, samples: number): number {
+    if (!Number.isSafeInteger(samples) || samples < 0) throw new Error("Invalid tail length.");
+    if (generation !== this.generation || this.closed.has(generation)) return 0;
+    const speech = this.speech.get(speechId);
+    if (!speech || speech.progress.stopped) return 0;
+    const entries = [...this.sources]
+      .filter((entry) => entry.speech.progress.channel === speech.progress.channel)
+      .sort((a, b) => b.start - a.start);
+    // A following utterance already scheduled on this timeline must not move.
+    if (entries[0]?.speech !== speech) return 0;
+    let remaining = samples;
+    for (const entry of entries) {
+      if (entry.speech !== speech || !remaining) break;
+      const removed = Math.min(remaining, entry.samples - this.played(entry));
+      entry.samples -= removed;
+      remaining -= removed;
+      speech.progress.queuedSamples -= removed;
+      if (!removed) break;
+      if (!entry.samples) {
+        entry.finish(false);
+        entry.source.stop();
+      } else {
+        entry.source.stop(entry.start + entry.samples / speech.progress.sampleRate);
+      }
+    }
+    this.until[speech.progress.channel] = Math.max(
+      this.context.currentTime,
+      ...[...this.sources]
+        .filter((entry) => entry.speech.progress.channel === speech.progress.channel)
+        .map((entry) => entry.start + entry.samples / entry.speech.progress.sampleRate),
+    );
+    return samples - remaining;
   }
 
   play(

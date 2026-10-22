@@ -6,7 +6,9 @@ class Source extends EventTarget {
   startedAt = 0;
   connect = vi.fn();
   disconnect = vi.fn();
-  stop = vi.fn(() => this.dispatchEvent(new Event("ended")));
+  stop = vi.fn((at?: number) => {
+    if (at === undefined) this.dispatchEvent(new Event("ended"));
+  });
   start(at: number) {
     this.startedAt = at;
   }
@@ -41,6 +43,48 @@ function fixture() {
 }
 
 describe("speech playback output", () => {
+  it("shortens an unplayed tail and schedules the next utterance at its new end", async () => {
+    const f = fixture();
+    const a = f.controller.play(f.pcm, 8000, f.signal.signal, f.metadata);
+    const b = f.controller.play(f.pcm, 8000, f.signal.signal, f.metadata);
+    f.context.currentTime = 0.52;
+    expect(f.controller.trimTail("response-1", "speech-1", 2400)).toBe(2400);
+    expect(f.sources[1]!.stop).toHaveBeenCalledWith(1.72);
+    const c = f.controller.play(f.pcm, 8000, f.signal.signal, {
+      ...f.metadata,
+      speechId: "speech-2",
+    });
+    expect(f.sources[2]!.startedAt).toBe(1.72);
+    f.context.currentTime = 3;
+    f.sources.forEach((source) => source.end());
+    await Promise.all([a, b, c]);
+    expect(f.controller.progress("response-1")[0]).toMatchObject({
+      queuedSamples: 13600,
+      playedSamples: 13600,
+      stopped: false,
+    });
+  });
+
+  it("never removes heard samples or moves an already scheduled following utterance", async () => {
+    const f = fixture();
+    const a = f.controller.play(f.pcm, 8000, f.signal.signal, f.metadata);
+    f.context.currentTime = 0.52;
+    expect(f.controller.trimTail("old", "speech-1", 8000)).toBe(0);
+    expect(f.controller.trimTail("response-1", "speech-1", 8000)).toBe(4000);
+    expect(f.controller.progress("response-1")[0]).toMatchObject({
+      queuedSamples: 4000,
+      playedSamples: 4000,
+      stopped: false,
+    });
+    const b = f.controller.play(f.pcm, 8000, f.signal.signal, {
+      ...f.metadata,
+      speechId: "speech-2",
+    });
+    expect(f.controller.trimTail("response-1", "speech-1", 1)).toBe(0);
+    f.context.currentTime = 2;
+    f.sources.forEach((source) => source.end());
+    await Promise.all([a, b]);
+  });
   it("queues PCM continuously with only a 20 ms initial lead", async () => {
     const f = fixture();
     const a = f.controller.play(f.pcm, 8000, f.signal.signal, f.metadata);

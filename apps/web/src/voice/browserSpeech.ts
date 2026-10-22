@@ -358,6 +358,9 @@ export function createBrowserAudio(onInterrupted?: () => void) {
     playbackProgress(generation: string) {
       return playback?.progress(generation) ?? [];
     },
+    trimPlaybackTail(generation: string, speechId: string, samples: number) {
+      return playback?.trimTail(generation, speechId, samples) ?? 0;
+    },
     emittingSpeech(generation: string) {
       return playback?.emitting(generation) ?? [];
     },
