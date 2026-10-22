@@ -25,8 +25,8 @@ import {
 
 describe("silent call control", () => {
   it("keeps hold markers and their partial prefixes out of spoken prose", () => {
-    expect(withoutCallControl("<otis-hold/>")).toBe("");
-    expect(withoutCallControl("<otis-ho")).toBe("");
+    for (let length = 1; length <= "<otis-hold/>".length; length++)
+      expect(withoutCallControl("<otis-hold/>".slice(0, length))).toBe("");
     expect(withoutCallControl("It is < 5.")).toBe("It is < 5.");
     expect(withoutCallControl('Hello. <otis-delegate>{"intent":"Check"}</otis-delegate>')).toBe(
       "Hello. ",

@@ -177,7 +177,7 @@ export function withoutCallControl(text: string) {
       /<otis-(?:delegate|status|lookup|results|memory)>[\s\S]*?(?:<\/otis-(?:delegate|status|lookup|results|memory)>|$)/g,
       "",
     )
-    .replace(/<(?:o(?:t(?:i(?:s(?:-[a-z-]*)?)?)?)?)?$/g, "");
+    .replace(/<(?:o(?:t(?:i(?:s(?:-[a-z-]*)?)?)?)?)?\/?$/g, "");
   return !text.includes("<otis-delegate>") && isEmptyOperatorUpdate(prose) ? "" : prose;
 }
 /** Some providers stream deltas, others complete whole messages. Keep one copy of each. */

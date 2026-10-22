@@ -20,7 +20,10 @@ sessions. Claude admits this isolation; other adapters remain operator-only unti
 they can enforce it.
 Opening a call prepares the idle native query without offering a message or
 creating a turn, so CLI initialization overlaps listening. Merely allocating a
-provider thread does not start that query.
+provider thread does not start that query. Tool-free voice text deltas use the
+existing 50 ms coalescer, so prose can reach speech before trailing control
+blocks finish. Completed snapshots keep the same message identity; controls
+still execute only after a successful completed turn.
 `apps/server/src/speech/callOperator.ts` owns durable links, delegation, typed
 updates and heard records. Operator activity projects into the visible chat.
 Hanging up releases speech while provider work continues. Model pairs persist

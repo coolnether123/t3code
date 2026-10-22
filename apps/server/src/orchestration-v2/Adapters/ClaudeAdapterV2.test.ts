@@ -2541,6 +2541,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     readonly nativeSessionId?: string;
     readonly settings?: ClaudeSettings;
     readonly freshQueueOnReopen?: boolean;
+    readonly toolMode?: "none";
   }) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -2571,6 +2572,10 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       const terminalReceipts =
         yield* Queue.unbounded<
           Extract<ProviderAdapter.ProviderAdapterV2Event, { type: "turn.terminal" }>
+        >();
+      const messageReceipts =
+        yield* Queue.unbounded<
+          Extract<ProviderAdapter.ProviderAdapterV2Event, { type: "message.updated" }>
         >();
       const subagentReceipts =
         yield* Queue.unbounded<
@@ -2665,22 +2670,27 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         },
       });
       const threadId = ThreadId.make("thread-claude-wake");
+      const runtimePolicy = {
+        ...CLAUDE_TEST_RUNTIME_POLICY,
+        ...(options?.toolMode ? { toolMode: options.toolMode } : {}),
+      };
       const runtime = yield* adapter.openSession({
         threadId,
         providerSessionId: ProviderSessionId.make("provider-session-claude-wake"),
         modelSelection: CLAUDE_TEST_MODEL_SELECTION,
-        runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+        runtimePolicy,
       });
       const providerThread = yield* runtime.ensureThread({
         threadId,
         modelSelection: CLAUDE_TEST_MODEL_SELECTION,
-        runtimePolicy: CLAUDE_TEST_RUNTIME_POLICY,
+        runtimePolicy,
       });
       const events: Array<ProviderAdapter.ProviderAdapterV2Event> = [];
       yield* runtime.events.pipe(
         Stream.runForEach((event) =>
           Effect.gen(function* () {
             events.push(event);
+            if (event.type === "message.updated") yield* Queue.offer(messageReceipts, event);
             if (event.type === "subagent.updated") {
               yield* Queue.offer(subagentReceipts, event);
             }
@@ -2724,6 +2734,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         continuationReceipts,
         events,
         terminalReceipts,
+        messageReceipts,
         subagentReceipts,
         systemNoticeReceipts,
         getOpenedOptions: () => openedOptions,
@@ -4151,6 +4162,159 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         ? [event.providerTurn.tokenUsage.usedTokens]
         : [],
     );
+
+  it.effect.each(["snapshot", "terminal", "operator"] as const)(
+    "streams isolated voice text before %s without duplicating its final snapshot",
+    (completion) =>
+      Effect.gen(function* () {
+        const voice = completion !== "operator";
+        const harness = yield* makeWakeHarnessWithOptions(voice ? { toolMode: "none" } : {});
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make(`attempt-voice-text-${completion}`),
+            text: "Report the build result.",
+            attachments: [],
+            runtimePolicy: {
+              ...CLAUDE_TEST_RUNTIME_POLICY,
+              ...(voice ? { toolMode: "none" as const } : {}),
+            },
+          }),
+        );
+        yield* harness.offerAndWait(
+          usageStreamFrame({
+            type: "message_start",
+            message: {
+              id: "voice-stream-message",
+              type: "message",
+              role: "assistant",
+              model: "claude-sonnet-4-6",
+              content: [],
+              stop_reason: null,
+              stop_sequence: null,
+              usage: zeroUsage,
+            },
+          }),
+        );
+        yield* harness.offerAndWait(
+          usageStreamFrame({
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "text", text: "The build passed." },
+          }),
+        );
+        yield* TestClock.adjust("50 millis");
+        const partial = voice ? yield* Queue.take(harness.messageReceipts) : undefined;
+        if (partial) {
+          assert.isTrue(partial.message.streaming);
+          assert.equal(partial.message.text, "The build passed.");
+        } else assert.equal(yield* Queue.size(harness.messageReceipts), 0);
+        const fullText =
+          'The build passed.\n<otis-memory>{"summary":"Build passed","openItems":[]}</otis-memory>';
+        if (completion === "terminal") {
+          yield* harness.offerAndWait(
+            makeResultFrame({ uuid: "voice-stream-result", result: "The build passed." }),
+          );
+        } else {
+          yield* harness.offerAndWait(
+            usageStreamFrame({
+              type: "content_block_delta",
+              index: 0,
+              delta: { type: "text_delta", text: fullText.slice("The build passed.".length) },
+            }),
+          );
+          const snapshot = claudeSdkFrame({
+            type: "assistant",
+            message: {
+              model: "claude-sonnet-4-6",
+              id: "voice-stream-message",
+              type: "message",
+              role: "assistant",
+              content: [{ type: "text", text: fullText }],
+              stop_reason: null,
+              stop_sequence: null,
+              usage: zeroUsage,
+            },
+            parent_tool_use_id: null,
+            uuid: "voice-stream-snapshot",
+            session_id: WAKE_NATIVE_SESSION,
+          });
+          yield* harness.offerAndWait(snapshot);
+          yield* harness.offerAndWait(snapshot);
+        }
+        const finished = yield* Queue.take(harness.messageReceipts);
+        assert.isFalse(finished.message.streaming);
+        assert.equal(
+          finished.message.text,
+          completion === "terminal" ? "The build passed." : fullText,
+        );
+        if (partial) {
+          assert.equal(finished.message.id, partial.message.id);
+          assert.deepEqual(finished.message.createdAt, partial.message.createdAt);
+        }
+        if (completion !== "terminal") {
+          yield* harness.offerAndWait(
+            makeResultFrame({ uuid: "voice-stream-result", result: fullText }),
+          );
+        }
+        yield* Queue.take(harness.terminalReceipts);
+        assert.equal(
+          harness.events.filter((e) => e.type === "message.updated").length,
+          voice ? 2 : 1,
+        );
+        if (completion === "snapshot") {
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make("voice-repeated-sdk-id"),
+              text: "Again.",
+              attachments: [],
+              runtimePolicy: { ...CLAUDE_TEST_RUNTIME_POLICY, toolMode: "none" },
+            }),
+          );
+          yield* harness.offerAndWait(
+            usageStreamFrame({
+              type: "message_start",
+              message: {
+                id: "voice-stream-message",
+                type: "message",
+                role: "assistant",
+                model: "claude-sonnet-4-6",
+                content: [],
+                stop_reason: null,
+                stop_sequence: null,
+                usage: zeroUsage,
+              },
+            }),
+          );
+          yield* harness.offerAndWait(
+            usageStreamFrame({
+              type: "content_block_start",
+              index: 0,
+              content_block: { type: "text", text: "Confirmed." },
+            }),
+          );
+          yield* TestClock.adjust("50 millis");
+          const next = yield* Queue.take(harness.messageReceipts);
+          assert.notEqual(next.message.id, finished.message.id);
+          yield* harness.offerAndWait(
+            makeResultFrame({ uuid: "voice-next-result", result: "Confirmed." }),
+          );
+          const nextFinished = yield* Queue.take(harness.messageReceipts);
+          assert.equal(nextFinished.message.id, next.message.id);
+          assert.isFalse(nextFinished.message.streaming);
+          yield* Queue.take(harness.terminalReceipts);
+        }
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
 
   it.effect("reports context from final stream usage when the request starts at zero", () =>
     Effect.gen(function* () {
