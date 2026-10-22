@@ -1,5 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - The cold-start request needs an explicit HTTP deadline.
 import * as NodeHttp from "node:http";
+import * as NodeCrypto from "node:crypto";
+import * as NodeUtil from "node:util";
 import {
   CALL_PREPARE_TIMEOUT_MS,
   type SpeechTransportRequest,
@@ -30,6 +32,8 @@ const acquireSpeechLease = (url: string, init: RequestInit): Promise<Response> =
   });
 
 export class SpeechUnavailableError extends Error {}
+
+const speechDebug = NodeUtil.debuglog("t3-speech");
 
 /** An absent or unhealthy recognizer must never be started as a readiness probe. */
 export async function speechInputMode(
@@ -87,11 +91,28 @@ export async function* streamSpeech(
     input.text.length > 1600
   )
     throw new Error("Invalid speech request.");
+  const requestId = NodeCrypto.randomUUID();
+  const started = performance.now();
+  const trace = (stage: string, fields = {}) => {
+    if (speechDebug.enabled)
+      speechDebug("%j", {
+        requestId,
+        stage,
+        atMs: performance.timeOrigin + performance.now(),
+        elapsedMs: performance.now() - started,
+        ...fields,
+      });
+  };
+  trace("request");
   const response = await fetcher("http://127.0.0.1:8085/v1/audio/speech", {
     method: "POST",
     redirect: "error",
     signal: AbortSignal.any([signal, AbortSignal.timeout(300_000)]),
-    headers: { "content-type": "application/json", "X-Voice-Session-Id": input.sessionId },
+    headers: {
+      "content-type": "application/json",
+      "X-Voice-Session-Id": input.sessionId,
+      "X-Request-Id": requestId,
+    },
     body: JSON.stringify({
       model: input.model ?? "breeze-tts-2",
       input: input.text,
@@ -100,6 +121,7 @@ export async function* streamSpeech(
       stream: true,
     }),
   });
+  trace("headers", { status: response.status });
   if (!response.ok)
     throw new SpeechUnavailableError(`Local speech service unavailable (${response.status}).`);
   const sampleRate = Number(response.headers.get("x-sample-rate"));
@@ -108,20 +130,31 @@ export async function* streamSpeech(
   const reader = response.body.getReader();
   let carry = Buffer.alloc(0);
   let bytes = 0;
+  let index = 0;
   try {
     for (;;) {
       signal.throwIfAborted();
       const result = await reader.read();
       if (result.done) break;
+      trace("received", {
+        index,
+        bytes: result.value.length,
+        totalBytes: bytes + result.value.length,
+      });
       const chunk = Buffer.concat([carry, result.value]);
       bytes += result.value.length;
       if (bytes > 24_000_000) throw new Error("Speech service returned too much PCM audio.");
       const length = chunk.length & ~1;
       carry = chunk.subarray(length);
-      if (length) yield { audio: chunk.subarray(0, length).toString("base64"), sampleRate };
+      if (length) {
+        yield { audio: chunk.subarray(0, length).toString("base64"), sampleRate };
+        trace("consumer-resumed", { index });
+      }
+      index++;
     }
     if (!bytes || carry.length) throw new Error("Speech service returned incomplete PCM audio.");
   } finally {
+    trace("closed", { chunks: index, bytes });
     await reader.cancel().catch(() => {});
     reader.releaseLock();
   }

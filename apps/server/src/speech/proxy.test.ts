@@ -104,6 +104,9 @@ describe("local speech proxy", () => {
     const first = audio.next();
     source.enqueue(new Uint8Array([1, 0, 2]));
     expect((await first).value).toEqual({ audio: "AQA=", sampleRate: 24000 });
+    expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get("X-Request-Id")).toMatch(
+      /^[0-9a-f-]{36}$/,
+    );
     source.enqueue(new Uint8Array([0]));
     expect((await audio.next()).value).toEqual({ audio: "AgA=", sampleRate: 24000 });
     await audio.return(undefined);
