@@ -947,20 +947,23 @@ export class ThreadVoiceSession {
       void this.listen();
     }
   }
-  private async playSentence(id: string, text: string, signal: AbortSignal, generation: string) {
-    return this.retry("call.speak", signal, async () => {
+  private async playSentence(id: string, text: string, signal: AbortSignal, generation?: string) {
+    const pipelined = generation !== undefined;
+    const responseGeneration = generation ?? this.deps.id();
+    const output = this.deps.audio as VoiceDependencies["audio"] &
+      Partial<import("./playback.ts").SpeechPlaybackAudio>;
+    if (!pipelined) output.beginPlayback?.(responseGeneration);
+    const audio = await this.retry("call.speak", signal, async () => {
       const attempt = new AbortController();
       const audioSignal = AbortSignal.any([signal, attempt.signal]);
       const attemptId = this.deps.id();
       const chunks: Promise<void>[] = [];
-      const output = this.deps.audio as VoiceDependencies["audio"] &
-        Partial<import("./playback.ts").SpeechPlaybackAudio>;
       const play = (chunk: { audio: string; sampleRate: number }) => {
         audioSignal.throwIfAborted();
         this.filler.startReply();
         this.deps.speechEvent?.({ type: "audio", speechId: id });
         return output.play(chunk.audio, chunk.sampleRate, audioSignal, {
-          generation,
+          generation: responseGeneration,
           speechId: id,
           attemptId,
         });
@@ -968,7 +971,13 @@ export class ThreadVoiceSession {
       try {
         this.change("speaking");
         const result = await this.request(
-          { action: "call.speak", speechId: id, text, streamAudio: true, generation },
+          {
+            action: "call.speak",
+            speechId: id,
+            text,
+            streamAudio: true,
+            generation: responseGeneration,
+          },
           audioSignal,
           (chunk) => {
             audioSignal.throwIfAborted();
@@ -1006,6 +1015,8 @@ export class ThreadVoiceSession {
         throw error;
       }
     });
+    if (!pipelined) await audio.playback;
+    return audio;
   }
   async interrupt() {
     if (!this.active) return;

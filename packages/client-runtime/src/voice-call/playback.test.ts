@@ -24,7 +24,7 @@ function fixture() {
       ({
         duration: length / rate,
         getChannelData: () => new Float32Array(length),
-      }) as AudioBuffer,
+      }) as unknown as AudioBuffer,
     createBufferSource: () => {
       const source = new Source();
       sources.push(source);

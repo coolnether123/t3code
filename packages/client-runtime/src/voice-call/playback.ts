@@ -55,6 +55,10 @@ type Scheduled = {
   samples: number;
   finish: (stopped: boolean, error?: unknown) => void;
 };
+type AudioClock = Pick<
+  AudioContext,
+  "currentTime" | "destination" | "createBuffer" | "createBufferSource"
+>;
 
 /** One PCM output owner. Generations are unique response IDs and cannot be reopened.
  * stop returns sample offsets synchronously; completion callbacks use the same offsets.
@@ -66,14 +70,13 @@ export class SpeechPlaybackController {
   private speech = new Map<string, Speech>();
   private sources = new Set<Scheduled>();
   private until = { reply: 0, backchannel: 0 };
+  private readonly context: AudioClock;
+  private readonly leadSeconds: number;
 
-  constructor(
-    private readonly context: Pick<
-      AudioContext,
-      "currentTime" | "destination" | "createBuffer" | "createBufferSource"
-    >,
-    private readonly leadSeconds = 0.02,
-  ) {}
+  constructor(context: AudioClock, leadSeconds = 0.02) {
+    this.context = context;
+    this.leadSeconds = leadSeconds;
+  }
 
   begin(generation: string) {
     if (this.closed.has(generation)) throw new DOMException("Obsolete response", "AbortError");

@@ -89,6 +89,7 @@ export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(
                     input.signal.throwIfAborted();
                     const generation =
                       "generation" in input.request ? input.request.generation : undefined;
+                    const audioGeneration = frame.generation ?? generation;
                     const speechId =
                       "speechId" in input.request ? input.request.speechId : undefined;
                     if (generation && frame.generation && frame.generation !== generation)
@@ -105,9 +106,7 @@ export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(
                       input.onAudio({
                         audio: frame.audio,
                         sampleRate: frame.sampleRate,
-                        ...((frame.generation ?? generation)
-                          ? { generation: frame.generation ?? generation }
-                          : {}),
+                        ...(audioGeneration ? { generation: audioGeneration } : {}),
                         ...(frame.speechId ? { speechId: frame.speechId } : {}),
                       });
                     } catch {
