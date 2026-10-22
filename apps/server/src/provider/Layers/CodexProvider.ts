@@ -115,6 +115,8 @@ function codexAccountAuthLabel(account: CodexSchema.V2GetAccountResponse["accoun
       return "ChatGPT Plus Subscription";
     case "pro":
       return "ChatGPT Pro 20x Subscription";
+    case "promax":
+      return "ChatGPT Pro Subscription";
     case "prolite":
       return "ChatGPT Pro 5x Subscription";
     case "team":
@@ -136,7 +138,6 @@ function codexAccountAuthLabel(account: CodexSchema.V2GetAccountResponse["accoun
     case "unknown":
       return "ChatGPT Subscription";
     default:
-      account.planType satisfies never;
       return undefined;
   }
 }

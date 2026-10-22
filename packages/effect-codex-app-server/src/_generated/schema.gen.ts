@@ -4905,43 +4905,10 @@ export const V2GetAccountRateLimitsResponse__RateLimitReachedType = Schema.Liter
   "workspace_member_usage_limit_reached",
 ]).annotate({ identifier: "V2GetAccountRateLimitsResponse__RateLimitReachedType" });
 
-export type V2GetAccountResponse__PlanType =
-  | "free"
-  | "go"
-  | "plus"
-  | "pro"
-  | "prolite"
-  | "team"
-  | "self_serve_business_prolite"
-  | "self_serve_business_usage_based"
-  | "business"
-  | "ent26"
-  | "enterprise_cbp_automation"
-  | "enterprise_cbp_usage_based"
-  | "enterprise"
-  | "edu"
-  | "edu_plus"
-  | "edu_pro"
-  | "unknown";
-export const V2GetAccountResponse__PlanType = Schema.Literals([
-  "free",
-  "go",
-  "plus",
-  "pro",
-  "prolite",
-  "team",
-  "self_serve_business_prolite",
-  "self_serve_business_usage_based",
-  "business",
-  "ent26",
-  "enterprise_cbp_automation",
-  "enterprise_cbp_usage_based",
-  "enterprise",
-  "edu",
-  "edu_plus",
-  "edu_pro",
-  "unknown",
-]).annotate({ identifier: "V2GetAccountResponse__PlanType" });
+export type V2GetAccountResponse__PlanType = string;
+export const V2GetAccountResponse__PlanType = Schema.String.annotate({
+  identifier: "V2GetAccountResponse__PlanType",
+});
 
 export type V2GetAccountTokenUsageResponse__AccountTokenUsageDailyBucket = {
   readonly startDate: string;

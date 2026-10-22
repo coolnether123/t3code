@@ -14,6 +14,7 @@ it("preserves metadata-only resume on the wire", () => {
 });
 
 const isGetAccountResponse = Schema.is(CodexSchema.V2GetAccountResponse);
+const decodeGetAccountResponse = Schema.decodeUnknownSync(CodexSchema.V2GetAccountResponse);
 const isThreadReadResponse = Schema.is(CodexSchema.V2ThreadReadResponse);
 const isThreadResumeResponse = Schema.is(CodexSchema.V2ThreadResumeResponse);
 const isThreadRollbackResponse = Schema.is(CodexSchema.V2ThreadRollbackResponse);
@@ -213,6 +214,7 @@ it("accepts Codex misalignment policy errors for thread responses", () => {
 
 it("accepts Codex 0.150 account plan values", () => {
   const planTypes = [
+    "promax",
     "self_serve_business_prolite",
     "ent26",
     "enterprise_cbp_automation",
@@ -232,4 +234,26 @@ it("accepts Codex 0.150 account plan values", () => {
 
     assert.equal(isGetAccountResponse(accountResponse), true);
   }
+});
+
+it("decodes new account plans and ignores added account routing fields", () => {
+  for (const planType of ["promax", "future-plan"]) {
+    const account = { type: "chatgpt", email: "redacted@example.com", planType } as const;
+    const decoded = decodeGetAccountResponse({
+      account,
+      requiresOpenaiAuth: true,
+      workspaceRouting: {
+        chatgptAccountId: "synthetic-account-id",
+        backendOrigin: "https://chatgpt.com/backend-api",
+        accountRoutingOverride: null,
+      },
+    });
+    assert.deepEqual(decoded, { account, requiresOpenaiAuth: true });
+  }
+  assert.isFalse(
+    isGetAccountResponse({
+      account: { type: "chatgpt", email: "redacted@example.com", planType: 123 },
+      requiresOpenaiAuth: true,
+    }),
+  );
 });
