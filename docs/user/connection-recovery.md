@@ -3,6 +3,8 @@
 T3 retries temporary Codex connection failures before showing an error. If a
 provider becomes unavailable, T3 checks it again in the background, even when
 its chat is not open. A lost computer connection shows that T3 is trying again.
+If a temporary status check fails, your last known models stay available while
+T3 checks again. A slow Claude check also keeps its known models available.
 If it needs your help, open Connections to reconnect the computer.
 
 Provider and turn errors show a short explanation. Expand **Details** to see

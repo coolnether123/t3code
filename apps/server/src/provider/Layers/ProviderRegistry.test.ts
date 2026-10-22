@@ -7,6 +7,7 @@ import * as Path from "effect/Path";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -1266,6 +1267,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           } satisfies ServerProvider;
           assert.deepStrictEqual(mergeProviderSnapshot(signedIn, failed), {
             ...failed,
+            status: "warning",
+            message: "antigravity status check failed; showing the last known models.",
             auth: signedIn.auth,
             models: signedIn.models,
           });
@@ -2326,16 +2329,22 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
 
           yield* Effect.gen(function* () {
             const registry = yield* ProviderRegistry.ProviderRegistry;
+            const failedProbe = yield* registry.streamChanges.pipe(
+              Stream.filter((providers) =>
+                providers.some(
+                  (provider) =>
+                    provider.instanceId === "codex_personal" && provider.status === "error",
+                ),
+              ),
+              Stream.runHead,
+              Effect.forkChild({ startImmediately: true }),
+            );
             let providers = yield* registry.getProviders;
-            for (
-              let attempts = 0;
-              attempts < 50 &&
+            if (
               providers.find((provider) => provider.instanceId === "codex_personal")?.status !==
-                "error";
-              attempts += 1
+              "error"
             ) {
-              yield* Effect.yieldNow;
-              providers = yield* registry.getProviders;
+              providers = Option.getOrThrow(yield* Fiber.join(failedProbe));
             }
             const codexPersonal = providers.find(
               (provider) => provider.instanceId === "codex_personal",
@@ -2998,6 +3007,24 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           ),
         );
       });
+
+      it.effect("keeps Claude models available when its version probe is slow", () =>
+        Effect.gen(function* () {
+          const killCalls = yield* Ref.make(0);
+          const statusFiber = yield* checkClaudeProviderStatus(
+            defaultClaudeSettings,
+            claudeCapabilities(),
+          ).pipe(Effect.provide(hangingScopedSpawnerLayer(killCalls)), Effect.forkChild);
+          yield* Effect.yieldNow;
+          yield* TestClock.adjust("11 seconds");
+          const status = yield* Fiber.join(statusFiber);
+          assert.strictEqual(status.status, "warning");
+          assert.strictEqual(status.installed, true);
+          assert.ok(status.models.some((model) => !model.isCustom));
+          assert.include(status.message, "slow to respond");
+          assert.strictEqual(yield* Ref.get(killCalls), 1);
+        }),
+      );
 
       it.effect("returns warning when the Claude initialization result is unavailable", () =>
         Effect.gen(function* () {

@@ -680,13 +680,9 @@ export const migrateCodexResumeRollout = Effect.fn("migrateCodexResumeRollout")(
     );
     return;
   }
-  return yield* new CodexResumeRolloutMigrationError({
-    sharedHomePath,
-    effectiveHomePath,
+  // Codex can resume daemon-owned threads without a local rollout to copy.
+  yield* Effect.logWarning("Codex resume rollout not found in the shared home; resuming as is", {
     threadId: input.resumeThreadId,
-    operation: "readDirectory",
-    path: sharedHomePath,
-    cause: new Error("The persisted Codex resume rollout was not found."),
   });
 });
 

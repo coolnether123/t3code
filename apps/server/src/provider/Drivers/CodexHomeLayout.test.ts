@@ -217,6 +217,21 @@ it.layer(NodeServices.layer)("CodexHomeLayout", (it) => {
       }),
     );
 
+    it.effect("leaves daemon-owned threads resumable when no shared rollout exists", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const sharedHome = yield* makeTempDir("t3code-codex-shared-");
+        const isolatedHome = yield* makeTempDir("t3code-codex-isolated-");
+        yield* migrateCodexResumeRollout({
+          sharedHomePath: sharedHome,
+          effectiveHomePath: isolatedHome,
+          resumeThreadId: "019e487f-1234-7abc-8def-0123456789ab",
+        });
+        expect(yield* fileSystem.exists(path.join(isolatedHome, "sessions"))).toBe(false);
+      }),
+    );
+
     it.effect("copies only the exact legacy rollout without deleting its source", () =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;

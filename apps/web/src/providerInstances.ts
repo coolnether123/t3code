@@ -75,7 +75,15 @@ export interface ProviderInstanceEntry {
  * `ready` probe status can remain in the streamed snapshot until reconciliation.
  */
 export function isProviderInstancePickerReady(entry: ProviderInstanceEntry): boolean {
-  return entry.enabled && entry.isAvailable && entry.status === "ready";
+  return (
+    entry.enabled &&
+    entry.isAvailable &&
+    (entry.status === "ready" ||
+      (entry.status === "warning" &&
+        entry.installed &&
+        entry.snapshot.auth.status !== "unauthenticated" &&
+        entry.models.some((model) => !model.isCustom)))
+  );
 }
 
 /** Readiness for desktop-backed Codex includes the host installation and its login state. */
@@ -399,6 +407,10 @@ export function resolveSelectableProviderInstanceEntry(
     }
   }
   return (
+    entries.find(
+      (entry) =>
+        entry.showInNewChats && entry.status === "ready" && isProviderInstancePickerReady(entry),
+    ) ??
     entries.find((entry) => entry.showInNewChats && isProviderInstancePickerReady(entry)) ??
     entries.find((entry) => isSelectableProviderInstanceEntry(entry) && entry.status !== "error")
   );
