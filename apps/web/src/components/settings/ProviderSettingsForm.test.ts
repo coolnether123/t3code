@@ -14,6 +14,7 @@ describe("ProviderSettingsForm helpers", () => {
 
     expect(codex).toBeDefined();
     expect(deriveProviderSettingsFields(codex!).map((field) => field.key)).toEqual([
+      "useDesktopAppDaemon",
       "binaryPath",
       "homePath",
       "shadowHomePath",
