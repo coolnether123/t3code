@@ -205,6 +205,7 @@ describe("Codex Windows sandbox state recovery", () => {
           let confirmedAttempts = 0;
           const recovered = yield* withCodexSandboxStartupRecovery({
             homeDirectory: home,
+            platform: "win32",
             run: () => {
               confirmedAttempts += 1;
               return confirmedAttempts === 1
@@ -223,6 +224,7 @@ describe("Codex Windows sandbox state recovery", () => {
           });
           const unrelated = yield* withCodexSandboxStartupRecovery({
             homeDirectory: home,
+            platform: "win32",
             run: () => {
               unrelatedAttempts += 1;
               return Effect.fail(unrelatedExit);
@@ -250,6 +252,7 @@ describe("Codex Windows sandbox state recovery", () => {
           const startup = (index: number) =>
             withCodexSandboxStartupRecovery({
               homeDirectory: home,
+              platform: "win32",
               run: () => {
                 attempts[index] = (attempts[index] ?? 0) + 1;
                 return attempts[index] === 1
@@ -282,6 +285,7 @@ describe("Codex Windows sandbox state recovery", () => {
           let attempts = 0;
           const result = yield* withCodexSandboxStartupRecovery({
             homeDirectory: home,
+            platform: "win32",
             run: () => {
               attempts += 1;
               if (attempts === 1) {

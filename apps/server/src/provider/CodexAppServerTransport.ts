@@ -5,7 +5,10 @@ import * as NodeStream from "node:stream";
 
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import type { CodexSettings } from "@t3tools/contracts";
-import { Platform as HostProcessPlatform } from "@t3tools/shared/HostProcess";
+import {
+  HomeDirectory as HostProcessHomeDirectory,
+  Platform as HostProcessPlatform,
+} from "@t3tools/shared/HostProcess";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -559,7 +562,7 @@ export const resolveCodexBinaryPath = Effect.fn("resolveCodexBinaryPath")(functi
 ): Effect.fn.Return<string, never, FileSystem.FileSystem | Path.Path> {
   const platform = yield* HostProcessPlatform;
   if (!settings.useDesktopAppDaemon || settings.binaryPath !== "codex") {
-    return settings.binaryPath;
+    return expandHomePath(settings.binaryPath, yield* HostProcessHomeDirectory);
   }
 
   const fileSystem = yield* FileSystem.FileSystem;
