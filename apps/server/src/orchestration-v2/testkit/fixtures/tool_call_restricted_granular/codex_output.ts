@@ -38,6 +38,9 @@ export function assertToolCallRestrictedGranularOutput(
   const approval = projection.turnItems.find((item) => item.type === "approval_request");
   assert.equal(
     approval?.prompt,
-    "add /home/replay-user/t3code/packages/effect-codex-app-server/.codex-probe-write-action.txt",
+    "1 proposed file change:\n" +
+      "ADD /home/replay-user/t3code/packages/effect-codex-app-server/.codex-probe-write-action.txt\n" +
+      "\nChange 1 diff:\n" +
+      "codex app-server approval fixture.\n\n",
   );
 }
