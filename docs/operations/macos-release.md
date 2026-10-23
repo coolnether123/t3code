@@ -26,6 +26,12 @@ maximization only after the window receives focus. Later user activation works
 normally. Do not replace this with an ordinary app launch during unattended
 maintenance.
 
+The rollback desktop must also support background launch. `open -g` cannot
+prevent an older app from explicitly requesting focus. Before unattended
+maintenance, arrange a rollback that preserves focus; an older desktop build
+that calls `app.focus` needs a different recovery launch. Do not assume the
+candidate's background flag changes the old binary's behavior.
+
 Mac preparation sets `VITE_OTIS_CALL_ENABLED=false`. The call control also
 defaults to off when the variable is absent; a build must explicitly set it to
 `true` to include the control.
