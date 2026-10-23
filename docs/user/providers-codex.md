@@ -100,6 +100,14 @@ continuation: the desktop app gets a new provider thread, while the original
 chat and its history stay unchanged. Files, attachments, approvals, and live
 tool state do not transfer as active state.
 
+## Continue chats on another instance
+
+In a Codex instance's settings, **Continue its chats on** chooses the Codex
+instance that receives its chats' next turns. Choose **None** to turn the
+route off. The destination must be enabled for the project. Instances sharing
+the same Codex home can resume the native conversation; separate Codex homes
+use the normal conversation handoff.
+
 ## Use multiple accounts
 
 Add another ChatGPT account in **Settings → Providers**, then select the account

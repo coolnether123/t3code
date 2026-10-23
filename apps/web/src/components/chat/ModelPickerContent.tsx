@@ -1,3 +1,4 @@
+import { plainError } from "../../lib/plainError";
 import {
   ANTIGRAVITY_DEFAULT_MODEL,
   type ProviderInstanceId,
@@ -205,7 +206,7 @@ function ModelPickerProviderNotices({
           {setupEntries.map((entry) => (
             <div key={entry.instanceId} className="px-1 py-1.5 text-xs leading-snug">
               <p className="line-clamp-3 text-muted-foreground">
-                {getProviderStatusMessage(entry.snapshot)}
+                {plainError(getProviderStatusMessage(entry.snapshot), "provider")}
               </p>
               <InlineButton
                 className="mt-1"

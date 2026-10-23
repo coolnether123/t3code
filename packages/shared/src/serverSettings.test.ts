@@ -3,10 +3,13 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ServerSettings,
+  ServerSettingsPatch,
   UsageLimitSourceId,
   type ServerProvider,
 } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
+import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 import { resolveServerBackgroundActivitySettings } from "./backgroundActivitySettings.ts";
 import { createModelSelection } from "./model.ts";
@@ -24,6 +27,61 @@ import {
 } from "./serverSettings.ts";
 
 const FOLDED_SERVER_SETTINGS = { ...DEFAULT_SERVER_SETTINGS, projectSettingsFolded: true };
+const encodeSettings = Schema.encodeSync(ServerSettings);
+const decodeSettings = Schema.decodeUnknownSync(ServerSettings);
+const decodeSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
+
+describe("saved computer and continuation settings", () => {
+  it("persists a trimmed computer name and custom color, then clears both", () => {
+    const updated = applyServerSettingsPatch(
+      DEFAULT_SERVER_SETTINGS,
+      decodeSettingsPatch({
+        environmentName: " Elora ",
+        environmentColor: "#Aa12Bb",
+      }),
+    );
+    const reopened = decodeSettings(JSON.parse(JSON.stringify(encodeSettings(updated))));
+    expect(reopened.environmentName).toBe("Elora");
+    expect(reopened.environmentColor).toBe("#Aa12Bb");
+    const cleared = applyServerSettingsPatch(reopened, {
+      environmentName: "",
+      environmentColor: null,
+    });
+    expect(decodeSettings(encodeSettings(cleared))).toMatchObject({
+      environmentName: "",
+      environmentColor: null,
+    });
+    expect(() => decodeSettingsPatch({ environmentColor: "blue" })).toThrow();
+  });
+
+  it("preserves a continuation route through storage and removes it when cleared", () => {
+    const sourceId = ProviderInstanceId.make("codex");
+    const targetId = ProviderInstanceId.make("codex_desktop");
+    const updated = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      providerInstances: {
+        ...DEFAULT_SERVER_SETTINGS.providerInstances,
+        [sourceId]: {
+          driver: ProviderDriverKind.make("codex"),
+          config: {},
+          continueThreadsOn: targetId,
+        },
+        [targetId]: {
+          driver: ProviderDriverKind.make("codex"),
+          config: { useDesktopAppDaemon: true },
+        },
+      },
+    });
+    const reopened = decodeSettings(JSON.parse(JSON.stringify(encodeSettings(updated))));
+    expect(reopened.providerInstances[sourceId]?.continueThreadsOn).toBe(targetId);
+    const { continueThreadsOn: _route, ...withoutRoute } = reopened.providerInstances[sourceId]!;
+    const cleared = applyServerSettingsPatch(reopened, {
+      providerInstances: { ...reopened.providerInstances, [sourceId]: withoutRoute },
+    });
+    expect(decodeSettings(encodeSettings(cleared)).providerInstances[sourceId]).not.toHaveProperty(
+      "continueThreadsOn",
+    );
+  });
+});
 
 describe("fallbackTextGenerationModelSelection", () => {
   it("ignores a configured non-default instance at machine scope, matching no fallback", () => {

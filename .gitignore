@@ -49,3 +49,5 @@ node_modules/
 .trigger-tree/
 # pnpm content-addressable store; never belongs in the repo.
 .pnpm-store/
+__pycache__/
+*.pyc

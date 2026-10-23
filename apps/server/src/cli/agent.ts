@@ -263,7 +263,8 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
           request.kind === "snapshot"
             ? request.threadId
             : "threadId" in request.action.command &&
-                request.action.command.type !== "thread.create"
+                request.action.command.type !== "thread.create" &&
+                request.action.command.type !== "thread.unarchive"
               ? request.action.command.threadId
               : undefined;
         // GET query fields are the endpoint's payload, including its optional history cursor.
@@ -285,8 +286,22 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
         if (request.kind === "snapshot")
           return { ...context, ...compactAgentSnapshot(target, shell, detail, request.offset) };
         const { action } = request;
+        const actionShell =
+          action.command.type === "thread.unarchive"
+            ? {
+                ...shell,
+                archivedThreads: [
+                  yield* boundedHttp(
+                    client.orchestration.threadShell({
+                      headers,
+                      params: { threadId: action.command.threadId },
+                    }),
+                  ),
+                ],
+              }
+            : shell;
         yield* checked(() =>
-          validateAgentAction(action, target, shell, detail, target.descriptor.capabilities),
+          validateAgentAction(action, target, actionShell, detail, target.descriptor.capabilities),
         );
         const runtimeNow = yield* readPersistedServerRuntimeState(target.runtimeStatePath).pipe(
           Effect.mapError(

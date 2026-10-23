@@ -68,6 +68,12 @@ to perform. Read the reported session, latest turn, and pending requests before
 sending a turn-control or approval command. A compact history window is not a
 claim that older messages or activities do not exist.
 
+`thread.unarchive` reads the target's shell metadata before dispatch, without
+loading its transcript. The authenticated `GET
+/api/orchestration/threads/:threadId/shell` endpoint includes archived threads
+and returns 404 for missing or deleted threads. Environment and runtime checks
+still apply to restoration.
+
 Selected-thread output includes the session's provider instance, status, and
 last error; the latest turn's state and result; the latest eight messages and
 20 activities; and up to 20 open-request records separately. It also includes

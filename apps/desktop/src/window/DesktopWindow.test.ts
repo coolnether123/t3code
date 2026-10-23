@@ -127,6 +127,7 @@ function makeFakeBrowserWindow() {
     setTitleBarOverlay: vi.fn(),
     setWindowButtonPosition: vi.fn(),
     show: vi.fn(),
+    showInactive: vi.fn(),
     webContents,
   };
 
@@ -201,23 +202,26 @@ const layerElectronTheme = Layer.succeed(ElectronTheme.ElectronTheme, {
   onUpdated: () => Effect.void,
 } satisfies ElectronTheme.ElectronTheme["Service"]);
 
-const layerDesktopEnvironment = DesktopEnvironment.layer(environmentInput).pipe(
-  Layer.provide(
-    Layer.mergeAll(
-      NodeServices.layer,
-      DesktopConfig.layerTest({
-        T3CODE_PORT: "3773",
-        VITE_DEV_SERVER_URL: "http://127.0.0.1:5733",
-      }),
+const layerDesktopEnvironment = (backgroundLaunch = false) =>
+  DesktopEnvironment.layer(environmentInput).pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        NodeServices.layer,
+        DesktopConfig.layerTest({
+          T3CODE_PORT: "3773",
+          T3CODE_BACKGROUND_LAUNCH: String(backgroundLaunch),
+          VITE_DEV_SERVER_URL: "http://127.0.0.1:5733",
+        }),
+      ),
     ),
-  ),
-);
+  );
 
 const desktopWindowBoundsEquivalence = Schema.toEquivalence(
   DesktopAppSettings.DesktopWindowBoundsSchema,
 );
 
 function layerTest(input: {
+  readonly backgroundLaunch?: boolean;
   readonly window: Electron.BrowserWindow;
   readonly createCount: Ref.Ref<number>;
   readonly mainWindow: Ref.Ref<Option.Option<Electron.BrowserWindow>>;
@@ -306,7 +310,7 @@ function layerTest(input: {
           recordMetrics: () => Effect.void,
           shutdown: Effect.void,
         }),
-        layerDesktopEnvironment,
+        layerDesktopEnvironment(input.backgroundLaunch),
         layerDesktopAppSettings,
         layerDesktopClientSettings,
         layerDesktopServerExposure,
@@ -427,7 +431,7 @@ const makeSplashScenario = (createOutcomes: readonly (Electron.BrowserWindow | n
             recordMetrics: () => Effect.void,
             shutdown: Effect.void,
           }),
-          layerDesktopEnvironment,
+          layerDesktopEnvironment(),
           DesktopAppSettings.layerTest(),
           layerDesktopClientSettings,
           layerDesktopServerExposure,
@@ -1065,6 +1069,44 @@ describe("DesktopWindow", () => {
             Layer.mergeAll(layer, Logger.layer([logger], { mergeWithExisting: false })),
           ),
         );
+      }),
+  );
+
+  it.effect(
+    "background startup does not activate the window and later user activation still works",
+    () =>
+      Effect.gen(function* () {
+        const fake = makeFakeBrowserWindow();
+        const createCount = yield* Ref.make(0);
+        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+        const revealed = vi.fn();
+        const shown = Promise.withResolvers<void>();
+        fake.window.showInactive = () => shown.resolve();
+        const layer = layerTest({
+          window: fake.window,
+          createCount,
+          mainWindow,
+          onReveal: revealed,
+          backgroundLaunch: true,
+          desktopSettings: {
+            ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
+            mainWindowMaximized: true,
+          },
+        });
+        yield* Effect.gen(function* () {
+          const windows = yield* DesktopWindow.DesktopWindow;
+          yield* windows.handleBackendReady(new URL("http://127.0.0.1:3773"));
+          const ready = fake.windowListeners.get("ready-to-show");
+          if (!ready) return yield* Effect.die("missing first-reveal listener");
+          ready();
+          yield* Effect.promise(() => shown.promise);
+          assert.equal(revealed.mock.calls.length, 0);
+          assert.equal(fake.maximize.mock.calls.length, 0);
+          yield* windows.activate;
+          assert.equal(revealed.mock.calls.length, 1);
+          fake.windowListeners.get("focus")?.();
+          assert.equal(fake.maximize.mock.calls.length, 1);
+        }).pipe(Effect.provide(layer));
       }),
   );
 

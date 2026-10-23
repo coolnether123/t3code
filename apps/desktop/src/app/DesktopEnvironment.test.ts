@@ -39,6 +39,15 @@ const makeEnvironment = (
 ) => DesktopEnvironment.DesktopEnvironment.pipe(Effect.provide(layerEnvironment(overrides, env)));
 
 describe("DesktopEnvironment", () => {
+  it.effect("uses an explicit background-launch flag without changing normal startup", () =>
+    Effect.gen(function* () {
+      assert.equal((yield* makeEnvironment()).backgroundLaunch, false);
+      assert.equal(
+        (yield* makeEnvironment({}, { T3CODE_BACKGROUND_LAUNCH: "1" })).backgroundLaunch,
+        true,
+      );
+    }),
+  );
   it.effect("derives state paths and development identity inside Effect", () =>
     Effect.gen(function* () {
       const environment = yield* makeEnvironment(

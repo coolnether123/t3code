@@ -218,6 +218,12 @@ export const makeManagedServerProvider = Effect.fn("makeManagedServerProvider")(
 
   const hasProviderStatusDemand = Effect.gen(function* () {
     const state = yield* Ref.get(snapshotStateRef);
+    if (
+      state.snapshot.enabled &&
+      state.snapshot.status === "error" &&
+      state.snapshot.auth.status !== "unauthenticated"
+    )
+      return true;
     const instanceId = state.snapshot.instanceId;
     const [genericDemand, instanceDemand] = yield* Effect.all([
       host.shouldRunBackgroundWork({ type: "provider-status" }),

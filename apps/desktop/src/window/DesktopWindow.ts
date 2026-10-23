@@ -828,17 +828,23 @@ export const make = Effect.gen(function* () {
       revealSubscribers.push((fire) => window.webContents.once("did-finish-load", fire));
     }
     bindFirstRevealTrigger(revealSubscribers, () => {
-      if (!window.isDestroyed()) {
-        window.webContents.setBackgroundThrottling(true);
-      }
-      if (persistedSettings.mainWindowMaximized) {
+      if (window.isDestroyed()) return;
+      window.webContents.setBackgroundThrottling(true);
+      if (persistedSettings.mainWindowMaximized && !environment.backgroundLaunch) {
         window.maximize();
+      } else if (persistedSettings.mainWindowMaximized) {
+        window.once("focus", () => {
+          if (!window.isDestroyed()) window.maximize();
+        });
       }
-      void runPromise(Effect.andThen(electronWindow.reveal(window), dismissConnectingSplash));
+      const reveal = environment.backgroundLaunch
+        ? Effect.sync(() => window.showInactive())
+        : electronWindow.reveal(window);
+      void runPromise(Effect.andThen(reveal, dismissConnectingSplash));
     });
 
     loadApplication();
-    if (environment.isDevelopment) {
+    if (environment.isDevelopment && !environment.backgroundLaunch) {
       window.webContents.openDevTools({ mode: "detach" });
     }
 
@@ -933,7 +939,8 @@ export const make = Effect.gen(function* () {
     });
     splash.once("ready-to-show", () => {
       if (!splash.isDestroyed()) {
-        splash.show();
+        if (environment.backgroundLaunch) splash.showInactive();
+        else splash.show();
       }
     });
     void splash.loadURL(buildConnectingSplashDataUrl(shouldUseDarkColors));

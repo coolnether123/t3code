@@ -6,6 +6,7 @@ import { CircleAlertIcon, XIcon } from "lucide-react";
 import { OpenAI } from "../Icons";
 import { ChatGptUsageButton } from "../settings/ChatGptUsageButton";
 import { ExpandableText } from "../settings/ExpandableText";
+import { plainError } from "../../lib/plainError";
 
 export function getThreadErrorBannerMessage(error: string): string {
   let payload: unknown;
@@ -78,7 +79,10 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
               <p>Review your usage settings in ChatGPT to continue.</p>
             </div>
           ) : (
-            <ExpandableText text={error} collapsedText={getThreadErrorBannerMessage(error)} />
+            <ExpandableText
+              text={error}
+              collapsedText={plainError(getThreadErrorBannerMessage(error))}
+            />
           )}
         </AlertDescription>
         {(chatGptUsageLimit || onDismiss) && (

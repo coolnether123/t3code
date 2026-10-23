@@ -1,12 +1,10 @@
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off - Replay fixtures use local files and the test clock.
 import * as NodeFS from "node:fs";
 import * as NodePerfHooks from "node:perf_hooks";
 import { afterEach, expect, it, vi } from "vite-plus/test";
-import { shouldEndTurn } from "../../apps/web/src/voice/turnEnding";
-import { createDeviceSpeech, type DeviceRecognition } from "../../apps/web/src/voice/deviceSpeech";
-import {
-  ThreadVoiceSession,
-  type VoiceDependencies,
-} from "../../packages/client-runtime/src/voice-call/session";
+import { shouldEndTurn } from "./turnEnding.ts";
+import { createDeviceSpeech, type DeviceRecognition } from "./deviceSpeech.ts";
+import { ThreadVoiceSession, type VoiceDependencies } from "./session.ts";
 
 type Fixture = {
   id: string;

@@ -6627,7 +6627,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     (showProviderUnavailable ? "Enable a provider in Settings" : "Ask anything...")}
                 </button>
                 {collapsedComposerImagePreviews}
-                {activeThread ? (
+                {activeThread && import.meta.env.VITE_OTIS_CALL_ENABLED === "true" ? (
                   <Button
                     type="button"
                     size="sm"
@@ -7346,7 +7346,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     </>
                   ) : null}
                   <div className={cn("min-w-0", isVoiceActive && "order-first w-full")}>
-                    {activeThread ? (
+                    {activeThread && import.meta.env.VITE_OTIS_CALL_ENABLED === "true" ? (
                       <ThreadVoiceControls
                         key={`${environmentId}:${activeThread.id}`}
                         ref={voiceRef}

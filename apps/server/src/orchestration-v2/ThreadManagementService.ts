@@ -56,6 +56,7 @@ import { DispatchModeLimit, exceededDispatchModeLimit } from "./DispatchModeLimi
 import { projectTurnItemForDetail } from "./WireProjection.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { resolveContinuationRoute } from "../provider/continuationRoute.ts";
 
 export type ThreadManagementSendMode = "auto" | "queue" | "steer" | "restart";
 
@@ -671,10 +672,43 @@ const make = Effect.gen(function* () {
   };
 
   const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
-    ensureCommandTranscripts(command).pipe(
-      Effect.andThen(assertDispatchTargetEnabled(command)),
-      Effect.andThen(orchestrator.dispatch(command)),
-    );
+    Effect.gen(function* () {
+      let routed = command;
+      if (command.type === "message.dispatch" && !(yield* hasReceipt(command.commandId))) {
+        const projection = yield* orchestrator.getThreadRecords(command.threadId, []);
+        const settings = yield* serverSettings.getSettings.pipe(
+          Effect.mapError(
+            (cause) =>
+              new Orchestrator.OrchestratorDispatchError({
+                commandId: command.commandId,
+                commandType: command.type,
+                cause,
+              }),
+          ),
+        );
+        const modelSelection = yield* Effect.try({
+          try: () =>
+            resolveContinuationRoute(
+              settings.providerInstances,
+              command.modelSelection ?? projection.thread.modelSelection,
+            ),
+          catch: (cause) =>
+            new Orchestrator.OrchestratorDispatchError({
+              commandId: command.commandId,
+              commandType: command.type,
+              cause,
+            }),
+        });
+        if (
+          modelSelection.instanceId !==
+          (command.modelSelection ?? projection.thread.modelSelection).instanceId
+        )
+          routed = { ...command, modelSelection };
+      }
+      yield* ensureCommandTranscripts(routed);
+      yield* assertDispatchTargetEnabled(routed);
+      return yield* orchestrator.dispatch(routed);
+    });
 
   const getProjectThread: ThreadManagementServiceShape["getProjectThread"] = (input) =>
     getThreadProjection(input.threadId).pipe(

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
+import * as DateTime from "effect/DateTime";
 import {
   EnvironmentProviderStatus,
   OrchestrationV2ThreadDetailSnapshot,
@@ -186,6 +187,36 @@ describe("agent action boundary", () => {
         detail,
       ),
     ).toThrow();
+  });
+  it("restores an archived thread from shell evidence without loading its transcript", () => {
+    const action = decodeAgentAction(
+      envelope({
+        type: "thread.unarchive",
+        commandId: "restore-a",
+        threadId: "thread-a",
+      }),
+    );
+    const archived = { ...shellThread, archivedAt: DateTime.makeUnsafe(now) };
+    expect(() =>
+      validateAgentAction(action, identity, { ...shell, threads: [], archivedThreads: [archived] }),
+    ).not.toThrow();
+    expect(() => validateAgentAction(action, identity, shell)).toThrow("Archived thread");
+    expect(() =>
+      validateAgentAction(action, identity, { ...shell, archivedThreads: [shellThread] }),
+    ).toThrow("Archived thread");
+    expect(() =>
+      validateAgentAction(action, identity, {
+        ...shell,
+        archivedThreads: [{ ...archived, deletedAt: DateTime.makeUnsafe(now) }],
+      }),
+    ).toThrow("Archived thread");
+    expect(() =>
+      validateAgentAction(
+        action,
+        { ...identity, environmentId: "elsewhere" },
+        { ...shell, archivedThreads: [archived] },
+      ),
+    ).toThrow("Environment");
   });
   it("rejects unknown fields, oversized input and destructive commands", () => {
     expect(() => decodeAgentAction(envelope({ ...interrupt, typo: true }))).toThrow();

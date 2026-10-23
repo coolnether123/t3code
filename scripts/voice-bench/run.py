@@ -280,8 +280,9 @@ def main():
             manifest_path=corpus/"manifest.pending.json"
         env={**os.environ,"VOICE_BENCH_MANIFEST":str(manifest_path),"VOICE_BENCH_OUTPUT":str(out/"replay.json")}
         if args.policy: env["VOICE_BENCH_POLICY"]=args.policy
-        vp=shutil.which("vp.cmd") or shutil.which("vp")
-        result=subprocess.run([vp,"test","run","scripts/voice-bench/replay.test.ts","--reporter=dot"],cwd=ROOT,env=env,capture_output=True,text=True,encoding="utf-8",errors="replace")
+        vp=ROOT/"node_modules"/".bin"/("vp.cmd" if os.name=="nt" else "vp")
+        if not vp.is_file(): raise RuntimeError("Install the locked project dependencies before replaying fixtures")
+        result=subprocess.run([vp,"test","run","apps/web/src/voice/replay.test.ts","--reporter=dot"],cwd=ROOT,env=env,capture_output=True,text=True,encoding="utf-8",errors="replace")
         (out/"replay.log").write_text(result.stdout+result.stderr,encoding="utf-8")
         if result.returncode: raise RuntimeError(f"Replay exit {result.returncode}, see replay.log")
         return json.loads((out/"replay.json").read_text())

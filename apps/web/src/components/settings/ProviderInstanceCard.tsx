@@ -60,6 +60,7 @@ import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
 import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayout";
+import { ProviderContinuationSettings } from "./ProviderContinuationSettings";
 import { AcpSessionManagementSection } from "./AcpSessionManagementSection";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { readCodexSetupMode } from "./CodexSetupSection.logic";
@@ -1202,6 +1203,18 @@ export function ProviderInstanceCard({
               ))}
             </div>
           ) : null}
+        </SettingsSection>
+      ) : null}
+
+      {environmentId !== undefined && instance.driver === "codex" ? (
+        <SettingsSection title="Chat continuation">
+          <ProviderContinuationSettings
+            environmentId={environmentId}
+            instanceId={instanceId}
+            instance={instance}
+            disabled={readOnly || !canWriteSettings}
+            onUpdate={onUpdate}
+          />
         </SettingsSection>
       ) : null}
 

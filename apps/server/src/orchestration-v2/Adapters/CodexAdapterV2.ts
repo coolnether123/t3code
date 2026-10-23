@@ -1,4 +1,5 @@
 import { makeCodexFileChangeApprovalContext } from "../../provider/CodexFileChangeApprovalContext.ts";
+import { retryScopedConnection } from "../../provider/connectionRetry.ts";
 import {
   CODEX_COMPUTER_CONTROL_OPTION_ID,
   normalizeCodexComputerControlMode,
@@ -1647,6 +1648,7 @@ export const layerAppServerClientFactory: Layer.Layer<
                 }),
               ),
           }),
+          retryScopedConnection,
         ),
     });
   }),

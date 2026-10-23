@@ -1,6 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
   connectionCatalogDisplayUrl,
+  computerAppearance,
   hasRelayRoute,
   type EnvironmentPresentation as BaseEnvironmentPresentation,
 } from "@t3tools/client-runtime/connection";
@@ -21,6 +22,7 @@ import { usePreparedConnection } from "./session";
 export interface EnvironmentPresentation extends BaseEnvironmentPresentation {
   readonly environmentId: EnvironmentId;
   readonly label: string;
+  readonly color: string;
   readonly displayUrl: string | null;
   readonly relayManaged: boolean;
 }
@@ -29,10 +31,16 @@ function projectEnvironmentPresentation(
   environmentId: EnvironmentId,
   presentation: BaseEnvironmentPresentation,
 ): EnvironmentPresentation {
+  const computer = computerAppearance({
+    environmentId,
+    fallbackLabel: presentation.entry.target.label,
+    serverConfig: presentation.serverConfig,
+  });
   return {
     ...presentation,
     environmentId,
-    label: presentation.entry.target.label,
+    label: computer.name,
+    color: computer.color,
     displayUrl: connectionCatalogDisplayUrl(presentation.entry),
     relayManaged: hasRelayRoute(presentation.entry),
   };

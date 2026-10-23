@@ -320,6 +320,68 @@ describe("makeManagedServerProvider", () => {
     ).pipe(Effect.provide(Layer.mergeAll(layerAlwaysRunTest, TestClock.layer()))),
   );
 
+  it.effect.each([
+    ["authenticated error", true, "authenticated", true],
+    ["unknown-auth error", true, "unknown", true],
+    ["sign-in error", true, "unauthenticated", false],
+    ["disabled error", false, "authenticated", false],
+  ] as const)(
+    "handles %s without foreground demand",
+    ([_label, enabled, authStatus, shouldRecover]) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const calls = yield* Ref.make(0);
+          const initialCheckDone = yield* Deferred.make<void>();
+          const recovered = yield* Deferred.make<void>();
+          const provider = yield* makeManagedServerProvider<TestSettings>({
+            resolveMaintenance: () => Effect.succeed(maintenanceCapabilities),
+            getSettings: Effect.succeed({ enabled }),
+            streamSettings: Stream.empty,
+            haveSettingsChanged: (previous, next) => previous.enabled !== next.enabled,
+            initialSnapshot: () => Effect.succeed(initialSnapshot),
+            checkProvider: Ref.updateAndGet(calls, (count) => count + 1).pipe(
+              Effect.tap((count) =>
+                count === 1
+                  ? Deferred.succeed(initialCheckDone, undefined).pipe(Effect.ignore)
+                  : Effect.void,
+              ),
+              Effect.flatMap((count) =>
+                count === 1
+                  ? Effect.succeed({
+                      ...refreshedSnapshot,
+                      enabled,
+                      status: "error" as const,
+                      auth: { status: authStatus },
+                    })
+                  : Deferred.succeed(recovered, undefined).pipe(Effect.as(refreshedSnapshot)),
+              ),
+            ),
+            refreshInterval: "1 second",
+          });
+          yield* Deferred.await(initialCheckDone);
+          assert.strictEqual(yield* Ref.get(calls), 1);
+          const readyFiber = shouldRecover
+            ? yield* provider.streamChanges.pipe(
+                Stream.filter((snapshot) => snapshot.status === "ready"),
+                Stream.take(1),
+                Stream.runDrain,
+                Effect.forkChild,
+              )
+            : undefined;
+          yield* TestClock.adjust("1 second");
+          if (shouldRecover) yield* Deferred.await(recovered);
+          if (readyFiber !== undefined) yield* Fiber.join(readyFiber);
+          assert.strictEqual(yield* Ref.get(calls), shouldRecover ? 2 : 1);
+          if (shouldRecover) {
+            assert.strictEqual((yield* provider.getSnapshot).status, "ready");
+            yield* TestClock.adjust("1 second");
+            yield* Effect.yieldNow;
+            assert.strictEqual(yield* Ref.get(calls), 2);
+          }
+        }),
+      ).pipe(Effect.provide(Layer.mergeAll(layerNeverRunTest, TestClock.layer()))),
+  );
+
   it.effect("keeps manual refresh when interval refresh is disabled", () =>
     Effect.scoped(
       Effect.gen(function* () {

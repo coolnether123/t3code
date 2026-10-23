@@ -314,6 +314,12 @@ export function validateAgentAction(
       reject("Thread ID already exists.");
     return;
   }
+  if (command.type === "thread.unarchive") {
+    const archived = shell.archivedThreads.find((thread) => thread.id === command.threadId);
+    if (archived === undefined || archived.archivedAt === null || archived.deletedAt !== null)
+      reject("Archived thread must be read from this environment before restoring it.");
+    return;
+  }
   if (
     !("threadId" in command) ||
     detail?.projection.thread?.id !== command.threadId ||
@@ -419,7 +425,11 @@ export function compactAgentSnapshot(
       id: thread.id,
       title: clip(thread.title, 300),
       projectId: thread.projectId,
+      activeRunId: thread.activeRunId,
+      status: thread.status,
+      pendingRuntimeRequest: thread.pendingRuntimeRequest,
     })),
+    threadCount: shell.threads.length,
     projectsOmitted: Math.max(0, shell.projects.length - offset - 25),
     threadsOmitted: Math.max(0, shell.threads.length - offset - 25),
     listPage: {

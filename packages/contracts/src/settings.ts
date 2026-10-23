@@ -1120,7 +1120,13 @@ export const BirthdayCelebrationPreference = Schema.Struct({
 );
 export type BirthdayCelebrationPreference = typeof BirthdayCelebrationPreference.Type;
 
+const EnvironmentColor = Schema.String.check(Schema.isPattern(/^#[0-9a-fA-F]{6}$/));
+
 export const ServerSettings = Schema.Struct({
+  environmentName: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  environmentColor: Schema.NullOr(EnvironmentColor).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   birthdayCelebration: Schema.NullOr(BirthdayCelebrationPreference).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
@@ -1415,6 +1421,8 @@ const ModelSelectionPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
+  environmentName: Schema.optionalKey(TrimmedString),
+  environmentColor: Schema.optionalKey(Schema.NullOr(EnvironmentColor)),
   birthdayCelebration: Schema.optionalKey(Schema.NullOr(BirthdayCelebrationPreference)),
   setModelFavorites: Schema.optionalKey(
     Schema.Array(Schema.Struct({ ...ModelFavorite.fields, favorite: Schema.Boolean })),

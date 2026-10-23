@@ -192,6 +192,22 @@ export const layer = HttpApiBuilder.group(
         }),
       )
       .handle(
+        "threadShell",
+        Effect.fn("environment.orchestration.threadShell")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          const thread = yield* threadManagement.getThreadShell(args.params.threadId).pipe(
+            traceLocalHandlerWork,
+            Effect.catch((cause) =>
+              failEnvironmentInternal("orchestration_thread_snapshot_failed", cause),
+            ),
+          );
+          if (thread === null || thread.deletedAt !== null)
+            return yield* failEnvironmentNotFound("thread_not_found");
+          return thread;
+        }),
+      )
+      .handle(
         "threadSnapshot",
         Effect.fn("environment.orchestration.threadSnapshot")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);

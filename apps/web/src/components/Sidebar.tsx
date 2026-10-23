@@ -185,6 +185,7 @@ import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { cn } from "~/lib/utils";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
+import { ComputerBadge } from "./ComputerBadge";
 import { ProjectEnvironmentBadge } from "./ProjectEnvironmentBadge";
 import {
   buildDraftActionMenuItems,
@@ -2478,6 +2479,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               ) : null}
             </div>
             <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-secondary-label text-xs">
+              <ComputerBadge environmentId={thread.environmentId} className="max-w-28 shrink-0" />
               {thread.branch ? (
                 <>
                   <ThreadWorktreeIndicator thread={thread} />
@@ -2740,7 +2742,13 @@ function SidebarEnvironmentScopePicker(props: {
     <Menu>
       <MenuTrigger render={<SidebarMenuButton aria-label="Browse environment" />}>
         <ServerIcon />
-        <span className="min-w-0 flex-1">{selectedLabel}</span>
+        <span className="min-w-0 flex-1">
+          {props.selectedEnvironmentId === null ? (
+            selectedLabel
+          ) : (
+            <ComputerBadge environmentId={props.selectedEnvironmentId} />
+          )}
+        </span>
         <ChevronDownIcon />
       </MenuTrigger>
       <MenuPopup align="start" className="w-(--anchor-width)">
@@ -2754,7 +2762,7 @@ function SidebarEnvironmentScopePicker(props: {
               value={environment.environmentId}
               closeOnClick
             >
-              {environment.label}
+              <ComputerBadge environmentId={environment.environmentId} />
             </MenuRadioItem>
           ))}
           <MenuRadioItem value="all" closeOnClick>

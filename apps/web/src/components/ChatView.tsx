@@ -2288,7 +2288,9 @@ export default function ChatView(props: ChatViewProps) {
         id: `environment-unavailable:${activeEnvironmentUnavailableState.environmentId}`,
         variant: unavailableConnection.phase === "error" ? "error" : "warning",
         icon: <WifiOffIcon />,
-        title: `${activeEnvironmentUnavailableState.label} is ${environmentReconnecting ? "reconnecting" : "offline"}`,
+        title: environmentReconnecting
+          ? "T3 is trying again. Your chats are saved."
+          : "T3 can't connect to this computer. Open Connections to check it.",
         actions: (
           <>
             {!environmentReconnecting ? (

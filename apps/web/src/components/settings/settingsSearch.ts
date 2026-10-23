@@ -130,6 +130,13 @@ const SOURCE_CONTROL_HOST_SEARCH_ITEMS = sourceControlClients.definitions.flatMa
 
 export const SETTINGS_SEARCH_ITEMS = [
   {
+    id: "computers",
+    title: "Computer names and colors",
+    to: "/settings/appearance",
+    scope: "environment-defaults",
+    searchTerms: ["computer name color colour identity"],
+  },
+  {
     id: "storage-worktree-keep-when",
     targetId: "storage-worktrees",
     title: "Keep worktrees with local changes",

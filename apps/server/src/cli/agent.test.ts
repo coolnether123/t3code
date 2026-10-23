@@ -145,6 +145,82 @@ describe("agent authentication", () => {
 });
 
 describe("agent HTTP action receipt", () => {
+  it.effect("restores using archived metadata before any transcript read", () =>
+    Effect.gen(function* () {
+      const state = fakeAuth();
+      const archived = {
+        id: "archived-a",
+        projectId: "project-a",
+        title: "Archived fixture",
+        createdBy: "user",
+        creationSource: "web",
+        providerInstanceId: "codex",
+        modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        activeProviderThreadId: null,
+        lineage: { rootThreadId: "archived-a", parentThreadId: null, relationshipToParent: null },
+        forkedFrom: null,
+        latestRunId: null,
+        activeRunId: null,
+        status: "idle",
+        pendingRuntimeRequest: null,
+        latestVisibleMessage: null,
+        latestUserMessageAt: null,
+        hasActionableProposedPlan: false,
+        itemCount: 0,
+        visibleItemCount: 0,
+        createdAt: now,
+        updatedAt: now,
+        archivedAt: now,
+        deletedAt: null,
+        settledOverride: null,
+        settledAt: null,
+      };
+      const action = decodeAgentAction(
+        json({
+          environmentId: "env-a",
+          runtime: { pid: 123, startedAt: now },
+          command: { type: "thread.unarchive", commandId: "restore-a", threadId: archived.id },
+        }),
+      );
+      let dispatched = false;
+      let shellReads = 0;
+      let transcriptReadsBeforeDispatch = 0;
+      const result = yield* Effect.gen(function* () {
+        const target = yield* resolveAgentTarget("/sandbox");
+        return yield* executeAgentRequest(target, { kind: "act", action }, state.auth);
+      }).pipe(
+        Effect.provide(testLayer),
+        Effect.provideService(
+          FetchHttpClient.Fetch,
+          mockFetch(async (url) => {
+            const path = new URL(String(url)).pathname;
+            if (path.includes("/.well-known/")) return Response.json(descriptor);
+            if (path === "/api/orchestration/shell") {
+              shellReads++;
+              return Response.json(shell);
+            }
+            if (path.endsWith("/archived-a/shell")) return Response.json(archived);
+            if (path.endsWith("/dispatch")) {
+              dispatched = true;
+              return Response.json({ sequence: 13 });
+            }
+            if (!dispatched) transcriptReadsBeforeDispatch++;
+            throw new Error("Transcript deliberately unavailable");
+          }),
+        ),
+      );
+      expect(result).toMatchObject({ status: "accepted", commandId: "restore-a", sequence: 13 });
+      expect(dispatched).toBe(true);
+      expect(shellReads).toBe(2);
+      expect(transcriptReadsBeforeDispatch).toBe(0);
+      expect(state.revoked).toEqual(["session-a"]);
+    }),
+  );
+
   it.effect("rejects oversized receipt identity before HTTP dispatch", () =>
     Effect.gen(function* () {
       const state = fakeAuth();

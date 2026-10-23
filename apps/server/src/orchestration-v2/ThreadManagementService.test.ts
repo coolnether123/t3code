@@ -385,6 +385,90 @@ const layerDispatchChokepointTest =
       Layer.provideMerge(layerReceiptsTest),
     );
 
+it.effect("replays a received dispatch even after its continuation target is removed", () => {
+  const dispatched: Array<string> = [];
+  const layerTest = layerDispatchChokepointTest(
+    ServerSettings.layerTest({
+      providerInstances: {
+        [ProviderInstanceId.make("codex_work")]: {
+          driver: "codex",
+          enabled: true,
+          continueThreadsOn: ProviderInstanceId.make("codex_removed"),
+        },
+      },
+    }),
+  )(dispatched);
+  return Effect.gen(function* () {
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    const receipts = yield* CommandReceiptStore.CommandReceiptStoreV2;
+    const commandId = CommandId.make("command:thread-management:route-replay");
+    const threadId = ThreadId.make("thread:thread-management:chokepoint");
+    yield* receipts.upsert({
+      commandId,
+      threadId,
+      commandType: "message.dispatch",
+      acceptedAt: DateTime.makeUnsafe("2026-10-22T00:00:00Z"),
+      resultSequence: 1,
+      status: "accepted",
+      error: null,
+    });
+    yield* threads.dispatch({
+      type: "message.dispatch",
+      commandId,
+      threadId,
+      messageId: MessageId.make("message:thread-management:route-replay"),
+      text: "Synthetic replay",
+      attachments: [],
+      dispatchMode: { type: "queue_after_active" },
+      createdBy: "agent",
+      creationSource: "server",
+    });
+    expect(dispatched).toEqual(["message.dispatch"]);
+  }).pipe(Effect.provide(layerTest));
+});
+
+it.effect("checks destination project access after routing a Codex continuation", () => {
+  const targetId = ProviderInstanceId.make("codex_desktop");
+  const projectId = ProjectId.make("project:thread-management:chokepoint");
+  const dispatched: Array<string> = [];
+  const layerTest = layerDispatchChokepointTest(
+    ServerSettings.layerTest({
+      providerInstances: {
+        [ProviderInstanceId.make("codex_work")]: {
+          driver: "codex",
+          enabled: true,
+          continueThreadsOn: targetId,
+        },
+        [targetId]: { driver: "codex", enabled: true },
+      },
+      projectSettingsOverrides: {
+        [projectId]: { providerInstances: { [targetId]: { enabled: false } } },
+      },
+    }),
+  )(dispatched);
+  return Effect.gen(function* () {
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    const error = yield* Effect.flip(
+      threads.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("command:thread-management:route-disabled"),
+        threadId: ThreadId.make("thread:thread-management:chokepoint"),
+        messageId: MessageId.make("message:thread-management:route-disabled"),
+        text: "Synthetic continuation",
+        attachments: [],
+        dispatchMode: { type: "queue_after_active" },
+        createdBy: "agent",
+        creationSource: "server",
+      }),
+    );
+    expect(error).toBeInstanceOf(
+      ThreadManagementService.ThreadManagementProviderInstanceDisabledError,
+    );
+    expect(error).toMatchObject({ instanceId: targetId });
+    expect(dispatched).toEqual([]);
+  }).pipe(Effect.provide(layerTest));
+});
+
 it.effect(
   "the dispatch chokepoint refuses a continuation message.dispatch on a project-disabled instance before reaching the orchestrator",
   () => {
