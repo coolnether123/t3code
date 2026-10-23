@@ -1,4 +1,3 @@
-/** @vitest-environment happy-dom */
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { useState } from "react";
@@ -6,7 +5,7 @@ import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/
 import { USAGE_CONTRACT_VERSION, UsageDay, type UsageSummary } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
-import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
   environments: [
@@ -29,18 +28,23 @@ const state = vi.hoisted(() => ({
 }));
 
 vi.mock("@effect/atom-react", () => ({ useAtomValue: () => state.environments }));
-vi.mock("@t3tools/client-runtime/state/runtime", () => ({
+vi.mock("@t3tools/client-runtime/state/runtime", async (original) => ({
+  ...(await original<typeof import("@t3tools/client-runtime/state/runtime")>()),
   executeAtomQuery: (...args: unknown[]) => state.execute(...args),
 }));
 vi.mock("../rpc/atomRegistry", () => ({ appAtomRegistry: {} }));
 vi.mock("./presentation", () => ({
   environmentPresentations: { presentationsAtom: {} },
 }));
+vi.mock("./session", () => ({ environmentSession: { sessionStateAtom: vi.fn() } }));
 vi.mock("./server", () => ({
   serverEnvironment: { usageSummary: (request: unknown) => request },
 }));
 
-import { useUsage } from "./usage";
+let useUsage: (typeof import("./usage"))["useUsage"];
+beforeAll(async () => {
+  ({ useUsage } = await import("./usage"));
+});
 
 function UsageProbe() {
   useUsage({

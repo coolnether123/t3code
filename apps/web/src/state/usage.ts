@@ -23,7 +23,8 @@ import {
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useStableCallback } from "../hooks/useStableCallback";
 
 import { mergeUsage, type EnvironmentUsage, type MergedUsage } from "@t3tools/shared/usageMerge";
 import { appAtomRegistry } from "../rpc/atomRegistry";
@@ -127,22 +128,7 @@ export function useUsage(
   selectedEnvironmentIds: ReadonlySet<EnvironmentId> | null = null,
   hiddenProviders: ReadonlySet<UsageProviderKind> = NO_HIDDEN_PROVIDERS,
 ): UsageView {
-  const windowKey = useMemo(
-    () => JSON.stringify(usageQueryInput(input, USAGE_CONTRACT_VERSION)),
-    [
-      input.sinceDay,
-      input.untilDay,
-      input.timeZone,
-      input.resolution,
-      input.sinceTime,
-      input.untilTime,
-      input.includeQuotaHistory,
-      input.includeRepeatedInput,
-      input.quotaHistoryOnly,
-      input.quotaIntervals,
-      input.quotaProvider,
-    ],
-  );
+  const windowKey = (() => JSON.stringify(usageQueryInput(input, USAGE_CONTRACT_VERSION)))();
   const atom = usageByWindowAtom(windowKey);
   const observedEnvironments = useAtomValue(atom);
   const [refreshed, setRefreshed] = useState<{
@@ -151,7 +137,7 @@ export function useUsage(
     readonly statuses: readonly EnvironmentUsageStatus[];
     readonly baselineReadAt: ReadonlyMap<string, string | undefined>;
   } | null>(null);
-  const environments = useMemo(() => {
+  const environments = (() => {
     if (refreshed?.windowKey !== windowKey) return observedEnvironments;
     const byId = new Map(refreshed.statuses.map((status) => [status.environmentId, status]));
     return observedEnvironments.map((environment) => {
@@ -172,16 +158,13 @@ export function useUsage(
       }
       return { ...refreshedEnvironment, connection: environment.connection };
     });
-  }, [observedEnvironments, refreshed, windowKey]);
-  const selectedEnvironments = useMemo(
-    () =>
-      selectedEnvironmentIds === null
-        ? environments
-        : environments.filter((environment) =>
-            selectedEnvironmentIds.has(environment.environmentId),
-          ),
-    [environments, selectedEnvironmentIds],
-  );
+  })();
+  const selectedEnvironments = (() =>
+    selectedEnvironmentIds === null
+      ? environments
+      : environments.filter((environment) =>
+          selectedEnvironmentIds.has(environment.environmentId),
+        ))();
   const retriedFailures = useRef(new Set<string>());
   const delayedRetries = useRef(new Set<string>());
   const delayedRetryTimers = useRef(new Map<string, ReturnType<typeof globalThis.setTimeout>>());
@@ -197,96 +180,97 @@ export function useUsage(
   } | null>(null);
   const refreshGeneration = useRef(0);
   const windowKeyRef = useRef(windowKey);
-  windowKeyRef.current = windowKey;
+  const refreshAfterCommit = useRef<UsageView["refresh"] | null>(null);
+  useLayoutEffect(() => {
+    windowKeyRef.current = windowKey;
+  }, [windowKey]);
 
   // Refreshing only the derived atom would re-read the per-environment SWR
   // queries within their stale window and change nothing. Refresh each
   // environment's query so the button always rescans.
-  const refresh = useCallback(
-    async (nextInput?: UsageSummaryInput) => {
-      const input = nextInput
-        ? usageQueryInput(nextInput, USAGE_CONTRACT_VERSION)
-        : (JSON.parse(windowKey) as UsageSummaryInput);
-      const requestWindowKey = JSON.stringify(input);
-      const inFlight = refreshInFlight.current;
-      if (inFlight?.requestWindowKey === requestWindowKey) {
-        return inFlight.promise;
-      }
-      const requestInput = { ...input, refresh: nextInput?.refresh ?? true };
-      const generation = refreshGeneration.current + 1;
-      refreshGeneration.current = generation;
-      const baselineReadAt = new Map(
-        environments.map((environment) => [environment.environmentId, environment.summary?.readAt]),
-      );
-      const requestStatuses = environments.map((environment) =>
-        requestWindowKey === windowKey
-          ? { ...environment, isPending: true }
-          : { ...environment, isPending: true, error: null, summary: null },
-      );
-      setRefreshed({
-        windowKey: requestWindowKey,
-        generation,
-        statuses: requestStatuses,
-        baselineReadAt,
-      });
-      const promise = (async () => {
-        const statuses = await Promise.all(
-          environments.map(async (environment) => {
-            const result = await executeAtomQuery(
-              appAtomRegistry,
-              serverEnvironment.usageSummary({
-                environmentId: environment.environmentId,
-                input: requestInput,
-              }),
-              { refresh: true, reportFailure: false, reportDefect: false },
-            );
-            const status = {
-              ...environment,
-              isPending: false,
-              error: result._tag === "Failure" ? "This environment could not report usage." : null,
-              summary:
-                result._tag === "Failure" && requestWindowKey === windowKey
-                  ? environment.summary
-                  : Option.getOrNull(AsyncResult.value(result)),
-            };
-            setRefreshed((previous) => {
-              if (previous?.generation !== generation) return previous;
-              const nextStatuses = previous.statuses.map((entry) =>
-                entry.environmentId === status.environmentId ? status : entry,
-              );
-              return { ...previous, statuses: nextStatuses };
-            });
-            return status;
-          }),
-        );
-        setRefreshed((previous) =>
-          previous?.generation === generation
-            ? { ...previous, windowKey: requestWindowKey, statuses }
-            : previous,
-        );
-        return statuses;
-      })();
-      refreshInFlight.current = { requestWindowKey, promise };
-      const settleInFlight = (statuses?: readonly EnvironmentUsageStatus[]) => {
-        if (refreshInFlight.current?.promise === promise) refreshInFlight.current = null;
-        if (
-          statuses?.some((status) => status.error !== null) === true &&
-          windowKeyRef.current === requestWindowKey
-        ) {
-          const pendingRetryKeys = [...delayedRetries.current].filter((retryKey) =>
-            retryKey.startsWith(`${requestWindowKey}:`),
+  const refresh = useStableCallback(async (nextInput?: UsageSummaryInput) => {
+    const input = nextInput
+      ? usageQueryInput(nextInput, USAGE_CONTRACT_VERSION)
+      : (JSON.parse(windowKey) as UsageSummaryInput);
+    const requestWindowKey = JSON.stringify(input);
+    const inFlight = refreshInFlight.current;
+    if (inFlight?.requestWindowKey === requestWindowKey) {
+      return inFlight.promise;
+    }
+    const requestInput = { ...input, refresh: nextInput?.refresh ?? true };
+    const generation = refreshGeneration.current + 1;
+    refreshGeneration.current = generation;
+    const baselineReadAt = new Map(
+      environments.map((environment) => [environment.environmentId, environment.summary?.readAt]),
+    );
+    const requestStatuses = environments.map((environment) =>
+      requestWindowKey === windowKey
+        ? { ...environment, isPending: true }
+        : { ...environment, isPending: true, error: null, summary: null },
+    );
+    setRefreshed({
+      windowKey: requestWindowKey,
+      generation,
+      statuses: requestStatuses,
+      baselineReadAt,
+    });
+    const promise = (async () => {
+      const statuses = await Promise.all(
+        environments.map(async (environment) => {
+          const result = await executeAtomQuery(
+            appAtomRegistry,
+            serverEnvironment.usageSummary({
+              environmentId: environment.environmentId,
+              input: requestInput,
+            }),
+            { refresh: true, reportFailure: false, reportDefect: false },
           );
-          for (const retryKey of pendingRetryKeys) delayedRetries.current.delete(retryKey);
-          if (pendingRetryKeys.length > 0) void refreshRef.current();
-        }
-      };
-      void promise.then(settleInFlight, () => settleInFlight());
-      return promise;
-    },
-    [environments, windowKey],
-  );
-  const refreshRef = useRef(refresh);
-  refreshRef.current = refresh;
+          const status = {
+            ...environment,
+            isPending: false,
+            error: result._tag === "Failure" ? "This environment could not report usage." : null,
+            summary:
+              result._tag === "Failure" && requestWindowKey === windowKey
+                ? environment.summary
+                : Option.getOrNull(AsyncResult.value(result)),
+          };
+          setRefreshed((previous) => {
+            if (previous?.generation !== generation) return previous;
+            const nextStatuses = previous.statuses.map((entry) =>
+              entry.environmentId === status.environmentId ? status : entry,
+            );
+            return { ...previous, statuses: nextStatuses };
+          });
+          return status;
+        }),
+      );
+      setRefreshed((previous) =>
+        previous?.generation === generation
+          ? { ...previous, windowKey: requestWindowKey, statuses }
+          : previous,
+      );
+      return statuses;
+    })();
+    refreshInFlight.current = { requestWindowKey, promise };
+    const settleInFlight = (statuses?: readonly EnvironmentUsageStatus[]) => {
+      if (refreshInFlight.current?.promise === promise) refreshInFlight.current = null;
+      if (
+        statuses?.some((status) => status.error !== null) === true &&
+        windowKeyRef.current === requestWindowKey
+      ) {
+        const pendingRetryKeys = [...delayedRetries.current].filter((retryKey) =>
+          retryKey.startsWith(`${requestWindowKey}:`),
+        );
+        for (const retryKey of pendingRetryKeys) delayedRetries.current.delete(retryKey);
+        if (pendingRetryKeys.length > 0) void refreshAfterCommit.current?.();
+      }
+    };
+    void promise.then(settleInFlight, () => settleInFlight());
+    return promise;
+  });
+  useLayoutEffect(() => {
+    refreshAfterCommit.current = refresh;
+  }, [refresh]);
 
   // Route navigation can remount this view while its shared atom still holds a
   // transient disconnected result. Retry that result once on entry so mobile
@@ -316,12 +300,12 @@ export function useUsage(
       // active. Consume it once after that request settles, without resetting
       // the episode budget and allowing an unbounded retry loop.
       delayedRetries.current.delete(retryKey);
-      void refreshRef.current();
+      void refresh();
       return;
     }
     if (retriedFailures.current.has(retryKey)) return;
     retriedFailures.current.add(retryKey);
-    void refreshRef.current();
+    void refresh();
     // A first read can be interrupted while a remote WebSocket is reconnecting.
     // Keep one delayed retry alive across the transient pending/error renders.
     const timer = globalThis.setTimeout(() => {
@@ -334,7 +318,7 @@ export function useUsage(
         delayedRetries.current.add(retryKey);
         return;
       }
-      void refreshRef.current();
+      void refresh();
     }, 3_000);
     delayedRetryTimers.current.set(retryKey, timer);
   }, [environments, refresh, windowKey]);
@@ -342,23 +326,28 @@ export function useUsage(
   useEffect(() => {
     const timers = delayedRetryTimers.current;
     return () => {
-      for (const timer of timers.values()) globalThis.clearTimeout(timer);
-      timers.clear();
-      delayedRetries.current.clear();
+      for (const [retryKey, timer] of timers) {
+        if (!retryKey.startsWith(`${windowKey}:`)) continue;
+        globalThis.clearTimeout(timer);
+        timers.delete(retryKey);
+      }
+      for (const retryKey of delayedRetries.current) {
+        if (retryKey.startsWith(`${windowKey}:`)) delayedRetries.current.delete(retryKey);
+      }
       const deferred = deferredTranscriptRetry.current;
-      if (deferred.timer !== null) globalThis.clearTimeout(deferred.timer);
-      deferred.timer = null;
+      if (deferred.windowKey === windowKey) {
+        if (deferred.timer !== null) globalThis.clearTimeout(deferred.timer);
+        deferred.timer = null;
+      }
     };
-  }, [windowKey]);
+  }, [windowKey, delayedRetryTimers, delayedRetries]);
 
   const hiddenProviderKey = JSON.stringify([...hiddenProviders].sort());
   const selectionKey = JSON.stringify(
     selectedEnvironmentIds === null ? null : [...selectedEnvironmentIds].sort(),
   );
-  const merged = useMemo(
-    () => mergeAnsweredUsage(withoutProviders(selectedEnvironments, hiddenProviders)),
-    [selectedEnvironments, hiddenProviderKey],
-  );
+  const merged = (() =>
+    mergeAnsweredUsage(withoutProviders(selectedEnvironments, hiddenProviders)))();
 
   const hasDeferredTranscripts = selectedEnvironments.some((environment) =>
     environment.summary?.sources.some(isDeferredTranscriptSource),
@@ -435,24 +424,33 @@ export function useUsage(
     readonly window: UsageSummaryInput;
     readonly merged: MergedUsage;
     readonly selectionKey: string;
+    readonly windowKey: string;
     readonly hiddenProviderKey: string;
   } | null>(null);
   if (
     answeredCount > 0 &&
     (lastAnswered?.merged !== merged ||
+      lastAnswered.windowKey !== windowKey ||
       lastAnswered.selectionKey !== selectionKey ||
       lastAnswered.hiddenProviderKey !== hiddenProviderKey)
   ) {
-    setLastAnswered({ window: input, merged, selectionKey, hiddenProviderKey });
+    setLastAnswered({ window: input, merged, windowKey, selectionKey, hiddenProviderKey });
+  } else if (
+    lastAnswered !== null &&
+    (lastAnswered.selectionKey !== selectionKey ||
+      lastAnswered.hiddenProviderKey !== hiddenProviderKey)
+  ) {
+    setLastAnswered(null);
   }
   return {
     merged,
     shown:
-      answeredCount === 0 &&
-      lastAnswered?.selectionKey === selectionKey &&
-      lastAnswered.hiddenProviderKey === hiddenProviderKey
-        ? lastAnswered
-        : null,
+      answeredCount > 0
+        ? { window: input, merged }
+        : lastAnswered?.selectionKey === selectionKey &&
+            lastAnswered.hiddenProviderKey === hiddenProviderKey
+          ? lastAnswered
+          : null,
     environments,
     selectedEnvironments,
     isPending: answeredCount === 0 && stillReporting > 0,

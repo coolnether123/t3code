@@ -208,6 +208,13 @@ describe("usage environment selection", () => {
     expect(latest.shown?.window).toBe(nextWindow);
     expect(latest.shown?.merged.costUsd).toBe(30);
 
+    const answeredWindow = { ...nextWindow, sinceDay: UsageDay.make("2026-08-27") };
+    await act(() => root.render(<Probe selected={selected} window={answeredWindow} />));
+    testState.environments = [environment("a", null)];
+    await act(() => root.render(<Probe selected={selected} window={answeredWindow} />));
+    expect(latest.shown?.window).toBe(answeredWindow);
+    expect(latest.shown?.merged.costUsd).toBe(30);
+
     testState.environments = [environment("a", null)];
     await act(() =>
       root.render(<Probe selected={selected} hidden={new Set(["claude"])} window={input} />),
