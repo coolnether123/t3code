@@ -99,7 +99,7 @@ export function UsageLimitCards({
               selected ? "border-foreground/40 bg-muted/30" : "border-border/60",
             )}
           >
-            <span className="flex w-full items-baseline justify-between gap-2 text-[11px] text-muted-foreground">
+            <span className="flex w-full items-baseline justify-between gap-2 text-2xs text-muted-foreground">
               <span>{LIMIT_PROVIDER_NAMES[limit.provider]}</span>
               <span className="truncate">{limit.label}</span>
             </span>
@@ -109,17 +109,17 @@ export function UsageLimitCards({
                   {summary.remainingPercent}%
                   <span className="ms-1 text-xs font-normal text-muted-foreground">left</span>
                 </span>
-                <span className="text-[11px] text-muted-foreground tabular-nums">
+                <span className="text-2xs text-muted-foreground tabular-nums">
                   {summary.stale
                     ? `Last reading ${dateTime(summary.observedAt)}`
                     : `Resets in ${quotaDuration(summary.resetInMs)}`}
                 </span>
                 <span
                   className={cn(
-                    "rounded px-1.5 py-0.5 text-[10px] tabular-nums",
+                    "rounded px-1.5 py-0.5 text-3xs tabular-nums",
                     behind
-                      ? "bg-red-500/10 text-red-600 dark:text-red-400"
-                      : "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400",
+                      ? "bg-error/10 text-error-foreground"
+                      : "bg-success/10 text-success-foreground",
                   )}
                 >
                   {Math.abs(summary.paceDelta).toFixed(1)} pts {behind ? "behind" : "ahead"}
@@ -128,7 +128,7 @@ export function UsageLimitCards({
             ) : (
               <>
                 <span className="text-base text-muted-foreground">Not recorded</span>
-                <span className="line-clamp-2 text-[11px] text-muted-foreground">
+                <span className="line-clamp-2 text-2xs text-muted-foreground">
                   {limit.message ?? "Waiting for the first reading."}
                 </span>
               </>

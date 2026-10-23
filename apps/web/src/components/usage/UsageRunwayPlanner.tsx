@@ -7,7 +7,7 @@ import {
   type ApiCostPace,
   type ManualResetSummary,
 } from "./usageApiPace";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
 const date = (value: string) =>
   new Date(value).toLocaleString(undefined, {
@@ -22,7 +22,7 @@ export function UsageRunwayPlanner({
   pace,
   scheduledResetAt,
   manualResets,
-  now = Date.now(),
+  now: suppliedNow,
 }: {
   readonly pace: ApiCostPace | null;
   /** The account timer, kept separate from any public announcement. */
@@ -30,11 +30,10 @@ export function UsageRunwayPlanner({
   readonly manualResets?: ManualResetSummary | null;
   readonly now?: number;
 }) {
+  const [initialNow] = useState(Date.now);
+  const now = suppliedNow ?? initialNow;
   const [toleranceHours, setToleranceHours] = useState(DEFAULT_NO_USAGE_TOLERANCE_HOURS);
-  const plan = useMemo(
-    () => usageRunwayPlan(pace, scheduledResetAt, now, toleranceHours),
-    [pace, scheduledResetAt, now, toleranceHours],
-  );
+  const plan = (() => usageRunwayPlan(pace, scheduledResetAt, now, toleranceHours))();
 
   return (
     <section
@@ -43,7 +42,7 @@ export function UsageRunwayPlanner({
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">Runway plan</p>
+          <p className="text-xs uppercase tracking-widest text-muted-foreground">Runway plan</p>
           <h2 className="mt-1 text-base font-medium">Time without usage at this burn</h2>
         </div>
         <label className="flex min-h-11 items-center gap-2 text-sm">
@@ -64,7 +63,7 @@ export function UsageRunwayPlanner({
       </div>
 
       {plan === null ? (
-        <p role="status" className="mt-4 border-l-2 border-amber-500 pl-3 text-sm">
+        <p role="status" className="mt-4 border-l-2 border-warning pl-3 text-sm">
           Waiting for a fresh, fully priced API-cost reading. The planner will not invent a burn
           rate from incomplete transcripts.
         </p>
@@ -165,10 +164,7 @@ function ManualResetCard({
     now - checkedAt >= 0 &&
     now - checkedAt <= QUOTA_STALE_MS;
   const emptyAt = estimatedEmptyAt ? Date.parse(estimatedEmptyAt) : NaN;
-  const scenario = useMemo(
-    () => manualResetScenario(pace, manualResets, now, scheduledResetAt),
-    [pace, manualResets, now, scheduledResetAt],
-  );
+  const scenario = (() => manualResetScenario(pace, manualResets, now, scheduledResetAt))();
   return (
     <div className="mt-5 border-t border-border pt-4">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -210,7 +206,7 @@ function ManualResetCard({
       )}
       {count > 0 ? (
         <div className="mt-3 rounded-md border border-border bg-background/40 p-3">
-          <p className="text-xs uppercase tracking-[0.14em] text-muted-foreground">
+          <p className="text-xs uppercase tracking-widest text-muted-foreground">
             Reset 1 when empty · conditional scenario
           </p>
           {scenario?.expiryAllowsUse === false ? (

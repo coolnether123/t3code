@@ -1,7 +1,7 @@
 import type { UsageQuotaSample } from "@t3tools/contracts";
 import { formatTokens, formatUsd } from "@t3tools/shared/usageFormat";
 import type { QuotaPeriod } from "@t3tools/shared/usageQuota";
-import { useId, useMemo, useState } from "react";
+import { useId, useState } from "react";
 
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { modelDisplayName } from "./UsageModelHourlyChart";
@@ -126,19 +126,12 @@ export function UsageModelTracker({
 }) {
   const id = useId();
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
-  const data = useMemo(
-    () => (models ? modelTrackerData(period, samples, models, activity) : null),
-    [period, samples, models, activity],
-  );
-  const readings = useMemo(
-    () =>
-      samples.filter(
-        (sample) =>
-          sample.observedAt >= period.first.observedAt &&
-          sample.observedAt <= period.last.observedAt,
-      ),
-    [samples, period],
-  );
+  const data = (() => (models ? modelTrackerData(period, samples, models, activity) : null))();
+  const readings = (() =>
+    samples.filter(
+      (sample) =>
+        sample.observedAt >= period.first.observedAt && sample.observedAt <= period.last.observedAt,
+    ))();
   const points = data?.points;
   const index = points ? Math.min(selectedIndex ?? points.length - 1, points.length - 1) : 0;
   const selected = points?.[index];
@@ -202,7 +195,7 @@ export function UsageModelTracker({
                     {row.estimatedPoints === null ? "—" : `≈ ${percentage(row.estimatedPoints)}`}
                   </span>
                 </div>
-                <p className="mt-1 ps-4 text-[11px] text-muted-foreground tabular-nums">
+                <p className="mt-1 ps-4 text-2xs text-muted-foreground tabular-nums">
                   {formatTokens(tokenCount(row.totals))} tokens · {formatUsd(row.costUsd)} API
                   estimate · {(row.share * 100).toFixed(0)}% of priced activity
                 </p>
@@ -219,7 +212,7 @@ export function UsageModelTracker({
 
           {points && data.drop > 0 ? (
             <div className="mt-5">
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-2xs text-muted-foreground">
                 <span className="inline-flex items-center gap-1.5">
                   <span aria-hidden className="w-4 border-t border-dashed border-foreground" />
                   Saved quota change
@@ -228,7 +221,7 @@ export function UsageModelTracker({
               </div>
               <div className="mt-3 flex min-w-0 gap-2">
                 <div
-                  className="flex w-10 shrink-0 flex-col justify-between pb-1 text-right text-[10px] tabular-nums text-muted-foreground"
+                  className="flex w-10 shrink-0 flex-col justify-between pb-1 text-right text-3xs tabular-nums text-muted-foreground"
                   aria-hidden
                 >
                   <span>{Math.ceil(data.drop)} pts</span>
@@ -295,7 +288,7 @@ export function UsageModelTracker({
                   ) : null}
                 </svg>
               </div>
-              <div className="ms-12 mt-1 flex justify-between gap-3 text-[11px] text-muted-foreground">
+              <div className="ms-12 mt-1 flex justify-between gap-3 text-2xs text-muted-foreground">
                 <span>{shortTime(period.first.observedAt)}</span>
                 <span>{shortTime(period.last.observedAt)}</span>
               </div>

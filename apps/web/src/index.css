@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./components/birthday.css";
 
 @custom-variant dark (&:is(.dark, .dark *));
 @custom-variant light (&:not(.dark, .dark *));
@@ -240,6 +241,11 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --color-diff-deletion-foreground: var(--diff-deletion-foreground);
   --color-info-foreground: var(--info-foreground);
   --color-info: var(--info);
+  --color-usage-observed: #52b8bf;
+  --color-usage-forecast: #d88d42;
+  --color-birthday-flame: #f8d477;
+  --color-birthday-candle: #a8dcca;
+  --spacing-safe-page: calc(env(safe-area-inset-bottom) + 3rem);
   --color-destructive-foreground: var(--destructive-foreground);
   --color-ring: var(--ring);
   --color-input: var(--contrast-input);

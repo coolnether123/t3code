@@ -23,7 +23,6 @@ import { formatUsd } from "@t3tools/shared/usageFormat";
 import {
   useEffect,
   useId,
-  useMemo,
   useState,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
@@ -82,7 +81,8 @@ export function UsagePaceChart({
   readonly priorApiPace?: PriorApiPaceInput | null;
   readonly manualResets?: ManualResetSummary | null;
 }) {
-  const [now, setNow] = useState(Date.now);
+  const [clock, setClock] = useState(Date.now);
+  const now = Math.max(clock, Date.parse(samples.at(-1)?.observedAt ?? "") || 0);
   const [view, setView] = useState<"forecast" | "observed">("forecast");
   const [showApiPace, setShowApiPace] = useState(true);
   const [inspected, setInspected] = useState<number | null>(null);
@@ -96,49 +96,36 @@ export function UsagePaceChart({
   } | null>(null);
   const [drag, setDrag] = useState<readonly [number, number] | null>(null);
   const id = useId();
-  const cycles = useMemo(() => quotaPeriods(samples), [samples]);
+  const cycles = (() => quotaPeriods(samples))();
   const selectedCycleIndex = cycles.findIndex((cycle) => cycle.id === selectedCycle);
   const cycleIndex = selectedCycleIndex < 0 ? cycles.length - 1 : selectedCycleIndex;
   const cycle = cycles[cycleIndex];
   const historical = cycleIndex < cycles.length - 1;
-  const cycleSamples = useMemo(
-    () =>
-      cycle
-        ? samples.filter(
-            (sample) =>
-              sample.observedAt >= cycle.first.observedAt &&
-              (cycle.next === null || sample.observedAt < cycle.next.observedAt),
-          )
-        : [],
-    [samples, cycle],
-  );
-  const chartSamples = useMemo(() => quotaHistoryPoints(cycleSamples), [cycleSamples]);
-  useEffect(() => setNow(Date.now()), [samples]);
+  const cycleSamples = (() =>
+    cycle
+      ? samples.filter(
+          (sample) =>
+            sample.observedAt >= cycle.first.observedAt &&
+            (cycle.next === null || sample.observedAt < cycle.next.observedAt),
+        )
+      : [])();
+  const chartSamples = (() => quotaHistoryPoints(cycleSamples))();
   useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 60_000);
+    const timer = window.setInterval(() => setClock(Date.now()), 60_000);
     return () => window.clearInterval(timer);
   }, []);
   const announced = historical ? null : currentResetAnnouncement(news, samples.at(-1), now);
-  const forecast = useMemo(
-    () =>
-      quotaForecast(
-        historical ? cycleSamples : samples,
-        historical && cycle ? Date.parse(cycle.last.observedAt) : now,
-        3,
-        announced?.targetAt,
-        windowMs,
-      ),
-    [samples, cycleSamples, cycle, historical, now, announced, windowMs],
-  );
-  const activityPoints = useMemo(
-    () => quotaActivityPoints(cycleSamples, activity),
-    [cycleSamples, activity],
-  );
-  const burnComparison = useMemo(
-    () => compareUsageBurn(cycleSamples, activity),
-    [cycleSamples, activity],
-  );
-  const crossings = useMemo(() => quotaPercentCrossings(activityPoints), [activityPoints]);
+  const forecast = (() =>
+    quotaForecast(
+      historical ? cycleSamples : samples,
+      historical && cycle ? Date.parse(cycle.last.observedAt) : now,
+      3,
+      announced?.targetAt,
+      windowMs,
+    ))();
+  const activityPoints = (() => quotaActivityPoints(cycleSamples, activity))();
+  const burnComparison = (() => compareUsageBurn(cycleSamples, activity))();
+  const crossings = (() => quotaPercentCrossings(activityPoints))();
   if (!forecast) return null;
   // Show the whole saved cycle, including earlier monitoring runs. Measurements
   // and cost calibration still use the forecast's active monitoring run.
@@ -184,12 +171,12 @@ export function UsagePaceChart({
     setPointerX(null);
     onRangeChange?.(range);
   };
-  const zoomTo = (
-    duration: number,
-    center = pointerX === null
-      ? Math.min((viewStart + viewEnd) / 2, Date.parse(f.latest.observedAt))
-      : chartStart + pointerX * (chartEnd - chartStart),
-  ) => {
+  const zoomTo = (duration: number, requestedCenter?: number) => {
+    const center =
+      requestedCenter ??
+      (pointerX === null
+        ? Math.min((viewStart + viewEnd) / 2, Date.parse(f.latest.observedAt))
+        : chartStart + pointerX * (chartEnd - chartStart));
     const span = Math.min(fullEnd - chartStart, Math.max(60_000, duration));
     const start = Math.max(chartStart, Math.min(fullEnd - span, center - span / 2));
     setRange(span >= fullEnd - chartStart ? null : [start, start + span]);
@@ -478,12 +465,12 @@ export function UsagePaceChart({
               remaining{historical || f.stale ? " at last reading" : ""}
             </p>
             <p
-              className={`lg:mt-2 inline-flex rounded px-2 py-1 text-[11px] tabular-nums ${behind ? "bg-red-500/10 text-red-600 dark:text-red-400" : "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"}`}
+              className={`lg:mt-2 inline-flex rounded px-2 py-1 text-2xs tabular-nums ${behind ? "bg-error/10 text-error-foreground" : "bg-success/10 text-success-foreground"}`}
             >
               {Math.abs(paceDelta).toFixed(1)} points {behind ? "behind" : "ahead"}
             </p>
           </div>
-          <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-2 text-[10px] lg:grid-cols-1 lg:text-xs">
+          <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-2 text-3xs lg:grid-cols-1 lg:text-xs">
             <div className="flex items-start justify-between gap-2">
               <dt className="text-muted-foreground">
                 {historical ? "Reset observed" : "Reset in"}
@@ -491,7 +478,7 @@ export function UsagePaceChart({
               <dd className="text-right tabular-nums">
                 {historical ? date(cycle!.next!.observedAt) : quotaDuration(f.resetInMs)}
                 {!historical ? (
-                  <span className="mt-1 hidden text-[10px] text-muted-foreground lg:block">
+                  <span className="mt-1 hidden text-3xs text-muted-foreground lg:block">
                     {date(f.planningResetAt)}
                   </span>
                 ) : null}
@@ -501,9 +488,7 @@ export function UsagePaceChart({
               <dt className="text-muted-foreground">Used</dt>
               <dd className="text-right tabular-nums">
                 {f.usedPercent}%
-                <span className="mt-1 block text-[10px] text-muted-foreground">
-                  used this cycle
-                </span>
+                <span className="mt-1 block text-3xs text-muted-foreground">used this cycle</span>
               </dd>
             </div>
             {!historical ? (
@@ -539,20 +524,18 @@ export function UsagePaceChart({
         <div className="min-w-0">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div
-              className="hidden flex-wrap gap-x-4 gap-y-2 text-[11px] text-muted-foreground sm:flex"
+              className="hidden flex-wrap gap-x-4 gap-y-2 text-2xs text-muted-foreground sm:flex"
               aria-label="Chart legend"
             >
               <span className="inline-flex items-center gap-1.5">
-                <span
-                  className={`w-3 border-t-2 ${behind ? "border-red-500" : "border-emerald-500"}`}
-                />
+                <span className={`w-3 border-t-2 ${behind ? "border-error" : "border-success"}`} />
                 {activityPoints.some((point) => point.estimated)
                   ? "API-weighted estimate"
                   : "Recorded"}
               </span>
               {!observed ? (
                 <span className="inline-flex items-center gap-1.5">
-                  <span className="w-3 border-t-2 border-dashed border-amber-500" />
+                  <span className="w-3 border-t-2 border-dashed border-warning" />
                   Forecast
                 </span>
               ) : null}
@@ -562,7 +545,7 @@ export function UsagePaceChart({
               </span>
               {!observed && showApiPace && costPace ? (
                 <span className="inline-flex items-center gap-1.5">
-                  <span className="w-3 border-t border-dashed border-cyan-500" />
+                  <span className="w-3 border-t border-dashed border-info" />
                   API
                 </span>
               ) : null}
@@ -595,7 +578,7 @@ export function UsagePaceChart({
                 ))}
               </div>
             ) : (
-              <span className="text-[11px] text-muted-foreground">Saved cycle</span>
+              <span className="text-2xs text-muted-foreground">Saved cycle</span>
             )}
           </div>
           <div
@@ -671,18 +654,18 @@ export function UsagePaceChart({
                 <ChevronRightIcon className="size-4" />
               </button>
             </div>
-            <span className="hidden text-[10px] text-muted-foreground sm:inline">
+            <span className="hidden text-3xs text-muted-foreground sm:inline">
               Drag to zoom · double-click to reset · right-click for more
             </span>
           </div>
           {activeZoom ? (
-            <p className="mt-1 text-[10px] text-muted-foreground" aria-label="Visible chart range">
+            <p className="mt-1 text-3xs text-muted-foreground" aria-label="Visible chart range">
               {date(new Date(viewStart).toISOString())} to {date(new Date(viewEnd).toISOString())}
             </p>
           ) : null}
           <p
             role="status"
-            className={`mt-2 text-right text-[10px] ${f.stale ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground"}`}
+            className={`mt-2 text-right text-3xs ${f.stale ? "text-warning-foreground" : "text-muted-foreground"}`}
           >
             {historical ? "Last reading" : f.stale ? "Reading is stale" : "Updated"} ·{" "}
             {date(f.latest.observedAt)}
@@ -690,7 +673,7 @@ export function UsagePaceChart({
           <div className="mt-2 flex gap-2">
             <div
               aria-hidden
-              className="relative h-28 sm:h-[clamp(7rem,18dvh,9rem)] w-9 shrink-0 text-[10px] text-muted-foreground tabular-nums"
+              className="relative h-28 sm:h-[clamp(7rem,18dvh,9rem)] w-9 shrink-0 text-3xs text-muted-foreground tabular-nums"
             >
               {yTicks.map((p) => (
                 <span
@@ -706,7 +689,7 @@ export function UsagePaceChart({
               <svg
                 viewBox="0 0 960 200"
                 preserveAspectRatio="none"
-                className="h-full w-full touch-pan-y select-none outline-offset-4 focus-visible:outline-2 focus-visible:outline-ring"
+                className="h-full w-full touch-pan-y select-none -outline-offset-2 focus-visible:outline-2 focus-visible:outline-ring"
                 role="img"
                 tabIndex={0}
                 onPointerDown={(event) => {
@@ -837,7 +820,7 @@ export function UsagePaceChart({
                     d={areaPath}
                     clipPath={`url(#${id}-${side})`}
                     fill="currentColor"
-                    className={side === "ahead" ? "text-emerald-500/15" : "text-red-500/15"}
+                    className={side === "ahead" ? "text-success/15" : "text-error/15"}
                   />
                 ))}
                 {ticks.map((tick) => (
@@ -883,7 +866,7 @@ export function UsagePaceChart({
                         aria-label="API cost projection"
                         d={`M${forecastX(f.observationX) * 960},${y(curveBalance)} L${forecastX(costPace.projectionEndX) * 960},${y(costPace.projectionEndPercent)} L${forecastX(1) * 960},${y(costPace.projectionEndPercent)}`}
                         fill="none"
-                        stroke="#52b8bf"
+                        stroke="var(--color-usage-observed)"
                         strokeWidth={2}
                         strokeDasharray="3 3"
                         vectorEffect="non-scaling-stroke"
@@ -894,7 +877,7 @@ export function UsagePaceChart({
                       y1={y(curveBalance)}
                       x2={forecastX(f.projectionEndX) * 960}
                       y2={y(f.projectionEndPercent)}
-                      stroke="#d88d42"
+                      stroke="var(--color-usage-forecast)"
                       strokeWidth={2}
                       strokeDasharray="7 4"
                       vectorEffect="non-scaling-stroke"
@@ -909,9 +892,7 @@ export function UsagePaceChart({
                     fill="none"
                     stroke="currentColor"
                     className={
-                      side === "ahead"
-                        ? "text-emerald-600 dark:text-emerald-400"
-                        : "text-red-500 dark:text-red-400"
+                      side === "ahead" ? "text-success-foreground" : "text-error-foreground"
                     }
                     clipPath={`url(#${id}-${side})`}
                     strokeWidth={2}
@@ -973,7 +954,7 @@ export function UsagePaceChart({
             </div>
           </div>
           <div
-            className="relative ml-11 mt-2 h-5 text-[10px] text-muted-foreground tabular-nums"
+            className="relative ml-11 mt-2 h-5 text-3xs text-muted-foreground tabular-nums"
             aria-hidden="true"
           >
             {ticks.map((tick, index) => (
@@ -1000,7 +981,7 @@ export function UsagePaceChart({
           </div>
           <span
             role="status"
-            className="pointer-events-none mt-1 block min-h-4 text-[11px] text-muted-foreground tabular-nums"
+            className="pointer-events-none mt-1 block min-h-4 text-2xs text-muted-foreground tabular-nums"
           >
             {futureAt
               ? `Projection ${date(futureAt)} · target ${targetAtFuture!.toFixed(0)}% · blended ${blendedAtFuture!.toFixed(0)}%${apiAtFuture === null ? "" : ` · API ${apiAtFuture.toFixed(0)}%`}`
@@ -1031,7 +1012,7 @@ export function UsagePaceChart({
             Average miss: API {burnComparison.apiMeanError!.toFixed(1)} points · forecast{" "}
             {burnComparison.forecastMeanError!.toFixed(1)} points
           </p>
-          <p className="mt-1 text-[10px] text-muted-foreground">
+          <p className="mt-1 text-3xs text-muted-foreground">
             Each check uses the forecast and API spending known at its start, then compares both
             with the next recorded reading. Differences under half a quota point are ties; gaps and
             resets are skipped. API dollars are a proxy for quota use, not a bill.
@@ -1039,7 +1020,7 @@ export function UsagePaceChart({
         </section>
       ) : null}
       {!historical && f.stale ? (
-        <p role="alert" className="mt-3 text-xs text-amber-600 dark:text-amber-400">
+        <p role="alert" className="mt-3 text-xs text-warning-foreground">
           No fresh reading. Forecasts use the last saved balance.
         </p>
       ) : null}
@@ -1095,7 +1076,7 @@ export function UsagePaceChart({
                     <input
                       type="checkbox"
                       aria-label="Show API cost pace"
-                      className="size-4 accent-[#52b8bf]"
+                      className="size-4 accent-usage-observed"
                       checked={showApiPace}
                       onChange={(event) => setShowApiPace(event.target.checked)}
                     />
