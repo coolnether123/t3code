@@ -248,7 +248,7 @@ export function quotaValueWithHistoricalCalibration(
   earlier: readonly QuotaValueSnapshot[] = [],
 ): QuotaValue {
   if (current.value.usdPerPercentagePoint !== null || previous === undefined) return current.value;
-  const candidates = [previous, ...earlier.toReversed()];
+  const candidates = [previous, ...[...earlier].reverse()];
   let source: QuotaValueSnapshot | undefined;
   for (const [index, candidate] of candidates.entries()) {
     const next = index === 0 ? current : candidates[index - 1];
