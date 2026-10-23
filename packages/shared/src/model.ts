@@ -33,11 +33,9 @@ export interface SelectableModelOption {
 
 export function createModelCapabilities(input: {
   optionDescriptors: ReadonlyArray<ProviderOptionDescriptor>;
-  subagentBackends?: ModelCapabilities["subagentBackends"];
 }): ModelCapabilities {
   return {
     optionDescriptors: input.optionDescriptors.map(cloneDescriptor),
-    ...(input.subagentBackends ? { subagentBackends: input.subagentBackends } : {}),
   };
 }
 
