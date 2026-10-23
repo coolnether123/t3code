@@ -15,6 +15,7 @@ const testState = vi.hoisted(() => ({
 
 vi.mock(import("@tanstack/react-router"), async (original) => ({
   ...(await original()),
+  Link: "a" as never,
   useNavigate: (() => testState.navigate) as never,
   useCanGoBack: () => testState.canGoBack,
 }));
