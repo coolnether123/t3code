@@ -19,6 +19,7 @@ import {
   getProviderOptionStringSelectionValue,
   normalizeCustomModelSlug,
   normalizeModelSlug,
+  resolveSelectableModel,
   modelSelectionsEqual,
 } from "./model.ts";
 
@@ -67,6 +68,15 @@ describe("model slug normalization", () => {
 
     expect(normalizeModelSlug("opus", claude)).toBe("opus");
     expect(normalizeCustomModelSlug(" opus ")).toBe("opus");
+  });
+
+  it("resolves catalog aliases after exact custom identifiers", () => {
+    const claude = ProviderDriverKind.make("claudeAgent");
+    const catalog = { slug: "claude-opus-5", name: "Catalog Opus" };
+    expect(
+      resolveSelectableModel(claude, "opus", [catalog, { slug: "opus", name: "Custom Opus" }]),
+    ).toBe("opus");
+    expect(resolveSelectableModel(claude, "opus", [catalog])).toBe(catalog.slug);
   });
 });
 
