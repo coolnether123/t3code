@@ -20,6 +20,7 @@ import { HttpClient, HttpClientResponse } from "effect/http";
 import * as TestClock from "effect/testing/TestClock";
 import { ChildProcessSpawner } from "effect/process";
 import * as CodexInstallation from "./CodexInstallation.ts";
+import { makePosixFixtureSpawner } from "../testUtils/posixFixtureSpawner.ts";
 
 const archive = Buffer.from(
   "H4sIAAAAAAAC/+3W0W6DIBQGYB/FcD0sKNSkD7J7aom6tmAQtzXL3n3QZM3qdWVt+n8XoCckJp78wLY3q8bu9Ge2HBbUUp7nYD4H8s9zrNdSsCxnWQLT6JULn8ye09K9h/u2/c0/jSM9xqGzo0+bf3Gdf15WQiD/Kdy61/CA+z8dlO9Wrv2387+c5Z9VZY38p7BY0+Gh8t/sVauLt9Ga9Pnnop7ln1e4/6fxRQ7qZCf/qt3YW0M2OX/JyfvljbCCy3XBSaiGH9VqH4tKuaZbC6qG4aDpTrmP3sQV2nh3Gmxvzqsud0vyjaABAAAAAAAAAAAAAAAk8gOq19rvACgAAA==",
@@ -44,16 +45,21 @@ const makeHarness = Effect.fn("test.makeCodexInstallation")(function* (
   } = {},
 ) {
   const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const isWindows = yield* HostProcess.isWindows;
   const baseDir =
     input.baseDir ?? (yield* fs.makeTempDirectoryScoped({ prefix: "t3-codex-install-test-" }));
-  const localDirectory = `${baseDir}/local`;
-  const localBinaryPath = `${localDirectory}/codex`;
+  // A relative entry keeps the simulated POSIX PATH free of a Windows drive colon.
+  const localDirectory = isWindows
+    ? path.relative(".", path.join(baseDir, "local"))
+    : path.join(baseDir, "local");
+  const localBinaryPath = path.join(localDirectory, "codex");
   const probeLog = `${baseDir}/local-probes.txt`;
   if (input.local) {
     yield* fs.makeDirectory(localDirectory, { recursive: true });
     yield* fs.writeFileString(
       localBinaryPath,
-      `#!/bin/sh\nprintf '%s\\n' "$*" >> '${probeLog}'\ncase "$1" in\n--version) ${input.local.versionFails ? "exit 1" : `printf '%s\\n' 'codex-cli ${input.local.version}'`};;\napp-server) exit ${input.local.appServerFails ? "1" : "0"};;\nesac\n`,
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> '${probeLog.replaceAll("\\", "/")}'\ncase "$1" in\n--version) ${input.local.versionFails ? "exit 1" : `printf '%s\\n' 'codex-cli ${input.local.version}'`};;\napp-server) exit ${input.local.appServerFails ? "1" : "0"};;\nesac\n`,
       { mode: 0o755 },
     );
   }
@@ -64,6 +70,24 @@ const makeHarness = Effect.fn("test.makeCodexInstallation")(function* (
   const failedRenames = yield* Queue.unbounded<void>();
   const lockingFs: FileSystem.FileSystem = {
     ...fs,
+    stat: (file) =>
+      fs.stat(file).pipe(
+        Effect.map((info) => {
+          // NTFS cannot retain the executable bits in this POSIX archive fixture.
+          const relative = path.relative(baseDir, file).replaceAll("\\", "/");
+          const archivedExecutable = [
+            "bin/codex",
+            "bin/codex-code-mode-host",
+            "codex-path/rg",
+          ].some((member) => relative.endsWith(`/${member}`));
+          return isWindows &&
+            input.platform !== "win32" &&
+            !relative.startsWith("../") &&
+            archivedExecutable
+            ? { ...info, mode: info.mode | 0o111 }
+            : info;
+        }),
+      ),
     // Suspended so each retry of the same effect is a fresh attempt, like the real rename.
     rename: (from, to) =>
       Effect.suspend(() =>
@@ -83,7 +107,7 @@ const makeHarness = Effect.fn("test.makeCodexInstallation")(function* (
           : fs.rename(from, to),
       ),
   };
-  const spawner = input.spawner ?? (yield* ChildProcessSpawner.ChildProcessSpawner);
+  const spawner = input.spawner ?? (yield* makePosixFixtureSpawner(baseDir));
   const installation = yield* CodexInstallation.makeCodexInstallation({
     baseDir,
     releaseAsset: { ...asset, sha256 },
@@ -182,7 +206,7 @@ it.effect.each([
     expect((yield* h.installation.state).installedVersion).toBeNull();
     yield* h.installation.start;
     const installed = yield* terminalState(h.installation);
-    expect(installed.phase).toBe("succeeded");
+    expect(installed.phase, installed.message ?? undefined).toBe("succeeded");
     const executable = yield* h.installation.resolve();
     expect(executable.source).toBe("managed");
     expect(installed.executablePath).toBe(executable.executablePath);
@@ -285,10 +309,13 @@ it.effect(
   () =>
     Effect.gen(function* () {
       const { installation, fs, baseDir } = yield* makeHarness();
+      const path = yield* Path.Path;
       yield* installation.start;
       expect((yield* terminalState(installation)).phase).toBe("succeeded");
       const executable = yield* installation.resolve();
-      expect(executable.executablePath).toBe(`${baseDir}/tools/codex/0.156.1/bin/codex`);
+      expect(executable.executablePath).toBe(
+        path.join(baseDir, "tools", "codex", "0.156.1", "bin", "codex"),
+      );
       expect(
         yield* fs.readFileString(`${executable.managedVersionDirectory}/bin/codex-code-mode-host`),
       ).toBe("host");
