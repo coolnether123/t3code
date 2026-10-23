@@ -160,6 +160,7 @@ describe("call panel action boundary", () => {
           model: "synthetic-model",
           options: [{ id: "reasoningEffort", value: "medium" }],
         },
+        backchannels: false,
       },
       [],
     );

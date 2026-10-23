@@ -1,3 +1,4 @@
+import * as NodeURL from "node:url";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
@@ -140,9 +141,7 @@ const readDelegatedTaskStatusTranscript = Effect.fn("readDelegatedTaskStatusTran
   followupResult: string,
 ) {
   const fs = yield* FileSystem.FileSystem;
-  const text = yield* fs.readFileString(
-    decodeURIComponent(delegatedTaskStatusTranscriptFile.pathname),
-  );
+  const text = yield* fs.readFileString(NodeURL.fileURLToPath(delegatedTaskStatusTranscriptFile));
   return yield* decodeProviderReplayNdjson(text.replaceAll(queuedFollowupResult, followupResult));
 }, Effect.provide(NodeServices.layer));
 
@@ -193,6 +192,9 @@ function makeDeterministicAdapter(input: {
   readonly capabilities: OrchestrationV2ProviderCapabilities;
   readonly capturedTurns: Ref.Ref<ReadonlyArray<CapturedTurn>>;
   readonly shouldComplete: (turn: ProviderAdapter.ProviderAdapterV2TurnInput) => boolean;
+  readonly onTurnStarted?: (
+    turn: ProviderAdapter.ProviderAdapterV2TurnInput,
+  ) => Effect.Effect<void>;
   readonly terminalGate?: (
     turn: ProviderAdapter.ProviderAdapterV2TurnInput,
   ) => Deferred.Deferred<void> | undefined;
@@ -265,6 +267,8 @@ function makeDeterministicAdapter(input: {
           resumeThread: ({ providerThread }) => Effect.succeed(providerThread),
           startTurn: (turnInput) =>
             Effect.gen(function* () {
+              const terminalGate = input.terminalGate?.(turnInput);
+              yield* input.onTurnStarted?.(turnInput) ?? Effect.void;
               yield* Ref.update(input.capturedTurns, (turns) => [
                 ...turns,
                 {
@@ -300,7 +304,6 @@ function makeDeterministicAdapter(input: {
                   },
                 },
               ]);
-              const terminalGate = input.terminalGate?.(turnInput);
               if (terminalGate !== undefined) {
                 yield* Deferred.await(terminalGate);
               } else if (!input.shouldComplete(turnInput)) {
@@ -428,6 +431,7 @@ function waitForProjection(
   threadId: ThreadId,
   predicate: (projection: OrchestrationV2ThreadProjection) => boolean,
 ) {
+  const timeoutError = new Error(`Timed out waiting for orchestration projection ${threadId}.`);
   return Effect.gen(function* () {
     for (let attempt = 0; attempt < 1_000; attempt += 1) {
       const projection = yield* orchestrator.getThreadProjection(threadId);
@@ -436,9 +440,7 @@ function waitForProjection(
       }
       yield* Effect.sleep("5 millis");
     }
-    return yield* Effect.die(
-      new Error(`Timed out waiting for orchestration projection ${threadId}.`),
-    );
+    return yield* Effect.die(timeoutError);
   });
 }
 
@@ -536,6 +538,7 @@ describe("orchestrator MCP toolkit", () => {
         Effect.gen(function* () {
           const cwd = yield* checkpointWorkspace("orchestrator-mcp-toolkit");
           const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
+          const turnStarts = new Map<MessageId, Deferred.Deferred<void>>();
           const steerReceivedGates = new Map<string, Deferred.Deferred<void>>();
           const parentTerminalGates = new Map<ThreadId, Deferred.Deferred<void>>();
           const deliveryTerminalGates = new Map<ThreadId, Deferred.Deferred<void>>();
@@ -548,6 +551,12 @@ describe("orchestrator MCP toolkit", () => {
                 turns: { ...CodexProviderCapabilitiesV2.turns, supportsActiveSteering: false },
               },
               capturedTurns,
+              onTurnStarted: (turn) => {
+                const started = turnStarts.get(turn.message.messageId);
+                return started === undefined
+                  ? Effect.void
+                  : Deferred.succeed(started, undefined).pipe(Effect.asVoid);
+              },
               shouldComplete: (turn) =>
                 turn.threadId !== parentThreadId && turn.message.text !== cancellationPrompt,
               terminalGate: (turn) =>
@@ -3819,23 +3828,32 @@ describe("orchestrator MCP toolkit", () => {
             const dispatchFanoutDelivery = (
               label: string,
               delivery: OrchestrationV2DelegatedCompletionDelivery,
+              parentGate?: Deferred.Deferred<void>,
             ) =>
-              orchestrator.dispatch({
-                type: "message.dispatch",
-                createdBy: "agent",
-                creationSource: "server",
-                commandId: CommandId.make(`command:mcp-fanout-parent:dispatch-${label}`),
-                threadId: fanoutParentThreadId,
-                messageId: delivery.messageId,
-                text: "Delegated tasks reached terminal states.",
-                attachments: [],
-                modelSelection: codexSelection,
-                dispatchMode: { type: "queue_after_active" },
-                delegatedCompletion: {
-                  parentRunId: fanoutRun.id,
-                  generation: delivery.generation,
-                  taskIds: delivery.taskIds,
-                },
+              Effect.gen(function* () {
+                const started = yield* Deferred.make<void>();
+                turnStarts.set(delivery.messageId, started);
+                yield* orchestrator.dispatch({
+                  type: "message.dispatch",
+                  createdBy: "agent",
+                  creationSource: "server",
+                  commandId: CommandId.make(`command:mcp-fanout-parent:dispatch-${label}`),
+                  threadId: fanoutParentThreadId,
+                  messageId: delivery.messageId,
+                  text: "Delegated tasks reached terminal states.",
+                  attachments: [],
+                  modelSelection: codexSelection,
+                  dispatchMode: { type: "queue_after_active" },
+                  delegatedCompletion: {
+                    parentRunId: fanoutRun.id,
+                    generation: delivery.generation,
+                    taskIds: delivery.taskIds,
+                  },
+                });
+                // A queued delivery cannot start while its parent turn is held.
+                if (parentGate !== undefined) yield* Deferred.succeed(parentGate, undefined);
+                yield* Deferred.await(started);
+                turnStarts.delete(delivery.messageId);
               });
             const deliveryRunStatus = (
               projection: OrchestrationV2ThreadProjection,
@@ -3861,8 +3879,7 @@ describe("orchestrator MCP toolkit", () => {
               return yield* Effect.die(new Error("First fan-out delivery missing."));
             }
             expect(sortedIds(firstFanoutDelivery.taskIds)).toEqual(idsOf(beforeFirstStarts));
-            yield* dispatchFanoutDelivery("first", firstFanoutDelivery);
-            yield* Deferred.succeed(fanoutParentGate, undefined);
+            yield* dispatchFanoutDelivery("first", firstFanoutDelivery, fanoutParentGate);
             yield* waitForProjection(
               orchestrator,
               fanoutParentThreadId,

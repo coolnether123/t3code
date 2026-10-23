@@ -1,8 +1,7 @@
-/** @vitest-environment happy-dom */
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
   environments: [] as unknown[],
@@ -30,15 +29,29 @@ vi.mock("@t3tools/client-runtime/publicResetHistory", async (importOriginal) => 
     return { refresh: state.publicRefresh, stop: vi.fn() };
   },
 }));
-vi.mock("@tanstack/react-router", () => ({ Link: "a" }));
-vi.mock("../../env", () => ({ isElectron: false }));
-vi.mock("../ui/button", () => ({ Button: "button" }));
-vi.mock("../ui/scroll-area", () => ({ ScrollArea: "div" }));
-vi.mock("../ui/sidebar", () => ({ SidebarInset: "div" }));
+vi.mock("@tanstack/react-router", async (original) => ({
+  ...(await original<typeof import("@tanstack/react-router")>()),
+  Link: "a",
+}));
+vi.mock("../../env", async (original) => ({
+  ...(await original<typeof import("../../env")>()),
+  isElectron: false,
+}));
+vi.mock("../ui/scroll-area", async (original) => ({
+  ...(await original<typeof import("../ui/scroll-area")>()),
+  ScrollArea: "div",
+}));
+vi.mock("../ui/sidebar", async (original) => ({
+  ...(await original<typeof import("../ui/sidebar")>()),
+  SidebarInset: "div",
+}));
 vi.mock("../WorkspacePageContainer", () => ({ WorkspacePageContainer: "main" }));
 vi.mock("../WorkspacePageHeader", () => ({ WorkspacePageHeader: "header" }));
 
-import { UsageResetPage } from "./UsageResetPage";
+let UsageResetPage: (typeof import("./UsageResetPage"))["UsageResetPage"];
+beforeAll(async () => {
+  ({ UsageResetPage } = await import("./UsageResetPage"));
+});
 
 const LIMITS_VIEW_KEY = "t3code:usage-limits-view:v1";
 /** Opens the page on a tab, as a returning viewer's saved preference would. */

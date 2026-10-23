@@ -1,17 +1,21 @@
-/** @vitest-environment happy-dom */
 import { act, type ReactElement } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({ navigate: vi.fn(), setOpenMobile: vi.fn(), pathname: "/" }));
-vi.mock("@tanstack/react-router", () => ({
+vi.mock("@tanstack/react-router", async (original) => ({
+  ...(await original<typeof import("@tanstack/react-router")>()),
   Link: "a",
   useNavigate: () => state.navigate,
   useCanGoBack: () => false,
   useLocation: ({ select }: { select: (location: { pathname: string }) => unknown }) =>
     select({ pathname: state.pathname }),
 }));
-vi.mock("../../state/environments", () => ({ useEnvironments: () => ({ environments: [] }) }));
+vi.mock("../../state/environments", async (original) => ({
+  ...(await original<typeof import("../../state/environments")>()),
+  useEnvironments: () => ({ environments: [] }),
+  usePullRequestsSupported: () => false,
+}));
 vi.mock("../ui/sidebar", () => ({
   SidebarFooter: "footer",
   SidebarHeader: "header",
@@ -32,7 +36,10 @@ vi.mock("./SidebarUpdatePill", () => ({
 }));
 vi.mock("./SidebarProviderUpdatePill", () => ({ SidebarProviderUpdatePill: () => null }));
 
-import { SidebarUtilityMenu } from "./SidebarChrome";
+let SidebarUtilityMenu: (typeof import("./SidebarChrome"))["SidebarUtilityMenu"];
+beforeAll(async () => {
+  ({ SidebarUtilityMenu } = await import("./SidebarChrome"));
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -59,7 +66,7 @@ describe("sidebar attribution navigation", () => {
       await act(async () => root.render(<SidebarUtilityMenu key="attribution" />));
       expect(container.textContent).toContain("Back");
       await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
-      expect(state.navigate).toHaveBeenLastCalledWith({ to: "/" });
+      expect(state.navigate).toHaveBeenLastCalledWith({ href: "/" });
     } finally {
       await act(async () => root.unmount());
     }

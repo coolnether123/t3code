@@ -1,6 +1,6 @@
 import type { HourlyModelTotals, HourlyTotals } from "@t3tools/shared/usageMerge";
 import { formatHourShort, formatTokens, formatUsd } from "@t3tools/shared/usageFormat";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
 const WIDTH = 960;
@@ -47,14 +47,11 @@ export function UsageModelHourlyChart({
   readonly hourly: readonly HourlyTotals[];
   readonly timeZone: string;
 }) {
-  const byHour = useMemo(() => new Map(hourly.map((entry) => [entry.hourStart, entry])), [hourly]);
-  const modelKeys = useMemo(() => collectHourlyModelKeys(hourly), [hourly]);
+  const byHour = (() => new Map(hourly.map((entry) => [entry.hourStart, entry])))();
+  const modelKeys = (() => collectHourlyModelKeys(hourly))();
   const [selectedIndex, setSelectedIndex] = useState(Math.max(0, hours.length - 1));
   const [selectedModelKey, setSelectedModelKey] = useState<string | null>(null);
-  const modelMetadata = useMemo(
-    () => new Map(hourly.flatMap((entry) => [...entry.byModel.entries()])),
-    [hourly],
-  );
+  const modelMetadata = (() => new Map(hourly.flatMap((entry) => [...entry.byModel.entries()])))();
   const max = Math.max(
     0,
     ...hours.map((start) =>
@@ -85,7 +82,7 @@ export function UsageModelHourlyChart({
         pricing is available.
       </p>
       <div
-        className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground"
+        className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-muted-foreground"
         aria-label="Model legend"
       >
         {modelKeys.map((key) => {
@@ -109,7 +106,7 @@ export function UsageModelHourlyChart({
       </div>
       <div className="flex min-w-0 flex-col gap-1">
         <div className="flex min-w-0 gap-2">
-          <span className="w-12 shrink-0 self-start pt-1 text-right text-[10px] text-muted-foreground tabular-nums">
+          <span className="w-12 shrink-0 self-start pt-1 text-right text-3xs text-muted-foreground tabular-nums">
             {formatTokens(max)}
           </span>
           <svg
@@ -198,7 +195,7 @@ export function UsageModelHourlyChart({
             })}
           </svg>
         </div>
-        <div className="flex justify-between pl-14 text-[10px] text-muted-foreground">
+        <div className="flex justify-between pl-14 text-3xs text-muted-foreground">
           <span>{formatHourShort(hours[0]!, timeZone)}</span>
           <span>{formatHourShort(hours[Math.floor(hours.length / 2)]!, timeZone)}</span>
           <span>{formatHourShort(hours.at(-1)!, timeZone)}</span>
@@ -220,7 +217,7 @@ export function UsageModelHourlyChart({
           </div>
         ) : null}
       </div>
-      <label className="flex w-full flex-col gap-1 text-[11px] text-muted-foreground">
+      <label className="flex w-full flex-col gap-1 text-2xs text-muted-foreground">
         Inspect hour
         <select
           aria-label="Inspect hourly model usage"

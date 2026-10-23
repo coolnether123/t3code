@@ -3727,7 +3727,7 @@ it.layer(
           const serverSettings = yield* makeMutableServerSettingsService(
             decodeServerSettings(
               deepMerge(encodedDefaultServerSettings, {
-                providerInstances: disabledDefaultSlots("codex", "grok"),
+                providerInstances: disabledDefaultSlots("codex", "grok", "claudeAgent"),
               }),
             ),
           );

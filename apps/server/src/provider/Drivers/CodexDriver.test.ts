@@ -229,7 +229,7 @@ it.layer(layerTest)("CodexDriver", (it) => {
         expect(restored.auth.email).toBe("account@example.test");
         expect(restored.runtimePaths?.homePath).toBe(sharedHome);
         expect(restored.runtimePaths?.shadowHomePath).toContain(
-          `providers/codex/${instanceId}/shadow`,
+          NodePath.join("providers", "codex", instanceId, "shadow"),
         );
         // The fixture app-server cannot start, so the workspace scan fails
         // instead of passing the machine snapshot off as the workspace's skills.

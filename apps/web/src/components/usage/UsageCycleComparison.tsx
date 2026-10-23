@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import type { UsageQuotaSample } from "@t3tools/contracts";
 import { quotaCostWindow, type QuotaPeriod } from "@t3tools/shared/usageQuota";
 import { formatTokens, formatUsd, makeWindow } from "@t3tools/shared/usageFormat";
@@ -152,7 +152,7 @@ function ComparisonPlot({ comparison }: { readonly comparison: Comparison }) {
   return (
     <figure aria-label="Quota used over equal recorded time">
       <div className="flex flex-wrap gap-4 text-xs">
-        <span className="text-sky-500">━ Selected cycle</span>
+        <span className="text-info">━ Selected cycle</span>
         <span className="text-muted-foreground">┄ Earlier cycle</span>
       </div>
       <svg
@@ -175,7 +175,7 @@ function ComparisonPlot({ comparison }: { readonly comparison: Comparison }) {
               x="32"
               y={119 - (value / max) * 100}
               textAnchor="end"
-              className="fill-muted-foreground text-[12px]"
+              className="fill-muted-foreground text-xs"
             >
               {value}
             </text>
@@ -191,13 +191,13 @@ function ComparisonPlot({ comparison }: { readonly comparison: Comparison }) {
         <path
           d={path(comparison.selected.points)}
           fill="none"
-          className="stroke-sky-500"
+          className="stroke-info"
           strokeWidth="2.5"
         />
-        <text x="40" y="140" className="fill-muted-foreground text-[12px]">
+        <text x="40" y="140" className="fill-muted-foreground text-xs">
           First reading
         </text>
-        <text x="680" y="140" textAnchor="end" className="fill-muted-foreground text-[12px]">
+        <text x="680" y="140" textAnchor="end" className="fill-muted-foreground text-xs">
           {quotaDuration(comparison.duration)} recorded
         </text>
       </svg>
@@ -212,12 +212,9 @@ function ComparisonCosts({
   readonly comparison: Comparison;
   readonly selectedIds: readonly string[] | null;
 }) {
-  const input = useMemo(
-    () =>
-      quotaCostWindow([comparison.baseline.interval, comparison.selected.interval]) ??
-      makeWindow(1),
-    [comparison],
-  );
+  const input = (() =>
+    quotaCostWindow([comparison.baseline.interval, comparison.selected.interval]) ??
+    makeWindow(1))();
   const usage = useUsage(input);
   const environments = usage.environments.filter(
     (environment) => selectedIds === null || selectedIds.includes(environment.environmentId),

@@ -1265,6 +1265,7 @@ export const make = (
   Effect.gen(function* () {
     const crypto = yield* Crypto.Crypto;
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const hostPlatform = yield* HostProcess.Platform;
     const runtimeScope = yield* Scope.fork(yield* Scope.Scope);
     const eventQueue = yield* Queue.unbounded<AcpSessionRuntimeEvent>();
     const modeStateRef = yield* Ref.make<AcpSessionModeState | undefined>(undefined);
@@ -1477,7 +1478,8 @@ export const make = (
           extendEnv: options.spawn.extendEnv ?? true,
           ...(options.ownDetachedProcessGroup === undefined
             ? {}
-            : { detached: options.ownDetachedProcessGroup }),
+            : { detached: options.ownDetachedProcessGroup && hostPlatform !== "win32" }),
+          windowsHide: true,
           shell: containedSpawnCommand.shell,
         }),
       )
@@ -1627,7 +1629,6 @@ export const make = (
       Effect.uninterruptible(terminateOwnedProcessGroupImpl),
     );
     if (options.ownDetachedProcessGroup === true) {
-      const hostPlatform = yield* HostProcess.Platform;
       const forceTerminateOwnedProcessGroup =
         hostPlatform === "win32"
           ? terminateWindowsProcessTreeWithTaskkill(Number(child.pid)).pipe(

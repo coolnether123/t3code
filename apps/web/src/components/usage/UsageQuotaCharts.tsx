@@ -1,7 +1,7 @@
 import type { UsageQuotaSample } from "@t3tools/contracts";
 import { formatUsd } from "@t3tools/shared/usageFormat";
 import { quotaHistoryPoints, type QuotaPeriod, type QuotaValue } from "@t3tools/shared/usageQuota";
-import { useId, useMemo, useState } from "react";
+import { useId, useState } from "react";
 
 export function UsageQuotaCharts({
   samples,
@@ -10,7 +10,7 @@ export function UsageQuotaCharts({
   readonly samples: readonly UsageQuotaSample[];
   readonly values: readonly { period: QuotaPeriod; value: QuotaValue }[];
 }) {
-  const points = useMemo(() => quotaHistoryPoints(samples), [samples]);
+  const points = (() => quotaHistoryPoints(samples))();
   const [selectedTime, setSelectedTime] = useState<string | null>(null);
   const id = useId();
   const selectedIndex = Math.max(

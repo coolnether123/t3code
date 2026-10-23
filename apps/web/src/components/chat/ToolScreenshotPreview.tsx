@@ -32,7 +32,7 @@ export function ToolScreenshotPreview(props: {
     <button
       type="button"
       aria-label={`Expand ${label}`}
-      className="mb-2 block max-w-full cursor-zoom-in rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      className="mb-2 block max-w-full cursor-zoom-in rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
       onClick={() => props.onImageExpand({ images: [{ src: asset.url, name: label }], index: 0 })}
     >
       <img

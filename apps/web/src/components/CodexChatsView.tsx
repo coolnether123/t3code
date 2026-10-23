@@ -16,7 +16,7 @@ import {
   SendIcon,
   WrenchIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 
 import { createCodexDesktopApi, type CodexDesktopApi } from "../codexDesktopApi";
@@ -140,7 +140,7 @@ function ThreadRow({
           <span className="truncate text-sm font-medium text-foreground">
             {thread.title?.trim() || "Untitled Codex chat"}
           </span>
-          <span className="shrink-0 text-[10px] text-muted-foreground/60">
+          <span className="shrink-0 text-3xs text-muted-foreground/60">
             {formatThreadTime(thread.updatedAt)}
           </span>
         </span>
@@ -169,7 +169,9 @@ export function CodexChatsView({ api = defaultCodexDesktopApi }: { api?: CodexDe
   const [historyCursor, setHistoryCursor] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [listState, setListState] = useState<"loading" | "ready" | "error">("loading");
-  const [historyState, setHistoryState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [historyState, setHistoryState] = useState<"idle" | "loading" | "ready" | "error">(
+    routeSearch.thread ? "loading" : "idle",
+  );
   const [error, setError] = useState<string | null>(null);
   const [composer, setComposer] = useState("");
   const [sendState, setSendState] = useState<{
@@ -186,24 +188,26 @@ export function CodexChatsView({ api = defaultCodexDesktopApi }: { api?: CodexDe
   const requestPollRef = useRef<number | null>(null);
   const sendObservationRef = useRef<number | null>(null);
   const initialRouteThreadIdRef = useRef(routeSearch.thread);
-  const autoSelectedRouteThreadIdRef = useRef<string | null>(null);
+  const [autoSelectedRouteThreadId, setAutoSelectedRouteThreadId] = useState<string | null>(null);
   const historyRequestRef = useRef(0);
   const listRequestRef = useRef(0);
   const selectedThreadIdRef = useRef<string | null>(null);
   const sendGenerationRef = useRef(0);
   const historyScrollRef = useRef<HTMLDivElement>(null);
-  selectedThreadIdRef.current = selectedThreadId;
+  useEffect(() => {
+    selectedThreadIdRef.current = selectedThreadId;
+  }, [selectedThreadId]);
 
-  const selectedThread = useMemo(() => {
+  const selectedThread = (() => {
     if (!selectedThreadId) return null;
     return (
       threadDetails.get(selectedThreadId) ??
       threads.find((thread) => thread.id === selectedThreadId) ??
       null
     );
-  }, [selectedThreadId, threadDetails, threads]);
+  })();
 
-  const loadThreads = useCallback(async () => {
+  const loadThreads = async () => {
     const requestNumber = ++listRequestRef.current;
     setListState((state) => (state === "ready" ? state : "loading"));
     try {
@@ -222,7 +226,7 @@ export function CodexChatsView({ api = defaultCodexDesktopApi }: { api?: CodexDe
       setSelectedThreadId(nextSelectedId);
       const selectedId = nextSelectedId;
       if (!initialRouteThreadIdRef.current && selectedId !== undefined) {
-        autoSelectedRouteThreadIdRef.current = selectedId;
+        setAutoSelectedRouteThreadId(selectedId);
         void navigate({ search: { thread: selectedId ?? undefined }, replace: true });
       }
       setListState("ready");
@@ -232,9 +236,9 @@ export function CodexChatsView({ api = defaultCodexDesktopApi }: { api?: CodexDe
       setListState("error");
       setError(cause instanceof Error ? cause.message : "Could not load Codex chats.");
     }
-  }, [api, navigate, search]);
+  };
 
-  const loadMoreThreads = useCallback(async () => {
+  const loadMoreThreads = async () => {
     if (threadListCursor === null) return;
     const requestNumber = ++listRequestRef.current;
     try {
@@ -252,19 +256,25 @@ export function CodexChatsView({ api = defaultCodexDesktopApi }: { api?: CodexDe
       if (requestNumber !== listRequestRef.current) return;
       setError(cause instanceof Error ? cause.message : "Could not load more Codex chats.");
     }
-  }, [api, search, threadListCursor]);
+  };
 
-  useEffect(() => {
-    if (routeSearch.thread !== selectedThreadId) setSelectedThreadId(routeSearch.thread ?? null);
-  }, [routeSearch.thread, selectedThreadId]);
-
-  useEffect(() => {
-    if (autoSelectedRouteThreadIdRef.current === routeSearch.thread) {
-      autoSelectedRouteThreadIdRef.current = null;
-      return;
+  const [previousRouteThreadId, setPreviousRouteThreadId] = useState(routeSearch.thread);
+  if (previousRouteThreadId !== routeSearch.thread) {
+    setPreviousRouteThreadId(routeSearch.thread);
+    setSelectedThreadId(routeSearch.thread ?? null);
+    if (autoSelectedRouteThreadId === routeSearch.thread) {
+      setAutoSelectedRouteThreadId(null);
+    } else {
+      setMobileListOpen(routeSearch.thread == null);
     }
-    setMobileListOpen(routeSearch.thread == null);
-  }, [routeSearch.thread]);
+  }
+  const [previousHistoryThreadId, setPreviousHistoryThreadId] = useState(selectedThreadId);
+  if (previousHistoryThreadId !== selectedThreadId) {
+    setPreviousHistoryThreadId(selectedThreadId);
+    setMessages([]);
+    setHistoryCursor(null);
+    setHistoryState(selectedThreadId ? "loading" : "idle");
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -292,18 +302,13 @@ export function CodexChatsView({ api = defaultCodexDesktopApi }: { api?: CodexDe
     return () => window.clearTimeout(timeout);
   }, [loadThreads, search]);
 
-  const loadHistory = useCallback(
-    async (preserveOlder = true) => {
-      const requestNumber = ++historyRequestRef.current;
-      if (!selectedThreadId) {
-        setMessages([]);
-        setHistoryCursor(null);
-        setHistoryState("idle");
-        return null;
-      }
-      setHistoryState((state) => (state === "ready" ? state : "loading"));
-      try {
-        const response = await api.getThread(selectedThreadId);
+  const loadHistory = async (preserveOlder = true) => {
+    const requestNumber = ++historyRequestRef.current;
+    if (!selectedThreadId) {
+      return null;
+    }
+    return api.getThread(selectedThreadId).then(
+      (response) => {
         if (requestNumber !== historyRequestRef.current) return null;
         setThreadDetails((current) => new Map(current).set(response.thread.id, response.thread));
         setMessages((current) =>
@@ -313,17 +318,17 @@ export function CodexChatsView({ api = defaultCodexDesktopApi }: { api?: CodexDe
         setHistoryState("ready");
         setError(null);
         return response;
-      } catch (cause) {
+      },
+      (cause: unknown) => {
         if (requestNumber !== historyRequestRef.current) return null;
         setHistoryState("error");
         setError(cause instanceof Error ? cause.message : "Could not load this Codex chat.");
         return null;
-      }
-    },
-    [api, selectedThreadId],
-  );
+      },
+    );
+  };
 
-  const loadOlderHistory = useCallback(async () => {
+  const loadOlderHistory = async () => {
     if (!selectedThreadId || historyCursor === null) return;
     const requestNumber = ++historyRequestRef.current;
     const scrollElement = historyScrollRef.current;
@@ -345,7 +350,7 @@ export function CodexChatsView({ api = defaultCodexDesktopApi }: { api?: CodexDe
       if (requestNumber !== historyRequestRef.current) return;
       setError(cause instanceof Error ? cause.message : "Could not load older messages.");
     }
-  }, [api, historyCursor, selectedThreadId]);
+  };
 
   useEffect(() => {
     void loadHistory(false);
@@ -386,52 +391,49 @@ export function CodexChatsView({ api = defaultCodexDesktopApi }: { api?: CodexDe
     sendGenerationRef.current += 1;
   };
 
-  const observeAfterSend = useCallback(
-    (threadId: string, generation: number) => {
-      let attempts = 0;
-      const refresh = async () => {
-        if (
-          !shouldApplyCodexResult({
-            currentThreadId: selectedThreadIdRef.current,
-            resultThreadId: threadId,
-            currentGeneration: sendGenerationRef.current,
-            resultGeneration: generation,
-          })
-        )
-          return;
-        const response = await loadHistory();
-        if (!response) {
-          sendObservationRef.current = null;
-          return;
-        }
-        if (
-          !shouldApplyCodexResult({
-            currentThreadId: selectedThreadIdRef.current,
-            resultThreadId: threadId,
-            currentGeneration: sendGenerationRef.current,
-            resultGeneration: generation,
-          })
-        )
-          return;
-        attempts += 1;
-        if (
-          response.thread.status === "error" ||
-          response.thread.status === "needs_attention" ||
-          attempts >= POST_SEND_OBSERVATION_ATTEMPTS
-        ) {
-          sendObservationRef.current = null;
-          if (attempts >= POST_SEND_OBSERVATION_ATTEMPTS) setObservationTimedOut(true);
-          return;
-        }
-        sendObservationRef.current = window.setTimeout(
-          () => void refresh(),
-          POST_SEND_OBSERVATION_INTERVAL_MS,
-        );
-      };
-      void refresh();
-    },
-    [loadHistory],
-  );
+  const observeAfterSend = (threadId: string, generation: number) => {
+    let attempts = 0;
+    const refresh = async () => {
+      if (
+        !shouldApplyCodexResult({
+          currentThreadId: selectedThreadIdRef.current,
+          resultThreadId: threadId,
+          currentGeneration: sendGenerationRef.current,
+          resultGeneration: generation,
+        })
+      )
+        return;
+      const response = await loadHistory();
+      if (!response) {
+        sendObservationRef.current = null;
+        return;
+      }
+      if (
+        !shouldApplyCodexResult({
+          currentThreadId: selectedThreadIdRef.current,
+          resultThreadId: threadId,
+          currentGeneration: sendGenerationRef.current,
+          resultGeneration: generation,
+        })
+      )
+        return;
+      attempts += 1;
+      if (
+        response.thread.status === "error" ||
+        response.thread.status === "needs_attention" ||
+        attempts >= POST_SEND_OBSERVATION_ATTEMPTS
+      ) {
+        sendObservationRef.current = null;
+        if (attempts >= POST_SEND_OBSERVATION_ATTEMPTS) setObservationTimedOut(true);
+        return;
+      }
+      sendObservationRef.current = window.setTimeout(
+        () => void refresh(),
+        POST_SEND_OBSERVATION_INTERVAL_MS,
+      );
+    };
+    void refresh();
+  };
 
   const handleSend = async () => {
     const text = composer.trim();
@@ -528,7 +530,7 @@ export function CodexChatsView({ api = defaultCodexDesktopApi }: { api?: CodexDe
   const currentSendError = sendState?.error ?? error;
   const showList = mobileListOpen;
   return (
-    <SidebarInset className="h-dvh min-h-0 overflow-hidden bg-background text-foreground">
+    <SidebarInset className="h-dvh min-h-0 overflow-hidden">
       <main className="flex min-h-0 min-w-0 flex-1 flex-col">
         <header className="flex min-h-14 shrink-0 items-center justify-between gap-3 border-b border-border/65 px-4 py-3 sm:px-6">
           <div className="flex min-w-0 items-center gap-2.5">
@@ -561,15 +563,16 @@ export function CodexChatsView({ api = defaultCodexDesktopApi }: { api?: CodexDe
                 <Input
                   nativeInput
                   unstyled
+                  size="inline"
                   value={search}
                   onChange={(event) => setSearch(event.currentTarget.value)}
                   placeholder="Search Codex chats"
                   aria-label="Search Codex chats"
-                  className="min-w-0 flex-1 [&_[data-slot=input]]:h-auto [&_[data-slot=input]]:p-0 [&_[data-slot=input]]:text-sm [&_[data-slot=input]]:placeholder:text-muted-foreground/60"
+                  className="min-w-0 flex-1"
                 />
               </div>
             </div>
-            <div className="min-h-0 flex-1 overflow-y-auto p-2">
+            <div className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-both p-2">
               {listState === "loading" ? (
                 <div className="flex items-center justify-center gap-2 px-3 py-8 text-xs text-muted-foreground">
                   <LoaderCircleIcon className="size-3.5 animate-spin" /> Loading Codex chats
@@ -645,7 +648,7 @@ export function CodexChatsView({ api = defaultCodexDesktopApi }: { api?: CodexDe
 
             <div
               ref={historyScrollRef}
-              className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-8"
+              className="min-h-0 flex-1 overflow-y-auto scrollbar-gutter-both px-4 py-5 sm:px-8"
             >
               {!selectedThread ? (
                 <div className="flex h-full items-center justify-center text-center">
@@ -765,7 +768,7 @@ export function CodexChatsView({ api = defaultCodexDesktopApi }: { api?: CodexDe
                   <SendIcon />
                 </Button>
               </div>
-              <p className="mx-auto mt-1.5 w-full max-w-3xl text-[10px] text-muted-foreground/55">
+              <p className="mx-auto mt-1.5 w-full max-w-3xl text-3xs text-muted-foreground/55">
                 Ctrl/⌘ + Enter to send
               </p>
             </div>

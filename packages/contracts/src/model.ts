@@ -101,22 +101,6 @@ function canonicalSelectionsToLegacyObject(
 
 export const ModelCapabilities = Schema.Struct({
   optionDescriptors: Schema.optional(Schema.Array(ProviderOptionDescriptor)),
-  subagentBackends: Schema.optional(
-    Schema.Struct({
-      v1: Schema.Struct({
-        supported: Schema.Boolean,
-        reason: Schema.optional(TrimmedNonEmptyString),
-      }),
-      v2: Schema.Struct({
-        supported: Schema.Boolean,
-        reason: Schema.optional(TrimmedNonEmptyString),
-      }),
-      "native-v1-control": Schema.Struct({
-        supported: Schema.Boolean,
-        reason: Schema.optional(TrimmedNonEmptyString),
-      }),
-    }),
-  ),
 });
 export type ModelCapabilities = typeof ModelCapabilities.Type;
 
@@ -131,8 +115,7 @@ export const CustomModelSetting = Schema.Union([Schema.String, CustomModelEntry]
 export type CustomModelSetting = typeof CustomModelSetting.Type;
 
 /**
- * The user-selectable sub-agent control paths. These are runtime routes, not
- * prompt hints: the server validates the selected route before a turn starts.
+ * Saved sub-agent runtime routes, retained for existing threads and clients.
  */
 export const SubagentBackend = Schema.Literals(["v1", "v2", "native-v1-control"]);
 export type SubagentBackend = typeof SubagentBackend.Type;

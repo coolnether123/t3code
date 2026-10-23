@@ -1,4 +1,5 @@
 import type { ModelSelection, ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 export const CODEX_COMPUTER_CONTROL_OPTION_ID = "computerControl";
 // Keep persisted mode IDs readable. The legacy "desktop" mode grants the T3
@@ -22,7 +23,7 @@ export function normalizeCodexComputerControlMode(
  * the daemon exposes neither and T3 has to supply managed Chrome itself.
  */
 export const codexDesktopDaemonHasAppTools = (
-  platform: NodeJS.Platform = process.platform,
+  platform: NodeJS.Platform = HostProcess.Platform.defaultValue(),
 ): boolean => platform !== "win32";
 
 /** Whether this session receives T3's managed Chrome MCP toolkit. */
@@ -31,7 +32,7 @@ export const modelSelectionAllowsFullComputerControl = (
   providerDriverKind: ProviderDriverKind | undefined,
   boundInstanceId: ProviderInstanceId | undefined,
   desktopBacked = false,
-  platform: NodeJS.Platform = process.platform,
+  platform: NodeJS.Platform = HostProcess.Platform.defaultValue(),
 ): boolean => {
   if (providerDriverKind !== "codex") return false;
   if (desktopBacked && codexDesktopDaemonHasAppTools(platform)) return false;

@@ -4,7 +4,7 @@ import {
   MAX_BIRTHDAY_NOTE_LENGTH,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSettings";
 import { usePrimaryEnvironment } from "../../state/environments";
 import { Button } from "../ui/button";
@@ -24,13 +24,25 @@ export function BirthdaySettings() {
   const savedNotes = saved?.notes?.join("\n") ?? "";
   const [notesText, setNotesText] = useState(savedNotes);
   const [error, setError] = useState("");
-  useEffect(() => {
+  const savedDateKey = JSON.stringify([
+    saved?.month,
+    saved?.day,
+    saved?.enabled,
+    saved?.tapEffects,
+  ]);
+  const [seenDateKey, setSeenDateKey] = useState(savedDateKey);
+  const [seenNotes, setSeenNotes] = useState(savedNotes);
+  if (seenDateKey !== savedDateKey) {
+    setSeenDateKey(savedDateKey);
     setMonth(saved?.month.toString() ?? "");
     setDay(saved?.day.toString() ?? "");
     setEnabled(saved?.enabled ?? true);
     setTapEffects(saved?.tapEffects ?? true);
-  }, [saved?.month, saved?.day, saved?.enabled, saved?.tapEffects]);
-  useEffect(() => setNotesText(savedNotes), [savedNotes]);
+  }
+  if (seenNotes !== savedNotes) {
+    setSeenNotes(savedNotes);
+    setNotesText(savedNotes);
+  }
 
   return (
     <SettingsSection {...searchableSetting("birthday-celebration")}>

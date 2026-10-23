@@ -1,9 +1,11 @@
 import * as NodeAssert from "node:assert/strict";
 
 import { NodeServices } from "@effect/platform-node";
+import * as NodePath from "@effect/platform-node/NodePath";
 import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import { describe } from "vite-plus/test";
@@ -14,10 +16,13 @@ import {
   resolveCodexDesktopPluginSkillRoots,
 } from "./CodexDesktopPluginSkills.ts";
 
+const bundledRoot = "A:/bundle";
+const codexHome = "A:\\fake-codex-home";
+const chromeSkills = "A:\\bundle\\plugins\\chrome\\skills";
 const config = `
 [marketplaces.openai-bundled]
 source_type = "local"
-source = 'A:/bundle'
+source = '${bundledRoot}'
 
 [plugins."chrome@openai-bundled"]
 enabled = true
@@ -33,6 +38,7 @@ const withConfig = <A, E, R>(
   source: string,
   existing: ReadonlyArray<string>,
   effect: Effect.Effect<A, E, R>,
+  pathLayer: Layer.Layer<Path.Path> = NodePath.layerWin32,
 ) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -55,12 +61,25 @@ const withConfig = <A, E, R>(
       }),
     );
     return { result, reads, checked, path };
-  }).pipe(Effect.provide(NodeServices.layer));
+  }).pipe(Effect.provide(Layer.merge(NodeServices.layer, pathLayer)));
 
 describe("Codex desktop plugin skill roots", () => {
+  it.effect("discovers POSIX plugin roots with the POSIX path service", () =>
+    Effect.gen(function* () {
+      const root = "/bundle/plugins/chrome/skills";
+      const result = yield* withConfig(
+        config.replace(bundledRoot, "/bundle"),
+        [root],
+        resolveCodexDesktopPluginSkillRoots({ CODEX_HOME: "/codex-home" }),
+        NodePath.layerPosix,
+      );
+      NodeAssert.deepStrictEqual(result.reads, ["/codex-home/config.toml"]);
+      NodeAssert.deepStrictEqual(result.result, [root]);
+    }),
+  );
   it("reads only enabled bundled plugins from the local marketplace", () => {
     NodeAssert.deepStrictEqual(parseCodexDesktopPluginConfig(config), {
-      source: "A:/bundle",
+      source: bundledRoot,
       enabledPlugins: ["chrome", "computer-use"],
     });
     NodeAssert.deepStrictEqual(
@@ -77,16 +96,16 @@ enabled = true
 
   it.effect("skips missing skill directories and uses the daemon CODEX_HOME", () =>
     Effect.gen(function* () {
-      const home = "A:\\fake-codex-home";
+      const home = codexHome;
       const result = yield* withConfig(
         config,
-        ["A:\\bundle\\plugins\\chrome\\skills"],
+        [chromeSkills],
         resolveCodexDesktopPluginSkillRoots({ CODEX_HOME: home }),
       );
       NodeAssert.deepStrictEqual(result.reads, [result.path.join(home, "config.toml")]);
       NodeAssert.deepStrictEqual(result.checked, [
-        result.path.join("A:/bundle", "plugins", "chrome", "skills"),
-        result.path.join("A:/bundle", "plugins", "computer-use", "skills"),
+        result.path.join(bundledRoot, "plugins", "chrome", "skills"),
+        result.path.join(bundledRoot, "plugins", "computer-use", "skills"),
       ]);
       NodeAssert.deepStrictEqual(result.result, [result.checked[0]]);
     }),
@@ -107,7 +126,7 @@ enabled = true
               },
             },
           },
-          { CODEX_HOME: "A:\\fake-codex-home" },
+          { CODEX_HOME: codexHome },
         ),
       );
       NodeAssert.deepStrictEqual(result, { extraRoots: [], warning: undefined });
@@ -117,13 +136,13 @@ enabled = true
 
   it.effect("returns roots only after the daemon accepts them", () =>
     Effect.gen(function* () {
-      const root = "A:\\bundle\\plugins\\chrome\\skills";
+      const root = chromeSkills;
       const { result } = yield* withConfig(
         config,
         [root],
         attachCodexDesktopPluginSkills(
           { raw: { request: () => Effect.succeed({}) } },
-          { CODEX_HOME: "A:\\fake-codex-home" },
+          { CODEX_HOME: codexHome },
         ),
       );
       NodeAssert.deepStrictEqual(result, { extraRoots: [root], warning: undefined });
@@ -145,7 +164,7 @@ enabled = true
               },
             },
           },
-          { CODEX_HOME: "A:\\fake-codex-home" },
+          { CODEX_HOME: codexHome },
         ),
       );
       NodeAssert.match(
@@ -160,7 +179,7 @@ enabled = true
     Effect.gen(function* () {
       const { result } = yield* withConfig(
         config,
-        ["A:\\bundle\\plugins\\chrome\\skills"],
+        [chromeSkills],
         attachCodexDesktopPluginSkills(
           {
             raw: {
@@ -174,7 +193,7 @@ enabled = true
                 ),
             },
           },
-          { CODEX_HOME: "A:\\fake-codex-home" },
+          { CODEX_HOME: codexHome },
         ),
       );
       NodeAssert.equal(

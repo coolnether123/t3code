@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { formatUsd } from "@t3tools/shared/usageFormat";
 import {
   estimatedQuotaDrop,
@@ -45,7 +45,7 @@ export function UsageActivityPanel({
   const [view, setView] = useState<"intensity" | "models" | "spikes">("intensity");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [drag, setDrag] = useState<readonly [number, number] | null>(null);
-  const data = useMemo(() => visibleChartActivity(activity, start, end), [activity, start, end]);
+  const data = (() => visibleChartActivity(activity, start, end))();
   const selected = data.bins.find((bin) => bin.id === selectedId) ?? data.ranked[0];
   const selectedIndex = selected ? data.bins.indexOf(selected) : -1;
   const quotaDrop = selected ? estimatedQuotaDrop(points, selected.start, selected.end) : null;
@@ -89,19 +89,19 @@ export function UsageActivityPanel({
       </div>
       <dl className="mt-1 grid grid-cols-3 gap-2 tabular-nums">
         <div>
-          <dt className="text-[10px] text-muted-foreground">API value in view</dt>
+          <dt className="text-3xs text-muted-foreground">API value in view</dt>
           <dd className="mt-1 text-sm font-medium">
             {data.complete ? formatUsd(data.cost) : "Reading activity…"}
           </dd>
         </div>
         <div>
-          <dt className="text-[10px] text-muted-foreground">Average / hour</dt>
+          <dt className="text-3xs text-muted-foreground">Average / hour</dt>
           <dd className="mt-1 text-sm font-medium">
             {data.averagePerHour === null ? "—" : formatUsd(data.averagePerHour)}
           </dd>
         </div>
         <div>
-          <dt className="text-[10px] text-muted-foreground">Peak vs average</dt>
+          <dt className="text-3xs text-muted-foreground">Peak vs average</dt>
           <dd className="mt-1 text-sm font-medium">
             {data.averagePerHour && data.peak
               ? `${(data.peak.perHour / data.averagePerHour).toFixed(1)}×`
@@ -129,13 +129,13 @@ export function UsageActivityPanel({
                     <span className="w-4 text-muted-foreground">{index + 1}</span>
                     <span className="min-w-0 flex-1">
                       <span className="block">{date(bin.start)}</span>
-                      <span className="block truncate text-[10px] text-muted-foreground">
+                      <span className="block truncate text-3xs text-muted-foreground">
                         {bin.models[0]?.[0] ?? "No model activity"}
                       </span>
                     </span>
                     <span className="text-right tabular-nums">
                       <span className="block">{formatUsd(bin.cost!)}</span>
-                      <span className="text-[10px] text-muted-foreground">
+                      <span className="text-3xs text-muted-foreground">
                         {formatUsd(bin.perHour!)} / hour
                       </span>
                     </span>
@@ -153,7 +153,7 @@ export function UsageActivityPanel({
                 <svg
                   viewBox="0 0 960 120"
                   preserveAspectRatio="none"
-                  className="h-28 w-full touch-pan-y select-none outline-offset-4 focus-visible:outline-2 focus-visible:outline-ring"
+                  className="h-28 w-full touch-pan-y select-none -outline-offset-2 focus-visible:outline-2 focus-visible:outline-ring"
                   role="img"
                   tabIndex={0}
                   aria-label={
@@ -242,7 +242,7 @@ export function UsageActivityPanel({
                             width={width}
                             y={120 - height}
                             height={height}
-                            className="fill-cyan-600 dark:fill-cyan-400"
+                            className="fill-info-foreground"
                           />
                         )}
                         {selected?.id === bin.id ? (
@@ -266,14 +266,14 @@ export function UsageActivityPanel({
                       y={0}
                       width={Math.abs(drag[1] - drag[0]) * 960}
                       height={120}
-                      className="fill-cyan-400/20 stroke-cyan-400"
+                      className="fill-info/20 stroke-info"
                       strokeWidth={1}
                       vectorEffect="non-scaling-stroke"
                       pointerEvents="none"
                     />
                   ) : null}
                 </svg>
-                <div className="mt-1 flex justify-between text-[10px] text-muted-foreground">
+                <div className="mt-1 flex justify-between text-3xs text-muted-foreground">
                   <span>{time(start)}</span>
                   <span>{time(activityEnd)}</span>
                 </div>
@@ -287,21 +287,21 @@ export function UsageActivityPanel({
         </div>
         {data.complete ? (
           <div className="min-w-0 space-y-2" aria-label="Model cost shares">
-            <h4 className="text-[10px] text-muted-foreground">Top models / hour</h4>
+            <h4 className="text-3xs text-muted-foreground">Top models / hour</h4>
             {data.models
               .filter(([, cost]) => cost > 0)
               .slice(0, 4)
               .map(([model, cost]) => (
                 <div key={model}>
                   <div className="flex justify-between gap-2">
-                    <span className="min-w-0 truncate text-[10px] sm:text-xs" aria-label={model}>
+                    <span className="min-w-0 truncate text-3xs sm:text-xs" aria-label={model}>
                       {model.replace(/^gpt-/, "")}
                     </span>
-                    <span className="shrink-0 text-[10px] tabular-nums sm:text-xs">
+                    <span className="shrink-0 text-3xs tabular-nums sm:text-xs">
                       {formatUsd(
                         data.cost > 0 ? ((data.averagePerHour ?? 0) * cost) / data.cost : 0,
                       )}
-                      <span className="hidden text-[10px] text-muted-foreground sm:inline">
+                      <span className="hidden text-3xs text-muted-foreground sm:inline">
                         {" "}
                         · {data.cost > 0 ? Math.round((cost / data.cost) * 100) : 0}%
                       </span>
@@ -328,12 +328,12 @@ export function UsageActivityPanel({
             aria-label="Selected activity interval"
             aria-live="polite"
           >
-            <summary className="min-h-9 cursor-pointer content-center text-[10px] text-muted-foreground">
+            <summary className="min-h-9 cursor-pointer content-center text-3xs text-muted-foreground">
               Inspect interval ·{" "}
               {selected.cost === null ? "Costs unavailable" : formatUsd(selected.cost)}
             </summary>
             <div className="flex flex-wrap items-center justify-between gap-1">
-              <span className="text-[11px]">
+              <span className="text-2xs">
                 {date(selected.start)} to {time(selected.end)}
               </span>
               <button
@@ -350,12 +350,12 @@ export function UsageActivityPanel({
                 : `${formatUsd(selected.cost)} API value · ${formatUsd(selected.perHour!)} / hour`}
             </p>
             {quotaDrop !== null ? (
-              <p className="mt-1 text-[10px] text-muted-foreground">
+              <p className="mt-1 text-3xs text-muted-foreground">
                 ≈ {quotaDrop.toFixed(2)} quota points used. Estimated between readings.
               </p>
             ) : null}
             {selected.cost !== null ? (
-              <div className="mt-2 space-y-1 text-[11px] text-muted-foreground">
+              <div className="mt-2 space-y-1 text-2xs text-muted-foreground">
                 {selected.models.slice(0, 3).map(([model, cost]) => (
                   <div key={model} className="flex justify-between gap-2">
                     <span className="truncate">{model}</span>
@@ -367,7 +367,7 @@ export function UsageActivityPanel({
           </details>
         ) : null}
         {data.complete && data.models.length > 4 ? (
-          <details className="mt-1 text-[10px] text-muted-foreground">
+          <details className="mt-1 text-3xs text-muted-foreground">
             <summary className="min-h-8 cursor-pointer content-center">All models</summary>
             <div className="space-y-2 pb-2" aria-label="All model hourly costs">
               {data.models.map(([model, cost]) => (
@@ -382,10 +382,10 @@ export function UsageActivityPanel({
             </div>
           </details>
         ) : null}
-        <details className="mt-1 text-[10px] text-muted-foreground">
+        <details className="mt-1 text-3xs text-muted-foreground">
           <summary className="min-h-8 cursor-pointer content-center">Insights & help</summary>
           {data.busiestQuarterShare !== null ? (
-            <p className="mt-1 text-[10px] text-muted-foreground">
+            <p className="mt-1 text-3xs text-muted-foreground">
               The busiest 25% of this time accounted for{" "}
               <span className="font-medium text-foreground">
                 {Math.round(data.busiestQuarterShare * 100)}% of API value

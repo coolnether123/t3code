@@ -375,7 +375,7 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
               ) : (
                 historicalPeriods
                   .slice(0, -1)
-                  .toReversed()
+                  .reverse()
                   .map((period) => {
                     const value = values.find((entry) => entry.period.id === period.id)?.value;
                     return (
@@ -533,7 +533,7 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
               The public history does not contain two regular resets yet.
             </Text>
           ) : (
-            publicEstimates.toReversed().map((row) => {
+            [...publicEstimates].reverse().map((row) => {
               const tokens = row.models.reduce(
                 (total, model) =>
                   total +
