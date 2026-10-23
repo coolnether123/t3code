@@ -150,9 +150,60 @@ it("serializes competing maintenance processes after reclaiming a stale lock", a
     maintenanceFs.unlinkSync(marker);
   });
 })().catch(error => { console.error(error); process.exitCode = 1; });`;
-    await Promise.all(Array.from({ length: 6 }, () => exec(process.execPath, ["-e", script])));
+    const processes = Array.from({ length: 6 }, () => exec(process.execPath, ["-e", script]));
+    await Promise.allSettled(processes);
+    await Promise.all(processes);
     await expect(NodeFSP.stat(lock)).rejects.toThrow();
     expect(await NodeFSP.readdir(root)).toEqual([]);
+  } finally {
+    await NodeFSP.rm(root, { recursive: true, force: true });
+  }
+});
+
+it.each([
+  ["unlinkSync", "EPERM"],
+  ["unlinkSync", "EACCES"],
+  ["readdirSync", "EPERM"],
+  ["readdirSync", "EACCES"],
+  ["rmdirSync", "EPERM"],
+  ["rmdirSync", "EACCES"],
+])("reclaims a stale lock after a Windows %s %s sharing error", async (operation, code) => {
+  const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-tool-stale-sharing-"));
+  try {
+    const lock = NodePath.join(root, ".maintenance-lock");
+    await NodeFSP.mkdir(lock);
+    await NodeFSP.writeFile(
+      NodePath.join(lock, "stale-owner.json"),
+      JSON.stringify({ pid: 2147483647 }),
+    );
+    const script =
+      deviceToolMaintenanceScript +
+      `
+Object.defineProperty(process, 'platform', { value: 'win32' });
+const operation = ${JSON.stringify(operation)};
+const originalOperation = maintenanceFs[operation];
+let blockedOnce = false;
+maintenanceFs[operation] = function(path, ...args) {
+  const target = operation === 'unlinkSync' ? 'stale-owner.json' : '.maintenance-lock';
+  if (!blockedOnce && maintenancePath.basename(path) === target) {
+    blockedOnce = true;
+    const error = new Error('Stale owner deletion is still pending');
+    error.code = ${JSON.stringify(code)};
+    throw error;
+  }
+  return originalOperation.call(this, path, ...args);
+};
+(async () => {
+  const root = ${JSON.stringify(root)};
+  const result = await withToolMaintenance(root, () => 'reclaimed');
+  console.log(JSON.stringify({ result, blockedOnce, remaining: maintenanceFs.readdirSync(root) }));
+})().catch(error => { console.error(error); process.exitCode = 1; });`;
+    const result = await exec(process.execPath, ["-e", script]);
+    expect(JSON.parse(result.stdout)).toEqual({
+      result: "reclaimed",
+      blockedOnce: true,
+      remaining: [],
+    });
   } finally {
     await NodeFSP.rm(root, { recursive: true, force: true });
   }
