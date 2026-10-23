@@ -257,17 +257,21 @@ describe("transcript usage index", () => {
     { name: "Codex only", options: { providers: ["codex"] } },
   ];
 
-  for (const window of windows) {
-    for (const shape of shapes) {
-      it(`matches per-record aggregation for ${window.name}, ${shape.name}`, () => {
-        for (const seed of [1, 2, 3, 4]) {
-          const files = transcripts(seed);
-          const options = { ...window.options, ...shape.options, rates };
-          expectSameUsage(byIndex(files, options), byRecords(files, options));
-        }
-      });
+  it.each(
+    windows.flatMap((window) =>
+      shapes.map((shape) => ({
+        name: `${window.name}, ${shape.name}`,
+        window,
+        shape,
+      })),
+    ),
+  )("matches per-record aggregation for $name", ({ window, shape }) => {
+    for (const seed of [1, 2, 3, 4]) {
+      const files = transcripts(seed);
+      const options = { ...window.options, ...shape.options, rates };
+      expectSameUsage(byIndex(files, options), byRecords(files, options));
     }
-  }
+  });
 
   it("rebuilds the first holder when a second transcript shares its key", () => {
     const registry = new DedupeKeyRegistry();
