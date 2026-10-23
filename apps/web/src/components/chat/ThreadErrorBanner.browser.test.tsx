@@ -7,17 +7,18 @@ import { page } from "vite-plus/test/browser";
 
 import { ThreadErrorBanner } from "./ThreadErrorBanner";
 
-it("expands even a short JSON error to its exact diagnostics and collapses back to its message", async () => {
+it("expands even a short JSON error to its exact diagnostics and collapses back to its plain message", async () => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
   const error = '  {"error": {"message":"Turn failed", "code":"unsupported_value"}}\t ';
+  const summary = "Your message couldn't finish. Check the last reply, then try again.";
 
   try {
     await act(async () => root.render(<ThreadErrorBanner error={error} />));
 
-    await expect.element(page.getByText("Turn failed", { exact: true })).toBeVisible();
+    await expect.element(page.getByText(summary, { exact: true })).toBeVisible();
     expect(container.textContent).not.toContain("unsupported_value");
 
     await act(async () => page.getByRole("button", { name: "Show full error" }).click());
@@ -28,7 +29,7 @@ it("expands even a short JSON error to its exact diagnostics and collapses back 
 
     await act(async () => page.getByRole("button", { name: "Show less" }).click());
 
-    await expect.element(page.getByText("Turn failed", { exact: true })).toBeVisible();
+    await expect.element(page.getByText(summary, { exact: true })).toBeVisible();
     expect(container.textContent).not.toContain("unsupported_value");
   } finally {
     await act(async () => root.unmount());
