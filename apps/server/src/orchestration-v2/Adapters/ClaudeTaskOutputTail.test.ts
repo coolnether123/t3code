@@ -7,7 +7,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 
-import { tailClaudeTaskOutput } from "./ClaudeTaskOutputTail.ts";
+import { claudeTaskOutputRoot, tailClaudeTaskOutput } from "./ClaudeTaskOutputTail.ts";
 
 const SESSION_ID = "0c91bb28-9e89-4889-bd22-3de9880233d3";
 const TASK_ID = "bk6xreeye";
@@ -24,6 +24,18 @@ const makeTaskFile = Effect.gen(function* () {
 // Live clock and a real file: this proves the tail follows the writer, which
 // TestClock cannot interleave with filesystem IO.
 describe("tailClaudeTaskOutput", () => {
+  it.effect("uses the supplied user id and disables file tailing without one", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      assert.equal(
+        claudeTaskOutputRoot({ CLAUDE_CODE_TMPDIR: "task-temp" }, path, 501),
+        path.join("task-temp", "claude-501"),
+      );
+      assert.isUndefined(
+        claudeTaskOutputRoot({ CLAUDE_CODE_TMPDIR: "task-temp" }, path, undefined),
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
   it.live("follows a file that appears after the task starts, across split characters", () =>
     Effect.scoped(
       Effect.gen(function* () {

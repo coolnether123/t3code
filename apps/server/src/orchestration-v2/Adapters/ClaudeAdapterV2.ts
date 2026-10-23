@@ -3527,6 +3527,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
   adapterOptions: ClaudeAdapterV2Options,
 ) {
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+  const userId = yield* HostProcess.UserId;
   const { attachmentsDir, fileSystem, path, crypto, idAllocator, queryRunner } = adapterOptions;
   const subagentModelCatalog = scopeClaudeModelCatalog(
     BUNDLED_CLAUDE_MODEL_CATALOG,
@@ -3577,7 +3578,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           string,
           { readonly fiber: Fiber.Fiber<void>; readonly stop: Deferred.Deferred<void> }
         >();
-        const taskOutputRoot = claudeTaskOutputRoot(adapterOptions.environment, path);
+        const taskOutputRoot = claudeTaskOutputRoot(adapterOptions.environment, path, userId);
         // Waits for the tail's last read so its output lands before the call settles.
         const stopTaskOutputTail = (toolUseId: string) =>
           Effect.suspend(() => {
