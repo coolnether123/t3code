@@ -591,6 +591,11 @@ const make = Effect.gen(function* () {
   );
 
   const readRawConfig = fs.readFileString(settingsPath).pipe(
+    Effect.map(Option.some),
+    Effect.catchIf(
+      (cause) => cause.reason._tag === "NotFound",
+      () => Effect.succeedNone,
+    ),
     Effect.mapError(
       (cause) =>
         new ServerSettingsError({
@@ -660,10 +665,10 @@ const make = Effect.gen(function* () {
     let legacySourceControl: Parameters<typeof migrateLegacySourceControlSettings>[1] = {};
     let parseFailure = Option.none<unknown>();
 
-    if (yield* readConfigExists) {
-      const raw = yield* readRawConfig;
-      const decoded = decodeServerSettingsJsonExit(raw);
-      const legacySettings = decodeLegacyProviderSettingsJsonExit(raw);
+    const raw = (yield* readConfigExists) ? yield* readRawConfig : Option.none<string>();
+    if (Option.isSome(raw)) {
+      const decoded = decodeServerSettingsJsonExit(raw.value);
+      const legacySettings = decodeLegacyProviderSettingsJsonExit(raw.value);
       if (legacySettings._tag === "Success") {
         legacyProviders = legacySettings.value.providers;
         legacySourceControl = {
@@ -1102,22 +1107,36 @@ const make = Effect.gen(function* () {
     }).pipe(Effect.orElseSucceed(() => Option.none<string>()));
 
     const initialLinkTarget = yield* watchLinkTarget;
+    const settingsEvents = yield* Stream.toPull(watchFileChanges(settingsPath)).pipe(
+      Effect.provideService(Scope.Scope, watcherScope),
+    );
+    const linkChanges = yield* Stream.toPull(watchFileChanges(settingsPath)).pipe(
+      Effect.provideService(Scope.Scope, watcherScope),
+    );
+    const initialTargetReady = yield* Deferred.make<void>();
     const linkTargetEvents = Stream.make(initialLinkTarget).pipe(
-      Stream.concat(watchFileChanges(settingsPath).pipe(Stream.mapEffect(() => watchLinkTarget))),
+      Stream.concat(
+        Stream.fromPull(Effect.succeed(linkChanges)).pipe(Stream.mapEffect(() => watchLinkTarget)),
+      ),
       Stream.changes,
-      Stream.switchMap(
-        Option.match({
-          onNone: () => Stream.empty,
-          onSome: (linkTargetPath) =>
-            watchFileChanges(linkTargetPath).pipe(Stream.ignore({ log: true })),
-        }),
+      Stream.switchMap((target) =>
+        Stream.unwrap(
+          Effect.gen(function* () {
+            const events = Option.isSome(target)
+              ? watchFileChanges(target.value).pipe(Stream.ignore({ log: true }))
+              : Stream.empty;
+            const pull = yield* Stream.toPull(events);
+            yield* Deferred.succeed(initialTargetReady, undefined);
+            return Stream.fromPull(Effect.succeed(pull));
+          }),
+        ),
       ),
     );
 
     // Editors emit multiple events per save (truncate, write, rename) and
     // `fs.watch` can fire before the content has been flushed to disk.
     const debouncedSettingsEvents = Stream.merge(
-      watchFileChanges(settingsPath),
+      Stream.fromPull(Effect.succeed(settingsEvents)),
       linkTargetEvents,
     ).pipe(Stream.debounce(Duration.millis(100)));
 
@@ -1126,6 +1145,7 @@ const make = Effect.gen(function* () {
       Effect.forkIn(watcherScope),
       Effect.asVoid,
     );
+    yield* Deferred.await(initialTargetReady);
   });
 
   const start = Effect.gen(function* () {
