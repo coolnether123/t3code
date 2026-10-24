@@ -7,7 +7,7 @@ import {
   useRouterState,
 } from "@tanstack/react-router";
 import { useAtomValue } from "@effect/atom-react";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useRef } from "react";
 
 import { isCommandPaletteOpen } from "../commandPaletteBus";
 import { ThreadRouteView } from "../components/ThreadRouteView";
@@ -259,14 +259,12 @@ function EnvironmentChatLocationTracker() {
   );
   const { environments, selectedEnvironmentId, setSelectedEnvironmentId } =
     useSidebarEnvironmentScope();
-  const connectedEnvironmentIds = useMemo<ReadonlySet<string>>(
-    () => new Set<string>(environments.map((environment) => environment.environmentId)),
-    [environments],
-  );
+  const connectedEnvironmentIds = ((): ReadonlySet<string> =>
+    new Set<string>(environments.map((environment) => environment.environmentId)))();
   const hasThreadShell = threadShell !== null;
   const draftEnvironmentId = draftSession?.environmentId ?? null;
   const draftIsUnpromoted = draftSession?.promotedTo == null;
-  const routeLocation = useMemo<RememberedChatLocation | null>(() => {
+  const routeLocation = ((): RememberedChatLocation | null => {
     if (pathname === "/") {
       return { kind: "index" };
     }
@@ -281,16 +279,7 @@ function EnvironmentChatLocationTracker() {
       return { kind: "draft", environmentId: draftEnvironmentId, draftId: routeDraftId };
     }
     return null;
-  }, [
-    draftEnvironmentId,
-    draftIsUnpromoted,
-    hasThreadShell,
-    pathname,
-    routeDraftId,
-    routeThreadEnvironmentId,
-    routeThreadId,
-    threadStatus,
-  ]);
+  })();
   const routeLocationKey = routeLocation
     ? routeLocation.kind === "index"
       ? "index"

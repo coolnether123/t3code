@@ -1,6 +1,6 @@
 import { Link } from "@tanstack/react-router";
 import { ArrowLeftIcon, RefreshCwIcon } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { formatDayShort, makeWindow } from "@t3tools/shared/usageFormat";
 import { mergeRepeatedInputSummaries } from "@t3tools/shared/usageRepeatedInput";
 
@@ -30,14 +30,11 @@ export function RepeatedInputPage() {
     ...selection.window,
     includeRepeatedInput: true,
   });
-  const selected = useMemo(
-    () =>
-      environments.filter(
-        (entry) => environmentId === "all" || entry.environmentId === environmentId,
-      ),
-    [environments, environmentId],
-  );
-  const data = useMemo(() => mergeRepeatedInputSummaries(selected), [selected]);
+  const selected = (() =>
+    environments.filter(
+      (entry) => environmentId === "all" || entry.environmentId === environmentId,
+    ))();
+  const data = (() => mergeRepeatedInputSummaries(selected))();
   const pending = selected.some((entry) => entry.isPending);
   const incomplete = selected.filter(
     (entry) =>
@@ -59,7 +56,7 @@ export function RepeatedInputPage() {
   };
 
   return (
-    <SidebarInset className="isolate h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
+    <SidebarInset className="isolate h-dvh min-h-0 overflow-hidden overscroll-y-none">
       <WorkspacePageHeader electron={isElectron}>
         <div className="flex w-full min-w-0 items-center justify-between gap-3">
           <Link

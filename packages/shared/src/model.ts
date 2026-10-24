@@ -33,11 +33,9 @@ export interface SelectableModelOption {
 
 export function createModelCapabilities(input: {
   optionDescriptors: ReadonlyArray<ProviderOptionDescriptor>;
-  subagentBackends?: ModelCapabilities["subagentBackends"];
 }): ModelCapabilities {
   return {
     optionDescriptors: input.optionDescriptors.map(cloneDescriptor),
-    ...(input.subagentBackends ? { subagentBackends: input.subagentBackends } : {}),
   };
 }
 
@@ -354,18 +352,9 @@ export function formatModelSlugName(slug: string): string {
 
 export function normalizeModelSlug(
   model: string | null | undefined,
-  provider: ProviderDriverKind = DEFAULT_PROVIDER_DRIVER_KIND,
+  _provider: ProviderDriverKind = DEFAULT_PROVIDER_DRIVER_KIND,
 ): string | null {
-  const trimmed = normalizeCustomModelSlug(model);
-  if (!trimmed) {
-    return null;
-  }
-
-  const aliases = MODEL_SLUG_ALIASES_BY_PROVIDER[provider] ?? {};
-  const aliased = Object.prototype.hasOwnProperty.call(aliases, trimmed)
-    ? aliases[trimmed]
-    : undefined;
-  return typeof aliased === "string" ? aliased : trimmed;
+  return normalizeCustomModelSlug(model);
 }
 
 /** Custom model identifiers are provider-owned, so only trim them; never expand aliases. */
@@ -470,7 +459,11 @@ export function resolveSelectableModel(
     return byAlias.slug;
   }
 
-  const normalized = normalizeModelSlug(trimmed, provider);
+  const aliases = MODEL_SLUG_ALIASES_BY_PROVIDER[provider] ?? {};
+  const aliased = Object.prototype.hasOwnProperty.call(aliases, trimmed)
+    ? aliases[trimmed]
+    : undefined;
+  const normalized = typeof aliased === "string" ? aliased : trimmed;
   if (!normalized) {
     return null;
   }

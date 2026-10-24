@@ -25,7 +25,7 @@ import {
 } from "@t3tools/shared/usageQuota";
 import { Link } from "@tanstack/react-router";
 import { RefreshCwIcon } from "lucide-react";
-import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 
 import { isElectron } from "../../env";
 import { cn } from "~/lib/utils";
@@ -162,56 +162,37 @@ export function UsageResetPage() {
   const [selectedIds, setSelectedIds] = useState<readonly string[] | null>(null);
 
   // The computer whose saved readings are charted, and every limit it reports.
-  const sources = useMemo(
-    () =>
-      history.environments.filter((environment) =>
-        limitWindows(environment.summary).some(hasReadings),
-      ),
-    [history.environments],
-  );
+  const sources = (() =>
+    history.environments.filter((environment) =>
+      limitWindows(environment.summary).some(hasReadings),
+    ))();
   const source =
     sources.find((environment) => environment.environmentId === sourceId) ?? sources[0];
-  const allWindows = useMemo(
-    () =>
-      limitWindows(
-        source?.summary ??
-          history.environments.find((environment) => environment.summary !== null)?.summary,
-      ),
-    [source, history.environments],
-  );
-  const visibleWindows = useMemo(
-    () =>
-      allWindows.filter((limit) => view.provider === "both" || limit.provider === view.provider),
-    [allWindows, view.provider],
-  );
-  const selectedWindow = useMemo(
-    () =>
-      visibleWindows.find((limit) => limit.key === view.windowKey) ??
-      visibleWindows.find(hasReadings) ??
-      visibleWindows[0],
-    [visibleWindows, view.windowKey],
-  );
+  const allWindows = (() =>
+    limitWindows(
+      source?.summary ??
+        history.environments.find((environment) => environment.summary !== null)?.summary,
+    ))();
+  const visibleWindows = (() =>
+    allWindows.filter((limit) => view.provider === "both" || limit.provider === view.provider))();
+  const selectedWindow = (() =>
+    visibleWindows.find((limit) => limit.key === view.windowKey) ??
+    visibleWindows.find(hasReadings) ??
+    visibleWindows[0])();
   const windowKey = selectedWindow?.key ?? "";
   const quotaProvider = selectedWindow?.provider ?? "codex";
   /** Cost reads for a Claude limit price Claude transcripts instead of Codex's. */
-  const forProvider = useCallback(
-    (input: UsageSummaryInput): UsageSummaryInput =>
-      quotaProvider === "codex" ? input : { ...input, quotaProvider },
-    [quotaProvider],
-  );
+  const forProvider = (input: UsageSummaryInput): UsageSummaryInput =>
+    quotaProvider === "codex" ? input : { ...input, quotaProvider };
 
   const sourceEnvironmentId = source?.environmentId;
-  const effectiveSelectedIds = useMemo<readonly string[] | null>(
-    () => selectedIds ?? (sourceEnvironmentId === undefined ? null : [sourceEnvironmentId]),
-    [selectedIds, sourceEnvironmentId],
-  );
-  const rawSamples = useMemo(
-    () => (selectedWindow && hasReadings(selectedWindow) ? selectedWindow.samples : undefined),
-    [selectedWindow],
-  );
-  const samples = useMemo(() => quotaMonitoringSamples(rawSamples ?? []), [rawSamples]);
+  const effectiveSelectedIds = ((): readonly string[] | null =>
+    selectedIds ?? (sourceEnvironmentId === undefined ? null : [sourceEnvironmentId]))();
+  const rawSamples = (() =>
+    selectedWindow && hasReadings(selectedWindow) ? selectedWindow.samples : undefined)();
+  const samples = (() => quotaMonitoringSamples(rawSamples ?? []))();
   // Graphs and cost panels share the complete saved cycles.
-  const historicalPeriods = useMemo(() => quotaPeriods(rawSamples ?? []), [rawSamples]);
+  const historicalPeriods = (() => quotaPeriods(rawSamples ?? []))();
   // A chosen cycle belongs to the limit it was chosen on.
   const [cycleSelection, setCycleSelection] = useState<{
     readonly key: string;
@@ -221,22 +202,19 @@ export function UsageResetPage() {
   const setSelectedCycle = (cycle: string | null) => setCycleSelection({ key: windowKey, cycle });
   const selectedPeriod =
     historicalPeriods.find((period) => period.id === selectedCycle) ?? historicalPeriods.at(-1);
-  const periods = useMemo(
-    () =>
-      selectedPeriod
-        ? historicalPeriods.slice(
-            Math.max(0, historicalPeriods.indexOf(selectedPeriod) - 1),
-            historicalPeriods.indexOf(selectedPeriod) + 1,
-          )
-        : [],
-    [historicalPeriods, selectedPeriod],
-  );
-  const intervals = useMemo(() => quotaIntervals(periods), [periods]);
-  const paceInterval = useMemo(() => apiPaceInterval(intervals.at(-1)), [intervals]);
-  const costInput = useMemo(() => {
+  const periods = (() =>
+    selectedPeriod
+      ? historicalPeriods.slice(
+          Math.max(0, historicalPeriods.indexOf(selectedPeriod) - 1),
+          historicalPeriods.indexOf(selectedPeriod) + 1,
+        )
+      : [])();
+  const intervals = (() => quotaIntervals(periods))();
+  const paceInterval = (() => apiPaceInterval(intervals.at(-1)))();
+  const costInput = (() => {
     const window = quotaCostWindow(intervals);
     return window ? forProvider(window) : historyInput;
-  }, [historyInput, intervals, forProvider]);
+  })();
   const costs = useUsage(costInput);
 
   // Background refresh: saved readings every minute while visible, then costs
@@ -247,19 +225,16 @@ export function UsageResetPage() {
   const refreshBackgroundCosts = useEffectEvent(async () => {
     if (backgroundCostRefreshActive.current) return;
     backgroundCostRefreshActive.current = true;
-    try {
-      while (pendingBackgroundCostWindow.current) {
-        const input = pendingBackgroundCostWindow.current;
-        pendingBackgroundCostWindow.current = null;
-        try {
-          await costs.refresh(input);
-        } catch {
-          // The next visible reading retries a transiently unavailable environment.
-        }
+    while (pendingBackgroundCostWindow.current) {
+      const input = pendingBackgroundCostWindow.current;
+      pendingBackgroundCostWindow.current = null;
+      try {
+        await costs.refresh(input);
+      } catch {
+        // The next visible reading retries a transiently unavailable environment.
       }
-    } finally {
-      backgroundCostRefreshActive.current = false;
     }
+    backgroundCostRefreshActive.current = false;
   });
   const refreshVisibleMonitor = useEffectEvent(async () => {
     if (
@@ -287,9 +262,8 @@ export function UsageResetPage() {
       }
     } catch {
       // The next visible tick retries a transiently unavailable environment.
-    } finally {
-      backgroundRefreshActive.current = false;
     }
+    backgroundRefreshActive.current = false;
   });
   useEffect(() => {
     const timer = window.setInterval(() => void refreshVisibleMonitor(), 60_000);
@@ -305,63 +279,49 @@ export function UsageResetPage() {
     cycleId: string;
     range: readonly [number, number] | null;
   } | null>(null);
-  const cycleSamples = useMemo(
-    () =>
-      selectedPeriod
-        ? (rawSamples ?? []).filter(
-            (sample) =>
-              sample.observedAt >= selectedPeriod.first.observedAt &&
-              sample.observedAt <= selectedPeriod.last.observedAt,
-          )
-        : [],
-    [selectedPeriod, rawSamples],
-  );
-  const activityIntervals = useMemo(
-    () =>
-      selectedPeriod
-        ? chartActivityIntervals(
-            cycleSamples,
-            chartRange?.cycleId === selectedPeriod.id ? chartRange.range : null,
-          )
-        : [],
-    [selectedPeriod, cycleSamples, chartRange],
-  );
-  const modelActivityIntervals = useMemo(
-    () => (selectedPeriod ? chartActivityIntervals(cycleSamples, null) : []),
-    [selectedPeriod, cycleSamples],
-  );
+  const cycleSamples = (() =>
+    selectedPeriod
+      ? (rawSamples ?? []).filter(
+          (sample) =>
+            sample.observedAt >= selectedPeriod.first.observedAt &&
+            sample.observedAt <= selectedPeriod.last.observedAt,
+        )
+      : [])();
+  const activityIntervals = (() =>
+    selectedPeriod
+      ? chartActivityIntervals(
+          cycleSamples,
+          chartRange?.cycleId === selectedPeriod.id ? chartRange.range : null,
+        )
+      : [])();
+  const modelActivityIntervals = (() =>
+    selectedPeriod ? chartActivityIntervals(cycleSamples, null) : [])();
   // Let sibling reads start once the cycle read settles. A bounded transcript
   // scan may stay partial after its retries; that must not keep them waiting.
   const cycleCostsSettled = intervals.length === 0 || (!costs.isPending && !costs.isPartial);
-  const paceInput = useMemo(
-    () =>
-      cycleCostsSettled && paceInterval
-        ? forProvider(quotaCostWindow([paceInterval])!)
-        : historyInput,
-    [paceInterval, historyInput, cycleCostsSettled, forProvider],
-  );
+  const paceInput = (() =>
+    cycleCostsSettled && paceInterval
+      ? forProvider(quotaCostWindow([paceInterval])!)
+      : historyInput)();
   const paceCosts = useUsage(paceInput);
   const [requestedActivityIntervals, setRequestedActivityIntervals] = useState(activityIntervals);
   useEffect(() => {
     const timer = window.setTimeout(() => setRequestedActivityIntervals(activityIntervals), 300);
     return () => window.clearTimeout(timer);
   }, [activityIntervals]);
-  const activityInput = useMemo(() => {
+  const activityInput = (() => {
     const window = cycleCostsSettled ? quotaCostWindow(requestedActivityIntervals) : null;
     return window ? forProvider(window) : historyInput;
-  }, [requestedActivityIntervals, cycleCostsSettled, historyInput, forProvider]);
+  })();
   const activityCosts = useUsage(activityInput);
-  const modelActivityInput = useMemo(() => {
+  const modelActivityInput = (() => {
     const window = cycleCostsSettled ? quotaCostWindow(modelActivityIntervals) : null;
     return window ? forProvider(window) : historyInput;
-  }, [modelActivityIntervals, cycleCostsSettled, historyInput, forProvider]);
+  })();
   const modelActivityCosts = useUsage(modelActivityInput);
-  const isSelected = useCallback(
-    (environmentId: string) =>
-      effectiveSelectedIds === null || effectiveSelectedIds.includes(environmentId),
-    [effectiveSelectedIds],
-  );
-  const chartActivity = useMemo(() => {
+  const isSelected = (environmentId: string) =>
+    effectiveSelectedIds === null || effectiveSelectedIds.includes(environmentId);
+  const chartActivity = (() => {
     const environments = activityCosts.environments.filter((environment) =>
       isSelected(environment.environmentId),
     );
@@ -369,8 +329,8 @@ export function UsageResetPage() {
       interval,
       models: monitoredModels(interval, environments),
     }));
-  }, [activityIntervals, activityCosts.environments, isSelected]);
-  const modelChartActivity = useMemo(() => {
+  })();
+  const modelChartActivity = (() => {
     const environments = modelActivityCosts.environments.filter((environment) =>
       isSelected(environment.environmentId),
     );
@@ -378,23 +338,20 @@ export function UsageResetPage() {
       interval,
       models: monitoredModels(interval, environments),
     }));
-  }, [modelActivityIntervals, modelActivityCosts.environments, isSelected]);
+  })();
   const historical = periods.at(-2);
-  const paceModels = useMemo(
-    () =>
-      paceInterval
-        ? monitoredModels(
-            paceInterval.id,
-            paceCosts.environments.filter((environment) => isSelected(environment.environmentId)),
-          )
-        : null,
-    [paceInterval, paceCosts.environments, isSelected],
-  );
+  const paceModels = (() =>
+    paceInterval
+      ? monitoredModels(
+          paceInterval.id,
+          paceCosts.environments.filter((environment) => isSelected(environment.environmentId)),
+        )
+      : null)();
   // A new interval changes the cost query key. While that query is warming,
   // retain the history response for environments that have not answered yet;
   // its saved snapshots keep prior-cycle values visible without treating them
   // as current measured cost. A completed cost response always wins.
-  const costEnvironments = useMemo(() => {
+  const costEnvironments = (() => {
     const historyById = new Map(
       history.environments.map((environment) => [environment.environmentId, environment]),
     );
@@ -403,75 +360,65 @@ export function UsageResetPage() {
       return historyById.get(environment.environmentId) ?? environment;
     });
     return current.length > 0 ? current : history.environments;
-  }, [costs.environments, history.environments]);
-  const selected = useMemo(
-    () => costEnvironments.filter((environment) => isSelected(environment.environmentId)),
-    [costEnvironments, isSelected],
-  );
-  const selectedWithSavedCosts = useMemo(
-    () =>
-      selected.map((environment) => {
-        const historyEnvironment = history.environments.find(
-          (candidate) => candidate.environmentId === environment.environmentId,
-        );
-        const snapshots = historyEnvironment?.summary?.quotaCostSnapshots;
-        return snapshots === undefined
-          ? environment
-          : {
-              ...environment,
-              summary: environment.summary
-                ? {
-                    ...environment.summary,
-                    quotaCostSnapshots: [
-                      ...(environment.summary.quotaCostSnapshots ?? []),
-                      ...snapshots,
-                    ],
-                  }
-                : (historyEnvironment?.summary ?? environment.summary),
-            };
-      }),
-    [history.environments, selected],
-  );
+  })();
+  const selected = (() =>
+    costEnvironments.filter((environment) => isSelected(environment.environmentId)))();
+  const selectedWithSavedCosts = (() =>
+    selected.map((environment) => {
+      const historyEnvironment = history.environments.find(
+        (candidate) => candidate.environmentId === environment.environmentId,
+      );
+      const snapshots = historyEnvironment?.summary?.quotaCostSnapshots;
+      return snapshots === undefined
+        ? environment
+        : {
+            ...environment,
+            summary: environment.summary
+              ? {
+                  ...environment.summary,
+                  quotaCostSnapshots: [
+                    ...(environment.summary.quotaCostSnapshots ?? []),
+                    ...snapshots,
+                  ],
+                }
+              : (historyEnvironment?.summary ?? environment.summary),
+          };
+    }))();
   const costScope =
     selected.length === 0 ? "no computers" : selected.map((entry) => entry.label).join(", ");
-  const currentValues = useMemo(
-    () => quotaValueSnapshots(source?.environmentId, historicalPeriods, selectedWithSavedCosts),
-    [source?.environmentId, historicalPeriods, selectedWithSavedCosts],
+  const currentValues = (() =>
+    quotaValueSnapshots(source?.environmentId, historicalPeriods, selectedWithSavedCosts))();
+  const [snapshots, setSnapshots] = useState<ReadonlyMap<string, QuotaValueSnapshot>>(() =>
+    retainQuotaValueSnapshots(new Map(), currentValues),
   );
-  const [snapshots, setSnapshots] = useState<ReadonlyMap<string, QuotaValueSnapshot>>(
-    () => new Map(),
-  );
-  useEffect(() => {
-    setSnapshots((previous) => retainQuotaValueSnapshots(previous, currentValues));
-  }, [currentValues]);
-  const values = useMemo(
-    () =>
-      currentValues.map((current, index) => {
-        const value = quotaValueWithSnapshot(current, snapshots);
-        const previous = index > 0 ? currentValues[index - 1] : undefined;
-        return {
-          period: current.period,
-          value: quotaValueWithHistoricalCalibration(
-            { ...current, value },
-            previous
-              ? { ...previous, value: quotaValueWithSnapshot(previous, snapshots) }
-              : undefined,
-            currentValues.slice(0, index - 1).map((candidate) => ({
-              ...candidate,
-              value: quotaValueWithSnapshot(candidate, snapshots),
-            })),
-          ),
-        };
-      }),
-    [currentValues, snapshots],
-  );
-  const valueByPeriod = useMemo(
-    () => new Map(values.map(({ period, value }) => [period.id, value])),
-    [values],
-  );
+  const calculationKey = JSON.stringify(currentValues.map(({ key, value }) => [key, value]));
+  const [previousCalculationKey, setPreviousCalculationKey] = useState(calculationKey);
+  if (previousCalculationKey !== calculationKey) {
+    setPreviousCalculationKey(calculationKey);
+    setSnapshots(retainQuotaValueSnapshots(snapshots, currentValues));
+  }
+  const values = (() =>
+    currentValues.map((current, index) => {
+      const value = quotaValueWithSnapshot(current, snapshots);
+      const previous = index > 0 ? currentValues[index - 1] : undefined;
+      return {
+        period: current.period,
+        value: quotaValueWithHistoricalCalibration(
+          { ...current, value },
+          previous
+            ? { ...previous, value: quotaValueWithSnapshot(previous, snapshots) }
+            : undefined,
+          currentValues.slice(0, index - 1).map((candidate) => ({
+            ...candidate,
+            value: quotaValueWithSnapshot(candidate, snapshots),
+          })),
+        ),
+      };
+    }))();
+  const valueByPeriod = (() => new Map(values.map(({ period, value }) => [period.id, value])))();
   const last = samples.at(-1);
   const current = values.find(({ period }) => period.id === selectedPeriod?.id);
-  const calibrationPeriod = useMemo(() => {
+  const calibrationPeriod = (() => {
     const calibration = current?.value.historicalCalibration;
     if (!calibration) return historical;
     return historicalPeriods.find(
@@ -479,11 +426,9 @@ export function UsageResetPage() {
         period.first.observedAt === calibration.since &&
         period.last.observedAt === calibration.until,
     );
-  }, [current?.value.historicalCalibration, historical, historicalPeriods]);
-  const calibrationInterval = useMemo(
-    () => (calibrationPeriod ? (quotaIntervals([calibrationPeriod]).at(0) ?? null) : null),
-    [calibrationPeriod],
-  );
+  })();
+  const calibrationInterval = (() =>
+    calibrationPeriod ? (quotaIntervals([calibrationPeriod]).at(0) ?? null) : null)();
   const codexHistory = quotaProvider === "codex" ? source?.summary?.quotaHistory : undefined;
   const trackedManualResetCount = codexHistory?.bankedResetCount;
   const trackedManualResetCheckedAt = codexHistory?.bankedResetCheckedAt;
@@ -499,26 +444,16 @@ export function UsageResetPage() {
   );
   // Public-reset estimates are a Codex view, read only while their tab is open.
   const showPublic = activeTab === "public";
-  const publicIntervals = useMemo(
-    () => publicResetIntervals(publicHistory.announcements),
-    [publicHistory.announcements],
-  );
-  const publicCostInput = useMemo(
-    () =>
-      showPublic && cycleCostsSettled
-        ? (quotaCostWindow(publicIntervals) ?? historyInput)
-        : historyInput,
-    [historyInput, publicIntervals, cycleCostsSettled, showPublic],
-  );
+  const publicIntervals = (() => publicResetIntervals(publicHistory.announcements))();
+  const publicCostInput = (() =>
+    showPublic && cycleCostsSettled
+      ? (quotaCostWindow(publicIntervals) ?? historyInput)
+      : historyInput)();
   const publicCosts = useUsage(publicCostInput);
-  const selectedPublicCosts = useMemo(
-    () => publicCosts.environments.filter((environment) => isSelected(environment.environmentId)),
-    [isSelected, publicCosts.environments],
-  );
-  const publicEstimates = useMemo(
-    () => publicResetCostEstimates(publicHistory.announcements, selectedPublicCosts),
-    [publicHistory.announcements, selectedPublicCosts],
-  );
+  const selectedPublicCosts = (() =>
+    publicCosts.environments.filter((environment) => isSelected(environment.environmentId)))();
+  const publicEstimates = (() =>
+    publicResetCostEstimates(publicHistory.announcements, selectedPublicCosts))();
   const publicCostsReady =
     publicCostInput !== historyInput && !publicCosts.isPending && !publicCosts.isPartial;
   const refreshMonitor = async () => {
@@ -562,13 +497,12 @@ export function UsageResetPage() {
       );
     } catch {
       setRefreshMessage("Refresh did not finish. Check your connection and try again.");
-    } finally {
-      refreshActive.current = false;
-      setRefreshing(false);
     }
+    refreshActive.current = false;
+    setRefreshing(false);
   };
 
-  const priorApiPace = useMemo<PriorApiPaceInput | null>(() => {
+  const priorApiPace = ((): PriorApiPaceInput | null => {
     if (!calibrationPeriod || !calibrationInterval || !current) return null;
     return {
       interval: calibrationInterval,
@@ -579,12 +513,11 @@ export function UsageResetPage() {
         ? { calibrationTargetSince: current.period.first.observedAt }
         : {}),
     };
-  }, [calibrationPeriod, calibrationInterval, selectedWithSavedCosts, current, historical]);
-  const currentModels = useMemo(
-    () =>
-      current ? monitoredPeriodModels(current.period, current.value, selectedWithSavedCosts) : null,
-    [current, selectedWithSavedCosts],
-  );
+  })();
+  const currentModels = (() =>
+    current
+      ? monitoredPeriodModels(current.period, current.value, selectedWithSavedCosts)
+      : null)();
   const models =
     currentModels ??
     (current?.value.historicalCalibration !== undefined ? (priorApiPace?.models ?? null) : null);
@@ -614,7 +547,7 @@ export function UsageResetPage() {
     : null;
 
   return (
-    <SidebarInset className="h-dvh min-h-0 overflow-hidden bg-background text-foreground">
+    <SidebarInset className="h-dvh min-h-0 overflow-hidden">
       <WorkspacePageHeader electron={isElectron}>
         <div className="flex w-full min-w-0 items-center gap-3">
           <Link
@@ -678,7 +611,7 @@ export function UsageResetPage() {
       <ScrollArea className="min-h-0 flex-1">
         <WorkspacePageContainer
           width="expanded"
-          className="max-w-none gap-4 px-3 pt-3 sm:px-5 pb-[calc(env(safe-area-inset-bottom)+3rem)]"
+          className="max-w-none gap-4 px-3 pt-3 sm:px-5 pb-safe-page"
         >
           {refreshMessage || sourceMessage ? (
             <p role="status" aria-live="polite" className="text-xs text-muted-foreground">

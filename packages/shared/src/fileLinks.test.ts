@@ -22,7 +22,14 @@ describe("parseFileUrlHref", () => {
     expect(parseFileUrlHref("file:///c%3A/Users/x/shot.png")?.path).toBe("/c%3A/Users/x/shot.png");
   });
 
-  it.each(["https://example.com/a.ts", "file://%", "/Users/julius/a.ts"])("rejects %s", (href) => {
+  it.each([
+    "https://example.com/a.ts",
+    "file://%",
+    "/Users/julius/a.ts",
+    "C:/repo/a.ts",
+    "d:alert(1)",
+    "javascript:alert(1)",
+  ])("rejects %s", (href) => {
     expect(parseFileUrlHref(href)).toBeNull();
   });
 });

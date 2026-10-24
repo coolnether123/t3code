@@ -177,7 +177,7 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
       return {
         stdout:
           input.args[0] === "--version"
-            ? `t3 v${/versions\/([^/]+)\//.exec(input.command)?.[1] ?? "1.2.3"}\n`
+            ? `t3 v${/versions[/\\]([^/\\]+)[/\\]/.exec(input.command)?.[1] ?? "1.2.3"}\n`
             : input.command === "loginctl" && input.args[0] === "show-user"
               ? `${control.linger}\n`
               : input.args[1] === "is-enabled"
@@ -347,8 +347,11 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
         activeVersion: "1.2.3",
       });
       expect(plan.program).toEqual([runtime.entryPath, "__service-launcher"]);
-      expect(yield* fs.readFileString(plan.unitPath)).toContain(
-        `ExecStart=${runtime.entryPath} __service-launcher`,
+      const unit = yield* fs.readFileString(plan.unitPath);
+      const encodedEntry = /^ExecStart=(.+) __service-launcher$/m.exec(unit)?.[1];
+      expect(encodedEntry).toBeDefined();
+      expect(encodedEntry?.startsWith('"') ? JSON.parse(encodedEntry) : encodedEntry).toBe(
+        runtime.entryPath.replaceAll("%", "%%"),
       );
       expect(yield* service.status).toMatchObject({
         current: true,
@@ -496,7 +499,13 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
         protocol: SERVICE_LAUNCHER_PROTOCOL,
         activeVersion: "1.2.4",
       });
-      expect(yield* fs.readFileString(plan.unitPath)).toContain("versions/1.2.4/t3");
+      const unit = yield* fs.readFileString(plan.unitPath);
+      const encodedEntry = /^ExecStart=(.+) __service-launcher$/m.exec(unit)?.[1];
+      expect(encodedEntry).toBeDefined();
+      expect(encodedEntry?.startsWith('"') ? JSON.parse(encodedEntry) : encodedEntry).toBe(
+        plan.program[0]?.replaceAll("%", "%%"),
+      );
+      expect(plan.program[0]).toContain("1.2.4");
       expect(
         commands.filter(
           (command) => command.startsWith("systemctl ") && !command.includes("show-environment"),

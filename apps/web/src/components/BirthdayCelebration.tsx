@@ -2,14 +2,12 @@ import {
   createContext,
   useContext,
   useEffect,
-  useMemo,
   useState,
   type CSSProperties,
   type ReactNode,
 } from "react";
 import { Link } from "@tanstack/react-router";
 import { usePrimarySettings } from "../hooks/useSettings";
-import "./birthday.css";
 
 const CONFETTI_COLORS = ["#ffaf91", "#f8d477", "#a8dcca", "#d5b7f4"];
 const BIRTHDAY_NOTES: readonly string[] = [
@@ -48,24 +46,25 @@ export function BirthdayCelebration({ children }: { readonly children: ReactNode
   const effects = active && birthday?.tapEffects === true;
   const year = today.getFullYear();
   const notes = birthday?.notes?.length ? birthday.notes : BIRTHDAY_NOTES;
-  const context = useMemo(
-    () => ({ active, year, noteIndex, notes, nextNote: () => setNoteIndex((index) => index + 1) }),
-    [active, year, noteIndex, notes],
-  );
+  const context = (() => ({
+    active,
+    year,
+    noteIndex,
+    notes,
+    nextNote: () => setNoteIndex((index) => index + 1),
+  }))();
 
   useEffect(() => {
-    if (!birthday?.enabled) return;
     const update = () => setNow(Date.now());
     const timer = window.setInterval(update, 30_000);
     document.addEventListener("visibilitychange", update);
     window.addEventListener("focus", update);
-    update();
     return () => {
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", update);
       window.removeEventListener("focus", update);
     };
-  }, [birthday?.enabled, birthday?.month, birthday?.day]);
+  }, []);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -101,7 +100,8 @@ export function BirthdayCelebration({ children }: { readonly children: ReactNode
       if (at - lastBurst < 100) return;
       lastBurst = at;
       const rect = control.getBoundingClientRect();
-      const id = nextId++;
+      const id = nextId;
+      nextId += 1;
       setBursts((previous) => [
         ...previous.slice(-2),
         {
@@ -202,7 +202,10 @@ export function BirthdayGreeting() {
         <svg viewBox="0 0 88 92" aria-hidden="true" className="birthday-cake">
           <title>{cake.name}</title>
           {!wished ? (
-            <path d="M44 4c-7 9-9 13-5 17 3 3 8 2 10-2 2-5-2-10-5-15Z" fill="#f8d477" />
+            <path
+              d="M44 4c-7 9-9 13-5 17 3 3 8 2 10-2 2-5-2-10-5-15Z"
+              fill="var(--color-birthday-flame)"
+            />
           ) : (
             <path
               d="M44 21c-6-5 7-8 1-14"
@@ -213,7 +216,7 @@ export function BirthdayGreeting() {
               opacity=".5"
             />
           )}
-          <rect x="41" y="25" width="6" height="21" rx="2" fill="#a8dcca" />
+          <rect x="41" y="25" width="6" height="21" rx="2" fill="var(--color-birthday-candle)" />
           <path d="M18 56h52v23c0 6-52 6-52 0Z" fill={cake.layer} />
           <ellipse cx="44" cy="56" rx="26" ry="10" fill={cake.icing} />
           <path
@@ -226,7 +229,14 @@ export function BirthdayGreeting() {
             strokeWidth="2"
             strokeLinecap="round"
           />
-          <ellipse cx="44" cy="83" rx="34" ry="4" fill="#a8dcca" opacity=".65" />
+          <ellipse
+            cx="44"
+            cy="83"
+            rx="34"
+            ry="4"
+            fill="var(--color-birthday-candle)"
+            opacity=".65"
+          />
         </svg>
         <span>{wished ? "↻ Run again" : "▶ Make a wish"}</span>
       </button>

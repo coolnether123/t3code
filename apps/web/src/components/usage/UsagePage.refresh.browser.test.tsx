@@ -1,4 +1,4 @@
-import { RegistryContext } from "@effect/atom-react";
+import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import { EnvironmentId, ProviderInstanceId, USAGE_CONTRACT_VERSION } from "@t3tools/contracts";
 import { mergeUsage } from "@t3tools/shared/usageMerge";
 import type { Atom } from "effect/reactivity";
@@ -17,6 +17,7 @@ const state = vi.hoisted(() => ({
 
 vi.mock(import("@tanstack/react-router"), async (original) => ({
   ...(await original()),
+  Link: "a" as never,
   useNavigate: (() => vi.fn()) as never,
   useCanGoBack: () => false,
 }));
@@ -60,15 +61,23 @@ vi.mock(import("../../state/usage"), async (original) => {
   };
   return {
     ...(await original()),
-    useUsage: (() => ({
-      merged: mergeUsage([], USAGE_CONTRACT_VERSION),
-      environments: [environment],
-      selectedEnvironments: [environment],
-      isPending: false,
-      shown: null,
-      isPartial: false,
-      refresh: async () => undefined,
-    })) as never,
+    useUsage: (() => {
+      const presentations = useAtomValue(state.presentations);
+      const environments = [...presentations].map(([environmentId, presentation]) => ({
+        ...environment,
+        environmentId,
+        connection: presentation.connection,
+      }));
+      return {
+        merged: mergeUsage([], USAGE_CONTRACT_VERSION),
+        environments,
+        selectedEnvironments: environments,
+        isPending: false,
+        shown: null,
+        isPartial: false,
+        refresh: async () => undefined,
+      };
+    }) as never,
   };
 });
 

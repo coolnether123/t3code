@@ -169,7 +169,7 @@ const configuredAllowedHosts = (process.env.T3CODE_DEV_ALLOWED_HOSTS ?? "")
   .filter((entry) => entry.length > 0);
 const allowedHosts = [".ts.net", ...configuredAllowedHosts];
 
-export default defineConfig(() => {
+export default defineConfig(({ mode }) => {
   return {
     assetsInclude: ["**/*.wasm"],
     plugins: [
@@ -240,9 +240,11 @@ export default defineConfig(() => {
       // first request. Without this, a cold worktree discovers and transforms
       // modules one import-level at a time while the browser waits — which
       // over a tailnet origin turns into minutes of waterfall.
-      warmup: {
-        clientFiles: ["./src/main.tsx"],
-      },
+      ...(mode === "test"
+        ? {}
+        : {
+            warmup: { clientFiles: ["./src/main.tsx"] },
+          }),
       ...(devProxyTarget
         ? {
             // One entry per shared prefix; the server's dev catch-all 404s the

@@ -4,8 +4,11 @@ import {
   CheckpointRef,
   EnvironmentId,
   MessageId,
+  ProjectId,
+  ProviderInstanceId,
   RunId,
   ThreadId,
+  type OrchestrationV2ProjectedTurnItem,
 } from "@t3tools/contracts";
 import type { LegendListRef } from "@legendapp/list/react";
 import { act, createRef, Profiler, useState, type ComponentProps, type ReactElement } from "react";
@@ -16,6 +19,8 @@ import { userEvent } from "vite-plus/test/browser";
 import "~/index.css";
 
 import { serverEnvironment } from "../../state/server";
+import { environmentThreadDetails } from "../../state/threads";
+import * as DateTime from "effect/DateTime";
 import { PullRequestLinkPreview } from "../pullRequest/PullRequestLinkPreview";
 import { Tooltip, TooltipPopup, TooltipScrollDismissArea, TooltipTrigger } from "../ui/tooltip";
 import { MessagesTimeline, remarkThoughtPreview } from "./MessagesTimeline";
@@ -702,19 +707,97 @@ describe("MessagesTimeline messages", () => {
 
   it("forks from a completed assistant response", async () => {
     const onForkFromRun = vi.fn(async () => {});
-    await renderTimeline(
-      [
+    const threadId = ThreadId.make("thread-1");
+    const runId = RunId.make("run-1");
+    const now = DateTime.makeUnsafe(CREATED_AT);
+    const providerInstanceId = ProviderInstanceId.make("codex");
+    const modelSelection = { instanceId: providerInstanceId, model: "gpt-5.4" };
+    const projectedItem = v2Item("assistant_message", {
+      id: "assistant-item-1",
+      messageId: "assistant-1",
+      text: "Done",
+      streaming: false,
+    }) as OrchestrationV2ProjectedTurnItem;
+    const projection = {
+      thread: {
+        id: threadId,
+        projectId: ProjectId.make("project-1"),
+        title: "Thread",
+        providerInstanceId,
+        modelSelection,
+        runtimeMode: "full-access" as const,
+        interactionMode: "default" as const,
+        branch: null,
+        worktreePath: null,
+        activeProviderThreadId: null,
+        lineage: { rootThreadId: threadId, parentThreadId: null, relationshipToParent: null },
+        forkedFrom: null,
+        createdBy: "user" as const,
+        creationSource: "web" as const,
+        createdAt: now,
+        updatedAt: now,
+        archivedAt: null,
+        settledOverride: null,
+        settledAt: null,
+        lastVisitedAt: null,
+        deletedAt: null,
+      },
+      attempts: [],
+      nodes: [],
+      subagents: [],
+      providerSessions: [],
+      providerThreads: [],
+      providerTurns: [],
+      runtimeRequests: [],
+      messages: [],
+      plans: [],
+      checkpointScopes: [],
+      checkpoints: [],
+      contextHandoffs: [],
+      contextTransfers: [],
+      visibleTurnItems: [],
+      updatedAt: now,
+      turnItems: [projectedItem.item],
+      runs: [
         {
-          ...message("Done", { role: "assistant", runId: RunId.make("run-1") }, "assistant-1"),
-          projectedItem: v2Item("assistant_message", {
-            id: "assistant-item-1",
-            messageId: "assistant-1",
-            text: "Done",
-            streaming: false,
-          }),
-        } as Entry,
+          id: runId,
+          threadId,
+          ordinal: 1,
+          providerInstanceId,
+          modelSelection,
+          providerThreadId: null,
+          userMessageId: MessageId.make("user-1"),
+          rootNodeId: null,
+          activeAttemptId: null,
+          status: "completed" as const,
+          requestedAt: now,
+          startedAt: now,
+          completedAt: now,
+          checkpointId: null,
+          contextHandoffId: null,
+        },
       ],
-      { onForkFromRun },
+    };
+    await renderElement(
+      <RegistryProvider
+        initialValues={[
+          [
+            environmentThreadDetails.threadAtom({ environmentId: ENVIRONMENT_ID, threadId }),
+            { environmentId: ENVIRONMENT_ID, projection },
+          ],
+        ]}
+      >
+        <MessagesTimeline
+          {...baseProps()}
+          onForkFromRun={onForkFromRun}
+          timelineEntries={[
+            {
+              ...message("Done", { role: "assistant", runId }, "assistant-1"),
+              projectedItem,
+            } as Entry,
+          ]}
+        />
+      </RegistryProvider>,
     );
     await click(button("Fork from this response"));
     expect(onForkFromRun).toHaveBeenCalledWith({ sourceThreadId: "thread-1", runId: "run-1" });

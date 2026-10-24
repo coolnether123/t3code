@@ -88,9 +88,7 @@ export function mightCarryUsage(line: string, provider: UsageProviderKind): bool
   return line.includes('"token_count"');
 }
 
-/* -------------------------------------------------------------------------- */
 /* Claude Code                                                                */
-/* -------------------------------------------------------------------------- */
 
 /**
  * Parses one line of a Claude Code transcript.
@@ -157,9 +155,7 @@ export function parseClaudeLine(line: string): UsageRecord | null {
   };
 }
 
-/* -------------------------------------------------------------------------- */
 /* Gemini CLI                                                                 */
-/* -------------------------------------------------------------------------- */
 
 export interface GeminiScanState {
   sessionId: string;
@@ -268,9 +264,7 @@ export function parseAntigravityTokenCache(
   };
 }
 
-/* -------------------------------------------------------------------------- */
 /* OpenCode                                                                   */
-/* -------------------------------------------------------------------------- */
 
 /**
  * Parses one OpenCode assistant message from its SQLite session store.
@@ -335,9 +329,7 @@ export function parseOpenCodeMessageValue(
   };
 }
 
-/* -------------------------------------------------------------------------- */
 /* Codex                                                                      */
-/* -------------------------------------------------------------------------- */
 
 /**
  * Rolling state for a single Codex rollout file.

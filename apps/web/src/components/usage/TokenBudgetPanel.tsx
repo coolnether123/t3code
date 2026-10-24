@@ -181,7 +181,7 @@ export function TokenBudgetPanel({
                 >
                   <th className="py-3 font-medium">
                     <span>{price.label}</span>
-                    <span className="mt-0.5 block text-[11px] font-normal text-muted-foreground">
+                    <span className="mt-0.5 block text-2xs font-normal text-muted-foreground">
                       {price.model}
                     </span>
                   </th>

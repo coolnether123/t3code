@@ -1,4 +1,4 @@
-import { useDeferredValue, useMemo, useState } from "react";
+import { useDeferredValue, useState } from "react";
 import { ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon, SearchIcon } from "lucide-react";
 import type {
   UsageRepeatedInputCatalogItem,
@@ -127,7 +127,7 @@ function Comparison({ data }: { readonly data: UsageRepeatedInputSummary }) {
   const [metric, setMetric] = useState<ComparisonMetric>("tokens");
   const [page, setPage] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
-  const groups = useMemo(() => {
+  const groups = (() => {
     const result = comparisonGroups(data.totals, dimension);
     return dimension === "time"
       ? result
@@ -136,7 +136,7 @@ function Comparison({ data }: { readonly data: UsageRepeatedInputSummary }) {
             (comparisonValue(b, metric) ?? -1) - (comparisonValue(a, metric) ?? -1) ||
             a.label.localeCompare(b.label),
         );
-  }, [data.totals, dimension, metric]);
+  })();
   const currentPage = Math.min(page, Math.max(0, Math.ceil(groups.length / PAGE_SIZE) - 1));
   const visible =
     dimension === "time"
@@ -212,7 +212,7 @@ function Comparison({ data }: { readonly data: UsageRepeatedInputSummary }) {
       ) : (
         <div className="grid min-w-0 gap-5 lg:grid-cols-[minmax(0,1fr)_15rem]">
           <div className="min-w-0 space-y-2">
-            <div className="flex justify-between text-[11px] text-muted-foreground">
+            <div className="flex justify-between text-2xs text-muted-foreground">
               <span>
                 {dimension === "time" ? "Reported periods, oldest first" : "Largest first"}
               </span>
@@ -261,7 +261,7 @@ function Comparison({ data }: { readonly data: UsageRepeatedInputSummary }) {
                     );
                   })}
                 </div>
-                <div className="flex justify-between text-[11px] text-muted-foreground">
+                <div className="flex justify-between text-2xs text-muted-foreground">
                   <span>{groups[0]?.sinceDay}</span>
                   <span>{groups[groups.length - 1]?.untilDay}</span>
                 </div>
@@ -280,7 +280,7 @@ function Comparison({ data }: { readonly data: UsageRepeatedInputSummary }) {
                     ))}
                   </select>
                 </label>
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-2xs text-muted-foreground">
                   Up to 48 groups of reported periods. Gaps have no observation; interval totals are
                   not daily rates. Select a bar for its date range.
                 </p>
@@ -318,7 +318,7 @@ function Comparison({ data }: { readonly data: UsageRepeatedInputSummary }) {
                       <span className="col-start-2 row-start-1 text-right tabular-nums sm:col-auto sm:row-auto">
                         {displayValue(value)}
                         {metric === "value" && group.incomplete && value !== null ? (
-                          <span className="block text-[10px] text-muted-foreground">subtotal</span>
+                          <span className="block text-3xs text-muted-foreground">subtotal</span>
                         ) : null}
                       </span>
                     </button>
@@ -360,7 +360,7 @@ function Comparison({ data }: { readonly data: UsageRepeatedInputSummary }) {
                 </div>
               </dl>
               {active.incomplete ? (
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-2xs text-muted-foreground">
                   Pricing is incomplete for this group.
                 </p>
               ) : null}
@@ -444,7 +444,7 @@ function PayloadRow({
       >
         <span className="min-w-0">
           <span className="block truncate text-sm font-medium">{item.displayName}</span>
-          <span className="block truncate text-[11px] text-muted-foreground">
+          <span className="block truncate text-2xs text-muted-foreground">
             {SOURCE_LABELS[item.sourceKind]} ·{" "}
             {catalogItem
               ? catalogItem.observed
@@ -455,7 +455,7 @@ function PayloadRow({
             <span>{(catalogItem?.fileRevisionHash ?? item.contentHash).slice(0, 12)}</span>
           </span>
           {catalogItem ? (
-            <span className="mt-1 block text-[11px] tabular-nums text-muted-foreground">
+            <span className="mt-1 block text-2xs tabular-nums text-muted-foreground">
               {catalogItem.byteLength === null
                 ? "Unknown file size"
                 : `${integer(catalogItem.byteLength)} bytes`}
@@ -481,7 +481,7 @@ function PayloadRow({
         <span className="text-right text-xs tabular-nums">
           {money(value)}
           {incomplete && value !== null ? (
-            <span className="block text-[10px] text-muted-foreground">subtotal</span>
+            <span className="block text-3xs text-muted-foreground">subtotal</span>
           ) : null}
         </span>
         <ChevronDownIcon
@@ -665,51 +665,45 @@ function Payloads({
   const [observed, setObserved] = useState("all");
   const [sort, setSort] = useState(catalog ? "name" : "tokens");
   const [page, setPage] = useState(0);
-  const indexed = useMemo(
-    () =>
-      items.map((item) => ({
-        item,
-        value: "observed" in item ? item.estimatedApiCostUsd : payloadValue(item),
-        tokens: totalTokens(item.directTokens),
-        search: [
-          item.displayName,
-          item.contentHash,
-          item.fileRevisionHash ?? "",
-          ...item.modelCosts.map((model) => model.model),
-          ...item.breakdowns.map(projectLabel),
-        ]
-          .join("\n")
-          .toLowerCase(),
-      })),
-    [items],
-  );
-  const filtered = useMemo(
-    () =>
-      indexed
-        .filter(
-          ({ item, search: text }) =>
-            (source === "all" || item.sourceKind === source) &&
-            (observed === "all" ||
-              ("observed" in item && item.observed === (observed === "observed"))) &&
-            (confidence === "all" ||
-              item.confidenceCounts[confidence as keyof typeof item.confidenceCounts] > 0) &&
-            (query === "" || text.includes(query)),
-        )
-        .sort((a, b) =>
-          sort === "name"
-            ? a.item.displayName.localeCompare(b.item.displayName) ||
-              a.item.contentHash.localeCompare(b.item.contentHash) ||
-              (a.item.fileRevisionHash ?? "").localeCompare(b.item.fileRevisionHash ?? "")
-            : sort === "recent"
-              ? (b.item.lastObservedAt ?? "").localeCompare(a.item.lastObservedAt ?? "")
-              : sort === "occurrences"
-                ? b.item.occurrences - a.item.occurrences
-                : sort === "value"
-                  ? (b.value ?? -1) - (a.value ?? -1)
-                  : b.tokens - a.tokens,
-        ),
-    [indexed, source, confidence, observed, query, sort],
-  );
+  const indexed = (() =>
+    items.map((item) => ({
+      item,
+      value: "observed" in item ? item.estimatedApiCostUsd : payloadValue(item),
+      tokens: totalTokens(item.directTokens),
+      search: [
+        item.displayName,
+        item.contentHash,
+        item.fileRevisionHash ?? "",
+        ...item.modelCosts.map((model) => model.model),
+        ...item.breakdowns.map(projectLabel),
+      ]
+        .join("\n")
+        .toLowerCase(),
+    })))();
+  const filtered = (() =>
+    indexed
+      .filter(
+        ({ item, search: text }) =>
+          (source === "all" || item.sourceKind === source) &&
+          (observed === "all" ||
+            ("observed" in item && item.observed === (observed === "observed"))) &&
+          (confidence === "all" ||
+            item.confidenceCounts[confidence as keyof typeof item.confidenceCounts] > 0) &&
+          (query === "" || text.includes(query)),
+      )
+      .sort((a, b) =>
+        sort === "name"
+          ? a.item.displayName.localeCompare(b.item.displayName) ||
+            a.item.contentHash.localeCompare(b.item.contentHash) ||
+            (a.item.fileRevisionHash ?? "").localeCompare(b.item.fileRevisionHash ?? "")
+          : sort === "recent"
+            ? (b.item.lastObservedAt ?? "").localeCompare(a.item.lastObservedAt ?? "")
+            : sort === "occurrences"
+              ? b.item.occurrences - a.item.occurrences
+              : sort === "value"
+                ? (b.value ?? -1) - (a.value ?? -1)
+                : b.tokens - a.tokens,
+      ))();
   const currentPage = Math.min(page, Math.max(0, Math.ceil(filtered.length / PAGE_SIZE) - 1));
   const hasFilters =
     search !== "" || source !== "all" || confidence !== "all" || observed !== "all";
@@ -723,7 +717,7 @@ function Payloads({
             {integer(items.length)}
           </span>
         </h2>
-        <span className="text-[11px] text-muted-foreground">
+        <span className="text-2xs text-muted-foreground">
           {catalog
             ? "Includes revisions with no observation"
             : "Select a payload for evidence and session context"}
@@ -833,12 +827,12 @@ function Payloads({
           </Button>
         ) : null}
       </div>
-      <p className="text-[11px] text-muted-foreground">
+      <p className="text-2xs text-muted-foreground">
         Filters apply to complete tracked items. Evidence filters include any matching observation;
         totals and charts keep the full selected window.
       </p>
       <div>
-        <div className="hidden grid-cols-[minmax(0,1fr)_5rem_6rem_6rem_1rem] gap-3 border-b border-border pb-2 text-right text-[11px] text-muted-foreground sm:grid">
+        <div className="hidden grid-cols-[minmax(0,1fr)_5rem_6rem_6rem_1rem] gap-3 border-b border-border pb-2 text-right text-2xs text-muted-foreground sm:grid">
           <span className="text-left">
             {catalog
               ? "Skill / evidence / revision size"
@@ -885,7 +879,7 @@ export function RepeatedInputSection({
 }: {
   readonly data?: RepeatedInputSectionData | null;
 }) {
-  const totals = useMemo(() => {
+  const totals = (() => {
     let tokens = emptyTokens();
     let occurrences = 0;
     const confidence = { reference: 0, likelyRead: 0, confirmedPayload: 0 };
@@ -897,7 +891,7 @@ export function RepeatedInputSection({
       confidence.confirmedPayload += item.confidenceCounts.confirmedPayload;
     }
     return { tokens, occurrences, confidence };
-  }, [data]);
+  })();
   if (data == null) return null;
   const unknown = data.coverageGaps
     .filter((gap) => gap.reason === "unattributed")
@@ -933,7 +927,7 @@ export function RepeatedInputSection({
           </div>
         ))}
       </dl>
-      <p className="text-[11px] leading-relaxed text-muted-foreground">
+      <p className="text-2xs leading-relaxed text-muted-foreground">
         API-equivalent values estimate direct payload input. Unknown models and missing prices stay
         unpriced. These estimates do not measure subscription usage or charges.
         {data.priceStatus === "unpriced" && data.estimatedApiCostUsd !== null
@@ -948,7 +942,7 @@ export function RepeatedInputSection({
         <div className="space-y-2">
           <h3 className="text-xs font-medium">Observation confidence</h3>
           <ConfidenceBreakdown counts={totals.confidence} />
-          <p className="text-[11px] text-muted-foreground">
+          <p className="text-2xs text-muted-foreground">
             A reference alone does not confirm the payload was sent.
           </p>
         </div>

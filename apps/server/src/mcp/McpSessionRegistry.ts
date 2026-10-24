@@ -8,6 +8,7 @@ import {
   type ServerSettings as ServerSettingsContract,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Option from "effect/Option";
 import * as ServerSettings from "../serverSettings.ts";
 import { modelSelectionAllowsFullComputerControl } from "../provider/CodexComputerControl.ts";
@@ -113,7 +114,7 @@ export const resolveMcpCapabilities = (
   providerDriverKind?: ProviderDriverKind,
   providerInstanceId?: ProviderInstanceId,
   desktopBackedCodex = false,
-  platform: NodeJS.Platform = process.platform,
+  platform: NodeJS.Platform = HostProcess.Platform.defaultValue(),
 ): ReadonlySet<McpInvocationContext.McpCapability> =>
   new Set([
     ...(modelSelectionAllowsFullComputerControl(
@@ -201,6 +202,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         settings === undefined
           ? false
           : isDesktopBackedCodexInstance(settings, request.providerInstanceId),
+        yield* HostProcess.Platform,
       );
       const providerSessionId = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
       const rawToken = yield* crypto.randomBytes(32).pipe(Effect.map(tokenFromBytes), Effect.orDie);

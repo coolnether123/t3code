@@ -38,11 +38,26 @@ function layerAcpRegistryProviderAdapterRegistryReplay(
 ) {
   const layerHost = TestProviderHost.layer().pipe(Layer.provide(NodeServices.layer));
 
-  return ProviderAdapterRegistry.layerFromAdaptersEffect(
+  return Layer.unwrap(
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const processExits: Array<Effect.Effect<unknown>> = [];
+      // Bounded session release can finish before its native process exits.
+      // The replay owner drains exit receipts before removing its workspace.
+      yield* Effect.addFinalizer(() =>
+        Effect.forEach(processExits, (exit) => exit, { discard: true }),
+      );
+      const childProcessSpawner = ChildProcessSpawner.make((command) =>
+        spawner
+          .spawn(command)
+          .pipe(
+            Effect.tap((child) =>
+              Effect.sync(() => processExits.push(Effect.exit(child.exitCode))),
+            ),
+          ),
+      );
       const replayGate = options.replayGate;
       const replayDir = yield* fileSystem
         .makeTempDirectory({
@@ -68,7 +83,7 @@ function layerAcpRegistryProviderAdapterRegistryReplay(
         }),
         assertComplete: makeAcpReplayCompletenessAssertion(fileSystem, statusPath, transcript),
       });
-      return [adapter];
+      return ProviderAdapterRegistry.layerFromAdapters([adapter]);
     }),
   ).pipe(
     Layer.provide(

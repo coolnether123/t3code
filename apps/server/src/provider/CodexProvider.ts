@@ -222,23 +222,6 @@ export function mapCodexModelCapabilities(
     : null;
   const defaultServiceTier = catalogDefaultServiceTier ?? DEFAULT_SERVICE_TIER_ID;
   const optionDescriptors: ProviderOptionDescriptor[] = [];
-  const multiAgentVersion = model.multiAgentVersion;
-  const unavailableMultiAgentReason = (requested: "V1" | "V2"): string => {
-    if (multiAgentVersion === undefined) {
-      return "The live Codex model catalog did not advertise a multi-agent version for this model.";
-    }
-    if (multiAgentVersion === null) {
-      return "The live Codex model catalog reported no multi-agent runtime for this model.";
-    }
-    if (multiAgentVersion === "disabled") {
-      return "The live Codex model catalog reports multi-agent support as disabled for this model.";
-    }
-    if (multiAgentVersion !== "v1" && multiAgentVersion !== "v2") {
-      return `The live Codex model catalog advertised unrecognized multi-agent version '${multiAgentVersion}'.`;
-    }
-    return `The live Codex model catalog advertises '${multiAgentVersion}', not ${requested}.`;
-  };
-
   if (reasoningOptions.length > 0) {
     optionDescriptors.push({
       id: "reasoningEffort",
@@ -309,21 +292,6 @@ export function mapCodexModelCapabilities(
 
   return createModelCapabilities({
     optionDescriptors,
-    subagentBackends: {
-      v1: {
-        supported: multiAgentVersion === "v1",
-        ...(multiAgentVersion === "v1" ? {} : { reason: unavailableMultiAgentReason("V1") }),
-      },
-      v2: {
-        supported: multiAgentVersion === "v2",
-        ...(multiAgentVersion === "v2" ? {} : { reason: unavailableMultiAgentReason("V2") }),
-      },
-      "native-v1-control": {
-        supported: false,
-        reason:
-          "The linked-provider control has been retired. Saved threads use the provider default.",
-      },
-    },
   });
 }
 

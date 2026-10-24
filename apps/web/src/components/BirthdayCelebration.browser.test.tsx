@@ -1,4 +1,3 @@
-/** @vitest-environment happy-dom */
 import type { BirthdayCelebrationPreference } from "@t3tools/contracts";
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";

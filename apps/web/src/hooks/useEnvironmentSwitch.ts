@@ -1,7 +1,7 @@
 import { EnvironmentId, ProjectId, ThreadId } from "@t3tools/contracts";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useRouter } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useRef } from "react";
 
 import { sortScopedProjectsForSidebar } from "../components/Sidebar.logic";
 import { DraftId, useComposerDraftStore } from "../composerDraftStore";
@@ -34,12 +34,12 @@ export function useEnvironmentSwitch() {
   const projects = useProjects();
   const threads = useThreadShells();
   const { handleNewThread } = useHandleNewThread();
-  const [pendingValue, setPendingValue] = useState<string | null>(null);
+  const pendingValue = useRef<string | null>(null);
 
   const switchEnvironment = (value: string) => {
     const targetEnvironmentId = value === ALL_ENVIRONMENTS_CHAT_LOCATION_SCOPE ? null : value;
     if (targetEnvironmentId === selectedEnvironmentId) {
-      setPendingValue(null);
+      pendingValue.current = null;
       return;
     }
     const connectedEnvironmentIds = environments.map((environment) => environment.environmentId);
@@ -47,14 +47,14 @@ export function useEnvironmentSwitch() {
       targetEnvironmentId !== null &&
       !connectedEnvironmentIds.some((environmentId) => environmentId === targetEnvironmentId)
     ) {
-      setPendingValue(null);
+      pendingValue.current = null;
       return;
     }
     if (!shellsBootstrapped) {
-      setPendingValue(value);
+      pendingValue.current = value;
       return;
     }
-    setPendingValue(null);
+    pendingValue.current = null;
 
     const scopeKey = environmentChatLocationScopeKey(targetEnvironmentId);
     const uiState = useUiStateStore.getState();
@@ -119,9 +119,9 @@ export function useEnvironmentSwitch() {
   };
 
   useEffect(() => {
-    if (pendingValue === null || !shellsBootstrapped) return;
-    switchEnvironment(pendingValue);
-  });
+    if (pendingValue.current === null || !shellsBootstrapped) return;
+    switchEnvironment(pendingValue.current);
+  }, [shellsBootstrapped, switchEnvironment]);
 
   return switchEnvironment;
 }

@@ -1000,6 +1000,7 @@ function layerClaudeAgentSdkReplay(
  * file each recorded `task_started` names, holding that call's recorded output,
  * under a scenario-owned `CLAUDE_CODE_TMPDIR`.
  */
+const REPLAY_USER_ID = 501;
 const writeReplayTaskOutputFiles = Effect.fn("ClaudeReplay.writeTaskOutputFiles")(function* (
   transcript: ClaudeAgentSdkReplayTranscript,
 ) {
@@ -1024,7 +1025,7 @@ const writeReplayTaskOutputFiles = Effect.fn("ClaudeReplay.writeTaskOutputFiles"
     const stderr = typeof result.stderr === "string" ? result.stderr : "";
     outputByToolUseId.set(toolResult.tool_use_id, `${result.stdout}${stderr}`);
   }
-  const root = claudeTaskOutputRoot({ CLAUDE_CODE_TMPDIR: tmpRoot }, path);
+  const root = claudeTaskOutputRoot({ CLAUDE_CODE_TMPDIR: tmpRoot }, path, REPLAY_USER_ID);
   for (const frame of frames) {
     if (frame.type !== "system" || frame.subtype !== "task_started") continue;
     if (frame.task_type !== "local_bash" || frame.is_backgrounded !== false) continue;
@@ -1071,6 +1072,7 @@ function layerClaudeProviderAdapterRegistryReplay(
     Layer.provide(
       Layer.mergeAll(
         layerClaudeAgentSdkReplay(transcript, options),
+        Layer.succeed(HostProcess.UserId, REPLAY_USER_ID),
         IdAllocator.layer,
         NodeServices.layer,
         layerServerConfig,

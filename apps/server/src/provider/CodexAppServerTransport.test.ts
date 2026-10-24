@@ -2,6 +2,7 @@ import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import { Platform as HostProcessPlatform } from "@t3tools/shared/HostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ChildProcess from "effect/process/ChildProcess";
 import { ChildProcessSpawner } from "effect/process";
 import * as Effect from "effect/Effect";
@@ -84,6 +85,20 @@ describe("CodexAppServerTransport", () => {
       "/Users/christinesmith/Applications/ChatGPT.app/Contents/Resources/codex",
     ]);
   });
+
+  it.effect.each([false, true])(
+    "expands an explicit tilde binary with desktop daemon %s",
+    (useDesktopAppDaemon) =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const home = path.resolve("synthetic-codex-home");
+        const resolved = yield* resolveCodexBinaryPath({
+          binaryPath: "~/bin/codex",
+          useDesktopAppDaemon,
+        }).pipe(Effect.provideService(HostProcess.HomeDirectory, home));
+        expect(resolved).toBe(path.join(home, "bin", "codex"));
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
 
   it.effect("resolves the managed Windows CLI for a desktop-backed provider", () =>
     Effect.gen(function* () {
