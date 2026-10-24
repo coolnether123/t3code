@@ -29,8 +29,16 @@ maintenance.
 The rollback desktop must also support background launch. `open -g` cannot
 prevent an older app from explicitly requesting focus. Before unattended
 maintenance, arrange a rollback that preserves focus; an older desktop build
-that calls `app.focus` needs a different recovery launch. Do not assume the
-candidate's background flag changes the old binary's behavior.
+that calls `app.focus` requires `--headless-rollback`. That option starts the
+restored bundle's server through its own Electron runtime with
+`ELECTRON_RUN_AS_NODE=1`, checks its loopback listener and environment identity,
+and leaves the desktop closed. It also applies if deployment fails after
+stopping the old app but before swapping bundles. Startup output goes to the
+null device because it can contain pairing credentials. An unsuccessful
+headless health check stops its captured child and never opens the old
+desktop. The installer recognizes a recovered headless backend as the owner
+on later deployments. Do not assume the candidate's background flag changes
+the old binary's behavior.
 
 Mac preparation sets `VITE_OTIS_CALL_ENABLED=false`. The call control also
 defaults to off when the variable is absent; a build must explicitly set it to

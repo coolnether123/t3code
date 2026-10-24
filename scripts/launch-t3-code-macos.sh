@@ -11,6 +11,7 @@ BACKUP_ROOT=""; ARTIFACT_DIR=""; EXPECTED_BRANCH="${T3CODE_EXPECTED_BRANCH:-feat
 EXPECTED_COMMIT="${T3CODE_EXPECTED_COMMIT:-}"; SERVER_PORT="${T3CODE_PORT:-3773}"
 ARCH="${T3CODE_DESKTOP_ARCH:-}"; WAIT_SECONDS=120
 DRY_RUN=0; PREPARE_ONLY=0; BUILD_ONLY=0; SKIP_BUILD=0
+HEADLESS_ROLLBACK=0
 RUN_ID=""; RUN_DIR=""; LOG_PATH=/dev/null; STATE_PATH=""; STAGED_APP=""; PREVIOUS_APP=""
 EXPECTED_ENVIRONMENT_ID=""
 VP_PATH=""; declare -a OWNED_PIDS=()
@@ -38,6 +39,7 @@ Usage: launch-t3-code-macos.sh --expected-commit <full-sha> --backup-root <dir> 
   --port <number>           Server loopback port (default: 3773).
   --wait-seconds <15..600>  Health timeout (default: 120).
   --skip-build              Use existing desktop/server bundles.
+  --headless-rollback       Recover the old backend without opening its desktop.
   --help                    Show this help.
 No launchd, Tailscale, service definitions, T3 home, database, attachments, or
 Electron support data are changed by this workflow.
@@ -51,6 +53,7 @@ while [[ "$#" -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift;; --prepare-only) PREPARE_ONLY=1; shift;;
     --build-only) BUILD_ONLY=1; shift;; --skip-build) SKIP_BUILD=1; shift;;
+    --headless-rollback) HEADLESS_ROLLBACK=1; shift;;
     --source-root) SOURCE_ROOT="$(need "$1" "${2:-}")"; shift 2;;
     --expected-branch) EXPECTED_BRANCH="$(need "$1" "${2:-}")"; shift 2;;
     --expected-commit) EXPECTED_COMMIT="$(need "$1" "${2:-}")"; shift 2;;
@@ -165,6 +168,7 @@ roots() {
     row="${row#"${row%%[![:space:]]*}"}"
     pid="${row%% *}"; command="${row#"$pid"}"; command="${command#"${command%%[![:space:]]*}"}"; [[ "$pid" =~ ^[0-9]+$ ]] || continue
     case "$command" in "$exe"|"$exe "*)
+      if [[ "$command" == "$exe $APP_PATH/Contents/Resources/app.asar/apps/server/dist/bin.mjs serve --mode web --base-dir $T3_HOME --host 127.0.0.1 --port $SERVER_PORT --no-browser" ]]; then printf '%s\n' "$pid"; continue; fi
       [[ "$command" == *" --type="* || "$command" == *" --process-type="* || "$command" == *"apps/server/dist"* || "$command" == *"--bootstrap-fd"* ]] || printf '%s\n' "$pid";; esac
   done
 }
@@ -433,15 +437,26 @@ launch_verify() {
     sleep 1
   done; printf 'app did not pass API health within %s seconds; see %s\n' "$WAIT_SECONDS" "$log" >&2; return 1
 }
+launch_previous() {
+  if [[ "$HEADLESS_ROLLBACK" -eq 1 ]]; then
+    local exe; exe="$(validate_app "$APP_PATH")"
+    /usr/bin/python3 "$SOURCE_ROOT/scripts/macos-headless-backend.py" --executable "$exe" \
+      --entry "$APP_PATH/Contents/Resources/app.asar/apps/server/dist/bin.mjs" \
+      --home "$T3_HOME" --port "$SERVER_PORT" --environment-id "$EXPECTED_ENVIRONMENT_ID" \
+      --wait-seconds "$WAIT_SECONDS"
+  else
+    launch_verify
+  fi
+}
 rollback() {
   local exe rt failed; idle_gate; exe="$(bundle_exec "$APP_PATH")"; rt="$(root "$exe")"; if [[ -n "$rt" ]]; then capture_tree "$rt"; check_listeners; stop_tree; fi
-  failed="$RUN_DIR/failed-candidate-$(basename "$APP_PATH")"; [[ ! -e "$failed" ]] || fail "rollback destination exists"; [[ -d "$APP_PATH" ]] && mv "$APP_PATH" "$failed"; [[ -d "$PREVIOUS_APP" ]] || fail "previous app unavailable"; mv "$PREVIOUS_APP" "$APP_PATH"; write_state rolled-back; rm -f "$STATE_PATH"; launch_verify || fail "rollback health verification failed"; printf 'rollback passed; failed candidate retained at %s\n' "$failed"
+  failed="$RUN_DIR/failed-candidate-$(basename "$APP_PATH")"; [[ ! -e "$failed" ]] || fail "rollback destination exists"; [[ -d "$APP_PATH" ]] && mv "$APP_PATH" "$failed"; [[ -d "$PREVIOUS_APP" ]] || fail "previous app unavailable"; mv "$PREVIOUS_APP" "$APP_PATH"; write_state rolled-back; rm -f "$STATE_PATH"; launch_previous || fail "rollback health verification failed"; printf 'rollback passed; failed candidate retained at %s\n' "$failed"
 }
 deploy() {
   [[ -d "$APP_PATH" ]] || fail "installed app missing; refusing deployment"; local old new app_parent app_name
   storage startup "$T3_HOME/userdata" >>"$LOG_PATH" 2>&1 || fail "first-launch database copy would cross the 20 GiB floor"
   old="$(validate_app "$APP_PATH")"; record_environment_identity; space_gate "$T3_HOME"; idle_gate; backup_app; idle_gate
-  trap 'if [[ "$RESTART_OLD_ON_FAILURE" == 1 ]]; then launch_verify >>"$LOG_PATH" 2>&1 || true; fi' EXIT
+  trap 'if [[ "$RESTART_OLD_ON_FAILURE" == 1 ]]; then if ! launch_previous >>"$LOG_PATH" 2>&1; then printf "old backend recovery failed; reconcile %s\n" "$LOG_PATH" >&2; fi; fi' EXIT
   storage startup "$T3_HOME/userdata" >>"$LOG_PATH" 2>&1 || fail "first-launch database copy would cross the 20 GiB floor"
   stop_existing "$old"; RESTART_OLD_ON_FAILURE=1
   storage checkpoint "$T3_HOME/userdata/state.sqlite" >>"$LOG_PATH" 2>&1 || fail "quiescent SQLite checkpoint failed"

@@ -15,6 +15,30 @@ const scriptPath = NodePath.join(
 const source = NodeFS.readFileSync(scriptPath, "utf8");
 
 describe("launch-t3-code-macos", () => {
+  it("recognizes a recovered headless backend without claiming desktop children", () => {
+    const roots = source.match(/roots\(\) \{[\s\S]*?\n\}(?=\nroot\(\))/)?.[0];
+    assert.isString(roots);
+    const app = "/Applications/T3 Code (Alpha).app";
+    const exe = `${app}/Contents/MacOS/T3 Code (Alpha)`;
+    const entry = `${app}/Contents/Resources/app.asar/apps/server/dist/bin.mjs`;
+    const rows = [
+      `100 ${exe}`,
+      `101 ${exe} ${entry} --bootstrap-fd 3`,
+      `102 ${exe} --type=renderer`,
+      `200 ${exe} ${entry} serve --mode web --base-dir /Users/test/.t3 --host 127.0.0.1 --port 3773 --no-browser`,
+      `201 ${exe} ${entry} serve --mode web --base-dir /Users/other/.t3 --host 127.0.0.1 --port 3773 --no-browser`,
+    ];
+    const program = [
+      `APP_PATH='${app}'; T3_HOME=/Users/test/.t3; SERVER_PORT=3773`,
+      `ps() { printf '%s\\n' ${rows.map((row) => `'${row}'`).join(" ")}; }`,
+      roots,
+      `roots '${exe}'`,
+    ].join("\n");
+    const bash = NodeOS.type() === "Windows_NT" ? "C:/Program Files/Git/bin/bash.exe" : "/bin/bash";
+    const result = NodeChildProcess.execFileSync(bash, ["-c", program], { encoding: "utf8" });
+    assert.deepEqual(result.trim().split(/\r?\n/), ["100", "200"]);
+  });
+
   it.each(["preparing", "queued", "starting", "running", "waiting", "completed", "failed"])(
     "checks %s snapshot state even without an active run ID",
     (status) => {
