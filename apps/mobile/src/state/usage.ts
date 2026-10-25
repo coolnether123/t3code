@@ -25,7 +25,7 @@ import {
 import { mergeUsage, type EnvironmentUsage, type MergedUsage } from "@t3tools/shared/usageMerge";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 
 import { appAtomRegistry } from "./atom-registry";
 import { environmentPresentations } from "./presentation";
@@ -189,15 +189,26 @@ export function useUsage(
     return mergeUsage(answered, USAGE_CONTRACT_VERSION);
   }, [environments, providers, selectedEnvironmentIds]);
 
+  const retry = useRef({ windowKey, failures: 0, attempts: 0 });
   const hasDeferredTranscripts = environments.some((environment) =>
-    environment.isConnected && (environment.error !== null || environment.summary?.sources.some((source) => source.status === "partial")),
+    environment.isConnected && (environment.error !== null || environment.summary?.sources.some((source) =>
+      source.status === "partial" && /\bdeferred\b|response budget|complete-line chunks/i.test(source.message ?? ""))),
   );
   useEffect(() => {
+    if (retry.current.windowKey !== windowKey) retry.current = { windowKey, failures: 0, attempts: 0 };
+    const failed = environments.some((environment) => environment.error !== null);
+    if (!failed) retry.current.failures = 0;
+    if (!hasDeferredTranscripts) retry.current.attempts = 0;
+    if (failed && retry.current.failures >= 5) return;
     if (!hasDeferredTranscripts || environments.some((environment) => environment.isPending))
       return;
-    const timer = setTimeout(() => void refresh(), 750);
+    const timer = setTimeout(() => {
+      if (failed) retry.current.failures++;
+      retry.current.attempts++;
+      void refresh();
+    }, Math.min(8_000, 750 * 2 ** Math.min(retry.current.attempts, 4)));
     return () => clearTimeout(timer);
-  }, [environments, hasDeferredTranscripts, refresh]);
+  }, [environments, hasDeferredTranscripts, refresh, windowKey]);
 
   const answeredCount = environments.filter((environment) => environment.summary !== null).length;
   const stillReporting = environments.filter(

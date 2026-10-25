@@ -94,6 +94,47 @@ beforeEach(() => {
 });
 
 describe("incremental scan integration", () => {
+  it.effect("shares one cold scan for concurrent summary and overlapping reset periods", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const readStarted = yield* Deferred.make<void>();
+      const releaseRead = yield* Deferred.make<void>();
+      let reads = 0;
+      const service = yield* make.pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          exists: () => Effect.succeed(true),
+          readFileString: (file, ...args) => file.endsWith("usage-scan-cache.json")
+            ? Effect.gen(function* () {
+                reads++;
+                yield* Deferred.succeed(readStarted, undefined);
+                yield* Deferred.await(releaseRead);
+                return emptyScanCache;
+              })
+            : fs.readFileString(file, ...args),
+        }),
+        Effect.provideService(HttpClient.HttpClient, HttpClient.make(() => Effect.die("Offline fixture"))),
+      );
+      const input = { sinceDay: UsageDay.make("2026-08-29"), untilDay: UsageDay.make("2026-09-02"), timeZone: "UTC", providers: ["codex"] as const };
+      const periods = [
+        { id: "wide", sinceTime: "2026-08-30T00:00:00Z", untilTime: "2026-09-01T00:00:00Z" },
+        { id: "narrow", sinceTime: "2026-08-30T12:00:00Z", untilTime: "2026-08-31T12:00:00Z" },
+      ];
+      const requests = yield* Effect.all([
+        service.readSummary(input),
+        ...periods.map((period) => service.readSummary({ ...input, quotaIntervals: [period] })),
+      ], { concurrency: "unbounded" }).pipe(Effect.forkChild);
+      yield* Deferred.await(readStarted);
+      yield* Deferred.succeed(releaseRead, undefined);
+      const results = yield* Fiber.join(requests);
+      expect(reads).toBe(1);
+      expect(results[0]?.quotaCosts).toBeUndefined();
+      expect(results[1]?.quotaCosts?.every((row) => row.intervalId === "wide")).toBe(true);
+      expect(results[2]?.quotaCosts?.every((row) => row.intervalId === "narrow")).toBe(true);
+      const mainInventories = vi.mocked(listTranscriptFilesBounded).mock.calls.filter(([root]) => /[\\/]sessions$/.test(root) && !/[\\/]codex-home[\\/]/.test(root));
+      expect(mainInventories).toHaveLength(1);
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(testLayer, TestClock.layer()))),
+  );
   it.effect.each([false, true])(
     "bounds stalled settings with quota history %s",
     (includeQuotaHistory) =>

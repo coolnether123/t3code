@@ -15,17 +15,20 @@ export function UsageValueHistory({ history, publicHistory, selectedIds, subscri
   readonly historyInput: UsageSummaryInput;
 }) {
   const selected = (environment: EnvironmentUsageStatus) => selectedIds === null || selectedIds.includes(environment.environmentId);
-  const initial = history.filter(selected).flatMap((entry) => entry.summary?.quotaCostSnapshots ?? []);
+  const selectedHistory = history.filter(selected);
+  const ready = publicHistory.status === "ready" && selectedHistory.length > 0 && selectedHistory.every((entry) => entry.summary !== null);
+  const initial = selectedHistory.flatMap((entry) => entry.summary?.quotaCostSnapshots ?? []);
   const now = history.find((entry) => entry.summary !== null)?.summary?.readAt ?? new Date().toISOString();
   const announcements = publicHistory.announcements.filter((row) => row.resetType === "regular").map((row) => row.announcedAt);
   const sinceTime = `${subscription.startDate}T00:00:00.000Z`;
-  const plan = resetHistoryPlan(initial, sinceTime, now, announcements);
+  const samples = selectedHistory[0]?.summary?.quotaHistory?.samples ?? [];
+  const plan = resetHistoryPlan(initial, sinceTime, now, announcements, samples);
   const missing = plan.flatMap((window) => window.missing).slice(-64);
-  const costs = useUsage(quotaCostWindow(missing) ?? historyInput);
+  const costs = useUsage(ready ? quotaCostWindow(missing) ?? historyInput : historyInput);
   const months = usageMonthIntervals(subscription.startDate, now);
-  const monthly = useUsage(quotaCostWindow(months) ?? historyInput);
+  const monthly = useUsage(ready ? quotaCostWindow(months.slice(-64)) ?? historyInput : historyInput);
   const saved = [...initial, ...costs.environments.filter(selected).flatMap((entry) => entry.summary?.quotaCostSnapshots ?? [])];
-  const windows = resetHistoryPlan(saved, sinceTime, now, announcements);
+  const windows = resetHistoryPlan(saved, sinceTime, now, announcements, samples);
   const paid = subscriptionPayments(subscription.startDate, subscription.monthlyUsd, now);
   const totalPaid = paid.reduce((sum, payment) => sum + payment.paidUsd, 0);
   const totalValue = windows.reduce((sum, window) => sum + window.costUsd, 0);
@@ -36,6 +39,7 @@ export function UsageValueHistory({ history, publicHistory, selectedIds, subscri
     return rows.length > 0 && rows.every((row) => row.complete && row.unpricedRecords === 0)
       ? rows.reduce((sum, row) => sum + row.costUsd, 0) : null;
   };
+  if (!ready) return <p role="status" className="text-sm text-muted-foreground">{publicHistory.status === "unavailable" ? "Reset history is unavailable" : "Still counting"}</p>;
   return <div className="space-y-3">
     <details>
       <summary className="cursor-pointer text-sm tabular-nums">

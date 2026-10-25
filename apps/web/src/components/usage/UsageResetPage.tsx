@@ -606,6 +606,13 @@ export function UsageResetPage() {
               onIncludedChange={setSelectedIds}
               monitoringSince={samples[0]?.observedAt ?? null}
               readingCount={samples.length}
+              subscription={subscription}
+              onSubscriptionChange={(usageSubscription) => {
+                if (settingsEnvironmentId) void updateSettings({
+                  environmentId: settingsEnvironmentId as EnvironmentId,
+                  input: { patch: { usageSubscription } },
+                });
+              }}
             />
             <Button
               className="size-9"

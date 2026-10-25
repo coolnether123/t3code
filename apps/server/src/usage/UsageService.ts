@@ -2256,6 +2256,24 @@ export const make = Effect.gen(function* () {
         providerQuotaHistories: undefined,
         aggregator: undefined,
       };
+      let savedCosts: UsageQuotaCost[] = [];
+      const withSavedCosts = (summary: UsageSummary): UsageSummary => ({
+        ...summary,
+        quotaCosts: input.quotaIntervals === undefined ? undefined : [
+          ...savedCosts,
+          ...(summary.quotaCosts ?? []).filter((cost) => !savedCosts.some((saved) =>
+            saved.intervalId === cost.intervalId && JSON.stringify(saved.fingerprint) === JSON.stringify(cost.fingerprint))),
+        ],
+        quotaCostSnapshots: [
+          ...(summary.quotaCostSnapshots ?? []),
+          ...savedCosts.flatMap((cost) => {
+            const row = quotaCostLedger.find((row) => JSON.stringify(row.fingerprint) === JSON.stringify(cost.fingerprint) &&
+              row.sinceTime === input.quotaIntervals?.find((interval) => interval.id === cost.intervalId)?.sinceTime &&
+              row.untilTime === input.quotaIntervals?.find((interval) => interval.id === cost.intervalId)?.untilTime);
+            return row ? [{ ...row, intervalId: cost.intervalId }] : [];
+          }),
+        ],
+      });
       return yield* Effect.gen(function* () {
         const result = yield* Effect.gen(function* () {
           if (input.sinceDay > input.untilDay) {
@@ -2311,11 +2329,13 @@ export const make = Effect.gen(function* () {
                 row.sinceTime === interval.sinceTime && row.untilTime === interval.untilTime &&
                 (Date.parse(row.resetsAt) <= startedAtMs || quotaCostLedger.some((next) =>
                   JSON.stringify(next.fingerprint) === JSON.stringify(row.fingerprint) &&
+                  !/^(api-pace:|compare:|month:|codex-resets:)/.test(next.intervalId) &&
                   Date.parse(next.sinceTime) >= Date.parse(row.untilTime))),
               );
               return row ? [{ ...row, intervalId: interval.id, complete: true }] : [];
             }),
           );
+          savedCosts = saved;
           if (intervals.length > 0 && saved.length > 0 &&
               saved.length === sources.filter((source) => source.status !== "missing").length * intervals.length) {
             const history = yield* readSummaryUnlocked({ ...input, quotaHistoryOnly: true }, undefined);
@@ -2331,19 +2351,24 @@ export const make = Effect.gen(function* () {
             const cached = summaryCache.get(key, yield* Clock.currentTimeMillis);
             if (cached !== undefined) return cached;
           }
-          const batchKey = usageReadBatchKey(input);
+          const scanInput = intervals.length === 0 ? input : { ...input, quotaIntervals: intervals.filter((interval) =>
+            saved.filter((row) => row.intervalId === interval.id).length !== sources.filter((source) => source.status !== "missing").length),
+          };
+          const batchKey = usageReadBatchKey(scanInput);
           let shared = inFlightSummaries.get(batchKey);
           if (shared?.started) {
             const active = mergeUsageReads(shared.inputs);
-            const covered = active.sinceDay <= input.sinceDay && active.untilDay >= input.untilDay &&
-              (active.providers === undefined || (input.providers ?? [input.quotaProvider ?? "codex"]).every((provider) => active.providers!.includes(provider))) &&
-              (input.quotaIntervals ?? []).every((interval) => active.quotaIntervals?.some((candidate) => JSON.stringify(candidate) === JSON.stringify(interval)));
+            const covered = active.sinceDay <= scanInput.sinceDay && active.untilDay >= scanInput.untilDay &&
+              (!scanInput.includeQuotaHistory || active.includeQuotaHistory === true || active.quotaIntervals !== undefined) &&
+              (scanInput.providers !== undefined || scanInput.quotaIntervals !== undefined || active.providers === undefined) &&
+              (active.providers === undefined || (scanInput.providers ?? [scanInput.quotaProvider ?? "codex"]).every((provider) => active.providers!.includes(provider))) &&
+              (scanInput.quotaIntervals ?? []).every((interval) => active.quotaIntervals?.some((candidate) => JSON.stringify(candidate) === JSON.stringify(interval)));
             if (!covered) shared = undefined;
           }
           if (shared && (input.quotaIntervals ?? []).some((interval) => shared!.inputs.some((other) => other.quotaIntervals?.some((candidate) => candidate.id === interval.id && JSON.stringify(candidate) !== JSON.stringify(interval))))) shared = undefined;
           if (shared === undefined) {
             const batch = {
-              inputs: [input], started: false, progress,
+              inputs: [scanInput], started: false, progress,
               result: Deferred.makeUnsafe<Exit.Exit<UsageSummary, UsageReadError>>(),
             };
             inFlightSummaries.set(batchKey, batch);
@@ -2367,12 +2392,12 @@ export const make = Effect.gen(function* () {
               { startImmediately: true },
             );
           } else {
-            if (!shared.started) shared.inputs.push(input);
+            if (!shared.started) shared.inputs.push(scanInput);
             progress = shared.progress;
           }
           const exit = yield* Deferred.await(shared.result);
           if (Exit.isFailure(exit)) return yield* Effect.failCause(exit.cause);
-          const summary = projectUsageRead(exit.value, input);
+          const summary = withSavedCosts(projectUsageRead(exit.value, input));
           if (
             summary.sources.length > 0 &&
             summary.sources.every((source) => source.status === "missing")
@@ -2388,7 +2413,7 @@ export const make = Effect.gen(function* () {
             detail: "Usage response budget expired before source coverage could be established.",
           });
         }
-        return projectUsageRead(yield* partialSummaryAtDeadline(input, startedAtMs, resolvedDirs, progress), input);
+        return withSavedCosts(projectUsageRead(yield* partialSummaryAtDeadline(input, startedAtMs, resolvedDirs, progress), input));
       });
     },
   );

@@ -1,4 +1,4 @@
-import type { UsageQuotaCostSnapshot, UsageQuotaInterval } from "@t3tools/contracts";
+import type { UsageQuotaCostSnapshot, UsageQuotaInterval, UsageQuotaSample } from "@t3tools/contracts";
 
 const sourceKey = (row: UsageQuotaCostSnapshot) => JSON.stringify([
   row.fingerprint.hostId, row.fingerprint.provider,
@@ -9,8 +9,10 @@ const time = Date.parse;
 /** Keep the longest observation per start, then sum distinct transcript homes. */
 export function cleanResetLedger(rows: readonly UsageQuotaCostSnapshot[]) {
   const byStart = new Map<string, UsageQuotaCostSnapshot>();
+  const observed = rows.filter((row) => row.fingerprint.provider === "codex" && !row.estimatedFromTranscripts && !/^(api-pace:|compare:|month:|codex-resets:)/.test(row.intervalId));
   for (const row of rows) {
     if (row.fingerprint.provider !== "codex" || /^(api-pace:|compare:|month:|codex-resets:)/.test(row.intervalId)) continue;
+    if (row.estimatedFromTranscripts && observed.some((other) => time(other.sinceTime) < time(row.untilTime) && time(other.untilTime) > time(row.sinceTime))) continue;
     const key = `${sourceKey(row)}:${time(row.sinceTime)}`;
     const old = byStart.get(key);
     if (!old || time(row.untilTime) > time(old.untilTime) ||
@@ -44,11 +46,20 @@ export function cleanResetLedger(rows: readonly UsageQuotaCostSnapshot[]) {
 export function resetHistoryPlan(
   rows: readonly UsageQuotaCostSnapshot[], sinceTime: string, now: string,
   publicResets: readonly string[],
+  samples: readonly UsageQuotaSample[] = [],
 ) {
   const observed = cleanResetLedger(rows.filter((row) => !row.estimatedFromTranscripts));
   const start = time(sinceTime);
   const end = time(now);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start >= end) return [];
   const boundaries = new Set([start, ...observed.map((row) => time(row.sinceTime)).filter((t) => t > start && t < end)]);
+  const readings = samples.toSorted((a, b) => time(a.observedAt) - time(b.observedAt));
+  for (const [index, sample] of readings.entries()) {
+    const previous = readings[index - 1];
+    const reset = time(sample.observedAt);
+    if (reset <= start || reset >= end || previous && !(sample.remainingPercent > previous.remainingPercent && sample.resetsAt !== previous.resetsAt)) continue;
+    if (!observed.some((row) => reset >= time(row.sinceTime) && reset <= time(row.untilTime))) boundaries.add(reset);
+  }
   for (const reset of publicResets.map(time)) {
     if (reset <= start || reset >= end) continue;
     // A public announcement can precede the account reset. Observed windows own that boundary.
@@ -57,10 +68,10 @@ export function resetHistoryPlan(
     boundaries.add(reset);
   }
   const starts = [...boundaries].sort((a, b) => a - b);
-  const saved = cleanResetLedger(rows);
   return starts.map((from, index) => {
     const until = starts[index + 1] ?? end;
-    const segments = saved.filter((row) => time(row.sinceTime) >= from && time(row.untilTime) <= until);
+    const segments = cleanResetLedger(rows.filter((row) => time(row.sinceTime) >= from && time(row.untilTime) <= until));
+    const lastReading = readings.findLast((sample) => time(sample.observedAt) >= from && time(sample.observedAt) < until);
     let cursor = from;
     const missing: UsageQuotaInterval[] = [];
     for (const segment of segments) {
@@ -73,8 +84,8 @@ export function resetHistoryPlan(
       sinceTime: new Date(from).toISOString(), untilTime: new Date(until).toISOString(),
       open: index === starts.length - 1,
       costUsd: segments.reduce((sum, row) => sum + row.costUsd, 0),
-      remainingPercent: observed.find((row) => time(row.sinceTime) === from)?.lastRemainingPercent ?? null,
-      estimatedFromTranscripts: !observed.some((row) => time(row.sinceTime) === from),
+      remainingPercent: lastReading?.remainingPercent ?? observed.find((row) => time(row.sinceTime) === from)?.lastRemainingPercent ?? null,
+      estimatedFromTranscripts: lastReading === undefined && !observed.some((row) => time(row.sinceTime) === from),
       sources: segments.flatMap((segment) => segment.sources), missing,
     };
   });

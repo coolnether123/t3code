@@ -85,9 +85,9 @@ export function UsagePublicResets({
               <div className="text-right">
                 <p className="text-sm tabular-nums">
                   {!costsReady
-                    ? "Calculating…"
+                      ? "Still counting"
                     : row.costUsd === null
-                      ? "Estimate unavailable"
+                        ? row.reason === "Still counting" ? "Still counting" : "Estimate unavailable"
                       : formatUsd(row.costUsd)}
                 </p>
                 {costsReady || row.costUsd !== null ? (

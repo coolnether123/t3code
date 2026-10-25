@@ -2,6 +2,18 @@
 
 On mobile, choose **Usage** in the workspace navigation.
 
+## Reset value history
+
+Open **Usage > Limits > Reset history** to compare estimated API value across
+Codex reset windows. Expand a window for its model totals, or expand the paid
+and value line for monthly figures. Windows without saved limit readings use
+transcript estimates. These dollar amounts estimate API value, not subscription
+charges.
+
+In **Monitor settings**, set your plan, monthly price and subscription start
+date. Paid totals count monthly payments from that date. A cold transcript scan
+shows **Still counting** and refreshes as more history becomes available.
+
 Prompt and word reports can come from Otis analytics. If Otis is unavailable,
 still indexing or stale, the page labels its retained T3 fallback. If reports
 disagree, T3 remains selected. Refresh retries the connection. Missing history

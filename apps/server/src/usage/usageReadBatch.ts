@@ -3,8 +3,18 @@ import type { UsageSummary, UsageSummaryInput } from "@t3tools/contracts";
 /** Only day/model queries can be projected without losing attribution. */
 export function usageReadBatchKey(input: UsageSummaryInput): string {
   if (input.includeRepeatedInput || input.resolution === "hour") return JSON.stringify(input);
-  const { sinceDay, untilDay, quotaIntervals, providers, includeQuotaHistory, refresh, ...shape } = input;
-  return JSON.stringify(shape);
+  return JSON.stringify({
+    timeZone: input.timeZone,
+    resolution: input.resolution ?? "day",
+    quotaProvider: input.quotaProvider ?? "codex",
+    clientContractVersion: input.clientContractVersion ?? 5,
+    sessionIds: input.sessionIds,
+    runIds: input.runIds,
+    turnIds: input.turnIds,
+    groupBy: input.groupBy ?? "model",
+    includeQuotaHistory: false,
+    awaitRefresh: input.awaitRefresh,
+  });
 }
 
 export function mergeUsageReads(inputs: readonly UsageSummaryInput[]): UsageSummaryInput {

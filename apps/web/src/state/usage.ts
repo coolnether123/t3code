@@ -33,6 +33,7 @@ import { serverEnvironment } from "./server";
 
 const DEFERRED_TRANSCRIPT_REFRESH_BASE_MS = 750;
 const DEFERRED_TRANSCRIPT_REFRESH_MAX_MS = 8_000;
+const MAX_FAILED_REFRESHES = 5;
 
 const isDeferredTranscriptSource = (
   source: NonNullable<EnvironmentUsageStatus["summary"]>["sources"][number],
@@ -171,6 +172,7 @@ export function useUsage(
     windowKey,
     signature: "",
     stalledAttempts: 0,
+    failedAttempts: 0,
     timer: null as ReturnType<typeof globalThis.setTimeout> | null,
   });
   const refreshInFlight = useRef<{
@@ -362,12 +364,14 @@ export function useUsage(
       retry.windowKey = windowKey;
       retry.signature = "";
       retry.stalledAttempts = 0;
+      retry.failedAttempts = 0;
       retry.timer = null;
     }
     if (!hasDeferredTranscripts) {
       if (retry.timer !== null) globalThis.clearTimeout(retry.timer);
       retry.signature = "";
       retry.stalledAttempts = 0;
+      retry.failedAttempts = 0;
       retry.timer = null;
       return;
     }
@@ -386,6 +390,9 @@ export function useUsage(
       retry.signature = deferredSignature;
       retry.stalledAttempts = 0;
     }
+    const failed = selectedEnvironments.some((environment) => environment.error !== null);
+    if (!failed) retry.failedAttempts = 0;
+    if (failed && retry.failedAttempts >= MAX_FAILED_REFRESHES) return;
     const waitingOrFailed = selectedEnvironments.some(
       (environment) => environment.isPending,
     );
@@ -405,6 +412,7 @@ export function useUsage(
       retry.timer = null;
       if (windowKeyRef.current !== windowKey) return;
       retry.stalledAttempts += 1;
+      if (failed) retry.failedAttempts += 1;
       void refresh({
         ...(JSON.parse(windowKey) as UsageSummaryInput),
         refresh: false,

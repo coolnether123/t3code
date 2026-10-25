@@ -1,6 +1,7 @@
 import { Settings2Icon } from "lucide-react";
 
 import { Button } from "../ui/button";
+import { Input } from "../ui/input";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 
 interface Computer {
@@ -11,10 +12,6 @@ interface Computer {
 const dateTime = (value: string) =>
   new Date(value).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 
-/**
- * The monitor's only settings, in one place: which computer's saved readings
- * are charted, and whose transcripts price them.
- */
 export function UsageMonitorSettings({
   sources,
   sourceId,
@@ -53,9 +50,9 @@ export function UsageMonitorSettings({
         <div className="space-y-4 p-4">
           <fieldset className="space-y-2 text-sm">
             <legend>Subscription</legend>
-            <label className="flex flex-col gap-1">Plan<input className="min-h-9 rounded-md border border-border bg-background px-2" defaultValue={subscription.plan} onBlur={(event) => { if (event.target.value.trim()) onSubscriptionChange({ ...subscription, plan: event.target.value.trim() }); }} /></label>
-            <label className="flex flex-col gap-1">Monthly price ($)<input className="min-h-9 rounded-md border border-border bg-background px-2" type="number" min="0" step="0.01" defaultValue={subscription.monthlyUsd} onBlur={(event) => { const monthlyUsd = event.target.valueAsNumber; if (Number.isFinite(monthlyUsd) && monthlyUsd >= 0) onSubscriptionChange({ ...subscription, monthlyUsd }); }} /></label>
-            <label className="flex flex-col gap-1">Started<input className="min-h-9 rounded-md border border-border bg-background px-2" type="date" value={subscription.startDate} onChange={(event) => { if (event.target.validity.valid && event.target.value) onSubscriptionChange({ ...subscription, startDate: event.target.value }); }} /></label>
+            <label className="flex flex-col gap-1">Plan<Input key={subscription.plan} defaultValue={subscription.plan} onBlur={(event) => { if (event.target.value.trim()) onSubscriptionChange({ ...subscription, plan: event.target.value.trim() }); }} /></label>
+            <label className="flex flex-col gap-1">Monthly price ($)<Input key={subscription.monthlyUsd} type="number" min="0" max="100000" step="0.01" defaultValue={subscription.monthlyUsd} onBlur={(event) => { const monthlyUsd = event.target.valueAsNumber; if (event.target.validity.valid && Number.isFinite(monthlyUsd) && monthlyUsd >= 0) onSubscriptionChange({ ...subscription, monthlyUsd }); }} /></label>
+            <label className="flex flex-col gap-1">Started<Input type="date" value={subscription.startDate} onChange={(event) => { if (event.target.validity.valid && event.target.value) onSubscriptionChange({ ...subscription, startDate: event.target.value }); }} /></label>
           </fieldset>
           {sources.length > 1 ? (
             <label className="flex flex-col gap-1.5 text-sm">

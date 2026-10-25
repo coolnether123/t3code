@@ -247,7 +247,7 @@ export function publicResetCostEstimates(
     }
     let reason: string | null = null;
     if (environments.length === 0) reason = "No computers are selected.";
-    else if (!complete || environments.some((entry) => entry.summary?.sources.some((source) => source.fingerprint.provider === "codex" && source.status === "partial")) && seen.size === 0)
+    else if (!complete || environments.some((entry) => entry.isPending || entry.error !== null || entry.summary === null || entry.summary?.sources.some((source) => source.fingerprint.provider === "codex" && source.status === "partial")) && seen.size === 0)
       reason = "Still counting";
     else if (seen.size === 0) reason = "No Codex transcript source is available for this period.";
     else if (unpricedRecords > 0)
