@@ -7,6 +7,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeTimers from "node:timers";
 import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
 import { Platform as HostProcessPlatform } from "@t3tools/shared/HostProcess";
 import {
   CallOptions,
@@ -127,6 +128,7 @@ export interface CallRecord extends CallOptions {
 export const sha256 = (value: string | Uint8Array) =>
   NodeCrypto.createHash("sha256").update(value).digest("hex");
 const time = () => Effect.runSync(Clock.currentTimeMillis);
+const nowIso = () => DateTime.formatIso(Effect.runSync(DateTime.now));
 export function callIdentifier(value: string | undefined): string {
   if (!value || !/^[a-zA-Z0-9_-]{1,100}$/.test(value)) throw new Error("Invalid call record ID.");
   return value;
@@ -134,6 +136,38 @@ export function callIdentifier(value: string | undefined): string {
 
 /** One writer per key within the server that owns this T3 home. */
 export class CallStore {
+  private registryReady: Promise<void> | undefined;
+  private registryRecovered = false;
+  private registry = new Map<string, { threadId: string; closed: boolean }>();
+  async openCallSnapshot() {
+    try {
+      await (this.registryReady ??= (async () => {
+        await NodeFSP.mkdir(this.root, { recursive: true });
+        const recovered = new Map<string, { threadId: string; closed: boolean }>();
+        for (const entry of await NodeFSP.readdir(this.root, { withFileTypes: true })) {
+          if (!entry.isDirectory() || entry.name.startsWith("_")) continue;
+          const record = await this.require(entry.name);
+          recovered.set(record.callId, { threadId: record.threadId, closed: record.closed });
+        }
+        // Writes during recovery, including hang-ups, take precedence over disk reads.
+        this.registry = new Map([...recovered, ...this.registry]);
+        for (const [id, call] of this.registry) if (call.closed) this.registry.delete(id);
+        this.registryRecovered = true;
+      })());
+      const openCalls = [...this.registry]
+        .filter(([, call]) => !call.closed)
+        .map(([callId, call]) => ({ callId, threadId: call.threadId }));
+      return {
+        coverage: "complete" as const,
+        count: openCalls.length,
+        openCalls,
+        observedAt: nowIso(),
+      };
+    } catch {
+      this.registryReady = undefined;
+      return { coverage: "unavailable" as const, count: 0, openCalls: [], observedAt: nowIso() };
+    }
+  }
   private recovery: Promise<void> | undefined;
   private expirations = new Map<string, ReturnType<typeof NodeTimers.setTimeout>>();
   private locks = new Map<string, Promise<unknown>>();
@@ -242,6 +276,11 @@ export class CallStore {
         await file.close();
       }
       await NodeFSP.rename(temporary, target);
+      if (name === "call.json") {
+        const record = JSON.parse(Buffer.from(bytes).toString("utf8")) as CallRecord;
+        if (record.closed && this.registryRecovered) this.registry.delete(callId);
+        else this.registry.set(callId, { threadId: record.threadId, closed: record.closed });
+      }
       // Windows does not support opening directories for fsync. File data is flushed
       // before rename; POSIX additionally flushes the directory entry.
       if (this.platform !== "win32") {

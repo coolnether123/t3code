@@ -82,6 +82,23 @@ async function fixture() {
 }
 
 describe("durable calls", () => {
+  it("reports complete open-call coverage, removes hung-up calls, and fails closed on unavailable archives", async () => {
+    const f = await fixture();
+    expect(await f.store.openCallSnapshot()).toMatchObject({
+      coverage: "complete",
+      count: 1,
+      openCalls: [{ callId: "call-1", threadId: options.threadId }],
+    });
+    await f.request({ action: "call.close" });
+    expect(await f.store.openCallSnapshot()).toMatchObject({
+      coverage: "complete",
+      count: 0,
+      openCalls: [],
+    });
+    const unavailable = new CallStore(NodePath.join(f.directory, "not-a-directory"));
+    await NodeFSP.writeFile(unavailable.root, "synthetic");
+    expect(await unavailable.openCallSnapshot()).toMatchObject({ coverage: "unavailable" });
+  });
   it("records one call-ended history entry after an explicit hangup", async () => {
     const f = await fixture();
     await f.request({ action: "call.close" });

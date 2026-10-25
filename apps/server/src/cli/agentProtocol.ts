@@ -415,6 +415,7 @@ export function compactAgentSnapshot(
     environmentId: identity.environmentId,
     runtime: identity.runtime,
     snapshotSequence: detail?.snapshotSequence ?? shell.snapshotSequence,
+    ...(shell.voice === undefined ? {} : { voice: { ...shell.voice, runtime: identity.runtime } }),
     shellSequence: shell.snapshotSequence,
     projects: shell.projects.slice(offset, offset + 25).map((project) => ({
       id: project.id,

@@ -25,6 +25,14 @@
         // These fixture scripts are injected into a browser page by path.
         "fixtures/*/*.js",
         "knip-schemas.ts",
+        // Windows maintenance entry points are loaded by Task Scheduler and PowerShell.
+        "t3-build-job.mjs",
+        "t3-deploy.mjs",
+        "t3-supervisor.mjs",
+        "t3-nightly-sync.mjs",
+        "t3-nightly-check.mjs",
+        "t3-nightly-task-links.mjs",
+        "t3-*.fixture.mjs",
         "mobile-native-client.ts",
         "setup-worktree.ts",
         "sign-macos.ts",

@@ -24,6 +24,7 @@ import * as Option from "effect/Option";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ServerConfig from "../config.ts";
 import { callOperator } from "./callOperator.ts";
+import { callStore } from "./callStore.ts";
 import { withoutCallControl, type OperatorLink } from "./operatorProtocol.ts";
 import * as Auxiliary from "../provider/AuxiliaryProviderSessions.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -478,6 +479,13 @@ const make = Effect.gen(function* () {
     );
   });
   return {
+    openCalls: Effect.fn("VoiceThreadService.openCalls")(function* () {
+      const snapshot = yield* Effect.promise(() => callStore(config.stateDir).openCallSnapshot());
+      const activeSessions = (yield* sessions.listSessions())
+        .filter((session) => !["ready", "closed"].includes(session.status))
+        .map((session) => ({ threadId: session.threadId, status: session.status }));
+      return { ...snapshot, activeSessions };
+    }),
     openOtis,
     dispatch,
     context,

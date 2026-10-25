@@ -1,4 +1,5 @@
 import * as FileSystem from "effect/FileSystem";
+import * as VoiceThreadService from "../speech/VoiceThreadService.ts";
 import * as ServerConfig from "../config.ts";
 import * as ThreadMessageIntake from "./ThreadMessageIntake.ts";
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
@@ -9,6 +10,8 @@ import {
   type OrchestrationProjectShell,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
+import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
@@ -56,6 +59,7 @@ export const layer = HttpApiBuilder.group(
   "orchestration",
   Effect.fnUntraced(function* (handlers) {
     const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
+    const voiceThreads = yield* Effect.serviceOption(VoiceThreadService.VoiceThreadService);
     const dispatchContext = yield* Effect.context<
       | FileSystem.FileSystem
       | ServerConfig.ServerConfig
@@ -96,7 +100,16 @@ export const layer = HttpApiBuilder.group(
         }),
       );
       const projects = yield* enrichProjectShells(base.projects);
-      return { ...base, projects };
+      const voice = Option.isSome(voiceThreads)
+        ? yield* voiceThreads.value.openCalls()
+        : {
+            coverage: "unavailable" as const,
+            count: 0,
+            openCalls: [],
+            activeSessions: [],
+            observedAt: DateTime.formatIso(yield* DateTime.now),
+          };
+      return { ...base, projects, voice };
     });
 
     const loadThreadSnapshot = Effect.fn("http.orchestration.loadThreadSnapshot")(function* (
