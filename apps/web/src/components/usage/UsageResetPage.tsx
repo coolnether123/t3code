@@ -757,6 +757,16 @@ export function UsageResetPage() {
               </p>
             </div>
           ) : null}
+          {historyAnswered && quotaProvider === "codex" ? (
+            <UsageValueHistory
+              history={history.environments}
+              publicHistory={publicHistory}
+              selectedIds={effectiveSelectedIds}
+              subscription={subscription}
+              historyInput={historyInput}
+              showWindows={activeTab === "history" || activeTab === "cycles"}
+            />
+          ) : null}
           {historyAnswered && activeTab !== undefined ? (
             <section aria-label="Limit details" className="min-w-0">
               <div
@@ -790,15 +800,7 @@ export function UsageResetPage() {
                 aria-labelledby={`limits-tab-${activeTab}`}
                 className="space-y-5 pt-4"
               >
-                {activeTab === "history" ? (
-                  <UsageValueHistory
-                    history={history.environments}
-                    publicHistory={publicHistory}
-                    selectedIds={effectiveSelectedIds}
-                    subscription={subscription}
-                    historyInput={historyInput}
-                  />
-                ) : activeTab === "public" ? (
+                {activeTab === "history" ? null : activeTab === "public" ? (
                   <UsagePublicResets
                     history={publicHistory}
                     estimates={publicEstimates}
@@ -807,17 +809,19 @@ export function UsageResetPage() {
                   />
                 ) : !source || !rawSamples || !current ? null : activeTab === "cycles" ? (
                   <>
-                    <UsageResetHistory
-                      periods={historicalPeriods}
-                      values={valueByPeriod}
-                      environments={selectedWithSavedCosts}
-                      selectedCycle={selectedCycle}
-                      monitoringSince={samples[0]!.observedAt}
-                      onSelectCycle={(cycleId) => {
-                        setSelectedCycle(cycleId);
-                        chartRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
-                      }}
-                    />
+                    {quotaProvider !== "codex" || publicHistory.status !== "ready" ? (
+                      <UsageResetHistory
+                        periods={historicalPeriods}
+                        values={valueByPeriod}
+                        environments={selectedWithSavedCosts}
+                        selectedCycle={selectedCycle}
+                        monitoringSince={samples[0]!.observedAt}
+                        onSelectCycle={(cycleId) => {
+                          setSelectedCycle(cycleId);
+                          chartRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+                        }}
+                      />
+                    ) : null}
                     <UsageCycleComparison
                       key={`${source.environmentId}:${windowKey}`}
                       period={current.period}
