@@ -51,10 +51,12 @@ $env:GRADLE_USER_HOME = $GradleDirectory
 $env:Path = "$NodeDirectory;$JavaDirectory/bin;$AndroidSdk/platform-tools;$env:Path"
 $env:APP_VARIANT = 'preview'
 $env:T3CODE_MOBILE_UPDATES_ENABLED = '0'
+$env:MOBILE_VERSION_POLICY = 'appVersion'
 $env:EXPO_NO_TELEMETRY = '1'
 $env:EXPO_NO_DOTENV = '1'
 $env:CI = '1'
 $env:CMAKE_BUILD_PARALLEL_LEVEL = '1'
+$env:RAYON_NUM_THREADS = '2'
 
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 Push-Location $mobileDirectory
@@ -134,7 +136,7 @@ if (process.argv.includes('export:embed') && !process.argv.includes('--max-worke
         ) + $gradleArguments)
         Invoke-Checked (Join-Path $androidDirectory 'gradlew.bat') (@(
             ':app:assembleRelease',
-            '-Dorg.gradle.jvmargs=-Xmx2560m -XX:MaxMetaspaceSize=512m -XX:ActiveProcessorCount=2'
+            '-Dorg.gradle.jvmargs=-Xmx1536m -XX:MaxMetaspaceSize=512m -XX:ActiveProcessorCount=2'
         ) + $gradleArguments)
     } finally { Pop-Location }
 
@@ -188,6 +190,7 @@ if (process.argv.includes('export:embed') && !process.argv.includes('--max-worke
         architectures = $Architectures
         variant = 'preview'
         updatesEnabled = $false
+        runtimeVersionPolicy = 'appVersion'
         minifyEnabled = $false
         node = (& $node --version)
         androidSdk = $AndroidSdk
