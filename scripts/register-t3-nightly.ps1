@@ -14,6 +14,8 @@ $configPath = Join-Path $ArtifactRoot 'nightly-config.json'
 $settings = [ordered]@{repository=$Repository;node=$node;artifactRoot=$ArtifactRoot;releaseRoot=$ReleaseRoot;deployConfig=(Join-Path $ReleaseRoot 'deploy-config.json');otisCall='A:/Dev/Projects/Otis/tools/otis-call/otis-call.mjs';taskLinkCheck='A:/Dev/Projects/Otis/tools/change-tracking/check-task-links.mjs';taskId='agenda-task:43f97c65571d4e89baa85b2349753c3d';handoff=(Join-Path $ArtifactRoot 'HANDOFF.md');workerCapabilities=(Join-Path $ArtifactRoot 'manifest.json')}
 $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\conhost.exe" -Argument "--headless `"$node`" `"$control/t3-nightly-sync.mjs`" `"$configPath`"" -WorkingDirectory $Repository
 $trigger = New-ScheduledTaskTrigger -Daily -At '03:30'
+# Omit the offset so Windows follows the local daylight-saving rules.
+$trigger.StartBoundary = (Get-Date).Date.AddHours(3).AddMinutes(30).ToString("yyyy-MM-dd'T'HH:mm:ss")
 $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
 $options = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero)
 $name = 'Otis T3 Nightly Sync'
