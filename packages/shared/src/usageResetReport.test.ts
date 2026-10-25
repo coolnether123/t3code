@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
+import * as DateTime from "effect/DateTime";
 import type { UsageQuotaCostSnapshot } from "@t3tools/contracts";
 import { cleanResetLedger, resetHistoryPlan, subscriptionPayments } from "./usageResetReport.ts";
 
@@ -21,6 +22,37 @@ const row = (
   resetsAt: end,
 });
 describe("reset value history", () => {
+  it.each([
+    ["2026-10-20T06:35:31.371Z", "2026-10-22T10:05:31.352Z", 99],
+    ["2026-10-22T10:05:31.352Z", "2026-10-22T17:10:37.048Z", 50],
+    ["2026-10-23T17:45:30.629Z", "2026-10-25T06:10:31.050Z", 82],
+    ["2026-10-25T06:10:31.050Z", "2026-10-25T12:20:00Z", 44],
+  ])("retains priced usage when an empty home has a later end: %s", (start, end) => {
+    const paid = row(
+      start,
+      DateTime.formatIso(DateTime.makeUnsafe(Date.parse(end) - 300_000)),
+      676.97,
+    );
+    const empty = { ...row(start, end, 0, "/home/empty"), records: 0 };
+    expect(resetHistoryPlan([paid, empty], start, end, [])[0]?.costUsd).toBe(676.97);
+    expect(
+      resetHistoryPlan([paid, { ...empty, fingerprint: paid.fingerprint }], start, end, [])[0]
+        ?.costUsd,
+    ).toBe(676.97);
+  });
+  it.each([
+    ["2026-10-13T05:00:00Z", "2026-10-13T05:06:00Z"],
+    ["2026-10-11T04:00:00Z", "2026-10-11T04:01:00Z"],
+  ])("prefers a sampled reset to its nearby public announcement: %s", (announcement, reset) => {
+    const start = "2026-10-10T00:00:00Z";
+    const samples = [
+      { observedAt: start, remainingPercent: 10, resetsAt: reset },
+      { observedAt: reset, remainingPercent: 100, resetsAt: "2026-10-20T00:00:00Z" },
+    ];
+    const plan = resetHistoryPlan([], start, "2026-10-14T00:00:00Z", [announcement], samples);
+    expect(plan).toHaveLength(2);
+    expect(plan[1]?.sinceTime).toBe(DateTime.formatIso(DateTime.makeUnsafe(reset)));
+  });
   it("does not invent an ending percentage across an unobserved gap", () => {
     const saved = row("2026-09-01T00:00:00Z", "2026-09-06T00:00:00Z", 100);
     const next = row("2026-09-08T00:00:00Z", "2026-09-09T00:00:00Z", 20);
