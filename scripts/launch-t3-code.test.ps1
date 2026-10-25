@@ -10,7 +10,10 @@ $ast = [Management.Automation.Language.Parser]::ParseFile($launcher, [ref]$token
 if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
 # Load the launcher's actual definitions without executing its deployment entry point.
 $entry = @($ast.EndBlock.Statements | Where-Object { $_ -is [Management.Automation.Language.TryStatementAst] })[0]
-. ([ScriptBlock]::Create($ast.Extent.Text.Substring(0, $entry.Extent.StartOffset)))
+$definitions = $ast.Extent.Text.Substring(0, $entry.Extent.StartOffset)
+# A synthetic ScriptBlock has no PSScriptRoot. Resolve the extracted module here.
+$definitions = $definitions.Replace(". (Join-Path `$PSScriptRoot 't3-build-common.ps1')", ". '$($PSScriptRoot.Replace("'", "''"))/t3-build-common.ps1'")
+. ([ScriptBlock]::Create($definitions))
 $fixtureRoot = [IO.Path]::GetFullPath($ArtifactRoot)
 New-Item -ItemType Directory -Path $fixtureRoot | Out-Null
 $source = Join-Path $fixtureRoot 'source'
