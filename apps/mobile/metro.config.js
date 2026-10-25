@@ -7,6 +7,14 @@ const extraThemes = require("./generated-uniwind-theme-names.json");
 
 /** @type {import("expo/metro-config").MetroConfig} */
 const config = getDefaultConfig(__dirname);
+// Expo's embedded manifest starts Metro without the CLI's worker argument.
+if (process.env.T3CODE_MOBILE_BUILD_MAX_WORKERS) {
+  const buildWorkers = Number(process.env.T3CODE_MOBILE_BUILD_MAX_WORKERS);
+  if (!Number.isSafeInteger(buildWorkers) || buildWorkers < 1) {
+    throw new Error("T3CODE_MOBILE_BUILD_MAX_WORKERS must be a positive integer.");
+  }
+  config.maxWorkers = buildWorkers;
+}
 const workspaceRoot = path.resolve(__dirname, "../..");
 const generatedLicenseModuleRoot = path.join(__dirname, ".generated", "third-party-licenses");
 const licenseGeneratorSource = path.join(

@@ -52,6 +52,7 @@ $env:Path = "$NodeDirectory;$JavaDirectory/bin;$AndroidSdk/platform-tools;$env:P
 $env:APP_VARIANT = 'preview'
 $env:T3CODE_MOBILE_UPDATES_ENABLED = '0'
 $env:MOBILE_VERSION_POLICY = 'appVersion'
+$env:T3CODE_MOBILE_BUILD_MAX_WORKERS = '1'
 $env:EXPO_NO_TELEMETRY = '1'
 $env:EXPO_NO_DOTENV = '1'
 $env:CI = '1'
@@ -132,6 +133,7 @@ if (process.argv.includes('export:embed') && !process.argv.includes('--max-worke
         Invoke-Checked (Join-Path $androidDirectory 'gradlew.bat') (@(
             ':app:createBundleReleaseJsAndAssets',
             ':expo-widgets:generateExpoWidgetsBundle', ':expo-widgets:generateExpoWidgetsLayoutRegistry',
+            ':app:createReleaseUpdatesResources',
             '-Dorg.gradle.jvmargs=-Xmx768m -XX:MaxMetaspaceSize=384m -XX:ActiveProcessorCount=2'
         ) + $gradleArguments)
         Invoke-Checked (Join-Path $androidDirectory 'gradlew.bat') (@(
