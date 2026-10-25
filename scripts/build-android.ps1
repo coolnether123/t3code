@@ -50,6 +50,7 @@ $env:T3CODE_MOBILE_UPDATES_ENABLED = '0'
 $env:EXPO_NO_TELEMETRY = '1'
 $env:EXPO_NO_DOTENV = '1'
 $env:CI = '1'
+$env:CMAKE_BUILD_PARALLEL_LEVEL = '1'
 
 New-Item -ItemType Directory -Path $OutputDirectory -Force | Out-Null
 Push-Location $mobileDirectory
@@ -67,6 +68,7 @@ try {
     # Sign the finished APK with the private local key instead of Expo's public debug key.
     $gradleSource = [IO.File]::ReadAllText($appGradle)
     $gradleSource = $gradleSource -replace '(?m)^\s*signingConfig signingConfigs\.debug\s*$', ''
+    $gradleSource = $gradleSource -replace '(?m)^\s*(?://\s*)?extraPackagerArgs = .*$', '    extraPackagerArgs = ["--max-workers", "1"]'
     [IO.File]::WriteAllText($appGradle, $gradleSource, $utf8)
     if ($PrepareOnly) {
         Write-Output 'Android sources prepared. No APK built.'
@@ -76,7 +78,9 @@ try {
     Push-Location $androidDirectory
     try {
         Invoke-Checked (Join-Path $androidDirectory 'gradlew.bat') @(
-            ':app:assembleRelease', '--no-daemon', '--console=plain', '--max-workers=2',
+            ':app:assembleRelease', '--no-daemon', '--console=plain', '--max-workers=1',
+            '-Dorg.gradle.jvmargs=-Xmx1536m -XX:MaxMetaspaceSize=512m',
+            '-Dorg.gradle.parallel=false', '-Pkotlin.compiler.execution.strategy=in-process',
             "-PreactNativeArchitectures=$Architectures", '-Pandroid.builder.sdkDownload=false'
         )
     } finally { Pop-Location }
@@ -127,6 +131,7 @@ try {
         builtAtUtc = [DateTime]::UtcNow.ToString('o')
         apk = $apkPath
         sha256 = (Get-FileHash -LiteralPath $apkPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        sizeBytes = (Get-Item -LiteralPath $apkPath).Length
         architectures = $Architectures
         variant = 'preview'
         updatesEnabled = $false
