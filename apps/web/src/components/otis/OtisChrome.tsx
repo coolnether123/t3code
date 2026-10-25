@@ -6,6 +6,7 @@ import { useSidebar } from "../ui/sidebar";
 import "./otis.css";
 
 export function OtisChrome(props: {
+  canCall?: boolean;
   active: boolean;
   ready: boolean;
   status: string;
@@ -16,6 +17,11 @@ export function OtisChrome(props: {
   mute: (muted: boolean) => void;
   speaker: (enabled: boolean) => void;
 }) {
+  const error = props.error
+    ? /insufficient_scope|EnvironmentScopeRequiredError/.test(props.error)
+      ? "This device can't start calls. Pair it with full access."
+      : "The call could not connect. Please try again."
+    : undefined;
   const router = useRouter();
   const [full, setFull] = useState(false);
   const [muted, setMuted] = useState(false);
@@ -76,36 +82,42 @@ export function OtisChrome(props: {
             Otis
           </span>
         </div>
-        <button
-          className={`pointer-events-auto absolute right-4 top-[58px] grid size-[52px] place-items-center rounded-full border text-otis-button-text disabled:opacity-50 ${showCall ? "border-white/35 bg-white/15" : "border-otis-line bg-otis-chrome"}`}
-          aria-label={showCall ? "Minimize call" : props.active ? "Open active call" : "Call Otis"}
-          disabled={!props.active && !props.ready}
-          onClick={() => {
-            if (showCall) {
-              setFull(false);
-              return;
+        {props.canCall !== false ? (
+          <button
+            className={`pointer-events-auto absolute right-4 top-[58px] grid size-[52px] place-items-center rounded-full border text-otis-button-text disabled:opacity-50 ${showCall ? "border-white/35 bg-white/15" : "border-otis-line bg-otis-chrome"}`}
+            aria-label={
+              showCall ? "Minimize call" : props.active ? "Open active call" : "Call Otis"
             }
-            setFull(true);
-            if (!props.active) {
-              setSeconds(0);
-              setMuted(false);
-              props.mute(false);
-              props.start();
-            }
-          }}
-        >
-          {showCall ? <Minimize2Icon /> : <PhoneIcon />}
-        </button>
+            disabled={!props.active && !props.ready}
+            onClick={() => {
+              if (showCall) {
+                setFull(false);
+                return;
+              }
+              setFull(true);
+              if (!props.active) {
+                setSeconds(0);
+                setMuted(false);
+                props.mute(false);
+                props.start();
+              }
+            }}
+          >
+            {showCall ? <Minimize2Icon /> : <PhoneIcon />}
+          </button>
+        ) : null}
       </header>
       {showCall ? (
         <>
           <div className="absolute top-[210px] w-full text-center text-3xl font-medium tracking-otis-timer text-otis-timer [&_p]:p-3 [&_p]:text-sm [&_p]:tracking-normal">
             {Math.floor(seconds / 60)}:{String(seconds % 60).padStart(2, "0")}
             <p role="status">{props.status}</p>
-            {props.error ? (
+            {error ? (
               <p role="alert">
-                {props.error}
-                <button onClick={props.retry}>Retry call</button>
+                {error}
+                {props.canCall !== false && props.retry ? (
+                  <button onClick={props.retry}>Retry call</button>
+                ) : null}
               </p>
             ) : null}
           </div>
@@ -157,13 +169,15 @@ export function OtisChrome(props: {
               Return to call
             </button>
           ) : null}
-          {props.error ? (
+          {error ? (
             <p
               role="alert"
-              className="pointer-events-auto absolute right-4 bottom-[210px] rounded-full bg-otis-chip px-4.5 py-3 text-otis-chip-text"
+              className="pointer-events-auto absolute inset-x-4 bottom-[210px] wrap-anywhere rounded-2xl bg-otis-chip px-4.5 py-3 text-otis-chip-text"
             >
-              {props.error}
-              <button onClick={props.retry}>Retry call</button>
+              {error}
+              {props.canCall !== false && props.retry ? (
+                <button onClick={props.retry}>Retry call</button>
+              ) : null}
             </p>
           ) : null}
         </>

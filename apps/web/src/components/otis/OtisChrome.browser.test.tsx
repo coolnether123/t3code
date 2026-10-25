@@ -88,3 +88,32 @@ it("keeps a call live when minimized and exposes mute, speaker and end", async (
   expect(end).toHaveBeenCalledOnce();
   await expect.element(screen.getByRole("button", { name: "Call Otis" })).toBeVisible();
 });
+
+it("keeps Otis permission errors readable and hides calls without operate scope", async () => {
+  await page.viewport(390, 844);
+  await using screen = await render(
+    <div style={{ position: "relative", height: 844, width: "100%" }}>
+      <OtisChrome
+        canCall={false}
+        active={false}
+        ready={false}
+        status=""
+        error={
+          '{"_tag":"EnvironmentScopeRequiredError","code":"insufficient_scope","traceId":"private"}'
+        }
+        start={vi.fn()}
+        end={vi.fn()}
+        mute={vi.fn()}
+        speaker={vi.fn()}
+      />
+    </div>,
+  );
+  await expect
+    .element(screen.getByRole("alert"))
+    .toHaveTextContent("This device can't start calls. Pair it with full access.");
+  expect(screen.container.querySelector('[aria-label="Call Otis"]')).toBeNull();
+  expect(screen.container.textContent).not.toContain("traceId");
+  const rect = screen.container.querySelector('[role="alert"]')!.getBoundingClientRect();
+  expect(rect.left).toBeGreaterThanOrEqual(0);
+  expect(rect.right).toBeLessThanOrEqual(390);
+});

@@ -1,7 +1,9 @@
 /* oxlint-disable t3code/no-dom-test-environment -- The mocked call controller gate must run without launching a browser. */
 /** @vitest-environment happy-dom */
 
+// oxlint-disable-next-line t3code/require-disposable-render -- This existing happy-dom controller fixture owns its root in afterEach.
 import { act, createRef } from "react";
+// oxlint-disable-next-line t3code/require-disposable-render -- This existing happy-dom controller fixture owns its root in afterEach.
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import {
@@ -49,6 +51,7 @@ vi.mock("../../voice/browserSpeech", () => ({
   requestSpeech: controller.request,
 }));
 vi.mock("../../voice/callPersistence", () => ({ callPersistence: () => ({}) }));
+vi.mock("../../state/session", () => ({ useEnvironmentScope: () => true }));
 vi.mock("../../state/entities", () => ({ useThreadProjection: () => null }));
 vi.mock("./CallModelSelectors", () => ({
   CallModelSelectors: () => <div>Voice model and background agent</div>,
