@@ -119,13 +119,21 @@ if (process.argv.includes('export:embed') && !process.argv.includes('--max-worke
 
     Push-Location $androidDirectory
     try {
-        Invoke-Checked (Join-Path $androidDirectory 'gradlew.bat') @(
-            ':app:assembleRelease', '--no-daemon', '--console=plain', '--max-workers=1',
-            '-Dorg.gradle.jvmargs=-Xmx1536m -XX:MaxMetaspaceSize=512m',
+        $gradleArguments = @(
+            '--no-daemon', '--console=plain', '--max-workers=1',
             '-Dorg.gradle.parallel=false', '-Pkotlin.compiler.execution.strategy=in-process',
             "-Pandroid.cmakeVersion=$CMakeVersion",
             "-PreactNativeArchitectures=$Architectures", '-Pandroid.builder.sdkDownload=false'
         )
+        # Metro needs headroom that Gradle's compile heap would otherwise retain.
+        Invoke-Checked (Join-Path $androidDirectory 'gradlew.bat') (@(
+            ':app:createBundleReleaseJsAndAssets',
+            '-Dorg.gradle.jvmargs=-Xmx768m -XX:MaxMetaspaceSize=384m'
+        ) + $gradleArguments)
+        Invoke-Checked (Join-Path $androidDirectory 'gradlew.bat') (@(
+            ':app:assembleRelease',
+            '-Dorg.gradle.jvmargs=-Xmx1536m -XX:MaxMetaspaceSize=512m'
+        ) + $gradleArguments)
     } finally { Pop-Location }
 
     $unsignedApk = Join-Path $androidDirectory 'app/build/outputs/apk/release/app-release-unsigned.apk'
