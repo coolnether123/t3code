@@ -98,12 +98,12 @@ function fixture(t, missingClient = false) {
     }
     if (process.argv[2] === 'build') {
       NodeFS.mkdirSync(NodePath.join(cwd,'dist'),{recursive:true});
-      NodeFS.writeFileSync(NodePath.join(cwd,'dist/index.html'),'synthetic client');
+      if (!${missingClient}) NodeFS.writeFileSync(NodePath.join(cwd,'dist/index.html'),'synthetic client');
     }
-    if (process.argv[2] === 'pack' && cwd.endsWith('server')) {
-      NodeFS.mkdirSync(NodePath.join(cwd,'dist/client'),{recursive:true});
+    if (['pack','exec'].includes(process.argv[2]) && cwd.endsWith('server')) {
+      NodeFS.mkdirSync(NodePath.join(cwd,'dist'),{recursive:true});
       NodeFS.writeFileSync(NodePath.join(cwd,'dist/bin.mjs'),'synthetic server');
-      if (!${missingClient}) NodeFS.writeFileSync(NodePath.join(cwd,'dist/client/index.html'),'synthetic served client');
+      if (process.argv[2] === 'exec') NodeFS.cpSync(NodePath.resolve(cwd,'../web/dist'),NodePath.join(cwd,'dist/client'),{recursive:true});
     }
   `,
   );
@@ -164,6 +164,10 @@ NodeTest.test(
     );
     NodeAssert.equal(NodeFS.existsSync(NodePath.join(release, ".env")), false);
     NodeAssert.equal(NodeFS.existsSync(NodePath.join(release, ".repos")), false);
+    NodeAssert.equal(
+      NodeFS.readFileSync(NodePath.join(release, "apps/server/dist/client/index.html"), "utf8"),
+      "synthetic client",
+    );
     NodeAssert.equal(
       NodeFS.existsSync(NodePath.join(release, "apps/mobile/src/features/usage/usageProviders.ts")),
       true,

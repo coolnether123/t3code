@@ -568,7 +568,9 @@ function Invoke-T3PreparedBuild {
             Invoke-ProjectCommand "desktop typecheck" @("run", "--filter", "@t3tools/desktop", "typecheck") $commandLogPath
         }
         Invoke-ProjectCommand "web build" @("build", "--logLevel", "error") $commandLogPath (Join-Path $deployRoot "apps\web")
-        Invoke-ProjectCommand "server bundle" @("pack", "--logLevel", "error") $commandLogPath (Join-Path $deployRoot "apps\server")
+        # Fresh releases need the package CLI's served-client staging.
+        $serverBuildArguments = if ($immutableProjection) { @('exec', 'node', 'scripts/cli.ts', 'build') } else { @('pack', '--logLevel', 'error') }
+        Invoke-ProjectCommand "server bundle" $serverBuildArguments $commandLogPath (Join-Path $deployRoot "apps\server")
         Invoke-ProjectCommand "desktop bundle" @("pack", "--logLevel", "error") $commandLogPath (Join-Path $deployRoot "apps\desktop")
         Invoke-ProjectCommand "desktop Electron runtime" @("run", "--filter", "@t3tools/desktop", "ensure:electron") $commandLogPath
     }
