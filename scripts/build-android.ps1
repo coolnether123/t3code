@@ -74,6 +74,7 @@ try {
     $rootGradle = Join-Path $androidDirectory 'build.gradle'
     $rootGradleSource = [IO.File]::ReadAllText($rootGradle)
     $rootGradleSource = $rootGradleSource -replace '(?m)^ext\.ndkVersion = .*\r?\n', ''
+    $rootGradleSource = $rootGradleSource -replace '(?ms)^// Local Android build concurrency\r?\n.*?^// End local Android build concurrency\r?\n?', ''
     $rootGradleSource = ($rootGradleSource -split '(?m)^// Local Android build concurrency\r?$', 2)[0].TrimEnd()
     # AGP invokes Ninja directly, so CMAKE_BUILD_PARALLEL_LEVEL alone does not bound compilers.
     $nativePools = @'
@@ -91,9 +92,10 @@ allprojects {
     }
   }
 }
+// End local Android build concurrency
 '@
-    $rootGradleSource = "$rootGradleSource`n`n$nativePools`n"
-    [IO.File]::WriteAllText($rootGradle, "ext.ndkVersion = '$NdkVersion'`n$rootGradleSource", $utf8)
+    # React Native's root plugin evaluates the app, so register its DSL hook first.
+    [IO.File]::WriteAllText($rootGradle, "ext.ndkVersion = '$NdkVersion'`n$nativePools`n$rootGradleSource`n", $utf8)
 
     # Sign the finished APK with the private local key instead of Expo's public debug key.
     $gradleSource = [IO.File]::ReadAllText($appGradle)
