@@ -15,6 +15,7 @@ import type { OrchestratorV2Error } from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as OrchestrationMcp from "./OrchestratorMcpService.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import { isCallLinkedSession } from "../speech/callOperator.ts";
 
 export const unavailable = () =>
   new OrchestratorMcpFailure({
@@ -43,6 +44,7 @@ export interface CallerLimits {
 }
 
 export interface Caller {
+  readonly auxiliary?: boolean;
   readonly scope: McpInvocationContext.McpInvocationScope;
   readonly threads: ThreadManagement.ThreadManagementService["Service"];
   readonly caller: OrchestrationV2ThreadShell | undefined;
@@ -74,9 +76,22 @@ export const loadCaller = Effect.fn("mcp.loadCaller")(function* () {
       },
     } satisfies Caller;
   }
-  const caller = yield* threads
-    .getThreadShell(scope.thread.threadId)
-    .pipe(Effect.mapError(unavailable));
+  let callerThreadId = scope.thread.threadId;
+  const auxiliary = isCallLinkedSession(callerThreadId);
+  if (auxiliary) {
+    const owner = yield* threads.getAuxiliaryOwner({
+      threadId: callerThreadId,
+      mcpCredentialId: scope.thread.providerSessionId,
+      providerInstanceId: scope.thread.providerInstanceId,
+    });
+    if (owner === undefined)
+      return yield* new OrchestratorMcpFailure({
+        code: "parent_not_active",
+        message: "The calling auxiliary session is no longer active.",
+      });
+    callerThreadId = owner;
+  }
+  const caller = yield* threads.getThreadShell(callerThreadId).pipe(Effect.mapError(unavailable));
   if (caller === null || caller.deletedAt !== null) {
     return yield* new OrchestratorMcpFailure({
       code: "thread_not_found",
@@ -84,6 +99,7 @@ export const loadCaller = Effect.fn("mcp.loadCaller")(function* () {
     });
   }
   return {
+    auxiliary,
     scope,
     threads,
     caller,
@@ -108,8 +124,9 @@ export const assertTargetWithinLimits = (
  * token that outlived its session cannot act. An OAuth client has no run; its
  * session and ceiling are its authority.
  */
-export function assertLiveCaller({ caller, scope }: Caller) {
+export function assertLiveCaller({ caller, scope, auxiliary }: Caller) {
   if (caller === undefined) return Effect.void;
+  if (auxiliary && caller.archivedAt === null && caller.deletedAt === null) return Effect.void;
   return OrchestrationMcp.isLiveCallerShell(caller, scope.thread?.providerInstanceId)
     ? Effect.void
     : Effect.fail(

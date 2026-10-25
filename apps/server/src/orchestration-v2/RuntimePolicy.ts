@@ -55,6 +55,9 @@ export const layer: Layer.Layer<RuntimePolicyV2> = Layer.succeed(RuntimePolicyV2
     Effect.succeed({
       runtimeMode: input.thread.runtimeMode,
       interactionMode: input.thread.interactionMode,
+      ...(input.thread.subagentBackend === undefined
+        ? {}
+        : { subagentBackend: input.thread.subagentBackend }),
       cwd: input.thread.worktreePath,
     }),
 });
@@ -114,6 +117,9 @@ export const layerFromProjectStore: Layer.Layer<
         return ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
           runtimeMode: providerRuntimeMode(input.thread.runtimeMode, supportedRuntimeModes),
           interactionMode: input.thread.interactionMode,
+          ...(input.thread.subagentBackend === undefined
+            ? {}
+            : { subagentBackend: input.thread.subagentBackend }),
           cwd,
         });
       }),

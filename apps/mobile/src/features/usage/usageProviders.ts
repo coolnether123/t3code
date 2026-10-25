@@ -1,42 +1,53 @@
 import type { UsageProviderKind } from "@t3tools/contracts";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 
+/**
+ * Series and table order. The chart stacks providers from the bottom in this
+ * order, so it also fixes which band sits on top of the bars.
+ */
 export const PROVIDER_ORDER: readonly UsageProviderKind[] = [
   "codex",
   "claude",
+  "gemini",
+  "opencode",
+  "chatgpt",
+  "aistudio",
   "grok",
   "cursor",
-  "opencode",
   "antigravity",
   "pi",
   "muse",
 ];
 
-/** The usage series a provider driver reports under, or null for drivers without one. */
-export function usageProviderKind(driver: string): UsageProviderKind | null {
-  if (driver === "claudeAgent") return "claude";
-  return PROVIDER_ORDER.find((kind) => kind === driver) ?? null;
-}
-
 export const PROVIDER_LABEL: Record<UsageProviderKind, string> = {
   claude: "Claude Code",
   codex: "Codex",
-  grok: "Grok Build",
-  cursor: "Cursor",
+  gemini: "Gemini",
   opencode: "OpenCode",
+  chatgpt: "ChatGPT archive",
+  aistudio: "AI Studio archive",
+  grok: "Grok",
+  cursor: "Cursor",
   antigravity: "Antigravity",
   pi: "Pi",
   muse: "Muse Code",
 };
 
+/**
+ * Claude's brand orange holds in both themes; Codex is neutral and must flip
+ * with the theme or its bars vanish against the matching background.
+ */
 export function useProviderColors(): Record<UsageProviderKind, string> {
   const { themeAppearance: scheme } = useAppearancePreferences();
   return {
     claude: "#d97757",
     codex: scheme === "dark" ? "#e6e6e6" : "#3c3c43",
-    grok: scheme === "dark" ? "#a1a1aa" : "#52525b",
+    gemini: "#4e8cff",
+    opencode: "#7c9cff",
+    chatgpt: "#10a37f",
+    aistudio: "#f9ab00",
+    grok: scheme === "dark" ? "#e5e5e5" : "#52525b",
     cursor: "#8b8b8b",
-    opencode: "#5b9bbd",
     antigravity: "#8c7bd1",
     pi: "#4d9f8a",
     muse: "#0866ff",
@@ -56,4 +67,10 @@ export function useUsageMixColors() {
     fast: dark ? "#838383" : "#797979",
     ultrafast: dark ? "#e6e6e6" : "#3c3c43",
   };
+}
+
+/** The usage series a provider driver reports under, or null for drivers without one. */
+export function usageProviderKind(driver: string): UsageProviderKind | null {
+  if (driver === "claudeAgent") return "claude";
+  return PROVIDER_ORDER.find((kind) => kind === driver) ?? null;
 }

@@ -1,3 +1,4 @@
+import { Button } from "../ui/button";
 import { useComposerTypingGuard } from "./useComposerTypingGuard";
 import { insertAttachmentReferencesForDraft } from "./composerAttachmentReferences";
 import { DESKTOP_PASTE_AS_TEXT_EVENT } from "../../lib/desktopPasteAsText";
@@ -19,6 +20,7 @@ import type {
   EnvironmentId,
   ModelSelection,
   ProjectId,
+  CallOptions,
   PreviewAnnotationPayload,
   ProviderApprovalDecision,
   ThreadContextRecord,
@@ -195,6 +197,7 @@ import {
   composerSuggestionOptionId,
 } from "./ComposerCommandMenu";
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
+import { ThreadVoiceControls, type ThreadVoiceHandle } from "./ThreadVoiceControls";
 import {
   ComposerAttachButton,
   ComposerAttachmentFileList,
@@ -307,6 +310,7 @@ function consumePasteAsTextShortcut(deadline: { current: number }): boolean {
 const runtimeModeOptions = runtimeModes.map((mode) => ({ mode, ...runtimeModeConfig[mode] }));
 
 export interface ChatComposerHandle {
+  stopVoice: () => void;
   focusAtEnd: () => void;
   focusAt: (cursor: number) => void;
   restoreAfterTimelineReachedEnd: () => void;
@@ -368,6 +372,7 @@ export interface ChatComposerHandle {
 }
 
 export interface ChatComposerProps {
+  ensureVoiceThread(options: CallOptions): Promise<void>;
   composerDraftTarget: ScopedThreadRef | DraftId;
   environmentId: EnvironmentId;
   canOperateThread: boolean;
@@ -1103,17 +1108,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const hasWrappedPrompt = useComposerMultilinePrompt(composerMenuAnchor);
   const hasMultilinePrompt = prompt.includes("\n") || hasWrappedPrompt;
   const [isTasksDrawerOpen, setIsTasksDrawerOpen] = useState(false);
+  const [isVoicePanelOpen, setIsVoicePanelOpen] = useState(false);
+  const [isVoiceActive, setIsVoiceActive] = useState(false);
+  const callSendPending = useRef(false);
   // A pending question stays expanded: its card moves into the banner dock,
-  // so collapsing would leave the surface empty and squashed beneath it.
+  // so collapsing would leave the surface empty and squashed beneath it. An open
+  // call keeps its controls mounted in the expanded footer too.
   const isComposerCollapsedMobile =
     isMobileViewport &&
     !forceExpandedOnMobile &&
     !isComposerFocused &&
     !hasMultilinePrompt &&
+    !isVoicePanelOpen &&
+    !isVoiceActive &&
     pendingUserInputs.length === 0;
 
   const composerEditorRef = useRef<ComposerPromptEditorHandle>(null);
   const pasteAsTextShortcutUntilRef = useRef(0);
+  const voiceRef = useRef<ThreadVoiceHandle>(null);
   const composerFormRef = useRef<HTMLFormElement>(null);
   const composerSurfaceRef = useRef<HTMLDivElement>(null);
   const providerInputRejectedRef = useRef(false);
@@ -2116,8 +2128,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     submissionIntent?: ComposerSubmissionIntent,
   ) => {
     if (
-      noProviderAvailable ||
-      isSendDisabled ||
+      callSendPending.current ||
+      (!isVoiceActive && (noProviderAvailable || isSendDisabled)) ||
       !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)
     ) {
       event?.preventDefault();
@@ -2148,6 +2160,27 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       prompt: promptRef.current,
       submissionTarget: activePendingProgress ? "pending-user-input" : "provider-turn",
       event,
+      onCallSend: isVoiceActive
+        ? (text) => {
+            callSendPending.current = true;
+            void voiceRef.current
+              ?.say(text)
+              .then(() => {
+                if (promptRef.current === text) {
+                  promptRef.current = "";
+                  setComposerDraftPrompt(composerDraftTarget, "");
+                }
+              })
+              .finally(() => {
+                callSendPending.current = false;
+              })
+              .catch((error: unknown) =>
+                setComposerSubmissionError(
+                  error instanceof Error ? error.message : "Could not save the typed call turn.",
+                ),
+              );
+          }
+        : undefined,
       onSend: (sendEvent) => {
         providerInputRejectedRef.current = false;
         onSend(
@@ -2370,7 +2403,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     isExistingThread: routeKind === "server" && activeThreadId !== null,
     isMobileViewport,
     isScrollCollapsed: isComposerScrollCollapsed,
-    hasExpandedChrome: composerHasExpandedChrome,
+    hasExpandedChrome: composerHasExpandedChrome || isVoicePanelOpen || isVoiceActive,
     hasMultilinePrompt,
     timelineOverflows,
   });
@@ -2999,6 +3032,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     return () => window.removeEventListener("dragend", onWindowDragEnd);
   }, [isDragOverComposer]);
   const handleInterruptPrimaryAction = () => {
+    voiceRef.current?.stop();
     void onInterrupt();
   };
   const handleInterruptPrimaryActionStable = useStableCallback(handleInterruptPrimaryAction);
@@ -3076,6 +3110,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   useImperativeHandle(
     composerRef,
     () => ({
+      stopVoice: () => voiceRef.current?.stop(),
       focusAtEnd: () => {
         composerEditorRef.current?.focusAtEnd();
       },
@@ -3647,6 +3682,22 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     (showProviderUnavailable ? "Enable a provider in Settings" : "Ask anything...")}
                 </button>
                 {collapsedComposerImagePreviews}
+                {activeThread ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="shrink-0"
+                    onPointerDown={(event) => event.preventDefault()}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      // Expands the footer, which mounts the call controls with their panel open.
+                      setIsVoicePanelOpen(true);
+                    }}
+                  >
+                    Call Otis
+                  </Button>
+                ) : null}
                 <button
                   type="button"
                   data-chat-composer-transition-actions="true"
@@ -3806,29 +3857,32 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     onCitationDraftSave={saveCitationDraftToPromptStable}
                     onPaste={onComposerPasteStable}
                     placeholder={
-                      isComposerApprovalState
-                        ? activePendingApproval?.supportsFeedback
-                          ? "Send feedback to decline this request"
-                          : "Send a message to decline and redirect the agent"
-                        : activePendingProgress
-                          ? isChoiceOnlyPendingQuestion
-                            ? "Choose an option above"
-                            : "Type your own answer, or leave this blank to use the selected option"
-                          : showPlanFollowUpPrompt && activeProposedPlan
-                            ? "Add feedback to refine the plan, or leave this blank to implement it"
-                            : projectSelectionRequired
-                              ? "Choose a project above to start a thread"
-                              : showProviderUnavailable
-                                ? "Enable a provider in Settings to send a message"
-                                : phase === "disconnected"
-                                  ? DISCONNECTED_COMPOSER_PLACEHOLDER
-                                  : "Ask anything, @tag files/folders, $use skills, or / for commands"
+                      isVoiceActive
+                        ? "Type to Otis while you wait"
+                        : isComposerApprovalState
+                          ? activePendingApproval?.supportsFeedback
+                            ? "Send feedback to decline this request"
+                            : "Send a message to decline and redirect the agent"
+                          : activePendingProgress
+                            ? isChoiceOnlyPendingQuestion
+                              ? "Choose an option above"
+                              : "Type your own answer, or leave this blank to use the selected option"
+                            : showPlanFollowUpPrompt && activeProposedPlan
+                              ? "Add feedback to refine the plan, or leave this blank to implement it"
+                              : projectSelectionRequired
+                                ? "Choose a project above to start a thread"
+                                : showProviderUnavailable
+                                  ? "Enable a provider in Settings to send a message"
+                                  : phase === "disconnected"
+                                    ? DISCONNECTED_COMPOSER_PLACEHOLDER
+                                    : "Ask anything, @tag files/folders, $use skills, or / for commands"
                     }
                     disabled={
-                      isConnecting ||
-                      projectSelectionRequired ||
-                      isChoiceOnlyPendingQuestion ||
-                      activePendingIsResponding
+                      !isVoiceActive &&
+                      (isConnecting ||
+                        projectSelectionRequired ||
+                        isChoiceOnlyPendingQuestion ||
+                        activePendingIsResponding)
                     }
                   />
                 </ComposerContextActionsContext>
@@ -3877,8 +3931,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 className={cn(
                   "flex min-w-0 flex-nowrap items-center justify-between gap-2 overflow-visible px-3 pb-3 sm:px-4 sm:pb-4",
                   pendingUserInputs.length > 0 && "pt-2",
+                  isVoiceActive && "flex-wrap",
                   isComposerFooterCompact ? "gap-1.5" : "gap-2 sm:gap-0",
-                  showMobilePendingAnswerActions && "hidden sm:flex",
+                  showMobilePendingAnswerActions &&
+                    !isVoicePanelOpen &&
+                    !isVoiceActive &&
+                    "hidden sm:flex",
                   isComposerResting &&
                     "absolute right-px z-10 h-12 w-auto gap-0 py-0 sm:gap-0 sm:py-0",
                   isComposerResting &&
@@ -3904,9 +3962,44 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   data-chat-composer-primary-actions-compact={
                     isComposerPrimaryActionsCompact ? "true" : "false"
                   }
-                  className="flex shrink-0 flex-nowrap items-center justify-end gap-2"
+                  className={cn(
+                    "flex shrink-0 flex-nowrap items-center justify-end gap-2",
+                    isVoiceActive && "contents",
+                  )}
                 >
                   {composerAttachButton}
+                  <div className={cn("min-w-0", isVoiceActive && "order-first w-full")}>
+                    {activeThread ? (
+                      <ThreadVoiceControls
+                        key={`${environmentId}:${activeThread.id}`}
+                        ref={voiceRef}
+                        onPanelOpenChange={setIsVoicePanelOpen}
+                        onActiveChange={setIsVoiceActive}
+                        defaultOpen={isVoicePanelOpen}
+                        instanceEntries={providerInstanceEntries}
+                        modelOptionsByInstance={modelOptionsByInstance}
+                        threadId={activeThread.id}
+                        ensureThread={props.ensureVoiceThread}
+                        isDraft={!props.isServerThread}
+                        defaultModelSelection={settings.defaultModelSelection}
+                        environmentId={environmentId}
+                        modelSelection={selectedModelSelection}
+                        running={
+                          phase === "running" ||
+                          isSendBusy ||
+                          activeThread.latestRun?.status === "running"
+                        }
+                        enabled={
+                          !isConnecting &&
+                          !noProviderAvailable &&
+                          !projectSelectionRequired &&
+                          environmentUnavailable === null &&
+                          !composerSendState.hasSendableContent
+                        }
+                        connected={environmentUnavailable === null && !isConnecting}
+                      />
+                    ) : null}
+                  </div>
                   <ComposerFooterPrimaryActions
                     compact={isComposerResting || isComposerPrimaryActionsCompact}
                     canOperateThread={canOperateThread}
@@ -3915,8 +4008,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     }
                     reserveContextWindowMeter={reserveContextWindowMeter}
                     activeThreadModelDisplayName={activeThreadModelDisplayName}
-                    pendingAction={pendingPrimaryAction}
-                    isRunning={phase === "running"}
+                    pendingAction={isVoiceActive ? null : pendingPrimaryAction}
+                    isRunning={!isVoiceActive && phase === "running"}
                     canInterrupt={canInterrupt}
                     followUpBehavior={followUpBehavior}
                     canSteer={!isCompacting}
@@ -3936,19 +4029,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       },
                     )}
                     showPlanFollowUpPrompt={
-                      pendingUserInputs.length === 0 && showPlanFollowUpPrompt
+                      !isVoiceActive && pendingUserInputs.length === 0 && showPlanFollowUpPrompt
                     }
                     promptHasText={prompt.trim().length > 0}
-                    isSendBusy={isSendBusy}
-                    sendDisabledReason={sendDisabledReason}
-                    isConnecting={isConnecting}
+                    isSendBusy={!isVoiceActive && isSendBusy}
+                    sendDisabledReason={isVoiceActive ? null : sendDisabledReason}
+                    isConnecting={!isVoiceActive && isConnecting}
                     isEnvironmentUnavailable={
-                      environmentUnavailable !== null ||
-                      noProviderAvailable ||
-                      projectSelectionRequired
+                      !isVoiceActive &&
+                      (environmentUnavailable !== null ||
+                        noProviderAvailable ||
+                        projectSelectionRequired)
                     }
-                    isPreparingWorktree={isPreparingWorktree}
-                    hasSendableContent={composerSendState.hasSendableContent}
+                    isPreparingWorktree={!isVoiceActive && isPreparingWorktree}
+                    hasSendableContent={
+                      isVoiceActive
+                        ? prompt.trim().length > 0
+                        : composerSendState.hasSendableContent
+                    }
                     canResume={showResumeAction}
                     preserveComposerFocusOnPointerDown={isMobileViewport || isComposerResting}
                     isEditingQueuedMessage={isEditingQueuedMessage}

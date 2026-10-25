@@ -42,6 +42,7 @@ import { resolveThreadRouteTarget } from "../threadRoutes";
 import { legacyProjectCwdPreferenceKey, useUiStateStore } from "../uiStateStore";
 import { useClientSettings } from "./useSettings";
 import { useThreadRouteTarget } from "./useThreadRouteTarget";
+import { useSidebarEnvironmentScope } from "./useSidebarEnvironmentScope";
 
 interface NewThreadWorkspaceOptions {
   branch?: string | null;
@@ -391,6 +392,7 @@ export function useNewThreadHandler() {
 }
 
 export function useHandleNewThread() {
+  const { selectedEnvironmentId } = useSidebarEnvironmentScope();
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const routeTarget = useThreadRouteTarget();
   const routeThreadRef = routeTarget?.kind === "server" ? routeTarget.threadRef : null;
@@ -407,7 +409,10 @@ export function useHandleNewThread() {
   const projects = useProjects();
   const handleNewThread = useNewThreadHandler();
   const [defaultProject] = orderItemsByPreferredIds({
-    items: projects,
+    items:
+      selectedEnvironmentId === null
+        ? projects
+        : projects.filter((project) => project.environmentId === selectedEnvironmentId),
     preferredIds: projectOrder,
     getId: getProjectOrderKey,
     getPreferenceIds: (project) => [
@@ -423,6 +428,7 @@ export function useHandleNewThread() {
     activeDraftThread,
     activeThread,
     defaultProjectRef,
+    selectedEnvironmentId,
     handleNewThread,
     routeDraftId,
     routeThreadRef,

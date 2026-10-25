@@ -106,6 +106,7 @@ function layerExecutorFor(input: {
         open: () => Effect.die("unused open"),
         get: () => Effect.succeed(Option.none()),
         isLive: () => Effect.succeed(false),
+        getAuxiliaryOwner: () => Effect.succeed(undefined),
         close: () => Effect.void,
         closeInstance: () => Effect.void,
         release: () => record("release"),

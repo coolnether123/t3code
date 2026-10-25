@@ -36,9 +36,21 @@ export interface CodexAppServerIncomingRequest {
   readonly params?: unknown;
 }
 
+export interface CodexAppServerTerminationContext {
+  readonly code?: number;
+  readonly pid?: number;
+  readonly cause?: unknown;
+  readonly stderr?: string;
+  readonly stderrTruncated?: boolean;
+  readonly method?: string;
+  readonly requestId?: string;
+}
+
 export interface CodexAppServerPatchedProtocolOptions {
   readonly stdio: Stdio.Stdio;
-  readonly terminationError?: Effect.Effect<CodexError.CodexAppServerError>;
+  readonly terminationError?: (
+    context: CodexAppServerTerminationContext,
+  ) => Effect.Effect<CodexError.CodexAppServerError>;
   readonly logIncoming?: boolean;
   readonly logOutgoing?: boolean;
   // Test override; production uses MAX_INCOMING_MESSAGE_BYTES.
@@ -445,10 +457,22 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
             Effect.matchEffect({
               onFailure: (error) => handleTermination(() => Effect.succeed(error)),
               onSuccess: () =>
-                handleTermination(
-                  () =>
-                    options.terminationError ??
-                    Effect.succeed(new CodexError.CodexAppServerInputStreamEndedError({})),
+                handleTermination(() =>
+                  Effect.gen(function* () {
+                    const requests = yield* Ref.get(pending);
+                    const active = requests.values().next().value as
+                      | CodexAppServerPendingRequest
+                      | undefined;
+                    const requestId = active
+                      ? [...requests.entries()].find(([, value]) => value === active)?.[0]
+                      : undefined;
+                    const context = active
+                      ? { method: active.method, ...(requestId ? { requestId } : {}) }
+                      : {};
+                    return yield* options.terminationError
+                      ? options.terminationError(context)
+                      : Effect.succeed(new CodexError.CodexAppServerInputStreamEndedError({}));
+                  }),
                 ),
             }),
           ),

@@ -156,7 +156,7 @@ function downloadElectronRuntime(electronDir, version) {
     if (hostPlatform === "darwin") {
       runChecked("ditto", ["-x", "-k", zipPath, NodePath.join(electronDir, "dist")]);
     } else {
-      runChecked("python3", [
+      runChecked(hostPlatform === "win32" ? "python" : "python3", [
         "-c",
         "import os, sys, zipfile; os.makedirs(sys.argv[2], exist_ok=True); zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])",
         zipPath,

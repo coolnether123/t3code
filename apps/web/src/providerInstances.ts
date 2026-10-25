@@ -39,6 +39,8 @@ export interface ProviderInstanceEntry {
   readonly continuationGroupKey?: string | undefined;
   readonly enabled: boolean;
   readonly installed: boolean;
+  /** True when this Codex instance uses the environment's desktop app daemon. */
+  readonly useDesktopAppDaemon?: boolean | undefined;
   readonly status: ServerProviderState;
   readonly isDefault: boolean;
   readonly isAvailable: boolean;
@@ -47,6 +49,28 @@ export interface ProviderInstanceEntry {
 }
 
 export type ProviderCatalogAvailability = "loading" | "ready" | "unavailable" | "unconfigured";
+
+/** Readiness for desktop-backed Codex includes the host installation and its login state. */
+export function isDesktopBackedProviderInstanceReady(entry: ProviderInstanceEntry): boolean {
+  return (
+    entry.useDesktopAppDaemon === true &&
+    entry.enabled &&
+    entry.installed &&
+    entry.isAvailable &&
+    entry.status === "ready" &&
+    entry.snapshot.auth.status !== "unauthenticated"
+  );
+}
+
+/** Name the runtime, not just the Codex brand, on existing thread chrome. */
+export function codexThreadRuntimeLabel(entry: ProviderInstanceEntry | null): string | null {
+  if (entry?.driverKind !== "codex") return null;
+  return entry.useDesktopAppDaemon === true ? "Codex desktop" : "Codex CLI";
+}
+
+/** Keep an explicitly selected desktop-backed instance bound while it is unavailable. */
+export const canKeepExplicitProviderInstanceSelection = (entry: ProviderInstanceEntry): boolean =>
+  entry.enabled && (entry.isAvailable || entry.useDesktopAppDaemon === true);
 
 /**
  * Environment config streams are reactive: treating their initial `null` as a
@@ -68,7 +92,15 @@ export function resolveProviderCatalogAvailability(input: {
  * status can remain in the streamed snapshot until reconciliation.
  */
 export function isProviderInstancePickerReady(entry: ProviderInstanceEntry): boolean {
-  return entry.enabled && entry.isAvailable && entry.status === "ready";
+  return (
+    entry.enabled &&
+    entry.isAvailable &&
+    (entry.status === "ready" ||
+      (entry.status === "warning" &&
+        entry.installed &&
+        entry.snapshot.auth.status !== "unauthenticated" &&
+        entry.models.some((model) => !model.isCustom)))
+  );
 }
 
 export function isProviderInstancePickerVisible(entry: ProviderInstanceEntry): boolean {
@@ -147,6 +179,21 @@ export function applyProviderInstanceSettings(
 ): ReadonlyArray<ProviderInstanceEntry> {
   return entries.map((entry) => {
     const enabled = resolveProjectProviderInstanceEnabled(settings, projectId, entry.instanceId);
+    if (entry.driverKind === "codex") {
+      const config = Object.hasOwn(settings.providerInstances, entry.instanceId)
+        ? settings.providerInstances[entry.instanceId]?.config
+        : undefined;
+      const useDesktopAppDaemon =
+        config !== null &&
+        typeof config === "object" &&
+        !Array.isArray(config) &&
+        (config as { readonly useDesktopAppDaemon?: unknown }).useDesktopAppDaemon === true
+          ? true
+          : undefined;
+      return enabled === entry.enabled && useDesktopAppDaemon === entry.useDesktopAppDaemon
+        ? entry
+        : { ...entry, enabled, useDesktopAppDaemon };
+    }
     return applyProviderInstanceBranding(
       enabled === entry.enabled ? entry : { ...entry, enabled },
       settings,
@@ -233,11 +280,12 @@ export function resolveSelectableProviderInstanceEntry(
 ): ProviderInstanceEntry | undefined {
   if (instanceId !== undefined) {
     const requested = entries.find((entry) => entry.instanceId === instanceId);
-    if (requested && isSelectableProviderInstanceEntry(requested)) {
+    if (requested && canKeepExplicitProviderInstanceSelection(requested)) {
       return requested;
     }
   }
   return (
+    entries.find((entry) => entry.status === "ready" && isProviderInstancePickerReady(entry)) ??
     entries.find(isProviderInstancePickerReady) ??
     entries.find((entry) => isSelectableProviderInstanceEntry(entry) && entry.status !== "error")
   );
@@ -246,16 +294,21 @@ export function resolveSelectableProviderInstanceEntry(
 export function resolveSelectableProviderInstance(
   providers: ReadonlyArray<ServerProvider>,
   instanceId: ProviderInstanceId | undefined,
+  settings?: Pick<ServerSettings, "providerInstances" | "projectSettingsOverrides">,
 ): ProviderInstanceId | undefined {
-  const entries = deriveProviderInstanceEntries(providers);
+  const derivedEntries = deriveProviderInstanceEntries(providers);
+  const entries = settings
+    ? applyProviderInstanceSettings(derivedEntries, settings, null)
+    : derivedEntries;
   return resolveSelectableProviderInstanceEntry(entries, instanceId)?.instanceId;
 }
 
 export function resolveDefaultProviderModelSelection(
   providers: ReadonlyArray<ServerProvider>,
   selection: ModelSelection | null | undefined,
+  settings?: Pick<ServerSettings, "providerInstances" | "projectSettingsOverrides">,
 ): ModelSelection | null {
-  const instanceId = resolveSelectableProviderInstance(providers, selection?.instanceId);
+  const instanceId = resolveSelectableProviderInstance(providers, selection?.instanceId, settings);
   if (instanceId === undefined) return null;
   if (selection?.instanceId === instanceId) return selection;
   const model = getDefaultProviderInstanceModel(providers, instanceId);

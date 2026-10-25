@@ -113,6 +113,37 @@ it.effect("sets the selected browser session cookies through the HTTP route", ()
           expect(retiredScopeResponse.status).toBe(400);
           expect(await retiredScopeResponse.json()).toMatchObject({ reason: "invalid_scope" });
 
+          const accessResponse = await environmentA.handler(
+            new Request("http://127.0.0.1/oauth/token", {
+              method: "POST",
+              body: new URLSearchParams({
+                grant_type: AuthTokenExchangeGrantType,
+                subject_token: DEV_TOKEN,
+                subject_token_type: AuthEnvironmentBootstrapTokenType,
+                requested_token_type: AuthAccessTokenType,
+                scope: "orchestration:read",
+              }),
+            }),
+            requestContext,
+          );
+          expect(accessResponse.status).toBe(200);
+          const access = (await accessResponse.json()) as { access_token: string };
+          const ticketResponse = await environmentA.handler(
+            postJson(
+              "/api/auth/websocket-ticket",
+              {},
+              {
+                authorization: `Bearer ${access.access_token}`,
+              },
+            ),
+            requestContext,
+          );
+          expect(ticketResponse.status).toBe(200);
+          expect(await ticketResponse.json()).toMatchObject({
+            ticket: expect.any(String),
+            expiresAt: expect.any(String),
+          });
+
           const devCookies = devResponse.headers.getSetCookie();
           const devCookie = devCookies.find((cookie) => cookie.startsWith("t3_dev_session_"));
           expect(devCookie).toContain("HttpOnly");

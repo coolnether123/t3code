@@ -1,3 +1,13 @@
+import { UsageReportInput, UsageReport } from "./usage.ts";
+import { ResetCheckState } from "./resetCheck.ts";
+import { CommunityCheckState } from "./communityCheck.ts";
+import {
+  PreviewAutomationHost,
+  PreviewAutomationStreamEvent,
+  PreviewAutomationError,
+  PreviewAutomationResponse,
+  PreviewAutomationHostFocus,
+} from "./previewAutomation.ts";
 import {
   OrchestrationV2SearchThreadError,
   OrchestrationV2SearchThreadInput,
@@ -380,6 +390,16 @@ import { VcsError } from "./vcs.ts";
 import { Project, ProjectMutation, ProjectMutationError } from "./project.ts";
 
 export const WS_METHODS = {
+  previewAutomationConnect: "previewAutomation.connect",
+  previewAutomationRespond: "previewAutomation.respond",
+  previewAutomationFocusHost: "previewAutomation.focusHost",
+  serverGetUsageReport: "server.getUsageReport",
+  serverGetResetCheck: "server.getResetCheck",
+  serverStartResetCheck: "server.startResetCheck",
+  serverCancelResetCheck: "server.cancelResetCheck",
+  serverGetCommunityCheck: "server.getCommunityCheck",
+  serverStartCommunityCheck: "server.startCommunityCheck",
+  serverCancelCommunityCheck: "server.cancelCommunityCheck",
   projectsList: "projects.list",
   projectsAdd: "projects.add",
   projectsRemove: "projects.remove",
@@ -1888,7 +1908,82 @@ export class RpcScopeAuthorization extends RpcMiddleware.Service<RpcScopeAuthori
   { error: EnvironmentAuthorizationError },
 ) {}
 
+export const WsServerGetUsageReportRpc = Rpc.make(WS_METHODS.serverGetUsageReport, {
+  payload: UsageReportInput,
+  success: UsageReport,
+  error: Schema.Union([EnvironmentAuthorizationError, UsageReadError]),
+});
+
+export const WsServerGetResetCheckRpc = Rpc.make(WS_METHODS.serverGetResetCheck, {
+  payload: Schema.Struct({}),
+  success: ResetCheckState,
+  error: EnvironmentAuthorizationError,
+});
+
+export const WsServerStartResetCheckRpc = Rpc.make(WS_METHODS.serverStartResetCheck, {
+  payload: Schema.Struct({}),
+  success: ResetCheckState,
+  error: EnvironmentAuthorizationError,
+});
+
+export const WsServerCancelResetCheckRpc = Rpc.make(WS_METHODS.serverCancelResetCheck, {
+  payload: Schema.Struct({}),
+  success: ResetCheckState,
+  error: EnvironmentAuthorizationError,
+});
+
+export const WsServerGetCommunityCheckRpc = Rpc.make(WS_METHODS.serverGetCommunityCheck, {
+  payload: Schema.Struct({}),
+  success: CommunityCheckState,
+  error: EnvironmentAuthorizationError,
+});
+
+export const WsServerStartCommunityCheckRpc = Rpc.make(WS_METHODS.serverStartCommunityCheck, {
+  payload: Schema.Struct({}),
+  success: CommunityCheckState,
+  error: EnvironmentAuthorizationError,
+});
+
+export const WsServerCancelCommunityCheckRpc = Rpc.make(WS_METHODS.serverCancelCommunityCheck, {
+  payload: Schema.Struct({}),
+  success: CommunityCheckState,
+  error: EnvironmentAuthorizationError,
+});
+
+export const WsPreviewAutomationConnectRpc = Rpc.make(WS_METHODS.previewAutomationConnect, {
+  payload: PreviewAutomationHost,
+  success: PreviewAutomationStreamEvent,
+  error: Schema.Union([PreviewAutomationError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
+export const WsPreviewAutomationRespondRpc = Rpc.make(WS_METHODS.previewAutomationRespond, {
+  payload: PreviewAutomationResponse,
+  error: Schema.Union([PreviewAutomationError, EnvironmentAuthorizationError]),
+});
+
+export const WsPreviewAutomationFocusHostRpc = Rpc.make(WS_METHODS.previewAutomationFocusHost, {
+  payload: PreviewAutomationHostFocus,
+  error: EnvironmentAuthorizationError,
+});
+
+export const LegacyUsageRpcGroup = RpcGroup.make(
+  WsServerGetUsageSummaryRpc,
+  WsServerGetUsageReportRpc,
+).middleware(RpcScopeAuthorization);
+
 export const WsRpcGroup = RpcGroup.make(
+  WsServerGetUsageReportRpc,
+  WsServerGetResetCheckRpc,
+  WsServerStartResetCheckRpc,
+  WsServerCancelResetCheckRpc,
+  WsServerGetCommunityCheckRpc,
+  WsServerStartCommunityCheckRpc,
+  WsServerCancelCommunityCheckRpc,
+  WsPreviewAutomationConnectRpc,
+  WsPreviewAutomationRespondRpc,
+  WsPreviewAutomationFocusHostRpc,
+
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,

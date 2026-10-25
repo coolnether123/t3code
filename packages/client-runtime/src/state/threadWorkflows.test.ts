@@ -2,11 +2,14 @@ import { describe, expect, it } from "vite-plus/test";
 import type { OrchestrationV2ThreadProjection } from "@t3tools/contracts";
 
 import {
+  canDetachThreadProviderSession,
   canForkProjectedAssistantItem,
   deriveThreadQueueWorkflowState,
   resolveLatestMergeBackRun,
   threadSupportsProviderHandoff,
 } from "./threadWorkflows.ts";
+
+const forkableRun = { id: "run", status: "completed" } as never;
 
 const capabilities = (input?: {
   readonly queued?: boolean;
@@ -328,6 +331,77 @@ describe("thread workflows", () => {
     },
   );
 
+  it("does not promote queued work until the running provider turn is projected", () => {
+    const state = deriveThreadQueueWorkflowState({
+      thread: { id: "thread", activeProviderThreadId: "provider-thread" },
+      runs: [
+        {
+          id: "active",
+          status: "running",
+          providerThreadId: "provider-thread",
+          activeAttemptId: "attempt-active",
+          ordinal: 1,
+        },
+        { id: "queued", status: "queued", userMessageId: "message", ordinal: 2 },
+      ],
+      messages: [{ id: "message", text: "Queued" }],
+      providerTurns: [],
+      providerThreads: [
+        {
+          id: "provider-thread",
+          appThreadId: "thread",
+          providerSessionId: "provider-session",
+        },
+      ],
+      providerSessions: [
+        {
+          id: "provider-session",
+          status: "running",
+          capabilities: capabilities({ queued: true, steer: true }),
+        },
+      ],
+    } as never);
+
+    expect(state.canPromoteToSteer).toBe(false);
+  });
+
+  it("does not expose known unsupported queue or fork actions", () => {
+    const projection = {
+      thread: { id: "thread", activeProviderThreadId: "provider-thread" },
+      runs: [{ id: "queued", status: "queued", userMessageId: "message", ordinal: 1 }],
+      messages: [],
+      providerThreads: [
+        {
+          id: "provider-thread",
+          appThreadId: "thread",
+          providerSessionId: "provider-session",
+        },
+      ],
+      providerSessions: [
+        {
+          id: "provider-session",
+          status: "ready",
+          capabilities: capabilities(),
+        },
+      ],
+    } as never;
+    const queue = deriveThreadQueueWorkflowState(projection);
+    const projectedItem = {
+      item: { type: "assistant_message", runId: "run", status: "completed" },
+    } as never;
+
+    expect(queue.canReorder).toBe(false);
+    expect(queue.canPromoteToSteer).toBe(false);
+    expect(
+      canForkProjectedAssistantItem({
+        projectedItem,
+        run: forkableRun,
+        capabilities: capabilities(),
+      }),
+    ).toBe(false);
+    expect(canDetachThreadProviderSession(projection)).toBe(true);
+  });
+
   it("allows native, portable, and capability-unknown exact-run forks", () => {
     const projectedItem = {
       item: { type: "assistant_message", runId: "run", status: "completed" },
@@ -336,21 +410,37 @@ describe("thread workflows", () => {
     expect(
       canForkProjectedAssistantItem({
         projectedItem,
+        run: forkableRun,
         capabilities: capabilities({ nativeFork: true }),
       }),
     ).toBe(true);
     expect(
       canForkProjectedAssistantItem({
         projectedItem,
+        run: forkableRun,
         capabilities: capabilities({ portableFork: true }),
       }),
     ).toBe(true);
-    expect(canForkProjectedAssistantItem({ projectedItem })).toBe(true);
+    expect(canForkProjectedAssistantItem({ projectedItem, run: forkableRun })).toBe(true);
+    expect(canForkProjectedAssistantItem({ projectedItem, run: null })).toBe(false);
+    expect(
+      canForkProjectedAssistantItem({
+        projectedItem,
+        run: { id: "different-run", status: "completed" } as never,
+      }),
+    ).toBe(false);
+    expect(
+      canForkProjectedAssistantItem({
+        projectedItem,
+        run: { id: "run", status: "running" } as never,
+      }),
+    ).toBe(false);
     expect(
       canForkProjectedAssistantItem({
         projectedItem: {
           item: { type: "assistant_message", runId: "run", status: "running" },
         } as never,
+        run: forkableRun,
       }),
     ).toBe(false);
   });

@@ -2,7 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 
 import { resolveModelAliases, UsageAggregator } from "./usageAggregation.ts";
 import type { RateTable } from "./usagePricing.ts";
-import type { UsageRecord } from "@t3tools/provider-core/server/usage";
+import type { UsageRecord } from "./usageTranscripts.ts";
 
 const rates: RateTable = new Map([
   [
@@ -18,7 +18,21 @@ const rates: RateTable = new Map([
         cacheReadCostPerToken: 2e-6,
         cacheCreationCostPerToken: 2.5e-5,
       },
-      ultrafast: null,
+    },
+  ],
+  [
+    "gpt-long-context",
+    {
+      inputCostPerToken: 1e-6,
+      outputCostPerToken: 2e-6,
+      cacheReadCostPerToken: 0.1e-6,
+      cacheCreationCostPerToken: 1.25e-6,
+      above272kTokens: {
+        inputCostPerToken: 2e-6,
+        outputCostPerToken: 3e-6,
+        cacheReadCostPerToken: 0.2e-6,
+        cacheCreationCostPerToken: 2.5e-6,
+      },
     },
   ],
 ]);
@@ -26,6 +40,7 @@ const rates: RateTable = new Map([
 function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
   return {
     provider: "claude",
+    // 2026-08-07T04:05Z is still Aug 6 in Los Angeles.
     timestampMs: Date.parse("2026-08-07T04:05:13.944Z"),
     model: "claude-fable-5",
     sessionId: "session-a",
@@ -37,7 +52,6 @@ function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
       reasoningTokens: 0,
     },
     reportedCostUsd: null,
-    speed: "standard",
     dedupeKey: null,
     ...overrides,
   };
@@ -68,21 +82,17 @@ function aggregate(
 }
 
 describe("UsageAggregator", () => {
-  it("splits a bucket's cost by category and speed", () => {
-    const [bucket] = aggregate([record(), record({ speed: "fast" })]).buckets;
-
-    expect(bucket).toMatchObject({
-      costUsd: expect.closeTo(0.016875),
-      categoryCostUsd: {
-        input: expect.closeTo(0.003),
-        cacheRead: expect.closeTo(0.003),
-        cacheWrite: expect.closeTo(0.000375),
-        output: expect.closeTo(0.0075),
-      },
-      fastCostUsd: expect.closeTo(0.01125),
-      speedPremiumUsd: expect.closeTo(0.005625),
-    });
-    expect(bucket).not.toHaveProperty("ultrafastCostUsd");
+  it("requires exact bounds for hourly aggregation", () => {
+    expect(
+      () =>
+        new UsageAggregator({
+          timeZone: "UTC",
+          sinceDay: "2026-08-01",
+          untilDay: "2026-08-31",
+          resolution: "hour",
+          rates,
+        }),
+    ).toThrow("requires exact time bounds");
   });
 
   it("keeps only the first record for a repeated dedupe key", () => {
@@ -98,6 +108,13 @@ describe("UsageAggregator", () => {
     expect(result.buckets[0]?.totals.outputTokens).toBe(50);
   });
 
+  it("still sums records that carry no dedupe key", () => {
+    const result = aggregate([record(), record()]);
+
+    expect(result.duplicatesDropped).toBe(0);
+    expect(result.buckets[0]?.totals.outputTokens).toBe(100);
+  });
+
   it("buckets by the day in the requested time zone", () => {
     const utc = aggregate([record()], "UTC");
     const losAngeles = aggregate([record()], "America/Los_Angeles");
@@ -106,37 +123,26 @@ describe("UsageAggregator", () => {
     expect(losAngeles.buckets[0]?.day).toBe("2026-08-06");
   });
 
-  it("finds the day at a quarter-hour zone's midnight across interleaved buckets", () => {
-    const result = aggregate(
-      [
-        record({ timestampMs: Date.parse("2026-08-01T18:14:59.999Z") }),
-        record({ timestampMs: Date.parse("2026-08-01T18:15:00.000Z") }),
-        record({ timestampMs: Date.parse("2026-08-01T18:15:00.000Z"), model: "claude-opus-5" }),
-        record({ timestampMs: Date.parse("2026-08-01T18:16:00.000Z") }),
-      ],
-      "Asia/Kathmandu",
-    );
+  it("keeps exact local-day boundaries in offset time zones", () => {
+    const aggregator = new UsageAggregator({
+      timeZone: "Asia/Kathmandu",
+      sinceDay: "2026-08-01",
+      untilDay: "2026-08-01",
+      rates,
+    });
+    for (const timestamp of [
+      "2026-07-31T18:14:59.999Z",
+      "2026-07-31T18:15:00.000Z",
+      "2026-08-01T18:14:59.999Z",
+      "2026-08-01T18:15:00.000Z",
+    ]) {
+      aggregator.add(record({ timestampMs: Date.parse(timestamp) }));
+    }
 
-    expect(result.buckets.map((bucket) => [bucket.day, bucket.model, bucket.records])).toEqual([
-      ["2026-08-01", "claude-fable-5", 1],
-      ["2026-08-02", "claude-fable-5", 2],
-      ["2026-08-02", "claude-opus-5", 1],
-    ]);
-  });
-
-  it("finds the day at a fixed offset's midnight between quarter hours", () => {
-    const result = aggregate(
-      [
-        record({ timestampMs: Date.parse("2026-08-01T23:58:59.999Z") }),
-        record({ timestampMs: Date.parse("2026-08-01T23:59:00.000Z") }),
-      ],
-      "+00:01",
-    );
-
-    expect(result.buckets.map((bucket) => [bucket.day, bucket.records])).toEqual([
-      ["2026-08-01", 1],
-      ["2026-08-02", 1],
-    ]);
+    const result = aggregator.finish();
+    expect(result.outOfWindow).toBe(2);
+    expect(result.buckets[0]?.day).toBe("2026-08-01");
+    expect(result.buckets[0]?.records).toBe(2);
   });
 
   it("splits an hourly request into fixed buckets anchored to its exact start", () => {
@@ -174,6 +180,42 @@ describe("UsageAggregator", () => {
     ]);
   });
 
+  it("keeps daily payloads collapsed when hourly resolution is not requested", () => {
+    const result = aggregate([
+      record({ timestampMs: Date.parse("2026-08-07T04:05:13.944Z") }),
+      record({ timestampMs: Date.parse("2026-08-07T05:05:13.944Z") }),
+    ]);
+
+    expect(result.buckets).toHaveLength(1);
+    expect(result.buckets[0]?.hourStart).toBeUndefined();
+    expect(result.buckets[0]?.records).toBe(2);
+  });
+
+  it("prices against the rate table", () => {
+    const result = aggregate([record()]);
+
+    // 100*1e-5 + 1000*1e-6 + 10*1.25e-5 + 50*5e-5
+    expect(result.buckets[0]?.costUsd).toBeCloseTo(0.004625, 9);
+    expect(result.buckets[0]?.costSource).toBe("modelPriced");
+  });
+
+  it("uses the long-context rates for a request above 272K input tokens", () => {
+    const result = aggregate([
+      record({
+        model: "gpt-long-context",
+        totals: {
+          uncachedInputTokens: 200_001,
+          cachedInputTokens: 72_000,
+          cacheCreationTokens: 0,
+          outputTokens: 1_000,
+          reasoningTokens: 500,
+        },
+      }),
+    ]);
+
+    expect(result.buckets[0]?.costUsd).toBeCloseTo(0.400_002 + 0.014_4 + 0.003, 9);
+  });
+
   it("counts tokens but not cost for a model with no rate", () => {
     const result = aggregate([record({ model: "kimi-k3" })]);
 
@@ -188,6 +230,255 @@ describe("UsageAggregator", () => {
 
     expect(result.buckets[0]?.costUsd).toBe(1.25);
     expect(result.buckets[0]?.costSource).toBe("providerReported");
+  });
+
+  it("drops records outside the window", () => {
+    const result = aggregate([record({ timestampMs: Date.parse("2026-07-01T12:00:00Z") })]);
+
+    expect(result.outOfWindow).toBe(1);
+    expect(result.buckets).toHaveLength(0);
+  });
+
+  it("does not let an out-of-window duplicate suppress an in-window copy", () => {
+    const result = aggregate([
+      record({
+        timestampMs: Date.parse("2026-07-01T12:00:00Z"),
+        dedupeKey: "shared-record",
+      }),
+      record({ dedupeKey: "shared-record" }),
+    ]);
+
+    expect(result.outOfWindow).toBe(1);
+    expect(result.duplicatesDropped).toBe(0);
+    expect(result.buckets[0]?.records).toBe(1);
+  });
+
+  it("filters and groups by native provider, session, and turn identity", () => {
+    const aggregator = new UsageAggregator({
+      timeZone: "UTC",
+      sinceDay: "2026-08-01",
+      untilDay: "2026-08-31",
+      rates,
+      providers: ["codex"],
+      sessionIds: ["child-session"],
+      turnIds: ["turn-2"],
+      groupBy: "turn",
+    });
+    const selected = record({
+      provider: "codex",
+      sessionId: "child-session",
+      turnId: "turn-2",
+      dedupeKey: "child-turn-2",
+    });
+    aggregator.add(record({ sessionId: "child-session", turnId: "turn-2" }));
+    aggregator.add({ ...selected, sessionId: "parent-session", dedupeKey: "parent-turn-2" });
+    aggregator.add({ ...selected, turnId: "turn-1", dedupeKey: "child-turn-1" });
+    aggregator.add(selected);
+    aggregator.add(selected);
+
+    const result = aggregator.finish();
+    expect(result.duplicatesDropped).toBe(1);
+    expect(result.buckets).toMatchObject([
+      {
+        provider: "codex",
+        sessionId: "child-session",
+        turnId: "turn-2",
+        records: 1,
+        totals: { outputTokens: 50 },
+      },
+    ]);
+  });
+
+  it("keeps session-grouped summary buckets free of run-only activity fields", () => {
+    const aggregator = new UsageAggregator({
+      timeZone: "UTC",
+      sinceDay: "2026-08-01",
+      untilDay: "2026-08-31",
+      rates,
+      groupBy: "session",
+    });
+    aggregator.add(record({ sessionId: "known-session", nativeSessionId: "known-session" }));
+
+    const bucket = aggregator.finish().buckets[0];
+    expect(bucket?.sessionId).toBe("known-session");
+    expect(bucket).not.toHaveProperty("firstActivityAt");
+    expect(bucket).not.toHaveProperty("lastActivityAt");
+  });
+
+  it("reconciles completed, resumed, forked, parent, and child records without replay inflation", () => {
+    const completed = record({
+      provider: "codex",
+      sessionId: "parent",
+      turnId: "turn-complete",
+      dedupeKey: "native-response-complete",
+      totals: { ...record().totals, outputTokens: 30, reasoningTokens: 10 },
+    });
+    const child = record({
+      provider: "codex",
+      sessionId: "child",
+      turnId: "turn-child",
+      dedupeKey: "native-response-child",
+      totals: { ...record().totals, outputTokens: 20, reasoningTokens: 5 },
+    });
+    const result = aggregate([
+      completed,
+      { ...completed, sessionId: "resumed-parent" },
+      { ...completed, sessionId: "fork-copy" },
+      child,
+      child,
+    ]);
+
+    expect(result.duplicatesDropped).toBe(3);
+    expect(result.buckets[0]).toMatchObject({
+      records: 2,
+      sessions: 2,
+      totals: { outputTokens: 50, reasoningTokens: 15 },
+    });
+  });
+
+  it("reports whether a record contributed", () => {
+    const aggregator = new UsageAggregator({
+      timeZone: "UTC",
+      sinceDay: "2026-08-01",
+      untilDay: "2026-08-31",
+      rates,
+    });
+
+    expect(aggregator.add(record({ dedupeKey: "msg_1:" }))).toBe(true);
+    expect(aggregator.add(record({ dedupeKey: "msg_1:" }))).toBe(false);
+    expect(aggregator.add(record({ timestampMs: Date.parse("2026-07-01T12:00:00Z") }))).toBe(false);
+  });
+
+  it("groups by exact native run ID and deduplicates copied records", () => {
+    const aggregator = new UsageAggregator({
+      timeZone: "UTC",
+      sinceDay: "2026-08-01",
+      untilDay: "2026-08-31",
+      rates,
+      groupBy: "run",
+    });
+    const first = record({
+      sessionId: "run-a",
+      nativeSessionId: "run-a",
+      timestampMs: Date.parse("2026-08-01T10:00:00.000Z"),
+      dedupeKey: "copied-record",
+    });
+    aggregator.add(first);
+    aggregator.add({ ...first, timestampMs: Date.parse("2026-08-01T10:01:00.000Z") });
+    aggregator.add(
+      record({
+        sessionId: "run-a",
+        nativeSessionId: "run-a",
+        timestampMs: Date.parse("2026-08-01T10:02:00.000Z"),
+        dedupeKey: "run-a-second",
+      }),
+    );
+    aggregator.add(
+      record({
+        sessionId: "run-b",
+        nativeSessionId: "run-b",
+        timestampMs: Date.parse("2026-08-01T10:03:00.000Z"),
+        dedupeKey: "run-b-first",
+      }),
+    );
+
+    const result = aggregator.finish();
+    expect(result.duplicatesDropped).toBe(1);
+    expect(result.buckets).toHaveLength(2);
+    expect(result.buckets).toMatchObject([
+      {
+        runId: "run-a",
+        firstActivityAt: "2026-08-01T10:00:00.000Z",
+        lastActivityAt: "2026-08-01T10:02:00.000Z",
+        records: 2,
+        totals: { outputTokens: 100 },
+      },
+      {
+        runId: "run-b",
+        firstActivityAt: "2026-08-01T10:03:00.000Z",
+        lastActivityAt: "2026-08-01T10:03:00.000Z",
+        records: 1,
+      },
+    ]);
+  });
+
+  it("keeps synthetic session keys unattributed in run groups and filters exact IDs", () => {
+    const aggregator = new UsageAggregator({
+      timeZone: "UTC",
+      sinceDay: "2026-08-01",
+      untilDay: "2026-08-31",
+      rates,
+      runIds: ["native-run"],
+      groupBy: "run",
+    });
+    aggregator.add(
+      record({
+        sessionId: "archive-content-hash",
+        dedupeKey: "unattributed-archive-record",
+      }),
+    );
+    aggregator.add(
+      record({
+        sessionId: "other-run",
+        nativeSessionId: "other-run",
+        dedupeKey: "other-run-record",
+      }),
+    );
+    aggregator.add(
+      record({
+        sessionId: "internal-key",
+        nativeSessionId: "native-run",
+        dedupeKey: "selected-run-record",
+      }),
+    );
+
+    const result = aggregator.finish();
+    expect(result.buckets).toMatchObject([{ runId: "native-run", records: 1 }]);
+  });
+
+  it("separates providers and models into their own buckets", () => {
+    const result = aggregate([
+      record(),
+      record({ provider: "codex", model: "gpt-5.6-sol" }),
+      record({ model: "claude-opus-5" }),
+    ]);
+
+    expect(result.buckets).toHaveLength(3);
+  });
+});
+
+describe("upstream aggregation regressions", () => {
+  it("finds the day at a fixed offset's midnight between quarter hours", () => {
+    const result = aggregate(
+      [
+        record({ timestampMs: Date.parse("2026-08-01T23:58:59.999Z") }),
+        record({ timestampMs: Date.parse("2026-08-01T23:59:00.000Z") }),
+      ],
+      "+00:01",
+    );
+
+    expect(result.buckets.map((bucket) => [bucket.day, bucket.records])).toEqual([
+      ["2026-08-01", 1],
+      ["2026-08-02", 1],
+    ]);
+  });
+
+  it("finds the day at a quarter-hour zone's midnight across interleaved buckets", () => {
+    const result = aggregate(
+      [
+        record({ timestampMs: Date.parse("2026-08-01T18:14:59.999Z") }),
+        record({ timestampMs: Date.parse("2026-08-01T18:15:00.000Z") }),
+        record({ timestampMs: Date.parse("2026-08-01T18:15:00.000Z"), model: "claude-opus-5" }),
+        record({ timestampMs: Date.parse("2026-08-01T18:16:00.000Z") }),
+      ],
+      "Asia/Kathmandu",
+    );
+
+    expect(result.buckets.map((bucket) => [bucket.day, bucket.model, bucket.records])).toEqual([
+      ["2026-08-01", "claude-fable-5", 1],
+      ["2026-08-02", "claude-fable-5", 2],
+      ["2026-08-02", "claude-opus-5", 1],
+    ]);
   });
 
   it("folds a mapped model into its target and prices it there", () => {
@@ -208,9 +499,7 @@ describe("UsageAggregator", () => {
     expect(result.buckets[0]?.costUsd).toBeCloseTo(0.00925, 9);
     expect(result.buckets[0]?.unpricedRecords).toBe(0);
   });
-});
 
-describe("resolveModelAliases", () => {
   it("follows chains to the final model and drops chains that enter a loop", () => {
     expect(
       resolveModelAliases({
@@ -227,5 +516,22 @@ describe("resolveModelAliases", () => {
         ["preview", "example-model"],
       ]),
     );
+  });
+
+  it("splits a bucket's cost by category and speed", () => {
+    const [bucket] = aggregate([record(), record({ speed: "fast" })]).buckets;
+
+    expect(bucket).toMatchObject({
+      costUsd: expect.closeTo(0.013875),
+      categoryCostUsd: {
+        input: expect.closeTo(0.003),
+        cacheRead: expect.closeTo(0.003),
+        cacheWrite: expect.closeTo(0.000375),
+        output: expect.closeTo(0.0075),
+      },
+      fastCostUsd: expect.closeTo(0.00925),
+      speedPremiumUsd: expect.closeTo(0.004625),
+    });
+    expect(bucket?.ultrafastCostUsd).toBe(0);
   });
 });

@@ -120,6 +120,7 @@ import {
 import { SettingsProjectGroupingRouteScreen } from "./features/settings/SettingsProjectGroupingRouteScreen";
 import { SettingsProjectOverviewRouteScreen } from "./features/settings/SettingsProjectOverviewRouteScreen";
 import { UsageLimitAccountScreen } from "./features/usage/UsageLimitsPooled";
+import { RepeatedInputRouteScreen } from "./features/usage/RepeatedInputRouteScreen";
 import { UsageRouteScreen } from "./features/usage/UsageRouteScreen";
 import { SettingsAboutRouteScreen } from "./features/settings/SettingsAboutRouteScreen";
 import { SettingsNotificationsRouteScreen } from "./features/settings/SettingsNotificationsRouteScreen";
@@ -433,6 +434,13 @@ const SettingsContentStack = createV5SheetStackNavigator({
       linking: "usage",
       options: {
         title: "Usage",
+      },
+    }),
+    SettingsRepeatedInput: createNativeStackScreen({
+      screen: RepeatedInputRouteScreen,
+      linking: "repeated-input",
+      options: {
+        title: "Skills & repeated input",
       },
     }),
   },

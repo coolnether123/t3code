@@ -20,6 +20,7 @@ import {
   PreviewAutomationTimeoutError,
   PreviewAutomationUnsupportedClientError,
   PreviewTabId,
+  type EnvironmentId,
   type PreviewAutomationError,
   type PreviewAutomationOperation,
   type PreviewAutomationHost,
@@ -37,6 +38,7 @@ import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as SubscriptionRef from "effect/SubscriptionRef";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 
 import * as McpInvocationContext from "./McpInvocationContext.ts";
@@ -61,6 +63,8 @@ export interface PreviewAutomationConnectOptions {
 export class PreviewAutomationBroker extends Context.Service<
   PreviewAutomationBroker,
   {
+    readonly isBrowserAvailable: (environmentId: EnvironmentId) => Effect.Effect<boolean>;
+    readonly streamBrowserAvailability: (environmentId: EnvironmentId) => Stream.Stream<boolean>;
     readonly connect: (
       host: PreviewAutomationHost,
       options?: PreviewAutomationConnectOptions,
@@ -187,6 +191,12 @@ const supportsOperation = (
   connection: ClientConnection,
   operation: PreviewAutomationOperation,
 ): boolean => connection.supportedOperations.has(operation);
+
+// A browser choice requires one host that can complete a basic interaction,
+// not several hosts whose individual operations happen to cover it together.
+const BROWSER_OPERATIONS = ["status", "open", "navigate", "snapshot", "click", "type"] as const;
+const supportsBrowser = (host: ClientConnection): boolean =>
+  BROWSER_OPERATIONS.every((operation) => supportsOperation(host, operation));
 
 type RemoteDetailKind = "null" | "array" | "object" | "string" | "number" | "boolean";
 
@@ -350,6 +360,18 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
     requestSequence: 0,
     focusSequence: 0,
   });
+  const availableEnvironments = yield* SubscriptionRef.make<ReadonlySet<EnvironmentId>>(new Set());
+  // Called under the broker state lock so replacements and disconnects publish
+  // in registration order. Request traffic and focus changes do not publish.
+  const publishAvailability = (next: BrokerState) =>
+    SubscriptionRef.set(
+      availableEnvironments,
+      new Set(
+        Array.from(next.clients.values())
+          .filter(supportsBrowser)
+          .map((host) => host.environmentId),
+      ),
+    );
 
   const closeConnection = Effect.fn("PreviewAutomationBroker.closeConnection")(function* (
     queue: ClientConnection["queue"],
@@ -378,15 +400,13 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
     queue: ClientConnection["queue"],
     completeStream = false,
   ) {
-    yield* SynchronizedRef.modifyEffect(state, (current) => {
-      if (current.clients.get(clientId)?.queue !== queue) {
-        return Effect.succeed([undefined, current] as const);
-      }
+    const disconnected = yield* SynchronizedRef.modifyEffect(state, (current) => {
       const removed = removeConnectionFromState(current, clientId, queue);
-      return closeConnection(queue, removed.disconnected, completeStream).pipe(
-        Effect.as([undefined, removed.state] as const),
+      return publishAvailability(removed.state).pipe(
+        Effect.as([removed.disconnected, removed.state] as const),
       );
     });
+    yield* closeConnection(queue, disconnected, completeStream);
   });
 
   const acquireConnection = Effect.fn("PreviewAutomationBroker.acquireConnection")(function* (
@@ -408,7 +428,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       focusOrder: 0,
       queue,
     };
-    const registration = yield* SynchronizedRef.modify(state, (current) => {
+    const registration = yield* SynchronizedRef.modifyEffect(state, (current) => {
       const previousConnection = current.clients.get(clientId);
       const removed = previousConnection
         ? removeConnectionFromState(current, clientId, previousConnection.queue)
@@ -417,14 +437,17 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
       const focusSequence = removed.state.focusSequence + 1;
       const registeredConnection = { ...connection, focusOrder: focusSequence };
       clients.set(clientId, registeredConnection);
-      return [
-        {
-          previousConnection,
-          disconnected: removed.disconnected,
-          registeredConnection,
-        },
-        { ...removed.state, clients, focusSequence },
-      ] as const;
+      const next = { ...removed.state, clients, focusSequence };
+      return publishAvailability(next).pipe(
+        Effect.as([
+          {
+            previousConnection,
+            disconnected: removed.disconnected,
+            registeredConnection,
+          },
+          next,
+        ] as const),
+      );
     });
     if (registration.previousConnection) {
       yield* closeConnection(registration.previousConnection.queue, registration.disconnected);
@@ -543,6 +566,7 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
                     Number(right.preferred) - Number(left.preferred) ||
                     Number(ownsTargetTab(right, true)) - Number(ownsTargetTab(left, true)) ||
                     Number(ownsTargetTab(right)) - Number(ownsTargetTab(left)) ||
+                    Number(supportsBrowser(right)) - Number(supportsBrowser(left)) ||
                     Number(right.focused) - Number(left.focused) ||
                     right.focusOrder - left.focusOrder,
                 )[0];
@@ -694,7 +718,21 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
     return result;
   });
 
-  return PreviewAutomationBroker.of({ connect, focusHost, respond, invoke });
+  return PreviewAutomationBroker.of({
+    connect,
+    focusHost,
+    respond,
+    invoke,
+    isBrowserAvailable: (environmentId) =>
+      SubscriptionRef.get(availableEnvironments).pipe(
+        Effect.map((ready) => ready.has(environmentId)),
+      ),
+    streamBrowserAvailability: (environmentId) =>
+      SubscriptionRef.changes(availableEnvironments).pipe(
+        Stream.map((ready) => ready.has(environmentId)),
+        Stream.changes,
+      ),
+  });
 }).pipe(Effect.withSpan("PreviewAutomationBroker.make"));
 
 export const layer = Layer.effect(PreviewAutomationBroker, make);

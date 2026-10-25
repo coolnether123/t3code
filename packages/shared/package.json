@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./usageResetReport": {
+      "types": "./src/usageResetReport.ts",
+      "import": "./src/usageResetReport.ts"
+    },
     "./changedFileKind": {
       "types": "./src/changedFileKind.ts",
       "import": "./src/changedFileKind.ts"
@@ -482,6 +486,22 @@
     "./PtyAdapter": {
       "types": "./src/PtyAdapter.ts",
       "import": "./src/PtyAdapter.ts"
+    },
+    "./toolScreenshot": {
+      "types": "./src/toolScreenshot.ts",
+      "import": "./src/toolScreenshot.ts"
+    },
+    "./usageRepeatedInput": {
+      "types": "./src/usageRepeatedInput.ts",
+      "import": "./src/usageRepeatedInput.ts"
+    },
+    "./usageQuota": {
+      "types": "./src/usageQuota.ts",
+      "import": "./src/usageQuota.ts"
+    },
+    "./usageQuotaForecast": {
+      "types": "./src/usageQuotaForecast.ts",
+      "import": "./src/usageQuotaForecast.ts"
     },
     "./markdownMath": {
       "types": "./src/markdownMath.ts",

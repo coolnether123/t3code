@@ -1,3 +1,4 @@
+import { BirthdaySettings } from "./BirthdaySettings";
 import type { CSSProperties } from "react";
 import { useState } from "react";
 import {
@@ -432,6 +433,7 @@ export function AppearanceSettingsPanel() {
         />
       </SettingsSection>
 
+      <BirthdaySettings />
       <TypographySection />
     </SettingsPageContainer>
   );

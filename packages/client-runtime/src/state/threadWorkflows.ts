@@ -168,10 +168,17 @@ export function deriveThreadQueueWorkflowState(projection: Projection): ThreadQu
 
 export function canForkProjectedAssistantItem(input: {
   readonly projectedItem: OrchestrationV2ProjectedTurnItem;
+  readonly run: Run | null;
   readonly capabilities?: OrchestrationV2ProviderCapabilities | undefined;
 }): boolean {
   const item = input.projectedItem.item;
-  if (item.type !== "assistant_message" || item.runId === null || item.status !== "completed") {
+  if (
+    item.type !== "assistant_message" ||
+    item.runId === null ||
+    item.status !== "completed" ||
+    input.run?.id !== item.runId ||
+    !["completed", "waiting", "failed", "interrupted", "cancelled"].includes(input.run.status)
+  ) {
     return false;
   }
   if (input.capabilities === undefined) {

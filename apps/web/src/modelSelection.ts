@@ -28,6 +28,7 @@ import { ModelEsque } from "./components/chat/providerIconUtils";
 import {
   type ProviderInstanceEntry,
   deriveProviderInstanceEntries,
+  isDesktopBackedProviderInstanceReady,
   NO_PROVIDER_MODEL_SELECTION,
 } from "./providerInstances";
 import { sortModelsForProviderInstance } from "./modelOrdering";
@@ -220,13 +221,16 @@ export function getAppModelOptionsForInstance(
   }
 
   const preferences = readInstanceModelPreferences(settings, entry.instanceId);
-  return appendUnavailableDynamicModelSelection(
+  const optionsWithSelection = appendUnavailableDynamicModelSelection(
     applyInstanceModelPreferences(options, preferences),
     entry.models,
     entry.driverKind,
     selectedModel,
     preferences.hiddenModels,
   );
+  return entry.useDesktopAppDaemon && !isDesktopBackedProviderInstanceReady(entry)
+    ? optionsWithSelection.map((option) => ({ ...option, isUnavailable: true }))
+    : optionsWithSelection;
 }
 
 export function resolveAppModelSelection(

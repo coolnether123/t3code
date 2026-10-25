@@ -1,0 +1,7 @@
+fix(voice): start calls from new chats and honor visible models
+
+Create draft threads through the existing command before opening a call.
+Keep audio mounted through the first turn, dismiss empty rejected opens on
+hang-up, and resolve hidden model choices through visible saved defaults.
+
+Otis-Task: agenda-task:515bbc54cb61482681e950e524421ce4

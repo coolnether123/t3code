@@ -1440,6 +1440,7 @@ export const resolveProviderInstanceTerminalEnvironment = Effect.fn(
 )(function* (input: {
   readonly serverSettings: ServerSettings.ServerSettingsService["Service"];
   readonly path: Path.Path;
+  readonly baseDir?: string;
   readonly rawProviderInstanceId: string;
   readonly env: Record<string, string> | undefined;
 }) {
@@ -1492,6 +1493,7 @@ export const make = Effect.fn("TerminalManager.make")(function* () {
       path,
       rawProviderInstanceId,
       env,
+      baseDir,
     }),
   );
   return yield* makeWithOptions({

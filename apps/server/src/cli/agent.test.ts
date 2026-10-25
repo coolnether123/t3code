@@ -1,0 +1,516 @@
+import { describe, expect, it } from "@effect/vitest";
+import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
+import { FetchHttpClient } from "effect/http";
+import {
+  AuthSessionId,
+  AuthOrchestrationReadScope,
+  AuthOrchestrationOperateScope,
+  EnvironmentAuthInvalidError,
+} from "@t3tools/contracts";
+import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import { resolveAgentTarget, withAgentSession, executeAgentRequest } from "./agent.ts";
+import {
+  agentCommandSchema,
+  decodeAgentAction,
+  decodeAgentRequest,
+  encodeAgentOutput,
+} from "./agentProtocol.ts";
+
+const now = "2026-08-31T04:00:00.000Z";
+const runtime = {
+  version: 1,
+  pid: 123,
+  port: 8282,
+  origin: "http://127.0.0.1:8282",
+  startedAt: now,
+};
+const descriptor = {
+  environmentId: "env-a",
+  label: "Scratch",
+  platform: { os: "windows", arch: "x64" },
+  serverVersion: "0.0.33",
+  capabilities: { repositoryIdentity: true, threadPinning: true, threadSettlement: true },
+};
+const shell = {
+  schemaVersion: 2,
+  snapshotSequence: 12,
+  projects: [],
+  threads: [],
+  archivedThreads: [],
+};
+const project = {
+  id: "project-a",
+  title: "Scratch",
+  workspaceRoot: "/scratch",
+  defaultModelSelection: null,
+  scripts: [],
+  createdAt: now,
+  updatedAt: now,
+  deletedAt: null,
+};
+const json = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const fs = FileSystem.layerNoop({
+  readFileString: (path) =>
+    Effect.succeed(path.endsWith("environment-id") ? "env-a" : json(runtime)),
+});
+
+function fakeAuth() {
+  const issued: Array<Parameters<EnvironmentAuth.EnvironmentAuth["Service"]["issueSession"]>[0]> =
+    [];
+  const revoked: string[] = [];
+  const auth = {
+    issueSession: (
+      input: Parameters<EnvironmentAuth.EnvironmentAuth["Service"]["issueSession"]>[0],
+    ) => {
+      issued.push(input);
+      return Effect.succeed({
+        sessionId: AuthSessionId.make("session-a"),
+        token: "private-test-token",
+        method: "bearer-access-token" as const,
+        scopes: input?.scopes ?? [],
+        subject: "test",
+        client: { deviceType: "bot" as const },
+        expiresAt: DateTime.makeUnsafe(now),
+      });
+    },
+    revokeSession: (id: AuthSessionId) =>
+      Effect.sync(() => {
+        revoked.push(id);
+        return true;
+      }),
+  } satisfies Pick<EnvironmentAuth.EnvironmentAuth["Service"], "issueSession" | "revokeSession">;
+  return { auth, issued, revoked };
+}
+
+const testLayer = Layer.mergeAll(fs, Path.layer, FetchHttpClient.layer);
+const mockFetch = (
+  handler: (url: string | Request | URL, options?: RequestInit) => Promise<Response>,
+): typeof fetch => Object.assign(handler, { preconnect: () => {} });
+
+describe("agent authentication", () => {
+  it.effect("checks the descriptor without transmitting a token", () =>
+    Effect.gen(function* () {
+      const requests: Array<RequestInit | undefined> = [];
+      const result = yield* resolveAgentTarget("/sandbox").pipe(
+        Effect.provide(testLayer),
+        Effect.provideService(
+          FetchHttpClient.Fetch,
+          mockFetch(async (_url, options) => {
+            requests.push(options);
+            return Response.json(descriptor);
+          }),
+        ),
+      );
+      expect(result.environmentId).toBe("env-a");
+      expect(new Headers(requests[0]?.headers).get("authorization")).toBeNull();
+    }),
+  );
+  it.effect("rejects a wrong environment before acquiring any auth session", () =>
+    Effect.gen(function* () {
+      const result = yield* Effect.result(
+        resolveAgentTarget("/sandbox").pipe(
+          Effect.provide(testLayer),
+          Effect.provideService(
+            FetchHttpClient.Fetch,
+            mockFetch(async () => Response.json({ ...descriptor, environmentId: "wrong" })),
+          ),
+        ),
+      );
+      expect(result._tag).toBe("Failure");
+    }),
+  );
+  it.effect("issues minimum short-lived scopes and revokes on failed use", () =>
+    Effect.gen(function* () {
+      const state = fakeAuth();
+      const result = yield* Effect.result(
+        withAgentSession(state.auth, false, () => Effect.fail("failed read")),
+      );
+      expect(result._tag).toBe("Failure");
+      expect(state.issued[0]?.scopes).toEqual([AuthOrchestrationReadScope]);
+      expect(Duration.toMillis(state.issued[0]!.ttl!)).toBe(120000);
+      expect(state.revoked).toEqual(["session-a"]);
+      yield* withAgentSession(state.auth, true, () => Effect.void);
+      expect(state.issued[1]?.scopes).toEqual([
+        AuthOrchestrationReadScope,
+        AuthOrchestrationOperateScope,
+      ]);
+    }),
+  );
+});
+
+describe("agent HTTP action receipt", () => {
+  it.effect("restores using archived metadata before any transcript read", () =>
+    Effect.gen(function* () {
+      const state = fakeAuth();
+      const archived = {
+        id: "archived-a",
+        projectId: "project-a",
+        title: "Archived fixture",
+        createdBy: "user",
+        creationSource: "web",
+        providerInstanceId: "codex",
+        modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        activeProviderThreadId: null,
+        lineage: { rootThreadId: "archived-a", parentThreadId: null, relationshipToParent: null },
+        forkedFrom: null,
+        latestRunId: null,
+        activeRunId: null,
+        status: "idle",
+        pendingRuntimeRequest: null,
+        latestVisibleMessage: null,
+        latestUserMessageAt: null,
+        hasActionableProposedPlan: false,
+        itemCount: 0,
+        visibleItemCount: 0,
+        createdAt: now,
+        updatedAt: now,
+        archivedAt: now,
+        deletedAt: null,
+        settledOverride: null,
+        settledAt: null,
+      };
+      const action = decodeAgentAction(
+        json({
+          environmentId: "env-a",
+          runtime: { pid: 123, startedAt: now },
+          command: { type: "thread.unarchive", commandId: "restore-a", threadId: archived.id },
+        }),
+      );
+      let dispatched = false;
+      let shellReads = 0;
+      let transcriptReadsBeforeDispatch = 0;
+      const result = yield* Effect.gen(function* () {
+        const target = yield* resolveAgentTarget("/sandbox");
+        return yield* executeAgentRequest(target, { kind: "act", action }, state.auth);
+      }).pipe(
+        Effect.provide(testLayer),
+        Effect.provideService(
+          FetchHttpClient.Fetch,
+          mockFetch(async (url) => {
+            const path = new URL(String(url)).pathname;
+            if (path.includes("/.well-known/")) return Response.json(descriptor);
+            if (path === "/api/orchestration/shell") {
+              shellReads++;
+              return Response.json(shell);
+            }
+            if (path.endsWith("/archived-a/shell")) return Response.json(archived);
+            if (path.endsWith("/dispatch")) {
+              dispatched = true;
+              return Response.json({ sequence: 13 });
+            }
+            if (!dispatched) transcriptReadsBeforeDispatch++;
+            throw new Error("Transcript deliberately unavailable");
+          }),
+        ),
+      );
+      expect(result).toMatchObject({ status: "accepted", commandId: "restore-a", sequence: 13 });
+      expect(dispatched).toBe(true);
+      expect(shellReads).toBe(2);
+      expect(transcriptReadsBeforeDispatch).toBe(0);
+      expect(state.revoked).toEqual(["session-a"]);
+    }),
+  );
+
+  it.effect("rejects oversized receipt identity before HTTP dispatch", () =>
+    Effect.gen(function* () {
+      const state = fakeAuth();
+      let dispatches = 0;
+      const action = decodeAgentAction(
+        json({
+          environmentId: "env-a",
+          runtime: { pid: 123, startedAt: now },
+          command: {
+            type: "project.create",
+            commandId: "x".repeat(200 * 1024),
+            projectId: "project-a",
+            title: "Scratch",
+            workspaceRoot: "/scratch",
+          },
+        }),
+      );
+      expect(() =>
+        encodeAgentOutput({
+          status: "accepted",
+          commandId: action.command.commandId,
+          sequence: 13,
+        }),
+      ).toThrow();
+      const result = yield* Effect.result(
+        Effect.gen(function* () {
+          const target = yield* resolveAgentTarget("/sandbox");
+          return yield* executeAgentRequest(target, { kind: "act", action }, state.auth);
+        }).pipe(
+          Effect.provide(testLayer),
+          Effect.provideService(
+            FetchHttpClient.Fetch,
+            mockFetch(async (url) => {
+              if (String(url).endsWith("/mutate")) {
+                dispatches++;
+                return Response.json(project);
+              }
+              return Response.json(String(url).includes("/.well-known/") ? descriptor : shell);
+            }),
+          ),
+        ),
+      );
+      expect(dispatches).toBe(0);
+      expect(result._tag).toBe("Failure");
+      expect(state.revoked).toEqual(["session-a"]);
+    }),
+  );
+  it.effect("reports an explicit auth refusal as rejected, not a provider failure", () =>
+    Effect.gen(function* () {
+      const state = fakeAuth();
+      const action = decodeAgentAction(
+        json({
+          environmentId: "env-a",
+          runtime: { pid: 123, startedAt: now },
+          command: {
+            type: "project.create",
+            commandId: "command-denied",
+            projectId: "project-a",
+            title: "Scratch",
+            workspaceRoot: "/scratch",
+          },
+        }),
+      );
+      const result = yield* Effect.gen(function* () {
+        const target = yield* resolveAgentTarget("/sandbox");
+        return yield* executeAgentRequest(target, { kind: "act", action }, state.auth);
+      }).pipe(
+        Effect.provide(testLayer),
+        Effect.provideService(
+          FetchHttpClient.Fetch,
+          mockFetch(async (url) => {
+            if (String(url).endsWith("/mutate"))
+              return Response.json(
+                new EnvironmentAuthInvalidError({
+                  code: "auth_invalid",
+                  reason: "invalid_credential",
+                  traceId: "trace-a",
+                }),
+                { status: 401 },
+              );
+            return Response.json(String(url).includes("/.well-known/") ? descriptor : shell);
+          }),
+        ),
+      );
+      expect(result).toMatchObject({
+        status: "rejected",
+        commandId: "command-denied",
+        rejection: { code: "auth_invalid", traceId: "trace-a" },
+      });
+      expect(state.revoked).toEqual(["session-a"]);
+    }),
+  );
+  it.effect("does not retry an uncertain dispatch and still revokes the session", () =>
+    Effect.gen(function* () {
+      const state = fakeAuth();
+      let dispatchCount = 0;
+      const request = decodeAgentAction(
+        json({
+          environmentId: "env-a",
+          runtime: { pid: 123, startedAt: now },
+          command: {
+            type: "project.create",
+            commandId: "command-a",
+            projectId: "project-a",
+            title: "Scratch",
+            workspaceRoot: "/scratch",
+          },
+        }),
+      );
+      const program = Effect.gen(function* () {
+        const target = yield* resolveAgentTarget("/sandbox");
+        return yield* executeAgentRequest(target, { kind: "act", action: request }, state.auth);
+      });
+      const result = yield* program.pipe(
+        Effect.provide(testLayer),
+        Effect.provideService(
+          FetchHttpClient.Fetch,
+          mockFetch(async (url) => {
+            if (String(url).endsWith("/mutate")) {
+              dispatchCount++;
+              throw new Error("private-test-token transport failure");
+            }
+            return Response.json(String(url).includes("/.well-known/") ? descriptor : shell);
+          }),
+        ),
+      );
+      expect(result).toMatchObject({
+        status: "unknown",
+        commandId: "command-a",
+        target: { projectId: "project-a" },
+      });
+      expect(json(result)).not.toContain("private-test-token");
+      expect(dispatchCount).toBe(1);
+      expect(state.revoked).toEqual(["session-a"]);
+    }),
+  );
+  it("generates schema discovery from existing command definitions", () => {
+    expect(json(agentCommandSchema("thread.create"))).toContain("runtimeMode");
+    expect(json(agentCommandSchema("message.dispatch"))).toContain("targetRunId");
+    expect(() => agentCommandSchema("thread.delete")).toThrow();
+  });
+  it.effect("keeps accepted receipts when readback fails without retrying", () =>
+    Effect.gen(function* () {
+      const state = fakeAuth();
+      let dispatches = 0;
+      const action = decodeAgentAction(
+        json({
+          environmentId: "env-a",
+          runtime: { pid: 123, startedAt: now },
+          command: {
+            type: "project.create",
+            commandId: "command-accepted",
+            projectId: "project-a",
+            title: "Scratch",
+            workspaceRoot: "/scratch",
+          },
+        }),
+      );
+      const result = yield* Effect.gen(function* () {
+        const target = yield* resolveAgentTarget("/sandbox");
+        return yield* executeAgentRequest(target, { kind: "act", action }, state.auth);
+      }).pipe(
+        Effect.provide(testLayer),
+        Effect.provideService(
+          FetchHttpClient.Fetch,
+          mockFetch(async (url) => {
+            if (String(url).includes("/.well-known/")) return Response.json(descriptor);
+            if (String(url).endsWith("/mutate")) {
+              dispatches++;
+              return Response.json(project);
+            }
+            if (dispatches > 0) throw new Error("readback unavailable");
+            return Response.json(shell);
+          }),
+        ),
+      );
+      expect(result).toMatchObject({
+        status: "accepted",
+        commandId: "command-accepted",
+        sequence: null,
+        providerCompletion: "not-confirmed",
+        projectionObserved: false,
+        readbackError: "Receipt accepted; subsequent readback failed.",
+      });
+      expect(dispatches).toBe(1);
+      expect(state.revoked).toEqual(["session-a"]);
+    }),
+  );
+});
+
+describe("agent request mode", () => {
+  it.effect("reads bounded provider summaries with only orchestration-read scope", () =>
+    Effect.gen(function* () {
+      const state = fakeAuth();
+      const request = decodeAgentRequest('{"kind":"providers","instance":"codex_work"}');
+      const requestedUrls: string[] = [];
+      const result = yield* Effect.gen(function* () {
+        const target = yield* resolveAgentTarget("/sandbox");
+        return yield* executeAgentRequest(target, request, state.auth);
+      }).pipe(
+        Effect.provide(testLayer),
+        Effect.provideService(
+          FetchHttpClient.Fetch,
+          mockFetch(async (url) => {
+            const address = String(url);
+            requestedUrls.push(address);
+            if (address.includes("/.well-known/")) return Response.json(descriptor);
+            if (address.includes("/api/providers"))
+              return Response.json({
+                providers: [
+                  {
+                    instanceId: "codex_work",
+                    driver: "codex",
+                    displayName: "Work Codex",
+                    enabled: true,
+                    status: "ready",
+                    availability: "available",
+                    message: "Desktop daemon connected",
+                    messageTruncated: false,
+                    version: "1.0.0",
+                    auth: { status: "authenticated", type: "oauth", label: "Signed in" },
+                    modelCount: 4,
+                    skillCount: 2,
+                    desktopBacked: true,
+                  },
+                ],
+                providerCount: 1,
+                providersOmitted: 0,
+              });
+            throw new Error("Unexpected provider request path.");
+          }),
+        ),
+      );
+      expect(result).toMatchObject({
+        environmentId: "env-a",
+        runtime: { pid: 123, startedAt: now },
+        providers: [{ instanceId: "codex_work", desktopBacked: true, modelCount: 4 }],
+      });
+      expect(state.issued[0]?.scopes).toEqual([AuthOrchestrationReadScope]);
+      expect(requestedUrls.some((url) => url.includes("instanceId=codex_work"))).toBe(true);
+      expect(json(result)).not.toContain("private-test-token");
+    }),
+  );
+
+  it.effect("dispatches confirmed actions through the existing identity validator", () =>
+    Effect.gen(function* () {
+      const state = fakeAuth();
+      let dispatches = 0;
+      const request = decodeAgentRequest(
+        json({
+          kind: "act",
+          confirm: true,
+          environmentId: "another-environment",
+          runtime: { pid: 123, startedAt: now },
+          command: {
+            type: "project.create",
+            commandId: "command-a",
+            projectId: "project-a",
+            title: "Scratch",
+            workspaceRoot: "/scratch",
+          },
+        }),
+      );
+      const result = yield* Effect.result(
+        Effect.gen(function* () {
+          const target = yield* resolveAgentTarget("/sandbox");
+          return yield* executeAgentRequest(target, request, state.auth);
+        }).pipe(
+          Effect.provide(testLayer),
+          Effect.provideService(
+            FetchHttpClient.Fetch,
+            mockFetch(async (url) => {
+              const address = String(url);
+              if (address.includes("/.well-known/")) return Response.json(descriptor);
+              if (address.endsWith("/mutate")) {
+                dispatches++;
+                return Response.json(project);
+              }
+              return Response.json(shell);
+            }),
+          ),
+        ),
+      );
+      expect(result._tag).toBe("Failure");
+      expect(dispatches).toBe(0);
+      expect(state.issued[0]?.scopes).toEqual([
+        AuthOrchestrationReadScope,
+        AuthOrchestrationOperateScope,
+      ]);
+      expect(state.revoked).toEqual(["session-a"]);
+    }),
+  );
+});

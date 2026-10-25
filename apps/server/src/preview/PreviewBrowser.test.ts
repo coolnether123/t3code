@@ -1,3 +1,4 @@
+import { TestClock } from "effect/testing";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -123,6 +124,8 @@ const makeHarness = Effect.fn("test.makePreviewBrowser")(function* (
 it.layer(NodeServices.layer)("PreviewBrowser", (it) => {
   it.effect("installs a verified download with its file modes and then reuses it", () =>
     Effect.gen(function* () {
+      // Native filesystem timestamps need a positive epoch on Windows.
+      yield* TestClock.setTime(DateTime.toEpochMillis(DateTime.makeUnsafe("2026-10-22T12:00:00Z")));
       const { browser, fs, path, installRoot, requests } = yield* makeHarness();
       yield* fs.makeDirectory(path.join(installRoot, "1.0.0"), { recursive: true });
       const active = path.join(installRoot, ".install-other");

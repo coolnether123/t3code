@@ -224,6 +224,7 @@ const initRepoWithCommit = (
     yield* driver.initRepo({ cwd });
     yield* git(cwd, ["config", "user.email", "test@test.com"]);
     yield* git(cwd, ["config", "user.name", "Test"]);
+    yield* git(cwd, ["config", "core.autocrlf", "false"]);
     yield* writeTextFile(cwd, "README.md", "# test\n");
     yield* git(cwd, ["add", "."]);
     yield* git(cwd, ["commit", "-m", "initial commit"]);
@@ -582,6 +583,67 @@ it.effect("invalidates a ref snapshot when a mutation fails after changing Git",
 
       const refs = yield* driver.listRefs({ cwd });
       assert.isTrue(refs.refs.some((ref) => ref.name === "feature/partial-failure"));
+    }),
+  ).pipe(Effect.provide(layerServerConfig.pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
+it.effect("fails a ref snapshot when for-each-ref exits unsuccessfully", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const delegate = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const snapshotAttempts = yield* Ref.make(0);
+      const failingSnapshotSpawner = ChildProcessSpawner.make((command) =>
+        Effect.gen(function* () {
+          if (!ChildProcess.isStandardCommand(command)) {
+            return yield* Effect.die("expected a standard Git command");
+          }
+          if (command.args.includes("for-each-ref")) {
+            yield* Ref.update(snapshotAttempts, (count) => count + 1);
+            return makeNonRepositoryHandle();
+          }
+          return yield* delegate.spawn(command);
+        }),
+      );
+      const driver = yield* makeGitVcsDriverCore().pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, failingSnapshotSpawner),
+      );
+      const cwd = yield* makeTmpDir();
+      yield* initRepoWithCommit(cwd).pipe(Effect.provideService(GitVcsDriver.GitVcsDriver, driver));
+
+      const error = yield* driver.listRefs({ cwd, refresh: true }).pipe(Effect.flip);
+
+      assert.deepInclude(error, {
+        _tag: "GitCommandError",
+        operation: "GitVcsDriver.listRefs.snapshotRefs",
+        detail: "Git ref snapshot enumeration failed.",
+        exitCode: 128,
+      });
+      assert.equal(yield* Ref.get(snapshotAttempts), 1);
+    }),
+  ).pipe(Effect.provide(layerServerConfig.pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
+it.effect.each([
+  { label: "space", suffix: " " },
+  { label: "tab", suffix: "\t" },
+])("preserves a root path ending in $label in status output", ({ suffix }) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const delegate = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const path = yield* Path.Path;
+      const cwd = yield* makeTmpDir();
+      const reportedRoot = path.join(cwd, `reported-root${suffix}`);
+      const spawner = ChildProcessSpawner.make((command) =>
+        ChildProcess.isStandardCommand(command) && command.args.includes("--show-toplevel")
+          ? Effect.succeed(makeSuccessfulHandle(`${reportedRoot}\n`))
+          : delegate.spawn(command),
+      );
+      const driver = yield* makeGitVcsDriverCore().pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      );
+      yield* initRepoWithCommit(cwd).pipe(Effect.provideService(GitVcsDriver.GitVcsDriver, driver));
+      const status = yield* driver.statusDetailsLocal(cwd);
+      assert.equal(status.workingTree.rootPath, reportedRoot);
     }),
   ).pipe(Effect.provide(layerServerConfig.pipe(Layer.provideMerge(NodeServices.layer)))),
 );
@@ -1193,7 +1255,10 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
               operation: "GitVcsDriver.test.sshRefusal",
               cwd,
               args: ["fetch", "origin"],
-              env: { LC_ALL: "C", GIT_SSH_COMMAND: fakeSsh },
+              env: {
+                LC_ALL: "C",
+                GIT_SSH_COMMAND: `'${fakeSsh.replaceAll("\\", "/").replaceAll("'", "'\\''")}'`,
+              },
             })
             .pipe(Effect.flip);
 
@@ -1225,7 +1290,10 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
             operation: "GitVcsDriver.test.osPermission",
             cwd,
             args: ["fetch", "origin"],
-            env: { LC_ALL: "C", GIT_SSH_COMMAND: fakeSsh },
+            env: {
+              LC_ALL: "C",
+              GIT_SSH_COMMAND: `'${fakeSsh.replaceAll("\\", "/").replaceAll("'", "'\\''")}'`,
+            },
           })
           .pipe(Effect.flip);
 
@@ -1494,7 +1562,8 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         const cwd = yield* makeTmpDir();
         yield* initRepoWithCommit(cwd);
         const driver = yield* GitVcsDriver.GitVcsDriver;
-        yield* writeTextFile(cwd, ":(exclude)after.ts", "literal pathspec contents\n");
+        const literalPath = (yield* HostProcess.isWindows) ? "[ab]after.ts" : ":(exclude)after.ts";
+        yield* writeTextFile(cwd, literalPath, "literal pathspec contents\n");
         yield* writeTextFile(cwd, "ordinary.ts", "ordinary contents\n");
         const indexBefore = yield* git(cwd, ["ls-files", "--stage"]);
 
@@ -1506,14 +1575,14 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         const scoped = yield* driver.getReviewDiffPreview({
           cwd,
           file: {
-            path: ":(exclude)after.ts",
+            path: literalPath,
             previousPath: null,
             sourceKind: "working-tree",
           },
         });
         const scopedSource = scoped.sources.find((source) => source.kind === "working-tree")!;
         assert.deepStrictEqual(scopedSource.files, [
-          { path: ":(exclude)after.ts", previousPath: null, additions: 1, deletions: 0 },
+          { path: literalPath, previousPath: null, additions: 1, deletions: 0 },
         ]);
         assert.include(scopedSource.diff, "+literal pathspec contents");
         assert.notInclude(scopedSource.diff, "ordinary.ts");
@@ -2497,8 +2566,10 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
     it.effect("commits selected files from a nested project directory", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
-        // A root basename ending in whitespace catches a root lookup that trims Git's output.
-        const cwd = path.join(yield* makeTmpDir(), "repo ");
+        // Windows Git rejects trailing-space folder names; the output cases above
+        // protect whitespace preservation on every platform.
+        const basename = (yield* HostProcess.isWindows) ? "repo with spaces" : "repo ";
+        const cwd = path.join(yield* makeTmpDir(), basename);
         yield* (yield* FileSystem.FileSystem).makeDirectory(cwd);
         yield* initRepoWithCommit(cwd);
         yield* writeTextFile(cwd, "nested/tracked.txt", "one\n");
@@ -2518,7 +2589,7 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
           { path: "README.md", insertions: 1, deletions: 0 },
         ]);
         // The root is what the paths above are relative to, not the nested cwd, and it keeps
-        // the trailing space so the resolved editor target is the file that exists.
+        // any whitespace in the root so the resolved editor target is the file that exists.
         assert.equal(status.workingTree.rootPath, NodeFS.realpathSync.native(cwd));
         assert.equal(
           NodeFS.existsSync(path.join(status.workingTree.rootPath!, "nested", "new.txt")),

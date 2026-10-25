@@ -117,6 +117,7 @@ export const CodexAppServerIdentifierPurpose = Schema.Literals([
   "provider-event",
   "command-approval-request",
   "file-change-approval-request",
+  "permissions-approval-request",
   "mcp-elicitation-request",
   "app-permission-approval-request",
   "user-input-request",
@@ -149,6 +150,10 @@ export class CodexAppServerProcessExitedError extends Schema.TaggedError<CodexAp
     code: Schema.optional(Schema.Number),
     pid: Schema.optionalKey(Schema.Int),
     cause: Schema.optional(Schema.Defect()),
+    stderr: Schema.optionalKey(Schema.String),
+    stderrTruncated: Schema.optionalKey(Schema.Boolean),
+    method: Schema.optionalKey(Schema.String),
+    requestId: Schema.optionalKey(Schema.String),
   },
 ) {
   override get message() {

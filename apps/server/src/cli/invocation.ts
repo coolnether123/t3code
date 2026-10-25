@@ -25,7 +25,7 @@ function detectCliRunner(entryPath: string): CliRunner | null {
   ) {
     return "pnpm dlx";
   }
-  if (path.includes("/.bun/install/cache/") || path.includes("/bunx-")) {
+  if (path.includes("/.bun/install/cache/") || /\/bunx-\d+-[^/]+\//.test(path)) {
     return "bunx";
   }
   return null;
@@ -73,7 +73,8 @@ export const resolveServerInstallation = Effect.gen(function* () {
   const path = yield* Path.Path;
   const platform = yield* HostProcess.Platform;
   const entry = yield* fs.realPath(yield* resolveEntryPath);
-  const match = /^(.*)\/lib\/node_modules\/t3\/(?:dist\/bin\.mjs|bin\/t3\.mjs)$/.exec(entry);
+  const match =
+    /^(.*)[\\/]lib[\\/]node_modules[\\/]t3[\\/](?:dist[\\/]bin\.mjs|bin[\\/]t3\.mjs)$/.exec(entry);
   if (!match) {
     const runner = detectCliRunner(entry);
     return runner === null

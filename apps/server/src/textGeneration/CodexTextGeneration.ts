@@ -10,6 +10,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import {
   type CodexSettings,
   DEFAULT_TEXT_GENERATION_REASONING_EFFORT,
+  type ModelSelection,
   type ServerProviderModel,
   TextGenerationError,
 } from "@t3tools/contracts";

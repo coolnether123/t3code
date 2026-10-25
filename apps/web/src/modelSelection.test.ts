@@ -69,6 +69,49 @@ function settingsWithProviderInstances(): UnifiedSettings {
 }
 
 describe("instance-scoped model selection", () => {
+  it("marks models unavailable only for a failed desktop-backed Codex instance", () => {
+    const codex = provider({ instanceId: "codex", models: ["gpt-5.6-sol"] });
+    const failedCodex = {
+      ...codex,
+      status: "error" as const,
+      message: "Codex desktop daemon is not running on this Mac.",
+    };
+    const entry = {
+      ...deriveProviderInstanceEntries([failedCodex])[0]!,
+      useDesktopAppDaemon: true,
+    };
+    const options = getAppModelOptionsForInstance(settingsWithProviderInstances(), entry);
+
+    expect(options[0]).toMatchObject({
+      slug: "gpt-5.6-sol",
+      isUnavailable: true,
+    });
+
+    const regularCodex = deriveProviderInstanceEntries([failedCodex])[0]!;
+    expect(
+      getAppModelOptionsForInstance(settingsWithProviderInstances(), regularCodex)[0]
+        ?.isUnavailable,
+    ).toBeUndefined();
+  });
+
+  it("preserves server-provided legacy model metadata", () => {
+    const baseProvider = provider({
+      instanceId: "claudeAgent",
+      models: ["claude-opus-4-8"],
+    });
+    const providers = [
+      {
+        ...baseProvider,
+        models: [{ ...baseProvider.models[0]!, isLegacy: true }],
+      },
+    ];
+    const stock = deriveProviderInstanceEntries(providers)[0]!;
+
+    expect(getAppModelOptionsForInstance(settingsWithProviderInstances(), stock)[0]?.isLegacy).toBe(
+      true,
+    );
+  });
+
   it("keeps custom models on the provider instance that declared them", () => {
     const providers = [
       provider({

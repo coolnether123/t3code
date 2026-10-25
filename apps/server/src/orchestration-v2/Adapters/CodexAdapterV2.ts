@@ -1,3 +1,21 @@
+import { makeCodexFileChangeApprovalContext } from "../../provider/CodexFileChangeApprovalContext.ts";
+import {
+  CODEX_COMPUTER_CONTROL_OPTION_ID,
+  normalizeCodexComputerControlMode,
+} from "../../provider/CodexComputerControl.ts";
+import { buildCodexAppServerCommandArgs } from "../../provider/CodexSubagentPolicy.ts";
+import {
+  codexDesktopDaemonEnvironment,
+  makeCodexDesktopDaemonStdio,
+  resolveCodexBinaryPath,
+} from "../../provider/CodexAppServerTransport.ts";
+import { attachCodexDesktopPluginSkills } from "../../provider/CodexDesktopPluginSkills.ts";
+import {
+  preflightCodexMcpServers,
+  codexMcpDisableOverride,
+} from "../../provider/CodexMcpPreflight.ts";
+import { recoverCodexDenyReadAclState } from "../../provider/CodexSandboxRecovery.ts";
+import { migrateCodexResumeRollout } from "../../provider/Drivers/CodexHomeLayout.ts";
 import { revertCodexThread } from "../../provider/CodexThreadRevert.ts";
 import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudget";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
@@ -737,6 +755,8 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
     readonly hasT3Mcp?: boolean;
     readonly browserToolsAvailable?: boolean;
     readonly deviceToolsAvailable?: boolean;
+    readonly useDesktopAppDaemon?: boolean;
+    readonly computerControlAvailable?: boolean;
     /** ChatGPT token sharing does not accept service tiers. */
     readonly omitServiceTier?: boolean;
     readonly appContext?: ProviderAdapter.ProviderAdapterV2TurnInput["appContext"];
@@ -775,7 +795,19 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
     const t3Context =
       input.hasT3Mcp === true
         ? buildCodexAdditionalContext(
-            { model: input.modelSelection.model, reasoningEffort: effort ?? undefined },
+            {
+              model: input.modelSelection.model,
+              reasoningEffort: effort ?? undefined,
+              useDesktopAppDaemon: input.useDesktopAppDaemon,
+              computerControlAvailable: input.computerControlAvailable,
+              subagentBackend: input.runtimePolicy.subagentBackend,
+              computerControlMode: normalizeCodexComputerControlMode(
+                getModelSelectionStringOptionValue(
+                  input.modelSelection,
+                  CODEX_COMPUTER_CONTROL_OPTION_ID,
+                ),
+              ),
+            },
             {
               browser: input.browserToolsAvailable ?? true,
               device: input.deviceToolsAvailable ?? false,
@@ -1373,6 +1405,16 @@ function codexThreadRuntimeParams(input: {
     ...(input.modelSelection === undefined ? {} : { model: input.modelSelection.model }),
     config: {
       ...CODEX_THREAD_CONFIG,
+      ...(input.runtimePolicy?.subagentBackend !== "v1" &&
+      input.runtimePolicy?.subagentBackend !== "v2"
+        ? {}
+        : {
+            "agents.enabled":
+              input.runtimePolicy?.subagentBackend === "v1" ||
+              input.runtimePolicy?.subagentBackend === "v2",
+            "features.multi_agent": input.runtimePolicy?.subagentBackend === "v1",
+            "features.multi_agent_v2": input.runtimePolicy?.subagentBackend === "v2",
+          }),
       ...(mcpSession === undefined
         ? {}
         : {
@@ -1568,49 +1610,100 @@ export const layerAppServerClientFactory: Layer.Layer<
     const agentScope = yield* AgentScope;
 
     return CodexAppServerClientFactory.of({
-      open: Effect.fn("CodexAdapterV2.open")(function* (input) {
-        const scope = yield* Scope.Scope;
-        const environment = {
-          ...codexAppServerEnvironment(input.environment),
-          ...(input.settings.homePath ? { CODEX_HOME: input.settings.homePath } : {}),
-        };
-        const command = yield* makeCodexAppServerSpawnCommand({
-          command: input.settings.binaryPath || "codex",
-          args: codexAppServerArgs(
-            resolveCodexLaunchArgs(input.settings.launchArgs, input.environment),
-          ),
-          env: environment,
-          threadId: input.threadId,
-        }).pipe(Effect.provideService(AgentScope, agentScope));
-        const handle = yield* spawner.spawn(command).pipe(
-          Effect.provideService(Scope.Scope, scope),
-          Effect.mapError(
-            (cause) =>
-              new ProviderAdapter.ProviderAdapterOpenSessionError({
-                driver: CODEX_PROVIDER,
-                providerSessionId: input.providerSessionId,
-                cause,
-              }),
-          ),
-        );
-        const protocolLogger = makeCodexAppServerProtocolLogger({
-          nativeEventLogger,
-          threadId: input.threadId,
-          providerSessionId: input.providerSessionId,
-        });
-        const clientOptions: CodexClient.CodexAppServerClientOptions =
-          protocolLogger === undefined
-            ? {}
+      open: Effect.fn("CodexAdapterV2.open")(
+        function* (input) {
+          const scope = yield* Scope.Scope;
+          yield* recoverCodexDenyReadAclState().pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterOpenSessionError({
+                  driver: CODEX_PROVIDER,
+                  providerSessionId: input.providerSessionId,
+                  cause,
+                }),
+            ),
+          );
+          const desktopDaemon = input.settings.useDesktopAppDaemon;
+          const environment = desktopDaemon
+            ? codexDesktopDaemonEnvironment(input.environment)
             : {
-                logIncoming: true,
-                logOutgoing: true,
-                logger: protocolLogger,
+                ...codexAppServerEnvironment(input.environment),
+                ...(input.settings.homePath ? { CODEX_HOME: input.settings.homePath } : {}),
               };
-        const context = yield* Layer.build(CodexClient.layerChildProcess(handle, clientOptions));
-        return yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
-          Effect.provide(context),
-        );
-      }),
+          const preflight = yield* Effect.promise(() =>
+            preflightCodexMcpServers({
+              homePath: input.settings.homePath,
+              environment,
+              ...(input.runtimePolicy.cwd === null ? {} : { cwd: input.runtimePolicy.cwd }),
+            }),
+          );
+          const mcpArgs = preflight.disabledServerNames.flatMap((name) => [
+            "-c",
+            codexMcpDisableOverride(name),
+          ]);
+          const command = yield* makeCodexAppServerSpawnCommand({
+            command: input.settings.binaryPath || "codex",
+            args: buildCodexAppServerCommandArgs({
+              appServerTransport: desktopDaemon ? "desktop-daemon" : "stdio",
+              launchArgs: resolveCodexLaunchArgs(input.settings.launchArgs, input.environment),
+              appServerArgs: mcpArgs,
+              ...(input.runtimePolicy.subagentBackend === undefined
+                ? {}
+                : { subagentBackend: input.runtimePolicy.subagentBackend }),
+            }),
+            env: environment,
+            threadId: input.threadId,
+          }).pipe(Effect.provideService(AgentScope, agentScope));
+          const handle = yield* spawner.spawn(command).pipe(
+            Effect.provideService(Scope.Scope, scope),
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterOpenSessionError({
+                  driver: CODEX_PROVIDER,
+                  providerSessionId: input.providerSessionId,
+                  cause,
+                }),
+            ),
+          );
+          const protocolLogger = makeCodexAppServerProtocolLogger({
+            nativeEventLogger,
+            threadId: input.threadId,
+            providerSessionId: input.providerSessionId,
+          });
+          const clientOptions: CodexClient.CodexAppServerClientOptions =
+            protocolLogger === undefined
+              ? {}
+              : {
+                  logIncoming: true,
+                  logOutgoing: true,
+                  logger: protocolLogger,
+                };
+          const transportLayer = desktopDaemon
+            ? CodexClient.layerChildProcessStdio(
+                handle,
+                yield* makeCodexDesktopDaemonStdio(handle),
+                clientOptions,
+              )
+            : CodexClient.layerChildProcess(handle, clientOptions);
+          const context = yield* Layer.build(transportLayer);
+          return yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
+            Effect.provide(context),
+          );
+        },
+        (effect, input) =>
+          effect.pipe(
+            Effect.catchTags({
+              CodexAppServerTransportError: (cause) =>
+                Effect.fail(
+                  new ProviderAdapter.ProviderAdapterOpenSessionError({
+                    driver: CODEX_PROVIDER,
+                    providerSessionId: input.providerSessionId,
+                    cause,
+                  }),
+                ),
+            }),
+          ),
+      ),
     });
   }),
 );
@@ -1652,8 +1745,11 @@ export const createCodexAdapterV2 = Effect.fn("CodexAdapterV2.createCodexAdapter
   const settings = {
     ...config,
     enabled,
-    binaryPath: expandHomePath(config.binaryPath, yield* HostProcess.HomeDirectory),
-    homePath: homeLayout.effectiveHomePath ?? "",
+    binaryPath: expandHomePath(
+      yield* resolveCodexBinaryPath(config, hostEnvironment),
+      yield* HostProcess.HomeDirectory,
+    ),
+    homePath: config.useDesktopAppDaemon ? "" : (homeLayout.effectiveHomePath ?? ""),
   } satisfies CodexSettings;
 
   return yield* makeCodexAdapterV2({
@@ -1685,6 +1781,7 @@ const layer: Layer.Layer<
   | FileSystem.FileSystem
   | IdAllocator.IdAllocatorV2
   | McpProviderSessions.McpProviderSessions
+  | Path.Path
   | ServerConfig
 > = Layer.effect(
   ProviderAdapter.ProviderAdapterV2,
@@ -1737,6 +1834,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
   adapterOptions: CodexAdapterV2Options,
 ) {
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+  const path = yield* Path.Path;
   const readMcpSession = (threadId: ThreadId | null) =>
     threadId === null ? Effect.succeed(undefined) : mcpSessions.read(threadId);
   const { clientFactory, crypto, fileSystem, idAllocator, serverConfig } = adapterOptions;
@@ -1763,6 +1861,29 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                     }),
                 ),
               );
+        if (!adapterOptions.settings.useDesktopAppDaemon && adapterOptions.settings.homePath) {
+          const configured = yield* resolveCodexHomeLayout({
+            ...adapterOptions.settings,
+            homePath: "",
+            shadowHomePath: "",
+          }).pipe(Effect.provideService(Path.Path, path));
+          yield* migrateCodexResumeRollout({
+            sharedHomePath: configured.sharedHomePath,
+            effectiveHomePath: adapterOptions.settings.homePath,
+            resumeThreadId: input.initialNativeThreadId,
+          }).pipe(
+            Effect.provideService(FileSystem.FileSystem, fileSystem),
+            Effect.provideService(Path.Path, path),
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterOpenSessionError({
+                  driver: CODEX_PROVIDER,
+                  providerSessionId: input.providerSessionId,
+                  cause,
+                }),
+            ),
+          );
+        }
         const client = yield* clientFactory.open({
           instanceId: adapterOptions.instanceId,
           threadId: input.threadId,
@@ -1839,6 +1960,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 }),
               );
             yield* client.notify("initialized", undefined);
+            if (adapterOptions.settings.useDesktopAppDaemon)
+              yield* attachCodexDesktopPluginSkills(client, adapterOptions.environment).pipe(
+                Effect.provideService(FileSystem.FileSystem, fileSystem),
+                Effect.provideService(Path.Path, path),
+              );
             yield* Ref.set(initialized, true);
           }),
         );
@@ -1897,6 +2023,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           new Map<ProviderTurnId, ActiveCodexProviderRetry>(),
         );
         const planIds = yield* Ref.make(new Map<string, OrchestrationV2PlanArtifact["id"]>());
+        const fileChangeApprovalContext = makeCodexFileChangeApprovalContext();
         const pendingRuntimeRequests = yield* Ref.make(
           new Map<string, PendingCodexRuntimeRequest>(),
         );
@@ -4747,6 +4874,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
 
         yield* client.handleServerNotification("item/started", (payload) =>
           Effect.gen(function* () {
+            if (payload.item.type === "fileChange")
+              fileChangeApprovalContext.remember(
+                { threadId: payload.threadId, turnId: payload.turnId, itemId: payload.item.id },
+                payload.item.changes,
+              );
             const context = yield* awaitActiveTurn(payload.turnId);
             if (context === undefined) {
               return;
@@ -5274,10 +5406,16 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               nativeRequestId: payload.itemId,
               requestKind: "file-change",
               prompt:
+                fileChangeApprovalContext.take({
+                  threadId: payload.threadId,
+                  turnId: payload.turnId,
+                  itemId: payload.itemId,
+                }) ??
                 codexFileChangeApprovalPrompt({
                   ...payload,
                   fileChanges: context.fileChangeKindsByItem.get(payload.itemId) ?? {},
-                }) ?? null,
+                }) ??
+                null,
             });
             const decision = yield* Deferred.make<ProviderApprovalDecision, never>();
             yield* Ref.update(pendingRuntimeRequests, (current) => {
@@ -6411,6 +6549,8 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               hasT3Mcp: mcpSession !== undefined,
               browserToolsAvailable: mcpSession?.browserToolsAvailable ?? true,
               deviceToolsAvailable: mcpSession?.capabilities?.has("device") ?? false,
+              computerControlAvailable: mcpSession?.capabilities?.has("computer") ?? false,
+              useDesktopAppDaemon: adapterOptions.settings.useDesktopAppDaemon,
               omitServiceTier: adapterOptions.resolveRuntime !== undefined,
               ...(turnInput.appContext === undefined ? {} : { appContext: turnInput.appContext }),
             });

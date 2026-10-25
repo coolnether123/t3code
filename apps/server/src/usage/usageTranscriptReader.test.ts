@@ -1,378 +1,622 @@
-// @effect-diagnostics nodeBuiltinImport:off - resume coverage writes, appends
-// to, and truncates real transcript files byte-exactly, mirroring the reader's
-// own deliberate node:fs usage.
+// @effect-diagnostics nodeBuiltinImport:off
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { afterEach, assert, beforeEach, describe, it } from "@effect/vitest";
-import type { TranscriptUsageFormat } from "@t3tools/provider-core/server/usage";
-import * as Schema from "effect/Schema";
+import { describe, expect, it } from "@effect/vitest";
 
-import { TEST_FORMATS } from "./usageTestFormats.ts";
-import { readTranscriptRecords, transcriptLineGate } from "./usageTranscriptReader.ts";
+import {
+  readRepeatedInputRecords,
+  readTranscriptRecords,
+  readTranscriptPrefixFingerprint,
+  listTranscriptFilesBounded,
+  listTranscriptFiles,
+  selectTranscriptFilesForScan,
+  transcriptAppendIsSafe,
+  transcriptCursorIsLineBoundary,
+  type TranscriptFile,
+} from "./usageTranscriptReader.ts";
+import { createRepeatedInputCatalog } from "./usageRepeatedInput.ts";
 
-let dir: string;
-
-beforeEach(async () => {
-  dir = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "usage-reader-test-"));
+const file = (path: string, size: number, mtimeMs: number): TranscriptFile => ({
+  path,
+  size,
+  mtimeMs,
 });
 
-afterEach(async () => {
-  await NodeFSP.rm(dir, { recursive: true, force: true });
+describe("selectTranscriptFilesForScan", () => {
+  it("selects newest cold files within the byte budget", () => {
+    const selection = selectTranscriptFilesForScan(
+      [file("old", 40, 1), file("new", 60, 3), file("middle", 50, 2)],
+      ({ size }) => size,
+      100,
+    );
+
+    expect(selection.files.map(({ path }) => path)).toEqual(["new", "old"]);
+    expect(selection.coldBytes).toBe(100);
+    expect(selection.deferredFiles).toBe(1);
+    expect(selection.deferredBytes).toBe(50);
+  });
+
+  it("always includes warm files without charging the cold budget", () => {
+    const selection = selectTranscriptFilesForScan(
+      [file("warm", 500, 3), file("cold", 100, 2)],
+      ({ path, size }) => (path === "warm" ? 0 : size),
+      100,
+    );
+
+    expect(selection.files.map(({ path }) => path)).toEqual(["warm", "cold"]);
+    expect(selection.coldBytes).toBe(100);
+    expect(selection.deferredFiles).toBe(0);
+  });
+
+  it("only charges the changed transcript when the rest are warm", () => {
+    const selection = selectTranscriptFilesForScan(
+      [file("unchanged-a", 500, 3), file("edited", 60, 2), file("unchanged-b", 400, 1)],
+      ({ path, size }) => (path !== "edited" ? 0 : size),
+      100,
+    );
+
+    expect(selection.files.map(({ path }) => path)).toEqual([
+      "unchanged-a",
+      "edited",
+      "unchanged-b",
+    ]);
+    expect(selection.coldBytes).toBe(60);
+    expect(selection.deferredFiles).toBe(0);
+  });
+
+  it("returns smaller files before an oversized transcript", () => {
+    const selection = selectTranscriptFilesForScan(
+      [file("oversized", 1_000, 3), file("small", 50, 2)],
+      ({ size }) => size,
+      100,
+    );
+
+    expect(selection.files.map(({ path }) => path)).toEqual(["small"]);
+    expect(selection.deferredFiles).toBe(1);
+    expect(selection.deferredBytes).toBe(1_000);
+    expect(selection.coldBytes).toBe(50);
+  });
+
+  it("selects one oversized transcript when it is the only cold work", () => {
+    const selection = selectTranscriptFilesForScan(
+      [file("oversized", 1_000, 3)],
+      ({ size }) => size,
+      100,
+    );
+
+    expect(selection.files.map(({ path }) => path)).toEqual(["oversized"]);
+    expect(selection.deferredFiles).toBe(0);
+    expect(selection.deferredBytes).toBe(0);
+    expect(selection.coldBytes).toBe(1_000);
+  });
+
+  it("selects a formerly oversized transcript after newer files become warm", () => {
+    const selection = selectTranscriptFilesForScan(
+      [file("new", 60, 3), file("oversized", 1_000, 2)],
+      ({ path, size }) => (path === "new" ? 0 : size),
+      100,
+    );
+
+    expect(selection.files.map(({ path }) => path)).toEqual(["new", "oversized"]);
+    expect(selection.deferredFiles).toBe(0);
+  });
+
+  it("does not starve oversized history while active rollouts only append", () => {
+    const selection = selectTranscriptFilesForScan(
+      [file("active", 2_000, 3), file("oversized", 1_000, 2), file("oversized-2", 900, 1)],
+      ({ path, size }) => (path === "active" ? 40 : size),
+      100,
+    );
+
+    expect(selection.files.map(({ path }) => path)).toEqual(["active", "oversized"]);
+    expect(selection.deferredFiles).toBe(1);
+    expect(selection.deferredBytes).toBe(900);
+    expect(selection.coldBytes).toBe(1_040);
+  });
+
+  it("budgets only appended bytes so growing large chats do not starve other files", () => {
+    const selection = selectTranscriptFilesForScan(
+      [
+        { ...file("active-large", 200_000_000, 3), startByte: 199_960_000 },
+        { ...file("active-small", 70_000_000, 2), startByte: 69_900_000 },
+        { ...file("cold", 50_000_000, 1), startByte: 0 },
+      ],
+      ({ size, startByte }) => size - startByte,
+      128 * 1024 * 1024,
+    );
+    expect(selection.files.map(({ path }) => path)).toEqual([
+      "active-large",
+      "active-small",
+      "cold",
+    ]);
+    expect(selection.coldBytes).toBe(50_140_000);
+    expect(selection.deferredFiles).toBe(0);
+  });
 });
 
-function claudeLine(id: number, outputTokens: number): string {
-  return `${JSON.stringify({
-    type: "assistant",
-    timestamp: "2026-08-01T10:00:00Z",
-    requestId: `req_${id}`,
-    sessionId: "session-1",
-    message: {
-      id: `msg_${id}`,
-      model: "claude-fable-5",
-      usage: { input_tokens: 10, output_tokens: outputTokens },
-    },
-  })}\n`;
-}
-
-function codexMetaLine(): string {
-  return `${JSON.stringify({
-    type: "session_meta",
-    timestamp: "2026-08-01T10:00:00Z",
-    payload: { type: "session_meta", id: "codex-session-1" },
-  })}\n`;
-}
-
-function codexModelLine(model: string): string {
-  return `${JSON.stringify({
-    type: "turn_context",
-    timestamp: "2026-08-01T10:00:01Z",
-    payload: { type: "turn_context", model },
-  })}\n`;
-}
-
-function codexTierLine(serviceTier: string): string {
-  return `${JSON.stringify({
-    type: "event_msg",
-    timestamp: "2026-08-01T10:00:01Z",
-    payload: { type: "thread_settings_applied", thread_settings: { service_tier: serviceTier } },
-  })}\n`;
-}
-
-function codexUsageLine(outputTokens: number, secondsOffset: number): string {
-  return `${JSON.stringify({
-    type: "event_msg",
-    timestamp: `2026-08-01T10:00:${String(secondsOffset).padStart(2, "0")}Z`,
-    payload: {
-      type: "token_count",
-      info: { last_token_usage: { input_tokens: 100, output_tokens: outputTokens } },
-    },
-  })}\n`;
-}
-
-describe("readTranscriptRecords resume", () => {
-  it.each([
-    { mode: "buffered", streamingThresholdBytes: Infinity },
-    { mode: "streaming", streamingThresholdBytes: 0 },
-  ])("counts malformed tails once across $mode reads and resume", async (options) => {
-    const format: TranscriptUsageFormat<{ errors: number }> = {
-      ...TEST_FORMATS.claude,
-      selectFields: { ...TEST_FORMATS.claude.selectFields, usage: true },
-      state: {
-        initial: () => ({ errors: 0 }),
-        schema: Schema.Struct({ errors: Schema.Number }),
-      },
-      parseLine(line, state) {
-        return this.parseProjected(JSON.parse(line), state);
-      },
-      parseProjected(value, state) {
-        if (
-          typeof value === "object" &&
-          value !== null &&
-          "usage" in value &&
-          value.usage === "malformed"
-        ) {
-          state.errors += 1;
-          return [];
-        }
-        return TEST_FORMATS.claude.parseProjected(value, undefined);
-      },
-      readMalformedRecords: (state: { errors: number }) => state.errors,
-    };
-    const path = NodePath.join(dir, "diagnostics.jsonl");
-    const malformed = JSON.stringify({ usage: "malformed" });
-    // Completed lines enter the projected parser only when they cross a stream chunk.
-    const committed = `${JSON.stringify({ usage: "malformed", padding: "x".repeat(256 * 1024) })}\n${claudeLine(1, 5)}`;
-    await NodeFSP.writeFile(path, committed + malformed);
-
-    const first = await readTranscriptRecords(path, format, undefined, options);
-    assert.isNotNull(first);
-    assert.deepStrictEqual(
-      first.records.map((record) => record.totals.outputTokens),
-      [5],
+describe("incremental transcript reads", () => {
+  it("marks an inventory incomplete when its deadline has already elapsed", async () => {
+    const directory = await NodeFSP.mkdtemp(
+      NodePath.join(NodeOS.tmpdir(), "t3-usage-list-deadline-"),
     );
-    assert.deepStrictEqual(first.tailRecords, []);
-    assert.strictEqual(first.position.resumeOffset, Buffer.byteLength(committed));
-    assert.deepStrictEqual(first.position.state, { errors: 1 });
-    assert.strictEqual(first.malformedRecords, 2);
-
-    const savedPosition = JSON.parse(JSON.stringify(first.position));
-    await NodeFSP.appendFile(path, `\n${claudeLine(2, 7)}${malformed}\n`);
-    const resumed = await readTranscriptRecords(path, format, savedPosition, options);
-    assert.isNotNull(resumed);
-    assert.isTrue(resumed.resumed);
-    assert.deepStrictEqual(
-      resumed.records.map((record) => record.totals.outputTokens),
-      [7],
-    );
-    assert.deepStrictEqual(resumed.position.state, { errors: 3 });
-    assert.strictEqual(resumed.malformedRecords, 3);
-
-    const full = await readTranscriptRecords(path, format, undefined, options);
-    assert.isNotNull(full);
-    assert.deepStrictEqual([...first.records, ...resumed.records], full.records);
-    assert.deepStrictEqual(resumed.tailRecords, full.tailRecords);
-    assert.deepStrictEqual(resumed.position, full.position);
-    assert.strictEqual(resumed.malformedRecords, full.malformedRecords);
+    try {
+      const listing = await listTranscriptFilesBounded(directory, 0, "codex", -1);
+      expect(listing).toEqual({ files: [], complete: false });
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
   });
 
-  it("parses only appended lines when resuming a grown file", async () => {
-    const path = NodePath.join(dir, "claude.jsonl");
-    await NodeFSP.writeFile(path, claudeLine(1, 5) + claudeLine(2, 7));
-    const first = await readTranscriptRecords(path, TEST_FORMATS.claude);
-    assert.isNotNull(first);
-    assert.strictEqual(first.records.length, 2);
-    assert.isFalse(first.resumed);
-    assert.strictEqual(first.malformedRecords, 0);
-
-    await NodeFSP.appendFile(path, claudeLine(3, 11));
-    const second = await readTranscriptRecords(path, TEST_FORMATS.claude, first.position);
-    assert.isNotNull(second);
-    assert.isTrue(second.resumed);
-    assert.strictEqual(second.records.length, 1);
-    assert.strictEqual(second.records[0]?.totals.outputTokens, 11);
-
-    const full = await readTranscriptRecords(path, TEST_FORMATS.claude);
-    assert.isNotNull(full);
-    assert.deepStrictEqual([...first.records, ...second.records], [...full.records]);
+  it("lists nested recent transcripts with bounded metadata batches and excludes other files", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-list-"));
+    const nested = NodePath.join(directory, "nested");
+    try {
+      await NodeFSP.mkdir(nested);
+      await Promise.all(
+        Array.from({ length: 70 }, (_, index) =>
+          NodeFSP.writeFile(NodePath.join(nested, `${index}.jsonl`), "{}\n"),
+        ),
+      );
+      await NodeFSP.writeFile(NodePath.join(directory, "ignore.txt"), "text");
+      const old = NodePath.join(directory, "old.jsonl");
+      await NodeFSP.writeFile(old, "{}\n");
+      await NodeFSP.utimes(old, 1, 1);
+      const files = await listTranscriptFiles(directory, 2_000, "codex");
+      expect(files).toHaveLength(70);
+      expect(files.every((file) => file.path.startsWith(nested) && file.size === 3)).toBe(true);
+      expect(await listTranscriptFiles(NodePath.join(directory, "missing"), 0, "codex")).toEqual(
+        [],
+      );
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
   });
 
-  it("carries the Codex reducer state across the resume boundary", async () => {
-    const path = NodePath.join(dir, "rollout.jsonl");
-    await NodeFSP.writeFile(
-      path,
-      codexMetaLine() + codexModelLine("gpt-5.2-codex") + codexTierLine("ultrafast"),
-    );
-    const first = await readTranscriptRecords(path, TEST_FORMATS.codex);
-    assert.isNotNull(first);
-    assert.strictEqual(first.records.length, 0);
+  it("resumes an expired inventory from discovered files instead of restarting its walk", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-inventory-"));
+    try {
+      await Promise.all(
+        Array.from({ length: 129 }, (_, index) =>
+          NodeFSP.writeFile(NodePath.join(directory, `${index}.jsonl`), "{}\n"),
+        ),
+      );
+      const expiresAfterOneBatch = () => {
+        let calls = 0;
+        return () => (calls++ < 2 ? 0 : 2);
+      };
+      const first = await listTranscriptFilesBounded(
+        directory,
+        0,
+        "codex",
+        1,
+        expiresAfterOneBatch(),
+      );
+      expect(first).toEqual({ files: [], complete: false });
 
-    await NodeFSP.appendFile(path, codexUsageLine(9, 5));
-    const second = await readTranscriptRecords(path, TEST_FORMATS.codex, first.position);
-    assert.isNotNull(second);
-    assert.isTrue(second.resumed);
-    assert.strictEqual(second.records.length, 1);
-    assert.strictEqual(second.records[0]?.model, "gpt-5.2-codex");
-    assert.strictEqual(second.records[0]?.speed, "ultrafast");
-    assert.strictEqual(second.records[0]?.sessionId, "codex-session-1");
+      const second = await listTranscriptFilesBounded(
+        directory,
+        1,
+        "codex",
+        1,
+        expiresAfterOneBatch(),
+      );
+      expect(second.complete).toBe(false);
+      expect(second.files).toHaveLength(128);
+
+      const complete = await listTranscriptFilesBounded(
+        directory,
+        0,
+        "codex",
+        Number.POSITIVE_INFINITY,
+      );
+      expect(complete).toMatchObject({ complete: true });
+      expect(complete.files).toHaveLength(129);
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
   });
 
-  it("suppresses a Codex duplicate usage event that straddles the boundary", async () => {
-    const path = NodePath.join(dir, "rollout.jsonl");
-    await NodeFSP.writeFile(
-      path,
-      codexMetaLine() + codexModelLine("gpt-5.2-codex") + codexUsageLine(9, 5),
-    );
-    const first = await readTranscriptRecords(path, TEST_FORMATS.codex);
-    assert.isNotNull(first);
-    assert.strictEqual(first.records.length, 1);
+  it("refreshes a known inventory from changed directories and recent transcripts", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-known-"));
+    const oldDay = NodePath.join(directory, "2026", "08", "01");
+    const today = NodePath.join(directory, "2026", "09", "28");
+    let wall = Date.parse("2026-09-28T12:00:00.000Z");
+    try {
+      await NodeFSP.mkdir(oldDay, { recursive: true });
+      await NodeFSP.mkdir(today, { recursive: true });
+      const old = NodePath.join(oldDay, "old.jsonl");
+      const active = NodePath.join(today, "active.jsonl");
+      await NodeFSP.writeFile(old, "{}\n");
+      await NodeFSP.utimes(old, 1_000, 1_000);
+      await NodeFSP.writeFile(active, "{}\n");
+      await NodeFSP.utimes(active, wall / 1_000, wall / 1_000);
+      await NodeFSP.utimes(today, wall / 1_000, wall / 1_000);
+      const clock = () => wall;
+      const list = () =>
+        listTranscriptFilesBounded(
+          directory,
+          0,
+          "codex",
+          Number.POSITIVE_INFINITY,
+          undefined,
+          clock,
+        );
+      expect((await list()).files).toHaveLength(2);
 
-    // Codex re-emits an unchanged token_count on stream boundaries; the copy
-    // lands after the resume point and must still be dropped.
-    await NodeFSP.appendFile(path, codexUsageLine(9, 5) + codexUsageLine(21, 8));
-    const second = await readTranscriptRecords(path, TEST_FORMATS.codex, first.position);
-    assert.isNotNull(second);
-    assert.isTrue(second.resumed);
-    assert.deepStrictEqual(
-      second.records.map((record) => record.totals.outputTokens),
-      [21],
-    );
+      // A recent transcript grows and a new one appears; both are seen without a full walk.
+      await NodeFSP.appendFile(active, "{}\n");
+      const added = NodePath.join(today, "added.jsonl");
+      await NodeFSP.writeFile(added, "{}\n");
+      wall += 60_000;
+      await NodeFSP.utimes(active, wall / 1_000, wall / 1_000);
+      await NodeFSP.utimes(added, wall / 1_000, wall / 1_000);
+      await NodeFSP.utimes(today, wall / 1_000, wall / 1_000);
+      const refreshed = await list();
+      expect(refreshed.complete).toBe(true);
+      expect(refreshed.files.find((file) => file.path === active)?.size).toBe(6);
+      expect(refreshed.files.map((file) => file.path).sort()).toEqual([active, added, old].sort());
+
+      // A deleted directory's transcripts disappear.
+      await NodeFSP.rm(oldDay, { recursive: true, force: true });
+      wall += 60_000;
+      expect((await list()).files.map((file) => file.path).sort()).toEqual([active, added].sort());
+
+      // An old transcript's append is left to the periodic full walk.
+      await NodeFSP.mkdir(oldDay, { recursive: true });
+      await NodeFSP.writeFile(old, "{}\n");
+      await NodeFSP.utimes(old, 1_000, 1_000);
+      wall += 6 * 60_000;
+      expect((await list()).files.some((file) => file.path === old)).toBe(true);
+      await NodeFSP.appendFile(old, "{}\n");
+      await NodeFSP.utimes(old, 1_000, 1_000);
+      wall += 60_000;
+      expect((await list()).files.find((file) => file.path === old)?.size).toBe(3);
+      wall += 6 * 60_000;
+      expect((await list()).files.find((file) => file.path === old)?.size).toBe(6);
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
   });
 
-  it("defers an unterminated trailing line to tailRecords, then consumes it once terminated", async () => {
-    const path = NodePath.join(dir, "claude.jsonl");
-    const unterminated = claudeLine(2, 7).trimEnd();
-    await NodeFSP.writeFile(path, claudeLine(1, 5) + unterminated);
-    const first = await readTranscriptRecords(path, TEST_FORMATS.claude);
-    assert.isNotNull(first);
-    assert.strictEqual(first.records.length, 1);
-    assert.strictEqual(first.tailRecords.length, 1);
-    assert.strictEqual(first.tailRecords[0]?.totals.outputTokens, 7);
-
-    await NodeFSP.appendFile(path, `\n${claudeLine(3, 11)}`);
-    const second = await readTranscriptRecords(path, TEST_FORMATS.claude, first.position);
-    assert.isNotNull(second);
-    assert.isTrue(second.resumed);
-    assert.deepStrictEqual(
-      second.records.map((record) => record.totals.outputTokens),
-      [7, 11],
-    );
-    assert.strictEqual(second.tailRecords.length, 0);
-  });
-
-  it.each([
-    { mode: "buffered", streamingThresholdBytes: Infinity },
-    { mode: "streaming", streamingThresholdBytes: 0 },
-  ])(
-    "resumes an initial Codex carried-total tail without rebilling it ($mode)",
-    async (options) => {
-      const path = NodePath.join(dir, "continuation.jsonl");
-      const usage = (input: number, output: number) => ({
-        input_tokens: input,
-        output_tokens: output,
-      });
-      const event = (last: unknown, cumulative: unknown) =>
+  it("resumes a growing Codex JSONL file without rereading its prefix", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-append-"));
+    const path = NodePath.join(directory, "rollout.jsonl");
+    const first =
+      [
         JSON.stringify({
+          timestamp: "2026-08-29T10:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "session-a" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-08-29T10:00:01.000Z",
+          type: "turn_context",
+          payload: { model: "gpt-5.6-sol" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-08-29T10:00:02.000Z",
           type: "event_msg",
-          timestamp: "2026-08-01T10:00:05Z",
           payload: {
             type: "token_count",
-            info: { last_token_usage: last, total_token_usage: cumulative },
+            info: {
+              last_token_usage: { input_tokens: 10, cached_input_tokens: 3, output_tokens: 2 },
+            },
           },
-        });
-      const firstLine = event(usage(100, 20), usage(500, 60));
-      await NodeFSP.writeFile(
-        path,
-        codexMetaLine() + codexModelLine("gpt-6-astra") + codexTierLine("ultrafast") + firstLine,
-      );
-      const first = await readTranscriptRecords(path, TEST_FORMATS.codex, undefined, options);
-      assert.isNotNull(first);
-      assert.strictEqual(first.records.length, 0);
-      assert.deepStrictEqual(
-        first.tailRecords.map((r) => [r.totals.outputTokens, r.speed]),
-        [[20, "ultrafast"]],
-      );
-      assert.strictEqual(first.malformedRecords, 0);
+        }),
+      ].join("\n") + "\n";
+    const second =
+      JSON.stringify({
+        timestamp: "2026-08-29T10:00:03.000Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            last_token_usage: { input_tokens: 20, cached_input_tokens: 5, output_tokens: 4 },
+          },
+        },
+      }) + "\n";
 
-      await NodeFSP.appendFile(path, `\n${firstLine}\n${event(usage(10, 2), usage(510, 62))}\n`);
-      const resumed = await readTranscriptRecords(
-        path,
-        TEST_FORMATS.codex,
-        JSON.parse(JSON.stringify(first.position)),
-        options,
-      );
-      const full = await readTranscriptRecords(path, TEST_FORMATS.codex, undefined, options);
-      assert.isNotNull(resumed);
-      assert.isNotNull(full);
-      assert.isTrue(resumed.resumed);
-      assert.deepStrictEqual(resumed.records, full.records);
-      assert.deepStrictEqual(
-        resumed.records.map((r) => [r.totals.outputTokens, r.speed]),
-        [
-          [20, "ultrafast"],
-          [2, "ultrafast"],
-        ],
-      );
-      assert.deepStrictEqual(resumed.tailRecords, []);
-      assert.strictEqual(resumed.malformedRecords, 0);
-      assert.deepStrictEqual(resumed.position, full.position);
-    },
-  );
+    try {
+      await NodeFSP.writeFile(path, first);
+      const initial = await readTranscriptRecords(path, "codex", { endByte: first.length - 1 });
+      expect(initial?.records).toHaveLength(1);
+      expect(await transcriptCursorIsLineBoundary(path, first.length)).toBe(true);
+      const codexState = initial?.codexState;
+      if (codexState === undefined) throw new Error("Codex parser state was not returned");
 
-  it("re-parses from the start when the guard bytes no longer match", async () => {
-    const path = NodePath.join(dir, "claude.jsonl");
-    await NodeFSP.writeFile(path, claudeLine(1, 5));
-    const first = await readTranscriptRecords(path, TEST_FORMATS.claude);
-    assert.isNotNull(first);
+      await NodeFSP.appendFile(path, second);
+      const appended = await readTranscriptRecords(path, "codex", {
+        startByte: first.length,
+        endByte: first.length + second.length - 1,
+        codexState,
+      });
 
-    await NodeFSP.writeFile(path, claudeLine(4, 13) + claudeLine(5, 17));
-    const second = await readTranscriptRecords(path, TEST_FORMATS.claude, first.position);
-    assert.isNotNull(second);
-    assert.isFalse(second.resumed);
-    assert.deepStrictEqual(
-      second.records.map((record) => record.totals.outputTokens),
-      [13, 17],
-    );
+      expect(appended?.records).toHaveLength(1);
+      expect(appended?.records[0]?.model).toBe("gpt-5.6-sol");
+      expect(appended?.records[0]?.sessionId).toBe("session-a");
+      expect(appended?.records[0]?.totals.outputTokens).toBe(4);
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
   });
 
-  it("re-parses from the start when the file shrank below the resume point", async () => {
-    const path = NodePath.join(dir, "claude.jsonl");
-    await NodeFSP.writeFile(path, claudeLine(1, 5) + claudeLine(2, 7));
-    const first = await readTranscriptRecords(path, TEST_FORMATS.claude);
-    assert.isNotNull(first);
+  it("returns a complete-line cursor when a bounded JSONL read ends mid-record", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-cursor-"));
+    const path = NodePath.join(directory, "rollout.jsonl");
+    const prefix =
+      [
+        JSON.stringify({
+          timestamp: "2026-08-29T10:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "session-a" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-08-29T10:00:01.000Z",
+          type: "turn_context",
+          payload: { model: "gpt-5.6-sol" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-08-29T10:00:02.000Z",
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              last_token_usage: { input_tokens: 10, cached_input_tokens: 3, output_tokens: 2 },
+            },
+          },
+        }),
+      ].join("\n") + "\n";
+    const finalRecord =
+      JSON.stringify({
+        timestamp: "2026-08-29T10:00:03.000Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            last_token_usage: { input_tokens: 20, cached_input_tokens: 5, output_tokens: 4 },
+          },
+        },
+      }) + "\n";
+    const contents = `${prefix}${finalRecord}`;
+    try {
+      await NodeFSP.writeFile(path, contents);
+      const prefixBytes = Buffer.byteLength(prefix);
+      const partial = await readTranscriptRecords(path, "codex", {
+        endByte: prefixBytes + 2,
+        sourceSize: Buffer.byteLength(contents),
+      });
+      expect(partial?.nextByte).toBe(prefixBytes);
+      expect(partial?.records).toHaveLength(1);
+      expect(await transcriptCursorIsLineBoundary(path, partial!.nextByte)).toBe(true);
 
-    await NodeFSP.writeFile(path, claudeLine(3, 11));
-    const second = await readTranscriptRecords(path, TEST_FORMATS.claude, first.position);
-    assert.isNotNull(second);
-    assert.isFalse(second.resumed);
-    assert.deepStrictEqual(
-      second.records.map((record) => record.totals.outputTokens),
-      [11],
-    );
+      const resumed = await readTranscriptRecords(path, "codex", {
+        startByte: partial!.nextByte,
+        endByte: Buffer.byteLength(contents) - 1,
+        sourceSize: Buffer.byteLength(contents),
+        ...(partial!.codexState === undefined ? {} : { codexState: partial!.codexState }),
+      });
+      expect(resumed?.nextByte).toBe(Buffer.byteLength(contents));
+      expect(resumed?.records).toHaveLength(1);
+      expect(resumed?.records[0]).toMatchObject({
+        sessionId: "session-a",
+        model: "gpt-5.6-sol",
+        totals: { outputTokens: 4 },
+      });
+      const complete = await readTranscriptRecords(path, "codex", {
+        sourceSize: Buffer.byteLength(contents),
+      });
+      expect([...(partial?.records ?? []), ...(resumed?.records ?? [])]).toEqual(complete?.records);
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
   });
 
-  it("parses a line larger than one stream chunk", async () => {
-    const path = NodePath.join(dir, "claude.jsonl");
-    const bigLine = `${JSON.stringify({
-      type: "assistant",
-      timestamp: "2026-08-01T10:00:00Z",
-      requestId: "req_big",
-      sessionId: "session-1",
-      padding: "x".repeat(512 * 1024),
-      message: {
-        id: "msg_big",
-        model: "claude-fable-5",
-        usage: { input_tokens: 10, output_tokens: 42 },
-      },
+  it("reads a large compaction record without making usage permanently incomplete", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-compacted-"));
+    const path = NodePath.join(directory, "rollout.jsonl");
+    const contents =
+      [
+        { type: "session_meta", payload: { id: "session-a" } },
+        { type: "turn_context", payload: { model: "gpt-5.6-sol" } },
+        { type: "compacted", payload: { message: "x".repeat(5 * 1024 * 1024) } },
+        {
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: { last_token_usage: { input_tokens: 10, output_tokens: 2 } },
+          },
+        },
+      ]
+        .map((record) => JSON.stringify({ timestamp: "2026-08-29T10:00:02.000Z", ...record }))
+        .join("\n") + "\n";
+    try {
+      await NodeFSP.writeFile(path, contents);
+      const result = await readTranscriptRecords(path, "codex");
+      expect(result?.discardedLines).toBe(0);
+      expect(result?.discardingLine).toBe(false);
+      expect(result?.records).toMatchObject([{ totals: { outputTokens: 2 } }]);
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("skips an oversized record that cannot carry usage and keeps the transcript complete", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-oversized-"));
+    const path = NodePath.join(directory, "rollout.jsonl");
+    const prefix =
+      [
+        JSON.stringify({
+          timestamp: "2026-08-29T10:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "session-a" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-08-29T10:00:01.000Z",
+          type: "turn_context",
+          payload: { model: "gpt-5.6-sol" },
+        }),
+      ].join("\n") + "\n";
+    const oversized = `${JSON.stringify({ type: "event_msg", payload: { text: "x".repeat(8 * 1024 * 1024 + 1) } })}\n`;
+    const usage =
+      JSON.stringify({
+        timestamp: "2026-08-29T10:00:02.000Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          info: {
+            last_token_usage: { input_tokens: 10, cached_input_tokens: 3, output_tokens: 2 },
+          },
+        },
+      }) + "\n";
+    const contents = `${prefix}${oversized}${usage}`;
+    try {
+      await NodeFSP.writeFile(path, contents);
+      const first = await readTranscriptRecords(path, "codex", {
+        endByte: Buffer.byteLength(prefix) + 8 * 1024 * 1024,
+        sourceSize: Buffer.byteLength(contents),
+      });
+      // The skipped line is finished in the same read, past the range end.
+      expect(first?.discardingLine).toBe(false);
+      expect(first?.discardedLines).toBe(0);
+      expect(first?.nextByte).toBe(Buffer.byteLength(prefix) + Buffer.byteLength(oversized));
+      expect(first?.records).toEqual([]);
+
+      const second = await readTranscriptRecords(path, "codex", {
+        startByte: first!.nextByte,
+        endByte: Buffer.byteLength(contents) - 1,
+        sourceSize: Buffer.byteLength(contents),
+        ...(first!.codexState === undefined ? {} : { codexState: first!.codexState }),
+      });
+      expect(second?.nextByte).toBe(Buffer.byteLength(contents));
+      expect(second?.discardingLine).toBe(false);
+      expect(second?.discardedLines).toBe(0);
+      expect(second?.records).toMatchObject([{ totals: { outputTokens: 2 } }]);
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("counts an oversized record that could carry usage as missing coverage", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-oversized-"));
+    const codexPath = NodePath.join(directory, "rollout.jsonl");
+    const claudePath = NodePath.join(directory, "session.jsonl");
+    const padding = "x".repeat(10 * 1024 * 1024);
+    const codexUsage = `${JSON.stringify({
+      timestamp: "2026-08-29T10:00:02.000Z",
+      type: "event_msg",
+      payload: { type: "token_count", info: { padding } },
     })}\n`;
-    await NodeFSP.writeFile(path, bigLine + claudeLine(2, 7));
+    // A tool output that quotes a usage event is not one.
+    const codexQuote = `${JSON.stringify({
+      timestamp: "2026-08-29T10:00:03.000Z",
+      type: "response_item",
+      payload: { type: "function_call_output", output: `${padding}"type":"token_count"` },
+    })}\n`;
+    // Claude writes usage after the content, deep inside an oversized line.
+    const claudeUsage = `${JSON.stringify({
+      message: { id: "msg_1", content: padding, usage: { output_tokens: 2 } },
+      type: "assistant",
+    })}\n`;
+    try {
+      await NodeFSP.writeFile(codexPath, codexUsage + codexQuote);
+      const codex = await readTranscriptRecords(codexPath, "codex", {
+        endByte: 11 * 1024 * 1024,
+        sourceSize: Buffer.byteLength(codexUsage + codexQuote),
+      });
+      expect(codex?.discardedLines).toBe(1);
+      expect(codex?.nextByte).toBe(Buffer.byteLength(codexUsage));
+      const quote = await readTranscriptRecords(codexPath, "codex", {
+        startByte: codex!.nextByte,
+      });
+      expect(quote?.discardedLines).toBe(0);
 
-    const parsed = await readTranscriptRecords(path, TEST_FORMATS.claude);
-    assert.isNotNull(parsed);
-    assert.deepStrictEqual(
-      parsed.records.map((record) => record.totals.outputTokens),
-      [42, 7],
-    );
+      await NodeFSP.writeFile(claudePath, claudeUsage);
+      const claude = await readTranscriptRecords(claudePath, "claude");
+      expect(claude?.discardedLines).toBe(1);
+
+      // A skip resumed from an older read cannot see the line's start.
+      const resumed = await readTranscriptRecords(codexPath, "codex", {
+        startByte: Buffer.byteLength(codexUsage) + 1024 * 1024,
+        discardPartialLine: true,
+      });
+      expect(resumed?.discardedLines).toBe(1);
+      expect(resumed?.nextByte).toBe(Buffer.byteLength(codexUsage + codexQuote));
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
   });
 
-  it("keeps a CRLF Codex reducer line whose marker straddles a stream chunk", async () => {
-    const path = NodePath.join(dir, "rollout.jsonl");
-    const crlf = (line: string) => line.replace("\n", "\r\n");
-    const modelLine = crlf(codexModelLine("gpt-5.2-codex"));
-    const head = crlf(codexMetaLine());
-    const fillerBytes =
-      256 * 1024 - Buffer.byteLength(head) - modelLine.indexOf("turn_context") - 4;
-    const fillerEnvelope = crlf(`${JSON.stringify({ type: "response_item", output: "" })}\n`);
-    const padding = "é".repeat((fillerBytes - Buffer.byteLength(fillerEnvelope)) / 2);
-    const filler = crlf(`${JSON.stringify({ type: "response_item", output: padding })}\n`);
-    const content = head + filler + modelLine + crlf(codexUsageLine(40, 2));
-    await NodeFSP.writeFile(path, content);
-
-    const result = await readTranscriptRecords(path, TEST_FORMATS.codex);
-    assert.isNotNull(result);
-    assert.strictEqual(result.records.length, 1);
-    assert.strictEqual(result.records[0]?.model, "gpt-5.2-codex");
-    assert.strictEqual(result.records[0]?.sessionId, "codex-session-1");
-    assert.strictEqual(result.position.resumeOffset, Buffer.byteLength(content));
+  it("validates an append cursor against the unchanged prefix", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-prefix-"));
+    const path = NodePath.join(directory, "rollout.jsonl");
+    const prefix = '{"type":"session_meta","payload":{"id":"s"}}\n';
+    try {
+      await NodeFSP.writeFile(path, prefix);
+      const fingerprint = await readTranscriptPrefixFingerprint(path, Buffer.byteLength(prefix));
+      expect(fingerprint).not.toBeNull();
+      expect(
+        await transcriptAppendIsSafe(path, {
+          offset: Buffer.byteLength(prefix),
+          prefixFingerprint: fingerprint!,
+        }),
+      ).toBe(true);
+      await NodeFSP.writeFile(path, `{"changed":true}\n${prefix}`);
+      expect(
+        await transcriptAppendIsSafe(path, {
+          offset: Buffer.byteLength(prefix),
+          prefixFingerprint: fingerprint!,
+        }),
+      ).toBe(false);
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
   });
-});
 
-describe("transcriptLineGate", () => {
-  const gates = {
-    one: transcriptLineGate(['"usage"']),
-    several: transcriptLineGate(['"token_count"', '"session_meta"', '"a.b(c)"']),
-  };
-  const markers = { one: ['"usage"'], several: ['"token_count"', '"session_meta"', '"a.b(c)"'] };
-
-  it("matches markers beside multi-byte and malformed UTF-8", () => {
-    const invalid = Buffer.from([0xff, 0xc3]);
-    for (const kind of ["one", "several"] as const) {
-      for (const marker of markers[kind]) {
-        assert.isTrue(gates[kind](Buffer.from(`{"text":"日本語 é",${marker}:1}`)));
-        assert.isTrue(gates[kind](Buffer.concat([invalid, Buffer.from(marker), invalid])));
-        assert.isFalse(gates[kind](Buffer.from(`{"text":"日本語 é ${marker.slice(1, -1)}"}`)));
-      }
+  it("imports only appended Codex evidence and keeps raw source text local", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-repeat-"));
+    const path = NodePath.join(directory, "rollout.jsonl");
+    const skill = "private skill contents";
+    const catalog = createRepeatedInputCatalog([
+      { path: NodePath.join(directory, "SKILL.md"), content: skill, tokenCount: 3 },
+    ]);
+    const first =
+      [
+        JSON.stringify({
+          timestamp: "2026-09-13T00:00:00.000Z",
+          type: "session_meta",
+          payload: { id: "session-a" },
+        }),
+        JSON.stringify({
+          timestamp: "2026-09-13T00:00:01.000Z",
+          type: "turn_context",
+          payload: { turn_id: "turn-a", model: "gpt-5.6-sol" },
+        }),
+      ].join("\n") + "\n";
+    const appended =
+      JSON.stringify({
+        timestamp: "2026-09-13T00:00:02.000Z",
+        type: "response_item",
+        payload: { type: "custom_tool_call_output", id: "output-a", output: skill },
+      }) + "\n";
+    try {
+      await NodeFSP.writeFile(path, first);
+      const initial = await readRepeatedInputRecords(path, {
+        endByte: Buffer.byteLength(first) - 1,
+        catalog,
+      });
+      expect(initial?.observations).toEqual([]);
+      await NodeFSP.appendFile(path, appended);
+      const next = await readRepeatedInputRecords(path, {
+        startByte: Buffer.byteLength(first),
+        catalog,
+        ...(initial?.parserState === undefined ? {} : { parserState: initial.parserState }),
+      });
+      expect(next?.observations).toHaveLength(1);
+      expect(JSON.stringify(next?.observations)).not.toContain(skill);
+    } finally {
+      await NodeFSP.rm(directory, { recursive: true, force: true });
     }
   });
 });

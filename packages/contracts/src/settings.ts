@@ -590,6 +590,16 @@ export function makeProviderSettingsSchema<const Fields extends Schema.Struct.Fi
 
 export const CodexSettings = makeProviderSettingsSchema(
   {
+    useDesktopAppDaemon: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(false)),
+      Schema.annotateKey({
+        title: "Use Codex desktop app",
+        description:
+          "Run this instance's threads in the host's Codex desktop installation, with its sign-in, plugins, connectors, browser extension, and approvals. Requires the host bridge setup.",
+        providerSettingsForm: { control: "switch" },
+      }),
+    ),
+
     setupMode: Schema.optionalKey(Schema.Literals(["managed", "existing"])).pipe(
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
@@ -640,7 +650,7 @@ export const CodexSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["binaryPath", "homePath", "shadowHomePath", "launchArgs"],
+    order: ["useDesktopAppDaemon", "binaryPath", "homePath", "shadowHomePath", "launchArgs"],
   },
 );
 export type CodexSettings = typeof CodexSettings.Type;
@@ -1128,7 +1138,52 @@ export const StorageCleanupSettings = Schema.Struct({
 });
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
+export const MAX_BIRTHDAY_NOTES = 24;
+export const MAX_BIRTHDAY_NOTE_LENGTH = 360;
+export const BirthdayCelebrationPreference = Schema.Struct({
+  month: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 12 })),
+  day: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 31 })),
+  enabled: Schema.Boolean,
+  tapEffects: Schema.Boolean,
+  notes: Schema.optionalKey(
+    Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(MAX_BIRTHDAY_NOTE_LENGTH))).check(
+      Schema.makeFilter(
+        (notes) =>
+          notes.length <= MAX_BIRTHDAY_NOTES && notes.every((note) => !/[\r\n]/u.test(note)),
+      ),
+    ),
+  ),
+}).check(
+  Schema.makeFilter(
+    ({ month, day }) => (month !== 2 || day <= 29) && (![4, 6, 9, 11].includes(month) || day <= 30),
+  ),
+);
+export type BirthdayCelebrationPreference = typeof BirthdayCelebrationPreference.Type;
+
+export const UsageSubscription = Schema.Struct({
+  plan: TrimmedNonEmptyString,
+  monthlyUsd: Schema.Number.check(
+    Schema.isGreaterThanOrEqualTo(0),
+    Schema.isLessThanOrEqualTo(100000),
+  ),
+  startDate: Schema.String.check(
+    Schema.isPattern(/^\d{4}-\d{2}-\d{2}$/),
+    Schema.makeFilter((value) => {
+      const [year = 0, month = 0, day = 0] = value.split("-").map(Number);
+      const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+      const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+      return (
+        (year >= 1 && month >= 1 && month <= 12 && day >= 1 && day <= days[month - 1]!) ||
+        "Use a valid calendar date."
+      );
+    }),
+  ),
+});
+
 export const ServerSettings = Schema.Struct({
+  birthdayCelebration: Schema.NullOr(BirthdayCelebrationPreference).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   // Null means no client has migrated this preference yet; an empty value is
   // authoritative so another device cannot resurrect cleared preferences.
   favorites: Schema.NullOr(ModelFavorites).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
@@ -1309,6 +1364,12 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
 
+  usageSubscription: UsageSubscription.pipe(
+    Schema.withDecodingDefault(
+      Effect.succeed({ plan: "Codex Pro", monthlyUsd: 200, startDate: "2026-07-01" }),
+    ),
+  ),
+
   usagePriceOverrides: Schema.Record(TrimmedNonEmptyString, UsageModelPriceOverride).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
@@ -1345,7 +1406,7 @@ const DEFAULT_ENABLED_DEFAULT_INSTANCES: ReadonlySet<ProviderInstanceId> = new S
 export const isUnconfiguredDefaultInstanceEnabled = (instanceId: ProviderInstanceId): boolean =>
   DEFAULT_ENABLED_DEFAULT_INSTANCES.has(instanceId);
 
-const defaultEnabledForDriver = (driver: ProviderDriverKind): boolean =>
+export const defaultEnabledForDriver = (driver: ProviderDriverKind): boolean =>
   !DEFAULT_DISABLED_PROVIDER_DRIVERS.has(driver);
 
 export const resolveProviderInstanceEnabled = (
@@ -1475,6 +1536,7 @@ const ModelSelectionPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
+  birthdayCelebration: Schema.optionalKey(Schema.NullOr(BirthdayCelebrationPreference)),
   setModelFavorites: Schema.optionalKey(
     Schema.Array(Schema.Struct({ ...ModelFavorite.fields, favorite: Schema.Boolean })),
   ),
@@ -1630,6 +1692,8 @@ export const ServerSettingsPatch = Schema.Struct({
     Schema.Record(UsageLimitSourceId, Schema.NullOr(UsageLimitSourceConfig)),
   ),
   cursorKeychainUsageEnabled: Schema.optionalKey(Schema.Boolean),
+
+  usageSubscription: Schema.optionalKey(UsageSubscription),
 
   usagePriceOverrides: Schema.optionalKey(
     Schema.Record(TrimmedNonEmptyString, Schema.NullOr(UsageModelPriceOverride)),

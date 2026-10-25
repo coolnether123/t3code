@@ -28,7 +28,7 @@ async function fetchPrimaryEnvironmentDescriptor(): Promise<ExecutionEnvironment
   });
 }
 
-function readPrimaryEnvironmentDescriptor(): ExecutionEnvironmentDescriptor | null {
+export function readPrimaryEnvironmentDescriptor(): ExecutionEnvironmentDescriptor | null {
   return primaryEnvironmentDescriptor;
 }
 
@@ -61,3 +61,7 @@ export function resetPrimaryEnvironmentDescriptorForTests(): void {
   primaryEnvironmentDescriptorPromise = null;
   primaryEnvironmentDescriptor = null;
 }
+
+export const __resetPrimaryEnvironmentBootstrapForTests = resetPrimaryEnvironmentDescriptorForTests;
+export const __resetPrimaryEnvironmentDescriptorBootstrapForTests =
+  resetPrimaryEnvironmentDescriptorForTests;

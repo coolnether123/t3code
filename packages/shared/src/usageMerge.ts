@@ -59,6 +59,16 @@ export interface HourlyTotals {
   readonly costUsd: number;
   readonly totalTokens: number;
   readonly byProvider: ReadonlyMap<UsageProviderKind, { costUsd: number; totalTokens: number }>;
+  /** Model rollups for this hour, keyed as `${provider}:${model}`. */
+  readonly byModel: ReadonlyMap<string, HourlyModelTotals>;
+}
+
+export interface HourlyModelTotals {
+  readonly model: string;
+  readonly provider: UsageProviderKind;
+  readonly costUsd: number;
+  readonly totalTokens: number;
+  readonly records: number;
 }
 
 export interface CostQuality {
@@ -90,6 +100,12 @@ export interface UsageContractMismatch {
 }
 
 export interface MergedUsage {
+  readonly codexServiceTiers?: {
+    readonly fastCostUsd: number;
+    readonly fastRecords: number;
+    readonly userReportedRecords: number;
+    readonly unknownRecords: number;
+  };
   readonly costUsd: number;
   readonly uncachedInputTokens: number;
   readonly cachedInputTokens: number;
@@ -140,6 +156,15 @@ function bucketKey(bucket: UsageBucket): string {
   return JSON.stringify([bucket.day, bucket.hourStart ?? null, bucket.provider, bucket.model]);
 }
 
+/**
+ * Decides which environment owns each physical transcript directory.
+ *
+ * Several environments on one machine (worktree servers, for instance) resolve
+ * the same provider home and would otherwise double count every token. The
+ * most recently read summary claims a fingerprint; the rest have that provider's
+ * buckets dropped. Environment ids break ties so the winner is stable when
+ * summaries have the same read time.
+ */
 function claimSources(environments: readonly EnvironmentUsage[]): {
   readonly ownerByFingerprint: ReadonlyMap<string, EnvironmentId>;
   readonly supplementalBucketsByEnvironment: ReadonlyMap<EnvironmentId, ReadonlySet<UsageBucket>>;
@@ -348,6 +373,12 @@ export function mergeUsage(
   let cacheSavingsUsd = 0;
   let providerReportedRecords = 0;
   let unpricedRecords = 0;
+  const codexServiceTiers = {
+    fastCostUsd: 0,
+    fastRecords: 0,
+    userReportedRecords: 0,
+    unknownRecords: 0,
+  };
   const categoryCost = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 };
   const speedCost = { fast: 0, ultrafast: 0, premium: 0 };
 
@@ -383,6 +414,16 @@ export function mergeUsage(
       costUsd: number;
       totalTokens: number;
       byProvider: Map<UsageProviderKind, { costUsd: number; totalTokens: number }>;
+      byModel: Map<
+        string,
+        {
+          model: string;
+          provider: UsageProviderKind;
+          costUsd: number;
+          totalTokens: number;
+          records: number;
+        }
+      >;
     }
   >();
   const contributingEnvironments: EnvironmentId[] = [];
@@ -411,6 +452,16 @@ export function mergeUsage(
 
     for (const bucket of buckets) {
       const tokens = bucketTokens(bucket);
+      if (bucket.provider === "codex") {
+        if (bucket.serviceTier === "priority" || bucket.serviceTier === "fast") {
+          codexServiceTiers.fastCostUsd += bucket.costUsd;
+          codexServiceTiers.fastRecords += bucket.records;
+        }
+        if (bucket.serviceTierSource === "userReported")
+          codexServiceTiers.userReportedRecords += bucket.records;
+        if (bucket.serviceTier === undefined || bucket.serviceTier === "unknown")
+          codexServiceTiers.unknownRecords += bucket.records;
+      }
 
       costUsd += bucket.costUsd;
       cacheSavingsUsd += bucket.cacheSavingsUsd;
@@ -495,6 +546,7 @@ export function mergeUsage(
           costUsd: 0,
           totalTokens: 0,
           byProvider: new Map<UsageProviderKind, { costUsd: number; totalTokens: number }>(),
+          byModel: new Map(),
         };
         hour.costUsd += bucket.costUsd;
         hour.totalTokens += tokens;
@@ -505,6 +557,19 @@ export function mergeUsage(
         hourProvider.costUsd += bucket.costUsd;
         hourProvider.totalTokens += tokens;
         hour.byProvider.set(bucket.provider, hourProvider);
+
+        const hourlyModelKey = `${bucket.provider}:${bucket.model}`;
+        const hourlyModel = hour.byModel.get(hourlyModelKey) ?? {
+          model: bucket.model,
+          provider: bucket.provider,
+          costUsd: 0,
+          totalTokens: 0,
+          records: 0,
+        };
+        hourlyModel.costUsd += bucket.costUsd;
+        hourlyModel.totalTokens += tokens;
+        hourlyModel.records += bucket.records;
+        hour.byModel.set(hourlyModelKey, hourlyModel);
         hourlyAccumulator.set(bucket.hourStart, hour);
       }
     }
@@ -553,6 +618,7 @@ export function mergeUsage(
   );
 
   return {
+    codexServiceTiers,
     costUsd,
     uncachedInputTokens,
     cachedInputTokens,

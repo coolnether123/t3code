@@ -229,6 +229,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     targetId: "appearance",
   },
   {
+    id: "birthday-celebration",
+    title: "Birthday celebration",
+    to: "/settings/appearance",
+    searchTerms: ["birthday celebration party confetti notes"],
+    targetId: "birthday-celebration",
+  },
+  {
     id: "theme",
     title: "Themes",
     to: "/settings/appearance",

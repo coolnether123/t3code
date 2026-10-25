@@ -1,0 +1,1291 @@
+import * as AntigravityUsage from "../provider/Drivers/AntigravityUsage.ts";
+import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
+import { MuseUsageHome } from "@t3tools/provider-muse/server";
+import * as CodexUsageHistory from "./CodexUsageHistory.ts";
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeSqlite from "node:sqlite";
+import * as Path from "effect/Path";
+import { describe, expect, it } from "@effect/vitest";
+import { beforeEach, vi } from "vite-plus/test";
+import * as Effect from "effect/Effect";
+import * as Clock from "effect/Clock";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as Exit from "effect/Exit";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
+import * as TestClock from "effect/testing/TestClock";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { HttpClient } from "effect/http";
+import { UsageDay, type UsageSummary } from "@t3tools/contracts";
+import * as ServerConfig from "../config.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import { make } from "./UsageService.ts";
+import { quotaCostLedgerKey, readQuotaCostLedger } from "./usageQuotaCostLedger.ts";
+import { encodeScanCache, type ScanCache } from "./usageScanCache.ts";
+import { initialCodexScanState, type UsageRecord } from "./usageTranscripts.ts";
+import {
+  listTranscriptFilesBounded,
+  readRepeatedInputRecords,
+  readTranscriptRecords,
+  transcriptCursorIsLineBoundary,
+} from "./usageTranscriptReader.ts";
+
+const files = [
+  { path: "/fixture/large.jsonl", size: 200_000_040, mtimeMs: Date.parse("2026-08-30T23:00:00Z") },
+  { path: "/fixture/small.jsonl", size: 70_000_060, mtimeMs: Date.parse("2026-08-30T22:00:00Z") },
+];
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const emptyScanCache = encodeJson(encodeScanCache(new Map()));
+let inventoryComplete = true;
+vi.mock("./usageTranscriptReader.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./usageTranscriptReader.ts")>()),
+  listTranscriptFilesBounded: vi.fn(async (root: string) => ({
+    files: /[\\/]sessions$/.test(root) && !/[\\/]codex-home[\\/]/.test(root) ? files : [],
+    complete: inventoryComplete,
+  })),
+  readDirectoryVolumeId: vi.fn(async () => "fixture"),
+  transcriptCursorIsLineBoundary: vi.fn(async () => true),
+  readTranscriptRecords: vi.fn(async (filePath: string) => ({
+    records: [],
+    nextByte: files.find((file) => file.path === filePath)?.size ?? Number.MAX_SAFE_INTEGER,
+    discardedLines: 0,
+    discardingLine: false,
+    codexState: initialCodexScanState(),
+  })),
+  readRepeatedInputRecords: vi.fn(async () => null),
+}));
+
+/** Rows the durable scan store holds for each transcript. */
+const storedFiles = (stateDir: string) => {
+  const db = new NodeSqlite.DatabaseSync(`${stateDir}/usage-scan-cache.sqlite`, { readOnly: true });
+  try {
+    return db
+      .prepare("SELECT path, mtime_ms, scan_cursor, record_count FROM files ORDER BY path")
+      .all() as unknown as ReadonlyArray<{
+      readonly path: string;
+      readonly mtime_ms: number;
+      readonly scan_cursor: number | null;
+      readonly record_count: number;
+    }>;
+  } finally {
+    db.close();
+  }
+};
+
+const testLayer = Layer.mergeAll(
+  Layer.mock(AntigravityUsage.AntigravityUsage)({}),
+  Layer.mock(CursorUsageAccounts.CursorUsageAccounts)({}),
+  Layer.succeed(CodexUsageHistory.CodexUsageHistory, {
+    resolve: () => Effect.succeed(new Map()),
+  }),
+  Layer.succeed(MuseUsageHome.MuseUsageHome, { resolve: () => Effect.succeed(undefined) }),
+  ServerSettings.layerTest(),
+  ServerConfig.layerTest(process.cwd(), { prefix: "t3-scan-budget-test-" }),
+).pipe(Layer.provideMerge(NodeServices.layer));
+
+beforeEach(() => {
+  inventoryComplete = true;
+  vi.mocked(listTranscriptFilesBounded).mockReset();
+  vi.mocked(readTranscriptRecords).mockReset();
+  vi.mocked(readRepeatedInputRecords).mockReset();
+  vi.mocked(transcriptCursorIsLineBoundary).mockReset();
+});
+
+describe("incremental scan integration", () => {
+  it.effect("persists transcript gap estimates once and reuses the closed period", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const config = yield* ServerConfig.ServerConfig;
+      const path = yield* Path.Path;
+      const persisted = yield* Deferred.make<void>();
+      yield* TestClock.setTime(Date.parse("2026-09-21T00:00:00Z"));
+      const file = {
+        path: "/fixture/gap.jsonl",
+        size: 100,
+        mtimeMs: Date.parse("2026-09-18T00:00:00Z"),
+      };
+      vi.mocked(listTranscriptFilesBounded).mockImplementation(async (root) => ({
+        files: /[\\/]sessions$/.test(root) && !/[\\/]codex-home[\\/]/.test(root) ? [file] : [],
+        complete: true,
+      }));
+      vi.mocked(readTranscriptRecords).mockResolvedValue({
+        records: [
+          {
+            provider: "codex",
+            model: "fixture",
+            sessionId: "gap",
+            timestampMs: file.mtimeMs,
+            reportedCostUsd: 3,
+            dedupeKey: "gap-record",
+            totals: {
+              uncachedInputTokens: 10,
+              cachedInputTokens: 0,
+              cacheCreationTokens: 0,
+              outputTokens: 1,
+              reasoningTokens: 0,
+            },
+          },
+        ],
+        nextByte: file.size,
+        discardedLines: 0,
+        discardingLine: false,
+        codexState: initialCodexScanState(),
+      });
+      const service = yield* make.pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          exists: () => Effect.succeed(true),
+          readFileString: (filePath, ...args) =>
+            filePath.endsWith("usage-scan-cache.json")
+              ? Effect.succeed(emptyScanCache)
+              : fs.readFileString(filePath, ...args),
+          rename: (from, to) =>
+            fs
+              .rename(from, to)
+              .pipe(
+                Effect.tap(() =>
+                  to.endsWith("usage-quota-cost-ledger.json")
+                    ? Deferred.succeed(persisted, undefined)
+                    : Effect.void,
+                ),
+              ),
+        }),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("Offline fixture")),
+        ),
+      );
+      const input = {
+        sinceDay: UsageDay.make("2026-09-15"),
+        untilDay: UsageDay.make("2026-09-21"),
+        timeZone: "UTC",
+        providers: ["codex"] as const,
+        quotaIntervals: [
+          {
+            id: "transcript-window:gap",
+            sinceTime: "2026-09-17T00:00:00Z",
+            untilTime: "2026-09-19T00:00:00Z",
+          },
+        ],
+      };
+      const first = yield* service.readSummary(input);
+      expect(
+        first.quotaCostSnapshots?.some((row) => row.costUsd === 3 && row.estimatedFromTranscripts),
+      ).toBe(true);
+      yield* Deferred.await(persisted);
+      const saved = yield* readQuotaCostLedger(
+        path.join(config.stateDir, "usage-quota-cost-ledger.json"),
+      );
+      expect(saved.some((row) => row.costUsd === 3 && row.estimatedFromTranscripts)).toBe(true);
+      vi.mocked(readTranscriptRecords).mockClear();
+      const second = yield* service.readSummary(input);
+      expect(second.quotaCosts?.some((row) => row.costUsd === 3 && row.complete)).toBe(true);
+      expect(readTranscriptRecords).not.toHaveBeenCalled();
+      const filtered = yield* service.readSummary({ ...input, sessionIds: ["missing-session"] });
+      expect(filtered.quotaCosts?.every((row) => row.costUsd === 0)).toBe(true);
+      expect(filtered.quotaCostSnapshots).toEqual([]);
+      const whole = yield* service.readSummary(input);
+      expect(whole.quotaCosts?.some((row) => row.costUsd === 3)).toBe(true);
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(testLayer, TestClock.layer()))),
+  );
+  it.effect("shares one cold scan for concurrent summary and overlapping reset periods", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const readStarted = yield* Deferred.make<void>();
+      const releaseRead = yield* Deferred.make<void>();
+      let reads = 0;
+      const service = yield* make.pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          exists: () => Effect.succeed(true),
+          readFileString: (file, ...args) =>
+            file.endsWith("usage-scan-cache.json")
+              ? Effect.gen(function* () {
+                  reads++;
+                  yield* Deferred.succeed(readStarted, undefined);
+                  yield* Deferred.await(releaseRead);
+                  return emptyScanCache;
+                })
+              : fs.readFileString(file, ...args),
+        }),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("Offline fixture")),
+        ),
+      );
+      const input = {
+        sinceDay: UsageDay.make("2026-08-29"),
+        untilDay: UsageDay.make("2026-09-02"),
+        timeZone: "UTC",
+        providers: ["codex"] as const,
+      };
+      const periods = [
+        { id: "wide", sinceTime: "2026-08-30T00:00:00Z", untilTime: "2026-09-01T00:00:00Z" },
+        { id: "narrow", sinceTime: "2026-08-30T12:00:00Z", untilTime: "2026-08-31T12:00:00Z" },
+      ];
+      const requests = yield* Effect.all(
+        [
+          service.readSummary(input),
+          ...periods.map((period) => service.readSummary({ ...input, quotaIntervals: [period] })),
+        ],
+        { concurrency: "unbounded" },
+      ).pipe(Effect.forkChild);
+      yield* Deferred.await(readStarted);
+      yield* Deferred.succeed(releaseRead, undefined);
+      const results = yield* Fiber.join(requests);
+      expect(reads).toBe(1);
+      expect(results[0]?.quotaCosts).toBeUndefined();
+      expect(results[1]?.quotaCosts?.every((row) => row.intervalId === "wide")).toBe(true);
+      expect(results[2]?.quotaCosts?.every((row) => row.intervalId === "narrow")).toBe(true);
+      const mainInventories = vi
+        .mocked(listTranscriptFilesBounded)
+        .mock.calls.filter(
+          ([root]) => /[\\/]sessions$/.test(root) && !/[\\/]codex-home[\\/]/.test(root),
+        );
+      expect(mainInventories).toHaveLength(1);
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(testLayer, TestClock.layer()))),
+  );
+  it.effect.each([false, true])(
+    "bounds stalled settings with quota history %s",
+    (includeQuotaHistory) =>
+      Effect.gen(function* () {
+        const settings = yield* ServerSettings.ServerSettingsService;
+        const started = yield* Deferred.make<void>();
+        const service = yield* make.pipe(
+          Effect.provideService(ServerSettings.ServerSettingsService, {
+            ...settings,
+            getSettings: Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),
+          }),
+          Effect.provideService(
+            HttpClient.HttpClient,
+            HttpClient.make(() => Effect.die("Offline fixture")),
+          ),
+        );
+        let completed: Exit.Exit<unknown, unknown> | undefined;
+        yield* service
+          .readSummary({
+            sinceDay: UsageDay.make("2026-08-29"),
+            untilDay: UsageDay.make("2026-09-02"),
+            timeZone: "UTC",
+            includeQuotaHistory,
+          })
+          .pipe(
+            Effect.onExit((exit) =>
+              Effect.sync(() => {
+                completed = exit;
+              }),
+            ),
+            Effect.forkChild,
+          );
+        yield* Deferred.await(started);
+        yield* TestClock.adjust("12 seconds");
+        expect(completed).toBeDefined();
+        if (completed !== undefined) {
+          expect(Exit.isFailure(completed)).toBe(true);
+          expect(encodeJson(completed)).toContain("before source coverage could be established");
+        }
+      }).pipe(Effect.scoped, Effect.provide(Layer.merge(testLayer, TestClock.layer()))),
+  );
+
+  it.effect("keeps a shared wait inside each caller's original deadline", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      const settingsStarted = yield* Deferred.make<void>();
+      const releaseSettings = yield* Deferred.make<void>();
+      const cacheStarted = yield* Deferred.make<void>();
+      let settingsReads = 0;
+      const service = yield* make.pipe(
+        Effect.provideService(ServerSettings.ServerSettingsService, {
+          ...settings,
+          getSettings: Effect.gen(function* () {
+            settingsReads += 1;
+            if (settingsReads === 1) {
+              yield* Deferred.succeed(settingsStarted, undefined);
+              yield* Deferred.await(releaseSettings);
+            }
+            return yield* settings.getSettings;
+          }),
+        }),
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          exists: () => Effect.succeed(true),
+          realPath: (path) => Effect.succeed(path),
+          readFileString: (path) =>
+            path.endsWith("usage-scan-cache.json")
+              ? Deferred.succeed(cacheStarted, undefined).pipe(Effect.andThen(Effect.never))
+              : Effect.succeed(""),
+        }),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("Offline fixture")),
+        ),
+      );
+      const input = {
+        sinceDay: UsageDay.make("2026-08-29"),
+        untilDay: UsageDay.make("2026-09-02"),
+        timeZone: "UTC",
+        providers: ["codex"] as const,
+      };
+      let waiterCompleted = false;
+      let ownerCompleted = false;
+      const waiter = yield* service.readSummary(input).pipe(
+        Effect.onExit(() =>
+          Effect.sync(() => {
+            waiterCompleted = true;
+          }),
+        ),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(settingsStarted);
+      yield* TestClock.adjust("4 seconds");
+      const owner = yield* service.readSummary(input).pipe(
+        Effect.onExit(() =>
+          Effect.sync(() => {
+            ownerCompleted = true;
+          }),
+        ),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(cacheStarted);
+      yield* Deferred.succeed(releaseSettings, undefined);
+      yield* TestClock.adjust("8 seconds");
+      expect(waiterCompleted).toBe(true);
+      const waitingResult = yield* Fiber.join(waiter);
+      expect(waitingResult.scanDurationMs).toBe(12_000);
+      expect(waitingResult.sources.length).toBeGreaterThan(0);
+      expect(waitingResult.sources.every((source) => source.status === "partial")).toBe(true);
+      expect(ownerCompleted).toBe(false);
+      yield* TestClock.adjust("4 seconds");
+      const ownerResult = yield* Fiber.join(owner);
+      expect(ownerResult.sources.every((source) => source.status === "partial")).toBe(true);
+      expect(settingsReads).toBe(2);
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(testLayer, TestClock.layer()))),
+  );
+
+  it.effect("keeps warm totals through partial inventory and complete transcript deletion", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const nowMs = Date.parse("2026-09-20T12:00:00Z");
+      const path = yield* Path.Path;
+      yield* TestClock.setTime(nowMs);
+
+      const usage: UsageRecord = {
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        sessionId: "warm-session",
+        timestampMs: nowMs - 60_000,
+        totals: {
+          uncachedInputTokens: 10,
+          cachedInputTokens: 2,
+          cacheCreationTokens: 0,
+          outputTokens: 3,
+          reasoningTokens: 0,
+        },
+        reportedCostUsd: null,
+        dedupeKey: "warm-record",
+      };
+      const warm = { path: "", size: 1_000, mtimeMs: nowMs - 30_000 };
+      let root = "";
+      let phase: "present" | "partial" | "deleted" = "present";
+
+      vi.mocked(readTranscriptRecords).mockClear();
+      const originalListing = vi.mocked(listTranscriptFilesBounded).getMockImplementation()!;
+      const originalRead = vi.mocked(readTranscriptRecords).getMockImplementation()!;
+      try {
+        vi.mocked(listTranscriptFilesBounded).mockImplementation(async (candidate) => {
+          const primary =
+            /[\\/]sessions$/.test(candidate) && !/[\\/]codex-home[\\/]/.test(candidate);
+          if (!primary) return { files: [], complete: true };
+          root = candidate;
+          warm.path = path.join(candidate, "warm.jsonl");
+          if (phase === "partial") return { files: [], complete: false };
+          if (phase === "deleted") return { files: [], complete: true };
+          return { files: [{ ...warm }], complete: true };
+        });
+        vi.mocked(readTranscriptRecords).mockImplementation(
+          async (filePath, _provider, options) => ({
+            records: filePath === warm.path && (options?.startByte ?? 0) === 0 ? [usage] : [],
+            nextByte: warm.size,
+            discardedLines: 0,
+            discardingLine: false,
+            codexState: initialCodexScanState(),
+          }),
+        );
+
+        const service = yield* make.pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            exists: () => Effect.succeed(true),
+            readFileString: (path, ...args) =>
+              path.endsWith("usage-scan-cache.json")
+                ? Effect.succeed(emptyScanCache)
+                : fs.readFileString(path, ...args),
+          }),
+          Effect.provideService(
+            HttpClient.HttpClient,
+            HttpClient.make(() => Effect.die("Offline fixture")),
+          ),
+        );
+        const input = {
+          sinceDay: UsageDay.make("2026-09-19"),
+          untilDay: UsageDay.make("2026-09-21"),
+          timeZone: "UTC",
+          providers: ["codex"] as const,
+          refresh: true,
+        };
+        const total = (summary: UsageSummary) =>
+          summary.buckets.reduce((sum, bucket) => sum + bucket.totals.uncachedInputTokens, 0);
+        const rootSource = (summary: UsageSummary) =>
+          summary.sources.find((source) => source.fingerprint.resolvedHomePath === root);
+
+        const first = yield* service.readSummary(input);
+        expect(total(first)).toBe(10);
+        expect(rootSource(first)?.status).toBe("ok");
+        expect(readTranscriptRecords).toHaveBeenCalledTimes(1);
+
+        vi.mocked(transcriptCursorIsLineBoundary).mockClear();
+        phase = "partial";
+        const partial = yield* service.readSummary(input);
+        expect(total(partial)).toBe(10);
+        expect(rootSource(partial)?.status).toBe("partial");
+        expect(readTranscriptRecords).toHaveBeenCalledTimes(1);
+
+        phase = "present";
+        const complete = yield* service.readSummary(input);
+        expect(total(complete)).toBe(10);
+        expect(rootSource(complete)?.status).toBe("ok");
+        expect(readTranscriptRecords).toHaveBeenCalledTimes(1);
+
+        expect(transcriptCursorIsLineBoundary).not.toHaveBeenCalled();
+        phase = "deleted";
+        const deleted = yield* service.readSummary(input);
+        expect(total(deleted)).toBe(10);
+        expect(rootSource(deleted)?.status).toBe("ok");
+        expect(readTranscriptRecords).toHaveBeenCalledTimes(1);
+
+        const persistedCache = encodeJson(
+          encodeScanCache(
+            new Map([
+              [
+                warm.path,
+                {
+                  size: warm.size,
+                  mtimeMs: nowMs - 200 * 24 * 60 * 60 * 1000,
+                  provider: "codex",
+                  records: [usage],
+                },
+              ],
+            ]) satisfies ScanCache,
+            [
+              {
+                provider: "codex",
+                rootPath: root,
+                sinceMs: nowMs - 90 * 24 * 60 * 60 * 1000,
+                scannedAtMs: nowMs,
+                volumeId: "fixture",
+              },
+            ],
+          ),
+        );
+        vi.mocked(readTranscriptRecords).mockClear();
+        const restartedService = yield* make.pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            exists: (candidate) => Effect.succeed(candidate !== root),
+            readFileString: (candidate, ...args) =>
+              candidate.endsWith("usage-scan-cache.json")
+                ? Effect.succeed(persistedCache)
+                : fs.readFileString(candidate, ...args),
+          }),
+          Effect.provideService(
+            HttpClient.HttpClient,
+            HttpClient.make(() => Effect.die("Offline fixture")),
+          ),
+        );
+        const afterRestart = yield* restartedService.readSummary(input);
+        expect(total(afterRestart)).toBe(10);
+        expect(rootSource(afterRestart)?.status).toBe("partial");
+        expect(rootSource(afterRestart)?.fingerprint.volumeId).toBe("fixture");
+        expect(readTranscriptRecords).not.toHaveBeenCalled();
+      } finally {
+        vi.mocked(listTranscriptFilesBounded).mockImplementation(originalListing);
+        vi.mocked(readTranscriptRecords).mockImplementation(originalRead);
+      }
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(testLayer, TestClock.layer()))),
+  );
+
+  it.effect("resumes persisted chunks with exact token totals and no duplicate records", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const record = (
+        dedupeKey: string,
+        timestampMs: number,
+        uncachedInputTokens: number,
+        cachedInputTokens: number,
+        outputTokens: number,
+      ): UsageRecord => ({
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        sessionId: "session-a",
+        timestampMs,
+        totals: {
+          uncachedInputTokens,
+          cachedInputTokens,
+          cacheCreationTokens: 0,
+          outputTokens,
+          reasoningTokens: 0,
+        },
+        reportedCostUsd: null,
+        dedupeKey,
+      });
+      const firstRecord = record("first", Date.parse("2026-08-30T23:00:00Z"), 10, 2, 3);
+      const secondRecord = record("second", Date.parse("2026-08-30T23:01:00Z"), 30, 4, 5);
+      const initialByPath = new Map<string, readonly UsageRecord[]>([
+        [files[0]!.path, [firstRecord]],
+      ]);
+      const completeByPath = new Map<string, readonly UsageRecord[]>([
+        [files[0]!.path, [firstRecord, secondRecord]],
+      ]);
+      let completePass = false;
+      vi.mocked(listTranscriptFilesBounded).mockImplementation(async (root: string) => ({
+        files: /[\\/]sessions$/.test(root) && !/[\\/]codex-home[\\/]/.test(root) ? [files[0]!] : [],
+        complete: inventoryComplete,
+      }));
+      vi.mocked(readTranscriptRecords).mockImplementation(async (filePath, _provider, options) => {
+        const firstChunk = initialByPath.get(filePath) ?? [];
+        const completeRecords = completeByPath.get(filePath) ?? [];
+        const startByte = options?.startByte ?? 0;
+        return {
+          records:
+            startByte === 0
+              ? completePass
+                ? completeRecords
+                : firstChunk
+              : [...firstChunk, ...completeRecords.slice(1)],
+          nextByte: completePass || startByte > 0 ? Number.MAX_SAFE_INTEGER : 10,
+          discardedLines: 0,
+          discardingLine: false,
+          codexState: initialCodexScanState(),
+        };
+      });
+      try {
+        const config = yield* ServerConfig.ServerConfig;
+        const input = {
+          sinceDay: UsageDay.make("2026-08-29"),
+          untilDay: UsageDay.make("2026-09-02"),
+          timeZone: "UTC",
+          providers: ["codex"] as const,
+          refresh: true,
+        };
+        const first = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const firstService = yield* make.pipe(
+              Effect.provideService(FileSystem.FileSystem, {
+                ...fs,
+                exists: () => Effect.succeed(true),
+                readFileString: (path, ...args) =>
+                  path.endsWith("usage-scan-cache.json")
+                    ? Effect.succeed(emptyScanCache)
+                    : fs.readFileString(path, ...args),
+              }),
+              Effect.provideService(
+                HttpClient.HttpClient,
+                HttpClient.make(() => Effect.die("Offline fixture")),
+              ),
+            );
+            return yield* firstService.readSummary(input);
+          }),
+        );
+        expect(first.sources.some((source) => source.status === "partial")).toBe(true);
+        expect(storedFiles(config.stateDir)).toEqual([
+          { path: files[0]!.path, mtime_ms: files[0]!.mtimeMs, scan_cursor: 10, record_count: 1 },
+        ]);
+
+        completePass = true;
+        vi.mocked(readTranscriptRecords).mockClear();
+        const resumedService = yield* make.pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            exists: () => Effect.succeed(true),
+            readFileString: (path, ...args) =>
+              path.endsWith("usage-scan-cache.json")
+                ? Effect.succeed(emptyScanCache)
+                : fs.readFileString(path, ...args),
+          }),
+          Effect.provideService(
+            HttpClient.HttpClient,
+            HttpClient.make(() => Effect.die("Offline fixture")),
+          ),
+        );
+        const resumed = yield* resumedService.readSummary(input);
+        expect(vi.mocked(readTranscriptRecords)).toHaveBeenCalledTimes(1);
+        expect(
+          vi.mocked(readTranscriptRecords).mock.calls.map(([, , options]) => options?.startByte),
+        ).toEqual([10]);
+
+        vi.mocked(readTranscriptRecords).mockClear();
+        const completeService = yield* make.pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            exists: () => Effect.succeed(true),
+            readFileString: (path, ...args) =>
+              path.endsWith("usage-scan-cache.json")
+                ? Effect.succeed(emptyScanCache)
+                : fs.readFileString(path, ...args),
+          }),
+          Effect.provideService(
+            HttpClient.HttpClient,
+            HttpClient.make(() => Effect.die("Offline fixture")),
+          ),
+        );
+        const complete = yield* completeService.readSummary(input);
+        expect(resumed.buckets.map(({ totals }) => totals)).toEqual(
+          complete.buckets.map(({ totals }) => totals),
+        );
+        expect(resumed.buckets[0]!.totals).toEqual({
+          uncachedInputTokens: 40,
+          cachedInputTokens: 6,
+          cacheCreationTokens: 0,
+          outputTokens: 8,
+          reasoningTokens: 0,
+        });
+      } finally {
+        vi.mocked(listTranscriptFilesBounded).mockImplementation(async (root: string) => ({
+          files: /[\\/]sessions$/.test(root) && !/[\\/]codex-home[\\/]/.test(root) ? files : [],
+          complete: inventoryComplete,
+        }));
+        vi.mocked(readTranscriptRecords).mockImplementation(async () => ({
+          records: [],
+          nextByte: Number.MAX_SAFE_INTEGER,
+          discardedLines: 0,
+          discardingLine: false,
+          codexState: initialCodexScanState(),
+        }));
+      }
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect(
+    "returns an explicit partial summary at the response deadline and releases the scan",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const config = yield* ServerConfig.ServerConfig;
+        const path = yield* Path.Path;
+        const fingerprint = {
+          hostId: "fixture",
+          provider: "codex" as const,
+          resolvedHomePath: "/sessions",
+          volumeId: "fixture",
+        };
+        const saved = {
+          key: quotaCostLedgerKey(fingerprint, "cycle"),
+          fingerprint,
+          intervalId: "cycle",
+          sinceTime: "2026-08-31T00:00:00Z",
+          untilTime: "2026-08-31T01:00:00Z",
+          costUsd: 125,
+          records: 4,
+          unpricedRecords: 0,
+          recordedAt: "2026-08-31T02:00:00Z",
+          firstRemainingPercent: 100,
+          lastRemainingPercent: 80,
+          resetsAt: "2026-09-07T00:00:00Z",
+        };
+        yield* fs.writeFileString(
+          path.join(config.stateDir, "usage-quota-cost-ledger.json"),
+          encodeJson({ version: 1, rows: [saved] }),
+        );
+        const firstCacheRead = yield* Deferred.make<void>();
+        const releaseCacheLoad = yield* Deferred.make<void>();
+        let stallCacheLoad = true;
+        let cacheReads = 0;
+        const service = yield* make.pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            exists: () => Effect.succeed(stallCacheLoad),
+            readFileString: (path, ...args) =>
+              path.endsWith("usage-scan-cache.json")
+                ? Effect.gen(function* () {
+                    cacheReads += 1;
+                    if (stallCacheLoad) {
+                      yield* Deferred.succeed(firstCacheRead, undefined);
+                      yield* Deferred.await(releaseCacheLoad);
+                    }
+                    return emptyScanCache;
+                  })
+                : fs.readFileString(path, ...args),
+          }),
+          Effect.provideService(
+            HttpClient.HttpClient,
+            HttpClient.make(() => Effect.die("Offline fixture")),
+          ),
+        );
+        const input = {
+          sinceDay: UsageDay.make("2026-08-29"),
+          untilDay: UsageDay.make("2026-09-02"),
+          timeZone: "UTC",
+          providers: ["codex"] as const,
+          quotaIntervals: [
+            { id: "cycle", sinceTime: "2026-08-31T00:00:00Z", untilTime: "2026-08-31T01:00:00Z" },
+          ],
+        };
+        const first = yield* service.readSummary(input).pipe(Effect.forkChild);
+        yield* Deferred.await(firstCacheRead);
+        yield* TestClock.adjust("12 seconds");
+        const partial = yield* Fiber.join(first);
+        expect(partial.buckets).toEqual([]);
+        expect(partial.quotaCosts).toEqual([]);
+        expect(partial.quotaCostSnapshots).toEqual([saved]);
+        expect(partial.quotaHistory).toBeDefined();
+        expect(partial.sources.every((source) => source.fingerprint.volumeId === "fixture")).toBe(
+          true,
+        );
+        expect(partial.pricing.status).toBe("unavailable");
+        expect(partial.sources).not.toHaveLength(0);
+        expect(partial.sources.every((source) => source.status === "partial")).toBe(true);
+        expect(
+          partial.sources.every((source) => source.message?.includes("response budget expired")),
+        ).toBe(true);
+
+        // The import outlives the request that started it; the retry waits for
+        // the same import instead of reading the legacy cache again.
+        stallCacheLoad = false;
+        yield* Deferred.succeed(releaseCacheLoad, undefined);
+        const retry = yield* service.readSummary(input);
+        expect(retry.sources.every((source) => source.status === "missing")).toBe(true);
+        expect(cacheReads).toBe(1);
+      }).pipe(Effect.scoped, Effect.provide(Layer.merge(testLayer, TestClock.layer()))),
+  );
+
+  it.effect("marks totals partial when transcript inventory reaches its response budget", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      inventoryComplete = false;
+      try {
+        const service = yield* make.pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            exists: () => Effect.succeed(true),
+          }),
+          Effect.provideService(
+            HttpClient.HttpClient,
+            HttpClient.make(() => Effect.die("Offline fixture")),
+          ),
+        );
+        const summary = yield* service.readSummary({
+          sinceDay: UsageDay.make("2026-08-29"),
+          untilDay: UsageDay.make("2026-09-02"),
+          timeZone: "UTC",
+          providers: ["codex"],
+          refresh: true,
+        });
+        expect(summary.sources).not.toHaveLength(0);
+        expect(summary.sources.every((source) => source.status === "partial")).toBe(true);
+        expect(summary.sources.every((source) => source.message?.includes("response budget"))).toBe(
+          true,
+        );
+      } finally {
+        inventoryComplete = true;
+      }
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect(
+    "reprices cached Codex history after a manual tier correction without rereading transcripts",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const fetchedAtMs = yield* Clock.currentTimeMillis;
+        const usage = {
+          provider: "codex" as const,
+          model: "gpt-5.6-sol",
+          sessionId: "session",
+          timestampMs: Date.parse("2026-08-31T01:00:00Z"),
+          totals: {
+            uncachedInputTokens: 1_000,
+            cachedInputTokens: 0,
+            cacheCreationTokens: 0,
+            outputTokens: 100,
+            reasoningTokens: 0,
+          },
+          reportedCostUsd: null,
+          dedupeKey: null,
+        };
+        const cache = encodeScanCache(
+          new Map(
+            files.map((file, index) => [
+              file.path,
+              {
+                ...file,
+                provider: "codex" as const,
+                records: index === 0 ? [usage] : [],
+                codexState: initialCodexScanState(),
+              },
+            ]),
+          ),
+        );
+        let corrections = "[]";
+        vi.mocked(readTranscriptRecords).mockClear();
+        const service = yield* make.pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            exists: () => Effect.succeed(true),
+            readFileString: (path, ...args) => {
+              if (path.endsWith("usage-scan-cache.json")) return Effect.succeed(encodeJson(cache));
+              if (path.endsWith("usage-codex-fast-windows.json"))
+                return Effect.succeed(corrections);
+              if (path.endsWith("usage-model-rates.json"))
+                return Effect.succeed(
+                  encodeJson({
+                    fetchedAtMs,
+                    document: {
+                      "gpt-5.6-sol": {
+                        input_cost_per_token: 4e-6,
+                        output_cost_per_token: 20e-6,
+                        input_cost_per_token_priority: 8e-6,
+                        output_cost_per_token_priority: 40e-6,
+                      },
+                    },
+                  }),
+                );
+              return fs.readFileString(path, ...args);
+            },
+          }),
+          Effect.provideService(
+            HttpClient.HttpClient,
+            HttpClient.make(() => Effect.die("Offline fixture")),
+          ),
+        );
+        const input = {
+          sinceDay: UsageDay.make("2026-08-29"),
+          untilDay: UsageDay.make("2026-09-02"),
+          timeZone: "UTC",
+          refresh: true,
+          quotaIntervals: [
+            { id: "cycle", sinceTime: "2026-08-30T23:00:00Z", untilTime: "2026-08-31T03:00:00Z" },
+          ],
+        };
+        const before = yield* service.readSummary(input);
+        corrections = encodeJson([
+          {
+            sinceTime: "2026-08-30T23:00:00Z",
+            untilTime: "2026-08-31T03:00:00Z",
+            note: "User report",
+          },
+        ]);
+        const after = yield* service.readSummary(input);
+        expect(before.buckets[0]!.costUsd).toBeCloseTo(0.006);
+        expect(after.buckets[0]!.costUsd).toBeCloseTo(0.012);
+        expect(after.buckets[0]!.totals).toEqual(before.buckets[0]!.totals);
+        expect(after.quotaCosts!.reduce((sum, row) => sum + row.costUsd, 0)).toBeCloseTo(0.012);
+        expect(readTranscriptRecords).not.toHaveBeenCalled();
+        corrections = "[]";
+        const removed = yield* service.readSummary(input);
+        expect(removed.buckets[0]!.costUsd).toBeCloseTo(0.006);
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("serves a cached window while another range is blocked on the scan semaphore", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const loading = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      let directoryExists = false;
+      const service = yield* make.pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          exists: () => Effect.succeed(directoryExists),
+        }),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("Offline fixture")),
+        ),
+      );
+      const cachedInput = {
+        sinceDay: UsageDay.make("2026-08-29"),
+        untilDay: UsageDay.make("2026-09-02"),
+        timeZone: "UTC",
+        quotaIntervals: [],
+      };
+      yield* service.readSummary(cachedInput);
+      directoryExists = true;
+      vi.mocked(readTranscriptRecords).mockImplementationOnce(async () => {
+        loading.resolve();
+        await release.promise;
+        return {
+          records: [],
+          nextByte: Number.MAX_SAFE_INTEGER,
+          discardedLines: 0,
+          discardingLine: false,
+          codexState: initialCodexScanState(),
+        };
+      });
+      const blocked = yield* service
+        .readSummary({ ...cachedInput, sinceDay: UsageDay.make("2026-08-28") })
+        .pipe(Effect.forkChild);
+      yield* Effect.promise(() => loading.promise);
+      // Keep a generous guard so a semaphore regression cannot hang the suite;
+      // this is not a cache-latency target.
+      const cached = yield* service
+        .readSummary(cachedInput)
+        .pipe(Effect.timeout(1_000), Effect.exit);
+      expect(cached._tag).toBe("Success");
+      release.resolve();
+      yield* Fiber.join(blocked);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+  it.effect("keeps scanning after the reader that started the scan is cancelled", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const reading = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const service = yield* make.pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          exists: () => Effect.succeed(true),
+        }),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("Offline fixture")),
+        ),
+      );
+      const input = {
+        sinceDay: UsageDay.make("2026-08-29"),
+        untilDay: UsageDay.make("2026-09-02"),
+        timeZone: "UTC",
+        providers: ["codex"] as const,
+        refresh: true,
+      };
+      vi.mocked(readTranscriptRecords).mockClear();
+      vi.mocked(readTranscriptRecords).mockImplementationOnce(async (filePath) => {
+        reading.resolve();
+        await release.promise;
+        return {
+          records: [],
+          nextByte: files.find((file) => file.path === filePath)?.size ?? Number.MAX_SAFE_INTEGER,
+          discardedLines: 0,
+          discardingLine: false,
+          codexState: initialCodexScanState(),
+        };
+      });
+      const first = yield* service.readSummary(input).pipe(Effect.forkChild);
+      yield* Effect.promise(() => reading.promise);
+      yield* Fiber.interrupt(first);
+      const retry = yield* service.readSummary(input).pipe(Effect.exit, Effect.forkChild);
+      release.resolve();
+      expect((yield* Fiber.join(retry))._tag).toBe("Success");
+      // A restarted scan would read the blocked transcript from its first byte again.
+      const readsFromStart = vi
+        .mocked(readTranscriptRecords)
+        .mock.calls.filter(([, , options]) => (options?.startByte ?? 0) === 0)
+        .map(([filePath]) => filePath);
+      expect(readsFromStart.toSorted()).toEqual(files.map((file) => file.path).toSorted());
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("continues the legacy cache import after its first reader is cancelled", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const loading = yield* Deferred.make<void>();
+      const releaseLoad = yield* Deferred.make<void>();
+      let cacheReads = 0;
+      const service = yield* make.pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          exists: () => Effect.succeed(false),
+          readFileString: (path, ...args) =>
+            path.endsWith("usage-scan-cache.json")
+              ? Effect.gen(function* () {
+                  cacheReads += 1;
+                  yield* Deferred.succeed(loading, undefined);
+                  yield* Deferred.await(releaseLoad);
+                  return emptyScanCache;
+                })
+              : fs.readFileString(path, ...args),
+        }),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("Offline fixture")),
+        ),
+      );
+      const input = {
+        sinceDay: UsageDay.make("2026-08-29"),
+        untilDay: UsageDay.make("2026-09-02"),
+        timeZone: "UTC",
+        quotaIntervals: [],
+        refresh: true,
+      };
+      const first = yield* service.readSummary(input).pipe(Effect.forkChild);
+      yield* Deferred.await(loading);
+      yield* Fiber.interrupt(first);
+      const retry = yield* service.readSummary(input).pipe(Effect.exit, Effect.forkChild);
+      yield* Deferred.succeed(releaseLoad, undefined);
+      expect((yield* Fiber.join(retry))._tag).toBe("Success");
+      expect(cacheReads).toBe(1);
+      yield* service.readSummary(input);
+      expect(cacheReads).toBe(1);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("keeps scan progress durable without a flush when the service closes", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const service = yield* make.pipe(
+            Effect.provideService(
+              HttpClient.HttpClient,
+              HttpClient.make(() => Effect.die("Offline fixture")),
+            ),
+          );
+          yield* service.readSummary({
+            sinceDay: UsageDay.make("2026-08-29"),
+            untilDay: UsageDay.make("2026-09-02"),
+            timeZone: "UTC",
+            quotaIntervals: [],
+            refresh: true,
+          });
+        }).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...(yield* FileSystem.FileSystem),
+            exists: () => Effect.succeed(true),
+          }),
+        ),
+      );
+      // The large fixture exceeds the cold-scan budget and is deferred; the
+      // file that was scanned is already durable with no background flush.
+      expect(storedFiles(config.stateDir).map((row) => row.path)).toEqual([files[1]!.path]);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("uses validated append cursors for both the scan budget and actual reads", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const cache = encodeScanCache(
+        new Map(
+          files.map((file, index) => [
+            file.path,
+            {
+              size: file.size - (index === 0 ? 40 : 60),
+              mtimeMs: file.mtimeMs - 1,
+              provider: "codex" as const,
+              records: [],
+              codexState: initialCodexScanState(),
+            },
+          ]),
+        ),
+      );
+      const writes: string[] = [];
+      vi.mocked(readTranscriptRecords).mockClear();
+      vi.mocked(transcriptCursorIsLineBoundary).mockClear();
+      const service = yield* make.pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          exists: () => Effect.succeed(true),
+          readFileString: (path, ...args) =>
+            path.endsWith("usage-scan-cache.json")
+              ? Effect.succeed(JSON.stringify(cache))
+              : fs.readFileString(path, ...args),
+          writeFileString: (path, contents, ...args) => {
+            writes.push(path);
+            return fs.writeFileString(path, contents, ...args);
+          },
+        }),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("Offline fixture")),
+        ),
+      );
+      const result = yield* service.readSummary({
+        sinceDay: UsageDay.make("2026-08-29"),
+        untilDay: UsageDay.make("2026-09-02"),
+        timeZone: "UTC",
+        quotaIntervals: [],
+        refresh: true,
+      });
+      expect(result.sources.every((source) => source.status === "ok")).toBe(true);
+      expect(readTranscriptRecords).toHaveBeenCalledTimes(2);
+      expect(readTranscriptRecords).toHaveBeenCalledWith(
+        files[0]!.path,
+        "codex",
+        expect.objectContaining({ startByte: 200_000_000 }),
+      );
+      expect(readTranscriptRecords).toHaveBeenCalledWith(
+        files[1]!.path,
+        "codex",
+        expect.objectContaining({ startByte: 70_000_000 }),
+      );
+      expect(transcriptCursorIsLineBoundary).toHaveBeenCalledTimes(2);
+      // The retired whole-document cache is never rewritten.
+      expect(writes.some((path) => path.includes("usage-scan-cache.json"))).toBe(false);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("rechecks a warm-looking file when an earlier scan skipped a line", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const cache = encodeScanCache(
+        new Map(
+          files.map((file, index) => [
+            file.path,
+            {
+              size: file.size,
+              mtimeMs: file.mtimeMs,
+              provider: "codex" as const,
+              records: [],
+              codexState: initialCodexScanState(),
+              ...(index === 0 ? { scanSkippedLines: 1 } : {}),
+            },
+          ]),
+        ),
+      );
+      vi.mocked(readTranscriptRecords).mockClear();
+      const service = yield* make.pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          exists: () => Effect.succeed(true),
+          readFileString: (path, ...args) =>
+            path.endsWith("usage-scan-cache.json")
+              ? Effect.succeed(JSON.stringify(cache))
+              : fs.readFileString(path, ...args),
+        }),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("Offline fixture")),
+        ),
+      );
+      const result = yield* service.readSummary({
+        sinceDay: UsageDay.make("2026-08-29"),
+        untilDay: UsageDay.make("2026-09-02"),
+        timeZone: "UTC",
+        providers: ["codex"],
+        quotaIntervals: [],
+        refresh: true,
+      });
+      expect(readTranscriptRecords).toHaveBeenCalledTimes(1);
+      expect(readTranscriptRecords).toHaveBeenCalledWith(
+        files[0]!.path,
+        "codex",
+        expect.objectContaining({ startByte: 0 }),
+      );
+      expect(result.sources.every((source) => source.status === "ok")).toBe(true);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("defers old warm entries until repeated-input metadata is rebuilt", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const encodedCache = encodeScanCache(
+        new Map(
+          files.map((file) => [
+            file.path,
+            {
+              ...file,
+              provider: "codex" as const,
+              records: [],
+              codexState: initialCodexScanState(),
+            },
+          ]),
+        ),
+      );
+      const oldCache = encodeJson(encodedCache);
+      vi.mocked(readTranscriptRecords).mockClear();
+      vi.mocked(readRepeatedInputRecords).mockClear();
+      const service = yield* make.pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          exists: () => Effect.succeed(true),
+          readFileString: (path, ...args) =>
+            path.endsWith("usage-scan-cache.json")
+              ? Effect.succeed(oldCache)
+              : fs.readFileString(path, ...args),
+        }),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("Offline fixture")),
+        ),
+      );
+      const result = yield* service.readSummary({
+        sinceDay: UsageDay.make("2026-08-29"),
+        untilDay: UsageDay.make("2026-09-02"),
+        timeZone: "UTC",
+        providers: ["codex"],
+        includeRepeatedInput: true,
+        refresh: true,
+      });
+
+      const codexSource = result.sources.find((source) => source.fingerprint.provider === "codex");
+      expect(codexSource?.status).toBe("partial");
+      expect(readTranscriptRecords).not.toHaveBeenCalled();
+      expect(readRepeatedInputRecords).toHaveBeenCalledTimes(1);
+      expect(readRepeatedInputRecords).toHaveBeenCalledWith(
+        files[1]!.path,
+        expect.objectContaining({ startByte: 0 }),
+      );
+      expect(readRepeatedInputRecords).not.toHaveBeenCalledWith(files[0]!.path, expect.anything());
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("stores each rescanned transcript with its newest mtime", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const originalMtime = files[0]!.mtimeMs;
+      const originalSizes = files.map((file) => file.size);
+      yield* Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        files[0]!.size = 10_000;
+        files[1]!.size = 20_000;
+        const service = yield* make.pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            exists: () => Effect.succeed(true),
+          }),
+          Effect.provideService(
+            HttpClient.HttpClient,
+            HttpClient.make(() => Effect.die("Offline fixture")),
+          ),
+        );
+        const input = {
+          sinceDay: UsageDay.make("2026-08-29"),
+          untilDay: UsageDay.make("2026-09-02"),
+          timeZone: "UTC",
+          quotaIntervals: [],
+          refresh: true,
+        };
+        for (const [offset, sinceDay] of [
+          [0, "2026-08-29"],
+          [1_000, "2026-08-28"],
+          [2_000, "2026-08-27"],
+        ] as const) {
+          files[0]!.mtimeMs = originalMtime + offset;
+          const summary = yield* service.readSummary({
+            ...input,
+            sinceDay: UsageDay.make(sinceDay),
+          });
+          expect(summary.sources.every((source) => source.status === "ok")).toBe(true);
+        }
+        expect(
+          storedFiles(config.stateDir).find((row) => row.path === files[0]!.path)?.mtime_ms,
+        ).toBe(originalMtime + 2_000);
+      }).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            files[0]!.mtimeMs = Date.parse("2026-08-30T23:00:00Z");
+            files.forEach((file, index) => {
+              file.size = originalSizes[index]!;
+            });
+          }),
+        ),
+      );
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+});
+
+vi.mock("./usageProviderReaders.ts", async () => {
+  const Effect = await import("effect/Effect");
+  return { makeProviderUsageReader: Effect.succeed(() => Effect.succeed([])) };
+});

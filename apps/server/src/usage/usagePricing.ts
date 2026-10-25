@@ -1,3 +1,12 @@
+/**
+ * Model rate lookup and cost arithmetic.
+ *
+ * Rates come from LiteLLM's `model_prices_and_context_window.json`, the same
+ * table `ccusage` prices against. Everything here is pure: fetching and caching
+ * the table lives in `UsageService`.
+ *
+ * @module usagePricing
+ */
 import type {
   UsageCategoryCost,
   UsageCostSource,
@@ -5,26 +14,28 @@ import type {
   UsageTokenTotals,
 } from "@t3tools/contracts";
 
-import type { UsageRecord, UsageSpeed } from "@t3tools/provider-core/server/usage";
-
-export interface TokenRates {
+/**
+ * The subset of a LiteLLM entry we price against. All values are USD per token.
+ *
+ * Context-length and service tiers use each request's metadata. Missing service
+ * tier metadata retains the standard estimate and is identified in the UI.
+ */
+export interface ModelRate {
   readonly inputCostPerToken: number;
   readonly outputCostPerToken: number;
-  readonly cacheReadCostPerToken: number;
-  readonly cacheCreationCostPerToken: number;
-}
-
-/**
- * LiteLLM also publishes `*_above_272k_tokens`, `*_flex`, and `*_batches` variants. Transcripts
- * don't record those, so we don't price them.
- */
-export interface ModelRate extends TokenRates {
-  readonly fast: TokenRates | null;
-  readonly ultrafast: TokenRates | null;
+  readonly cacheReadCostPerToken: number | null;
+  readonly cacheCreationCostPerToken: number | null;
+  readonly above200kTokens?: ModelRate;
+  readonly above272kTokens?: ModelRate;
+  readonly priority?: ModelRate;
+  readonly fast?: ModelRate;
+  readonly ultrafast?: ModelRate;
+  readonly flex?: ModelRate;
 }
 
 export type RateTable = ReadonlyMap<string, ModelRate>;
 
+/** Custom prices use the exact model key supplied by the user. */
 export function createOverrideRateTable(
   overrides: Readonly<Record<string, UsageModelPriceOverride>>,
 ): RateTable {
@@ -38,66 +49,39 @@ export function createOverrideRateTable(
           (prices.cacheReadCostPerMillionTokens ?? prices.inputCostPerMillionTokens) / 1_000_000,
         cacheCreationCostPerToken:
           (prices.cacheWriteCostPerMillionTokens ?? prices.inputCostPerMillionTokens) / 1_000_000,
-        fast: null,
-        ultrafast: null,
       },
     ]),
   );
 }
 
-type LiteLlmEntry = Readonly<Record<string, unknown>>;
+/** Raw shape of one LiteLLM entry, narrowed to the fields we read. */
+interface LiteLlmEntry {
+  readonly [key: string]: unknown;
+  readonly input_cost_per_token?: unknown;
+  readonly output_cost_per_token?: unknown;
+  readonly cache_read_input_token_cost?: unknown;
+  readonly cache_creation_input_token_cost?: unknown;
+  readonly input_cost_per_token_cache_hit?: unknown;
+  readonly input_cost_per_token_above_200k_tokens?: unknown;
+  readonly output_cost_per_token_above_200k_tokens?: unknown;
+  readonly cache_read_input_token_cost_above_200k_tokens?: unknown;
+  readonly cache_creation_input_token_cost_above_200k_tokens?: unknown;
+  readonly input_cost_per_token_above_272k_tokens?: unknown;
+  readonly output_cost_per_token_above_272k_tokens?: unknown;
+  readonly cache_read_input_token_cost_above_272k_tokens?: unknown;
+  readonly cache_creation_input_token_cost_above_272k_tokens?: unknown;
+}
 
 function finiteNumber(value: unknown): number | null {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 /**
- * Anthropic bills cache reads at a discount and cache writes at a premium. When the standard
- * tier omits them, cached input is priced as plain input rather than as free.
- */
-function readTokenRates(
-  entry: LiteLlmEntry,
-  suffix: string,
-  standard?: TokenRates,
-): TokenRates | null {
-  const input = finiteNumber(entry[`input_cost_per_token${suffix}`]);
-  const output = finiteNumber(entry[`output_cost_per_token${suffix}`]);
-  if (input === null || output === null) return null;
-  const cacheRate = (name: string, field: "cacheReadCostPerToken" | "cacheCreationCostPerToken") =>
-    finiteNumber(entry[`${name}${suffix}`]) ??
-    (standard !== undefined && standard.inputCostPerToken > 0
-      ? (standard[field] / standard.inputCostPerToken) * input
-      : input);
-  return {
-    inputCostPerToken: input,
-    outputCostPerToken: output,
-    cacheReadCostPerToken: cacheRate("cache_read_input_token_cost", "cacheReadCostPerToken"),
-    cacheCreationCostPerToken: cacheRate(
-      "cache_creation_input_token_cost",
-      "cacheCreationCostPerToken",
-    ),
-  };
-}
-
-function scaleTokenRates(rates: TokenRates, multiple: number): TokenRates {
-  return {
-    inputCostPerToken: rates.inputCostPerToken * multiple,
-    outputCostPerToken: rates.outputCostPerToken * multiple,
-    cacheReadCostPerToken: rates.cacheReadCostPerToken * multiple,
-    cacheCreationCostPerToken: rates.cacheCreationCostPerToken * multiple,
-  };
-}
-
-function fastMultiplier(entry: LiteLlmEntry): number | null {
-  const specific = entry["provider_specific_entry"];
-  if (typeof specific !== "object" || specific === null) return null;
-  const fast = finiteNumber((specific as Record<string, unknown>)["fast"]);
-  return fast !== null && fast > 0 ? fast : null;
-}
-
-/**
- * Entries without both an input and an output rate are dropped: a half-priced model would
- * silently under-report cost, which is worse than reporting the model as unpriced.
+ * Projects the LiteLLM document into a rate table.
+ *
+ * Entries without both an input and an output rate are dropped: a half-priced
+ * model would silently under-report cost, which is worse than reporting the
+ * model as unpriced.
  */
 export function parseRateTable(document: unknown): RateTable {
   const table = new Map<string, ModelRate>();
@@ -106,85 +90,178 @@ export function parseRateTable(document: unknown): RateTable {
   for (const [name, raw] of Object.entries(document as Record<string, unknown>)) {
     if (typeof raw !== "object" || raw === null) continue;
     const entry = raw as LiteLlmEntry;
-    const standard = readTokenRates(entry, "");
-    if (standard === null) continue;
+    const input = finiteNumber(entry.input_cost_per_token);
+    const output = finiteNumber(entry.output_cost_per_token);
+    if (input === null || output === null) continue;
 
-    const key = normalizeRateKey(name);
-    if (key.length === 0) continue;
-    const multiple = fastMultiplier(entry);
-    table.set(key, {
-      ...standard,
-      fast:
-        multiple === null
-          ? readTokenRates(entry, "_priority", standard)
-          : scaleTokenRates(standard, multiple),
-      ultrafast: readTokenRates(entry, "_ultrafast", standard),
+    const aboveInput = finiteNumber(entry.input_cost_per_token_above_272k_tokens);
+    const aboveOutput = finiteNumber(entry.output_cost_per_token_above_272k_tokens);
+    const above200Input = finiteNumber(entry.input_cost_per_token_above_200k_tokens);
+    const above200Output = finiteNumber(entry.output_cost_per_token_above_200k_tokens);
+    const rate: ModelRate = {
+      inputCostPerToken: input,
+      outputCostPerToken: output,
+      cacheReadCostPerToken:
+        finiteNumber(entry.cache_read_input_token_cost) ??
+        finiteNumber(entry.input_cost_per_token_cache_hit),
+      cacheCreationCostPerToken: finiteNumber(entry.cache_creation_input_token_cost),
+      ...(above200Input !== null && above200Output !== null
+        ? {
+            above200kTokens: {
+              inputCostPerToken: above200Input,
+              outputCostPerToken: above200Output,
+              cacheReadCostPerToken: finiteNumber(
+                entry.cache_read_input_token_cost_above_200k_tokens,
+              ),
+              cacheCreationCostPerToken: finiteNumber(
+                entry.cache_creation_input_token_cost_above_200k_tokens,
+              ),
+            },
+          }
+        : {}),
+      ...(aboveInput !== null && aboveOutput !== null
+        ? {
+            above272kTokens: {
+              inputCostPerToken: aboveInput,
+              outputCostPerToken: aboveOutput,
+              cacheReadCostPerToken: finiteNumber(
+                entry.cache_read_input_token_cost_above_272k_tokens,
+              ),
+              cacheCreationCostPerToken: finiteNumber(
+                entry.cache_creation_input_token_cost_above_272k_tokens,
+              ),
+            },
+          }
+        : {}),
+    };
+    const tiers: { priority?: ModelRate; flex?: ModelRate } = {};
+    for (const tier of ["priority", "flex"] as const) {
+      const tierInput = finiteNumber(entry[`input_cost_per_token_${tier}`]);
+      const tierOutput = finiteNumber(entry[`output_cost_per_token_${tier}`]);
+      if (tierInput === null || tierOutput === null) continue;
+      const contexts: { above200kTokens?: ModelRate; above272kTokens?: ModelRate } = {};
+      for (const limit of [200, 272] as const) {
+        const suffix = `_above_${limit}k_tokens_${tier}`;
+        const longInput = finiteNumber(entry[`input_cost_per_token${suffix}`]);
+        const longOutput = finiteNumber(entry[`output_cost_per_token${suffix}`]);
+        const standardLong = limit === 272 ? rate.above272kTokens : rate.above200kTokens;
+        if (longInput !== null && longOutput !== null) {
+          contexts[`above${limit}kTokens`] = {
+            inputCostPerToken: longInput,
+            outputCostPerToken: longOutput,
+            cacheReadCostPerToken: finiteNumber(entry[`cache_read_input_token_cost${suffix}`]),
+            cacheCreationCostPerToken: finiteNumber(
+              entry[`cache_creation_input_token_cost${suffix}`],
+            ),
+          };
+        } else if (
+          standardLong &&
+          tier === "priority" &&
+          /^(?:openai\/)?gpt-5\.6-(?:sol|terra|luna)$/.test(normalizeModelName(name))
+        ) {
+          // OpenAI Fast mode pricing, verified 2026-08-30: 2x at both context lengths.
+          // https://developers.openai.com/api/docs/pricing
+          contexts[`above${limit}kTokens`] = {
+            inputCostPerToken: standardLong.inputCostPerToken * 2,
+            outputCostPerToken: standardLong.outputCostPerToken * 2,
+            cacheReadCostPerToken:
+              standardLong.cacheReadCostPerToken === null
+                ? null
+                : standardLong.cacheReadCostPerToken * 2,
+            cacheCreationCostPerToken:
+              standardLong.cacheCreationCostPerToken === null
+                ? null
+                : standardLong.cacheCreationCostPerToken * 2,
+          };
+        }
+      }
+      tiers[tier] = {
+        inputCostPerToken: tierInput,
+        outputCostPerToken: tierOutput,
+        cacheReadCostPerToken:
+          finiteNumber(entry[`cache_read_input_token_cost_${tier}`]) ??
+          (rate.cacheReadCostPerToken !== null && rate.inputCostPerToken > 0
+            ? (rate.cacheReadCostPerToken / rate.inputCostPerToken) * tierInput
+            : null),
+        cacheCreationCostPerToken:
+          finiteNumber(entry[`cache_creation_input_token_cost_${tier}`]) ??
+          (rate.cacheCreationCostPerToken !== null && rate.inputCostPerToken > 0
+            ? (rate.cacheCreationCostPerToken / rate.inputCostPerToken) * tierInput
+            : null),
+        ...contexts,
+      };
+    }
+    const fastMultiple =
+      typeof entry.provider_specific_entry === "object" && entry.provider_specific_entry !== null
+        ? finiteNumber((entry.provider_specific_entry as Record<string, unknown>).fast)
+        : null;
+    const scaled = (multiple: number): ModelRate => ({
+      inputCostPerToken: rate.inputCostPerToken * multiple,
+      outputCostPerToken: rate.outputCostPerToken * multiple,
+      cacheReadCostPerToken:
+        rate.cacheReadCostPerToken === null ? null : rate.cacheReadCostPerToken * multiple,
+      cacheCreationCostPerToken:
+        rate.cacheCreationCostPerToken === null ? null : rate.cacheCreationCostPerToken * multiple,
+    });
+    const ultraInput = finiteNumber(entry.input_cost_per_token_ultrafast);
+    const ultraOutput = finiteNumber(entry.output_cost_per_token_ultrafast);
+    table.set(normalizeModelName(name), {
+      ...rate,
+      ...tiers,
+      ...(fastMultiple !== null && fastMultiple > 0 ? { fast: scaled(fastMultiple) } : {}),
+      ...(ultraInput !== null && ultraOutput !== null
+        ? {
+            ultrafast: {
+              inputCostPerToken: ultraInput,
+              outputCostPerToken: ultraOutput,
+              cacheReadCostPerToken:
+                finiteNumber(entry.cache_read_input_token_cost_ultrafast) ??
+                (rate.inputCostPerToken > 0
+                  ? ((rate.cacheReadCostPerToken ?? rate.inputCostPerToken) /
+                      rate.inputCostPerToken) *
+                    ultraInput
+                  : ultraInput),
+              cacheCreationCostPerToken:
+                finiteNumber(entry.cache_creation_input_token_cost_ultrafast) ?? ultraInput,
+            },
+          }
+        : {}),
     });
   }
-
-  const aliasCandidates = new Map<string, ModelRate | null>();
+  const aliases = new Map<string, ModelRate | null>();
   for (const [key, rate] of table) {
-    const alias = bareModelName(key);
-    if (alias.length === 0 || alias === key || table.has(alias)) continue;
-    const held = aliasCandidates.get(alias);
-    if (held === undefined) {
-      aliasCandidates.set(alias, rate);
-    } else if (held !== null && !sameRate(held, rate)) {
-      aliasCandidates.set(alias, null);
-    }
+    const alias = key.slice(key.lastIndexOf("/") + 1);
+    if (alias === key || table.has(alias)) continue;
+    const previous = aliases.get(alias);
+    aliases.set(
+      alias,
+      previous === undefined
+        ? rate
+        : previous !== null && JSON.stringify(previous) === JSON.stringify(rate)
+          ? previous
+          : null,
+    );
   }
-  for (const [alias, rate] of aliasCandidates) {
-    if (rate !== null) table.set(alias, rate);
-  }
-
+  for (const [alias, rate] of aliases) if (rate !== null) table.set(alias, rate);
   return table;
 }
 
-function sameTokenRates(a: TokenRates | null, b: TokenRates | null): boolean {
-  if (a === null || b === null) return a === b;
-  return (
-    a.inputCostPerToken === b.inputCostPerToken &&
-    a.outputCostPerToken === b.outputCostPerToken &&
-    a.cacheReadCostPerToken === b.cacheReadCostPerToken &&
-    a.cacheCreationCostPerToken === b.cacheCreationCostPerToken
-  );
-}
-
-function sameRate(a: ModelRate, b: ModelRate): boolean {
-  return (
-    sameTokenRates(a, b) &&
-    sameTokenRates(a.fast, b.fast) &&
-    sameTokenRates(a.ultrafast, b.ultrafast)
-  );
-}
-
-function ratesAt(rate: ModelRate, speed: UsageSpeed): TokenRates {
-  return (speed === "standard" ? null : rate[speed]) ?? rate;
-}
-
-function normalizeRateKey(model: string): string {
+/**
+ * Canonicalises a model name for lookup.
+ *
+ * Retains the provider namespace: resellers can charge different rates for the
+ * same underlying model. Only casing and surrounding whitespace are normalized.
+ */
+export function normalizeModelName(model: string): string {
   return model.trim().toLowerCase();
 }
 
-function bareModelName(key: string): string {
-  const slash = key.lastIndexOf("/");
-  return slash === -1 ? key : key.slice(slash + 1);
-}
-
 /**
- * Drops a bracketed variant suffix such as `claude-fable-5-1[1m]`, which
- * Claude Code writes for the 1M context tier. The rate table only knows the
- * base name, and we price at the base tier anyway.
- */
-function stripVariantSuffix(key: string): string {
-  const bracket = key.indexOf("[");
-  return bracket === -1 ? key : key.slice(0, bracket);
-}
-
-/**
- * `<synthetic>` marks locally generated messages that were never billed. Bare family names
- * ("opus", "sonnet") are genuinely ambiguous across generations, so we report them as unpriced
- * instead of guessing a generation.
+ * Models we never price, regardless of the table.
+ *
+ * `<synthetic>` marks locally generated messages that were never billed. Bare
+ * family names ("opus", "sonnet") are genuinely ambiguous across generations,
+ * so we report them as unpriced instead of guessing a generation.
  */
 const UNPRICEABLE_MODELS = new Set([
   "<synthetic>",
@@ -196,110 +273,183 @@ const UNPRICEABLE_MODELS = new Set([
 ]);
 
 /**
- * A scan prices every record twice against a few dozen models, and tables are
- * never mutated once built.
+ * First-party preview IDs whose token rates matched the stable family they
+ * became. This is intentionally narrow: models without a documented paid
+ * equivalent remain unpriced instead of borrowing a vaguely similar rate.
  */
-const resolvedRates = new WeakMap<RateTable, Map<string, ModelRate | null>>();
+const MODEL_RATE_ALIASES = new Map([
+  ["gemini-2.0-flash-exp", "gemini-2.0-flash"],
+  ["gemini-2.0-flash-thinking-exp-01-21", "gemini-2.0-flash"],
+  ["gemini-2.5-flash-preview-04-17", "gemini-2.5-flash"],
+  ["gemini-2.5-flash-preview-05-20", "gemini-2.5-flash"],
+  ["gemini-2.5-pro-exp-03-25", "gemini-2.5-pro"],
+  ["gemini-2.5-pro-preview-03-25", "gemini-2.5-pro"],
+  ["gemini-2.5-pro-preview-05-06", "gemini-2.5-pro"],
+  ["gemini-2.5-pro-preview-06-05", "gemini-2.5-pro"],
+]);
 
 export function lookupRate(table: RateTable, model: string): ModelRate | null {
-  let resolved = resolvedRates.get(table);
-  if (resolved === undefined) {
-    resolved = new Map();
-    resolvedRates.set(table, resolved);
+  const normalized = normalizeModelName(model);
+  if (normalized.length === 0 || UNPRICEABLE_MODELS.has(normalized)) return null;
+  const exact = table.get(normalized);
+  if (exact !== undefined) return exact;
+  const alias = MODEL_RATE_ALIASES.get(normalized);
+  if (alias !== undefined) {
+    return table.get(alias) ?? table.get(`gemini/${alias}`) ?? null;
   }
-  let rate = resolved.get(model);
-  if (rate === undefined) {
-    rate = resolveRate(table, model);
-    resolved.set(model, rate);
+  // First-party transcript spellings may differ from the catalogue's namespace.
+  // Never strip arbitrary reseller or local-router prefixes.
+  if (/^(openai\/gpt-|anthropic\/claude-)/.test(normalized)) {
+    return table.get(normalized.slice(normalized.indexOf("/") + 1)) ?? null;
   }
-  return rate;
+  if (normalized.startsWith("google/gemini-")) {
+    const name = normalized.slice("google/".length);
+    return table.get(`gemini/${name}`) ?? table.get(name) ?? null;
+  }
+  if (normalized.startsWith("gemini-")) return table.get(`gemini/${normalized}`) ?? null;
+  return null;
 }
-
-function resolveRate(table: RateTable, model: string): ModelRate | null {
-  const key = stripVariantSuffix(normalizeRateKey(model));
-  const bareName = bareModelName(key);
-  if (bareName.length === 0 || UNPRICEABLE_MODELS.has(bareName)) return null;
-  return table.get(key) ?? null;
-}
-
-export type PricedRecord = Pick<
-  UsageRecord,
-  "model" | "rateModel" | "totals" | "speed" | "reportedCostUsd"
->;
 
 export interface PricedUsage {
   readonly costUsd: number;
   readonly costSource: UsageCostSource;
-  readonly categoryCostUsd: UsageCategoryCost | null;
-  readonly speedPremiumUsd: number;
 }
 
-function costByCategory(totals: UsageTokenTotals, rates: TokenRates): UsageCategoryCost {
-  return {
-    input: totals.uncachedInputTokens * rates.inputCostPerToken,
-    cacheRead: totals.cachedInputTokens * rates.cacheReadCostPerToken,
-    cacheWrite: totals.cacheCreationTokens * rates.cacheCreationCostPerToken,
-    output: totals.outputTokens * rates.outputCostPerToken,
-  };
-}
-
-function sumCategories(cost: UsageCategoryCost): number {
-  return cost.input + cost.cacheRead + cost.cacheWrite + cost.output;
+function rateForTotals(
+  base: ModelRate,
+  totals: UsageTokenTotals,
+  serviceTier?: string,
+): ModelRate | null {
+  if (serviceTier === "ultrafast") return base.ultrafast ?? null;
+  if (serviceTier === "fast" && base.fast !== undefined) return base.fast;
+  const tier = serviceTier === "fast" ? "priority" : serviceTier;
+  const rate =
+    tier === undefined || tier === "default"
+      ? base
+      : tier === "priority"
+        ? base.priority
+        : tier === "flex"
+          ? base.flex
+          : undefined;
+  if (rate === undefined) return null;
+  const inputTokens =
+    totals.uncachedInputTokens + totals.cachedInputTokens + totals.cacheCreationTokens;
+  if (inputTokens > 272_000 && (base.above272kTokens || rate.above272kTokens)) {
+    return rate.above272kTokens ?? null;
+  }
+  if (inputTokens > 200_000 && (base.above200kTokens || rate.above200kTokens)) {
+    return rate.above200kTokens ?? null;
+  }
+  return rate;
 }
 
 /**
+ * Prices a bucket's tokens.
+ *
  * `reasoningTokens` is intentionally not charged separately: it is already
  * counted inside `outputTokens`.
  */
 export function priceUsage(
   table: RateTable,
-  record: PricedRecord,
+  model: string,
+  totals: UsageTokenTotals,
+  reportedCostUsd: number | null,
+  serviceTier?: string,
   overrides?: RateTable,
 ): PricedUsage {
-  const { model, totals, reportedCostUsd } = record;
-  const override = overrides?.get(model.trim());
-  const reported =
-    override === undefined && reportedCostUsd !== null && Number.isFinite(reportedCostUsd)
-      ? reportedCostUsd
-      : null;
-  const unsplit = (costUsd: number, costSource: UsageCostSource): PricedUsage => ({
-    costUsd,
-    costSource,
-    categoryCostUsd: null,
-    speedPremiumUsd: 0,
-  });
-  const rate = override ?? lookupRate(table, record.rateModel ?? model);
-  if (rate === null) {
-    return reported === null ? unsplit(0, "unpriced") : unsplit(reported, "providerReported");
+  if (reportedCostUsd !== null && finiteNumber(reportedCostUsd) !== null) {
+    return { costUsd: reportedCostUsd, costSource: "providerReported" };
   }
 
-  const listCost = costByCategory(totals, ratesAt(rate, record.speed));
-  const listCostUsd = sumCategories(listCost);
-  if (reported !== null && listCostUsd <= 0) return unsplit(reported, "providerReported");
-  const premiumUsd =
-    record.speed === "standard" ? 0 : listCostUsd - sumCategories(costByCategory(totals, rate));
-  const scale = reported === null ? 1 : reported / listCostUsd;
-  return {
-    costUsd: reported ?? listCostUsd,
-    costSource: reported === null ? "modelPriced" : "providerReported",
-    categoryCostUsd: {
-      input: listCost.input * scale,
-      cacheRead: listCost.cacheRead * scale,
-      cacheWrite: listCost.cacheWrite * scale,
-      output: listCost.output * scale,
-    },
-    speedPremiumUsd: premiumUsd * scale,
-  };
+  const baseRate = lookupRate(overrides ?? table, model) ?? lookupRate(table, model);
+  if (baseRate === null) return { costUsd: 0, costSource: "unpriced" };
+  const rate = rateForTotals(baseRate, totals, serviceTier);
+  if (rate === null) return { costUsd: 0, costSource: "unpriced" };
+  if (
+    (totals.cachedInputTokens > 0 && rate.cacheReadCostPerToken === null) ||
+    (totals.cacheCreationTokens > 0 && rate.cacheCreationCostPerToken === null)
+  )
+    return { costUsd: 0, costSource: "unpriced" };
+
+  const costUsd =
+    totals.uncachedInputTokens * rate.inputCostPerToken +
+    totals.cachedInputTokens * (rate.cacheReadCostPerToken ?? 0) +
+    totals.cacheCreationTokens * (rate.cacheCreationCostPerToken ?? 0) +
+    totals.outputTokens * rate.outputCostPerToken;
+
+  return { costUsd, costSource: "modelPriced" };
 }
 
+/**
+ * What the cached input would have cost at full input rates, minus what it
+ * actually cost. Drives the "cache savings" figure.
+ */
 export function cacheSavingsUsd(
   table: RateTable,
-  record: PricedRecord,
+  model: string,
+  totals: UsageTokenTotals,
+  serviceTier?: string,
   overrides?: RateTable,
 ): number {
-  const rate =
-    overrides?.get(record.model.trim()) ?? lookupRate(table, record.rateModel ?? record.model);
-  if (rate === null) return 0;
-  const rates = ratesAt(rate, record.speed);
-  return record.totals.cachedInputTokens * (rates.inputCostPerToken - rates.cacheReadCostPerToken);
+  const baseRate = lookupRate(overrides ?? table, model) ?? lookupRate(table, model);
+  if (baseRate === null) return 0;
+  const rate = rateForTotals(baseRate, totals, serviceTier);
+  if (rate === null || rate.cacheReadCostPerToken === null) return 0;
+  return totals.cachedInputTokens * (rate.inputCostPerToken - rate.cacheReadCostPerToken);
+}
+
+/** Allocates reported costs proportionally without changing the provider's total. */
+export function priceUsageRecord(
+  table: RateTable,
+  record: import("./usageTranscripts.ts").UsageRecord,
+  overrides?: RateTable,
+) {
+  const override = overrides?.get(record.model.trim());
+  const model = override === undefined ? (record.rateModel ?? record.model) : record.model;
+  const speedTier = record.speed === "standard" ? undefined : record.speed;
+  const base = override ?? lookupRate(table, model);
+  const tier =
+    override !== undefined
+      ? undefined
+      : (record.serviceTier ??
+        (speedTier === "fast" && base?.priority === undefined && base?.fast === undefined
+          ? undefined
+          : speedTier === "ultrafast" && base?.ultrafast === undefined
+            ? undefined
+            : speedTier));
+  const priced =
+    override === undefined
+      ? priceUsage(table, model, record.totals, record.reportedCostUsd, tier)
+      : priceUsage(new Map([[normalizeModelName(model), override]]), model, record.totals, null);
+  const rate = base === null ? null : rateForTotals(base, record.totals, tier);
+  const cacheSavingsUsd =
+    rate === null || rate.cacheReadCostPerToken === null
+      ? 0
+      : record.totals.cachedInputTokens * (rate.inputCostPerToken - rate.cacheReadCostPerToken);
+  const unsplit = { ...priced, cacheSavingsUsd, categoryCostUsd: null, speedPremiumUsd: 0 };
+  if (rate === null || priced.costSource === "unpriced") return unsplit;
+  const categories = (r: ModelRate): UsageCategoryCost => ({
+    input: record.totals.uncachedInputTokens * r.inputCostPerToken,
+    cacheRead: record.totals.cachedInputTokens * (r.cacheReadCostPerToken ?? r.inputCostPerToken),
+    cacheWrite:
+      record.totals.cacheCreationTokens * (r.cacheCreationCostPerToken ?? r.inputCostPerToken),
+    output: record.totals.outputTokens * r.outputCostPerToken,
+  });
+  const sum = (c: UsageCategoryCost) => c.input + c.cacheRead + c.cacheWrite + c.output;
+  const list = categories(rate),
+    total = sum(list);
+  if (total <= 0) return unsplit;
+  const scale = priced.costUsd / total;
+  const standardRate = base === null ? null : rateForTotals(base, record.totals);
+  return {
+    ...priced,
+    cacheSavingsUsd,
+    categoryCostUsd: {
+      input: list.input * scale,
+      cacheRead: list.cacheRead * scale,
+      cacheWrite: list.cacheWrite * scale,
+      output: list.output * scale,
+    },
+    speedPremiumUsd: standardRate === null ? 0 : (total - sum(categories(standardRate))) * scale,
+  };
 }

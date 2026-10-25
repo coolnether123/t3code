@@ -1,3 +1,13 @@
+import * as ServerSettings from "../serverSettings.ts";
+import { type ComputerChromeScreenshot } from "@t3tools/contracts";
+import {
+  ComputerStandardToolkit,
+  ComputerScreenshotToolkit,
+  ComputerScreenshotTool,
+} from "./toolkits/computer/tools.ts";
+import * as ComputerHandlers from "./toolkits/computer/handlers.ts";
+import * as ChromeAutomation from "../browser/ChromeAutomation.ts";
+import { makeChromeScreenshotStore } from "../browser/ChromeScreenshotStore.ts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -993,6 +1003,90 @@ const imageToolRegistration = <Tools extends Record<string, Tool.Any>, A, E, R, 
     Layer.provide(McpToolAccess.HandlersLayer.layer(handlers)),
   );
 
+const registerComputerScreenshot = Effect.fn("McpHttpServer.registerComputerScreenshot")(
+  function* () {
+    const server = yield* McpServer.McpServer;
+    const automation = yield* ChromeAutomation.ChromeAutomation;
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    const storeScreenshot = yield* makeChromeScreenshotStore();
+    const built = yield* decodeAsAdvertised(ComputerScreenshotToolkit);
+    const tool = ComputerScreenshotTool;
+    yield* server.addTool({
+      tool: new McpSchema.Tool({
+        name: tool.name,
+        description: Tool.getDescription(tool),
+        inputSchema: Tool.getJsonSchema(tool),
+        annotations: {
+          title: "Screenshot T3 Chrome",
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: true,
+        },
+      }),
+      annotations: tool.annotations,
+      handle: (payload) =>
+        Effect.withFiber((fiber) => {
+          const invocation = Context.getUnsafe(
+            fiber.context,
+            McpInvocationContext.McpInvocationContext,
+          );
+          return built.handle("computer_screenshot", payload).pipe(
+            Stream.unwrap,
+            Stream.run(Sink.last()),
+            Effect.flatMap(Effect.fromOption),
+            Effect.flatMap(({ encodedResult }) =>
+              storeScreenshot(
+                invocation.thread!.threadId,
+                encodedResult as ComputerChromeScreenshot,
+              ).pipe(Effect.map((screenshot) => ({ encodedResult, screenshot }))),
+            ),
+            Effect.provideService(ChromeAutomation.ChromeAutomation, automation),
+            Effect.provideService(ThreadManagementService.ThreadManagementService, threads),
+            Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+            Effect.matchCauseEffect({
+              onFailure: (cause) =>
+                imageToolFailure(
+                  "computer_screenshot",
+                  "screenshot",
+                  "Chrome screenshot failed.",
+                )(cause),
+              onSuccess: ({ encodedResult, screenshot }) => {
+                const { data, ...captureMetadata } = encodedResult as ComputerChromeScreenshot;
+                const metadata = { ...captureMetadata, screenshot };
+                return Effect.succeed(
+                  new McpSchema.CallToolResult({
+                    isError: false,
+                    structuredContent: metadata,
+                    content: [
+                      { type: "text", text: JSON.stringify(metadata) },
+                      {
+                        type: "image",
+                        mimeType: metadata.mimeType,
+                        data: new Uint8Array(Buffer.from(data, "base64")),
+                      },
+                    ],
+                  }),
+                );
+              },
+            }),
+          );
+        }),
+    });
+  },
+);
+
+const layerComputerToolkit = Layer.mergeAll(
+  toolkitRegistration(
+    ComputerStandardToolkit,
+    ComputerHandlers.ComputerStandardToolkitHandlersLive,
+  ),
+  imageToolRegistration(
+    registerComputerScreenshot(),
+    ComputerHandlers.ComputerScreenshotToolkitHandlersLive,
+  ),
+);
+
 export const layerHtmlToolkit = Layer.mergeAll(
   toolkitRegistration(HtmlRenderToolkit, HtmlHandlers.layerRender),
   imageToolRegistration(registerHtmlPreview(), HtmlHandlers.layerPreview),
@@ -1070,8 +1164,10 @@ export const layerMcpTransport = McpServer.layerHttp({
   allowSessionTermination: true,
 }).pipe(Layer.provide(layerMcpAuthMiddleware));
 
+const layerForkToolkits = Layer.mergeAll(layerPreviewToolkit, layerComputerToolkit);
+
 export const layer = Layer.mergeAll(
-  layerPreviewToolkit,
+  layerForkToolkits,
   layerOrchestratorToolkit,
   layerThreadToolkit,
   layerAttachmentToolkit,

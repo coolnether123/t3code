@@ -1,22 +1,47 @@
+/**
+ * Usage reporting contract.
+ *
+ * Each environment scans the provider CLIs' own on-disk session transcripts
+ * (`~/.claude/projects/**\/*.jsonl`, `~/.codex/{sessions,archived_sessions}/**\/*.jsonl`,
+ * `~/.gemini/tmp/<project>/chats/session-*`, `~/.local/share/opencode/opencode.db`)
+ * rather than
+ * relying on T3 Code's own orchestration projections, so usage stays complete
+ * even for turns that were never driven through T3 Code. This mirrors the
+ * approach `ccusage` takes.
+ *
+ * Environments return pre-aggregated `(day, hourStart?, provider, model)`
+ * buckets. Raw transcript records never cross the wire.
+ *
+ * @module usage
+ */
 import * as Schema from "effect/Schema";
 
-import { ForwardCompatibleArray, NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import {
+  ForwardCompatibleArray,
+  NonNegativeInt,
+  PositiveInt,
+  TrimmedNonEmptyString,
+} from "./baseSchemas.ts";
+import { UsageModelPriceOverride } from "./settings.ts";
 
 /**
  * Bumped whenever the shape of {@link UsageSummary} changes incompatibly.
  * Adding providers or other array-element variants is additive: unknown entries
  * are skipped on decode and do not require a version bump.
  */
-export const USAGE_CONTRACT_VERSION = 6 as const;
+export const USAGE_CONTRACT_VERSION = 8 as const;
 
 export const USAGE_MERGE_COMPATIBLE_SINCE = 4 as const;
 
 export const UsageProviderKind = Schema.Literals([
   "claude",
   "codex",
+  "gemini",
+  "opencode",
+  "chatgpt",
+  "aistudio",
   "grok",
   "cursor",
-  "opencode",
   "antigravity",
   "pi",
   "muse",
@@ -33,14 +58,29 @@ export type UsageDay = typeof UsageDay.Type;
 export const UsageResolution = Schema.Literals(["day", "hour"]);
 export type UsageResolution = typeof UsageResolution.Type;
 
+export const UsageAttributionGroup = Schema.Literals(["model", "session", "turn", "run"]);
+export type UsageAttributionGroup = typeof UsageAttributionGroup.Type;
+
+const UsageNativeId = TrimmedNonEmptyString.check(Schema.isMaxLength(512));
+const UsageNativeIdList = Schema.Array(UsageNativeId).check(Schema.isMaxLength(128));
+
+/**
+ * Why a bucket's cost is what it is.
+ *
+ * - `providerReported` - the transcript carried an explicit cost figure.
+ * - `modelPriced` - we matched the model against the LiteLLM rate table.
+ * - `unpriced` - tokens are known, rates are not. Counted in totals, excluded
+ *   from cost.
+ */
 export const UsageCostSource = Schema.Literals(["providerReported", "modelPriced", "unpriced"]);
 export type UsageCostSource = typeof UsageCostSource.Type;
 
 /**
  * `cachedInputTokens` and `cacheCreationTokens` are disjoint from
  * `uncachedInputTokens`; summing all three gives total input. `reasoningTokens`
- * is a *subset* of `outputTokens` (Codex reports it that way, and Anthropic
- * folds thinking into output), so it must never be added on top.
+ * is a *subset* of `outputTokens` (Codex reports it that way, Gemini thoughts
+ * are folded into output, and Anthropic does not break thinking out), so it
+ * must never be added on top.
  */
 export const UsageTokenTotals = Schema.Struct({
   uncachedInputTokens: NonNegativeInt,
@@ -64,6 +104,20 @@ export const UsageBucket = Schema.Struct({
   hourStart: Schema.optional(TrimmedNonEmptyString),
   provider: UsageProviderKind,
   model: TrimmedNonEmptyString,
+  /** Present when the request groups by native session or turn identity. */
+  sessionId: Schema.optional(UsageNativeId),
+  /** Present only when the source record carried a provider-native run ID. */
+  runId: Schema.optional(UsageNativeId),
+  /** Exact activity bounds are present for run-grouped reads. */
+  firstActivityAt: Schema.optional(TrimmedNonEmptyString),
+  lastActivityAt: Schema.optional(TrimmedNonEmptyString),
+  /** Present when the request groups by native turn identity. */
+  turnId: Schema.optional(UsageNativeId),
+  /** Omitted by older servers. Unknown metadata uses the standard estimate. */
+  serviceTier: Schema.optional(Schema.String),
+  serviceTierSource: Schema.optional(
+    Schema.Literals(["transcript", "t3Request", "userReported", "unknown"]),
+  ),
   sourcePath: Schema.optional(TrimmedNonEmptyString),
   totals: UsageTokenTotals,
   costUsd: Schema.Number,
@@ -125,12 +179,108 @@ export type UsagePricingStatus = typeof UsagePricingStatus.Type;
 export const UsagePricing = Schema.Struct({
   status: UsagePricingStatus,
   source: TrimmedNonEmptyString,
+  /** SHA-256 of the exact rate document used for model-priced records. */
+  revision: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   fetchedAt: Schema.NullOr(Schema.String),
   knownModels: NonNegativeInt,
 });
 export type UsagePricing = typeof UsagePricing.Type;
 
+/** Sanitized observations imported from an external quota tracker. */
+export const UsageQuotaSample = Schema.Struct({
+  observedAt: Schema.String,
+  remainingPercent: Schema.Number,
+  resetsAt: Schema.String,
+});
+export type UsageQuotaSample = typeof UsageQuotaSample.Type;
+
+export const UsageQuotaHistory = Schema.Struct({
+  status: Schema.Literals(["ready", "missing", "invalid"]),
+  source: Schema.String,
+  samples: Schema.Array(UsageQuotaSample),
+  /** Number of manual reset credits currently reported by the local tracker. */
+  bankedResetCount: Schema.optional(NonNegativeInt),
+  /** Timestamp of the local tracker's snapshot used for bankedResetCount. */
+  bankedResetCheckedAt: Schema.optional(Schema.String),
+  message: Schema.NullOr(Schema.String),
+});
+export type UsageQuotaHistory = typeof UsageQuotaHistory.Type;
+
+/**
+ * Saved readings of one provider subscription window other than Codex's
+ * weekly limit, such as Claude's session and weekly windows. Samples use the
+ * Codex shape so cycle and pace math apply unchanged.
+ */
+export const UsageProviderQuotaHistory = Schema.Struct({
+  provider: Schema.Literals(["claude"]),
+  windowId: TrimmedNonEmptyString,
+  label: Schema.String,
+  kind: Schema.Literals(["session", "weekly", "monthly", "other"]),
+  windowDurationMins: Schema.optional(NonNegativeInt),
+  status: Schema.Literals(["ready", "missing", "unavailable"]),
+  message: Schema.NullOr(Schema.String),
+  /** Last reading attempt, successful or not. */
+  checkedAt: Schema.optional(Schema.String),
+  samples: Schema.Array(UsageQuotaSample),
+});
+export type UsageProviderQuotaHistory = typeof UsageProviderQuotaHistory.Type;
+
+/** Cost is measured after the first observation and through the last one. */
+export const UsageQuotaInterval = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  sinceTime: TrimmedNonEmptyString,
+  untilTime: TrimmedNonEmptyString,
+});
+export type UsageQuotaInterval = typeof UsageQuotaInterval.Type;
+
+export const UsageQuotaCost = Schema.Struct({
+  intervalId: Schema.String,
+  fingerprint: UsageSourceFingerprint,
+  costUsd: Schema.Number,
+  records: NonNegativeInt,
+  unpricedRecords: NonNegativeInt,
+  complete: Schema.Boolean,
+  models: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        model: Schema.String,
+        totals: UsageTokenTotals,
+        costUsd: Schema.Number,
+        records: NonNegativeInt,
+        unpricedRecords: NonNegativeInt,
+      }),
+    ),
+  ),
+});
+export type UsageQuotaCost = typeof UsageQuotaCost.Type;
+
+/** Durable, complete priced cost for one observed quota interval. */
+export const UsageQuotaCostSnapshot = Schema.Struct({
+  intervalId: Schema.String,
+  fingerprint: UsageSourceFingerprint,
+  sinceTime: Schema.String,
+  untilTime: Schema.String,
+  costUsd: Schema.Number,
+  records: NonNegativeInt,
+  recordedAt: Schema.String,
+  firstRemainingPercent: Schema.Number,
+  lastRemainingPercent: Schema.Number,
+  resetsAt: Schema.String,
+  estimatedFromTranscripts: Schema.optional(Schema.Boolean),
+  models: Schema.optional(UsageQuotaCost.fields.models),
+});
+export type UsageQuotaCostSnapshot = typeof UsageQuotaCostSnapshot.Type;
+
 export const UsageSummaryInput = Schema.Struct({
+  /**
+   * Highest response contract understood by the client. Contract v6 added
+   * OpenCode, v7 added imported ChatGPT and AI Studio archives, and v8 added
+   * Cursor, Antigravity and Pi.
+   */
+  clientContractVersion: Schema.optional(NonNegativeInt),
+  /** Revalidate recent files while retaining parsed, unchanged transcripts. */
+  refresh: Schema.optional(Schema.Boolean),
+  /** Inclusive first day of the window, in `timeZone`. */
   sinceDay: UsageDay,
   untilDay: UsageDay,
   /**
@@ -141,9 +291,185 @@ export const UsageSummaryInput = Schema.Struct({
   resolution: Schema.optional(UsageResolution),
   sinceTime: Schema.optional(TrimmedNonEmptyString),
   untilTime: Schema.optional(TrimmedNonEmptyString),
+  /** Opt into the local repeated-input attribution subsection. */
+  includeRepeatedInput: Schema.optional(Schema.Boolean),
+  /** Restrict the scan result to these provider kinds. */
+  providers: Schema.optional(
+    Schema.Array(UsageProviderKind).check(Schema.isMinLength(1), Schema.isMaxLength(10)),
+  ),
+  /** Restrict the result to exact provider-native session IDs. */
+  sessionIds: Schema.optional(UsageNativeIdList),
+  /** Restrict run-grouped reads to exact provider-native run IDs. */
+  runIds: Schema.optional(UsageNativeIdList),
+  /** Restrict the result to exact provider-native turn IDs. */
+  turnIds: Schema.optional(UsageNativeIdList),
+  /** Retain native IDs in bucket keys. Defaults to model-level aggregation. */
+  groupBy: Schema.optional(UsageAttributionGroup),
+  includeQuotaHistory: Schema.optional(Schema.Boolean),
+  /** Read saved observations without scanning transcripts or fetching prices. */
+  quotaHistoryOnly: Schema.optional(Schema.Boolean),
+  quotaIntervals: Schema.optional(Schema.Array(UsageQuotaInterval).check(Schema.isMaxLength(64))),
+  /** Whose subscription the quota intervals measure. Defaults to Codex. */
+  quotaProvider: Schema.optional(Schema.Literals(["codex", "claude"])),
   awaitRefresh: Schema.optional(Schema.Boolean),
 });
 export type UsageSummaryInput = typeof UsageSummaryInput.Type;
+
+/**
+ * A source that can be attributed as repeated input. This is intentionally a
+ * closed first slice. Ordinary user or assistant messages are not a source
+ * kind, even when their text happens to repeat.
+ */
+export const UsageRepeatedInputSourceKind = Schema.Literals([
+  "skill",
+  "instruction",
+  "developerBlock",
+  "toolOperation",
+]);
+export type UsageRepeatedInputSourceKind = typeof UsageRepeatedInputSourceKind.Type;
+
+/** Evidence strength for one repeated-input observation. */
+export const UsageRepeatedInputConfidence = Schema.Literals([
+  "reference",
+  "likelyRead",
+  "confirmedPayload",
+]);
+export type UsageRepeatedInputConfidence = typeof UsageRepeatedInputConfidence.Type;
+
+/**
+ * Token attribution for a repeated payload. The five fields are disjoint:
+ * exact and estimated are non-cache input, cached and cacheWrite retain a
+ * provider-reported cache class, and unknown is attributable input with no
+ * safer classification. They stay separate from the full session input total.
+ */
+export const UsageRepeatedInputTokenAttribution = Schema.Struct({
+  exact: NonNegativeInt,
+  estimated: NonNegativeInt,
+  cached: NonNegativeInt,
+  cacheWrite: NonNegativeInt,
+  unknown: NonNegativeInt,
+});
+export type UsageRepeatedInputTokenAttribution = typeof UsageRepeatedInputTokenAttribution.Type;
+
+export const UsageRepeatedInputPriceStatus = Schema.Literals([
+  "providerReported",
+  "estimated",
+  "unpriced",
+]);
+export type UsageRepeatedInputPriceStatus = typeof UsageRepeatedInputPriceStatus.Type;
+
+/** One model's API-equivalent value for an item or total. */
+export const UsageRepeatedInputModelCost = Schema.Struct({
+  model: TrimmedNonEmptyString,
+  directTokens: UsageRepeatedInputTokenAttribution,
+  /** Null means the model or one required rate is unknown. It is never zero. */
+  estimatedApiCostUsd: Schema.NullOr(Schema.Number),
+  priceStatus: UsageRepeatedInputPriceStatus,
+  occurrences: NonNegativeInt,
+});
+export type UsageRepeatedInputModelCost = typeof UsageRepeatedInputModelCost.Type;
+
+/** Compact date/project/model rollup used by the repeated-input projection. */
+export const UsageRepeatedInputBreakdown = Schema.Struct({
+  sourceKind: UsageRepeatedInputSourceKind,
+  model: Schema.NullOr(TrimmedNonEmptyString),
+  project: Schema.NullOr(TrimmedNonEmptyString),
+  environment: Schema.NullOr(TrimmedNonEmptyString),
+  sinceDay: UsageDay,
+  untilDay: UsageDay,
+  occurrences: NonNegativeInt,
+  sessions: NonNegativeInt,
+  turns: NonNegativeInt,
+  directTokens: UsageRepeatedInputTokenAttribution,
+  fullSessionInputTokens: UsageRepeatedInputTokenAttribution,
+  estimatedApiCostUsd: Schema.NullOr(Schema.Number),
+  priceStatus: UsageRepeatedInputPriceStatus,
+});
+export type UsageRepeatedInputBreakdown = typeof UsageRepeatedInputBreakdown.Type;
+
+/** A server-projected repeated-input item. Raw transcript/source text is absent. */
+export const UsageRepeatedInputItem = Schema.Struct({
+  displayName: TrimmedNonEmptyString,
+  sourceKind: UsageRepeatedInputSourceKind,
+  contentHash: TrimmedNonEmptyString,
+  fileRevisionHash: Schema.NullOr(TrimmedNonEmptyString),
+  firstObservedAt: Schema.String,
+  lastObservedAt: Schema.String,
+  occurrences: NonNegativeInt,
+  affectedSessions: NonNegativeInt,
+  affectedTurns: NonNegativeInt,
+  confidence: UsageRepeatedInputConfidence,
+  confidenceCounts: Schema.Struct({
+    reference: NonNegativeInt,
+    likelyRead: NonNegativeInt,
+    confirmedPayload: NonNegativeInt,
+  }),
+  directTokens: UsageRepeatedInputTokenAttribution,
+  /** Full session input is context only and must not be used as item cost. */
+  fullSessionInputTokens: UsageRepeatedInputTokenAttribution,
+  modelCosts: Schema.Array(UsageRepeatedInputModelCost),
+  breakdowns: Schema.Array(UsageRepeatedInputBreakdown),
+});
+export type UsageRepeatedInputItem = typeof UsageRepeatedInputItem.Type;
+
+/**
+ * A currently discoverable skill revision. Unlike UsageRepeatedInputItem,
+ * this projection also contains skills with no transcript observation in the
+ * requested window. Null observation fields mean "never observed", not zero.
+ */
+export const UsageRepeatedInputCatalogItem = Schema.Struct({
+  displayName: TrimmedNonEmptyString,
+  sourceKind: UsageRepeatedInputSourceKind,
+  contentHash: TrimmedNonEmptyString,
+  fileRevisionHash: Schema.NullOr(TrimmedNonEmptyString),
+  byteLength: Schema.NullOr(NonNegativeInt),
+  tokenCount: Schema.NullOr(NonNegativeInt),
+  observed: Schema.Boolean,
+  firstObservedAt: Schema.NullOr(Schema.String),
+  lastObservedAt: Schema.NullOr(Schema.String),
+  occurrences: NonNegativeInt,
+  affectedSessions: NonNegativeInt,
+  affectedTurns: NonNegativeInt,
+  confidence: Schema.NullOr(UsageRepeatedInputConfidence),
+  confidenceCounts: Schema.Struct({
+    reference: NonNegativeInt,
+    likelyRead: NonNegativeInt,
+    confirmedPayload: NonNegativeInt,
+  }),
+  directTokens: UsageRepeatedInputTokenAttribution,
+  fullSessionInputTokens: UsageRepeatedInputTokenAttribution,
+  modelCosts: Schema.Array(UsageRepeatedInputModelCost),
+  breakdowns: Schema.Array(UsageRepeatedInputBreakdown),
+  estimatedApiCostUsd: Schema.NullOr(Schema.Number),
+  priceStatus: UsageRepeatedInputPriceStatus,
+});
+export type UsageRepeatedInputCatalogItem = typeof UsageRepeatedInputCatalogItem.Type;
+
+export const UsageRepeatedInputCoverageGap = Schema.Struct({
+  reason: Schema.Literals([
+    "oversized",
+    "malformed",
+    "unavailable",
+    "missingModel",
+    "missingTokenizer",
+    "unattributed",
+  ]),
+  count: NonNegativeInt,
+  message: TrimmedNonEmptyString,
+});
+export type UsageRepeatedInputCoverageGap = typeof UsageRepeatedInputCoverageGap.Type;
+
+export const UsageRepeatedInputSummary = Schema.Struct({
+  items: Schema.Array(UsageRepeatedInputItem),
+  /** Current discoverable skill revisions, including zero-observation rows. */
+  catalog: Schema.optional(Schema.Array(UsageRepeatedInputCatalogItem)),
+  totals: Schema.Array(UsageRepeatedInputBreakdown),
+  coverageGaps: Schema.Array(UsageRepeatedInputCoverageGap),
+  /** All API-equivalent values are estimates, never subscription usage. */
+  estimatedApiCostUsd: Schema.NullOr(Schema.Number),
+  priceStatus: UsageRepeatedInputPriceStatus,
+});
+export type UsageRepeatedInputSummary = typeof UsageRepeatedInputSummary.Type;
 
 export const UsageSummary = Schema.Struct({
   contractVersion: Schema.Number,
@@ -155,8 +481,392 @@ export const UsageSummary = Schema.Struct({
   sources: ForwardCompatibleArray(UsageSource),
   pricing: UsagePricing,
   scanDurationMs: NonNegativeInt,
+  quotaHistory: Schema.optional(UsageQuotaHistory),
+  providerQuotaHistories: Schema.optional(Schema.Array(UsageProviderQuotaHistory)),
+  quotaCosts: Schema.optional(Schema.Array(UsageQuotaCost)),
+  quotaCostSnapshots: Schema.optional(Schema.Array(UsageQuotaCostSnapshot)),
+  repeatedInput: Schema.optional(UsageRepeatedInputSummary),
 });
 export type UsageSummary = typeof UsageSummary.Type;
+
+/**
+ * The compact, agent-facing usage read API. This is deliberately separate
+ * from {@link UsageSummary}: existing clients need transcript-shaped buckets,
+ * while agents generally need one bounded rollup and its calculation
+ * assumptions.
+ */
+export const USAGE_REPORT_CONTRACT_VERSION = 1 as const;
+
+export const UsageReportMode = Schema.Literals([
+  "overview",
+  "providers",
+  "models",
+  "series",
+  "quota",
+  "pricing",
+  "runs",
+  "prompts",
+]);
+export type UsageReportMode = typeof UsageReportMode.Type;
+
+/** Maximum number of rows an agent query can request from one projection. */
+export const UsageReportRowLimit = PositiveInt.check(Schema.isLessThanOrEqualTo(512));
+export type UsageReportRowLimit = typeof UsageReportRowLimit.Type;
+
+const UsageReportRunId = TrimmedNonEmptyString.check(Schema.isMaxLength(512));
+const UsageReportRunIds = Schema.Array(UsageReportRunId).check(
+  Schema.isMinLength(1),
+  Schema.isMaxLength(32),
+);
+
+export const UsageReportInput = Schema.Struct({
+  mode: UsageReportMode,
+  sinceDay: UsageDay,
+  untilDay: UsageDay,
+  timeZone: TrimmedNonEmptyString,
+  refresh: Schema.optional(Schema.Boolean),
+  /** Required with `mode: "series"` only when hourly data is requested. */
+  resolution: Schema.optional(UsageResolution),
+  sinceTime: Schema.optional(TrimmedNonEmptyString),
+  untilTime: Schema.optional(TrimmedNonEmptyString),
+  providers: Schema.optional(
+    Schema.Array(UsageProviderKind).check(Schema.isMinLength(1), Schema.isMaxLength(10)),
+  ),
+  /** Output row cap. The server applies a mode-specific default when omitted. */
+  limit: Schema.optional(UsageReportRowLimit),
+  /** Single normalized whole word; supported only by prompt reports. */
+  keyword: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(64))),
+  /** Read the retained local producer during the prompt compatibility window. */
+  promptSource: Schema.optional(Schema.Literal("t3")),
+  /** Exact provider-native run/session IDs; supported only by `mode: "runs"`. */
+  runIds: Schema.optional(UsageReportRunIds),
+  /** Optional live quota interval reads; saved snapshots are returned by default. */
+  quotaIntervals: Schema.optional(Schema.Array(UsageQuotaInterval).check(Schema.isMaxLength(64))),
+});
+export type UsageReportInput = typeof UsageReportInput.Type;
+
+export const UsageReportCoverageStatus = Schema.Literals([
+  "complete",
+  "partial",
+  "missing",
+  "notRequested",
+]);
+export type UsageReportCoverageStatus = typeof UsageReportCoverageStatus.Type;
+
+/** Bounded coverage facts; no transcript paths or raw records cross this API. */
+export const UsageReportCoverage = Schema.Struct({
+  status: UsageReportCoverageStatus,
+  sourceCount: NonNegativeInt,
+  completeSources: NonNegativeInt,
+  partialSources: NonNegativeInt,
+  missingSources: NonNegativeInt,
+  failedSources: NonNegativeInt,
+  scannedFiles: NonNegativeInt,
+  skippedFiles: NonNegativeInt,
+  malformedRecords: NonNegativeInt,
+  distinctSessions: NonNegativeInt,
+  records: NonNegativeInt,
+  pricedRecords: NonNegativeInt,
+  unpricedRecords: NonNegativeInt,
+});
+export type UsageReportCoverage = typeof UsageReportCoverage.Type;
+
+/** One compact token/cost rollup used by every report mode. */
+export const UsageReportTotals = Schema.Struct({
+  totals: UsageTokenTotals,
+  costUsd: Schema.Number,
+  cacheSavingsUsd: Schema.Number,
+  records: NonNegativeInt,
+  pricedRecords: NonNegativeInt,
+  unpricedRecords: NonNegativeInt,
+  sessions: NonNegativeInt,
+});
+export type UsageReportTotals = typeof UsageReportTotals.Type;
+
+export const UsageReportProviderRow = Schema.Struct({
+  provider: UsageProviderKind,
+  ...UsageReportTotals.fields,
+});
+export type UsageReportProviderRow = typeof UsageReportProviderRow.Type;
+
+export const UsageReportModelRow = Schema.Struct({
+  provider: UsageProviderKind,
+  model: TrimmedNonEmptyString,
+  ...UsageReportTotals.fields,
+});
+export type UsageReportModelRow = typeof UsageReportModelRow.Type;
+
+export const UsageReportSeriesPoint = Schema.Struct({
+  day: UsageDay,
+  /** UTC bucket start, present only for hourly series. */
+  hourStart: Schema.optional(TrimmedNonEmptyString),
+  ...UsageReportTotals.fields,
+});
+export type UsageReportSeriesPoint = typeof UsageReportSeriesPoint.Type;
+
+/** A safe, explicit projection of configured model price overrides. */
+export const UsageReportPriceOverride = Schema.Struct({
+  model: TrimmedNonEmptyString,
+  ...UsageModelPriceOverride.fields,
+});
+export type UsageReportPriceOverride = typeof UsageReportPriceOverride.Type;
+
+/**
+ * Metadata needed to reproduce or qualify API-equivalent cost calculations.
+ * Subscription charges are intentionally not implied by these values.
+ */
+export const UsageReportCalculation = Schema.Struct({
+  formulaVersion: Schema.Literal(1),
+  costBasis: Schema.Literal("apiEquivalent"),
+  costSemantics: TrimmedNonEmptyString,
+  cacheSavingsSemantics: TrimmedNonEmptyString,
+  serviceTierPolicy: TrimmedNonEmptyString,
+  pricing: UsagePricing,
+  priceOverrides: Schema.Array(UsageReportPriceOverride),
+  priceOverrideCount: NonNegativeInt,
+  priceOverridesTruncated: Schema.Boolean,
+});
+export type UsageReportCalculation = typeof UsageReportCalculation.Type;
+
+const UsageReportEnvelope = {
+  contractVersion: Schema.Literal(USAGE_REPORT_CONTRACT_VERSION),
+  mode: UsageReportMode,
+  readAt: Schema.String,
+  timeZone: TrimmedNonEmptyString,
+  sinceDay: UsageDay,
+  untilDay: UsageDay,
+  scanDurationMs: NonNegativeInt,
+  calculation: UsageReportCalculation,
+  coverage: UsageReportCoverage,
+} as const;
+
+export const UsageReportRunPriceCoverage = Schema.Literals(["complete", "partial", "unpriced"]);
+export type UsageReportRunPriceCoverage = typeof UsageReportRunPriceCoverage.Type;
+export const UsageReportThreadMapping = Schema.Literals([
+  "matched",
+  "missing",
+  "ambiguous",
+  "unavailable",
+]);
+
+/** One provider-native session in the requested window. */
+export const UsageReportRunRow = Schema.Struct({
+  provider: UsageProviderKind,
+  runId: UsageReportRunId,
+  /** Null when the projected T3 session index has no exact, unique match. */
+  threadId: Schema.NullOr(TrimmedNonEmptyString.check(Schema.isMaxLength(512))),
+  threadMapping: UsageReportThreadMapping,
+  models: Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(128))).check(
+    Schema.isMaxLength(16),
+  ),
+  totalModels: NonNegativeInt,
+  modelsTruncated: Schema.Boolean,
+  firstActivityAt: Schema.NullOr(Schema.String),
+  lastActivityAt: Schema.NullOr(Schema.String),
+  ...UsageReportTotals.fields,
+  pricingCoverage: UsageReportRunPriceCoverage,
+});
+export type UsageReportRunRow = typeof UsageReportRunRow.Type;
+
+/** One local calendar day of an exact provider-native run. */
+export const UsageReportDailyRunRow = Schema.Struct({
+  day: UsageDay,
+  provider: UsageProviderKind,
+  runId: UsageReportRunId,
+  threadId: Schema.NullOr(TrimmedNonEmptyString.check(Schema.isMaxLength(512))),
+  threadMapping: UsageReportThreadMapping,
+  ...UsageReportTotals.fields,
+});
+export type UsageReportDailyRunRow = typeof UsageReportDailyRunRow.Type;
+
+export const UsageReportDailyUnattributedRow = Schema.Struct({
+  day: UsageDay,
+  provider: UsageProviderKind,
+  ...UsageReportTotals.fields,
+});
+export type UsageReportDailyUnattributedRow = typeof UsageReportDailyUnattributedRow.Type;
+
+/** Records with provider usage but no safe native run identity. */
+export const UsageReportUnattributedRun = Schema.Struct({
+  provider: UsageProviderKind,
+  firstActivityAt: Schema.NullOr(Schema.String),
+  lastActivityAt: Schema.NullOr(Schema.String),
+  ...UsageReportTotals.fields,
+});
+export type UsageReportUnattributedRun = typeof UsageReportUnattributedRun.Type;
+
+export const UsageReportRunCoverage = Schema.Struct({
+  /** `filtered` means only the exact run IDs in the request were considered. */
+  status: Schema.Literals(["complete", "partial", "filtered"]),
+  records: NonNegativeInt,
+  attributedRecords: NonNegativeInt,
+  unattributedRecords: NonNegativeInt,
+  distinctRuns: NonNegativeInt,
+});
+export type UsageReportRunCoverage = typeof UsageReportRunCoverage.Type;
+
+export const UsageReportRuns = Schema.Struct({
+  ...UsageReportEnvelope,
+  mode: Schema.Literal("runs"),
+  runs: Schema.Array(UsageReportRunRow),
+  totalRuns: NonNegativeInt,
+  truncated: Schema.Boolean,
+  dailyRuns: Schema.Array(UsageReportDailyRunRow),
+  totalDailyRuns: NonNegativeInt,
+  dailyRunsTruncated: Schema.Boolean,
+  dailyUnattributed: Schema.Array(UsageReportDailyUnattributedRow),
+  totalDailyUnattributed: NonNegativeInt,
+  dailyUnattributedTruncated: Schema.Boolean,
+  /** At most one row per known provider; independent of the run row limit. */
+  unattributed: Schema.Array(UsageReportUnattributedRun).check(Schema.isMaxLength(10)),
+  runCoverage: UsageReportRunCoverage,
+  threadMappingStatus: Schema.Literals(["complete", "partial", "notRequested"]),
+});
+export type UsageReportRuns = typeof UsageReportRuns.Type;
+
+export const UsageReportOverview = Schema.Struct({
+  ...UsageReportEnvelope,
+  mode: Schema.Literal("overview"),
+  totals: UsageReportTotals,
+});
+export type UsageReportOverview = typeof UsageReportOverview.Type;
+
+export const UsageReportProviders = Schema.Struct({
+  ...UsageReportEnvelope,
+  mode: Schema.Literal("providers"),
+  rows: Schema.Array(UsageReportProviderRow),
+  totalRows: NonNegativeInt,
+  truncated: Schema.Boolean,
+});
+export type UsageReportProviders = typeof UsageReportProviders.Type;
+
+export const UsageReportModels = Schema.Struct({
+  ...UsageReportEnvelope,
+  mode: Schema.Literal("models"),
+  rows: Schema.Array(UsageReportModelRow),
+  totalRows: NonNegativeInt,
+  truncated: Schema.Boolean,
+});
+export type UsageReportModels = typeof UsageReportModels.Type;
+
+export const UsageReportSeries = Schema.Struct({
+  ...UsageReportEnvelope,
+  mode: Schema.Literal("series"),
+  resolution: UsageResolution,
+  points: Schema.Array(UsageReportSeriesPoint),
+  totalPoints: NonNegativeInt,
+  truncated: Schema.Boolean,
+});
+export type UsageReportSeries = typeof UsageReportSeries.Type;
+
+export const UsageReportQuotaCost = Schema.Struct({
+  intervalId: TrimmedNonEmptyString,
+  fingerprint: UsageSourceFingerprint,
+  sinceTime: TrimmedNonEmptyString,
+  untilTime: TrimmedNonEmptyString,
+  costUsd: Schema.Number,
+  records: NonNegativeInt,
+  pricedRecords: NonNegativeInt,
+  unpricedRecords: NonNegativeInt,
+  complete: Schema.Boolean,
+  firstRemainingPercent: Schema.NullOr(Schema.Number),
+  lastRemainingPercent: Schema.NullOr(Schema.Number),
+  resetsAt: Schema.NullOr(TrimmedNonEmptyString),
+  models: Schema.Array(UsageReportModelRow),
+  totalModels: NonNegativeInt,
+  modelsTruncated: Schema.Boolean,
+});
+export type UsageReportQuotaCost = typeof UsageReportQuotaCost.Type;
+
+export const UsageReportQuota = Schema.Struct({
+  ...UsageReportEnvelope,
+  mode: Schema.Literal("quota"),
+  quotaHistory: UsageQuotaHistory,
+  samplesTruncated: Schema.Boolean,
+  totalSamples: NonNegativeInt,
+  costs: Schema.Array(UsageReportQuotaCost),
+  totalCosts: NonNegativeInt,
+  costsTruncated: Schema.Boolean,
+});
+export type UsageReportQuota = typeof UsageReportQuota.Type;
+
+export const UsageReportPricing = Schema.Struct({
+  ...UsageReportEnvelope,
+  mode: Schema.Literal("pricing"),
+});
+export type UsageReportPricing = typeof UsageReportPricing.Type;
+
+export const UsageReportPrompts = Schema.Struct({
+  contractVersion: Schema.Literal(USAGE_REPORT_CONTRACT_VERSION),
+  mode: Schema.Literal("prompts"),
+  readAt: Schema.String,
+  timeZone: TrimmedNonEmptyString,
+  sinceDay: UsageDay,
+  untilDay: UsageDay,
+  scope: Schema.Literal("t3UserMessages"),
+  coverage: Schema.Struct({
+    status: Schema.Literals(["complete", "partial", "missing"]),
+    examinedMessages: NonNegativeInt,
+    countedMessages: NonNegativeInt,
+    sourceMessages: Schema.optional(NonNegativeInt),
+    truncatedMessages: NonNegativeInt,
+    reasons: Schema.Array(Schema.String).check(Schema.isMaxLength(10)),
+  }),
+  totals: Schema.Struct({
+    prompts: NonNegativeInt,
+    words: NonNegativeInt,
+    characters: NonNegativeInt,
+    threads: NonNegativeInt,
+    activeDays: NonNegativeInt,
+    averageWordsPerPrompt: Schema.NullOr(Schema.Number),
+  }),
+  daily: Schema.Array(
+    Schema.Struct({
+      day: UsageDay,
+      prompts: NonNegativeInt,
+      words: NonNegativeInt,
+    }),
+  ).check(Schema.isMaxLength(366)),
+  words: Schema.Array(
+    Schema.Struct({
+      word: TrimmedNonEmptyString.check(Schema.isMaxLength(64)),
+      count: NonNegativeInt,
+    }),
+  ).check(Schema.isMaxLength(512)),
+  countedDistinctWords: NonNegativeInt,
+  keyword: Schema.optional(
+    Schema.Struct({
+      word: Schema.String,
+      count: NonNegativeInt,
+      prompts: NonNegativeInt,
+    }),
+  ),
+  wordsTruncated: Schema.Boolean,
+  countingPolicy: Schema.String,
+  analytics: Schema.optional(
+    Schema.Struct({
+      authority: Schema.Literals(["Otis", "T3-fallback"]),
+      freshness: Schema.Literals(["current", "stale", "unavailable"]),
+      sourceObservedAt: Schema.NullOr(Schema.String),
+      parity: Schema.Literals(["matched", "mismatch", "unavailable", "cutover-verified"]),
+      differences: Schema.Array(Schema.String).check(Schema.isMaxLength(16)),
+      reason: Schema.optional(Schema.String),
+    }),
+  ),
+});
+export type UsageReportPrompts = typeof UsageReportPrompts.Type;
+
+export const UsageReport = Schema.Union([
+  UsageReportOverview,
+  UsageReportProviders,
+  UsageReportModels,
+  UsageReportSeries,
+  UsageReportQuota,
+  UsageReportPricing,
+  UsageReportRuns,
+  UsageReportPrompts,
+]);
+export type UsageReport = typeof UsageReport.Type;
 
 export class UsageReadError extends Schema.TaggedError<UsageReadError>()("UsageReadError", {
   reason: Schema.Literals(["scanFailed", "invalidWindow"]),

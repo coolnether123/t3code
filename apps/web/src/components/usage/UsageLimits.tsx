@@ -363,14 +363,16 @@ export function ResetCredits({
  * The page advances `now` on explicit refresh rather than ticking: a live clock would repaint the
  * page for no decision-changing gain.
  */
+const NO_HIDDEN_PROVIDERS: ReadonlySet<UsageProviderKind> = new Set();
+
 export function UsageLimitsSection({
   selectedEnvironmentIds,
-  hiddenProviders,
+  hiddenProviders = NO_HIDDEN_PROVIDERS,
   now,
   cursorPrompt,
 }: {
   readonly selectedEnvironmentIds: ReadonlySet<EnvironmentId> | null;
-  readonly hiddenProviders: ReadonlySet<UsageProviderKind>;
+  readonly hiddenProviders?: ReadonlySet<UsageProviderKind>;
   readonly now: number;
   readonly cursorPrompt?: ReactNode;
 }) {

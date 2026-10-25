@@ -111,6 +111,11 @@ export class GitWorkflowService extends Context.Service<
     readonly removeWorktree: (
       input: VcsRemoveWorktreeInput,
     ) => Effect.Effect<void, GitCommandError>;
+    /** True only when every commit on the branch is already reachable from the project's HEAD. */
+    readonly isBranchMerged: (input: {
+      readonly cwd: string;
+      readonly branch: string;
+    }) => Effect.Effect<boolean, GitCommandError>;
     readonly pruneWorktrees: (input: {
       readonly cwd: string;
     }) => Effect.Effect<void, GitCommandError>;
@@ -437,6 +442,18 @@ export const make = Effect.gen(function* () {
     removeWorktree: (input) =>
       ensureGitCommand("GitWorkflowService.removeWorktree", input.cwd).pipe(
         Effect.andThen(git.removeWorktree(input)),
+      ),
+    isBranchMerged: (input) =>
+      ensureGitCommand("GitWorkflowService.isBranchMerged", input.cwd).pipe(
+        Effect.andThen(
+          git.execute({
+            operation: "GitWorkflowService.isBranchMerged",
+            cwd: input.cwd,
+            args: ["merge-base", "--is-ancestor", input.branch, "HEAD"],
+            allowNonZeroExit: true,
+          }),
+        ),
+        Effect.map((result) => result.exitCode === 0),
       ),
     pruneWorktrees: (input) =>
       ensureGitCommand("GitWorkflowService.pruneWorktrees", input.cwd).pipe(

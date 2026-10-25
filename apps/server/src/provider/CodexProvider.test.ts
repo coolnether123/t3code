@@ -3,35 +3,38 @@ import { assert, it } from "@effect/vitest";
 import { applyPreferredCodexDefaultModel, mapCodexModelCapabilities } from "./CodexProvider.ts";
 
 it("maps current Codex model capability fields", () => {
-  const capabilities = mapCodexModelCapabilities({
-    additionalSpeedTiers: [],
-    defaultReasoningEffort: "super-high",
-    description: "Test model",
-    displayName: "GPT Test",
-    hidden: false,
-    id: "gpt-test",
-    isDefault: true,
-    model: "gpt-test",
-    defaultServiceTier: "flex",
-    serviceTiers: [
-      {
-        id: "priority",
-        name: "Fast",
-        description: "Lower latency responses.",
-      },
-      {
-        id: "flex",
-        name: "Flex",
-        description: "Lower-cost asynchronous routing.",
-      },
-    ],
-    supportedReasoningEfforts: [
-      {
-        description: "Maximum reasoning",
-        reasoningEffort: "super-high",
-      },
-    ],
-  });
+  const capabilities = mapCodexModelCapabilities(
+    {
+      additionalSpeedTiers: [],
+      defaultReasoningEffort: "super-high",
+      description: "Test model",
+      displayName: "GPT Test",
+      hidden: false,
+      id: "gpt-test",
+      isDefault: true,
+      model: "gpt-test",
+      defaultServiceTier: "flex",
+      serviceTiers: [
+        {
+          id: "priority",
+          name: "Fast",
+          description: "Lower latency responses.",
+        },
+        {
+          id: "flex",
+          name: "Flex",
+          description: "Lower-cost asynchronous routing.",
+        },
+      ],
+      supportedReasoningEfforts: [
+        {
+          description: "Maximum reasoning",
+          reasoningEffort: "super-high",
+        },
+      ],
+    },
+    [],
+  );
 
   assert.deepStrictEqual(capabilities.optionDescriptors, [
     {
@@ -65,30 +68,33 @@ it("maps current Codex model capability fields", () => {
 });
 
 it("uses standard routing when the catalog has no default service tier", () => {
-  const capabilities = mapCodexModelCapabilities({
-    additionalSpeedTiers: ["fast"],
-    defaultReasoningEffort: "medium",
-    defaultServiceTier: null,
-    description: "Test model",
-    displayName: "GPT Test",
-    hidden: false,
-    id: "gpt-test",
-    isDefault: true,
-    model: "gpt-test",
-    serviceTiers: [
-      {
-        id: "priority",
-        name: "Fast",
-        description: "1.5x speed, increased usage",
-      },
-      {
-        id: "ultrafast",
-        name: "Ultrafast",
-        description: "The fastest available responses for latency-sensitive work.",
-      },
-    ],
-    supportedReasoningEfforts: [],
-  });
+  const capabilities = mapCodexModelCapabilities(
+    {
+      additionalSpeedTiers: ["fast"],
+      defaultReasoningEffort: "medium",
+      defaultServiceTier: null,
+      description: "Test model",
+      displayName: "GPT Test",
+      hidden: false,
+      id: "gpt-test",
+      isDefault: true,
+      model: "gpt-test",
+      serviceTiers: [
+        {
+          id: "priority",
+          name: "Fast",
+          description: "1.5x speed, increased usage",
+        },
+        {
+          id: "ultrafast",
+          name: "Ultrafast",
+          description: "The fastest available responses for latency-sensitive work.",
+        },
+      ],
+      supportedReasoningEfforts: [],
+    },
+    [],
+  );
 
   assert.deepStrictEqual(capabilities.optionDescriptors, [
     {
@@ -152,4 +158,20 @@ it("ignores custom models that shadow a preferred slug", () => {
   ]);
 
   assert.deepStrictEqual(models.find((model) => model.isDefault)?.slug, "gpt-5.4");
+});
+
+it("keeps Sol as the discovered default when the catalog defaults to Astra", () => {
+  const models = applyPreferredCodexDefaultModel([
+    { slug: "gpt-6-astra", name: "Astra", isCustom: false, isDefault: true, capabilities: null },
+    { slug: "gpt-6-luna", name: "Luna", isCustom: false, capabilities: null },
+    { slug: "gpt-6.1-sol", name: "Sol", isCustom: false, capabilities: null },
+  ]);
+  assert.deepStrictEqual(
+    models.filter((model) => model.isDefault).map((model) => model.slug),
+    ["gpt-6.1-sol"],
+  );
+  assert.deepStrictEqual(
+    models.map((model) => model.slug),
+    ["gpt-6-astra", "gpt-6-luna", "gpt-6.1-sol"],
+  );
 });

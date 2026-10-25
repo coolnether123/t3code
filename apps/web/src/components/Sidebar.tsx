@@ -54,7 +54,14 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 
-import { FolderIcon, ListFilterIcon, PlusIcon, SettingsIcon } from "lucide-react";
+import {
+  ChevronDownIcon,
+  ServerIcon,
+  FolderIcon,
+  ListFilterIcon,
+  PlusIcon,
+  SettingsIcon,
+} from "lucide-react";
 import {
   useEffect,
   useLayoutEffect,
@@ -103,6 +110,8 @@ import {
 } from "../threadSelectionStore";
 import { useAcknowledgeThreadWoke, useThreadActions } from "../hooks/useThreadActions";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
+import { useEnvironmentSwitch } from "../hooks/useEnvironmentSwitch";
+import { useSidebarEnvironmentScope } from "../hooks/useSidebarEnvironmentScope";
 import { useSidebarProjectGroups } from "../hooks/useSidebarProjectGroups";
 import { useTerminalFocus } from "../hooks/useTerminalFocus";
 import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
@@ -203,9 +212,10 @@ import {
   ComboboxTrigger,
   useComboboxFilter,
 } from "./ui/combobox";
-import { SidebarContent, SidebarGroup, useSidebar } from "./ui/sidebar";
+import { SidebarContent, SidebarGroup, SidebarMenuButton, useSidebar } from "./ui/sidebar";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { SidebarHeaderIconButton, SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
+import { Menu, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuTrigger } from "./ui/menu";
 import { TooltipProvider } from "./ui/tooltip";
 import { composerDraftHasUserContent, DraftId, useComposerDraftStore } from "../composerDraftStore";
 import { useThreadRouteTarget } from "../hooks/useThreadRouteTarget";
@@ -753,6 +763,50 @@ const SIDEBAR_DRAG_DISTANCE = 6;
 
 const SIDEBAR_DRAG_LABEL_HEIGHT = 24;
 
+function SidebarEnvironmentScopePicker(props: {
+  readonly environments: ReadonlyArray<{
+    readonly environmentId: EnvironmentId;
+    readonly label: string;
+  }>;
+  readonly selectedEnvironmentId: EnvironmentId | null;
+  readonly onSelect: (environmentId: string) => void;
+}) {
+  const selectedLabel =
+    props.selectedEnvironmentId === null
+      ? "All environments"
+      : (props.environments.find(
+          (environment) => environment.environmentId === props.selectedEnvironmentId,
+        )?.label ?? "Environment");
+  return (
+    <Menu>
+      <MenuTrigger render={<SidebarMenuButton aria-label="Browse environment" />}>
+        <ServerIcon />
+        <span className="min-w-0 flex-1">{selectedLabel}</span>
+        <ChevronDownIcon />
+      </MenuTrigger>
+      <MenuPopup align="start" className="w-(--anchor-width)">
+        <MenuRadioGroup
+          value={props.selectedEnvironmentId ?? "all"}
+          onValueChange={(value) => props.onSelect(value as string)}
+        >
+          {props.environments.map((environment) => (
+            <MenuRadioItem
+              key={environment.environmentId}
+              value={environment.environmentId}
+              closeOnClick
+            >
+              {environment.label}
+            </MenuRadioItem>
+          ))}
+          <MenuRadioItem value="all" closeOnClick>
+            All environments
+          </MenuRadioItem>
+        </MenuRadioGroup>
+      </MenuPopup>
+    </Menu>
+  );
+}
+
 export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReveal }) {
   const {
     projects,
@@ -846,6 +900,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     },
   });
   const newThreadContext = useHandleNewThread();
+  const { environments: scopeEnvironments, selectedEnvironmentId } = useSidebarEnvironmentScope();
+  const switchEnvironment = useEnvironmentSwitch();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const clearSelection = useThreadSelectionStore((s) => s.clearSelection);
   const setSelectionAnchor = useThreadSelectionStore((s) => s.setAnchor);
@@ -950,13 +1006,24 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     projectScopeKey === null
       ? null
       : (projectGroups.find((project) => project.projectKey === projectScopeKey) ?? null);
-  const scopedProjectKeys =
+  // The environment scope narrows whatever the project scope allows.
+  const scopeProjectRefs =
     scopedProjectGroup === null
+      ? selectedEnvironmentId === null
+        ? null
+        : projectGroups.flatMap((group) => group.memberProjectRefs)
+      : scopedProjectGroup.memberProjectRefs;
+  const scopedProjectKeys =
+    scopeProjectRefs === null
       ? null
       : new Set(
-          scopedProjectGroup.memberProjectRefs.map(
-            (projectRef) => `${projectRef.environmentId}:${projectRef.projectId}`,
-          ),
+          scopeProjectRefs
+            .filter(
+              (projectRef) =>
+                selectedEnvironmentId === null ||
+                projectRef.environmentId === selectedEnvironmentId,
+            )
+            .map((projectRef) => `${projectRef.environmentId}:${projectRef.projectId}`),
         );
   useEffect(() => {
     const nextKey = resolveSidebarProjectScopeKey({
@@ -2669,6 +2736,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         activeThread: newThreadContext.activeThread ?? undefined,
         defaultProjectRef: newThreadContext.defaultProjectRef,
         handleNewThread: newThreadContext.handleNewThread,
+        selectedEnvironmentId: newThreadContext.selectedEnvironmentId,
       });
       return;
     }
@@ -2688,6 +2756,16 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         className="min-h-full"
         fixedHeader={
           <SidebarGroup className="z-[1]">
+            {scopeEnvironments.length > 1 ? (
+              <SidebarEnvironmentScopePicker
+                environments={scopeEnvironments}
+                selectedEnvironmentId={selectedEnvironmentId}
+                onSelect={(environmentId) => {
+                  clearSelection();
+                  switchEnvironment(environmentId);
+                }}
+              />
+            ) : null}
             <SidebarThreadHeader
               searchFieldRef={headerSearchRef}
               hasProjects={projectGroups.length > 0}

@@ -522,8 +522,13 @@ function OpenCommandPaletteDialog(props: {
   const desktopLocalBootstraps = useDesktopLocalBootstraps();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const availableSettingsSearchItems = useAvailableSettingsSearchItems();
-  const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread } =
-    useHandleNewThread();
+  const {
+    activeDraftThread,
+    activeThread,
+    defaultProjectRef,
+    handleNewThread,
+    selectedEnvironmentId,
+  } = useHandleNewThread();
   const paletteRouteTarget = useThreadRouteTarget();
   const projects = useProjects();
   const referenceThreadRef =
@@ -651,7 +656,11 @@ function OpenCommandPaletteDialog(props: {
     return options;
   })();
   const defaultAddProjectEnvironmentId =
-    addProjectEnvironmentOptions.find((option) => option.isConnected)?.environmentId ?? null;
+    addProjectEnvironmentOptions.find(
+      (option) => option.isConnected && option.environmentId === selectedEnvironmentId,
+    )?.environmentId ??
+    addProjectEnvironmentOptions.find((option) => option.isConnected)?.environmentId ??
+    null;
   const wslAddProjectEnvironmentOption =
     addProjectEnvironmentOptions.find((option) => {
       if (!option.isConnected) {
@@ -1226,6 +1235,7 @@ function OpenCommandPaletteDialog(props: {
             activeThread: activeThread ?? undefined,
             defaultProjectRef,
             handleNewThread,
+            selectedEnvironmentId,
           });
         },
       });

@@ -1,5 +1,10 @@
+import * as FileSystem from "effect/FileSystem";
+import * as ServerConfig from "../config.ts";
+import * as ThreadMessageIntake from "./ThreadMessageIntake.ts";
+import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import {
   AuthOrchestrationReadScope,
+  AuthOrchestrationOperateScope,
   EnvironmentHttpApi,
   type OrchestrationProjectShell,
 } from "@t3tools/contracts";
@@ -50,6 +55,12 @@ export const layer = HttpApiBuilder.group(
   EnvironmentHttpApi,
   "orchestration",
   Effect.fnUntraced(function* (handlers) {
+    const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
+    const dispatchContext = yield* Effect.context<
+      | FileSystem.FileSystem
+      | ServerConfig.ServerConfig
+      | ThreadManagementService.ThreadManagementService
+    >();
     const sql = yield* SqlClient.SqlClient;
     const environment = yield* ServerEnvironment.ServerEnvironmentIdentity;
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
@@ -150,6 +161,24 @@ export const layer = HttpApiBuilder.group(
 
     return handlers
       .handle(
+        "dispatch",
+        Effect.fn("environment.orchestration.dispatch")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
+          const result = yield* startup
+            .enqueueCommand(
+              ThreadMessageIntake.dispatchCommand(
+                ThreadManagementService.withCreationProvenance(args.payload, {
+                  createdBy: "agent",
+                  creationSource: "server",
+                }),
+              ).pipe(Effect.provide(dispatchContext)),
+            )
+            .pipe(Effect.catch((cause) => failEnvironmentInternal("internal_error", cause)));
+          return { sequence: result.sequence };
+        }),
+      )
+      .handle(
         "shellSnapshot",
         Effect.fn("environment.orchestration.shellSnapshot")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
@@ -160,6 +189,22 @@ export const layer = HttpApiBuilder.group(
               failEnvironmentInternal("orchestration_snapshot_failed", cause),
             ),
           );
+        }),
+      )
+      .handle(
+        "threadShell",
+        Effect.fn("environment.orchestration.threadShell")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          const thread = yield* threadManagement.getThreadShell(args.params.threadId).pipe(
+            traceLocalHandlerWork,
+            Effect.catch((cause) =>
+              failEnvironmentInternal("orchestration_thread_snapshot_failed", cause),
+            ),
+          );
+          if (thread === null || thread.deletedAt !== null)
+            return yield* failEnvironmentNotFound("thread_not_found");
+          return thread;
         }),
       )
       .handle(

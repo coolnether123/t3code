@@ -1,4 +1,17 @@
 // @effect-diagnostics globalDate:off
+/**
+ * Folds parsed transcript records into `(day, hourStart?, provider, model)`
+ * buckets.
+ *
+ * `Intl.DateTimeFormat` is the only reliable way to resolve a wall-clock day in
+ * an arbitrary IANA zone, and it takes a `Date`. That is why the raw `Date`
+ * construction is allowed here; nothing in this module reads the clock.
+ *
+ * Pure, so the bucketing and de-duplication rules are testable without touching
+ * the filesystem or the network.
+ *
+ * @module usageAggregation
+ */
 import type {
   UsageBucket,
   UsageCategoryCost,
@@ -7,14 +20,62 @@ import type {
   UsageTokenTotals,
 } from "@t3tools/contracts";
 
-import { EMPTY_TOTALS, type UsageRecord } from "@t3tools/provider-core/server/usage";
-import { cacheSavingsUsd, priceUsage, type RateTable } from "./usagePricing.ts";
+import { addTotals, EMPTY_TOTALS, type UsageRecord } from "./usageTranscripts.ts";
+import { priceUsageRecord, type RateTable } from "./usagePricing.ts";
+import {
+  lowerBound,
+  readGroupRange,
+  type GroupRange,
+  type IndexedGroup,
+  type PricedRecord,
+} from "./usageRecordIndex.ts";
+
+/** The record fields that pick a bucket; shared by raw records and indexed groups. */
+type BucketDimensions = Pick<
+  UsageRecord,
+  | "provider"
+  | "sourcePath"
+  | "model"
+  | "sessionId"
+  | "nativeSessionId"
+  | "turnId"
+  | "serviceTier"
+  | "serviceTierSource"
+>;
+
+function safeRunIdOf(record: BucketDimensions): string {
+  return record.nativeSessionId !== undefined &&
+    record.nativeSessionId.length > 0 &&
+    record.nativeSessionId.length <= 512 &&
+    record.nativeSessionId.trim() === record.nativeSessionId
+    ? record.nativeSessionId
+    : "";
+}
+
+/** First instant in `(afterMs, beforeMs]` whose local day is no longer `day`. */
+function firstInstantAfterDay(
+  toDay: (timestampMs: number) => string,
+  day: string,
+  afterMs: number,
+  beforeMs: number,
+): number {
+  let low = afterMs + 1;
+  let high = beforeMs;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (toDay(middle) === day) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
 
 /**
+ * Formats an instant as a `YYYY-MM-DD` day in `timeZone`.
+ *
  * `en-CA` yields ISO-ordered parts, which is why it is used here rather than
  * assembling the day from `Date` getters (those are host-local only).
  */
-function makeDayFormatter(timeZone: string): (timestampMs: number) => string {
+export function makeDayFormatter(timeZone: string): (timestampMs: number) => string {
   let format: Intl.DateTimeFormat;
   try {
     format = new Intl.DateTimeFormat("en-CA", {
@@ -24,6 +85,7 @@ function makeDayFormatter(timeZone: string): (timestampMs: number) => string {
       day: "2-digit",
     });
   } catch {
+    // An unknown zone should degrade to UTC rather than fail the whole scan.
     format = new Intl.DateTimeFormat("en-CA", {
       timeZone: "UTC",
       year: "numeric",
@@ -31,32 +93,80 @@ function makeDayFormatter(timeZone: string): (timestampMs: number) => string {
       day: "2-digit",
     });
   }
-  // Formatting once per quarter-hour slot keeps `Intl` (about 2µs a call) off
-  // the per-record path. Named zones put midnight on a quarter hour, so their
-  // slots never split; a fixed offset such as `+00:01` can, and records in a
-  // split slot are formatted exactly.
-  const days = new Map<number, string | null>();
-  return (timestampMs) => {
-    const slot = Math.floor(timestampMs / QUARTER_HOUR_MS);
-    let day = days.get(slot);
-    if (day === undefined) {
-      const first = format.format(new Date(slot * QUARTER_HOUR_MS));
-      const last = format.format(new Date((slot + 1) * QUARTER_HOUR_MS - 1));
-      day = first === last ? first : null;
-      days.set(slot, day);
+  return (timestampMs) => format.format(new Date(timestampMs));
+}
+
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+
+interface DailyWindowIndex {
+  readonly sinceTimeMs: number;
+  readonly untilTimeMs: number;
+  readonly dayAt: (timestampMs: number) => string | null;
+  /** The day holding `timestampMs` and the instant the next one starts. */
+  readonly dayRangeAt: (
+    timestampMs: number,
+  ) => { readonly day: string; readonly endMs: number } | null;
+}
+
+function nextIsoDay(day: string): string {
+  return new Date(Date.parse(`${day}T00:00:00Z`) + DAY_MS).toISOString().slice(0, 10);
+}
+
+/** Builds exact local-day boundaries once instead of formatting every record. */
+function makeDailyWindowIndex(
+  toDay: (timestampMs: number) => string,
+  sinceDay: string,
+  untilDay: string,
+): DailyWindowIndex {
+  const firstInstantOfDay = (day: string): number => {
+    const center = Date.parse(`${day}T00:00:00Z`);
+    let low = center - 26 * HOUR_MS;
+    let high = center + 26 * HOUR_MS;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (toDay(middle) < day) low = middle + 1;
+      else high = middle;
     }
-    return day ?? format.format(new Date(timestampMs));
+    return low;
+  };
+
+  const days: string[] = [];
+  const starts: number[] = [];
+  for (let day = sinceDay; day <= untilDay; day = nextIsoDay(day)) {
+    days.push(day);
+    starts.push(firstInstantOfDay(day));
+  }
+  const untilTimeMs = firstInstantOfDay(nextIsoDay(untilDay));
+
+  const dayIndexAt = (timestampMs: number): number => {
+    if (timestampMs < (starts[0] ?? untilTimeMs) || timestampMs >= untilTimeMs) return -1;
+    let low = 0;
+    let high = starts.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if ((starts[middle] ?? untilTimeMs) <= timestampMs) low = middle + 1;
+      else high = middle;
+    }
+    return low - 1;
+  };
+  return {
+    sinceTimeMs: starts[0] ?? untilTimeMs,
+    untilTimeMs,
+    dayAt: (timestampMs) => days[dayIndexAt(timestampMs)] ?? null,
+    dayRangeAt: (timestampMs) => {
+      const index = dayIndexAt(timestampMs);
+      const day = days[index];
+      return day === undefined ? null : { day, endMs: starts[index + 1] ?? untilTimeMs };
+    },
   };
 }
 
-const QUARTER_HOUR_MS = 15 * 60 * 1000;
-const HOUR_MS = 60 * 60 * 1000;
-
 interface MutableBucket {
-  totals: { -readonly [K in keyof UsageTokenTotals]: number };
+  totals: UsageTokenTotals;
   costUsd: number;
   cacheSavingsUsd: number;
-  categoryCostUsd: UsageCategoryCost | null;
+  categoryCostUsd: { -readonly [K in keyof UsageCategoryCost]: UsageCategoryCost[K] };
   fastCostUsd: number;
   ultrafastCostUsd: number;
   speedPremiumUsd: number;
@@ -64,6 +174,8 @@ interface MutableBucket {
   unpricedRecords: number;
   providerReportedRecords: number;
   sessions: Set<string>;
+  firstActivityAtMs: number;
+  lastActivityAtMs: number;
 }
 
 export interface AggregateOptions {
@@ -72,10 +184,15 @@ export interface AggregateOptions {
   readonly untilDay: string;
   readonly rates: RateTable;
   readonly priceOverrides?: RateTable;
-  readonly modelAliases?: ReadonlyMap<string, string>;
   readonly resolution?: UsageResolution;
   readonly sinceTimeMs?: number;
   readonly untilTimeMs?: number;
+  readonly providers?: readonly UsageRecord["provider"][];
+  readonly sessionIds?: readonly string[];
+  readonly runIds?: readonly string[];
+  readonly turnIds?: readonly string[];
+  readonly modelAliases?: ReadonlyMap<string, string>;
+  readonly groupBy?: "model" | "session" | "turn" | "run";
 }
 
 export function resolveModelAliases(
@@ -96,11 +213,15 @@ export function resolveModelAliases(
 
 export interface AggregateResult {
   readonly buckets: readonly UsageBucket[];
+  /** Records dropped because an earlier record carried the same dedupe key. */
   readonly duplicatesDropped: number;
+  /** Records whose day fell outside the requested window. */
   readonly outOfWindow: number;
 }
 
 /**
+ * Accumulates records across many files.
+ *
  * De-duplication is global across the whole scan, not per file: Claude Code
  * copies a message's records forward when a session is resumed or forked, so
  * the same `dedupeKey` legitimately appears in several transcripts.
@@ -110,20 +231,21 @@ export class UsageAggregator {
   readonly #seen = new Set<string>();
   readonly #toDay: (timestampMs: number) => string;
   readonly #hourlyWindow: { readonly sinceTimeMs: number; readonly untilTimeMs: number } | null;
+  readonly #dailyWindow: DailyWindowIndex | null;
   readonly #options: AggregateOptions;
-  #lastBucket: {
-    readonly day: string;
-    readonly hourIndex: number;
-    readonly provider: string;
-    readonly model: string;
-    readonly source: string;
-    readonly bucket: MutableBucket;
-  } | null = null;
+  readonly #providers: ReadonlySet<UsageRecord["provider"]> | null;
+  readonly #sessionIds: ReadonlySet<string> | null;
+  readonly #runIds: ReadonlySet<string> | null;
+  readonly #turnIds: ReadonlySet<string> | null;
   #duplicatesDropped = 0;
   #outOfWindow = 0;
 
   constructor(options: AggregateOptions) {
     this.#options = options;
+    this.#providers = options.providers === undefined ? null : new Set(options.providers);
+    this.#sessionIds = options.sessionIds === undefined ? null : new Set(options.sessionIds);
+    this.#runIds = options.runIds === undefined ? null : new Set(options.runIds);
+    this.#turnIds = options.turnIds === undefined ? null : new Set(options.turnIds);
     this.#toDay = makeDayFormatter(options.timeZone);
     if (options.resolution === "hour") {
       if (options.sinceTimeMs === undefined || options.untilTimeMs === undefined) {
@@ -133,20 +255,52 @@ export class UsageAggregator {
         sinceTimeMs: options.sinceTimeMs,
         untilTimeMs: options.untilTimeMs,
       };
+      this.#dailyWindow = null;
     } else {
       this.#hourlyWindow = null;
+      this.#dailyWindow = makeDailyWindowIndex(this.#toDay, options.sinceDay, options.untilDay);
     }
   }
 
-  add(input: UsageRecord, sourcePath?: string): boolean {
-    const record = this.#mapModel(input);
-    if (record.dedupeKey !== null) {
-      if (this.#seen.has(record.dedupeKey)) {
-        this.#duplicatesDropped += 1;
-        return false;
-      }
-      this.#seen.add(record.dedupeKey);
-    }
+  /** Prices a record with this aggregation's rates, as `add` does. */
+  price(input: UsageRecord): PricedRecord {
+    const record = mapUsageModel(input, this.#options.modelAliases);
+    const priced = priceUsageRecord(this.#options.rates, record, this.#options.priceOverrides);
+    return {
+      record,
+      costUsd: priced.costUsd,
+      costSource: priced.costSource,
+      categoryCostUsd: priced.categoryCostUsd,
+      fastCostUsd:
+        record.speed === "fast" ||
+        record.serviceTier === "priority" ||
+        record.serviceTier === "fast"
+          ? priced.costUsd
+          : 0,
+      ultrafastCostUsd: record.speed === "ultrafast" ? priced.costUsd : 0,
+      speedPremiumUsd: priced.speedPremiumUsd,
+      cacheSavingsUsd: priced.cacheSavingsUsd,
+    };
+  }
+
+  /** The instants a record must fall in to count. */
+  window(): { readonly sinceTimeMs: number; readonly untilTimeMs: number } {
+    return this.#hourlyWindow ?? this.#dailyWindow!;
+  }
+
+  /**
+   * Folds one record in. Returns whether it actually contributed, so callers
+   * can derive per-window facts (distinct sessions, for one) from the records
+   * that landed rather than everything the mtime prefilter happened to admit.
+   */
+  add(record: UsageRecord): boolean {
+    return this.addPriced(this.price(record));
+  }
+
+  /** `add` for a record priced when its transcript was indexed. */
+  addPriced(priced: PricedRecord): boolean {
+    const { record } = priced;
+    if (!this.#accepts(record)) return false;
 
     if (
       this.#hourlyWindow !== null &&
@@ -156,152 +310,203 @@ export class UsageAggregator {
       this.#outOfWindow += 1;
       return false;
     }
-
-    const day = this.#toDay(record.timestampMs);
-    if (
-      this.#hourlyWindow === null &&
-      (day < this.#options.sinceDay || day > this.#options.untilDay)
-    ) {
+    const day =
+      this.#dailyWindow === null
+        ? this.#toDay(record.timestampMs)
+        : this.#dailyWindow.dayAt(record.timestampMs);
+    if (day === null) {
       this.#outOfWindow += 1;
       return false;
     }
 
-    const hourIndex =
-      this.#hourlyWindow === null
-        ? -1
-        : Math.floor((record.timestampMs - this.#hourlyWindow.sinceTimeMs) / HOUR_MS);
-    const bucket = this.#bucketFor(day, hourIndex, record.provider, record.model, sourcePath ?? "");
-
-    const priced = priceUsage(this.#options.rates, record, this.#options.priceOverrides);
-
-    const totals = bucket.totals;
-    totals.uncachedInputTokens += record.totals.uncachedInputTokens;
-    totals.cachedInputTokens += record.totals.cachedInputTokens;
-    totals.cacheCreationTokens += record.totals.cacheCreationTokens;
-    totals.outputTokens += record.totals.outputTokens;
-    totals.reasoningTokens += record.totals.reasoningTokens;
-    bucket.costUsd += priced.costUsd;
-    if (priced.categoryCostUsd !== null) {
-      const sum = bucket.categoryCostUsd;
-      const add = priced.categoryCostUsd;
-      bucket.categoryCostUsd =
-        sum === null
-          ? add
-          : {
-              input: sum.input + add.input,
-              cacheRead: sum.cacheRead + add.cacheRead,
-              cacheWrite: sum.cacheWrite + add.cacheWrite,
-              output: sum.output + add.output,
-            };
+    // A duplicate outside the requested window must not poison an in-window
+    // copy from another transcript. The scan admits boundary files by mtime,
+    // so this ordering is observable for resumed and forked sessions.
+    if (record.dedupeKey !== null) {
+      if (this.#seen.has(record.dedupeKey)) {
+        this.#duplicatesDropped += 1;
+        return false;
+      }
+      this.#seen.add(record.dedupeKey);
     }
-    if (record.speed === "fast") bucket.fastCostUsd += priced.costUsd;
-    if (record.speed === "ultrafast") bucket.ultrafastCostUsd += priced.costUsd;
-    bucket.speedPremiumUsd += priced.speedPremiumUsd;
-    bucket.cacheSavingsUsd += cacheSavingsUsd(
-      this.#options.rates,
-      record,
-      this.#options.priceOverrides,
-    );
-    bucket.records += 1;
-    if (priced.costSource === "unpriced") bucket.unpricedRecords += 1;
-    if (priced.costSource === "providerReported") bucket.providerReportedRecords += 1;
-    if (record.sessionId.length > 0) bucket.sessions.add(record.sessionId);
+
+    this.#accumulate(this.#bucketFor(record, day, this.#hourStart(record.timestampMs)), {
+      totals: record.totals,
+      costUsd: priced.costUsd,
+      cacheSavingsUsd: priced.cacheSavingsUsd,
+      categoryCostUsd: priced.categoryCostUsd ?? null,
+      fastCostUsd: priced.fastCostUsd ?? 0,
+      ultrafastCostUsd: priced.ultrafastCostUsd ?? 0,
+      speedPremiumUsd: priced.speedPremiumUsd ?? 0,
+      records: 1,
+      unpricedRecords: priced.costSource === "unpriced" ? 1 : 0,
+      providerReportedRecords: priced.costSource === "providerReported" ? 1 : 0,
+      firstMs: record.timestampMs,
+      lastMs: record.timestampMs,
+    });
     return true;
   }
 
-  /** The target's own rate applies, so a provider-specific `rateModel` is dropped. */
-  #mapModel(record: UsageRecord): UsageRecord {
-    const model = this.#options.modelAliases?.get(record.model);
-    if (model === undefined) return record;
-    const { rateModel: _rateModel, ...rest } = record;
-    return { ...rest, model };
+  /**
+   * Folds in every record of an indexed group that falls in the window, one
+   * range per day or hour. Returns whether any record contributed. Indexed
+   * groups hold no key another transcript shares, so they skip the dedupe pass.
+   */
+  addGroup(group: IndexedGroup): boolean {
+    if (!this.#accepts(group)) return false;
+    const { sinceTimeMs, untilTimeMs } = this.window();
+    const start = lowerBound(group.timestamps, sinceTimeMs);
+    const end = lowerBound(group.timestamps, untilTimeMs);
+    this.#outOfWindow += group.timestamps.length - (end - start);
+    let position = start;
+    while (position < end) {
+      const timestampMs = group.timestamps[position]!;
+      let day: string;
+      let hourStart = "";
+      let bucketEndMs: number;
+      if (this.#hourlyWindow !== null) {
+        const hour = Math.floor((timestampMs - this.#hourlyWindow.sinceTimeMs) / HOUR_MS);
+        bucketEndMs = this.#hourlyWindow.sinceTimeMs + (hour + 1) * HOUR_MS;
+        day = this.#toDay(timestampMs);
+        hourStart = this.#hourStart(timestampMs);
+        // An hour anchored off the zone's midnight can span two local days;
+        // records keep the day they happened on, as `add` assigns them.
+        if (this.#toDay(bucketEndMs - 1) !== day) {
+          bucketEndMs = firstInstantAfterDay(this.#toDay, day, timestampMs, bucketEndMs);
+        }
+      } else {
+        const located = this.#dailyWindow!.dayRangeAt(timestampMs)!;
+        day = located.day;
+        bucketEndMs = located.endMs;
+      }
+      const next = Math.min(end, lowerBound(group.timestamps, bucketEndMs));
+      this.#accumulate(
+        this.#bucketFor(group, day, hourStart),
+        readGroupRange(group, position, next),
+      );
+      position = next;
+    }
+    return end > start;
   }
 
-  /**
-   * Records arrive file by file in time order, so most land in the bucket the
-   * previous record used. Checking that first skips building and hashing a
-   * key string per record.
-   */
-  #bucketFor(
-    day: string,
-    hourIndex: number,
-    provider: string,
-    model: string,
-    source: string,
-  ): MutableBucket {
-    const last = this.#lastBucket;
-    if (
-      last !== null &&
-      last.day === day &&
-      last.hourIndex === hourIndex &&
-      last.provider === provider &&
-      last.model === model &&
-      last.source === source
-    ) {
-      return last.bucket;
-    }
-    const window = this.#hourlyWindow;
-    const hourStart =
-      window === null ? "" : new Date(window.sinceTimeMs + hourIndex * HOUR_MS).toISOString();
-    const key = `${day}\u0000${hourStart}\u0000${provider}\u0000${model}\u0000${source}`;
+  #accepts(record: BucketDimensions): boolean {
+    const safeRunId = safeRunIdOf(record);
+    return !(
+      (this.#providers !== null && !this.#providers.has(record.provider)) ||
+      (this.#sessionIds !== null && !this.#sessionIds.has(record.sessionId)) ||
+      (this.#runIds !== null && !this.#runIds.has(safeRunId)) ||
+      (this.#turnIds !== null && (record.turnId === undefined || !this.#turnIds.has(record.turnId)))
+    );
+  }
+
+  #hourStart(timestampMs: number): string {
+    return this.#hourlyWindow === null
+      ? ""
+      : new Date(
+          this.#hourlyWindow.sinceTimeMs +
+            Math.floor((timestampMs - this.#hourlyWindow.sinceTimeMs) / HOUR_MS) * HOUR_MS,
+        ).toISOString();
+  }
+
+  #bucketFor(record: BucketDimensions, day: string, hourStart: string): MutableBucket {
+    const safeRunId = safeRunIdOf(record);
+    const safeSessionId =
+      record.sessionId.length > 0 && record.sessionId.length <= 512 ? record.sessionId : "";
+    const sessionId =
+      this.#options.groupBy === "session" || this.#options.groupBy === "turn" ? safeSessionId : "";
+    const turnId = this.#options.groupBy === "turn" ? (record.turnId ?? "") : "";
+    const runId = this.#options.groupBy === "run" ? safeRunId : "";
+    const key = `${day}\u0000${hourStart}\u0000${record.provider}\u0000${record.model}\u0000${record.serviceTier ?? "unknown"}\u0000${record.serviceTierSource ?? "unknown"}\u0000${sessionId}\u0000${turnId}\u0000${runId}\u0000${record.sourcePath ?? ""}`;
     let bucket = this.#buckets.get(key);
     if (bucket === undefined) {
       bucket = {
-        totals: { ...EMPTY_TOTALS },
+        totals: EMPTY_TOTALS,
         costUsd: 0,
-        cacheSavingsUsd: 0,
-        categoryCostUsd: null,
+        categoryCostUsd: { input: 0, cacheRead: 0, cacheWrite: 0, output: 0 },
         fastCostUsd: 0,
         ultrafastCostUsd: 0,
         speedPremiumUsd: 0,
+        cacheSavingsUsd: 0,
         records: 0,
         unpricedRecords: 0,
         providerReportedRecords: 0,
         sessions: new Set<string>(),
+        firstActivityAtMs: Number.POSITIVE_INFINITY,
+        lastActivityAtMs: Number.NEGATIVE_INFINITY,
       };
       this.#buckets.set(key, bucket);
     }
-    this.#lastBucket = { day, hourIndex, provider, model, source, bucket };
+    const distinctSessionId = this.#options.groupBy === "run" ? safeRunId : safeSessionId;
+    if (distinctSessionId !== "") bucket.sessions.add(distinctSessionId);
     return bucket;
+  }
+
+  #accumulate(bucket: MutableBucket, range: GroupRange): void {
+    bucket.totals = addTotals(bucket.totals, range.totals);
+    bucket.costUsd += range.costUsd;
+    for (const category of ["input", "cacheRead", "cacheWrite", "output"] as const)
+      bucket.categoryCostUsd[category] += range.categoryCostUsd?.[category] ?? 0;
+    bucket.fastCostUsd += range.fastCostUsd ?? 0;
+    bucket.ultrafastCostUsd += range.ultrafastCostUsd ?? 0;
+    bucket.speedPremiumUsd += range.speedPremiumUsd ?? 0;
+    bucket.cacheSavingsUsd += range.cacheSavingsUsd;
+    bucket.records += range.records;
+    bucket.firstActivityAtMs = Math.min(bucket.firstActivityAtMs, range.firstMs);
+    bucket.lastActivityAtMs = Math.max(bucket.lastActivityAtMs, range.lastMs);
+    bucket.unpricedRecords += range.unpricedRecords;
+    bucket.providerReportedRecords += range.providerReportedRecords;
   }
 
   finish(): AggregateResult {
     const buckets: UsageBucket[] = [];
     for (const [key, bucket] of this.#buckets) {
-      const [day = "", hourStart = "", provider = "", model = "", sourcePath = ""] =
-        key.split("\u0000");
-      const category = bucket.categoryCostUsd;
-      const fastCostUsd = roundUsd(bucket.fastCostUsd);
-      const ultrafastCostUsd = roundUsd(bucket.ultrafastCostUsd);
-      const speedPremiumUsd = roundUsd(bucket.speedPremiumUsd);
+      const [
+        day = "",
+        hourStart = "",
+        provider = "",
+        model = "",
+        serviceTier = "unknown",
+        serviceTierSource = "unknown",
+        sessionId = "",
+        turnId = "",
+        runId = "",
+        sourcePath = "",
+      ] = key.split("\u0000");
       buckets.push({
         day: day as UsageDay,
         ...(hourStart === "" ? {} : { hourStart }),
         provider: provider as UsageBucket["provider"],
         model,
+        ...(sessionId === "" ? {} : { sessionId }),
+        ...(runId === "" ? {} : { runId }),
+        ...(this.#options.groupBy === "run"
+          ? {
+              firstActivityAt: new Date(bucket.firstActivityAtMs).toISOString(),
+              lastActivityAt: new Date(bucket.lastActivityAtMs).toISOString(),
+            }
+          : {}),
+        ...(turnId === "" ? {} : { turnId }),
+        ...(provider === "codex"
+          ? {
+              serviceTier,
+              serviceTierSource: serviceTierSource as UsageBucket["serviceTierSource"],
+            }
+          : {}),
         ...(sourcePath === "" ? {} : { sourcePath }),
-        totals: { ...bucket.totals },
+        categoryCostUsd: bucket.categoryCostUsd,
+        fastCostUsd: bucket.fastCostUsd,
+        ultrafastCostUsd: bucket.ultrafastCostUsd,
+        speedPremiumUsd: bucket.speedPremiumUsd,
+        totals: bucket.totals,
         costUsd: bucket.costUsd,
         cacheSavingsUsd: bucket.cacheSavingsUsd,
-        ...(category === null
-          ? {}
-          : {
-              categoryCostUsd: {
-                input: roundUsd(category.input),
-                cacheRead: roundUsd(category.cacheRead),
-                cacheWrite: roundUsd(category.cacheWrite),
-                output: roundUsd(category.output),
-              },
-            }),
-        ...(fastCostUsd === 0 ? {} : { fastCostUsd }),
-        ...(ultrafastCostUsd === 0 ? {} : { ultrafastCostUsd }),
-        ...(speedPremiumUsd === 0 ? {} : { speedPremiumUsd }),
         costSource: resolveCostSource(bucket),
         records: bucket.records,
         unpricedRecords: bucket.unpricedRecords,
         sessions: bucket.sessions.size,
       });
     }
+    // Stable ordering keeps payloads diffable and snapshot tests meaningful.
     buckets.sort(
       (a, b) =>
         a.day.localeCompare(b.day) ||
@@ -318,12 +523,23 @@ export class UsageAggregator {
   }
 }
 
-function roundUsd(value: number): number {
-  return Math.round(value * 1e6) / 1e6;
-}
-
+/**
+ * A bucket mixes records from one model, but their cost provenance can differ
+ * when only some records carried a reported cost. The weakest provenance in the
+ * bucket wins so the UI never overstates confidence.
+ */
 function resolveCostSource(bucket: MutableBucket): UsageBucket["costSource"] {
   if (bucket.unpricedRecords === bucket.records) return "unpriced";
   if (bucket.providerReportedRecords === bucket.records) return "providerReported";
   return "modelPriced";
+}
+
+export function mapUsageModel(
+  record: UsageRecord,
+  aliases?: ReadonlyMap<string, string>,
+): UsageRecord {
+  const model = aliases?.get(record.model);
+  if (model === undefined) return record;
+  const { rateModel: _rateModel, ...rest } = record;
+  return { ...rest, model };
 }

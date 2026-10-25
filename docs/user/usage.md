@@ -1,34 +1,78 @@
-# Usage and limits
-
-Open **Usage** from the sidebar or the command palette, or press `mod+u` on web and
-desktop when the terminal is not focused. Customize `usage.open` in
-**Settings → Keybindings**.
+# Review usage
 
 On mobile, choose **Usage** in the workspace navigation.
 
+Prompt and word reports can come from Otis analytics. If Otis is unavailable,
+still indexing or stale, the page labels its retained T3 fallback. If reports
+disagree, T3 remains selected. Refresh retries the connection. Missing history
+is shown as unavailable, not zero prompts. Words are not tokens.
+
+## Reset value history
+
+Open **Usage > Limits > Reset history** to compare estimated API value across
+Codex reset windows. Expand a window for its model totals, or expand the paid
+and value line for monthly figures. Windows without saved limit readings use
+transcript estimates. These dollar amounts estimate API value, not subscription
+charges.
+
+In **Monitor settings**, set your plan, monthly price and subscription start
+date. Paid totals count monthly payments from that date. A cold transcript scan
+shows **Still counting** and refreshes as more history becomes available.
+
+## Prompts and words
+
+The Usage page reports stored user messages in **Prompts & words** for the
+selected period. Each environment has its own counts, frequent words and daily
+table. Use the panel's Refresh button to read newly stored messages.
+
+Use **Count a word** to find occurrences across the selected period. Enter one
+word, including common words or numbers. Search matches a whole normalized
+word, so `the` does not match `theater`. **Clear** removes the search. The result
+shows occurrences and the number of prompts containing the word.
+
+Each stored user-message ID counts as one prompt. Imported and archived chats
+are included. Repeated submissions count separately, as do copies stored in
+separate chats. Chats outside this environment's T3 history are not included.
+These counts describe stored messages, not provider requests or authored text.
+They do not verify who authored every imported user message. Voice mirrors that
+reuse a message ID count once. Copies with separate IDs count separately when
+the stored history has no shared source identity.
+
+Word counts use Unicode letter and number runs after text normalization.
+Frequent words are lowercase and omit common English words and word runs
+containing digits. Punctuation splits words, so `gpt-4o` contributes `gpt`.
+Code and pasted instructions in user messages contribute to the
+word count. Attachment-only messages count as prompts, but attachment contents,
+agent replies, system messages and tools do not contribute words.
+Combining marks remain inside words; composed and decomposed accents match.
+Emoji do not count as words. Inline quotations count as submitted text.
+
+Words are not tokens, costs or subscription usage. Environments are shown
+separately rather than adding potentially copied history together. A partial
+history notice means the counts cover only the examined subset. Missing history
+is unavailable, not a zero. The report contains counts and individual frequent
+words, never full prompt text.
+
+Counts use a local derived index. A partial `index-warming` notice means the
+background indexer is building the remaining stored history. The indexed and
+stored prompt counts show progress. Use Refresh to read the latest counts.
+Indexing continues without more requests and resumes after a server restart.
+Edits and deletions invalidate their indexed counts. Oversized messages remain
+partial instead of contributing a prefix word count, and partial reports omit
+the word average. Complete coverage means all stored messages in the period
+were indexed. Imports may omit older messages, and messages outside the stored
+history remain unknown.
+
+For a birthday palette and tap effects on these screens, see [Celebrate your birthday](birthday-theme.md).
+
 ## Understand your usage
 
-**Usage** combines Codex, Claude Code, Grok Build, OpenCode, Antigravity, Pi, Muse Code, and Cursor history
-from your connected environments. It shows token use, cache savings, model breakdowns, and estimated API-equivalent
+**Usage** combines Codex, Claude Code, Gemini, Grok Build, OpenCode, Antigravity, Pi, Muse Code,
+Cursor, and configured chat archives from your connected environments. It shows token use, cache savings, model breakdowns, and estimated API-equivalent
 cost, split by token type and by speed. These estimates are not your subscription bill.
 **Premium** is what Fast and Ultrafast requests cost above standard rates. Cost that cannot be
 split, such as a provider-reported cost for a model without public rates, shows as **Other**.
 Select a model under **Breakdown** to see its trend, cache hit rate, and cost per million tokens.
-
-Totals depend on the history available on each server. Grok turns without a saved completed-turn
-record are missing from the totals.
-
-OpenCode reads its SQLite database and older JSON history. Antigravity reads local conversation
-databases, including T3-managed profiles. Set `OPENCODE_DATA_DIR` or `ANTIGRAVITY_DATA_DIR` on the
-server to read a different data directory; comma-separated paths read multiple directories.
-
-Cursor reads account usage from Cursor's dashboard API using the CLI login saved on the server.
-This includes headless T3 sessions and desktop usage across machines; the same account counts
-once across connected environments. Without an accessible CLI login, T3 shows a
-notice instead of incomplete local totals. T3 does not estimate missing tokens from conversation text.
-On macOS, choose **Enable Cursor usage** on Usage to allow T3 to read your existing CLI login
-from Keychain. You can turn it off in **Settings → Providers → Usage providers**. macOS may ask
-you to allow access on the server Mac.
 
 Usage includes each configured account's history, including disabled accounts. Custom homes follow
 the account's home setting or its `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, or `GROK_HOME` environment
@@ -43,45 +87,41 @@ Use absolute paths or `~/` paths in the account's environment settings; relative
 depend on each project's working directory and cannot be reliably discovered by Usage. Accounts
 sharing a history directory count once.
 
-When your app and server support different providers, usage totals may cover only the providers
-your app understands. Update the app to include newly supported providers.
+Choose **Limits** for subscription windows and banked resets, or **Cost** and **Tokens** for local history. The provider filter controls the providers included in the charts and totals. Cost and token breakdowns show input, cache reads, cache writes and output. Speed costs show standard, fast and ultrafast usage when the provider records that information.
 
-On web and desktop, use the environment dropdown to filter costs, tokens, and limits. All
-environments are selected by default. The dropdown shows which environments are still scanning;
-results appear as each one responds, and figures still updating are dimmed. Cursor shows its last
-saved totals first, then updates them when Cursor's API responds.
+Use **Past 24h** for an hourly chart covering the exact rolling 24-hour period. The **7 days**,
+**30 days**, **90 days**, **120 days**, and **1 year** ranges use daily resolution. Cost and token
+toggles update both the headline and chart, and refreshing rescans every connected environment.
 
-If recent work is missing or a new model shows no cost, refresh to rescan session history and
-update model pricing.
+In **Hourly model usage**, each bar shows processed tokens for Astra, Sol, Luna, Terra, or another
+recorded model. Select an hour to see its token total and estimated dollar cost; token totals include
+cached input, and empty hours remain visible so the timeline stays accurate.
 
-## Set custom model prices
+Parsed transcripts are cached individually on the environment that owns them. Expanding to a range
+that has not been viewed before may briefly warm older history; afterward, unchanged chats reuse
+their cached records and only new or edited transcript files are parsed again.
 
-On web or desktop, open the environment dropdown on **Usage**, then choose **Model prices** to add,
-edit, or reset a model's estimated price. **Apply to** starts with your current Usage filter;
-choose all environments or select individual destinations. Enter the exact model ID and USD
-rates per million input and output tokens. You can enter any model ID, including models
-without public pricing. When a model on **Usage** has no known price, select it under
-**Breakdown** and choose **Set price** to open this table with that model added.
+Usage history is independent from the providers enabled for new T3 Code chats. Disabling Claude
+Code or leaving Gemini unavailable as a chat provider does not remove their locally stored history
+from Usage. Gemini totals include Gemini CLI sessions and locally recorded Antigravity token totals.
+OpenCode totals come from its local session database and remain available when OpenCode is disabled
+as a provider for new chats.
 
-Cache read and cache write rates are optional and use the input rate when blank. Enter `0` for
-tokens that are free. Saved prices replace automatic pricing for all of that environment's
-history and are shared with clients connected to it. When environments have different prices,
-cells show **Mixed**. Edit rates directly in the table, then choose **Save changes** to apply all
-edited rows. Untouched cells keep each environment's rate. Select one environment to inspect its
-prices. **Reset to automatic** marks a model's override for removal when you save; you can undo
-it before saving.
+## Understand API estimates
 
-To count one model as another, such as a preview model under its released name, enter the target
-model ID under **Map to**. The mapped model no longer appears on **Usage**: its tokens and cost
-move to the target model and use the target's price. Clear **Map to** or reset the row to show
-the model on its own again.
+Recorded dollar costs take precedence over token estimates. Otherwise, Usage applies the latest
+cached model prices at standard text-token rates, including each request's context-length tier.
+Provider namespaces are kept separate: a reseller's rate cannot replace a direct provider's rate.
+Unknown models and missing rates are marked unpriced, not treated as free usage. Reasoning tokens
+already included in output are not charged twice.
 
-Each destination reports whether the change saved. Offline or unavailable environments are
-marked **Not saved**. Reconnect them and choose **Retry failed saves** to finish the same change
-without writing again to environments that already saved. Changes are not queued after you close
-the dialog.
+These are current-price equivalents, not historical invoices. They do not reconstruct fast,
+flex, batch, regional, or negotiated pricing. Cache-write estimates use the standard short-lived
+cache rate; storage duration, long-lived cache premiums, audio/image-specific rates, and tool fees
+are not reconstructed from token totals. Provider-reported costs may themselves be estimates from
+the local harness. A subscription's quota percentage is not a dollar balance.
 
-## Track subscription limits
+## Subscription limits
 
 **Usage → Limits** pools every subscription account it can see per provider, so with several Codex
 or Claude accounts across your enabled environments and hubs you read one number per window rather than a
@@ -98,24 +138,6 @@ Claude resets are not available when the server runs on macOS, where Claude keep
 Keychain. On narrow screens, numbered rows below
 the bar show each account's quota, countdown, and credits. Tap a row to open its details.
 
-The same account signed in on more than one environment, or reported by a hub as well, counts once.
-Filter with the environment dropdown to see what a single machine has.
-
-When a Claude or Codex account has no overall weekly quota left, its pooled session contribution
-shows 0% left. The next refill depends on both reset times: an exhausted session must also reset,
-and a partly spent session may only regain its unused portion when the week resets. Missing or
-stale reset times have no refill estimate; refresh Limits for a new reading. Claude's
-model-specific weekly allowances keep their reported values.
-
-Opening Limits checks the selected connected environments automatically. Each client waits at
-least five minutes between automatic checks of an environment, including after a failed check.
-If a window still looks stale, refresh Limits to re-check every provider and hub.
-
-Pick `/usage-limits` from the composer's command menu, or send it as a message, to check the
-current model's limits without leaving the conversation. The result opens above the composer and
-closes when you dismiss it or send your next message. It uses the same snapshot as **Usage → Limits**, so it does not run the agent or refresh
-anything. The command is offered only for providers that appear under **Usage → Limits**.
-
 OpenCode Go reports its session, weekly, and monthly allowance when OpenCode runs locally in
 the environment. T3 cannot report limits for external OpenCode servers because their credentials
 belong to the remote server. Limits need an OpenCode Go API key, or an OpenCode Console connected
@@ -127,37 +149,354 @@ its monthly allowance, including separate Auto and API usage, using the CLI logi
 usage. Keychain login is used for limits only with Cursor's default API endpoint. If you configure
 a custom Cursor endpoint, use an explicit token or file-based CLI login for limits.
 
-Grok reports the remaining subscription allowance and reset time for its current billing period
-after signing in with `grok login`. Explicit `XAI_API_KEY` connections and custom authentication
-or endpoint configurations do not report subscription limits.
+## Review repeated input
 
-API-key accounts may not report subscription limits. This also applies to Claude connections
-using a proxy through `ANTHROPIC_AUTH_TOKEN`.
+Open **Skills & repeated input** beside Usage in the sidebar to inspect attribution on its own
+page. On mobile, open it from Settings. Use **Usage** in the header to return to your usage totals.
+The attribution page has its own period and computer selectors. Its refresh reads transcript
+metadata for the selected period.
 
-## Connect a CLIProxyAPI hub
+Compare direct tokens, occurrences, or estimated value by source kind, model, computer and project,
+or time. Select a bar to inspect its breakdown. Search the tracked payloads or filter by **Skills**
+and evidence level, then expand a row for its model costs and observation details. Payload filters
+affect the list; the overview and comparison retain the full selected period and computer scope.
 
-To see pooled accounts, open **Settings → Providers → Usage providers → Add hub**. Choose the
-environment that will connect to the hub and enter its URL and management key.
+The **Current skills** catalog lists every `SKILL.md` revision discoverable on the selected
+computers, including skills with no transcript evidence in the selected period. Use its search,
+observation filter, sorting, and paging controls to distinguish **Observed** from **Never observed**
+skills. A never-observed skill keeps its current file hash, size, and tokenizer count when available,
+but has no invented dates, confidence, tokens, or dollar value. Historical observed revisions remain
+available in the separate payload history even after the current file changes.
 
-The accounts appear under **Usage → Limits**. Codex accounts show banked reset credits; select an
-account and choose **Use reset** to redeem one. No hub plugin is required.
+The first source is local Codex session transcripts. Skills are checked first, including
+`SKILL.md` files such as `unslop`. Other typed sources can include AGENTS or instruction files,
+named reusable developer blocks, and repeatable tool-operation payloads. Ordinary repeated chat
+text is not treated as a reusable operation.
 
-This connection supplies usage information; configure
-the provider separately to send agent requests through the hub. Remove the hub from the same
-settings section when you no longer need it.
+Each item shows its display name, source kind, stable content hash, file revision or hash when one
+exists, first and last observation, occurrence count, affected sessions and turns, and confidence.
+The page keeps these confidence levels separate:
 
-## Subscription usage widget
+- **Reference** means a transcript names the file or source.
+- **Likely read** means the record supports a read but does not contain the complete payload.
+- **Confirmed read** means the complete repeated payload was observed and can be attributed.
 
-Add **Subscription usage** from your iOS or Android widget gallery to see remaining Codex and
-Claude quotas. Tap it to open **Usage → Limits**; on Android this works while T3 is running in
-the background, otherwise open the app from the launcher. On iOS, use **Edit Widget** to choose
-Session, Weekly, or both for each provider. Reopen T3 to refresh expired readings.
+Direct payload input is separate from the full input reported for an affected session or turn. A
+session that loaded a skill can contain other instructions, history, tool output, and user input.
+The page never labels that full session total as the skill's cost.
 
-## Keyboard shortcuts
+Token attribution shows exact, estimated, cached, cache-write, and unknown values when the source
+provides them. The model rows use the same current pricing table and pricing revision as the rest
+of Usage. Provider-reported cost wins. An unknown model, missing price, malformed record, or
+missing tokenizer remains **Unpriced**, not `$0.00`.
 
-On web and desktop, open Usage from the command palette. While on Usage,
-press `C`, `T`, or `L` for Cost, Tokens, or Limits while not typing in a field.
-Use `Ctrl+Shift+1/2/3/4` (`Cmd+Shift+1/2/3/4` on macOS) for the past
-24 hours, 7 days, 30 days, or 90 days. Period shortcuts do nothing on Limits.
-Press `Escape` to return to the previous page. Customize these shortcuts in
-**Settings → Keybindings**.
+After a transcript contains a confirmed complete skill payload, later model turns in the same
+carried context attribute that skill again. T3 labels the skill tokens **Cached** or **Cache write**
+only when the provider's complete request partition proves that placement. If a request mixes
+cached and uncached input, the skill remains **Unknown** because request-level totals cannot prove
+where that payload landed. Context resets, compaction, and forks end the carried attribution.
+
+When a range mixes priced and unpriced models, the combined number is the priced subtotal and is
+marked incomplete. It does not assign a zero-dollar value to the remaining input.
+
+Every dollar value on this page is labeled as an API-equivalent estimate. It is an
+estimate of what the recorded tokens would represent at the selected API rates. It is not a
+charge, subscription balance, or reset consumption. The page can group totals by item, source
+kind, model, project or environment, and date when those aggregates are covered by the scan.
+
+Raw transcript text stays on the environment that read it. Only fingerprints, aggregate token and
+value data, provenance, and coverage gaps cross the connection. The importer reuses the transcript
+cache and cursor. Unchanged files are not reparsed, and an appended transcript reads only its new
+records when the saved cursor is safe. File edits, forks, and retries invalidate the affected
+cache entry and use stable record identities so the same occurrence is not counted twice.
+
+If several historical file revisions share one display name, an exact path identifies the matching
+revision. Name-only evidence stays unattributed rather than being multiplied across every revision.
+
+The coverage notice names records that are too large, malformed, unavailable, missing a model or
+tokenizer, or impossible to assign to one repeated payload. Those records stay visible as unknown
+or uncovered data. Usage does not invent a token count or a price to fill the gap. Long ranges
+render aggregate rows first; expanding an item loads only its saved metadata, never raw transcript
+text.
+
+Repeated-input attribution is additive. Enabling it does not change the normal Usage token buckets,
+model pricing, API-equivalent totals, or the separate Codex usage-and-reset calculations.
+
+### Import product chat archives
+
+Configured ChatGPT and Google AI Studio exports appear as **ChatGPT archive** and **AI Studio
+archive**. Raw chat text stays on the environment that reads it. Only aggregate token and cost
+buckets cross the T3 connection.
+
+ChatGPT exports retain message dates and model names but do not include an API token ledger. Usage
+estimates each message from its text, reconstructs the parent context for each assistant response,
+and places the result on the original message date. Reimporting an overlapping export does not count
+the same conversation message twice.
+
+AI Studio exports include per-message token counts but omit the original chat date and request-level
+usage ledger. Usage reconstructs the input context for each model turn and uses the downloaded
+file's timestamp on the graph. A notice stays visible while this source contributes. Exact duplicate
+files are counted once by content; separate branches remain separate chats.
+
+Imported product chats are API-equivalent estimates, not proof of API charges. Unknown experimental
+models remain unpriced when no documented paid equivalent exists.
+
+## Monitor subscription limits
+
+Open **Limits & resets** from Usage, or **Limits & resets →** below the Codex or Claude row, which
+opens the page on that provider. You can also tap or hold the **Codex icon/name**. **Usage** in the
+header takes you back. Scrolling cancels the hold gesture. Enter and Space activate the focused
+Codex button.
+
+Use **Codex**, **Claude**, or **Both** in the header to choose whose limits appear. Each limit has a
+card: Codex's weekly limit, and Claude's session, weekly, and model-specific weekly limits. A card
+shows what is left, when it resets, and whether use is ahead of or behind an even pace. Select a
+card to chart that limit; everything below the chart follows it. Right-click a card to copy its
+numbers or to show only that provider. The page remembers your choice.
+
+If a computer disconnects before its first reading, the page says it is reconnecting instead of
+claiming a limit was never recorded. A slow first reading prompts you to check the connection or
+reload the page. Public reset news can still load separately.
+
+### Claude limits
+
+T3 reads Claude's session and weekly limits through the Claude CLI on the computer running the
+T3 server, every few minutes while background activity is allowed. It sends no prompt and uses
+no model tokens, and it works even when Claude is turned off for chats. It uses the CLI's own
+sign-in: if the CLI is signed out, the Claude cards say so, and running `claude auth login` once
+in a terminal starts the readings. While readings are unavailable, T3 retries every 30 minutes.
+Claude limits chart like Codex's. A session limit is paced over its five hours; API value prices
+Claude transcripts from the same computers. The planner and public reset estimates are Codex-only.
+
+The monitor leads with remaining usage and the total used in the current account cycle.
+For example, 81% remaining means 19% used. If tracking began at 83%, the monitor observed
+a two-percentage-point drop. Those two points are not the cycle total.
+
+**Model impact** uses the selected cycle's saved readings and Codex transcript costs for the
+selected computers. It shows recorded tokens and API-equivalent cost for each model. Its
+"quota-equivalent" points divide each change between saved readings in proportion to the
+models' API-equivalent costs in that stretch of time. A drop with no priced model activity stays
+unattributed. This is an estimate, not a provider-reported quota charge for Astra, Sol, or any
+other model. The dashed line in the chart is
+the saved pooled quota change; colored lines are cumulative model estimates. Inspect the slider
+for a time and its estimates. The timed curve waits for complete matching transcript coverage,
+and no share is inferred when model records are incomplete or no priced activity is available.
+
+**Recorded** shows saved readings. **To reset** adds the current-pace projection through the
+planning deadline. The daily budget leaves 3% unused. The forecast blends the observed pace
+with the current weekly average.
+The chart colors saved readings and the filled area green ahead of weekly pace and red behind it. A dashed line shows
+even weekly spending. Tracking gaps use API-weighted estimates when complete priced activity is available. Otherwise,
+straight lines join saved readings, including
+earlier monitoring runs in the same cycle. These lines show the change between readings without
+claiming when it happened. Reset changes remain separate, and gaps do not become measured activity.
+
+Use the previous and next arrows above the chart to browse saved reset cycles one at a time.
+**Current** returns to the live cycle. Completed charts end at the first reading confirming the
+next reset, and their pace line reaches zero at that boundary. The active cycle keeps the scheduled
+planning deadline until a reset is observed. Past cycles show recorded balances, dates and the interval
+in which the next reset was observed. Current forecasts and banked reset counts stay with the live
+cycle. Only cycles retained in the saved account history are available.
+
+Expand **Forecast details & readings** to inspect readings or turn **API cost pace** on or off to compare the blue projection.
+It divides API-equivalent spending from the last six hours by elapsed hours, including idle
+time. If monitoring began more recently, it uses that shorter interval, with at least one hour
+required. Only the current cycle and selected computers contribute. The server measures costs
+after the interval start through the latest account reading, using the same pricing and
+source deduplication as the remaining-value estimate.
+
+Estimated time to empty is remaining API value divided by average dollars per hour. For
+example, $50 remaining at $10/hour gives five hours. The caption shows the measured window,
+hourly cost, and outcome; **API value runs out** gives its projected timestamp. The blue line
+maps the declining dollar balance onto the chart's remaining-percentage scale and stops at
+zero. A complete zero-cost interval produces a flat line with no exhaustion timestamp.
+
+Expand **Runway plan** for downtime planning. It turns that projection into downtime. It shows how long usage would be
+unavailable before the account's scheduled reset if the measured dollar burn continues. Choose
+the **maximum time without usage** you can tolerate; 12 hours is the default. The planner also
+calculates the maximum average dollars per hour that would reach zero at that deadline. A lower
+burn keeps usage available longer, while a higher burn exceeds the selected downtime limit.
+Elapsed time since the last reading is charged at the measured rate, so the estimate advances
+without waiting for another chart sample. If the rate is zero, the planner says usage lasts to
+the reset rather than inventing an exhaustion time.
+
+Stale readings, incomplete or unpriced costs, and a missing remaining-value estimate withhold
+the blue projection. Elapsed clock time does not count as newly measured spending. The orange
+line retains its percentage-based estimate for comparison. Model changes can affect Codex
+allowance differently, so neither line guarantees future capacity or changes measured usage.
+
+An earlier public reset announcement changes the planning deadline, not your account balance.
+The original weekly timer stays under **Source and weekly timer**. Announcements come from
+Tibo's public posts through the independent Reset Beacon feed. The source link and time
+interpretation remain visible. A missing or expired announcement falls back to the account timer.
+A countdown reaching zero never creates a reset observation or changes usage to 100%.
+
+**Public resets** uses the historical announcements published by
+[Codex Resets](https://codex-resets.com/). T3 treats consecutive regular announcements as
+approximate boundaries and totals the Codex transcript records stored on the selected computers
+between those times. Each completed period shows its current-price API-equivalent value and a
+per-model token and cost breakdown when the scan is complete.
+
+This backfills estimates for periods before local percentage monitoring began, but it does not
+backfill account usage percentages. Announcement time can precede account propagation, public
+announcements are global rather than account-specific, and missing local transcripts are not zero
+usage. Banked reset grants remain visible as context but never split a period because the user
+chooses when to redeem them. T3 sends Codex Resets no account credentials, usage totals, chat data,
+or transcript content.
+
+The page checks readings every minute and public news every five minutes while open.
+The separate Codex Limits collector records every five minutes while its computer is awake
+and signed in, even with T3 closed. Readings older than 15 minutes are labeled stale.
+News requests send no account credentials, usage totals, or chat data.
+Saved quota history and completed cost snapshots survive page navigation and server restarts,
+with bounded retention. Chart readings support hover, tap, and keyboard inspection.
+
+Press **Refresh** to reload saved readings and public reset sources, then check API costs for the
+newly read and backdated intervals. The button shows progress and ignores repeated taps until it
+finishes.
+Unchanged transcripts keep their cached records. On the mobile app, pulling down does the same.
+Growing chats read only their appended text when the saved cursor is valid. Public reset news
+updates independently and does not hold the usage refresh open.
+Refresh does not force a new collector sample.
+Long windows such as **90 days** and **120 days** warm in bounded transcript batches while the
+page remains open. If every selected computer fails to return a result, the window is shown as
+**Unavailable** rather than as zero usage.
+
+The view uses the latest continuous monitoring run for current measurements. A gap over 24 hours
+begins another run. Older samples remain saved and appear in **Reset history**. When a new cycle
+has too little current data to calibrate a pace or dollar value, the monitor may show a provisional
+estimate based on the immediately preceding completed cycle. It includes that cycle's local date
+range and is replaced automatically when current-cycle calibration is valid. Percentages are never
+combined across reset boundaries. The observation interval is not an exact reset timestamp. A banked
+reset or account change can look similar.
+
+Each completed reset can be expanded to show input tokens, output tokens, and API-equivalent value
+for every recorded model. Input includes cached and cache-creation tokens; reasoning tokens are
+already included in output. Short-lived account-window switches that return to the original timer
+are ignored so they do not split one real cycle into several resets.
+
+The authenticated `server.getUsageSummary` query can narrow results to exact providers, native
+session IDs, or native turn IDs. Callers may group returned buckets by model, session, or turn.
+Environment identity remains the connection target, and every response retains each physical
+source fingerprint and coverage status. Filters are bounded to 128 native IDs and never return raw
+transcript text.
+
+`costUsd` is API-equivalent value. `providerReported` means the provider supplied that request's
+cost, `modelPriced` means T3 calculated it from the rate document identified by
+`pricing.revision`, and `unpriced` keeps tokens while adding no dollars. None of these fields claims
+the amount charged for a subscription. Account allowance remains in the separate quota history.
+
+The runway baseline uses the account timer. **Banked manual resets** are shown separately and
+never get added to the current balance or treated as an extension of the current timer. A full
+manual reset refreshes both the short and weekly windows and starts a new approximately seven-day
+window. The planner can show each credit's expiry and whether it remains available at the
+estimated empty time when the connected account snapshot supplies expiry dates. Current saved
+snapshots may provide only the verified count and check time, in which case expiry eligibility
+is left unknown. If you redeem one, wait for the next account reading before planning the new
+window; the planner never redeems credits for you.
+
+### Understand the dollar estimate
+
+The page puts the limit cards and chart first. Below the chart, **Cycles** lists completed
+cycles and compares them, **Models** shows each model's share, **Planner** compares models at API
+prices, and **Public resets** estimates use between public announcements. Select a completed cycle
+to open it in the chart; right-click it to copy its summary. Expand **Inspect recorded readings** to
+scrub through the saved observations with a pointer or arrow keys.
+
+Drag across the quota graph to zoom into a period, or choose **24h**, **6h**, or
+**1h**. The plus and minus buttons change the zoom; the arrows move through time.
+**Full cycle**, Escape, or a double-click restores the whole chart. Right-click the chart to copy
+the reading under the pointer or a cycle summary, zoom to one, six, or 24 hours around the
+pointer, switch between recorded readings and the projection, or move between cycles. These
+controls work on past reset cycles too. The percentage axis expands when zoomed.
+
+**Where usage went** offers Intensity, Models, and Spikes views. Models splits bars
+by model and shows cost shares; Spikes ranks intervals by hourly spending. Tap a bar,
+use the arrow keys, or choose a spike to inspect costs, models, and estimated quota use.
+Drag across the bars to zoom the quota chart to the selected time. Double-click or press Escape
+to reset, or use **Zoom here** to open one interval. The bars fill the recorded time rather
+than leaving room for the future projection. All controls work without hovering.
+The summary compares peak and average spending, including idle time, and shows
+what fraction of cost came from the busiest 25% of the selected time.
+
+**Which burn did the readings follow?** checks non-overlapping six-hour windows in the full
+cycle. It compares the orange blended forecast and the API spending pace available at the start
+of each window with the next recorded quota reading. The API pace converts priced spending to
+quota points using at least five points of earlier measured use. The tracker counts wins, ties
+within half a quota point, and average misses. It skips resets, missing costs, and stale or
+missing readings. It is a historical comparison, not a guarantee that API dollars measure quota.
+
+The compact tracking layout keeps quota, API spending per hour, and the top model
+hourly rates together. Model rates use the same visible interval, including idle
+time. Expand **Inspect interval** for the selected interval or **All models** for
+the remaining models. Forecast explanations and planning stay collapsed until needed.
+
+**Compare cycles** shows how the selected cycle differs from an earlier saved cycle.
+Expand it and choose any older cycle to overlay quota used and compare API value per
+hour, total API value, input cache hit rate, and output tokens per hour. The comparison
+uses equal durations from each cycle's first saved reading, limited by the shorter
+recorded cycle. These starts may be later than the actual resets. Quota endpoints
+between readings are interpolated; gaps do not prove when usage occurred.
+
+The takeaways identify changes in spending pace, caching, and the model with the
+largest hourly cost change. Expand **Model changes** for every model, including ones
+only used in one window. Transcript comparisons load when opened and use the same
+selected computers on both sides. Incomplete or unpriced costs withhold cost insights
+while the saved quota comparison remains available. API equivalents and output token
+counts do not measure task quality or productivity.
+
+Zooming requests finer cost intervals from recorded transcripts. The curve spreads
+each confirmed percentage drop across API spending since the previous drop. Repeated
+whole-percent readings do not pin the fractional curve. Dotted horizontal guides
+use exact whole percentages when zoomed, with markers at estimated crossings.
+Original readings remain available in the saved-readings inspector. After the last drop, the unfinished fraction uses the previous drop's cost
+provisionally and stays within one percentage point of the last reading. API-derived
+decimals are estimates, not additional account measurements. Partial-bin totals are
+prorated; missing or unpriced costs keep the straight-line connection.
+Different models can consume quota differently, so API activity is a guide to
+where to investigate, not an exact account of subscription allowance.
+
+**Model comparisons at API prices** applies the same estimated API-price equivalent
+of the remaining quota to GPT-6 Astra, GPT-6 Sol, GPT-5.6 Terra, and GPT-6 Luna.
+Its default input/cache/output mix comes from the exact monitored interval.
+The model breakdown below it uses that same
+interval, excludes Spark, and counts reasoning inside output once. Older servers
+without model totals show a pending state; example mixes remain available.
+
+Choose an example mix, output only, or uncached input only to explore other work.
+**Custom mix** lets you set the output share and the cache hit rate for input.
+Cache writes use each model's published write price. Long-context and Fast mode
+controls apply their respective token-price multipliers.
+Each row applies the whole estimate to one model, so rows cannot be added together. M means
+million and B means billion. Prices have a verification date and a source link.
+Tool charges and regional surcharges are excluded. These are API-price comparisons;
+changing models can change Codex consumption, so they do not guarantee a number of
+Codex tokens. Incomplete cost data withholds the comparison.
+
+On your configured birthday, the celebration keeps your selected T3 theme. Make a
+wish to put out the candle, run it again to relight it, or open **birthday.log** for
+another note. Confetti is brief and respects the tap-effects and reduced-motion settings.
+
+**API value**, beside the chart, prices transcripts from the same observed interval.
+**Left at API prices** uses that cost per observed percentage point. It shows **Learning**
+until at least five points have been observed. A qualified earlier reset cycle can calibrate a
+shorter interval provisionally until current measured costs are ready. Bounded zero-use timer
+changes totaling up to 60 minutes can bridge the interval without counting as resets. Spark is
+excluded because it has a separate quota.
+
+Dollar values are API-equivalent estimates, not subscription bills, cash balances, or credits.
+Model mix and missing history affect them. Incomplete scans and missing prices withhold a new
+current estimate while a refresh is pending; previously saved exact costs remain labeled with
+their calculation time. A qualified earlier reset cycle can provide a labeled provisional model
+and value estimate until current costs are ready. Within the same cycle, the last complete cost
+remains visible through its recorded date while the scan warms, using that saved percentage
+denominator until a newer complete reading replaces it.
+
+The monitor defaults to the quota-source computer. Use the settings button in the header to choose
+the computer whose readings are charted and to opt in to other computers for cost comparison. The
+line under the chart names the computers whose transcripts are priced. Selecting an unavailable computer withholds the combined
+estimate. Select computers using the same Codex account. Percentages are never added across machines.
+The tracker does not verify account identity or identify chats copied between distinct sources.
+The power monitor is separate and does not contribute to Codex quota totals.
+
+The reset-cycle arrows update the chart, API-equivalent value, and token planner together. Older cycles are calculated from their recorded transcript interval. Local Qwen sessions do not count toward the OpenAI subscription conversion. Refresh keeps the selected cycle. Incomplete transcript reads retry automatically with a bounded backoff; complete saved calculations remain available while newer data is being read.

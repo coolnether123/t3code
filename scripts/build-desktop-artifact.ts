@@ -1649,6 +1649,25 @@ export function createStagePatchedDependencies(
   );
 }
 
+export function pinPatchedStageDependencies(
+  dependencies: Record<string, string>,
+  patchedDependencies: Record<string, string>,
+): Record<string, string> {
+  const pinned = { ...dependencies };
+  for (const patchKey of Object.keys(patchedDependencies)) {
+    const separator = patchKey.lastIndexOf("@");
+    if (separator < 1) continue;
+    const name = getPatchedDependencyPackageName(patchKey);
+    const version = patchKey.slice(separator + 1);
+    // A fresh staging install must retain the version its patch was checked
+    // against instead of floating beyond the locked workspace dependency.
+    if (pinned[name] === `^${version}` || pinned[name] === `~${version}`) {
+      pinned[name] = version;
+    }
+  }
+  return pinned;
+}
+
 function getPatchedDependencyPackageName(patchKey: string): string {
   const versionSeparator = patchKey.lastIndexOf("@");
   return versionSeparator > 0 ? patchKey.slice(0, versionSeparator) : patchKey;
@@ -3168,10 +3187,13 @@ export const stageWindowsServerSidecar = Effect.fn("stageWindowsServerSidecar")(
   yield* fs.makeDirectory(path.join(serverStageDir, "apps/server"), { recursive: true });
   yield* fs.copy(input.serverDistDir, path.join(serverStageDir, "apps/server/dist"));
 
-  const sidecarDependencies = {
-    ...input.runtimeExternalDependencies,
-    ...resolveFffNativeDependencies("win", input.arch, input.fffNodeVersion),
-  };
+  const sidecarDependencies = pinPatchedStageDependencies(
+    {
+      ...input.runtimeExternalDependencies,
+      ...resolveFffNativeDependencies("win", input.arch, input.fffNodeVersion),
+    },
+    input.patchedDependencies,
+  );
   const sidecarPatchedDependencies = createStagePatchedDependencies(
     input.patchedDependencies,
     sidecarDependencies,
@@ -3884,7 +3906,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
     );
   }
 
-  const stageDependencies =
+  const stageDependencies = pinPatchedStageDependencies(
     options.platform === "win"
       ? { ...resolvedDesktopRuntimeDependencies }
       : resolveMergedStageDependencies({
@@ -3893,7 +3915,9 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
           desktopDependencies: resolvedDesktopRuntimeDependencies,
           arch: options.arch,
           fffNodeVersion: serverPackageJson.dependencies["@ff-labs/fff-node"],
-        });
+        }),
+    workspacePatchedDependencies,
+  );
   const stagePatchedDependencies = createStagePatchedDependencies(
     workspacePatchedDependencies,
     stageDependencies,

@@ -1,4 +1,10 @@
-import { ArrowLeftIcon, ChartNoAxesColumnIcon, SettingsIcon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  BotIcon,
+  ChartNoAxesColumnIcon,
+  LayersIcon,
+  SettingsIcon,
+} from "lucide-react";
 import type { ReactNode } from "react";
 import { memo } from "react";
 import { Link, useLocation, useNavigate } from "@tanstack/react-router";
@@ -188,6 +194,15 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
     void navigate({ to: "/usage" });
   };
 
+  const handleCodexClick = () => {
+    closeMobileSidebar();
+    void navigate({ to: "/codex", search: { thread: undefined } });
+  };
+  const handleRepeatedInputClick = () => {
+    closeMobileSidebar();
+    void navigate({ to: "/repeated-input" });
+  };
+
   const handleBackClick = () => {
     closeMobileSidebar();
     void navigateToMainApp();
@@ -221,6 +236,12 @@ export const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
             label="Usage"
             onClick={handleUsageClick}
           />
+          <SidebarUtilityItem
+            icon={<LayersIcon />}
+            label="Skills & repeated input"
+            onClick={handleRepeatedInputClick}
+          />
+          <SidebarUtilityItem icon={<BotIcon />} label="Codex chats" onClick={handleCodexClick} />
         </>
       )}
       <SidebarUpdatePill />

@@ -24,6 +24,7 @@ import {
   UserInputAttachments,
   RuntimeMode,
 } from "./providerPolicy.ts";
+import { SubagentBackend } from "./model.ts";
 import { ProviderInstanceId, ProviderDriverKind } from "./providerInstance.ts";
 
 const ProviderSessionStatus = Schema.Literals([
@@ -51,6 +52,8 @@ export const ProviderSession = Schema.Struct({
 export type ProviderSession = typeof ProviderSession.Type;
 
 export const ProviderSessionStartInput = Schema.Struct({
+  /** Tool-free conversation session. Adapters must reject unsupported isolation. */
+  toolMode: Schema.optional(Schema.Literal("none")),
   threadId: ThreadId,
   provider: Schema.optional(ProviderDriverKind),
   providerInstanceId: Schema.optional(ProviderInstanceId),
@@ -60,14 +63,18 @@ export const ProviderSessionStartInput = Schema.Struct({
   resumeCursor: Schema.optional(Schema.Unknown),
   approvalPolicy: Schema.optional(ProviderApprovalPolicy),
   sandboxMode: Schema.optional(ProviderSandboxMode),
+  subagentBackend: Schema.optional(SubagentBackend),
   runtimeMode: RuntimeMode,
 });
 export type ProviderSessionStartInput = typeof ProviderSessionStartInput.Type;
 
 export const ProviderSendTurnInput = Schema.Struct({
   threadId: ThreadId,
-  /** Internal recovery signal. Allows an empty turn only for adapters that
-      explicitly support promptless continuation. */
+  /** Original chat message identity, retained through provider dispatch and recovery. */
+  messageId: Schema.optional(TrimmedNonEmptyString),
+  /** Explicit Codex steering. Must match the active provider turn. */
+  expectedTurnId: Schema.optional(TurnId),
+  /** Internal recovery signal for provider sessions resumed after a restart. */
   continuation: Schema.optional(Schema.Boolean),
   input: Schema.optional(
     TrimmedNonEmptyString.check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)),
@@ -79,6 +86,7 @@ export const ProviderSendTurnInput = Schema.Struct({
   ),
   modelSelection: Schema.optional(ModelSelection),
   interactionMode: Schema.optional(ProviderInteractionMode),
+  subagentBackend: Schema.optional(SubagentBackend),
 });
 export type ProviderSendTurnInput = typeof ProviderSendTurnInput.Type;
 

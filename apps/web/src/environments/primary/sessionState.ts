@@ -18,7 +18,7 @@ const primarySessionStateAtom = Atom.make(
   Atom.withLabel("primary-environment:session"),
 );
 
-function refreshPrimarySessionState(): void {
+export function refreshPrimarySessionState(): void {
   appAtomRegistry.refresh(primarySessionStateAtom);
 }
 

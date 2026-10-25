@@ -6,6 +6,7 @@ export interface ReferenceRepo {
   readonly versionSourcePath: string;
   readonly packageVersionPath: ReadonlyArray<string>;
   readonly versionTagPrefix: string;
+  readonly guidanceFiles?: ReadonlyArray<string>;
 }
 
 export const referenceRepos: ReadonlyArray<ReferenceRepo> = [
@@ -17,6 +18,7 @@ export const referenceRepos: ReadonlyArray<ReferenceRepo> = [
     versionSourcePath: "pnpm-workspace.yaml",
     packageVersionPath: ["catalog", "effect"],
     versionTagPrefix: "effect@",
+    guidanceFiles: ["LLMS.md"],
   },
   {
     id: "alchemy-effect",

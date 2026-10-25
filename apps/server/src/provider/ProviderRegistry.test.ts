@@ -8,6 +8,8 @@ import { describe, it, assert, expect } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as PlatformError from "effect/PlatformError";
+import * as CodexErrors from "effect-codex-app-server/errors";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -87,6 +89,7 @@ const disabledDefaultSlots = (
 
 const defaultClaudeSettings: ClaudeSettings = Schema.decodeSync(ClaudeSettings)({});
 const defaultCodexSettings: CodexSettings = Schema.decodeSync(CodexSettings)({});
+const disabledCodexSettings: CodexSettings = Schema.decodeSync(CodexSettings)({ enabled: false });
 
 process.env.T3CODE_CURSOR_ENABLED = "1";
 
@@ -222,6 +225,65 @@ const codexModelCapabilities = createModelCapabilities({
     booleanDescriptor("fastMode", "Fast Mode"),
   ],
 }) satisfies NonNullable<ServerProvider["models"][number]["capabilities"]>;
+
+function layerMockCommandSpawner(
+  handler: (
+    command: string,
+    args: ReadonlyArray<string>,
+  ) => { stdout: string; stderr: string; code: number },
+) {
+  return Layer.succeed(
+    ChildProcessSpawner.ChildProcessSpawner,
+    ChildProcessSpawner.make((command) => {
+      const cmd = command as unknown as {
+        command: string;
+        args: ReadonlyArray<string>;
+      };
+      return Effect.succeed(mockHandle(handler(cmd.command, cmd.args)));
+    }),
+  );
+}
+
+function layerFailingSpawner(description: string) {
+  return Layer.succeed(
+    ChildProcessSpawner.ChildProcessSpawner,
+    ChildProcessSpawner.make(() =>
+      Effect.fail(
+        PlatformError.systemError({
+          _tag: "NotFound",
+          module: "ChildProcess",
+          method: "spawn",
+          description,
+        }),
+      ),
+    ),
+  );
+}
+
+function layerHangingScopedSpawner(killCalls: Ref.Ref<number>) {
+  return Layer.succeed(
+    ChildProcessSpawner.ChildProcessSpawner,
+    ChildProcessSpawner.make(() =>
+      Effect.gen(function* () {
+        const handle = ChildProcessSpawner.makeHandle({
+          pid: ChildProcessSpawner.ProcessId(1),
+          exitCode: Effect.never,
+          isRunning: Effect.succeed(true),
+          kill: () => Ref.update(killCalls, (current) => current + 1),
+          unref: Effect.succeed(Effect.void),
+          stdin: Sink.drain,
+          stdout: Stream.never,
+          stderr: Stream.never,
+          all: Stream.never,
+          getInputFd: () => Sink.drain,
+          getOutputFd: () => Stream.empty,
+        });
+        yield* Effect.addFinalizer(() => handle.kill().pipe(Effect.ignore));
+        return handle;
+      }),
+    ),
+  );
+}
 
 function makeCodexProbeSnapshot(
   input: Partial<CodexAppServerProviderSnapshot> = {},
@@ -424,9 +486,275 @@ it.layer(
         assert.strictEqual(status.auth.status, "unknown");
       }),
     );
+
+    it.effect("returns an api key label for codex api key auth", () =>
+      Effect.gen(function* () {
+        const status = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+          Effect.succeed(
+            makeCodexProbeSnapshot({
+              account: {
+                account: { type: "apiKey" },
+                requiresOpenaiAuth: false,
+              },
+            }),
+          ),
+        );
+
+        assert.strictEqual(status.status, "ready");
+        assert.strictEqual(status.auth.status, "authenticated");
+        assert.strictEqual(status.auth.type, "apiKey");
+        assert.strictEqual(status.auth.label, "OpenAI API Key");
+      }),
+    );
+
+    it.effect("returns an Amazon Bedrock label for codex Bedrock auth", () =>
+      Effect.gen(function* () {
+        const status = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+          Effect.succeed(
+            makeCodexProbeSnapshot({
+              account: {
+                account: { type: "amazonBedrock" },
+                requiresOpenaiAuth: false,
+              },
+            }),
+          ),
+        );
+
+        assert.strictEqual(status.status, "ready");
+        assert.strictEqual(status.auth.status, "authenticated");
+        assert.strictEqual(status.auth.type, "amazonBedrock");
+        assert.strictEqual(status.auth.label, "Amazon Bedrock");
+      }),
+    );
+
+    it.effect.each([
+      "codex",
+      "/Applications/Custom App.app/Contents/Resources/codex",
+      "C:\\Tools\\codex.exe",
+    ])("explains how to configure a Codex executable that cannot start: %s", (binaryPath) =>
+      Effect.gen(function* () {
+        const settings = { ...defaultCodexSettings, binaryPath };
+        const status = yield* checkCodexProviderStatus(settings, (input) => {
+          assert.strictEqual(input.binaryPath, binaryPath);
+          return Effect.fail(
+            new CodexErrors.CodexAppServerSpawnError({
+              command: `${binaryPath} app-server`,
+              cause: new Error("spawn ENOENT"),
+            }),
+          );
+        });
+        assert.strictEqual(status.status, "error");
+        assert.strictEqual(status.installed, false);
+        assert.strictEqual(status.auth.status, "unknown");
+        assert.include(status.message, binaryPath);
+        assert.include(status.message, "Settings → Providers → Codex → Binary path on the server");
+        assert.strictEqual(
+          status.message?.includes("Installing ChatGPT or Codex desktop"),
+          binaryPath === "codex",
+        );
+        assert.strictEqual(settings.binaryPath, binaryPath);
+      }),
+    );
+
+    it.effect(
+      "does not time out a healthy probe slower than the shared 10s auth-probe timeout (#7513)",
+      () =>
+        Effect.gen(function* () {
+          const statusFiber = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+            Effect.sleep("15 seconds").pipe(Effect.as(makeCodexProbeSnapshot())),
+          ).pipe(Effect.forkChild);
+
+          yield* Effect.yieldNow;
+          yield* TestClock.adjust("15 seconds");
+
+          const status = yield* Fiber.join(statusFiber);
+          assert.strictEqual(status.status, "ready");
+        }),
+    );
+
+    it.effect(
+      "keeps the last successful Codex catalog and skills after repeated probe timeouts",
+      () =>
+        Effect.gen(function* () {
+          const identity = {
+            instanceId: ProviderInstanceId.make("codex"),
+            driver: ProviderDriverKind.make("codex"),
+          };
+          const successful = {
+            ...identity,
+            ...(yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+              Effect.succeed(
+                makeCodexProbeSnapshot({
+                  skills: [
+                    {
+                      name: "typescript",
+                      description: "TypeScript help",
+                      path: "/skills/typescript/SKILL.md",
+                      enabled: true,
+                    },
+                  ],
+                }),
+              ),
+            )),
+          };
+          // The same merge consumes both in-memory and persisted provider snapshots.
+          const cached = decodeServerProvider(encodeServerProvider(successful));
+          const statusFiber = yield* checkCodexProviderStatus(
+            defaultCodexSettings,
+            () => Effect.never,
+          ).pipe(Effect.forkChild);
+          yield* Effect.yieldNow;
+          yield* TestClock.adjust("21 seconds");
+          const timedOut = { ...identity, ...(yield* Fiber.join(statusFiber)) };
+          assert.deepStrictEqual(timedOut.models, []);
+          const transientFailure = {
+            ...identity,
+            ...(yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+              Effect.fail(
+                new CodexErrors.CodexAppServerTransportError({
+                  operation: "read-input-stream",
+                  cause: new Error("connection closed"),
+                }),
+              ),
+            )),
+          };
+
+          const pending = ProviderRegistry.mergeProviderSnapshot(cached, {
+            ...timedOut,
+            status: "warning",
+            installed: false,
+          });
+          assert.deepStrictEqual(pending.skills, successful.skills);
+          for (const previous of [
+            successful,
+            cached,
+            pending,
+            { ...cached, status: "error" as const },
+          ]) {
+            const retained = ProviderRegistry.mergeProviderSnapshot(previous, timedOut);
+            const repeated = ProviderRegistry.mergeProviderSnapshot(retained, timedOut);
+            const failed = ProviderRegistry.mergeProviderSnapshot(repeated, transientFailure);
+            for (const provider of [retained, repeated, failed]) {
+              assert.deepStrictEqual(provider.models, successful.models);
+              assert.deepStrictEqual(provider.skills, successful.skills);
+              assert.deepStrictEqual(provider.slashCommands, successful.slashCommands);
+              assert.strictEqual(provider.status, "warning");
+              assert.include(provider.message, "showing the last known models");
+            }
+            assert.strictEqual(retained.checkedAt, timedOut.checkedAt);
+            assert.strictEqual(failed.checkedAt, transientFailure.checkedAt);
+            const recovered = ProviderRegistry.mergeProviderSnapshot(repeated, {
+              ...successful,
+              skills: [],
+            });
+            assert.strictEqual(recovered.status, "ready");
+            assert.strictEqual(recovered.message, undefined);
+            assert.deepStrictEqual(recovered.skills, []);
+
+            const missing = {
+              ...identity,
+              ...(yield* checkCodexProviderStatus(defaultCodexSettings, () =>
+                Effect.fail(
+                  new CodexErrors.CodexAppServerSpawnError({
+                    command: "codex app-server",
+                    cause: new Error("spawn ENOENT"),
+                  }),
+                ),
+              )),
+            };
+            const unavailable = ProviderRegistry.mergeProviderSnapshot(repeated, missing);
+            assert.strictEqual(unavailable.status, "error");
+            assert.strictEqual(unavailable.installed, false);
+            assert.deepStrictEqual(unavailable.models, []);
+            assert.deepStrictEqual(unavailable.skills, []);
+            assert.include(unavailable.message, "Binary path on the server");
+          }
+        }),
+    );
+
+    it.effect("closes the probe and keeps an empty catalog on timeout without prior success", () =>
+      Effect.gen(function* () {
+        const killCalls = yield* Ref.make(0);
+        const statusFiber = yield* checkCodexProviderStatus(defaultCodexSettings).pipe(
+          Effect.provide(layerHangingScopedSpawner(killCalls)),
+          Effect.forkChild,
+        );
+
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust("21 seconds");
+        yield* Effect.yieldNow;
+
+        const status = yield* Fiber.join(statusFiber);
+        assert.strictEqual(status.status, "error");
+        assert.deepStrictEqual(status.models, []);
+        assert.deepStrictEqual(status.skills, []);
+        assert.deepStrictEqual(
+          ProviderRegistry.mergeProviderSnapshot(undefined, {
+            ...status,
+            instanceId: ProviderInstanceId.make("codex"),
+            driver: ProviderDriverKind.make("codex"),
+          }).models,
+          [],
+        );
+        assert.strictEqual(
+          status.message,
+          "Timed out while checking Codex app-server provider status.",
+        );
+        assert.strictEqual(yield* Ref.get(killCalls), 1);
+      }),
+    );
   });
 
   describe("ProviderRegistry.layer", () => {
+    it.each([
+      "claudeAgent",
+      "cursor",
+      "grok",
+      "opencode",
+      "pi",
+      "antigravity",
+      "acpRegistry",
+      "muse",
+    ])("retains the catalog and skills when an installed %s inventory probe fails", (driver) => {
+      const previous = {
+        instanceId: ProviderInstanceId.make(driver),
+        driver: ProviderDriverKind.make(driver),
+        displayName: driver,
+        status: "ready",
+        enabled: true,
+        installed: true,
+        auth: { status: "authenticated" },
+        checkedAt: "2026-10-21T07:00:00.000Z",
+        version: "1.0.0",
+        models: [{ slug: "discovered", name: "Discovered", isCustom: false, capabilities: null }],
+        skills: [{ name: "test", description: "Test skill", path: "/skills/test", enabled: true }],
+        slashCommands: [],
+      } as const satisfies ServerProvider;
+      const failed = {
+        ...previous,
+        status: "error",
+        auth: { status: "unknown" },
+        models: [],
+        skills: [],
+        message: "Provider probe timed out.",
+      } as const satisfies ServerProvider;
+      const retained = ProviderRegistry.mergeProviderSnapshot(previous, failed);
+      assert.deepStrictEqual(retained.models, previous.models);
+      assert.deepStrictEqual(retained.skills, previous.skills);
+      assert.strictEqual(retained.status, "warning");
+      assert.include(retained.message, "showing the last known models");
+
+      for (const unavailable of [
+        { ...failed, installed: false },
+        { ...failed, enabled: false, status: "disabled" as const },
+        { ...failed, auth: { status: "unauthenticated" as const } },
+      ]) {
+        const merged = ProviderRegistry.mergeProviderSnapshot(previous, unavailable);
+        assert.strictEqual(merged.status, unavailable.status);
+        assert.strictEqual(merged.message, unavailable.message);
+      }
+    });
+
     it("stores workspace skills, commands and options without changing machine metadata", () => {
       const provider = {
         instanceId: ProviderInstanceId.make("codex"),
@@ -1116,6 +1444,7 @@ it.layer(
       const signedIn = {
         instanceId: ProviderInstanceId.make("antigravity-personal"),
         driver: ProviderDriverKind.make("antigravity"),
+        displayName: "Antigravity",
         status: "ready",
         enabled: true,
         installed: true,
@@ -1158,6 +1487,33 @@ it.layer(
           ProviderRegistry.mergeProviderSnapshot(merged, restartProbe),
           merged,
         );
+      });
+
+      it("carries the account through the boot probe and a failed probe without hiding them", () => {
+        const booting = {
+          ...restartProbe,
+          installed: false,
+          version: null,
+          message: "Checking Antigravity availability.",
+        } satisfies ServerProvider;
+        assert.deepStrictEqual(ProviderRegistry.mergeProviderSnapshot(signedIn, booting), {
+          ...booting,
+          auth: signedIn.auth,
+          models: signedIn.models,
+        });
+
+        const failed = {
+          ...restartProbe,
+          status: "error",
+          message: "Antigravity did not respond to its local health check within 90 seconds.",
+        } satisfies ServerProvider;
+        assert.deepStrictEqual(ProviderRegistry.mergeProviderSnapshot(signedIn, failed), {
+          ...failed,
+          status: "warning",
+          message: "Antigravity status check failed; showing the last known models.",
+          auth: signedIn.auth,
+          models: signedIn.models,
+        });
       });
 
       it("does not invent an account after sign-out, disable, uninstall, or for other providers", () => {
@@ -2145,9 +2501,186 @@ it.layer(
           assert.notInclude(unavailable, "ghost_stale");
         }),
     );
+
+    it.effect(
+      "keeps Cursor disabled and skips provider probing when settings use their defaults",
+      () =>
+        Effect.gen(function* () {
+          const serverSettings = yield* makeMutableServerSettingsService(
+            decodeServerSettings(
+              deepMerge(encodedDefaultServerSettings, {
+                providerInstances: disabledDefaultSlots("codex", "grok", "claudeAgent"),
+              }),
+            ),
+          );
+          let cursorSpawned = false;
+          const scope = yield* Scope.make();
+          yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
+          const layerProviderRegistry = ProviderRegistry.layer.pipe(
+            Layer.provideMerge(ProviderInstanceRegistryHydration.layer),
+            Layer.provideMerge(AntigravityInstallation.AntigravityInstallation.layer),
+            Layer.provideMerge(
+              Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),
+            ),
+            Layer.provideMerge(ServerSecretStore.layer),
+            Layer.provideMerge(
+              ServerConfig.layerTest(process.cwd(), {
+                prefix: "t3-provider-registry-",
+              }),
+            ),
+            Layer.provideMerge(layerTestHttpClient),
+            Layer.provideMerge(
+              Layer.succeed(
+                ProviderEventLoggers.ProviderEventLoggers,
+                ProviderEventLoggers.NoOpProviderEventLoggers,
+              ),
+            ),
+            Layer.provideMerge(ProviderLatestVersions.layer),
+            Layer.provideMerge(McpProviderSessions.layer),
+            Layer.provideMerge(ModelManifest.layerTest),
+            Layer.provideMerge(ResetCreditCoordinator.layerTest),
+            Layer.provideMerge(
+              OpenCodeRuntime.layer.pipe(Layer.provide(OpenCodeServerLedger.layerTest)),
+            ),
+            Layer.provideMerge(layerBackgroundPolicyAlwaysRun),
+            Layer.provideMerge(
+              layerMockCommandSpawner((command, args) => {
+                if (command === "cursor-agent") {
+                  cursorSpawned = true;
+                }
+                const joined = args.join(" ");
+                if (joined === "--version") {
+                  return {
+                    stdout: `${command} 1.0.0\n`,
+                    stderr: "",
+                    code: 0,
+                  };
+                }
+                if (joined === "auth status") {
+                  return {
+                    stdout: '{"authenticated":true}\n',
+                    stderr: "",
+                    code: 0,
+                  };
+                }
+                throw new Error(`Unexpected args: ${command} ${joined}`);
+              }),
+            ),
+          );
+          const runtimeServices = yield* Layer.build(
+            Layer.mergeAll(
+              Layer.succeed(ServerSettingsModule.ServerSettingsService, serverSettings),
+              layerProviderRegistry,
+            ),
+          ).pipe(Scope.provide(scope));
+
+          yield* Effect.gen(function* () {
+            const registry = yield* ProviderRegistry.ProviderRegistry;
+            const providers = yield* registry.getProviders;
+            const cursorProvider = providers.find(
+              (provider) => provider.instanceId === ProviderInstanceId.make("cursor"),
+            );
+
+            assert.deepStrictEqual(providers.map((provider) => provider.instanceId).toSorted(), [
+              "antigravity",
+              "claudeAgent",
+              "codex",
+              "cursor",
+              "grok",
+              "muse",
+              "opencode",
+              "pi",
+            ]);
+            assert.strictEqual(cursorProvider?.enabled, false);
+            assert.strictEqual(cursorProvider?.status, "disabled");
+            assert.strictEqual(cursorProvider?.message, "Cursor is disabled in T3 Code settings.");
+            const museProvider = providers.find((provider) => provider.driver === "muse");
+            assert.strictEqual(museProvider?.enabled, false);
+            assert.strictEqual(museProvider?.status, "disabled");
+            assert.strictEqual(cursorSpawned, false);
+          }).pipe(Effect.provide(runtimeServices));
+        }),
+    );
+
+    it.effect("skips codex probes entirely when the provider is disabled", () =>
+      Effect.gen(function* () {
+        const status = yield* checkCodexProviderStatus(disabledCodexSettings).pipe(
+          Effect.provide(layerFailingSpawner("spawn codex ENOENT")),
+        );
+        assert.strictEqual(status.enabled, false);
+        assert.strictEqual(status.status, "disabled");
+        assert.strictEqual(status.installed, false);
+        assert.strictEqual(status.message, "Codex is disabled in T3 Code settings.");
+      }),
+    );
   });
 
   describe("checkClaudeProviderStatus", () => {
+    it.effect("keeps Claude models selectable when the version probe times out", () =>
+      Effect.gen(function* () {
+        const killCalls = yield* Ref.make(0);
+        const fiber = yield* checkClaudeProviderStatus(defaultClaudeSettings).pipe(
+          Effect.provide(layerHangingScopedSpawner(killCalls)),
+          Effect.forkChild,
+        );
+        yield* TestClock.adjust("1 minute");
+        const status = yield* Fiber.join(fiber);
+        assert.strictEqual(status.status, "warning");
+        assert.strictEqual(status.installed, true);
+        assert.ok(status.models.some((model) => !model.isCustom));
+      }),
+    );
+
+    it.effect("returns ready when claude is installed and authenticated", () =>
+      Effect.gen(function* () {
+        const status = yield* checkClaudeProviderStatus(
+          defaultClaudeSettings,
+          claudeCapabilities(),
+        );
+        assert.strictEqual(status.status, "ready");
+        assert.strictEqual(status.installed, true);
+        assert.strictEqual(status.auth.status, "authenticated");
+      }).pipe(
+        Effect.provide(
+          layerMockSpawner((args) => {
+            const joined = args.join(" ");
+            if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
+            if (joined === "auth status")
+              return {
+                stdout: '{"loggedIn":true,"authMethod":"claude.ai"}\n',
+                stderr: "",
+                code: 0,
+              };
+            throw new Error(`Unexpected args: ${joined}`);
+          }),
+        ),
+      ),
+    );
+
+    it.effect("returns ready and labels Bedrock-backed Claude as authenticated", () =>
+      Effect.gen(function* () {
+        // Bedrock authenticates via external AWS credentials, so the SDK init
+        // reports only `apiProvider` with no subscription or token.
+        const status = yield* checkClaudeProviderStatus(
+          defaultClaudeSettings,
+          claudeCapabilities({ apiProvider: "bedrock" }),
+        );
+        assert.strictEqual(status.status, "ready");
+        assert.strictEqual(status.installed, true);
+        assert.strictEqual(status.auth.status, "authenticated");
+        assert.strictEqual(status.auth.type, "bedrock");
+        assert.strictEqual(status.auth.label, "Amazon Bedrock");
+      }).pipe(
+        Effect.provide(
+          layerMockSpawner((args) => {
+            const joined = args.join(" ");
+            if (joined === "--version") return { stdout: "1.0.0\n", stderr: "", code: 0 };
+            throw new Error(`Unexpected args: ${joined}`);
+          }),
+        ),
+      ),
+    );
+
     it.effect("reports a logged-out CLI as unauthenticated", () =>
       Effect.gen(function* () {
         // The capability probe resolves for a logged-out CLI, so `tokenSource:

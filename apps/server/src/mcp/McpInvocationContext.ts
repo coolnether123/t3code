@@ -1,5 +1,9 @@
 import {
   type AuthMcpClientAccess,
+  type ModelSelection,
+  type ProviderDriverKind,
+  type TurnId,
+  ComputerControlUnavailableError,
   type EnvironmentId,
   McpCapabilityUnavailableError,
   OrchestratorMcpFailure,
@@ -12,6 +16,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 
 const ALL_MCP_CAPABILITIES = [
+  "computer",
   "preview",
   "orchestration",
   "worktree",
@@ -24,6 +29,11 @@ export interface McpThreadCaller {
   readonly threadId: ThreadId;
   readonly providerSessionId: string;
   readonly providerInstanceId: ProviderInstanceId;
+  readonly providerDriverKind?: ProviderDriverKind | undefined;
+  readonly parentModelSelection?: ModelSelection | undefined;
+  readonly parentTurnId?: TurnId | undefined;
+  readonly runtimeMode?: RuntimeMode | undefined;
+  readonly workingDirectory?: string | undefined;
 }
 
 export interface McpClientCaller {
@@ -45,6 +55,7 @@ export const clientRuntimeModeCeiling = (client: McpClientCaller | undefined): R
  * preview, worktree handoff) need `thread`.
  */
 export interface McpInvocationScope {
+  readonly auxiliaryOwnerThreadId?: ThreadId;
   readonly environmentId: EnvironmentId;
   readonly capabilities: ReadonlySet<McpCapability>;
   readonly issuedAt: number;
@@ -60,12 +71,22 @@ export class McpInvocationContext extends Context.Service<
 
 export type McpCapabilityError<C extends McpCapability> = C extends "preview"
   ? PreviewAutomationUnavailableError
-  : McpCapabilityUnavailableError;
+  : C extends "computer"
+    ? ComputerControlUnavailableError
+    : McpCapabilityUnavailableError;
 
 const missingCapability = (
   invocation: McpInvocationScope,
   capability: McpCapability,
-): PreviewAutomationUnavailableError | McpCapabilityUnavailableError => {
+):
+  | PreviewAutomationUnavailableError
+  | McpCapabilityUnavailableError
+  | ComputerControlUnavailableError => {
+  if (capability === "computer")
+    return new ComputerControlUnavailableError({
+      message:
+        "Full Chrome or Full desktop control is not active for this provider turn. Select one of those modes and start a new turn.",
+    });
   const fields = {
     environmentId: invocation.environmentId,
     ...(invocation.thread === undefined
@@ -92,7 +113,7 @@ export const requireMcpCapability = <const C extends McpCapability>(
     Effect.withSpan("mcp.requireCapability"),
   );
 
-export const requireThreadMcpCapability = <const C extends "preview" | "device">(
+export const requireThreadMcpCapability = <const C extends "preview" | "device" | "computer">(
   capability: C,
 ): Effect.Effect<McpThreadInvocationScope, McpCapabilityError<C>, McpInvocationContext> =>
   McpInvocationContext.pipe(
@@ -100,6 +121,14 @@ export const requireThreadMcpCapability = <const C extends "preview" | "device">
       (invocation): invocation is McpThreadInvocationScope =>
         invocation.capabilities.has(capability) && invocation.thread !== undefined,
       (invocation) => missingCapability(invocation, capability) as McpCapabilityError<C>,
+    ),
+    Effect.map((invocation) =>
+      invocation.auxiliaryOwnerThreadId === undefined
+        ? invocation
+        : {
+            ...invocation,
+            thread: { ...invocation.thread, threadId: invocation.auxiliaryOwnerThreadId },
+          },
     ),
     Effect.withSpan("mcp.requireCapability"),
   );

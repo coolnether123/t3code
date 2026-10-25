@@ -6423,14 +6423,20 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         const second = yield* answerNext;
         yield* harness.firstTerminal;
 
+        // The fork's remembered prompt lists each file with its diff, so compare only the file lines.
+        const listedFiles = (prompt: string | undefined) =>
+          (prompt ?? "")
+            .split("\n")
+            .filter((line) => /^(ADD|UPDATE|DELETE) /.test(line))
+            .toSorted();
         assert.deepEqual(
           [first, second].map((request) => [
             request.nativeRequestRef?.nativeId,
-            approvalItem(harness.events, request)?.prompt,
+            listedFiles(approvalItem(harness.events, request)?.prompt),
           ]),
           [
-            ["patch-b", "update /w/b.ts"],
-            ["patch-a", "add /w/a.ts\nupdate /w/c.ts -> /w/d.ts\ndelete /w/e.ts"],
+            ["patch-b", ["UPDATE /w/b.ts"]],
+            ["patch-a", ["ADD /w/a.ts", "DELETE /w/e.ts", "UPDATE /w/c.ts -> /w/d.ts"]],
           ],
         );
         assert.deepEqual(

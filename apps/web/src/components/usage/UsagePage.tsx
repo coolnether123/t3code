@@ -1,3 +1,8 @@
+import { Link, useNavigate } from "@tanstack/react-router";
+import { BirthdayGreeting } from "../BirthdayCelebration";
+import { UsagePrompts } from "./UsagePrompts";
+import { UsageModelHourlyChart } from "./UsageModelHourlyChart";
+import { CodexUsageButton } from "./CodexUsageButton";
 import { ChatGptUsageButton } from "../settings/ChatGptUsageButton";
 import { usesChatGptSharing } from "@t3tools/shared/usageLimits";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
@@ -179,6 +184,8 @@ function UsageModelDialogHost({
 }
 
 export function UsagePage() {
+  const navigate = useNavigate();
+  const [promptRefreshRevision, setPromptRefreshRevision] = useState(0);
   const [preferences, setPreferences] = useState(readUsagePagePreferences);
   useEscapeToGoBack();
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
@@ -186,9 +193,12 @@ export function UsagePage() {
   const shortcutTitle = (
     option: (typeof METRIC_OPTIONS)[number] | (typeof WINDOW_OPTIONS)[number],
   ) => {
-    const shortcut = shortcutLabelForCommand(keybindings, option.command, {
-      context: { usagePageOpen: true },
-    });
+    const shortcut =
+      "command" in option
+        ? shortcutLabelForCommand(keybindings, option.command, {
+            context: { usagePageOpen: true },
+          })
+        : null;
     return shortcut ? `${option.label} (${shortcut})` : option.label;
   };
   const [windowSelection, setWindowSelection] = useState(() => ({
@@ -287,7 +297,9 @@ export function UsagePage() {
 
     const command = resolveUsageShortcut(event, keybindings);
     const metricOption = METRIC_OPTIONS.find((option) => option.command === command);
-    const periodOption = WINDOW_OPTIONS.find((option) => option.command === command);
+    const periodOption = WINDOW_OPTIONS.find(
+      (option) => "command" in option && option.command === command,
+    );
     if (!metricOption && !periodOption) return;
 
     event.preventDefault();
@@ -302,6 +314,7 @@ export function UsagePage() {
   }, []);
 
   const refreshWindow = () => {
+    setPromptRefreshRevision((revision) => revision + 1);
     if (refreshingRef.current) return;
 
     if (showingLimits) {
@@ -515,6 +528,50 @@ export function UsagePage() {
 
         <ScrollArea className="min-h-0 flex-1">
           <WorkspacePageContainer width="wide">
+            <BirthdayGreeting />
+            <div className="mb-5 flex justify-end">
+              <Link to="/usage-resets" className="text-sm underline">
+                Limits &amp; resets
+              </Link>
+            </div>
+            {!showingLimits ? (
+              <UsagePrompts
+                environments={environments}
+                selectedEnvironmentIds={selectedEnvironmentIds}
+                window={window}
+                refreshRevision={promptRefreshRevision}
+              />
+            ) : null}
+            {!showingLimits && isPast24Hours ? (
+              <UsageModelHourlyChart
+                hours={hours}
+                hourly={merged.hourly}
+                timeZone={window.timeZone}
+              />
+            ) : null}
+            {!showingLimits && merged.codexServiceTiers ? (
+              <div
+                className="mb-4 text-xs text-muted-foreground"
+                aria-label="Codex Fast Mode accounting"
+              >
+                <CodexUsageButton
+                  onOpen={() => {
+                    void navigate({ to: "/usage-resets" });
+                  }}
+                >
+                  Codex Fast Mode
+                </CodexUsageButton>
+                <p>
+                  {formatUsd(merged.codexServiceTiers.fastCostUsd)} across{" "}
+                  {formatCount(merged.codexServiceTiers.fastRecords)} responses.
+                </p>
+                <p>
+                  {formatCount(merged.codexServiceTiers.userReportedRecords)} responses use
+                  user-reported windows. {formatCount(merged.codexServiceTiers.unknownRecords)}{" "}
+                  responses have no speed metadata.
+                </p>
+              </div>
+            ) : null}
             {selectedEnvironments.length === 0 ? (
               <p className="text-sm text-muted-foreground">
                 {environments.length === 0

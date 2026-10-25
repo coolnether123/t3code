@@ -83,6 +83,7 @@ import {
   type KeybindingsUpdateToastController,
 } from "../components/KeybindingsUpdateToast.logic";
 
+import { BirthdayCelebration } from "../components/BirthdayCelebration";
 import { getDesktopSnapShotBridge } from "../lib/desktopSnapShot";
 import { installDesktopPasteAsText } from "../lib/desktopPasteAsText";
 import { shouldResumeSnapShotSetupOnStartup } from "../lib/snapShotSetupResume";
@@ -254,7 +255,7 @@ function RootRouteView() {
             <EventRouter skipInitialBootstrapNavigation={returningFromWelcome} />
           ) : null}
           {isElectron ? <DesktopUpdateLaunchNotice /> : null}
-          {appShell}
+          <BirthdayCelebration>{appShell}</BirthdayCelebration>
           {/* Above the router: a theme draft is judged by walking the app, so the
               editor has to survive navigation away from settings. */}
           <ThemeEditorHost />

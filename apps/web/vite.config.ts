@@ -186,7 +186,7 @@ const configuredAllowedHosts = (process.env.T3CODE_DEV_ALLOWED_HOSTS ?? "")
   .filter((entry) => entry.length > 0);
 const allowedHosts = [".ts.net", ...configuredAllowedHosts];
 
-export default defineConfig(() => {
+export default defineConfig(({ mode }) => {
   return {
     run: {
       tasks: {
@@ -268,6 +268,12 @@ export default defineConfig(() => {
       // Transform the whole module graph at server start instead of on the
       // first request. Without this, a cold worktree discovers and transforms
       // modules one import-level at a time while the browser waits — which
+      // over a tailnet origin turns into minutes of waterfall.
+      ...(mode === "test"
+        ? {}
+        : {
+            warmup: { clientFiles: ["./src/main.tsx"] },
+          }),
       // over a tailnet origin turns into minutes of waterfall. Bundled dev
       // ignores this; warmBundledDevPlugin covers it there.
       warmup: {

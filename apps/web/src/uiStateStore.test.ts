@@ -11,7 +11,9 @@ import {
   persistState,
   reorderProjects,
   resolveProjectExpanded,
+  setLastChatLocationForScope,
   setProjectExpanded,
+  setSidebarEnvironmentScopeId,
   type UiState,
 } from "./uiStateStore";
 
@@ -20,15 +22,44 @@ function makeUiState(overrides: Partial<UiState> = {}): UiState {
     projectExpandedById: {},
     projectOrder: [],
     sidebarProjectScopeKey: null,
+    sidebarEnvironmentScopeId: null,
     threadLastVisitedAtById: {},
     threadChangedFilesExpandedById: {},
     defaultAdvertisedEndpointKey: null,
     pullRequestMergeMethod: "merge",
+    lastChatLocationByScope: {},
     ...overrides,
   };
 }
 
 describe("uiStateStore pure functions", () => {
+  it("switches environments without retaining a project filter from the other Mac", () => {
+    const next = setSidebarEnvironmentScopeId(
+      makeUiState({ sidebarProjectScopeKey: "project-on-elora" }),
+      "millie",
+    );
+    expect(next.sidebarEnvironmentScopeId).toBe("millie");
+    expect(next.sidebarProjectScopeKey).toBeNull();
+  });
+  it("remembers and clears a chat location for a scope", () => {
+    const location = { kind: "thread", environmentId: "elora", threadId: "thread-1" } as const;
+    const remembered = setLastChatLocationForScope(makeUiState(), "environment:elora", location);
+
+    expect(remembered.lastChatLocationByScope["environment:elora"]).toEqual(location);
+    expect(
+      setLastChatLocationForScope(remembered, "environment:elora", null).lastChatLocationByScope,
+    ).toEqual({});
+  });
+  it("bounds runtime chat-location history", () => {
+    const state = Array.from({ length: 40 }, (_, index) => index).reduce(
+      (current, index) =>
+        setLastChatLocationForScope(current, `environment:env-${index}`, { kind: "index" }),
+      makeUiState(),
+    );
+
+    expect(Object.keys(state.lastChatLocationByScope)).toHaveLength(32);
+    expect(Object.keys(state.lastChatLocationByScope)[0]).toBe("environment:env-8");
+  });
   it("stores server timestamps without moving visit state backwards", () => {
     const threadId = ThreadId.make("thread-1");
     const initialState = makeUiState();
@@ -127,6 +158,8 @@ describe("parsePersistedState", () => {
       defaultAdvertisedEndpointKey: "desktop-core:lan:http",
       sidebarProjectScopeKey: null,
       pullRequestMergeMethod: "merge",
+      sidebarEnvironmentScopeId: null,
+      lastChatLocationByScope: {},
       threadChangedFilesExpandedById: {
         "environment:thread-1": {
           "turn-1": false,
@@ -162,6 +195,60 @@ describe("parsePersistedState", () => {
     expect(resolveProjectExpanded(parsed.projectExpandedById, [projectAKey])).toBe(true);
     expect(resolveProjectExpanded(parsed.projectExpandedById, [projectBKey])).toBe(false);
     expect(resolveProjectExpanded(parsed.projectExpandedById, ["unknown"])).toBe(true);
+  });
+
+  it("preserves legacy expanded-only semantics for one-way migration", () => {
+    const parsed = parsePersistedState({
+      expandedProjectCwds: ["/repo/a"],
+    });
+
+    expect(
+      resolveProjectExpanded(parsed.projectExpandedById, [
+        legacyProjectCwdPreferenceKey("/repo/a"),
+      ]),
+    ).toBe(true);
+    expect(
+      resolveProjectExpanded(parsed.projectExpandedById, [
+        legacyProjectCwdPreferenceKey("/repo/b"),
+      ]),
+    ).toBe(false);
+  });
+
+  it("sanitizes remembered locations and keeps only the newest bounded entries", () => {
+    const locations = Object.fromEntries(
+      Array.from({ length: 40 }, (_, index) => [`environment:env-${index}`, { kind: "index" }]),
+    );
+    const parsed = parsePersistedState({
+      lastChatLocationByScope: {
+        all: { kind: "thread", environmentId: "elora", threadId: "thread-1" },
+        "environment:millie": { kind: "draft", environmentId: "millie", draftId: "draft-1" },
+        "environment:wrong": { kind: "thread", environmentId: "elora", threadId: "thread-2" },
+        "bad-scope": { kind: "index" },
+        "environment:elora": { kind: "thread", environmentId: "elora", threadId: "" },
+      } as NonNullable<PersistedUiState["lastChatLocationByScope"]>,
+    });
+
+    expect(parsed.lastChatLocationByScope.all).toEqual({
+      kind: "thread",
+      environmentId: "elora",
+      threadId: "thread-1",
+    });
+    expect(parsed.lastChatLocationByScope["environment:millie"]).toEqual({
+      kind: "draft",
+      environmentId: "millie",
+      draftId: "draft-1",
+    });
+    expect(parsed.lastChatLocationByScope["environment:wrong"]).toBeUndefined();
+    expect(parsed.lastChatLocationByScope["bad-scope"]).toBeUndefined();
+    expect(parsed.lastChatLocationByScope["environment:elora"]).toBeUndefined();
+
+    const bounded = parsePersistedState({
+      lastChatLocationByScope: locations as NonNullable<
+        PersistedUiState["lastChatLocationByScope"]
+      >,
+    });
+    expect(Object.keys(bounded.lastChatLocationByScope)).toHaveLength(32);
+    expect(Object.keys(bounded.lastChatLocationByScope)[0]).toBe("environment:env-8");
   });
 });
 
@@ -214,6 +301,14 @@ describe("uiStateStore persistence", () => {
         },
       },
       defaultAdvertisedEndpointKey: "desktop-core:lan:http",
+      lastChatLocationByScope: {
+        "environment:elora": {
+          kind: "thread",
+          environmentId: "elora",
+          threadId: "thread-1",
+        },
+        all: { kind: "draft", environmentId: "millie", draftId: "draft-1" },
+      },
     });
 
     persistState(state);
@@ -231,6 +326,15 @@ describe("uiStateStore persistence", () => {
       },
       defaultAdvertisedEndpointKey: "desktop-core:lan:http",
       sidebarProjectScopeKey: null,
+      sidebarEnvironmentScopeId: null,
+      lastChatLocationByScope: {
+        "environment:elora": {
+          kind: "thread",
+          environmentId: "elora",
+          threadId: "thread-1",
+        },
+        all: { kind: "draft", environmentId: "millie", draftId: "draft-1" },
+      },
       threadChangedFilesExpansionVersion: 2,
       threadChangedFilesExpandedById: {
         "environment:thread-1": {

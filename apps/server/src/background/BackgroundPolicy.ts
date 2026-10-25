@@ -138,7 +138,12 @@ function hasThermalPressure(hostPower: HostPowerSnapshot): boolean {
   return hostPower.thermalState === "serious" || hostPower.thermalState === "critical";
 }
 
-function isHostConstrained(
+/**
+ * Whether the host itself should pause background work: suspended, under
+ * thermal pressure, or locked, in low-power mode, or on battery when the
+ * user's settings pause for those.
+ */
+export function isHostConstrained(
   hostPower: HostPowerSnapshot,
   settings: ResolvedBackgroundActivitySettings,
 ): boolean {

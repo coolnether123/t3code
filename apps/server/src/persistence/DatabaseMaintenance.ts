@@ -1,4 +1,5 @@
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -146,6 +147,7 @@ const lockExclusively = Effect.fn("DatabaseMaintenance.lockExclusively")(functio
 const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const platform = yield* HostProcess.Platform;
   const legacyPath = (databasePath: string) =>
     path.join(path.dirname(databasePath), "state.sqlite");
 
@@ -226,14 +228,24 @@ const make = Effect.gen(function* () {
     function* (databasePath: string) {
       const legacy = legacyPath(databasePath);
       if (!(yield* fs.exists(legacy))) return;
-      // A version before 0.1.0 may still be running against it. Keep the lock
-      // while deleting, and delete the database before its WAL so a failure
-      // never leaves it without committed transactions.
+      // Delete the database before its WAL so a failure retains committed data.
+      const removeFiles = Effect.forEach(["", "-wal", "-shm"], (suffix) =>
+        fs.remove(legacy + suffix, { force: true }),
+      );
+      if (platform === "win32") {
+        // SQLite handles forbid deletion on Windows, including our own handle.
+        // Close after checking exclusivity. A new opener also blocks deletion,
+        // and the WAL remains intact if deleting the database fails.
+        yield* lockExclusively(legacy).pipe(
+          Effect.provide(NodeSqliteClient.layer({ filename: legacy })),
+        );
+        yield* removeFiles;
+        return;
+      }
+      // POSIX permits unlinking open files, so retain the SQLite lock throughout.
       yield* Effect.gen(function* () {
         yield* lockExclusively(legacy);
-        for (const suffix of ["", "-wal", "-shm"]) {
-          yield* fs.remove(legacy + suffix, { force: true });
-        }
+        yield* removeFiles;
       }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: legacy })));
     },
     (effect, databasePath) =>

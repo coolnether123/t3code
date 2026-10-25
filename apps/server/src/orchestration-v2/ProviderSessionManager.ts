@@ -146,6 +146,7 @@ export interface ProviderSessionManagerV2Shape {
   readonly shutdown: Effect.Effect<void>;
   readonly open: (input: {
     readonly threadId: ThreadId;
+    readonly owningThreadId?: ThreadId;
     readonly providerSessionId: ProviderSessionId;
     readonly modelSelection: ModelSelection;
     readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
@@ -163,6 +164,11 @@ export interface ProviderSessionManagerV2Shape {
     ProviderSessionManagerV2Error
   >;
   readonly isLive: (providerSessionId: ProviderSessionId) => Effect.Effect<boolean>;
+  readonly getAuxiliaryOwner: (input: {
+    readonly mcpCredentialId: string;
+    readonly threadId: ThreadId;
+    readonly providerInstanceId: ProviderInstanceId;
+  }) => Effect.Effect<ThreadId | undefined>;
   readonly close: (
     providerSessionId: ProviderSessionId,
   ) => Effect.Effect<void, ProviderSessionManagerV2Error>;
@@ -188,6 +194,8 @@ export class ProviderSessionManagerV2 extends Context.Service<
 >()("t3/orchestration-v2/ProviderSessionManager/ProviderSessionManagerV2") {}
 
 interface LiveSessionEntry {
+  readonly isolatedThreadId: ThreadId | null;
+  readonly owningThreadId: ThreadId | undefined;
   readonly attachedThreadIds: ReadonlySet<ThreadId>;
   readonly loadedProviderThreadKeyByThread: ReadonlyMap<ThreadId, string>;
   /**
@@ -435,6 +443,11 @@ export const layerWithOptions = (
       const prepareMcpSession = (
         threadId: ThreadId,
         providerInstanceId: ProviderInstanceId,
+        metadata?: {
+          readonly owningThreadId?: ThreadId;
+          readonly modelSelection?: ModelSelection;
+          readonly runtimePolicy?: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
+        },
       ): Effect.Effect<PreparedMcpCredential> =>
         options.configureMcp === false
           ? mcpSessions
@@ -450,7 +463,7 @@ export const layerWithOptions = (
                 // re-attaches across a workspace handoff must come back to the
                 // same token or the process's tool calls fail auth.
                 const { browser: browserToolsAvailable, device: deviceToolsAvailable } =
-                  yield* agentAccessSettings(threadId);
+                  yield* agentAccessSettings(metadata?.owningThreadId ?? threadId);
                 const capabilities = new Set<
                   import("../mcp/McpInvocationContext.ts").McpCapability
                 >(["orchestration", "worktree", "pull-requests"]);
@@ -488,6 +501,15 @@ export const layerWithOptions = (
                 const credential = yield* mcpSessionRegistry.issue({
                   threadId,
                   providerInstanceId,
+                  ...(metadata?.modelSelection === undefined
+                    ? {}
+                    : { modelSelection: metadata.modelSelection }),
+                  ...(metadata?.runtimePolicy === undefined
+                    ? {}
+                    : {
+                        runtimeMode: metadata.runtimePolicy.runtimeMode,
+                        workingDirectory: metadata.runtimePolicy.cwd ?? undefined,
+                      }),
                   browserToolsAvailable,
                   capabilities,
                 });
@@ -644,6 +666,12 @@ export const layerWithOptions = (
 
         const events: Array<OrchestrationV2DomainEvent> = [];
         for (const threadId of input.entry.attachedThreadIds) {
+          // Auxiliary identities have no app projection; visible requests belong to their owner.
+          if (
+            threadId === input.entry.isolatedThreadId &&
+            (yield* projectionStore.getThreadShell(threadId)) === null
+          )
+            continue;
           const projection = yield* projectionStore.getThreadRecords(
             threadId,
             ["runtimeRequests", "nodes", "turnItems"],
@@ -757,6 +785,11 @@ export const layerWithOptions = (
           if (input.detachedThreadId !== undefined) threadIds.add(input.detachedThreadId);
           const released = [];
           for (const threadId of threadIds) {
+            if (
+              threadId === input.entry.isolatedThreadId &&
+              (yield* projectionStore.getThreadShell(threadId)) === null
+            )
+              continue;
             const projection = yield* projectionStore.getThreadRecords(threadId, [
               "providerThreads",
             ]);
@@ -1994,6 +2027,18 @@ export const layerWithOptions = (
                   // request UI can answer them and unblock session setup.
                   const threadId = sessionScopedRuntimeRequestThreadId(event);
                   if (threadId !== undefined) {
+                    const owner =
+                      entry.isolatedThreadId === threadId ? entry.owningThreadId : undefined;
+                    const visibleEvent =
+                      owner === undefined
+                        ? event
+                        : event.type === "node.updated"
+                          ? { ...event, node: { ...event.node, threadId: owner } }
+                          : event.type === "turn_item.updated"
+                            ? { ...event, turnItem: { ...event.turnItem, threadId: owner } }
+                            : event.type === "runtime_request.updated"
+                              ? { ...event, threadId: owner }
+                              : event;
                     yield* Effect.gen(function* () {
                       const current = (yield* Ref.get(sessions)).get(
                         sessionKey(entry.runtime.providerSessionId),
@@ -2003,8 +2048,8 @@ export const layerWithOptions = (
                         .ingestNormalized({
                           providerSessionId: entry.runtime.providerSessionId,
                           providerInstanceId: entry.runtime.instanceId,
-                          threadId,
-                          event,
+                          threadId: owner ?? threadId,
+                          event: visibleEvent,
                         })
                         .pipe(
                           Effect.mapError(
@@ -2017,6 +2062,8 @@ export const layerWithOptions = (
                           ),
                         );
                     }).pipe(entry.requestEventPermit.withPermits(1));
+                    if (owner !== undefined)
+                      yield* publishToSubscribers(entry.eventSubscribers, { type: "event", event });
                     return;
                   }
                   yield* publishToSubscribers(entry.eventSubscribers, { type: "event", event });
@@ -2120,6 +2167,16 @@ export const layerWithOptions = (
               const key = sessionKey(input.providerSessionId);
               const existing = (yield* Ref.get(sessions)).get(key);
               if (existing !== undefined) {
+                if (
+                  existing.isolatedThreadId !== null &&
+                  existing.isolatedThreadId !== input.threadId
+                ) {
+                  return yield* new ProviderSessionOpenError({
+                    instanceId: input.modelSelection.instanceId,
+                    providerSessionId: input.providerSessionId,
+                    cause: "An isolated provider session cannot host another conversation.",
+                  });
+                }
                 const attached = existing.attachedThreadIds.has(input.threadId);
                 if (!attached && !existing.supportsMultipleProviderThreads) {
                   return yield* new ProviderSessionOpenError({
@@ -2151,6 +2208,7 @@ export const layerWithOptions = (
               const prepared = yield* prepareMcpSession(
                 input.threadId,
                 input.modelSelection.instanceId,
+                input,
               );
               const mcpCredentialId = prepared.mcpCredentialId;
               let reservationDropped = mcpCredentialId === undefined;
@@ -2221,7 +2279,12 @@ export const layerWithOptions = (
               const exposedRuntime = decorateRuntime(runtime, eventSubscribers);
               const now = yield* Clock.currentTimeMillis;
               const entry: LiveSessionEntry = {
-                attachedThreadIds: new Set([input.threadId]),
+                isolatedThreadId: input.runtimePolicy.isolated ? input.threadId : null,
+                owningThreadId: input.owningThreadId,
+                attachedThreadIds: new Set([
+                  input.threadId,
+                  ...(input.owningThreadId ? [input.owningThreadId] : []),
+                ]),
                 loadedProviderThreadKeyByThread: new Map(),
                 mcpCredentialIdByThread:
                   mcpCredentialId === undefined
@@ -2252,7 +2315,7 @@ export const layerWithOptions = (
                 input.providerSessionId,
                 writeProviderSessionEvents({
                   runtime,
-                  threadIds: [input.threadId],
+                  threadIds: entry.attachedThreadIds,
                   type: "provider-session.attached",
                   payload: runtime.providerSession,
                 }),
@@ -2283,6 +2346,17 @@ export const layerWithOptions = (
         isLive: (providerSessionId) =>
           Ref.get(sessions).pipe(
             Effect.map((current) => current.has(sessionKey(providerSessionId))),
+          ),
+        getAuxiliaryOwner: (input) =>
+          Ref.get(sessions).pipe(
+            Effect.map((current) => {
+              return [...current.values()].find(
+                (entry) =>
+                  entry.isolatedThreadId === input.threadId &&
+                  entry.runtime.instanceId === input.providerInstanceId &&
+                  entry.mcpCredentialIdByThread.get(input.threadId) === input.mcpCredentialId,
+              )?.owningThreadId;
+            }),
           ),
         get: Effect.fn("ProviderSessionManager.get")(
           function* (providerSessionId) {

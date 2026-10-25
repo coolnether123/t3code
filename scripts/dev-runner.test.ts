@@ -164,6 +164,69 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         assert.equal(env.HOST, undefined);
       }),
     );
+
+    it.effect("drops an inherited HOST even when --host is given", () =>
+      Effect.gen(function* () {
+        const env = yield* createDevRunnerEnv({
+          mode: "dev",
+          baseEnv: { HOST: "0.0.0.0", T3CODE_WEB_BIND_HOST: "0.0.0.0" },
+          serverOffset: 0,
+          webOffset: 0,
+          t3Home: undefined,
+          browser: undefined,
+          autoBootstrapProjectFromCwd: undefined,
+          logWebSocketEvents: undefined,
+          host: "0.0.0.0",
+          port: undefined,
+          devUrl: undefined,
+        });
+
+        assert.equal(env.HOST, undefined);
+        assert.equal(env.T3CODE_WEB_BIND_HOST, undefined);
+        assert.equal(env.T3CODE_HOST, "0.0.0.0");
+      }),
+    );
+
+    it.effect("still pins HOST for dev:desktop", () =>
+      Effect.gen(function* () {
+        const env = yield* createDevRunnerEnv({
+          mode: "dev:desktop",
+          baseEnv: { HOST: "0.0.0.0" },
+          serverOffset: 0,
+          webOffset: 0,
+          t3Home: undefined,
+          browser: undefined,
+          autoBootstrapProjectFromCwd: undefined,
+          logWebSocketEvents: undefined,
+          host: undefined,
+          port: undefined,
+          devUrl: undefined,
+        });
+
+        assert.equal(env.HOST, "127.0.0.1");
+      }),
+    );
+
+    it.effect("keeps explicit backend URLs for the desktop renderer", () =>
+      Effect.gen(function* () {
+        const env = yield* createDevRunnerEnv({
+          mode: "dev:desktop",
+          baseEnv: {},
+          serverOffset: 0,
+          webOffset: 0,
+          t3Home: undefined,
+          browser: undefined,
+          autoBootstrapProjectFromCwd: undefined,
+          logWebSocketEvents: undefined,
+          host: undefined,
+          port: undefined,
+          devUrl: undefined,
+        });
+
+        assert.equal(env.VITE_HTTP_URL, "http://127.0.0.1:13773");
+        assert.equal(env.VITE_WS_URL, "ws://127.0.0.1:13773");
+      }),
+    );
   });
 
   describe("findFirstAvailableOffset", () => {
@@ -489,6 +552,21 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
 
           return { env: captured, vpArgs, tailscaleCalls };
         });
+
+      it.effect("defaults T3CODE_BUNDLED_DEV=1 for a shared run", () =>
+        Effect.gen(function* () {
+          const { env } = yield* shareSpawned({ ambientBundledDev: undefined });
+          assert.equal(env?.T3CODE_BUNDLED_DEV, "1");
+        }),
+      );
+
+      it.effect("binds a shared Vite upstream to IPv4 loopback without pinning HMR", () =>
+        Effect.gen(function* () {
+          const { env } = yield* shareSpawned({ ambientBundledDev: undefined });
+          assert.equal(env?.T3CODE_WEB_BIND_HOST, "127.0.0.1");
+          assert.equal(env?.HOST, undefined);
+        }),
+      );
 
       it.effect("keeps an explicit T3CODE_BUNDLED_DEV=0 opt-out", () =>
         Effect.gen(function* () {

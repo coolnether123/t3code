@@ -1,22 +1,46 @@
 // @effect-diagnostics nodeBuiltinImport:off
+// @effect-diagnostics globalDate:off - the inventory sweep interval is wall-clock, like file mtimes.
 /**
+ * Raw filesystem access for transcript scanning.
+ *
+ * Isolated here so the rest of the usage code stays on Effect's `FileSystem`.
  * The direct `node:fs` streaming is deliberate: a cold 30-day window is ~1.4 GB
- * across ~1,500 files, and buffer-level streaming is roughly an order of
- * magnitude cheaper than materialising each file.
+ * across ~1,500 files, and `readline` over a read stream is roughly an order of
+ * magnitude cheaper than materialising each file. The equivalent Effect stream
+ * pipeline is idiomatic but not fast enough to sit behind a page load.
+ *
+ * @module usageTranscriptReader
  */
+import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
-import * as NodeStringDecoder from "node:string_decoder";
+import * as NodeReadline from "node:readline";
+import * as NodeSqlite from "node:sqlite";
+import * as NodeCrypto from "node:crypto";
 
-import type {
-  SelectedFields,
-  TranscriptUsageFormat,
-  UsageRecord,
-} from "@t3tools/provider-core/server/usage";
-import * as Option from "effect/Option";
-import * as Schema from "effect/Schema";
+import type { UsageProviderKind } from "@t3tools/contracts";
 
-import { createTranscriptJsonReader } from "../project/AgentSessionJson.ts";
+import {
+  initialCodexScanState,
+  initialGeminiScanState,
+  mightCarryUsage,
+  parseAntigravityTokenCache,
+  parseClaudeLine,
+  parseCodexLine,
+  parseGeminiLine,
+  parseGeminiValue,
+  parseOpenCodeMessageValue,
+  type CodexScanState,
+  type UsageRecord,
+} from "./usageTranscripts.ts";
+import { parseAiStudioExport, parseChatGptExport } from "./usageImportedChats.ts";
+import {
+  initialRepeatedInputParserState,
+  parseCodexRepeatedInputLineDetailed,
+  type ParseCodexRepeatedInputOptions,
+  type RepeatedInputObservation,
+  type RepeatedInputParserState,
+} from "./usageRepeatedInput.ts";
 
 export interface TranscriptFile {
   readonly path: string;
@@ -24,114 +48,398 @@ export interface TranscriptFile {
   readonly mtimeMs: number;
 }
 
+export interface TranscriptFileListing {
+  readonly files: readonly TranscriptFile[];
+  /** False when the bounded directory walk stopped before it saw every entry. */
+  readonly complete: boolean;
+}
+
+interface TranscriptInventoryWalk {
+  running: boolean;
+  readonly directories: string[];
+  directoryOffset: number;
+  readonly transcripts: string[];
+  transcriptOffset: number;
+  readonly files: Map<string, TranscriptFile>;
+  /** Each directory's mtime, taken before its entries were read. */
+  readonly directoryMtimes: Map<string, number>;
+}
+
+const pendingTranscriptInventories = new Map<string, TranscriptInventoryWalk>();
+
 /**
- * The guard hash fingerprints the bytes immediately before `resumeOffset`. A
- * resume only proceeds when those bytes still match: transcripts are
- * append-only by design, but a rotated or rewritten file silently mis-parsed
- * from the middle would corrupt usage totals.
+ * The last complete walk of a root. Later reads refresh it instead of walking
+ * again: a directory whose mtime is unchanged has the same entries, so only
+ * changed directories are re-read and only recently written transcripts are
+ * re-stat'd. A full walk still runs every few minutes, because appending to an
+ * old transcript (a resumed session) changes neither its directory nor, until
+ * then, anything the refresh looks at.
  */
-export interface TranscriptParsePosition {
-  readonly resumeOffset: number;
-  readonly guardLength: number;
-  readonly guardHash: number;
-  readonly state: unknown;
+interface KnownTranscriptInventory {
+  readonly files: Map<string, TranscriptFile>;
+  readonly directoryMtimes: Map<string, number>;
+  readonly sweptAtMs: number;
 }
 
-export interface TranscriptParseResult {
-  readonly records: readonly UsageRecord[];
-  /**
-   * Records from a trailing segment the writer has not newline-terminated yet.
-   * Kept out of `records` because `position` deliberately excludes that
-   * segment: the next scan re-reads it once the writer finishes the line.
-   */
-  readonly tailRecords: readonly UsageRecord[];
-  /** Includes tentative tail diagnostics; position.state only includes committed lines. */
-  readonly malformedRecords: number;
-  readonly position: TranscriptParsePosition;
-  readonly resumed: boolean;
-}
+const knownTranscriptInventories = new Map<string, KnownTranscriptInventory>();
+const FULL_INVENTORY_SWEEP_MS = 5 * 60_000;
+/** Transcripts written within this span are re-stat'd on every refresh. */
+const ACTIVE_TRANSCRIPT_MS = 48 * 60 * 60_000;
+const METADATA_BATCH = 128;
 
-export const GUARD_LENGTH = 64;
-const STREAMING_THRESHOLD_BYTES = 8 * 1024 * 1024;
-const NEWLINE = 0x0a;
-const STAT_CONCURRENCY = 32;
-const CARRIAGE_RETURN = 0x0d;
-
-function selectUsageFields(fields: SelectedFields) {
-  return (path: ReadonlyArray<string | number | null>): boolean => {
-    let selected: true | SelectedFields = fields;
-    for (const key of path) {
-      if (selected === true) return true;
-      if (typeof key !== "string" || !Object.hasOwn(selected, key)) return false;
-      selected = selected[key]!;
-    }
-    return true;
-  };
-}
-
-function fnv1a(buffer: Buffer): number {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < buffer.length; index += 1) {
-    hash ^= buffer[index]!;
-    hash = Math.imul(hash, 0x01000193);
+const statMtime = async (path: string): Promise<number | null> => {
+  try {
+    return (await NodeFSP.stat(path)).mtimeMs;
+  } catch {
+    return null;
   }
-  return hash >>> 0;
+};
+
+const isInside = (directory: string, path: string) =>
+  path.startsWith(directory.endsWith(NodePath.sep) ? directory : directory + NodePath.sep);
+
+/**
+ * Brings a known inventory up to date. Returns false when the deadline passed
+ * first; what was refreshed so far is kept and the rest is retried next time.
+ */
+async function refreshKnownInventory(
+  known: KnownTranscriptInventory,
+  isTranscript: (name: string) => boolean,
+  expired: () => boolean,
+  wallClock: () => number,
+): Promise<boolean> {
+  const changed: string[] = [];
+  const directories = [...known.directoryMtimes.keys()];
+  for (let offset = 0; offset < directories.length; offset += METADATA_BATCH) {
+    const batch = directories.slice(offset, offset + METADATA_BATCH);
+    const mtimes = await Promise.all(batch.map(statMtime));
+    batch.forEach((directory, index) => {
+      const mtime = mtimes[index];
+      if (mtime === null) {
+        for (const path of [...known.directoryMtimes.keys()]) {
+          if (path === directory || isInside(directory, path)) known.directoryMtimes.delete(path);
+        }
+        for (const path of [...known.files.keys()]) {
+          if (isInside(directory, path)) known.files.delete(path);
+        }
+      } else if (mtime !== known.directoryMtimes.get(directory)) {
+        changed.push(directory);
+      }
+    });
+    if (expired()) return false;
+  }
+
+  const restat = new Set<string>();
+  const queue = [...changed];
+  while (queue.length > 0) {
+    const batch = queue.splice(0, 64);
+    const listings = await Promise.all(
+      batch.map(async (directory) => {
+        const mtime = await statMtime(directory);
+        try {
+          return {
+            directory,
+            mtime,
+            entries: await NodeFSP.readdir(directory, { withFileTypes: true }),
+          };
+        } catch {
+          return { directory, mtime, entries: null };
+        }
+      }),
+    );
+    for (const { directory, mtime, entries } of listings) {
+      if (entries === null || mtime === null) continue;
+      known.directoryMtimes.set(directory, mtime);
+      const present = new Set<string>();
+      for (const entry of entries) {
+        const child = NodePath.join(directory, entry.name);
+        if (entry.isDirectory()) {
+          if (!known.directoryMtimes.has(child)) queue.push(child);
+        } else if (isTranscript(entry.name)) {
+          present.add(child);
+          restat.add(child);
+        }
+      }
+      for (const path of [...known.files.keys()]) {
+        if (NodePath.dirname(path) === directory && !present.has(path)) known.files.delete(path);
+      }
+    }
+    if (expired()) return false;
+  }
+
+  const activeSince = wallClock() - ACTIVE_TRANSCRIPT_MS;
+  for (const file of known.files.values()) {
+    if (file.mtimeMs >= activeSince) restat.add(file.path);
+  }
+  const paths = [...restat];
+  for (let offset = 0; offset < paths.length; offset += METADATA_BATCH) {
+    const batch = paths.slice(offset, offset + METADATA_BATCH);
+    const stats = await Promise.all(
+      batch.map(async (path) => {
+        try {
+          const stats = await NodeFSP.stat(path);
+          return { path, size: stats.size, mtimeMs: stats.mtimeMs };
+        } catch {
+          return { path, size: -1, mtimeMs: -1 };
+        }
+      }),
+    );
+    for (const file of stats) {
+      if (file.size < 0) known.files.delete(file.path);
+      else known.files.set(file.path, file);
+    }
+    if (expired()) return false;
+  }
+  return true;
+}
+
+export interface TranscriptScanSelection<File extends TranscriptFile = TranscriptFile> {
+  readonly files: readonly File[];
+  readonly deferredFiles: number;
+  readonly deferredBytes: number;
+  readonly coldBytes: number;
 }
 
 /**
- * Grok sessions also ship multi-megabyte `chat_history` and `events` logs that
- * never carry usage, so the basename filter keeps a cold scan off those files.
- * Results keep `readdir` order, which the aggregator's first-seen dedupe relies
- * on.
+ * Chooses newest transcripts first while bounding uncached I/O for one request.
+ * Warm files cost zero and validated append reads cost only their new bytes.
+ * This allows repeated reads to progressively
+ * fill the cache without making the usage page wait on an unbounded cold scan.
+ */
+export function selectTranscriptFilesForScan<File extends TranscriptFile>(
+  files: readonly File[],
+  bytesToRead: (file: File) => number,
+  maxColdBytes: number,
+): TranscriptScanSelection<File> {
+  const selected: File[] = [];
+  let deferredFiles = 0;
+  let deferredBytes = 0;
+  let coldBytes = 0;
+  const oversized: File[] = [];
+  let selectedColdFile = false;
+
+  const newestFirst = [...files].sort(
+    (left, right) => right.mtimeMs - left.mtimeMs || left.path.localeCompare(right.path),
+  );
+  for (const file of newestFirst) {
+    const readBytes = bytesToRead(file);
+    if (readBytes === 0) {
+      selected.push(file);
+      continue;
+    }
+    if (readBytes <= maxColdBytes - coldBytes) {
+      selected.push(file);
+      coldBytes += readBytes;
+      if (readBytes === file.size && readBytes > 0) selectedColdFile = true;
+      continue;
+    }
+    oversized.push(file);
+    deferredFiles += 1;
+    deferredBytes += readBytes;
+  }
+
+  // A single giant rollout must make progress eventually, but it should not
+  // block the first useful result while smaller cold files can fill the
+  // bounded batch. Warm files and append-only active rollouts do not provide
+  // that first-load protection, so admit one oversized file alongside them
+  // and keep the partial totals visible while it is parsed.
+  if (!selectedColdFile && oversized.length > 0) {
+    const file = oversized[0]!;
+    const readBytes = bytesToRead(file);
+    selected.push(file);
+    coldBytes += readBytes;
+    deferredFiles -= 1;
+    deferredBytes -= readBytes;
+  }
+
+  return { files: selected, deferredFiles, deferredBytes, coldBytes };
+}
+
+/**
+ * Lists provider transcript files under `root` last modified at or after `sinceMs`.
+ *
+ * Errors on individual entries are swallowed: session files rotate and get
+ * removed while the walk is in flight, and a partial listing is far better than
+ * failing the page.
  */
 export async function listTranscriptFiles(
   root: string,
   sinceMs: number,
-  options?: { readonly fileName?: string },
-): Promise<{ readonly files: readonly TranscriptFile[]; readonly failedPaths: number }> {
-  const fileName = options?.fileName;
-  const candidates: string[] = [];
-  let failedPaths = 0;
-  const walk = async (dir: string): Promise<void> => {
-    let entries;
-    try {
-      entries = await NodeFSP.readdir(dir, { withFileTypes: true });
-    } catch {
-      failedPaths += 1;
-      return;
-    }
-    for (const entry of entries) {
-      const child = NodePath.join(dir, entry.name);
-      if (entry.isDirectory()) await walk(child);
-      else if (fileName !== undefined ? entry.name === fileName : entry.name.endsWith(".jsonl")) {
-        candidates.push(child);
-      }
-    }
-  };
-  await walk(root);
-
-  const found: Array<TranscriptFile | undefined> = Array.from({ length: candidates.length });
-  const queue = candidates.entries();
-  const statQueued = async (): Promise<void> => {
-    for (const [index, path] of queue) {
-      try {
-        const stats = await NodeFSP.stat(path);
-        if (stats.mtimeMs >= sinceMs) {
-          found[index] = { path, size: stats.size, mtimeMs: stats.mtimeMs };
-        }
-      } catch (error) {
-        if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
-          failedPaths += 1;
-        }
-      }
-    }
-  };
-  await Promise.all(
-    Array.from({ length: Math.min(STAT_CONCURRENCY, candidates.length) }, statQueued),
-  );
-  return { files: found.filter((file) => file !== undefined), failedPaths };
+  provider: UsageProviderKind,
+): Promise<readonly TranscriptFile[]> {
+  return (await listTranscriptFilesBounded(root, sinceMs, provider, Number.POSITIVE_INFINITY))
+    .files;
 }
 
+/**
+ * Lists recent transcript files without letting directory metadata consume an
+ * entire RPC deadline. Callers must surface an incomplete listing as partial.
+ */
+export async function listTranscriptFilesBounded(
+  root: string,
+  sinceMs: number,
+  provider: UsageProviderKind,
+  maxDurationMs: number,
+  now: () => number = () => performance.now(),
+  wallClock: () => number = () => Date.now(),
+): Promise<TranscriptFileListing> {
+  if (provider === "opencode") {
+    return { files: await listOpenCodeDatabase(root, sinceMs), complete: true };
+  }
+
+  const isTranscript = (name: string) =>
+    provider === "aistudio"
+      ? true
+      : provider === "chatgpt"
+        ? name === "conversations.json"
+        : provider === "gemini"
+          ? (name.startsWith("session-") && (name.endsWith(".json") || name.endsWith(".jsonl"))) ||
+            name === "tokens_cache.json"
+          : name.endsWith(".jsonl");
+  const inventoryKey = `${provider}\u0000${root}`;
+  const deadline = now() + maxDurationMs;
+  const expired = () => now() >= deadline;
+  const withinWindow = (files: Iterable<TranscriptFile>) =>
+    [...files].filter((file) => file.mtimeMs >= sinceMs);
+
+  const known = knownTranscriptInventories.get(inventoryKey);
+  if (
+    known !== undefined &&
+    !pendingTranscriptInventories.has(inventoryKey) &&
+    wallClock() - known.sweptAtMs < FULL_INVENTORY_SWEEP_MS
+  ) {
+    if (expired()) return { files: withinWindow(known.files.values()), complete: false };
+    const refreshed = await refreshKnownInventory(known, isTranscript, expired, wallClock);
+    return { files: withinWindow(known.files.values()), complete: refreshed };
+  }
+
+  const inventory = pendingTranscriptInventories.get(inventoryKey) ?? {
+    running: false,
+    directories: [root],
+    directoryOffset: 0,
+    transcripts: [],
+    transcriptOffset: 0,
+    files: new Map<string, TranscriptFile>(),
+    directoryMtimes: new Map<string, number>(),
+  };
+  pendingTranscriptInventories.set(inventoryKey, inventory);
+  const partial = (): TranscriptFileListing => ({
+    files: withinWindow(inventory.files.values()),
+    complete: false,
+  });
+  // Effect cancellation does not stop an already-started native filesystem promise.
+  if (inventory.running) return partial();
+  inventory.running = true;
+  try {
+    // The provider homes contain thousands of nested directories. Walking one
+    // directory at a time made a warm refresh spend tens of seconds on metadata.
+    // Breadth-first batches keep I/O bounded while allowing independent folders
+    // to resolve together.
+    while (true) {
+      if (expired()) return partial();
+      // Stat as soon as discovery finds a batch. Returning a timed partial
+      // inventory therefore carries useful files forward instead of repeating a
+      // long directory-only pass on the next request.
+      if (inventory.transcriptOffset < inventory.transcripts.length) {
+        const paths = inventory.transcripts.slice(
+          inventory.transcriptOffset,
+          inventory.transcriptOffset + 128,
+        );
+        inventory.transcriptOffset += paths.length;
+        const batch = await Promise.all(
+          paths.map(async (child) => {
+            try {
+              const stats = await NodeFSP.stat(child);
+              return { path: child, size: stats.size, mtimeMs: stats.mtimeMs };
+            } catch {
+              return null;
+            }
+          }),
+        );
+        for (const file of batch) {
+          if (file !== null) inventory.files.set(file.path, file);
+        }
+        if (expired()) return partial();
+        continue;
+      }
+      if (inventory.directoryOffset < inventory.directories.length) {
+        const directories = inventory.directories.slice(
+          inventory.directoryOffset,
+          inventory.directoryOffset + 64,
+        );
+        inventory.directoryOffset += directories.length;
+        const listings = await Promise.all(
+          directories.map(async (dir) => {
+            // Taken before the entries, so an entry added meanwhile changes it.
+            const mtime = await statMtime(dir);
+            try {
+              return { dir, mtime, entries: await NodeFSP.readdir(dir, { withFileTypes: true }) };
+            } catch {
+              return { dir, mtime: null, entries: [] };
+            }
+          }),
+        );
+        for (const { dir, mtime, entries } of listings) {
+          if (mtime !== null) inventory.directoryMtimes.set(dir, mtime);
+          for (const entry of entries) {
+            const child = NodePath.join(dir, entry.name);
+            if (entry.isDirectory()) inventory.directories.push(child);
+            else if (isTranscript(entry.name)) inventory.transcripts.push(child);
+          }
+        }
+        if (expired()) return partial();
+        continue;
+      }
+      if (pendingTranscriptInventories.get(inventoryKey) === inventory) {
+        pendingTranscriptInventories.delete(inventoryKey);
+      }
+      knownTranscriptInventories.set(inventoryKey, {
+        files: new Map(inventory.files),
+        directoryMtimes: new Map(inventory.directoryMtimes),
+        sweptAtMs: wallClock(),
+      });
+      return { files: withinWindow(inventory.files.values()), complete: true };
+    }
+  } finally {
+    inventory.running = false;
+  }
+}
+
+/**
+ * Returns OpenCode's SQLite store as one cacheable source.
+ *
+ * SQLite may leave new commits in the WAL while the main database file stays
+ * unchanged. Folding the sidecars into the synthetic size/mtime identity makes
+ * a newly appended assistant response invalidate only this source's cache.
+ */
+async function listOpenCodeDatabase(
+  root: string,
+  sinceMs: number,
+): Promise<readonly TranscriptFile[]> {
+  const databasePath = NodePath.join(root, "opencode.db");
+  let size = 0;
+  let mtimeMs = 0;
+  let foundDatabase = false;
+  for (const path of [databasePath, `${databasePath}-wal`, `${databasePath}-shm`]) {
+    try {
+      const stats = await NodeFSP.stat(path);
+      size += stats.size;
+      mtimeMs = Math.max(mtimeMs, stats.mtimeMs);
+      if (path === databasePath) foundDatabase = true;
+    } catch {
+      // SQLite sidecars are optional and disappear after checkpoints.
+    }
+  }
+  return foundDatabase && mtimeMs >= sinceMs ? [{ path: databasePath, size, mtimeMs }] : [];
+}
+
+/**
+ * Filesystem identity of a directory, as `device:inode`.
+ *
+ * Used to tell "two servers reading the same transcript directory" apart from
+ * "two machines whose hostname and home path happen to match". Returns an empty
+ * string when the directory cannot be stat'd.
+ */
 export async function readDirectoryVolumeId(path: string): Promise<string> {
   try {
     const stats = await NodeFSP.stat(path);
@@ -139,42 +447,6 @@ export async function readDirectoryVolumeId(path: string): Promise<string> {
   } catch {
     return "";
   }
-}
-
-async function guardMatches(
-  handle: NodeFSP.FileHandle,
-  position: TranscriptParsePosition,
-): Promise<boolean> {
-  if (position.guardLength <= 0 || position.guardLength > GUARD_LENGTH) return false;
-  try {
-    const window = Buffer.alloc(position.guardLength);
-    const { bytesRead } = await handle.read(
-      window,
-      0,
-      position.guardLength,
-      position.resumeOffset - position.guardLength,
-    );
-    return bytesRead === position.guardLength && fnv1a(window) === position.guardHash;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Several would be one pass over the line each, so they are matched together as
- * one alternation over the line's latin1 view instead: latin1 maps every byte
- * to one character without validating it, so an ASCII marker matches exactly
- * where its bytes do.
- */
-export function transcriptLineGate(markers: readonly [string, ...string[]]) {
-  if (markers.length === 1) {
-    const marker = Buffer.from(markers[0]);
-    return (line: Buffer) => line.includes(marker);
-  }
-  const pattern = new RegExp(
-    markers.map((marker) => marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"),
-  );
-  return (line: Buffer) => pattern.test(line.toString("latin1"));
 }
 
 /**
@@ -185,156 +457,536 @@ export function transcriptLineGate(markers: readonly [string, ...string[]]) {
  * is a stable fact worth memoising, while a transient read failure memoised
  * under the same `(size, mtime)` key would silently drop that file's usage
  * until the file next changes.
+ *
+ * Codex carries the active model on `turn_context` lines that hold no usage of
+ * their own, so those still have to pass through the reducer to keep model
+ * attribution correct.
  */
-export async function readTranscriptRecords<State>(
+export interface TranscriptReadOptions {
+  readonly startByte?: number;
+  readonly endByte?: number;
+  /** Source length when `endByte` is a bounded chunk rather than EOF. */
+  readonly sourceSize?: number;
+  /** Continue discarding one oversized JSONL line until its terminating newline. */
+  readonly discardPartialLine?: boolean;
+  readonly codexState?: CodexScanState;
+}
+
+export interface TranscriptReadResult {
+  readonly records: readonly UsageRecord[];
+  /** First byte not folded into `records` or parser state. Always follows a newline unless EOF. */
+  readonly nextByte: number;
+  /** Oversized complete records omitted under the bounded-memory policy. */
+  readonly discardedLines: number;
+  /** `nextByte` remains inside an oversized record and is not a parser cursor. */
+  readonly discardingLine: boolean;
+  readonly codexState?: CodexScanState;
+}
+
+export interface RepeatedInputReadOptions extends Omit<
+  ParseCodexRepeatedInputOptions,
+  "project" | "environment"
+> {
+  readonly startByte?: number | undefined;
+  readonly endByte?: number | undefined;
+  readonly parserState?: RepeatedInputParserState | undefined;
+  readonly project?: string | null | undefined;
+  readonly environment?: string | null | undefined;
+}
+
+export interface RepeatedInputReadResult {
+  readonly observations: readonly RepeatedInputObservation[];
+  readonly gaps: readonly import("@t3tools/contracts").UsageRepeatedInputCoverageGap[];
+  readonly parserState: RepeatedInputParserState;
+}
+
+/** Whether an append cursor follows a complete JSONL record. */
+export async function transcriptCursorIsLineBoundary(
   filePath: string,
-  format: TranscriptUsageFormat<State>,
-  resumeFrom?: TranscriptParsePosition,
-  options?: { readonly streamingThresholdBytes?: number },
-): Promise<TranscriptParseResult | null> {
-  const streamingThresholdBytes = options?.streamingThresholdBytes ?? STREAMING_THRESHOLD_BYTES;
-  let handle: NodeFSP.FileHandle;
+  offset: number,
+): Promise<boolean> {
+  if (offset === 0) return true;
+  let file: NodeFSP.FileHandle | null = null;
   try {
-    handle = await NodeFSP.open(filePath, "r");
+    file = await NodeFSP.open(filePath, "r");
+    const byte = Buffer.allocUnsafe(1);
+    const read = await file.read(byte, 0, 1, offset - 1);
+    return read.bytesRead === 1 && byte[0] === 0x0a;
+  } catch {
+    return false;
+  } finally {
+    await file?.close();
+  }
+}
+
+/**
+ * Visits only complete JSONL records in a byte range and returns the first
+ * unread byte. A bounded read never feeds a torn final line to a reducer, so
+ * its returned cursor can safely carry parser state into the next request.
+ */
+const MAX_JSONL_LINE_BYTES = 8 * 1024 * 1024;
+
+interface JsonlReadProgress {
+  readonly nextByte: number;
+  /** Oversized lines skipped that could have carried usage. */
+  readonly discardedLines: number;
+  readonly discardingLine: boolean;
+}
+
+/**
+ * Which oversized lines could have carried usage, using the same markers as
+ * the per-line gate. A line without them is ignored whatever its size, so
+ * skipping it loses nothing and must not leave the transcript incomplete.
+ */
+export interface OversizedLineRelevance {
+  /** Markers that count only in a line's first `PREFIX_MARKER_BYTES`. */
+  readonly prefixMarkers: readonly string[];
+  /** Markers that count anywhere in the line. */
+  readonly anywhereMarkers: readonly string[];
+}
+
+/**
+ * Codex writes `{"timestamp":…,"type":…,"payload":{"type":…` with the event
+ * type first, so a tool output that merely quotes "token_count" does not match.
+ */
+const PREFIX_MARKER_BYTES = 4 * 1024;
+
+const CODEX_LINE_RELEVANCE: OversizedLineRelevance = {
+  prefixMarkers: [
+    '"type":"token_count"',
+    '"type":"turn_context"',
+    '"type":"session_meta"',
+    '"type":"thread_settings_applied"',
+  ],
+  anywhereMarkers: [],
+};
+// Claude writes `usage` after the message content, so it can sit anywhere.
+const CLAUDE_LINE_RELEVANCE: OversizedLineRelevance = {
+  prefixMarkers: [],
+  anywhereMarkers: ['"usage"'],
+};
+
+async function readCompleteJsonlLines(
+  filePath: string,
+  options: Pick<
+    TranscriptReadOptions,
+    "startByte" | "endByte" | "sourceSize" | "discardPartialLine"
+  >,
+  visit: (line: string) => void,
+  relevance: OversizedLineRelevance,
+): Promise<JsonlReadProgress> {
+  const start = options.startByte ?? 0;
+  const end = options.endByte;
+  if (end !== undefined && end < start) {
+    return { nextByte: start, discardedLines: 0, discardingLine: false };
+  }
+
+  const prefixMarkers = relevance.prefixMarkers.map((marker) => Buffer.from(marker));
+  const anywhereMarkers = relevance.anywhereMarkers.map((marker) => Buffer.from(marker));
+  const overlap = Math.max(0, ...anywhereMarkers.map((marker) => marker.length - 1));
+  const holds = (bytes: Buffer, markers: readonly Buffer[]) =>
+    markers.some((marker) => bytes.includes(marker));
+
+  let nextByte = start;
+  let pending = Buffer.alloc(0);
+  let discardedLines = 0;
+  let discardingLine = options.discardPartialLine === true;
+  // A line resumed mid-skip started in an earlier read whose bytes are gone.
+  let discardRelevant = discardingLine;
+  let discardTail = Buffer.alloc(0);
+  const startDiscarding = (line: Buffer) => {
+    discardingLine = true;
+    discardRelevant =
+      holds(line.subarray(0, PREFIX_MARKER_BYTES), prefixMarkers) || holds(line, anywhereMarkers);
+    discardTail = overlap > 0 ? Buffer.from(line.subarray(-overlap)) : Buffer.alloc(0);
+  };
+  const finishDiscarding = () => {
+    if (discardRelevant) discardedLines += 1;
+    discardingLine = false;
+    discardRelevant = false;
+    discardTail = Buffer.alloc(0);
+  };
+  const discardUntilLineEnd = (bytes: Buffer): Buffer => {
+    const lineEnd = bytes.indexOf(0x0a);
+    const part = lineEnd < 0 ? bytes : bytes.subarray(0, lineEnd);
+    if (!discardRelevant && anywhereMarkers.length > 0) {
+      const window = Buffer.concat([discardTail, part]);
+      discardRelevant = holds(window, anywhereMarkers);
+      discardTail = Buffer.from(window.subarray(-overlap));
+    }
+    if (lineEnd < 0) {
+      nextByte += bytes.length;
+      return Buffer.alloc(0);
+    }
+    nextByte += lineEnd + 1;
+    finishDiscarding();
+    return bytes.subarray(lineEnd + 1);
+  };
+  const input = NodeFS.createReadStream(filePath, {
+    ...(start === 0 ? {} : { start }),
+    ...(end === undefined ? {} : { end }),
+  });
+  for await (const chunk of input) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    const remaining = discardingLine ? discardUntilLineEnd(bytes) : bytes;
+    if (discardingLine) continue;
+    pending = pending.length === 0 ? remaining : Buffer.concat([pending, remaining]);
+    let lineEnd = pending.indexOf(0x0a);
+    while (lineEnd >= 0) {
+      const hasCarriageReturn = lineEnd > 0 && pending[lineEnd - 1] === 0x0d;
+      visit(pending.subarray(0, hasCarriageReturn ? lineEnd - 1 : lineEnd).toString("utf8"));
+      nextByte += lineEnd + 1;
+      pending = pending.subarray(lineEnd + 1);
+      lineEnd = pending.indexOf(0x0a);
+    }
+    if (pending.length > MAX_JSONL_LINE_BYTES) {
+      // Retaining an arbitrary JSON value only to find its newline would make
+      // the response memory-unbounded. Skip it in fixed-size chunks instead,
+      // and preserve partial source coverage when it could have held usage.
+      startDiscarding(pending);
+      nextByte += pending.length;
+      pending = Buffer.alloc(0);
+    }
+  }
+
+  // Finish a skipped line past the range end rather than carrying it into the
+  // next read: its relevance is known only while its first bytes are at hand.
+  if (discardingLine && end !== undefined) {
+    const sourceEnd = options.sourceSize === undefined ? undefined : options.sourceSize - 1;
+    if (sourceEnd === undefined || sourceEnd > end) {
+      const rest = NodeFS.createReadStream(filePath, {
+        start: end + 1,
+        ...(sourceEnd === undefined ? {} : { end: sourceEnd }),
+      });
+      for await (const chunk of rest) {
+        discardUntilLineEnd(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        if (!discardingLine) break;
+      }
+      rest.destroy();
+    }
+  }
+
+  // JSONL producers occasionally omit the final newline. It is safe to parse
+  // that final record only when this range reaches the known end of the file.
+  const reachesEnd =
+    end === undefined || options.sourceSize === undefined || end >= options.sourceSize - 1;
+  if (discardingLine) {
+    // The line runs to the end of the file; it may still be being written.
+    finishDiscarding();
+  } else if (pending.length > 0 && reachesEnd) {
+    const hasCarriageReturn = pending[pending.length - 1] === 0x0d;
+    visit(
+      pending.subarray(0, hasCarriageReturn ? pending.length - 1 : pending.length).toString("utf8"),
+    );
+    nextByte += pending.length;
+  }
+  return { nextByte, discardedLines, discardingLine };
+}
+
+export async function readTranscriptRecords(
+  filePath: string,
+  provider: UsageProviderKind,
+  options: TranscriptReadOptions = {},
+): Promise<TranscriptReadResult | null> {
+  if (provider === "aistudio" || provider === "chatgpt") {
+    const records = await readImportedChatRecords(filePath, provider);
+    return records === null
+      ? null
+      : {
+          records,
+          nextByte: options.sourceSize ?? (options.endByte ?? -1) + 1,
+          discardedLines: 0,
+          discardingLine: false,
+        };
+  }
+  if (provider === "gemini") {
+    const records = await readGeminiTranscriptRecords(filePath);
+    return records === null
+      ? null
+      : {
+          records,
+          nextByte: options.sourceSize ?? (options.endByte ?? -1) + 1,
+          discardedLines: 0,
+          discardingLine: false,
+        };
+  }
+  if (provider === "opencode") {
+    const records = await readOpenCodeDatabaseRecords(filePath);
+    return records === null
+      ? null
+      : {
+          records,
+          nextByte: options.sourceSize ?? (options.endByte ?? -1) + 1,
+          discardedLines: 0,
+          discardingLine: false,
+        };
+  }
+
+  const records: UsageRecord[] = [];
+  const codexState = options.codexState
+    ? {
+        ...options.codexState,
+        ...(options.codexState.providerState === undefined
+          ? {}
+          : { providerState: { ...options.codexState.providerState } }),
+      }
+    : initialCodexScanState();
+
+  try {
+    const start = options.startByte ?? 0;
+    const end = options.endByte;
+    if (end !== undefined && end < start) {
+      return provider === "codex"
+        ? { records, nextByte: start, discardedLines: 0, discardingLine: false, codexState }
+        : { records, nextByte: start, discardedLines: 0, discardingLine: false };
+    }
+    const progress = await readCompleteJsonlLines(
+      filePath,
+      options,
+      (line) => {
+        if (provider === "codex") {
+          if (
+            !mightCarryUsage(line, provider) &&
+            !line.includes('"turn_context"') &&
+            !line.includes('"session_meta"') &&
+            !line.includes('"thread_settings_applied"')
+          ) {
+            return;
+          }
+          const record = parseCodexLine(line, codexState);
+          if (record !== null) records.push(record);
+          return;
+        }
+
+        if (!mightCarryUsage(line, provider)) return;
+        const record = parseClaudeLine(line);
+        if (record !== null) records.push(record);
+      },
+      provider === "codex" ? CODEX_LINE_RELEVANCE : CLAUDE_LINE_RELEVANCE,
+    );
+    return provider === "codex" ? { records, ...progress, codexState } : { records, ...progress };
   } catch {
     return null;
   }
+}
+
+/**
+ * Streams Codex input evidence without returning transcript text. The cursor
+ * arguments mirror `readTranscriptRecords`, so the caller can feed only an
+ * append after validating the cached prefix fingerprint.
+ */
+export async function readRepeatedInputRecords(
+  filePath: string,
+  options: RepeatedInputReadOptions = {},
+): Promise<RepeatedInputReadResult | null> {
+  const parserState = options.parserState
+    ? { ...options.parserState }
+    : initialRepeatedInputParserState({
+        ...(options.project === undefined ? {} : { project: options.project }),
+        ...(options.environment === undefined ? {} : { environment: options.environment }),
+      });
+  const observations: RepeatedInputObservation[] = [];
+  const gaps: import("@t3tools/contracts").UsageRepeatedInputCoverageGap[] = [];
+  const start = options.startByte ?? 0;
+  const end = options.endByte;
+  if (end !== undefined && end < start) return { observations, gaps, parserState };
 
   try {
-    const codec = format.state;
-    const decodeState = codec === undefined ? undefined : Schema.decodeUnknownOption(codec.schema);
-    const encodeState = codec === undefined ? undefined : Schema.encodeSync(codec.schema);
-    let state = codec === undefined ? (undefined as State) : codec.initial();
-    let resumed = false;
-    let start = 0;
-    const savedState =
-      resumeFrom === undefined || decodeState === undefined || resumeFrom.state === null
-        ? Option.none()
-        : decodeState(resumeFrom.state);
-    if (
-      resumeFrom !== undefined &&
-      resumeFrom.resumeOffset > 0 &&
-      (codec === undefined || Option.isSome(savedState)) &&
-      (await guardMatches(handle, resumeFrom))
-    ) {
-      if (Option.isSome(savedState)) state = savedState.value;
-      start = resumeFrom.resumeOffset;
-      resumed = true;
+    const lines = NodeReadline.createInterface({
+      input: NodeFS.createReadStream(filePath, {
+        encoding: "utf8",
+        ...(start === 0 ? {} : { start }),
+        ...(end === undefined ? {} : { end }),
+      }),
+      crlfDelay: Infinity,
+    });
+    const parseOptions: ParseCodexRepeatedInputOptions = {
+      ...(options.catalog === undefined ? {} : { catalog: options.catalog }),
+      ...(options.tokenizer === undefined ? {} : { tokenizer: options.tokenizer }),
+      ...(options.maxPayloadBytes === undefined
+        ? {}
+        : { maxPayloadBytes: options.maxPayloadBytes }),
+      ...(options.project === undefined ? {} : { project: options.project }),
+      ...(options.environment === undefined ? {} : { environment: options.environment }),
+    };
+    for await (const line of lines) {
+      const parsed = parseCodexRepeatedInputLineDetailed(line, parserState, parseOptions);
+      observations.push(...parsed.observations);
+      gaps.push(...parsed.gaps);
     }
+  } catch {
+    gaps.push({
+      reason: "unavailable",
+      count: 1,
+      message: "The Codex transcript could not be read.",
+    });
+    return { observations, gaps, parserState };
+  }
+  return { observations, gaps, parserState };
+}
 
-    const toLineString = (lineBuffer: Buffer): string => {
-      const content =
-        lineBuffer.length > 0 && lineBuffer[lineBuffer.length - 1] === CARRIAGE_RETURN
-          ? lineBuffer.subarray(0, -1)
-          : lineBuffer;
-      return content.toString("utf8");
-    };
+export const readCodexRepeatedInputRecords = readRepeatedInputRecords;
 
-    const mightCarryUsage = transcriptLineGate(format.usageMarkers);
-    const parseLine = (lineBuffer: Buffer, lineState: State, out: UsageRecord[]): void => {
-      if (!mightCarryUsage(lineBuffer)) return;
-      for (const record of format.parseLine(toLineString(lineBuffer), lineState)) out.push(record);
-    };
-
-    const records: UsageRecord[] = [];
-    let resumeOffset = start;
-    let scanOffset = start;
-    let pendingChunks: Buffer[] = [];
-    let pendingBytes = 0;
-    let streaming: ReturnType<typeof createTranscriptJsonReader> | undefined;
-    let decoder: NodeStringDecoder.StringDecoder | undefined;
-    const selectPath = selectUsageFields(format.selectFields);
-
-    const append = (segment: Buffer) => {
-      if (!streaming && pendingBytes + segment.length <= streamingThresholdBytes) {
-        if (segment.length > 0) pendingChunks.push(segment);
-        pendingBytes += segment.length;
-        return;
-      }
-      if (!streaming) {
-        // Usage has no import-history budget: retain all selected usage fields,
-        // regardless of the size of the surrounding unselected tool content.
-        streaming = createTranscriptJsonReader(() => {}, selectPath, { maxDepth: Infinity });
-        decoder = new NodeStringDecoder.StringDecoder("utf8");
-        for (const pending of pendingChunks) streaming.write(decoder.write(pending));
-        pendingChunks = [];
-        pendingBytes = 0;
-      }
-      streaming.write(decoder!.write(segment));
-    };
-    const finish = (lineState: State, out: UsageRecord[]) => {
-      if (streaming) {
-        streaming.write(decoder!.end());
-        const projected = streaming.finish();
-        for (const record of format.parseProjected(projected, lineState)) out.push(record);
-      } else if (pendingBytes > 0) {
-        const line =
-          pendingChunks.length === 1
-            ? pendingChunks[0]!
-            : Buffer.concat(pendingChunks, pendingBytes);
-        parseLine(line, lineState, out);
-      }
-      pendingChunks = [];
-      pendingBytes = 0;
-      streaming = undefined;
-      decoder = undefined;
-    };
-    const stream = handle.createReadStream({
-      start,
-      autoClose: false,
-      highWaterMark: 256 * 1024,
-    }) as AsyncIterable<Buffer>;
+/** SHA-256 of the exact UTF-8 prefix used to validate append-only reads. */
+export async function readTranscriptPrefixFingerprint(
+  filePath: string,
+  prefixLength: number,
+): Promise<string | null> {
+  if (!Number.isSafeInteger(prefixLength) || prefixLength < 0) return null;
+  if (prefixLength === 0) return NodeCrypto.createHash("sha256").digest("hex");
+  try {
+    const hash = NodeCrypto.createHash("sha256");
+    const stream = NodeFS.createReadStream(filePath, { start: 0, end: prefixLength - 1 });
+    let bytes = 0;
     for await (const chunk of stream) {
-      let lineStart = 0;
-      while (lineStart < chunk.length) {
-        const newlineIndex = chunk.indexOf(NEWLINE, lineStart);
-        if (newlineIndex === -1) {
-          append(chunk.subarray(lineStart));
-          break;
-        }
-        if (!streaming && pendingBytes === 0) {
-          parseLine(chunk.subarray(lineStart, newlineIndex), state, records);
-        } else {
-          append(chunk.subarray(lineStart, newlineIndex));
-          finish(state, records);
-        }
-        lineStart = newlineIndex + 1;
-        resumeOffset = scanOffset + lineStart;
+      const buffer = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
+      bytes += buffer.byteLength;
+      hash.update(buffer);
+    }
+    return bytes === prefixLength ? hash.digest("hex") : null;
+  } catch {
+    return null;
+  }
+}
+
+export interface TranscriptAppendCursor {
+  readonly offset: number;
+  readonly prefixFingerprint: string;
+}
+
+/** Checks both JSONL boundary and byte-prefix identity before an append read. */
+export async function transcriptAppendIsSafe(
+  filePath: string,
+  cursor: TranscriptAppendCursor,
+): Promise<boolean> {
+  if (cursor.offset <= 0 || !(await transcriptCursorIsLineBoundary(filePath, cursor.offset))) {
+    return cursor.offset === 0;
+  }
+  const fingerprint = await readTranscriptPrefixFingerprint(filePath, cursor.offset);
+  return fingerprint !== null && fingerprint === cursor.prefixFingerprint;
+}
+
+/** Reads one already-local product export; raw chat text never leaves the server. */
+async function readImportedChatRecords(
+  filePath: string,
+  provider: "aistudio" | "chatgpt",
+): Promise<readonly UsageRecord[] | null> {
+  try {
+    const raw = await NodeFSP.readFile(filePath, "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    const stats = await NodeFSP.stat(filePath);
+    if (provider === "chatgpt") {
+      return parseChatGptExport(parsed, { importedAtMs: stats.mtimeMs });
+    }
+    const conversationId = NodeCrypto.createHash("sha256").update(raw).digest("hex");
+    return parseAiStudioExport(parsed, { conversationId, importedAtMs: stats.mtimeMs });
+  } catch {
+    return null;
+  }
+}
+
+interface OpenCodeMessageRow {
+  readonly id: unknown;
+  readonly session_id: unknown;
+  readonly time_created: unknown;
+  readonly data: unknown;
+}
+
+/** Reads usage-only assistant metadata without touching prompts or credentials. */
+async function readOpenCodeDatabaseRecords(
+  filePath: string,
+): Promise<readonly UsageRecord[] | null> {
+  let database: NodeSqlite.DatabaseSync | null = null;
+  try {
+    database = new NodeSqlite.DatabaseSync(filePath, { readOnly: true });
+    const rows = database
+      .prepare(
+        "SELECT id, session_id, time_created, data FROM message WHERE json_extract(data, '$.role') = 'assistant'",
+      )
+      .all() as unknown as readonly OpenCodeMessageRow[];
+    const records: UsageRecord[] = [];
+    for (const row of rows) {
+      if (
+        typeof row.id !== "string" ||
+        typeof row.session_id !== "string" ||
+        typeof row.time_created !== "number" ||
+        typeof row.data !== "string"
+      ) {
+        continue;
       }
-      scanOffset += chunk.length;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(row.data) as unknown;
+      } catch {
+        continue;
+      }
+      const record = parseOpenCodeMessageValue(parsed, {
+        id: row.id,
+        sessionId: row.session_id,
+        timestampMs: row.time_created,
+      });
+      if (record !== null) records.push(record);
     }
-
-    // The unfinished tail parses against a copy, so the saved state stays at
-    // `resumeOffset` and the next scan replays the tail from it.
-    const encodedState = encodeState === undefined ? null : encodeState(state);
-    const tailRecords: UsageRecord[] = [];
-    const tailState =
-      decodeState === undefined ? state : Option.getOrThrow(decodeState(encodedState));
-    finish(tailState, tailRecords);
-
-    const guardLength = Math.min(GUARD_LENGTH, resumeOffset);
-    let guardHash = 0;
-    if (guardLength > 0) {
-      const window = Buffer.alloc(guardLength);
-      await handle.read(window, 0, guardLength, resumeOffset - guardLength);
-      guardHash = fnv1a(window);
-    }
-
-    return {
-      records,
-      tailRecords,
-      malformedRecords: format.readMalformedRecords?.(tailState) ?? 0,
-      position: {
-        resumeOffset,
-        guardLength,
-        guardHash,
-        state: encodedState,
-      },
-      resumed,
-    };
+    return records;
   } catch {
     return null;
   } finally {
-    await handle.close().catch(() => undefined);
+    database?.close();
+  }
+}
+
+async function readGeminiTranscriptRecords(
+  filePath: string,
+): Promise<readonly UsageRecord[] | null> {
+  const state = initialGeminiScanState();
+  const byMessage = new Map<string, UsageRecord>();
+  const withoutIdentity: UsageRecord[] = [];
+  const keep = (record: UsageRecord | null) => {
+    if (record === null) return;
+    if (record.dedupeKey === null) withoutIdentity.push(record);
+    else byMessage.set(record.dedupeKey, record);
+  };
+
+  try {
+    if (NodePath.basename(filePath) === "tokens_cache.json") {
+      const parsed = JSON.parse(await NodeFSP.readFile(filePath, "utf8")) as unknown;
+      const stats = await NodeFSP.stat(filePath);
+      keep(
+        parseAntigravityTokenCache(parsed, {
+          timestampMs: stats.mtimeMs,
+          sessionId: NodePath.basename(
+            NodePath.dirname(NodePath.dirname(NodePath.dirname(filePath))),
+          ),
+        }),
+      );
+      return [...byMessage.values(), ...withoutIdentity];
+    }
+
+    if (filePath.endsWith(".json")) {
+      const parsed = JSON.parse(await NodeFSP.readFile(filePath, "utf8")) as unknown;
+      keep(parseGeminiValue(parsed, state));
+      if (typeof parsed === "object" && parsed !== null) {
+        const messages = (parsed as Record<string, unknown>)["messages"];
+        if (Array.isArray(messages)) {
+          for (const message of messages) keep(parseGeminiValue(message, state));
+        }
+      }
+      return [...byMessage.values(), ...withoutIdentity];
+    }
+
+    const lines = NodeReadline.createInterface({
+      input: NodeFS.createReadStream(filePath, { encoding: "utf8" }),
+      crlfDelay: Infinity,
+    });
+    for await (const line of lines) {
+      if (!mightCarryUsage(line, "gemini") && !line.includes('"sessionId"')) continue;
+      // JSONL session files write metadata and messages as standalone records.
+      // `$set` patch records repeat message arrays and must not be counted too.
+      if (line.includes('"$set"')) continue;
+      keep(parseGeminiLine(line, state));
+    }
+    return [...byMessage.values(), ...withoutIdentity];
+  } catch {
+    return null;
   }
 }

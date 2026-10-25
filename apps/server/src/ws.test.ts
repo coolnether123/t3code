@@ -1,6 +1,9 @@
+import * as UsageResetCheck from "./usage/UsageResetCheck.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
+  ORCHESTRATION_PROTOCOL_VERSION,
+  LegacyUsageRpcGroup,
   AuthSessionId,
   EnvironmentId,
   ProjectId,
@@ -13,6 +16,9 @@ import {
   type ServerConfigStreamEvent,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
+import * as Fiber from "effect/Fiber";
+import { TestClock } from "effect/testing";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
@@ -106,12 +112,62 @@ import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as ProjectEnrichment from "./project/ProjectEnrichmentService.ts";
 import * as ProjectService from "./project/ProjectService.ts";
 import {
+  hasCompatibleOrchestrationProtocol,
+  isLegacyUsageProtocol,
+  resolveAvailableEditorsForConfig,
+  shouldUseBoundedThreadSnapshot,
   layerWsRpc,
   subscribeOrchestrationV2Shell,
   subscribeOrchestrationV2Thread,
   WS_RPC_SERVER_OPTIONS,
   withLateEditorConfig,
 } from "./ws.ts";
+
+it("keeps the ticket-only usage connection restricted to its legacy read methods", () => {
+  assert.isTrue(isLegacyUsageProtocol(new URL("https://host.test/ws?wsTicket=synthetic-ticket")));
+  assert.isFalse(isLegacyUsageProtocol(new URL("https://host.test/ws?orchestrationProtocol=0")));
+  assert.deepEqual(Array.from(LegacyUsageRpcGroup.requests.keys()).sort(), [
+    WS_METHODS.serverGetUsageReport,
+    WS_METHODS.serverGetUsageSummary,
+  ]);
+});
+
+it("accepts only the current orchestration protocol before websocket RPC setup", () => {
+  assert.isTrue(
+    hasCompatibleOrchestrationProtocol(
+      new URL(`https://host.test/ws?orchestrationProtocol=${ORCHESTRATION_PROTOCOL_VERSION}`),
+    ),
+  );
+  assert.isFalse(hasCompatibleOrchestrationProtocol(new URL("https://host.test/ws")));
+  assert.isFalse(
+    hasCompatibleOrchestrationProtocol(
+      new URL(`https://host.test/ws?orchestrationProtocol=${ORCHESTRATION_PROTOCOL_VERSION - 1}`),
+    ),
+  );
+});
+
+it("keeps full thread snapshot fallback unless the client opts into bounded history", () => {
+  assert.isFalse(shouldUseBoundedThreadSnapshot({}));
+  assert.isFalse(shouldUseBoundedThreadSnapshot({ acceptBoundedSnapshot: false }));
+  assert.isTrue(shouldUseBoundedThreadSnapshot({ acceptBoundedSnapshot: true }));
+});
+
+it.effect("does not block server config when editor discovery never resolves", () =>
+  Effect.gen(function* () {
+    const discoveryInterrupted = yield* Deferred.make<void>();
+    const responseFiber = yield* resolveAvailableEditorsForConfig(
+      Effect.never.pipe(
+        Effect.onInterrupt(() => Deferred.succeed(discoveryInterrupted, undefined)),
+      ),
+    ).pipe(Effect.forkChild);
+
+    yield* TestClock.adjust(Duration.seconds(5));
+
+    const availableEditors = yield* Fiber.join(responseFiber);
+    yield* Deferred.await(discoveryInterrupted);
+    assert.deepEqual(availableEditors, []);
+  }),
+);
 
 const snapshotConfig = (fields: Partial<ServerConfig>) =>
   ({ availableEditors: [], settings: {}, ...fields }) as unknown as ServerConfig;
@@ -352,6 +408,8 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(ThreadManagement.ThreadManagementService)({}),
   Layer.mock(ThreadSearch.ThreadSearch)({}),
   Layer.mock(UsageService.UsageService)({}),
+  UsageResetCheck.layerTest,
+  UsageResetCheck.communityLayerTest,
   Layer.mock(VcsProvisioningService.VcsProvisioningService)({}),
   Layer.mock(VcsStatusBroadcaster.VcsStatusBroadcaster)({}),
   Layer.mock(WorkspaceEntries.WorkspaceEntries)({}),

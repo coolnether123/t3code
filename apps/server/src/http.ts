@@ -2,7 +2,11 @@ import * as Mime from "effect/http/Mime";
 import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
+  ENVIRONMENT_PROVIDER_MESSAGE_MAX_LENGTH,
+  ENVIRONMENT_PROVIDER_SNAPSHOT_LIMIT,
+  ENVIRONMENT_PROVIDER_TEXT_MAX_LENGTH,
   EnvironmentHttpApi,
+  type EnvironmentProviderStatus,
 } from "@t3tools/contracts";
 import { isDevProxiedPath } from "@t3tools/shared/devProxy";
 import { injectMcpAppCookieBootstrap, injectMcpAppThemeBootstrap } from "@t3tools/shared/mcpApp";
@@ -40,12 +44,14 @@ import {
 } from "./assets/AttachmentUpload.ts";
 import * as BrowserTraceCollector from "./observability/BrowserTraceCollector.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
+import * as ProviderRegistry from "./provider/ProviderRegistry.ts";
 import { traceRelayRequest } from "./cloud/traceRelayRequest.ts";
 import {
   annotateEnvironmentRequest,
   failEnvironmentScopeRequired,
   failEnvironmentAuthInvalid,
   failEnvironmentInternal,
+  requireEnvironmentScope,
 } from "./auth/http.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import { WEBHOOK_ROUTE_PREFIX } from "./scheduledTasks/ScheduledTaskService.ts";
@@ -291,7 +297,7 @@ function resolveDevRedirectUrl(devUrl: URL, requestUrl: URL): string {
   return redirectUrl.toString();
 }
 
-const authenticateRawRouteWithScope =
+export const authenticateRawRouteWithScope =
   /* Request instrumentation already owns the span; keep this helper in that context. */
   Effect.fnUntraced(function* (
     scope: typeof AuthOrchestrationReadScope | typeof AuthOrchestrationOperateScope,
@@ -324,6 +330,78 @@ export const layerServerEnvironmentHttpApi = HttpApiBuilder.group(
       Effect.fn("environment.metadata.descriptor")(function* (args) {
         yield* annotateEnvironmentRequest(args.endpoint.name);
         return yield* serverEnvironment.getDescriptor;
+      }, traceRelayRequest),
+    );
+  }),
+);
+
+export const providerSnapshotsHttpApiLayer = HttpApiBuilder.group(
+  EnvironmentHttpApi,
+  "providers",
+  Effect.fnUntraced(function* (handlers) {
+    const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
+
+    return handlers.handle(
+      "snapshot",
+      Effect.fn("environment.providers.snapshot")(function* (args) {
+        yield* annotateEnvironmentRequest(args.endpoint.name);
+        yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+        const providers = yield* providerRegistry.getProviders;
+        const instanceFilter = args.payload.instanceId;
+        const result: Array<EnvironmentProviderStatus> = [];
+        let providerCount = 0;
+        const boundedText = (value: string, limit: number) => value.slice(0, limit);
+        for (const provider of providers) {
+          if (instanceFilter !== undefined && provider.instanceId !== instanceFilter) continue;
+          providerCount++;
+          if (result.length >= ENVIRONMENT_PROVIDER_SNAPSHOT_LIMIT) continue;
+          const message = provider.message;
+
+          result.push({
+            instanceId: provider.instanceId,
+            driver: provider.driver,
+            ...(provider.displayName === undefined
+              ? {}
+              : {
+                  displayName: boundedText(
+                    provider.displayName,
+                    ENVIRONMENT_PROVIDER_TEXT_MAX_LENGTH,
+                  ),
+                }),
+            enabled: provider.enabled,
+            status: provider.status,
+            availability: provider.availability ?? "available",
+            ...(message === undefined
+              ? {}
+              : { message: boundedText(message, ENVIRONMENT_PROVIDER_MESSAGE_MAX_LENGTH) }),
+            messageTruncated:
+              message !== undefined && message.length > ENVIRONMENT_PROVIDER_MESSAGE_MAX_LENGTH,
+            version:
+              provider.version === null
+                ? null
+                : boundedText(provider.version, ENVIRONMENT_PROVIDER_TEXT_MAX_LENGTH),
+            auth: {
+              status: provider.auth.status,
+              ...(provider.auth.type === undefined
+                ? {}
+                : { type: boundedText(provider.auth.type, ENVIRONMENT_PROVIDER_TEXT_MAX_LENGTH) }),
+              ...(provider.auth.label === undefined
+                ? {}
+                : {
+                    label: boundedText(provider.auth.label, ENVIRONMENT_PROVIDER_TEXT_MAX_LENGTH),
+                  }),
+            },
+            modelCount: provider.models.length,
+            skillCount: provider.skills.length,
+            ...(provider.driver === "codex" ? { desktopBacked: null } : {}),
+          });
+        }
+
+        return {
+          providers: result,
+          providerCount,
+          providersOmitted: providerCount - result.length,
+        };
       }, traceRelayRequest),
     );
   }),

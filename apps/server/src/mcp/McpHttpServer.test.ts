@@ -1,5 +1,8 @@
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import { expect, it } from "@effect/vitest";
 import { NodeHttpServer } from "@effect/platform-node";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -59,13 +62,19 @@ const client = McpSchema.McpServerClient.of({
   },
   getClient: Effect.die("unused"),
 });
-const layerTest = McpHttpServer.layerPreviewToolkit.pipe(
-  Layer.provideMerge(McpServer.McpServer.layer),
-  Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
-  Layer.provideMerge(PreviewAutomationBroker.layer),
-  Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-http-server-test-" })),
-  Layer.provideMerge(NodeServices.layer),
-);
+const layerTestWithThreads = (
+  threads: Layer.Layer<ThreadManagement.ThreadManagementService> = McpToolAccessTestkit.liveThreadsLayer,
+) =>
+  McpHttpServer.layerPreviewToolkit.pipe(
+    Layer.provideMerge(McpServer.McpServer.layer),
+    Layer.provideMerge(threads),
+    Layer.provideMerge(PreviewAutomationBroker.layer),
+    Layer.provideMerge(
+      ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-http-server-test-" }),
+    ),
+    Layer.provideMerge(NodeServices.layer),
+  );
+const layerTest = layerTestWithThreads();
 const layerPullRequestsTest = McpHttpServer.layerPullRequestsToolkit.pipe(
   Layer.provideMerge(McpServer.McpServer.layer),
   Layer.provideMerge(McpToolAccessTestkit.liveThreadsLayer),
@@ -131,6 +140,68 @@ const callTool = (name: string, args: Record<string, unknown>) =>
   });
 
 const callSnapshot = (args: Record<string, unknown>) => callTool("preview_snapshot", args);
+
+it.effect.each([true, false])(
+  "operator preview uses its visible owner only while its session is live: %s",
+  (live) =>
+    Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+      const connected = yield* Deferred.make<void>();
+      const requests: Array<string> = [];
+      const events = yield* broker.connect({ clientId: "operator-preview", environmentId });
+      yield* Stream.runForEach(events, (event) => {
+        if (event.type === "connected") return Deferred.succeed(connected, undefined);
+        requests.push(event.request.threadId);
+        return broker.respond({
+          clientId: "operator-preview",
+          connectionId: event.connectionId,
+          requestId: event.request.requestId,
+          ok: true,
+          result: {
+            available: true,
+            visible: true,
+            loading: false,
+            tabId,
+            url: "http://example.test/",
+            title: "Example",
+          },
+        });
+      }).pipe(Effect.forkScoped);
+      yield* Deferred.await(connected);
+      const syntheticThread = ThreadId.make("t3-call-operator-preview");
+      const result = yield* server.callTool({ name: "preview_open", arguments: {} }).pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, {
+          ...invocation,
+          thread: { ...invocation.thread, threadId: syntheticThread },
+        }),
+        Effect.provideService(McpSchema.McpServerClient, client),
+      );
+      expect(requests).toEqual(live ? [threadId] : []);
+      expect(result.isError).toBe(!live);
+    }).pipe(
+      Effect.provide(
+        layerTestWithThreads(
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            getThreadShell: (id) =>
+              Effect.succeed(
+                id === threadId
+                  ? McpToolAccessTestkit.liveThreadShell(threadId, { activeRunId: null })
+                  : null,
+              ),
+            getAuxiliaryOwner: (input) => {
+              expect(input).toEqual({
+                threadId: ThreadId.make("t3-call-operator-preview"),
+                mcpCredentialId: invocation.thread.providerSessionId,
+                providerInstanceId: invocation.thread.providerInstanceId,
+              });
+              return Effect.succeed(live ? threadId : undefined);
+            },
+          }),
+        ),
+      ),
+    ),
+);
 
 // Real tool definitions with handlers that record what they decoded.
 const layerRecordingTools = (calls: Array<unknown>) => {
@@ -355,6 +426,80 @@ it.effect("refuses preview tools to a client outside a thread before they run", 
       { type: "text", text: expect.stringContaining("needs an agent running inside T3 Code") },
     ]);
   }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("rejects non-boolean snapshot image options before selecting a browser host", () =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    for (const includeImage of ["false", 0]) {
+      const result = yield* server
+        .callTool({
+          name: "preview_snapshot",
+          arguments: { includeImage },
+        })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+      expect(result.isError).toBe(true);
+      expect(result.content).toEqual([{ type: "text", text: "Preview snapshot failed: AiError." }]);
+      expect(result.structuredContent).toEqual({
+        error: { _tag: "AiError", operation: "snapshot", failureCount: 1 },
+      });
+    }
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("saves the snapshot PNG on request and reports its path", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const inputs = yield* serveSnapshots("mcp-save-client", snapshotResult);
+
+      const snapshot = yield* callSnapshot({ save: true, includeImage: true });
+
+      expect(snapshot.isError).toBe(false);
+      expect(inputs).toEqual([{}]);
+      expect(snapshot.content.map((content) => content.type)).toContain("image");
+      const structured = snapshot.structuredContent as { readonly screenshotPath?: string };
+      const screenshotPath = structured.screenshotPath;
+      expect(typeof screenshotPath).toBe("string");
+      expect(path.dirname(screenshotPath!)).toBe(config.browserArtifactsDir);
+      expect(path.basename(screenshotPath!)).toMatch(
+        /^browser-screenshot-example-test-[0-9a-z]+-[0-9a-f]{8}\.png$/,
+      );
+      expect(Buffer.from(yield* fileSystem.readFile(screenshotPath!)).toString()).toBe("png");
+      const [, text] = snapshot.content;
+      expect(text?.type === "text" ? text.text : "").toContain(JSON.stringify(screenshotPath));
+
+      const unsaved = yield* callSnapshot({});
+      expect(unsaved.structuredContent).not.toHaveProperty("screenshotPath");
+
+      const pathOnly = yield* callSnapshot({ save: true });
+      const saved = pathOnly.structuredContent as { readonly screenshotPath: string };
+      expect(saved).toEqual({ url: snapshotResult.url, screenshotPath: expect.any(String) });
+      expect(Buffer.from(yield* fileSystem.readFile(saved.screenshotPath)).toString()).toBe("png");
+      const [only, ...others] = pathOnly.content;
+      expect(others).toEqual([]);
+      expect(only?.type === "text" ? decodeJsonText(only.text) : null).toEqual(saved);
+    }),
+  ).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("treats null snapshot options like omitted ones", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const inputs = yield* serveSnapshots("mcp-null-options-client", snapshotResult);
+
+      const omitted = yield* callSnapshot({});
+      const nulls = yield* callSnapshot({ tabId: null, includeImage: null, save: null });
+
+      expect(nulls).toEqual(omitted);
+      expect(inputs).toEqual([{}, {}]);
+    }),
+  ).pipe(Effect.provide(layerTest)),
 );
 
 it.effect("decodes null optional arguments the way it decodes omitted ones", () => {
@@ -820,3 +965,5 @@ it.effect("admits provider and OAuth client credentials and points only clients 
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
+
+const tabId = PreviewTabId.make("tab-mcp-test");

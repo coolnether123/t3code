@@ -1,3 +1,5 @@
+import { LegacyUsageRpcGroup } from "@t3tools/contracts";
+import * as UsageResetCheck from "./usage/UsageResetCheck.ts";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -16,6 +18,7 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
+import type * as Scope from "effect/Scope";
 import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
 import { rpcInitialItems } from "./rpcInitialItems.ts";
@@ -273,7 +276,7 @@ const resolveDiscoveryForConfig = <A, E, R>(
     Effect.map(Option.getOrElse(onTimeout)),
   );
 
-const resolveAvailableEditorsForConfig = <A, E, R>(
+export const resolveAvailableEditorsForConfig = <A, E, R>(
   discovery: Effect.Effect<ReadonlyArray<A>, E, R>,
 ) => resolveDiscoveryForConfig(discovery, () => []);
 
@@ -567,6 +570,7 @@ const isOtherWsRpc = (rpc: ServerWsRpc): rpc is Exclude<ServerWsRpc, SplitWsRpc>
 const serverWsRpcs = Array.from(ServerWsRpcGroup.requests.values());
 const SplitWsRpcGroup = RpcGroup.make(...serverWsRpcs.filter(isSplitWsRpc));
 const OtherWsRpcGroup = RpcGroup.make(...serverWsRpcs.filter(isOtherWsRpc));
+const ServerUsageRpcGroup = LegacyUsageRpcGroup.middleware(RpcInstrumentation);
 // Replaying each intervening event costs a shell refetch; past this gap a
 // single O(active-threads) snapshot is cheaper and bounded.
 const SHELL_RESUME_MAX_GAP = 1_000;
@@ -625,14 +629,18 @@ const MAX_CLIENT_APP_VERSION_LENGTH = 64;
 const MAX_CLIENT_BROWSER_LENGTH = 64;
 const MAX_CLIENT_DEVICE_MODEL_LENGTH = 80;
 
-function hasCompatibleOrchestrationProtocol(url: URL): boolean {
+export function isLegacyUsageProtocol(url: URL): boolean {
+  return !url.searchParams.has(ORCHESTRATION_PROTOCOL_QUERY_PARAM);
+}
+
+export function hasCompatibleOrchestrationProtocol(url: URL): boolean {
   return (
     url.searchParams.get(ORCHESTRATION_PROTOCOL_QUERY_PARAM) ===
     String(ORCHESTRATION_PROTOCOL_VERSION)
   );
 }
 
-function shouldUseBoundedThreadSnapshot(input: {
+export function shouldUseBoundedThreadSnapshot(input: {
   readonly acceptBoundedSnapshot?: boolean;
 }): boolean {
   return input.acceptBoundedSnapshot === true;
@@ -1282,6 +1290,8 @@ export const layerWsRpc = (
               Effect.orElseSucceed(() => null),
             );
       const usage = yield* UsageService.UsageService;
+      const resetCheck = yield* UsageResetCheck.UsageResetCheck;
+      const communityCheck = yield* UsageResetCheck.UsageCommunityCheck;
       const usageLimitSources = yield* UsageLimitSources.UsageLimitSources;
       const projectSetupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
       const worktreeSetupTracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
@@ -2461,6 +2471,14 @@ export const layerWsRpc = (
         [WS_METHODS.serverGetResourceTelemetryHistory]: (input) =>
           resourceTelemetry.readHistory(input),
         [WS_METHODS.serverGetUsageSummary]: (input) => usage.readSummary(input),
+        [WS_METHODS.serverGetUsageReport]: (input) => usage.readReport(input),
+        [WS_METHODS.serverGetResetCheck]: () => resetCheck.read,
+        [WS_METHODS.serverStartResetCheck]: () => resetCheck.start,
+        [WS_METHODS.serverCancelResetCheck]: () => resetCheck.cancel,
+        [WS_METHODS.serverGetCommunityCheck]: () => communityCheck.read,
+        [WS_METHODS.serverStartCommunityCheck]: () => communityCheck.start,
+        [WS_METHODS.serverCancelCommunityCheck]: () => communityCheck.cancel,
+
         [WS_METHODS.serverRefreshUsageRates]: (_input) => usage.refreshRates,
         [WS_METHODS.serverRetryResourceTelemetry]: (_input) => resourceTelemetry.retry,
         [WS_METHODS.serverCheckOtlpEndpoint]: (input) => otlpEndpointCheck.check(input),
@@ -2957,6 +2975,13 @@ export const layerWsRpc = (
         [WS_METHODS.previewAdjust]: (input) => previewManager.adjust(input),
         [WS_METHODS.previewRefresh]: (input) => previewManager.refresh(input),
         [WS_METHODS.previewClose]: (input) => previewManager.close(input),
+        [WS_METHODS.previewAutomationConnect]: (input) =>
+          previewAutomationBroker
+            .connect(input)
+            .pipe(Effect.flatMap((stream) => Stream.toQueue(stream, { capacity: "unbounded" }))),
+        [WS_METHODS.previewAutomationRespond]: (input) => previewAutomationBroker.respond(input),
+        [WS_METHODS.previewAutomationFocusHost]: (input) =>
+          previewAutomationBroker.focusHost(input),
         [WS_METHODS.previewList]: (input) => previewManager.list(input),
         [WS_METHODS.previewClearProfile]: (input) => serverBrowser.clearProfile(input.profileId),
         [WS_METHODS.previewReportProfiles]: (input) => serverBrowser.reportProfiles(input),
@@ -3207,7 +3232,11 @@ export const layer = Layer.unwrap(
       Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest;
         const requestUrl = HttpServerRequest.toURL(request);
-        if (Option.isNone(requestUrl) || !hasCompatibleOrchestrationProtocol(requestUrl.value)) {
+        const legacyUsage = Option.isSome(requestUrl) && isLegacyUsageProtocol(requestUrl.value);
+        if (
+          Option.isNone(requestUrl) ||
+          (!legacyUsage && !hasCompatibleOrchestrationProtocol(requestUrl.value))
+        ) {
           return HttpServerResponse.jsonUnsafe(
             {
               code: "orchestration_protocol_incompatible",
@@ -3238,7 +3267,11 @@ export const layer = Layer.unwrap(
         yield* analytics.recordOwners(readClientOwners(request), "client");
         const rpcWebSocketHttpEffect = yield* Effect.gen(function* () {
           const { protocol, httpEffect } = yield* RpcServer.makeProtocolWithHttpEffectWebsocket;
-          yield* RpcServer.make(ServerWsRpcGroup, WS_RPC_SERVER_OPTIONS).pipe(
+          yield* (
+            legacyUsage
+              ? RpcServer.make(ServerUsageRpcGroup, WS_RPC_SERVER_OPTIONS)
+              : RpcServer.make(ServerWsRpcGroup, WS_RPC_SERVER_OPTIONS)
+          ).pipe(
             Effect.provideService(RpcServer.Protocol, withTerminalOutputWindow(protocol)),
             Effect.provide(
               Layer.merge(

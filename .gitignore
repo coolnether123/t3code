@@ -16,6 +16,7 @@ build/
 release/
 release-mock/
 .t3
+/.t3-call-acceptance/
 .idea/
 apps/web/.playwright
 apps/web/playwright-report
@@ -44,5 +45,7 @@ node_modules/
 .env*
 !.env.example
 
+# Local Codex trigger-tree hook state
+.trigger-tree/
 # pnpm content-addressable store; never belongs in the repo.
 .pnpm-store/

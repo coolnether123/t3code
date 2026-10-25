@@ -6,17 +6,14 @@ import * as Layer from "effect/Layer";
 import type { CheckpointStoreError } from "./Errors.ts";
 import type { VcsCheckpointOps } from "../vcs/VcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
+import type { VcsCheckpointRestoreResult, VcsRestoreCheckpointInput } from "../vcs/VcsDriver.ts";
 
 export interface CaptureCheckpointInput {
   readonly cwd: string;
   readonly checkpointRef: CheckpointRef;
 }
 
-export interface RestoreCheckpointInput {
-  readonly cwd: string;
-  readonly checkpointRef: CheckpointRef;
-  readonly fallbackToHead?: boolean;
-}
+export type RestoreCheckpointInput = VcsRestoreCheckpointInput;
 
 export interface DiffCheckpointsInput {
   readonly cwd: string;
@@ -52,12 +49,12 @@ export class CheckpointStore extends Context.Service<
     ) => Effect.Effect<void, CheckpointStoreError>;
 
     readonly hasCheckpointRef: (
-      input: Omit<RestoreCheckpointInput, "fallbackToHead">,
+      input: Pick<RestoreCheckpointInput, "cwd" | "checkpointRef">,
     ) => Effect.Effect<boolean, CheckpointStoreError>;
 
     readonly restoreCheckpoint: (
       input: RestoreCheckpointInput,
-    ) => Effect.Effect<boolean, CheckpointStoreError>;
+    ) => Effect.Effect<VcsCheckpointRestoreResult, CheckpointStoreError>;
 
     readonly diffCheckpoints: (
       input: DiffCheckpointsInput,

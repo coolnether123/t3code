@@ -1,3 +1,11 @@
+import * as VoiceRuntime from "./speech/VoiceRuntime.ts";
+import * as AuxiliaryProviderSessions from "./provider/AuxiliaryProviderSessions.ts";
+import * as VoiceThreadService from "./speech/VoiceThreadService.ts";
+import * as ThreadCommandExecutor from "./orchestration-v2/ThreadCommandExecutor.ts";
+import { speechRouteLayer } from "./speech/http.ts";
+import { codexDesktopRouteLayer } from "./provider/CodexDesktopHttp.ts";
+import * as ChromeAutomation from "./browser/ChromeAutomation.ts";
+import * as CodexDesktopStore from "./provider/CodexDesktopStore.ts";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay";
 import * as Random from "effect/Random";
@@ -174,6 +182,8 @@ import * as CursorAccountReader from "@t3tools/provider-cursor/server/CursorAcco
 import * as CursorKeychain from "@t3tools/provider-cursor/server/CursorKeychain";
 import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
 import * as UsageService from "./usage/UsageService.ts";
+import * as UsageResetCheck from "./usage/UsageResetCheck.ts";
+import * as UsageProjection from "./usage/UsageProjection.ts";
 import * as CodexUsageHistory from "./usage/CodexUsageHistory.ts";
 import * as RuntimeLayer from "./orchestration-v2/runtimeLayer.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
@@ -267,7 +277,12 @@ const layerBackground = BackgroundPolicy.layer.pipe(
   Layer.provideMerge(layerServerSettings),
 );
 
-const layerUsage = UsageService.layer.pipe(
+const layerUsage = Layer.mergeAll(
+  UsageService.layer,
+  UsageResetCheck.layer,
+  UsageResetCheck.communityLayer,
+).pipe(
+  Layer.provide(UsageProjection.layer),
   Layer.provide(
     Layer.mergeAll(
       AntigravityUsage.layer,
@@ -670,7 +685,23 @@ const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
   ),
 );
 
-const layerRuntimeDependencies = layerRuntimeCoreDependencies.pipe(
+const layerAuxiliarySessions = AuxiliaryProviderSessions.layer.pipe(
+  Layer.provide(ProviderAdapterRegistry.layerFromProviderInstanceRegistry),
+);
+const layerRuntimeDependencies = VoiceRuntime.layer.pipe(
+  Layer.provideMerge(
+    VoiceThreadService.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          RuntimeLayer.layerEventSink,
+          ProjectionStoreV2.layer,
+          ThreadCommandExecutor.layer,
+        ),
+      ),
+    ),
+  ),
+  Layer.provideMerge(layerAuxiliarySessions),
+  Layer.provideMerge(layerRuntimeCoreDependencies),
   Layer.provideMerge(layerUsage),
   Layer.provideMerge(layerBackground),
   Layer.provideMerge(layerResourceDiagnostics),
@@ -701,12 +732,15 @@ const layerMakeRoutes = Layer.mergeAll(
       Layer.provide(PullRequestHttp.layer),
       Layer.provide(ProjectHttp.layer),
       Layer.provide(ServerHttp.layerServerEnvironmentHttpApi),
+      Layer.provide(ServerHttp.providerSnapshotsHttpApiLayer),
       Layer.provide(WebhookRoute.layer.pipe(Layer.provide(RelayDeliveryProof.layer))),
       Layer.provide(AuthHttp.layerAuthenticatedAuth),
     ),
     ServerHttp.layerOtlpTracesProxyRoute,
     ServerHttp.layerAssetRoute,
     ServerHttp.layerAttachmentUploadRoute,
+    speechRouteLayer,
+    codexDesktopRouteLayer,
     DeviceHubProxy.layer,
     ServerBrowserStream.routeLayer,
     ServerHttp.layerStaticAndDevRoute,
@@ -724,6 +758,8 @@ const layerMakeRoutes = Layer.mergeAll(
   // and mutations observed on WebSocket invalidate patches subsequently read over HTTP.
   Layer.provide(layerPullRequestService),
   Layer.provide(ServerBrowser.layer.pipe(Layer.provide(DesktopBrowserChannel.layer))),
+  Layer.provide(ChromeAutomation.layer),
+  Layer.provide(CodexDesktopStore.layer),
   Layer.provide(PreviewBrowser.layer),
   Layer.provide(PreviewAutomationBroker.layer),
   Layer.provide(ServerSelfUpdate.layer.pipe(Layer.provide(layerDesktopAppUpdate))),

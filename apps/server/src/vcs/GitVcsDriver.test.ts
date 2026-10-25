@@ -943,11 +943,11 @@ it.effect("restores empty checkpoints without changing paths outside the workspa
         yield* fileSystem.writeFileString(addedPath, "new\n");
         if (staged) yield* runGit(cwd, ["add", "added.txt"]);
         assert.isTrue(
-          yield* driver.checkpoints.restoreCheckpoint({
+          (yield* driver.checkpoints.restoreCheckpoint({
             cwd,
             checkpointRef,
             fallbackToHead: false,
-          }),
+          })).restored,
         );
         assert.isTrue(yield* fileSystem.exists(cwd));
         assert.isFalse(yield* fileSystem.exists(addedPath));
@@ -960,7 +960,8 @@ it.effect("restores empty checkpoints without changing paths outside the workspa
       yield* fileSystem.makeDirectory(path.join(cwd, "untracked"));
       yield* fileSystem.writeFileString(path.join(cwd, "untracked", "file.txt"), "remove\n");
       assert.isTrue(
-        yield* driver.checkpoints.restoreCheckpoint({ cwd, checkpointRef, fallbackToHead: false }),
+        (yield* driver.checkpoints.restoreCheckpoint({ cwd, checkpointRef, fallbackToHead: false }))
+          .restored,
       );
       assert.strictEqual(yield* fileSystem.readFileString(path.join(cwd, "ignored.txt")), "keep\n");
       assert.isFalse(yield* fileSystem.exists(path.join(cwd, "untracked")));
@@ -1240,4 +1241,53 @@ it.effect("git metrics count fsync fallback and transient retry subprocesses sep
     Effect.provide(NodeServices.layer),
     Effect.provideService(Metric.MetricRegistry, new Map()),
   ),
+);
+
+it.effect.each(["win32", "linux"] as const)(
+  "checkpoint working-tree commands enable Git long paths only on Windows (%s)",
+  (platform) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const liveProcess = yield* VcsProcess.VcsProcess;
+      const driver = yield* GitVcsDriver.makeVcsDriverShape();
+      const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-checkpoint-long-paths-" });
+      const { git, checkpointRef } = yield* makeCheckpointFixture(driver, cwd);
+      // An unborn nested repository fails the first `add`, so recovery's listing runs too.
+      yield* git(["init", "empty"]);
+      const observedArgs: ReadonlyArray<string>[] = [];
+      const platformDriver = yield* GitVcsDriver.makeVcsDriverShape().pipe(
+        Effect.provideService(HostProcess.Platform, platform),
+        Effect.provideService(VcsProcess.VcsProcess, {
+          run: (input) => {
+            observedArgs.push(input.args);
+            return liveProcess.run(input);
+          },
+        }),
+      );
+
+      yield* platformDriver.checkpoints.captureCheckpoint({ cwd, checkpointRef });
+      yield* fs.writeFileString(path.join(cwd, "file.txt"), "changed\n");
+      assert.isTrue(
+        (yield* platformDriver.checkpoints.restoreCheckpoint({ cwd, checkpointRef })).restored,
+      );
+
+      assert.strictEqual(yield* fs.readFileString(path.join(cwd, "file.txt")), "unstaged\n");
+      assert.strictEqual((yield* git(["ls-tree", checkpointRef, "--", "empty"])).stdout, "");
+      for (const command of ["add", "ls-files", "restore", "clean", "reset"]) {
+        const calls = observedArgs.filter(
+          (args) => args.includes(command) && (command !== "ls-files" || args.includes("--others")),
+        );
+        assert.isNotEmpty(calls, `Expected checkpoint command: ${command}`);
+        for (const args of calls) {
+          const setting = args.indexOf("core.longpaths=true");
+          if (platform === "win32") {
+            assert.strictEqual(args[setting - 1], "-c", args.join(" "));
+            assert.isBelow(setting, args.indexOf(command), args.join(" "));
+          } else {
+            assert.strictEqual(setting, -1, args.join(" "));
+          }
+        }
+      }
+    }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
 );

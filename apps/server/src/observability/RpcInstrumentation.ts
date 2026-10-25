@@ -14,6 +14,16 @@ type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
  * even where they differ from the method prefix.
  */
 const RPC_AGGREGATES = {
+  [WS_METHODS.previewAutomationConnect]: "preview",
+  [WS_METHODS.previewAutomationRespond]: "preview",
+  [WS_METHODS.previewAutomationFocusHost]: "preview",
+  [WS_METHODS.serverGetUsageReport]: "server",
+  [WS_METHODS.serverStartResetCheck]: "server",
+  [WS_METHODS.serverGetResetCheck]: "server",
+  [WS_METHODS.serverCancelResetCheck]: "server",
+  [WS_METHODS.serverStartCommunityCheck]: "server",
+  [WS_METHODS.serverGetCommunityCheck]: "server",
+  [WS_METHODS.serverCancelCommunityCheck]: "server",
   [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: "orchestrationV2",
   [ORCHESTRATION_V2_WS_METHODS.getWorkflowScript]: "orchestration",
   [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: "orchestration",

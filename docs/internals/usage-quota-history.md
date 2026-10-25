@@ -1,0 +1,202 @@
+# Saved quota history integration
+
+`UsageService.readSummary` accepts optional `includeQuotaHistory` and `quotaIntervals` fields.
+The reset page uses `quotaHistoryOnly` to read observations without scanning transcripts,
+fetching model prices, or waiting for the transcript-scan lock. Its subsequent `quotaIntervals`
+request scans only Codex sources. Ordinary usage requests continue to include all providers.
+Old clients and servers can continue using usage contract 6. New clients detect missing optional
+fields and show an unsupported-server state rather than treating missing values as zero.
+
+The server reads Codex Limits' Windows `LOCALAPPDATA/CodexLimits/state.json`. Operators can set
+`T3CODE_QUOTA_HISTORY_PATH` to a compatible saved file on another platform. Clients cannot supply
+filesystem paths. The import is read-only, bounded to 2 MiB and 5,000 samples, and accepts only
+the main `codex` limit with a 10,080-minute window. On hosts with the companion sampler, it also
+reads at most 64 content-addressed archive chunks of 1,000 observations and 256 KiB each. A
+damaged or oversized archive makes the import invalid without touching the files. It returns sanitized observation time,
+remaining percentage, and scheduled reset time. It never reads credentials, starts the tracker,
+or queries an account. Codex Limits owns the Windows collection and retention. The separate macOS
+sampler archives its own file; the T3 server only reads it.
+
+`packages/shared/src/usageQuota.ts` groups consecutive observations. Reset-clock changes within
+one minute are treated as timestamp jitter. A percentage increase or a larger clock change
+starts another period. A changed clock without evidence of replenishment is ambiguous unless
+the observations straddle the previously scheduled boundary. Reset events are observation
+intervals, not exact timestamps; the final group has no confirmed reset.
+
+The client requests at most 64 ordered, disjoint exact cost intervals, with two UTC calendar days
+of scan padding. `QuotaCostAccumulator` receives only records accepted by the existing
+`UsageAggregator` deduplication pass. It prices records strictly after the first observation and
+through the last observation. Spark/bengalfox records are excluded from the main quota comparison.
+It returns separate interval totals per physical source so duplicate environment aliases do not
+inflate the merge. Raw transcript text never crosses the wire.
+
+The ordinary Usage totals are unchanged. The summary cache key includes the history flag and
+intervals, including the distinction between omitted intervals and an empty interval request.
+The second cost query reuses the same per-file transcript cache as ordinary Usage.
+
+The tracker stores no account identity. The web, desktop, and native-mobile views display estimates
+with an explicit assumption that selected transcript sources cover the same account without copied
+chats. A confirmation checkbox does not verify identity and no longer gates the calculation.
+`remainingValueUsd` estimates the last observed percentage even in an unfinished period;
+`unusedValueUsd` additionally requires a classified, closely observed reset boundary.
+Complete same-window results remain visible during background refresh; initial, partial, failed,
+or unpriced results cannot produce a remaining-value estimate.
+Each reset page also retains up to 128 complete period calculations for its mounted lifetime.
+The key includes tracker ID, selected environment IDs and physical source fingerprints, and the
+full observed period. A later incomplete result can display that labeled snapshot, never a new
+conversion from partial costs. No snapshot is persisted as live account data.
+Partial or unpriced costs are withheld. The five-percentage-point minimum limits unstable
+conversions from rounded observations. The one-hour reset-observation limit bounds, but does
+not eliminate, uncertainty about usage between observations. No model-equivalence guarantee or
+fixed subscription-to-dollar exchange rate is implied.
+
+`quotaHistoryPoints` supplies both clients with elapsed-time coordinates and line-break flags.
+Graphs do not interpolate across observation gaps over an hour or reset changes, and never extend
+the last saved percentage to the present. Dollar comparison bars use the same per-period values
+as the text summaries. Presentation-only observation selection makes no usage requests.
+
+## Ongoing observations and pace
+
+The Windows Codex Limits app now supports `--collect-once` with no window. Its separately installed
+Windows task records every five minutes and at user sign-in. Collection is independent of T3,
+uses `account/rateLimits/read`, and never starts a model turn. A process mutex prevents concurrent
+writers. The parser selects the 10,080-minute main Codex window explicitly, rather than selecting
+whichever short or weekly window has less remaining. Failed reads leave history intact.
+
+Web and native reset pages refresh only the history query every minute and on foreground return.
+The timer does not trigger cost scans unless observations actually change. The quota-history
+importer remains read-only; collecting another reading needs no backend restart or new wire fields.
+
+`usageQuotaForecast.ts` is shared by both clients. It blends the current observed slope with the
+current weekly-window average, with a minimum hour and one percentage point before using an
+observed slope. Earlier periods no longer affect the forecast. Reset-separated periods prevent
+negative burn. Its target reserve is explicitly
+3%; it does not read or alter the tray application's reserve setting. The measurement timestamp
+anchors all estimates; the UI clock only updates countdowns and freshness. A reading older than
+15 minutes or an expired window is historical, never a current balance. Actual lines break at
+long observation gaps. Projection lines are separate and reach zero at exhaustion, not at reset
+when exhaustion occurs sooner. A current single observation can use the weekly-window average
+without waiting for chat scans or the dollar-conversion calibration threshold.
+
+## Current monitoring view
+
+`quotaMonitoringSamples` retains the most recent run after a gap over 24 hours. Both reset pages
+apply it before requesting cost intervals. This leaves archived tracker data intact while excluding
+old runs from the UI and cost calibration. Total cycle usage is `100 - remainingPercent`;
+monitored usage is `first.remainingPercent - last.remainingPercent`. Only the latter can calibrate
+costs for that same shorter interval. The page displays both and labels the pre-monitoring usage.
+
+`packages/client-runtime/src/resetAnnouncements.ts` owns a public, unauthenticated news read from
+Reset Beacon's documented `/api/forecast`. It accepts only fresh, scheduled announcements with a
+Tibo X status URL, Codex reset text, and a valid deadline. It excludes banked-reset text. Requests
+omit credentials, referrers, and trace propagation; they time out after ten seconds and recur every
+five minutes only while the page is mounted. Unmount interrupts the request and schedule.
+This adapter is shared by web and native mobile. No account or transcript data reaches the feed.
+
+A valid earlier announcement changes the planning deadline and target pace, never the saved
+account percentage or weekly clock. The UI labels the independent feed and links the source post.
+Its Pacific-local-time interpretation is disclosed. Expired news, failed reads, and elapsed
+deadlines fall back to the weekly timer. A new observed account cycle retires the old announcement.
+The feed is not an authoritative account-reset detector. Actual reset records still require
+account observations, and their cause can remain ambiguous.
+
+`packages/client-runtime/src/publicResetHistory.ts` reads Codex Resets' documented, unauthenticated
+`/api/v1/resets` endpoint. It strictly decodes the v1 response, accepts only the documented Tibo X
+links or observed records, bounds response and text size, omits credentials, referrers, and tracing,
+and asks the browser cache to revalidate with the API's ETag. The watcher refreshes every four hours
+while a reset page is mounted and stops its request and schedule on unmount.
+
+Only consecutive `regular` announcements form cost intervals. Up to 65 announcements produce the
+64 intervals already accepted by `UsageSummaryInput.quotaIntervals`; the existing server-side
+Codex transcript scanner and `QuotaCostAccumulator` price those intervals without a new RPC or a
+second costing model. `banked` grants remain presentation metadata because a grant is not applied
+until the account owner redeems it. The client keeps public periods separate from locally observed
+quota periods, so it never fabricates `UsageQuotaSample` percentages or writes public events into
+the local tracker history.
+
+Public timestamps use `announced_at`, not an execution timestamp. The web and native-mobile views
+therefore label every period as an API-equivalent estimate, disclose propagation uncertainty, and
+withhold incomplete, unpriced, or empty transcript totals. Physical source fingerprints are
+deduplicated before aggregation. No account or transcript data is sent to Codex Resets.
+
+## Claude subscription windows
+
+`ClaudeQuotaSampler` is the Claude counterpart of the Codex Limits collector, but it runs inside
+the T3 server. On the provider health-check interval it calls `readClaudeSubscriptionWindows`,
+which reuses the Claude capability probe: the Agent SDK starts the configured Claude CLI with a
+never-yielding prompt and issues its `get_usage` control request, so no model request is made.
+It runs whether or not Claude is enabled for chats and whether or not a client is connected; it
+pauses only for host constraints (suspend, thermal pressure, and the locked, low-power, and
+battery settings). A signed-out CLI or an account without subscription limits is saved as the
+reason and retried every 30 minutes.
+
+Readings are kept per window id (`five_hour`, `seven_day`, and model-scoped weeklies) in
+`usage-claude-quota-history.json` in the state directory, as `[observedAtMs, remainingPercent,
+resetsAtMs]` triples. Unchanged consecutive readings are coalesced but kept at least hourly;
+retention is 120 days and 12,000 readings per window. Summaries that include quota history return
+them as `providerQuotaHistories` using the `UsageQuotaSample` shape, so `quotaPeriods`, forecasts,
+and the pace chart apply unchanged. `quotaForecast` and the chart take the window length, so a
+session limit is paced over five hours. `quotaProvider: "claude"` makes `QuotaCostAccumulator`
+price Claude records for the requested intervals; it is part of the client query key and is
+omitted for Codex so existing Codex keys are unchanged. The cost ledger remains Codex-only.
+
+## Transcript scan cache
+
+Parsed records are stored in `usage-scan-cache.sqlite` (`UsageScanStore`), not in a single JSON
+document. Each transcript has a head row (size, mtime, parser cursor, Codex parser state,
+repeated-input data) and append-only record chunks in the positional per-file format the old cache
+used, so decoding keeps its corrupt-entry rules. Only a per-file index (size, mtime, cursors,
+record count, latest usage time) is resident; entries are decoded on demand behind a bounded
+decode cache. A transcript that grew appends its new records; a re-parsed one replaces its chunks.
+The database opens on first use and is released after each scan. Window filtering and scan
+planning read the index, and unchanged files whose latest usage predates a window are not decoded.
+The pre-SQLite `usage-scan-cache.json` is imported once on a detached fiber in small transactions,
+then kept as `usage-scan-cache.json.imported`.
+
+Transcript listings keep the last complete walk per root. Later reads stat known directories,
+re-read only directories whose mtime changed, and re-stat only transcripts written in the last
+48 hours; a full walk runs every five minutes to catch appends to older transcripts. Summaries
+that request the same root within ten seconds share one complete listing.
+
+## On-demand Luna research
+
+The web Limits page no longer shows these jobs; the server methods remain for other clients.
+
+`UsageResetCheck` owns one bounded research job per environment. Authenticated read scopes can
+read status; orchestration-operate scopes are required to start or cancel. Concurrent starts share
+one job. Three typed RPC methods carry `ResetCheckState` through the shared client runtime to web,
+desktop, and native mobile. Clients poll every three seconds only while a job is running.
+
+The runner uses the configured Codex executable and effective Codex home. It pins `gpt-5.6-luna`,
+live web search, read-only sandboxing, and no approval prompts. Shell and multi-agent tools and
+project instructions are disabled, and user config is ignored. API-key environment variables are
+not passed. Before launch, a ten-second public request fetches Reset Beacon's current announcement
+snapshot. Only a fresh, size-bounded subset is supplied as explicitly untrusted, indirect evidence.
+No credentials, referrers, or tracing headers accompany the request, and redirects are refused.
+The job receives this snapshot, a fixed public-news prompt, and the current time, never quota or
+chat data. Normal Codex rollouts remain enabled so this work appears in transcript usage.
+
+The job stops after three minutes and supports cancellation. Temporary output files are scoped to
+the subprocess. Structured output uses Codex's supported JSON Schema subset; server validation
+separately bounds text, source count, URLs, timestamps, and date ranges. A claimed current-feed read
+needs a cited original profile/feed URL. Indirect or ambiguous timing cannot receive high confidence.
+Unverified feed access cannot produce a reassuring no-reset result.
+
+The last state is atomically saved to `codex-reset-check.json` in the provider status cache. It
+survives navigation and server restarts; an interrupted job becomes a failed check on restart.
+The UI labels the check time and saved nature of the result. Research never changes account quota,
+the weekly timer, observed resets, or the public-feed planning deadline. Direct X access remains
+dependent on the search provider and X's access restrictions; no browser cookies are exported.
+
+`UsageCommunityCheck` owns a second job and `codex-community-check.json` result. Its three
+community RPCs use the same read/operate authorization split. The two jobs share the fixed
+Luna process runner, timeout, cancellation, and persistence implementation, but never share
+state. The community schema has no reset-time or account-percentage fields. Source validation
+accepts bounded X status links from community authors, rejects duplicate post IDs, and requires
+a dated original for firsthand reset/waiting classifications. Both clients label limited access.
+
+Transcript scan budgeting uses the same validated append offset as the reader. A growing
+200 MB chat with 40 KB appended consumes 40 KB of the scan budget. A missing parser cursor,
+truncation, provider change, or incomplete JSONL boundary requires a full read instead.
+Usage refresh awaits new observations and their matching cost interval; reset news updates
+through its independent watcher. Transcript parsing remains bounded separately by unread bytes.

@@ -1,0 +1,156 @@
+import { describe, expect, it } from "vite-plus/test";
+
+import { buildCodexAdditionalContext } from "./CodexDeveloperInstructions.ts";
+
+const runtime = { model: "gpt-5.6-sol", reasoningEffort: "high" } as const;
+
+describe("Codex browser provider instructions", () => {
+  it("does not infer a managed browser from the selected mode", () => {
+    for (const computerControlMode of ["chrome", "desktop"] as const) {
+      const instructions = JSON.stringify(
+        buildCodexAdditionalContext({ ...runtime, computerControlMode }, false),
+      );
+      expect(instructions).not.toContain("computer_start");
+      expect(instructions).not.toContain("preview_status");
+      expect(instructions).not.toMatch(
+        /@oai\/sky|mcp__node_repl__js|explicitly trusts|unrestricted/,
+      );
+    }
+  });
+
+  it("gives desktop-backed Windows threads managed Chrome guidance when the daemon lends no app tools", () => {
+    const instructions = JSON.stringify(
+      buildCodexAdditionalContext(
+        {
+          ...runtime,
+          useDesktopAppDaemon: true,
+          computerControlMode: "chrome",
+          computerControlAvailable: true,
+        },
+        true,
+      ),
+    );
+
+    expect(instructions).toMatch(/computer_start.*computer_navigate.*computer_snapshot/s);
+    expect(instructions).not.toContain("Codex Chrome browser-extension route");
+    expect(instructions).not.toContain(
+      "Do not substitute Sky, the built-in browser, T3 managed Chrome",
+    );
+  });
+
+  it("describes the host Codex desktop tools without managed Chrome fallback guidance", () => {
+    const instructions = JSON.stringify(
+      buildCodexAdditionalContext(
+        {
+          ...runtime,
+          useDesktopAppDaemon: true,
+          computerControlMode: "chrome",
+          computerControlAvailable: false,
+        },
+        true,
+      ),
+    );
+
+    expect(instructions).toContain("host's Codex desktop installation");
+    expect(instructions).toContain("Codex Chrome browser-extension route");
+    expect(instructions).toContain("Windows Computer Use through Sky via node_repl");
+    expect(instructions).toContain("site permissions and action-time confirmations");
+    expect(instructions).toContain("report that instead of switching browsers");
+    expect(instructions).not.toContain("computer_start");
+    expect(instructions).not.toContain("Configured Windows Computer Use");
+  });
+
+  it("describes only the discovered managed Chrome tools and their separate profile", () => {
+    const instructions = JSON.stringify(
+      buildCodexAdditionalContext(
+        { ...runtime, computerControlMode: "chrome", computerControlAvailable: true },
+        false,
+      ),
+    );
+    expect(instructions).toMatch(
+      /computer_start.*computer_status.*computer_tabs.*computer_select_tab/s,
+    );
+    expect(instructions).toMatch(/computer_navigate.*computer_snapshot.*computer_click/s);
+    expect(instructions).toMatch(/computer_fill.*computer_type.*computer_close/s);
+    expect(instructions).toContain("separate persistent Chrome profile");
+    expect(instructions).toContain("Tool availability is not an approval");
+    expect(instructions).toContain("Opening a URL does not provide observation or input control");
+    expect(instructions).not.toContain("preview_status");
+  });
+
+  it("makes the saved desktop preference's browser-only fallback explicit", () => {
+    const instructions = JSON.stringify(
+      buildCodexAdditionalContext(
+        { ...runtime, computerControlMode: "desktop", computerControlAvailable: true },
+        false,
+      ),
+    );
+    expect(instructions).toContain("does not attach Codex desktop Computer Use to T3");
+    expect(instructions).toContain("browser-only fallback");
+    expect(instructions).toContain("independently configured MCP server");
+    expect(instructions).not.toMatch(/Full Windows and Chrome control|@oai\/sky|explicitly trusts/);
+  });
+
+  it("keeps preview mode independent from managed Chrome availability", () => {
+    const instructions = JSON.stringify(
+      buildCodexAdditionalContext(
+        { ...runtime, computerControlMode: "preview", computerControlAvailable: true },
+        true,
+      ),
+    );
+    expect(instructions).toContain("preview_status");
+    expect(instructions).not.toContain("computer_start");
+    expect(instructions).not.toContain("Desktop control availability");
+  });
+
+  it("does not describe managed tools when capability discovery reports them absent", () => {
+    const instructions = JSON.stringify(
+      buildCodexAdditionalContext(
+        { ...runtime, computerControlMode: "chrome", computerControlAvailable: false },
+        true,
+      ),
+    );
+    expect(instructions).toContain("preview_status");
+    expect(instructions).not.toContain("computer_start");
+  });
+
+  it("allows the documented configured Windows skill route independently of browser preference", () => {
+    for (const computerControlMode of ["preview", "chrome", "desktop"] as const) {
+      const instructions = JSON.stringify(
+        buildCodexAdditionalContext(
+          { ...runtime, computerControlMode, computerControlAvailable: false },
+          false,
+        ),
+      );
+      expect(instructions).toContain(
+        "does not disable independently configured MCP tools or skills",
+      );
+      expect(instructions).toContain("installed Computer Use skill");
+      expect(instructions).toContain("documented package entry point through the existing runtime");
+      expect(instructions).toContain("lightweight host check in the current session");
+      expect(instructions).toContain("A callable JavaScript tool alone does not prove");
+      expect(instructions).toContain("Host reachability is not app approval or permission to act");
+      expect(instructions).toContain("Select exactly one target window");
+      expect(instructions).toContain("action-time confirmations");
+      expect(instructions).toContain("coordinate foreground ownership with the user");
+      expect(instructions).toContain("stop on cancellation or a locked desktop");
+      expect(instructions).toContain(
+        "Do not install a bridge, spawn a helper, use private endpoints",
+      );
+      expect(instructions).not.toMatch(/computer_start|preview_status/);
+    }
+  });
+
+  it("does not treat a managed Chrome limitation as a denial of a requested configured provider", () => {
+    const instructions = JSON.stringify(
+      buildCodexAdditionalContext(
+        { ...runtime, computerControlMode: "chrome", computerControlAvailable: true },
+        false,
+      ),
+    );
+    expect(instructions).toContain("check its installed skill and configured tools");
+    expect(instructions).toContain(
+      "do not treat it as proof that the requested provider is unavailable",
+    );
+  });
+});

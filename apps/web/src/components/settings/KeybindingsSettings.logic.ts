@@ -22,7 +22,9 @@ import { METRIC_OPTIONS, WINDOW_OPTIONS } from "../usage/usageShortcuts";
 const usageCommandOrder = new Map<KeybindingCommand, number>(
   [
     "usage.open" as const,
-    ...[...METRIC_OPTIONS, ...WINDOW_OPTIONS].map((option) => option.command),
+    ...[...METRIC_OPTIONS, ...WINDOW_OPTIONS].flatMap((option) =>
+      "command" in option ? [option.command] : [],
+    ),
   ].map((command, index) => [command, index]),
 );
 
@@ -369,7 +371,9 @@ export function commandLabel(command: KeybindingCommand): string {
   if (command === "thread.copyReference") return "Pull Request: Copy Link or Thread ID";
   const usageMetric = METRIC_OPTIONS.find((option) => option.command === command);
   if (usageMetric) return `Usage: ${usageMetric.label}`;
-  const usagePeriod = WINDOW_OPTIONS.find((option) => option.command === command);
+  const usagePeriod = WINDOW_OPTIONS.find(
+    (option) => "command" in option && option.command === command,
+  );
   if (usagePeriod) return `Usage: Period: ${usagePeriod.label}`;
   if (command === "view.reopenClosed") return "Reopen Closed Tab";
   if (command === "preview.focusUrl") return "Preview: Focus URL";

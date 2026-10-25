@@ -1,3 +1,4 @@
+import { resolveCodexBinaryPath } from "../CodexAppServerTransport.ts";
 import { CodexSettings, ProviderDriverKind } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -163,7 +164,10 @@ export const CodexDriver: ProviderDriver<
     const effectiveConfig = {
       ...config,
       enabled,
-      binaryPath: expandHomePath(config.binaryPath, yield* HostProcess.HomeDirectory),
+      binaryPath: expandHomePath(
+        yield* resolveCodexBinaryPath(config, processEnv),
+        yield* HostProcess.HomeDirectory,
+      ),
       homePath: homeLayout.effectiveHomePath ?? "",
     } satisfies CodexSettings;
     const resolveMaintenance = yield* makeCachedProviderMaintenanceResolution(

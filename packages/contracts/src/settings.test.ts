@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
+it("validates subscription billing dates as calendar dates", () => {
+  const valid = Schema.is(UsageSubscription);
+  const subscription = { plan: "Codex Pro", monthlyUsd: 200, startDate: "2026-07-01" };
+  expect(valid(subscription)).toBe(true);
+  expect(valid({ ...subscription, startDate: "2026-02-31" })).toBe(false);
+  expect(valid({ ...subscription, startDate: "2028-02-29" })).toBe(true);
+  expect(valid({ ...subscription, startDate: "2026-02-29" })).toBe(false);
+});
+
 import { type CommandId, ProjectId } from "./baseSchemas.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import {
@@ -16,6 +25,7 @@ import {
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
+  UsageSubscription,
   withIdleCompaction,
 } from "./settings.ts";
 

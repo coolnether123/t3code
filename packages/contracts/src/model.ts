@@ -114,6 +114,12 @@ export type CustomModelEntry = typeof CustomModelEntry.Type;
 export const CustomModelSetting = Schema.Union([Schema.String, CustomModelEntry]);
 export type CustomModelSetting = typeof CustomModelSetting.Type;
 
+/**
+ * Saved sub-agent runtime routes, retained for existing threads and clients.
+ */
+export const SubagentBackend = Schema.Literals(["v1", "v2", "native-v1-control"]);
+export type SubagentBackend = typeof SubagentBackend.Type;
+
 const CODEX_DRIVER_KIND = ProviderDriverKind.make("codex");
 const CLAUDE_DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
 const CURSOR_DRIVER_KIND = ProviderDriverKind.make("cursor");
@@ -123,7 +129,7 @@ const PI_DRIVER_KIND = ProviderDriverKind.make("pi");
 const ACP_REGISTRY_DRIVER_KIND = ProviderDriverKind.make("acpRegistry");
 const OPENCODE_DRIVER_KIND = ProviderDriverKind.make("opencode");
 
-export const DEFAULT_MODEL = "gpt-6-astra";
+export const DEFAULT_MODEL = "gpt-6.1-sol";
 
 /**
  * The provider snapshot marks the first of these present in the live
@@ -147,7 +153,6 @@ export const DEFAULT_MODEL_BY_PROVIDER: Partial<Record<ProviderDriverKind, strin
   [CODEX_DRIVER_KIND]: DEFAULT_MODEL,
   [CLAUDE_DRIVER_KIND]: "claude-fable-5-1",
   [CURSOR_DRIVER_KIND]: "auto",
-  // Product slug, not an ACP model id. The Grok adapter treats it as "the session's current model".
   [GROK_DRIVER_KIND]: "grok-build",
   [MUSE_DRIVER_KIND]: MUSE_DEFAULT_MODEL,
   [ACP_REGISTRY_DRIVER_KIND]: "default",
@@ -178,7 +183,30 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
     "5.3-spark": "gpt-5.3-codex-spark",
     "gpt-5.3-spark": "gpt-5.3-codex-spark",
   },
-  [CLAUDE_DRIVER_KIND]: {},
+  [CLAUDE_DRIVER_KIND]: {
+    opus: "claude-opus-5",
+    "opus-5": "claude-opus-5",
+    "claude-opus-5.0": "claude-opus-5",
+    "claude-opus-5-0": "claude-opus-5",
+    "opus-4.8": "claude-opus-4-8",
+    "claude-opus-4.8": "claude-opus-4-8",
+    "opus-4.7": "claude-opus-4-7",
+    "claude-opus-4.7": "claude-opus-4-7",
+    "opus-4.6": "claude-opus-4-6",
+    "claude-opus-4.6": "claude-opus-4-6",
+    "claude-opus-4-6-20251117": "claude-opus-4-6",
+    sonnet: "claude-sonnet-5",
+    "sonnet-5": "claude-sonnet-5",
+    "claude-sonnet-5.0": "claude-sonnet-5",
+    "claude-sonnet-5-0": "claude-sonnet-5",
+    "sonnet-4.6": "claude-sonnet-4-6",
+    "claude-sonnet-4.6": "claude-sonnet-4-6",
+    "claude-sonnet-4-6-20251117": "claude-sonnet-4-6",
+    haiku: "claude-haiku-4-5",
+    "haiku-4.5": "claude-haiku-4-5",
+    "claude-haiku-4.5": "claude-haiku-4-5",
+    "claude-haiku-4-5-20251001": "claude-haiku-4-5",
+  },
   [CURSOR_DRIVER_KIND]: {
     composer: "composer-2",
     "composer-1.5": "composer-1.5",
@@ -194,7 +222,6 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
 };
 
 export const PROVIDER_DISPLAY_NAMES: Partial<Record<ProviderDriverKind, string>> = {
-  [ProviderDriverKind.make("antigravity")]: "Antigravity",
   [CODEX_DRIVER_KIND]: "Codex",
   [CLAUDE_DRIVER_KIND]: "Claude",
   [CURSOR_DRIVER_KIND]: "Cursor",

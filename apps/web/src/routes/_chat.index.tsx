@@ -12,6 +12,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../components/
 import { SidebarInset } from "../components/ui/sidebar";
 import { WorkspacePageHeader } from "../components/WorkspacePageHeader";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
+import { useSidebarEnvironmentScope } from "../hooks/useSidebarEnvironmentScope";
 import {
   readProject,
   useAllEnvironmentShellsBootstrapped,
@@ -44,8 +45,18 @@ function IndexDraftLanding() {
   const startedAttemptRef = useRef<number | null>(null);
   const [startState, setStartState] = useState({ failed: false, retryRequest: 0 });
 
-  const mostRecentProject =
-    sortScopedProjectsForSidebar(projects, threads, "updated_at")[0] ?? null;
+  const { selectedEnvironmentId } = useSidebarEnvironmentScope();
+  const mostRecentProject = bootstrapped
+    ? (sortScopedProjectsForSidebar(
+        selectedEnvironmentId === null
+          ? projects
+          : projects.filter((project) => project.environmentId === selectedEnvironmentId),
+        selectedEnvironmentId === null
+          ? threads
+          : threads.filter((thread) => thread.environmentId === selectedEnvironmentId),
+        "updated_at",
+      )[0] ?? null)
+    : null;
   const attempt = startState.retryRequest;
 
   useEffect(() => {

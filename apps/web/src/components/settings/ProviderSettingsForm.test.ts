@@ -9,6 +9,35 @@ import {
 } from "./ProviderSettingsForm";
 
 describe("ProviderSettingsForm helpers", () => {
+  it("derives visible provider config fields from the client definition schema", () => {
+    const codex = providerClients.get(ProviderDriverKind.make("codex"));
+
+    expect(codex).toBeDefined();
+    expect(deriveProviderSettingsFields(codex!).map((field) => field.key)).toEqual([
+      "useDesktopAppDaemon",
+      "binaryPath",
+      "homePath",
+      "shadowHomePath",
+      "launchArgs",
+    ]);
+  });
+
+  it("sources labels and descriptions from schema annotations", () => {
+    const opencode = providerClients.get(ProviderDriverKind.make("opencode"));
+    expect(opencode).toBeDefined();
+
+    const serverPassword = deriveProviderSettingsFields(opencode!).find(
+      (field) => field.key === "serverPassword",
+    );
+
+    expect(serverPassword).toMatchObject({
+      label: "Server password",
+      description: "Stored separately on the host.",
+      control: "password",
+      secret: true,
+    });
+  });
+
   it("keeps every masked field as a stored secret", () => {
     const settingsSchema = makeProviderSettingsSchema({
       token: TrimmedString.pipe(

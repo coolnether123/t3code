@@ -3,6 +3,7 @@ import {
   type ModelCapabilities,
   type ServerProvider,
   type ServerProviderSlashCommand,
+  type ServerProviderUsageWindow,
   type ServerProviderResetCredits,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -430,6 +431,44 @@ const probeClaudeCapabilities = (
   );
 };
 
+export type ClaudeSubscriptionReading =
+  | { readonly _tag: "Windows"; readonly windows: ReadonlyArray<ServerProviderUsageWindow> }
+  | { readonly _tag: "Unavailable"; readonly reason: string };
+
+/**
+ * Reads the account's subscription windows for usage history, whether or not
+ * the Claude provider is enabled for chats. Like the capability probe, it
+ * never sends a prompt.
+ */
+export const readClaudeSubscriptionWindows = Effect.fn("readClaudeSubscriptionWindows")(function* (
+  claudeSettings: ClaudeSettings,
+) {
+  const checkedAt = DateTime.formatIso(yield* DateTime.now);
+  const probe = yield* probeClaudeCapabilities(claudeSettings);
+  if (probe === undefined) {
+    return {
+      _tag: "Unavailable",
+      reason: "The Claude CLI could not be started to read limits.",
+    } satisfies ClaudeSubscriptionReading;
+  }
+  if (probe.usage === undefined) {
+    return {
+      _tag: "Unavailable",
+      reason: "The Claude CLI did not report subscription limits.",
+    } satisfies ClaudeSubscriptionReading;
+  }
+  const { limits } = claudeUsageResponseToLimits({ response: probe.usage, checkedAt });
+  if (limits.windows.length > 0) {
+    return { _tag: "Windows", windows: limits.windows } satisfies ClaudeSubscriptionReading;
+  }
+  return {
+    _tag: "Unavailable",
+    reason:
+      probe.subscriptionType === undefined
+        ? "Sign in to the Claude CLI on this computer with `claude auth login` to track Claude limits."
+        : "This Claude account does not report subscription limits.",
+  } satisfies ClaudeSubscriptionReading;
+});
 type ClaudeCapabilitiesProbeError = Effect.Error<ReturnType<typeof probeClaudeCapabilities>>;
 
 const runClaudeCommand = Effect.fn("runClaudeCommand")(function* (
@@ -543,6 +582,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   }
 
   if (Option.isNone(versionProbe.success)) {
+    // A slow version probe on a loaded machine is transient; hiding every model for it strands the picker.
     return buildServerProvider({
       presentation: CLAUDE_PRESENTATION,
       enabled: claudeSettings.enabled,
@@ -551,10 +591,9 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       probe: {
         installed: true,
         version: null,
-        status: "error",
+        status: "warning",
         auth: { status: "unknown" },
-        message:
-          "Claude Agent CLI is installed but failed to run. Timed out while running command.",
+        message: "Claude Agent CLI was slow to respond; showing the known models.",
       },
     });
   }

@@ -1,0 +1,593 @@
+// @effect-diagnostics nodeBuiltinImport:off - The desktop daemon socket requires a Node duplex transport.
+import * as NodeOS from "node:os";
+import * as NodeNet from "node:net";
+import * as NodeStream from "node:stream";
+
+import * as NodeSocket from "@effect/platform-node/NodeSocket";
+import type { CodexSettings } from "@t3tools/contracts";
+import {
+  HomeDirectory as HostProcessHomeDirectory,
+  Platform as HostProcessPlatform,
+} from "@t3tools/shared/HostProcess";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
+import * as Queue from "effect/Queue";
+import * as Sink from "effect/Sink";
+import * as Stdio from "effect/Stdio";
+import * as Stream from "effect/Stream";
+import * as Schedule from "effect/Schedule";
+import * as Scope from "effect/Scope";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
+
+import * as CodexErrors from "effect-codex-app-server/errors";
+import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
+
+export type CodexAppServerTransport = "stdio" | "desktop-daemon";
+
+export function codexDesktopDaemonEnvironment(
+  environment: NodeJS.ProcessEnv = process.env,
+  hostEnvironment: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const daemonEnvironment = Object.fromEntries(
+    Object.entries(environment).filter(([name]) => name.toUpperCase() !== "CODEX_HOME"),
+  );
+  const hostCodexHome = Object.entries(hostEnvironment).find(
+    ([name]) => name.toUpperCase() === "CODEX_HOME",
+  )?.[1];
+  if (hostCodexHome !== undefined) daemonEnvironment.CODEX_HOME = hostCodexHome;
+  return daemonEnvironment;
+}
+
+/** The managed CLI that owns the desktop daemon, from its package manifest. */
+export const codexManagedCliPath = Effect.fn("codexManagedCliPath")(function* (
+  codexHome: string,
+  platform: NodeJS.Platform = HostProcessPlatform.defaultValue(),
+) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const packageRoot = path.join(codexHome, "packages", "standalone", "current");
+  const entrypoint = yield* fileSystem
+    .readFileString(path.join(packageRoot, "codex-package.json"))
+    .pipe(
+      Effect.map((text) => {
+        try {
+          const manifest = JSON.parse(text) as { readonly entrypoint?: unknown };
+          return typeof manifest.entrypoint === "string" && manifest.entrypoint.length > 0
+            ? manifest.entrypoint
+            : undefined;
+        } catch {
+          return undefined;
+        }
+      }),
+      Effect.orElseSucceed(() => undefined),
+    );
+  // Older Windows packages keep the executable under `bin`; older Unix
+  // packages kept it at the package root.
+  const fallback = platform === "win32" ? path.join("bin", "codex.exe") : "codex";
+  return path.join(packageRoot, entrypoint ?? fallback);
+});
+
+/**
+ * Starts the host's managed Codex daemon unless it reports itself running,
+ * for example after a reboot or after the daemon exited and left its control
+ * socket file behind. `daemon start` is idempotent and keeps the user's saved
+ * daemon settings. A failure is left to the connection attempt, which reports
+ * the actionable repair message.
+ */
+export const ensureCodexDesktopDaemonStarted = Effect.fn("ensureCodexDesktopDaemonStarted")(
+  function* (environment: NodeJS.ProcessEnv) {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const platform = yield* HostProcessPlatform;
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const codexHome = environment.CODEX_HOME ?? path.join(NodeOS.homedir(), ".codex");
+    const socketPath = path.join(codexHome, "app-server-control", "app-server-control.sock");
+    const managedCli = yield* codexManagedCliPath(codexHome, platform);
+    const runDaemonCommand = (command: "version" | "start", timeout: Duration.Input) =>
+      spawner
+        .spawn(
+          ChildProcess.make(managedCli, ["app-server", "daemon", command], {
+            env: environment,
+            extendEnv: false,
+            shell: false,
+          }),
+        )
+        .pipe(
+          Effect.flatMap((child) =>
+            Effect.all([child.all.pipe(Stream.decodeText(), Stream.mkString), child.exitCode], {
+              concurrency: "unbounded",
+            }),
+          ),
+          Effect.scoped,
+          Effect.timeout(timeout),
+          Effect.map(([output, exitCode]) => ({ output, exitCode: Number(exitCode) })),
+          Effect.orElseSucceed(() => ({ output: "", exitCode: -1 })),
+        );
+
+    // A socket file alone does not prove a live daemon: one that exits
+    // uncleanly leaves the file behind and refuses every connection.
+    if (yield* fileSystem.exists(socketPath).pipe(Effect.orElseSucceed(() => false))) {
+      const version = yield* runDaemonCommand("version", "10 seconds");
+      if (codexDaemonVersionReportsRunning(version.output)) return;
+    }
+    const started = yield* runDaemonCommand("start", "30 seconds");
+    yield* Effect.logInfo("codex.desktop-daemon.start", {
+      exitCode: started.exitCode,
+      output: started.output.trim().slice(-500),
+    });
+  },
+);
+
+/** True when `codex app-server daemon version` printed a running status. */
+export function codexDaemonVersionReportsRunning(output: string): boolean {
+  for (const line of output.split(/\r?\n/u).reverse()) {
+    try {
+      const report = JSON.parse(line) as { readonly status?: unknown };
+      if (typeof report === "object" && report !== null) return report.status === "running";
+    } catch {
+      // Diagnostics such as ignored-config warnings share the stream.
+    }
+  }
+  return false;
+}
+
+interface CodexAppServerProtocolLogEvent {
+  readonly direction: "incoming" | "outgoing";
+  readonly stage: "raw" | "decoded" | "decode_failed";
+  readonly payload: unknown;
+}
+
+const REDACTED = "[REDACTED]";
+
+function redactLogValue(value: unknown, secrets: ReadonlyArray<string>, key?: string): unknown {
+  if (key && /http[_-]?headers$/iu.test(key)) return REDACTED;
+  if (typeof value === "string") {
+    let safeValue = value;
+    for (const secret of secrets) {
+      if (secret.length > 0) safeValue = safeValue.replaceAll(secret, REDACTED);
+    }
+    if (/^\s*[[{]/u.test(safeValue)) {
+      try {
+        return JSON.stringify(redactLogValue(JSON.parse(safeValue), secrets));
+      } catch {
+        return safeValue;
+      }
+    }
+    return safeValue;
+  }
+  if (Array.isArray(value)) return value.map((entry) => redactLogValue(entry, secrets));
+  if (typeof value !== "object" || value === null) return value;
+
+  return Object.fromEntries(
+    Object.entries(value).map(([entryKey, entryValue]) => [
+      entryKey,
+      redactLogValue(entryValue, secrets, entryKey),
+    ]),
+  );
+}
+
+export function redactCodexProtocolLogEvent<T>(value: T, secrets: ReadonlyArray<string> = []): T {
+  return redactLogValue(value, secrets) as T;
+}
+
+export function redactCodexSensitiveText(
+  text: string,
+  secrets: ReadonlyArray<string> = [],
+): string {
+  return secrets.reduce(
+    (safeText, secret) => (secret.length > 0 ? safeText.replaceAll(secret, REDACTED) : safeText),
+    text,
+  );
+}
+
+export function makeCodexAppServerProtocolLogger(secrets: ReadonlyArray<string> = []) {
+  return (event: CodexAppServerProtocolLogEvent) =>
+    Effect.logDebug("Codex App Server protocol event").pipe(
+      Effect.annotateLogs({ event: redactCodexProtocolLogEvent(event, secrets) }),
+    );
+}
+
+export function codexDesktopDaemonRepairMessage(problem: string): string {
+  return `Codex desktop app daemon ${problem}. Run the standalone managed Codex CLI's \`app-server daemon bootstrap\` command, then its \`app-server daemon version\` command, and confirm it reports status "running".`;
+}
+
+export function codexDesktopDaemonFailureProblem(cause: unknown): string {
+  const message = cause instanceof Error ? cause.message : String(cause);
+  if (/not.?signed.?in|unauthenticated|authentication required|login required/iu.test(message)) {
+    return "could not authenticate because the desktop app is not signed in";
+  }
+  if (/protocol|version|handshake|initialize/iu.test(message)) {
+    return "could not complete the proxy handshake or app-server protocol check";
+  }
+  if (/timed? ?out|timeout/iu.test(message)) {
+    return "timed out while connecting to the daemon";
+  }
+  if (/ENOENT|ECONNREFUSED|socket|connect/iu.test(message)) {
+    return "could not reach the daemon control socket";
+  }
+  if (/exit|terminated|closed/iu.test(message)) {
+    return "the app-server proxy exited unexpectedly";
+  }
+  return "could not complete the app-server proxy connection";
+}
+
+export function codexDesktopDaemonFailureMessage(cause: unknown): string {
+  return codexDesktopDaemonRepairMessage(codexDesktopDaemonFailureProblem(cause));
+}
+
+const CODEX_DESKTOP_DAEMON_WS_URL = "ws://localhost/";
+const CODEX_DESKTOP_DAEMON_KEEPALIVE_INTERVAL = "15 seconds";
+const CODEX_DESKTOP_DAEMON_HANDSHAKE_TIMEOUT_MS = 10_000;
+
+type DesktopDaemonChildProcess = Pick<
+  ChildProcessSpawner.ChildProcessHandle,
+  "pid" | "stdin" | "stdout"
+>;
+
+const toError = (cause: unknown): Error =>
+  cause instanceof Error ? cause : new Error(String(cause));
+
+const toTransportError = (
+  operation: CodexErrors.CodexAppServerTransportOperation,
+  pid: ChildProcessSpawner.ProcessId,
+  cause: unknown,
+) => new CodexErrors.CodexAppServerTransportError({ operation, pid, cause });
+
+const textEncoder = new TextEncoder();
+
+const toMessageText = (data: NodeSocket.NodeWS.WebSocket.RawData): string => {
+  const decoder = new TextDecoder();
+  if (typeof data === "string") return data;
+  if (data instanceof Uint8Array) return decoder.decode(data);
+  if (data instanceof ArrayBuffer) return decoder.decode(new Uint8Array(data));
+
+  const size = data.reduce((total, chunk) => total + chunk.byteLength, 0);
+  const output = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of data) {
+    output.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return decoder.decode(output);
+};
+
+/**
+ * Adapts `codex app-server proxy` to the line-oriented app-server client.
+ *
+ * The desktop proxy exposes the daemon's Unix WebSocket as a raw byte stream
+ * on its own stdin/stdout. `ws` owns the HTTP Upgrade and WebSocket framing;
+ * this adapter translates WebSocket message boundaries to the line-oriented
+ * Effect child-process streams.
+ */
+export const makeCodexDesktopDaemonStdio = Effect.fn("makeCodexDesktopDaemonStdio")(function* (
+  child: DesktopDaemonChildProcess,
+): Effect.fn.Return<Stdio.Stdio, CodexErrors.CodexAppServerTransportError, Scope.Scope> {
+  const context = yield* Effect.context<never>();
+  const runFork = Effect.runForkWith(context);
+  const outgoingTextDecoder = new TextDecoder();
+  const childInput = yield* Queue.unbounded<Uint8Array>();
+  let bridge: NodeStream.Duplex | undefined;
+
+  const childInputFiber = Stream.fromQueue(childInput).pipe(
+    Stream.run(child.stdin),
+    Effect.tapError((cause) =>
+      Effect.sync(() => {
+        bridge?.destroy(toError(cause));
+      }),
+    ),
+    Effect.ignore,
+    Effect.forkScoped,
+  );
+  yield* childInputFiber;
+
+  bridge = new NodeStream.Duplex({
+    read() {
+      // The stdout pump below pushes bytes as the proxy produces them.
+    },
+    write(chunk, _encoding, callback) {
+      runFork(
+        Queue.offer(childInput, new Uint8Array(chunk)).pipe(
+          Effect.match({
+            onFailure: (cause) => callback(toError(cause)),
+            onSuccess: () => callback(),
+          }),
+        ),
+      );
+    },
+    destroy(cause, callback) {
+      runFork(Queue.shutdown(childInput));
+      callback(cause === null ? undefined : toError(cause));
+    },
+  });
+  // `ws` installs its own socket error listener during the HTTP upgrade, but
+  // the bridge can be destroyed while that upgrade is being interrupted.
+  // Keep a listener for the cleanup race so a late stream error cannot become
+  // an uncaught Node exception.
+  bridge.on("error", () => undefined);
+  yield* Effect.addFinalizer(() =>
+    Effect.sync(() => {
+      bridge?.destroy();
+    }),
+  );
+
+  yield* child.stdout.pipe(
+    Stream.runForEach((chunk) =>
+      Effect.sync(() => {
+        if (!bridge?.destroyed) bridge.push(chunk);
+      }),
+    ),
+    Effect.tapError((cause) =>
+      Effect.sync(() => {
+        bridge?.destroy(toError(cause));
+      }),
+    ),
+    Effect.ensuring(
+      Effect.sync(() => {
+        if (bridge && !bridge.destroyed) bridge.push(null);
+      }),
+    ),
+    Effect.ignore,
+    Effect.forkScoped,
+  );
+
+  let socket: NodeSocket.NodeWS.WebSocket | undefined;
+  let handshakeOpen: (() => void) | undefined;
+  let handshakeError: ((cause: unknown) => void) | undefined;
+  let handshakeClose: (() => void) | undefined;
+  let handshakeSettled = false;
+  const terminateSocket = () => {
+    if (socket && socket.readyState !== NodeSocket.NodeWS.WebSocket.CLOSED) {
+      socket.terminate();
+    }
+    bridge?.destroy();
+  };
+  const removeHandshakeListeners = () => {
+    if (handshakeOpen) socket?.off("open", handshakeOpen);
+    if (handshakeClose) socket?.off("close", handshakeClose);
+    // Keep the error guard attached through socket termination. `ws` may emit
+    // a deferred error after the other listeners and bridge have been closed.
+  };
+
+  // Register this before starting the asynchronous upgrade. A failed or
+  // interrupted upgrade must close the socket and bridge even when the
+  // handshake callback never resumes successfully.
+  yield* Effect.addFinalizer(() =>
+    Effect.sync(() => {
+      removeHandshakeListeners();
+      terminateSocket();
+    }),
+  );
+
+  const websocket = yield* Effect.callback<
+    NodeSocket.NodeWS.WebSocket,
+    CodexErrors.CodexAppServerTransportError
+  >((resume) => {
+    const failOpen = (cause: unknown) => {
+      if (handshakeSettled) return;
+      handshakeSettled = true;
+      terminateSocket();
+      resume(Effect.fail(toTransportError("read-input-stream", child.pid, cause)));
+    };
+    handshakeError = failOpen;
+    handshakeClose = () => failOpen(new Error("Desktop daemon WebSocket closed during handshake"));
+    handshakeOpen = () => {
+      if (handshakeSettled) return;
+      handshakeSettled = true;
+      // The socket is now the live transport. Do not close it here; the
+      // enclosing scope finalizer owns teardown after the client is built.
+      resume(Effect.succeed(socket!));
+    };
+    try {
+      socket = new NodeSocket.NodeWS.WebSocket(CODEX_DESKTOP_DAEMON_WS_URL, {
+        createConnection: (() => bridge!) as unknown as typeof NodeNet.createConnection,
+        handshakeTimeout: CODEX_DESKTOP_DAEMON_HANDSHAKE_TIMEOUT_MS,
+        perMessageDeflate: false,
+      });
+      // Keep the error/close listeners attached through the transition from
+      // handshake to the live transport. A bridge teardown can otherwise emit
+      // a late error between callback completion and the live listeners below.
+      socket.on("open", handshakeOpen);
+      socket.on("error", handshakeError);
+      socket.on("close", handshakeClose);
+    } catch (cause) {
+      failOpen(cause);
+    }
+    return Effect.sync(() => {
+      if (!handshakeSettled) {
+        handshakeSettled = true;
+        terminateSocket();
+      }
+    });
+  });
+
+  const incoming = yield* Queue.unbounded<Uint8Array>();
+  const shutdownIncoming = () => {
+    runFork(Queue.shutdown(incoming));
+  };
+  const onMessage = (data: NodeSocket.NodeWS.WebSocket.RawData) => {
+    const message = toMessageText(data).replace(/(?:\r\n|\n)$/, "");
+    if (message.length === 0) return;
+    runFork(Queue.offer(incoming, textEncoder.encode(`${message}\n`)).pipe(Effect.ignore));
+  };
+  const onError = (cause: Error) => {
+    shutdownIncoming();
+    bridge?.destroy(cause);
+  };
+  const onClose = () => {
+    shutdownIncoming();
+  };
+  websocket.on("message", onMessage);
+  websocket.on("error", onError);
+  websocket.on("close", onClose);
+
+  // The proxy stays silent when its daemon restarts and only fails on the next
+  // write, so a daemon restart would otherwise go unnoticed until the user's
+  // next turn is lost in the dead pipe. A ping makes that write; the proxy then
+  // exits and the session reports it. A missed pong tears the transport down.
+  let awaitingPong = false;
+  const onPong = () => {
+    awaitingPong = false;
+  };
+  websocket.on("pong", onPong);
+  yield* Effect.sync(() => {
+    if (websocket.readyState !== NodeSocket.NodeWS.WebSocket.OPEN) return;
+    if (awaitingPong) {
+      onError(new Error("Codex desktop daemon stopped answering keepalive pings"));
+      websocket.terminate();
+      return;
+    }
+    awaitingPong = true;
+    websocket.ping();
+  }).pipe(
+    Effect.delay(CODEX_DESKTOP_DAEMON_KEEPALIVE_INTERVAL),
+    Effect.repeat(Schedule.spaced(CODEX_DESKTOP_DAEMON_KEEPALIVE_INTERVAL)),
+    Effect.ignore,
+    Effect.forkScoped,
+  );
+
+  const sendMessage = (message: string) =>
+    Effect.callback<void, PlatformError.PlatformError>((resume) => {
+      if (websocket.readyState !== NodeSocket.NodeWS.WebSocket.OPEN) {
+        resume(
+          Effect.fail(
+            PlatformError.systemError({
+              _tag: "Unknown",
+              module: "CodexDesktopDaemonWebSocket",
+              method: "send",
+              description: "WebSocket is not open",
+            }),
+          ),
+        );
+        return;
+      }
+      try {
+        websocket.send(message, (cause: Error | undefined) =>
+          resume(
+            cause == null
+              ? Effect.void
+              : Effect.fail(
+                  PlatformError.systemError({
+                    _tag: "Unknown",
+                    module: "CodexDesktopDaemonWebSocket",
+                    method: "send",
+                    cause,
+                  }),
+                ),
+          ),
+        );
+      } catch (cause) {
+        resume(
+          Effect.fail(
+            PlatformError.systemError({
+              _tag: "Unknown",
+              module: "CodexDesktopDaemonWebSocket",
+              method: "send",
+              cause,
+            }),
+          ),
+        );
+      }
+    });
+
+  let outgoingRemainder = "";
+  const send = (chunk: string | Uint8Array) =>
+    Effect.gen(function* () {
+      const text =
+        outgoingRemainder +
+        (typeof chunk === "string" ? chunk : outgoingTextDecoder.decode(chunk, { stream: true }));
+      let start = 0;
+      for (let newline = text.indexOf("\n"); newline !== -1; newline = text.indexOf("\n", start)) {
+        const message = text.slice(start, newline).replace(/\r$/, "");
+        if (message.length > 0) yield* sendMessage(message);
+        start = newline + 1;
+      }
+      outgoingRemainder = text.slice(start);
+    });
+
+  yield* Effect.addFinalizer(() =>
+    Effect.sync(() => {
+      websocket.off("message", onMessage);
+      websocket.off("error", onError);
+      websocket.off("close", onClose);
+      websocket.off("pong", onPong);
+      shutdownIncoming();
+      if (websocket.readyState !== NodeSocket.NodeWS.WebSocket.CLOSED) websocket.terminate();
+      bridge?.destroy();
+    }),
+  );
+
+  return Stdio.make({
+    args: Effect.succeed([]),
+    stdin: Stream.fromQueue(incoming),
+    stdout: () => Sink.forEach((chunk: string | Uint8Array) => send(chunk)),
+    stderr: () => Sink.drain,
+  });
+});
+
+export function codexAppServerTransport(
+  settings: Pick<CodexSettings, "useDesktopAppDaemon">,
+): CodexAppServerTransport {
+  return settings.useDesktopAppDaemon ? "desktop-daemon" : "stdio";
+}
+
+export function codexAppServerCommandArgs(
+  transport: CodexAppServerTransport,
+  appServerArgs: ReadonlyArray<string> = [],
+): ReadonlyArray<string> {
+  return transport === "desktop-daemon"
+    ? ["app-server", "proxy"]
+    : ["app-server", ...appServerArgs];
+}
+
+export function macDesktopCodexBinaryCandidates(homeDirectory: string): ReadonlyArray<string> {
+  return [
+    "/Applications/Codex.app/Contents/Resources/codex",
+    `${homeDirectory}/Applications/Codex.app/Contents/Resources/codex`,
+    "/Applications/ChatGPT.app/Contents/Resources/codex",
+    `${homeDirectory}/Applications/ChatGPT.app/Contents/Resources/codex`,
+  ];
+}
+
+/**
+ * The desktop bridge must use the app-bundled CLI when it is available. That
+ * keeps the proxy protocol version aligned with the running desktop daemon.
+ * An explicit binary path always wins.
+ */
+export const resolveCodexBinaryPath = Effect.fn("resolveCodexBinaryPath")(function* (
+  settings: Pick<CodexSettings, "binaryPath" | "useDesktopAppDaemon">,
+  environment: NodeJS.ProcessEnv = process.env,
+): Effect.fn.Return<string, never, FileSystem.FileSystem | Path.Path> {
+  const platform = yield* HostProcessPlatform;
+  if (!settings.useDesktopAppDaemon || settings.binaryPath !== "codex") {
+    return expandHomePath(settings.binaryPath, yield* HostProcessHomeDirectory);
+  }
+
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  let candidates: ReadonlyArray<string>;
+  if (platform === "darwin") {
+    candidates = macDesktopCodexBinaryCandidates(NodeOS.homedir());
+  } else if (platform === "win32") {
+    const configuredCodexHome = Object.entries(environment).find(
+      ([name]) => name.toUpperCase() === "CODEX_HOME",
+    )?.[1];
+    const codexHome = configuredCodexHome
+      ? expandHomePath(configuredCodexHome, NodeOS.homedir())
+      : path.join(NodeOS.homedir(), ".codex");
+    candidates = [yield* codexManagedCliPath(codexHome, platform)];
+  } else {
+    return settings.binaryPath;
+  }
+
+  for (const candidate of candidates) {
+    const exists = yield* fileSystem
+      .exists(path.normalize(candidate))
+      .pipe(Effect.orElseSucceed(() => false));
+    if (exists) return path.normalize(candidate);
+  }
+
+  return settings.binaryPath;
+});

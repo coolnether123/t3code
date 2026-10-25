@@ -1,3 +1,4 @@
+import { useSidebarEnvironmentScope } from "../hooks/useSidebarEnvironmentScope";
 import {
   type ClientSettings,
   type EnvironmentId,
@@ -66,6 +67,7 @@ export function useSortedProjectGroups(environmentLabelById: ReadonlyMap<Environ
   const projectOrder = useUiStateStore((store) => store.projectOrder);
   const clientSettings = useClientSettings(selectCommandPaletteClientSettings);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const { selectedEnvironmentId } = useSidebarEnvironmentScope();
   const projectGroupingSettings = {
     sidebarProjectGroupingMode: clientSettings.sidebarProjectGroupingMode,
     sidebarProjectGroupingOverrides: clientSettings.sidebarProjectGroupingOverrides,
@@ -80,7 +82,13 @@ export function useSortedProjectGroups(environmentLabelById: ReadonlyMap<Environ
     ],
   });
   const unsortedProjectGroups = buildSidebarProjectSnapshots({
-    projects: clientSettings.sidebarProjectSortOrder === "manual" ? orderedProjects : projects,
+    projects: (clientSettings.sidebarProjectSortOrder === "manual"
+      ? orderedProjects
+      : projects
+    ).filter(
+      (project) =>
+        selectedEnvironmentId === null || project.environmentId === selectedEnvironmentId,
+    ),
     settings: projectGroupingSettings,
     primaryEnvironmentId,
     resolveEnvironmentLabel: (environmentId) => environmentLabelById.get(environmentId) ?? null,

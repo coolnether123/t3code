@@ -2481,6 +2481,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       interactionMode: command.interactionMode,
       branch: command.branch,
       worktreePath: command.worktreePath,
+      ...(command.subagentBackend === undefined
+        ? {}
+        : { subagentBackend: command.subagentBackend }),
       activeProviderThreadId: null,
       pullRequests: [],
       lineage: {
@@ -3242,6 +3245,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                     Date.parse(thread.limitRecovery.resetAt)
                 ? { snoozedUntil: null, snoozedAt: null, lastSnoozeWakeAt: now }
                 : {}),
+            ...(command.subagentBackend === undefined
+              ? {}
+              : { subagentBackend: command.subagentBackend }),
             ...(command.branch === undefined ? {} : { branch: command.branch }),
             ...(command.worktreePath === undefined ? {} : { worktreePath: command.worktreePath }),
             ...(command.linkedPullRequest === undefined

@@ -1,3 +1,7 @@
+import {
+  buildCodexControlInstructions,
+  type CodexControlRuntime,
+} from "./CodexControlInstructions.ts";
 import type { ProviderInteractionMode } from "@t3tools/contracts";
 import type { V2TurnStartParams__AdditionalContextEntry } from "effect-codex-app-server/schema";
 import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
@@ -187,7 +191,7 @@ Use the \`request_user_input\` tool only when it is listed in the available tool
 In Default mode, strongly prefer making reasonable assumptions and executing the user's request rather than stopping to ask questions. If you absolutely must ask a question because the answer cannot be discovered from local context and a reasonable assumption would be risky, ask the user directly with a concise plain-text question. Never write a multiple choice question as a textual assistant message.
 </collaboration_mode>`;
 
-export interface CodexRuntimeInfo {
+export interface CodexRuntimeInfo extends CodexControlRuntime {
   readonly model: string;
   readonly modelName?: string | undefined;
   readonly reasoningEffort?: string | undefined;
@@ -209,6 +213,10 @@ export function buildCodexAdditionalContext(
   toolsAvailable: boolean | T3CodeToolAvailability = true,
 ): Record<string, V2TurnStartParams__AdditionalContextEntry> {
   const tools = toolInstructions(toolsAvailable);
+  const controls = buildCodexControlInstructions(
+    runtime,
+    typeof toolsAvailable === "boolean" ? toolsAvailable : toolsAvailable.browser,
+  );
   // Separate keys keep each value under Codex's per-entry cap. Codex emits
   // entries in key order, so the numbering preserves the authored order.
   return {
@@ -223,5 +231,6 @@ export function buildCodexAdditionalContext(
       value: buildRuntimeInstructions({ harness: "Codex", ...runtime }),
     },
     ...(tools ? { t3_code_tools: { kind: "application", value: tools } } : {}),
+    ...(controls ? { t3_code_control: { kind: "application", value: controls } } : {}),
   };
 }

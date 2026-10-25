@@ -1,3 +1,6 @@
+import { resolveDesktopRuntimeDependencies } from "./build-desktop-artifact.ts";
+import { bundlesWslRuntime } from "./build-desktop-artifact.ts";
+import { STAGE_INSTALL_ARGS } from "./build-desktop-artifact.ts";
 // @effect-diagnostics nodeBuiltinImport:off - Tests use Node's glob matcher to verify electron-builder exclusions.
 import * as NodeCrypto from "node:crypto";
 import * as NodePath from "node:path";
@@ -26,6 +29,10 @@ import {
   BundleNotSelfContainedError,
   BuildCommandFailedError,
   parseWslRuntimeArchiveMembers,
+  DesktopDmgBackgroundSourceMissingError,
+  createStageWorkspaceConfig,
+  createStagePatchedDependencies,
+  pinPatchedStageDependencies,
   readWorkspaceConfig,
   createBuildConfig,
   DESKTOP_FILE_EXCLUSIONS,
@@ -522,6 +529,161 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       ),
     ),
   );
+
+  it.effect("disables electron-builder publish detection for local builds", () =>
+    Effect.gen(function* () {
+      const local = yield* createBuildConfig(
+        "mac",
+        "dmg",
+        "0.0.33",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+
+      assert.isNull(local.publish);
+    }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+  );
+
+  it("stages only the desktop main-process externals", () => {
+    assert.deepStrictEqual(
+      resolveDesktopRuntimeDependencies(
+        {
+          "@clerk/electron": "catalog:",
+          "@clerk/electron-passkeys": "catalog:",
+          "@crowecawcaw/xa11y": "0.13.0",
+          "@effect/platform-node": "catalog:",
+          "@napi-rs/keyring": "^1.3.0",
+          "@t3tools/contracts": "workspace:*",
+          "@t3tools/shared": "workspace:*",
+          "dbus-next": "0.10.2",
+          effect: "catalog:",
+          electron: "41.5.0",
+          "electron-updater": "^6.6.2",
+          "ffi-rs": "1.3.2",
+          "playwright-core": "1.60.0",
+        },
+        {
+          "@clerk/electron": "0.0.37",
+          "@clerk/electron-passkeys": "0.0.3",
+          "@effect/platform-node": "4.0.0-beta.59",
+          effect: "4.0.0-beta.59",
+        },
+      ),
+      {
+        "@clerk/electron-passkeys": "0.0.3",
+        "@crowecawcaw/xa11y": "0.13.0",
+        "@napi-rs/keyring": "^1.3.0",
+        "ffi-rs": "1.3.2",
+        "playwright-core": "1.60.0",
+      },
+    );
+  });
+
+  it("carries only staged dependency patch metadata into staged desktop installs", () => {
+    assert.deepStrictEqual(
+      createStagePatchedDependencies(
+        {
+          "@expo/metro-config@56.0.13": "patches/@expo%2Fmetro-config@56.0.13.patch",
+          "@ff-labs/fff-node@0.9.4": "patches/@ff-labs__fff-node@0.9.4.patch",
+          "@pierre/diffs@1.1.20": "patches/@pierre%2Fdiffs@1.1.20.patch",
+          "alchemy@2.0.0-beta.49": "patches/alchemy@2.0.0-beta.49.patch",
+          "effect@4.0.0-beta.73": "patches/effect@4.0.0-beta.73.patch",
+        },
+        {
+          "@ff-labs/fff-node": "0.9.4",
+          "@pierre/diffs": "1.1.20",
+          effect: "4.0.0-beta.73",
+        },
+      ),
+      {
+        "@ff-labs/fff-node@0.9.4": "patches/@ff-labs__fff-node@0.9.4.patch",
+        "@pierre/diffs@1.1.20": "patches/@pierre%2Fdiffs@1.1.20.patch",
+        "effect@4.0.0-beta.73": "patches/effect@4.0.0-beta.73.patch",
+      },
+    );
+
+    assert.deepStrictEqual(
+      createStagePatchedDependencies(
+        {
+          "@expo/metro-config@56.0.13": "patches/@expo%2Fmetro-config@56.0.13.patch",
+        },
+        { effect: "4.0.0-beta.73" },
+      ),
+      {},
+    );
+  });
+
+  it("keeps patched staging dependencies at their checked workspace version", () => {
+    const dependencies = {
+      "node-pty": "^1.2.0-beta.15",
+      "@scope/native": "~2.0.0",
+      other: "^3.0.0",
+    };
+    assert.deepStrictEqual(
+      pinPatchedStageDependencies(dependencies, {
+        "node-pty@1.2.0-beta.15": "patches/node-pty.patch",
+        "@scope/native@2.0.0": "patches/native.patch",
+        "not-staged@1.0.0": "patches/not-staged.patch",
+      }),
+      { "node-pty": "1.2.0-beta.15", "@scope/native": "2.0.0", other: "^3.0.0" },
+    );
+    assert.equal(dependencies["node-pty"], "^1.2.0-beta.15");
+  });
+
+  it("leaves unrelated patch versions for pnpm to reject", () => {
+    assert.deepStrictEqual(
+      pinPatchedStageDependencies(
+        { native: "^2.0.0", exact: "1.0.0" },
+        {
+          "native@1.0.0": "patches/old.patch",
+          exact: "patches/exact.patch",
+        },
+      ),
+      { native: "^2.0.0", exact: "1.0.0" },
+    );
+  });
+
+  it("installs optional native dependencies for the target desktop architecture", () => {
+    assert.deepStrictEqual(STAGE_INSTALL_ARGS, ["install", "--prod"]);
+    assert.deepStrictEqual(createStageWorkspaceConfig({ platform: "mac", arch: "x64" }), {
+      supportedArchitectures: {
+        os: ["darwin"],
+        cpu: ["x64"],
+      },
+      packageExtensions: stagePackageExtensions,
+    });
+    assert.deepStrictEqual(createStageWorkspaceConfig({ platform: "linux", arch: "x64" }), {
+      supportedArchitectures: {
+        os: ["linux"],
+        cpu: ["x64"],
+        libc: ["glibc"],
+      },
+      packageExtensions: stagePackageExtensions,
+    });
+    assert.deepStrictEqual(createStageWorkspaceConfig({ platform: "win", arch: "x64" }), {
+      supportedArchitectures: {
+        os: ["win32"],
+        cpu: ["x64"],
+      },
+      packageExtensions: stagePackageExtensions,
+    });
+    assert.deepStrictEqual(createStageWorkspaceConfig({ platform: "win", arch: "arm64" }), {
+      supportedArchitectures: {
+        os: ["win32"],
+        cpu: ["arm64"],
+      },
+      packageExtensions: stagePackageExtensions,
+    });
+    assert.deepStrictEqual(createStageWorkspaceConfig({ platform: "mac", arch: "universal" }), {
+      supportedArchitectures: {
+        os: ["darwin"],
+        cpu: ["arm64", "x64"],
+      },
+      packageExtensions: stagePackageExtensions,
+    });
+  });
 
   // pnpm writes "set this to true or false" placeholders into allowBuilds when a
   // tarball changes. pnpm ignores them, but the release build decode rejects them.
@@ -1671,3 +1833,8 @@ it.effect.skipIf(!symlinksSupported)("rebases packaged links into the isolated t
     );
   }).pipe(Effect.provide(NodeServices.layer)),
 );
+
+const stagePackageExtensions = {
+  "electron-webauthn": { peerDependenciesMeta: { typescript: { optional: true } } },
+  "@electron-webauthn/macos": { peerDependenciesMeta: { typescript: { optional: true } } },
+};

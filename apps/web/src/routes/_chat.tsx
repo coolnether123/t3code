@@ -1,14 +1,20 @@
 import { AuthPreviewOperateScope } from "@t3tools/contracts";
-import { Outlet, createFileRoute, redirect } from "@tanstack/react-router";
+import {
+  Outlet,
+  createFileRoute,
+  redirect,
+  useParams,
+  useRouterState,
+} from "@tanstack/react-router";
 import { useAtomValue } from "@effect/atom-react";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 
 import { isCommandPaletteOpen } from "../commandPaletteBus";
 import { ThreadRouteView } from "../components/ThreadRouteView";
 import { ThreadLinkPrompt } from "../components/promptLinks/ThreadLinkPrompt";
 import { useClientSettings, useLegacySidebarEnabled } from "../hooks/useSettings";
 import { openCommandPalette } from "../commandPaletteBus";
-import { useProjects } from "../state/entities";
+import { useProjects, useThreadShell, useThreadStatus } from "../state/entities";
 import { isPreviewAvailableFor } from "../browser/previewRuntime";
 import { usePrimaryEnvironmentId } from "../state/environments";
 import { useEnvironmentScope } from "../state/session";
@@ -17,6 +23,7 @@ import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
 import { dispatchPreviewAction } from "../components/preview/previewActionBus";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useScratchProject } from "../hooks/useScratchProject";
+import { useSidebarEnvironmentScope } from "../hooks/useSidebarEnvironmentScope";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { isPreviewFocused } from "../lib/previewFocus";
 import { isTerminalFocused } from "../lib/terminalFocus";
@@ -26,6 +33,13 @@ import { resolveShortcutCommand } from "../keybindings";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { selectActiveRightPanel, useRightPanelStore } from "../rightPanelStore";
 import { useThreadSelectionStore } from "../threadSelectionStore";
+import { useComposerDraftStore } from "../composerDraftStore";
+import { resolveThreadRouteTarget } from "../threadRoutes";
+import {
+  environmentChatLocationScopeKey,
+  useUiStateStore,
+  type RememberedChatLocation,
+} from "../uiStateStore";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { primaryServerKeybindingsAtom } from "~/state/server";
 import { useThreadRouteTarget } from "../hooks/useThreadRouteTarget";
@@ -33,8 +47,14 @@ import { useThreadRouteTarget } from "../hooks/useThreadRouteTarget";
 function ChatRouteGlobalShortcuts() {
   const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
   const selectedThreadKeysSize = useThreadSelectionStore((state) => state.selectedThreadKeys.size);
-  const { activeDraftThread, activeThread, defaultProjectRef, handleNewThread, routeThreadRef } =
-    useHandleNewThread();
+  const {
+    activeDraftThread,
+    activeThread,
+    defaultProjectRef,
+    handleNewThread,
+    routeThreadRef,
+    selectedEnvironmentId,
+  } = useHandleNewThread();
   const canOperatePreview = useEnvironmentScope(
     routeThreadRef?.environmentId ?? null,
     AuthPreviewOperateScope,
@@ -46,7 +66,10 @@ function ChatRouteGlobalShortcuts() {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const { scratchEnvironmentId, startScratchThread } = useScratchProject();
   const projectGroupCount = buildSidebarProjectSnapshots({
-    projects,
+    projects: projects.filter(
+      (project) =>
+        selectedEnvironmentId === null || project.environmentId === selectedEnvironmentId,
+    ),
     settings: projectGroupingSettings,
     primaryEnvironmentId,
     resolveEnvironmentLabel: () => null,
@@ -91,11 +114,16 @@ function ChatRouteGlobalShortcuts() {
       if (command === "chat.newLocal") {
         event.preventDefault();
         event.stopPropagation();
+        if (projectGroupCount === 0) {
+          openCommandPalette({ open: "add-project" });
+          return;
+        }
         void startNewThreadFromContext({
           activeDraftThread,
           activeThread: activeThread ?? undefined,
           defaultProjectRef,
           handleNewThread,
+          selectedEnvironmentId,
         });
         return;
       }
@@ -114,6 +142,13 @@ function ChatRouteGlobalShortcuts() {
       if (command === "chat.new") {
         event.preventDefault();
         event.stopPropagation();
+        if (projectGroupCount === 0) {
+          openCommandPalette({ open: "add-project" });
+          return;
+        }
+        // The default sidebar routes creation through the command palette
+        // whenever there is a real choice to make; the legacy sidebar (and
+        // single-project setups) keep the immediate contextual create.
         if (!legacySidebarEnabled && projectGroupCount > 1) {
           openCommandPalette({ open: "new-thread-in" });
           return;
@@ -123,6 +158,7 @@ function ChatRouteGlobalShortcuts() {
           activeThread: activeThread ?? undefined,
           defaultProjectRef,
           handleNewThread,
+          selectedEnvironmentId,
         });
         return;
       }
@@ -181,6 +217,7 @@ function ChatRouteGlobalShortcuts() {
     handleNewThread,
     keybindings,
     defaultProjectRef,
+    selectedEnvironmentId,
     previewOpen,
     primaryEnvironmentId,
     projectGroupCount,
@@ -195,12 +232,126 @@ function ChatRouteGlobalShortcuts() {
   return null;
 }
 
+function EnvironmentChatLocationTracker() {
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const routeTarget = useParams({
+    strict: false,
+    select: (params) => resolveThreadRouteTarget(params),
+  });
+  const routeThreadRef = routeTarget?.kind === "server" ? routeTarget.threadRef : null;
+  const routeThreadEnvironmentId = routeThreadRef?.environmentId ?? null;
+  const routeThreadId = routeThreadRef?.threadId ?? null;
+  const threadShell = useThreadShell(routeThreadRef);
+  const threadStatus = useThreadStatus(routeThreadRef);
+  const routeDraftId = routeTarget?.kind === "draft" ? routeTarget.draftId : null;
+  const draftSession = useComposerDraftStore((store) =>
+    routeDraftId ? store.getDraftSession(routeDraftId) : null,
+  );
+  const { environments, selectedEnvironmentId, setSelectedEnvironmentId } =
+    useSidebarEnvironmentScope();
+  const connectedEnvironmentIds = ((): ReadonlySet<string> =>
+    new Set<string>(environments.map((environment) => environment.environmentId)))();
+  const hasThreadShell = threadShell !== null;
+  const draftEnvironmentId = draftSession?.environmentId ?? null;
+  const draftIsUnpromoted = draftSession?.promotedTo == null;
+  const routeLocation = ((): RememberedChatLocation | null => {
+    if (pathname === "/") {
+      return { kind: "index" };
+    }
+    if (routeThreadEnvironmentId && routeThreadId && hasThreadShell && threadStatus !== "deleted") {
+      return {
+        kind: "thread",
+        environmentId: routeThreadEnvironmentId,
+        threadId: routeThreadId,
+      };
+    }
+    if (routeDraftId && draftEnvironmentId && draftIsUnpromoted) {
+      return { kind: "draft", environmentId: draftEnvironmentId, draftId: routeDraftId };
+    }
+    return null;
+  })();
+  const routeLocationKey = routeLocation
+    ? routeLocation.kind === "index"
+      ? "index"
+      : routeLocation.kind === "thread"
+        ? `thread:${routeLocation.environmentId}:${routeLocation.threadId}`
+        : `draft:${routeLocation.environmentId}:${routeLocation.draftId}`
+    : null;
+  const previousLocationRef = useRef<{
+    readonly pathname: string;
+    readonly routeLocationKey: string | null;
+    readonly selectedEnvironmentId: string | null;
+    readonly connectedEnvironmentIds: ReadonlySet<string>;
+  } | null>(null);
+
+  useEffect(() => {
+    const previous = previousLocationRef.current;
+    const routeChanged =
+      previous === null ||
+      previous.pathname !== pathname ||
+      previous.routeLocationKey !== routeLocationKey;
+    const scopeChanged =
+      previous !== null && previous.selectedEnvironmentId !== selectedEnvironmentId;
+    const routeEnvironmentJustConnected =
+      previous !== null &&
+      routeLocation !== null &&
+      routeLocation.kind !== "index" &&
+      connectedEnvironmentIds.has(routeLocation.environmentId) &&
+      !previous.connectedEnvironmentIds.has(routeLocation.environmentId);
+    previousLocationRef.current = {
+      pathname,
+      routeLocationKey,
+      selectedEnvironmentId,
+      connectedEnvironmentIds,
+    };
+    if (!routeLocation || (!routeChanged && !scopeChanged && !routeEnvironmentJustConnected))
+      return;
+
+    const uiState = useUiStateStore.getState();
+    const remember = (environmentId: string | null) =>
+      uiState.setLastChatLocationForScope(
+        environmentChatLocationScopeKey(environmentId),
+        routeLocation,
+      );
+
+    if (routeLocation.kind === "index") {
+      remember(selectedEnvironmentId);
+      return;
+    }
+    if (!connectedEnvironmentIds.has(routeLocation.environmentId)) return;
+
+    if ((routeChanged || routeEnvironmentJustConnected) && selectedEnvironmentId !== null) {
+      if (selectedEnvironmentId !== routeLocation.environmentId) {
+        setSelectedEnvironmentId(routeLocation.environmentId);
+      }
+      remember(routeLocation.environmentId);
+      return;
+    }
+    if (selectedEnvironmentId === null) {
+      remember(null);
+      remember(routeLocation.environmentId);
+    } else if (selectedEnvironmentId === routeLocation.environmentId) {
+      remember(routeLocation.environmentId);
+    }
+  }, [
+    connectedEnvironmentIds,
+    pathname,
+    routeLocation,
+    routeLocationKey,
+    selectedEnvironmentId,
+    setSelectedEnvironmentId,
+  ]);
+
+  return null;
+}
+
 function ChatRouteLayout() {
   // Both thread routes render here, not in their own leaf components, so the
   // draft-to-thread promotion keeps one ChatView mounted across the swap.
   const threadTarget = useThreadRouteTarget();
   return (
     <>
+      <EnvironmentChatLocationTracker />
       <ChatRouteGlobalShortcuts />
       {threadTarget?.kind === "server" ? (
         <ThreadLinkPrompt threadRef={threadTarget.threadRef} />

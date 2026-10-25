@@ -61,6 +61,7 @@ import {
   type EnvironmentId,
   type MessageId,
   type ModelSelection,
+  type CallOptions,
   type PreviewAnnotationPayload,
   ProviderInstanceId,
   type ServerProvider,
@@ -317,6 +318,7 @@ import {
 } from "./chat/draftHeroTransition";
 import {
   buildLocalDraftThread,
+  buildVoiceThreadCreateInput,
   collectUserMessageBlobPreviewUrls,
   deriveCommittedServerUserMessageIds,
   dismissBranchMismatchForSession,
@@ -420,6 +422,7 @@ export default function ChatView(props: ChatViewProps) {
       currentRouteThreadKeyRef.current = null;
     };
   }, [routeThreadKey]);
+  const createThread = useOrchestrationCommand(threadEnvironment.create, { reportFailure: false });
   const updateThreadMetadata = useOrchestrationCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
@@ -1779,6 +1782,7 @@ export default function ChatView(props: ChatViewProps) {
   const canInterruptRunningThread =
     canOperateThread && deriveCanInterruptRunningThread(activeThread !== undefined, activeRuntime);
   const onInterrupt = async () => {
+    composerRef.current?.stopVoice();
     if (
       !activeThread ||
       !readEnvironmentScope(activeThread.environmentId, AuthOrchestrationOperateScope)
@@ -2792,6 +2796,24 @@ export default function ChatView(props: ChatViewProps) {
     void sendStandaloneCommand("/compact", "Failed to compact context.");
   };
 
+  const ensureVoiceThread = async (options: CallOptions) => {
+    if (isServerThread) return;
+    if (!activeThread || !activeProject || options.threadId !== activeThread.id)
+      throw new Error("Choose an available project before starting a call.");
+    const result = await createThread(
+      buildVoiceThreadCreateInput({
+        thread: activeThread,
+        projectId: activeProject.id,
+        options,
+        runtimeMode,
+        interactionMode,
+        branch: activeThreadBranch,
+      }),
+    );
+    if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+  };
+
+  const ensureVoiceThreadStable = useStableCallback(ensureVoiceThread);
   const {
     getModelDisabledReason,
     handleInteractionModeChange,
@@ -3491,6 +3513,7 @@ export default function ChatView(props: ChatViewProps) {
                           ) : null}
                           {!composerMounted ? null : (
                             <ChatComposer
+                              ensureVoiceThread={ensureVoiceThreadStable}
                               canOperateThread={canOperateThread}
                               reportedModelSelection={reportedModelSelection}
                               multipleModelSelections={multipleModelSelections}

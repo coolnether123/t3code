@@ -1,4 +1,5 @@
 import { Button } from "../../components/ui/Button";
+import { UsageResetScreen } from "./UsageResetScreen";
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import { ChatGptUsageSummary } from "./ChatGptUsageSummary";
 import { ScreenScrollView as ScrollView } from "../../components/ui/ScreenScrollView";
@@ -84,10 +85,20 @@ const CURSOR_KEYCHAIN_COPY = "Requires access to your Cursor login in macOS Keyc
 
 export function UsageRouteScreen(props: { readonly workspace?: boolean }) {
   const route = useRoute<RouteProp<{ Usage: { tab?: string } | undefined }, "Usage">>();
-  return <UsageScreen workspace={props.workspace} tabParam={route.params?.tab} />;
+  const [showResets, setShowResets] = useState(false);
+  return showResets ? (
+    <UsageResetScreen onBack={() => setShowResets(false)} />
+  ) : (
+    <UsageScreen
+      workspace={props.workspace}
+      tabParam={route.params?.tab}
+      onOpenResets={() => setShowResets(true)}
+    />
+  );
 }
 
 function UsageScreen(props: {
+  readonly onOpenResets: () => void;
   readonly workspace?: boolean;
   readonly tabParam: string | undefined;
 }) {
@@ -294,6 +305,9 @@ function UsageScreen(props: {
           entering={FadeIn.duration(160).reduceMotion(ReduceMotion.System)}
           className="gap-6"
         >
+          <Pressable accessibilityRole="button" onPress={props.onOpenResets} className="py-3">
+            <Text className="text-sm text-foreground">Quota history &amp; reset tracking</Text>
+          </Pressable>
           {showingLimits ? (
             <UsageLimitsSection
               now={limits.now}

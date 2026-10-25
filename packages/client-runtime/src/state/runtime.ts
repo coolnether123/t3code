@@ -379,6 +379,8 @@ export interface AtomQueryOptions extends AtomCommandOptions {
    */
   readonly refresh?: boolean;
   readonly signal?: AbortSignal;
+  /** Bound a refresh so a disconnected environment cannot leave callers pending. */
+  readonly timeoutMs?: number;
 }
 
 export async function executeAtomQuery<A, E>(
@@ -403,8 +405,17 @@ export async function executeAtomQuery<A, E>(
       });
     }),
   );
+  const bounded =
+    options.timeoutMs === undefined
+      ? query
+      : query.pipe(
+          Effect.timeoutOrElse({
+            duration: options.timeoutMs,
+            orElse: () => Effect.die(new Error("Query refresh timed out.")),
+          }),
+        );
   return executeAtomCommand(
-    () => Effect.runPromiseExit(query, { signal: options.signal }),
+    () => Effect.runPromiseExit(bounded, { signal: options.signal }),
     options,
     reporter,
   );

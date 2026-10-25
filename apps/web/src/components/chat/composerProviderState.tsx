@@ -101,7 +101,18 @@ function resolveComposerOptionSelections(
   selections: ReadonlyArray<ProviderOptionSelection> | undefined;
 } {
   const caps = getProviderModelCapabilities(models, model, provider, planModeEnabled);
-  return { caps, selections: withImplicitFastModeDefault(caps, modelOptions) };
+  const planDisabled = !planModeEnabled;
+  const agent = caps.optionDescriptors?.find(
+    (descriptor) => descriptor.type === "select" && descriptor.id === "agent",
+  );
+  const survivingAgent = agent?.type === "select" ? agent.currentValue : undefined;
+  const allowedOptions = planDisabled
+    ? modelOptions?.flatMap((option) => {
+        if (option.id !== "agent" || option.value !== "plan") return [option];
+        return survivingAgent === undefined ? [] : [{ ...option, value: survivingAgent }];
+      })
+    : modelOptions;
+  return { caps, selections: withImplicitFastModeDefault(caps, allowedOptions) };
 }
 
 export function getComposerProviderState(input: ComposerProviderStateInput): ComposerProviderState {

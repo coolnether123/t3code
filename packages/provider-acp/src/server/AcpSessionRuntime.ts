@@ -736,7 +736,7 @@ export function observePosixOwnershipLedger(input: {
   }
 }
 
-function observePosixOwnershipLedgerContinuously(input: {
+export function observePosixOwnershipLedgerContinuously(input: {
   readonly childQueues: Map<number, Array<number>>;
   readonly controller: AcpPosixProcessTreeController;
   readonly frontier: Map<number, AcpOwnedPosixProcess>;
@@ -1039,11 +1039,11 @@ export function terminatePosixOwnedProcessTree(input: {
   }).pipe(withWallClock);
 }
 
-function windowsTaskkillResultIsSuccess(exitCode: number, _output?: string): boolean {
+export function windowsTaskkillResultIsSuccess(exitCode: number, _output?: string): boolean {
   return exitCode === 0;
 }
 
-const terminateWindowsProcessTreeWithTaskkill = (
+export const terminateWindowsProcessTreeWithTaskkill = (
   pid: number,
 ): Effect.Effect<void, AcpProcessGroupTerminationError, ChildProcessSpawner.ChildProcessSpawner> =>
   Effect.scoped(
@@ -1265,6 +1265,7 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
 > {
   const crypto = yield* Crypto.Crypto;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const hostPlatform = yield* HostProcess.Platform;
   const runtimeScope = yield* Scope.fork(yield* Scope.Scope);
   const eventQueue = yield* Queue.unbounded<AcpSessionRuntimeEvent>();
   const modeStateRef = yield* Ref.make<AcpSessionModeState | undefined>(undefined);
@@ -1476,7 +1477,8 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
         extendEnv: options.spawn.extendEnv ?? true,
         ...(options.ownDetachedProcessGroup === undefined
           ? {}
-          : { detached: options.ownDetachedProcessGroup }),
+          : { detached: options.ownDetachedProcessGroup && hostPlatform !== "win32" }),
+        windowsHide: true,
         shell: containedSpawnCommand.shell,
       }),
     )
@@ -1635,7 +1637,6 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
     Effect.uninterruptible(terminateOwnedProcessGroupImpl),
   );
   if (options.ownDetachedProcessGroup === true) {
-    const hostPlatform = yield* HostProcess.Platform;
     const forceTerminateOwnedProcessGroup =
       hostPlatform === "win32"
         ? terminateWindowsProcessTreeWithTaskkill(Number(child.pid)).pipe(

@@ -1,4 +1,3 @@
-// @effect-diagnostics nodeBuiltinImport:off - checks the host's default Codex directory without writing to it.
 import * as NodeURL from "node:url";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Stream from "effect/Stream";
@@ -19,12 +18,39 @@ import * as ServerConfig from "../config.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as CodexInstallation from "./CodexInstallation.ts";
+import { resolveManagedCodexHomeLayout } from "./CodexManagedHome.ts";
 import { makeCodexManagedRuntime } from "./CodexManagedRuntime.ts";
 import * as ProviderCredentialStore from "./ProviderCredentialStore.ts";
 import { codexAppServerArgs } from "./codexLaunchArgs.ts";
 
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeSettings = Schema.decodeSync(CodexSettings);
+it.effect("managed home defaults to the global Codex home and honors configured home paths", () =>
+  Effect.gen(function* () {
+    const path = yield* Path.Path;
+    const primary = yield* resolveManagedCodexHomeLayout(
+      "/t3-state",
+      ProviderInstanceId.make("codex"),
+      decodeSettings({}),
+    );
+    assert.equal(primary.sharedHomePath, path.join(yield* HostProcess.HomeDirectory, ".codex"));
+    assert.equal(primary.mode, "direct");
+    const additional = yield* resolveManagedCodexHomeLayout(
+      "/t3-state",
+      ProviderInstanceId.make("codex-work"),
+      decodeSettings({}),
+    );
+    assert.equal(additional.sharedHomePath, primary.sharedHomePath);
+    assert.equal(additional.mode, "authOverlay");
+    const configured = yield* resolveManagedCodexHomeLayout(
+      "/t3-state",
+      ProviderInstanceId.make("codex-work"),
+      decodeSettings({ homePath: "/custom/shared", shadowHomePath: "/custom/shadow" }),
+    );
+    assert.equal(configured.sharedHomePath, path.resolve("/custom/shared"));
+    assert.equal(configured.effectiveHomePath, path.resolve("/custom/shadow"));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
 const decodeCommand = Schema.decodeUnknownSync(
   Schema.fromJsonString(Schema.Tuple([Schema.String, Schema.Array(Schema.String)])),
 );
@@ -121,7 +147,7 @@ it.live.each(
             assert.equal(runtime.homeLayout.mode, "direct");
           } else {
             assert.include(effective.config.homePath, instanceId);
-            assert.include(effective.config.homePath, "userdata/providers/codex");
+            assert.include(effective.config.homePath, path.join("userdata", "providers", "codex"));
             assert.equal(runtime.homeLayout.mode, "authOverlay");
             assert.equal(
               yield* fs.readLink(path.join(effective.config.homePath, "sessions")),

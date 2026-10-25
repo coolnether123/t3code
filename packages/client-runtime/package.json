@@ -451,6 +451,42 @@
       "types": "./src/pullRequestQuery.ts",
       "default": "./src/pullRequestQuery.ts"
     },
+    "./voice-call/floor": {
+      "types": "./src/voice-call/floor.ts",
+      "default": "./src/voice-call/floor.ts"
+    },
+    "./voice-call/transport": {
+      "types": "./src/voice-call/transport.ts",
+      "default": "./src/voice-call/transport.ts"
+    },
+    "./voice-call/playback": {
+      "types": "./src/voice-call/playback.ts",
+      "default": "./src/voice-call/playback.ts"
+    },
+    "./voice-call": {
+      "types": "./src/voice-call/session.ts",
+      "default": "./src/voice-call/session.ts"
+    },
+    "./usageRefresh": {
+      "types": "./src/usageRefresh.ts",
+      "default": "./src/usageRefresh.ts"
+    },
+    "./resetCheckPresentation": {
+      "types": "./src/resetCheckPresentation.ts",
+      "default": "./src/resetCheckPresentation.ts"
+    },
+    "./resetAnnouncements": {
+      "types": "./src/resetAnnouncements.ts",
+      "default": "./src/resetAnnouncements.ts"
+    },
+    "./publicResetHistory": {
+      "types": "./src/publicResetHistory.ts",
+      "default": "./src/publicResetHistory.ts"
+    },
+    "./diagnostics": {
+      "types": "./src/diagnostics.ts",
+      "default": "./src/diagnostics.ts"
+    },
     "./model-traits": {
       "types": "./src/modelTraits.ts",
       "default": "./src/modelTraits.ts"

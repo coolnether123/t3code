@@ -41,6 +41,7 @@ const BACKGROUND_PROMPT =
   "Use the subagent tool with background enabled to delegate to the general subagent with the prompt: 'Run the shell command `sleep 20` with the bash tool and then reply exactly CHILD_OK.' As soon as it is launched, reply exactly PARENT_OK and end your turn without waiting for it.";
 const instanceId = ProviderInstanceId.make("opencode");
 const bigPickle: ModelSelection = { instanceId, model: "opencode/big-pickle" };
+const nemotron: ModelSelection = { instanceId, model: "opencode/nemotron-3.5-lightning-free" };
 const mimo: ModelSelection = { instanceId, model: "opencode/mimo-v2.6-flash-free" };
 
 const out = (type: string, input?: unknown): ProviderReplayEntry => ({
@@ -947,5 +948,55 @@ describe("OpenCode 2 through the orchestrator", () => {
         const shell = result.shellSnapshot.threads.find((row) => row.id === projection!.thread.id);
         assert.deepEqual(shell?.pendingBackgroundTasks ?? [], []);
       }).pipe(Effect.scoped, Effect.provide(Layer.merge(NodeServices.layer, IdAllocator.layer))),
+  );
+
+  it.effect(
+    "runs plan mode as OpenCode's plan agent and switches back before the next prompt",
+    () =>
+      Effect.gen(function* () {
+        const name = "opencode2_switch";
+        const cwd = yield* checkpointWorkspace(name);
+        const thread = threadCommands({ name, worktreePath: cwd });
+
+        const recorded = withDirectory(
+          yield* readProviderReplayTranscript(
+            new URL(
+              "./testkit/fixtures/opencode2_switch/opencode_transcript.ndjson",
+              import.meta.url,
+            ),
+          ),
+          cwd,
+        );
+        const projection = yield* runScenario({
+          name,
+          threadId: thread.threadId,
+          entries: recorded.entries,
+          commands: [
+            thread.create,
+            thread.interactionMode("mode-plan", "plan"),
+            thread.message(
+              "plan",
+              bigPickle,
+              "Create a file named plan_probe.txt containing HI using the write tool.",
+            ),
+            thread.interactionMode("mode-default", "default"),
+            thread.message("switched", nemotron, "Reply exactly SWITCHED."),
+          ],
+        });
+        assert.deepEqual(
+          projection.runs.map((run) => [run.status, run.modelSelection.model]),
+          [
+            ["completed", bigPickle.model],
+            ["completed", nemotron.model],
+          ],
+        );
+        const replies = projection.turnItems.flatMap((item) =>
+          item.type === "assistant_message" ? [item.text] : [],
+        );
+
+        assert.include(replies[0], "Plan mode");
+        assert.equal(replies[1], "SWITCHED");
+        assert.lengthOf(projection.providerThreads, 1);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });

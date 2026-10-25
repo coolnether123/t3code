@@ -1,3 +1,5 @@
+import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
+import * as ServerConfig from "../config.ts";
 import {
   AuthSessionId,
   type AuthEnvironmentScope,
@@ -131,6 +133,14 @@ it.effect("exports full history with size, scope, and missing-thread checks", ()
     const routes = HttpApiBuilder.layer(TranscriptTestApi).pipe(
       Layer.provide(OrchestrationHttp.layer),
       Layer.provide(
+        Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({
+          enqueueCommand: (effect) => effect,
+        }),
+      ),
+      Layer.provide(
+        ServerConfig.layerTest(process.cwd(), { prefix: "t3-orchestration-http-test-" }),
+      ),
+      Layer.provide(
         Layer.succeed(ServerEnvironment.ServerEnvironmentIdentity, {
           getEnvironmentId: Effect.succeed(environmentId),
         }),
@@ -238,7 +248,48 @@ it.effect("exports full history with size, scope, and missing-thread checks", ()
     }
 
     expect((yield* read(ThreadId.make("missing"))).status).toBe(404);
+    const readShell = (id: ThreadId) =>
+      Effect.promise(() =>
+        handler(
+          new Request(`http://localhost/api/orchestration/threads/${id}/shell`, {
+            headers: { [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT },
+          }),
+        ),
+      );
+    yield* eventSink.write({
+      events: [
+        {
+          id: EventId.make("archive-source"),
+          type: "thread.archived",
+          threadId: thread.id,
+          occurredAt: now,
+          payload: { ...thread, archivedAt: now },
+        },
+      ],
+    });
+    const archivedShell = yield* readShell(thread.id);
+    expect(archivedShell.status).toBe(200);
+    expect(yield* Effect.promise(() => archivedShell.json())).toMatchObject({
+      id: thread.id,
+      archivedAt: DateTime.formatIso(now),
+      itemCount: 200,
+    });
+    expect((yield* readShell(ThreadId.make("missing"))).status).toBe(404);
     allowed = false;
     expect((yield* read(thread.id)).status).toBe(403);
+    expect((yield* readShell(thread.id)).status).toBe(403);
+    allowed = true;
+    yield* eventSink.write({
+      events: [
+        {
+          id: EventId.make("delete-source"),
+          type: "thread.deleted",
+          threadId: thread.id,
+          occurredAt: now,
+          payload: { ...thread, archivedAt: now, deletedAt: now },
+        },
+      ],
+    });
+    expect((yield* readShell(thread.id)).status).toBe(404);
   }),
 );

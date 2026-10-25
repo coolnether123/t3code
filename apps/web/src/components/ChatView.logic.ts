@@ -32,6 +32,8 @@ import {
   type ModelSelection,
   type OrchestrationMessageContext,
   type PreviewAnnotationPayload,
+  type CallOptions,
+  type RuntimeMode,
   type ProviderInteractionMode,
   ProviderDriverKind,
   type ProviderInstanceId,
@@ -101,6 +103,7 @@ import type { DesktopPreviewOverlay } from "../previewStateStore";
 import type { RightPanelSurface } from "../rightPanelStore";
 import {
   NO_PROVIDER_MODEL_SELECTION,
+  canKeepExplicitProviderInstanceSelection,
   resolveSelectableProviderInstanceEntry,
   type ProviderInstanceEntry,
 } from "../providerInstances";
@@ -112,6 +115,31 @@ export const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "t3code:last-invoked-script-by
 export const MAX_HIDDEN_MOUNTED_TERMINAL_THREADS = 10;
 
 const ENVIRONMENT_RECONNECT_WARNING_GRACE_MS = 2_000;
+
+/** Reuse the ordinary create command with the draft's identity and call voice selection. */
+export function buildVoiceThreadCreateInput(input: {
+  thread: Thread;
+  projectId: ProjectId;
+  options: CallOptions;
+  runtimeMode: RuntimeMode;
+  interactionMode: ProviderInteractionMode;
+  branch: string | null;
+}) {
+  return {
+    environmentId: input.thread.environmentId,
+    input: {
+      threadId: input.thread.id,
+      projectId: input.projectId,
+      title: input.thread.title,
+      modelSelection: input.options.modelSelection,
+      runtimeMode: input.runtimeMode,
+      interactionMode: input.interactionMode,
+      branch: input.branch,
+      worktreePath: input.thread.worktreePath,
+      createdAt: input.thread.createdAt,
+    },
+  };
+}
 
 export function agentControlledBrowserCloseConfirmation(
   surfaces: readonly RightPanelSurface[],
@@ -273,6 +301,61 @@ export function shouldDockDraftHeroForSubmission(input: {
     input.isDraftHeroState &&
     input.activeThreadKey !== null
   );
+}
+
+export function shouldQueueFollowUp(input: {
+  phase: SessionPhase;
+  followUpBehavior: "queue" | "steer";
+  hasThread: boolean;
+  hasContent: boolean;
+  hasPendingRequest: boolean;
+  hasDirectAnnotation: boolean;
+}): boolean {
+  return (
+    input.phase === "running" &&
+    input.followUpBehavior === "queue" &&
+    input.hasThread &&
+    input.hasContent &&
+    !input.hasPendingRequest &&
+    !input.hasDirectAnnotation
+  );
+}
+
+export function resolveFollowUpSubmission(input: {
+  phase: SessionPhase;
+  followUpBehavior: "queue" | "steer";
+  hasThread: boolean;
+  hasContent: boolean;
+  hasPendingRequest: boolean;
+  hasDirectAnnotation: boolean;
+  hasQueuedFollowUps: boolean;
+  isSendBusy: boolean;
+  isConnecting: boolean;
+  isThreadLoading: boolean;
+  isEnvironmentUnavailable: boolean;
+}): "steer" | "queue" | "send" {
+  if (
+    input.phase === "running" &&
+    input.followUpBehavior === "steer" &&
+    input.hasThread &&
+    input.hasContent &&
+    !input.hasDirectAnnotation
+  ) {
+    return "steer";
+  }
+  if (shouldQueueFollowUp(input)) return "queue";
+  if (
+    input.hasQueuedFollowUps &&
+    input.hasContent &&
+    !input.hasPendingRequest &&
+    !input.hasDirectAnnotation &&
+    (input.phase === "running" || (!input.isSendBusy && !input.isConnecting)) &&
+    !input.isThreadLoading &&
+    !input.isEnvironmentUnavailable
+  ) {
+    return "queue";
+  }
+  return "send";
 }
 
 export function shouldReleaseTimelineAnchorForToolActivity(input: {
@@ -461,8 +544,9 @@ export function resolveDraftPromotionNavigationTarget(input: {
   serverThreadRef: ScopedThreadRef | null;
   serverThread: Pick<Thread, "latestRun" | "latestUserMessageAt"> | null | undefined;
   backgroundSubmissionPending: boolean;
+  voiceCallActive?: boolean;
 }): ScopedThreadRef | null {
-  if (input.backgroundSubmissionPending) {
+  if (input.backgroundSubmissionPending || input.voiceCallActive) {
     return null;
   }
   const latestRun = input.serverThread?.latestRun ?? null;
@@ -596,7 +680,8 @@ export function resolveComposerProviderSelection(input: {
     input.candidateInstanceIds
       .map((candidate) =>
         compatibleEntries.find(
-          (entry) => entry.instanceId === candidate && entry.enabled && entry.isAvailable,
+          (entry) =>
+            entry.instanceId === candidate && canKeepExplicitProviderInstanceSelection(entry),
         ),
       )
       .find((entry) => entry !== undefined) ??

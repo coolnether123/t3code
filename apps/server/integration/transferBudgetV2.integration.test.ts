@@ -1,3 +1,5 @@
+import * as ServerRuntimeStartup from "../src/serverRuntimeStartup.ts";
+import * as ServerConfig from "../src/config.ts";
 // @effect-diagnostics nodeBuiltinImport:off - Measures real local HTTP/WebSocket sockets.
 import * as NodeHttp from "node:http";
 import * as NodeUtil from "node:util";
@@ -159,6 +161,10 @@ const layerHandlers = group.toLayer({
 const layerRoutes = Layer.mergeAll(
   HttpApiBuilder.layer(TransferApi).pipe(
     Layer.provide(OrchestrationHttp.layer),
+    Layer.provide(
+      Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({ enqueueCommand: (effect) => effect }),
+    ),
+    Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-transfer-test-" })),
     Layer.provide(layerAuth),
   ),
   RpcServer.layerHttp({ group, path: "/ws", protocol: "websocket" }).pipe(

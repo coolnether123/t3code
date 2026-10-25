@@ -30,6 +30,7 @@ const BASE_WEB_PORT = 5733;
 const MAX_HASH_OFFSET = 3000;
 const MAX_PORT = 65535;
 const DESKTOP_DEV_LOOPBACK_HOST = "127.0.0.1";
+const SHARED_WEB_LOOPBACK_HOST = "127.0.0.1";
 // HTTP(S) requests to these ports are blocked by the Fetch standard before a
 // browser reaches the network. Keep the complete list here so explicit or
 // future wider offsets cannot produce a URL that curl accepts but browsers
@@ -330,6 +331,7 @@ export const createDevRunnerEnv = Effect.fn("dev-runner.createDevRunnerEnv")(fun
       `http://${isDesktopMode ? DESKTOP_DEV_LOOPBACK_HOST : "localhost"}:${webPort}`,
   };
 
+  delete output.T3CODE_WEB_BIND_HOST;
   if (configuredBaseDir !== undefined) {
     output.T3CODE_HOME = resolvedBaseDir;
   } else {
@@ -821,6 +823,7 @@ export const runDevRunnerWithInput = Effect.fn("dev-runner.runDevRunnerWithInput
       );
 
       if (shared) {
+        if (!input.built) env.T3CODE_WEB_BIND_HOST = SHARED_WEB_LOOPBACK_HOST;
         // The app is reached from the tailnet origin. Vite already allows
         // *.ts.net hosts; the backend needs the origin for credentialed
         // requests that bypass the proxy (desktop renderer, direct calls).

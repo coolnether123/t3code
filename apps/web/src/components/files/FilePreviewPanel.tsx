@@ -138,8 +138,8 @@ interface FilePreviewPanelProps {
   /** The deeper path breadcrumbs keep after the browser moved up; see `navigateFolder`. */
   folderTrail: string | undefined;
   onPendingChange: (relativePath: string, pending: boolean) => void;
-  selectedFilePending: boolean;
-  workspaceMutationId: string | null;
+  selectedFilePending?: boolean;
+  workspaceMutationId?: string | null;
 }
 
 const FILE_EXPLORER_STORAGE_KEY = "t3code.fileExplorerOpen";
@@ -1002,8 +1002,8 @@ export default function FilePreviewPanel({
   onNavigateFolder,
   folderTrail,
   onPendingChange,
-  selectedFilePending,
-  workspaceMutationId,
+  selectedFilePending = false,
+  workspaceMutationId = null,
 }: FilePreviewPanelProps) {
   const relativePath =
     attachment === undefined ? resolveFilePreviewPath(requestedPath, cwd) : requestedPath;

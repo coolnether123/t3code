@@ -1,3 +1,4 @@
+import { PROVIDER_ORDER } from "./usageProviders";
 import { describe, expect, it } from "vite-plus/test";
 
 import { buildPeriodColumns } from "./UsageProviderChart";
@@ -19,6 +20,7 @@ describe("buildPeriodColumns", () => {
         ]),
       },
     ],
+    // 2026-08-02 is deliberately absent: a day with no activity.
     [
       "2026-08-03",
       {
@@ -30,18 +32,29 @@ describe("buildPeriodColumns", () => {
     ],
   ]);
 
+  it("plots each day on its own", () => {
+    expect(buildPeriodColumns(days, byDay, "cost").map((column) => column.total)).toEqual([
+      42, 0, 5,
+    ]);
+  });
+
+  it("reads the requested metric", () => {
+    expect(buildPeriodColumns(days, byDay, "tokens").map((column) => column.total)).toEqual([
+      420, 0, 50,
+    ]);
+  });
+
   it("keeps band values absolute rather than cumulative", () => {
+    // Regression: the bands were once stack offsets, which drew Claude Code
+    // permanently above Codex regardless of which provider spent more.
     const [first] = buildPeriodColumns(days, byDay, "cost");
 
-    expect(first?.bands).toEqual([
-      { provider: "codex", value: 10 },
-      { provider: "claude", value: 20 },
-      { provider: "grok", value: 0 },
-      { provider: "cursor", value: 0 },
-      { provider: "opencode", value: 0 },
-      { provider: "antigravity", value: 0 },
-      { provider: "pi", value: 5 },
-      { provider: "muse", value: 7 },
-    ]);
+    const values = { codex: 10, claude: 20, pi: 5, muse: 7 };
+    expect(first?.bands).toEqual(
+      PROVIDER_ORDER.map((provider) => ({
+        provider,
+        value: values[provider as keyof typeof values] ?? 0,
+      })),
+    );
   });
 });

@@ -630,6 +630,7 @@ function makeBrowserAccessProject(projectId: ProjectId): Project {
 }
 
 function runBrowserAccessScenario(input: {
+  readonly callOperator?: boolean;
   readonly enableAgentBrowserAccess: boolean;
   readonly projectOverride: boolean;
   readonly deviceOverride?: boolean;
@@ -667,8 +668,34 @@ function runBrowserAccessScenario(input: {
         });
       }
       yield* manager
-        .open({ threadId, providerSessionId, modelSelection, runtimePolicy })
+        .open({
+          threadId: input.callOperator ? ThreadId.make("t3-call-operator-synthetic") : threadId,
+          ...(input.callOperator ? { owningThreadId: threadId } : {}),
+          providerSessionId,
+          modelSelection,
+          runtimePolicy: { ...runtimePolicy, ...(input.callOperator ? { isolated: true } : {}) },
+        })
         .pipe(Effect.ignore);
+      if (input.callOperator) {
+        const captured = (yield* Ref.get(mcpConfigs))[0]!;
+        const caller = {
+          threadId: captured.threadId,
+          mcpCredentialId: captured.providerSessionId,
+          providerInstanceId: captured.providerInstanceId,
+        };
+        assert.equal(yield* manager.getAuxiliaryOwner(caller), threadId);
+        assert.isUndefined(
+          yield* manager.getAuxiliaryOwner({ ...caller, mcpCredentialId: "expired-credential" }),
+        );
+        assert.isUndefined(
+          yield* manager.getAuxiliaryOwner({
+            ...caller,
+            providerInstanceId: ProviderInstanceId.make("other"),
+          }),
+        );
+        yield* manager.close(providerSessionId);
+        assert.isUndefined(yield* manager.getAuxiliaryOwner(caller));
+      }
     }).pipe(
       Effect.provide(
         layerTest({
@@ -1629,6 +1656,31 @@ it.effect("ProviderSessionManagerV2 honors a project browser-access opt-out", ()
     });
     assert.isDefined(captured);
     assert.equal(captured?.browserToolsAvailable, false);
+  }),
+);
+
+it.effect("ProviderSessionManagerV2 honors a project browser-access opt-in", () =>
+  Effect.gen(function* () {
+    const captured = yield* runBrowserAccessScenario({
+      enableAgentBrowserAccess: false,
+      projectOverride: true,
+    });
+    assert.isDefined(captured);
+    assert.equal(captured?.browserToolsAvailable, true);
+  }),
+);
+
+it.effect("call operators inherit browser and device access while keeping their MCP identity", () =>
+  Effect.gen(function* () {
+    const captured = yield* runBrowserAccessScenario({
+      enableAgentBrowserAccess: false,
+      projectOverride: true,
+      deviceOverride: true,
+      callOperator: true,
+    });
+    assert.equal(captured?.threadId, "t3-call-operator-synthetic");
+    assert.equal(captured?.browserToolsAvailable, true);
+    assert.equal(captured?.capabilities?.has("device"), true);
   }),
 );
 

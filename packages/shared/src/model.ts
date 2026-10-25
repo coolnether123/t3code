@@ -1,5 +1,6 @@
 import {
-  type CustomModelSetting,
+  DEFAULT_MODEL,
+  DEFAULT_MODEL_BY_PROVIDER,
   MODEL_SLUG_ALIASES_BY_PROVIDER,
   ModelCapabilities,
   type ModelSelection,
@@ -7,6 +8,7 @@ import {
   ProviderInstanceId,
   type ProviderOptionDescriptor,
   type ProviderOptionSelection,
+  type CustomModelSetting,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -45,7 +47,7 @@ function getRawSelectionValueById(
   return selection?.value;
 }
 
-function getProviderOptionSelectionValue(
+export function getProviderOptionSelectionValue(
   selections: ReadonlyArray<ProviderOptionSelection> | null | undefined,
   id: string,
 ): string | boolean | undefined {
@@ -66,6 +68,13 @@ function getProviderOptionBooleanSelectionValue(
 ): boolean | undefined {
   const value = getProviderOptionSelectionValue(selections, id);
   return typeof value === "boolean" ? value : undefined;
+}
+
+export function getModelSelectionOptionValue(
+  modelSelection: ModelSelection | null | undefined,
+  id: string,
+): string | boolean | undefined {
+  return getProviderOptionSelectionValue(modelSelection?.options, id);
 }
 
 export function getModelSelectionStringOptionValue(
@@ -309,22 +318,30 @@ export function buildExplicitProviderOptionSelectionsFromDescriptors(
   descriptors: ReadonlyArray<ProviderOptionDescriptor> | null | undefined,
   selections: ReadonlyArray<ProviderOptionSelection> | null | undefined,
 ): Array<ProviderOptionSelection> | undefined {
-  if (!selections || selections.length === 0) {
-    return undefined;
+  if (!descriptors || !selections || selections.length === 0) return undefined;
+  const allowed = new Set(descriptors.map((descriptor) => descriptor.id));
+  const result = selections.filter((selection) => allowed.has(selection.id));
+  return result.length > 0 ? result.map((selection) => ({ ...selection })) : undefined;
+}
+
+export function getModelSelectionOptionDescriptors(
+  modelSelection: ModelSelection | null | undefined,
+  caps?: ModelCapabilities | null | undefined,
+): ReadonlyArray<ProviderOptionDescriptor> {
+  if (!modelSelection) {
+    return [];
   }
-  const explicitIds = new Set(selections.map((selection) => selection.id));
-  const normalized = buildProviderOptionSelectionsFromDescriptors(descriptors)?.filter(
-    (selection) => explicitIds.has(selection.id),
-  );
-  return normalized && normalized.length > 0 ? normalized : undefined;
+  if (!caps) {
+    return [];
+  }
+  return getProviderOptionDescriptors({
+    caps,
+    selections: modelSelection.options,
+  });
 }
 
 export function isClaudeUltrathinkPrompt(text: string | null | undefined): boolean {
   return typeof text === "string" && /\bultrathink\b/i.test(text);
-}
-
-export function codexModelFamily(slug: string): string {
-  return slug.startsWith("openai.gpt-") ? slug.slice("openai.".length) : slug;
 }
 
 export function formatCodexModelName(name: string): string {
@@ -349,18 +366,9 @@ export function formatModelSlugName(slug: string): string {
 
 export function normalizeModelSlug(
   model: string | null | undefined,
-  provider: ProviderDriverKind = DEFAULT_PROVIDER_DRIVER_KIND,
+  _provider: ProviderDriverKind = DEFAULT_PROVIDER_DRIVER_KIND,
 ): string | null {
-  const trimmed = normalizeCustomModelSlug(model);
-  if (!trimmed) {
-    return null;
-  }
-
-  const aliases = MODEL_SLUG_ALIASES_BY_PROVIDER[provider] ?? {};
-  const aliased = Object.prototype.hasOwnProperty.call(aliases, trimmed)
-    ? aliases[trimmed]
-    : undefined;
-  return typeof aliased === "string" ? aliased : trimmed;
+  return normalizeCustomModelSlug(model);
 }
 
 /** Custom model identifiers are provider-owned, so only trim them; never expand aliases. */
@@ -370,6 +378,11 @@ export function normalizeCustomModelSlug(model: string | null | undefined): stri
   }
 
   return model.trim() || null;
+}
+
+/** Compare Codex model families without changing provider-owned dispatch IDs. */
+export function codexModelFamily(slug: string): string {
+  return slug.startsWith("openai.gpt-") ? slug.slice("openai.".length) : slug;
 }
 
 export interface CustomModelDefinition {
@@ -410,6 +423,10 @@ export function readCustomModelEntries(value: unknown): CustomModelDefinition[] 
     });
   }
   return entries;
+}
+
+export function readCustomModelSlugs(value: unknown): string[] {
+  return readCustomModelEntries(value).map((entry) => entry.slug);
 }
 
 export function toCustomModelSetting(entry: CustomModelDefinition): CustomModelSetting {
@@ -456,7 +473,11 @@ export function resolveSelectableModel(
     return byAlias.slug;
   }
 
-  const normalized = normalizeModelSlug(trimmed, provider);
+  const aliases = MODEL_SLUG_ALIASES_BY_PROVIDER[provider] ?? {};
+  const aliased = Object.prototype.hasOwnProperty.call(aliases, trimmed)
+    ? aliases[trimmed]
+    : undefined;
+  const normalized = typeof aliased === "string" ? aliased : trimmed;
   if (!normalized) {
     return null;
   }
@@ -465,7 +486,23 @@ export function resolveSelectableModel(
   return resolved ? resolved.slug : null;
 }
 
-function trimOrNull<T extends string>(value: T | null | undefined): T | null {
+function resolveModelSlug(model: string | null | undefined, provider: ProviderDriverKind): string {
+  const normalized = normalizeModelSlug(model, provider);
+  if (!normalized) {
+    return DEFAULT_MODEL_BY_PROVIDER[provider] ?? DEFAULT_MODEL;
+  }
+  return normalized;
+}
+
+export function resolveModelSlugForProvider(
+  provider: ProviderDriverKind,
+  model: string | null | undefined,
+): string {
+  return resolveModelSlug(model, provider);
+}
+
+/** Trim a string, returning null for empty/missing values. */
+export function trimOrNull<T extends string>(value: T | null | undefined): T | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim() as T;
   return trimmed || null;
@@ -513,11 +550,10 @@ export function applyClaudePromptEffortPrefix(
   if (!trimmed) {
     return trimmed;
   }
-  // Prefixing a slash command turns it into plain prose, so Claude never
-  // runs it. Command names come from arbitrary file names ("/deploy.prod",
-  // "/plugin:skill"), so accept any first token without a second slash;
-  // absolute paths like "/home/theo/app.ts" keep the prefix.
-  if (effort !== "ultrathink" || /^\/[^\s/]+(?:\s|$)/u.test(trimmed)) {
+  if (effort !== "ultrathink") {
+    return trimmed;
+  }
+  if (/^\/[a-z][a-z0-9:.-]*(?:\s|$)/i.test(trimmed)) {
     return trimmed;
   }
   if (trimmed.startsWith("Ultrathink:")) {

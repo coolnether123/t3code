@@ -26,8 +26,8 @@ const MAX_READ_BYTES = 256 * 1024;
 export function claudeTaskOutputRoot(
   environment: Readonly<Record<string, string | undefined>> | undefined,
   path: Path.Path,
+  uid: number | undefined,
 ): string | undefined {
-  const uid = process.getuid?.();
   if (uid === undefined) return undefined;
   const base = environment?.CLAUDE_CODE_TMPDIR?.trim() || "/tmp";
   return path.join(base, `claude-${uid}`);

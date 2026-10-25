@@ -47,17 +47,27 @@ import {
 import {
   DpopFailureReason,
   AuthSessionId,
+  NonNegativeInt,
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
+import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import {
   OrchestrationV2ShellSnapshot,
   OrchestrationV2ThreadBoundedSnapshot,
+  OrchestrationV2Command,
+  OrchestrationV2DispatchCommandResult,
   OrchestrationV2ThreadDetailSnapshot,
   OrchestrationV2ThreadHistoryPage,
   OrchestrationV2ThreadTranscript,
+  OrchestrationV2ThreadShell,
 } from "./orchestrationV2.ts";
 import { Project, ProjectMutation, ProjectSnapshot } from "./project.ts";
+import {
+  ServerProviderAvailability,
+  ServerProviderAuthStatus,
+  ServerProviderState,
+} from "./server.ts";
 import {
   PullRequestDiffInput,
   PullRequestDiffResult,
@@ -527,6 +537,52 @@ export const AuthOtherClientSessionsRevokeResult = Schema.Struct({
 });
 export type AuthOtherClientSessionsRevokeResult = typeof AuthOtherClientSessionsRevokeResult.Type;
 
+export const ENVIRONMENT_PROVIDER_SNAPSHOT_LIMIT = 25;
+export const ENVIRONMENT_PROVIDER_MESSAGE_MAX_LENGTH = 2000;
+export const ENVIRONMENT_PROVIDER_TEXT_MAX_LENGTH = 300;
+
+export const EnvironmentProviderStatus = Schema.Struct({
+  instanceId: ProviderInstanceId,
+  driver: ProviderDriverKind,
+  displayName: Schema.optional(
+    Schema.String.check(Schema.isMaxLength(ENVIRONMENT_PROVIDER_TEXT_MAX_LENGTH)),
+  ),
+  enabled: Schema.Boolean,
+  status: ServerProviderState,
+  availability: ServerProviderAvailability,
+  message: Schema.optional(
+    Schema.String.check(Schema.isMaxLength(ENVIRONMENT_PROVIDER_MESSAGE_MAX_LENGTH)),
+  ),
+  messageTruncated: Schema.Boolean,
+  version: Schema.NullOr(
+    Schema.String.check(Schema.isMaxLength(ENVIRONMENT_PROVIDER_TEXT_MAX_LENGTH)),
+  ),
+  auth: Schema.Struct({
+    status: ServerProviderAuthStatus,
+    type: Schema.optional(
+      Schema.String.check(Schema.isMaxLength(ENVIRONMENT_PROVIDER_TEXT_MAX_LENGTH)),
+    ),
+    label: Schema.optional(
+      Schema.String.check(Schema.isMaxLength(ENVIRONMENT_PROVIDER_TEXT_MAX_LENGTH)),
+    ),
+  }),
+  modelCount: NonNegativeInt,
+  skillCount: NonNegativeInt,
+  desktopBacked: Schema.optional(Schema.NullOr(Schema.Boolean)),
+});
+export type EnvironmentProviderStatus = typeof EnvironmentProviderStatus.Type;
+
+const EnvironmentProviderSnapshotQuery = {
+  instanceId: Schema.optional(ProviderInstanceId),
+};
+
+export const EnvironmentProviderSnapshotResult = Schema.Struct({
+  providers: Schema.Array(EnvironmentProviderStatus),
+  providerCount: NonNegativeInt,
+  providersOmitted: NonNegativeInt,
+});
+export type EnvironmentProviderSnapshotResult = typeof EnvironmentProviderSnapshotResult.Type;
+
 class EnvironmentMetadataHttpApi extends HttpApiGroup.make("metadata").add(
   HttpApiEndpoint.get("descriptor", "/.well-known/t3/environment", {
     success: ExecutionEnvironmentDescriptor,
@@ -617,6 +673,14 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
+class EnvironmentProvidersHttpApi extends HttpApiGroup.make("providers").add(
+  HttpApiEndpoint.get("snapshot", "/api/providers", {
+    headers: OptionalBearerHeaders,
+    payload: EnvironmentProviderSnapshotQuery,
+    success: EnvironmentProviderSnapshotResult,
+    error: EnvironmentOrchestrationSnapshotErrors,
+  }).middleware(EnvironmentAuthenticatedAuth),
+) {}
 class EnvironmentMcpOAuthHttpApi extends HttpApiGroup.make("mcpOAuth")
   .add(
     HttpApiEndpoint.get("protectedResource", "/.well-known/oauth-protected-resource", {
@@ -686,10 +750,26 @@ const EnvironmentOrchestrationThreadHistoryErrors = [
 
 class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestration")
   .add(
+    HttpApiEndpoint.post("dispatch", "/api/orchestration/dispatch", {
+      headers: OrchestrationProtocolHeaders,
+      payload: OrchestrationV2Command,
+      success: OrchestrationV2DispatchCommandResult,
+      error: [EnvironmentRequestInvalidError, ...EnvironmentOrchestrationSnapshotErrors],
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
     HttpApiEndpoint.get("shellSnapshot", "/api/orchestration/shell", {
       headers: OrchestrationProtocolHeaders,
       success: OrchestrationV2ShellSnapshot,
       error: EnvironmentOrchestrationSnapshotErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("threadShell", "/api/orchestration/threads/:threadId/shell", {
+      headers: OrchestrationProtocolHeaders,
+      params: EnvironmentOrchestrationThreadSnapshotParams,
+      success: OrchestrationV2ThreadShell,
+      error: EnvironmentOrchestrationThreadSnapshotErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   )
   .add(
@@ -854,6 +934,7 @@ class EnvironmentWebhooksHttpApi extends HttpApiGroup.make("webhooks")
 export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentMetadataHttpApi)
   .add(EnvironmentAuthHttpApi)
+  .add(EnvironmentProvidersHttpApi)
   .add(EnvironmentMcpOAuthHttpApi)
   .add(EnvironmentOrchestrationHttpApi)
   .add(EnvironmentPullRequestsHttpApi)

@@ -1,3 +1,27 @@
+import { type ProviderOptionChoice } from "@t3tools/contracts";
+import {
+  CODEX_COMPUTER_CONTROL_OPTION_ID,
+  codexDesktopDaemonHasAppTools,
+} from "./CodexComputerControl.ts";
+import {
+  type CodexMcpToolInventory,
+  T3_MANAGED_CHROME_TOOLS,
+  T3_PREVIEW_BROWSER_TOOLS,
+  hasT3PreviewBrowserTools,
+  resolveCodexBrowserCapabilities,
+} from "./CodexBrowserCapabilities.ts";
+const registeredBrowserTools: ReadonlyArray<CodexMcpToolInventory> = [
+  {
+    name: "t3-code",
+    tools: Object.fromEntries(
+      [...T3_MANAGED_CHROME_TOOLS, ...T3_PREVIEW_BROWSER_TOOLS].map((name) => [name, {}]),
+    ),
+  },
+];
+import {
+  codexDesktopDaemonEnvironment,
+  makeCodexDesktopDaemonStdio,
+} from "./CodexAppServerTransport.ts";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -169,6 +193,8 @@ export function codexDefaultReasoningEffortOverride(model: string): "medium" | u
 
 export function mapCodexModelCapabilities(
   model: CodexSchema.V2ModelListResponse__Model,
+  browserTools: ReadonlyArray<CodexMcpToolInventory> = registeredBrowserTools,
+  desktopBacked = false,
 ): ModelCapabilities {
   const reasoningOptions = model.supportedReasoningEfforts.map(({ reasoningEffort }) =>
     reasoningEffort ===
@@ -199,7 +225,6 @@ export function mapCodexModelCapabilities(
     : null;
   const defaultServiceTier = catalogDefaultServiceTier ?? DEFAULT_SERVICE_TIER_ID;
   const optionDescriptors: ProviderOptionDescriptor[] = [];
-
   if (reasoningOptions.length > 0) {
     optionDescriptors.push({
       id: "reasoningEffort",
@@ -234,6 +259,40 @@ export function mapCodexModelCapabilities(
     });
   }
 
+  if (!desktopBacked || !codexDesktopDaemonHasAppTools()) {
+    const browserOptions: ProviderOptionChoice[] = [];
+    for (const capability of resolveCodexBrowserCapabilities(browserTools)) {
+      if (capability.id === "t3-managed-chrome" && capability.available) {
+        browserOptions.push({
+          id: "chrome",
+          label: capability.label,
+          description:
+            "Use T3's separate persistent Chrome profile. This does not control your normal Chrome profile or Windows desktop.",
+        });
+      }
+    }
+    if (hasT3PreviewBrowserTools(browserTools)) {
+      browserOptions.push({
+        id: "preview",
+        label: "T3 Preview",
+        description: "Use T3's isolated collaborative preview browser.",
+      });
+    }
+    const defaultBrowser = browserOptions[0];
+    if (defaultBrowser) {
+      optionDescriptors.push({
+        id: CODEX_COMPUTER_CONTROL_OPTION_ID,
+        label: "Browser provider",
+        type: "select",
+        options: browserOptions.map((option) => ({
+          ...option,
+          ...(option.id === defaultBrowser.id ? { isDefault: true } : {}),
+        })),
+        currentValue: defaultBrowser.id,
+      });
+    }
+  }
+
   return createModelCapabilities({
     optionDescriptors,
   });
@@ -254,7 +313,7 @@ function parseCodexModelListResponse(
 export function applyPreferredCodexDefaultModel(
   models: ReadonlyArray<ServerProviderModel>,
 ): ReadonlyArray<ServerProviderModel> {
-  const preferredSlug = PREFERRED_DEFAULT_CODEX_MODELS.flatMap((slug) =>
+  const preferredSlug = ["gpt-6.1-sol", ...PREFERRED_DEFAULT_CODEX_MODELS].flatMap((slug) =>
     models.filter((model) => !model.isCustom && codexModelFamily(model.slug) === slug),
   )[0]?.slug;
   if (!preferredSlug) {
@@ -467,6 +526,7 @@ export function buildCodexInitializeParams(): CodexSchema.V1InitializeParams {
 }
 
 export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(function* (input: {
+  readonly useDesktopAppDaemon?: boolean;
   readonly binaryPath: string;
   readonly homePath?: string | undefined;
   readonly launchArgs?: string | undefined;
@@ -480,13 +540,15 @@ export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(fu
     ? expandHomePath(input.homePath, yield* HostProcess.HomeDirectory)
     : undefined;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const environment = {
-    ...codexAppServerEnvironment(input.environment),
-    ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
-  };
+  const environment = input.useDesktopAppDaemon
+    ? codexDesktopDaemonEnvironment(input.environment)
+    : {
+        ...codexAppServerEnvironment(input.environment),
+        ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
+      };
   const spawnCommand = yield* resolveSpawnCommand(
     input.binaryPath,
-    codexAppServerArgs(input.launchArgs),
+    input.useDesktopAppDaemon ? ["app-server", "proxy"] : codexAppServerArgs(input.launchArgs),
     { env: environment, extendEnv: true },
   );
   const child = yield* spawner
@@ -508,7 +570,11 @@ export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(fu
           }),
       ),
     );
-  const clientContext = yield* Layer.build(CodexClient.layerChildProcess(child));
+  const clientContext = yield* Layer.build(
+    input.useDesktopAppDaemon
+      ? CodexClient.layerChildProcessStdio(child, yield* makeCodexDesktopDaemonStdio(child))
+      : CodexClient.layerChildProcess(child),
+  );
   const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
     Effect.provide(clientContext),
   );
@@ -518,6 +584,7 @@ export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(fu
 });
 
 const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(function* (input: {
+  readonly useDesktopAppDaemon?: boolean;
   readonly binaryPath: string;
   readonly homePath?: string;
   readonly launchArgs?: string;
@@ -543,17 +610,39 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
 
   // Optional discovery must finish before the outer timeout can discard the account result.
   const deadlineMs = spawnedAtMs + CODEX_AUTH_PROBE_TIMEOUT_MS - CODEX_DISCOVERY_MARGIN_MS;
+  const modelsRequest = input.useDesktopAppDaemon
+    ? Effect.gen(function* () {
+        // Connecting a proxy does not restart the daemon or refresh its in-memory
+        // catalog. Use the installed CLI and the daemon's home for discovery so
+        // an older running daemon cannot hide newly available account models.
+        const catalogSpawnedAtMs = DateTime.toEpochMillis(yield* DateTime.now);
+        const catalog = yield* withCodexAppServerClient({
+          ...input,
+          useDesktopAppDaemon: false,
+          homePath: initialize.codexHome,
+        });
+        return yield* accountResponse.account?.type === "chatgpt"
+          ? requestCodexChatGptModels({
+              client: catalog.client,
+              codexHome: catalog.initialize.codexHome,
+              spawnedAtMs: catalogSpawnedAtMs,
+              deadlineMs,
+            })
+          : withCodexDiscoveryDeadline(requestAllCodexModels(catalog.client), deadlineMs);
+      }).pipe(Effect.scoped, (effect) => withCodexDiscoveryDeadline(effect, deadlineMs))
+    : accountResponse.account?.type === "chatgpt"
+      ? requestCodexChatGptModels({
+          client,
+          codexHome: initialize.codexHome,
+          spawnedAtMs,
+          deadlineMs,
+        })
+      : withCodexDiscoveryDeadline(requestAllCodexModels(client), deadlineMs);
+
   const [skillsResponse, models, serviceTier, rateLimits] = yield* Effect.all(
     [
       withCodexDiscoveryDeadline(client.request("skills/list", { cwds: [input.cwd] }), deadlineMs),
-      accountResponse.account?.type === "chatgpt"
-        ? requestCodexChatGptModels({
-            client,
-            codexHome: initialize.codexHome,
-            spawnedAtMs,
-            deadlineMs,
-          })
-        : withCodexDiscoveryDeadline(requestAllCodexModels(client), deadlineMs),
+      modelsRequest,
       // The shared catalog must exclude config from the server's launch project.
       withCodexDiscoveryDeadline(
         client.request("config/read", { includeLayers: false }),
@@ -691,6 +780,7 @@ function accountProbeStatus({ account, rateLimits }: CodexAppServerProviderSnaps
 export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(function* (
   codexSettings: CodexSettings,
   probe: (input: {
+    readonly useDesktopAppDaemon?: boolean;
     readonly binaryPath: string;
     readonly homePath?: string;
     readonly launchArgs?: string;
@@ -734,6 +824,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     binaryPath: codexSettings.binaryPath,
     homePath: codexSettings.homePath,
     launchArgs: resolveCodexLaunchArgs(codexSettings.launchArgs, resolvedEnvironment),
+    useDesktopAppDaemon: codexSettings.useDesktopAppDaemon,
     cwd: process.cwd(),
     environment: resolvedEnvironment,
     ...(managedAuth ? { skipNativeUsage: true } : {}),

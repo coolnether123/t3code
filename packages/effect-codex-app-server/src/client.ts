@@ -4,7 +4,6 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stdio from "effect/Stdio";
-import * as Stream from "effect/Stream";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as CodexRpc from "./_generated/meta.gen.ts";
@@ -17,7 +16,12 @@ import {
   encodeOptionalPayload,
   runHandler,
 } from "./_internal/shared.ts";
-import { makeChildStdio, makeTerminationError } from "./_internal/stdio.ts";
+import {
+  captureChildStderr,
+  makeChildStdio,
+  makeTerminationError,
+  readFinalChildStderr,
+} from "./_internal/stdio.ts";
 
 export interface CodexAppServerClientOptions {
   readonly logIncoming?: boolean;
@@ -25,6 +29,7 @@ export interface CodexAppServerClientOptions {
   readonly logger?: (
     event: CodexProtocol.CodexAppServerProtocolLogEvent,
   ) => Effect.Effect<void, never>;
+  readonly onStderr?: (chunk: string) => Effect.Effect<void, never>;
 }
 
 interface CodexAppServerClientRaw {
@@ -97,7 +102,9 @@ const V2TurnStartParamsWithCollaborationMode = CodexSchema.V2TurnStartParams.pip
 export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make")(function* (
   stdio: Stdio.Stdio,
   options: CodexAppServerClientOptions = {},
-  terminationError?: Effect.Effect<CodexError.CodexAppServerError>,
+  terminationError?: (
+    context: CodexProtocol.CodexAppServerTerminationContext,
+  ) => Effect.Effect<CodexError.CodexAppServerError>,
 ): Effect.fn.Return<CodexAppServerClient["Service"], never, Scope.Scope> {
   const requestHandlers = new Map<string, ServerRequestHandler>();
   const notificationHandlers = new Map<string, Array<ServerNotificationHandler>>();
@@ -162,7 +169,11 @@ export const make = Effect.fn("effect-codex-app-server/CodexAppServerClient.make
     const handlers = notificationHandlers.get(notification.method) ?? [];
 
     if (schema) {
-      return decodeNotificationPayload(notification.method, schema, notification.params).pipe(
+      return decodeNotificationPayload<unknown, unknown>(
+        notification.method,
+        schema,
+        notification.params,
+      ).pipe(
         Effect.flatMap((decoded) =>
           Effect.forEach(handlers, (handler) => handler(decoded), { discard: true }),
         ),
@@ -270,6 +281,30 @@ export const layerChildProcess = (
 const makeChildProcessClient = Effect.fn(
   "effect-codex-app-server/CodexAppServerClient.makeChildProcessClient",
 )(function* (handle: ChildProcessSpawner.ChildProcessHandle, options: CodexAppServerClientOptions) {
-  yield* Stream.runDrain(handle.stderr).pipe(Effect.ignore, Effect.forkScoped);
-  return yield* make(makeChildStdio(handle), options, makeTerminationError(handle));
+  return yield* makeChildProcessStdioClient(handle, makeChildStdio(handle), options);
 });
+
+const makeChildProcessStdioClient = Effect.fn(
+  "effect-codex-app-server/CodexAppServerClient.makeChildProcessStdioClient",
+)(function* (
+  handle: ChildProcessSpawner.ChildProcessHandle,
+  stdio: Stdio.Stdio,
+  options: CodexAppServerClientOptions,
+) {
+  const stderr = yield* captureChildStderr(handle.stderr, options.onStderr);
+  return yield* make(stdio, options, (context) =>
+    makeTerminationError(handle, context, readFinalChildStderr(stderr)),
+  );
+});
+
+/**
+ * Builds a client over a caller-provided stdio-shaped transport while retaining
+ * child-process exit and stderr diagnostics. This is used by transports whose
+ * wire bytes are not line-oriented until after an adapter has decoded them.
+ */
+export const layerChildProcessStdio = (
+  handle: ChildProcessSpawner.ChildProcessHandle,
+  stdio: Stdio.Stdio,
+  options: CodexAppServerClientOptions = {},
+): Layer.Layer<CodexAppServerClient> =>
+  Layer.effect(CodexAppServerClient, makeChildProcessStdioClient(handle, stdio, options));

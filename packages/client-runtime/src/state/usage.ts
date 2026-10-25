@@ -1,8 +1,8 @@
 import type {
   EnvironmentId,
-  ServerProvider,
-  UsageSummary,
   UsageSummaryInput,
+  UsageSummary,
+  ServerProvider,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import type { AtomRegistry } from "effect/reactivity";
@@ -65,6 +65,7 @@ export async function refreshUsageLimits<A>(
   const refreshAfter = limitsRefreshAfter.get(environmentId) ?? 0;
   // @effect-diagnostics-next-line globalDate:off
   if (automatic && Date.now() < refreshAfter) return;
+
   const current = Promise.resolve()
     .then(refresh)
     .finally(() => {
@@ -76,6 +77,7 @@ export async function refreshUsageLimits<A>(
   return await current;
 }
 
+/** Refresh pricing, then await each selected environment's rescan while it remains connected. */
 export async function refreshUsage({
   registry,
   server,
@@ -112,6 +114,7 @@ export async function refreshUsage({
         const sessionUnavailable =
           ratesResult._tag === "Failure" &&
           isEnvironmentRpcUnavailable(squashAtomCommandFailure(ratesResult));
+        // Invalidate even on failure so reconnects cannot reuse the old summary.
         registry.refresh(query);
         if (sessionUnavailable || controller.signal.aborted) return;
         await executeAtomQuery(registry, query, {

@@ -1,3 +1,4 @@
+import { SubagentBackend } from "./model.ts";
 import { OrchestrationMessageContext } from "./composerContext.ts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -393,6 +394,7 @@ const LenientThreadOpens = Schema.NullOr(OrchestrationV2ThreadOpens).pipe(
 );
 
 export const OrchestrationV2AppThread = Schema.Struct({
+  subagentBackend: Schema.optional(SubagentBackend),
   ...OrchestrationV2CreationFields,
   id: ThreadId,
   projectId: ProjectId,
@@ -1153,6 +1155,7 @@ export const OrchestrationV2IdleCompaction = Schema.Literals(["beforeCacheExpire
 export type OrchestrationV2IdleCompaction = typeof OrchestrationV2IdleCompaction.Type;
 
 export const OrchestrationV2ConversationMessage = Schema.Struct({
+  voiceDelegation: Schema.optional(Schema.Boolean),
   notification: Schema.optional(OrchestrationV2Notification),
   ...OrchestrationV2CreationFields,
   scheduledTaskId: Schema.optional(ScheduledTaskId),
@@ -1521,6 +1524,9 @@ export const OrchestrationV2TurnItem = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
     type: Schema.Literal("system_notice"),
+    activity: Schema.optional(
+      Schema.Struct({ kind: Schema.String, payload: Schema.optional(Schema.Unknown) }),
+    ),
     message: Schema.String,
   }),
   Schema.Struct({
@@ -2288,6 +2294,9 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
     type: Schema.Literal("system_notice"),
+    activity: Schema.optional(
+      Schema.Struct({ kind: Schema.String, payload: Schema.optional(Schema.Unknown) }),
+    ),
     message: Schema.String,
   }),
   Schema.Struct({
@@ -2650,6 +2659,7 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("thread.create"),
+    subagentBackend: Schema.optional(SubagentBackend),
     ...OrchestrationV2CreationFields,
     commandId: CommandId,
     threadId: ThreadId,
@@ -2768,6 +2778,7 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("thread.metadata.update"),
+    subagentBackend: Schema.optional(SubagentBackend),
     commandId: CommandId,
     threadId: ThreadId,
     title: Schema.optional(TrimmedNonEmptyString),

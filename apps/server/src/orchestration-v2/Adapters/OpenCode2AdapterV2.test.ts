@@ -30,6 +30,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Scope from "effect/Scope";
@@ -2454,6 +2455,7 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
       const attachmentsDir = yield* fileSystem.makeTempDirectoryScoped({
         prefix: "t3 oc2 #images-",
       });
+      const fixturePath = yield* Path.Path;
       const image = (id: string, name: string, mimeType = "image/png") =>
         ChatImageAttachment.make({
           type: "image",
@@ -2534,9 +2536,9 @@ it.layer(McpProviderSessions.layer)("OpenCode2 adapter", (it) => {
           text: [
             index === 0 ? "What is in this image?" : "And this one?",
             `[Attached image "${attachment.name}" is saved at: ${path}]`,
-            `[Attached image "missing.png" is saved at: ${attachmentsDir}/${missing.id}.png]`,
-            `[Attached image "diagram.svg" is saved at: ${attachmentsDir}/${unsupported.id}.svg]`,
-            `[Attached file "requirements.pdf" is saved at: ${attachmentsDir}/${document.id}.pdf]`,
+            `[Attached image "missing.png" is saved at: ${fixturePath.join(attachmentsDir, `${missing.id}.png`)}]`,
+            `[Attached image "diagram.svg" is saved at: ${fixturePath.join(attachmentsDir, `${unsupported.id}.svg`)}]`,
+            `[Attached file "requirements.pdf" is saved at: ${fixturePath.join(attachmentsDir, `${document.id}.pdf`)}]`,
           ].join("\n\n"),
         });
         if (external) {
