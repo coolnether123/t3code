@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$DryRun,
+    # List stale mirror files and exit before any deploy operation.
+    [switch]$PruneDryRun,
     [switch]$Fast,
     [switch]$Full,
     [switch]$SkipBuild,
@@ -37,7 +39,8 @@ $tailnetServePort = 9445
 $webPortOffset = $webPort - 5733
 $expectedDevUrl = "http://127.0.0.1:$webPort/"
 $expectedTailnetProxy = "http://127.0.0.1:$serverPort"
-$planOnly = $DryRun -or [bool]$WhatIfPreference
+$planOnly = $DryRun -or $PruneDryRun -or [bool]$WhatIfPreference
+$pruneArtifactRoot = "A:\Dev\Artifacts\t3-launcher-prune-20261024"
 $transcriptStarted = $false
 $transcriptPath = $null
 $needsTailscaleServe = $false
@@ -59,6 +62,13 @@ $excludedRelativeFiles = @(
 
 $excludedDirectoryNames = @(
     ".git",
+    ".logs",
+    ".generated",
+    ".plans",
+    ".cache",
+    ".turbo",
+    "secrets",
+    "logs",
     ".trigger-tree",
     ".t3",
     ".vite-plus",
@@ -117,9 +127,13 @@ function Assert-SafeRoot {
     if (-not (Test-Path -LiteralPath $resolved -PathType Container)) {
         throw "$Label does not exist as a directory: $resolved"
     }
-    $item = Get-Item -LiteralPath $resolved -Force
-    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "$Label is a reparse point. Refusing to operate through it: $resolved"
+    $ancestor = $resolved
+    while ($ancestor) {
+        $item = Get-Item -LiteralPath $ancestor -Force
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "$Label has a reparse point. Refusing to operate through it: $ancestor"
+        }
+        $ancestor = [System.IO.Path]::GetDirectoryName($ancestor)
     }
     return $resolved
 }
@@ -154,6 +168,10 @@ function Test-ExcludedRelativePath {
     param([Parameter(Mandatory)][string]$RelativePath)
     $normalized = $RelativePath.Replace('/', '\').TrimStart('\')
     $comparison = $normalized.ToLowerInvariant()
+    $leaf = [System.IO.Path]::GetFileName($normalized)
+    if ($leaf -like ".env*" -or $leaf -in @("settings.json", "settings.local.json") -or $leaf -like "*.tsbuildinfo") {
+        return $true
+    }
     foreach ($excluded in $excludedRelativeFiles) {
         if ($comparison -eq $excluded.ToLowerInvariant()) {
             return $true
@@ -269,11 +287,138 @@ function Get-FingerprintMap {
 }
 
 function Get-DependencyRelativePaths {
-    param([Parameter(Mandatory)][object[]]$Files)
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Files)
     return @($Files | Where-Object {
         $name = [System.IO.Path]::GetFileName($_.Relative)
         $name -eq "package.json" -or $name -eq "pnpm-lock.yaml" -or $name -eq "pnpm-workspace.yaml"
     } | ForEach-Object { $_.Relative.ToLowerInvariant() })
+}
+
+function Get-StaleDeployFiles {
+    param(
+        [Parameter(Mandatory)][string]$SourceRoot,
+        [Parameter(Mandatory)][string]$DeployRoot
+    )
+    $source = @{}
+    foreach ($file in @(Get-IncludedFiles $SourceRoot)) {
+        $source[$file.Relative.ToLowerInvariant()] = $true
+    }
+    return @(Get-IncludedFiles $DeployRoot | Where-Object {
+        -not $source.ContainsKey($_.Relative.ToLowerInvariant())
+    } | Sort-Object Relative)
+}
+
+function Assert-MirrorFile {
+    param([string]$Root, [string]$Relative)
+    $candidate = Assert-ContainedPath $Root (Join-Path $Root $Relative) "prune file"
+    if (Test-ExcludedRelativePath $Relative) {
+        throw "Refusing to prune a protected path: $Relative"
+    }
+    $ancestor = $candidate
+    while (-not (Test-SamePath $ancestor $Root)) {
+        $item = Get-Item -LiteralPath $ancestor -Force
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Refusing to prune through a reparse point: $ancestor"
+        }
+        $ancestor = [System.IO.Path]::GetDirectoryName($ancestor)
+    }
+    if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+        throw "Prune candidate is no longer a file: $candidate"
+    }
+    return $candidate
+}
+
+function Remove-StaleDeployFiles {
+    param(
+        [Parameter(Mandatory)][string]$SourceRoot,
+        [Parameter(Mandatory)][string]$DeployRoot,
+        [Parameter(Mandatory)][string]$ArtifactRoot,
+        [Parameter(Mandatory)][string]$DeployCommit,
+        [switch]$PlanOnly
+    )
+    $SourceRoot = Assert-SafeRoot $SourceRoot "prune source"
+    $DeployRoot = Assert-SafeRoot $DeployRoot "prune mirror"
+    if ((Test-SamePath $SourceRoot $DeployRoot) -or
+        $SourceRoot.StartsWith($DeployRoot + '\', [StringComparison]::OrdinalIgnoreCase) -or
+        $DeployRoot.StartsWith($SourceRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Prune source and mirror must be separate trees."
+    }
+    $stale = @(Get-StaleDeployFiles $SourceRoot $DeployRoot)
+    Write-Host "  stale deploy files $($stale.Count)"
+    if ($PlanOnly) {
+        foreach ($file in $stale) { Write-Host "  PRUNE $($file.Relative)" }
+        return $stale.Count
+    }
+    if ($stale.Count -eq 0) { return 0 }
+    if ($DeployCommit -notmatch '^[a-fA-F0-9]{40}$') { throw "Invalid deploy commit for backup name." }
+    $artifactFull = Normalize-AbsolutePath $ArtifactRoot
+    foreach ($root in @($SourceRoot, $DeployRoot)) {
+        if ((Test-SamePath $root $artifactFull) -or $artifactFull.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Prune backups must be outside source and mirror."
+        }
+    }
+    New-Item -ItemType Directory -Path $artifactFull -Force | Out-Null
+    $artifactFull = Assert-SafeRoot $artifactFull "prune artifacts"
+    $backup = Join-Path $artifactFull "deploy-pruned-$DeployCommit-$([Guid]::NewGuid().ToString('N')).tar"
+    $listPath = $backup + ".files.nul"
+    $verifyRoot = $backup + ".verify"
+    $hashes = @{}
+    foreach ($file in $stale) {
+        $path = Assert-MirrorFile $DeployRoot $file.Relative
+        $hashes[$file.Relative] = Get-FileSha256 $path
+        if ($file.Relative -match '[\r\n]') { throw "Cannot archive a path containing a newline." }
+    }
+    # ./ prevents a file name from being interpreted as an archive option.
+    [IO.File]::WriteAllText($listPath, ((@($stale | ForEach-Object { './' + $_.Relative.Replace('\', '/') }) -join "`0") + "`0"), (New-Object Text.UTF8Encoding($false)))
+    $tarPath = Join-Path $env:SystemRoot "System32\tar.exe"
+    # Windows tar reads non-ASCII list files incorrectly. Pass Unicode arguments
+    # in bounded batches to stay below the Windows command-line limit.
+    $batch = New-Object 'System.Collections.Generic.List[string]'
+    $batchLength = 0
+    $archiveMode = '-cf'
+    foreach ($file in @($stale) + @($null)) {
+        $relative = if ($null -ne $file) { './' + $file.Relative.Replace('\', '/') } else { '' }
+        if ($batch.Count -gt 0 -and ($batchLength + $relative.Length -gt 16000 -or $null -eq $file)) {
+            & $tarPath $archiveMode $backup -C $DeployRoot @($batch.ToArray())
+            if ($LASTEXITCODE -ne 0) { throw "Prune backup failed. No files deleted." }
+            $archiveMode = '-rf'
+            $batch.Clear()
+            $batchLength = 0
+        }
+        if ($null -ne $file) {
+            $batch.Add($relative)
+            $batchLength += $relative.Length + 3
+        }
+    }
+    New-Item -ItemType Directory -Path $verifyRoot | Out-Null
+    & $tarPath -xf $backup -C $verifyRoot
+    if ($LASTEXITCODE -ne 0) { throw "Prune backup extraction failed. No files deleted." }
+    foreach ($file in $stale) {
+        $archived = Assert-MirrorFile $verifyRoot $file.Relative
+        if ((Get-FileSha256 $archived) -ne $hashes[$file.Relative]) {
+            throw "Prune backup verification failed: $($file.Relative). No files deleted."
+        }
+    }
+    Write-Host "  verified backup of $($stale.Count) files: $backup"
+    # Recheck the whole batch before deletion, including files added to source during backup.
+    $currentStale = @{}
+    foreach ($file in @(Get-StaleDeployFiles $SourceRoot $DeployRoot)) { $currentStale[$file.Relative] = $true }
+    foreach ($file in $stale) {
+        $path = Assert-MirrorFile $DeployRoot $file.Relative
+        if (-not $currentStale.ContainsKey($file.Relative) -or (Get-FileSha256 $path) -ne $hashes[$file.Relative]) {
+            throw "Projection changed during backup. No files deleted; retry with a fresh plan."
+        }
+    }
+    foreach ($file in $stale) {
+        $path = Assert-MirrorFile $DeployRoot $file.Relative
+        Remove-Item -LiteralPath $path -Force
+    }
+    # Only remove the disposable extraction after its absolute containment is checked.
+    $verifyRoot = Assert-ContainedPath $artifactFull $verifyRoot "backup verification directory"
+    [void](Assert-SafeRoot $verifyRoot "backup verification directory")
+    Remove-Item -LiteralPath $verifyRoot -Recurse -Force
+    Write-Host "  pruned $($stale.Count) deploy files"
+    return $stale.Count
 }
 
 function Sync-TrackedSourceFiles {
@@ -295,7 +440,7 @@ function Sync-TrackedSourceFiles {
         return 0
     }
     if ($PlanOnly) {
-        Write-Plan "Would copy $($mismatches.Count) source files into deploy without deleting anything."
+        Write-Plan "Would copy $($mismatches.Count) source files into deploy."
         return $mismatches.Count
     }
     foreach ($file in $mismatches) {
@@ -310,7 +455,7 @@ function Sync-TrackedSourceFiles {
         }
         Copy-Item -LiteralPath $file.FullName -Destination $destination -Force
     }
-    Write-Host "  copied $($mismatches.Count) files. No deploy files were deleted."
+    Write-Host "  copied $($mismatches.Count) files."
     return $mismatches.Count
 }
 
@@ -777,6 +922,12 @@ try {
     Write-Host "  source $sourceBranch $sourceCommit"
     Write-Host "  deploy detached $deployCommitBefore"
 
+    if ($PruneDryRun) {
+        [void](Remove-StaleDeployFiles $sourceRoot $deployRoot $pruneArtifactRoot $deployCommitBefore -PlanOnly)
+        Write-Host "  prune dry run complete; no files or runtime state changed"
+        return
+    }
+
     $sourcePackage = Get-Content -LiteralPath (Join-Path $sourceRoot "package.json") -Raw | ConvertFrom-Json
     $desktopCommand = [string]$sourcePackage.scripts.'dev:desktop'
     if ($desktopCommand -ne "node scripts/dev-runner.ts dev:desktop") {
@@ -820,7 +971,7 @@ try {
         -not $sourceRelatives.ContainsKey($_.Relative.ToLowerInvariant())
     })
     if ($deployOnlyFiles.Count -gt 0) {
-        Write-Host "  preserving $($deployOnlyFiles.Count) deploy-only files absent from source"
+        Write-Host "  will back up and prune $($deployOnlyFiles.Count) deploy-only files absent from source"
     }
     $mismatches = New-Object 'System.Collections.Generic.List[object]'
     foreach ($file in $sourceFiles) {
@@ -840,7 +991,8 @@ try {
     $missingDependencyProbes = @($dependencyProbePaths | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
     $dependencyNeedsInstall =
         -not (Test-Path -LiteralPath (Join-Path $deployRoot "node_modules\.modules.yaml")) -or
-        $missingDependencyProbes.Count -gt 0
+        $missingDependencyProbes.Count -gt 0 -or
+        @(Get-DependencyRelativePaths $deployOnlyFiles).Count -gt 0
     foreach ($relative in $dependencyRelatives) {
         if (-not $deployMap.ContainsKey($relative) -or $deployMap[$relative] -ne $sourceMap[$relative]) {
             $dependencyNeedsInstall = $true
@@ -853,6 +1005,7 @@ try {
     Write-Host "  dependency state $(if ($dependencyNeedsInstall) { 'requires vp i' } else { 'matches lock/manifests' })"
 
     Write-Phase "sync"
+    [void](Remove-StaleDeployFiles $sourceRoot $deployRoot $pruneArtifactRoot $deployCommitBefore -PlanOnly:$planOnly)
     [void](Sync-TrackedSourceFiles $sourceRoot $deployRoot -PlanOnly:$planOnly)
 
     $verificationDir = Join-Path $t3Home "userdata\verification"
@@ -892,6 +1045,7 @@ try {
     }
 
     Write-Phase "final sync"
+    [void](Remove-StaleDeployFiles $sourceRoot $deployRoot $pruneArtifactRoot $deployCommitBefore -PlanOnly:$planOnly)
     [void](Sync-TrackedSourceFiles $sourceRoot $deployRoot -PlanOnly:$planOnly)
 
     Write-Phase "checks and builds"
@@ -1040,6 +1194,9 @@ try {
         }
         if ($finalParity -ne 0) {
             throw "Source/deploy parity check found $finalParity mismatched files after sync."
+        }
+        if (@(Get-StaleDeployFiles $sourceRoot $deployRoot).Count -ne 0) {
+            throw "Source/deploy parity check found stale files after sync."
         }
         $sourceStatusText = Invoke-GitText $sourceRoot @("status", "--short", "--untracked-files=all")
         $sourceStatus = @($sourceStatusText -split "`r?`n" | Where-Object { $_.Length -gt 0 })
