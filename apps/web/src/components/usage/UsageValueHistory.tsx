@@ -18,6 +18,7 @@ export function UsageValueHistory({
   selectedIds,
   subscription,
   historyInput,
+  showWindows = true,
 }: {
   readonly history: readonly EnvironmentUsageStatus[];
   readonly publicHistory: PublicResetHistory;
@@ -28,6 +29,7 @@ export function UsageValueHistory({
     readonly startDate: string;
   };
   readonly historyInput: UsageSummaryInput;
+  readonly showWindows?: boolean;
 }) {
   const selected = (environment: EnvironmentUsageStatus) =>
     selectedIds === null || selectedIds.includes(environment.environmentId);
@@ -58,11 +60,33 @@ export function UsageValueHistory({
       .filter(selected)
       .flatMap((entry) => entry.summary?.quotaCostSnapshots ?? []),
   ];
-  const windows = resetHistoryPlan(saved, sinceTime, now, announcements, samples);
+  const pendingCosts = costs.environments
+    .filter(selected)
+    .flatMap((entry) => entry.summary?.quotaCosts ?? [])
+    .filter((row) => !row.complete && row.unpricedRecords === 0);
+  const unavailableHistory = costs.environments
+    .filter(selected)
+    .some((entry) =>
+      entry.summary?.sources.some((source) =>
+        source.message?.includes("no longer have source files"),
+      ),
+    );
+  const pendingLabel = unavailableHistory ? "Incomplete transcript history" : "Still counting";
+  const windows = resetHistoryPlan(saved, sinceTime, now, announcements, samples).map((window) => {
+    const pending = pendingCosts.filter((row) =>
+      window.missing.some((gap) => gap.id === row.intervalId),
+    );
+    return {
+      ...window,
+      pending,
+      estimatedFromTranscripts: window.estimatedFromTranscripts || pending.length > 0,
+      costUsd: window.costUsd + pending.reduce((sum, row) => sum + row.costUsd, 0),
+    };
+  });
   const paid = subscriptionPayments(subscription.startDate, subscription.monthlyUsd, now);
   const totalPaid = paid.reduce((sum, payment) => sum + payment.paidUsd, 0);
   const totalValue = windows.reduce((sum, window) => sum + window.costUsd, 0);
-  const counting = windows.some((window) => window.missing.length > 0);
+  const counting = !ready || windows.some((window) => window.missing.length > 0);
   const ratio = (value: number, payment: number) =>
     payment > 0 ? `${(value / payment).toFixed(1)}×` : "";
   const monthlyRows = monthly.environments
@@ -74,19 +98,13 @@ export function UsageValueHistory({
       ? rows.reduce((sum, row) => sum + row.costUsd, 0)
       : null;
   };
-  if (!ready)
-    return (
-      <p role="status" className="text-sm text-muted-foreground">
-        {publicHistory.status === "unavailable" ? "Reset history is unavailable" : "Still counting"}
-      </p>
-    );
   return (
     <div className="space-y-3">
       <details>
         <summary className="cursor-pointer text-sm tabular-nums">
           {formatUsd(totalPaid)} paid · {formatUsd(totalValue)} estimated API value ·{" "}
           {ratio(totalValue, totalPaid)}
-          {counting ? " · Still counting" : ""}
+          {counting ? ` · ${pendingLabel}` : ""}
         </summary>
         <dl className="mt-3 space-y-2 text-xs tabular-nums">
           {months.toReversed().map((month) => {
@@ -98,7 +116,7 @@ export function UsageValueHistory({
                 <dd>
                   {formatUsd(payment)} paid ·{" "}
                   {value === null
-                    ? "Still counting"
+                    ? pendingLabel
                     : `${formatUsd(value)} value · ${ratio(value, payment)}`}
                 </dd>
               </div>
@@ -106,57 +124,59 @@ export function UsageValueHistory({
           })}
         </dl>
       </details>
-      <ol className="divide-y divide-border">
-        {windows.toReversed().map((window) => {
-          const models = new Map<string, number>();
-          for (const row of window.sources)
-            for (const model of row.models ?? [])
-              models.set(model.model, (models.get(model.model) ?? 0) + model.costUsd);
-          const complete = window.missing.length === 0;
-          return (
-            <li key={window.sinceTime} className="py-3">
-              <details>
-                <summary className="flex cursor-pointer flex-wrap justify-between gap-3 text-sm">
-                  <span>
-                    {dateTime(window.sinceTime)}
-                    <span className="block pt-1 text-xs text-muted-foreground">
-                      to {window.open ? "now" : dateTime(window.untilTime)}
+      {showWindows && ready ? (
+        <ol className="divide-y divide-border">
+          {windows.toReversed().map((window) => {
+            const models = new Map<string, number>();
+            for (const row of [...window.sources, ...window.pending])
+              for (const model of row.models ?? [])
+                models.set(model.model, (models.get(model.model) ?? 0) + model.costUsd);
+            const complete = window.missing.length === 0;
+            return (
+              <li key={window.sinceTime} className="py-3">
+                <details>
+                  <summary className="flex cursor-pointer flex-wrap justify-between gap-3 text-sm">
+                    <span>
+                      {dateTime(window.sinceTime)}
+                      <span className="block pt-1 text-xs text-muted-foreground">
+                        to {window.open ? "now" : dateTime(window.untilTime)}
+                      </span>
                     </span>
-                  </span>
-                  <span className="text-right tabular-nums">
-                    {complete || window.costUsd > 0 ? formatUsd(window.costUsd) : "Still counting"}
-                    <span className="block pt-1 text-xs text-muted-foreground">
-                      {window.remainingPercent === null
-                        ? "Estimated from transcripts"
-                        : `${100 - window.remainingPercent}% used${window.open ? "" : window.remainingPercent === 0 ? " · limit reached 0%" : ` · reset at ${window.remainingPercent}% left`}${window.estimatedFromTranscripts ? " · estimated from transcripts" : ""}`}
+                    <span className="text-right tabular-nums">
+                      {complete || window.costUsd > 0 ? formatUsd(window.costUsd) : pendingLabel}
+                      <span className="block pt-1 text-xs text-muted-foreground">
+                        {window.remainingPercent === null
+                          ? "Estimated from transcripts"
+                          : `${100 - window.remainingPercent}% used${window.open ? "" : window.remainingPercent === 0 ? " · limit reached 0%" : ` · reset at ${window.remainingPercent}% left`}${window.estimatedFromTranscripts ? " · estimated from transcripts" : ""}`}
+                      </span>
                     </span>
-                  </span>
-                </summary>
-                {!complete ? (
-                  <p role="status" className="mt-2 text-xs text-muted-foreground">
-                    Still counting
-                  </p>
-                ) : null}
-                <dl className="mt-3 space-y-2 text-xs">
-                  {[...models]
-                    .sort((a, b) => b[1] - a[1])
-                    .map(([model, dollars]) => (
-                      <div key={model} className="flex justify-between gap-3">
-                        <dt className="break-all">{model}</dt>
-                        <dd className="tabular-nums">{formatUsd(dollars)}</dd>
-                      </div>
-                    ))}
-                </dl>
-              </details>
-            </li>
-          );
-        })}
-      </ol>
+                  </summary>
+                  {!complete ? (
+                    <p role="status" className="mt-2 text-xs text-muted-foreground">
+                      {pendingLabel}
+                    </p>
+                  ) : null}
+                  <dl className="mt-3 space-y-2 text-xs">
+                    {[...models]
+                      .sort((a, b) => b[1] - a[1])
+                      .map(([model, dollars]) => (
+                        <div key={model} className="flex justify-between gap-3">
+                          <dt className="break-all">{model}</dt>
+                          <dd className="tabular-nums">{formatUsd(dollars)}</dd>
+                        </div>
+                      ))}
+                  </dl>
+                </details>
+              </li>
+            );
+          })}
+        </ol>
+      ) : null}
       <div className="flex justify-between border-t border-border pt-3 text-sm tabular-nums">
         <span>Grand total</span>
         <span>
           {formatUsd(totalValue)}
-          {counting ? " · Still counting" : ""}
+          {counting ? ` · ${pendingLabel}` : ""}
         </span>
       </div>
     </div>

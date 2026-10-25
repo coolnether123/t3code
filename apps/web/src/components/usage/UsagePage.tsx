@@ -39,6 +39,7 @@ import {
 } from "@t3tools/shared/usageMerge";
 
 import { isElectron } from "../../env";
+import { cleanResetLedger } from "@t3tools/shared/usageResetReport";
 import { cn } from "../../lib/utils";
 import { usePrimarySettings } from "../../hooks/useSettings";
 import { resolveHour12 } from "../../timestampFormat";
@@ -697,6 +698,19 @@ function UsageOverview({
   // A primitive copy: reading `loading.partial` in the JSX would keep `loading` alive
   // across every derivation below and fold them into one cache scope.
   const loadingPartial = loading.partial === true;
+  const savedCodexValue = cleanResetLedger(
+    selectedEnvironments.flatMap((environment) =>
+      (environment.summary?.quotaCostSnapshots ?? []).filter((row) => {
+        const day = (value: string) =>
+          new Date(value).toLocaleDateString("en-CA", { timeZone: shownWindow.timeZone });
+        return (
+          row.untilTime < (environment.summary?.readAt ?? "") &&
+          day(row.sinceTime) >= shownWindow.sinceDay &&
+          day(row.untilTime) <= shownWindow.untilDay
+        );
+      }),
+    ),
+  ).reduce((sum, row) => sum + row.costUsd, 0);
   const loadingProviders = new Set(
     PROVIDER_ORDER.filter((provider) => loading.everyProvider || loading.providers.has(provider)),
   );
@@ -755,6 +769,15 @@ function UsageOverview({
 
   return (
     <div aria-busy={loadingPartial} className="flex flex-col gap-6">
+      {loadingPartial &&
+      metric === "cost" &&
+      !hiddenProviders.has("codex") &&
+      savedCodexValue > 0 ? (
+        <p className="text-sm text-muted-foreground">
+          Saved Codex reset value: {formatUsd(savedCodexValue)} across closed windows in this range.{" "}
+          The transcript total below is still counting.
+        </p>
+      ) : null}
       {sourceMessages.map((message) => (
         <p key={message} className="mb-4 text-sm text-muted-foreground">
           {message}
