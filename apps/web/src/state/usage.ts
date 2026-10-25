@@ -350,8 +350,10 @@ export function useUsage(
   const merged = (() =>
     mergeAnsweredUsage(withoutProviders(selectedEnvironments, hiddenProviders)))();
 
-  const hasDeferredTranscripts = selectedEnvironments.some((environment) =>
-    environment.isConnected && (environment.error !== null || environment.summary?.sources.some(isDeferredTranscriptSource)),
+  const hasDeferredTranscripts = selectedEnvironments.some(
+    (environment) =>
+      environment.isConnected &&
+      (environment.error !== null || environment.summary?.sources.some(isDeferredTranscriptSource)),
   );
 
   // A bounded server scan intentionally returns partial data while its cache is
@@ -393,9 +395,7 @@ export function useUsage(
     const failed = selectedEnvironments.some((environment) => environment.error !== null);
     if (!failed) retry.failedAttempts = 0;
     if (failed && retry.failedAttempts >= MAX_FAILED_REFRESHES) return;
-    const waitingOrFailed = selectedEnvironments.some(
-      (environment) => environment.isPending,
-    );
+    const waitingOrFailed = selectedEnvironments.some((environment) => environment.isPending);
     if (waitingOrFailed) {
       if (retry.timer !== null) globalThis.clearTimeout(retry.timer);
       retry.timer = null;

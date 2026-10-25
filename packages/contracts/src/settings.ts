@@ -1162,13 +1162,22 @@ export type BirthdayCelebrationPreference = typeof BirthdayCelebrationPreference
 
 export const UsageSubscription = Schema.Struct({
   plan: TrimmedNonEmptyString,
-  monthlyUsd: Schema.Number.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(100000)),
-  startDate: Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}$/), Schema.makeFilter((value) => {
-    const [year = 0, month = 0, day = 0] = value.split("-").map(Number);
-    const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
-    const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    return year >= 1 && month >= 1 && month <= 12 && day >= 1 && day <= days[month - 1]! || "Use a valid calendar date.";
-  })),
+  monthlyUsd: Schema.Number.check(
+    Schema.isGreaterThanOrEqualTo(0),
+    Schema.isLessThanOrEqualTo(100000),
+  ),
+  startDate: Schema.String.check(
+    Schema.isPattern(/^\d{4}-\d{2}-\d{2}$/),
+    Schema.makeFilter((value) => {
+      const [year = 0, month = 0, day = 0] = value.split("-").map(Number);
+      const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+      const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+      return (
+        (year >= 1 && month >= 1 && month <= 12 && day >= 1 && day <= days[month - 1]!) ||
+        "Use a valid calendar date."
+      );
+    }),
+  ),
 });
 
 export const ServerSettings = Schema.Struct({
@@ -1355,7 +1364,11 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
 
-  usageSubscription: UsageSubscription.pipe(Schema.withDecodingDefault(Effect.succeed({ plan: "Codex Pro", monthlyUsd: 200, startDate: "2026-07-01" }))),
+  usageSubscription: UsageSubscription.pipe(
+    Schema.withDecodingDefault(
+      Effect.succeed({ plan: "Codex Pro", monthlyUsd: 200, startDate: "2026-07-01" }),
+    ),
+  ),
 
   usagePriceOverrides: Schema.Record(TrimmedNonEmptyString, UsageModelPriceOverride).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),

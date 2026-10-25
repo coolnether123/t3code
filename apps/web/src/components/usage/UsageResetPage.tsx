@@ -196,9 +196,14 @@ export function UsageResetPage() {
 
   const sourceEnvironmentId = source?.environmentId;
   const settingsEnvironmentId = sourceEnvironmentId ?? history.environments[0]?.environmentId;
-  const settings = useAtomValue(settingsEnvironmentId ? serverEnvironment.settingsValueAtom(settingsEnvironmentId as EnvironmentId) : emptySettingsAtom);
+  const settings = useAtomValue(
+    settingsEnvironmentId
+      ? serverEnvironment.settingsValueAtom(settingsEnvironmentId as EnvironmentId)
+      : emptySettingsAtom,
+  );
   const subscription = settings?.usageSubscription ?? DEFAULT_SERVER_SETTINGS.usageSubscription;
   const updateSettings = useAtomCommand(serverEnvironment.updateSettings);
+  const canEditSubscription = useAtomValue(serverEnvironment.updateSettings.permissionAtom(settingsEnvironmentId ?? null));
 
   const effectiveSelectedIds = ((): readonly string[] | null =>
     selectedIds ?? (sourceEnvironmentId === undefined ? null : [sourceEnvironmentId]))();
@@ -449,7 +454,9 @@ export function UsageResetPage() {
   // Nothing but Public resets can be shown before a limit has readings.
   const hasCycle = Boolean(source && selectedWindow && rawSamples && last && current);
   const tabs = TABS.filter(
-    (tab) => (!tab.codexOnly || quotaProvider === "codex") && (hasCycle || tab.id === "public" || tab.id === "history"),
+    (tab) =>
+      (!tab.codexOnly || quotaProvider === "codex") &&
+      (hasCycle || tab.id === "public" || tab.id === "history"),
   );
   const activeTab = tabs.some((tab) => tab.id === view.tab) ? view.tab : tabs[0]?.id;
   // Until some computer answers, a missing reading means "not read yet", not "not recorded".
@@ -460,7 +467,7 @@ export function UsageResetPage() {
   const showPublic = activeTab === "public";
   const publicIntervals = (() => publicResetIntervals(publicHistory.announcements))();
   const publicCostInput = (() =>
-    showPublic && cycleCostsSettled
+    showPublic
       ? (quotaCostWindow(publicIntervals) ?? historyInput)
       : historyInput)();
   const publicCosts = useUsage(publicCostInput);
@@ -607,11 +614,13 @@ export function UsageResetPage() {
               monitoringSince={samples[0]?.observedAt ?? null}
               readingCount={samples.length}
               subscription={subscription}
+              canEditSubscription={canEditSubscription}
               onSubscriptionChange={(usageSubscription) => {
-                if (settingsEnvironmentId) void updateSettings({
-                  environmentId: settingsEnvironmentId as EnvironmentId,
-                  input: { patch: { usageSubscription } },
-                });
+                if (settingsEnvironmentId)
+                  void updateSettings({
+                    environmentId: settingsEnvironmentId as EnvironmentId,
+                    input: { patch: { usageSubscription } },
+                  });
               }}
             />
             <Button
@@ -780,7 +789,13 @@ export function UsageResetPage() {
                 className="space-y-5 pt-4"
               >
                 {activeTab === "history" ? (
-                  <UsageValueHistory history={history.environments} publicHistory={publicHistory} selectedIds={effectiveSelectedIds} subscription={subscription} historyInput={historyInput} />
+                  <UsageValueHistory
+                    history={history.environments}
+                    publicHistory={publicHistory}
+                    selectedIds={effectiveSelectedIds}
+                    subscription={subscription}
+                    historyInput={historyInput}
+                  />
                 ) : activeTab === "public" ? (
                   <UsagePublicResets
                     history={publicHistory}

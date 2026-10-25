@@ -190,23 +190,33 @@ export function useUsage(
   }, [environments, providers, selectedEnvironmentIds]);
 
   const retry = useRef({ windowKey, failures: 0, attempts: 0 });
-  const hasDeferredTranscripts = environments.some((environment) =>
-    environment.isConnected && (environment.error !== null || environment.summary?.sources.some((source) =>
-      source.status === "partial" && /\bdeferred\b|response budget|complete-line chunks/i.test(source.message ?? ""))),
+  const hasDeferredTranscripts = environments.some(
+    (environment) =>
+      environment.isConnected &&
+      (environment.error !== null ||
+        environment.summary?.sources.some(
+          (source) =>
+            source.status === "partial" &&
+            /\bdeferred\b|response budget|complete-line chunks/i.test(source.message ?? ""),
+        )),
   );
   useEffect(() => {
-    if (retry.current.windowKey !== windowKey) retry.current = { windowKey, failures: 0, attempts: 0 };
+    if (retry.current.windowKey !== windowKey)
+      retry.current = { windowKey, failures: 0, attempts: 0 };
     const failed = environments.some((environment) => environment.error !== null);
     if (!failed) retry.current.failures = 0;
     if (!hasDeferredTranscripts) retry.current.attempts = 0;
     if (failed && retry.current.failures >= 5) return;
     if (!hasDeferredTranscripts || environments.some((environment) => environment.isPending))
       return;
-    const timer = setTimeout(() => {
-      if (failed) retry.current.failures++;
-      retry.current.attempts++;
-      void refresh();
-    }, Math.min(8_000, 750 * 2 ** Math.min(retry.current.attempts, 4)));
+    const timer = setTimeout(
+      () => {
+        if (failed) retry.current.failures++;
+        retry.current.attempts++;
+        void refresh();
+      },
+      Math.min(8_000, 750 * 2 ** Math.min(retry.current.attempts, 4)),
+    );
     return () => clearTimeout(timer);
   }, [environments, hasDeferredTranscripts, refresh, windowKey]);
 

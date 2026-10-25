@@ -19,19 +19,38 @@ export function usageReadBatchKey(input: UsageSummaryInput): string {
 
 export function mergeUsageReads(inputs: readonly UsageSummaryInput[]): UsageSummaryInput {
   const first = inputs[0]!;
-  const intervals = new Map(inputs.flatMap((input) =>
-    (input.quotaIntervals ?? []).map((interval) => [JSON.stringify(interval), interval] as const),
-  ));
+  const intervals = new Map(
+    inputs.flatMap((input) =>
+      (input.quotaIntervals ?? []).map((interval) => [JSON.stringify(interval), interval] as const),
+    ),
+  );
   return {
     ...first,
-    sinceDay: inputs.reduce((day, input) => input.sinceDay < day ? input.sinceDay : day, first.sinceDay),
-    untilDay: inputs.reduce((day, input) => input.untilDay > day ? input.untilDay : day, first.untilDay),
+    sinceDay: inputs.reduce(
+      (day, input) => (input.sinceDay < day ? input.sinceDay : day),
+      first.sinceDay,
+    ),
+    untilDay: inputs.reduce(
+      (day, input) => (input.untilDay > day ? input.untilDay : day),
+      first.untilDay,
+    ),
     includeQuotaHistory: inputs.some((input) => input.includeQuotaHistory),
     refresh: inputs.some((input) => input.refresh),
-    providers: inputs.some((input) => input.providers === undefined && input.quotaIntervals === undefined)
+    providers: inputs.some(
+      (input) => input.providers === undefined && input.quotaIntervals === undefined,
+    )
       ? undefined
-      : [...new Set(inputs.flatMap((input) => input.providers ?? [input.quotaProvider ?? "codex"]))],
-    quotaIntervals: intervals.size > 0 ? [...intervals.values()] : undefined,
+      : [
+          ...new Set(
+            inputs.flatMap((input) => input.providers ?? [input.quotaProvider ?? "codex"]),
+          ),
+        ],
+    quotaIntervals:
+      intervals.size > 0
+        ? [...intervals.values()]
+        : inputs.some((input) => input.quotaIntervals !== undefined)
+          ? []
+          : undefined,
   };
 }
 
@@ -44,9 +63,17 @@ export function projectUsageRead(summary: UsageSummary, input: UsageSummaryInput
     ...summary,
     sinceDay: input.sinceDay,
     untilDay: input.untilDay,
-    buckets: summary.buckets.filter((bucket) => selected(bucket.provider) && bucket.day >= input.sinceDay && bucket.day <= input.untilDay),
+    buckets: summary.buckets.filter(
+      (bucket) =>
+        selected(bucket.provider) && bucket.day >= input.sinceDay && bucket.day <= input.untilDay,
+    ),
     sources: summary.sources.filter((source) => selected(source.fingerprint.provider)),
-    quotaCosts: input.quotaIntervals === undefined ? undefined : summary.quotaCosts?.filter((row) => ids.has(row.intervalId)),
-    quotaCostSnapshots: summary.quotaCostSnapshots?.filter((row) => input.quotaIntervals === undefined || ids.has(row.intervalId)),
+    quotaCosts:
+      input.quotaIntervals === undefined
+        ? undefined
+        : summary.quotaCosts?.filter((row) => ids.has(row.intervalId)),
+    quotaCostSnapshots: summary.quotaCostSnapshots?.filter(
+      (row) => input.quotaIntervals === undefined || ids.has(row.intervalId),
+    ),
   };
 }

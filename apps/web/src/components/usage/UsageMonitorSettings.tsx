@@ -23,6 +23,7 @@ export function UsageMonitorSettings({
   readingCount,
   subscription,
   onSubscriptionChange,
+  canEditSubscription,
 }: {
   readonly sources: readonly Computer[];
   readonly sourceId: string | undefined;
@@ -32,8 +33,17 @@ export function UsageMonitorSettings({
   readonly onIncludedChange: (ids: readonly string[]) => void;
   readonly monitoringSince: string | null;
   readonly readingCount: number;
-  readonly subscription: { readonly plan: string; readonly monthlyUsd: number; readonly startDate: string };
-  readonly onSubscriptionChange: (value: { plan: string; monthlyUsd: number; startDate: string }) => void;
+  readonly subscription: {
+    readonly plan: string;
+    readonly monthlyUsd: number;
+    readonly startDate: string;
+  };
+  readonly canEditSubscription: boolean;
+  readonly onSubscriptionChange: (value: {
+    plan: string;
+    monthlyUsd: number;
+    startDate: string;
+  }) => void;
 }) {
   const included = (id: string) => includedIds === null || includedIds.includes(id);
   return (
@@ -48,11 +58,46 @@ export function UsageMonitorSettings({
       </PopoverTrigger>
       <PopoverPopup align="end" className="w-[min(22rem,calc(100vw-2rem))]" padding="none">
         <div className="space-y-4 p-4">
-          <fieldset className="space-y-2 text-sm">
+          <fieldset className="space-y-2 text-sm" disabled={!canEditSubscription}>
             <legend>Subscription</legend>
-            <label className="flex flex-col gap-1">Plan<Input key={subscription.plan} defaultValue={subscription.plan} onBlur={(event) => { if (event.target.value.trim()) onSubscriptionChange({ ...subscription, plan: event.target.value.trim() }); }} /></label>
-            <label className="flex flex-col gap-1">Monthly price ($)<Input key={subscription.monthlyUsd} type="number" min="0" max="100000" step="0.01" defaultValue={subscription.monthlyUsd} onBlur={(event) => { const monthlyUsd = event.target.valueAsNumber; if (event.target.validity.valid && Number.isFinite(monthlyUsd) && monthlyUsd >= 0) onSubscriptionChange({ ...subscription, monthlyUsd }); }} /></label>
-            <label className="flex flex-col gap-1">Started<Input type="date" value={subscription.startDate} onChange={(event) => { if (event.target.validity.valid && event.target.value) onSubscriptionChange({ ...subscription, startDate: event.target.value }); }} /></label>
+            <label className="flex flex-col gap-1">
+              Plan
+              <Input
+                key={subscription.plan}
+                defaultValue={subscription.plan}
+                onBlur={(event) => {
+                  if (event.target.value.trim())
+                    onSubscriptionChange({ ...subscription, plan: event.target.value.trim() });
+                }}
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              Monthly price ($)
+              <Input
+                key={subscription.monthlyUsd}
+                type="number"
+                min="0"
+                max="100000"
+                step="0.01"
+                defaultValue={subscription.monthlyUsd}
+                onBlur={(event) => {
+                  const monthlyUsd = event.target.valueAsNumber;
+                  if (event.target.validity.valid && Number.isFinite(monthlyUsd) && monthlyUsd >= 0)
+                    onSubscriptionChange({ ...subscription, monthlyUsd });
+                }}
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              Started
+              <Input
+                type="date"
+                value={subscription.startDate}
+                onChange={(event) => {
+                  if (event.target.validity.valid && event.target.value)
+                    onSubscriptionChange({ ...subscription, startDate: event.target.value });
+                }}
+              />
+            </label>
           </fieldset>
           {sources.length > 1 ? (
             <label className="flex flex-col gap-1.5 text-sm">

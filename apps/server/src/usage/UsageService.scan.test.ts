@@ -22,7 +22,7 @@ import { UsageDay, type UsageSummary } from "@t3tools/contracts";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { make } from "./UsageService.ts";
-import { quotaCostLedgerKey } from "./usageQuotaCostLedger.ts";
+import { quotaCostLedgerKey, readQuotaCostLedger } from "./usageQuotaCostLedger.ts";
 import { encodeScanCache, type ScanCache } from "./usageScanCache.ts";
 import { initialCodexScanState, type UsageRecord } from "./usageTranscripts.ts";
 import {
@@ -94,6 +94,97 @@ beforeEach(() => {
 });
 
 describe("incremental scan integration", () => {
+  it.effect("persists transcript gap estimates once and reuses the closed period", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const config = yield* ServerConfig.ServerConfig;
+      const path = yield* Path.Path;
+      const persisted = yield* Deferred.make<void>();
+      yield* TestClock.setTime(Date.parse("2026-09-21T00:00:00Z"));
+      const file = {
+        path: "/fixture/gap.jsonl",
+        size: 100,
+        mtimeMs: Date.parse("2026-09-18T00:00:00Z"),
+      };
+      vi.mocked(listTranscriptFilesBounded).mockImplementation(async (root) => ({
+        files: /[\\/]sessions$/.test(root) && !/[\\/]codex-home[\\/]/.test(root) ? [file] : [],
+        complete: true,
+      }));
+      vi.mocked(readTranscriptRecords).mockResolvedValue({
+        records: [
+          {
+            provider: "codex",
+            model: "fixture",
+            sessionId: "gap",
+            timestampMs: file.mtimeMs,
+            reportedCostUsd: 3,
+            dedupeKey: "gap-record",
+            totals: {
+              uncachedInputTokens: 10,
+              cachedInputTokens: 0,
+              cacheCreationTokens: 0,
+              outputTokens: 1,
+              reasoningTokens: 0,
+            },
+          },
+        ],
+        nextByte: file.size,
+        discardedLines: 0,
+        discardingLine: false,
+        codexState: initialCodexScanState(),
+      });
+      const service = yield* make.pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          exists: () => Effect.succeed(true),
+          readFileString: (filePath, ...args) =>
+            filePath.endsWith("usage-scan-cache.json")
+              ? Effect.succeed(emptyScanCache)
+              : fs.readFileString(filePath, ...args),
+          rename: (from, to) =>
+            fs
+              .rename(from, to)
+              .pipe(
+                Effect.tap(() =>
+                  to.endsWith("usage-quota-cost-ledger.json")
+                    ? Deferred.succeed(persisted, undefined)
+                    : Effect.void,
+                ),
+              ),
+        }),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("Offline fixture")),
+        ),
+      );
+      const input = {
+        sinceDay: UsageDay.make("2026-09-15"),
+        untilDay: UsageDay.make("2026-09-21"),
+        timeZone: "UTC",
+        providers: ["codex"] as const,
+        quotaIntervals: [
+          {
+            id: "transcript-window:gap",
+            sinceTime: "2026-09-17T00:00:00Z",
+            untilTime: "2026-09-19T00:00:00Z",
+          },
+        ],
+      };
+      const first = yield* service.readSummary(input);
+      expect(
+        first.quotaCostSnapshots?.some((row) => row.costUsd === 3 && row.estimatedFromTranscripts),
+      ).toBe(true);
+      yield* Deferred.await(persisted);
+      const saved = yield* readQuotaCostLedger(
+        path.join(config.stateDir, "usage-quota-cost-ledger.json"),
+      );
+      expect(saved.some((row) => row.costUsd === 3 && row.estimatedFromTranscripts)).toBe(true);
+      vi.mocked(readTranscriptRecords).mockClear();
+      const second = yield* service.readSummary(input);
+      expect(second.quotaCosts?.some((row) => row.costUsd === 3 && row.complete)).toBe(true);
+      expect(readTranscriptRecords).not.toHaveBeenCalled();
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(testLayer, TestClock.layer()))),
+  );
   it.effect("shares one cold scan for concurrent summary and overlapping reset periods", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -104,26 +195,38 @@ describe("incremental scan integration", () => {
         Effect.provideService(FileSystem.FileSystem, {
           ...fs,
           exists: () => Effect.succeed(true),
-          readFileString: (file, ...args) => file.endsWith("usage-scan-cache.json")
-            ? Effect.gen(function* () {
-                reads++;
-                yield* Deferred.succeed(readStarted, undefined);
-                yield* Deferred.await(releaseRead);
-                return emptyScanCache;
-              })
-            : fs.readFileString(file, ...args),
+          readFileString: (file, ...args) =>
+            file.endsWith("usage-scan-cache.json")
+              ? Effect.gen(function* () {
+                  reads++;
+                  yield* Deferred.succeed(readStarted, undefined);
+                  yield* Deferred.await(releaseRead);
+                  return emptyScanCache;
+                })
+              : fs.readFileString(file, ...args),
         }),
-        Effect.provideService(HttpClient.HttpClient, HttpClient.make(() => Effect.die("Offline fixture"))),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("Offline fixture")),
+        ),
       );
-      const input = { sinceDay: UsageDay.make("2026-08-29"), untilDay: UsageDay.make("2026-09-02"), timeZone: "UTC", providers: ["codex"] as const };
+      const input = {
+        sinceDay: UsageDay.make("2026-08-29"),
+        untilDay: UsageDay.make("2026-09-02"),
+        timeZone: "UTC",
+        providers: ["codex"] as const,
+      };
       const periods = [
         { id: "wide", sinceTime: "2026-08-30T00:00:00Z", untilTime: "2026-09-01T00:00:00Z" },
         { id: "narrow", sinceTime: "2026-08-30T12:00:00Z", untilTime: "2026-08-31T12:00:00Z" },
       ];
-      const requests = yield* Effect.all([
-        service.readSummary(input),
-        ...periods.map((period) => service.readSummary({ ...input, quotaIntervals: [period] })),
-      ], { concurrency: "unbounded" }).pipe(Effect.forkChild);
+      const requests = yield* Effect.all(
+        [
+          service.readSummary(input),
+          ...periods.map((period) => service.readSummary({ ...input, quotaIntervals: [period] })),
+        ],
+        { concurrency: "unbounded" },
+      ).pipe(Effect.forkChild);
       yield* Deferred.await(readStarted);
       yield* Deferred.succeed(releaseRead, undefined);
       const results = yield* Fiber.join(requests);
@@ -131,7 +234,11 @@ describe("incremental scan integration", () => {
       expect(results[0]?.quotaCosts).toBeUndefined();
       expect(results[1]?.quotaCosts?.every((row) => row.intervalId === "wide")).toBe(true);
       expect(results[2]?.quotaCosts?.every((row) => row.intervalId === "narrow")).toBe(true);
-      const mainInventories = vi.mocked(listTranscriptFilesBounded).mock.calls.filter(([root]) => /[\\/]sessions$/.test(root) && !/[\\/]codex-home[\\/]/.test(root));
+      const mainInventories = vi
+        .mocked(listTranscriptFilesBounded)
+        .mock.calls.filter(
+          ([root]) => /[\\/]sessions$/.test(root) && !/[\\/]codex-home[\\/]/.test(root),
+        );
       expect(mainInventories).toHaveLength(1);
     }).pipe(Effect.scoped, Effect.provide(Layer.merge(testLayer, TestClock.layer()))),
   );

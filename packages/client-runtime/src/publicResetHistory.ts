@@ -203,20 +203,39 @@ export function publicResetCostEstimates(
         (source) => source.fingerprint.provider === "codex" && source.status !== "missing",
       );
       for (const snapshot of summary.quotaCostSnapshots ?? []) {
-        if (snapshot.fingerprint.provider !== "codex" || sources.some((source) => fingerprintKey(source.fingerprint) === fingerprintKey(snapshot.fingerprint))) continue;
-        sources.push({ fingerprint: snapshot.fingerprint, status: "ok", scannedFiles: 0, skippedFiles: 0, malformedRecords: 0, distinctSessions: 0, message: null });
+        if (
+          snapshot.fingerprint.provider !== "codex" ||
+          sources.some(
+            (source) => fingerprintKey(source.fingerprint) === fingerprintKey(snapshot.fingerprint),
+          )
+        )
+          continue;
+        sources.push({
+          fingerprint: snapshot.fingerprint,
+          status: "ok",
+          scannedFiles: 0,
+          skippedFiles: 0,
+          malformedRecords: 0,
+          distinctSessions: 0,
+          message: null,
+        });
       }
       for (const source of sources) {
         const key = fingerprintKey(source.fingerprint);
         if (seen.has(key)) continue;
-        const saved = summary.quotaCostSnapshots?.find((candidate) =>
-          candidate.sinceTime === period.interval.sinceTime && candidate.untilTime === period.interval.untilTime && fingerprintKey(candidate.fingerprint) === key,
-        );
-        const row = saved ? { ...saved, complete: true, unpricedRecords: 0 } : summary.quotaCosts?.find(
+        const saved = summary.quotaCostSnapshots?.find(
           (candidate) =>
-            candidate.intervalId === period.interval.id &&
+            candidate.sinceTime === period.interval.sinceTime &&
+            candidate.untilTime === period.interval.untilTime &&
             fingerprintKey(candidate.fingerprint) === key,
         );
+        const row = saved
+          ? { ...saved, complete: true, unpricedRecords: 0 }
+          : summary.quotaCosts?.find(
+              (candidate) =>
+                candidate.intervalId === period.interval.id &&
+                fingerprintKey(candidate.fingerprint) === key,
+            );
         if (!row) {
           complete = false;
           continue;
@@ -247,7 +266,19 @@ export function publicResetCostEstimates(
     }
     let reason: string | null = null;
     if (environments.length === 0) reason = "No computers are selected.";
-    else if (!complete || environments.some((entry) => entry.isPending || entry.error !== null || entry.summary === null || entry.summary?.sources.some((source) => source.fingerprint.provider === "codex" && source.status === "partial")) && seen.size === 0)
+    else if (
+      !complete ||
+      (environments.some(
+        (entry) =>
+          entry.isPending ||
+          entry.error !== null ||
+          entry.summary === null ||
+          entry.summary?.sources.some(
+            (source) => source.fingerprint.provider === "codex" && source.status === "partial",
+          ),
+      ) &&
+        seen.size === 0)
+    )
       reason = "Still counting";
     else if (seen.size === 0) reason = "No Codex transcript source is available for this period.";
     else if (unpricedRecords > 0)

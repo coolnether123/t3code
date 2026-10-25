@@ -2,6 +2,11 @@
 
 On mobile, choose **Usage** in the workspace navigation.
 
+Prompt and word reports can come from Otis analytics. If Otis is unavailable,
+still indexing or stale, the page labels its retained T3 fallback. If reports
+disagree, T3 remains selected. Refresh retries the connection. Missing history
+is shown as unavailable, not zero prompts. Words are not tokens.
+
 ## Reset value history
 
 Open **Usage > Limits > Reset history** to compare estimated API value across
@@ -13,11 +18,6 @@ charges.
 In **Monitor settings**, set your plan, monthly price and subscription start
 date. Paid totals count monthly payments from that date. A cold transcript scan
 shows **Still counting** and refreshes as more history becomes available.
-
-Prompt and word reports can come from Otis analytics. If Otis is unavailable,
-still indexing or stale, the page labels its retained T3 fallback. If reports
-disagree, T3 remains selected. Refresh retries the connection. Missing history
-is shown as unavailable, not zero prompts. Words are not tokens.
 
 ## Prompts and words
 

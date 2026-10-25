@@ -41,6 +41,8 @@ const DocumentSchema = Schema.Struct({
   version: Schema.Literal(QUOTA_COST_LEDGER_VERSION),
   rows: Schema.Array(LedgerRowSchema),
 });
+const decodeDocument = Schema.decodeUnknownEffect(Schema.fromJsonString(DocumentSchema));
+const encodeDocument = Schema.encodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 
 const keyOf = (fingerprint: UsageSourceFingerprint, intervalId: string) =>
   JSON.stringify([
@@ -172,33 +174,36 @@ export function upsertQuotaCostLedger(
   return [...rows.filter((item) => item.key !== row.key), row].slice(-MAX_QUOTA_COST_LEDGER_ROWS);
 }
 
-export const readQuotaCostLedger = (filePath: string) =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const info = yield* fs.stat(filePath).pipe(Effect.orElseSucceed(() => null));
-    if (info === null || Number(info.size) > MAX_QUOTA_COST_LEDGER_BYTES) return [] as const;
-    const raw = yield* fs.readFileString(filePath).pipe(Effect.orElseSucceed(() => ""));
-    if (Buffer.byteLength(raw, "utf8") > MAX_QUOTA_COST_LEDGER_BYTES) return [] as const;
-    return yield* Schema.decodeUnknownEffect(Schema.fromJsonString(DocumentSchema))(raw).pipe(
-      Effect.map((document) => decodeQuotaCostLedger(document)),
-      Effect.orElseSucceed(() => [] as const),
-    );
-  });
+export const readQuotaCostLedger = Effect.fn("UsageQuotaCostLedger.read")(function* (
+  filePath: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const info = yield* fs.stat(filePath).pipe(Effect.orElseSucceed(() => null));
+  if (info === null || Number(info.size) > MAX_QUOTA_COST_LEDGER_BYTES) return [] as const;
+  const raw = yield* fs.readFileString(filePath).pipe(Effect.orElseSucceed(() => ""));
+  if (Buffer.byteLength(raw, "utf8") > MAX_QUOTA_COST_LEDGER_BYTES) return [] as const;
+  return yield* decodeDocument(raw).pipe(
+    Effect.map((document) => decodeQuotaCostLedger(document)),
+    Effect.orElseSucceed(() => [] as const),
+  );
+});
 
-export const writeQuotaCostLedger = (filePath: string, rows: readonly QuotaCostLedgerRow[]) =>
-  Effect.gen(function* () {
-    const encode = (kept: readonly QuotaCostLedgerRow[]) =>
-      Schema.encodeUnknownEffect(Schema.fromJsonString(Schema.Unknown))({
-        version: QUOTA_COST_LEDGER_VERSION,
-        rows: kept,
-      });
-    let kept = rows.slice(-MAX_QUOTA_COST_LEDGER_ROWS);
-    let contents = yield* encode(kept);
-    while (kept.length > 0 && Buffer.byteLength(contents, "utf8") > MAX_QUOTA_COST_LEDGER_BYTES) {
-      kept = kept.slice(1);
-      contents = yield* encode(kept);
-    }
-    if (kept.length === 0 && rows.length > 0) return false;
-    yield* writeFileStringAtomically({ filePath, contents });
-    return true;
-  });
+export const writeQuotaCostLedger = Effect.fn("UsageQuotaCostLedger.write")(function* (
+  filePath: string,
+  rows: readonly QuotaCostLedgerRow[],
+) {
+  const encode = (kept: readonly QuotaCostLedgerRow[]) =>
+    encodeDocument({
+      version: QUOTA_COST_LEDGER_VERSION,
+      rows: kept,
+    });
+  let kept = rows.slice(-MAX_QUOTA_COST_LEDGER_ROWS);
+  let contents = yield* encode(kept);
+  while (kept.length > 0 && Buffer.byteLength(contents, "utf8") > MAX_QUOTA_COST_LEDGER_BYTES) {
+    kept = kept.slice(1);
+    contents = yield* encode(kept);
+  }
+  if (kept.length === 0 && rows.length > 0) return false;
+  yield* writeFileStringAtomically({ filePath, contents });
+  return true;
+});

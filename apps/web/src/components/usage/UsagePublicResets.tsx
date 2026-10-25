@@ -84,11 +84,11 @@ export function UsagePublicResets({
               </div>
               <div className="text-right">
                 <p className="text-sm tabular-nums">
-                  {!costsReady
+                  {row.costUsd !== null
+                    ? formatUsd(row.costUsd)
+                    : !costsReady || row.reason === "Still counting"
                       ? "Still counting"
-                    : row.costUsd === null
-                        ? row.reason === "Still counting" ? "Still counting" : "Estimate unavailable"
-                      : formatUsd(row.costUsd)}
+                      : "Estimate unavailable"}
                 </p>
                 {costsReady || row.costUsd !== null ? (
                   <p className="mt-1 text-xs text-muted-foreground">
