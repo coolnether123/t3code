@@ -104,7 +104,7 @@ allprojects {
     $gradleSource = $gradleSource -replace '(?m)^\s*(?://\s*)?extraPackagerArgs = .*$', '    extraPackagerArgs = ["--max-workers", "1"]'
     [IO.File]::WriteAllText($appGradle, $gradleSource, $utf8)
     # Widget bundling launches its own Expo CLI without the app's extraPackagerArgs.
-    $metroBootstrap = Join-Path $androidDirectory 'local-build-node.cjs'
+    $metroBootstrap = (Join-Path $androidDirectory 'local-build-node.cjs').Replace('\', '/')
     $metroBootstrapSource = @'
 if (process.argv.includes('export:embed') && !process.argv.includes('--max-workers')) {
   process.argv.push('--max-workers', '1');
