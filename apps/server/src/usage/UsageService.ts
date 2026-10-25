@@ -69,6 +69,7 @@ import {
 } from "../provider/Drivers/CodexHomeLayout.ts";
 import { makeDayFormatter, resolveModelAliases, UsageAggregator } from "./usageAggregation.ts";
 import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
+import { mergeUsageReads, projectUsageRead, usageReadBatchKey } from "./usageReadBatch.ts";
 import { UsageSummaryCache, usageSummaryCacheKey } from "./usageSummaryCache.ts";
 import { makeUsageReportCalculation, projectUsageReport } from "./usageReport.ts";
 import {
@@ -558,10 +559,12 @@ export const make = Effect.gen(function* () {
   // Shares the result only while an identical scan is running. Completed
   // provider-backed summaries are deliberately not retained because transcript
   // changes must be visible to the next request.
-  const inFlightSummaries = new Map<
-    string,
-    Deferred.Deferred<Exit.Exit<UsageSummary, UsageReadError>, never>
-  >();
+  const inFlightSummaries = new Map<string, {
+    inputs: UsageSummaryInput[];
+    started: boolean;
+    progress: UsageReadProgress;
+    result: Deferred.Deferred<Exit.Exit<UsageSummary, UsageReadError>, never>;
+  }>();
   // Each transcript's records priced once, reused until the transcript, its
   // prices or its shared de-duplication keys change. Reads happen under the
   // scan semaphore, so these are never touched concurrently.
@@ -1048,6 +1051,7 @@ export const make = Effect.gen(function* () {
     input: UsageSummaryInput,
     context: UsageReadContext | undefined,
     progress?: UsageReadProgress,
+    batched = false,
   ) {
     // A transcript read late in a pass can reveal that an earlier one, already
     // summed, shares a de-duplication key with it (the same Codex event in two
@@ -1059,6 +1063,7 @@ export const make = Effect.gen(function* () {
         context,
         progress,
         attempt < MAX_INDEXED_READ_ATTEMPTS ? "indexed" : "records",
+        batched,
       );
       if (result !== RESTART_READ) return result;
       if (progress !== undefined) {
@@ -1073,6 +1078,7 @@ export const make = Effect.gen(function* () {
     context: UsageReadContext | undefined,
     progress: UsageReadProgress | undefined,
     mode: "indexed" | "records",
+    batched: boolean,
   ) {
     if (input.sinceDay > input.untilDay) {
       return yield* new UsageReadError({
@@ -1108,7 +1114,7 @@ export const make = Effect.gen(function* () {
     const startedAtMs = yield* Clock.currentTimeMillis;
     const quotaIntervals = input.quotaIntervals ?? [];
     const quotaProvider = input.quotaProvider ?? "codex";
-    if (!validQuotaIntervals(quotaIntervals, input.sinceDay, input.untilDay)) {
+    if (!batched && !validQuotaIntervals(quotaIntervals, input.sinceDay, input.untilDay)) {
       return yield* new UsageReadError({
         reason: "invalidWindow",
         detail:
@@ -1330,7 +1336,7 @@ export const make = Effect.gen(function* () {
     const selectedTurnIds = input.turnIds === undefined ? null : new Set(input.turnIds);
     const activeDirs = dirs.filter(
       ({ provider }) =>
-        (input.quotaIntervals === undefined || provider === (input.quotaProvider ?? "codex")) &&
+        (batched || input.quotaIntervals === undefined || provider === (input.quotaProvider ?? "codex")) &&
         (selectedProviders === null || selectedProviders.has(provider)),
     );
     const plannedSources = yield* Effect.forEach(
@@ -1875,16 +1881,17 @@ export const make = Effect.gen(function* () {
       const last = quotaHistory?.samples.find(
         (sample) => sample.observedAt === interval?.untilTime,
       );
-      if (!interval || !first || !last) continue;
+      if (!interval || /^(api-pace:|compare:)/.test(interval.id)) continue;
       const next = upsertQuotaCostLedger(
         quotaCostLedger,
         cost,
         cost.fingerprint,
         {
           ...interval,
-          firstRemainingPercent: first.remainingPercent,
-          lastRemainingPercent: last.remainingPercent,
-          resetsAt: first.resetsAt,
+          firstRemainingPercent: first?.remainingPercent ?? 100,
+          lastRemainingPercent: last?.remainingPercent ?? 100,
+          resetsAt: first?.resetsAt ?? interval.untilTime,
+          ...(!first || !last ? { estimatedFromTranscripts: true } : {}),
         },
         recordedAt,
       );
@@ -1899,7 +1906,7 @@ export const make = Effect.gen(function* () {
 
     const legacyVersion = input.clientContractVersion ?? 5;
     const additionalProviders =
-      input.quotaIntervals !== undefined
+      input.quotaIntervals !== undefined && !batched
         ? []
         : (input.providers ??
           (legacyVersion < 8
@@ -1913,7 +1920,7 @@ export const make = Effect.gen(function* () {
       ...(additionalProviders === undefined ? {} : { providers: additionalProviders }),
     });
     for (const scan of providerScans) {
-      if (input.quotaIntervals !== undefined && scan.provider !== (input.quotaProvider ?? "codex"))
+      if (!batched && input.quotaIntervals !== undefined && scan.provider !== (input.quotaProvider ?? "codex"))
         continue;
       const sessions = new Set<string>();
       for (const file of scan.files ?? []) {
@@ -2113,7 +2120,7 @@ export const make = Effect.gen(function* () {
       const startedAtMs = yield* Clock.currentTimeMillis;
       let resolvedDirs: readonly { readonly provider: UsageProviderKind; readonly dir: string }[] =
         [];
-      const progress: UsageReadProgress = {
+      let progress: UsageReadProgress = {
         sources: [],
         pendingSources: [],
         quotaCosts: [],
@@ -2165,6 +2172,28 @@ export const make = Effect.gen(function* () {
             { concurrency: 8 },
           );
           progress.pendingSources.push(...sources);
+          if (!validQuotaIntervals(input.quotaIntervals ?? [], input.sinceDay, input.untilDay)) {
+            return yield* new UsageReadError({ reason: "invalidWindow", detail: "Quota intervals must be ordered, disjoint, and inside the scanned window with two days of padding." });
+          }
+          const intervals = input.quotaIntervals ?? [];
+          const saved = sources.filter((source) => source.status !== "missing").flatMap((source) =>
+            intervals.flatMap((interval) => {
+              const row = quotaCostLedger.find((row) =>
+                JSON.stringify(row.fingerprint) === JSON.stringify(source.fingerprint) &&
+                row.sinceTime === interval.sinceTime && row.untilTime === interval.untilTime &&
+                (Date.parse(row.resetsAt) <= startedAtMs || quotaCostLedger.some((next) =>
+                  JSON.stringify(next.fingerprint) === JSON.stringify(row.fingerprint) &&
+                  Date.parse(next.sinceTime) >= Date.parse(row.untilTime))),
+              );
+              return row ? [{ ...row, intervalId: interval.id, complete: true }] : [];
+            }),
+          );
+          if (intervals.length > 0 && saved.length > 0 &&
+              saved.length === sources.filter((source) => source.status !== "missing").length * intervals.length) {
+            const history = yield* readSummaryUnlocked({ ...input, quotaHistoryOnly: true }, undefined);
+            return { ...history, sources: sources.map((source) => ({ ...source, status: source.status === "missing" ? "missing" as const : "ok" as const, message: null })), quotaCosts: saved, quotaCostSnapshots: saved, pricing: pricing() };
+          }
+
           const key = repeatedAwareSummaryCacheKey(
             input,
             context.settings.usagePriceOverrides,
@@ -2174,36 +2203,48 @@ export const make = Effect.gen(function* () {
             const cached = summaryCache.get(key, yield* Clock.currentTimeMillis);
             if (cached !== undefined) return cached;
           }
-          let shared = inFlightSummaries.get(key);
+          const batchKey = usageReadBatchKey(input);
+          let shared = inFlightSummaries.get(batchKey);
+          if (shared?.started) {
+            const active = mergeUsageReads(shared.inputs);
+            const covered = active.sinceDay <= input.sinceDay && active.untilDay >= input.untilDay &&
+              (active.providers === undefined || (input.providers ?? [input.quotaProvider ?? "codex"]).every((provider) => active.providers!.includes(provider))) &&
+              (input.quotaIntervals ?? []).every((interval) => active.quotaIntervals?.some((candidate) => JSON.stringify(candidate) === JSON.stringify(interval)));
+            if (!covered) shared = undefined;
+          }
+          if (shared && (input.quotaIntervals ?? []).some((interval) => shared!.inputs.some((other) => other.quotaIntervals?.some((candidate) => candidate.id === interval.id && JSON.stringify(candidate) !== JSON.stringify(interval))))) shared = undefined;
           if (shared === undefined) {
-            const result = Deferred.makeUnsafe<Exit.Exit<UsageSummary, UsageReadError>>();
-            inFlightSummaries.set(key, result);
-            shared = result;
-            // Detached from the request that starts it: a reader that reaches its
-            // deadline stops waiting, but the scan keeps going. Interrupting it
-            // threw away the inventory and unpersisted chunks, so a transcript
-            // backlog larger than one budget never finished.
+            const batch = {
+              inputs: [input], started: false, progress,
+              result: Deferred.makeUnsafe<Exit.Exit<UsageSummary, UsageReadError>>(),
+            };
+            inFlightSummaries.set(batchKey, batch);
+            shared = batch;
+            // Capture queued windows after acquiring the lock. They use one
+            // inventory, parse and priced index pass, including overlapping quotas.
             yield* Effect.forkIn(
-              scanSemaphore
-                .withPermits(1)(
-                  readSummaryUnlocked(input, context, progress).pipe(
+              Effect.yieldNow.pipe(Effect.andThen(scanSemaphore.withPermits(1)(
+                Effect.suspend(() => {
+                  batch.started = true;
+                  return readSummaryUnlocked(mergeUsageReads(batch.inputs), context, batch.progress, true).pipe(
                     Effect.ensuring(Effect.sync(() => scanStore.release())),
-                  ),
-                )
-                .pipe(
-                  Effect.onExit((exit) =>
-                    Effect.sync(() => inFlightSummaries.delete(key)).pipe(
-                      Effect.andThen(Deferred.succeed(result, exit)),
-                    ),
-                  ),
-                ),
+                  );
+                }),
+              ))).pipe(
+                Effect.onExit((exit) => Effect.sync(() => {
+                  if (inFlightSummaries.get(batchKey) === batch) inFlightSummaries.delete(batchKey);
+                }).pipe(Effect.andThen(Deferred.succeed(batch.result, exit)))),
+              ),
               serviceScope,
               { startImmediately: true },
             );
+          } else {
+            if (!shared.started) shared.inputs.push(input);
+            progress = shared.progress;
           }
-          const exit = yield* Deferred.await(shared);
+          const exit = yield* Deferred.await(shared.result);
           if (Exit.isFailure(exit)) return yield* Effect.failCause(exit.cause);
-          const summary = exit.value;
+          const summary = projectUsageRead(exit.value, input);
           if (
             summary.sources.length > 0 &&
             summary.sources.every((source) => source.status === "missing")
@@ -2219,7 +2260,7 @@ export const make = Effect.gen(function* () {
             detail: "Usage response budget expired before source coverage could be established.",
           });
         }
-        return yield* partialSummaryAtDeadline(input, startedAtMs, resolvedDirs, progress);
+        return projectUsageRead(yield* partialSummaryAtDeadline(input, startedAtMs, resolvedDirs, progress), input);
       });
     },
   );

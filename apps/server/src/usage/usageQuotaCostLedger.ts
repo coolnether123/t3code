@@ -7,8 +7,8 @@ import { UsageQuotaCost, UsageSourceFingerprint } from "@t3tools/contracts";
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 
 export const QUOTA_COST_LEDGER_VERSION = 1 as const;
-export const MAX_QUOTA_COST_LEDGER_ROWS = 256;
-export const MAX_QUOTA_COST_LEDGER_BYTES = 512 * 1024;
+export const MAX_QUOTA_COST_LEDGER_ROWS = 2048;
+export const MAX_QUOTA_COST_LEDGER_BYTES = 4 * 1024 * 1024;
 
 export interface QuotaCostLedgerRow extends UsageQuotaCostSnapshot {
   readonly key: string;
@@ -34,6 +34,7 @@ const LedgerRowSchema = Schema.Struct({
   firstRemainingPercent: Schema.Number,
   lastRemainingPercent: Schema.Number,
   resetsAt: Schema.String,
+  estimatedFromTranscripts: Schema.optional(Schema.Boolean),
   models: Schema.optional(UsageQuotaCost.fields.models),
 });
 const DocumentSchema = Schema.Struct({
@@ -119,6 +120,7 @@ export function upsertQuotaCostLedger(
     readonly firstRemainingPercent: number;
     readonly lastRemainingPercent: number;
     readonly resetsAt: string;
+    readonly estimatedFromTranscripts?: boolean;
   },
   recordedAt: string,
 ): readonly QuotaCostLedgerRow[] {
@@ -164,6 +166,7 @@ export function upsertQuotaCostLedger(
     firstRemainingPercent: interval.firstRemainingPercent,
     lastRemainingPercent: interval.lastRemainingPercent,
     resetsAt: interval.resetsAt,
+    ...(interval.estimatedFromTranscripts ? { estimatedFromTranscripts: true } : {}),
     ...(cost.models === undefined ? {} : { models: cost.models }),
   };
   return [...rows.filter((item) => item.key !== row.key), row].slice(-MAX_QUOTA_COST_LEDGER_ROWS);

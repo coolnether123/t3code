@@ -31,7 +31,6 @@ import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentPresentations } from "./presentation";
 import { serverEnvironment } from "./server";
 
-const MAX_STALLED_DEFERRED_REFRESHES = 5;
 const DEFERRED_TRANSCRIPT_REFRESH_BASE_MS = 750;
 const DEFERRED_TRANSCRIPT_REFRESH_MAX_MS = 8_000;
 
@@ -350,7 +349,7 @@ export function useUsage(
     mergeAnsweredUsage(withoutProviders(selectedEnvironments, hiddenProviders)))();
 
   const hasDeferredTranscripts = selectedEnvironments.some((environment) =>
-    environment.summary?.sources.some(isDeferredTranscriptSource),
+    environment.isConnected && (environment.error !== null || environment.summary?.sources.some(isDeferredTranscriptSource)),
   );
 
   // A bounded server scan intentionally returns partial data while its cache is
@@ -388,14 +387,14 @@ export function useUsage(
       retry.stalledAttempts = 0;
     }
     const waitingOrFailed = selectedEnvironments.some(
-      (environment) => environment.isPending || environment.error !== null,
+      (environment) => environment.isPending,
     );
     if (waitingOrFailed) {
       if (retry.timer !== null) globalThis.clearTimeout(retry.timer);
       retry.timer = null;
       return;
     }
-    if (retry.stalledAttempts >= MAX_STALLED_DEFERRED_REFRESHES || retry.timer !== null) {
+    if (retry.timer !== null) {
       return;
     }
     const delay = Math.min(

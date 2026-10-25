@@ -1,3 +1,9 @@
+import { useAtomValue } from "@effect/atom-react";
+import { Atom } from "effect/reactivity";
+import { DEFAULT_SERVER_SETTINGS, type EnvironmentId } from "@t3tools/contracts";
+import { serverEnvironment } from "../../state/server";
+import { useAtomCommand } from "../../state/use-atom-command";
+import { UsageValueHistory } from "./UsageValueHistory";
 import { BirthdayGreeting } from "../BirthdayCelebration";
 import {
   watchResetAnnouncements,
@@ -58,6 +64,8 @@ import { UsagePaceChart } from "./UsagePaceChart";
 import { UsagePublicResets } from "./UsagePublicResets";
 import { monitoredPeriodModels, UsageResetHistory } from "./UsageResetHistory";
 
+const emptySettingsAtom = Atom.make(null);
+
 const dateTime = (value: string) =>
   new Date(value).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 const estimate = (value: number) =>
@@ -73,6 +81,7 @@ const TABS: readonly {
   readonly label: string;
   readonly codexOnly?: true;
 }[] = [
+  { id: "history", label: "Reset history", codexOnly: true },
   { id: "cycles", label: "Cycles" },
   { id: "models", label: "Models" },
   { id: "planner", label: "Planner", codexOnly: true },
@@ -186,6 +195,11 @@ export function UsageResetPage() {
     quotaProvider === "codex" ? input : { ...input, quotaProvider };
 
   const sourceEnvironmentId = source?.environmentId;
+  const settingsEnvironmentId = sourceEnvironmentId ?? history.environments[0]?.environmentId;
+  const settings = useAtomValue(settingsEnvironmentId ? serverEnvironment.settingsValueAtom(settingsEnvironmentId as EnvironmentId) : emptySettingsAtom);
+  const subscription = settings?.usageSubscription ?? DEFAULT_SERVER_SETTINGS.usageSubscription;
+  const updateSettings = useAtomCommand(serverEnvironment.updateSettings);
+
   const effectiveSelectedIds = ((): readonly string[] | null =>
     selectedIds ?? (sourceEnvironmentId === undefined ? null : [sourceEnvironmentId]))();
   const rawSamples = (() =>
@@ -435,7 +449,7 @@ export function UsageResetPage() {
   // Nothing but Public resets can be shown before a limit has readings.
   const hasCycle = Boolean(source && selectedWindow && rawSamples && last && current);
   const tabs = TABS.filter(
-    (tab) => (!tab.codexOnly || quotaProvider === "codex") && (hasCycle || tab.id === "public"),
+    (tab) => (!tab.codexOnly || quotaProvider === "codex") && (hasCycle || tab.id === "public" || tab.id === "history"),
   );
   const activeTab = tabs.some((tab) => tab.id === view.tab) ? view.tab : tabs[0]?.id;
   // Until some computer answers, a missing reading means "not read yet", not "not recorded".
@@ -758,7 +772,9 @@ export function UsageResetPage() {
                 aria-labelledby={`limits-tab-${activeTab}`}
                 className="space-y-5 pt-4"
               >
-                {activeTab === "public" ? (
+                {activeTab === "history" ? (
+                  <UsageValueHistory history={history.environments} publicHistory={publicHistory} selectedIds={effectiveSelectedIds} subscription={subscription} historyInput={historyInput} />
+                ) : activeTab === "public" ? (
                   <UsagePublicResets
                     history={publicHistory}
                     estimates={publicEstimates}

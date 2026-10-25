@@ -254,22 +254,17 @@ export class QuotaCostAccumulator {
   addPriced(priced: Pick<PricedRecord, "record" | "costUsd" | "costSource">): void {
     const { record } = priced;
     if (!this.#counts(record)) return;
-    // Binary search keeps a 90-day scan independent of the number of reset periods.
-    let low = 0;
-    let high = this.rows.length;
-    while (low < high) {
-      const mid = (low + high) >>> 1;
-      if (this.rows[mid]!.end <= record.timestampMs) low = mid + 1;
-      else high = mid;
+    // Batched readers can ask for overlapping periods. Each receives its own
+    // total, while the enclosing usage summary still counts each record once.
+    for (const row of this.rows) {
+      if (record.timestampMs < row.start || record.timestampMs >= row.end) continue;
+      this.#accumulate(row, record.model, {
+        totals: record.totals,
+        costUsd: priced.costUsd,
+        records: 1,
+        unpricedRecords: priced.costSource === "unpriced" ? 1 : 0,
+      });
     }
-    const row = this.rows[low];
-    if (!row || record.timestampMs < row.start) return;
-    this.#accumulate(row, record.model, {
-      totals: record.totals,
-      costUsd: priced.costUsd,
-      records: 1,
-      unpricedRecords: priced.costSource === "unpriced" ? 1 : 0,
-    });
   }
 
   /**

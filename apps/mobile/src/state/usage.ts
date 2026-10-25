@@ -190,7 +190,7 @@ export function useUsage(
   }, [environments, providers, selectedEnvironmentIds]);
 
   const hasDeferredTranscripts = environments.some((environment) =>
-    environment.summary?.sources.some((source) => source.status === "partial"),
+    environment.isConnected && (environment.error !== null || environment.summary?.sources.some((source) => source.status === "partial")),
   );
   useEffect(() => {
     if (!hasDeferredTranscripts || environments.some((environment) => environment.isPending))

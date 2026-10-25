@@ -265,6 +265,7 @@ export const UsageQuotaCostSnapshot = Schema.Struct({
   firstRemainingPercent: Schema.Number,
   lastRemainingPercent: Schema.Number,
   resetsAt: Schema.String,
+  estimatedFromTranscripts: Schema.optional(Schema.Boolean),
   models: Schema.optional(UsageQuotaCost.fields.models),
 });
 export type UsageQuotaCostSnapshot = typeof UsageQuotaCostSnapshot.Type;

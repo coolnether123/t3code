@@ -34,7 +34,7 @@ const LIMITS_VIEW_KEY = "t3code:usage-limits-view:v1";
 const LimitsViewSchema = Schema.Struct({
   provider: Schema.Literals(["codex", "claude", "both"]),
   windowKey: Schema.optional(Schema.String),
-  tab: Schema.Literals(["cycles", "models", "planner", "public"]),
+  tab: Schema.Literals(["history", "cycles", "models", "planner", "public"]),
 });
 export type LimitsView = typeof LimitsViewSchema.Type;
 const DEFAULT_LIMITS_VIEW: LimitsView = { provider: "both", tab: "cycles" };

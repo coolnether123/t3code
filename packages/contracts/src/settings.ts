@@ -1120,6 +1120,12 @@ export const BirthdayCelebrationPreference = Schema.Struct({
 );
 export type BirthdayCelebrationPreference = typeof BirthdayCelebrationPreference.Type;
 
+export const UsageSubscription = Schema.Struct({
+  plan: TrimmedNonEmptyString,
+  monthlyUsd: Schema.Number.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(100000)),
+  startDate: Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}$/)),
+});
+
 export const ServerSettings = Schema.Struct({
   birthdayCelebration: Schema.NullOr(BirthdayCelebrationPreference).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
@@ -1297,6 +1303,8 @@ export const ServerSettings = Schema.Struct({
   cursorKeychainUsageEnabled: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
+
+  usageSubscription: UsageSubscription.pipe(Schema.withDecodingDefault(Effect.succeed({ plan: "Codex Pro", monthlyUsd: 200, startDate: "2026-07-01" }))),
 
   usagePriceOverrides: Schema.Record(TrimmedNonEmptyString, UsageModelPriceOverride).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
@@ -1567,6 +1575,8 @@ export const ServerSettingsPatch = Schema.Struct({
     Schema.Record(UsageLimitSourceId, Schema.NullOr(UsageLimitSourceConfig)),
   ),
   cursorKeychainUsageEnabled: Schema.optionalKey(Schema.Boolean),
+
+  usageSubscription: Schema.optionalKey(UsageSubscription),
 
   usagePriceOverrides: Schema.optionalKey(
     Schema.Record(TrimmedNonEmptyString, Schema.NullOr(UsageModelPriceOverride)),

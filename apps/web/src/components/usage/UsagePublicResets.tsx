@@ -90,13 +90,13 @@ export function UsagePublicResets({
                       ? "Estimate unavailable"
                       : formatUsd(row.costUsd)}
                 </p>
-                {costsReady ? (
+                {costsReady || row.costUsd !== null ? (
                   <p className="mt-1 text-xs text-muted-foreground">
                     {row.records > 0 ? `${row.records.toLocaleString()} usage records` : row.reason}
                   </p>
                 ) : null}
               </div>
-              {costsReady && row.models.length > 0 ? (
+              {row.costUsd !== null && row.models.length > 0 ? (
                 <details className="w-full rounded-md border border-border/70 px-3 py-1.5">
                   <summary className="cursor-pointer text-xs text-muted-foreground">
                     Models ·{" "}
