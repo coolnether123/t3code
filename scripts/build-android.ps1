@@ -79,12 +79,16 @@ try {
     $nativePools = @'
 // Local Android build concurrency
 allprojects {
-  pluginManager.withPlugin('com.android.base') {
-    android.defaultConfig.externalNativeBuild.cmake.arguments(
-      '-DCMAKE_JOB_POOLS=compile=1;link=1',
-      '-DCMAKE_JOB_POOL_COMPILE=compile',
-      '-DCMAKE_JOB_POOL_LINK=link'
-    )
+  ['com.android.application', 'com.android.library'].each { androidPlugin ->
+    pluginManager.withPlugin(androidPlugin) {
+      androidComponents.finalizeDsl { androidDsl ->
+        androidDsl.defaultConfig.externalNativeBuild.cmake.arguments(
+          '-DCMAKE_JOB_POOLS=compile=1;link=1',
+          '-DCMAKE_JOB_POOL_COMPILE=compile',
+          '-DCMAKE_JOB_POOL_LINK=link'
+        )
+      }
+    }
   }
 }
 '@
