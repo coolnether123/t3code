@@ -89,6 +89,63 @@ describe("V2 session presentation", () => {
     ]);
   });
 
+  it("sorts the exact Otis live sequence and hides the empty 10:52 reply", () => {
+    const fixture = makeStreamingTimelineFixture();
+    const user = fixture.visibleTurnItems.find(({ item }) => item.type === "user_message")!;
+    const assistant = fixture.visibleTurnItems.find(
+      ({ item }) => item.type === "assistant_message",
+    )!;
+    const message = (source: typeof user, id: string, time: string, text: string) =>
+      ({
+        ...source,
+        sourceItemId: TurnItemId.make(id),
+        item: {
+          ...source.item,
+          id: TurnItemId.make(id),
+          messageId: MessageId.make(id),
+          threadId: ThreadId.make("otis-main"),
+          text,
+          streaming: false,
+          startedAt: DateTime.makeUnsafe(`2026-10-25T${time}:00Z`),
+        },
+      }) as OrchestrationV2ProjectedTurnItem;
+    const call = {
+      ...user,
+      item: {
+        ...user.item,
+        threadId: ThreadId.make("otis-main"),
+        type: "system_notice",
+        message: "Call ended",
+        activity: { kind: "call.ended" },
+        startedAt: DateTime.makeUnsafe("2026-10-25T15:23:00Z"),
+      },
+    } as OrchestrationV2ProjectedTurnItem;
+    const items = [
+      call,
+      message(assistant, "empty", "15:52", ""),
+      message(user, "test", "15:21", "test"),
+      message(assistant, "reply", "15:21", "reply"),
+      message(user, "hi", "16:16", "Hi otis"),
+      message(assistant, "hey", "16:16", "Hey Jared, I'm here."),
+    ];
+    const input = { visibleTurnItems: items, optimisticMessages: [] };
+    const entries = deriveTimelineEntriesFromVisibleTurnItems(input);
+    expect(entries.map((e) => (e.kind === "message" ? e.message.text : "Call ended"))).toEqual([
+      "test",
+      "reply",
+      "Call ended",
+      "Hi otis",
+      "Hey Jared, I'm here.",
+    ]);
+    const previous = deriveTimelineEntriesFromVisibleTurnItemsWithState({
+      ...input,
+      visibleTurnItems: items.slice(0, 2),
+    });
+    expect(deriveTimelineEntriesFromVisibleTurnItemsWithState(input, previous).entries).toEqual(
+      entries,
+    );
+  });
+
   it("uses run status as the settlement boundary", () => {
     const runId = RunId.make("run-1");
     expect(

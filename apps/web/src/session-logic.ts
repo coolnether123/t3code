@@ -615,7 +615,8 @@ function projectedWorkEntry(row: OrchestrationV2ProjectedTurnItem): WorkLogEntry
 
 /**
  * Builds the web timeline in the exact order committed by `visibleTurnItems`. Persistent
- * client-owned messages are inserted by timestamp without sorting the canonical sequence.
+ * client-owned messages are inserted by timestamp. Otis interleaves call records and
+ * imported messages by recorded time because their committed order can differ.
  */
 export interface TimelineEntriesInput {
   readonly visibleTurnItems: ReadonlyArray<OrchestrationV2ProjectedTurnItem>;
@@ -704,6 +705,16 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
       continue;
     }
     if (item.type === "user_message" || item.type === "assistant_message") {
+      if (
+        item.threadId === OTIS_THREAD_ID &&
+        item.type === "assistant_message" &&
+        !item.streaming &&
+        !item.text.trim() &&
+        !item.attachments?.length
+      ) {
+        committedMessageIds.add(item.messageId);
+        continue;
+      }
       const message: ChatMessage = {
         id: item.messageId,
         role: item.type === "user_message" ? "user" : "assistant",
@@ -860,7 +871,9 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
     }
   }
 
-  return entries;
+  return input.visibleTurnItems.some(({ item }) => item.threadId === OTIS_THREAD_ID)
+    ? entries.sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    : entries;
 }
 
 type AttachmentResource = Extract<AssetResource, { readonly _tag: "attachment" }>;
@@ -986,6 +999,7 @@ function reuseTimelineEntries(
   input: TimelineEntriesInput,
   previous: TimelineEntriesProjection,
 ): TimelineEntry[] | null {
+  if (input.visibleTurnItems.some(({ item }) => item.threadId === OTIS_THREAD_ID)) return null;
   const before = previous.input;
   if (
     input.visibleTurnItems.length < before.visibleTurnItems.length ||

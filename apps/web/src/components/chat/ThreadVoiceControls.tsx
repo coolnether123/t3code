@@ -1,3 +1,5 @@
+import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
+import { useEnvironmentScope } from "../../state/session";
 import { use } from "react";
 import { OtisChromeHost } from "../otis/OtisChromeHost";
 import { createPortal } from "react-dom";
@@ -74,6 +76,7 @@ export function ThreadVoiceControls({
   running: boolean;
   connected: boolean;
 }) {
+  const canCall = useEnvironmentScope(props.environmentId, AuthOrchestrationOperateScope);
   const [state, setState] = useState<VoiceState>("idle");
   const [detail, setDetail] = useState<string>();
   const [call, setCall] = useState<CallStatus>();
@@ -129,6 +132,7 @@ export function ThreadVoiceControls({
   const sessionRef = useRef<ThreadVoiceSession | null>(null);
   const anchorRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
+    if (!canCall) return;
     const abort = new AbortController();
     const version = configurationVersion.current;
     void requestSpeech(
@@ -165,7 +169,7 @@ export function ThreadVoiceControls({
           );
       });
     return () => abort.abort();
-  }, [props.environmentId, props.threadId, props.modelSelection]);
+  }, [props.environmentId, props.threadId, props.modelSelection, canCall]);
   const configure = async (next: CallModels, saveDefault = false) => {
     const version = ++configurationVersion.current;
     setModels(next);
@@ -276,6 +280,7 @@ export function ThreadVoiceControls({
   if (otisHost)
     return createPortal(
       <OtisChrome
+        canCall={canCall}
         active={active}
         ready={
           props.enabled && configurationReady && !!models.voice.model && !!models.operator.model
