@@ -6,7 +6,7 @@ import type {
   SnapShotSource,
 } from "@t3tools/contracts";
 import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
-import { CircleAlertIcon, PaperclipIcon, PlayIcon, XIcon } from "lucide-react";
+import { CircleAlertIcon, PaperclipIcon, PlusIcon, PlayIcon, XIcon } from "lucide-react";
 import { type ComponentProps, useLayoutEffect, useRef } from "react";
 
 import {
@@ -670,9 +670,11 @@ export function ComposerQueuedAttachmentRow({
 export function ComposerAttachButton({
   addComposerAttachments,
   focusComposer,
+  otis = false,
 }: {
   readonly addComposerAttachments: (files: File[]) => Promise<boolean>;
   readonly focusComposer: () => void;
+  readonly otis?: boolean;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   return (
@@ -706,7 +708,7 @@ export function ComposerAttachButton({
             />
           }
         >
-          <PaperclipIcon />
+          {otis ? <PlusIcon /> : <PaperclipIcon />}
         </TooltipTrigger>
         <TooltipPopup>Attach files</TooltipPopup>
       </Tooltip>

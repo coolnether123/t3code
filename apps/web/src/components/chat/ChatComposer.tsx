@@ -3453,6 +3453,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     !isComposerApprovalState;
   const composerAttachButton = showComposerAttachAction ? (
     <ComposerAttachButton
+      otis={activeThread?.id === OTIS_THREAD_ID}
       addComposerAttachments={addComposerAttachments}
       focusComposer={focusComposer}
     />

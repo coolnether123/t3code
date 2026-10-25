@@ -45,6 +45,50 @@ import { makeStreamingTimelineFixture, makeThreadProjectionFixture } from "./tes
 import type { ChatMessage } from "./types";
 
 describe("V2 session presentation", () => {
+  it("places Otis call status at its timestamp between committed messages", () => {
+    const fixture = makeStreamingTimelineFixture();
+    const source = fixture.visibleTurnItems.find(({ item }) => item.type === "user_message")!;
+    const sourceItem = source.item;
+    if (sourceItem.type !== "user_message") throw new Error("Expected user message fixture");
+    const threadId = ThreadId.make("otis-main");
+    const at = (minute: number) => DateTime.makeUnsafe(`2026-10-25T15:${minute}:00.000Z`);
+    const notice = (kind: string, minute: number): OrchestrationV2ProjectedTurnItem => ({
+      ...source,
+      sourceItemId: TurnItemId.make(kind),
+      item: {
+        ...sourceItem,
+        id: TurnItemId.make(kind),
+        threadId,
+        runId: null,
+        type: "system_notice",
+        message: kind,
+        activity: { kind },
+        startedAt: at(minute),
+        updatedAt: at(minute),
+      },
+    });
+    const before = { ...source, item: { ...sourceItem, threadId, startedAt: at(20) } };
+    const after = {
+      ...source,
+      item: {
+        ...sourceItem,
+        threadId,
+        messageId: MessageId.make("after-call"),
+        startedAt: at(24),
+      },
+    } as OrchestrationV2ProjectedTurnItem;
+    const entries = deriveTimelineEntriesFromVisibleTurnItems({
+      visibleTurnItems: [notice("call.ended", 23), notice("call.started", 21), before, after],
+      optimisticMessages: [],
+    });
+    expect(entries.map(({ kind, createdAt }) => [kind, createdAt])).toEqual([
+      ["message", DateTime.formatIso(at(20))],
+      ["event", DateTime.formatIso(at(21))],
+      ["event", DateTime.formatIso(at(23))],
+      ["message", DateTime.formatIso(at(24))],
+    ]);
+  });
+
   it("uses run status as the settlement boundary", () => {
     const runId = RunId.make("run-1");
     expect(

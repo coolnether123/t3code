@@ -1,8 +1,17 @@
 import { page } from "vite-plus/test/browser";
+import * as DateTime from "effect/DateTime";
 import { OtisChrome } from "../otis/OtisChrome";
 import { SidebarProvider } from "../ui/sidebar";
 import "../otis/otis.css";
-import { EnvironmentId, MessageId, RunId, ScheduledTaskId, ThreadId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  MessageId,
+  RunId,
+  ScheduledTaskId,
+  ThreadId,
+  TurnItemId,
+  type OrchestrationV2ProjectedTurnItem,
+} from "@t3tools/contracts";
 import type { LegendListRef } from "@legendapp/list/react";
 import { createRef, Profiler, type ComponentProps, type ReactElement } from "react";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -466,6 +475,50 @@ it("renders automatic compaction as one live divider that finishes with its reas
     .toBeVisible();
   expect(container.querySelectorAll('[role="separator"]')).toHaveLength(1);
   expect(container.textContent).not.toContain("Compacting before");
+});
+
+it("shows Otis call status as navy pills in timeline order", async () => {
+  setup();
+  const fixture = makeStreamingTimelineFixture();
+  const source = fixture.visibleTurnItems.find(({ item }) => item.type === "user_message")!;
+  const sourceItem = source.item;
+  if (sourceItem.type !== "user_message") throw new Error("Expected user message fixture");
+  const at = DateTime.makeUnsafe("2026-10-25T15:23:00.000Z");
+  const call: OrchestrationV2ProjectedTurnItem = {
+    ...source,
+    sourceItemId: TurnItemId.make("call-ended"),
+    item: {
+      ...sourceItem,
+      id: TurnItemId.make("call-ended"),
+      threadId: ThreadId.make("otis-main"),
+      runId: null,
+      type: "system_notice",
+      message: "Call ended",
+      activity: { kind: "call.ended" },
+      startedAt: at,
+      updatedAt: at,
+    },
+  };
+  const entries = deriveTimelineEntriesFromVisibleTurnItems({
+    visibleTurnItems: [call, source],
+    optimisticMessages: [],
+  });
+  await using screen = await renderTimeline(entries, {
+    routeThreadKey: "environment-local:otis-main",
+  });
+  const label = `${new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(DateTime.formatIso(at)))} · Call ended`;
+  await expect.element(screen.getByText(label)).toBeVisible();
+  const chip = screen.container.querySelector("[data-otis-call-status]")!;
+  expect(chip.classList.contains("bg-otis-chip")).toBe(true);
+  expect(chip.classList.contains("text-otis-chip-text")).toBe(true);
+  expect(chip.classList.contains("ml-auto")).toBe(true);
+  expect(getComputedStyle(chip).backgroundColor).toBe("rgb(29, 42, 66)");
+  expect(chip.querySelector("[data-otis-hang-up]")).not.toBeNull();
+  expect(chip.closest("details")).toBeNull();
+  expect(
+    screen.container.querySelector("[data-message-role]")!.compareDocumentPosition(chip) &
+      Node.DOCUMENT_POSITION_FOLLOWING,
+  ).toBeTruthy();
 });
 
 it("shows the Otis transcript with folding at phone and desktop sizes", async () => {
