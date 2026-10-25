@@ -1,3 +1,5 @@
+import { OTIS_THREAD_ID } from "@t3tools/contracts";
+import { OtisSidebarEntry } from "./otis/OtisSidebarEntry";
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
 import { resolveThreadCurrentPullRequestLink } from "@t3tools/client-runtime/thread-pull-requests";
 import { Spinner } from "~/components/ui/spinner";
@@ -2867,6 +2869,7 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     <SidebarContent
       fixedHeader={
         <SidebarGroup className="z-[1]">
+          <OtisSidebarEntry />
           <SidebarMenu>
             <SidebarMenuItem>
               <CommandDialogTrigger
@@ -3107,7 +3110,7 @@ function useSortedLegacySidebarProjects(input: {
     projectPhysicalKeyByScopedRef,
     sidebarProjectSortOrder,
   } = input;
-  const sidebarThreads = useThreadShells();
+  const sidebarThreads = useThreadShells().filter((thread) => thread.id !== OTIS_THREAD_ID);
   const sidebarProjectByKey = new Map(
     sidebarProjects.map((project) => [project.projectKey, project] as const),
   );

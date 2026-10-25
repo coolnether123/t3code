@@ -31,6 +31,8 @@ export async function requestSpeech(
 export function createBrowserAudio(onInterrupted?: () => void) {
   const deviceSpeech = createDeviceSpeech();
   let context: AudioContext | undefined;
+  let output: GainNode | undefined;
+  let speaker = true;
   let finishCapture: ((manual?: boolean) => void) | undefined;
   let preparedStream: MediaStream | undefined;
   let playback: SpeechPlaybackController | undefined;
@@ -102,7 +104,18 @@ export function createBrowserAudio(onInterrupted?: () => void) {
       if (interrupted || context?.state === "closed") this.close();
       if (!context) {
         context = new AudioContext();
-        playback = new SpeechPlaybackController(context);
+        output = context.createGain();
+        output.gain.value = speaker ? 1 : 0;
+        output.connect(context.destination);
+        const audio = context;
+        playback = new SpeechPlaybackController({
+          get currentTime() {
+            return audio.currentTime;
+          },
+          destination: output,
+          createBuffer: audio.createBuffer.bind(audio),
+          createBufferSource: audio.createBufferSource.bind(audio),
+        });
         playback.begin(playbackGeneration);
         context.addEventListener("statechange", stateChanged);
         document.addEventListener("visibilitychange", foreground);
@@ -118,6 +131,10 @@ export function createBrowserAudio(onInterrupted?: () => void) {
     finishAtPause() {
       deviceSpeech.finishAtPause();
       finishAtPause = true;
+    },
+    setSpeaker(enabled: boolean) {
+      speaker = enabled;
+      if (output) output.gain.value = enabled ? 1 : 0;
     },
     captureText: deviceSpeech.capture,
     async prepare(signal: AbortSignal, inputMode?: "pc" | "device") {
@@ -194,7 +211,7 @@ export function createBrowserAudio(onInterrupted?: () => void) {
       gain.gain.setValueAtTime(0.08, audio.currentTime);
       gain.gain.exponentialRampToValueAtTime(0.001, audio.currentTime + 0.2);
       tone.connect(gain);
-      gain.connect(audio.destination);
+      gain.connect(output ?? audio.destination);
       let cancel: () => void;
       try {
         await new Promise<void>((resolve, reject) => {

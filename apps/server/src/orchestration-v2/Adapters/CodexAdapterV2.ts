@@ -1,3 +1,4 @@
+import { OTIS_THREAD_ID } from "@t3tools/contracts";
 import { makeCodexFileChangeApprovalContext } from "../../provider/CodexFileChangeApprovalContext.ts";
 import {
   CODEX_COMPUTER_CONTROL_OPTION_ID,
@@ -752,6 +753,7 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
     readonly codexInput: ReadonlyArray<CodexSchema.V2TurnStartParams__UserInput>;
     readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
     readonly modelSelection: ModelSelection;
+    readonly otisConversation?: boolean;
     readonly hasT3Mcp?: boolean;
     readonly browserToolsAvailable?: boolean;
     readonly deviceToolsAvailable?: boolean;
@@ -780,9 +782,16 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
         ? undefined
         : getCodexServiceTierOptionValue(input.modelSelection);
     const developerInstructions =
-      input.hasT3Mcp !== true
-        ? undefined
-        : buildCodexDeveloperInstructions(input.runtimePolicy.interactionMode);
+      [
+        input.hasT3Mcp === true
+          ? buildCodexDeveloperInstructions(input.runtimePolicy.interactionMode)
+          : undefined,
+        input.otisConversation
+          ? "You are Otis in Jared's ongoing conversation. Call activate_otis if this conversation has not been activated, and apply its compatible personality guidance. Use the existing Otis tools and normal workspace permissions."
+          : undefined,
+      ]
+        .filter(Boolean)
+        .join("\n\n") || undefined;
     // An app's context is text an MCP server wrote, so it goes in as untrusted
     // context: Codex renders it as quoted user-side input, never as developer
     // instructions.
@@ -6543,6 +6552,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             const mcpSession = yield* mcpSessions.read(turnInput.threadId);
             const turnStartParams = yield* buildCodexTurnStartParams({
               nativeThreadId: threadId,
+              otisConversation: turnInput.threadId === OTIS_THREAD_ID,
               codexInput,
               runtimePolicy: turnInput.runtimePolicy,
               modelSelection: turnInput.modelSelection,

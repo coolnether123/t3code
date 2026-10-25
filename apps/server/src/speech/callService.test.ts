@@ -82,6 +82,24 @@ async function fixture() {
 }
 
 describe("durable calls", () => {
+  it("records one call-ended history entry after an explicit hangup", async () => {
+    const f = await fixture();
+    await f.request({ action: "call.close" });
+    await f.request({ action: "call.close" });
+    const ended = vi
+      .mocked(f.ports.dispatch)
+      .mock.calls.filter(
+        ([command]) =>
+          command.type === "thread.activity.append" && command.activity.kind === "call.ended",
+      );
+    expect(ended).toHaveLength(1);
+    expect(ended[0]?.[0]).toMatchObject({
+      threadId: options.threadId,
+      activity: { summary: "Call ended" },
+    });
+    expect((await f.service.status("call-1")).closed).toBe(true);
+  });
+
   it("accumulates PCM across request-scoped services, replaces revisions, and never dispatches partial words", async () => {
     const f = await fixture();
     const request = {
@@ -630,7 +648,11 @@ describe("durable calls", () => {
       }),
     );
     await f.request({ action: "call.close" });
-    expect(f.ports.dispatch).toHaveBeenCalledTimes(1);
+    expect(
+      vi
+        .mocked(f.ports.dispatch)
+        .mock.calls.filter(([command]) => command.type === "thread.turn.start"),
+    ).toHaveLength(1);
     expect((await f.service.status("call-1")).closed).toBe(true);
   });
   it.each(["transcribe", "speak"] as const)(
@@ -1059,7 +1081,11 @@ describe("typed call turns", () => {
         retryOf,
         text: "Keep my words",
       });
-      expect(f.ports.dispatch).toHaveBeenCalledOnce();
+      expect(
+        vi
+          .mocked(f.ports.dispatch)
+          .mock.calls.filter(([command]) => command.type === "thread.turn.start"),
+      ).toHaveLength(1);
       expect(f.ports.dispatch).toHaveBeenCalledWith(
         expect.objectContaining({ commandId: "voice:call-1:original-typed" }),
       );
@@ -1072,7 +1098,11 @@ describe("typed call turns", () => {
     await expect(
       f.request({ action: "call.deliver", utteranceId: "before-close" }),
     ).rejects.toThrow("This call has ended");
-    expect(f.ports.dispatch).toHaveBeenCalledOnce();
+    expect(
+      vi
+        .mocked(f.ports.dispatch)
+        .mock.calls.filter(([command]) => command.type === "thread.turn.start"),
+    ).toHaveLength(1);
   });
   it("skips STT, uses voice delivery once across recovery, and synthesizes a reply", async () => {
     const f = await fixture();
@@ -1130,5 +1160,9 @@ it("rejects typing after hang-up without acknowledging or dispatching it", async
     }),
   ).rejects.toThrow("This call has ended");
   expect(await f.store.read("call-1", "closed-typed.typed.json")).toBeUndefined();
-  expect(f.ports.dispatch).not.toHaveBeenCalled();
+  expect(
+    vi
+      .mocked(f.ports.dispatch)
+      .mock.calls.filter(([command]) => command.type === "thread.turn.start"),
+  ).toHaveLength(0);
 });

@@ -134,6 +134,34 @@ describe("CodexAdapterV2 assistant message streaming", () => {
 });
 
 describe("CodexAdapterV2 runtime policy", () => {
+  it.effect("activates the existing Otis personality only for the ongoing Otis conversation", () =>
+    Effect.gen(function* () {
+      const input = {
+        nativeThreadId: "synthetic",
+        codexInput: [{ type: "text" as const, text: "hello" }],
+        runtimePolicy: {
+          runtimeMode: "approval-required" as const,
+          interactionMode: "default" as const,
+          cwd: null,
+        },
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-6.1-sol" },
+      };
+      const otis = yield* CodexAdapterV2.buildCodexTurnStartParams({
+        ...input,
+        otisConversation: true,
+      });
+      const ordinary = yield* CodexAdapterV2.buildCodexTurnStartParams(input);
+      assert.include(
+        otis.collaborationMode?.settings.developer_instructions ?? "",
+        "activate_otis",
+      );
+      assert.notInclude(
+        ordinary.collaborationMode?.settings.developer_instructions ?? "",
+        "activate_otis",
+      );
+    }),
+  );
+
   it.effect("derives concrete Codex turn policies from every T3 runtime mode", () =>
     Effect.gen(function* () {
       const build = (
