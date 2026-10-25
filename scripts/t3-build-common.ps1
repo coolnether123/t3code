@@ -14,7 +14,7 @@ function Copy-T3ControlScripts {
     New-Item -ItemType Directory -Path $ControlRoot -Force | Out-Null
     [void](Assert-SafeRoot $ControlRoot 'maintenance controls')
     $target = Join-Path $ControlRoot $sha
-    $files = @('t3-nightly-sync.mjs','t3-nightly-check.mjs','t3-build-job.mjs','t3-deploy.mjs','t3-deploy-idle.mjs','t3-release-state.mjs','t3-supervisor.mjs')
+    $files = @('t3-nightly-sync.mjs','t3-nightly-check.mjs','t3-nightly-task-links.mjs','t3-build-job.mjs','t3-deploy.mjs','t3-deploy-idle.mjs','t3-release-state.mjs','t3-supervisor.mjs')
     if (-not (Test-Path -LiteralPath $target)) {
         $staging = Join-Path $ControlRoot ('.copy-' + [Guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $staging | Out-Null

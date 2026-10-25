@@ -108,7 +108,10 @@ async function scenario(kind) {
           }
           return { code: 0, text: "synthetic frozen install" };
         }
-        if (args[0] === config.taskLinkCheck) {
+        if (args[0].endsWith("t3-nightly-task-links.mjs")) {
+          NodeAssert.equal(args[1], config.taskLinkCheck);
+          NodeAssert.equal(args[2], "refs/remotes/origin/feat/t3-workers-prototype");
+          NodeAssert.equal(args[3], git(["rev-parse", tag], cwd).text);
           const message = git(["log", "-1", "--format=%B"], cwd).text;
           NodeAssert.equal(message.match(/Otis-Task:/g)?.length, 1);
           NodeAssert.ok(message.endsWith(`Otis-Task: ${taskId}`));

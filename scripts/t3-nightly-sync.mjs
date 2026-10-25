@@ -303,7 +303,12 @@ export async function runNightly(configFile, io = {}) {
     ledger.commit = sha;
     run(
       config.node,
-      [config.taskLinkCheck, "--base", "refs/remotes/origin/feat/t3-workers-prototype"],
+      [
+        NodePath.join(import.meta.dirname, "t3-nightly-task-links.mjs"),
+        config.taskLinkCheck,
+        "refs/remotes/origin/feat/t3-workers-prototype",
+        upstreamCommit,
+      ],
       tree,
     );
     run("git", ["-c", "push.followTags=false", "push", "-u", "origin", branch], tree);
