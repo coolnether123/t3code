@@ -48,22 +48,21 @@ export function UsageValueHistory({
   const sinceTime = `${subscription.startDate}T00:00:00.000Z`;
   const samples = selectedHistory[0]?.summary?.quotaHistory?.samples ?? [];
   const plan = resetHistoryPlan(initial, sinceTime, now, announcements, samples);
-  const missing = plan.flatMap((window) => window.missing).slice(-64);
-  const costs = useUsage(ready ? (quotaCostWindow(missing) ?? historyInput) : historyInput);
+  // A saved row covers one transcript home, not every source on the environment.
+  // Read whole windows so an empty home's ledger cannot hide another home's usage.
+  const intervals = plan.slice(-64).map((window) => ({
+    id: `transcript-window:${window.sinceTime}`,
+    sinceTime: window.sinceTime,
+    untilTime: window.untilTime,
+  }));
+  const costs = useUsage(ready ? (quotaCostWindow(intervals) ?? historyInput) : historyInput);
   const months = usageMonthIntervals(subscription.startDate, now);
   const monthly = useUsage(
     ready ? (quotaCostWindow(months.slice(-64)) ?? historyInput) : historyInput,
   );
-  const saved = [
-    ...initial,
-    ...costs.environments
-      .filter(selected)
-      .flatMap((entry) => entry.summary?.quotaCostSnapshots ?? []),
-  ];
-  const pendingCosts = costs.environments
+  const scannedCosts = costs.environments
     .filter(selected)
-    .flatMap((entry) => entry.summary?.quotaCosts ?? [])
-    .filter((row) => !row.complete && row.unpricedRecords === 0);
+    .flatMap((entry) => entry.summary?.quotaCosts ?? []);
   const unavailableHistory = costs.environments
     .filter(selected)
     .some((entry) =>
@@ -72,21 +71,44 @@ export function UsageValueHistory({
       ),
     );
   const pendingLabel = unavailableHistory ? "Incomplete transcript history" : "Still counting";
-  const windows = resetHistoryPlan(saved, sinceTime, now, announcements, samples).map((window) => {
-    const pending = pendingCosts.filter((row) =>
-      window.missing.some((gap) => gap.id === row.intervalId),
+  const windows = plan.map((window) => {
+    const scanned = scannedCosts.filter(
+      (row) => row.intervalId === `transcript-window:${window.sinceTime}`,
     );
+    const bySource = new Map<string, (typeof scanned)[number] | (typeof window.sources)[number]>();
+    for (const row of window.sources) {
+      const key = JSON.stringify(row.fingerprint);
+      const previous = bySource.get(key);
+      bySource.set(
+        key,
+        previous
+          ? {
+              ...row,
+              costUsd: previous.costUsd + row.costUsd,
+              models: [...(previous.models ?? []), ...(row.models ?? [])],
+            }
+          : row,
+      );
+    }
+    for (const row of scanned) {
+      const key = JSON.stringify(row.fingerprint);
+      if (row.costUsd >= (bySource.get(key)?.costUsd ?? 0)) bySource.set(key, row);
+    }
+    const sources = [...bySource.values()];
     return {
       ...window,
-      pending,
-      estimatedFromTranscripts: window.estimatedFromTranscripts || pending.length > 0,
-      costUsd: window.costUsd + pending.reduce((sum, row) => sum + row.costUsd, 0),
+      sources,
+      complete:
+        scanned.length > 0 && scanned.every((row) => row.complete && row.unpricedRecords === 0),
+      estimatedFromTranscripts:
+        window.estimatedFromTranscripts || scanned.some((row) => !row.complete),
+      costUsd: Math.round(sources.reduce((sum, row) => sum + row.costUsd, 0) * 100) / 100,
     };
   });
   const paid = subscriptionPayments(subscription.startDate, subscription.monthlyUsd, now);
   const totalPaid = paid.reduce((sum, payment) => sum + payment.paidUsd, 0);
   const totalValue = windows.reduce((sum, window) => sum + window.costUsd, 0);
-  const counting = !ready || windows.some((window) => window.missing.length > 0);
+  const counting = !ready || windows.some((window) => !window.complete);
   const ratio = (value: number, payment: number) =>
     payment > 0 ? `${(value / payment).toFixed(1)}×` : "";
   const monthlyRows = monthly.environments
@@ -94,8 +116,11 @@ export function UsageValueHistory({
     .flatMap((entry) => entry.summary?.quotaCosts ?? []);
   const monthValue = (id: string) => {
     const rows = monthlyRows.filter((row) => row.intervalId === id);
-    return rows.length > 0 && rows.every((row) => row.complete && row.unpricedRecords === 0)
-      ? rows.reduce((sum, row) => sum + row.costUsd, 0)
+    return rows.length > 0
+      ? {
+          costUsd: rows.reduce((sum, row) => sum + row.costUsd, 0),
+          complete: rows.every((row) => row.complete && row.unpricedRecords === 0),
+        }
       : null;
   };
   return (
@@ -117,7 +142,7 @@ export function UsageValueHistory({
                   {formatUsd(payment)} paid ·{" "}
                   {value === null
                     ? pendingLabel
-                    : `${formatUsd(value)} value · ${ratio(value, payment)}`}
+                    : `${formatUsd(value.costUsd)} value · ${ratio(value.costUsd, payment)}${value.complete ? "" : ` · ${pendingLabel}`}`}
                 </dd>
               </div>
             );
@@ -128,10 +153,10 @@ export function UsageValueHistory({
         <ol className="divide-y divide-border">
           {windows.toReversed().map((window) => {
             const models = new Map<string, number>();
-            for (const row of [...window.sources, ...window.pending])
+            for (const row of window.sources)
               for (const model of row.models ?? [])
                 models.set(model.model, (models.get(model.model) ?? 0) + model.costUsd);
-            const complete = window.missing.length === 0;
+            const complete = window.complete;
             return (
               <li key={window.sinceTime} className="py-3">
                 <details>

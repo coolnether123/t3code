@@ -21,18 +21,19 @@ export function cleanResetLedger(rows: readonly UsageQuotaCostSnapshot[]) {
     (row) =>
       row.fingerprint.provider === "codex" &&
       !row.estimatedFromTranscripts &&
-      !/^(api-pace:|compare:|month:|codex-resets:)/.test(row.intervalId),
+      !/^(api-pace:|compare:|month:|codex-resets:|chart:)/.test(row.intervalId),
   );
   for (const row of rows) {
     if (
       row.fingerprint.provider !== "codex" ||
-      /^(api-pace:|compare:|month:|codex-resets:)/.test(row.intervalId)
+      /^(api-pace:|compare:|month:|codex-resets:|chart:)/.test(row.intervalId)
     )
       continue;
     if (
       row.estimatedFromTranscripts &&
       observed.some(
         (other) =>
+          (other.records > 0 || row.records === 0) &&
           time(other.sinceTime) < time(row.untilTime) &&
           time(other.untilTime) > time(row.sinceTime),
       )
@@ -42,8 +43,11 @@ export function cleanResetLedger(rows: readonly UsageQuotaCostSnapshot[]) {
     const old = byStart.get(key);
     if (
       !old ||
-      time(row.untilTime) > time(old.untilTime) ||
-      (time(row.untilTime) === time(old.untilTime) && time(row.recordedAt) > time(old.recordedAt))
+      (row.costUsd > 0 && old.costUsd === 0) ||
+      ((row.costUsd > 0 || old.costUsd === 0) &&
+        (time(row.untilTime) > time(old.untilTime) ||
+          (time(row.untilTime) === time(old.untilTime) &&
+            time(row.recordedAt) > time(old.recordedAt))))
     )
       byStart.set(key, row);
   }
@@ -54,12 +58,21 @@ export function cleanResetLedger(rows: readonly UsageQuotaCostSnapshot[]) {
       Math.max(longestEnd.get(time(row.sinceTime)) ?? 0, time(row.untilTime)),
     );
   const candidates = [...byStart.values()].filter(
-    (row) => time(row.untilTime) === longestEnd.get(time(row.sinceTime)),
+    (row) =>
+      time(row.untilTime) === longestEnd.get(time(row.sinceTime)) ||
+      (row.costUsd > 0 &&
+        ![...byStart.values()].some(
+          (other) =>
+            other.costUsd > 0 &&
+            time(other.sinceTime) === time(row.sinceTime) &&
+            time(other.untilTime) > time(row.untilTime),
+        )),
   );
   const kept = candidates.filter(
     (row) =>
       !candidates.some(
         (other) =>
+          (other.costUsd > 0 || row.costUsd === 0) &&
           time(other.sinceTime) <= time(row.sinceTime) &&
           time(other.untilTime) >= time(row.untilTime) &&
           (time(other.sinceTime) < time(row.sinceTime) ||
@@ -124,6 +137,7 @@ export function resetHistoryPlan(
     if (reset <= start || reset >= end) continue;
     // A public announcement can precede the account reset. Observed windows own that boundary.
     if (
+      [...boundaries].some((boundary) => Math.abs(reset - boundary) < 15 * 60_000) ||
       observed.some(
         (row, index) =>
           (reset >= time(row.sinceTime) && reset <= time(row.untilTime) + 15 * 60_000) ||

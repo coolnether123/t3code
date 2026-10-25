@@ -108,3 +108,97 @@ it("starts July backfill and shows paid value without opening History", async ()
     ),
   ).toBe(true);
 });
+
+it.each([false, true])(
+  "counts recent windows with an empty saved home, scan complete=%s",
+  async (complete) => {
+    state.publicHistory = { announcements: [], checkedAt: 0, status: "ready" };
+    const fingerprint = {
+      hostId: "desktop",
+      provider: "codex",
+      resolvedHomePath: "/sessions",
+      volumeId: "1",
+    };
+    const start = "2026-10-25T06:10:31.050Z";
+    const end = "2026-10-25T12:20:00Z";
+    state.environments = [
+      {
+        environmentId: "desktop",
+        label: "Desktop",
+        isPending: false,
+        error: null,
+        summary: {
+          readAt: end,
+          sources: [],
+          quotaCostSnapshots: [
+            {
+              intervalId: start,
+              sinceTime: start,
+              untilTime: end,
+              costUsd: 0,
+              records: 0,
+              fingerprint: { ...fingerprint, resolvedHomePath: "/empty" },
+              recordedAt: end,
+              firstRemainingPercent: 100,
+              lastRemainingPercent: 56,
+              resetsAt: "2026-11-01T06:10:00Z",
+            },
+          ],
+        },
+      },
+    ];
+    window.localStorage.setItem(
+      "t3code:usage-limits-view:v1",
+      JSON.stringify({ provider: "codex", tab: "cycles" }),
+    );
+    state.useUsage.mockImplementation((input: UsageSummaryInput) => ({
+      environments: input.quotaIntervals
+        ? [
+            {
+              ...(state.environments[0] as object),
+              summary: {
+                readAt: end,
+                sources: [
+                  {
+                    status: complete ? "ok" : "partial",
+                    message: complete ? null : "Cached transcripts no longer have source files",
+                  },
+                ],
+                quotaCosts: input.quotaIntervals.map((interval) => ({
+                  intervalId: interval.id,
+                  complete,
+                  costUsd: interval.id.startsWith("month:")
+                    ? 321
+                    : interval.sinceTime === start
+                      ? 123
+                      : 0,
+                  records: 1,
+                  unpricedRecords: 0,
+                  fingerprint,
+                })),
+              },
+            },
+          ]
+        : state.environments,
+      isPending: false,
+      refresh: state.refresh,
+    }));
+    await using screen = await render(<UsageResetPage />);
+    await expect.element(screen.getByText(/paid.*\$123.00 estimated API value/)).toBeVisible();
+    await expect
+      .element(
+        screen.getByText(complete ? /^\$123.00$/ : /^\$123.00 · Incomplete transcript history$/),
+      )
+      .toBeVisible();
+    await screen.getByText(/paid.*estimated API value/).click();
+    await expect
+      .element(
+        screen
+          .getByText(
+            complete ? /\$321.00 value · 1.6×$/ : /\$321.00 value.*Incomplete transcript history/,
+          )
+          .first(),
+      )
+      .toBeVisible();
+  },
+);
