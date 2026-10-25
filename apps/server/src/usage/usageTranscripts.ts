@@ -7,6 +7,7 @@
  * @module usageTranscripts
  */
 import type { UsageProviderKind, UsageTokenTotals } from "@t3tools/contracts";
+import * as CodexUsage from "../provider/Drivers/codexUsage.ts";
 import { CLAUDE_SYNTHETIC_MODEL } from "../provider/Drivers/claudeUsage.ts";
 import { normalizeServiceTier } from "./codexServiceTier.ts";
 
@@ -30,6 +31,7 @@ export interface UsageRecord {
    * Key for cross-file de-duplication, or `null` when the record is inherently
    * unique and needs no dedup.
    */
+  readonly unresolvedServiceTierTurnId?: string;
   readonly dedupeKey: string | null;
 }
 
@@ -339,6 +341,7 @@ export function parseOpenCodeMessageValue(
  * attribute correctly from the switch onward.
  */
 export interface CodexScanState {
+  providerState?: CodexUsage.CodexScanState;
   model: string;
   serviceTier?: string | undefined;
   turnId?: string | undefined;
@@ -352,6 +355,7 @@ export interface CodexScanState {
 
 export function initialCodexScanState(): CodexScanState {
   return {
+    providerState: CodexUsage.initialCodexScanState(),
     model: "",
     sessionId: "",
     lastUsageSignature: null,
@@ -361,35 +365,7 @@ export function initialCodexScanState(): CodexScanState {
   };
 }
 
-/**
- * A forked or subagent rollout opens with the parent's full history copied in,
- * every line re-stamped to the fork instant. Those copies are written in one
- * synchronous burst (observed gaps 0-40ms), while the child's first genuine
- * usage event only lands after a real model turn (observed 5s+). One second of
- * separation splits the two cleanly; `ccusage` uses the same threshold.
- */
-const FORK_COPY_MAX_GAP_MS = 1000;
-
-/** Whether a `session_meta` payload marks the rollout as a fork or subagent. */
-function isForkedSessionMeta(payload: Record<string, unknown>): boolean {
-  if (typeof payload["forked_from_id"] === "string") return true;
-  const source = payload["source"];
-  if (typeof source !== "object" || source === null) return false;
-  const subagent = (source as Record<string, unknown>)["subagent"];
-  if (typeof subagent !== "object" || subagent === null) return false;
-  const spawn = (subagent as Record<string, unknown>)["thread_spawn"];
-  if (typeof spawn !== "object" || spawn === null) return false;
-  return typeof (spawn as Record<string, unknown>)["parent_thread_id"] === "string";
-}
-
-/**
- * Feeds one line of a Codex rollout into `state`, returning a record when the
- * line was a usage event.
- *
- * Deltas come from `last_token_usage`. Summing those across a session
- * reconciles with the session's final `total_token_usage`, provided
- * consecutive duplicate events are dropped, which this does.
- */
+/** Keeps native run attribution while the provider parser owns counter reconciliation. */
 export function parseCodexLine(line: string, state: CodexScanState): UsageRecord | null {
   let parsed: unknown;
   try {
@@ -398,119 +374,52 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
     return null;
   }
   if (typeof parsed !== "object" || parsed === null) return null;
-
-  const record = parsed as Record<string, unknown>;
-  const payload = record["payload"];
+  const envelope = parsed as Record<string, unknown>;
+  const payload = envelope["payload"];
   if (typeof payload !== "object" || payload === null) return null;
-  const payloadRecord = payload as Record<string, unknown>;
-  const payloadType = payloadRecord["type"];
-
-  if (record["type"] === "session_meta") {
-    // Only the first meta describes this file's own session. A forked rollout
-    // repeats the ancestors' metas right after it; letting those through would
-    // reassign every subsequent record to an ancestor session.
-    if (state.sawSessionMeta) return null;
-    state.sawSessionMeta = true;
-    const id = payloadRecord["id"] ?? payloadRecord["session_id"];
-    if (typeof id === "string") state.sessionId = id;
-    const metaTimestampMs = parseTimestampMs(record["timestamp"]);
-    if (metaTimestampMs !== null && isForkedSessionMeta(payloadRecord)) {
-      state.suppressingForkCopies = true;
-      state.forkCopyAnchorMs = metaTimestampMs;
-    }
-    return null;
+  const fields = payload as Record<string, unknown>;
+  const providerState = state.providerState ?? CodexUsage.initialCodexScanState();
+  if (envelope["type"] === "turn_context") {
+    const model = typeof fields["model"] === "string" ? fields["model"] : state.model;
+    const turnId = typeof fields["turn_id"] === "string" ? fields["turn_id"] : undefined;
+    // Legacy counters omit cumulative totals, so a distinct turn starts a new duplicate sequence.
+    if (model !== state.model || turnId !== state.turnId) providerState.lastUsageSignature = null;
+    state.serviceTier = normalizeServiceTier(fields["service_tier"] ?? fields["serviceTier"]);
+    state.turnId = turnId;
   }
-
-  if (record["type"] === "turn_context") {
-    const nextModel =
-      typeof payloadRecord["model"] === "string" ? payloadRecord["model"] : state.model;
-    const nextTurnId =
-      typeof payloadRecord["turn_id"] === "string" ? payloadRecord["turn_id"] : undefined;
-    // The same token_count payload can occur in two distinct turns. Keep the
-    // consecutive-event guard, but start a new sequence when the turn context
-    // actually changes so equal-sized turns are not silently dropped.
-    if (nextModel !== state.model || nextTurnId !== state.turnId) {
-      state.lastUsageSignature = null;
-    }
-    state.model = nextModel;
-    state.serviceTier = normalizeServiceTier(
-      payloadRecord["service_tier"] ?? payloadRecord["serviceTier"],
-    );
-    state.turnId = nextTurnId;
-    return null;
-  }
-
-  if (payloadType !== "token_count") return null;
-
-  const info = payloadRecord["info"];
-  if (typeof info !== "object" || info === null) return null;
-  const last = (info as Record<string, unknown>)["last_token_usage"];
-  if (typeof last !== "object" || last === null) return null;
-  const lastRecord = last as Record<string, unknown>;
-
-  // Only an event that is otherwise eligible may consume the duplicate
-  // signature. A token_count arriving before its turn_context (no model yet)
-  // must not poison it, or the re-emitted copy after the model is known would
-  // be skipped as a duplicate and those tokens never counted.
-  const timestampMs = parseTimestampMs(record["timestamp"]);
-  if (timestampMs === null) return null;
-  if (state.model.length === 0) return null;
-
-  // Codex re-emits an unchanged token_count on some stream boundaries. Summing
-  // those would double count, so identical consecutive payloads are skipped.
-  const signature = JSON.stringify(lastRecord);
-  if (signature === state.lastUsageSignature) return null;
-  state.lastUsageSignature = signature;
-
-  // In a forked rollout the copied parent history was already counted from the
-  // parent's own file. Drop the leading burst; the first usage event separated
-  // from its predecessor by a real turn's worth of time ends it for good.
-  if (state.suppressingForkCopies) {
-    if (timestampMs - state.forkCopyAnchorMs < FORK_COPY_MAX_GAP_MS) {
-      state.forkCopyAnchorMs = timestampMs;
-      return null;
-    }
-    state.suppressingForkCopies = false;
-  }
-
-  const inputTokens = int(lastRecord["input_tokens"]);
-  const cachedInputTokens = int(lastRecord["cached_input_tokens"]);
-  const cacheCreationTokens = int(lastRecord["cache_write_input_tokens"]);
-  const outputTokens = int(lastRecord["output_tokens"]);
-
-  const totals: UsageTokenTotals = {
-    // Codex reports `input_tokens` inclusive of the cached portion.
-    uncachedInputTokens: Math.max(0, inputTokens - cachedInputTokens - cacheCreationTokens),
-    cachedInputTokens,
-    cacheCreationTokens,
-    outputTokens,
-    // Reported inside output_tokens, surfaced separately for the token mix.
-    reasoningTokens: Math.min(outputTokens, int(lastRecord["reasoning_output_tokens"])),
-  };
-
-  if (totalTokens(totals) === 0) return null;
-
+  const record = CodexUsage.parseCodexLine(line, providerState);
+  state.providerState = providerState;
+  state.model = providerState.model;
+  state.sessionId = providerState.sessionId;
+  state.lastUsageSignature = providerState.lastUsageSignature;
+  state.sawSessionMeta = providerState.sawSessionMeta;
+  state.suppressingForkCopies = providerState.suppressingForkCopies;
+  state.forkCopyAnchorMs = providerState.forkCopyAnchorMs;
+  if (record === null) return null;
+  const info = fields["info"];
   const tier =
     normalizeServiceTier(
-      (info as Record<string, unknown>)["service_tier"] ?? payloadRecord["service_tier"],
-    ) ?? state.serviceTier;
-  const nativeSessionId = knownNativeSessionId(state.sessionId);
+      (typeof info === "object" && info !== null
+        ? (info as Record<string, unknown>)["service_tier"]
+        : undefined) ?? fields["service_tier"],
+    ) ??
+    (providerState.sawThreadSettings
+      ? record.speed === "fast"
+        ? "priority"
+        : record.speed === "ultrafast"
+          ? "ultrafast"
+          : "default"
+      : state.serviceTier);
+  const nativeSessionId = knownNativeSessionId(record.sessionId);
   return {
-    provider: "codex",
-    timestampMs,
-    model: state.model,
+    ...record,
     ...(state.turnId === undefined ? {} : { turnId: state.turnId }),
-    ...(tier === undefined ? {} : { serviceTier: tier, serviceTierSource: "transcript" as const }),
-    sessionId: state.sessionId,
     ...(nativeSessionId === undefined ? {} : { nativeSessionId }),
-    totals,
-    // Codex does not report cost in the rollout.
-    reportedCostUsd: null,
-    // The same rollout may temporarily exist in the legacy shared home and a
-    // T3-owned home during resume migration. Keep a stable cross-file key so
-    // usage counts that copied event once while preserving distinct turns.
+    ...(tier === undefined ? {} : { serviceTier: tier, serviceTierSource: "transcript" as const }),
     dedupeKey:
-      state.sessionId.length > 0 ? `codex:${state.sessionId}:${timestampMs}:${signature}` : null,
+      record.sessionId.length > 0
+        ? `codex:${record.sessionId}:${record.timestampMs}:${JSON.stringify(record.totals)}`
+        : null,
   };
 }
 

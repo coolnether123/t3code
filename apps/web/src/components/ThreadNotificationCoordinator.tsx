@@ -154,7 +154,10 @@ function EnvironmentNotifications({
       const kind =
         attention && attention !== prior.attention
           ? "input"
-          : completion !== null && (prior.completion === null || completion > prior.completion)
+          : !rawThread.latestRunStopRequested &&
+              !rawThread.latestRunSilent &&
+              completion !== null &&
+              (prior.completion === null || completion > prior.completion)
             ? "completion"
             : null;
       if (!kind) continue;
@@ -226,6 +229,7 @@ function EnvironmentNotifications({
         notification.addEventListener("click", () => {
           notification.close();
           window.focus();
+          void window.desktopBridge?.revealWindow?.().catch(() => undefined);
           void navigate({
             to: "/$environmentId/$threadId",
             params: { environmentId, threadId: thread.id },

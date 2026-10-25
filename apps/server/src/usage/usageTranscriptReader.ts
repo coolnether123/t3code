@@ -552,7 +552,12 @@ export interface OversizedLineRelevance {
 const PREFIX_MARKER_BYTES = 4 * 1024;
 
 const CODEX_LINE_RELEVANCE: OversizedLineRelevance = {
-  prefixMarkers: ['"type":"token_count"', '"type":"turn_context"', '"type":"session_meta"'],
+  prefixMarkers: [
+    '"type":"token_count"',
+    '"type":"turn_context"',
+    '"type":"session_meta"',
+    '"type":"thread_settings_applied"',
+  ],
   anywhereMarkers: [],
 };
 // Claude writes `usage` after the message content, so it can sit anywhere.
@@ -718,7 +723,14 @@ export async function readTranscriptRecords(
   }
 
   const records: UsageRecord[] = [];
-  const codexState = options.codexState ? { ...options.codexState } : initialCodexScanState();
+  const codexState = options.codexState
+    ? {
+        ...options.codexState,
+        ...(options.codexState.providerState === undefined
+          ? {}
+          : { providerState: { ...options.codexState.providerState } }),
+      }
+    : initialCodexScanState();
 
   try {
     const start = options.startByte ?? 0;
@@ -736,7 +748,8 @@ export async function readTranscriptRecords(
           if (
             !mightCarryUsage(line, provider) &&
             !line.includes('"turn_context"') &&
-            !line.includes('"session_meta"')
+            !line.includes('"session_meta"') &&
+            !line.includes('"thread_settings_applied"')
           ) {
             return;
           }

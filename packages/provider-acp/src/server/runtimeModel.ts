@@ -398,15 +398,23 @@ type AcpToolCallUpdate = Extract<
   { readonly sessionUpdate: "tool_call" | "tool_call_update" }
 >;
 
+type AcpSelectConfigOption = Extract<
+  EffectAcpSchema.SessionConfigOption,
+  { readonly type: "select" }
+>;
+
+// ACP resolves options in the same category by array order.
+export function findModelConfigOption(
+  configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption> | null | undefined,
+): AcpSelectConfigOption | undefined {
+  return configOptions?.find(
+    (option): option is AcpSelectConfigOption =>
+      option.category === "model" && option.type === "select" && option.id.trim().length > 0,
+  );
+}
+
 export function extractModelConfigId(sessionResponse: AcpSessionSetupResponse): string | undefined {
-  const configOptions = sessionResponse.configOptions;
-  if (!configOptions) return undefined;
-  for (const opt of configOptions) {
-    if (opt.category === "model" && opt.id.trim().length > 0) {
-      return opt.id.trim();
-    }
-  }
-  return undefined;
+  return findModelConfigOption(sessionResponse.configOptions)?.id.trim();
 }
 
 export function findSessionConfigOption(
@@ -785,7 +793,7 @@ function normalizeToolKind(kind: unknown): string | undefined {
   return typeof kind === "string" && kind.trim().length > 0 ? kind.trim() : undefined;
 }
 
-export function canonicalItemTypeFromAcpToolKind(kind: string | undefined): ToolLifecycleItemType {
+function canonicalItemTypeFromAcpToolKind(kind: string | undefined): ToolLifecycleItemType {
   switch (kind) {
     case "read":
       return "dynamic_tool_call";
@@ -806,6 +814,7 @@ export function canonicalItemTypeFromAcpToolKind(kind: string | undefined): Tool
 function makeToolCallState(
   input: {
     readonly toolCallId: string;
+    readonly name?: string | null | undefined;
     readonly title?: string | null | undefined;
     readonly kind?: EffectAcpSchema.ToolKind | null | undefined;
     readonly status?: EffectAcpSchema.ToolCallStatus | null | undefined;
@@ -833,6 +842,7 @@ function makeToolCallState(
       ? title
       : undefined;
   const data: Record<string, unknown> = { toolCallId };
+  if (input.name != null) data.name = input.name;
   if (kind) {
     data.kind = kind;
   }
@@ -903,6 +913,7 @@ function parseTypedToolCallState(
   return makeToolCallState(
     {
       toolCallId: event.toolCallId,
+      name: event.name,
       title: event.title,
       kind: event.kind,
       status: event.status,
@@ -1080,15 +1091,11 @@ const T3_MCP_TITLE_SUFFIX_CALL =
   /^(?<tool>[A-Za-z0-9][A-Za-z0-9_.-]*?)(?: \(t3[-_ ]?code MCP Server\)(?::|$)|[-_.]t3[-_ ]?code$)/i;
 
 /**
- * glm-acp-agent and Kimi CLI register injected MCP tools under their bare
- * names; Kimi additionally appends ": <raw args json>". The T3 inventory gate
- * alone is not enough: an agent can have its own tool of the same name (Hermes
- * has a built-in `delegate_task`) and title it "<tool>: <description>", so only
- * a bare name or a JSON object after the colon counts. The match stops at the
- * opening brace because Kimi retitles on every streamed args chunk, so the
- * JSON is often still incomplete.
+ * glm and Kimi use bare names; Antigravity uses "Running <tool>". Kimi appends
+ * streamed JSON arguments. Require a name or JSON opening brace so built-ins
+ * titled "<tool>: <description>" cannot impersonate an inventory entry.
  */
-const T3_MCP_BARE_TITLE_CALL = /^(?<tool>[A-Za-z0-9_]+)(?::\s*\{|$)/;
+const T3_MCP_BARE_TITLE_CALL = /^(?:Running )?(?<tool>[A-Za-z0-9_]+)(?::\s*\{|$)/;
 
 /**
  * ACP has no typed MCP tool-call item, so agents surface MCP calls in agent-specific shapes:
@@ -1279,27 +1286,24 @@ export interface SessionLoadGate {
   readonly candidateConfigOptions?: ReadonlyArray<EffectAcpSchema.SessionConfigOption>;
 }
 
-export const waitForSessionLoadReplayIdle = (input: {
+export const waitForSessionLoadReplayIdle = Effect.fn(
+  "AcpRuntimeModel.waitForSessionLoadReplayIdle",
+)(function* (input: {
   readonly gateRef: Ref.Ref<Option.Option<SessionLoadGate>>;
-}): Effect.Effect<EffectAcpSchema.LoadSessionResponse, never> =>
-  Effect.gen(function* () {
-    const pollInterval = Duration.millis(25);
-    while (true) {
-      const gate = yield* Ref.get(input.gateRef);
-      if (
-        Option.isSome(gate) &&
-        gate.value.active &&
-        gate.value.lastActivityAtMillis !== undefined
-      ) {
-        const idleGapMillis = Duration.toMillis(gate.value.idleGap);
-        const nowMillis = yield* Clock.currentTimeMillis;
-        if (nowMillis - gate.value.lastActivityAtMillis >= idleGapMillis) {
-          return syntheticLoadSessionResponseFromInitialize(gate.value.initializeResult);
-        }
+}): Effect.fn.Return<EffectAcpSchema.LoadSessionResponse, never> {
+  const pollInterval = Duration.millis(25);
+  while (true) {
+    const gate = yield* Ref.get(input.gateRef);
+    if (Option.isSome(gate) && gate.value.active && gate.value.lastActivityAtMillis !== undefined) {
+      const idleGapMillis = Duration.toMillis(gate.value.idleGap);
+      const nowMillis = yield* Clock.currentTimeMillis;
+      if (nowMillis - gate.value.lastActivityAtMillis >= idleGapMillis) {
+        return syntheticLoadSessionResponseFromInitialize(gate.value.initializeResult);
       }
-      yield* Effect.sleep(pollInterval);
     }
-  });
+    yield* Effect.sleep(pollInterval);
+  }
+});
 
 export function sessionModelStateFromInitialize(
   initializeResult: EffectAcpSchema.InitializeResponse,

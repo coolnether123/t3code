@@ -2,6 +2,8 @@ import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import { makeProviderUsageReader } from "./usageProviderReaders.ts";
+import { BUILT_IN_USAGE_DRIVERS } from "../provider/builtInDrivers.ts";
+import * as ProviderScanCache from "./usageProviderScanCache.ts";
 /**
  * UsageService - scans provider transcripts and returns priced usage buckets.
  *
@@ -60,6 +62,7 @@ import * as Scope from "effect/Scope";
 import { HttpClient, HttpClientResponse } from "effect/http";
 
 import { ServerConfig } from "../config.ts";
+import * as CodexUsageHistory from "./CodexUsageHistory.ts";
 import * as UsageProjection from "./UsageProjection.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
@@ -206,11 +209,6 @@ const transcriptIndexRevisionOf = (
 
 /** Files changed in this span are checked between complete directory audits. */
 const RECENT_TRANSCRIPT_WINDOW_MS = 48 * 60 * 60 * 1000;
-/**
- * A page asks for several windows at once. Within this span they share one
- * transcript directory listing instead of each walking the same directories.
- */
-const TRANSCRIPT_INVENTORY_REUSE_MS = 10 * 1000;
 
 /** Full audits catch deleted history without putting a tree walk on every request. */
 const FULL_SCAN_INTERVAL_MS = 15 * 60 * 1000;
@@ -536,17 +534,11 @@ export const make = Effect.gen(function* () {
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const httpClient = yield* HttpClient.HttpClient;
   const readProviderUsage = yield* makeProviderUsageReader;
+  const usageHistory = yield* Effect.serviceOption(CodexUsageHistory.CodexUsageHistory);
   const serviceScope = yield* Scope.make("sequential");
   const scanSemaphore = yield* Semaphore.make(1);
 
   const recentScanAt = new Map<string, number>();
-  const recentInventories = new Map<
-    string,
-    {
-      readonly listedAtMs: number;
-      readonly listing: Awaited<ReturnType<typeof listTranscriptFilesBounded>>;
-    }
-  >();
   let repeatedInputCatalog: RepeatedInputCatalog | null = null;
   let repeatedInputCatalogRoots = "";
   let repeatedInputCatalogAtMs = 0;
@@ -713,8 +705,8 @@ export const make = Effect.gen(function* () {
    * Claude's config dir is the home itself when overridden, but a default
    * install nests transcripts under `~/.claude/projects`. Probe both.
    */
-  const resolveClaudeTranscriptDir = (homePath: string) =>
-    Effect.gen(function* () {
+  const resolveClaudeTranscriptDir = Effect.fn("UsageService.resolveClaudeTranscriptDir")(
+    function* (homePath: string) {
       const nested = path.join(homePath, ".claude", "projects");
       const nestedExists = yield* fileSystem
         .exists(nested)
@@ -724,7 +716,8 @@ export const make = Effect.gen(function* () {
         .exists(fallback)
         .pipe(Effect.catchCause(() => Effect.succeed(false)));
       return nestedExists ? nested : fallbackExists ? fallback : nested;
-    });
+    },
+  );
 
   /** Resolves the transcript directory for each provider. */
   const resolveTranscriptDirs = Effect.fn("UsageService.resolveTranscriptDirs")(function* (
@@ -853,7 +846,7 @@ export const make = Effect.gen(function* () {
    * between them so the server keeps answering while a large cache moves over.
    * The legacy file is renamed, not deleted, so it remains a manual backup.
    */
-  const importLegacyScanCache = Effect.gen(function* () {
+  const importCustomScanCache = Effect.gen(function* () {
     if (!scanStore.persistent) {
       yield* Effect.logWarning("Usage scan cache database is unavailable; using a process cache.", {
         cause: String(scanStore.openError),
@@ -864,7 +857,16 @@ export const make = Effect.gen(function* () {
       Effect.flatMap((raw) => decodeScanCacheFile(raw)),
       Effect.orElseSucceed(() => null),
     );
-    if (document !== null) {
+    const providerDocument =
+      typeof document === "object" &&
+      document !== null &&
+      "files" in document &&
+      typeof document.files === "object" &&
+      document.files !== null &&
+      Object.values(document.files).some(
+        (entry) => typeof entry === "object" && entry !== null && "t" in entry,
+      );
+    if (document !== null && !providerDocument) {
       let batch: [string, CachedFile][] = [];
       let rows = 0;
       for (const [filePath, entry] of decodeScanCacheEntries(document)) {
@@ -886,19 +888,78 @@ export const make = Effect.gen(function* () {
         }
       }
     }
-    if (!scanStore.persistent) return;
+    if (!scanStore.persistent) return document;
     scanStore.writeFlag(LEGACY_SCAN_CACHE_IMPORT_FLAG, DateTime.formatIso(yield* DateTime.now));
-    if (document !== null) {
+    if (document !== null && !providerDocument) {
       yield* fileSystem
         .rename(legacyScanCachePath, `${legacyScanCachePath}.imported`)
         .pipe(Effect.ignore);
     }
-  }).pipe(Effect.withSpan("UsageService.importLegacyScanCache"));
+    return document;
+  }).pipe(Effect.withSpan("UsageService.importCustomScanCache"));
+  const importLegacyScanCache = Effect.fn("UsageService.importLegacyScanCache")(function* () {
+    const customDocument = yield* importCustomScanCache;
+    const flag = "providerJsonImportedAt";
+    if (scanStore.readFlag(flag) !== undefined) return;
+    const formats = new Map(
+      BUILT_IN_USAGE_DRIVERS.flatMap((driver) =>
+        driver.usage?.kind === "transcripts"
+          ? [[driver.usage.provider, driver.usage.format] as const]
+          : [],
+      ),
+    );
+    for (const name of [
+      ProviderScanCache.SCAN_CACHE_FILE_NAME,
+      ...ProviderScanCache.LEGACY_SCAN_CACHE_FILE_NAMES,
+    ]) {
+      // Both cache formats used this filename. Reuse the document read before
+      // the custom importer renamed it to keep migration consistent.
+      const document =
+        name === "usage-scan-cache.json" && customDocument !== undefined
+          ? customDocument
+          : yield* fileSystem.readFileString(path.join(config.stateDir, name)).pipe(
+              Effect.flatMap(decodeScanCacheFile),
+              Effect.orElseSucceed(() => null),
+            );
+      for (const [filePath, entry] of ProviderScanCache.decodeScanCache(document, formats)) {
+        if (
+          (entry.provider !== "codex" && entry.provider !== "claude") ||
+          scanStore.meta(filePath) !== undefined
+        )
+          continue;
+        const records = dedupeWithinFile(
+          [...entry.records, ...entry.tailRecords].map((record) => ({
+            ...record,
+            ...(record.sessionId.length === 0 ? {} : { nativeSessionId: record.sessionId }),
+            ...(record.unresolvedServiceTierTurnId === undefined
+              ? {}
+              : { turnId: record.unresolvedServiceTierTurnId }),
+            ...(record.provider === "codex" && record.sessionId.length > 0
+              ? {
+                  dedupeKey: `codex:${record.sessionId}:${record.timestampMs}:${JSON.stringify(record.totals)}`,
+                }
+              : {}),
+          })),
+        );
+        // Keep deleted-file history. Existing files cold-read into the bounded scanner's cursor.
+        scanStore.set(filePath, {
+          provider: entry.provider,
+          size: Math.max(0, entry.size),
+          mtimeMs: entry.mtimeMs,
+          records,
+          malformedRecords: entry.malformedRecords,
+          ...(entry.size > 0 ? { scanCursor: 0 } : {}),
+        });
+        yield* Effect.yieldNow;
+      }
+    }
+    if (scanStore.persistent) scanStore.writeFlag(flag, DateTime.formatIso(yield* DateTime.now));
+  });
   // Detached from the request that starts it: a reader that reaches its
   // deadline must not interrupt, and later restart, a half-finished import.
   let legacyScanCacheImport: Fiber.Fiber<void> | undefined;
   const ensureLegacyScanCacheImported = Effect.gen(function* () {
-    legacyScanCacheImport ??= yield* Effect.forkIn(importLegacyScanCache, serviceScope, {
+    legacyScanCacheImport ??= yield* Effect.forkIn(importLegacyScanCache(), serviceScope, {
       startImmediately: true,
     });
     yield* Fiber.await(legacyScanCacheImport);
@@ -977,64 +1038,126 @@ export const make = Effect.gen(function* () {
     ),
   );
 
+  const resolveHistoricalTiers = Effect.fn("UsageService.resolveHistoricalTiers")(function* (
+    records: readonly UsageRecord[],
+  ) {
+    if (Option.isNone(usageHistory)) return records;
+    const requests = new Map<CodexUsageHistory.CodexUsageHistoryRequest, UsageRecord>();
+    for (const record of records) {
+      if (record.unresolvedServiceTierTurnId === undefined || record.serviceTier !== undefined)
+        continue;
+      requests.set(
+        {
+          sessionId: record.sessionId,
+          nativeTurnId: record.unresolvedServiceTierTurnId,
+          model: record.model,
+        },
+        record,
+      );
+    }
+    if (requests.size === 0) return records;
+    const resolved = yield* usageHistory.value.resolve([...requests.keys()]).pipe(
+      Effect.catchTags({
+        CodexUsageHistoryReadError: () =>
+          Effect.succeed(
+            new Map<
+              CodexUsageHistory.CodexUsageHistoryRequest,
+              "standard" | "fast" | "ultrafast"
+            >(),
+          ),
+      }),
+    );
+    const corrections = new Map<UsageRecord, UsageRecord>();
+    for (const [request, speed] of resolved) {
+      const record = requests.get(request);
+      if (record === undefined) continue;
+      const { unresolvedServiceTierTurnId: _pending, ...settled } = record;
+      corrections.set(record, {
+        ...settled,
+        speed,
+        serviceTier: speed === "fast" ? "priority" : speed === "standard" ? "default" : speed,
+        serviceTierSource: "t3Request",
+      });
+    }
+    return corrections.size === 0
+      ? records
+      : records.map((record) => corrections.get(record) ?? record);
+  });
+
   /** Parses one transcript, reusing the cached result when it is unchanged. */
-  const readFileRecords = (
+  const readFileRecords = Effect.fn("UsageService.readFileRecords")(function* (
     filePath: string,
     size: number,
     mtimeMs: number,
     provider: UsageProviderKind,
     requestedStartByte: number,
-  ): Effect.Effect<{ readonly records: readonly UsageRecord[]; readonly complete: boolean }> =>
-    Effect.gen(function* () {
-      const meta = scanStore.meta(filePath);
-      // Provider is part of the identity: if both providers were ever pointed
-      // at one directory, a hit parsed by the other parser must not be reused.
+  ): Effect.fn.Return<{ readonly records: readonly UsageRecord[]; readonly complete: boolean }> {
+    const meta = scanStore.meta(filePath);
+    // Provider is part of the identity: if both providers were ever pointed
+    // at one directory, a hit parsed by the other parser must not be reused.
+    if (
+      meta &&
+      meta.size === size &&
+      meta.mtimeMs === mtimeMs &&
+      meta.provider === provider &&
+      meta.scanCursor === undefined &&
+      meta.scanSkippedLines === undefined &&
+      meta.scanDiscardingLine !== true
+    ) {
+      const warm = scanStore.load(filePath);
       if (
-        meta &&
-        meta.size === size &&
-        meta.mtimeMs === mtimeMs &&
-        meta.provider === provider &&
-        meta.scanCursor === undefined &&
-        meta.scanSkippedLines === undefined &&
-        meta.scanDiscardingLine !== true
+        warm !== undefined &&
+        (provider !== "codex" || warm.codexState?.providerState !== undefined)
       ) {
-        const warm = scanStore.load(filePath);
-        if (warm !== undefined) return { records: warm.records, complete: true };
+        const records = yield* resolveHistoricalTiers(warm.records);
+        if (records !== warm.records)
+          scanStore.set(filePath, { ...warm, records }, { replaceRecords: true });
+        return { records, complete: true };
       }
+    }
 
-      // A resumable entry whose row can no longer be read is parsed again
-      // from the start rather than appended to nothing.
-      const cached = requestedStartByte > 0 ? scanStore.load(filePath) : undefined;
-      const appendable = cached !== undefined;
-      const startByte = appendable ? requestedStartByte : 0;
-      const parsed = yield* Effect.promise(() =>
-        readTranscriptRecords(filePath, provider, {
-          startByte,
-          endByte: Math.min(size - 1, startByte + MAX_TRANSCRIPT_READ_BYTES_PER_FILE - 1),
-          sourceSize: size,
-          ...(appendable && cached.scanDiscardingLine === true ? { discardPartialLine: true } : {}),
-          ...(appendable && provider === "codex" && cached.codexState !== undefined
-            ? { codexState: cached.codexState }
-            : {}),
-        }),
-      );
-      // A read failure is not an empty transcript: caching it under this
-      // (size, mtime) would silently drop the file's usage until it changes.
-      if (parsed === null) return { records: [], complete: false };
-      // Stored already de-duplicated within the file, which is 99% of all
-      // duplicates. The aggregator still runs the cross-file dedupe pass.
-      const records = dedupeWithinFile([...(appendable ? cached.records : []), ...parsed.records]);
-      const nextByte = Math.min(size, Math.max(startByte, parsed.nextByte));
-      const scanSkippedLines =
-        (appendable ? (cached.scanSkippedLines ?? 0) : 0) + parsed.discardedLines;
-      const reachedEnd = nextByte >= size && !parsed.discardingLine;
-      const complete = reachedEnd && scanSkippedLines === 0;
+    // A resumable entry whose row can no longer be read is parsed again
+    // from the start rather than appended to nothing.
+    const cached = requestedStartByte > 0 ? scanStore.load(filePath) : undefined;
+    const appendable =
+      cached !== undefined &&
+      (provider !== "codex" || cached.codexState?.providerState !== undefined);
+    const startByte = appendable ? requestedStartByte : 0;
+    const parsed = yield* Effect.promise(() =>
+      readTranscriptRecords(filePath, provider, {
+        startByte,
+        endByte: Math.min(size - 1, startByte + MAX_TRANSCRIPT_READ_BYTES_PER_FILE - 1),
+        sourceSize: size,
+        ...(appendable && cached.scanDiscardingLine === true ? { discardPartialLine: true } : {}),
+        ...(appendable && provider === "codex" && cached.codexState !== undefined
+          ? { codexState: cached.codexState }
+          : {}),
+      }),
+    );
+    // A read failure is not an empty transcript: caching it under this
+    // (size, mtime) would silently drop the file's usage until it changes.
+    if (parsed === null)
+      return { records: scanStore.load(filePath)?.records ?? [], complete: false };
+    // Stored already de-duplicated within the file, which is 99% of all
+    // duplicates. The aggregator still runs the cross-file dedupe pass.
+    const parsedRecords = dedupeWithinFile([
+      ...(appendable ? cached.records : []),
+      ...parsed.records,
+    ]);
+    const records = yield* resolveHistoricalTiers(parsedRecords);
+    const nextByte = Math.min(size, Math.max(startByte, parsed.nextByte));
+    const scanSkippedLines =
+      (appendable ? (cached.scanSkippedLines ?? 0) : 0) + parsed.discardedLines;
+    const reachedEnd = nextByte >= size && !parsed.discardingLine;
+    const complete = reachedEnd && scanSkippedLines === 0;
 
-      // Written immediately: a later source can exhaust the response budget,
-      // and the next request, including after a restart, must resume from this
-      // complete-line cursor instead of parsing the chunk again. A file that
-      // only grew appends its new records rather than rewriting its history.
-      scanStore.set(filePath, {
+    // Written immediately: a later source can exhaust the response budget,
+    // and the next request, including after a restart, must resume from this
+    // complete-line cursor instead of parsing the chunk again. A file that
+    // only grew appends its new records rather than rewriting its history.
+    scanStore.set(
+      filePath,
+      {
         size,
         mtimeMs,
         provider,
@@ -1043,9 +1166,11 @@ export const make = Effect.gen(function* () {
         ...(scanSkippedLines === 0 ? {} : { scanSkippedLines }),
         ...(parsed.discardingLine ? { scanDiscardingLine: true } : {}),
         ...(parsed.codexState === undefined ? {} : { codexState: parsed.codexState }),
-      });
-      return { records, complete };
-    });
+      },
+      { replaceRecords: records !== parsedRecords },
+    );
+    return { records, complete };
+  });
 
   const readSummaryUnlocked = Effect.fn("UsageService.readSummaryUnlocked")(function* (
     input: UsageSummaryInput,
@@ -1325,7 +1450,8 @@ export const make = Effect.gen(function* () {
         if (stale !== filePath) staleTranscriptIndexes.add(stale);
       }
       staleTranscriptIndexes.delete(filePath);
-      if (complete) transcriptIndexes.set(filePath, { size, mtimeMs, provider, index });
+      if (complete && !records.some((record) => record.unresolvedServiceTierTurnId !== undefined))
+        transcriptIndexes.set(filePath, { size, mtimeMs, provider, index });
       else transcriptIndexes.delete(filePath);
       return index;
     };
@@ -1362,31 +1488,16 @@ export const make = Effect.gen(function* () {
           recentTranscriptWindowMs: RECENT_TRANSCRIPT_WINDOW_MS,
           fullScanIntervalMs: FULL_SCAN_INTERVAL_MS,
         });
-        const inventoryKey = `${coverageKey}\u0000${plan.scanStartMs}`;
-        const reusable = recentInventories.get(inventoryKey);
         const listing = !plan.shouldRefresh
           ? { files: [], complete: true }
-          : reusable !== undefined &&
-              reusable.listing.complete &&
-              startedAtMs - reusable.listedAtMs < TRANSCRIPT_INVENTORY_REUSE_MS
-            ? reusable.listing
-            : yield* Effect.promise(() =>
-                listTranscriptFilesBounded(
-                  dir,
-                  plan.scanStartMs,
-                  provider,
-                  MAX_TRANSCRIPT_INVENTORY_DURATION_MS,
-                ),
-              ).pipe(
-                Effect.tap((fresh) =>
-                  Effect.sync(() => {
-                    recentInventories.set(inventoryKey, {
-                      listedAtMs: startedAtMs,
-                      listing: fresh,
-                    });
-                  }),
-                ),
-              );
+          : yield* Effect.promise(() =>
+              listTranscriptFilesBounded(
+                dir,
+                plan.scanStartMs,
+                provider,
+                MAX_TRANSCRIPT_INVENTORY_DURATION_MS,
+              ),
+            );
         return {
           provider,
           dir,
@@ -1464,7 +1575,12 @@ export const make = Effect.gen(function* () {
           status: retainedFiles.length > 0 ? "partial" : "missing",
           scannedFiles,
           skippedFiles: 0,
-          malformedRecords: 0,
+          malformedRecords: retainedFiles.reduce(
+            (sum, [, entry]) =>
+              sum +
+              (entry.codexState?.providerState?.malformedRecords ?? entry.malformedRecords ?? 0),
+            0,
+          ),
           distinctSessions: sessionIds.size,
           message:
             retainedFiles.length > 0
@@ -1515,7 +1631,8 @@ export const make = Effect.gen(function* () {
             cached.provider === provider &&
             cached.scanCursor === undefined &&
             cached.scanSkippedLines === undefined &&
-            cached.scanDiscardingLine !== true;
+            cached.scanDiscardingLine !== true &&
+            (provider !== "codex" || cached.codexParserCurrent === true);
           const resumePartial =
             cached !== undefined &&
             cached.size === file.size &&
@@ -1535,7 +1652,8 @@ export const make = Effect.gen(function* () {
             cursorIsUsable &&
             (resumePartial || (cached.scanCursor === undefined && file.size > cached.size)) &&
             (resumePartial || cached.provider === provider) &&
-            (provider === "claude" || (provider === "codex" && cached.hasCodexState));
+            (provider === "claude" ||
+              (provider === "codex" && cached.hasCodexState && cached.codexParserCurrent === true));
           const startByte = warm ? file.size : appendable ? resumeByte : 0;
           const parserMatches = cached?.repeatedInputVersion === REPEATED_INPUT_CACHE_VERSION;
           const repeatedInputWarm =
@@ -1804,6 +1922,13 @@ export const make = Effect.gen(function* () {
         }
       }
 
+      const malformedRecords =
+        provider === "codex"
+          ? selection.files.reduce(
+              (sum, file) => sum + (scanStore.meta(file.path)?.malformedRecords ?? 0),
+              0,
+            )
+          : 0;
       const scanCompleted =
         listingComplete &&
         selection.deferredFiles === 0 &&
@@ -1844,24 +1969,27 @@ export const make = Effect.gen(function* () {
       }
       sources.push({
         fingerprint: { hostId, provider, resolvedHomePath: dir, volumeId },
-        status: !scanCompleted ? "partial" : "ok",
+        status: !scanCompleted || malformedRecords > 0 ? "partial" : "ok",
         scannedFiles,
         skippedFiles,
-        malformedRecords: 0,
+        malformedRecords,
         distinctSessions: sessionIds.size,
-        message: !listingComplete
-          ? "Usage is partial because the transcript inventory exceeded its response budget."
-          : incompleteFiles > 0
-            ? `Usage is partial while ${incompleteFiles} large transcript ${incompleteFiles === 1 ? "is" : "files are"} scanned in complete-line chunks.`
-            : selection.deferredFiles > 0
-              ? `Usage is partial while the transcript cache warms; ${selection.deferredFiles} older or oversized transcript files were deferred.`
-              : provider === "aistudio"
-                ? "AI Studio exports use exact chunk counts and source message dates when present. Older exports without createTime remain on their downloaded-file date; per-turn input context is reconstructed and copied branch prefixes are counted once."
-                : provider === "chatgpt"
-                  ? scannedFiles === 0
-                    ? "ChatGPT import is ready; no conversations.json export has been downloaded yet."
-                    : "ChatGPT exports contain message dates but no token ledger; token counts and API-equivalent cost are estimated from chat text."
-                  : null,
+        message:
+          malformedRecords > 0
+            ? `${malformedRecords} malformed or inconsistent usage records were skipped.`
+            : !listingComplete
+              ? "Usage is partial because the transcript inventory exceeded its response budget."
+              : incompleteFiles > 0
+                ? `Usage is partial while ${incompleteFiles} large transcript ${incompleteFiles === 1 ? "is" : "files are"} scanned in complete-line chunks.`
+                : selection.deferredFiles > 0
+                  ? `Usage is partial while the transcript cache warms; ${selection.deferredFiles} older or oversized transcript files were deferred.`
+                  : provider === "aistudio"
+                    ? "AI Studio exports use exact chunk counts and source message dates when present. Older exports without createTime remain on their downloaded-file date; per-turn input context is reconstructed and copied branch prefixes are counted once."
+                    : provider === "chatgpt"
+                      ? scannedFiles === 0
+                        ? "ChatGPT import is ready; no conversations.json export has been downloaded yet."
+                        : "ChatGPT exports contain message dates but no token ledger; token counts and API-equivalent cost are estimated from chat text."
+                      : null,
       });
     }
 
@@ -1941,7 +2069,7 @@ export const make = Effect.gen(function* () {
         status: scan.status ?? (scan.files === null ? "missing" : "ok"),
         scannedFiles: scan.files?.length ?? 0,
         skippedFiles: 0,
-        malformedRecords: 0,
+        malformedRecords: scan.malformedRecords,
         distinctSessions: sessions.size,
         message: scan.message ?? null,
         ...(scan.action === undefined ? {} : { action: scan.action }),

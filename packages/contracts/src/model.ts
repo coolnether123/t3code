@@ -129,7 +129,7 @@ const PI_DRIVER_KIND = ProviderDriverKind.make("pi");
 const ACP_REGISTRY_DRIVER_KIND = ProviderDriverKind.make("acpRegistry");
 const OPENCODE_DRIVER_KIND = ProviderDriverKind.make("opencode");
 
-export const DEFAULT_MODEL = "gpt-6-astra";
+export const DEFAULT_MODEL = "gpt-6.1-sol";
 
 /**
  * The provider snapshot marks the first of these present in the live

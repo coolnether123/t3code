@@ -149,6 +149,17 @@ function sqliteBackend(filePath: string): Backend {
       last_record TEXT,
       head TEXT NOT NULL
     )`);
+    // Add metadata without discarding retained records from deleted transcripts.
+    const columns = new Set(
+      db
+        .prepare("PRAGMA table_info(files)")
+        .all()
+        .map((column) => column.name),
+    );
+    if (!columns.has("codex_parser_current"))
+      db.exec("ALTER TABLE files ADD COLUMN codex_parser_current INTEGER NOT NULL DEFAULT 0");
+    if (!columns.has("malformed_records"))
+      db.exec("ALTER TABLE files ADD COLUMN malformed_records INTEGER NOT NULL DEFAULT 0");
     db.exec(`CREATE TABLE IF NOT EXISTS chunks (
       path TEXT NOT NULL,
       seq INTEGER NOT NULL,
@@ -175,7 +186,7 @@ function sqliteBackend(filePath: string): Backend {
     `SELECT path, provider, size, mtime_ms, scan_cursor, scan_skipped_lines,
       scan_discarding_line, prefix_fingerprint, repeated_input_version,
       has_codex_state, has_repeated_input, record_count, latest_ms, chunk_count,
-      last_record FROM files`,
+      last_record, codex_parser_current, malformed_records FROM files`,
   );
   const selectHead = db.prepare("SELECT head FROM files WHERE path = ?");
   const selectChunks = db.prepare("SELECT records FROM chunks WHERE path = ? ORDER BY seq");
@@ -183,8 +194,8 @@ function sqliteBackend(filePath: string): Backend {
     `INSERT OR REPLACE INTO files (path, provider, size, mtime_ms, scan_cursor,
       scan_skipped_lines, scan_discarding_line, prefix_fingerprint,
       repeated_input_version, has_codex_state, has_repeated_input, record_count,
-      latest_ms, chunk_count, last_record, head)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      latest_ms, chunk_count, last_record, head, codex_parser_current, malformed_records)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   const insertChunk = db.prepare(
     "INSERT OR REPLACE INTO chunks (path, seq, records) VALUES (?, ?, ?)",
@@ -253,6 +264,8 @@ function sqliteBackend(filePath: string): Backend {
                 : {}),
               ...(repeatedInputVersion === undefined ? {} : { repeatedInputVersion }),
               hasCodexState: row.has_codex_state === 1,
+              codexParserCurrent: row.codex_parser_current === 1,
+              malformedRecords: optionalNumber(row.malformed_records) ?? 0,
               hasRepeatedInput: row.has_repeated_input === 1,
               recordCount,
               latestMs,
@@ -294,6 +307,8 @@ function sqliteBackend(filePath: string): Backend {
             row.chunkCount,
             row.lastRecord,
             head,
+            meta.codexParserCurrent ? 1 : 0,
+            meta.malformedRecords ?? 0,
           );
           if (replaceChunks) deleteChunks.run(path);
           chunks.forEach((records, index) => insertChunk.run(path, firstChunkSeq + index, records));
@@ -498,12 +513,15 @@ export class UsageScanStore {
     return entry;
   }
 
-  set(path: string, entry: CachedFile): void {
-    this.setMany([[path, entry]]);
+  set(path: string, entry: CachedFile, options: { readonly replaceRecords?: boolean } = {}): void {
+    this.setMany([[path, entry]], options);
   }
 
   /** Writes every entry in one transaction, appending records when a file only grew. */
-  setMany(entries: Iterable<readonly [string, CachedFile]>): void {
+  setMany(
+    entries: Iterable<readonly [string, CachedFile]>,
+    options: { readonly replaceRecords?: boolean } = {},
+  ): void {
     const backend = this.#open();
     const writes: WriteRow[] = [];
     const remembered: [string, CachedFile, number][] = [];
@@ -513,6 +531,7 @@ export class UsageScanStore {
       const lastRecord = records.length === 0 ? null : recordSignature(records.at(-1)!);
       const previousCount = previous?.meta.recordCount ?? 0;
       const appendable =
+        !options.replaceRecords &&
         previous !== undefined &&
         previous.meta.provider === entry.provider &&
         previousCount <= records.length &&

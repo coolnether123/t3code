@@ -2,9 +2,9 @@ import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import { EnvironmentId, ProviderInstanceId, USAGE_CONTRACT_VERSION } from "@t3tools/contracts";
 import { mergeUsage } from "@t3tools/shared/usageMerge";
 import type { Atom } from "effect/reactivity";
-import { act, StrictMode } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
+import { StrictMode } from "react";
+import { act, render } from "../../../test/render";
+import { expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 
 import "~/index.css";
@@ -85,13 +85,6 @@ import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { UsagePage } from "./UsagePage";
 
 const PREFERENCES_KEY = "t3code:usage-page-preferences:v1";
-let root: Root;
-let container: HTMLDivElement;
-// Limits refreshes are throttled per environment for the whole session, so each test
-// gets fresh environment ids.
-let environmentNumber = 0;
-let environmentId: EnvironmentId;
-
 function presentation(phase = "connected") {
   return {
     entry: { target: { label: "Test" } },
@@ -137,37 +130,39 @@ const resetsIn = (countdown: string) =>
 const refreshButton = () => page.getByRole("button", { name: "Refresh limits" });
 const selectMetric = (label: string) => userEvent.click(page.getByRole("button", { name: label }));
 
-async function render({ strict = false } = {}) {
+function renderUsagePage({ strict = false } = {}) {
   const content = (
     <RegistryContext.Provider value={appAtomRegistry}>
       <UsagePage />
     </RegistryContext.Provider>
   );
-  await act(async () => root.render(strict ? <StrictMode>{content}</StrictMode> : content));
+  return render(strict ? <StrictMode>{content}</StrictMode> : content);
 }
 
-beforeEach(async () => {
-  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  // The metric toggle and its refresh button only show on wide screens.
-  await page.viewport(1440, 900);
-  vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-09-11T12:00:00Z"));
-  environmentNumber += 1;
-  environmentId = EnvironmentId.make(`test-${environmentNumber}`);
+let fixtureEnvironmentSequence = 0;
+
+async function setup() {
+  await using scope = new AsyncDisposableStack();
+  // The first render reads this time to calculate the quota countdown.
+  scope.use(vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-09-11T12:00:00Z")));
+  const previousPreferences = localStorage.getItem(PREFERENCES_KEY);
+  scope.defer(() => {
+    if (previousPreferences === null) localStorage.removeItem(PREFERENCES_KEY);
+    else localStorage.setItem(PREFERENCES_KEY, previousPreferences);
+  });
   localStorage.setItem(PREFERENCES_KEY, JSON.stringify({ metric: "limits", windowDays: 30 }));
   state.refreshProviders.mockReset().mockResolvedValue(undefined);
+  scope.defer(() => {
+    state.refreshProviders.mockReset();
+  });
+  // The limits throttle survives remounts, so each test needs its own environment identity.
+  const environmentId = EnvironmentId.make(`usage-refresh-fixture-${fixtureEnvironmentSequence++}`);
+  scope.defer(() => appAtomRegistry.set(state.presentations, new Map()));
   await setPresentations([[environmentId, presentation()]]);
-  container = document.createElement("div");
-  document.body.append(container);
-  root = createRoot(container);
-});
-
-afterEach(async () => {
-  await act(async () => root.unmount());
-  container.remove();
-  localStorage.clear();
-  vi.restoreAllMocks();
-  vi.unstubAllGlobals();
-});
+  // The metric toggle and its refresh button only show on wide screens.
+  await page.viewport(1440, 900);
+  return Object.assign(scope.move(), { environmentId });
+}
 
 it.each([
   ["wide", 1440],
@@ -175,8 +170,10 @@ it.each([
 ])(
   "refreshes the visible limits countdown from the %s toolbar without switching tabs, even when quota is unchanged",
   async (_layout, width) => {
+    await using fixture = await setup();
+    const { environmentId } = fixture;
     await page.viewport(width, 900);
-    await render();
+    await using _screen = await renderUsagePage();
     await expect.element(resetsIn("2h 0m")).toBeVisible();
     setNow("2026-09-11T12:30:00Z");
 
@@ -189,7 +186,8 @@ it.each([
 );
 
 it("uses the current time when returning to limits from tokens", async () => {
-  await render();
+  await using _fixture = await setup();
+  await using _screen = await renderUsagePage();
   await selectMetric("Tokens");
   setNow("2026-09-11T13:00:00Z");
   await selectMetric("Limits");
@@ -199,17 +197,17 @@ it("uses the current time when returning to limits from tokens", async () => {
 });
 
 it("refreshes once on opening Limits and suppresses rapid returns and remounts", async () => {
+  await using _fixture = await setup();
   localStorage.setItem(PREFERENCES_KEY, JSON.stringify({ metric: "tokens", windowDays: 30 }));
-  await render({ strict: true });
+  await using screen = await renderUsagePage({ strict: true });
   expect(state.refreshProviders).not.toHaveBeenCalled();
 
   await selectMetric("Limits");
   await vi.waitFor(() => expect(state.refreshProviders).toHaveBeenCalledTimes(1));
   await selectMetric("Tokens");
   await selectMetric("Limits");
-  await act(async () => root.unmount());
-  root = createRoot(container);
-  await render({ strict: true });
+  await screen.unmount();
+  await using _remounted = await renderUsagePage({ strict: true });
   expect(state.refreshProviders).toHaveBeenCalledTimes(1);
 
   await selectMetric("Tokens");
@@ -219,8 +217,10 @@ it("refreshes once on opening Limits and suppresses rapid returns and remounts",
 });
 
 it("waits for connection and refreshes new environments during a slow refresh", async () => {
+  await using fixture = await setup();
+  const { environmentId } = fixture;
   await setPresentations([[environmentId, presentation("disconnected")]]);
-  await render();
+  await using _screen = await renderUsagePage();
   expect(state.refreshProviders).not.toHaveBeenCalled();
 
   let finishRefresh!: () => void;
@@ -241,11 +241,12 @@ it("waits for connection and refreshes new environments during a slow refresh", 
 });
 
 it("keeps manual refresh busy until the already-running automatic check settles", async () => {
+  await using _fixture = await setup();
   let finishRefresh!: () => void;
   state.refreshProviders.mockImplementationOnce(
     () => new Promise((resolve) => (finishRefresh = () => resolve(undefined))),
   );
-  await render();
+  await using _screen = await renderUsagePage();
   await vi.waitFor(() => expect(state.refreshProviders).toHaveBeenCalledTimes(1));
 
   await userEvent.click(refreshButton());
