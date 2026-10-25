@@ -22,6 +22,7 @@ import {
   DesktopDmgBackgroundSourceMissingError,
   createStageWorkspaceConfig,
   createStagePatchedDependencies,
+  pinPatchedStageDependencies,
   readWorkspaceConfig,
   createBuildConfig,
   DESKTOP_ELECTRON_LANGUAGES,
@@ -464,6 +465,36 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         { effect: "4.0.0-beta.73" },
       ),
       {},
+    );
+  });
+
+  it("keeps patched staging dependencies at their checked workspace version", () => {
+    const dependencies = {
+      "node-pty": "^1.2.0-beta.15",
+      "@scope/native": "~2.0.0",
+      other: "^3.0.0",
+    };
+    assert.deepStrictEqual(
+      pinPatchedStageDependencies(dependencies, {
+        "node-pty@1.2.0-beta.15": "patches/node-pty.patch",
+        "@scope/native@2.0.0": "patches/native.patch",
+        "not-staged@1.0.0": "patches/not-staged.patch",
+      }),
+      { "node-pty": "1.2.0-beta.15", "@scope/native": "2.0.0", other: "^3.0.0" },
+    );
+    assert.equal(dependencies["node-pty"], "^1.2.0-beta.15");
+  });
+
+  it("leaves unrelated patch versions for pnpm to reject", () => {
+    assert.deepStrictEqual(
+      pinPatchedStageDependencies(
+        { native: "^2.0.0", exact: "1.0.0" },
+        {
+          "native@1.0.0": "patches/old.patch",
+          exact: "patches/exact.patch",
+        },
+      ),
+      { native: "^2.0.0", exact: "1.0.0" },
     );
   });
 
