@@ -1634,10 +1634,20 @@ export const make = Effect.gen(function* () {
       }
       for (const file of discoveredFiles) filesByPath.set(file.path, file);
       const files = [...filesByPath.values()];
+      const presentPaths = new Set(discoveredFiles.map((file) => file.path));
       const plannedFiles = yield* Effect.forEach(
         files,
         Effect.fnUntraced(function* (file) {
           const cached = scanStore.meta(file.path);
+          const unavailable =
+            listingComplete &&
+            shouldRefresh &&
+            !presentPaths.has(file.path) &&
+            cached !== undefined &&
+            (cached.scanCursor !== undefined ||
+              cached.scanSkippedLines !== undefined ||
+              (provider === "codex" && !cached.codexParserCurrent)) &&
+            !(yield* fileSystem.exists(file.path).pipe(Effect.orElseSucceed(() => true)));
           const warm =
             cached !== undefined &&
             cached.size === file.size &&
@@ -1702,6 +1712,7 @@ export const make = Effect.gen(function* () {
                   : 0;
           return {
             ...file,
+            unavailable,
             startByte,
             repeatedInputStartByte,
             repeatedInputWarm,
@@ -1712,7 +1723,14 @@ export const make = Effect.gen(function* () {
       ).pipe(Effect.withSpan("UsageService.planTranscriptFiles"));
       const selection = selectTranscriptFilesForScan(
         plannedFiles,
-        (file) => Math.max(file.size - file.startByte, file.size - file.repeatedInputStartByte),
+        // Ordinary reads consume one chunk, regardless of the remaining file size.
+        (file) =>
+          file.unavailable
+            ? 0
+            : Math.max(
+                Math.min(file.size - file.startByte, MAX_TRANSCRIPT_READ_BYTES_PER_FILE),
+                file.size - file.repeatedInputStartByte,
+              ),
         MAX_COLD_SCAN_BYTES_PER_SOURCE,
       );
       if (repeatedInputEnabled && provider === "codex" && selection.deferredFiles > 0) {
@@ -1731,6 +1749,7 @@ export const make = Effect.gen(function* () {
       let scannedFiles = 0;
       let skippedFiles = selection.deferredFiles;
       let incompleteFiles = 0;
+      let unavailableFiles = 0;
       // Distinct per directory. Buckets carry per-cell session counts, but a
       // session spans days and models, so clients total this figure instead.
       const sessionIds = new Set<string>();
@@ -1750,6 +1769,35 @@ export const make = Effect.gen(function* () {
       const readRecords = new Map<string, { records: readonly UsageRecord[]; complete: boolean }>();
 
       for (const file of selection.files) {
+        if (file.unavailable) {
+          const cached = scanStore.load(file.path);
+          if (cached !== undefined) {
+            unavailableFiles += 1;
+            if (!repeatedInputEnabled && mode === "indexed") {
+              readRecords.set(file.path, { records: cached.records, complete: false });
+              indexed.push({
+                file,
+                index: indexRecords(
+                  file.path,
+                  file.size,
+                  file.mtimeMs,
+                  provider,
+                  cached.records,
+                  false,
+                ),
+              });
+            } else {
+              for (const rawRecord of cached.records) {
+                const record = applyCodexServiceTier(rawRecord, tiers, fastWindows);
+                if (aggregator.add({ ...record, sourcePath: dir })) {
+                  if (record.sessionId.length > 0) sessionIds.add(record.sessionId);
+                  if (quotaIntervals.length > 0) quota.add(record);
+                }
+              }
+            }
+            continue;
+          }
+        }
         // An unchanged transcript whose newest usage predates the window has
         // nothing to contribute; its index row says so without decoding it.
         const stored = scanStore.meta(file.path);
@@ -1945,6 +1993,7 @@ export const make = Effect.gen(function* () {
           : 0;
       const scanCompleted =
         listingComplete &&
+        unavailableFiles === 0 &&
         selection.deferredFiles === 0 &&
         selection.files.every((file) => {
           const cached = scanStore.meta(file.path);
@@ -1997,13 +2046,15 @@ export const make = Effect.gen(function* () {
                 ? `Usage is partial while ${incompleteFiles} large transcript ${incompleteFiles === 1 ? "is" : "files are"} scanned in complete-line chunks.`
                 : selection.deferredFiles > 0
                   ? `Usage is partial while the transcript cache warms; ${selection.deferredFiles} older or oversized transcript files were deferred.`
-                  : provider === "aistudio"
-                    ? "AI Studio exports use exact chunk counts and source message dates when present. Older exports without createTime remain on their downloaded-file date; per-turn input context is reconstructed and copied branch prefixes are counted once."
-                    : provider === "chatgpt"
-                      ? scannedFiles === 0
-                        ? "ChatGPT import is ready; no conversations.json export has been downloaded yet."
-                        : "ChatGPT exports contain message dates but no token ledger; token counts and API-equivalent cost are estimated from chat text."
-                      : null,
+                  : unavailableFiles > 0
+                    ? `Usage is partial because ${unavailableFiles} cached transcripts need rescanning but no longer have source files. Retained usage is included; missing usage cannot be recovered.`
+                    : provider === "aistudio"
+                      ? "AI Studio exports use exact chunk counts and source message dates when present. Older exports without createTime remain on their downloaded-file date; per-turn input context is reconstructed and copied branch prefixes are counted once."
+                      : provider === "chatgpt"
+                        ? scannedFiles === 0
+                          ? "ChatGPT import is ready; no conversations.json export has been downloaded yet."
+                          : "ChatGPT exports contain message dates but no token ledger; token counts and API-equivalent cost are estimated from chat text."
+                        : null,
       });
     }
 
@@ -2159,7 +2210,7 @@ export const make = Effect.gen(function* () {
       ...(providerQuotaHistories === undefined ? {} : { providerQuotaHistories }),
       ...(input.quotaIntervals === undefined ? {} : { quotaCosts }),
       ...(input.quotaIntervals === undefined
-        ? {}
+        ? { quotaCostSnapshots: isWholeQuotaWindow(input) ? quotaCostLedger : [] }
         : {
             quotaCostSnapshots: quotaCostLedger.filter((row) =>
               input.quotaIntervals!.some((interval) => interval.id === row.intervalId),
@@ -2251,7 +2302,7 @@ export const make = Effect.gen(function* () {
         ? {}
         : { providerQuotaHistories: progress.providerQuotaHistories }),
       ...(input.quotaIntervals === undefined
-        ? {}
+        ? { quotaCostSnapshots: isWholeQuotaWindow(input) ? quotaCostLedger : [] }
         : {
             quotaCosts: progress.quotaCosts,
             quotaCostSnapshots: quotaCostLedger.filter((row) =>

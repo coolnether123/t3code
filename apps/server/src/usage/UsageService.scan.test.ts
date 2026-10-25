@@ -543,20 +543,19 @@ describe("incremental scan integration", () => {
       });
       const firstRecord = record("first", Date.parse("2026-08-30T23:00:00Z"), 10, 2, 3);
       const secondRecord = record("second", Date.parse("2026-08-30T23:01:00Z"), 30, 4, 5);
-      const initialByPath = new Map<string, readonly UsageRecord[]>([
-        [files[0]!.path, [firstRecord]],
-      ]);
-      const completeByPath = new Map<string, readonly UsageRecord[]>([
-        [files[0]!.path, [firstRecord, secondRecord]],
-      ]);
+      const chunkFile = { ...files[0]!, path: "" };
+      const path = yield* Path.Path;
       let completePass = false;
-      vi.mocked(listTranscriptFilesBounded).mockImplementation(async (root: string) => ({
-        files: /[\\/]sessions$/.test(root) && !/[\\/]codex-home[\\/]/.test(root) ? [files[0]!] : [],
-        complete: inventoryComplete,
-      }));
+      let missingSource = false;
+      const listing = async (root: string) => {
+        const primary = /[\\/]sessions$/.test(root) && !/[\\/]codex-home[\\/]/.test(root);
+        if (primary) chunkFile.path = path.join(root, "large.jsonl");
+        return { files: primary ? [{ ...chunkFile }] : [], complete: true };
+      };
+      vi.mocked(listTranscriptFilesBounded).mockImplementation(listing);
       vi.mocked(readTranscriptRecords).mockImplementation(async (filePath, _provider, options) => {
-        const firstChunk = initialByPath.get(filePath) ?? [];
-        const completeRecords = completeByPath.get(filePath) ?? [];
+        const firstChunk = filePath === chunkFile.path ? [firstRecord] : [];
+        const completeRecords = filePath === chunkFile.path ? [firstRecord, secondRecord] : [];
         const startByte = options?.startByte ?? 0;
         return {
           records:
@@ -585,7 +584,7 @@ describe("incremental scan integration", () => {
             const firstService = yield* make.pipe(
               Effect.provideService(FileSystem.FileSystem, {
                 ...fs,
-                exists: () => Effect.succeed(true),
+                exists: (path) => Effect.succeed(!missingSource || path !== chunkFile.path),
                 readFileString: (path, ...args) =>
                   path.endsWith("usage-scan-cache.json")
                     ? Effect.succeed(emptyScanCache)
@@ -596,12 +595,29 @@ describe("incremental scan integration", () => {
                 HttpClient.make(() => Effect.die("Offline fixture")),
               ),
             );
-            return yield* firstService.readSummary(input);
+            const partial = yield* firstService.readSummary(input);
+            missingSource = true;
+            vi.mocked(listTranscriptFilesBounded).mockResolvedValue({ files: [], complete: true });
+            vi.mocked(readTranscriptRecords).mockClear();
+            const missing = yield* firstService.readSummary(input);
+            expect(
+              missing.sources.some((source) =>
+                source.message?.includes("no longer have source files"),
+              ),
+            ).toBe(true);
+            expect(missing.buckets[0]!.totals.uncachedInputTokens).toBe(10);
+            expect(readTranscriptRecords).not.toHaveBeenCalled();
+            missingSource = false;
+            vi.mocked(listTranscriptFilesBounded).mockImplementation(listing);
+            const resumed = yield* firstService.readSummary(input);
+            expect(resumed.sources.every((source) => source.status === "ok")).toBe(true);
+            expect(resumed.buckets[0]!.totals.uncachedInputTokens).toBe(40);
+            return partial;
           }),
         );
         expect(first.sources.some((source) => source.status === "partial")).toBe(true);
         expect(storedFiles(config.stateDir)).toEqual([
-          { path: files[0]!.path, mtime_ms: files[0]!.mtimeMs, scan_cursor: 10, record_count: 1 },
+          { path: chunkFile.path, mtime_ms: files[0]!.mtimeMs, scan_cursor: null, record_count: 2 },
         ]);
 
         completePass = true;
@@ -621,10 +637,10 @@ describe("incremental scan integration", () => {
           ),
         );
         const resumed = yield* resumedService.readSummary(input);
-        expect(vi.mocked(readTranscriptRecords)).toHaveBeenCalledTimes(1);
+        expect(vi.mocked(readTranscriptRecords)).not.toHaveBeenCalled();
         expect(
           vi.mocked(readTranscriptRecords).mock.calls.map(([, , options]) => options?.startByte),
-        ).toEqual([10]);
+        ).toEqual([]);
 
         vi.mocked(readTranscriptRecords).mockClear();
         const completeService = yield* make.pipe(
@@ -1056,9 +1072,10 @@ describe("incremental scan integration", () => {
           }),
         ),
       );
-      // The large fixture exceeds the cold-scan budget and is deferred; the
-      // file that was scanned is already durable with no background flush.
-      expect(storedFiles(config.stateDir).map((row) => row.path)).toEqual([files[1]!.path]);
+      // Both bounded chunks fit the budget even though the whole files do not.
+      expect(storedFiles(config.stateDir).map((row) => row.path)).toEqual(
+        files.map((file) => file.path),
+      );
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 

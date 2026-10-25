@@ -18,6 +18,8 @@ charges.
 In **Monitor settings**, set your plan, monthly price and subscription start
 date. Paid totals count monthly payments from that date. A cold transcript scan
 shows **Still counting** and refreshes as more history becomes available.
+If source transcripts have been removed, retained usage is labeled incomplete.
+Saved reset values remain available separately from the transcript total.
 
 ## Prompts and words
 
