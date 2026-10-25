@@ -15,8 +15,6 @@ import {
   getProviderOptionDescriptors,
   readCustomModelEntries,
   toCustomModelSetting,
-  getProviderOptionBooleanSelectionValue,
-  getProviderOptionStringSelectionValue,
   normalizeCustomModelSlug,
   normalizeModelSlug,
   resolveSelectableModel,
@@ -196,14 +194,10 @@ describe("descriptor helpers", () => {
       { id: "fastMode", value: true },
     ]);
 
-    expect(getProviderOptionStringSelectionValue(selection.options, "reasoningEffort")).toBe(
-      "high",
-    );
-    expect(getProviderOptionStringSelectionValue(selection.options, "fastMode")).toBeUndefined();
-    expect(getProviderOptionBooleanSelectionValue(selection.options, "fastMode")).toBe(true);
-    expect(
-      getProviderOptionBooleanSelectionValue(selection.options, "reasoningEffort"),
-    ).toBeUndefined();
+    expect(getModelSelectionStringOptionValue(selection, "reasoningEffort")).toBe("high");
+    expect(getModelSelectionStringOptionValue(selection, "fastMode")).toBeUndefined();
+    expect(getModelSelectionBooleanOptionValue(selection, "fastMode")).toBe(true);
+    expect(getModelSelectionBooleanOptionValue(selection, "reasoningEffort")).toBeUndefined();
     expect(getModelSelectionStringOptionValue(selection, "reasoningEffort")).toBe("high");
     expect(getModelSelectionBooleanOptionValue(selection, "fastMode")).toBe(true);
   });

@@ -11,9 +11,8 @@ describe("composer voice lifecycle boundary", () => {
     const textActions = source.indexOf("<ComposerFooterPrimaryActions", voice);
     expect(voice).toBeGreaterThan(0);
     expect(textActions).toBeGreaterThan(voice);
-    expect(source.slice(voice, textActions)).toContain(
-      "!isComposerApprovalState || isVoiceActive ? (",
-    );
+    // Upstream keeps the footer available for approval feedback as well.
+    expect(source.slice(voice, textActions)).not.toContain("isComposerApprovalState ? null");
   });
   it("allows voice to attach while ordinary tool approvals or input are pending", () => {
     const voice = source.slice(source.indexOf("<ThreadVoiceControls"));

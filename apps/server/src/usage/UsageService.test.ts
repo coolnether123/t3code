@@ -1,5 +1,6 @@
 import * as AntigravityUsage from "../provider/Drivers/AntigravityUsage.ts";
 import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
+import { MuseUsageHome } from "@t3tools/provider-muse/server";
 // @effect-diagnostics nodeBuiltinImport:off - the suite seeds and grows real
 // transcript trees on disk, outside the service's Effect FileSystem.
 import * as NodeFSP from "node:fs/promises";
@@ -34,6 +35,7 @@ import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientResponse } from "effect/http";
 
 import * as ServerConfig from "../config.ts";
+import * as CodexUsageHistory from "./CodexUsageHistory.ts";
 import * as UsageProjection from "./UsageProjection.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { vi } from "vite-plus/test";
@@ -144,7 +146,15 @@ const serviceLayers = (input: {
     Layer.provideMerge(Layer.succeed(HostHomeDirectory, input.home)),
     Layer.provideMerge(Layer.mock(AntigravityUsage.AntigravityUsage)({})),
     Layer.provideMerge(Layer.mock(CursorUsageAccounts.CursorUsageAccounts)({})),
+    Layer.provideMerge(
+      Layer.succeed(MuseUsageHome.MuseUsageHome, { resolve: () => Effect.succeed(undefined) }),
+    ),
     Layer.provideMerge(ServerSettings.layerTest(input.settings)),
+    Layer.provideMerge(
+      Layer.succeed(CodexUsageHistory.CodexUsageHistory, {
+        resolve: () => Effect.succeed(new Map()),
+      }),
+    ),
     Layer.provideMerge(
       Layer.succeed(
         HttpClient.HttpClient,
@@ -170,6 +180,66 @@ function totalOutputTokens(summary: { buckets: readonly { totals: { outputTokens
 }
 
 describe("UsageService", () => {
+  it.live("retains reconciled Codex usage and diagnostics through restart and repair", () =>
+    Effect.gen(function* () {
+      const { home, settings } = yield* setup;
+      const configBaseDir = NodePath.join(home, "reconciled-state");
+      const dir = NodePath.join(home, "codex", "sessions");
+      const transcript = NodePath.join(dir, "rollout.jsonl");
+      const counter = (input: number, output: number, totalInput: number, totalOutput: number) =>
+        JSON.stringify({
+          type: "event_msg",
+          timestamp: "2026-08-01T10:00:02Z",
+          payload: {
+            type: "token_count",
+            info: {
+              last_token_usage: { input_tokens: input, output_tokens: output },
+              total_token_usage: { input_tokens: totalInput, output_tokens: totalOutput },
+            },
+          },
+        });
+      const prefix =
+        [
+          JSON.stringify({ type: "session_meta", payload: { id: "native-run" } }),
+          JSON.stringify({
+            type: "turn_context",
+            payload: { model: "gpt-6-astra", turn_id: "native-turn" },
+          }),
+          counter(100, 20, 100, 20),
+          counter(20, 5, 100, 20),
+        ].join("\n") + "\n";
+      yield* Effect.promise(async () => {
+        await NodeFSP.mkdir(dir, { recursive: true });
+        await NodeFSP.writeFile(transcript, prefix + counter(10, 2, 130, 28) + "\n");
+      });
+      const layers = serviceLayers({ prefix: "reconciled-codex", home, settings, configBaseDir });
+      const input: UsageSummaryInput = { ...WINDOW, providers: ["codex"], groupBy: "run" };
+      const first = yield* UsageService.make.pipe(Effect.provide(layers));
+      const cold = yield* first.readSummary(input);
+      assert.strictEqual(totalOutputTokens(cold), 20);
+      assert.strictEqual(
+        cold.sources.find((source) => source.fingerprint.provider === "codex")?.malformedRecords,
+        1,
+      );
+      const restarted = yield* UsageService.make.pipe(Effect.provide(layers));
+      const warm = yield* restarted.readSummary(input);
+      assert.strictEqual(totalOutputTokens(warm), 20);
+      assert.strictEqual(
+        warm.sources.find((source) => source.fingerprint.provider === "codex")?.status,
+        "partial",
+      );
+      assert.strictEqual(warm.buckets[0]?.runId, "native-run");
+      yield* Effect.promise(() =>
+        NodeFSP.writeFile(transcript, prefix + counter(10, 2, 110, 22) + "\n"),
+      );
+      const repaired = yield* restarted.readSummary({ ...input, refresh: true });
+      assert.strictEqual(totalOutputTokens(repaired), 22);
+      const source = repaired.sources.find((source) => source.fingerprint.provider === "codex");
+      assert.strictEqual(source?.malformedRecords, 0);
+      assert.strictEqual(source?.status, "ok");
+    }).pipe(Effect.scoped),
+  );
+
   it.live("keeps the contract-7 request and response consumed by Otis", () =>
     Effect.gen(function* () {
       const { home, settings, transcript } = yield* setup;

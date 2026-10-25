@@ -51,6 +51,7 @@ export type VcsCheckpointRestoreResult =
       readonly reason: VcsCheckpointRestoreFailureReason;
       readonly detail: string;
     };
+export const CHECKPOINT_DIFF_MAX_OUTPUT_BYTES = 10_000_000;
 
 export interface VcsDiffCheckpointsInput {
   readonly cwd: string;
@@ -59,6 +60,8 @@ export interface VcsDiffCheckpointsInput {
   readonly fallbackFromToHead?: boolean;
   readonly ignoreWhitespace: boolean;
   readonly format?: "patch" | "numstat";
+  /** Maximum bytes collected from the diff command. */
+  readonly maxOutputBytes?: number;
   /** An empty list yields an empty diff. */
   readonly filePaths?: ReadonlyArray<string>;
 }

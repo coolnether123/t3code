@@ -1,3 +1,4 @@
+import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ChromeAutomation from "../../../browser/ChromeAutomation.ts";
 import * as ExternalLauncher from "../../../process/externalLauncher.ts";
 import * as Orchestrator from "../../../orchestration-v2/Orchestrator.ts";
@@ -38,6 +39,7 @@ import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as PreviewBrowser from "../../../preview/PreviewBrowser.ts";
 
 const layerStubServices = Layer.mergeAll(
+  Layer.mock(McpProviderSessions.McpProviderSessions)({}),
   Layer.mock(ChromeAutomation.ChromeAutomation)({}),
   Layer.mock(ExternalLauncher.ExternalLauncher)({}),
   Layer.mock(Orchestrator.OrchestratorV2)({}),

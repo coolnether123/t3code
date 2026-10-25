@@ -1,3 +1,4 @@
+import type { ThemeAppearance } from "@t3tools/shared/themePalettes";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -229,6 +230,13 @@ const launchBrowser = Effect.fnUntraced(function* (input: {
         (cause) =>
           new HtmlRenderBrowserError({ reason: "the browser could not be started", cause }),
       ),
+      // Node throws some spawn errors synchronously, such as `spawn UNKNOWN`
+      // when policy blocks the executable; `mapError` cannot catch those.
+      Effect.catchDefect((cause) =>
+        Effect.fail(
+          new HtmlRenderBrowserError({ reason: "the browser could not be started", cause }),
+        ),
+      ),
     );
 
   let stderrTail = "";
@@ -381,33 +389,32 @@ const launchBrowser = Effect.fnUntraced(function* (input: {
     Effect.forkScoped,
   );
 
-  const send = <A>(
+  const send = Effect.fn("headlessChrome.send")(function* <A>(
     method: string,
     params: Record<string, unknown>,
     result: Schema.Decoder<A>,
     sessionId?: string,
-  ) =>
-    Effect.gen(function* () {
-      if (disconnected) return yield* disconnected;
-      const id = ++nextId;
-      const reply = yield* Deferred.make<unknown, BrowserFailure>();
-      pending.set(id, { method, reply });
-      const message = encodeCdpCommand({ id, method, params, ...(sessionId ? { sessionId } : {}) });
-      yield* Queue.offer(outgoing, new TextEncoder().encode(`${message}\0`));
-      return yield* Deferred.await(reply).pipe(
-        Effect.flatMap(Schema.decodeUnknownEffect(result)),
-        Effect.mapError((error) =>
-          error._tag === "HtmlRenderBrowserError"
-            ? error
-            : new HtmlRenderBrowserError({
-                reason: `${method} returned an unexpected result`,
-                cause: error,
-              }),
-        ),
-      );
-    });
+  ) {
+    if (disconnected) return yield* disconnected;
+    const id = ++nextId;
+    const reply = yield* Deferred.make<unknown, BrowserFailure>();
+    pending.set(id, { method, reply });
+    const message = encodeCdpCommand({ id, method, params, ...(sessionId ? { sessionId } : {}) });
+    yield* Queue.offer(outgoing, new TextEncoder().encode(`${message}\0`));
+    return yield* Deferred.await(reply).pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(result)),
+      Effect.mapError((error) =>
+        error._tag === "HtmlRenderBrowserError"
+          ? error
+          : new HtmlRenderBrowserError({
+              reason: `${method} returned an unexpected result`,
+              cause: error,
+            }),
+      ),
+    );
+  });
 
-  const openPage = Effect.fnUntraced(function* (width: number) {
+  const openPage = Effect.fnUntraced(function* (width: number, appearance: ThemeAppearance) {
     const { targetId } = yield* send(
       "Target.createTarget",
       { url: "about:blank" },
@@ -430,6 +437,12 @@ const launchBrowser = Effect.fnUntraced(function* (input: {
     yield* send("Page.enable", {}, Ignored, sessionId);
     yield* send("Runtime.enable", {}, Ignored, sessionId);
     yield* send("Log.enable", {}, Ignored, sessionId);
+    yield* send(
+      "Emulation.setEmulatedMedia",
+      { features: [{ name: "prefers-color-scheme", value: appearance }] },
+      Ignored,
+      sessionId,
+    );
     // Previews have no use for WebRTC, whose ICE servers can make the browser
     // resolve names outside the proxy. Runs before page scripts in every frame.
     yield* send(
@@ -544,6 +557,7 @@ export const captureHtmlScreenshot = Effect.fn("headlessChrome.captureHtmlScreen
     readonly html: string;
     readonly width: number;
     readonly urlFragment: string;
+    readonly appearance: ThemeAppearance;
   }) {
     const path = yield* Path.Path;
     const directory = yield* scratchDirectory;
@@ -552,7 +566,7 @@ export const captureHtmlScreenshot = Effect.fn("headlessChrome.captureHtmlScreen
       noSandbox: input.noSandbox,
       profileDirectory: path.join(directory, "profile"),
     });
-    const page = yield* browser.openPage(input.width);
+    const page = yield* browser.openPage(input.width, input.appearance);
     const contentHeight = yield* page.load(pageBody(input.html), input.urlFragment);
     const capturedHeight = Math.max(1, Math.min(contentHeight, MAX_CAPTURE_HEIGHT));
     const png = yield* page.screenshot(capturedHeight);
@@ -592,7 +606,7 @@ export const measureHtmlHeights = Effect.fn("headlessChrome.measureHtmlHeights")
   return yield* Effect.forEach(
     input.widths,
     (width) =>
-      browser.openPage(width).pipe(
+      browser.openPage(width, "dark").pipe(
         Effect.flatMap((page) =>
           page.load(body, input.urlFragment).pipe(Effect.ensuring(page.close)),
         ),

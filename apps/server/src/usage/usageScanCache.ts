@@ -21,6 +21,9 @@ import type {
   UsageRepeatedInputSourceKind,
 } from "@t3tools/contracts";
 
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as CodexUsage from "../provider/Drivers/codexUsage.ts";
 import { CLAUDE_SYNTHETIC_MODEL } from "../provider/Drivers/claudeUsage.ts";
 import type { CodexScanState, UsageRecord } from "./usageTranscripts.ts";
 import {
@@ -45,6 +48,7 @@ export interface CachedFile {
   readonly mtimeMs: number;
   readonly provider: UsageProviderKind;
   readonly records: readonly UsageRecord[];
+  readonly malformedRecords?: number;
   readonly codexState?: CodexScanState;
   /** Complete JSONL prefix already folded into `records`; absent only when complete. */
   readonly scanCursor?: number;
@@ -129,6 +133,9 @@ type SerializedRecord = readonly [
   turnId?: string | null,
   nativeSessionIndex?: number | null,
   speed?: "standard" | "fast" | "ultrafast" | null,
+  rateModelIndex?: number | null,
+  unresolvedServiceTierTurnId?: string | null,
+  serviceTierSource?: UsageRecord["serviceTierSource"] | null,
 ];
 
 type SerializedRepeatedInput = readonly [
@@ -171,6 +178,7 @@ interface SerializedFile {
   readonly m: number;
   readonly p: UsageProviderKind;
   readonly r: readonly SerializedRecord[];
+  readonly mr?: number;
   readonly q?: number;
   readonly x?: readonly [number, boolean];
   readonly h?: string;
@@ -187,6 +195,7 @@ interface SerializedFile {
     number,
     (string | null)?,
     (string | null)?,
+    unknown?,
   ];
 }
 
@@ -226,6 +235,7 @@ export function encodeScanCache(
       s: entry.size,
       m: entry.mtimeMs,
       p: entry.provider,
+      ...(entry.malformedRecords === undefined ? {} : { mr: entry.malformedRecords }),
       ...(entry.prefixFingerprint === undefined ? {} : { h: entry.prefixFingerprint }),
       ...(repeatedInputObservations === undefined
         ? {}
@@ -298,6 +308,7 @@ export function encodeScanCache(
               entry.codexState.forkCopyAnchorMs,
               entry.codexState.serviceTier ?? null,
               entry.codexState.turnId ?? null,
+              entry.codexState.providerState ?? null,
             ] as const,
           }),
       ...(entry.scanCursor === undefined ? {} : { q: entry.scanCursor }),
@@ -321,6 +332,9 @@ export function encodeScanCache(
           ? null
           : intern(sessions, sessionIndex, record.nativeSessionId),
         record.speed ?? null,
+        record.rateModel === undefined ? null : intern(models, modelIndex, record.rateModel),
+        record.unresolvedServiceTierTurnId ?? null,
+        record.serviceTierSource ?? null,
       ]),
     };
   }
@@ -514,6 +528,8 @@ function decodeSerializedFile(
   sessions: readonly string[],
 ): CachedFile | undefined {
   if (typeof raw !== "object" || raw === null) return undefined;
+  // Upstream positional rows use the same numeric version with a different layout.
+  if ("t" in raw) return undefined;
   const entry = raw as Partial<SerializedFile>;
   if (typeof entry.s !== "number" || typeof entry.m !== "number") return undefined;
   if (
@@ -598,13 +614,23 @@ function decodeSerializedFile(
       },
       reportedCostUsd: typeof reportedCostUsd === "number" ? reportedCostUsd : null,
       ...(typeof serviceTier === "string"
-        ? { serviceTier, serviceTierSource: "transcript" as const }
+        ? {
+            serviceTier,
+            serviceTierSource:
+              row[16] === "t3Request" || row[16] === "userReported"
+                ? row[16]
+                : ("transcript" as const),
+          }
         : {}),
       ...(typeof turnId === "string" ? { turnId } : {}),
       ...(nativeSessionId === undefined ? {} : { nativeSessionId }),
       ...(row[13] === "fast" || row[13] === "ultrafast" || row[13] === "standard"
         ? { speed: row[13] }
         : {}),
+      ...(typeof row[14] === "number" && typeof models[row[14]] === "string"
+        ? { rateModel: models[row[14]] }
+        : {}),
+      ...(typeof row[15] === "string" ? { unresolvedServiceTierTurnId: row[15] } : {}),
       dedupeKey: typeof dedupeKey === "string" ? dedupeKey : null,
     });
   }
@@ -739,6 +765,7 @@ function decodeSerializedFile(
       anchor,
       serviceTier,
       turnId,
+      providerStateValue,
     ] = entry.c;
     if (
       typeof model !== "string" ||
@@ -751,7 +778,9 @@ function decodeSerializedFile(
     ) {
       return undefined;
     }
+    const providerState = Schema.decodeUnknownOption(CodexUsage.CodexScanState)(providerStateValue);
     codexState = {
+      ...(Option.isSome(providerState) ? { providerState: providerState.value } : {}),
       model,
       sessionId,
       lastUsageSignature,
@@ -767,6 +796,9 @@ function decodeSerializedFile(
     mtimeMs: entry.m,
     provider,
     records,
+    ...(typeof entry.mr === "number" && Number.isSafeInteger(entry.mr) && entry.mr >= 0
+      ? { malformedRecords: entry.mr }
+      : {}),
     ...(codexState === undefined ? {} : { codexState }),
     ...(scanCursor === undefined ? {} : { scanCursor }),
     ...(scanSkippedLines === undefined ? {} : { scanSkippedLines }),
@@ -814,6 +846,8 @@ export interface CachedFileMeta {
   readonly prefixFingerprint?: string;
   readonly repeatedInputVersion?: number;
   readonly hasCodexState: boolean;
+  readonly codexParserCurrent?: boolean;
+  readonly malformedRecords?: number;
   readonly hasRepeatedInput: boolean;
   readonly recordCount: number;
   /** Latest of the file mtime, its record times, and its observation times. */
@@ -840,6 +874,9 @@ export function cachedFileMeta(entry: CachedFile): CachedFileMeta {
       ? {}
       : { repeatedInputVersion: entry.repeatedInputVersion }),
     hasCodexState: entry.codexState !== undefined,
+    codexParserCurrent: entry.codexState?.providerState !== undefined,
+    malformedRecords:
+      entry.codexState?.providerState?.malformedRecords ?? entry.malformedRecords ?? 0,
     hasRepeatedInput: entry.repeatedInputObservations !== undefined,
     recordCount: entry.records.length,
     latestMs,

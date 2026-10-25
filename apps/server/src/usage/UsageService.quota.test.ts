@@ -1,5 +1,7 @@
 import * as AntigravityUsage from "../provider/Drivers/AntigravityUsage.ts";
 import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
+import { MuseUsageHome } from "@t3tools/provider-muse/server";
+import * as CodexUsageHistory from "./CodexUsageHistory.ts";
 import { describe, expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
 import * as Effect from "effect/Effect";
@@ -16,6 +18,10 @@ import { readQuotaHistory } from "./usageQuotaHistory.ts";
 const testLayer = Layer.mergeAll(
   Layer.mock(AntigravityUsage.AntigravityUsage)({}),
   Layer.mock(CursorUsageAccounts.CursorUsageAccounts)({}),
+  Layer.succeed(CodexUsageHistory.CodexUsageHistory, {
+    resolve: () => Effect.succeed(new Map()),
+  }),
+  Layer.succeed(MuseUsageHome.MuseUsageHome, { resolve: () => Effect.succeed(undefined) }),
   ServerSettings.layerTest(),
   ServerConfig.layerTest(process.cwd(), { prefix: "t3-quota-service-test-" }),
 ).pipe(Layer.provideMerge(NodeServices.layer));
