@@ -1,5 +1,19 @@
 # Voice in a chat
 
+## Your ongoing Otis conversation
+
+Choose **Otis** at the top of the sidebar or phone browser chat list. It opens
+the same conversation on devices connected to that server. Attach files or photos
+with **+**, type a message, or use dictation. Dictation uses device recognition
+when available and otherwise uses the PC speech service.
+
+The call button opens Call Otis. Minimize returns to the conversation while the
+call continues. **Mute** pauses microphone input, **Speaker** toggles call playback,
+and **End** hangs up and records the call in the conversation. Approvals and tool
+activity stay in the chat.
+
+## Calling from another chat
+
 Open a chat on your phone's browser and select its model and thinking setting as
 usual. Choose **Call Otis**, then **Start call or recover saved call**. Allow
 microphone access. Wait for the ready sound before speaking.

@@ -1,3 +1,4 @@
+import { OTIS_THREAD_ID } from "@t3tools/contracts";
 import { shouldPreserveAssistantLineBreaks } from "@t3tools/shared/markdownPipeline";
 import { type RunId } from "@t3tools/contracts";
 import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thread-workflows";
@@ -25,13 +26,25 @@ import { MESSAGE_HEADING_LEVEL, MessageAuthorHeading } from "./TimelineRowParts"
 
 export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
+  const [expanded, setExpanded] = useState(false);
+  const fold =
+    ctx.threadRef?.threadId === OTIS_THREAD_ID &&
+    row.message.text.length > 650 &&
+    !row.message.streaming;
   const messageText = row.message.text || (row.message.streaming ? "" : "(empty response)");
 
   return (
     <>
       <div className="relative min-w-0 px-1 py-0.5">
         <MessageAuthorHeading>T3 Code</MessageAuthorHeading>
-        <div data-thread-find-text="true">
+        <div
+          data-thread-find-text="true"
+          className={
+            fold && !expanded
+              ? "max-h-[236px] overflow-hidden [mask-image:linear-gradient(#000_62%,transparent)]"
+              : undefined
+          }
+        >
           <AssistantCitationSource
             messageId={row.message.id}
             {...(ctx.threadRef ? { threadRef: ctx.threadRef } : {})}
@@ -53,6 +66,14 @@ export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind
             />
           </AssistantCitationSource>
         </div>
+        {fold ? (
+          <button
+            className="mt-2 block text-otis-more font-semibold text-otis-more"
+            onClick={() => setExpanded(!expanded)}
+          >
+            {expanded ? "Show less" : "Show more"}
+          </button>
+        ) : null}
         <AssistantChangedFilesSection
           turnSummary={row.assistantTurnDiffSummary}
           routeThreadKey={ctx.routeThreadKey}

@@ -2480,3 +2480,41 @@ code {
     }
   }
 }
+
+@theme {
+  --color-otis-bubble: #232323;
+  --color-otis-chrome: #1b1b1b;
+  --color-otis-text: #f4f4f4;
+  --color-otis-button-text: #f2f2f2;
+  --color-otis-line: #2e2e2e;
+  --color-otis-dot: #3d7bff;
+  --color-otis-name-surface: #161616;
+  --color-otis-timer: #c4d8ff;
+  --color-otis-speaker: #e4f6fb;
+  --color-otis-end: #e8322c;
+  --color-otis-mute-line: #4d6ca6;
+  --color-otis-mute: #22355a;
+  --color-otis-chip: #1d2a42;
+  --color-otis-chip-text: #b9cdf2;
+  --color-otis-more: #f0f0f0;
+  --text-otis-call-name: 17px;
+  --text-otis-more: 14.5px;
+  --tracking-otis-timer: 0.5px;
+}
+
+:root {
+  --otis-ring-small: radial-gradient(circle, #000 0 7px, #c4c7d6 8px);
+  --otis-ring: radial-gradient(circle, #000 0 13px, #c4c7d6 14px);
+  --otis-ring-calling: radial-gradient(circle, #36507a 0 13px, #c4c7d6 14px);
+  --otis-call-background:
+    radial-gradient(
+      120% 70% at 40% 45%,
+      #243858 0%,
+      rgba(36, 56, 88, 0.85) 45%,
+      rgba(36, 56, 88, 0) 80%
+    ),
+    radial-gradient(90% 60% at 85% 95%, #0f1c36 0%, rgba(15, 28, 54, 0) 70%),
+    linear-gradient(160deg, #8792a3 0%, #76839a 30%, #4c5d78 60%, #3a4d6c 100%);
+  --otis-chat-header: linear-gradient(#000 0%, rgba(0, 0, 0, 0.92) 45%, transparent);
+  --otis-mute-border: 1.5px;
+}

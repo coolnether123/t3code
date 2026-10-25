@@ -1,3 +1,5 @@
+import { OTIS_THREAD_ID } from "@t3tools/contracts";
+import { OtisButton } from "./otis/OtisButton";
 import { type EnvironmentId, type ScopedProjectRef } from "@t3tools/contracts";
 import type { EnvironmentServerConfig } from "@t3tools/client-runtime/connection";
 import { ThreadContextDragGhost } from "./chat/ThreadContextDragGhost";
@@ -378,7 +380,7 @@ function useSidebarThreads(input: {
 }) {
   const { projectScopeKey, scopedProjectKeys, serverConfigs, optimisticDrop, routeThreadRef } =
     input;
-  const threads = useQuietThreadShells();
+  const threads = useQuietThreadShells().filter((thread) => thread.id !== OTIS_THREAD_ID);
   const routeRowThreadKey =
     routeThreadRef === null
       ? null
@@ -2756,6 +2758,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         className="min-h-full"
         fixedHeader={
           <SidebarGroup className="z-[1]">
+            <OtisButton environmentId={primaryEnvironmentId} onOpen={navigateToThread} />
             {scopeEnvironments.length > 1 ? (
               <SidebarEnvironmentScopePicker
                 environments={scopeEnvironments}

@@ -1,3 +1,4 @@
+import { OTIS_THREAD_ID } from "@t3tools/contracts";
 import { WorkLogBlock } from "./WorkLog";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { useAtomValue } from "@effect/atom-react";
@@ -25,6 +26,22 @@ import { v2EventPresentation, subagentGroupTiming } from "./TimelineV2EventRow.l
 export function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "event" }> }) {
   const ctx = use(TimelineRowCtx);
   const { item, visibility, sourceThreadId } = row.projectedItem;
+  if (
+    item.type === "system_notice" &&
+    item.activity?.kind === "call.ended" &&
+    ctx.threadRef?.threadId === OTIS_THREAD_ID
+  ) {
+    return (
+      <div className="my-3 ml-auto mr-4 w-fit rounded-full bg-otis-chip px-4.5 py-3 text-base text-otis-chip-text">
+        {new Intl.DateTimeFormat(undefined, {
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        }).format(new Date(row.createdAt))}{" "}
+        {"\u00b7"} Call ended
+      </div>
+    );
+  }
   if (item.type === "subagent" && (row.subagents?.length ?? 1) > 1) {
     return <V2SubagentGroup key={row.id} row={row} />;
   }

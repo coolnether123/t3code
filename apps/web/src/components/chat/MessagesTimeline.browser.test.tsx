@@ -1,3 +1,7 @@
+import { page } from "vite-plus/test/browser";
+import { OtisChrome } from "../otis/OtisChrome";
+import { SidebarProvider } from "../ui/sidebar";
+import "../otis/otis.css";
 import { EnvironmentId, MessageId, RunId, ScheduledTaskId, ThreadId } from "@t3tools/contracts";
 import type { LegendListRef } from "@legendapp/list/react";
 import { createRef, Profiler, type ComponentProps, type ReactElement } from "react";
@@ -462,4 +466,69 @@ it("renders automatic compaction as one live divider that finishes with its reas
     .toBeVisible();
   expect(container.querySelectorAll('[role="separator"]')).toHaveLength(1);
   expect(container.textContent).not.toContain("Compacting before");
+});
+
+it("shows the Otis transcript with folding at phone and desktop sizes", async () => {
+  setup();
+  const entries = [
+    message(
+      "The launcher fingerprints each brief, assigns a run ID, and submits it to the queue so every worker can be traced back to the chat that started it.",
+      { role: "assistant" },
+      "otis-1",
+    ),
+    message(
+      "This chunk changes the plan because you want installable phone apps. Here is what it actually does.\n\n" +
+        "Checks existing projects and tools, and keeps the work in its own branch. ".repeat(12),
+      { role: "assistant" },
+      "otis-2",
+    ),
+  ];
+  await page.viewport(390, 844);
+  const container = document.createElement("div");
+  container.style.cssText = "width:100%;height:100dvh;background:black;color:#ececec";
+  await using screen = await render(
+    <SidebarProvider>
+      <div
+        data-otis-screen="true"
+        style={{
+          width: "100%",
+          maxWidth: 760,
+          margin: "auto",
+          height: "100dvh",
+          position: "relative",
+          display: "flex",
+          flexDirection: "column",
+          paddingTop: 150,
+        }}
+      >
+        <MessagesTimeline
+          {...baseProps()}
+          routeThreadKey="environment-local:otis-main"
+          timelineEntries={entries}
+          liveFollowEnabled={false}
+        />
+        <OtisChrome
+          active={false}
+          ready
+          status="Ready"
+          start={() => {}}
+          end={() => {}}
+          mute={() => {}}
+          speaker={() => {}}
+        />
+      </div>
+    </SidebarProvider>,
+    { container },
+  );
+  await expect
+    .element(screen.getByRole("button", { name: "Show more", exact: true }))
+    .toBeVisible();
+  expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(390);
+  await page.screenshot({ path: "__screenshots__/otis-chat-390.png" });
+  await screen.getByRole("button", { name: "Show more", exact: true }).click();
+  await expect
+    .element(screen.getByRole("button", { name: "Show less", exact: true }))
+    .toBeVisible();
+  await page.viewport(1280, 900);
+  await page.screenshot({ path: "__screenshots__/otis-chat-desktop.png" });
 });

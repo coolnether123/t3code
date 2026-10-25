@@ -1,6 +1,8 @@
 import * as Schema from "effect/Schema";
 import { ModelSelection } from "./modelSelection.ts";
 
+export const OTIS_THREAD_ID = "otis-main";
+
 // Router startup allows 600 seconds. Leave time to return the granted lease.
 export const CALL_PREPARE_TIMEOUT_MS = 660_000;
 
@@ -67,6 +69,7 @@ export const CallRequest = Schema.Struct({
   streamAudio: Schema.optional(Schema.Boolean),
   generation: Schema.optional(CallId),
   action: Schema.Literals([
+    "otis.open",
     "call.open",
     "call.prepare",
     "call.renew",
@@ -186,6 +189,7 @@ export const CallStatus = Schema.Struct({
 export type CallStatus = typeof CallStatus.Type;
 
 export const SpeechResponse = Schema.Struct({
+  threadId: Schema.optional(Schema.String),
   transcriptFinal: Schema.optional(Schema.Boolean),
   revision: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
   complete: Schema.optional(Schema.Boolean),
