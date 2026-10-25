@@ -472,8 +472,16 @@ function Invoke-ProjectCommand {
     Push-Location $WorkingDirectory
     $oldPath = $env:Path
     $oldCodexEnvironment = @{}
+    $oldBundlerEnvironment = @{}
     try {
         $env:Path = "$([System.IO.Path]::GetDirectoryName($nodePath));$oldPath"
+        if ($immutableProjection -and $Label -in @('web build', 'server bundle', 'desktop bundle')) {
+            # Both native pools must fit the CPU build lane's 4 GiB admission.
+            foreach ($name in @('ROLLDOWN_WORKER_THREADS', 'RAYON_NUM_THREADS')) {
+                $oldBundlerEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+                Set-Item -Path "Env:$name" -Value '2'
+            }
+        }
         # The desktop launcher is a project command boundary. These are
         # agent-host markers, not T3 build settings; Vite+ treats them as an
         # agent invocation and promotes ordinary build warnings to failures.
@@ -500,6 +508,10 @@ function Invoke-ProjectCommand {
     }
     finally {
         $env:Path = $oldPath
+        foreach ($name in $oldBundlerEnvironment.Keys) {
+            if ($null -eq $oldBundlerEnvironment[$name]) { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }
+            else { Set-Item -Path "Env:$name" -Value $oldBundlerEnvironment[$name] }
+        }
         foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like "CODEX_*" })) {
             Remove-Item -LiteralPath "Env:$($entry.Name)" -ErrorAction SilentlyContinue
         }
