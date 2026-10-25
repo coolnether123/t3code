@@ -83,6 +83,7 @@ allprojects {
   ['com.android.application', 'com.android.library'].each { androidPlugin ->
     pluginManager.withPlugin(androidPlugin) {
       androidComponents.finalizeDsl { androidDsl ->
+        androidDsl.externalNativeBuild.cmake.version = rootProject.property('android.cmakeVersion')
         androidDsl.defaultConfig.externalNativeBuild.cmake.arguments(
           '-DCMAKE_JOB_POOLS=compile=1;link=1',
           '-DCMAKE_JOB_POOL_COMPILE=compile',
