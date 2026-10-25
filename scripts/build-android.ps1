@@ -78,7 +78,10 @@ try {
     $rootGradleSource = [IO.File]::ReadAllText($rootGradle)
     $rootGradleSource = $rootGradleSource -replace '(?m)^ext\.ndkVersion = .*\r?\n', ''
     $rootGradleSource = $rootGradleSource -replace '(?ms)^// Local Android build concurrency\r?\n.*?^// End local Android build concurrency\r?\n?', ''
-    $rootGradleSource = ($rootGradleSource -split '(?m)^// Local Android build concurrency\r?$', 2)[0].TrimEnd()
+    if ($rootGradleSource -match '(?m)^// Local Android build concurrency\r?$') {
+        throw 'Regenerate Android sources before reusing a partial local build block.'
+    }
+    $rootGradleSource = $rootGradleSource.TrimEnd()
     # AGP invokes Ninja directly, so CMAKE_BUILD_PARALLEL_LEVEL alone does not bound compilers.
     $nativePools = @'
 // Local Android build concurrency
@@ -104,7 +107,9 @@ allprojects {
     # Sign the finished APK with the private local key instead of Expo's public debug key.
     $gradleSource = [IO.File]::ReadAllText($appGradle)
     $gradleSource = $gradleSource -replace '(?m)^\s*signingConfig signingConfigs\.debug\s*$', ''
-    $gradleSource = $gradleSource -replace '(?m)^\s*(?://\s*)?extraPackagerArgs = .*$', '    extraPackagerArgs = ["--max-workers", "1"]'
+    $packagerArgsPattern = '(?m)^\s*(?://\s*)?extraPackagerArgs = .*$'
+    if ($gradleSource -notmatch $packagerArgsPattern) { throw 'Unsupported Expo template: extraPackagerArgs was not found.' }
+    $gradleSource = $gradleSource -replace $packagerArgsPattern, '    extraPackagerArgs = ["--max-workers", "1"]'
     [IO.File]::WriteAllText($appGradle, $gradleSource, $utf8)
     # Widget bundling launches its own Expo CLI without the app's extraPackagerArgs.
     $metroBootstrap = (Join-Path $androidDirectory 'local-build-node.cjs').Replace('\', '/')
@@ -155,6 +160,9 @@ if (process.argv.includes('export:embed') && !process.argv.includes('--max-worke
     if ((Test-Path -LiteralPath $keyPath) -and -not (Test-Path -LiteralPath $passwordPath)) {
         throw 'The existing signing key has no password file. Restore its password before building.'
     }
+    if ((Test-Path -LiteralPath $passwordPath) -and -not (Test-Path -LiteralPath $keyPath)) {
+        throw 'The signing password exists but the key is missing. Restore the original key to preserve app updates.'
+    }
     if (-not (Test-Path -LiteralPath $passwordPath)) {
         $bytes = New-Object byte[] 32
         $random = [Security.Cryptography.RandomNumberGenerator]::Create()
@@ -183,8 +191,12 @@ if (process.argv.includes('export:embed') && !process.argv.includes('--max-worke
 
     $revision = & git -C $repoDirectory rev-parse HEAD
     if ($LASTEXITCODE -ne 0) { throw 'Could not read source revision.' }
+    $sourceStatus = & git -C $repoDirectory status --porcelain --untracked-files=no
+    if ($LASTEXITCODE -ne 0) { throw 'Could not read source working state.' }
     $metadata = [ordered]@{
         sourceRevision = $revision
+        sourceDirty = [bool]$sourceStatus
+        prebuildSkipped = [bool]$SkipPrebuild
         builtAtUtc = [DateTime]::UtcNow.ToString('o')
         apk = $apkPath
         sha256 = (Get-FileHash -LiteralPath $apkPath -Algorithm SHA256).Hash.ToLowerInvariant()
