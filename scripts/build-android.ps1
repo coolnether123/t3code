@@ -4,6 +4,8 @@ param(
     [string]$AndroidSdk = 'D:/Android/Sdk',
     [ValidatePattern('^\d+\.\d+\.\d+$')]
     [string]$NdkVersion = '28.2.13676358',
+    [string]$CMakeDirectory = 'A:/Dev/Tooling/cmake-t3-android-3.31.5',
+    [string]$CMakeVersion = '3.31.5',
     [string]$JavaDirectory = 'C:/Program Files/Eclipse Adoptium/jdk-21.0.5.11-hotspot',
     [string]$GradleDirectory = 'A:/Dev/Tooling/gradle-t3-android',
     [string]$KeyDirectory = 'A:/Dev/Tooling/keys/t3-android',
@@ -30,7 +32,7 @@ function Invoke-Checked {
     }
 }
 
-foreach ($requiredPath in @($node, $expo, $keytool, $AndroidSdk, (Join-Path $AndroidSdk "ndk/$NdkVersion/source.properties"))) {
+foreach ($requiredPath in @($node, $expo, $keytool, $AndroidSdk, (Join-Path $AndroidSdk "ndk/$NdkVersion/source.properties"), (Join-Path $CMakeDirectory 'bin/cmake.exe'), (Join-Path $CMakeDirectory 'bin/ninja.exe'))) {
     if (-not (Test-Path -LiteralPath $requiredPath)) {
         throw "Missing prerequisite: $requiredPath. Install locked dependencies with the repo-local vp first."
     }
@@ -65,7 +67,8 @@ try {
     if (-not (Test-Path -LiteralPath $appGradle)) { throw 'Expo did not generate app/build.gradle.' }
     $utf8 = New-Object System.Text.UTF8Encoding $false
     $sdkPath = $AndroidSdk.Replace('\', '/').Replace(':', '\:')
-    [IO.File]::WriteAllText((Join-Path $androidDirectory 'local.properties'), "sdk.dir=$sdkPath`n", $utf8)
+    $cmakePath = $CMakeDirectory.Replace('\', '/').Replace(':', '\:')
+    [IO.File]::WriteAllText((Join-Path $androidDirectory 'local.properties'), "sdk.dir=$sdkPath`ncmake.dir=$cmakePath`n", $utf8)
 
     # Expo's fallback NDK can differ from the one already installed for React Native.
     $rootGradle = Join-Path $androidDirectory 'build.gradle'
@@ -89,6 +92,7 @@ try {
             ':app:assembleRelease', '--no-daemon', '--console=plain', '--max-workers=1',
             '-Dorg.gradle.jvmargs=-Xmx1536m -XX:MaxMetaspaceSize=512m',
             '-Dorg.gradle.parallel=false', '-Pkotlin.compiler.execution.strategy=in-process',
+            "-Pandroid.cmakeVersion=$CMakeVersion",
             "-PreactNativeArchitectures=$Architectures", '-Pandroid.builder.sdkDownload=false'
         )
     } finally { Pop-Location }
@@ -146,6 +150,8 @@ try {
         node = (& $node --version)
         androidSdk = $AndroidSdk
         ndkVersion = $NdkVersion
+        cmakeVersion = $CMakeVersion
+        cmakeDirectory = $CMakeDirectory
         buildTools = $buildTools.Name
         lockSha256 = (Get-FileHash (Join-Path $repoDirectory 'pnpm-lock.yaml')).Hash.ToLowerInvariant()
     }
