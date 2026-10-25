@@ -2,6 +2,8 @@
 param(
     [string]$NodeDirectory = 'A:/Dev/Tooling/t3-node-v24.19.0',
     [string]$AndroidSdk = 'D:/Android/Sdk',
+    [ValidatePattern('^\d+\.\d+\.\d+$')]
+    [string]$NdkVersion = '28.2.13676358',
     [string]$JavaDirectory = 'C:/Program Files/Eclipse Adoptium/jdk-21.0.5.11-hotspot',
     [string]$GradleDirectory = 'A:/Dev/Tooling/gradle-t3-android',
     [string]$KeyDirectory = 'A:/Dev/Tooling/keys/t3-android',
@@ -28,7 +30,7 @@ function Invoke-Checked {
     }
 }
 
-foreach ($requiredPath in @($node, $expo, $keytool, $AndroidSdk)) {
+foreach ($requiredPath in @($node, $expo, $keytool, $AndroidSdk, (Join-Path $AndroidSdk "ndk/$NdkVersion/source.properties"))) {
     if (-not (Test-Path -LiteralPath $requiredPath)) {
         throw "Missing prerequisite: $requiredPath. Install locked dependencies with the repo-local vp first."
     }
@@ -64,6 +66,12 @@ try {
     $utf8 = New-Object System.Text.UTF8Encoding $false
     $sdkPath = $AndroidSdk.Replace('\', '/').Replace(':', '\:')
     [IO.File]::WriteAllText((Join-Path $androidDirectory 'local.properties'), "sdk.dir=$sdkPath`n", $utf8)
+
+    # Expo's fallback NDK can differ from the one already installed for React Native.
+    $rootGradle = Join-Path $androidDirectory 'build.gradle'
+    $rootGradleSource = [IO.File]::ReadAllText($rootGradle)
+    $rootGradleSource = $rootGradleSource -replace '(?m)^ext\.ndkVersion = .*\r?\n', ''
+    [IO.File]::WriteAllText($rootGradle, "ext.ndkVersion = '$NdkVersion'`n$rootGradleSource", $utf8)
 
     # Sign the finished APK with the private local key instead of Expo's public debug key.
     $gradleSource = [IO.File]::ReadAllText($appGradle)
@@ -137,6 +145,7 @@ try {
         updatesEnabled = $false
         node = (& $node --version)
         androidSdk = $AndroidSdk
+        ndkVersion = $NdkVersion
         buildTools = $buildTools.Name
         lockSha256 = (Get-FileHash (Join-Path $repoDirectory 'pnpm-lock.yaml')).Hash.ToLowerInvariant()
     }
