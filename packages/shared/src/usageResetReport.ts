@@ -142,6 +142,11 @@ export function resetHistoryPlan(
     const lastReading = readings.findLast(
       (sample) => time(sample.observedAt) >= from && time(sample.observedAt) < until,
     );
+    const observedWindow = observed.find((row) => time(row.sinceTime) === from);
+    const measuredUntil = lastReading?.observedAt ?? observedWindow?.untilTime;
+    const knownEnd =
+      index === starts.length - 1 ||
+      (measuredUntil !== undefined && until - time(measuredUntil) <= 15 * 60_000);
     let cursor = from;
     const missing: UsageQuotaInterval[] = [];
     for (const segment of segments) {
@@ -165,12 +170,14 @@ export function resetHistoryPlan(
       untilTime: new Date(until).toISOString(),
       open: index === starts.length - 1,
       costUsd: segments.reduce((sum, row) => sum + row.costUsd, 0),
-      remainingPercent:
-        lastReading?.remainingPercent ??
-        observed.find((row) => time(row.sinceTime) === from)?.lastRemainingPercent ??
-        null,
+      remainingPercent: knownEnd
+        ? (lastReading?.remainingPercent ?? observedWindow?.lastRemainingPercent ?? null)
+        : null,
       estimatedFromTranscripts:
-        lastReading === undefined && !observed.some((row) => time(row.sinceTime) === from),
+        segments.some((segment) =>
+          segment.sources.some((source) => source.estimatedFromTranscripts),
+        ) ||
+        (lastReading === undefined && observedWindow === undefined),
       sources: segments.flatMap((segment) => segment.sources),
       missing,
     };

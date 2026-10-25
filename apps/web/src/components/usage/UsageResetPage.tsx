@@ -203,7 +203,9 @@ export function UsageResetPage() {
   );
   const subscription = settings?.usageSubscription ?? DEFAULT_SERVER_SETTINGS.usageSubscription;
   const updateSettings = useAtomCommand(serverEnvironment.updateSettings);
-  const canEditSubscription = useAtomValue(serverEnvironment.updateSettings.permissionAtom(settingsEnvironmentId ?? null));
+  const canEditSubscription = useAtomValue(
+    serverEnvironment.updateSettings.permissionAtom(settingsEnvironmentId ?? null),
+  );
 
   const effectiveSelectedIds = ((): readonly string[] | null =>
     selectedIds ?? (sourceEnvironmentId === undefined ? null : [sourceEnvironmentId]))();
@@ -458,7 +460,9 @@ export function UsageResetPage() {
       (!tab.codexOnly || quotaProvider === "codex") &&
       (hasCycle || tab.id === "public" || tab.id === "history"),
   );
-  const activeTab = tabs.some((tab) => tab.id === view.tab) ? view.tab : tabs[0]?.id;
+  const activeTab = tabs.some((tab) => tab.id === view.tab)
+    ? view.tab
+    : ((!hasCycle ? tabs.find((tab) => tab.id === "public")?.id : undefined) ?? tabs[0]?.id);
   // Until some computer answers, a missing reading means "not read yet", not "not recorded".
   const historyAnswered = history.environments.some(
     (environment) => environment.summary !== null || environment.error !== null,
@@ -467,9 +471,7 @@ export function UsageResetPage() {
   const showPublic = activeTab === "public";
   const publicIntervals = (() => publicResetIntervals(publicHistory.announcements))();
   const publicCostInput = (() =>
-    showPublic
-      ? (quotaCostWindow(publicIntervals) ?? historyInput)
-      : historyInput)();
+    showPublic ? (quotaCostWindow(publicIntervals) ?? historyInput) : historyInput)();
   const publicCosts = useUsage(publicCostInput);
   const selectedPublicCosts = (() =>
     publicCosts.environments.filter((environment) => isSelected(environment.environmentId)))();

@@ -223,6 +223,12 @@ function includeRepeatedInput(input: UsageSummaryInput): boolean {
     input.quotaIntervals === undefined
   );
 }
+const isWholeQuotaWindow = (input: UsageSummaryInput) =>
+  input.resolution !== "hour" &&
+  (input.groupBy === undefined || input.groupBy === "model") &&
+  input.sessionIds === undefined &&
+  input.runIds === undefined &&
+  input.turnIds === undefined;
 
 function repeatedInputPrice(
   cost: number | null,
@@ -2017,7 +2023,8 @@ export const make = Effect.gen(function* () {
       const last = quotaHistory?.samples.find(
         (sample) => sample.observedAt === interval?.untilTime,
       );
-      if (!interval || /^(api-pace:|compare:)/.test(interval.id)) continue;
+      if (!interval || !isWholeQuotaWindow(input) || /^(api-pace:|compare:)/.test(interval.id))
+        continue;
       const next = upsertQuotaCostLedger(
         quotaCostLedger,
         cost,
@@ -2285,22 +2292,24 @@ export const make = Effect.gen(function* () {
                     ),
                 ),
               ],
-        quotaCostSnapshots: [
-          ...(summary.quotaCostSnapshots ?? []),
-          ...savedCosts.flatMap((cost) => {
-            const row = quotaCostLedger.find(
-              (row) =>
-                JSON.stringify(row.fingerprint) === JSON.stringify(cost.fingerprint) &&
-                row.sinceTime ===
-                  input.quotaIntervals?.find((interval) => interval.id === cost.intervalId)
-                    ?.sinceTime &&
-                row.untilTime ===
-                  input.quotaIntervals?.find((interval) => interval.id === cost.intervalId)
-                    ?.untilTime,
-            );
-            return row ? [{ ...row, intervalId: cost.intervalId }] : [];
-          }),
-        ],
+        quotaCostSnapshots: !isWholeQuotaWindow(input)
+          ? []
+          : [
+              ...(summary.quotaCostSnapshots ?? []),
+              ...savedCosts.flatMap((cost) => {
+                const row = quotaCostLedger.find(
+                  (row) =>
+                    JSON.stringify(row.fingerprint) === JSON.stringify(cost.fingerprint) &&
+                    row.sinceTime ===
+                      input.quotaIntervals?.find((interval) => interval.id === cost.intervalId)
+                        ?.sinceTime &&
+                    row.untilTime ===
+                      input.quotaIntervals?.find((interval) => interval.id === cost.intervalId)
+                        ?.untilTime,
+                );
+                return row ? [{ ...row, intervalId: cost.intervalId }] : [];
+              }),
+            ],
       });
       return yield* Effect.gen(function* () {
         const result = yield* Effect.gen(function* () {
@@ -2354,7 +2363,7 @@ export const make = Effect.gen(function* () {
             });
           }
           const intervals = input.quotaIntervals ?? [];
-          const saved = sources
+          const saved = (isWholeQuotaWindow(input) ? sources : [])
             .filter((source) => source.status !== "missing")
             .flatMap((source) =>
               intervals.flatMap((interval) => {

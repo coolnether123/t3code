@@ -21,6 +21,21 @@ const row = (
   resetsAt: end,
 });
 describe("reset value history", () => {
+  it("does not invent an ending percentage across an unobserved gap", () => {
+    const saved = row("2026-09-01T00:00:00Z", "2026-09-06T00:00:00Z", 100);
+    const next = row("2026-09-08T00:00:00Z", "2026-09-09T00:00:00Z", 20);
+    const plan = resetHistoryPlan([saved, next], saved.sinceTime, "2026-09-10T00:00:00Z", []);
+    expect(plan[0]?.remainingPercent).toBeNull();
+    const gap = plan[0]!.missing[0]!;
+    const estimated = {
+      ...row(gap.sinceTime, gap.untilTime, 10, "/home/a", gap.id),
+      estimatedFromTranscripts: true,
+    };
+    expect(
+      resetHistoryPlan([saved, next, estimated], saved.sinceTime, "2026-09-10T00:00:00Z", [])[0]
+        ?.estimatedFromTranscripts,
+    ).toBe(true);
+  });
   it("discards a premature gap estimate overlapping observed windows", () => {
     const observed = row("2026-08-30T00:00:00Z", "2026-09-06T00:00:00Z", 100);
     const premature = {

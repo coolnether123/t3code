@@ -62,6 +62,7 @@ export function UsageValueHistory({
   const paid = subscriptionPayments(subscription.startDate, subscription.monthlyUsd, now);
   const totalPaid = paid.reduce((sum, payment) => sum + payment.paidUsd, 0);
   const totalValue = windows.reduce((sum, window) => sum + window.costUsd, 0);
+  const counting = windows.some((window) => window.missing.length > 0);
   const ratio = (value: number, payment: number) =>
     payment > 0 ? `${(value / payment).toFixed(1)}×` : "";
   const monthlyRows = monthly.environments
@@ -85,6 +86,7 @@ export function UsageValueHistory({
         <summary className="cursor-pointer text-sm tabular-nums">
           {formatUsd(totalPaid)} paid · {formatUsd(totalValue)} estimated API value ·{" "}
           {ratio(totalValue, totalPaid)}
+          {counting ? " · Still counting" : ""}
         </summary>
         <dl className="mt-3 space-y-2 text-xs tabular-nums">
           {months.toReversed().map((month) => {
@@ -126,7 +128,7 @@ export function UsageValueHistory({
                     <span className="block pt-1 text-xs text-muted-foreground">
                       {window.remainingPercent === null
                         ? "Estimated from transcripts"
-                        : `${100 - window.remainingPercent}% used${window.open ? "" : window.remainingPercent === 0 ? " · limit reached 0%" : ` · reset at ${window.remainingPercent}% left`}`}
+                        : `${100 - window.remainingPercent}% used${window.open ? "" : window.remainingPercent === 0 ? " · limit reached 0%" : ` · reset at ${window.remainingPercent}% left`}${window.estimatedFromTranscripts ? " · estimated from transcripts" : ""}`}
                     </span>
                   </span>
                 </summary>
@@ -152,7 +154,10 @@ export function UsageValueHistory({
       </ol>
       <div className="flex justify-between border-t border-border pt-3 text-sm tabular-nums">
         <span>Grand total</span>
-        <span>{formatUsd(totalValue)}</span>
+        <span>
+          {formatUsd(totalValue)}
+          {counting ? " · Still counting" : ""}
+        </span>
       </div>
     </div>
   );

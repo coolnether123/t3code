@@ -183,6 +183,11 @@ describe("incremental scan integration", () => {
       const second = yield* service.readSummary(input);
       expect(second.quotaCosts?.some((row) => row.costUsd === 3 && row.complete)).toBe(true);
       expect(readTranscriptRecords).not.toHaveBeenCalled();
+      const filtered = yield* service.readSummary({ ...input, sessionIds: ["missing-session"] });
+      expect(filtered.quotaCosts?.every((row) => row.costUsd === 0)).toBe(true);
+      expect(filtered.quotaCostSnapshots).toEqual([]);
+      const whole = yield* service.readSummary(input);
+      expect(whole.quotaCosts?.some((row) => row.costUsd === 3)).toBe(true);
     }).pipe(Effect.scoped, Effect.provide(Layer.merge(testLayer, TestClock.layer()))),
   );
   it.effect("shares one cold scan for concurrent summary and overlapping reset periods", () =>
