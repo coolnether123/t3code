@@ -55,6 +55,7 @@ function fixture(t, missingClient = false) {
   };
   write("package.json", '{"type":"module"}');
   write("tracked.ts", "synthetic source");
+  write(".repos/reference.ts", "read-only reference, not a build input");
   write("apps/mobile/src/features/usage/usageProviders.ts", "synthetic tracked override");
   write("apps/server/src/secrets/Fixture.ts", "synthetic source, no private payload");
   const git = (...args) =>
@@ -67,6 +68,7 @@ function fixture(t, missingClient = false) {
     "add",
     "package.json",
     "tracked.ts",
+    ".repos/reference.ts",
     "apps/mobile/src/features/usage/usageProviders.ts",
     "apps/server/src/secrets/Fixture.ts",
   );
@@ -161,6 +163,7 @@ NodeTest.test(
       "synthetic source",
     );
     NodeAssert.equal(NodeFS.existsSync(NodePath.join(release, ".env")), false);
+    NodeAssert.equal(NodeFS.existsSync(NodePath.join(release, ".repos")), false);
     NodeAssert.equal(
       NodeFS.existsSync(NodePath.join(release, "apps/mobile/src/features/usage/usageProviders.ts")),
       true,

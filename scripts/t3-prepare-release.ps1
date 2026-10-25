@@ -57,7 +57,7 @@ $deployCommitBefore = $sha
 $pruneArtifactRoot = $ArtifactRoot
 $commandLogPath = Join-Path $ArtifactRoot "prepare-$sha.log"
 try {
-    [void](Invoke-GitText $Repository @('worktree', 'add', '--detach', $sourceRoot, $sha))
+    [void](Invoke-GitText $Repository @('-c', 'core.longpaths=true', 'worktree', 'add', '--detach', $sourceRoot, $sha))
     [void](Sync-TrackedSourceFiles $sourceRoot $deployRoot)
     Invoke-T3PreparedBuild
     foreach ($relative in @('apps/server/dist/bin.mjs', 'apps/server/dist/client/index.html', 'apps/web/dist/index.html')) {
@@ -80,6 +80,6 @@ try {
     Write-Host "Prepared $sha. Receipt: $targetRoot\release.json"
 } finally {
     if (Test-Path -LiteralPath $sourceRoot) {
-        [void](Invoke-GitText $Repository @('worktree', 'remove', $sourceRoot))
+        [void](Invoke-GitText $Repository @('-c', 'core.longpaths=true', 'worktree', 'remove', $sourceRoot))
     }
 }

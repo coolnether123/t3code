@@ -148,7 +148,7 @@ function Invoke-GitText {
         $ErrorActionPreference = $savedErrorAction
     }
     if ($gitExit -ne 0) {
-        throw "git $($Arguments -join ' ') failed in $Root with exit code $gitExit"
+        throw "git $($Arguments -join ' ') failed in $Root with exit code ${gitExit}: $(($result | Out-String).Trim())"
     }
     return (($result | Out-String).Trim())
 }
@@ -158,6 +158,7 @@ function Test-ExcludedRelativePath {
     $normalized = $RelativePath.Replace('/', '\').TrimStart('\')
     $comparison = $normalized.ToLowerInvariant()
     $leaf = [System.IO.Path]::GetFileName($normalized)
+    if ($immutableProjection -and ($normalized -split '\\')[0] -eq '.repos') { return $true }
     if ($leaf -like ".env*" -or (-not $immutableProjection -and $leaf -in @("settings.json", "settings.local.json")) -or $leaf -like "*.tsbuildinfo") {
         return $true
     }
