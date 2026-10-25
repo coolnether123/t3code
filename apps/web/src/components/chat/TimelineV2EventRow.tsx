@@ -28,17 +28,32 @@ export function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: 
   const { item, visibility, sourceThreadId } = row.projectedItem;
   if (
     item.type === "system_notice" &&
-    item.activity?.kind === "call.ended" &&
+    item.activity?.kind.startsWith("call.") &&
     ctx.threadRef?.threadId === OTIS_THREAD_ID
   ) {
     return (
-      <div className="my-3 ml-auto mr-4 w-fit rounded-full bg-otis-chip px-4.5 py-3 text-base text-otis-chip-text">
-        {new Intl.DateTimeFormat(undefined, {
-          hour: "2-digit",
-          minute: "2-digit",
-          hour12: false,
-        }).format(new Date(row.createdAt))}{" "}
-        {"\u00b7"} Call ended
+      <div
+        data-otis-call-status={item.activity.kind}
+        className="my-3 ml-auto mr-4 flex w-fit items-center gap-2 rounded-full bg-otis-chip px-4.5 py-3 text-base text-otis-chip-text"
+      >
+        <svg
+          data-otis-hang-up
+          aria-hidden="true"
+          width="22"
+          height="12"
+          viewBox="0 0 24 12"
+          fill="currentColor"
+        >
+          <path d="M12 1C6.5 1 2.3 3 1.2 5.3c-.4.9-.1 1.9.6 2.5l1.6 1.3c.7.6 1.8.6 2.5 0l1.3-1.1c.5-.4.7-1 .6-1.6l-.2-1.1c1.4-.5 2.9-.7 4.4-.7s3 .2 4.4.7l-.2 1.1c-.1.6.1 1.2.6 1.6l1.3 1.1c.7.6 1.8.6 2.5 0l1.6-1.3c.7-.6 1-1.6.6-2.5C21.7 3 17.5 1 12 1Z" />
+        </svg>
+        <span>
+          {new Intl.DateTimeFormat(undefined, {
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: false,
+          }).format(new Date(row.createdAt))}{" "}
+          {"\u00b7"} {item.message}
+        </span>
       </div>
     );
   }

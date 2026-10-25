@@ -1,6 +1,7 @@
 import type { ThreadStructure, ThreadStructureRuntime } from "@t3tools/client-runtime/state/shell";
 import { resolveThreadWorkingStartedAt } from "@t3tools/client-runtime/state/models";
 import {
+  OTIS_THREAD_ID,
   type AssetResource,
   type OrchestrationV2Checkpoint,
   type OrchestrationV2ExecutionNode,
@@ -636,6 +637,7 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
 ): TimelineEntry[] {
   const committedMessageIds = new Set<string>();
   const entries: TimelineEntry[] = [];
+  const callEntries: TimelineEntry[] = [];
   const attemptByRootNodeId = new Map(
     (input.attempts ?? []).map((attempt) => [attempt.rootNodeId, attempt] as const),
   );
@@ -674,6 +676,14 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
     const createdAt = projectedItemCreatedAt(row);
     const attempt = resolveAttempt(item);
     const attemptMetadata = attempt === undefined ? {} : { attempt };
+    if (
+      item.threadId === OTIS_THREAD_ID &&
+      item.type === "system_notice" &&
+      item.activity?.kind.startsWith("call.")
+    ) {
+      callEntries.push({ id: item.id, kind: "event", createdAt, projectedItem: row });
+      continue;
+    }
     if (item.type === "notification") {
       entries.push({
         id: item.id,
@@ -809,6 +819,13 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
       entry: projectedWorkEntry(row),
       ...attemptMetadata,
     });
+  }
+
+  // Call notices have no run, so projection order can put them ahead of earlier runs.
+  // Place them by call time without reordering the committed message sequence.
+  for (const entry of callEntries.toSorted((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+    const index = entries.findIndex((candidate) => candidate.createdAt > entry.createdAt);
+    entries.splice(index === -1 ? entries.length : index, 0, entry);
   }
 
   const retainedMessageIds = new Set([...committedMessageIds, ...foldedAnswerMessageIds]);
