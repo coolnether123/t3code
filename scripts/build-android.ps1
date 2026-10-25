@@ -103,6 +103,15 @@ allprojects {
     $gradleSource = $gradleSource -replace '(?m)^\s*signingConfig signingConfigs\.debug\s*$', ''
     $gradleSource = $gradleSource -replace '(?m)^\s*(?://\s*)?extraPackagerArgs = .*$', '    extraPackagerArgs = ["--max-workers", "1"]'
     [IO.File]::WriteAllText($appGradle, $gradleSource, $utf8)
+    # Widget bundling launches its own Expo CLI without the app's extraPackagerArgs.
+    $metroBootstrap = Join-Path $androidDirectory 'local-build-node.cjs'
+    $metroBootstrapSource = @'
+if (process.argv.includes('export:embed') && !process.argv.includes('--max-workers')) {
+  process.argv.push('--max-workers', '1');
+}
+'@
+    [IO.File]::WriteAllText($metroBootstrap, $metroBootstrapSource, $utf8)
+    $env:NODE_OPTIONS = "$env:NODE_OPTIONS --require=`"$metroBootstrap`"".Trim()
     if ($PrepareOnly) {
         Write-Output 'Android sources prepared. No APK built.'
         return
