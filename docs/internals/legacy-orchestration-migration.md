@@ -43,6 +43,12 @@ running half-upgraded. See `packages/client-runtime/src/connection/compatibility
 
 ## Divergent migration ids
 
+Before V2, the importer recognizes the shipped Windows fork ending in `PromptWordIndex` and the
+Mac fork ending in `ApprovalResponseDeliveries`. Their original entries 41 through 55 are
+retained in `t3_fork_migration_history`, and upstream prerequisites run before V2's foundation.
+Worker and approval-delivery tables retain their data. Mixed profiles and later unknown fork
+migrations stop the upgrade in a transaction without changing the ledger.
+
 `effect_sql_migrations` records `migration_id` and `name`, but the migrator compares ids only:
 rows at or below the recorded maximum are skipped without checking names. A database that ran a
 local or fork migration under an id this build later assigns to a different migration therefore
