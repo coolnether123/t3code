@@ -2,6 +2,7 @@
 # The synchronizer never removes them and never copies over them.
 $immutableProjection = $false
 $usePreparedVp = $false
+$singleThreadedTypecheck = $false
 $excludedRelativeFiles = @(
     ".git",
     ".env",
@@ -432,6 +433,7 @@ function Invoke-ProjectCommand {
         [Parameter(Mandatory)][string]$LogPath,
         [Parameter()][string]$WorkingDirectory
     )
+    if ($singleThreadedTypecheck -and $Label.EndsWith(' typecheck')) { $Arguments += '--singleThreaded' }
     Write-Host "  RUN $Label"
     if ($planOnly) {
         Write-Host "       vp $($Arguments -join ' ')"

@@ -12,6 +12,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 't3-build-common.ps1')
 $immutableProjection = $true
 $usePreparedVp = $true
+$singleThreadedTypecheck = $true
 # Legacy mirrors retain these machine overrides. An immutable release uses
 # the requested commit's versions instead of inheriting mirror-only files.
 $excludedRelativeFiles = @($excludedRelativeFiles | Where-Object {

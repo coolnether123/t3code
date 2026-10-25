@@ -1969,6 +1969,17 @@ export type OrchestrationV2ThreadShellSnapshot = typeof OrchestrationV2ThreadShe
 
 export const OrchestrationV2ShellSnapshot = Schema.Struct({
   ...OrchestrationV2ThreadShellSnapshot.fields,
+  voice: Schema.optionalKey(
+    Schema.Struct({
+      coverage: Schema.Literals(["complete", "unavailable"]),
+      count: Schema.Int,
+      openCalls: Schema.Array(Schema.Struct({ callId: Schema.String, threadId: Schema.String })),
+      activeSessions: Schema.Array(
+        Schema.Struct({ threadId: Schema.String, status: Schema.String }),
+      ),
+      observedAt: Schema.String,
+    }),
+  ),
   projects: Schema.Array(OrchestrationProjectShell),
 });
 export type OrchestrationV2ShellSnapshot = typeof OrchestrationV2ShellSnapshot.Type;

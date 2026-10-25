@@ -144,3 +144,7 @@ export class ReleaseTransaction {
     });
   }
 }
+
+if (process.argv[1] === import.meta.filename && process.argv[2] === "initialize") {
+  initializeReleaseState(process.argv[3], process.argv[4]);
+}

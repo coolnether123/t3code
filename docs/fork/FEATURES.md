@@ -22,3 +22,11 @@ The Mac staged-install and maintenance-lock changes remain part of fork history.
 Windows nightly sync must preserve them in merges without running Mac deployment
 commands or updating Mac branches. A moved feature needs its source and test
 mapping updated here before the sync candidate is accepted.
+
+Windows release preparation, idle evidence, supervisor coordination, recovery and
+nightly sync live in `scripts/t3-*.mjs`, `scripts/t3-*.ps1` and
+`tools/t3-supervisor/`. Their isolated checks are the matching `.fixture.mjs`
+files. Open-call coverage crosses `apps/server/src/speech/callStore.ts`,
+`apps/server/src/orchestration-v2/http.ts`, `apps/server/src/cli/agentProtocol.ts`
+and `packages/contracts/src/orchestrationV2.ts`; `callService.test.ts` covers the
+call lifecycle and unavailable registry.
