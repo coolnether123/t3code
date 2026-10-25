@@ -60,39 +60,48 @@ export function retainReleases(root) {
   }
   return deleted;
 }
-export function productionAdapter(config) {
+export function productionAdapter(config, io = {}) {
   let oldRuntime;
   let switchAt;
   let idle;
-  const cli = (release, request) =>
-    run(
-      config.node,
-      [
-        NodePath.join(release, "apps/server/dist/bin.mjs"),
-        "agent",
-        "request",
-        "--base-dir",
-        config.baseDir,
-      ],
-      JSON.stringify(request),
-    ).then(JSON.parse);
+  const cli =
+    io.cli ??
+    ((release, request) =>
+      run(
+        config.node,
+        [
+          NodePath.join(release, "apps/server/dist/bin.mjs"),
+          "agent",
+          "request",
+          "--base-dir",
+          config.baseDir,
+        ],
+        JSON.stringify(request),
+      ).then(JSON.parse));
   const currentCli = (request) => cli(readReleaseState(config.releaseRoot).current, request);
-  const owners = (command, release) =>
-    Promise.all(["server", "web"].map((mode) => supervisorCommand(config, mode, command, release)));
-  const until = async (operation, seconds = 180) => {
-    const end = Date.now() + seconds * 1000;
-    let last;
-    while (Date.now() < end) {
-      try {
-        const value = await operation();
-        if (value) return value;
-      } catch (error) {
-        last = error;
+  const owners =
+    io.owners ??
+    ((command, release) =>
+      Promise.all(
+        ["server", "web"].map((mode) => supervisorCommand(config, mode, command, release)),
+      ));
+  const http = io.fetch ?? fetch;
+  const until =
+    io.observe ??
+    (async (operation, seconds = 180) => {
+      const end = Date.now() + seconds * 1000;
+      let last;
+      while (Date.now() < end) {
+        try {
+          const value = await operation();
+          if (value) return value;
+        } catch (error) {
+          last = error;
+        }
+        await NodeTimersPromises.setTimeout(1000);
       }
-      await NodeTimersPromises.setTimeout(1000);
-    }
-    throw last ?? new Error("Deployment observation timed out");
-  };
+      throw last ?? new Error("Deployment observation timed out");
+    });
   const snapshotPages = async () => {
     const pages = [];
     let offset = 0;
@@ -135,7 +144,7 @@ export function productionAdapter(config) {
         const pages = await snapshotPages();
         const router =
           pages[0].voice === undefined
-            ? await fetch("http://127.0.0.1:8085/health").then((r) => r.json())
+            ? await http("http://127.0.0.1:8085/health").then((r) => r.json())
             : undefined;
         const evidence = idleEvidence(pages, router);
         return evidence.idle ? evidence : undefined;
@@ -145,10 +154,14 @@ export function productionAdapter(config) {
         ...idle,
         observedAt: new Date().toISOString(),
       });
+      return idle;
     },
     async stop() {
       switchAt = new Date().toISOString();
-      const statuses = await owners("stop");
+      const statuses = await until(
+        () => owners("stop"),
+        config.supervisorReadyTimeoutSeconds ?? 120,
+      );
       if (statuses.some((s) => !s.paused || s.pid !== null))
         throw new Error("Both owners must acknowledge shutdown");
     },
@@ -174,8 +187,11 @@ export function productionAdapter(config) {
       return root;
     },
     async restore(root) {
+      const manifest = readJson(NodePath.join(root, "snapshot.json"));
       if (
-        readJson(NodePath.join(root, "snapshot.json")).source !== config.baseDir ||
+        manifest.source !== config.baseDir ||
+        manifest.offline !== true ||
+        manifest.id !== NodePath.basename(root) ||
         NodePath.dirname(NodePath.resolve(root)) !== NodePath.resolve(config.backupRoot)
       )
         throw new Error("Offline snapshot identity mismatch");
@@ -200,11 +216,13 @@ export function productionAdapter(config) {
           return;
         const checks = await Promise.all(
           config.healthUrls.map(
-            async (url) => (await fetch(url, { signal: AbortSignal.timeout(10000) })).status,
+            async (url) => (await http(url, { signal: AbortSignal.timeout(10000) })).status,
           ),
         );
         if (checks.some((code) => code !== 200)) return;
         const snapshot = await cli(release, { kind: "snapshot" });
+        if (snapshot.runtime.pid !== statuses.find((status) => status.mode === "server")?.pid)
+          return;
         if (snapshot.runtime.pid === oldRuntime?.pid || snapshot.runtime.startedAt < switchAt)
           return;
         return {
@@ -252,7 +270,7 @@ export function productionAdapter(config) {
           creationSource: "server",
         });
         await until(async () => {
-          const detail = await cli(release, { kind: "snapshot", threadId });
+          const detail = await cli(release, { kind: "snapshot", thread: threadId });
           return (
             detail.messages.some(
               (m) => m.role === "assistant" && !m.streaming && m.text.trim() === nonce,

@@ -28,6 +28,10 @@ async function supervise(configFile, mode) {
   let paused = true;
   let release;
   let startedAt;
+  let ready = false;
+  let startupDeadline = 0;
+  let lastProbe = 0;
+  let failedChecks = 0;
   let serial = Promise.resolve();
   const stop = async () => {
     paused = true;
@@ -102,6 +106,10 @@ async function supervise(configFile, mode) {
     });
     await NodeEvents.once(child, "spawn");
     startedAt = new Date().toISOString();
+    ready = false;
+    startupDeadline = Date.now() + 300000;
+    lastProbe = 0;
+    failedChecks = 0;
     paused = false;
   };
   const status = () => ({
@@ -146,12 +154,28 @@ async function supervise(configFile, mode) {
   setInterval(() => {
     serial = serial
       .then(async () => {
-        if (
-          !paused &&
-          (child?.exitCode !== null || child?.signalCode !== null) &&
-          !readReleaseState(config.releaseRoot).pending
-        )
-          await start(readReleaseState(config.releaseRoot).current);
+        const state = readReleaseState(config.releaseRoot);
+        // Offline snapshots and rollback deliberately keep both owners paused.
+        if (paused || state.pending) return;
+        if (child?.exitCode !== null || child?.signalCode !== null) {
+          await start(state.current);
+          return;
+        }
+        if (config.fixtureLaunch || Date.now() - lastProbe < 15000) return;
+        lastProbe = Date.now();
+        const url = config.healthUrls[mode === "server" ? 0 : 1];
+        const healthy = await fetch(url, { signal: AbortSignal.timeout(8000) }).then(
+          (response) => response.status === 200,
+          () => false,
+        );
+        if (healthy) {
+          ready = true;
+          failedChecks = 0;
+          return;
+        }
+        if (!ready && Date.now() < startupDeadline) return;
+        failedChecks++;
+        if (!ready || failedChecks >= 6) await start(state.current);
       })
       .catch(() => {});
   }, 5000);

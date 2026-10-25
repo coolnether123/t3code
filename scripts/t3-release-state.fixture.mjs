@@ -163,6 +163,10 @@ NodeTest.test("missing client dist refuses before idle or process operations", a
   await NodeAssert.rejects(f.transaction.switchTo("missing"), /Missing dist/);
   NodeAssert.deepEqual(f.calls, []);
   NodeAssert.equal(readReleaseState(f.root).pending, null);
+  NodeAssert.equal(
+    JSON.parse(NodeFS.readFileSync(NodePath.join(f.root, "last-deploy.json"), "utf8")).result,
+    "preflight-failed",
+  );
 });
 
 NodeTest.test("idle evidence failure leaves release and data unchanged", async (t) => {
@@ -173,6 +177,10 @@ NodeTest.test("idle evidence failure leaves release and data unchanged", async (
   await NodeAssert.rejects(f.transaction.switchTo("one"), /Open calls unknown/);
   NodeAssert.equal(readReleaseState(f.root).current, "old");
   NodeAssert.equal(NodeFS.readFileSync(f.data, "utf8"), "old-schema");
+  NodeAssert.equal(
+    JSON.parse(NodeFS.readFileSync(NodePath.join(f.root, "last-deploy.json"), "utf8")).result,
+    "preflight-failed",
+  );
 });
 
 NodeTest.test("a concurrent owner is refused without changing its lock or state", async (t) => {

@@ -3,12 +3,13 @@ param(
     [string]$Commit = 'HEAD',
     [Parameter(Mandatory)][string]$ReleaseRoot,
     [Parameter(Mandatory)][string]$ArtifactRoot,
-    [string]$Repository = (Split-Path $PSScriptRoot),
+    [string]$Repository,
     [switch]$DryRun
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ([string]::IsNullOrWhiteSpace($Repository)) { $Repository = Split-Path $PSScriptRoot }
 . (Join-Path $PSScriptRoot 't3-build-common.ps1')
 $immutableProjection = $true
 $usePreparedVp = $true

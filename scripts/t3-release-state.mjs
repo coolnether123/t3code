@@ -67,16 +67,25 @@ export class ReleaseTransaction {
     return this.exclusive(async () => {
       const state = readReleaseState(this.root);
       if (state.pending) throw new Error("Interrupted switch requires recovery first");
-      await this.adapter.validate(candidate);
-      await this.adapter.waitForIdle();
       const receipt = {
         id: NodeCrypto.randomUUID(),
         candidate,
+        commit: NodePath.basename(candidate),
         previous: state.current,
         startedAt: new Date().toISOString(),
         checks: null,
         rollback: null,
       };
+      try {
+        await this.adapter.validate(candidate);
+        receipt.idle = await this.adapter.waitForIdle();
+      } catch (error) {
+        receipt.result = "preflight-failed";
+        receipt.failure = String(error);
+        receipt.finishedAt = new Date().toISOString();
+        this.receipt(receipt);
+        throw error;
+      }
       const previousGood = [...state.good];
       let backupForRollback = null;
       state.pending = { ...receipt, phase: "stopping", backup: null };

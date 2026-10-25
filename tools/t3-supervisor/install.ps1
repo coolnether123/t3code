@@ -11,6 +11,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path (Split-Path $PSScriptRoot)
+. (Join-Path $repo 'scripts/t3-build-common.ps1')
 $node = 'A:/Dev/Tooling/t3-node-v24.19.0/node.exe'
 if (-not (Test-Path -LiteralPath $Binary -PathType Leaf)) { throw 'Build the supervisor binary first' }
 if (-not $PSCmdlet.ShouldProcess('T3 supervisor tasks and executable', 'Back up and install release-aware supervisor')) { return }
@@ -26,7 +27,8 @@ foreach ($name in $tasks) {
 }
 $configPath = Join-Path $ReleaseRoot 'deploy-config.json'
 if (Test-Path -LiteralPath $configPath) { throw 'Existing config requires an explicit migration' }
-$settings = [ordered]@{ node=$node; releaseRoot=$ReleaseRoot; artifactRoot=$ArtifactRoot; backupRoot=(Join-Path $ReleaseRoot 'data-backups'); baseDir=$BaseDir; supervisorScript=(Join-Path $repo 'scripts/t3-supervisor.mjs'); projectId=$ProjectId; modelSelection=@{instanceId=$ProviderInstanceId;model='gpt-6.1-sol';options=@(@{id='effort';value='low'})}; healthUrls=@('http://127.0.0.1:3774/','http://127.0.0.1:6803/usage-resets',$TailnetHealthUrl) }
+$control = Copy-T3ControlScripts $repo (Join-Path $ReleaseRoot 'control')
+$settings = [ordered]@{ node=$node; releaseRoot=$ReleaseRoot; artifactRoot=$ArtifactRoot; backupRoot=(Join-Path $ReleaseRoot 'data-backups'); baseDir=$BaseDir; supervisorScript=(Join-Path $control 't3-supervisor.mjs'); projectId=$ProjectId; modelSelection=@{instanceId=$ProviderInstanceId;model='gpt-6.1-sol';options=@(@{id='effort';value='low'})}; healthUrls=@('http://127.0.0.1:3774/','http://127.0.0.1:6803/usage-resets',$TailnetHealthUrl) }
 if (-not (Test-Path -LiteralPath (Join-Path $ReleaseRoot 'state.json'))) {
     & $node (Join-Path $repo 'scripts/t3-release-state.mjs') initialize $ReleaseRoot $InitialRelease
     if ($LASTEXITCODE -ne 0) { throw 'Release state initialization failed' }

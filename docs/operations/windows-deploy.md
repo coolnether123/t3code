@@ -23,8 +23,9 @@ PowerShell invocation. The script backs up the installed executable and both tas
 XML files, initializes the previous release, and changes both task actions.
 It leaves both tasks disabled. Keep the backup path for reversing the installation.
 
-The installation config is `A:/Runtime/T3CodeReleases/deploy-config.json`. Its
-supervisor script path must remain available across reboots. Start both tasks
+The installation config is `A:/Runtime/T3CodeReleases/deploy-config.json`. The
+installer pins control scripts under the release root, with source and file
+hash receipts. Start both tasks
 after inspecting and enabling their actions. Then run:
 
 ```powershell
@@ -54,6 +55,9 @@ Run `scripts/register-t3-nightly.ps1` once to register the limited interactive-u
 task at 03:30 local. Its headless action runs deterministic source control and
 verification. Registration exports task XML and leaves auto-deploy disabled.
 The task's configuration and per-night JSON ledger live in the artifact folder.
+Registration requires a clean source candidate and pins the control scripts in
+that folder. Use `-Repository` to select the persistent Windows checkout and
+`-Update` to back up and replace this task's existing action.
 Register the script as an automation output on the owning agenda task and check
 the startup inventory after changing the action.
 
@@ -64,6 +68,8 @@ package typechecks and affected tests, and pushes a `sync/*` candidate. Failed
 checks are inherited only with exact classified evidence from a cached plain-tag
 baseline. Conflicts and real failures produce a bounded repair-worker packet.
 Moved paths update the feature inventory during a clean merge.
+Unavailable verification is recorded without starting a repair worker. Re-running
+the same night preserves an existing candidate for resumption.
 
 After the first successful live deployment, create
 `A:/Runtime/T3CodeReleases/auto-deploy-enabled` to allow the nightly controller to

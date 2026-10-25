@@ -1,6 +1,7 @@
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeChildProcess from "node:child_process";
+import * as NodeUtil from "node:util";
 const [root, artifact, filesJson] = process.argv.slice(2);
 NodeFS.mkdirSync(artifact, { recursive: true });
 const vp = NodePath.join(root, "node_modules/vite-plus/bin/vp");
@@ -32,9 +33,9 @@ for (const [name, args] of [
     env: { ...process.env, PATH: `${NodePath.dirname(process.execPath)};${process.env.PATH}` },
   });
   NodeFS.closeSync(log);
-  const text = NodeFS.readFileSync(NodePath.join(artifact, `${name}.log`), "utf8")
-    .replaceAll(root, "<root>")
-    .replace(/\x1b\[[0-9;]*m/g, "");
+  const text = NodeUtil.stripVTControlCharacters(
+    NodeFS.readFileSync(NodePath.join(artifact, `${name}.log`), "utf8"),
+  ).replaceAll(root, "<root>");
   const failures =
     name === "typecheck"
       ? text

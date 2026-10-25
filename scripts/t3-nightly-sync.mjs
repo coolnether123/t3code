@@ -30,7 +30,7 @@ export function compareChecks(candidate, baseline) {
         )),
   );
 }
-async function main(configFile) {
+export async function runNightly(configFile, io = {}) {
   const config = JSON.parse(NodeFS.readFileSync(configFile, "utf8"));
   const lock = NodeNet.createServer((s) => s.destroy());
   lock.listen("\\\\.\\pipe\\otis-t3-nightly-sync");
@@ -47,22 +47,29 @@ async function main(configFile) {
   );
   NodeFS.mkdirSync(artifact, { recursive: true });
   const ledger = { night, startedAt: new Date().toISOString(), artifact, result: "failed" };
-  const run = (exe, args, cwd = config.repository, allowFailure = false) => {
-    const result = NodeChildProcess.spawnSync(exe, args, {
-      cwd,
-      encoding: "utf8",
-      windowsHide: true,
-      maxBuffer: 64 * 1024 * 1024,
-      env: { ...process.env, PATH: `${NodePath.dirname(config.node)};${process.env.PATH}` },
+  const run =
+    io.run ??
+    ((exe, args, cwd = config.repository, allowFailure = false) => {
+      const result = NodeChildProcess.spawnSync(exe, args, {
+        cwd,
+        encoding: "utf8",
+        windowsHide: true,
+        maxBuffer: 64 * 1024 * 1024,
+        env: {
+          ...process.env,
+          PATH: `${NodePath.dirname(config.node)};${process.env.PATH}`,
+          GIT_TERMINAL_PROMPT: "0",
+          GCM_INTERACTIVE: "never",
+        },
+      });
+      NodeFS.appendFileSync(
+        NodePath.join(artifact, "commands.log"),
+        `${JSON.stringify({ exe, args, cwd, exit: result.status })}\n${result.stdout ?? ""}${result.stderr ?? ""}\n`,
+      );
+      if (result.status !== 0 && !allowFailure)
+        throw new Error(`Command failed: ${NodePath.basename(exe)} exit ${result.status}`);
+      return { code: result.status, text: result.stdout?.trim() ?? "" };
     });
-    NodeFS.appendFileSync(
-      NodePath.join(artifact, "commands.log"),
-      `${JSON.stringify({ exe, args, cwd, exit: result.status })}\n${result.stdout ?? ""}${result.stderr ?? ""}\n`,
-    );
-    if (result.status !== 0 && !allowFailure)
-      throw new Error(`Command failed: ${NodePath.basename(exe)} exit ${result.status}`);
-    return { code: result.status, text: result.stdout?.trim() ?? "" };
-  };
   const git = (...args) => run("git", args).text;
   const queue = (title, cwd, args) => {
     const definition = NodePath.join(artifact, `${NodeCrypto.randomUUID()}.job.json`);
@@ -122,14 +129,21 @@ async function main(configFile) {
     )
       throw new Error("Unexpected repository owner");
     git("fetch", "origin", "feat/t3-workers-prototype");
-    git("fetch", "upstream", "+refs/tags/*:refs/tags/*");
-    const tag = selectNightly(
-      git("ls-remote", "--tags", "--refs", "upstream", "v*-nightly.*")
-        .split(/\r?\n/)
-        .map((line) => line.split("refs/tags/")[1] ?? ""),
-    );
+    const advertisedTags = git("ls-remote", "--tags", "--refs", "upstream", "v*-nightly.*")
+      .split(/\r?\n/)
+      .map((line) => {
+        const [object, ref] = line.split(/\s+/);
+        return { object, tag: ref?.replace("refs/tags/", "") };
+      });
+    const tag = selectNightly(advertisedTags.map((entry) => entry.tag ?? ""));
     if (!tag) throw new Error("No upstream nightly tag");
     ledger.tag = tag;
+    const nightlyRef = `refs/t3-sync/upstream/${tag}`;
+    git("fetch", "upstream", `refs/tags/${tag}:${nightlyRef}`);
+    if (git("rev-parse", nightlyRef) !== advertisedTags.find((entry) => entry.tag === tag)?.object)
+      throw new Error("Upstream tag changed during fetch");
+    const upstreamCommit = git("rev-parse", `${nightlyRef}^{commit}`);
+    ledger.upstreamCommit = upstreamCommit;
     const base = git("rev-parse", "origin/feat/t3-workers-prototype");
     ledger.base = base;
     if (process.argv.includes("--observe")) {
@@ -137,7 +151,8 @@ async function main(configFile) {
         run("git", ["cat-file", "-e", `${base}:docs/fork/FEATURES.md`], config.repository, true)
           .code === 0;
       ledger.alreadySynced =
-        run("git", ["merge-base", "--is-ancestor", tag, base], config.repository, true).code === 0;
+        run("git", ["merge-base", "--is-ancestor", upstreamCommit, base], config.repository, true)
+          .code === 0;
       ledger.result = "observed";
       return;
     }
@@ -149,12 +164,25 @@ async function main(configFile) {
       return;
     }
     if (
-      run("git", ["merge-base", "--is-ancestor", tag, base], config.repository, true).code === 0
+      run("git", ["merge-base", "--is-ancestor", upstreamCommit, base], config.repository, true)
+        .code === 0
     ) {
       ledger.result = "already-synced";
       return;
     }
     const branch = `sync/t3-nightly-${night}-${base.slice(0, 8)}`;
+    if (
+      run(
+        "git",
+        ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
+        config.repository,
+        true,
+      ).code === 0
+    ) {
+      ledger.branch = branch;
+      ledger.result = "existing-candidate-needs-resume";
+      return;
+    }
     const tree = NodePath.join(
       NodePath.dirname(config.repository),
       `t3-sync-${night}-${NodeCrypto.randomUUID().slice(0, 8)}`,
@@ -162,12 +190,14 @@ async function main(configFile) {
     ledger.worktree = tree;
     ledger.branch = branch;
     git("worktree", "add", "-b", branch, tree, base);
-    const merge = run("git", ["merge", "--no-ff", "--no-commit", tag], tree, true);
+    const merge = run("git", ["merge", "--no-ff", "--no-commit", upstreamCommit], tree, true);
     if (merge.code !== 0) {
       ledger.conflicts = run("git", ["diff", "--name-only", "--diff-filter=U"], tree).text.split(
         /\r?\n/,
       );
-      worker(`Merge conflicts: ${ledger.conflicts.join(", ")}`);
+      if (ledger.conflicts.filter(Boolean).length)
+        worker(`Merge conflicts: ${ledger.conflicts.join(", ")}`);
+      else ledger.result = "merge-verification-unavailable";
       return;
     }
     const inventory = NodePath.join(tree, "docs/fork/FEATURES.md");
@@ -189,12 +219,12 @@ async function main(configFile) {
     NodeFS.writeFileSync(fileJson, JSON.stringify(files));
     const vp = NodePath.join(config.repository, "node_modules/vite-plus/bin/vp");
     if (queue("Nightly frozen dependency install", tree, [vp, "i", "--frozen-lockfile"]) !== 0) {
-      worker("Dependency installation failed; inspect commands.log");
+      ledger.result = "dependency-verification-unavailable";
       return;
     }
     const candidateChecks = NodePath.join(artifact, "candidate");
     queue("Nightly all-package typecheck and affected tests", tree, [
-      NodePath.join(config.repository, "scripts/t3-nightly-check.mjs"),
+      NodePath.join(import.meta.dirname, "t3-nightly-check.mjs"),
       tree,
       candidateChecks,
       fileJson,
@@ -202,8 +232,13 @@ async function main(configFile) {
     const candidate = JSON.parse(
       NodeFS.readFileSync(NodePath.join(candidateChecks, "checks.json"), "utf8"),
     );
+    if (candidate.some((check) => check.exit !== 0 && !check.classified)) {
+      ledger.result = "verification-unavailable";
+      ledger.failedChecks = candidate.filter((check) => check.exit !== 0);
+      return;
+    }
     if (!candidate.every((c) => c.exit === 0)) {
-      const tagSha = git("rev-parse", `${tag}^{commit}`);
+      const tagSha = upstreamCommit;
       const key = NodeCrypto.createHash("sha256")
         .update(
           JSON.stringify({
@@ -224,24 +259,26 @@ async function main(configFile) {
         if (
           queue("Nightly baseline frozen install", baseline, [vp, "i", "--frozen-lockfile"]) !== 0
         ) {
-          worker("Baseline installation failed");
+          ledger.result = "baseline-verification-unavailable";
           return;
         }
         queue("Nightly same-tag baseline", baseline, [
-          NodePath.join(config.repository, "scripts/t3-nightly-check.mjs"),
+          NodePath.join(import.meta.dirname, "t3-nightly-check.mjs"),
           baseline,
           cache,
           fileJson,
         ]);
       }
-      if (
-        !compareChecks(
-          candidate,
-          JSON.parse(NodeFS.readFileSync(NodePath.join(cache, "checks.json"), "utf8")),
-        )
-      ) {
+      const baselineChecks = JSON.parse(
+        NodeFS.readFileSync(NodePath.join(cache, "checks.json"), "utf8"),
+      );
+      if (baselineChecks.some((check) => check.exit !== 0 && !check.classified)) {
+        ledger.result = "baseline-verification-unavailable";
+        return;
+      }
+      if (!compareChecks(candidate, baselineChecks)) {
         worker(
-          "Candidate has real or unclassified failures; inspect candidate and cached baseline",
+          "Candidate has failures absent from the classified baseline; inspect candidate and cached baseline",
         );
         return;
       }
@@ -268,13 +305,23 @@ async function main(configFile) {
       [config.taskLinkCheck, "--base", "refs/remotes/origin/feat/t3-workers-prototype"],
       tree,
     );
-    run("git", ["push", "-u", "origin", branch], tree);
+    run("git", ["-c", "push.followTags=false", "push", "-u", "origin", branch], tree);
     ledger.result = "candidate-pushed";
     if (NodeFS.existsSync(NodePath.join(config.releaseRoot, "auto-deploy-enabled"))) {
       git("fetch", "origin", "feat/t3-workers-prototype");
       if (git("rev-parse", "origin/feat/t3-workers-prototype") !== base)
         throw new Error("Fork advanced; candidate requires reintegration");
-      run("git", ["push", "origin", `${sha}:refs/heads/feat/t3-workers-prototype`], tree);
+      run(
+        "git",
+        [
+          "-c",
+          "push.followTags=false",
+          "push",
+          "origin",
+          `${sha}:refs/heads/feat/t3-workers-prototype`,
+        ],
+        tree,
+      );
       const deployed = run(
         "powershell.exe",
         [
@@ -308,7 +355,9 @@ async function main(configFile) {
       NodePath.join(config.artifactRoot, "nightly-ledger.jsonl"),
       JSON.stringify(ledger) + "\n",
     );
-    lock.close();
+    await new Promise((resolve, reject) =>
+      lock.close((error) => (error ? reject(error) : resolve())),
+    );
   }
 }
-if (process.argv[1] === import.meta.filename) await main(process.argv[2]);
+if (process.argv[1] === import.meta.filename) await runNightly(process.argv[2]);

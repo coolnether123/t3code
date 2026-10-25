@@ -3,6 +3,32 @@
 $immutableProjection = $false
 $usePreparedVp = $false
 $singleThreadedTypecheck = $false
+
+function Copy-T3ControlScripts {
+    param([Parameter(Mandatory)][string]$Repository, [Parameter(Mandatory)][string]$ControlRoot)
+    $Repository = Assert-SafeRoot $Repository 'maintenance source'
+    if (Invoke-GitText $Repository @('status', '--porcelain')) { throw 'Maintenance scripts require a clean source candidate' }
+    $sha = Invoke-GitText $Repository @('rev-parse', 'HEAD')
+    $ControlRoot = Normalize-AbsolutePath $ControlRoot
+    if ((Test-SamePath $Repository $ControlRoot) -or $ControlRoot.StartsWith($Repository + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Maintenance controls must be outside the source checkout' }
+    New-Item -ItemType Directory -Path $ControlRoot -Force | Out-Null
+    [void](Assert-SafeRoot $ControlRoot 'maintenance controls')
+    $target = Join-Path $ControlRoot $sha
+    $files = @('t3-nightly-sync.mjs','t3-nightly-check.mjs','t3-build-job.mjs','t3-deploy.mjs','t3-deploy-idle.mjs','t3-release-state.mjs','t3-supervisor.mjs')
+    if (-not (Test-Path -LiteralPath $target)) {
+        $staging = Join-Path $ControlRoot ('.copy-' + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $staging | Out-Null
+        foreach ($name in $files) { Copy-Item -LiteralPath (Join-Path $Repository ('scripts/' + $name)) -Destination (Join-Path $staging $name) }
+        [IO.File]::WriteAllText((Join-Path $staging 'maintenance-control.json'), (@{commit=$sha;files=@($files | ForEach-Object { @{path=$_;sha256=(Get-FileSha256 (Join-Path $staging $_))} })} | ConvertTo-Json -Depth 6))
+        [IO.Directory]::Move($staging, $target)
+    }
+    [void](Assert-SafeRoot $target 'versioned maintenance controls')
+    if ((Get-Content -LiteralPath (Join-Path $target 'maintenance-control.json') -Raw | ConvertFrom-Json).commit -ne $sha) { throw 'Maintenance control receipt identity changed' }
+    foreach ($name in $files) {
+        if ((Get-FileSha256 (Join-Path $target $name)) -ne (Get-FileSha256 (Join-Path $Repository ('scripts/' + $name)))) { throw 'Versioned maintenance control identity changed' }
+    }
+    return $target
+}
 $excludedRelativeFiles = @(
     ".git",
     ".env",

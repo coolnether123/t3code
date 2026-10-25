@@ -9,6 +9,40 @@ import * as NodeURL from "node:url";
 const prepare = NodeURL.fileURLToPath(new URL("./t3-prepare-release.ps1", import.meta.url));
 const powershell = "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe";
 
+NodeTest.test(
+  "default repository resolves after PowerShell parameter binding without writing a dry run",
+  (t) => {
+    const root = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "t3-default-repository-fixture-"),
+    );
+    t.after(() => NodeFS.rmSync(root, { recursive: true, force: true }));
+    const releaseRoot = NodePath.join(root, "releases");
+    const result = NodeChildProcess.spawnSync(
+      powershell,
+      [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-WindowStyle",
+        "Hidden",
+        "-File",
+        "scripts/t3-prepare-release.ps1",
+        "-ReleaseRoot",
+        releaseRoot,
+        "-ArtifactRoot",
+        NodePath.join(root, "artifacts"),
+        "-DryRun",
+      ],
+      { cwd: NodePath.dirname(NodePath.dirname(prepare)), encoding: "utf8", windowsHide: true },
+    );
+    NodeAssert.equal(result.status, 0, result.stdout + result.stderr);
+    NodeAssert.match(result.stdout, /Would prepare [a-f0-9]{40}/);
+    NodeAssert.equal(NodeFS.existsSync(releaseRoot), false);
+  },
+);
+
 function fixture(t, missingClient = false) {
   const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-build-fixture-"));
   t.after(() => NodeFS.rmSync(root, { recursive: true, force: true }));
