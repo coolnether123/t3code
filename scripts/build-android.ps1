@@ -123,16 +123,18 @@ if (process.argv.includes('export:embed') && !process.argv.includes('--max-worke
             '--no-daemon', '--console=plain', '--max-workers=1',
             '-Dorg.gradle.parallel=false', '-Pkotlin.compiler.execution.strategy=in-process',
             "-Pandroid.cmakeVersion=$CMakeVersion",
+            '-Pandroid.enableMinifyInReleaseBuilds=false',
             "-PreactNativeArchitectures=$Architectures", '-Pandroid.builder.sdkDownload=false'
         )
         # Metro needs headroom that Gradle's compile heap would otherwise retain.
         Invoke-Checked (Join-Path $androidDirectory 'gradlew.bat') (@(
             ':app:createBundleReleaseJsAndAssets',
-            '-Dorg.gradle.jvmargs=-Xmx768m -XX:MaxMetaspaceSize=384m'
+            ':expo-widgets:generateExpoWidgetsBundle', ':expo-widgets:generateExpoWidgetsLayoutRegistry',
+            '-Dorg.gradle.jvmargs=-Xmx768m -XX:MaxMetaspaceSize=384m -XX:ActiveProcessorCount=2'
         ) + $gradleArguments)
         Invoke-Checked (Join-Path $androidDirectory 'gradlew.bat') (@(
             ':app:assembleRelease',
-            '-Dorg.gradle.jvmargs=-Xmx1536m -XX:MaxMetaspaceSize=512m'
+            '-Dorg.gradle.jvmargs=-Xmx2560m -XX:MaxMetaspaceSize=512m -XX:ActiveProcessorCount=2'
         ) + $gradleArguments)
     } finally { Pop-Location }
 
@@ -186,6 +188,7 @@ if (process.argv.includes('export:embed') && !process.argv.includes('--max-worke
         architectures = $Architectures
         variant = 'preview'
         updatesEnabled = $false
+        minifyEnabled = $false
         node = (& $node --version)
         androidSdk = $AndroidSdk
         ndkVersion = $NdkVersion
