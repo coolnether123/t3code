@@ -74,6 +74,21 @@ try {
     $rootGradle = Join-Path $androidDirectory 'build.gradle'
     $rootGradleSource = [IO.File]::ReadAllText($rootGradle)
     $rootGradleSource = $rootGradleSource -replace '(?m)^ext\.ndkVersion = .*\r?\n', ''
+    $rootGradleSource = ($rootGradleSource -split '(?m)^// Local Android build concurrency\r?$', 2)[0].TrimEnd()
+    # AGP invokes Ninja directly, so CMAKE_BUILD_PARALLEL_LEVEL alone does not bound compilers.
+    $nativePools = @'
+// Local Android build concurrency
+allprojects {
+  pluginManager.withPlugin('com.android.base') {
+    android.defaultConfig.externalNativeBuild.cmake.arguments(
+      '-DCMAKE_JOB_POOLS=compile=1;link=1',
+      '-DCMAKE_JOB_POOL_COMPILE=compile',
+      '-DCMAKE_JOB_POOL_LINK=link'
+    )
+  }
+}
+'@
+    $rootGradleSource = "$rootGradleSource`n`n$nativePools`n"
     [IO.File]::WriteAllText($rootGradle, "ext.ndkVersion = '$NdkVersion'`n$rootGradleSource", $utf8)
 
     # Sign the finished APK with the private local key instead of Expo's public debug key.
