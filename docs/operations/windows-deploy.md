@@ -6,7 +6,39 @@ switches the durable release state, and checks all three HTTP surfaces, the new
 runtime, projection reads after startup migrations, and a labelled Sol reply.
 The proof thread is archived. A failed candidate restores the offline snapshot
 and starts the previous release. An unfinished transaction is recovered by the
-server supervisor on its next start; the web supervisor waits for that recovery.
+server supervisor on its next start. Recovery failure is recorded in
+`last-recovery.json`; both owners then start `state.current` without clearing the
+pending journal. The web owner waits up to ten minutes for the recovery result.
+A pending journal does not suppress restarting an unpaused crashed child. Explicit
+stop commands still pause owners for offline snapshots. `-Status` exposes
+`stuckPending` and the recovery receipt so fallback is visible.
+
+The supervisor pipe uses Node's `readableAll` and `writableAll` listen options to
+permit clients from other Windows sessions. Node has no per-SID DACL option.
+This grants local users pipe access, including stop/start commands. Keep this
+choice limited to this maintainer workstation. Connection errors name the pipe
+and distinguish access denial, EPERM, from an absent owner, ENOENT.
+
+## Re-pin installed controls
+
+From a clean committed candidate, run:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File A:/Dev/Worktrees/t3-auto-sync-20261025/scripts/t3-repin-control.ps1
+```
+
+Add `-DryRun` to check idle state and prerequisites without backups or restarts.
+Keep auto-deploy disabled and resolve any pending transaction first. The script
+holds the deployment lock, checks idle state, backs up config and both task XMLs,
+pins controls with hashes, stops both existing tasks and requires ports to close.
+The installed wrapper's kill-on-close job owns the child processes. It atomically
+replaces config and restarts both tasks. Ports 3774 and 6803 have 330 seconds to
+return, followed by HTTP and owner identity checks. Failure restores the old
+config and restarts both tasks, with another full startup wait. No task XML or
+principal is changed. Backups remain under the configured artifact root.
+
+Run this only in the parent's idle window. The synthetic fixture proves restore
+behavior; it does not prove the live scheduled-task or cross-session path.
 
 Preparation uses the existing launcher build module. It never runs the candidate
 CLI against live data. Dependency installation and build commands enter the
@@ -69,7 +101,12 @@ Windows fork branch before starting sync work. It selects the newest upstream
 nightly by date and numeric sequence, merges in an isolated worktree, runs all
 package typechecks and affected tests, and pushes a `sync/*` candidate. Failed
 checks are inherited only with exact classified evidence from a cached plain-tag
-baseline. Conflicts and real failures produce a bounded repair-worker packet.
+baseline. Each run explicitly fetches the current remote fork tip before
+choosing its merge base. Conflicts and real failures write `repair.md` and
+`NEEDS-PARENT.json` in the night folder and append a `needs-parent` ledger result.
+The manifest records night, branch, worktree, packet path and conflict count.
+The parent launches the packet in the morning. The scheduler never calls
+`start_agent` or invents a chat identity.
 Moved paths update the feature inventory during a clean merge.
 Unavailable verification is recorded without starting a repair worker. Re-running
 the same night preserves an existing candidate for resumption.

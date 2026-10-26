@@ -209,10 +209,11 @@ export function productionAdapter(config, io = {}) {
         return evidence.idle ? evidence : undefined;
       }, config.idleTimeoutSeconds ?? 3600);
       oldRuntime = idle.runtime;
-      writeJson(NodePath.join(config.releaseRoot, "last-idle.json"), {
-        ...idle,
-        observedAt: new Date().toISOString(),
-      });
+      if (io.recordIdle !== false)
+        writeJson(NodePath.join(config.releaseRoot, "last-idle.json"), {
+          ...idle,
+          observedAt: new Date().toISOString(),
+        });
       return idle;
     },
     async stop() {
@@ -357,20 +358,49 @@ async function main() {
     throw new Error("Require production health ports 3774, 6803 and 9445");
   const transaction = new ReleaseTransaction(config.releaseRoot, productionAdapter(config));
   const result =
-    operation === "recover"
-      ? await transaction.recover()
-      : operation === "deploy"
-        ? await transaction.switchTo(candidate)
-        : operation === "status"
-          ? {
-              state: readReleaseState(config.releaseRoot),
-              lastDeploy: NodeFS.existsSync(NodePath.join(config.releaseRoot, "last-deploy.json"))
-                ? readJson(NodePath.join(config.releaseRoot, "last-deploy.json"))
-                : null,
-            }
-          : (() => {
-              throw new Error("Unknown operation");
-            })();
+    operation === "idle-preview"
+      ? await productionAdapter(
+          { ...config, idleTimeoutSeconds: 1 },
+          { recordIdle: false },
+        ).waitForIdle()
+      : operation === "idle"
+        ? await productionAdapter(config).waitForIdle()
+        : operation === "owners"
+          ? await Promise.all(
+              ["server", "web"].map(async (mode) => {
+                const owner = await supervisorCommand(config, mode, "status");
+                if (
+                  !owner.pid ||
+                  owner.paused ||
+                  owner.release !== readReleaseState(config.releaseRoot).current ||
+                  NodePath.resolve(owner.script ?? "") !== NodePath.resolve(config.supervisorScript)
+                )
+                  throw new Error(`Invalid ${mode} owner after re-pin`);
+                return owner;
+              }),
+            )
+          : operation === "recover"
+            ? await transaction.recover()
+            : operation === "deploy"
+              ? await transaction.switchTo(candidate)
+              : operation === "status"
+                ? {
+                    state: readReleaseState(config.releaseRoot),
+                    lastRecovery: NodeFS.existsSync(
+                      NodePath.join(config.releaseRoot, "last-recovery.json"),
+                    )
+                      ? readJson(NodePath.join(config.releaseRoot, "last-recovery.json"))
+                      : null,
+                    stuckPending: Boolean(readReleaseState(config.releaseRoot).pending),
+                    lastDeploy: NodeFS.existsSync(
+                      NodePath.join(config.releaseRoot, "last-deploy.json"),
+                    )
+                      ? readJson(NodePath.join(config.releaseRoot, "last-deploy.json"))
+                      : null,
+                  }
+                : (() => {
+                    throw new Error("Unknown operation");
+                  })();
   if (result.result === "healthy") {
     result.deletedReleases = retainReleases(config.releaseRoot);
     result.deletedSnapshots = retainSnapshots(config);

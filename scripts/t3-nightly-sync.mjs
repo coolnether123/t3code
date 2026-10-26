@@ -100,28 +100,23 @@ export async function runNightly(configFile, io = {}) {
     const packet = NodePath.join(artifact, "repair.md");
     NodeFS.writeFileSync(
       packet,
-      `Activate Otis.\n\nResolve the Windows nightly sync candidate at ${ledger.worktree}. ${reason}. Preserve docs/fork/FEATURES.md and the current fork behavior. Read ${config.handoff} for prior evidence. Verify, commit and push only the sync candidate. Do not deploy, restart, install supervisors, touch Macs or enable auto-deploy. Report the exact remaining gate.\n`,
+      `Activate Otis.\n\nResolve the Windows nightly sync candidate at ${ledger.worktree ?? config.repository}. ${reason}. Preserve docs/fork/FEATURES.md and the current fork behavior. Read ${config.handoff} for prior evidence. Verify, commit and push only the sync candidate. Do not deploy, restart, install supervisors, touch Macs or enable auto-deploy. Report the exact remaining gate.\n`,
     );
-    const args = {
-      runId: NodeCrypto.randomUUID(),
-      provider: "codex-cli",
-      requestedModel: "gpt-6.1-sol",
-      requestedEffort: "high",
-      effortReason: "Resolve upstream integration conflicts or reproduced failures",
-      cwd: ledger.worktree,
-      promptFile: packet,
-      promptSha256: NodeCrypto.createHash("sha256")
-        .update(NodeFS.readFileSync(packet))
-        .digest("hex"),
-      configFile: config.workerCapabilities,
-      permissionProfile: "danger-full-access",
-      taskId: config.taskId,
-      taskType: "implement",
-    };
-    const file = NodePath.join(artifact, "worker.json");
-    NodeFS.writeFileSync(file, JSON.stringify(args));
-    run(config.node, [config.otisCall, "call", "start_agent", `@${file}`]);
-    ledger.result = "worker-requested";
+    NodeFS.writeFileSync(
+      NodePath.join(artifact, "NEEDS-PARENT.json"),
+      JSON.stringify(
+        {
+          night,
+          branch: ledger.branch ?? null,
+          worktree: ledger.worktree ?? null,
+          packet,
+          conflictCount: ledger.conflicts?.filter(Boolean).length ?? 0,
+        },
+        null,
+        2,
+      ),
+    );
+    ledger.result = "needs-parent";
   };
   try {
     if (
@@ -129,7 +124,11 @@ export async function runNightly(configFile, io = {}) {
       git("remote", "get-url", "upstream") !== "https://github.com/pingdotgg/t3code.git"
     )
       throw new Error("Unexpected repository owner");
-    git("fetch", "origin", "feat/t3-workers-prototype");
+    git(
+      "fetch",
+      "origin",
+      "+refs/heads/feat/t3-workers-prototype:refs/remotes/origin/feat/t3-workers-prototype",
+    );
     const advertisedTags = git("ls-remote", "--tags", "--refs", "upstream", "v*-nightly.*")
       .split(/\r?\n/)
       .map((line) => {
@@ -198,7 +197,7 @@ export async function runNightly(configFile, io = {}) {
       );
       if (ledger.conflicts.filter(Boolean).length)
         worker(`Merge conflicts: ${ledger.conflicts.join(", ")}`);
-      else ledger.result = "merge-verification-unavailable";
+      else worker("Merge failed without conflicts; inspect commands.log");
       return;
     }
     const inventory = NodePath.join(tree, "docs/fork/FEATURES.md");
@@ -314,7 +313,11 @@ export async function runNightly(configFile, io = {}) {
     run("git", ["-c", "push.followTags=false", "push", "-u", "origin", branch], tree);
     ledger.result = "candidate-pushed";
     if (NodeFS.existsSync(NodePath.join(config.releaseRoot, "auto-deploy-enabled"))) {
-      git("fetch", "origin", "feat/t3-workers-prototype");
+      git(
+        "fetch",
+        "origin",
+        "+refs/heads/feat/t3-workers-prototype:refs/remotes/origin/feat/t3-workers-prototype",
+      );
       if (git("rev-parse", "origin/feat/t3-workers-prototype") !== base)
         throw new Error("Fork advanced; candidate requires reintegration");
       run(
@@ -353,6 +356,7 @@ export async function runNightly(configFile, io = {}) {
     }
   } catch (error) {
     ledger.failure = String(error);
+    worker(ledger.failure);
     process.exitCode = 1;
   } finally {
     ledger.finishedAt = new Date().toISOString();

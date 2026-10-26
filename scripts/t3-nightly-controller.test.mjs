@@ -47,7 +47,13 @@ async function scenario(kind) {
     git(["-c", "core.hooksPath=NUL", "commit", "-m", "fork fixture"]);
     git(["branch", "feat/t3-workers-prototype"]);
     git(["push", "origin", "feat/t3-workers-prototype"]);
+    const stale = git(["rev-parse", "HEAD"]).text;
+    write(repository, "src/current-tip.ts", "export const current = true;\n");
+    git(["add", "src/current-tip.ts"]);
+    git(["-c", "core.hooksPath=NUL", "commit", "-m", "current fork tip"]);
+    git(["push", "origin", "HEAD:refs/heads/feat/t3-workers-prototype"]);
     const fork = git(["rev-parse", "HEAD"]).text;
+    git(["update-ref", "refs/remotes/origin/feat/t3-workers-prototype", stale]);
     const upstream = NodePath.join(root, "Worktrees/upstream-source");
     git(["worktree", "add", "--detach", upstream, base]);
     if (kind === "conflict") write(upstream, "src/old.ts", "export const original = 3;\n");
@@ -117,13 +123,6 @@ async function scenario(kind) {
           NodeAssert.ok(message.endsWith(`Otis-Task: ${taskId}`));
           return { code: 0, text: "synthetic agenda acceptance" };
         }
-        if (args[0] === config.otisCall) {
-          const request = JSON.parse(NodeFS.readFileSync(args[3].slice(1), "utf8"));
-          NodeAssert.equal(request.requestedModel, "gpt-6.1-sol");
-          NodeAssert.equal(request.requestedEffort, "high");
-          workers.push(request);
-          return { code: 0, text: "synthetic worker receipt" };
-        }
         throw new Error("Unexpected external action in nightly fixture");
       },
     };
@@ -134,6 +133,7 @@ async function scenario(kind) {
         .split("\n")
         .map((line) => JSON.parse(line));
     const result = readLedger().at(-1);
+    NodeAssert.equal(result.base, fork);
     NodeAssert.equal(
       git(["ls-remote", "origin", "refs/heads/feat/t3-workers-prototype"]).text.split(/\s/)[0],
       fork,
@@ -157,8 +157,15 @@ async function scenario(kind) {
       NodeAssert.equal(result.result, "verification-unavailable", result.failure);
       NodeAssert.equal(workers.length, 0);
     } else {
-      NodeAssert.equal(result.result, "worker-requested", result.failure);
-      NodeAssert.equal(workers.length, 1);
+      NodeAssert.equal(result.result, "needs-parent", result.failure);
+      NodeAssert.equal(workers.length, 0);
+      const packet = JSON.parse(
+        NodeFS.readFileSync(NodePath.join(result.artifact, "NEEDS-PARENT.json"), "utf8"),
+      );
+      NodeAssert.equal(packet.worktree, result.worktree);
+      NodeAssert.equal(packet.branch, result.branch);
+      NodeAssert.equal(packet.conflictCount, kind === "conflict" ? 1 : 0);
+      NodeAssert.ok(NodeFS.existsSync(packet.packet));
     }
   } finally {
     NodeFS.rmSync(root, { recursive: true, force: true });

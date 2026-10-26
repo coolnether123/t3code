@@ -5,20 +5,68 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeEvents from "node:events";
 import * as NodeTimersPromises from "node:timers/promises";
-import { readReleaseState } from "./t3-release-state.mjs";
+import { ReleaseTransaction, readReleaseState } from "./t3-release-state.mjs";
 
 export const supervisorPipe = (root, mode) =>
   `\\\\.\\pipe\\t3-supervisor-${NodeCrypto.createHash("sha256").update(NodePath.resolve(root).toLowerCase()).digest("hex")}-${mode}`;
 export async function supervisorCommand(config, mode, command, release) {
   const socket = NodeNet.connect(supervisorPipe(config.releaseRoot, mode));
   socket.setTimeout(30000, () => socket.destroy(new Error("Supervisor acknowledgement timed out")));
-  await NodeEvents.once(socket, "connect");
+  try {
+    await NodeEvents.once(socket, "connect");
+  } catch (error) {
+    socket.destroy();
+    throw new Error(
+      `Supervisor ${mode} pipe ${socket.remoteAddress ?? supervisorPipe(config.releaseRoot, mode)}: ${error.code ?? error.message}. EPERM means pipe access was denied; ENOENT means the owner is not listening.`,
+      { cause: error },
+    );
+  }
   socket.write(JSON.stringify({ command, release }) + "\n");
   let data = "";
   for await (const chunk of socket) data += chunk;
   const result = JSON.parse(data);
   if (result.error) throw new Error(result.error);
   return result;
+}
+
+export const shouldRestartChild = (paused, child) =>
+  !paused && (!child || child.exitCode !== null || child.signalCode !== null);
+
+export async function recoverStartup(config, recover, start, waitForLock = true) {
+  try {
+    await recover();
+  } catch (error) {
+    // An active restore owns the same lock; do not start against its partial snapshot.
+    for (;;) {
+      try {
+        await new ReleaseTransaction(config.releaseRoot, {}).exclusive(async () => {
+          const state = readReleaseState(config.releaseRoot);
+          const receipt = {
+            ok: false,
+            failure: String(error),
+            pending: state.pending,
+            current: state.current,
+            at: new Date().toISOString(),
+            fallback: "start-current",
+          };
+          try {
+            await start(state.current);
+          } catch (failure) {
+            receipt.fallbackFailure = String(failure);
+          }
+          NodeFS.writeFileSync(
+            NodePath.join(config.releaseRoot, "last-recovery.json"),
+            JSON.stringify(receipt, null, 2),
+          );
+        });
+        return true;
+      } catch (failure) {
+        if (failure.code !== "EADDRINUSE") throw failure;
+        if (!waitForLock) return false;
+        await NodeTimersPromises.setTimeout(1000);
+      }
+    }
+  }
 }
 
 async function supervise(configFile, mode) {
@@ -60,7 +108,7 @@ async function supervise(configFile, mode) {
     }
     child = undefined;
   };
-  const start = async (selected) => {
+  const launch = async (selected) => {
     await stop();
     release = selected;
     const root = NodePath.resolve(release);
@@ -112,8 +160,16 @@ async function supervise(configFile, mode) {
     failedChecks = 0;
     paused = false;
   };
+  const start = async (selected) => {
+    try {
+      await launch(selected);
+    } finally {
+      paused = false;
+    }
+  };
   const status = () => ({
     supervisorPid: process.pid,
+    script: import.meta.filename,
     pid: child?.exitCode === null && child.signalCode === null ? child.pid : null,
     startedAt,
     release,
@@ -131,33 +187,92 @@ async function supervise(configFile, mode) {
         .then(async () => {
           const request = JSON.parse(data);
           if (request.command === "stop") await stop();
-          else if (request.command === "start") await start(request.release);
-          else if (request.command !== "status") throw new Error("Unknown supervisor command");
+          else if (request.command === "start") {
+            const state = readReleaseState(config.releaseRoot);
+            const allowed = [
+              state.current,
+              ...state.good,
+              state.pending?.candidate,
+              state.pending?.previous,
+            ].filter(Boolean);
+            if (
+              !allowed.some((path) => NodePath.resolve(path) === NodePath.resolve(request.release))
+            )
+              throw new Error("Release is absent from the deployment journal");
+            await start(request.release);
+          } else if (request.command !== "status") throw new Error("Unknown supervisor command");
           socket.end(JSON.stringify(status()));
         })
         .catch(() => socket.end(JSON.stringify({ error: "Supervisor operation failed" })));
     });
   });
-  server.listen(supervisorPipe(config.releaseRoot, mode));
+  // Node exposes world read/write pipe flags, but no per-SID DACL option.
+  server.listen({
+    path: supervisorPipe(config.releaseRoot, mode),
+    readableAll: true,
+    writableAll: true,
+  });
   await NodeEvents.once(server, "listening");
   const state = readReleaseState(config.releaseRoot);
   if (state.pending && mode === "server") {
-    const recovery = NodeChildProcess.spawn(
-      config.node,
-      [NodePath.join(import.meta.dirname, "t3-deploy.mjs"), "recover", configFile],
-      { windowsHide: true, stdio: "ignore" },
+    await recoverStartup(
+      config,
+      async () => {
+        const recovery = NodeChildProcess.spawn(
+          config.node,
+          [NodePath.join(import.meta.dirname, "t3-deploy.mjs"), "recover", configFile],
+          { windowsHide: true, stdio: "ignore" },
+        );
+        const [code] = await NodeEvents.once(recovery, "exit");
+        if (code !== 0) throw new Error(`Recovery failed with exit ${code}`);
+        if (!child || child.exitCode !== null)
+          await start(readReleaseState(config.releaseRoot).current);
+      },
+      start,
     );
-    const [code] = await NodeEvents.once(recovery, "exit");
-    if (code !== 0) throw new Error("Recovery failed; owners remain paused");
   } else if (!state.pending) await start(state.current);
+  else {
+    // The web owner stays available to recovery commands while awaiting the server result.
+    const recoveryDeadline = Date.now() + 600000;
+    const timer = setInterval(() => {
+      serial = serial
+        .then(async () => {
+          const latest = readReleaseState(config.releaseRoot);
+          const file = NodePath.join(config.releaseRoot, "last-recovery.json");
+          const receipt = NodeFS.existsSync(file)
+            ? JSON.parse(NodeFS.readFileSync(file, "utf8"))
+            : null;
+          if (latest.pending && Date.now() >= recoveryDeadline) {
+            const recovered = await recoverStartup(
+              config,
+              async () => {
+                throw new Error("Server recovery owner did not finish within ten minutes");
+              },
+              start,
+              false,
+            );
+            if (recovered) clearInterval(timer);
+            return;
+          }
+          if (
+            !latest.pending ||
+            (receipt?.ok === false && receipt.pending?.id === latest.pending.id)
+          ) {
+            clearInterval(timer);
+            if (!child || child.exitCode !== null) await start(latest.current);
+          }
+        })
+        .catch(() => {});
+    }, 1000);
+  }
   process.send?.("ready");
   setInterval(() => {
     serial = serial
       .then(async () => {
         const state = readReleaseState(config.releaseRoot);
         // Offline snapshots and rollback deliberately keep both owners paused.
-        if (paused || state.pending) return;
-        if (child?.exitCode !== null || child?.signalCode !== null) {
+        if (paused) return;
+        if (shouldRestartChild(paused, child)) {
           await start(state.current);
           return;
         }
