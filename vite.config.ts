@@ -91,9 +91,15 @@ export default defineConfig({
     cache: taskCacheConfig,
   },
   resolve: {
-    alias: {
-      "~": NodeURL.fileURLToPath(new URL("./apps/web/src", import.meta.url)),
-    },
+    alias: [
+      {
+        find: /^vite-plus\/test$/,
+        replacement: NodeURL.fileURLToPath(
+          new URL("./node_modules/vite-plus/dist/test/index.js", import.meta.url),
+        ),
+      },
+      { find: "~", replacement: NodeURL.fileURLToPath(new URL("./apps/web/src", import.meta.url)) },
+    ],
   },
   test: {
     environment: "node",

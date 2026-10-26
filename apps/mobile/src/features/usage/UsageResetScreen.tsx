@@ -8,7 +8,7 @@ import {
   watchPublicResetHistory,
   type PublicResetHistory,
 } from "@t3tools/client-runtime/publicResetHistory";
-import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { refreshCodexMonitor } from "@t3tools/client-runtime/usageRefresh";
 import {
   AppState,
@@ -95,23 +95,15 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
       entry.summary.quotaHistory.samples.length > 0,
   );
   const tracker = trackers.find((entry) => entry.environmentId === trackerId) ?? trackers[0];
-  const samples = quotaMonitoringSamples(tracker?.summary?.quotaHistory?.samples ?? []);
+  const rawSamples = tracker?.summary?.quotaHistory?.samples;
+  const samples = quotaMonitoringSamples(rawSamples ?? []);
   const historicalPeriods = quotaPeriods(tracker?.summary?.quotaHistory?.samples ?? []);
-  const periods = useMemo(() => quotaPeriods(samples), [samples]);
-  const intervals = useMemo(() => quotaIntervals(periods), [periods]);
-  const input = useMemo(
-    () => quotaCostWindow(intervals) ?? historyInput,
-    [historyInput, intervals],
-  );
+  const periods = quotaPeriods(samples);
+  const intervals = quotaIntervals(periods);
+  const input = quotaCostWindow(intervals) ?? historyInput;
   const costs = useUsage(input);
-  const publicIntervals = useMemo(
-    () => publicResetIntervals(publicHistory.announcements),
-    [publicHistory.announcements],
-  );
-  const publicCostInput = useMemo(
-    () => quotaCostWindow(publicIntervals) ?? historyInput,
-    [historyInput, publicIntervals],
-  );
+  const publicIntervals = publicResetIntervals(publicHistory.announcements);
+  const publicCostInput = quotaCostWindow(publicIntervals) ?? historyInput;
   const publicCosts = useUsage(publicCostInput);
   const effectivePublicSelectedIds =
     selectedIds ??
@@ -120,51 +112,36 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
       : publicCosts.environments[0]
         ? [publicCosts.environments[0].environmentId]
         : []);
-  const selectedPublicCosts = useMemo(
-    () =>
-      publicCosts.environments.filter((environment) =>
-        effectivePublicSelectedIds.includes(environment.environmentId),
-      ),
-    [effectivePublicSelectedIds, publicCosts.environments],
+  const selectedPublicCosts = publicCosts.environments.filter((environment) =>
+    effectivePublicSelectedIds.includes(environment.environmentId),
   );
-  const publicEstimates = useMemo(
-    () => publicResetCostEstimates(publicHistory.announcements, selectedPublicCosts),
-    [publicHistory.announcements, selectedPublicCosts],
+  const publicEstimates = publicResetCostEstimates(
+    publicHistory.announcements,
+    selectedPublicCosts,
   );
   const bankedAnnouncements = publicHistory.announcements.filter(
     (announcement) => announcement.resetType === "banked",
   );
-  const selected = useMemo(
-    () =>
-      costs.environments.filter(
-        (entry) => selectedIds === null || selectedIds.includes(entry.environmentId),
-      ),
-    [costs.environments, selectedIds],
+  const selected = costs.environments.filter(
+    (entry) => selectedIds === null || selectedIds.includes(entry.environmentId),
   );
-  const selectedWithSavedCosts = useMemo(
-    () =>
-      selected.map((environment) => {
-        const historyEnvironment = history.environments.find(
-          (candidate) => candidate.environmentId === environment.environmentId,
-        );
-        const saved = historyEnvironment?.summary?.quotaCostSnapshots;
-        return saved === undefined
-          ? environment
-          : {
-              ...environment,
-              summary: environment.summary
-                ? {
-                    ...environment.summary,
-                    quotaCostSnapshots: [
-                      ...(environment.summary.quotaCostSnapshots ?? []),
-                      ...saved,
-                    ],
-                  }
-                : (historyEnvironment?.summary ?? environment.summary),
-            };
-      }),
-    [history.environments, selected],
-  );
+  const selectedWithSavedCosts = selected.map((environment) => {
+    const historyEnvironment = history.environments.find(
+      (candidate) => candidate.environmentId === environment.environmentId,
+    );
+    const saved = historyEnvironment?.summary?.quotaCostSnapshots;
+    return saved === undefined
+      ? environment
+      : {
+          ...environment,
+          summary: environment.summary
+            ? {
+                ...environment.summary,
+                quotaCostSnapshots: [...(environment.summary.quotaCostSnapshots ?? []), ...saved],
+              }
+            : (historyEnvironment?.summary ?? environment.summary),
+        };
+  });
   const currentValues = quotaValueSnapshots(
     tracker?.environmentId,
     historicalPeriods,
