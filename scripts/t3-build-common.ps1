@@ -1,3 +1,7 @@
+# Queued hosts may disable module autoloading. JSON, sorting and host output
+# below require Utility even though hashing itself uses .NET.
+Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
+
 # These paths are owned by the deploy checkout or by the D-backed runtime.
 # The synchronizer never removes them and never copies over them.
 $immutableProjection = $false

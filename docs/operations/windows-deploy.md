@@ -41,7 +41,10 @@ Rollback restores the pre-switch userdata snapshot, including database WAL and
 SHM files. Data created during the unsuccessful candidate is retained in a
 separate `userdata.failed-*` directory for diagnosis. Treat those copies as
 private data. Retention deletes only receipted SHA release directories outside
-the last three good releases; it does not delete data snapshots or failed builds.
+the last three good releases. After a newer verified good deployment, snapshot
+retention removes older successful snapshots outside those releases. Failed,
+pending and unrecognized snapshots remain available for recovery. Failed builds
+are retained.
 
 `state.json`, `last-deploy.json`, `last-recovery.json` and `last-idle.json` under the
 release root expose the current release, checks and fallback evidence. A new

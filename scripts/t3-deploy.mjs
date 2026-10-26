@@ -60,6 +60,65 @@ export function retainReleases(root) {
   }
   return deleted;
 }
+// Unknown and unsuccessful snapshots are retained for recovery and diagnosis.
+export function retainSnapshots(config) {
+  const state = readReleaseState(config.releaseRoot);
+  if (state.pending) return [];
+  const lastFile = NodePath.join(config.releaseRoot, "last-deploy.json");
+  if (!NodeFS.existsSync(lastFile)) return [];
+  const latest = readJson(lastFile);
+  const verifiedAt = Date.parse(latest.finishedAt);
+  if (
+    latest.result !== "healthy" ||
+    latest.candidate !== state.current ||
+    !Number.isFinite(verifiedAt)
+  )
+    return [];
+  if (!NodeFS.existsSync(config.backupRoot)) return [];
+  const root = NodePath.resolve(config.backupRoot);
+  if (
+    NodeFS.lstatSync(root).isSymbolicLink() ||
+    NodeFS.realpathSync(root).toLowerCase() !== root.toLowerCase()
+  )
+    throw new Error("Snapshot retention root escapes configured path");
+  const keep = new Set(
+    [state.current, ...state.good.slice(0, 3)].map((p) => NodePath.resolve(p).toLowerCase()),
+  );
+  const targets = [];
+  for (const entry of NodeFS.readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const target = NodePath.join(root, entry.name);
+    const receiptFile = NodePath.join(config.releaseRoot, `receipt-${entry.name}.json`);
+    if (!NodeFS.existsSync(receiptFile)) continue;
+    const receipt = readJson(receiptFile);
+    const finishedAt = Date.parse(receipt.finishedAt);
+    if (
+      receipt.result !== "healthy" ||
+      !Number.isFinite(finishedAt) ||
+      finishedAt >= verifiedAt ||
+      typeof receipt.previous !== "string"
+    )
+      continue;
+    if (keep.has(NodePath.resolve(receipt.previous).toLowerCase())) continue;
+    const manifest = readJson(NodePath.join(target, "snapshot.json"));
+    if (
+      receipt.id !== entry.name ||
+      manifest.id !== entry.name ||
+      manifest.source !== config.baseDir ||
+      manifest.offline !== true
+    )
+      throw new Error("Snapshot retention identity mismatch");
+    if (
+      NodeFS.lstatSync(target).isSymbolicLink() ||
+      NodePath.dirname(NodeFS.realpathSync(target)).toLowerCase() !== root.toLowerCase()
+    )
+      throw new Error("Snapshot retention target escapes backup root");
+    targets.push(target);
+  }
+  // Validate the complete deletion set before removing any private snapshot.
+  for (const target of targets) NodeFS.rmSync(target, { recursive: true });
+  return targets.map((target) => NodePath.basename(target));
+}
 export function productionAdapter(config, io = {}) {
   let oldRuntime;
   let switchAt;
@@ -312,7 +371,10 @@ async function main() {
           : (() => {
               throw new Error("Unknown operation");
             })();
-  if (result.result === "healthy") result.deletedReleases = retainReleases(config.releaseRoot);
+  if (result.result === "healthy") {
+    result.deletedReleases = retainReleases(config.releaseRoot);
+    result.deletedSnapshots = retainSnapshots(config);
+  }
   console.log(JSON.stringify(result));
   if (result.ok === false || (result.result && result.result !== "healthy")) process.exitCode = 1;
 }
