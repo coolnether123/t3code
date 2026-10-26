@@ -208,7 +208,13 @@ function Get-IncludedFiles {
 
 function Get-FileSha256 {
     param([Parameter(Mandatory)][string]$Path)
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+    # The build queue's PowerShell host does not autoload Microsoft.PowerShell.Utility.
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '') }
+        finally { $sha.Dispose() }
+    } finally { $stream.Dispose() }
 }
 
 function Get-TextSha256 {
