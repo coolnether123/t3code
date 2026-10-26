@@ -9,14 +9,12 @@ import "~/index.css";
 const testState = vi.hoisted(() => ({
   useUsage: vi.fn(),
   navigate: vi.fn(),
-  canGoBack: true,
 }));
 
 vi.mock(import("@tanstack/react-router"), async (original) => ({
   ...(await original()),
   Link: "a" as never,
   useNavigate: (() => testState.navigate) as never,
-  useCanGoBack: () => testState.canGoBack,
 }));
 vi.mock(import("../../state/usage"), async (original) => ({
   ...(await original()),
@@ -47,7 +45,6 @@ const environments = [
 
 function setup() {
   testState.navigate.mockReset();
-  testState.canGoBack = true;
   testState.useUsage.mockReset().mockReturnValue({
     merged: mergeUsage([], USAGE_CONTRACT_VERSION),
     environments,
@@ -59,66 +56,38 @@ function setup() {
   });
 }
 
-describe("UsagePage Escape navigation", () => {
-  // Playwright cannot press a repeating or composing key, so those cases dispatch the event.
-  function escape(properties: { repeat?: boolean; isComposing?: boolean } = {}) {
-    return new KeyboardEvent("keydown", {
-      bubbles: true,
-      cancelable: true,
-      key: "Escape",
-      ...properties,
-    });
-  }
+describe("UsagePage modal dismissal", () => {
+  it.each([390, 1440])("closes Usage on Escape at width %s", async (width) => {
+    setup();
+    await page.viewport(width, 900);
+    await using _screen = await render(<UsagePage />);
+    await expect.element(page.getByRole("dialog", { name: "Usage" })).toBeVisible();
+    await page.screenshot({ path: `__screenshots__/usage-modal-${width}.png` });
+    await userEvent.keyboard("{Escape}");
+    await vi.waitFor(() => expect(testState.navigate).toHaveBeenCalledWith({ href: "/" }));
+  });
 
-  it("returns to the previous page on Escape", async () => {
+  it("closes Usage from its close button", async () => {
     setup();
     await using _screen = await render(<UsagePage />);
-    using back = vi.spyOn(window.history, "back").mockImplementation(() => {});
-    await userEvent.keyboard("{Escape}");
-    expect(back).toHaveBeenCalledOnce();
-    expect(testState.navigate).not.toHaveBeenCalled();
+    await userEvent.click(page.getByRole("button", { name: "Close", exact: true }));
+    await vi.waitFor(() => expect(testState.navigate).toHaveBeenCalledWith({ href: "/" }));
   });
 
-  it("returns home when there is no previous app page", async () => {
+  it("closes the environment menu before Escape closes Usage", async () => {
     setup();
-    await using screen = await render(<UsagePage />);
-    using back = vi.spyOn(window.history, "back").mockImplementation(() => {});
-    testState.canGoBack = false;
-    await screen.rerender(<UsagePage />);
-
-    await userEvent.keyboard("{Escape}");
-    expect(testState.navigate).toHaveBeenCalledWith({ to: "/" });
-    expect(back).not.toHaveBeenCalled();
-  });
-
-  it("closes the environment menu before Escape navigates back", async () => {
-    setup();
-    await using screen = await render(<UsagePage />);
-    using back = vi.spyOn(window.history, "back").mockImplementation(() => {});
-    const trigger = screen.container.querySelector<HTMLButtonElement>(
-      '[data-slot="menu-trigger"]',
-    )!;
+    await using _screen = await render(<UsagePage />);
+    await expect.element(page.getByRole("dialog", { name: "Usage" })).toBeVisible();
+    const trigger = document.querySelector<HTMLButtonElement>('[data-slot="menu-trigger"]')!;
     await userEvent.click(trigger);
     await expect.element(page.getByRole("menu")).toBeVisible();
 
     await userEvent.keyboard("{Escape}");
     await vi.waitFor(() => expect(document.querySelector('[role="menu"]')).toBeNull());
     expect(trigger.getAttribute("aria-expanded")).toBe("false");
-    expect(back).not.toHaveBeenCalled();
+    expect(testState.navigate).not.toHaveBeenCalled();
 
     await userEvent.keyboard("{Escape}");
-    expect(back).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(testState.navigate).toHaveBeenCalledWith({ href: "/" }));
   });
-
-  it.each([{ repeat: true }, { isComposing: true }])(
-    "ignores Escape with %j",
-    async (properties) => {
-      setup();
-      await using _screen = await render(<UsagePage />);
-      using back = vi.spyOn(window.history, "back").mockImplementation(() => {});
-      document.body.dispatchEvent(escape(properties));
-      expect(back).not.toHaveBeenCalled();
-      expect(testState.navigate).not.toHaveBeenCalled();
-    },
-  );
 });

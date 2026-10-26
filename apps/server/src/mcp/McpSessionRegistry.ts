@@ -34,10 +34,11 @@ export interface McpCredentialRequest {
   /**
    * When false, the credential is minted without the "preview" capability so
    * the user's choice to withhold agent browser access holds everywhere the
-   * token is honored (#7083). Defaults to full access.
+   * token is honored. Defaults to full access.
    */
   readonly browserToolsAvailable?: boolean;
   readonly capabilities?: ReadonlySet<McpInvocationContext.McpCapability>;
+  readonly subagent?: boolean;
 }
 
 export interface McpIssuedCredential {
@@ -195,6 +196,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
           parentModelSelection: request.modelSelection,
           runtimeMode: request.runtimeMode,
           workingDirectory: request.workingDirectory,
+          subagent: request.subagent === true,
         },
         client: undefined,
         capabilities: new Set<McpInvocationContext.McpCapability>([

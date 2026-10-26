@@ -18,6 +18,7 @@ const isCodexAppServerError = Schema.is(CodexError.CodexAppServerError);
 const MAX_BUFFERED_RAW_MESSAGES = 32;
 // Bound JSONL lines before joining and parsing; the LF delimiter is excluded.
 const MAX_INCOMING_MESSAGE_BYTES = 128 * 1024 * 1024;
+const EXIT_STATUS_GRACE = "250 millis";
 
 export interface CodexAppServerProtocolLogEvent {
   readonly direction: "incoming" | "outgoing";
@@ -470,7 +471,15 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
                       ? { method: active.method, ...(requestId ? { requestId } : {}) }
                       : {};
                     return yield* options.terminationError
-                      ? options.terminationError(context)
+                      ? options.terminationError(context).pipe(
+                          Effect.timeoutOrElse({
+                            duration: EXIT_STATUS_GRACE,
+                            orElse: () =>
+                              Effect.succeed(
+                                new CodexError.CodexAppServerInputStreamEndedError({}),
+                              ),
+                          }),
+                        )
                       : Effect.succeed(new CodexError.CodexAppServerInputStreamEndedError({}));
                   }),
                 ),

@@ -550,10 +550,8 @@ export function applyClaudePromptEffortPrefix(
   if (!trimmed) {
     return trimmed;
   }
-  if (effort !== "ultrathink") {
-    return trimmed;
-  }
-  if (/^\/[a-z][a-z0-9:.-]*(?:\s|$)/i.test(trimmed)) {
+  // Prefixing slash commands prevents Claude invocation; command names allow any token without a second slash.
+  if (effort !== "ultrathink" || /^\/[^\s/]+(?:\s|$)/u.test(trimmed)) {
     return trimmed;
   }
   if (trimmed.startsWith("Ultrathink:")) {

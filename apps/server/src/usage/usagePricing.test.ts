@@ -46,6 +46,67 @@ describe("usage pricing", () => {
     );
   });
 
+  it.each([false, true])("keeps a bare alias when a reseller omits speed tiers (%s)", (reverse) => {
+    const entries = [
+      [
+        "provider-a/example-model",
+        {
+          ...opus,
+          input_cost_per_token_priority: 10e-6,
+          output_cost_per_token_priority: 50e-6,
+          provider_specific_entry: { fast: 3 },
+          input_cost_per_token_ultrafast: 20e-6,
+          output_cost_per_token_ultrafast: 100e-6,
+          input_cost_per_token_flex: 2.5e-6,
+          output_cost_per_token_flex: 12.5e-6,
+          input_cost_per_token_above_200k_tokens: 10e-6,
+          output_cost_per_token_above_200k_tokens: 50e-6,
+          input_cost_per_token_above_272k_tokens: 15e-6,
+          output_cost_per_token_above_272k_tokens: 75e-6,
+        },
+      ],
+      ["provider-b/example-model", opus],
+    ];
+    const rates = parseRateTable(Object.fromEntries(reverse ? entries.toReversed() : entries));
+    expect(lookupRate(rates, "example-model")).toEqual(
+      lookupRate(rates, "provider-a/example-model"),
+    );
+    for (const tier of [undefined, "priority", "fast", "ultrafast", "flex"]) {
+      expect(priceUsage(rates, "example-model", tokens, null, tier)).toEqual(
+        priceUsage(rates, "provider-a/example-model", tokens, null, tier),
+      );
+    }
+    expect(priceUsage(rates, "provider-b/example-model", tokens, null, "priority").costSource).toBe(
+      "unpriced",
+    );
+  });
+
+  it.each(["base", "priority", "above200kTokens", "flex"])(
+    "leaves a bare alias unpriced when its %s rates conflict",
+    (tier) => {
+      const tiered = {
+        ...opus,
+        input_cost_per_token_priority: 10e-6,
+        output_cost_per_token_priority: 50e-6,
+        input_cost_per_token_above_200k_tokens: 10e-6,
+        output_cost_per_token_above_200k_tokens: 50e-6,
+        input_cost_per_token_flex: 2.5e-6,
+        output_cost_per_token_flex: 12.5e-6,
+      };
+      const field =
+        tier === "base"
+          ? "input_cost_per_token"
+          : tier === "above200kTokens"
+            ? "input_cost_per_token_above_200k_tokens"
+            : `input_cost_per_token_${tier}`;
+      const rates = parseRateTable({
+        "provider-a/example-model": tiered,
+        "provider-b/example-model": { ...tiered, [field]: 99e-6 },
+      });
+      expect(lookupRate(rates, "example-model")).toBeNull();
+    },
+  );
+
   it("only aliases recognized first-party model namespaces", () => {
     const rates = parseRateTable({ "claude-opus-5": opus, "gemini/gemini-2.5-pro": opus });
     expect(lookupRate(rates, "anthropic/claude-opus-5")).toEqual(

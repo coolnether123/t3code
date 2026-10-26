@@ -33,16 +33,14 @@ import { Link } from "@tanstack/react-router";
 import { RefreshCwIcon } from "lucide-react";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 
-import { isElectron } from "../../env";
 import { cn } from "~/lib/utils";
 import { useUsage } from "../../state/usage";
 import { Button } from "../ui/button";
 import { ScrollArea } from "../ui/scroll-area";
-import { SidebarInset } from "../ui/sidebar";
+import { AppRouteModal, AppRouteModalClose } from "../AppRouteModal";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { WorkspacePageContainer } from "../WorkspacePageContainer";
-import { WorkspacePageHeader } from "../WorkspacePageHeader";
 
 import { chartActivityIntervals } from "./usageChartActivity";
 import { apiPaceInterval, type PriorApiPaceInput } from "./usageApiPace";
@@ -570,9 +568,9 @@ export function UsageResetPage() {
     : null;
 
   return (
-    <SidebarInset className="h-dvh min-h-0 overflow-hidden">
-      <WorkspacePageHeader electron={isElectron}>
-        <div className="flex w-full min-w-0 items-center gap-3">
+    <AppRouteModal label="Limits">
+      <header className="flex min-h-12 shrink-0 items-center border-b px-3 py-1.5 sm:ps-5 sm:pe-2">
+        <div className="flex w-full min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
           <Link
             to="/usage"
             className="inline-flex min-h-11 items-center rounded-md text-sm text-muted-foreground hover:text-foreground"
@@ -583,22 +581,23 @@ export function UsageResetPage() {
             /
           </span>
           <h1 className="truncate text-sm font-medium">Limits</h1>
-          <ToggleGroup
-            aria-label="Providers"
-            className="ms-2"
-            variant="segmented"
-            value={[view.provider]}
-            onValueChange={(value) => {
-              const next = value[0];
-              if (next === "codex" || next === "claude" || next === "both") {
-                updateView({ provider: next });
-              }
-            }}
-          >
-            <Toggle value="codex">Codex</Toggle>
-            <Toggle value="claude">Claude</Toggle>
-            <Toggle value="both">Both</Toggle>
-          </ToggleGroup>
+          <div className="order-last w-full sm:order-none sm:ms-2 sm:w-auto">
+            <ToggleGroup
+              aria-label="Providers"
+              variant="segmented"
+              value={[view.provider]}
+              onValueChange={(value) => {
+                const next = value[0];
+                if (next === "codex" || next === "claude" || next === "both") {
+                  updateView({ provider: next });
+                }
+              }}
+            >
+              <Toggle value="codex">Codex</Toggle>
+              <Toggle value="claude">Claude</Toggle>
+              <Toggle value="both">Both</Toggle>
+            </ToggleGroup>
+          </div>
           <div className="ms-auto flex items-center gap-1">
             <UsageMonitorSettings
               sources={sources.map((environment) => ({
@@ -637,9 +636,10 @@ export function UsageResetPage() {
             >
               <RefreshCwIcon className={`size-4 ${refreshing ? "motion-safe:animate-spin" : ""}`} />
             </Button>
+            <AppRouteModalClose />
           </div>
         </div>
-      </WorkspacePageHeader>
+      </header>
       <ScrollArea className="min-h-0 flex-1">
         <WorkspacePageContainer
           width="expanded"
@@ -864,6 +864,6 @@ export function UsageResetPage() {
           <BirthdayGreeting />
         </WorkspacePageContainer>
       </ScrollArea>
-    </SidebarInset>
+    </AppRouteModal>
   );
 }

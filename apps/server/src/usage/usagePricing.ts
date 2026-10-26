@@ -1,12 +1,4 @@
-/**
- * Model rate lookup and cost arithmetic.
- *
- * Rates come from LiteLLM's `model_prices_and_context_window.json`, the same
- * table `ccusage` prices against. Everything here is pure: fetching and caching
- * the table lives in `UsageService`.
- *
- * @module usagePricing
- */
+// UsageService owns rate fetching; pricing here stays pure.
 import type {
   UsageCategoryCost,
   UsageCostSource,
@@ -231,19 +223,47 @@ export function parseRateTable(document: unknown): RateTable {
   const aliases = new Map<string, ModelRate | null>();
   for (const [key, rate] of table) {
     const alias = key.slice(key.lastIndexOf("/") + 1);
-    if (alias === key || table.has(alias)) continue;
+    if (alias.length === 0 || alias === key || table.has(alias)) continue;
     const previous = aliases.get(alias);
     aliases.set(
       alias,
-      previous === undefined
-        ? rate
-        : previous !== null && JSON.stringify(previous) === JSON.stringify(rate)
-          ? previous
-          : null,
+      previous === undefined ? rate : previous === null ? null : mergeAliasRate(previous, rate),
     );
   }
   for (const [alias, rate] of aliases) if (rate !== null) table.set(alias, rate);
   return table;
+}
+
+// Resellers may omit tiers; conflicting prices still make a bare model name ambiguous.
+function mergeAliasRate(a: ModelRate, b: ModelRate): ModelRate | null {
+  if (
+    a.inputCostPerToken !== b.inputCostPerToken ||
+    a.outputCostPerToken !== b.outputCostPerToken ||
+    a.cacheReadCostPerToken !== b.cacheReadCostPerToken ||
+    a.cacheCreationCostPerToken !== b.cacheCreationCostPerToken
+  ) {
+    return null;
+  }
+  const merged = { ...a };
+  for (const tier of [
+    "above200kTokens",
+    "above272kTokens",
+    "priority",
+    "fast",
+    "ultrafast",
+    "flex",
+  ] as const) {
+    const left = a[tier];
+    const right = b[tier];
+    if (left === undefined) {
+      if (right !== undefined) merged[tier] = right;
+    } else if (right !== undefined) {
+      const rate = mergeAliasRate(left, right);
+      if (rate === null) return null;
+      merged[tier] = rate;
+    }
+  }
+  return merged;
 }
 
 /**

@@ -4,19 +4,7 @@ import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/
 import { makeProviderUsageReader } from "./usageProviderReaders.ts";
 import { BUILT_IN_USAGE_DRIVERS } from "../provider/builtInDrivers.ts";
 import * as ProviderScanCache from "./usageProviderScanCache.ts";
-/**
- * UsageService - scans provider transcripts and returns priced usage buckets.
- *
- * The scan reads the provider CLIs' own session files rather than T3 Code's
- * orchestration projections, so usage covers turns driven outside T3 Code too.
- * This is the approach `ccusage` takes.
- *
- * Transcripts are append-only, so parsed records are memoised per file by
- * `(size, mtime)`. A cold 30-day scan of ~1.4 GB lands around 2-3 seconds; warm
- * scans only reparse files that changed.
- *
- * @module UsageService
- */
+// Read provider transcripts so usage includes work performed outside T3.
 import * as NodeOS from "node:os";
 
 import {
@@ -170,10 +158,7 @@ const LEGACY_SCAN_CACHE_IMPORT_FLAG = "legacyJsonImportedAt";
 const LEGACY_SCAN_CACHE_IMPORT_BATCH_ROWS = 5_000;
 const MAX_SUMMARY_CACHE_ENTRIES = 16;
 
-/**
- * Files are filtered by mtime before opening. The slack covers a session whose
- * last write lands just before local midnight on the window's first day.
- */
+// mtime slack includes writes just before local midnight on the window's first day.
 const MTIME_SLACK_MS = 36 * 60 * 60 * 1000;
 const MAX_HOURLY_WINDOW_MS = 24 * 60 * 60 * 1000;
 

@@ -1,19 +1,5 @@
-/**
- * Durable per-file scan cache.
- *
- * Transcripts are append-only and a file that has not changed can never yield
- * different usage, so parsed records are keyed by `(size, mtime)` and reused.
- * Without this every server restart re-parses the whole window: roughly 3.5s
- * for a 30-day scan here, against ~11ms to reload this cache.
- *
- * Caching *per file* rather than per day is deliberate. It is timezone
- * independent, so changing the reporting zone does not invalidate anything, and
- * it keeps cross-file de-duplication exact: cached entries are de-duplicated
- * within their own file only, and the aggregator still applies the global
- * dedupe pass over the small surviving key set.
- *
- * @module usageScanCache
- */
+// Cache per file so timezone changes do not invalidate parsed usage.
+// Deduplicate within each file here; the aggregator handles cross-file copies.
 import type {
   UsageProviderKind,
   UsageRepeatedInputConfidence,
@@ -32,15 +18,7 @@ import {
   type RepeatedInputObservation,
 } from "./usageRepeatedInput.ts";
 
-// v2 changed fork-copy suppression. v3 added root coverage. v4 persists the
-// Codex parser cursor. v5 reparses AI Studio files for source dates and branch
-// de-duplication. v6 adds stable Codex cross-file keys. v7 adds append-prefix
-// validation and compact repeated-input observations. v6 Codex entries keep
-// their ordinary usage records; repeated-input data is cold-built until a v7
-// prefix fingerprint exists, so the established usage cache is not discarded.
-// v8 adds a complete-line ordinary-usage cursor for bounded JSONL scans.
-// v9 persists exact provider-native session IDs. Older rows cannot distinguish
-// those IDs from synthetic session IDs, so they must be reparsed.
+// Older rows cannot distinguish native session IDs from synthetic IDs and must be reparsed.
 export const USAGE_SCAN_CACHE_VERSION = 9 as const;
 
 export interface CachedFile {
@@ -551,9 +529,7 @@ function decodeSerializedFile(
   // repeated-input read before enabling append-only attribution.
   if (version < 6 && provider === "codex") return undefined;
   const records: UsageRecord[] = [];
-  // Any corrupt row disqualifies the whole entry. Keeping the survivors
-  // under the original (size, mtime) would read as a valid warm hit and the
-  // file would never be re-parsed, silently losing the dropped rows' usage.
+  // Reject entire corrupt entries; partial survivors would appear warm and hide usage until the file changes.
   let corrupt = false;
   for (const row of entry.r) {
     if (!isRecordArray(row) || row.length < 10) {

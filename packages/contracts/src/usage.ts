@@ -1,19 +1,5 @@
-/**
- * Usage reporting contract.
- *
- * Each environment scans the provider CLIs' own on-disk session transcripts
- * (`~/.claude/projects/**\/*.jsonl`, `~/.codex/{sessions,archived_sessions}/**\/*.jsonl`,
- * `~/.gemini/tmp/<project>/chats/session-*`, `~/.local/share/opencode/opencode.db`)
- * rather than
- * relying on T3 Code's own orchestration projections, so usage stays complete
- * even for turns that were never driven through T3 Code. This mirrors the
- * approach `ccusage` takes.
- *
- * Environments return pre-aggregated `(day, hourStart?, provider, model)`
- * buckets. Raw transcript records never cross the wire.
- *
- * @module usage
- */
+// Environments scan provider transcripts, including work outside T3, and return
+// aggregated buckets. Raw transcript records never cross the wire.
 import * as Schema from "effect/Schema";
 
 import {
@@ -24,11 +10,7 @@ import {
 } from "./baseSchemas.ts";
 import { UsageModelPriceOverride } from "./settings.ts";
 
-/**
- * Bumped whenever the shape of {@link UsageSummary} changes incompatibly.
- * Adding providers or other array-element variants is additive: unknown entries
- * are skipped on decode and do not require a version bump.
- */
+/** Bump for incompatible UsageSummary changes; skipped unknown array variants need no bump. */
 export const USAGE_CONTRACT_VERSION = 8 as const;
 
 export const USAGE_MERGE_COMPATIBLE_SINCE = 4 as const;
@@ -64,24 +46,11 @@ export type UsageAttributionGroup = typeof UsageAttributionGroup.Type;
 const UsageNativeId = TrimmedNonEmptyString.check(Schema.isMaxLength(512));
 const UsageNativeIdList = Schema.Array(UsageNativeId).check(Schema.isMaxLength(128));
 
-/**
- * Why a bucket's cost is what it is.
- *
- * - `providerReported` - the transcript carried an explicit cost figure.
- * - `modelPriced` - we matched the model against the LiteLLM rate table.
- * - `unpriced` - tokens are known, rates are not. Counted in totals, excluded
- *   from cost.
- */
+// Unpriced tokens count toward token totals but contribute no cost.
 export const UsageCostSource = Schema.Literals(["providerReported", "modelPriced", "unpriced"]);
 export type UsageCostSource = typeof UsageCostSource.Type;
 
-/**
- * `cachedInputTokens` and `cacheCreationTokens` are disjoint from
- * `uncachedInputTokens`; summing all three gives total input. `reasoningTokens`
- * is a *subset* of `outputTokens` (Codex reports it that way, Gemini thoughts
- * are folded into output, and Anthropic does not break thinking out), so it
- * must never be added on top.
- */
+/** Sum uncached input, cache reads, and cache writes for input totals; reasoning is already included in output. */
 export const UsageTokenTotals = Schema.Struct({
   uncachedInputTokens: NonNegativeInt,
   cachedInputTokens: NonNegativeInt,
@@ -137,12 +106,7 @@ export const UsageSourceFingerprint = Schema.Struct({
   hostId: TrimmedNonEmptyString,
   provider: UsageProviderKind,
   resolvedHomePath: TrimmedNonEmptyString,
-  /**
-   * Filesystem identity of the transcript directory, as `device:inode`.
-   * Hostname and path alone are not enough: every Mac in a fleet resolves
-   * `/Users/<user>/.claude`, so two machines that happen to share a hostname
-   * would look like one source and have their usage silently dropped.
-   */
+  /** Transcript directory device:inode distinguishes machines sharing a hostname and home path. */
   volumeId: Schema.String,
 });
 export type UsageSourceFingerprint = typeof UsageSourceFingerprint.Type;
@@ -156,19 +120,11 @@ export const UsageSource = Schema.Struct({
   scannedFiles: NonNegativeInt,
   skippedFiles: NonNegativeInt,
   malformedRecords: NonNegativeInt,
-  /**
-   * Buckets also carry per-bucket session counts, but a session spans days and
-   * models, so summing those overcounts; this is the figure clients should
-   * total.
-   */
+  /** Total this count; bucket counts double-count sessions spanning days or models. */
   distinctSessions: NonNegativeInt,
   message: Schema.NullOr(TrimmedNonEmptyString),
   action: Schema.optionalKey(Schema.Literal("enableCursorKeychain")),
-  /**
-   * Present when this source answered from its cache while a slow refresh (an
-   * account API, for example) runs. Repeat the request with `awaitRefresh` to
-   * get the refreshed source.
-   */
+  /** Cached response during refresh; repeat with awaitRefresh for fresh data. */
   refreshing: Schema.optionalKey(Schema.Literal(true)),
 });
 export type UsageSource = typeof UsageSource.Type;
@@ -283,10 +239,7 @@ export const UsageSummaryInput = Schema.Struct({
   /** Inclusive first day of the window, in `timeZone`. */
   sinceDay: UsageDay,
   untilDay: UsageDay,
-  /**
-   * IANA zone the client wants days bucketed in. An offset would be wrong for
-   * any window that crosses a DST boundary.
-   */
+  /** IANA bucketing zone; offsets fail across DST boundaries. */
   timeZone: TrimmedNonEmptyString,
   resolution: Schema.optional(UsageResolution),
   sinceTime: Schema.optional(TrimmedNonEmptyString),

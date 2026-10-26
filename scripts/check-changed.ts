@@ -10,16 +10,21 @@
 //
 // Uncommitted and untracked files count. Affected packages come from
 // .github/scripts/ci-changes.cjs, the same mapping CI uses to gate its jobs.
-// The steps run side by side; each prints its output when it finishes. A
-// rerun on exactly the files of the last passing run prints that run's summary.
+// Windows runs bounded commands serially; other platforms run steps side by side.
+// A rerun on exactly the files of the last passing run prints that run's summary.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as Effect from "effect/Effect";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import { decide, readWorkspace } from "../.github/scripts/ci-changes.cjs";
+import { checkFileBatches } from "./lib/check-file-batches.ts";
 
 const root = NodePath.resolve(import.meta.dirname, "..");
+const vp = NodePath.join(root, "node_modules/vite-plus/bin/vp");
+const windows = Effect.runSync(HostProcess.isWindows);
 const CODE = /\.[cm]?[jt]sx?$/;
 
 // quotePath=false keeps non-ASCII paths as real paths instead of quoted escapes.
@@ -56,13 +61,9 @@ if (files.length === 0) {
 }
 console.log(`check:changed: ${files.length} files since ${base.slice(0, 12)}`);
 
-// The checked tree is the merge base plus the diff plus the untracked files.
-// Ignored generated sources, .astro types, generated declarations such as
-// apps/mobile/expo-env.d.ts, env files, and the install state can change results
-// too, so they are part of the key. Other ignored folders (iOS Pods, dist, the
-// Electron runtime) are large and no check reads them.
-// Computed again after a passing run, so edits made during the run are never
-// cached as passing.
+// Ignored generated sources, declarations, env files, and install state affect check results.
+// Include them in the key, but skip large ignored folders that no check reads.
+// Recompute after a passing run so edits made during it are never cached as passing.
 const inputKey = () => {
   const hash = NodeCrypto.createHash("sha256");
   // CI changes test behavior (vite.config.ts rejects .only under CI).
@@ -139,7 +140,8 @@ for (const file of code) {
   const dir = NodePath.dirname(file);
   const prefix = `${NodePath.basename(file).replace(CODE, "")}.`;
   for (const entry of NodeFS.readdirSync(NodePath.join(root, dir))) {
-    if (entry.startsWith(prefix) && TEST.test(entry)) tests.add(NodePath.join(dir, entry));
+    if (entry.startsWith(prefix) && TEST.test(entry))
+      tests.add(NodePath.join(dir, entry).replaceAll("\\", "/"));
   }
 }
 
@@ -162,12 +164,8 @@ const knipPasses = knipCheck.split(" && ").map((command, index, all) => {
   return { name: `knip ${index + 1}/${all.length}`, args: ["exec", "knip", ...args] };
 });
 
-// A version bump can strand a patch in pnpm-workspace.yaml: no resolved
-// version uses it and pnpm rejects the install with ERR_PNPM_UNUSED_PATCH.
-// CI catches that before merge through Release Smoke, because ci-changes.cjs
-// runs everything for any package.json and for root paths it does not map to
-// a package (pnpm-workspace.yaml, pnpm-lock.yaml, patches/). The local run
-// had no such check, so a stranded patch passed here and failed after push.
+// A version bump can leave a patch unused, causing pnpm to reject the install
+// with ERR_PNPM_UNUSED_PATCH. Check it here as Release Smoke does in CI.
 const runPatchCheck = files.some(
   (file) =>
     file === "pnpm-workspace.yaml" ||
@@ -178,12 +176,9 @@ const runPatchCheck = files.some(
     NodePath.basename(file) === "package.json",
 );
 
-// Mirror Release Smoke's temp-copy install: copy the workspace manifests to
-// a temp dir, omit the lockfile, and install with --lockfile-only, so the
-// working tree and its lockfile stay untouched (the mobile modules are
-// mobile file: dependencies, not workspace packages). Local pnpm may resolve
-// from cached registry metadata, so this catches patches stranded by your
-// own change, not registry drift.
+// Resolve without the lockfile in a temp copy to preserve the working tree and lockfile.
+// Copy mobile modules too: they are file: dependencies, not workspace packages.
+// Cached registry metadata limits this to patches stranded by local changes, not registry drift.
 const checkPatches = (): boolean => {
   const temp = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-patch-check-"));
   try {
@@ -206,8 +201,8 @@ const checkPatches = (): boolean => {
       if (NodeFS.existsSync(NodePath.join(root, extra))) copy(extra);
     }
     const { status, stdout, stderr, error } = NodeChildProcess.spawnSync(
-      "vp",
-      ["install", "--lockfile-only", "--ignore-scripts"],
+      process.execPath,
+      [vp, "install", "--lockfile-only", "--ignore-scripts"],
       { cwd: temp, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
     );
     if (status === 0) return true;
@@ -234,14 +229,82 @@ const graphql = ["apps/server", "packages/source-control-github"].filter((dir) =
 );
 
 const filters = (names: ReadonlyArray<string>) => names.flatMap((name) => ["--filter", name]);
+const batches = (files: readonly string[]) => (windows ? checkFileBatches(files) : [files]);
+const testCommands = windows
+  ? [
+      ...Map.groupBy(
+        [...tests],
+        (file) => packages.find((pkg) => file.startsWith(`${pkg.dir}/`))?.dir ?? ".",
+      ),
+    ].flatMap(([dir, selected]) => {
+      const cwd = NodePath.join(root, dir);
+      const config = NodeFS.existsSync(NodePath.join(cwd, "vite.config.ts"))
+        ? []
+        : ["--config", NodePath.relative(cwd, NodePath.join(root, "vite.config.ts"))];
+      const relative = selected.map((file) =>
+        NodePath.relative(cwd, NodePath.join(root, file)).replaceAll("\\", "/"),
+      );
+      return checkFileBatches(relative, 16_000, 8).map((files) => ({
+        cwd,
+        args: [
+          "test",
+          "run",
+          "--passWithNoTests",
+          "--maxWorkers=1",
+          "--reporter=dot",
+          ...config,
+          ...files,
+        ],
+      }));
+    })
+  : [{ cwd: root, args: ["test", "run", "--passWithNoTests", ...tests] }];
+const typecheckCommands = windows
+  ? affected.map((name) => {
+      const pkg = packages.find((pkg) => pkg.name === name)!;
+      const manifest = JSON.parse(
+        NodeFS.readFileSync(NodePath.join(root, pkg.dir, "package.json"), "utf8"),
+      );
+      const script: string = manifest.scripts?.typecheck ?? "tsc --noEmit";
+      return {
+        cwd: root,
+        args: [
+          "run",
+          "--cache",
+          "--filter",
+          name,
+          "typecheck",
+          ...(script.startsWith("tsc ") ? ["--singleThreaded"] : []),
+        ],
+      };
+    })
+  : [
+      {
+        cwd: root,
+        args: [
+          "run",
+          "--cache",
+          "--parallel",
+          "--concurrency-limit",
+          "4",
+          ...filters(affected),
+          "typecheck",
+        ],
+      },
+    ];
 const steps = [
   // Runs first; it takes about a second.
   runPatchCheck && { name: "unused patches", run: checkPatches },
   present.length > 0 && {
     name: "format",
-    args: ["fmt", "--check", "--no-error-on-unmatched-pattern", ...present],
+    commands: batches(present).map((files) => ({
+      cwd: root,
+      args: ["fmt", "--check", "--no-error-on-unmatched-pattern", ...files],
+    })),
   },
-  code.length > 0 && { name: "lint", args: ["lint", ...code] },
+  code.length > 0 && {
+    name: "lint",
+    commands: batches(code).map((files) => ({ cwd: root, args: ["lint", ...files] })),
+  },
   ...(runKnip ? knipPasses : []),
   ...graphql.map((dir) => ({
     name: `graphql (${dir})`,
@@ -249,51 +312,63 @@ const steps = [
   })),
   affected.length > 0 && {
     name: `typecheck (${affected.length} packages)`,
-    // `tsc --noEmit` writes nothing another package reads, so dependency order
-    // only made dependents wait: --parallel cut a contracts change from 13 s to 9 s.
-    args: [
-      "run",
-      "--cache",
-      "--parallel",
-      "--concurrency-limit",
-      "4",
-      ...filters(affected),
-      "typecheck",
-    ],
+    commands: typecheckCommands,
   },
   // From the repo root, the root vite.config.ts hands each file to its package's config.
   tests.size > 0 && {
     name: `test (${tests.size} files)`,
-    args: ["test", "run", "--passWithNoTests", ...tests],
+    commands: testCommands,
   },
 ].filter((step) => step !== false);
 
 // Output is piped, so keep the colors a terminal would get.
-const env = process.stdout.isTTY ? { ...process.env, FORCE_COLOR: "1" } : process.env;
-const results = await Promise.all(
-  steps.map(
-    (step) =>
-      new Promise<{ name: string; ok: boolean; seconds: string }>((resolve) => {
-        const started = performance.now();
-        const finish = (ok: boolean, output?: Buffer) => {
-          const seconds = ((performance.now() - started) / 1000).toFixed(1);
-          console.log(`\n> vp ${step.name}  ${ok ? "pass" : "FAIL"}  ${seconds}s`);
-          if (output) process.stdout.write(output);
-          resolve({ name: step.name, ok, seconds });
-        };
-        // In-process steps print their own output. The patch check is first and
-        // takes about a second, so the commands start right after it.
-        if ("run" in step) return finish(step.run());
-        const output: Array<Buffer> = [];
-        const child = NodeChildProcess.spawn("vp", step.args, { cwd: root, env });
-        child.stdout.on("data", (chunk: Buffer) => output.push(chunk));
-        child.stderr.on("data", (chunk: Buffer) => output.push(chunk));
-        // A failed spawn emits "error", then "close" with a nonzero code.
-        child.on("error", (error) => output.push(Buffer.from(`${error.message}\n`)));
-        child.on("close", (status) => finish(status === 0, Buffer.concat(output)));
-      }),
-  ),
-);
+// Knip's raw-transfer parser reserves a large buffer even for small files.
+const env = {
+  ...process.env,
+  ...(windows ? { KNIP_DISABLE_RAW_TRANSFER: "1" } : {}),
+  ...(process.stdout.isTTY ? { FORCE_COLOR: "1" } : {}),
+};
+const runStep = async (step: (typeof steps)[number]) => {
+  const started = performance.now();
+  let ok = true;
+  if ("run" in step) {
+    ok = step.run();
+  } else {
+    const commands = "commands" in step ? step.commands : [{ cwd: root, args: step.args }];
+    for (const command of commands) {
+      console.log(
+        `\ncheck:changed: ${step.name}, ${NodePath.relative(root, command.cwd) || "."}: ${command.args.join(" ")}`,
+      );
+      const status = await new Promise<number | null>((resolve) => {
+        try {
+          const child = NodeChildProcess.spawn(process.execPath, [vp, ...command.args], {
+            cwd: command.cwd,
+            env,
+          });
+          child.stdout.on("data", (chunk: Buffer) => process.stdout.write(chunk));
+          child.stderr.on("data", (chunk: Buffer) => process.stdout.write(chunk));
+          child.on("error", (error) => console.error(error.message));
+          child.on("close", resolve);
+        } catch (error) {
+          console.error(error);
+          resolve(1);
+        }
+      });
+      if (status !== 0) ok = false;
+    }
+  }
+  const seconds = ((performance.now() - started) / 1000).toFixed(1);
+  console.log(`\n> vp ${step.name}  ${ok ? "pass" : "FAIL"}  ${seconds}s`);
+  return { name: step.name, ok, seconds };
+};
+// Windows limits command lines to 32K characters. Serial processes also keep each
+// compiler or browser within the memory reserved for its check.
+const results: Array<Awaited<ReturnType<typeof runStep>>> = [];
+if (windows) {
+  for (const step of steps) results.push(await runStep(step));
+} else {
+  results.push(...(await Promise.all(steps.map(runStep))));
+}
 
 const summary = ["check:changed summary"];
 for (const result of results) {

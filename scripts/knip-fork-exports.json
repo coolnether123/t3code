@@ -1,0 +1,111 @@
+{
+  "apps/server/src/background/BackgroundPolicy.ts": ["isHostConstrained"],
+  "apps/server/src/browser/ChromeAutomation.ts": ["layerWithOptions", "profileArguments"],
+  "apps/server/src/mcp/McpSessionRegistry.ts": ["resolveMcpCapabilities"],
+  "apps/server/src/mcp/toolkits/computer/handlers.ts": ["ComputerToolkitHandlersLive"],
+  "apps/server/src/mcp/toolkits/computer/tools.ts": [
+    "ComputerClickTool",
+    "ComputerCloseTool",
+    "ComputerFillTool",
+    "ComputerNavigateTool",
+    "ComputerOpenUrlTool",
+    "ComputerSelectTabTool",
+    "ComputerSnapshotTool",
+    "ComputerStartTool",
+    "ComputerStatusTool",
+    "ComputerTabsTool",
+    "ComputerTypeTool",
+    "hasCurrentComputerCapability"
+  ],
+  "apps/server/src/persistence/forkWorkersMigration.fixture.ts": ["default", "ensureWorkerSchema"],
+  "apps/server/src/provider/ClaudeProvider.ts": ["readClaudeSubscriptionWindows"],
+  "apps/server/src/provider/CodexAppServerTransport.ts": [
+    "codexDesktopDaemonFailureMessage",
+    "codexDesktopDaemonFailureProblem",
+    "makeCodexAppServerProtocolLogger"
+  ],
+  "apps/server/src/provider/CodexComputerControl.ts": ["CODEX_COMPUTER_CONTROL_MODES"],
+  "apps/server/src/provider/CodexDesktopHttp.ts": ["codexDesktopStoreLayer"],
+  "apps/server/src/provider/CodexDesktopMailbox.ts": [
+    "isMailboxJobId",
+    "readCodexDesktopBinding",
+    "resolveCodexDesktopMailboxRoot"
+  ],
+  "apps/server/src/provider/CodexDesktopStore.ts": ["make"],
+  "apps/server/src/provider/CodexProvider.ts": ["codexPlanLabel"],
+  "apps/server/src/provider/CodexSubagentPolicy.ts": ["codexSubagentBackendAppServerArgs"],
+  "apps/server/src/usage/cliproxyApi.ts": ["creditRedeemRequestId"],
+  "apps/server/src/usage/promptWords.ts": ["PROMPT_COMMON_WORDS"],
+  "apps/server/src/usage/resetCheckResearch.ts": ["RESET_CHECK_MODEL"],
+  "apps/server/src/usage/usagePricing.ts": ["normalizeModelName"],
+  "apps/server/src/usage/usageQuotaCostLedger.ts": [
+    "MAX_QUOTA_COST_LEDGER_BYTES",
+    "MAX_QUOTA_COST_LEDGER_ROWS",
+    "QUOTA_COST_LEDGER_VERSION"
+  ],
+  "apps/server/src/usage/usageRecordIndex.ts": ["INDEX_FIELDS"],
+  "apps/server/src/usage/usageRepeatedInput.ts": [
+    "EMPTY_REPEATED_INPUT_TOKENS",
+    "defaultCodexInputRoots",
+    "detectCodexRepeatedInputLine",
+    "hashRepeatedInput",
+    "parseCodexRepeatedInputLine",
+    "stableContentHash"
+  ],
+  "apps/server/src/usage/UsageResetCheck.ts": ["makeCommunityResearch"],
+  "apps/server/src/usage/usageScanCache.ts": ["USAGE_SCAN_CACHE_VERSION"],
+  "apps/server/src/usage/usageScanStore.ts": ["coverageKey"],
+  "apps/server/src/usage/usageTranscriptReader.ts": [
+    "readCodexRepeatedInputRecords",
+    "readRepeatedInputRecords"
+  ],
+  "apps/server/src/usage/usageTranscripts.ts": ["totalTokens"],
+  "apps/web/src/components/chat/timelineScrollAnchoring.ts": [
+    "keepTimelineEndVisibleAfterOverlayGrowth"
+  ],
+  "apps/web/src/components/ChatView.logic.ts": ["resolveFollowUpSubmission", "shouldQueueFollowUp"],
+  "apps/web/src/components/usage/repeatedInputPresentation.ts": ["periodLabel"],
+  "apps/web/src/environments/primary/context.ts": [
+    "__resetPrimaryEnvironmentBootstrapForTests",
+    "__resetPrimaryEnvironmentDescriptorBootstrapForTests",
+    "readPrimaryEnvironmentDescriptor",
+    "resetPrimaryEnvironmentDescriptorForTests"
+  ],
+  "apps/web/src/environments/primary/sessionState.ts": ["refreshPrimarySessionState"],
+  "apps/web/src/lib/storage.ts": ["createDebouncedStorage"],
+  "apps/web/src/providerInstances.ts": ["codexThreadRuntimeLabel"],
+  "packages/client-runtime/src/publicResetHistory.ts": ["publicResetPeriods"],
+  "packages/client-runtime/src/voice-call/session.ts": ["speechIdentifier"],
+  "packages/client-runtime/src/voice-call/transport.ts": ["VoiceRequestError"],
+  "packages/contracts/src/providerRuntime.ts": ["TOOL_LIFECYCLE_ITEM_TYPES"],
+  "packages/contracts/src/rpc.ts": [
+    "WsPreviewAutomationConnectRpc",
+    "WsPreviewAutomationFocusHostRpc",
+    "WsPreviewAutomationRespondRpc",
+    "WsServerCancelCommunityCheckRpc",
+    "WsServerCancelResetCheckRpc",
+    "WsServerGetCommunityCheckRpc",
+    "WsServerGetResetCheckRpc",
+    "WsServerGetUsageReportRpc",
+    "WsServerStartCommunityCheckRpc",
+    "WsServerStartResetCheckRpc"
+  ],
+  "packages/contracts/src/settings.ts": ["defaultEnabledForDriver"],
+  "packages/contracts/src/usage.ts": ["USAGE_REPORT_CONTRACT_VERSION"],
+  "packages/provider-acp/src/server/AcpSessionRuntime.ts": [
+    "observePosixOwnershipLedgerContinuously",
+    "terminateWindowsProcessTreeWithTaskkill",
+    "windowsTaskkillResultIsSuccess"
+  ],
+  "packages/provider-core/src/server/usage.ts": ["EMPTY_TOTALS"],
+  "packages/shared/src/model.ts": [
+    "getModelSelectionOptionDescriptors",
+    "getModelSelectionOptionValue",
+    "getProviderOptionSelectionValue",
+    "readCustomModelSlugs",
+    "resolveModelSlugForProvider",
+    "trimOrNull"
+  ],
+  "packages/shared/src/toolScreenshot.ts": ["isChromeScreenshotTool"],
+  "packages/shared/src/usageRepeatedInput.ts": ["emptyRepeatedInputTokens"]
+}

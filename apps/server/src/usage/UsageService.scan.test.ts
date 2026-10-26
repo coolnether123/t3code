@@ -26,6 +26,7 @@ import { quotaCostLedgerKey, readQuotaCostLedger } from "./usageQuotaCostLedger.
 import { encodeScanCache, type ScanCache } from "./usageScanCache.ts";
 import { initialCodexScanState, type UsageRecord } from "./usageTranscripts.ts";
 import {
+  readDirectoryVolumeId,
   listTranscriptFilesBounded,
   readRepeatedInputRecords,
   readTranscriptRecords,
@@ -195,12 +196,32 @@ describe("incremental scan integration", () => {
       const fs = yield* FileSystem.FileSystem;
       const readStarted = yield* Deferred.make<void>();
       const releaseRead = yield* Deferred.make<void>();
+      const volumes = new Map<
+        string,
+        { callers: number; ready: ReturnType<typeof Promise.withResolvers<void>> }
+      >();
+      const originalVolume = vi.mocked(readDirectoryVolumeId).getMockImplementation()!;
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => vi.mocked(readDirectoryVolumeId).mockImplementation(originalVolume)),
+      );
+      // Finish every request's asynchronous source discovery before opening the scan batch.
+      vi.mocked(readDirectoryVolumeId).mockImplementation(async (root) => {
+        let volume = volumes.get(root);
+        if (!volume) {
+          volume = { callers: 0, ready: Promise.withResolvers<void>() };
+          volumes.set(root, volume);
+        }
+        if (++volume.callers === 3) volume.ready.resolve();
+        await volume.ready.promise;
+        return "fixture";
+      });
       let reads = 0;
       const service = yield* make.pipe(
         Effect.provideService(FileSystem.FileSystem, {
           ...fs,
-          exists: () => Effect.succeed(true),
-          readFileString: (file, ...args) =>
+          // Keep quota/rate history on this PC out of the cold-scan fixture.
+          exists: (file) => Effect.succeed(/[\\/]sessions$/.test(file)),
+          readFileString: (file) =>
             file.endsWith("usage-scan-cache.json")
               ? Effect.gen(function* () {
                   reads++;
@@ -208,7 +229,7 @@ describe("incremental scan integration", () => {
                   yield* Deferred.await(releaseRead);
                   return emptyScanCache;
                 })
-              : fs.readFileString(file, ...args),
+              : Effect.succeed("[]"),
         }),
         Effect.provideService(
           HttpClient.HttpClient,

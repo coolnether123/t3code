@@ -95,9 +95,8 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
       entry.summary.quotaHistory.samples.length > 0,
   );
   const tracker = trackers.find((entry) => entry.environmentId === trackerId) ?? trackers[0];
-  const rawSamples = tracker?.summary?.quotaHistory?.samples;
-  const samples = useMemo(() => quotaMonitoringSamples(rawSamples ?? []), [rawSamples]);
-  const historicalPeriods = useMemo(() => quotaPeriods(rawSamples ?? []), [rawSamples]);
+  const samples = quotaMonitoringSamples(tracker?.summary?.quotaHistory?.samples ?? []);
+  const historicalPeriods = quotaPeriods(tracker?.summary?.quotaHistory?.samples ?? []);
   const periods = useMemo(() => quotaPeriods(samples), [samples]);
   const intervals = useMemo(() => quotaIntervals(periods), [periods]);
   const input = useMemo(
@@ -114,16 +113,13 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
     [historyInput, publicIntervals],
   );
   const publicCosts = useUsage(publicCostInput);
-  const effectivePublicSelectedIds = useMemo(
-    () =>
-      selectedIds ??
-      (tracker
-        ? [tracker.environmentId]
-        : publicCosts.environments[0]
-          ? [publicCosts.environments[0].environmentId]
-          : []),
-    [publicCosts.environments, selectedIds, tracker?.environmentId],
-  );
+  const effectivePublicSelectedIds =
+    selectedIds ??
+    (tracker
+      ? [tracker.environmentId]
+      : publicCosts.environments[0]
+        ? [publicCosts.environments[0].environmentId]
+        : []);
   const selectedPublicCosts = useMemo(
     () =>
       publicCosts.environments.filter((environment) =>
@@ -169,9 +165,10 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
       }),
     [history.environments, selected],
   );
-  const currentValues = useMemo(
-    () => quotaValueSnapshots(tracker?.environmentId, historicalPeriods, selectedWithSavedCosts),
-    [tracker?.environmentId, historicalPeriods, selectedWithSavedCosts],
+  const currentValues = quotaValueSnapshots(
+    tracker?.environmentId,
+    historicalPeriods,
+    selectedWithSavedCosts,
   );
   const [snapshots, setSnapshots] = useState<ReadonlyMap<string, QuotaValueSnapshot>>(
     () => new Map(),
@@ -200,34 +197,33 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
     refreshActive.current = true;
     setRefreshing(true);
     setRefreshMessage("Refreshing readings, API costs and public resets…");
-    try {
-      setRefreshMessage(
-        await refreshCodexMonitor({
-          trackerId: tracker?.environmentId,
-          refreshHistory: history.refresh,
-          refreshCosts: async (costInput) => {
-            const replies = await Promise.all([
-              costs.refresh(costInput),
-              publicCosts.refresh(publicCostInput),
-            ]);
-            return replies.flat();
-          },
-          refreshNews: async () => {
-            const results = await Promise.all([
-              newsWatcher.current?.refresh() ?? Promise.resolve(false),
-              publicHistoryWatcher.current?.refresh() ?? Promise.resolve(false),
-            ]);
-            return results.some(Boolean);
-          },
-          onProgress: setRefreshMessage,
-        }),
-      );
-    } catch {
-      setRefreshMessage("Refresh did not finish. Check your connection and try again.");
-    } finally {
-      refreshActive.current = false;
-      setRefreshing(false);
-    }
+    await refreshCodexMonitor({
+      trackerId: tracker?.environmentId,
+      refreshHistory: history.refresh,
+      refreshCosts: async (costInput) => {
+        const replies = await Promise.all([
+          costs.refresh(costInput),
+          publicCosts.refresh(publicCostInput),
+        ]);
+        return replies.flat();
+      },
+      refreshNews: async () => {
+        const results = await Promise.all([
+          newsWatcher.current?.refresh() ?? Promise.resolve(false),
+          publicHistoryWatcher.current?.refresh() ?? Promise.resolve(false),
+        ]);
+        return results.some(Boolean);
+      },
+      onProgress: setRefreshMessage,
+    })
+      .then(setRefreshMessage)
+      .catch(() => {
+        setRefreshMessage("Refresh did not finish. Check your connection and try again.");
+      })
+      .finally(() => {
+        refreshActive.current = false;
+        setRefreshing(false);
+      });
   };
 
   const current = values.at(-1);

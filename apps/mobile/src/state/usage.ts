@@ -1,17 +1,7 @@
 import { needsCursorKeychainAccess } from "@t3tools/client-runtime/state/usage";
 import { resolveUsageAccess } from "@t3tools/client-runtime/state/usage-access";
 import { environmentSession } from "./session";
-/**
- * Multi-environment usage state.
- *
- * Every connected environment answers the same typed query; the client merges
- * the results. Raw transcripts never leave the machine that produced them.
- *
- * Mirror of `apps/web/src/state/usage.ts` over mobile's atom wiring; the merge
- * rules themselves live in `@t3tools/shared/usageMerge`.
- *
- * @module state/usage
- */
+// Merge summaries from connected environments; raw transcripts stay on their source machine.
 import { useAtomValue } from "@effect/atom-react";
 import { executeAtomQuery } from "@t3tools/client-runtime/state/runtime";
 import { usageQueryInput } from "@t3tools/client-runtime/usageRefresh";
@@ -42,13 +32,6 @@ export interface EnvironmentUsageStatus {
   readonly summary: UsageSummary | null;
 }
 
-/**
- * Reads every environment's summary for one window.
- *
- * Keyed by the serialised window so switching ranges does not thrash the atom
- * cache, and so each environment's query is shared with any other reader of the
- * same window.
- */
 const usageByWindowAtom = Atom.family((windowKey: string) =>
   Atom.make((get): readonly EnvironmentUsageStatus[] => {
     const input = JSON.parse(windowKey) as UsageSummaryInput;
@@ -115,26 +98,17 @@ export function useUsage(
 ): UsageView {
   const windowKey = useMemo(
     () => JSON.stringify(usageQueryInput(input, USAGE_CONTRACT_VERSION)),
-    [
-      input.sinceDay,
-      input.untilDay,
-      input.timeZone,
-      input.resolution,
-      input.sinceTime,
-      input.untilTime,
-      input.includeRepeatedInput,
-      input.includeQuotaHistory,
-      input.quotaHistoryOnly,
-      input.quotaIntervals,
-      input.quotaProvider,
-    ],
+    [input],
   );
   const atom = usageByWindowAtom(windowKey);
   const environments = useAtomValue(atom);
-  const selectedEnvironments =
-    selectedEnvironmentIds === null
-      ? environments
-      : environments.filter((entry) => selectedEnvironmentIds.has(entry.environmentId));
+  const selectedEnvironments = useMemo(
+    () =>
+      selectedEnvironmentIds === null
+        ? environments
+        : environments.filter((entry) => selectedEnvironmentIds.has(entry.environmentId)),
+    [environments, selectedEnvironmentIds],
+  );
 
   // Refreshing only the derived atom would re-read the per-environment SWR
   // queries within their stale window and change nothing. Refresh each
@@ -187,7 +161,7 @@ export function useUsage(
           ],
     );
     return mergeUsage(answered, USAGE_CONTRACT_VERSION);
-  }, [environments, providers, selectedEnvironmentIds]);
+  }, [selectedEnvironments, providers]);
 
   const retry = useRef({ windowKey, failures: 0, attempts: 0 });
   const hasDeferredTranscripts = environments.some(

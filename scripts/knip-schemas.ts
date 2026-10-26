@@ -5,6 +5,7 @@ import * as NodeWorkerThreads from "node:worker_threads";
 import type { Preprocessor } from "knip";
 // Knip needs the legacy compiler API, which TypeScript 7 no longer exports.
 import ts from "typescript-legacy";
+import retainedForkExports from "./knip-fork-exports.json" with { type: "json" };
 
 const schemaTypeId = "~effect/Schema/Schema";
 
@@ -111,6 +112,12 @@ const WORKERS = Math.min(3, NodeOS.availableParallelism());
 // Drops unused-export issues whose every symbol is an Effect schema.
 const preprocess = async (options: Parameters<Preprocessor>[0]) => {
   const categories = ["exports", "nsExports", "duplicates"] as const;
+  // The first upstream Knip adoption must preserve existing fork APIs. Keep the
+  // exceptions at symbol granularity so new exports in these files are checked.
+  const retained: Readonly<Record<string, readonly string[]>> =
+    NodePath.resolve(options.cwd) === NodePath.resolve(import.meta.dirname, "..")
+      ? retainedForkExports
+      : {};
   const projects = new Map<string | undefined, Map<string, Set<string>>>();
   for (const category of categories) {
     for (const [filePath, issues] of Object.entries(options.issues[category])) {
@@ -162,12 +169,18 @@ const preprocess = async (options: Parameters<Preprocessor>[0]) => {
   });
 
   for (const [filePath, names] of results.flat()) {
+    const compatibilityNames = retained[filePath.replaceAll("\\", "/")] ?? [];
     for (const category of categories) {
       const issues = options.issues[category][filePath];
       if (!issues) continue;
       for (const [key, issue] of Object.entries(issues)) {
         const symbols = issue.symbols ?? [{ symbol: issue.symbol }];
-        if (symbols.length > 0 && symbols.every(({ symbol }) => names.includes(symbol))) {
+        if (
+          symbols.length > 0 &&
+          symbols.every(
+            ({ symbol }) => names.includes(symbol) || compatibilityNames.includes(symbol),
+          )
+        ) {
           delete issues[key];
           options.counters[category]--;
         }

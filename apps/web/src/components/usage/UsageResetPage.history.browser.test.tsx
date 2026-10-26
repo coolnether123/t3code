@@ -1,7 +1,9 @@
 import { expect, it, vi } from "vite-plus/test";
 import { render } from "../../../test/render";
+import { page } from "vite-plus/test/browser";
 import { UsageResetPage } from "./UsageResetPage";
 import type { UsageSummaryInput } from "@t3tools/contracts";
+import "~/index.css";
 const state = vi.hoisted(() => ({
   environments: [] as unknown[],
   publicHistory: {
@@ -32,22 +34,14 @@ vi.mock("@tanstack/react-router", async (original) => ({
   ...(await original<typeof import("@tanstack/react-router")>()),
   Link: "a",
 }));
-vi.mock("../../env", async (original) => ({
-  ...(await original<typeof import("../../env")>()),
-  isElectron: false,
-}));
 vi.mock("../ui/scroll-area", async (original) => ({
   ...(await original<typeof import("../ui/scroll-area")>()),
   ScrollArea: "div",
 }));
-vi.mock("../ui/sidebar", async (original) => ({
-  ...(await original<typeof import("../ui/sidebar")>()),
-  SidebarInset: "div",
-}));
 vi.mock("../WorkspacePageContainer", () => ({ WorkspacePageContainer: "main" }));
-vi.mock("../WorkspacePageHeader", () => ({ WorkspacePageHeader: "header" }));
 
-it("starts July backfill and shows paid value without opening History", async () => {
+it.each([390, 1440])("shows paid value and starts backfill at width %s", async (width) => {
+  await page.viewport(width, 900);
   state.publicHistory = { announcements: [], checkedAt: 0, status: "ready" };
   state.environments = [
     {
@@ -95,10 +89,11 @@ it("starts July backfill and shows paid value without opening History", async ()
     isPending: false,
     refresh: state.refresh,
   }));
-  await using screen = await render(<UsageResetPage />);
-  await expect.element(screen.getByText(/paid.*\$123.00 estimated API value/)).toBeVisible();
+  await using _screen = await render(<UsageResetPage />);
+  await expect.element(page.getByRole("dialog", { name: "Limits" })).toBeVisible();
+  await expect.element(page.getByText(/paid.*\$123.00 estimated API value/)).toBeVisible();
   await expect
-    .element(screen.getByText(/paid.*estimated API value.*Incomplete transcript history/))
+    .element(page.getByText(/paid.*estimated API value.*Incomplete transcript history/))
     .toBeVisible();
   expect(
     state.useUsage.mock.calls.some(([input]) =>
@@ -107,6 +102,7 @@ it("starts July backfill and shows paid value without opening History", async ()
       ),
     ),
   ).toBe(true);
+  await page.screenshot({ path: `__screenshots__/limits-modal-${width}.png` });
 });
 
 it.each([false, true])(
@@ -183,17 +179,17 @@ it.each([false, true])(
       isPending: false,
       refresh: state.refresh,
     }));
-    await using screen = await render(<UsageResetPage />);
-    await expect.element(screen.getByText(/paid.*\$123.00 estimated API value/)).toBeVisible();
+    await using _screen = await render(<UsageResetPage />);
+    await expect.element(page.getByText(/paid.*\$123.00 estimated API value/)).toBeVisible();
     await expect
       .element(
-        screen.getByText(complete ? /^\$123.00$/ : /^\$123.00 · Incomplete transcript history$/),
+        page.getByText(complete ? /^\$123.00$/ : /^\$123.00 · Incomplete transcript history$/),
       )
       .toBeVisible();
-    await screen.getByText(/paid.*estimated API value/).click();
+    await page.getByText(/paid.*estimated API value/).click();
     await expect
       .element(
-        screen
+        page
           .getByText(
             complete ? /\$321.00 value · 1.6×$/ : /\$321.00 value.*Incomplete transcript history/,
           )
