@@ -1,4 +1,5 @@
 import * as NodeZlib from "node:zlib";
+import * as NodeURL from "node:url";
 
 import react from "@vitejs/plugin-react";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
@@ -75,8 +76,16 @@ const buildSourcemap: boolean | "hidden" =
 
 const unitTestProject = {
   extends: true,
+  resolve: {
+    alias: {
+      "vite-plus/test": NodeURL.fileURLToPath(
+        new URL("../../node_modules/vite-plus/dist/test/index.js", import.meta.url),
+      ),
+    },
+  },
   test: {
     name: "unit",
+    server: { deps: { inline: ["@effect/vitest"] } },
     include: ["src/**/*.test.{ts,tsx}"],
     exclude: ["src/**/*.browser.test.{ts,tsx}"],
     hookTimeout: 15_000,
