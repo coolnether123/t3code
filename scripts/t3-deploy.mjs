@@ -171,6 +171,7 @@ export function productionAdapter(config, io = {}) {
     } while (offset !== null);
     return pages;
   };
+  const liveUserdata = () => NodeFS.realpathSync(NodePath.join(config.baseDir, "userdata"));
   return {
     async validate(candidate) {
       const receipt = readJson(NodePath.join(candidate, "release.json"));
@@ -228,7 +229,8 @@ export function productionAdapter(config, io = {}) {
     async backup(id) {
       const root = NodePath.join(config.backupRoot, id);
       NodeFS.mkdirSync(root, { recursive: true });
-      NodeFS.cpSync(NodePath.join(config.baseDir, "userdata"), NodePath.join(root, "userdata"), {
+      // The live userdata may itself be a junction to another volume; only nested links are refused.
+      NodeFS.cpSync(liveUserdata(), NodePath.join(root, "userdata"), {
         recursive: true,
         dereference: false,
         errorOnExist: true,
@@ -255,7 +257,8 @@ export function productionAdapter(config, io = {}) {
         NodePath.dirname(NodePath.resolve(root)) !== NodePath.resolve(config.backupRoot)
       )
         throw new Error("Offline snapshot identity mismatch");
-      const data = NodePath.join(config.baseDir, "userdata");
+      // Restore into the junction target so the link survives and renames stay on one volume.
+      const data = liveUserdata();
       const failed = `${data}.failed-${NodeCrypto.randomUUID()}`;
       const staged = `${data}.restore-${NodeCrypto.randomUUID()}`;
       NodeFS.cpSync(NodePath.join(root, "userdata"), staged, { recursive: true });
