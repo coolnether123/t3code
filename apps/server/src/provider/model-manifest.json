@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-10-21T06:20:00Z",
+  "updatedAt": "2026-10-26T21:30:00Z",
   "compatibility": [
     {
       "driver": "codex",
@@ -101,6 +101,7 @@
     "codex": [
       "gpt-6-astra",
       "gpt-6.1-sol",
+      "gpt-6.1-terra",
       "gpt-6-luna",
       "gpt-daybreak-blue-latest",
       "gpt-daybreak-red-latest"
@@ -117,6 +118,11 @@
           "name": "GPT-6.1 Sol",
           "status": "current",
           "adapter": { "codex": { "minVersion": "0.153.0" } }
+        },
+        {
+          "slug": "gpt-6.1-terra",
+          "name": "GPT-6.1 Terra",
+          "status": "current"
         },
         {
           "slug": "gpt-6-astra",

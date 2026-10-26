@@ -18,6 +18,29 @@ const opus = {
 };
 
 describe("usage pricing", () => {
+  it("prices Terra input, output and cache reads from the source table", () => {
+    const table = parseRateTable({
+      "gpt-6.1-terra": {
+        input_cost_per_token: 1e-6,
+        output_cost_per_token: 5e-6,
+        cache_read_input_token_cost: 0.05e-6,
+      },
+    });
+    const result = priceUsage(
+      table,
+      "gpt-6.1-terra",
+      {
+        uncachedInputTokens: 1_000_000,
+        cachedInputTokens: 1_000_000,
+        cacheCreationTokens: 0,
+        outputTokens: 1_000_000,
+        reasoningTokens: 0,
+      },
+      null,
+    );
+    expect(result.costUsd).toBeCloseTo(6.05);
+  });
+
   it("uses stable-family rates for documented Gemini preview IDs", () => {
     const rate = {
       inputCostPerToken: 1.25e-6,

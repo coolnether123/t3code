@@ -13,6 +13,25 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as ModelManifest from "./ModelManifest.ts";
 
 describe("resolveProviderCatalog", () => {
+  it("lists Terra as current without changing the Codex default", () => {
+    const manifest = ModelManifest.BUNDLED_MODEL_MANIFEST;
+    const catalog = ModelManifest.resolveProviderCatalog(
+      manifest,
+      ProviderDriverKind.make("codex"),
+    );
+    assert(catalog !== null);
+    assert.deepInclude(
+      catalog.models.find((model) => model.slug === "gpt-6.1-terra"),
+      {
+        slug: "gpt-6.1-terra",
+        name: "GPT-6.1 Terra",
+        status: "current",
+      },
+    );
+    assert.isTrue(manifest.currentModels.codex?.includes("gpt-6.1-terra"));
+    assert.isUndefined(catalog.defaultChatModel);
+  });
+
   it("rejects invalid catalog references", () => {
     const invalidCatalog = (input: {
       readonly models: NonNullable<ModelManifest.ModelManifestData["providers"]>[string]["models"];
