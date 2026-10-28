@@ -51,7 +51,22 @@ export async function runNightly(configFile, io = {}) {
   const run =
     io.run ??
     ((exe, args, cwd = config.repository, allowFailure = false) => {
-      const commandArgs = exe === "git" ? ["-c", "core.longpaths=true", ...args] : args;
+      const commandArgs =
+        exe === "git"
+          ? [
+              "-c",
+              "core.longpaths=true",
+              "-c",
+              "http.postBuffer=1048576",
+              "-c",
+              "http.maxRequestBuffer=10485760",
+              "-c",
+              "gc.auto=0",
+              "-c",
+              "maintenance.auto=false",
+              ...args,
+            ]
+          : args;
       const result = NodeChildProcess.spawnSync(exe, commandArgs, {
         cwd,
         encoding: "utf8",
