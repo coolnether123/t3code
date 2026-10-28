@@ -52,8 +52,19 @@ for (const [name, args] of [
   const text = NodeUtil.stripVTControlCharacters(
     NodeFS.readFileSync(NodePath.join(artifact, `${name}.log`), "utf8"),
   ).replaceAll(root, "<root>");
+  const strictGate = ["format", "lint", "agent-context"].includes(name);
+  const unavailable =
+    result.error ||
+    result.signal ||
+    result.status === null ||
+    !NodeFS.existsSync(vp) ||
+    /(?:Cannot find module|ERR_MODULE_NOT_FOUND|MODULE_NOT_FOUND)/.test(text);
   const failures =
-    name === "typecheck"
+    strictGate
+      ? result.status !== 0 && !unavailable && text.trim()
+        ? [text.trim().slice(0, 8192)]
+        : []
+      : name === "typecheck"
       ? text
           .split(/\r?\n/)
           .filter((l) => /error TS\d+/.test(l))
@@ -74,7 +85,7 @@ for (const [name, args] of [
     name,
     exit: result.status,
     failures,
-    classified: result.status === 0 || failures.length > 0,
+    classified: result.status === 0 || (!unavailable && failures.length > 0),
   });
 }
 NodeFS.writeFileSync(NodePath.join(artifact, "checks.json"), JSON.stringify(results, null, 2));
