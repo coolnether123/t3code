@@ -141,7 +141,7 @@ const textFromNativeValue = (value: unknown): string => {
   }
 };
 
-const messageFromRecord = (value: unknown, index: number): CodexDesktopMessage | undefined => {
+const messageFromRecord = (value: unknown, id: string): CodexDesktopMessage | undefined => {
   if (typeof value !== "object" || value === null) return undefined;
   const row = value as Record<string, unknown>;
   const payload = row.payload;
@@ -164,7 +164,7 @@ const messageFromRecord = (value: unknown, index: number): CodexDesktopMessage |
   if (!role || text.length === 0) return undefined;
   const timestamp = asText(row.timestamp);
   return {
-    id: `${index}`,
+    id,
     role,
     text,
     createdAt: timestamp,
@@ -241,7 +241,7 @@ const messageFromItem = (itemJson: string, id: string): CodexDesktopMessage | un
   }
   const nativeMessage = messageFromNativeItem(value, id);
   if (nativeMessage) return nativeMessage;
-  const message = messageFromRecord(value, 0);
+  const message = messageFromRecord(value, id);
   return message ? { ...message, id } : undefined;
 };
 
@@ -449,9 +449,11 @@ export const make = Effect.fn("make")(function* (options?: { readonly homePath?:
             const start = Math.max(0, end - MAX_LEGACY_ROLLOUT_BYTES);
             const buffer = Buffer.alloc(end - start);
             const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
-            const text = buffer.subarray(0, bytesRead).toString("utf8");
+            const bytes = buffer.subarray(0, bytesRead);
+            const firstLine = start === 0 ? 0 : bytes.indexOf(10) + 1;
             return {
-              text: start === 0 ? text : text.slice(text.indexOf("\n") + 1),
+              text: bytes.subarray(firstLine).toString("utf8"),
+              textStart: start + firstLine,
               start,
               end,
               skip,
@@ -468,11 +470,14 @@ export const make = Effect.fn("make")(function* (options?: { readonly homePath?:
           }),
       });
       const raw = rawAndStart.text;
+      let lineOffset = rawAndStart.textStart;
       const parsedMessages = raw
-        .split(/\r?\n/)
-        .map((line, index) => {
+        .split("\n")
+        .map((line) => {
+          const offset = lineOffset;
+          lineOffset += Buffer.byteLength(line, "utf8") + 1;
           try {
-            return messageFromRecord(JSON.parse(line), index);
+            return messageFromRecord(JSON.parse(line), `${threadId}:${offset}`);
           } catch {
             return undefined;
           }

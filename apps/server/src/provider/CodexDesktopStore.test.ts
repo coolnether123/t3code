@@ -106,3 +106,41 @@ it.effect("pages a large legacy rollout from a bounded byte cursor", () => {
     ),
   );
 });
+
+it.effect("keeps legacy message identities across byte windows and appends", () => {
+  const fixture = makeLargeLegacyFixture();
+  const rollout = NodePath.join(fixture.home, "sessions", `${fixture.threadId}.jsonl`);
+  const event = (text: string) =>
+    `${JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: text } })}\n`;
+  const block = (text: string) => {
+    const message = event(text);
+    const filler = `${JSON.stringify({ padding: "x".repeat(8_000_000 - Buffer.byteLength(message) - 15) })}\n`;
+    return filler + message;
+  };
+  NodeFS.writeFileSync(rollout, block("first") + block("second") + block("third café"));
+  expect(NodeFS.statSync(rollout).size).toBe(24_000_000);
+  return Effect.gen(function* () {
+    const store = yield* CodexDesktopStore.CodexDesktopStore;
+    const second = yield* store.readThread(fixture.threadId, {
+      beforeCursor: "byte:16000000",
+      limit: 1,
+    });
+    const newest = yield* store.readThread(fixture.threadId, { limit: 1 });
+    expect(second.messages[0]?.text).toBe("second");
+    expect(newest.messages[0]?.text).toBe("third café");
+    expect(second.messages[0]?.id).not.toBe(newest.messages[0]?.id);
+    NodeFS.appendFileSync(rollout, event("appended"));
+    const afterAppend = yield* store.readThread(fixture.threadId, { limit: 2 });
+    const overlap = yield* store.readThread(fixture.threadId, {
+      beforeCursor: "byte:24000000",
+      limit: 1,
+    });
+    expect(afterAppend.messages[0]?.id).toBe(newest.messages[0]?.id);
+    expect(overlap.messages[0]?.id).toBe(newest.messages[0]?.id);
+  }).pipe(
+    Effect.provide(testLayer(fixture.home)),
+    Effect.ensuring(
+      Effect.sync(() => NodeFS.rmSync(fixture.home, { recursive: true, force: true })),
+    ),
+  );
+});
