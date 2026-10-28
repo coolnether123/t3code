@@ -202,20 +202,46 @@ export function publicResetCostEstimates(
       const sources = summary.sources.filter(
         (source) => source.fingerprint.provider === "codex" && source.status !== "missing",
       );
+      for (const snapshot of summary.quotaCostSnapshots ?? []) {
+        if (
+          snapshot.fingerprint.provider !== "codex" ||
+          sources.some(
+            (source) => fingerprintKey(source.fingerprint) === fingerprintKey(snapshot.fingerprint),
+          )
+        )
+          continue;
+        sources.push({
+          fingerprint: snapshot.fingerprint,
+          status: "ok",
+          scannedFiles: 0,
+          skippedFiles: 0,
+          malformedRecords: 0,
+          distinctSessions: 0,
+          message: null,
+        });
+      }
       for (const source of sources) {
         const key = fingerprintKey(source.fingerprint);
         if (seen.has(key)) continue;
-        const row = summary.quotaCosts?.find(
+        const saved = summary.quotaCostSnapshots?.find(
           (candidate) =>
-            candidate.intervalId === period.interval.id &&
+            candidate.sinceTime === period.interval.sinceTime &&
+            candidate.untilTime === period.interval.untilTime &&
             fingerprintKey(candidate.fingerprint) === key,
         );
+        const row = saved
+          ? { ...saved, complete: true, unpricedRecords: 0 }
+          : summary.quotaCosts?.find(
+              (candidate) =>
+                candidate.intervalId === period.interval.id &&
+                fingerprintKey(candidate.fingerprint) === key,
+            );
         if (!row) {
           complete = false;
           continue;
         }
         seen.add(key);
-        if (!row.complete || source.status !== "ok") complete = false;
+        if (!row.complete || (!saved && source.status !== "ok")) complete = false;
         costUsd += row.costUsd;
         records += row.records;
         unpricedRecords += row.unpricedRecords;
@@ -240,9 +266,21 @@ export function publicResetCostEstimates(
     }
     let reason: string | null = null;
     if (environments.length === 0) reason = "No computers are selected.";
+    else if (
+      !complete ||
+      (environments.some(
+        (entry) =>
+          entry.isPending ||
+          entry.error !== null ||
+          entry.summary === null ||
+          entry.summary?.sources.some(
+            (source) => source.fingerprint.provider === "codex" && source.status === "partial",
+          ),
+      ) &&
+        seen.size === 0)
+    )
+      reason = "Still counting";
     else if (seen.size === 0) reason = "No Codex transcript source is available for this period.";
-    else if (!complete)
-      reason = "The transcript scan is incomplete, so the period total is withheld.";
     else if (unpricedRecords > 0)
       reason = "Some matching records have no model price, so the period total is withheld.";
     else if (records === 0)

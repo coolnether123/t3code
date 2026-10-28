@@ -1,5 +1,7 @@
+import { OTIS_THREAD_ID } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import {
+  ProviderInstanceId,
   CommandId,
   EventId,
   MessageId,
@@ -9,6 +11,10 @@ import {
   type OrchestrationV2DomainEvent,
   type ProviderRuntimeEvent,
 } from "@t3tools/contracts";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+import * as Semaphore from "effect/Semaphore";
+import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -18,6 +24,7 @@ import * as Option from "effect/Option";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ServerConfig from "../config.ts";
 import { callOperator } from "./callOperator.ts";
+import { callStore } from "./callStore.ts";
 import { withoutCallControl, type OperatorLink } from "./operatorProtocol.ts";
 import * as Auxiliary from "../provider/AuxiliaryProviderSessions.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -37,6 +44,12 @@ class VoiceProjectUnavailableError extends Schema.TaggedError<VoiceProjectUnavai
   }
 }
 
+const OtisSettingsJson = Schema.fromJsonString(
+  Schema.Struct({ threadId: Schema.Literal(OTIS_THREAD_ID) }),
+);
+const decodeOtisSettings = Schema.decodeUnknownEffect(OtisSettingsJson);
+const encodeOtisSettings = Schema.encodeEffect(OtisSettingsJson);
+
 const encodePlaybackEvidence = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 const make = Effect.gen(function* () {
@@ -46,6 +59,75 @@ const make = Effect.gen(function* () {
   const executor = yield* ThreadCommandExecutor.ThreadCommandExecutor;
   const projects = yield* ProjectStore.ProjectStoreV2;
   const config = yield* ServerConfig.ServerConfig;
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const otisLock = yield* Semaphore.make(1);
+  const openOtis = Effect.fn("VoiceThreadService.openOtis")(function* () {
+    return yield* otisLock.withPermit(
+      Effect.gen(function* () {
+        // Stable command and thread IDs also recover a crash before settings are written.
+        const settingsPath = path.join(config.stateDir, "otis-thread.json");
+        const hasSettings = yield* fs.exists(settingsPath);
+        const threadId = ThreadId.make(
+          hasSettings
+            ? (yield* decodeOtisSettings(yield* fs.readFileString(settingsPath))).threadId
+            : OTIS_THREAD_ID,
+        );
+        const existing = yield* projections
+          .getThreadSnapshot(threadId)
+          .pipe(
+            Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.succeed(null) }),
+          );
+        if (existing) {
+          if (existing.projection.thread.deletedAt)
+            return yield* Effect.fail(new VoiceProjectUnavailableError({ threadId }));
+          if (existing.projection.thread.archivedAt)
+            yield* orchestrator.dispatch({
+              type: "thread.unarchive",
+              commandId: CommandId.make(yield* crypto.randomUUIDv4().pipe(Effect.orDie)),
+              threadId,
+            });
+          if (!hasSettings)
+            yield* writeFileStringAtomically({
+              filePath: settingsPath,
+              contents: yield* encodeOtisSettings({ threadId: OTIS_THREAD_ID }),
+            }).pipe(
+              Effect.provideService(FileSystem.FileSystem, fs),
+              Effect.provideService(Path.Path, path),
+            );
+          return threadId;
+        }
+        const available = yield* projects.list();
+        const project =
+          available.find((project) => project.title === "Otis") ??
+          available.find((project) => project.workspaceRoot === config.cwd);
+        if (!project) return yield* Effect.fail(new VoiceProjectUnavailableError({ threadId }));
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("otis-main:create"),
+          threadId,
+          projectId: project.projectId,
+          title: "Otis",
+          createdBy: "user",
+          creationSource: "server",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-6.1-sol" },
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+        });
+        yield* fs.makeDirectory(config.stateDir, { recursive: true });
+        yield* writeFileStringAtomically({
+          filePath: settingsPath,
+          contents: yield* encodeOtisSettings({ threadId: OTIS_THREAD_ID }),
+        }).pipe(
+          Effect.provideService(FileSystem.FileSystem, fs),
+          Effect.provideService(Path.Path, path),
+        );
+        return threadId;
+      }),
+    );
+  });
   const calls = callOperator(config.stateDir);
   const sessions = yield* Auxiliary.AuxiliaryProviderSessions;
   const crypto = yield* Crypto.Crypto;
@@ -397,6 +479,14 @@ const make = Effect.gen(function* () {
     );
   });
   return {
+    openCalls: Effect.fn("VoiceThreadService.openCalls")(function* () {
+      const snapshot = yield* Effect.promise(() => callStore(config.stateDir).openCallSnapshot());
+      const activeSessions = (yield* sessions.listSessions())
+        .filter((session) => !["ready", "closed"].includes(session.status))
+        .map((session) => ({ threadId: session.threadId, status: session.status }));
+      return { ...snapshot, activeSessions };
+    }),
+    openOtis,
     dispatch,
     context,
     recordVoiceEvent,

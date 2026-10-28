@@ -116,6 +116,22 @@ const shell = Schema.decodeUnknownSync(OrchestrationV2ShellSnapshot)({
   archivedThreads: [],
 });
 const envelope = (command: unknown) => encodeJson({ ...identity, command });
+it("binds voice coverage to the observed runtime and preserves legacy absence", () => {
+  expect(compactAgentSnapshot(identity, shell)).not.toHaveProperty("voice");
+  expect(
+    compactAgentSnapshot(identity, {
+      ...shell,
+      voice: { coverage: "complete", count: 0, openCalls: [], activeSessions: [], observedAt: now },
+    }).voice,
+  ).toEqual({
+    coverage: "complete",
+    count: 0,
+    openCalls: [],
+    activeSessions: [],
+    observedAt: now,
+    runtime: identity.runtime,
+  });
+});
 const interrupt = {
   type: "run.interrupt",
   commandId: "command-a",

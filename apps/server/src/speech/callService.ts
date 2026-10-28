@@ -492,6 +492,23 @@ export class CallService {
         await this.store.changed(record);
         await this.store.unbind(record.threadId, record.callId);
       });
+      if (!(await this.store.read(callId, "call-ended.json"))) {
+        await this.ports.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(`call-ended:${callId}`),
+          threadId: ThreadId.make(record.threadId),
+          createdAt: now(),
+          activity: {
+            id: EventId.make(`call-ended:${callId}`),
+            kind: "call.ended",
+            summary: "Call ended",
+            tone: "info",
+            turnId: null,
+            createdAt: now(),
+          },
+        });
+        await this.store.write(callId, "call-ended.json", { callId });
+      }
       return record.lease;
     });
     if (sessionId) {

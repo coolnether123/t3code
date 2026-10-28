@@ -31,9 +31,9 @@ import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentPresentations } from "./presentation";
 import { serverEnvironment } from "./server";
 
-const MAX_STALLED_DEFERRED_REFRESHES = 5;
 const DEFERRED_TRANSCRIPT_REFRESH_BASE_MS = 750;
 const DEFERRED_TRANSCRIPT_REFRESH_MAX_MS = 8_000;
+const MAX_FAILED_REFRESHES = 5;
 
 const isDeferredTranscriptSource = (
   source: NonNullable<EnvironmentUsageStatus["summary"]>["sources"][number],
@@ -172,6 +172,7 @@ export function useUsage(
     windowKey,
     signature: "",
     stalledAttempts: 0,
+    failedAttempts: 0,
     timer: null as ReturnType<typeof globalThis.setTimeout> | null,
   });
   const refreshInFlight = useRef<{
@@ -349,8 +350,10 @@ export function useUsage(
   const merged = (() =>
     mergeAnsweredUsage(withoutProviders(selectedEnvironments, hiddenProviders)))();
 
-  const hasDeferredTranscripts = selectedEnvironments.some((environment) =>
-    environment.summary?.sources.some(isDeferredTranscriptSource),
+  const hasDeferredTranscripts = selectedEnvironments.some(
+    (environment) =>
+      environment.isConnected &&
+      (environment.error !== null || environment.summary?.sources.some(isDeferredTranscriptSource)),
   );
 
   // A bounded server scan intentionally returns partial data while its cache is
@@ -363,12 +366,14 @@ export function useUsage(
       retry.windowKey = windowKey;
       retry.signature = "";
       retry.stalledAttempts = 0;
+      retry.failedAttempts = 0;
       retry.timer = null;
     }
     if (!hasDeferredTranscripts) {
       if (retry.timer !== null) globalThis.clearTimeout(retry.timer);
       retry.signature = "";
       retry.stalledAttempts = 0;
+      retry.failedAttempts = 0;
       retry.timer = null;
       return;
     }
@@ -387,15 +392,16 @@ export function useUsage(
       retry.signature = deferredSignature;
       retry.stalledAttempts = 0;
     }
-    const waitingOrFailed = selectedEnvironments.some(
-      (environment) => environment.isPending || environment.error !== null,
-    );
+    const failed = selectedEnvironments.some((environment) => environment.error !== null);
+    if (!failed) retry.failedAttempts = 0;
+    if (failed && retry.failedAttempts >= MAX_FAILED_REFRESHES) return;
+    const waitingOrFailed = selectedEnvironments.some((environment) => environment.isPending);
     if (waitingOrFailed) {
       if (retry.timer !== null) globalThis.clearTimeout(retry.timer);
       retry.timer = null;
       return;
     }
-    if (retry.stalledAttempts >= MAX_STALLED_DEFERRED_REFRESHES || retry.timer !== null) {
+    if (retry.timer !== null) {
       return;
     }
     const delay = Math.min(
@@ -406,6 +412,7 @@ export function useUsage(
       retry.timer = null;
       if (windowKeyRef.current !== windowKey) return;
       retry.stalledAttempts += 1;
+      if (failed) retry.failedAttempts += 1;
       void refresh({
         ...(JSON.parse(windowKey) as UsageSummaryInput),
         refresh: false,

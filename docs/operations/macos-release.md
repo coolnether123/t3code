@@ -40,9 +40,11 @@ desktop. The installer recognizes a recovered headless backend as the owner
 on later deployments. Do not assume the candidate's background flag changes
 the old binary's behavior.
 
-Mac preparation sets `VITE_OTIS_CALL_ENABLED=false`. The call control also
-defaults to off when the variable is absent; a build must explicitly set it to
-`true` to include the control.
+Mac preparation sets `VITE_OTIS_ENABLED=false` and
+`VITE_OTIS_CALL_ENABLED=false`. The first removes the Otis sidebar button and
+the Otis screen; the second removes the call control, which also defaults to
+off when the variable is absent. Set both when building a Millie backend
+candidate, because its server serves the same web client to phones.
 
 Keep a database backup from before the first start of a new orchestration
 version. Check retained chat records, pending requests and old-chat loading

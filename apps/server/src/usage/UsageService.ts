@@ -2,19 +2,9 @@ import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import { makeProviderUsageReader } from "./usageProviderReaders.ts";
-/**
- * UsageService - scans provider transcripts and returns priced usage buckets.
- *
- * The scan reads the provider CLIs' own session files rather than T3 Code's
- * orchestration projections, so usage covers turns driven outside T3 Code too.
- * This is the approach `ccusage` takes.
- *
- * Transcripts are append-only, so parsed records are memoised per file by
- * `(size, mtime)`. A cold 30-day scan of ~1.4 GB lands around 2-3 seconds; warm
- * scans only reparse files that changed.
- *
- * @module UsageService
- */
+import { BUILT_IN_USAGE_DRIVERS } from "../provider/builtInDrivers.ts";
+import * as ProviderScanCache from "./usageProviderScanCache.ts";
+// Read provider transcripts so usage includes work performed outside T3.
 import * as NodeOS from "node:os";
 
 import {
@@ -60,6 +50,7 @@ import * as Scope from "effect/Scope";
 import { HttpClient, HttpClientResponse } from "effect/http";
 
 import { ServerConfig } from "../config.ts";
+import * as CodexUsageHistory from "./CodexUsageHistory.ts";
 import * as UsageProjection from "./UsageProjection.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
@@ -69,6 +60,7 @@ import {
 } from "../provider/Drivers/CodexHomeLayout.ts";
 import { makeDayFormatter, resolveModelAliases, UsageAggregator } from "./usageAggregation.ts";
 import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
+import { mergeUsageReads, projectUsageRead, usageReadBatchKey } from "./usageReadBatch.ts";
 import { UsageSummaryCache, usageSummaryCacheKey } from "./usageSummaryCache.ts";
 import { makeUsageReportCalculation, projectUsageReport } from "./usageReport.ts";
 import {
@@ -166,10 +158,7 @@ const LEGACY_SCAN_CACHE_IMPORT_FLAG = "legacyJsonImportedAt";
 const LEGACY_SCAN_CACHE_IMPORT_BATCH_ROWS = 5_000;
 const MAX_SUMMARY_CACHE_ENTRIES = 16;
 
-/**
- * Files are filtered by mtime before opening. The slack covers a session whose
- * last write lands just before local midnight on the window's first day.
- */
+// mtime slack includes writes just before local midnight on the window's first day.
 const MTIME_SLACK_MS = 36 * 60 * 60 * 1000;
 const MAX_HOURLY_WINDOW_MS = 24 * 60 * 60 * 1000;
 
@@ -192,6 +181,7 @@ const MAX_USAGE_READ_DURATION_MS = 12_000;
 const RESTART_READ = Symbol("UsageService.restartRead");
 /** The last attempt aggregates record by record and cannot restart. */
 const MAX_INDEXED_READ_ATTEMPTS = 3;
+const encodeBatchKey = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 /** Everything a transcript index's prices depend on. */
 const transcriptIndexRevisionOf = (
@@ -205,11 +195,6 @@ const transcriptIndexRevisionOf = (
 
 /** Files changed in this span are checked between complete directory audits. */
 const RECENT_TRANSCRIPT_WINDOW_MS = 48 * 60 * 60 * 1000;
-/**
- * A page asks for several windows at once. Within this span they share one
- * transcript directory listing instead of each walking the same directories.
- */
-const TRANSCRIPT_INVENTORY_REUSE_MS = 10 * 1000;
 
 /** Full audits catch deleted history without putting a tree walk on every request. */
 const FULL_SCAN_INTERVAL_MS = 15 * 60 * 1000;
@@ -223,6 +208,12 @@ function includeRepeatedInput(input: UsageSummaryInput): boolean {
     input.quotaIntervals === undefined
   );
 }
+const isWholeQuotaWindow = (input: UsageSummaryInput) =>
+  input.resolution !== "hour" &&
+  (input.groupBy === undefined || input.groupBy === "model") &&
+  input.sessionIds === undefined &&
+  input.runIds === undefined &&
+  input.turnIds === undefined;
 
 function repeatedInputPrice(
   cost: number | null,
@@ -535,17 +526,11 @@ export const make = Effect.gen(function* () {
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const httpClient = yield* HttpClient.HttpClient;
   const readProviderUsage = yield* makeProviderUsageReader;
+  const usageHistory = yield* Effect.serviceOption(CodexUsageHistory.CodexUsageHistory);
   const serviceScope = yield* Scope.make("sequential");
   const scanSemaphore = yield* Semaphore.make(1);
 
   const recentScanAt = new Map<string, number>();
-  const recentInventories = new Map<
-    string,
-    {
-      readonly listedAtMs: number;
-      readonly listing: Awaited<ReturnType<typeof listTranscriptFilesBounded>>;
-    }
-  >();
   let repeatedInputCatalog: RepeatedInputCatalog | null = null;
   let repeatedInputCatalogRoots = "";
   let repeatedInputCatalogAtMs = 0;
@@ -560,7 +545,12 @@ export const make = Effect.gen(function* () {
   // changes must be visible to the next request.
   const inFlightSummaries = new Map<
     string,
-    Deferred.Deferred<Exit.Exit<UsageSummary, UsageReadError>, never>
+    {
+      inputs: UsageSummaryInput[];
+      started: boolean;
+      progress: UsageReadProgress;
+      result: Deferred.Deferred<Exit.Exit<UsageSummary, UsageReadError>, never>;
+    }
   >();
   // Each transcript's records priced once, reused until the transcript, its
   // prices or its shared de-duplication keys change. Reads happen under the
@@ -710,8 +700,8 @@ export const make = Effect.gen(function* () {
    * Claude's config dir is the home itself when overridden, but a default
    * install nests transcripts under `~/.claude/projects`. Probe both.
    */
-  const resolveClaudeTranscriptDir = (homePath: string) =>
-    Effect.gen(function* () {
+  const resolveClaudeTranscriptDir = Effect.fn("UsageService.resolveClaudeTranscriptDir")(
+    function* (homePath: string) {
       const nested = path.join(homePath, ".claude", "projects");
       const nestedExists = yield* fileSystem
         .exists(nested)
@@ -721,7 +711,8 @@ export const make = Effect.gen(function* () {
         .exists(fallback)
         .pipe(Effect.catchCause(() => Effect.succeed(false)));
       return nestedExists ? nested : fallbackExists ? fallback : nested;
-    });
+    },
+  );
 
   /** Resolves the transcript directory for each provider. */
   const resolveTranscriptDirs = Effect.fn("UsageService.resolveTranscriptDirs")(function* (
@@ -850,7 +841,7 @@ export const make = Effect.gen(function* () {
    * between them so the server keeps answering while a large cache moves over.
    * The legacy file is renamed, not deleted, so it remains a manual backup.
    */
-  const importLegacyScanCache = Effect.gen(function* () {
+  const importCustomScanCache = Effect.gen(function* () {
     if (!scanStore.persistent) {
       yield* Effect.logWarning("Usage scan cache database is unavailable; using a process cache.", {
         cause: String(scanStore.openError),
@@ -861,7 +852,16 @@ export const make = Effect.gen(function* () {
       Effect.flatMap((raw) => decodeScanCacheFile(raw)),
       Effect.orElseSucceed(() => null),
     );
-    if (document !== null) {
+    const providerDocument =
+      typeof document === "object" &&
+      document !== null &&
+      "files" in document &&
+      typeof document.files === "object" &&
+      document.files !== null &&
+      Object.values(document.files).some(
+        (entry) => typeof entry === "object" && entry !== null && "t" in entry,
+      );
+    if (document !== null && !providerDocument) {
       let batch: [string, CachedFile][] = [];
       let rows = 0;
       for (const [filePath, entry] of decodeScanCacheEntries(document)) {
@@ -883,19 +883,78 @@ export const make = Effect.gen(function* () {
         }
       }
     }
-    if (!scanStore.persistent) return;
+    if (!scanStore.persistent) return document;
     scanStore.writeFlag(LEGACY_SCAN_CACHE_IMPORT_FLAG, DateTime.formatIso(yield* DateTime.now));
-    if (document !== null) {
+    if (document !== null && !providerDocument) {
       yield* fileSystem
         .rename(legacyScanCachePath, `${legacyScanCachePath}.imported`)
         .pipe(Effect.ignore);
     }
-  }).pipe(Effect.withSpan("UsageService.importLegacyScanCache"));
+    return document;
+  }).pipe(Effect.withSpan("UsageService.importCustomScanCache"));
+  const importLegacyScanCache = Effect.fn("UsageService.importLegacyScanCache")(function* () {
+    const customDocument = yield* importCustomScanCache;
+    const flag = "providerJsonImportedAt";
+    if (scanStore.readFlag(flag) !== undefined) return;
+    const formats = new Map(
+      BUILT_IN_USAGE_DRIVERS.flatMap((driver) =>
+        driver.usage?.kind === "transcripts"
+          ? [[driver.usage.provider, driver.usage.format] as const]
+          : [],
+      ),
+    );
+    for (const name of [
+      ProviderScanCache.SCAN_CACHE_FILE_NAME,
+      ...ProviderScanCache.LEGACY_SCAN_CACHE_FILE_NAMES,
+    ]) {
+      // Both cache formats used this filename. Reuse the document read before
+      // the custom importer renamed it to keep migration consistent.
+      const document =
+        name === "usage-scan-cache.json" && customDocument !== undefined
+          ? customDocument
+          : yield* fileSystem.readFileString(path.join(config.stateDir, name)).pipe(
+              Effect.flatMap(decodeScanCacheFile),
+              Effect.orElseSucceed(() => null),
+            );
+      for (const [filePath, entry] of ProviderScanCache.decodeScanCache(document, formats)) {
+        if (
+          (entry.provider !== "codex" && entry.provider !== "claude") ||
+          scanStore.meta(filePath) !== undefined
+        )
+          continue;
+        const records = dedupeWithinFile(
+          [...entry.records, ...entry.tailRecords].map((record) => ({
+            ...record,
+            ...(record.sessionId.length === 0 ? {} : { nativeSessionId: record.sessionId }),
+            ...(record.unresolvedServiceTierTurnId === undefined
+              ? {}
+              : { turnId: record.unresolvedServiceTierTurnId }),
+            ...(record.provider === "codex" && record.sessionId.length > 0
+              ? {
+                  dedupeKey: `codex:${record.sessionId}:${record.timestampMs}:${JSON.stringify(record.totals)}`,
+                }
+              : {}),
+          })),
+        );
+        // Keep deleted-file history. Existing files cold-read into the bounded scanner's cursor.
+        scanStore.set(filePath, {
+          provider: entry.provider,
+          size: Math.max(0, entry.size),
+          mtimeMs: entry.mtimeMs,
+          records,
+          malformedRecords: entry.malformedRecords,
+          ...(entry.size > 0 ? { scanCursor: 0 } : {}),
+        });
+        yield* Effect.yieldNow;
+      }
+    }
+    if (scanStore.persistent) scanStore.writeFlag(flag, DateTime.formatIso(yield* DateTime.now));
+  });
   // Detached from the request that starts it: a reader that reaches its
   // deadline must not interrupt, and later restart, a half-finished import.
   let legacyScanCacheImport: Fiber.Fiber<void> | undefined;
   const ensureLegacyScanCacheImported = Effect.gen(function* () {
-    legacyScanCacheImport ??= yield* Effect.forkIn(importLegacyScanCache, serviceScope, {
+    legacyScanCacheImport ??= yield* Effect.forkIn(importLegacyScanCache(), serviceScope, {
       startImmediately: true,
     });
     yield* Fiber.await(legacyScanCacheImport);
@@ -974,64 +1033,126 @@ export const make = Effect.gen(function* () {
     ),
   );
 
+  const resolveHistoricalTiers = Effect.fn("UsageService.resolveHistoricalTiers")(function* (
+    records: readonly UsageRecord[],
+  ) {
+    if (Option.isNone(usageHistory)) return records;
+    const requests = new Map<CodexUsageHistory.CodexUsageHistoryRequest, UsageRecord>();
+    for (const record of records) {
+      if (record.unresolvedServiceTierTurnId === undefined || record.serviceTier !== undefined)
+        continue;
+      requests.set(
+        {
+          sessionId: record.sessionId,
+          nativeTurnId: record.unresolvedServiceTierTurnId,
+          model: record.model,
+        },
+        record,
+      );
+    }
+    if (requests.size === 0) return records;
+    const resolved = yield* usageHistory.value.resolve([...requests.keys()]).pipe(
+      Effect.catchTags({
+        CodexUsageHistoryReadError: () =>
+          Effect.succeed(
+            new Map<
+              CodexUsageHistory.CodexUsageHistoryRequest,
+              "standard" | "fast" | "ultrafast"
+            >(),
+          ),
+      }),
+    );
+    const corrections = new Map<UsageRecord, UsageRecord>();
+    for (const [request, speed] of resolved) {
+      const record = requests.get(request);
+      if (record === undefined) continue;
+      const { unresolvedServiceTierTurnId: _pending, ...settled } = record;
+      corrections.set(record, {
+        ...settled,
+        speed,
+        serviceTier: speed === "fast" ? "priority" : speed === "standard" ? "default" : speed,
+        serviceTierSource: "t3Request",
+      });
+    }
+    return corrections.size === 0
+      ? records
+      : records.map((record) => corrections.get(record) ?? record);
+  });
+
   /** Parses one transcript, reusing the cached result when it is unchanged. */
-  const readFileRecords = (
+  const readFileRecords = Effect.fn("UsageService.readFileRecords")(function* (
     filePath: string,
     size: number,
     mtimeMs: number,
     provider: UsageProviderKind,
     requestedStartByte: number,
-  ): Effect.Effect<{ readonly records: readonly UsageRecord[]; readonly complete: boolean }> =>
-    Effect.gen(function* () {
-      const meta = scanStore.meta(filePath);
-      // Provider is part of the identity: if both providers were ever pointed
-      // at one directory, a hit parsed by the other parser must not be reused.
+  ): Effect.fn.Return<{ readonly records: readonly UsageRecord[]; readonly complete: boolean }> {
+    const meta = scanStore.meta(filePath);
+    // Provider is part of the identity: if both providers were ever pointed
+    // at one directory, a hit parsed by the other parser must not be reused.
+    if (
+      meta &&
+      meta.size === size &&
+      meta.mtimeMs === mtimeMs &&
+      meta.provider === provider &&
+      meta.scanCursor === undefined &&
+      meta.scanSkippedLines === undefined &&
+      meta.scanDiscardingLine !== true
+    ) {
+      const warm = scanStore.load(filePath);
       if (
-        meta &&
-        meta.size === size &&
-        meta.mtimeMs === mtimeMs &&
-        meta.provider === provider &&
-        meta.scanCursor === undefined &&
-        meta.scanSkippedLines === undefined &&
-        meta.scanDiscardingLine !== true
+        warm !== undefined &&
+        (provider !== "codex" || warm.codexState?.providerState !== undefined)
       ) {
-        const warm = scanStore.load(filePath);
-        if (warm !== undefined) return { records: warm.records, complete: true };
+        const records = yield* resolveHistoricalTiers(warm.records);
+        if (records !== warm.records)
+          scanStore.set(filePath, { ...warm, records }, { replaceRecords: true });
+        return { records, complete: true };
       }
+    }
 
-      // A resumable entry whose row can no longer be read is parsed again
-      // from the start rather than appended to nothing.
-      const cached = requestedStartByte > 0 ? scanStore.load(filePath) : undefined;
-      const appendable = cached !== undefined;
-      const startByte = appendable ? requestedStartByte : 0;
-      const parsed = yield* Effect.promise(() =>
-        readTranscriptRecords(filePath, provider, {
-          startByte,
-          endByte: Math.min(size - 1, startByte + MAX_TRANSCRIPT_READ_BYTES_PER_FILE - 1),
-          sourceSize: size,
-          ...(appendable && cached.scanDiscardingLine === true ? { discardPartialLine: true } : {}),
-          ...(appendable && provider === "codex" && cached.codexState !== undefined
-            ? { codexState: cached.codexState }
-            : {}),
-        }),
-      );
-      // A read failure is not an empty transcript: caching it under this
-      // (size, mtime) would silently drop the file's usage until it changes.
-      if (parsed === null) return { records: [], complete: false };
-      // Stored already de-duplicated within the file, which is 99% of all
-      // duplicates. The aggregator still runs the cross-file dedupe pass.
-      const records = dedupeWithinFile([...(appendable ? cached.records : []), ...parsed.records]);
-      const nextByte = Math.min(size, Math.max(startByte, parsed.nextByte));
-      const scanSkippedLines =
-        (appendable ? (cached.scanSkippedLines ?? 0) : 0) + parsed.discardedLines;
-      const reachedEnd = nextByte >= size && !parsed.discardingLine;
-      const complete = reachedEnd && scanSkippedLines === 0;
+    // A resumable entry whose row can no longer be read is parsed again
+    // from the start rather than appended to nothing.
+    const cached = requestedStartByte > 0 ? scanStore.load(filePath) : undefined;
+    const appendable =
+      cached !== undefined &&
+      (provider !== "codex" || cached.codexState?.providerState !== undefined);
+    const startByte = appendable ? requestedStartByte : 0;
+    const parsed = yield* Effect.promise(() =>
+      readTranscriptRecords(filePath, provider, {
+        startByte,
+        endByte: Math.min(size - 1, startByte + MAX_TRANSCRIPT_READ_BYTES_PER_FILE - 1),
+        sourceSize: size,
+        ...(appendable && cached.scanDiscardingLine === true ? { discardPartialLine: true } : {}),
+        ...(appendable && provider === "codex" && cached.codexState !== undefined
+          ? { codexState: cached.codexState }
+          : {}),
+      }),
+    );
+    // A read failure is not an empty transcript: caching it under this
+    // (size, mtime) would silently drop the file's usage until it changes.
+    if (parsed === null)
+      return { records: scanStore.load(filePath)?.records ?? [], complete: false };
+    // Stored already de-duplicated within the file, which is 99% of all
+    // duplicates. The aggregator still runs the cross-file dedupe pass.
+    const parsedRecords = dedupeWithinFile([
+      ...(appendable ? cached.records : []),
+      ...parsed.records,
+    ]);
+    const records = yield* resolveHistoricalTiers(parsedRecords);
+    const nextByte = Math.min(size, Math.max(startByte, parsed.nextByte));
+    const scanSkippedLines =
+      (appendable ? (cached.scanSkippedLines ?? 0) : 0) + parsed.discardedLines;
+    const reachedEnd = nextByte >= size && !parsed.discardingLine;
+    const complete = reachedEnd && scanSkippedLines === 0;
 
-      // Written immediately: a later source can exhaust the response budget,
-      // and the next request, including after a restart, must resume from this
-      // complete-line cursor instead of parsing the chunk again. A file that
-      // only grew appends its new records rather than rewriting its history.
-      scanStore.set(filePath, {
+    // Written immediately: a later source can exhaust the response budget,
+    // and the next request, including after a restart, must resume from this
+    // complete-line cursor instead of parsing the chunk again. A file that
+    // only grew appends its new records rather than rewriting its history.
+    scanStore.set(
+      filePath,
+      {
         size,
         mtimeMs,
         provider,
@@ -1040,14 +1161,17 @@ export const make = Effect.gen(function* () {
         ...(scanSkippedLines === 0 ? {} : { scanSkippedLines }),
         ...(parsed.discardingLine ? { scanDiscardingLine: true } : {}),
         ...(parsed.codexState === undefined ? {} : { codexState: parsed.codexState }),
-      });
-      return { records, complete };
-    });
+      },
+      { replaceRecords: records !== parsedRecords },
+    );
+    return { records, complete };
+  });
 
   const readSummaryUnlocked = Effect.fn("UsageService.readSummaryUnlocked")(function* (
     input: UsageSummaryInput,
     context: UsageReadContext | undefined,
     progress?: UsageReadProgress,
+    batched = false,
   ) {
     // A transcript read late in a pass can reveal that an earlier one, already
     // summed, shares a de-duplication key with it (the same Codex event in two
@@ -1059,6 +1183,7 @@ export const make = Effect.gen(function* () {
         context,
         progress,
         attempt < MAX_INDEXED_READ_ATTEMPTS ? "indexed" : "records",
+        batched,
       );
       if (result !== RESTART_READ) return result;
       if (progress !== undefined) {
@@ -1073,6 +1198,7 @@ export const make = Effect.gen(function* () {
     context: UsageReadContext | undefined,
     progress: UsageReadProgress | undefined,
     mode: "indexed" | "records",
+    batched: boolean,
   ) {
     if (input.sinceDay > input.untilDay) {
       return yield* new UsageReadError({
@@ -1108,7 +1234,7 @@ export const make = Effect.gen(function* () {
     const startedAtMs = yield* Clock.currentTimeMillis;
     const quotaIntervals = input.quotaIntervals ?? [];
     const quotaProvider = input.quotaProvider ?? "codex";
-    if (!validQuotaIntervals(quotaIntervals, input.sinceDay, input.untilDay)) {
+    if (!batched && !validQuotaIntervals(quotaIntervals, input.sinceDay, input.untilDay)) {
       return yield* new UsageReadError({
         reason: "invalidWindow",
         detail:
@@ -1117,20 +1243,22 @@ export const make = Effect.gen(function* () {
     }
     const quotaHistory =
       input.includeQuotaHistory || input.quotaHistoryOnly || input.quotaIntervals !== undefined
-        ? yield* readQuotaHistory(undefined).pipe(
+        ? (progress?.quotaHistory ??
+          (yield* readQuotaHistory(undefined).pipe(
             Effect.provideService(Crypto.Crypto, crypto),
             Effect.provideService(FileSystem.FileSystem, fileSystem),
             Effect.provideService(Path.Path, path),
-          )
+          )))
         : undefined;
     // Claude windows come from the sampler's saved readings, beside Codex's.
     const providerQuotaHistories =
       input.includeQuotaHistory || input.quotaHistoryOnly || input.quotaIntervals !== undefined
-        ? yield* fileSystem.readFileString(claudeQuotaHistoryPath).pipe(
+        ? (progress?.providerQuotaHistories ??
+          (yield* fileSystem.readFileString(claudeQuotaHistoryPath).pipe(
             Effect.flatMap((text) => decodeScanCacheFile(text)),
             Effect.map((document) => claudeQuotaHistories(decodeClaudeQuotaHistory(document))),
             Effect.orElseSucceed(() => claudeQuotaHistories(emptyClaudeQuotaHistory)),
-          )
+          )))
         : undefined;
     if (progress !== undefined) {
       progress.quotaHistory = quotaHistory;
@@ -1319,7 +1447,8 @@ export const make = Effect.gen(function* () {
         if (stale !== filePath) staleTranscriptIndexes.add(stale);
       }
       staleTranscriptIndexes.delete(filePath);
-      if (complete) transcriptIndexes.set(filePath, { size, mtimeMs, provider, index });
+      if (complete && !records.some((record) => record.unresolvedServiceTierTurnId !== undefined))
+        transcriptIndexes.set(filePath, { size, mtimeMs, provider, index });
       else transcriptIndexes.delete(filePath);
       return index;
     };
@@ -1330,7 +1459,9 @@ export const make = Effect.gen(function* () {
     const selectedTurnIds = input.turnIds === undefined ? null : new Set(input.turnIds);
     const activeDirs = dirs.filter(
       ({ provider }) =>
-        (input.quotaIntervals === undefined || provider === (input.quotaProvider ?? "codex")) &&
+        (batched ||
+          input.quotaIntervals === undefined ||
+          provider === (input.quotaProvider ?? "codex")) &&
         (selectedProviders === null || selectedProviders.has(provider)),
     );
     const plannedSources = yield* Effect.forEach(
@@ -1356,31 +1487,16 @@ export const make = Effect.gen(function* () {
           recentTranscriptWindowMs: RECENT_TRANSCRIPT_WINDOW_MS,
           fullScanIntervalMs: FULL_SCAN_INTERVAL_MS,
         });
-        const inventoryKey = `${coverageKey}\u0000${plan.scanStartMs}`;
-        const reusable = recentInventories.get(inventoryKey);
         const listing = !plan.shouldRefresh
           ? { files: [], complete: true }
-          : reusable !== undefined &&
-              reusable.listing.complete &&
-              startedAtMs - reusable.listedAtMs < TRANSCRIPT_INVENTORY_REUSE_MS
-            ? reusable.listing
-            : yield* Effect.promise(() =>
-                listTranscriptFilesBounded(
-                  dir,
-                  plan.scanStartMs,
-                  provider,
-                  MAX_TRANSCRIPT_INVENTORY_DURATION_MS,
-                ),
-              ).pipe(
-                Effect.tap((fresh) =>
-                  Effect.sync(() => {
-                    recentInventories.set(inventoryKey, {
-                      listedAtMs: startedAtMs,
-                      listing: fresh,
-                    });
-                  }),
-                ),
-              );
+          : yield* Effect.promise(() =>
+              listTranscriptFilesBounded(
+                dir,
+                plan.scanStartMs,
+                provider,
+                MAX_TRANSCRIPT_INVENTORY_DURATION_MS,
+              ),
+            );
         return {
           provider,
           dir,
@@ -1458,7 +1574,12 @@ export const make = Effect.gen(function* () {
           status: retainedFiles.length > 0 ? "partial" : "missing",
           scannedFiles,
           skippedFiles: 0,
-          malformedRecords: 0,
+          malformedRecords: retainedFiles.reduce(
+            (sum, [, entry]) =>
+              sum +
+              (entry.codexState?.providerState?.malformedRecords ?? entry.malformedRecords ?? 0),
+            0,
+          ),
           distinctSessions: sessionIds.size,
           message:
             retainedFiles.length > 0
@@ -1498,10 +1619,20 @@ export const make = Effect.gen(function* () {
       }
       for (const file of discoveredFiles) filesByPath.set(file.path, file);
       const files = [...filesByPath.values()];
+      const presentPaths = new Set(discoveredFiles.map((file) => file.path));
       const plannedFiles = yield* Effect.forEach(
         files,
         Effect.fnUntraced(function* (file) {
           const cached = scanStore.meta(file.path);
+          const unavailable =
+            listingComplete &&
+            shouldRefresh &&
+            !presentPaths.has(file.path) &&
+            cached !== undefined &&
+            (cached.scanCursor !== undefined ||
+              cached.scanSkippedLines !== undefined ||
+              (provider === "codex" && !cached.codexParserCurrent)) &&
+            !(yield* fileSystem.exists(file.path).pipe(Effect.orElseSucceed(() => true)));
           const warm =
             cached !== undefined &&
             cached.size === file.size &&
@@ -1509,7 +1640,8 @@ export const make = Effect.gen(function* () {
             cached.provider === provider &&
             cached.scanCursor === undefined &&
             cached.scanSkippedLines === undefined &&
-            cached.scanDiscardingLine !== true;
+            cached.scanDiscardingLine !== true &&
+            (provider !== "codex" || cached.codexParserCurrent === true);
           const resumePartial =
             cached !== undefined &&
             cached.size === file.size &&
@@ -1529,7 +1661,8 @@ export const make = Effect.gen(function* () {
             cursorIsUsable &&
             (resumePartial || (cached.scanCursor === undefined && file.size > cached.size)) &&
             (resumePartial || cached.provider === provider) &&
-            (provider === "claude" || (provider === "codex" && cached.hasCodexState));
+            (provider === "claude" ||
+              (provider === "codex" && cached.hasCodexState && cached.codexParserCurrent === true));
           const startByte = warm ? file.size : appendable ? resumeByte : 0;
           const parserMatches = cached?.repeatedInputVersion === REPEATED_INPUT_CACHE_VERSION;
           const repeatedInputWarm =
@@ -1564,6 +1697,7 @@ export const make = Effect.gen(function* () {
                   : 0;
           return {
             ...file,
+            unavailable,
             startByte,
             repeatedInputStartByte,
             repeatedInputWarm,
@@ -1574,7 +1708,14 @@ export const make = Effect.gen(function* () {
       ).pipe(Effect.withSpan("UsageService.planTranscriptFiles"));
       const selection = selectTranscriptFilesForScan(
         plannedFiles,
-        (file) => Math.max(file.size - file.startByte, file.size - file.repeatedInputStartByte),
+        // Ordinary reads consume one chunk, regardless of the remaining file size.
+        (file) =>
+          file.unavailable
+            ? 0
+            : Math.max(
+                Math.min(file.size - file.startByte, MAX_TRANSCRIPT_READ_BYTES_PER_FILE),
+                file.size - file.repeatedInputStartByte,
+              ),
         MAX_COLD_SCAN_BYTES_PER_SOURCE,
       );
       if (repeatedInputEnabled && provider === "codex" && selection.deferredFiles > 0) {
@@ -1593,6 +1734,7 @@ export const make = Effect.gen(function* () {
       let scannedFiles = 0;
       let skippedFiles = selection.deferredFiles;
       let incompleteFiles = 0;
+      let unavailableFiles = 0;
       // Distinct per directory. Buckets carry per-cell session counts, but a
       // session spans days and models, so clients total this figure instead.
       const sessionIds = new Set<string>();
@@ -1612,6 +1754,35 @@ export const make = Effect.gen(function* () {
       const readRecords = new Map<string, { records: readonly UsageRecord[]; complete: boolean }>();
 
       for (const file of selection.files) {
+        if (file.unavailable) {
+          const cached = scanStore.load(file.path);
+          if (cached !== undefined) {
+            unavailableFiles += 1;
+            if (!repeatedInputEnabled && mode === "indexed") {
+              readRecords.set(file.path, { records: cached.records, complete: false });
+              indexed.push({
+                file,
+                index: indexRecords(
+                  file.path,
+                  file.size,
+                  file.mtimeMs,
+                  provider,
+                  cached.records,
+                  false,
+                ),
+              });
+            } else {
+              for (const rawRecord of cached.records) {
+                const record = applyCodexServiceTier(rawRecord, tiers, fastWindows);
+                if (aggregator.add({ ...record, sourcePath: dir })) {
+                  if (record.sessionId.length > 0) sessionIds.add(record.sessionId);
+                  if (quotaIntervals.length > 0) quota.add(record);
+                }
+              }
+            }
+            continue;
+          }
+        }
         // An unchanged transcript whose newest usage predates the window has
         // nothing to contribute; its index row says so without decoding it.
         const stored = scanStore.meta(file.path);
@@ -1798,8 +1969,16 @@ export const make = Effect.gen(function* () {
         }
       }
 
+      const malformedRecords =
+        provider === "codex"
+          ? selection.files.reduce(
+              (sum, file) => sum + (scanStore.meta(file.path)?.malformedRecords ?? 0),
+              0,
+            )
+          : 0;
       const scanCompleted =
         listingComplete &&
+        unavailableFiles === 0 &&
         selection.deferredFiles === 0 &&
         selection.files.every((file) => {
           const cached = scanStore.meta(file.path);
@@ -1838,24 +2017,29 @@ export const make = Effect.gen(function* () {
       }
       sources.push({
         fingerprint: { hostId, provider, resolvedHomePath: dir, volumeId },
-        status: !scanCompleted ? "partial" : "ok",
+        status: !scanCompleted || malformedRecords > 0 ? "partial" : "ok",
         scannedFiles,
         skippedFiles,
-        malformedRecords: 0,
+        malformedRecords,
         distinctSessions: sessionIds.size,
-        message: !listingComplete
-          ? "Usage is partial because the transcript inventory exceeded its response budget."
-          : incompleteFiles > 0
-            ? `Usage is partial while ${incompleteFiles} large transcript ${incompleteFiles === 1 ? "is" : "files are"} scanned in complete-line chunks.`
-            : selection.deferredFiles > 0
-              ? `Usage is partial while the transcript cache warms; ${selection.deferredFiles} older or oversized transcript files were deferred.`
-              : provider === "aistudio"
-                ? "AI Studio exports use exact chunk counts and source message dates when present. Older exports without createTime remain on their downloaded-file date; per-turn input context is reconstructed and copied branch prefixes are counted once."
-                : provider === "chatgpt"
-                  ? scannedFiles === 0
-                    ? "ChatGPT import is ready; no conversations.json export has been downloaded yet."
-                    : "ChatGPT exports contain message dates but no token ledger; token counts and API-equivalent cost are estimated from chat text."
-                  : null,
+        message:
+          malformedRecords > 0
+            ? `${malformedRecords} malformed or inconsistent usage records were skipped.`
+            : !listingComplete
+              ? "Usage is partial because the transcript inventory exceeded its response budget."
+              : incompleteFiles > 0
+                ? `Usage is partial while ${incompleteFiles} large transcript ${incompleteFiles === 1 ? "is" : "files are"} scanned in complete-line chunks.`
+                : selection.deferredFiles > 0
+                  ? `Usage is partial while the transcript cache warms; ${selection.deferredFiles} older or oversized transcript files were deferred.`
+                  : unavailableFiles > 0
+                    ? `Usage is partial because ${unavailableFiles} cached transcripts need rescanning but no longer have source files. Retained usage is included; missing usage cannot be recovered.`
+                    : provider === "aistudio"
+                      ? "AI Studio exports use exact chunk counts and source message dates when present. Older exports without createTime remain on their downloaded-file date; per-turn input context is reconstructed and copied branch prefixes are counted once."
+                      : provider === "chatgpt"
+                        ? scannedFiles === 0
+                          ? "ChatGPT import is ready; no conversations.json export has been downloaded yet."
+                          : "ChatGPT exports contain message dates but no token ledger; token counts and API-equivalent cost are estimated from chat text."
+                        : null,
       });
     }
 
@@ -1875,16 +2059,18 @@ export const make = Effect.gen(function* () {
       const last = quotaHistory?.samples.find(
         (sample) => sample.observedAt === interval?.untilTime,
       );
-      if (!interval || !first || !last) continue;
+      if (!interval || !isWholeQuotaWindow(input) || /^(api-pace:|compare:)/.test(interval.id))
+        continue;
       const next = upsertQuotaCostLedger(
         quotaCostLedger,
         cost,
         cost.fingerprint,
         {
           ...interval,
-          firstRemainingPercent: first.remainingPercent,
-          lastRemainingPercent: last.remainingPercent,
-          resetsAt: first.resetsAt,
+          firstRemainingPercent: first?.remainingPercent ?? 100,
+          lastRemainingPercent: last?.remainingPercent ?? 100,
+          resetsAt: first?.resetsAt ?? interval.untilTime,
+          ...(!first || !last ? { estimatedFromTranscripts: true } : {}),
         },
         recordedAt,
       );
@@ -1899,7 +2085,7 @@ export const make = Effect.gen(function* () {
 
     const legacyVersion = input.clientContractVersion ?? 5;
     const additionalProviders =
-      input.quotaIntervals !== undefined
+      input.quotaIntervals !== undefined && !batched
         ? []
         : (input.providers ??
           (legacyVersion < 8
@@ -1913,7 +2099,11 @@ export const make = Effect.gen(function* () {
       ...(additionalProviders === undefined ? {} : { providers: additionalProviders }),
     });
     for (const scan of providerScans) {
-      if (input.quotaIntervals !== undefined && scan.provider !== (input.quotaProvider ?? "codex"))
+      if (
+        !batched &&
+        input.quotaIntervals !== undefined &&
+        scan.provider !== (input.quotaProvider ?? "codex")
+      )
         continue;
       const sessions = new Set<string>();
       for (const file of scan.files ?? []) {
@@ -1934,7 +2124,7 @@ export const make = Effect.gen(function* () {
         status: scan.status ?? (scan.files === null ? "missing" : "ok"),
         scannedFiles: scan.files?.length ?? 0,
         skippedFiles: 0,
-        malformedRecords: 0,
+        malformedRecords: scan.malformedRecords,
         distinctSessions: sessions.size,
         message: scan.message ?? null,
         ...(scan.action === undefined ? {} : { action: scan.action }),
@@ -2005,7 +2195,7 @@ export const make = Effect.gen(function* () {
       ...(providerQuotaHistories === undefined ? {} : { providerQuotaHistories }),
       ...(input.quotaIntervals === undefined ? {} : { quotaCosts }),
       ...(input.quotaIntervals === undefined
-        ? {}
+        ? { quotaCostSnapshots: isWholeQuotaWindow(input) ? quotaCostLedger : [] }
         : {
             quotaCostSnapshots: quotaCostLedger.filter((row) =>
               input.quotaIntervals!.some((interval) => interval.id === row.intervalId),
@@ -2097,7 +2287,7 @@ export const make = Effect.gen(function* () {
         ? {}
         : { providerQuotaHistories: progress.providerQuotaHistories }),
       ...(input.quotaIntervals === undefined
-        ? {}
+        ? { quotaCostSnapshots: isWholeQuotaWindow(input) ? quotaCostLedger : [] }
         : {
             quotaCosts: progress.quotaCosts,
             quotaCostSnapshots: quotaCostLedger.filter((row) =>
@@ -2113,7 +2303,7 @@ export const make = Effect.gen(function* () {
       const startedAtMs = yield* Clock.currentTimeMillis;
       let resolvedDirs: readonly { readonly provider: UsageProviderKind; readonly dir: string }[] =
         [];
-      const progress: UsageReadProgress = {
+      let progress: UsageReadProgress = {
         sources: [],
         pendingSources: [],
         quotaCosts: [],
@@ -2121,6 +2311,42 @@ export const make = Effect.gen(function* () {
         providerQuotaHistories: undefined,
         aggregator: undefined,
       };
+      let savedCosts: UsageQuotaCost[] = [];
+      const withSavedCosts = (summary: UsageSummary): UsageSummary => ({
+        ...summary,
+        quotaCosts:
+          input.quotaIntervals === undefined
+            ? undefined
+            : [
+                ...savedCosts,
+                ...(summary.quotaCosts ?? []).filter(
+                  (cost) =>
+                    !savedCosts.some(
+                      (saved) =>
+                        saved.intervalId === cost.intervalId &&
+                        JSON.stringify(saved.fingerprint) === JSON.stringify(cost.fingerprint),
+                    ),
+                ),
+              ],
+        quotaCostSnapshots: !isWholeQuotaWindow(input)
+          ? []
+          : [
+              ...(summary.quotaCostSnapshots ?? []),
+              ...savedCosts.flatMap((cost) => {
+                const row = quotaCostLedger.find(
+                  (row) =>
+                    JSON.stringify(row.fingerprint) === JSON.stringify(cost.fingerprint) &&
+                    row.sinceTime ===
+                      input.quotaIntervals?.find((interval) => interval.id === cost.intervalId)
+                        ?.sinceTime &&
+                    row.untilTime ===
+                      input.quotaIntervals?.find((interval) => interval.id === cost.intervalId)
+                        ?.untilTime,
+                );
+                return row ? [{ ...row, intervalId: cost.intervalId }] : [];
+              }),
+            ],
+      });
       return yield* Effect.gen(function* () {
         const result = yield* Effect.gen(function* () {
           if (input.sinceDay > input.untilDay) {
@@ -2165,6 +2391,58 @@ export const make = Effect.gen(function* () {
             { concurrency: 8 },
           );
           progress.pendingSources.push(...sources);
+          if (!validQuotaIntervals(input.quotaIntervals ?? [], input.sinceDay, input.untilDay)) {
+            return yield* new UsageReadError({
+              reason: "invalidWindow",
+              detail:
+                "Quota intervals must be ordered, disjoint, and inside the scanned window with two days of padding.",
+            });
+          }
+          const intervals = input.quotaIntervals ?? [];
+          const saved = (isWholeQuotaWindow(input) ? sources : [])
+            .filter((source) => source.status !== "missing")
+            .flatMap((source) =>
+              intervals.flatMap((interval) => {
+                const row = quotaCostLedger.find(
+                  (row) =>
+                    JSON.stringify(row.fingerprint) === JSON.stringify(source.fingerprint) &&
+                    row.sinceTime === interval.sinceTime &&
+                    row.untilTime === interval.untilTime &&
+                    (Date.parse(row.resetsAt) <= startedAtMs ||
+                      quotaCostLedger.some(
+                        (next) =>
+                          JSON.stringify(next.fingerprint) === JSON.stringify(row.fingerprint) &&
+                          !/^(api-pace:|compare:|month:|codex-resets:)/.test(next.intervalId) &&
+                          Date.parse(next.sinceTime) >= Date.parse(row.untilTime),
+                      )),
+                );
+                return row ? [{ ...row, intervalId: interval.id, complete: true }] : [];
+              }),
+            );
+          savedCosts = saved;
+          if (
+            intervals.length > 0 &&
+            saved.length > 0 &&
+            saved.length ===
+              sources.filter((source) => source.status !== "missing").length * intervals.length
+          ) {
+            const history = yield* readSummaryUnlocked(
+              { ...input, quotaHistoryOnly: true },
+              undefined,
+            );
+            return {
+              ...history,
+              sources: sources.map((source) => ({
+                ...source,
+                status: source.status === "missing" ? ("missing" as const) : ("ok" as const),
+                message: null,
+              })),
+              quotaCosts: saved,
+              quotaCostSnapshots: saved,
+              pricing: pricing(),
+            };
+          }
+
           const key = repeatedAwareSummaryCacheKey(
             input,
             context.settings.usagePriceOverrides,
@@ -2174,36 +2452,116 @@ export const make = Effect.gen(function* () {
             const cached = summaryCache.get(key, yield* Clock.currentTimeMillis);
             if (cached !== undefined) return cached;
           }
-          let shared = inFlightSummaries.get(key);
+          const scanInput =
+            intervals.length === 0
+              ? input
+              : {
+                  ...input,
+                  quotaIntervals: intervals.filter(
+                    (interval) =>
+                      saved.filter((row) => row.intervalId === interval.id).length !==
+                      sources.filter((source) => source.status !== "missing").length,
+                  ),
+                };
+          const batchKey = encodeBatchKey([
+            usageReadBatchKey(scanInput),
+            context.settings.usagePriceOverrides,
+            context.settings.usageModelAliases,
+            ratesRevision,
+            context.dirs,
+          ]);
+          let shared = inFlightSummaries.get(batchKey);
+          if (shared?.started) {
+            const active = mergeUsageReads(shared.inputs);
+            const covered =
+              active.sinceDay <= scanInput.sinceDay &&
+              active.untilDay >= scanInput.untilDay &&
+              (!scanInput.includeQuotaHistory ||
+                active.includeQuotaHistory === true ||
+                active.quotaIntervals !== undefined) &&
+              (scanInput.providers !== undefined ||
+                scanInput.quotaIntervals !== undefined ||
+                active.providers === undefined) &&
+              (active.providers === undefined ||
+                (scanInput.providers ?? [scanInput.quotaProvider ?? "codex"]).every((provider) =>
+                  active.providers!.includes(provider),
+                )) &&
+              (scanInput.quotaIntervals ?? []).every((interval) =>
+                active.quotaIntervals?.some(
+                  (candidate) => JSON.stringify(candidate) === JSON.stringify(interval),
+                ),
+              );
+            if (!covered) shared = undefined;
+          }
+          if (
+            shared &&
+            (input.quotaIntervals ?? []).some((interval) =>
+              shared!.inputs.some((other) =>
+                other.quotaIntervals?.some(
+                  (candidate) =>
+                    candidate.id === interval.id &&
+                    JSON.stringify(candidate) !== JSON.stringify(interval),
+                ),
+              ),
+            )
+          )
+            shared = undefined;
           if (shared === undefined) {
-            const result = Deferred.makeUnsafe<Exit.Exit<UsageSummary, UsageReadError>>();
-            inFlightSummaries.set(key, result);
-            shared = result;
-            // Detached from the request that starts it: a reader that reaches its
-            // deadline stops waiting, but the scan keeps going. Interrupting it
-            // threw away the inventory and unpersisted chunks, so a transcript
-            // backlog larger than one budget never finished.
+            const batch = {
+              inputs: [scanInput],
+              started: false,
+              progress,
+              result: Deferred.makeUnsafe<Exit.Exit<UsageSummary, UsageReadError>>(),
+            };
+            inFlightSummaries.set(batchKey, batch);
+            shared = batch;
+            // Capture queued windows after acquiring the lock. They use one
+            // inventory, parse and priced index pass, including overlapping quotas.
             yield* Effect.forkIn(
-              scanSemaphore
-                .withPermits(1)(
-                  readSummaryUnlocked(input, context, progress).pipe(
-                    Effect.ensuring(Effect.sync(() => scanStore.release())),
+              Effect.yieldNow
+                .pipe(
+                  Effect.andThen(
+                    scanSemaphore.withPermits(1)(
+                      Effect.gen(function* () {
+                        const queued = mergeUsageReads(batch.inputs);
+                        if (queued.includeQuotaHistory || queued.quotaIntervals !== undefined) {
+                          yield* readSummaryUnlocked(
+                            { ...queued, quotaHistoryOnly: true },
+                            undefined,
+                            batch.progress,
+                            true,
+                          );
+                        }
+                        yield* ensureLegacyScanCacheImported;
+                        batch.started = true;
+                        return yield* readSummaryUnlocked(
+                          mergeUsageReads(batch.inputs),
+                          context,
+                          batch.progress,
+                          true,
+                        ).pipe(Effect.ensuring(Effect.sync(() => scanStore.release())));
+                      }),
+                    ),
                   ),
                 )
                 .pipe(
                   Effect.onExit((exit) =>
-                    Effect.sync(() => inFlightSummaries.delete(key)).pipe(
-                      Effect.andThen(Deferred.succeed(result, exit)),
-                    ),
+                    Effect.sync(() => {
+                      if (inFlightSummaries.get(batchKey) === batch)
+                        inFlightSummaries.delete(batchKey);
+                    }).pipe(Effect.andThen(Deferred.succeed(batch.result, exit))),
                   ),
                 ),
               serviceScope,
               { startImmediately: true },
             );
+          } else {
+            if (!shared.started) shared.inputs.push(scanInput);
+            progress = shared.progress;
           }
-          const exit = yield* Deferred.await(shared);
+          const exit = yield* Deferred.await(shared.result);
           if (Exit.isFailure(exit)) return yield* Effect.failCause(exit.cause);
-          const summary = exit.value;
+          const summary = withSavedCosts(projectUsageRead(exit.value, input));
           if (
             summary.sources.length > 0 &&
             summary.sources.every((source) => source.status === "missing")
@@ -2219,7 +2577,12 @@ export const make = Effect.gen(function* () {
             detail: "Usage response budget expired before source coverage could be established.",
           });
         }
-        return yield* partialSummaryAtDeadline(input, startedAtMs, resolvedDirs, progress);
+        return withSavedCosts(
+          projectUsageRead(
+            yield* partialSummaryAtDeadline(input, startedAtMs, resolvedDirs, progress),
+            input,
+          ),
+        );
       });
     },
   );

@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$DryRun,
+    # List stale mirror files and exit before any deploy operation.
+    [switch]$PruneDryRun,
     [switch]$Fast,
     [switch]$Full,
     [switch]$SkipBuild,
@@ -37,282 +39,14 @@ $tailnetServePort = 9445
 $webPortOffset = $webPort - 5733
 $expectedDevUrl = "http://127.0.0.1:$webPort/"
 $expectedTailnetProxy = "http://127.0.0.1:$serverPort"
-$planOnly = $DryRun -or [bool]$WhatIfPreference
+$planOnly = $DryRun -or $PruneDryRun -or [bool]$WhatIfPreference
+$pruneArtifactRoot = "A:\Dev\Artifacts\t3-launcher-prune-20261024"
 $transcriptStarted = $false
 $transcriptPath = $null
 $needsTailscaleServe = $false
 $startedRootPids = @()
 
-# These paths are owned by the deploy checkout or by the D-backed runtime.
-# The synchronizer never removes them and never copies over them.
-$excludedRelativeFiles = @(
-    ".git",
-    ".env",
-    ".env.local",
-    "infra\relay\.env",
-    "infra\relay\.env.local",
-    "apps\mobile\src\features\usage\usageProviders.ts",
-    "scripts\import-codex-history.mjs",
-    "apps\desktop\tsconfig.tsbuildinfo",
-    "apps\web\tsconfig.tsbuildinfo"
-)
-
-$excludedDirectoryNames = @(
-    ".git",
-    ".trigger-tree",
-    ".t3",
-    ".vite-plus",
-    "node_modules",
-    "caches",
-    "dist",
-    "dist-electron",
-    "target",
-    "userdata",
-    "work",
-    "worktrees",
-    "release"
-)
-
-function Write-Phase {
-    param([Parameter(Mandatory)][string]$Name)
-    Write-Host "[$Name]"
-}
-
-function Write-Plan {
-    param([Parameter(Mandatory)][string]$Message)
-    if ($planOnly) {
-        Write-Host "  PLAN $Message"
-    }
-    else {
-        Write-Host "  $Message"
-    }
-}
-
-function Normalize-AbsolutePath {
-    param([Parameter(Mandatory)][string]$Path)
-    $full = [System.IO.Path]::GetFullPath($Path)
-    return $full.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
-}
-
-function Test-SamePath {
-    param(
-        [Parameter(Mandatory)][string]$Left,
-        [Parameter(Mandatory)][string]$Right
-    )
-    return (Normalize-AbsolutePath $Left).Equals((Normalize-AbsolutePath $Right), [System.StringComparison]::OrdinalIgnoreCase)
-}
-
-function Assert-SafeRoot {
-    param(
-        [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][string]$Label
-    )
-    if ($Path -notmatch '^[A-Za-z]:[\\/]') {
-        throw "$Label must be an absolute path: $Path"
-    }
-    $resolved = Normalize-AbsolutePath $Path
-    if ($resolved.Length -lt 4 -or $resolved -match '^[A-Za-z]:$') {
-        throw "$Label resolves to an unsafe broad path: $resolved"
-    }
-    if (-not (Test-Path -LiteralPath $resolved -PathType Container)) {
-        throw "$Label does not exist as a directory: $resolved"
-    }
-    $item = Get-Item -LiteralPath $resolved -Force
-    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "$Label is a reparse point. Refusing to operate through it: $resolved"
-    }
-    return $resolved
-}
-
-function Assert-ContainedPath {
-    param(
-        [Parameter(Mandatory)][string]$Root,
-        [Parameter(Mandatory)][string]$Candidate,
-        [Parameter(Mandatory)][string]$Label
-    )
-    $rootFull = (Normalize-AbsolutePath $Root) + [System.IO.Path]::DirectorySeparatorChar
-    $candidateFull = Normalize-AbsolutePath $Candidate
-    if (-not $candidateFull.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "$Label is outside its approved root: $candidateFull"
-    }
-    return $candidateFull
-}
-
-function Invoke-GitText {
-    param(
-        [Parameter(Mandatory)][string]$Root,
-        [Parameter(Mandatory)][string[]]$Arguments
-    )
-    $result = & git -C $Root @Arguments 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "git $($Arguments -join ' ') failed in $Root with exit code $LASTEXITCODE"
-    }
-    return (($result | Out-String).Trim())
-}
-
-function Test-ExcludedRelativePath {
-    param([Parameter(Mandatory)][string]$RelativePath)
-    $normalized = $RelativePath.Replace('/', '\').TrimStart('\')
-    $comparison = $normalized.ToLowerInvariant()
-    foreach ($excluded in $excludedRelativeFiles) {
-        if ($comparison -eq $excluded.ToLowerInvariant()) {
-            return $true
-        }
-    }
-    foreach ($part in ($normalized -split '\\')) {
-        if ($excludedDirectoryNames -contains $part.ToLowerInvariant()) {
-            return $true
-        }
-    }
-    return $false
-}
-
-function Get-IncludedFiles {
-    param([Parameter(Mandatory)][string]$Root)
-    $pending = New-Object 'System.Collections.Generic.Stack[string]'
-    $pending.Push($Root)
-    $files = New-Object 'System.Collections.Generic.List[object]'
-
-    while ($pending.Count -gt 0) {
-        $directory = $pending.Pop()
-        foreach ($item in @(Get-ChildItem -LiteralPath $directory -Force)) {
-            $relative = $item.FullName.Substring($Root.Length).TrimStart('\', '/')
-            if (Test-ExcludedRelativePath $relative) {
-                continue
-            }
-            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-                throw "Refusing to traverse or copy a reparse point in the owned source projection: $($item.FullName)"
-            }
-            if ($item.PSIsContainer) {
-                $pending.Push($item.FullName)
-            }
-            elseif ($item -is [System.IO.FileInfo]) {
-                [void]$files.Add([pscustomobject]@{ Relative = $relative; FullName = $item.FullName })
-            }
-        }
-    }
-    return @($files.ToArray())
-}
-
-function Get-FileSha256 {
-    param([Parameter(Mandatory)][string]$Path)
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
-}
-
-function Get-TextSha256 {
-    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
-    $algorithm = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
-        return ([System.BitConverter]::ToString($algorithm.ComputeHash($bytes))).Replace("-", "")
-    }
-    finally {
-        $algorithm.Dispose()
-    }
-}
-
-function Get-ProjectionIdentity {
-    param(
-        [Parameter(Mandatory)][string]$Root,
-        [Parameter(Mandatory)][object[]]$Files,
-        [Parameter(Mandatory)][hashtable]$FingerprintMap
-    )
-    $entries = @($Files | Sort-Object Relative | ForEach-Object {
-        $key = $_.Relative.ToLowerInvariant()
-        [ordered]@{
-            path = $_.Relative.Replace('\', '/')
-            bytes = [int64](Get-Item -LiteralPath $_.FullName).Length
-            sha256 = $FingerprintMap[$key]
-        }
-    })
-    $identityText = (($entries | ForEach-Object {
-        "$($_.path)`0$($_.bytes)`0$($_.sha256)"
-    }) -join "`n")
-    return [ordered]@{
-        root = $Root
-        fileCount = $entries.Count
-        sha256 = Get-TextSha256 $identityText
-        files = $entries
-    }
-}
-
-function Get-BuildArtifactIdentity {
-    param(
-        [Parameter(Mandatory)][string]$Root,
-        [Parameter(Mandatory)][string[]]$RelativePaths
-    )
-    return @($RelativePaths | ForEach-Object {
-        $fullPath = Assert-ContainedPath $Root (Join-Path $Root $_) "build artifact"
-        if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
-            return [ordered]@{ path = $_.Replace('\', '/'); present = $false }
-        }
-        $item = Get-Item -LiteralPath $fullPath
-        return [ordered]@{
-            path = $_.Replace('\', '/')
-            present = $true
-            bytes = [int64]$item.Length
-            sha256 = Get-FileSha256 $fullPath
-        }
-    })
-}
-
-function Get-FingerprintMap {
-    param(
-        [Parameter(Mandatory)][string]$Root,
-        [Parameter(Mandatory)][object[]]$Files
-    )
-    $map = @{}
-    foreach ($file in $Files) {
-        $map[$file.Relative.ToLowerInvariant()] = Get-FileSha256 $file.FullName
-    }
-    return $map
-}
-
-function Get-DependencyRelativePaths {
-    param([Parameter(Mandatory)][object[]]$Files)
-    return @($Files | Where-Object {
-        $name = [System.IO.Path]::GetFileName($_.Relative)
-        $name -eq "package.json" -or $name -eq "pnpm-lock.yaml" -or $name -eq "pnpm-workspace.yaml"
-    } | ForEach-Object { $_.Relative.ToLowerInvariant() })
-}
-
-function Sync-TrackedSourceFiles {
-    param(
-        [Parameter(Mandatory)][string]$SourceRoot,
-        [Parameter(Mandatory)][string]$DeployRoot,
-        [switch]$PlanOnly
-    )
-    $sourceFiles = @(Get-IncludedFiles $SourceRoot)
-    $deployFiles = @(Get-IncludedFiles $DeployRoot)
-    $sourceMap = Get-FingerprintMap $SourceRoot $sourceFiles
-    $deployMap = Get-FingerprintMap $DeployRoot $deployFiles
-    $mismatches = @($sourceFiles | Where-Object {
-        $key = $_.Relative.ToLowerInvariant()
-        -not $deployMap.ContainsKey($key) -or $deployMap[$key] -ne $sourceMap[$key]
-    })
-    if ($mismatches.Count -eq 0) {
-        Write-Plan "Deploy projection already matches source."
-        return 0
-    }
-    if ($PlanOnly) {
-        Write-Plan "Would copy $($mismatches.Count) source files into deploy without deleting anything."
-        return $mismatches.Count
-    }
-    foreach ($file in $mismatches) {
-        $destination = Assert-ContainedPath $DeployRoot (Join-Path $DeployRoot $file.Relative) "sync destination"
-        $parent = [System.IO.Path]::GetDirectoryName($destination)
-        if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
-            New-Item -ItemType Directory -Path $parent -Force | Out-Null
-        }
-        $parentItem = Get-Item -LiteralPath $parent -Force
-        if (($parentItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "Sync destination parent is a reparse point: $parent"
-        }
-        Copy-Item -LiteralPath $file.FullName -Destination $destination -Force
-    }
-    Write-Host "  copied $($mismatches.Count) files. No deploy files were deleted."
-    return $mismatches.Count
-}
+. (Join-Path $PSScriptRoot 't3-build-common.ps1')
 
 function Get-ProcessCommandLine {
     param([Parameter(Mandatory)][object]$Process)
@@ -495,62 +229,6 @@ function Get-TailscaleProxy {
         }
     }
     return $null
-}
-
-function Invoke-ProjectCommand {
-    param(
-        [Parameter(Mandatory)][string]$Label,
-        [Parameter(Mandatory)][string[]]$Arguments,
-        [Parameter(Mandatory)][string]$LogPath,
-        [Parameter()][string]$WorkingDirectory
-    )
-    Write-Host "  RUN $Label"
-    if ($planOnly) {
-        Write-Host "       vp $($Arguments -join ' ')"
-        return
-    }
-    if ([string]::IsNullOrWhiteSpace($WorkingDirectory)) {
-        $WorkingDirectory = $deployRoot
-    }
-    Push-Location $WorkingDirectory
-    $oldPath = $env:Path
-    $oldCodexEnvironment = @{}
-    try {
-        $env:Path = "$([System.IO.Path]::GetDirectoryName($nodePath));$oldPath"
-        # The desktop launcher is a project command boundary. These are
-        # agent-host markers, not T3 build settings; Vite+ treats them as an
-        # agent invocation and promotes ordinary build warnings to failures.
-        foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like "CODEX_*" })) {
-            $oldCodexEnvironment[$entry.Name] = $entry.Value
-            Remove-Item -LiteralPath "Env:$($entry.Name)" -ErrorAction SilentlyContinue
-        }
-        $projectCommandErrorAction = $ErrorActionPreference
-        try {
-            # Vite+ writes an informational built-in-command note to stderr.
-            # Windows PowerShell 5 turns native stderr into ErrorRecord objects;
-            # use the native exit code for this one boundary, then restore the
-            # launcher's fail-closed preference.
-            $ErrorActionPreference = "Continue"
-            & $nodePath $vpCliPath @Arguments 1>> $LogPath 2>&1
-            $projectCommandExitCode = $LASTEXITCODE
-        }
-        finally {
-            $ErrorActionPreference = $projectCommandErrorAction
-        }
-        if ($projectCommandExitCode -ne 0) {
-            throw "$Label failed with exit code $projectCommandExitCode. See $LogPath"
-        }
-    }
-    finally {
-        $env:Path = $oldPath
-        foreach ($entry in @(Get-ChildItem Env: | Where-Object { $_.Name -like "CODEX_*" })) {
-            Remove-Item -LiteralPath "Env:$($entry.Name)" -ErrorAction SilentlyContinue
-        }
-        foreach ($name in $oldCodexEnvironment.Keys) {
-            Set-Item -Path "Env:$name" -Value $oldCodexEnvironment[$name]
-        }
-        Pop-Location
-    }
 }
 
 function Stop-ManagedDesktop {
@@ -777,6 +455,12 @@ try {
     Write-Host "  source $sourceBranch $sourceCommit"
     Write-Host "  deploy detached $deployCommitBefore"
 
+    if ($PruneDryRun) {
+        [void](Remove-StaleDeployFiles $sourceRoot $deployRoot $pruneArtifactRoot $deployCommitBefore -PlanOnly)
+        Write-Host "  prune dry run complete; no files or runtime state changed"
+        return
+    }
+
     $sourcePackage = Get-Content -LiteralPath (Join-Path $sourceRoot "package.json") -Raw | ConvertFrom-Json
     $desktopCommand = [string]$sourcePackage.scripts.'dev:desktop'
     if ($desktopCommand -ne "node scripts/dev-runner.ts dev:desktop") {
@@ -820,7 +504,7 @@ try {
         -not $sourceRelatives.ContainsKey($_.Relative.ToLowerInvariant())
     })
     if ($deployOnlyFiles.Count -gt 0) {
-        Write-Host "  preserving $($deployOnlyFiles.Count) deploy-only files absent from source"
+        Write-Host "  will back up and prune $($deployOnlyFiles.Count) deploy-only files absent from source"
     }
     $mismatches = New-Object 'System.Collections.Generic.List[object]'
     foreach ($file in $sourceFiles) {
@@ -840,7 +524,8 @@ try {
     $missingDependencyProbes = @($dependencyProbePaths | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })
     $dependencyNeedsInstall =
         -not (Test-Path -LiteralPath (Join-Path $deployRoot "node_modules\.modules.yaml")) -or
-        $missingDependencyProbes.Count -gt 0
+        $missingDependencyProbes.Count -gt 0 -or
+        @(Get-DependencyRelativePaths $deployOnlyFiles).Count -gt 0
     foreach ($relative in $dependencyRelatives) {
         if (-not $deployMap.ContainsKey($relative) -or $deployMap[$relative] -ne $sourceMap[$relative]) {
             $dependencyNeedsInstall = $true
@@ -853,6 +538,7 @@ try {
     Write-Host "  dependency state $(if ($dependencyNeedsInstall) { 'requires vp i' } else { 'matches lock/manifests' })"
 
     Write-Phase "sync"
+    [void](Remove-StaleDeployFiles $sourceRoot $deployRoot $pruneArtifactRoot $deployCommitBefore -PlanOnly:$planOnly)
     [void](Sync-TrackedSourceFiles $sourceRoot $deployRoot -PlanOnly:$planOnly)
 
     $verificationDir = Join-Path $t3Home "userdata\verification"
@@ -870,49 +556,7 @@ try {
         $transcriptStarted = $true
     }
 
-    Write-Phase "dependencies"
-    if ($dependencyNeedsInstall) {
-        # Install the exact source lockfile without resolving or rewriting versions.
-        $oldNpmConfigLockfile = $env:npm_config_lockfile
-        try {
-            $env:npm_config_lockfile = "true"
-            Invoke-ProjectCommand "vp i --frozen-lockfile" @("i", "--frozen-lockfile") $commandLogPath
-        }
-        finally {
-            if ($null -eq $oldNpmConfigLockfile) {
-                Remove-Item Env:npm_config_lockfile -ErrorAction SilentlyContinue
-            }
-            else {
-                $env:npm_config_lockfile = $oldNpmConfigLockfile
-            }
-        }
-    }
-    else {
-        Write-Plan "Dependency state is current. Skipping vp i."
-    }
-
-    Write-Phase "final sync"
-    [void](Sync-TrackedSourceFiles $sourceRoot $deployRoot -PlanOnly:$planOnly)
-
-    Write-Phase "checks and builds"
-    if ($Fast -or $SkipBuild) {
-        Write-Plan "Fast readiness mode selected. Skipping full contract/server/web/desktop checks and builds."
-    }
-    else {
-        if ($SkipTypecheck) {
-            Write-Plan "Explicitly skipping package typechecks; build commands still run."
-        }
-        else {
-            Invoke-ProjectCommand "contracts typecheck" @("run", "--filter", "@t3tools/contracts", "typecheck") $commandLogPath
-            Invoke-ProjectCommand "server typecheck" @("run", "--filter", "t3", "typecheck") $commandLogPath
-            Invoke-ProjectCommand "web typecheck" @("run", "--filter", "@t3tools/web", "typecheck") $commandLogPath
-            Invoke-ProjectCommand "desktop typecheck" @("run", "--filter", "@t3tools/desktop", "typecheck") $commandLogPath
-        }
-        Invoke-ProjectCommand "web build" @("build", "--logLevel", "error") $commandLogPath (Join-Path $deployRoot "apps\web")
-        Invoke-ProjectCommand "server bundle" @("pack", "--logLevel", "error") $commandLogPath (Join-Path $deployRoot "apps\server")
-        Invoke-ProjectCommand "desktop bundle" @("pack", "--logLevel", "error") $commandLogPath (Join-Path $deployRoot "apps\desktop")
-        Invoke-ProjectCommand "desktop Electron runtime" @("run", "--filter", "@t3tools/desktop", "ensure:electron") $commandLogPath
-    }
+    Invoke-T3PreparedBuild
 
     Write-Phase "tailscale"
     $tailscaleCommands = @(Get-Command tailscale.exe -All -ErrorAction SilentlyContinue)
@@ -1040,6 +684,9 @@ try {
         }
         if ($finalParity -ne 0) {
             throw "Source/deploy parity check found $finalParity mismatched files after sync."
+        }
+        if (@(Get-StaleDeployFiles $sourceRoot $deployRoot).Count -ne 0) {
+            throw "Source/deploy parity check found stale files after sync."
         }
         $sourceStatusText = Invoke-GitText $sourceRoot @("status", "--short", "--untracked-files=all")
         $sourceStatus = @($sourceStatusText -split "`r?`n" | Where-Object { $_.Length -gt 0 })

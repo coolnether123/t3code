@@ -1,11 +1,10 @@
-import { act } from "react";
-import { createRoot } from "react-dom/client";
+import { act, render, fakeTimers } from "../../test/render";
 import { useState } from "react";
 import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import { USAGE_CONTRACT_VERSION, UsageDay, type UsageSummary } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
   environments: [
@@ -20,6 +19,7 @@ const state = vi.hoisted(() => ({
     environmentId: string;
     label: string;
     connection?: EnvironmentConnectionPresentation;
+    isConnected?: boolean;
     isPending: boolean;
     error: string | null;
     summary: UsageSummary | null;
@@ -42,9 +42,6 @@ vi.mock("./server", () => ({
 }));
 
 let useUsage: (typeof import("./usage"))["useUsage"];
-beforeAll(async () => {
-  ({ useUsage } = await import("./usage"));
-});
 
 function UsageProbe() {
   useUsage({
@@ -194,7 +191,8 @@ function DifferentWindowResultProbe() {
   );
 }
 
-beforeEach(() => {
+async function setupUsageFixture() {
+  ({ useUsage } = await import("./usage"));
   state.environments = [
     {
       environmentId: "desktop",
@@ -207,28 +205,26 @@ beforeEach(() => {
   state.execute
     .mockReset()
     .mockResolvedValue(AsyncResult.failure(Cause.fail(new Error("disconnected"))));
-});
+}
 
 describe("usage route recovery", () => {
   it("retries a retained environment failure once when the route mounts", async () => {
+    await setupUsageFixture();
     const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<UsageProbe />));
-      expect(state.execute).toHaveBeenCalledTimes(1);
-      expect(state.execute.mock.calls[0]?.[1]).toEqual(
-        expect.objectContaining({
-          input: expect.objectContaining({ refresh: true }),
-        }),
-      );
-      await act(async () => root.render(<UsageProbe />));
-      expect(state.execute).toHaveBeenCalledTimes(1);
-    } finally {
-      await act(async () => root.unmount());
-    }
+    await using root = await render(null, { container, router: false });
+    await act(async () => root.rerender(<UsageProbe />));
+    expect(state.execute).toHaveBeenCalledTimes(1);
+    expect(state.execute.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({
+        input: expect.objectContaining({ refresh: true }),
+      }),
+    );
+    await act(async () => root.rerender(<UsageProbe />));
+    expect(state.execute).toHaveBeenCalledTimes(1);
   });
 
   it("adopts the result fetched by a manual refresh", async () => {
+    await setupUsageFixture();
     state.execute.mockResolvedValue(AsyncResult.success(refreshedSummary));
     state.environments = [
       {
@@ -240,17 +236,14 @@ describe("usage route recovery", () => {
       },
     ];
     const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<RefreshProbe />));
-      await act(async () => container.querySelector("button")?.click());
-      expect(container.textContent).toBe(refreshedSummary.readAt);
-    } finally {
-      await act(async () => root.unmount());
-    }
+    await using root = await render(null, { container, router: false });
+    await act(async () => root.rerender(<RefreshProbe />));
+    await act(async () => container.querySelector("button")?.click());
+    expect(container.textContent).toBe(refreshedSummary.readAt);
   });
 
   it("keeps the current connection state when a manual refresh has cached a result", async () => {
+    await setupUsageFixture();
     state.execute.mockResolvedValue(AsyncResult.success(refreshedSummary));
     state.environments = [
       {
@@ -263,25 +256,22 @@ describe("usage route recovery", () => {
       },
     ];
     const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<RefreshConnectionProbe />));
-      await act(async () => container.querySelector("button")?.click());
-      expect(container.textContent).toBe("connected");
-      state.environments = [
-        {
-          ...state.environments[0]!,
-          connection: { phase: "reconnecting", error: "Socket closed", traceId: null },
-        },
-      ];
-      await act(async () => root.render(<RefreshConnectionProbe />));
-      expect(container.textContent).toBe("reconnecting");
-    } finally {
-      await act(async () => root.unmount());
-    }
+    await using root = await render(null, { container, router: false });
+    await act(async () => root.rerender(<RefreshConnectionProbe />));
+    await act(async () => container.querySelector("button")?.click());
+    expect(container.textContent).toBe("connected");
+    state.environments = [
+      {
+        ...state.environments[0]!,
+        connection: { phase: "reconnecting", error: "Socket closed", traceId: null },
+      },
+    ];
+    await act(async () => root.rerender(<RefreshConnectionProbe />));
+    expect(container.textContent).toBe("reconnecting");
   });
 
   it("keeps the last successful summary visible when a refresh disconnects", async () => {
+    await setupUsageFixture();
     state.environments = [
       {
         environmentId: "desktop",
@@ -293,17 +283,14 @@ describe("usage route recovery", () => {
     ];
     state.execute.mockResolvedValue(AsyncResult.failure(Cause.fail(new Error("disconnected"))));
     const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<RetainPreviousProbe />));
-      await act(async () => container.querySelector("button")?.click());
-      expect(container.textContent).toBe(refreshedSummary.readAt);
-    } finally {
-      await act(async () => root.unmount());
-    }
+    await using root = await render(null, { container, router: false });
+    await act(async () => root.rerender(<RetainPreviousProbe />));
+    await act(async () => container.querySelector("button")?.click());
+    expect(container.textContent).toBe(refreshedSummary.readAt);
   });
 
   it("does not carry same-environment totals into a failed different-window refresh", async () => {
+    await setupUsageFixture();
     state.environments = [
       {
         environmentId: "desktop",
@@ -315,36 +302,29 @@ describe("usage route recovery", () => {
     ];
     state.execute.mockResolvedValue(AsyncResult.failure(Cause.fail(new Error("disconnected"))));
     const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<DifferentWindowResultProbe />));
-      await act(async () => container.querySelector("button")?.click());
-      expect(container.textContent).toBe("missing");
-    } finally {
-      await act(async () => root.unmount());
-    }
+    await using root = await render(null, { container, router: false });
+    await act(async () => root.rerender(<DifferentWindowResultProbe />));
+    await act(async () => container.querySelector("button")?.click());
+    expect(container.textContent).toBe("missing");
   });
 
   it("keeps one delayed retry alive while a remote connection recovers", async () => {
-    vi.useFakeTimers();
+    await setupUsageFixture();
+    using _timers = fakeTimers();
     state.execute
       .mockResolvedValueOnce(AsyncResult.failure(Cause.fail(new Error("disconnected"))))
       .mockResolvedValue(AsyncResult.success(refreshedSummary));
     const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<UsageProbe />));
-      expect(state.execute).toHaveBeenCalledTimes(1);
-      await act(async () => vi.advanceTimersByTimeAsync(3_000));
-      expect(state.execute).toHaveBeenCalledTimes(2);
-    } finally {
-      await act(async () => root.unmount());
-      vi.useRealTimers();
-    }
+    await using root = await render(null, { container, router: false });
+    await act(async () => root.rerender(<UsageProbe />));
+    expect(state.execute).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    expect(state.execute).toHaveBeenCalledTimes(2);
   });
 
   it("does not retry a failure while the original query is still pending", async () => {
-    vi.useFakeTimers();
+    await setupUsageFixture();
+    using _timers = fakeTimers();
     state.environments = [
       {
         environmentId: "desktop",
@@ -355,20 +335,16 @@ describe("usage route recovery", () => {
       },
     ];
     const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<UsageProbe />));
-      expect(state.execute).not.toHaveBeenCalled();
-      await act(async () => vi.advanceTimersByTimeAsync(3_000));
-      expect(state.execute).not.toHaveBeenCalled();
-    } finally {
-      await act(async () => root.unmount());
-      vi.useRealTimers();
-    }
+    await using root = await render(null, { container, router: false });
+    await act(async () => root.rerender(<UsageProbe />));
+    expect(state.execute).not.toHaveBeenCalled();
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    expect(state.execute).not.toHaveBeenCalled();
   });
 
   it("coalesces a delayed retry with an active same-window refresh", async () => {
-    vi.useFakeTimers();
+    await setupUsageFixture();
+    using _timers = fakeTimers();
     let finish!: (result: unknown) => void;
     state.execute.mockImplementation(
       () =>
@@ -377,27 +353,23 @@ describe("usage route recovery", () => {
         }),
     );
     const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<UsageProbe />));
-      expect(state.execute).toHaveBeenCalledTimes(1);
-      await act(async () => vi.advanceTimersByTimeAsync(3_000));
-      expect(state.execute).toHaveBeenCalledTimes(1);
+    await using root = await render(null, { container, router: false });
+    await act(async () => root.rerender(<UsageProbe />));
+    expect(state.execute).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    expect(state.execute).toHaveBeenCalledTimes(1);
 
-      await act(async () => {
-        finish(AsyncResult.failure(Cause.fail(new Error("disconnected"))));
-        await Promise.resolve();
-        await Promise.resolve();
-      });
-      expect(state.execute).toHaveBeenCalledTimes(2);
-    } finally {
-      await act(async () => root.unmount());
-      vi.useRealTimers();
-    }
+    await act(async () => {
+      finish(AsyncResult.failure(Cause.fail(new Error("disconnected"))));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(state.execute).toHaveBeenCalledTimes(2);
   });
 
   it("bounds retries when the deferred retry also fails slowly", async () => {
-    vi.useFakeTimers();
+    await setupUsageFixture();
+    using _timers = fakeTimers();
     const finishers: Array<(result: unknown) => void> = [];
     state.execute.mockImplementation(
       () =>
@@ -406,31 +378,26 @@ describe("usage route recovery", () => {
         }),
     );
     const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<UsageProbe />));
-      expect(state.execute).toHaveBeenCalledTimes(1);
-      await act(async () => vi.advanceTimersByTimeAsync(3_000));
-      expect(state.execute).toHaveBeenCalledTimes(1);
+    await using root = await render(null, { container, router: false });
+    await act(async () => root.rerender(<UsageProbe />));
+    expect(state.execute).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(3_000));
+    expect(state.execute).toHaveBeenCalledTimes(1);
 
-      await act(async () => {
-        finishers[0]?.(AsyncResult.failure(Cause.fail(new Error("disconnected"))));
-        await Promise.resolve();
-        await Promise.resolve();
-      });
-      expect(state.execute).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      finishers[0]?.(AsyncResult.failure(Cause.fail(new Error("disconnected"))));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(state.execute).toHaveBeenCalledTimes(2);
 
-      await act(async () => {
-        finishers[1]?.(AsyncResult.failure(Cause.fail(new Error("still disconnected"))));
-        await Promise.resolve();
-        await Promise.resolve();
-        vi.advanceTimersByTime(30_000);
-      });
-      expect(state.execute).toHaveBeenCalledTimes(2);
-    } finally {
-      await act(async () => root.unmount());
-      vi.useRealTimers();
-    }
+    await act(async () => {
+      finishers[1]?.(AsyncResult.failure(Cause.fail(new Error("still disconnected"))));
+      await Promise.resolve();
+      await Promise.resolve();
+      vi.advanceTimersByTime(30_000);
+    });
+    expect(state.execute).toHaveBeenCalledTimes(2);
   });
 
   it.each([
@@ -438,61 +405,85 @@ describe("usage route recovery", () => {
     "Usage is partial because the transcript inventory exceeded its response budget.",
     "Usage is partial while 1 large transcript is scanned in complete-line chunks.",
   ])("resumes an incomplete scan: %s", async (message) => {
-    vi.useFakeTimers();
+    await setupUsageFixture();
+    using _timers = fakeTimers();
     state.environments = [
       {
         environmentId: "desktop",
         label: "Desktop",
         isPending: false,
         error: null,
+        isConnected: true,
         summary: { ...deferredSummary, sources: [{ ...deferredSummary.sources[0]!, message }] },
       },
     ];
     state.execute.mockResolvedValue(AsyncResult.success(refreshedSummary));
     const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<UsageProbe />));
-      await act(async () => vi.advanceTimersByTimeAsync(750));
-      expect(state.execute).toHaveBeenCalledTimes(1);
-      await act(async () => vi.advanceTimersByTimeAsync(30_000));
-      expect(state.execute).toHaveBeenCalledTimes(1);
-    } finally {
-      await act(async () => root.unmount());
-      vi.useRealTimers();
-    }
+    await using root = await render(null, { container, router: false });
+    await act(async () => root.rerender(<UsageProbe />));
+    await act(async () => vi.advanceTimersByTimeAsync(750));
+    expect(state.execute).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(state.execute).toHaveBeenCalledTimes(1);
   });
 
-  it("backs off and stops after five deferred scans make no progress", async () => {
-    vi.useFakeTimers();
+  it("bounds repeated failures while the environment remains connected", async () => {
+    await setupUsageFixture();
+    using _timers = fakeTimers();
+    state.environments = [
+      {
+        environmentId: "desktop",
+        label: "Desktop",
+        isConnected: true,
+        isPending: false,
+        error: "This environment could not report usage.",
+        summary: null,
+      },
+    ];
+    state.execute.mockResolvedValue(AsyncResult.failure(Cause.fail(new Error("unavailable"))));
+    const container = document.createElement("div");
+    await using root = await render(null, { container, router: false });
+    await act(async () => root.rerender(<UsageProbe />));
+    for (let attempt = 0; attempt < 10; attempt++)
+      await act(async () => vi.advanceTimersByTimeAsync(8_000));
+    const attempts = state.execute.mock.calls.length;
+    expect(attempts).toBeGreaterThan(0);
+    expect(attempts).toBeLessThanOrEqual(7);
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(state.execute).toHaveBeenCalledTimes(attempts);
+  });
+
+  it("keeps retrying unchanged partial reads beyond five attempts until complete", async () => {
+    await setupUsageFixture();
+    using _timers = fakeTimers();
     state.environments = [
       {
         environmentId: "desktop",
         label: "Desktop",
         isPending: false,
         error: null,
+        isConnected: true,
         summary: deferredSummary,
       },
     ];
     state.execute.mockResolvedValue(AsyncResult.success(deferredSummary));
     const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<UsageProbe />));
-      for (const delay of [750, 1_500, 3_000, 6_000, 8_000]) {
-        await act(async () => vi.advanceTimersByTimeAsync(delay));
-      }
-      expect(state.execute).toHaveBeenCalledTimes(5);
-      await act(async () => vi.advanceTimersByTimeAsync(30_000));
-      expect(state.execute).toHaveBeenCalledTimes(5);
-    } finally {
-      await act(async () => root.unmount());
-      vi.useRealTimers();
+    await using root = await render(null, { container, router: false });
+    await act(async () => root.rerender(<UsageProbe />));
+    for (const delay of [750, 1_500, 3_000, 6_000, 8_000]) {
+      await act(async () => vi.advanceTimersByTimeAsync(delay));
     }
+    expect(state.execute).toHaveBeenCalledTimes(5);
+    state.execute.mockResolvedValue(AsyncResult.success(refreshedSummary));
+    await act(async () => vi.advanceTimersByTimeAsync(8_000));
+    expect(state.execute).toHaveBeenCalledTimes(6);
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(state.execute).toHaveBeenCalledTimes(6);
   });
 
   it("keeps warming a large deferred backlog while its count decreases", async () => {
-    vi.useFakeTimers();
+    await setupUsageFixture();
+    using _timers = fakeTimers();
     let deferredCount = 30;
     const summaryForCount = (count: number): UsageSummary => ({
       ...deferredSummary,
@@ -510,6 +501,7 @@ describe("usage route recovery", () => {
         label: "Desktop",
         isPending: false,
         error: null,
+        isConnected: true,
         summary: summaryForCount(deferredCount),
       },
     ];
@@ -520,61 +512,54 @@ describe("usage route recovery", () => {
       );
     });
     const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<UsageProbe />));
-      for (let attempt = 0; attempt < 30; attempt += 1) {
-        await act(async () => vi.advanceTimersByTimeAsync(750));
-      }
-      expect(state.execute).toHaveBeenCalledTimes(30);
-      await act(async () => vi.advanceTimersByTimeAsync(30_000));
-      expect(state.execute).toHaveBeenCalledTimes(30);
-    } finally {
-      await act(async () => root.unmount());
-      vi.useRealTimers();
+    await using root = await render(null, { container, router: false });
+    await act(async () => root.rerender(<UsageProbe />));
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      await act(async () => vi.advanceTimersByTimeAsync(750));
     }
+    expect(state.execute).toHaveBeenCalledTimes(30);
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(state.execute).toHaveBeenCalledTimes(30);
   });
 
   it("cancels a scheduled deferred retry when the environment fails", async () => {
-    vi.useFakeTimers();
+    await setupUsageFixture();
+    using _timers = fakeTimers();
     state.environments = [
       {
         environmentId: "desktop",
         label: "Desktop",
         isPending: false,
         error: null,
+        isConnected: true,
         summary: deferredSummary,
       },
     ];
     const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<UsageProbe />));
-      state.execute.mockClear();
-      state.environments = [
-        {
-          environmentId: "desktop",
-          label: "Desktop",
-          isPending: false,
-          error: "This environment could not report usage.",
-          summary: deferredSummary,
-        },
-      ];
-      await act(async () => root.render(<UsageProbe />));
-      state.execute.mockClear();
-      await act(async () => vi.advanceTimersByTimeAsync(30_000));
-      expect(
-        state.execute.mock.calls.filter(
-          ([, request]) => (request as { input?: { refresh?: boolean } }).input?.refresh === false,
-        ),
-      ).toHaveLength(0);
-    } finally {
-      await act(async () => root.unmount());
-      vi.useRealTimers();
-    }
+    await using root = await render(null, { container, router: false });
+    await act(async () => root.rerender(<UsageProbe />));
+    state.execute.mockClear();
+    state.environments = [
+      {
+        environmentId: "desktop",
+        label: "Desktop",
+        isPending: false,
+        error: "This environment could not report usage.",
+        summary: deferredSummary,
+      },
+    ];
+    await act(async () => root.rerender(<UsageProbe />));
+    state.execute.mockClear();
+    await act(async () => vi.advanceTimersByTimeAsync(30_000));
+    expect(
+      state.execute.mock.calls.filter(
+        ([, request]) => (request as { input?: { refresh?: boolean } }).input?.refresh === false,
+      ),
+    ).toHaveLength(0);
   });
 
   it("allows a newer shared answer to replace the manual refresh overlay", async () => {
+    await setupUsageFixture();
     state.execute.mockResolvedValue(AsyncResult.success(refreshedSummary));
     state.environments = [
       {
@@ -586,29 +571,26 @@ describe("usage route recovery", () => {
       },
     ];
     const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<RefreshProbe />));
-      await act(async () => container.querySelector("button")?.click());
-      expect(container.textContent).toBe(refreshedSummary.readAt);
+    await using root = await render(null, { container, router: false });
+    await act(async () => root.rerender(<RefreshProbe />));
+    await act(async () => container.querySelector("button")?.click());
+    expect(container.textContent).toBe(refreshedSummary.readAt);
 
-      state.environments = [
-        {
-          environmentId: "desktop",
-          label: "Desktop",
-          isPending: false,
-          error: null,
-          summary: { ...refreshedSummary, readAt: "2026-09-01T12:01:00.000Z" },
-        },
-      ];
-      await act(async () => root.render(<RefreshProbe />));
-      expect(container.textContent).toBe("2026-09-01T12:01:00.000Z");
-    } finally {
-      await act(async () => root.unmount());
-    }
+    state.environments = [
+      {
+        environmentId: "desktop",
+        label: "Desktop",
+        isPending: false,
+        error: null,
+        summary: { ...refreshedSummary, readAt: "2026-09-01T12:01:00.000Z" },
+      },
+    ];
+    await act(async () => root.rerender(<RefreshProbe />));
+    expect(container.textContent).toBe("2026-09-01T12:01:00.000Z");
   });
 
   it("publishes fast environment results while a slower refresh is pending", async () => {
+    await setupUsageFixture();
     let finishSlow!: (result: unknown) => void;
     const slow = new Promise((resolve) => {
       finishSlow = resolve;
@@ -636,34 +618,31 @@ describe("usage route recovery", () => {
         : slow,
     );
     const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<RefreshStatusesProbe />));
-      await act(async () => container.querySelector("button")?.click());
-      await act(async () => Promise.resolve());
-      expect(container.textContent).toContain("desktop:2026-09-01T12:02:00.000Z");
-      expect(container.textContent).toContain("laptop:pending");
+    await using root = await render(null, { container, router: false });
+    await act(async () => root.rerender(<RefreshStatusesProbe />));
+    await act(async () => container.querySelector("button")?.click());
+    await act(async () => Promise.resolve());
+    expect(container.textContent).toContain("desktop:2026-09-01T12:02:00.000Z");
+    expect(container.textContent).toContain("laptop:pending");
 
-      finishSlow(AsyncResult.failure(Cause.fail(new Error("disconnected"))));
-      await act(async () => slow);
-      state.environments = [
-        {
-          environmentId: "laptop",
-          label: "Laptop",
-          isPending: false,
-          error: null,
-          summary: { ...refreshedSummary, readAt: "2026-09-01T12:03:00.000Z" },
-        },
-        state.environments[0]!,
-      ];
-      await act(async () => root.render(<RefreshStatusesProbe />));
-      expect(container.textContent).toContain("laptop:2026-09-01T12:03:00.000Z");
-    } finally {
-      await act(async () => root.unmount());
-    }
+    finishSlow(AsyncResult.failure(Cause.fail(new Error("disconnected"))));
+    await act(async () => slow);
+    state.environments = [
+      {
+        environmentId: "laptop",
+        label: "Laptop",
+        isPending: false,
+        error: null,
+        summary: { ...refreshedSummary, readAt: "2026-09-01T12:03:00.000Z" },
+      },
+      state.environments[0]!,
+    ];
+    await act(async () => root.rerender(<RefreshStatusesProbe />));
+    expect(container.textContent).toContain("laptop:2026-09-01T12:03:00.000Z");
   });
 
   it("does not show the old window while refreshing a different request key", async () => {
+    await setupUsageFixture();
     state.execute.mockResolvedValue(AsyncResult.success(refreshedSummary));
     state.environments = [
       {
@@ -675,14 +654,10 @@ describe("usage route recovery", () => {
       },
     ];
     const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<RefreshDifferentWindowProbe />));
-      const button = container.querySelector("button")!;
-      await act(async () => button.click());
-      expect(button.textContent).toBe(refreshedSummary.readAt);
-    } finally {
-      await act(async () => root.unmount());
-    }
+    await using root = await render(null, { container, router: false });
+    await act(async () => root.rerender(<RefreshDifferentWindowProbe />));
+    const button = container.querySelector("button")!;
+    await act(async () => button.click());
+    expect(button.textContent).toBe(refreshedSummary.readAt);
   });
 });

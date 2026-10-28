@@ -46,7 +46,7 @@ it("allows types and schemas through the real Knip CLI without hiding runtime or
       "knip.json",
       JSON.stringify({
         entry: ["entry.ts"],
-        project: ["*.ts"],
+        project: ["**/*.ts"],
         includeEntryExports: true,
         include: [
           "exports",
@@ -116,6 +116,16 @@ it("allows types and schemas through the real Knip CLI without hiding runtime or
     );
     NodeFS.appendFileSync(NodePath.join(cwd, "namespace.ts"), `export const helper = () => 1;`);
     write("unused.ts", `export const orphan = 1;`);
+    // Retained fork names must not exempt another project with the same paths.
+    NodeFS.mkdirSync(NodePath.join(cwd, "apps/server/src/usage"), { recursive: true });
+    write(
+      "apps/server/src/usage/usagePricing.ts",
+      `export const used = 1; export const normalizeModelName = 2; export const newHelper = 3;`,
+    );
+    NodeFS.appendFileSync(
+      NodePath.join(cwd, "entry.ts"),
+      `import { used } from "./apps/server/src/usage/usagePricing.ts"; console.log(used);`,
+    );
     write(
       "package.json",
       JSON.stringify({
@@ -136,6 +146,12 @@ it("allows types and schemas through the real Knip CLI without hiding runtime or
       "ordinary",
     ]);
     expect(entry.duplicates).toHaveLength(1);
+    expect(
+      issues
+        .find((issue: { file: string }) => issue.file === "apps/server/src/usage/usagePricing.ts")
+        .exports.map((issue: { name: string }) => issue.name)
+        .sort(),
+    ).toEqual(["newHelper", "normalizeModelName"]);
     expect(
       issues.find((issue: { file: string }) => issue.file === "namespace.ts").nsExports,
     ).toEqual([expect.objectContaining({ name: "helper" })]);

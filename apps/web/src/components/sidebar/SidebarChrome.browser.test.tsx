@@ -1,6 +1,7 @@
-import { act, type ReactElement } from "react";
-import { createRoot } from "react-dom/client";
-import { afterEach, beforeAll, describe, expect, it, vi } from "vite-plus/test";
+import type { ReactElement } from "react";
+import { describe, expect, it, vi } from "vite-plus/test";
+import { userEvent } from "vite-plus/test/browser";
+import { render } from "../../../test/render";
 
 const state = vi.hoisted(() => ({ navigate: vi.fn(), setOpenMobile: vi.fn(), pathname: "/" }));
 vi.mock("@tanstack/react-router", async (original) => ({
@@ -35,40 +36,27 @@ vi.mock("./SidebarUpdatePill", () => ({
   SidebarUpdateArchitectureWarning: () => null,
 }));
 vi.mock("./SidebarProviderUpdatePill", () => ({ SidebarProviderUpdatePill: () => null }));
+vi.mock("./SidebarThreadUndoNotice", () => ({ SidebarThreadUndoNotice: () => null }));
 
-let SidebarUtilityMenu: (typeof import("./SidebarChrome"))["SidebarUtilityMenu"];
-beforeAll(async () => {
-  ({ SidebarUtilityMenu } = await import("./SidebarChrome"));
-});
+import { SidebarChromeFooter } from "./SidebarChrome";
 
-afterEach(() => {
-  vi.unstubAllGlobals();
-  vi.clearAllMocks();
+function setup() {
+  state.navigate.mockReset();
+  state.setOpenMobile.mockReset();
   state.pathname = "/";
-});
+}
 
 describe("sidebar attribution navigation", () => {
   it("opens the independent attribution page beside Usage and closes the mobile drawer", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<SidebarUtilityMenu />));
-      expect(container.querySelector('[aria-label="Usage"]')).not.toBeNull();
-      const attribution = container.querySelector<HTMLButtonElement>(
-        '[aria-label="Skills & repeated input"]',
-      )!;
-      expect(attribution).not.toBeNull();
-      await act(async () => attribution.click());
-      expect(state.navigate).toHaveBeenCalledWith({ to: "/repeated-input" });
-      expect(state.setOpenMobile).toHaveBeenCalledWith(false);
-      state.pathname = "/repeated-input";
-      await act(async () => root.render(<SidebarUtilityMenu key="attribution" />));
-      expect(container.textContent).toContain("Back");
-      await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
-      expect(state.navigate).toHaveBeenLastCalledWith({ href: "/" });
-    } finally {
-      await act(async () => root.unmount());
-    }
+    setup();
+    await using screen = await render(<SidebarChromeFooter />);
+    await expect.element(screen.getByRole("button", { name: "Usage", exact: true })).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Skills & repeated input" }));
+    expect(state.navigate).toHaveBeenCalledWith({ to: "/repeated-input" });
+    expect(state.setOpenMobile).toHaveBeenCalledWith(false);
+    state.pathname = "/repeated-input";
+    await screen.rerender(<SidebarChromeFooter key="attribution" />);
+    await userEvent.click(screen.getByRole("button", { name: "Back", exact: true }));
+    expect(state.navigate).toHaveBeenLastCalledWith({ href: "/" });
   });
 });

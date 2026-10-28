@@ -83,6 +83,8 @@ describe("UsageScanStore", () => {
       scanCursor: 600,
       prefixFingerprint: "abc",
       hasCodexState: true,
+      codexParserCurrent: true,
+      malformedRecords: 0,
       hasRepeatedInput: false,
       recordCount: 2,
       latestMs: 1_786_000_000_900,
@@ -145,6 +147,43 @@ describe("UsageScanStore", () => {
     expect(chunks).toEqual([{ seq: 0 }]);
     const reopened = UsageScanStore.open(file);
     expect(reopened.load("/a.jsonl")?.records.map((row) => row.timestampMs)).toEqual([9]);
+    reopened.close();
+  });
+
+  it("persists a recovered tier even when the last record is unchanged", () => {
+    const file = tempDatabase();
+    const store = UsageScanStore.open(file);
+    const first = record(1, { unresolvedServiceTierTurnId: "native-turn" });
+    const last = record(2);
+    store.set("/a.jsonl", entry([first, last]));
+    const { unresolvedServiceTierTurnId: _pending, ...settled } = first;
+    const corrected = {
+      ...settled,
+      speed: "fast" as const,
+      serviceTier: "priority",
+      serviceTierSource: "t3Request" as const,
+    };
+    store.set("/a.jsonl", entry([corrected, last]), { replaceRecords: true });
+    store.close();
+    const reopened = UsageScanStore.open(file);
+    expect(reopened.load("/a.jsonl")?.records).toEqual([corrected, last]);
+    reopened.close();
+  });
+
+  it("adds parser metadata to an existing cache without dropping retained history", () => {
+    const file = tempDatabase();
+    const store = UsageScanStore.open(file);
+    const saved = entry([record(1)]);
+    store.set("/deleted.jsonl", saved);
+    store.close();
+    const db = new NodeSqlite.DatabaseSync(file);
+    db.exec("ALTER TABLE files DROP COLUMN codex_parser_current");
+    db.exec("ALTER TABLE files DROP COLUMN malformed_records");
+    db.close();
+    const reopened = UsageScanStore.open(file);
+    expect(reopened.persistent).toBe(true);
+    expect(reopened.meta("/deleted.jsonl")?.codexParserCurrent).toBe(false);
+    expect(reopened.load("/deleted.jsonl")).toEqual(saved);
     reopened.close();
   });
 

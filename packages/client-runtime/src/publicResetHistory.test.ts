@@ -168,7 +168,7 @@ describe("Codex Resets history", () => {
 
     const partial = publicResetCostEstimates(announcements, [environment("partial", false, 0)])[0]!;
     expect(partial.costUsd).toBeNull();
-    expect(partial.reason).toContain("incomplete");
+    expect(partial.reason).toBe("Still counting");
 
     const unpriced = publicResetCostEstimates(announcements, [environment("ok", true, 1)])[0]!;
     expect(unpriced.costUsd).toBeNull();

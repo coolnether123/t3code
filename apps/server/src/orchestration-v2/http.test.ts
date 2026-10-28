@@ -36,6 +36,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import { ProjectEnrichmentService } from "../project/ProjectEnrichmentService.ts";
 import * as OrchestrationHttp from "./http.ts";
+import * as VoiceThreadService from "../speech/VoiceThreadService.ts";
 import { EventSinkV2 } from "./EventSink.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
@@ -98,9 +99,9 @@ const items = Schema.decodeUnknownSync(Schema.Array(OrchestrationV2TurnItem))(
   })),
 );
 
-it.effect("exports full history with size, scope, and missing-thread checks", () =>
+// Serves the orchestration HTTP routes over real stores; `allowed` gates the read scope.
+const serveOrchestrationHttp = (allowed: () => boolean, voice = false) =>
   Effect.gen(function* () {
-    let allowed = true;
     const runtime = ProviderReplayHarness.layerWithRegistry(
       { name: "thread-transcript" },
       ProviderAdapterRegistry.layerFromAdapters([]),
@@ -133,6 +134,20 @@ it.effect("exports full history with size, scope, and missing-thread checks", ()
     const routes = HttpApiBuilder.layer(TranscriptTestApi).pipe(
       Layer.provide(OrchestrationHttp.layer),
       Layer.provide(
+        voice
+          ? Layer.mock(VoiceThreadService.VoiceThreadService)({
+              openCalls: () =>
+                Effect.succeed({
+                  coverage: "complete" as const,
+                  count: 1,
+                  openCalls: [{ callId: "synthetic-call", threadId: "otis-main" }],
+                  activeSessions: [{ threadId: ThreadId.make("otis-main"), status: "running" }],
+                  observedAt: DateTime.formatIso(now),
+                }),
+            })
+          : Layer.empty,
+      ),
+      Layer.provide(
         Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({
           enqueueCommand: (effect) => effect,
         }),
@@ -153,7 +168,7 @@ it.effect("exports full history with size, scope, and missing-thread checks", ()
                 sessionId: AuthSessionId.make("test-session"),
                 subject: "test",
                 method: "bearer-access-token",
-                scopes: new Set<AuthEnvironmentScope>(allowed ? ["orchestration:read"] : []),
+                scopes: new Set<AuthEnvironmentScope>(allowed() ? ["orchestration:read"] : []),
               }),
             ),
           ),
@@ -167,6 +182,13 @@ it.effect("exports full history with size, scope, and missing-thread checks", ()
     );
     const { handler, dispose } = HttpRouter.toWebHandler(routes, { disableLogger: true });
     yield* Effect.addFinalizer(() => Effect.promise(dispose));
+    return { services, eventSink, handler };
+  });
+
+it.effect("exports full history with size, scope, and missing-thread checks", () =>
+  Effect.gen(function* () {
+    let allowed = true;
+    const { services, eventSink, handler } = yield* serveOrchestrationHttp(() => allowed);
     const read = (threadId: ThreadId) =>
       Effect.promise(() =>
         handler(
@@ -291,5 +313,61 @@ it.effect("exports full history with size, scope, and missing-thread checks", ()
       ],
     });
     expect((yield* readShell(thread.id)).status).toBe(404);
+  }),
+);
+
+it.effect("leaves older settled threads out of the HTTP shell only when asked", () =>
+  Effect.gen(function* () {
+    const { eventSink, handler } = yield* serveOrchestrationHttp(() => true, true);
+    yield* eventSink.write({
+      events: Array.from({ length: 26 }, (_, index) => {
+        const id = ThreadId.make(index === 0 ? "otis-main" : `settled-${index}`);
+        return {
+          id: EventId.make(`create-${id}`),
+          type: "thread.created" as const,
+          threadId: id,
+          occurredAt: now,
+          payload: {
+            ...thread,
+            id,
+            lineage: { ...thread.lineage, rootThreadId: id },
+            settledOverride: "settled" as const,
+            settledAt: DateTime.makeUnsafe(Date.UTC(2026, 8, 1 + index)),
+          },
+        };
+      }),
+    });
+    const shell = (query: string) =>
+      Effect.promise(async () => {
+        const response = await handler(
+          new Request(`http://localhost/api/orchestration/shell${query}`, {
+            headers: { [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT },
+          }),
+        );
+        return (await response.json()) as {
+          readonly threads: ReadonlyArray<{ readonly id: string }>;
+          readonly olderSettled?: { readonly counts: ReadonlyArray<unknown> };
+          readonly voice?: { readonly coverage: string; readonly count: number };
+        };
+      });
+
+    const full = yield* shell("");
+    expect(full.threads).toHaveLength(27);
+    expect(full.olderSettled).toBeUndefined();
+    const cut = yield* shell("?omitOlderSettled=1");
+    expect(cut.threads.map((row) => row.id).toSorted()).toEqual(
+      [thread.id, ...Array.from({ length: 25 }, (_, index) => `settled-${index + 1}`)].toSorted(),
+    );
+    expect(cut.olderSettled?.counts).toEqual([{ projectId: thread.projectId, count: 1 }]);
+    expect(cut.voice).toMatchObject({ coverage: "complete", count: 1 });
+    const otis = yield* Effect.promise(() =>
+      handler(
+        new Request("http://localhost/api/orchestration/threads/otis-main/shell", {
+          headers: { [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT },
+        }),
+      ),
+    );
+    expect(otis.status).toBe(200);
+    expect(yield* Effect.promise(() => otis.json())).toMatchObject({ id: "otis-main" });
   }),
 );

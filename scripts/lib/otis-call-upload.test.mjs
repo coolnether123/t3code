@@ -31,7 +31,10 @@ NodeTest.test(
       try {
         const service = new CallService(new CallStore(directory), {
           verify: async () => ({ runtimeMode: 'full-access', interactionMode: 'default' }),
-          dispatch: async () => {}, speech: async () => ({}), tenants: ['stt', 'tts'], ttsModel: 'test'
+          dispatch: async () => {},
+          speech: async (input) => input.action === 'acquire' || input.action === 'renew'
+            ? {sessionId:'synthetic-lease',tenants:['stt','tts'],expiresAt:'2099-10-18T00:00:00Z'} : {},
+          tenants: ['stt', 'tts'], ttsModel: 'test'
         });
         const signal = new AbortController().signal;
         await service.handle({action:'call.open',callId:'test',options:{threadId:'thread',modelSelection:{instanceId:'claudeAgent',model:'test'}}},signal);

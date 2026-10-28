@@ -19,6 +19,7 @@ const Gemini = providerMark("gemini", "Gemini");
 const GrokIcon = providerMark("grok", "Grok");
 const OpenCodeIcon = providerMark("opencode", "OpenCode");
 const PiIcon = providerMark("pi", "Pi");
+const MuseIcon = providerMark("muse", "Muse Code");
 
 type UsageProviderPresentation = {
   readonly label: string;
@@ -88,6 +89,12 @@ export const PROVIDER_PRESENTATION = {
     mark: AntigravityIcon,
   },
   pi: { driverKind: ProviderDriverKind.make("pi"), label: "Pi", color: "#4d9f8a", mark: PiIcon },
+  muse: {
+    label: "Muse Code",
+    color: "#0866ff",
+    mark: MuseIcon,
+    driverKind: ProviderDriverKind.make("muse"),
+  },
 } satisfies Record<UsageProviderKind, UsageProviderPresentation>;
 
 /** Stable provider reading order across charts, summaries, tables, and hover rows. */

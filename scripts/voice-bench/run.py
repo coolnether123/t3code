@@ -282,7 +282,7 @@ def main():
         if args.policy: env["VOICE_BENCH_POLICY"]=args.policy
         vp=ROOT/"node_modules"/".bin"/("vp.cmd" if os.name=="nt" else "vp")
         if not vp.is_file(): raise RuntimeError("Install the locked project dependencies before replaying fixtures")
-        result=subprocess.run([vp,"test","run","apps/web/src/voice/replay.test.ts","--reporter=dot"],cwd=ROOT,env=env,capture_output=True,text=True,encoding="utf-8",errors="replace")
+        result=subprocess.run([vp,"test","run","apps/web/src/voice/voiceBenchmarkReplay.test.ts","--reporter=dot"],cwd=ROOT,env=env,capture_output=True,text=True,encoding="utf-8",errors="replace")
         (out/"replay.log").write_text(result.stdout+result.stderr,encoding="utf-8")
         if result.returncode: raise RuntimeError(f"Replay exit {result.returncode}, see replay.log")
         return json.loads((out/"replay.json").read_text())

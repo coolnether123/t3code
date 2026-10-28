@@ -49,12 +49,13 @@ export function CallModelSelectors(
             {entry ? (
               <TraitsPicker
                 provider={entry.driverKind}
+                instanceId={selection.instanceId}
                 models={entry.models}
                 model={selection.model}
                 modelOptions={selection.options}
-                prompt=""
-                onPromptChange={() => {}}
+                allowPromptInjectedEffort={false}
                 planModeEnabled={false}
+                disabled={props.disabled ?? false}
                 onModelOptionsChange={(options) =>
                   select(role, { ...selection, ...(options ? { options } : { options: [] }) })
                 }

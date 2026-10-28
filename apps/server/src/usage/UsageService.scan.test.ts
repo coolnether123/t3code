@@ -1,5 +1,7 @@
 import * as AntigravityUsage from "../provider/Drivers/AntigravityUsage.ts";
 import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
+import { MuseUsageHome } from "@t3tools/provider-muse/server";
+import * as CodexUsageHistory from "./CodexUsageHistory.ts";
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeSqlite from "node:sqlite";
 import * as Path from "effect/Path";
@@ -20,10 +22,11 @@ import { UsageDay, type UsageSummary } from "@t3tools/contracts";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { make } from "./UsageService.ts";
-import { quotaCostLedgerKey } from "./usageQuotaCostLedger.ts";
+import { quotaCostLedgerKey, readQuotaCostLedger } from "./usageQuotaCostLedger.ts";
 import { encodeScanCache, type ScanCache } from "./usageScanCache.ts";
 import { initialCodexScanState, type UsageRecord } from "./usageTranscripts.ts";
 import {
+  readDirectoryVolumeId,
   listTranscriptFilesBounded,
   readRepeatedInputRecords,
   readTranscriptRecords,
@@ -75,6 +78,10 @@ const storedFiles = (stateDir: string) => {
 const testLayer = Layer.mergeAll(
   Layer.mock(AntigravityUsage.AntigravityUsage)({}),
   Layer.mock(CursorUsageAccounts.CursorUsageAccounts)({}),
+  Layer.succeed(CodexUsageHistory.CodexUsageHistory, {
+    resolve: () => Effect.succeed(new Map()),
+  }),
+  Layer.succeed(MuseUsageHome.MuseUsageHome, { resolve: () => Effect.succeed(undefined) }),
   ServerSettings.layerTest(),
   ServerConfig.layerTest(process.cwd(), { prefix: "t3-scan-budget-test-" }),
 ).pipe(Layer.provideMerge(NodeServices.layer));
@@ -88,6 +95,179 @@ beforeEach(() => {
 });
 
 describe("incremental scan integration", () => {
+  it.effect("persists transcript gap estimates once and reuses the closed period", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const config = yield* ServerConfig.ServerConfig;
+      const path = yield* Path.Path;
+      const persisted = yield* Deferred.make<void>();
+      yield* TestClock.setTime(Date.parse("2026-09-21T00:00:00Z"));
+      const file = {
+        path: "/fixture/gap.jsonl",
+        size: 100,
+        mtimeMs: Date.parse("2026-09-18T00:00:00Z"),
+      };
+      vi.mocked(listTranscriptFilesBounded).mockImplementation(async (root) => ({
+        files: /[\\/]sessions$/.test(root) && !/[\\/]codex-home[\\/]/.test(root) ? [file] : [],
+        complete: true,
+      }));
+      vi.mocked(readTranscriptRecords).mockResolvedValue({
+        records: [
+          {
+            provider: "codex",
+            model: "fixture",
+            sessionId: "gap",
+            timestampMs: file.mtimeMs,
+            reportedCostUsd: 3,
+            dedupeKey: "gap-record",
+            totals: {
+              uncachedInputTokens: 10,
+              cachedInputTokens: 0,
+              cacheCreationTokens: 0,
+              outputTokens: 1,
+              reasoningTokens: 0,
+            },
+          },
+        ],
+        nextByte: file.size,
+        discardedLines: 0,
+        discardingLine: false,
+        codexState: initialCodexScanState(),
+      });
+      const service = yield* make.pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          exists: () => Effect.succeed(true),
+          readFileString: (filePath, ...args) =>
+            filePath.endsWith("usage-scan-cache.json")
+              ? Effect.succeed(emptyScanCache)
+              : fs.readFileString(filePath, ...args),
+          rename: (from, to) =>
+            fs
+              .rename(from, to)
+              .pipe(
+                Effect.tap(() =>
+                  to.endsWith("usage-quota-cost-ledger.json")
+                    ? Deferred.succeed(persisted, undefined)
+                    : Effect.void,
+                ),
+              ),
+        }),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("Offline fixture")),
+        ),
+      );
+      const input = {
+        sinceDay: UsageDay.make("2026-09-15"),
+        untilDay: UsageDay.make("2026-09-21"),
+        timeZone: "UTC",
+        providers: ["codex"] as const,
+        quotaIntervals: [
+          {
+            id: "transcript-window:gap",
+            sinceTime: "2026-09-17T00:00:00Z",
+            untilTime: "2026-09-19T00:00:00Z",
+          },
+        ],
+      };
+      const first = yield* service.readSummary(input);
+      expect(
+        first.quotaCostSnapshots?.some((row) => row.costUsd === 3 && row.estimatedFromTranscripts),
+      ).toBe(true);
+      yield* Deferred.await(persisted);
+      const saved = yield* readQuotaCostLedger(
+        path.join(config.stateDir, "usage-quota-cost-ledger.json"),
+      );
+      expect(saved.some((row) => row.costUsd === 3 && row.estimatedFromTranscripts)).toBe(true);
+      vi.mocked(readTranscriptRecords).mockClear();
+      const second = yield* service.readSummary(input);
+      expect(second.quotaCosts?.some((row) => row.costUsd === 3 && row.complete)).toBe(true);
+      expect(readTranscriptRecords).not.toHaveBeenCalled();
+      const filtered = yield* service.readSummary({ ...input, sessionIds: ["missing-session"] });
+      expect(filtered.quotaCosts?.every((row) => row.costUsd === 0)).toBe(true);
+      expect(filtered.quotaCostSnapshots).toEqual([]);
+      const whole = yield* service.readSummary(input);
+      expect(whole.quotaCosts?.some((row) => row.costUsd === 3)).toBe(true);
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(testLayer, TestClock.layer()))),
+  );
+  it.effect("shares one cold scan for concurrent summary and overlapping reset periods", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const readStarted = yield* Deferred.make<void>();
+      const releaseRead = yield* Deferred.make<void>();
+      const volumes = new Map<
+        string,
+        { callers: number; ready: ReturnType<typeof Promise.withResolvers<void>> }
+      >();
+      const originalVolume = vi.mocked(readDirectoryVolumeId).getMockImplementation()!;
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => vi.mocked(readDirectoryVolumeId).mockImplementation(originalVolume)),
+      );
+      // Finish every request's asynchronous source discovery before opening the scan batch.
+      vi.mocked(readDirectoryVolumeId).mockImplementation(async (root) => {
+        let volume = volumes.get(root);
+        if (!volume) {
+          volume = { callers: 0, ready: Promise.withResolvers<void>() };
+          volumes.set(root, volume);
+        }
+        if (++volume.callers === 3) volume.ready.resolve();
+        await volume.ready.promise;
+        return "fixture";
+      });
+      let reads = 0;
+      const service = yield* make.pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          // Keep quota/rate history on this PC out of the cold-scan fixture.
+          exists: (file) => Effect.succeed(/[\\/]sessions$/.test(file)),
+          readFileString: (file) =>
+            file.endsWith("usage-scan-cache.json")
+              ? Effect.gen(function* () {
+                  reads++;
+                  yield* Deferred.succeed(readStarted, undefined);
+                  yield* Deferred.await(releaseRead);
+                  return emptyScanCache;
+                })
+              : Effect.succeed("[]"),
+        }),
+        Effect.provideService(
+          HttpClient.HttpClient,
+          HttpClient.make(() => Effect.die("Offline fixture")),
+        ),
+      );
+      const input = {
+        sinceDay: UsageDay.make("2026-08-29"),
+        untilDay: UsageDay.make("2026-09-02"),
+        timeZone: "UTC",
+        providers: ["codex"] as const,
+      };
+      const periods = [
+        { id: "wide", sinceTime: "2026-08-30T00:00:00Z", untilTime: "2026-09-01T00:00:00Z" },
+        { id: "narrow", sinceTime: "2026-08-30T12:00:00Z", untilTime: "2026-08-31T12:00:00Z" },
+      ];
+      const requests = yield* Effect.all(
+        [
+          service.readSummary(input),
+          ...periods.map((period) => service.readSummary({ ...input, quotaIntervals: [period] })),
+        ],
+        { concurrency: "unbounded" },
+      ).pipe(Effect.forkChild);
+      yield* Deferred.await(readStarted);
+      yield* Deferred.succeed(releaseRead, undefined);
+      const results = yield* Fiber.join(requests);
+      expect(reads).toBe(1);
+      expect(results[0]?.quotaCosts).toBeUndefined();
+      expect(results[1]?.quotaCosts?.every((row) => row.intervalId === "wide")).toBe(true);
+      expect(results[2]?.quotaCosts?.every((row) => row.intervalId === "narrow")).toBe(true);
+      const mainInventories = vi
+        .mocked(listTranscriptFilesBounded)
+        .mock.calls.filter(
+          ([root]) => /[\\/]sessions$/.test(root) && !/[\\/]codex-home[\\/]/.test(root),
+        );
+      expect(mainInventories).toHaveLength(1);
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(testLayer, TestClock.layer()))),
+  );
   it.effect.each([false, true])(
     "bounds stalled settings with quota history %s",
     (includeQuotaHistory) =>
@@ -384,20 +564,19 @@ describe("incremental scan integration", () => {
       });
       const firstRecord = record("first", Date.parse("2026-08-30T23:00:00Z"), 10, 2, 3);
       const secondRecord = record("second", Date.parse("2026-08-30T23:01:00Z"), 30, 4, 5);
-      const initialByPath = new Map<string, readonly UsageRecord[]>([
-        [files[0]!.path, [firstRecord]],
-      ]);
-      const completeByPath = new Map<string, readonly UsageRecord[]>([
-        [files[0]!.path, [firstRecord, secondRecord]],
-      ]);
+      const chunkFile = { ...files[0]!, path: "" };
+      const path = yield* Path.Path;
       let completePass = false;
-      vi.mocked(listTranscriptFilesBounded).mockImplementation(async (root: string) => ({
-        files: /[\\/]sessions$/.test(root) && !/[\\/]codex-home[\\/]/.test(root) ? [files[0]!] : [],
-        complete: inventoryComplete,
-      }));
+      let missingSource = false;
+      const listing = async (root: string) => {
+        const primary = /[\\/]sessions$/.test(root) && !/[\\/]codex-home[\\/]/.test(root);
+        if (primary) chunkFile.path = path.join(root, "large.jsonl");
+        return { files: primary ? [{ ...chunkFile }] : [], complete: true };
+      };
+      vi.mocked(listTranscriptFilesBounded).mockImplementation(listing);
       vi.mocked(readTranscriptRecords).mockImplementation(async (filePath, _provider, options) => {
-        const firstChunk = initialByPath.get(filePath) ?? [];
-        const completeRecords = completeByPath.get(filePath) ?? [];
+        const firstChunk = filePath === chunkFile.path ? [firstRecord] : [];
+        const completeRecords = filePath === chunkFile.path ? [firstRecord, secondRecord] : [];
         const startByte = options?.startByte ?? 0;
         return {
           records:
@@ -426,7 +605,7 @@ describe("incremental scan integration", () => {
             const firstService = yield* make.pipe(
               Effect.provideService(FileSystem.FileSystem, {
                 ...fs,
-                exists: () => Effect.succeed(true),
+                exists: (path) => Effect.succeed(!missingSource || path !== chunkFile.path),
                 readFileString: (path, ...args) =>
                   path.endsWith("usage-scan-cache.json")
                     ? Effect.succeed(emptyScanCache)
@@ -437,12 +616,29 @@ describe("incremental scan integration", () => {
                 HttpClient.make(() => Effect.die("Offline fixture")),
               ),
             );
-            return yield* firstService.readSummary(input);
+            const partial = yield* firstService.readSummary(input);
+            missingSource = true;
+            vi.mocked(listTranscriptFilesBounded).mockResolvedValue({ files: [], complete: true });
+            vi.mocked(readTranscriptRecords).mockClear();
+            const missing = yield* firstService.readSummary(input);
+            expect(
+              missing.sources.some((source) =>
+                source.message?.includes("no longer have source files"),
+              ),
+            ).toBe(true);
+            expect(missing.buckets[0]!.totals.uncachedInputTokens).toBe(10);
+            expect(readTranscriptRecords).not.toHaveBeenCalled();
+            missingSource = false;
+            vi.mocked(listTranscriptFilesBounded).mockImplementation(listing);
+            const resumed = yield* firstService.readSummary(input);
+            expect(resumed.sources.every((source) => source.status === "ok")).toBe(true);
+            expect(resumed.buckets[0]!.totals.uncachedInputTokens).toBe(40);
+            return partial;
           }),
         );
         expect(first.sources.some((source) => source.status === "partial")).toBe(true);
         expect(storedFiles(config.stateDir)).toEqual([
-          { path: files[0]!.path, mtime_ms: files[0]!.mtimeMs, scan_cursor: 10, record_count: 1 },
+          { path: chunkFile.path, mtime_ms: files[0]!.mtimeMs, scan_cursor: null, record_count: 2 },
         ]);
 
         completePass = true;
@@ -462,10 +658,10 @@ describe("incremental scan integration", () => {
           ),
         );
         const resumed = yield* resumedService.readSummary(input);
-        expect(vi.mocked(readTranscriptRecords)).toHaveBeenCalledTimes(1);
+        expect(vi.mocked(readTranscriptRecords)).not.toHaveBeenCalled();
         expect(
           vi.mocked(readTranscriptRecords).mock.calls.map(([, , options]) => options?.startByte),
-        ).toEqual([10]);
+        ).toEqual([]);
 
         vi.mocked(readTranscriptRecords).mockClear();
         const completeService = yield* make.pipe(
@@ -897,9 +1093,10 @@ describe("incremental scan integration", () => {
           }),
         ),
       );
-      // The large fixture exceeds the cold-scan budget and is deferred; the
-      // file that was scanned is already durable with no background flush.
-      expect(storedFiles(config.stateDir).map((row) => row.path)).toEqual([files[1]!.path]);
+      // Both bounded chunks fit the budget even though the whole files do not.
+      expect(storedFiles(config.stateDir).map((row) => row.path)).toEqual(
+        files.map((file) => file.path),
+      );
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 

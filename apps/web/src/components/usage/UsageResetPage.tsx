@@ -1,3 +1,9 @@
+import { useAtomValue } from "@effect/atom-react";
+import { Atom } from "effect/reactivity";
+import { DEFAULT_SERVER_SETTINGS, type EnvironmentId } from "@t3tools/contracts";
+import { serverEnvironment } from "../../state/server";
+import { useAtomCommand } from "../../state/use-atom-command";
+import { UsageValueHistory } from "./UsageValueHistory";
 import { BirthdayGreeting } from "../BirthdayCelebration";
 import {
   watchResetAnnouncements,
@@ -27,16 +33,14 @@ import { Link } from "@tanstack/react-router";
 import { RefreshCwIcon } from "lucide-react";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 
-import { isElectron } from "../../env";
 import { cn } from "~/lib/utils";
 import { useUsage } from "../../state/usage";
 import { Button } from "../ui/button";
 import { ScrollArea } from "../ui/scroll-area";
-import { SidebarInset } from "../ui/sidebar";
+import { AppRouteModal, AppRouteModalClose } from "../AppRouteModal";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { WorkspacePageContainer } from "../WorkspacePageContainer";
-import { WorkspacePageHeader } from "../WorkspacePageHeader";
 
 import { chartActivityIntervals } from "./usageChartActivity";
 import { apiPaceInterval, type PriorApiPaceInput } from "./usageApiPace";
@@ -58,6 +62,8 @@ import { UsagePaceChart } from "./UsagePaceChart";
 import { UsagePublicResets } from "./UsagePublicResets";
 import { monitoredPeriodModels, UsageResetHistory } from "./UsageResetHistory";
 
+const emptySettingsAtom = Atom.make(null);
+
 const dateTime = (value: string) =>
   new Date(value).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 const estimate = (value: number) =>
@@ -73,6 +79,7 @@ const TABS: readonly {
   readonly label: string;
   readonly codexOnly?: true;
 }[] = [
+  { id: "history", label: "Reset history", codexOnly: true },
   { id: "cycles", label: "Cycles" },
   { id: "models", label: "Models" },
   { id: "planner", label: "Planner", codexOnly: true },
@@ -186,6 +193,18 @@ export function UsageResetPage() {
     quotaProvider === "codex" ? input : { ...input, quotaProvider };
 
   const sourceEnvironmentId = source?.environmentId;
+  const settingsEnvironmentId = sourceEnvironmentId ?? history.environments[0]?.environmentId;
+  const settings = useAtomValue(
+    settingsEnvironmentId
+      ? serverEnvironment.settingsValueAtom(settingsEnvironmentId as EnvironmentId)
+      : emptySettingsAtom,
+  );
+  const subscription = settings?.usageSubscription ?? DEFAULT_SERVER_SETTINGS.usageSubscription;
+  const updateSettings = useAtomCommand(serverEnvironment.updateSettings);
+  const canEditSubscription = useAtomValue(
+    serverEnvironment.updateSettings.permissionAtom(settingsEnvironmentId ?? null),
+  );
+
   const effectiveSelectedIds = ((): readonly string[] | null =>
     selectedIds ?? (sourceEnvironmentId === undefined ? null : [sourceEnvironmentId]))();
   const rawSamples = (() =>
@@ -435,9 +454,13 @@ export function UsageResetPage() {
   // Nothing but Public resets can be shown before a limit has readings.
   const hasCycle = Boolean(source && selectedWindow && rawSamples && last && current);
   const tabs = TABS.filter(
-    (tab) => (!tab.codexOnly || quotaProvider === "codex") && (hasCycle || tab.id === "public"),
+    (tab) =>
+      (!tab.codexOnly || quotaProvider === "codex") &&
+      (hasCycle || tab.id === "public" || tab.id === "history"),
   );
-  const activeTab = tabs.some((tab) => tab.id === view.tab) ? view.tab : tabs[0]?.id;
+  const activeTab = tabs.some((tab) => tab.id === view.tab)
+    ? view.tab
+    : ((!hasCycle ? tabs.find((tab) => tab.id === "public")?.id : undefined) ?? tabs[0]?.id);
   // Until some computer answers, a missing reading means "not read yet", not "not recorded".
   const historyAnswered = history.environments.some(
     (environment) => environment.summary !== null || environment.error !== null,
@@ -446,9 +469,7 @@ export function UsageResetPage() {
   const showPublic = activeTab === "public";
   const publicIntervals = (() => publicResetIntervals(publicHistory.announcements))();
   const publicCostInput = (() =>
-    showPublic && cycleCostsSettled
-      ? (quotaCostWindow(publicIntervals) ?? historyInput)
-      : historyInput)();
+    showPublic ? (quotaCostWindow(publicIntervals) ?? historyInput) : historyInput)();
   const publicCosts = useUsage(publicCostInput);
   const selectedPublicCosts = (() =>
     publicCosts.environments.filter((environment) => isSelected(environment.environmentId)))();
@@ -547,9 +568,9 @@ export function UsageResetPage() {
     : null;
 
   return (
-    <SidebarInset className="h-dvh min-h-0 overflow-hidden">
-      <WorkspacePageHeader electron={isElectron}>
-        <div className="flex w-full min-w-0 items-center gap-3">
+    <AppRouteModal label="Limits">
+      <header className="flex min-h-12 shrink-0 items-center border-b px-3 py-1.5 sm:ps-5 sm:pe-2">
+        <div className="flex w-full min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
           <Link
             to="/usage"
             className="inline-flex min-h-11 items-center rounded-md text-sm text-muted-foreground hover:text-foreground"
@@ -560,22 +581,23 @@ export function UsageResetPage() {
             /
           </span>
           <h1 className="truncate text-sm font-medium">Limits</h1>
-          <ToggleGroup
-            aria-label="Providers"
-            className="ms-2"
-            variant="segmented"
-            value={[view.provider]}
-            onValueChange={(value) => {
-              const next = value[0];
-              if (next === "codex" || next === "claude" || next === "both") {
-                updateView({ provider: next });
-              }
-            }}
-          >
-            <Toggle value="codex">Codex</Toggle>
-            <Toggle value="claude">Claude</Toggle>
-            <Toggle value="both">Both</Toggle>
-          </ToggleGroup>
+          <div className="order-last w-full sm:order-none sm:ms-2 sm:w-auto">
+            <ToggleGroup
+              aria-label="Providers"
+              variant="segmented"
+              value={[view.provider]}
+              onValueChange={(value) => {
+                const next = value[0];
+                if (next === "codex" || next === "claude" || next === "both") {
+                  updateView({ provider: next });
+                }
+              }}
+            >
+              <Toggle value="codex">Codex</Toggle>
+              <Toggle value="claude">Claude</Toggle>
+              <Toggle value="both">Both</Toggle>
+            </ToggleGroup>
+          </div>
           <div className="ms-auto flex items-center gap-1">
             <UsageMonitorSettings
               sources={sources.map((environment) => ({
@@ -592,6 +614,15 @@ export function UsageResetPage() {
               onIncludedChange={setSelectedIds}
               monitoringSince={samples[0]?.observedAt ?? null}
               readingCount={samples.length}
+              subscription={subscription}
+              canEditSubscription={canEditSubscription}
+              onSubscriptionChange={(usageSubscription) => {
+                if (settingsEnvironmentId)
+                  void updateSettings({
+                    environmentId: settingsEnvironmentId as EnvironmentId,
+                    input: { patch: { usageSubscription } },
+                  });
+              }}
             />
             <Button
               className="size-9"
@@ -605,9 +636,10 @@ export function UsageResetPage() {
             >
               <RefreshCwIcon className={`size-4 ${refreshing ? "motion-safe:animate-spin" : ""}`} />
             </Button>
+            <AppRouteModalClose />
           </div>
         </div>
-      </WorkspacePageHeader>
+      </header>
       <ScrollArea className="min-h-0 flex-1">
         <WorkspacePageContainer
           width="expanded"
@@ -725,6 +757,16 @@ export function UsageResetPage() {
               </p>
             </div>
           ) : null}
+          {historyAnswered && quotaProvider === "codex" ? (
+            <UsageValueHistory
+              history={history.environments}
+              publicHistory={publicHistory}
+              selectedIds={effectiveSelectedIds}
+              subscription={subscription}
+              historyInput={historyInput}
+              showWindows={activeTab === "history" || activeTab === "cycles"}
+            />
+          ) : null}
           {historyAnswered && activeTab !== undefined ? (
             <section aria-label="Limit details" className="min-w-0">
               <div
@@ -758,7 +800,7 @@ export function UsageResetPage() {
                 aria-labelledby={`limits-tab-${activeTab}`}
                 className="space-y-5 pt-4"
               >
-                {activeTab === "public" ? (
+                {activeTab === "history" ? null : activeTab === "public" ? (
                   <UsagePublicResets
                     history={publicHistory}
                     estimates={publicEstimates}
@@ -767,17 +809,19 @@ export function UsageResetPage() {
                   />
                 ) : !source || !rawSamples || !current ? null : activeTab === "cycles" ? (
                   <>
-                    <UsageResetHistory
-                      periods={historicalPeriods}
-                      values={valueByPeriod}
-                      environments={selectedWithSavedCosts}
-                      selectedCycle={selectedCycle}
-                      monitoringSince={samples[0]!.observedAt}
-                      onSelectCycle={(cycleId) => {
-                        setSelectedCycle(cycleId);
-                        chartRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
-                      }}
-                    />
+                    {quotaProvider !== "codex" || publicHistory.status !== "ready" ? (
+                      <UsageResetHistory
+                        periods={historicalPeriods}
+                        values={valueByPeriod}
+                        environments={selectedWithSavedCosts}
+                        selectedCycle={selectedCycle}
+                        monitoringSince={samples[0]!.observedAt}
+                        onSelectCycle={(cycleId) => {
+                          setSelectedCycle(cycleId);
+                          chartRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+                        }}
+                      />
+                    ) : null}
                     <UsageCycleComparison
                       key={`${source.environmentId}:${windowKey}`}
                       period={current.period}
@@ -820,6 +864,6 @@ export function UsageResetPage() {
           <BirthdayGreeting />
         </WorkspacePageContainer>
       </ScrollArea>
-    </SidebarInset>
+    </AppRouteModal>
   );
 }

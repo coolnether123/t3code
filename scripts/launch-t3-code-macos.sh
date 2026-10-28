@@ -124,7 +124,7 @@ vp_run() {
   fi
 }
 prepare() {
-  export VITE_OTIS_CALL_ENABLED=false
+  export VITE_OTIS_ENABLED=false VITE_OTIS_CALL_ENABLED=false
   [[ "$SKIP_BUILD" -eq 1 ]] && { plan "Skipping locked install/check/build (--skip-build)."; return; }
   vp_run "frozen dependency install" install --frozen-lockfile
   vp_run "workspace typecheck" run typecheck; vp_run "repository checks" check; vp_run "desktop/server build" run build:desktop

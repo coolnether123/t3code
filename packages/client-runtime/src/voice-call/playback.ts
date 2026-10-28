@@ -56,10 +56,9 @@ type Scheduled = {
   samples: number;
   finish: (stopped: boolean, error?: unknown) => void;
 };
-type AudioClock = Pick<
-  AudioContext,
-  "currentTime" | "destination" | "createBuffer" | "createBufferSource"
->;
+type AudioClock = Pick<AudioContext, "currentTime" | "createBuffer" | "createBufferSource"> & {
+  readonly destination: AudioNode;
+};
 
 /** One PCM output owner. Generations are unique response IDs and cannot be reopened.
  * stop returns sample offsets synchronously; completion callbacks use the same offsets.

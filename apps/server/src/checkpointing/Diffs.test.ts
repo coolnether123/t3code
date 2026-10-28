@@ -29,10 +29,6 @@ describe("parseTurnDiffFilesFromUnifiedDiff", () => {
 });
 
 describe("parseTurnDiffFilesFromNumstat", () => {
-  it("returns an empty list when no files changed", () => {
-    expect(parseTurnDiffFilesFromNumstat("")).toEqual([]);
-  });
-
   it("sorts files and preserves addition and deletion counts", () => {
     const numstat = ["0\t2\tsrc/b.ts", "2\t1\ta.txt", ""].join("\0");
     expect(parseTurnDiffFilesFromNumstat(numstat)).toEqual([

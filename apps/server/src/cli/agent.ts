@@ -200,7 +200,9 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
           origin: target.origin,
         };
         if (request.kind === "capabilities") {
-          const shell = yield* boundedHttp(client.orchestration.shellSnapshot({ headers }));
+          const shell = yield* boundedHttp(
+            client.orchestration.shellSnapshot({ headers, query: {} }),
+          );
           const capabilities = target.descriptor.capabilities;
           const commands = AGENT_COMMAND_TYPES.filter((type) => {
             if (type === "thread.pin" || type === "thread.unpin")
@@ -258,7 +260,9 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
           );
           return compactAgentProviders(target, providerSnapshot);
         }
-        const shell = yield* boundedHttp(client.orchestration.shellSnapshot({ headers }));
+        const shell = yield* boundedHttp(
+          client.orchestration.shellSnapshot({ headers, query: {} }),
+        );
         const threadId =
           request.kind === "snapshot"
             ? request.threadId
@@ -376,7 +380,9 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
           };
         const readback = yield* Effect.result(
           Effect.gen(function* () {
-            const nextShell = yield* boundedHttp(client.orchestration.shellSnapshot({ headers }));
+            const nextShell = yield* boundedHttp(
+              client.orchestration.shellSnapshot({ headers, query: {} }),
+            );
             const nextDetail =
               "threadId" in command ? yield* loadThread(command.threadId) : undefined;
             return compactAgentSnapshot(target, nextShell, nextDetail);

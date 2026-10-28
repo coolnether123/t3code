@@ -1,0 +1,34 @@
+# Fork features to preserve during nightly merges
+
+This inventory records the fork behavior retained through the October 25
+nightly merge. Upstream subagents and delegated tasks replaced the old fork
+workers. Do not restore the retired workers while resolving a conflict.
+
+| Behavior                                                                                 | Source owners                                                                                                                   | Existing verification                                                                                                                                           |
+| ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Voice calls, operator notifications, new-chat calls, streaming and barge-in              | `apps/server/src/speech/`, `packages/contracts/src/speech.ts`, web speech components                                            | Speech service and store tests beside their sources; `packages/contracts/src/speech.test.ts`                                                                    |
+| Otis button, conversation screen, chronological call timeline and personality activation | `apps/web/src/components/otis/`, `apps/web/src/session-logic.ts`, `apps/server/src/orchestration-v2/Adapters/CodexAdapterV2.ts` | Otis browser tests, `session-logic.test.ts`, `CodexAdapterV2.test.ts`, orchestration HTTP snapshot tests                                                        |
+| Usage and Limits modals retain their public URLs, reset history, paid line and year view | `apps/web/src/routes/_chat.usage.tsx`, `apps/web/src/routes/_chat.usage-resets.tsx`, `apps/web/src/components/usage/`           | Usage and reset report tests beside their sources; integrated desktop and phone-width verification                                                              |
+| Usage history, quota and reset history, prompt reports and repeated-input reports        | `apps/server/src/usage/`, `packages/contracts/src/usage.ts`, mobile usage state and widgets                                     | `UsageService.test.ts`, `UsageService.scan.test.ts`, `usagePromptReport.test.ts`, `usageRepeatedInput.test.ts`, `usageScanStore.test.ts` in the usage directory |
+| Bounded usage reads continue refreshing until complete                                   | `apps/server/src/usage/`                                                                                                        | Usage service and scan tests, including cancellation and deadline cases                                                                                         |
+| Environment-scoped sidebar and last selected chat per environment                        | `apps/web/src/`, `packages/client-runtime/`                                                                                     | Existing sidebar and environment state tests; inspect current entry points before resolving moved files                                                         |
+| Birthday celebration preference                                                          | `apps/web/src/components/`, web settings                                                                                        | `apps/web/src/components/BirthdayCelebration.browser.test.tsx`                                                                                                  |
+| Desktop daemon support, continuation of isolated-home sessions, sandbox and MCP recovery | Server provider adapters and provider packages                                                                                  | Adapter and provider tests beside the affected implementation; preserve upstream CLI authentication behavior                                                    |
+| Managed Chrome control                                                                   | Server browser services and CLI                                                                                                 | Existing browser service and CLI tests                                                                                                                          |
+| Authenticated semantic agent CLI                                                         | `apps/server/src/cli/agent.ts`, `agentProtocol.ts`                                                                              | `agent.test.ts`, `agentProtocol.test.ts`, `agentExit.test.ts` in that directory                                                                                 |
+| Sol default and discovery with Luna and Astra retained                                   | Contracts and provider discovery                                                                                                | Model selection and provider discovery tests beside those implementations                                                                                       |
+| Telemetry defaults off                                                                   | Settings contracts and server settings                                                                                          | Existing settings default tests                                                                                                                                 |
+| Windows deployment mirror pruning with protected runtime state                           | `scripts/launch-t3-code.ps1`, `scripts/t3-build-common.ps1`                                                                     | `scripts/launch-t3-code.test.ps1`                                                                                                                               |
+
+The Mac staged-install and maintenance-lock changes remain part of fork history.
+Windows nightly sync must preserve them in merges without running Mac deployment
+commands or updating Mac branches. A moved feature needs its source and test
+mapping updated here before the sync candidate is accepted.
+
+Windows release preparation, idle evidence, supervisor coordination, recovery and
+nightly sync live in `scripts/t3-*.mjs`, `scripts/t3-*.ps1` and
+`tools/t3-supervisor/`. Their isolated checks are the matching `.fixture.mjs`
+files. Open-call coverage crosses `apps/server/src/speech/callStore.ts`,
+`apps/server/src/orchestration-v2/http.ts`, `apps/server/src/cli/agentProtocol.ts`
+and `packages/contracts/src/orchestrationV2.ts`; `callService.test.ts` covers the
+call lifecycle and unavailable registry.

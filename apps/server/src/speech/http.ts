@@ -38,6 +38,8 @@ export const speechRouteLayer = HttpRouter.add(
     const input = yield* decodeSpeechRequest(text);
     const config = yield* ServerConfig;
     const engine = yield* VoiceThreadService;
+    if (input.action === "otis.open")
+      return HttpServerResponse.jsonUnsafe({ threadId: yield* engine.openOtis() });
     const providers = yield* ProviderRegistry;
     const providerService = yield* AuxiliaryProviderSessions;
     const calls = new CallService(

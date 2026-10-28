@@ -222,6 +222,7 @@ describe("incremental transcript reads", () => {
     const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-usage-known-"));
     const oldDay = NodePath.join(directory, "2026", "08", "01");
     const today = NodePath.join(directory, "2026", "09", "28");
+    let wall = Date.parse("2026-09-28T12:00:00.000Z");
     try {
       await NodeFSP.mkdir(oldDay, { recursive: true });
       await NodeFSP.mkdir(today, { recursive: true });
@@ -230,7 +231,8 @@ describe("incremental transcript reads", () => {
       await NodeFSP.writeFile(old, "{}\n");
       await NodeFSP.utimes(old, 1_000, 1_000);
       await NodeFSP.writeFile(active, "{}\n");
-      let wall = performance.timeOrigin + performance.now();
+      await NodeFSP.utimes(active, wall / 1_000, wall / 1_000);
+      await NodeFSP.utimes(today, wall / 1_000, wall / 1_000);
       const clock = () => wall;
       const list = () =>
         listTranscriptFilesBounded(
@@ -248,6 +250,9 @@ describe("incremental transcript reads", () => {
       const added = NodePath.join(today, "added.jsonl");
       await NodeFSP.writeFile(added, "{}\n");
       wall += 60_000;
+      await NodeFSP.utimes(active, wall / 1_000, wall / 1_000);
+      await NodeFSP.utimes(added, wall / 1_000, wall / 1_000);
+      await NodeFSP.utimes(today, wall / 1_000, wall / 1_000);
       const refreshed = await list();
       expect(refreshed.complete).toBe(true);
       expect(refreshed.files.find((file) => file.path === active)?.size).toBe(6);

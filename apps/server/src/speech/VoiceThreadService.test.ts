@@ -17,6 +17,8 @@ import {
   RuntimeRequestId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -82,7 +84,7 @@ const dependencies = Layer.mergeAll(
 );
 const layer = VoiceThreadService.layer.pipe(
   Layer.provideMerge(dependencies),
-  Layer.provide(NodeServices.layer),
+  Layer.provideMerge(NodeServices.layer),
 );
 const seed = Effect.gen(function* () {
   const sink = yield* EventSink.EventSinkV2;
@@ -464,7 +466,7 @@ it.effect.each(["session", "turn"] as const)(
         Effect.provide(
           VoiceThreadService.layer.pipe(
             Layer.provideMerge(testDependencies),
-            Layer.provide(NodeServices.layer),
+            Layer.provideMerge(NodeServices.layer),
           ),
         ),
       );
@@ -719,4 +721,86 @@ it.effect("carries delivered audio evidence without claiming generated words wer
     expect(context.conversation).toContain("not proof Jared heard them");
     expect(context.conversation).toContain("Do not infer an exact heard word offset");
   }).pipe(Effect.provide(layer)),
+);
+
+it.effect("opens the saved ongoing Otis thread concurrently without creating another chat", () =>
+  Effect.gen(function* () {
+    const service = yield* seed;
+    const sink = yield* EventSink.EventSinkV2;
+    const savedThreadId = ThreadId.make("otis-main");
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make("saved-otis"),
+          type: "thread.created",
+          threadId: savedThreadId,
+          occurredAt: DateTime.makeUnsafe(now),
+          payload: {
+            ...thread,
+            id: savedThreadId,
+            lineage: {
+              rootThreadId: savedThreadId,
+              parentThreadId: null,
+              relationshipToParent: null,
+            },
+          },
+        },
+      ],
+    });
+    const config = yield* ServerConfig.ServerConfig;
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    yield* fs.writeFileString(
+      path.join(config.stateDir, "otis-thread.json"),
+      JSON.stringify({ threadId: savedThreadId }),
+    );
+    const opened = yield* Effect.all([service.openOtis(), service.openOtis()], {
+      concurrency: "unbounded",
+    });
+    expect(opened).toEqual([savedThreadId, savedThreadId]);
+    const snapshot = yield* service.snapshot(savedThreadId);
+    expect(snapshot.projection.messages).toEqual([]);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect(
+  "creates one Otis thread for simultaneous first opens and reuses its server settings",
+  () => {
+    const runtime = ProviderReplayHarness.layerWithRegistry(
+      { name: "otis-first-open" },
+      ProviderAdapterRegistry.layerFromAdapters([]),
+      { runEffectWorker: false },
+    );
+    return Effect.gen(function* () {
+      const service = yield* seed;
+      const opened = yield* Effect.all([service.openOtis(), service.openOtis()], {
+        concurrency: "unbounded",
+      });
+      expect(opened).toEqual(["otis-main", "otis-main"]);
+      const snapshot = yield* service.snapshot(opened[0]!);
+      expect(snapshot.projection.thread.title).toBe("Otis");
+      expect(snapshot.projection.thread.modelSelection.model).toBe("gpt-6.1-sol");
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      expect(
+        JSON.parse(yield* fs.readFileString(path.join(config.stateDir, "otis-thread.json"))),
+      ).toEqual({ threadId: "otis-main" });
+    }).pipe(
+      Effect.provide(
+        VoiceThreadService.layer.pipe(
+          Layer.provideMerge(
+            Layer.mergeAll(
+              runtime,
+              stores,
+              ThreadCommandExecutor.layer,
+              ServerConfig.layerTest(process.cwd(), { prefix: "otis-first-open-" }),
+              Layer.mock(Auxiliary.AuxiliaryProviderSessions)({}),
+            ),
+          ),
+          Layer.provideMerge(NodeServices.layer),
+        ),
+      ),
+    );
+  },
 );

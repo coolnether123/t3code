@@ -107,6 +107,22 @@ afterEach(async () => {
 });
 
 describe("durable thread voice session", () => {
+  it("discards microphone input captured while muted and resumes on unmute", async () => {
+    const f = fixture();
+    await f.session.start(options, []);
+    await f.session.setMuted(true);
+    await f.session.listen();
+    expect(f.audio.capture).toHaveBeenCalledTimes(1);
+    expect(
+      f.request.mock.calls.some(
+        ([input]) => input.action === "call.deliver" || input.action === "call.say",
+      ),
+    ).toBe(false);
+    await f.session.setMuted(false);
+    expect(f.audio.capture).toHaveBeenCalledTimes(2);
+    await f.session.stop();
+  });
+
   it("rejects delayed playback echo even when recognition first reports it after output ends", async () => {
     vi.useFakeTimers();
     const f = fixture();

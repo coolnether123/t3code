@@ -619,9 +619,18 @@ export class ThreadVoiceSession {
       if (!signal.aborted) this.failed(error);
     }
   }
+  private muted = false;
+  async setMuted(muted: boolean) {
+    this.muted = muted;
+    if (muted) {
+      this.deps.audio.finish();
+      await this.capture;
+    } else void this.listen();
+  }
   async listen() {
     if (
       !this.active ||
+      this.muted ||
       this.busy ||
       this.announcing ||
       this.capture ||
@@ -709,7 +718,7 @@ export class ThreadVoiceSession {
         this.recording = false;
         await this.interrupting;
         this.inputHolding = false;
-        if (!audio.audio && !audio.text) {
+        if (this.muted || (!audio.audio && !audio.text)) {
           this.filler.cancel();
           this.pendingFiller = undefined;
           this.saved!.recordings = this.saved!.recordings.filter((entry) => entry.id !== id);
@@ -764,7 +773,7 @@ export class ThreadVoiceSession {
       try {
         text = await this.deps.audio.captureText!(this.abort.signal, this.captureHooks());
         this.deviceUnavailable = text === null;
-        if (text?.trim()) {
+        if (!this.muted && text?.trim()) {
           const id = await this.queueTyped(text);
           this.scheduleFiller(id);
         }
@@ -806,6 +815,7 @@ export class ThreadVoiceSession {
         this.backchannelPolicy.activity(time());
       },
       transcript: (value) => {
+        if (this.muted) return false;
         const emittingIds = this.outputGeneration
           ? this.deps.audio.emittingSpeech?.(this.outputGeneration)
           : undefined;

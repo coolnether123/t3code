@@ -9,7 +9,7 @@ import {
   pruneScanCache,
   type ScanCache,
 } from "./usageScanCache.ts";
-import { initialCodexScanState, type UsageRecord } from "./usageTranscripts.ts";
+import { initialCodexScanState, parseCodexLine, type UsageRecord } from "./usageTranscripts.ts";
 import type { RepeatedInputActiveSource, RepeatedInputObservation } from "./usageRepeatedInput.ts";
 
 function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
@@ -386,6 +386,42 @@ describe("scan cache round trip", () => {
     expect(restored.get("/codex.jsonl")?.codexState).toEqual(
       original.get("/codex.jsonl")?.codexState,
     );
+  });
+
+  it("persists reconciled counters, diagnostics and recovered tier provenance", () => {
+    const codexState = initialCodexScanState();
+    parseCodexLine(
+      JSON.stringify({ type: "turn_context", payload: { model: "gpt-6-astra" } }),
+      codexState,
+    );
+    parseCodexLine(
+      JSON.stringify({
+        type: "event_msg",
+        timestamp: "2026-08-01T10:00:00Z",
+        payload: {
+          type: "token_count",
+          info: { last_token_usage: { input_tokens: -1, output_tokens: 2 } },
+        },
+      }),
+      codexState,
+    );
+    const saved = record({
+      provider: "codex",
+      rateModel: "gpt-6-astra",
+      speed: "fast",
+      serviceTier: "priority",
+      serviceTierSource: "t3Request",
+      unresolvedServiceTierTurnId: "native-turn",
+    });
+    const original: ScanCache = new Map([
+      [
+        "/codex.jsonl",
+        { size: 100, mtimeMs: 100, provider: "codex", records: [saved], codexState },
+      ],
+    ]);
+    const restored = decodeScanCache(JSON.parse(JSON.stringify(encodeScanCache(original))));
+    expect(restored.get("/codex.jsonl")).toEqual(original.get("/codex.jsonl"));
+    expect(restored.get("/codex.jsonl")?.codexState?.providerState?.malformedRecords).toBe(1);
   });
 
   it("invalidates v2 entries and coverage because they lack exact native session IDs", () => {

@@ -1,3 +1,9 @@
+import { AuthOrchestrationOperateScope } from "@t3tools/contracts";
+import { useEnvironmentScope } from "../../state/session";
+import { use } from "react";
+import { OtisChromeHost } from "../otis/OtisChromeHost";
+import { createPortal } from "react-dom";
+import { OtisChrome } from "../otis/OtisChrome";
 import { useEffect, useLayoutEffect, useRef, useState, useImperativeHandle, type Ref } from "react";
 import { MicIcon, SendIcon, Settings2Icon, SquareIcon, XIcon } from "lucide-react";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
@@ -70,6 +76,7 @@ export function ThreadVoiceControls({
   running: boolean;
   connected: boolean;
 }) {
+  const canCall = useEnvironmentScope(props.environmentId, AuthOrchestrationOperateScope);
   const [state, setState] = useState<VoiceState>("idle");
   const [detail, setDetail] = useState<string>();
   const [call, setCall] = useState<CallStatus>();
@@ -121,9 +128,11 @@ export function ThreadVoiceControls({
     (props.running
       ? projection?.runs.at(-1)?.id
       : (voiceReply?.turnId ?? projection?.runs.at(-1)?.id)) ?? null;
+  const audioRef = useRef<ReturnType<typeof createBrowserAudio> | null>(null);
   const sessionRef = useRef<ThreadVoiceSession | null>(null);
   const anchorRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
+    if (!canCall) return;
     const abort = new AbortController();
     const version = configurationVersion.current;
     void requestSpeech(
@@ -160,7 +169,7 @@ export function ThreadVoiceControls({
           );
       });
     return () => abort.abort();
-  }, [props.environmentId, props.threadId, props.modelSelection]);
+  }, [props.environmentId, props.threadId, props.modelSelection, canCall]);
   const configure = async (next: CallModels, saveDefault = false) => {
     const version = ++configurationVersion.current;
     setModels(next);
@@ -203,13 +212,15 @@ export function ThreadVoiceControls({
     }
   };
   useLayoutEffect(() => {
+    const audio = createBrowserAudio(() => session.audioInterrupted());
+    audioRef.current = audio;
     const session = new ThreadVoiceSession({
       ensureThread: (options) => callbacks.current.ensureThread(options),
       speechEvent: (event) =>
         window.dispatchEvent(new CustomEvent("t3-voice-speech", { detail: event })),
       request: (input, signal, onAudio) =>
         requestSpeech(props.environmentId, input, signal, onAudio),
-      audio: createBrowserAudio(() => session.audioInterrupted()),
+      audio,
       id: randomUUID,
       persistence: callPersistence(`${props.environmentId}:${props.threadId}`),
       change: (next, message, status) => {
@@ -265,6 +276,38 @@ export function ThreadVoiceControls({
   const unheard = (call?.operatorUpdates ?? updates).filter(
     (update) => !update.heardAt && (update.status === "done" || update.status === "needs-Jared"),
   );
+  const otisHost = use(OtisChromeHost);
+  if (otisHost)
+    return createPortal(
+      <OtisChrome
+        canCall={canCall}
+        active={active}
+        ready={
+          props.enabled && configurationReady && !!models.voice.model && !!models.operator.model
+        }
+        status={callStatusLabel(state, call)}
+        error={configurationError ?? (state === "error" ? detail : undefined)}
+        start={() =>
+          void sessionRef.current?.start(
+            {
+              threadId: props.threadId,
+              modelSelection: models.voice,
+              operatorSelection: models.operator,
+              backchannels,
+            },
+            messages,
+          )
+        }
+        retry={() => {
+          if (!configurationReady) void configure(models);
+          else void sessionRef.current?.resume();
+        }}
+        end={() => void sessionRef.current?.stop()}
+        mute={(muted) => sessionRef.current?.setMuted(muted)}
+        speaker={(enabled) => audioRef.current?.setSpeaker(enabled)}
+      />,
+      otisHost,
+    );
   return (
     <Popover open={expanded} onOpenChange={setExpanded}>
       <div ref={anchorRef} className="relative min-w-0 w-full" data-voice-state={state}>

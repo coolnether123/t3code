@@ -18,6 +18,12 @@ import * as Schema from "effect/Schema";
 
 import { createTranscriptJsonReader } from "../project/AgentSessionJson.ts";
 
+export interface TranscriptFile {
+  readonly path: string;
+  readonly size: number;
+  readonly mtimeMs: number;
+}
+
 /**
  * The guard hash fingerprints the bytes immediately before `resumeOffset`. A
  * resume only proceeds when those bytes still match: transcripts are
@@ -39,6 +45,8 @@ export interface TranscriptParseResult {
    * segment: the next scan re-reads it once the writer finishes the line.
    */
   readonly tailRecords: readonly UsageRecord[];
+  /** Includes tentative tail diagnostics; position.state only includes committed lines. */
+  readonly malformedRecords: number;
   readonly position: TranscriptParsePosition;
   readonly resumed: boolean;
 }
@@ -46,8 +54,8 @@ export interface TranscriptParseResult {
 export const GUARD_LENGTH = 64;
 const STREAMING_THRESHOLD_BYTES = 8 * 1024 * 1024;
 const NEWLINE = 0x0a;
-const CARRIAGE_RETURN = 0x0d;
 const STAT_CONCURRENCY = 32;
+const CARRIAGE_RETURN = 0x0d;
 
 function selectUsageFields(fields: SelectedFields) {
   return (path: ReadonlyArray<string | number | null>): boolean => {
@@ -68,6 +76,69 @@ function fnv1a(buffer: Buffer): number {
     hash = Math.imul(hash, 0x01000193);
   }
   return hash >>> 0;
+}
+
+/**
+ * Grok sessions also ship multi-megabyte `chat_history` and `events` logs that
+ * never carry usage, so the basename filter keeps a cold scan off those files.
+ * Results keep `readdir` order, which the aggregator's first-seen dedupe relies
+ * on.
+ */
+export async function listTranscriptFiles(
+  root: string,
+  sinceMs: number,
+  options?: { readonly fileName?: string },
+): Promise<{ readonly files: readonly TranscriptFile[]; readonly failedPaths: number }> {
+  const fileName = options?.fileName;
+  const candidates: string[] = [];
+  let failedPaths = 0;
+  const walk = async (dir: string): Promise<void> => {
+    let entries;
+    try {
+      entries = await NodeFSP.readdir(dir, { withFileTypes: true });
+    } catch {
+      failedPaths += 1;
+      return;
+    }
+    for (const entry of entries) {
+      const child = NodePath.join(dir, entry.name);
+      if (entry.isDirectory()) await walk(child);
+      else if (fileName !== undefined ? entry.name === fileName : entry.name.endsWith(".jsonl")) {
+        candidates.push(child);
+      }
+    }
+  };
+  await walk(root);
+
+  const found: Array<TranscriptFile | undefined> = Array.from({ length: candidates.length });
+  const queue = candidates.entries();
+  const statQueued = async (): Promise<void> => {
+    for (const [index, path] of queue) {
+      try {
+        const stats = await NodeFSP.stat(path);
+        if (stats.mtimeMs >= sinceMs) {
+          found[index] = { path, size: stats.size, mtimeMs: stats.mtimeMs };
+        }
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
+          failedPaths += 1;
+        }
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(STAT_CONCURRENCY, candidates.length) }, statQueued),
+  );
+  return { files: found.filter((file) => file !== undefined), failedPaths };
+}
+
+export async function readDirectoryVolumeId(path: string): Promise<string> {
+  try {
+    const stats = await NodeFSP.stat(path);
+    return `${stats.dev}:${stats.ino}`;
+  } catch {
+    return "";
+  }
 }
 
 async function guardMatches(
@@ -237,10 +308,9 @@ export async function readTranscriptRecords<State>(
     // `resumeOffset` and the next scan replays the tail from it.
     const encodedState = encodeState === undefined ? null : encodeState(state);
     const tailRecords: UsageRecord[] = [];
-    finish(
-      decodeState === undefined ? state : Option.getOrThrow(decodeState(encodedState)),
-      tailRecords,
-    );
+    const tailState =
+      decodeState === undefined ? state : Option.getOrThrow(decodeState(encodedState));
+    finish(tailState, tailRecords);
 
     const guardLength = Math.min(GUARD_LENGTH, resumeOffset);
     let guardHash = 0;
@@ -253,6 +323,7 @@ export async function readTranscriptRecords<State>(
     return {
       records,
       tailRecords,
+      malformedRecords: format.readMalformedRecords?.(tailState) ?? 0,
       position: {
         resumeOffset,
         guardLength,
@@ -266,63 +337,4 @@ export async function readTranscriptRecords<State>(
   } finally {
     await handle.close().catch(() => undefined);
   }
-}
-
-export interface TranscriptFile {
-  readonly path: string;
-  readonly size: number;
-  readonly mtimeMs: number;
-}
-/**
- * Grok sessions also ship multi-megabyte `chat_history` and `events` logs that
- * never carry usage, so the basename filter keeps a cold scan off those files.
- * Results keep `readdir` order, which the aggregator's first-seen dedupe relies
- * on.
- */
-export async function listTranscriptFiles(
-  root: string,
-  sinceMs: number,
-  options?: { readonly fileName?: string },
-): Promise<{ readonly files: readonly TranscriptFile[]; readonly failedPaths: number }> {
-  const fileName = options?.fileName;
-  const candidates: string[] = [];
-  let failedPaths = 0;
-  const walk = async (dir: string): Promise<void> => {
-    let entries;
-    try {
-      entries = await NodeFSP.readdir(dir, { withFileTypes: true });
-    } catch {
-      failedPaths += 1;
-      return;
-    }
-    for (const entry of entries) {
-      const child = NodePath.join(dir, entry.name);
-      if (entry.isDirectory()) await walk(child);
-      else if (fileName !== undefined ? entry.name === fileName : entry.name.endsWith(".jsonl")) {
-        candidates.push(child);
-      }
-    }
-  };
-  await walk(root);
-
-  const found: Array<TranscriptFile | undefined> = Array.from({ length: candidates.length });
-  const queue = candidates.entries();
-  const statQueued = async (): Promise<void> => {
-    for (const [index, path] of queue) {
-      try {
-        const stats = await NodeFSP.stat(path);
-        if (stats.mtimeMs >= sinceMs) {
-          found[index] = { path, size: stats.size, mtimeMs: stats.mtimeMs };
-        }
-      } catch (error) {
-        if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
-          failedPaths += 1;
-        }
-      }
-    }
-  };
-  await Promise.all(
-    Array.from({ length: Math.min(STAT_CONCURRENCY, candidates.length) }, statQueued),
-  );
-  return { files: found.filter((file) => file !== undefined), failedPaths };
 }

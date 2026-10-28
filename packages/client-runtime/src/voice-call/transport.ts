@@ -52,7 +52,7 @@ export const fetchEnvironmentSpeech = Effect.fn("voice.fetchEnvironmentSpeech")(
       "streamAudio" in input.request && input.request.streamAudio,
     ),
     url: (urls) => {
-      voiceUrl = new URL("/api/voice", urls.shellSnapshot()).toString();
+      voiceUrl = new URL("/api/voice", urls.shellSnapshot({ query: {} })).toString();
       return voiceUrl;
     },
     request: ({ headers }) =>
@@ -171,7 +171,7 @@ export function createVoiceRequestCommand<R, E>(
 ) {
   return createEnvironmentCommand(runtime, {
     label: "voice-request",
-    execute: (input: {
+    execute: Effect.fn("voice.request")(function* (input: {
       request: SpeechRequest;
       signal: AbortSignal;
       onAudio?: (chunk: {
@@ -180,23 +180,22 @@ export function createVoiceRequestCommand<R, E>(
         generation?: string;
         speechId?: string;
       }) => void;
-    }) =>
-      Effect.gen(function* () {
-        const supervisor = yield* EnvironmentSupervisor;
-        const prepared = yield* SubscriptionRef.get(supervisor.prepared);
-        if (Option.isNone(prepared))
-          return yield* Effect.fail(
-            new VoiceRequestError(
-              "This environment is disconnected. Speech remains queued on this device.",
-              true,
-            ),
-          );
-        return yield* fetchEnvironmentSpeech({
-          ...input,
-          prepared: prepared.value,
-          signer: yield* Effect.serviceOption(ManagedRelayDpopSigner),
-          remoteAuthorization: yield* Effect.serviceOption(RemoteEnvironmentAuthorization),
-        });
-      }),
+    }) {
+      const supervisor = yield* EnvironmentSupervisor;
+      const prepared = yield* SubscriptionRef.get(supervisor.prepared);
+      if (Option.isNone(prepared))
+        return yield* Effect.fail(
+          new VoiceRequestError(
+            "This environment is disconnected. Speech remains queued on this device.",
+            true,
+          ),
+        );
+      return yield* fetchEnvironmentSpeech({
+        ...input,
+        prepared: prepared.value,
+        signer: yield* Effect.serviceOption(ManagedRelayDpopSigner),
+        remoteAuthorization: yield* Effect.serviceOption(RemoteEnvironmentAuthorization),
+      });
+    }),
   });
 }

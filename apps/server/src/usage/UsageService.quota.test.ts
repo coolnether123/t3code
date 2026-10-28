@@ -1,10 +1,14 @@
 import * as AntigravityUsage from "../provider/Drivers/AntigravityUsage.ts";
 import * as CursorUsageAccounts from "@t3tools/provider-cursor/server/CursorUsageAccounts";
+import { MuseUsageHome } from "@t3tools/provider-muse/server";
+import * as CodexUsageHistory from "./CodexUsageHistory.ts";
 import { describe, expect, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
+import * as TestClock from "effect/testing/TestClock";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { HttpClient } from "effect/http";
 import * as ServerConfig from "../config.ts";
@@ -12,10 +16,15 @@ import * as ServerSettings from "../serverSettings.ts";
 import { make } from "./UsageService.ts";
 import { UsageDay } from "@t3tools/contracts";
 import { readQuotaHistory } from "./usageQuotaHistory.ts";
+import { quotaCostLedgerKey, writeQuotaCostLedger } from "./usageQuotaCostLedger.ts";
 
 const testLayer = Layer.mergeAll(
   Layer.mock(AntigravityUsage.AntigravityUsage)({}),
   Layer.mock(CursorUsageAccounts.CursorUsageAccounts)({}),
+  Layer.succeed(CodexUsageHistory.CodexUsageHistory, {
+    resolve: () => Effect.succeed(new Map()),
+  }),
+  Layer.succeed(MuseUsageHome.MuseUsageHome, { resolve: () => Effect.succeed(undefined) }),
   ServerSettings.layerTest(),
   ServerConfig.layerTest(process.cwd(), { prefix: "t3-quota-service-test-" }),
 ).pipe(Layer.provideMerge(NodeServices.layer));
@@ -33,6 +42,77 @@ vi.mock("./usageQuotaHistory.ts", async (importOriginal) => ({
 }));
 
 describe("history-only usage requests", () => {
+  it.effect("serves a closed period from the saved ledger without a transcript scan", () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(Date.parse("2026-07-08T00:00:00Z"));
+      const fs = yield* FileSystem.FileSystem;
+      const config = yield* ServerConfig.ServerConfig;
+      const path = yield* Path.Path;
+      const offline = HttpClient.make(() => Effect.die("Closed periods must not fetch prices"));
+      const baseline = yield* make.pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          exists: () => Effect.succeed(false),
+        }),
+        Effect.provideService(HttpClient.HttpClient, offline),
+      );
+      const input = {
+        sinceDay: UsageDay.make("2026-07-01"),
+        untilDay: UsageDay.make("2026-07-07"),
+        timeZone: "UTC",
+        providers: ["codex"] as const,
+      };
+      const missing = yield* baseline.readSummary(input);
+      const fingerprints = missing.sources.map((source) => source.fingerprint);
+      expect(fingerprints.length).toBeGreaterThan(0);
+      const interval = {
+        id: "public-reset",
+        sinceTime: "2026-07-03T00:00:00Z",
+        untilTime: "2026-07-04T00:00:00Z",
+      };
+      yield* writeQuotaCostLedger(
+        path.join(config.stateDir, "usage-quota-cost-ledger.json"),
+        fingerprints.map((fingerprint) => ({
+          key: quotaCostLedgerKey(fingerprint, "tracker-reset"),
+          fingerprint,
+          intervalId: "tracker-reset",
+          sinceTime: interval.sinceTime,
+          untilTime: interval.untilTime,
+          costUsd: 123,
+          records: 9,
+          unpricedRecords: 0,
+          recordedAt: "2026-07-05T00:00:00Z",
+          firstRemainingPercent: 100,
+          lastRemainingPercent: 14,
+          resetsAt: "2026-07-04T00:00:00Z",
+        })),
+      );
+      const readFileString = vi.fn(fs.readFileString);
+      const service = yield* make.pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fs,
+          readFileString,
+          exists: (filePath) =>
+            Effect.succeed(
+              fingerprints.some((fingerprint) => fingerprint.resolvedHomePath === filePath),
+            ),
+        }),
+        Effect.provideService(HttpClient.HttpClient, offline),
+      );
+      readFileString.mockClear();
+      const result = yield* service.readSummary({ ...input, quotaIntervals: [interval] });
+      expect(result.quotaCosts).toHaveLength(fingerprints.length);
+      expect(
+        result.quotaCosts?.every(
+          (cost) => cost.complete && cost.costUsd === 123 && cost.intervalId === interval.id,
+        ),
+      ).toBe(true);
+      expect(result.sources.every((source) => source.status === "ok")).toBe(true);
+      expect(
+        readFileString.mock.calls.some(([file]) => file.endsWith("usage-scan-cache.json")),
+      ).toBe(false);
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
   it.effect("exposes bounded pricing and quota report modes", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

@@ -1,7 +1,6 @@
-import { act } from "react";
-import { createRoot } from "react-dom/client";
+import { act, fakeTimers, render } from "../../../test/render";
 import { renderToStaticMarkup } from "react-dom/server";
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
   environments: [] as unknown[],
@@ -33,25 +32,17 @@ vi.mock("@tanstack/react-router", async (original) => ({
   ...(await original<typeof import("@tanstack/react-router")>()),
   Link: "a",
 }));
-vi.mock("../../env", async (original) => ({
-  ...(await original<typeof import("../../env")>()),
-  isElectron: false,
-}));
 vi.mock("../ui/scroll-area", async (original) => ({
   ...(await original<typeof import("../ui/scroll-area")>()),
   ScrollArea: "div",
 }));
-vi.mock("../ui/sidebar", async (original) => ({
-  ...(await original<typeof import("../ui/sidebar")>()),
-  SidebarInset: "div",
+vi.mock("../AppRouteModal", () => ({
+  AppRouteModal: "div",
+  AppRouteModalClose: () => null,
 }));
 vi.mock("../WorkspacePageContainer", () => ({ WorkspacePageContainer: "main" }));
-vi.mock("../WorkspacePageHeader", () => ({ WorkspacePageHeader: "header" }));
 
-let UsageResetPage: (typeof import("./UsageResetPage"))["UsageResetPage"];
-beforeAll(async () => {
-  ({ UsageResetPage } = await import("./UsageResetPage"));
-});
+import { UsageResetPage } from "./UsageResetPage";
 
 const LIMITS_VIEW_KEY = "t3code:usage-limits-view:v1";
 /** Opens the page on a tab, as a returning viewer's saved preference would. */
@@ -59,7 +50,7 @@ function openTab(tab: "cycles" | "models" | "planner" | "public", provider = "co
   window.localStorage.setItem(LIMITS_VIEW_KEY, JSON.stringify({ provider, tab }));
 }
 
-beforeEach(() => {
+function setup() {
   window.localStorage.removeItem(LIMITS_VIEW_KEY);
   state.environments = [];
   state.publicHistory = { announcements: [], checkedAt: null, status: "loading" };
@@ -71,16 +62,18 @@ beforeEach(() => {
     isPending: false,
     refresh: state.refresh,
   }));
-  vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-08-30T22:00:00Z"));
-});
+  return vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-08-30T22:00:00Z"));
+}
 
 describe("Limits page", () => {
   it("uses separate history, cycle, public, pace, chart, and full-cycle model reads", () => {
+    using _now = setup();
     renderToStaticMarkup(<UsageResetPage />);
     expect(state.useUsage).toHaveBeenCalledTimes(6);
   });
 
   it("releases independent calculation reads when the cycle scan settles partially", async () => {
+    using _now = setup();
     const fingerprint = {
       hostId: "desktop",
       provider: "codex",
@@ -182,27 +175,22 @@ describe("Limits page", () => {
     );
 
     openTab("public");
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<UsageResetPage />));
-      const intervalIds = requestedInputs.flatMap(
-        (input) => input.quotaIntervals?.map((interval) => interval.id) ?? [],
-      );
-      expect(intervalIds).toContain("2026-08-30T20:00:00Z");
-      expect(intervalIds).toContain("api-pace:2026-08-30T20:00:00.000Z");
-      expect(intervalIds.some((id) => id.startsWith("codex-resets:"))).toBe(true);
-      expect(new Set(intervalIds).size).toBeGreaterThanOrEqual(4);
-    } finally {
-      await act(async () => root.unmount());
-      container.remove();
-    }
+    // The modal and links are mocked; no router timers are needed here.
+    await using screen = await render(<UsageResetPage />, { router: false });
+    const container = screen.container;
+    const intervalIds = requestedInputs.flatMap(
+      (input) => input.quotaIntervals?.map((interval) => interval.id) ?? [],
+    );
+    expect(intervalIds).toContain("2026-08-30T20:00:00Z");
+    expect(intervalIds).toContain("api-pace:2026-08-30T20:00:00.000Z");
+    expect(intervalIds.some((id) => id.startsWith("codex-resets:"))).toBe(true);
+    expect(new Set(intervalIds).size).toBeGreaterThanOrEqual(4);
   });
 
   it("refreshes current-cycle costs after each visible history reading", async () => {
-    vi.useFakeTimers();
-    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    using _now = setup();
+    using _timers = fakeTimers();
+    using _visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
     const historyRefresh = vi.fn().mockResolvedValue([
       {
         environmentId: "local",
@@ -232,35 +220,28 @@ describe("Limits page", () => {
       isPending: false,
       refresh: ++hookCalls % 6 === 1 ? historyRefresh : costRefresh,
     }));
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<UsageResetPage />));
-      await act(async () => vi.advanceTimersByTimeAsync(60_000));
-      expect(historyRefresh).toHaveBeenCalledTimes(1);
-      expect(costRefresh).toHaveBeenCalledTimes(1);
-      expect(costRefresh.mock.lastCall?.[0].quotaIntervals).toEqual([
-        {
-          id: "2026-08-30T20:00:00Z",
-          sinceTime: "2026-08-30T20:00:00Z",
-          untilTime: "2026-08-30T21:55:00Z",
-        },
-      ]);
-      await act(async () => document.dispatchEvent(new Event("visibilitychange")));
-      expect(historyRefresh).toHaveBeenCalledTimes(2);
-      expect(costRefresh).toHaveBeenCalledTimes(2);
-    } finally {
-      await act(async () => root.unmount());
-      container.remove();
-      visibility.mockRestore();
-      vi.useRealTimers();
-    }
+    // The modal and links are mocked; no router timers are needed here.
+    await using screen = await render(<UsageResetPage />, { router: false });
+    const container = screen.container;
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(historyRefresh).toHaveBeenCalledTimes(1);
+    expect(costRefresh).toHaveBeenCalledTimes(1);
+    expect(costRefresh.mock.lastCall?.[0].quotaIntervals).toEqual([
+      {
+        id: "2026-08-30T20:00:00Z",
+        sinceTime: "2026-08-30T20:00:00Z",
+        untilTime: "2026-08-30T21:55:00Z",
+      },
+    ]);
+    await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+    expect(historyRefresh).toHaveBeenCalledTimes(2);
+    expect(costRefresh).toHaveBeenCalledTimes(2);
   });
 
   it("keeps fetching new readings while a cost scan is slow, then prices the latest interval", async () => {
-    vi.useFakeTimers();
-    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    using _now = setup();
+    using _timers = fakeTimers();
+    using _visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
     let finishFirstCostScan!: (result: readonly unknown[]) => void;
     const firstCostScan = new Promise<readonly unknown[]>((resolve) => {
       finishFirstCostScan = resolve;
@@ -298,11 +279,10 @@ describe("Limits page", () => {
       isPending: false,
       refresh: ++hookCalls % 6 === 1 ? historyRefresh : costRefresh,
     }));
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
+    // The modal and links are mocked; no router timers are needed here.
+    await using screen = await render(<UsageResetPage />, { router: false });
+    const container = screen.container;
     try {
-      await act(async () => root.render(<UsageResetPage />));
       await act(async () => vi.advanceTimersByTimeAsync(60_000));
       expect(historyRefresh).toHaveBeenCalledTimes(1);
       expect(costRefresh).toHaveBeenCalledTimes(1);
@@ -316,46 +296,38 @@ describe("Limits page", () => {
       );
     } finally {
       finishFirstCostScan([]);
-      await act(async () => root.unmount());
-      container.remove();
-      visibility.mockRestore();
-      vi.useRealTimers();
     }
   });
 
   it("shows progress, ignores repeated taps, then enables retry after failure", async () => {
+    using _now = setup();
     let reject!: (reason: Error) => void;
     state.refresh.mockReturnValue(
       new Promise<readonly unknown[]>((_resolve, rejectPromise) => {
         reject = rejectPromise;
       }),
     );
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<UsageResetPage />));
-      const button = container.querySelector<HTMLButtonElement>('[aria-label="Refresh limits"]')!;
-      await act(async () => {
-        button.click();
-        button.click();
-      });
-      expect(button.disabled).toBe(true);
-      expect(button.getAttribute("aria-busy")).toBe("true");
-      expect(container.textContent).toContain("Refreshing readings");
-      expect(state.refresh).toHaveBeenCalledTimes(1);
-      expect(state.news).toHaveBeenCalledTimes(1);
-      expect(state.publicRefresh).toHaveBeenCalledTimes(1);
-      await act(async () => reject(new Error("disconnected")));
-      expect(button.disabled).toBe(false);
-      expect(button.getAttribute("aria-busy")).toBe("false");
-      expect(container.textContent).toContain("Refresh did not finish");
-    } finally {
-      await act(async () => root.unmount());
-      container.remove();
-    }
+    // The modal and links are mocked; no router timers are needed here.
+    await using screen = await render(<UsageResetPage />, { router: false });
+    const container = screen.container;
+    const button = container.querySelector<HTMLButtonElement>('[aria-label="Refresh limits"]')!;
+    await act(async () => {
+      button.click();
+      button.click();
+    });
+    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("aria-busy")).toBe("true");
+    expect(container.textContent).toContain("Refreshing readings");
+    expect(state.refresh).toHaveBeenCalledTimes(1);
+    expect(state.news).toHaveBeenCalledTimes(1);
+    expect(state.publicRefresh).toHaveBeenCalledTimes(1);
+    await act(async () => reject(new Error("disconnected")));
+    expect(button.disabled).toBe(false);
+    expect(button.getAttribute("aria-busy")).toBe("false");
+    expect(container.textContent).toContain("Refresh did not finish");
   });
   it("does not show zero balance or dollars when no tracker data exists", () => {
+    using _now = setup();
     const markup = renderToStaticMarkup(<UsageResetPage />);
     expect(markup).toContain("No saved limit readings yet");
     expect(markup).toContain('to="/usage"');
@@ -364,6 +336,7 @@ describe("Limits page", () => {
   });
 
   it("shows a reconnecting environment without pretending its usage query failed", () => {
+    using _now = setup();
     state.environments = [
       {
         environmentId: "desktop",
@@ -387,7 +360,8 @@ describe("Limits page", () => {
   });
 
   it("replaces the initial spinner when the first reading does not progress", async () => {
-    vi.useFakeTimers();
+    using _now = setup();
+    using _timers = fakeTimers();
     state.environments = [
       {
         environmentId: "desktop",
@@ -403,24 +377,18 @@ describe("Limits page", () => {
       isPending: true,
       refresh: state.refresh,
     }));
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<UsageResetPage />));
-      expect(container.textContent).toContain("Reading saved limits");
-      expect(container.textContent).not.toContain("Not recorded");
-      await act(async () => vi.advanceTimersByTimeAsync(15_000));
-      expect(container.textContent).toContain("Saved readings are taking longer than expected");
-      expect(container.textContent).not.toContain("Reading saved limits");
-    } finally {
-      await act(async () => root.unmount());
-      container.remove();
-      vi.useRealTimers();
-    }
+    // The modal and links are mocked; no router timers are needed here.
+    await using screen = await render(<UsageResetPage />, { router: false });
+    const container = screen.container;
+    expect(container.textContent).toContain("Reading saved limits");
+    expect(container.textContent).not.toContain("Not recorded");
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
+    expect(container.textContent).toContain("Saved readings are taking longer than expected");
+    expect(container.textContent).not.toContain("Reading saved limits");
   });
 
   it("backdates public reset estimates without local quota observations", async () => {
+    using _now = setup();
     const fingerprint = {
       hostId: "desktop",
       provider: "codex",
@@ -493,24 +461,19 @@ describe("Limits page", () => {
         },
       },
     ];
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<UsageResetPage />));
-      expect(container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe(
-        "Public resets",
-      );
-      expect(container.textContent).toContain("1 banked reset grant is listed");
-      expect(container.textContent).toContain("$12.50");
-      expect(container.textContent).toContain("gpt-5.6-sol");
-      expect(container.textContent).toContain("4 usage records");
-    } finally {
-      await act(async () => root.unmount());
-      container.remove();
-    }
+    // The modal and links are mocked; no router timers are needed here.
+    await using screen = await render(<UsageResetPage />, { router: false });
+    const container = screen.container;
+    expect(container.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe(
+      "Public resets",
+    );
+    expect(container.textContent).toContain("1 banked reset grant is listed");
+    expect(container.textContent).toContain("$12.50");
+    expect(container.textContent).toContain("gpt-5.6-sol");
+    expect(container.textContent).toContain("4 usage records");
   });
   it("shows total usage separately from monitored usage and excludes archived runs", () => {
+    using _now = setup();
     const fingerprint = {
       hostId: "desktop",
       provider: "codex",
@@ -581,6 +544,7 @@ describe("Limits page", () => {
     }
   });
   it("shows a saved dollar cost for an older cycle after a monitoring gap", () => {
+    using _now = setup();
     const fingerprint = {
       hostId: "desktop",
       provider: "codex",
@@ -674,6 +638,7 @@ describe("Limits page", () => {
   });
 
   it("switches API values and token budgets with reset-cycle navigation", async () => {
+    using _now = setup();
     const fingerprint = {
       hostId: "desktop",
       provider: "codex",
@@ -759,38 +724,33 @@ describe("Limits page", () => {
     ];
 
     openTab("planner");
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<UsageResetPage />));
-      expect(container.querySelector("#api-value")?.textContent).toContain("$5.00");
-      await act(async () =>
-        container.querySelector<HTMLButtonElement>('[aria-label="Previous reset cycle"]')!.click(),
-      );
-      expect(container.querySelector("#api-value")?.textContent).toContain("$30.00");
-      expect(container.querySelector("#api-left")?.textContent).toContain("≈ $90");
-      expect(container.querySelector('[role="tabpanel"]')?.textContent).not.toContain("Pending");
-      expect(
-        state.useUsage.mock.calls.some(([input]) =>
-          input.quotaIntervals?.some(
-            (interval: { id: string }) => interval.id === "2026-08-27T20:00:00Z",
-          ),
+    // The modal and links are mocked; no router timers are needed here.
+    await using screen = await render(<UsageResetPage />, { router: false });
+    const container = screen.container;
+    expect(container.querySelector("#api-value")?.textContent).toContain("$5.00");
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[aria-label="Previous reset cycle"]')!.click(),
+    );
+    expect(container.querySelector("#api-value")?.textContent).toContain("$30.00");
+    expect(container.querySelector("#api-left")?.textContent).toContain("≈ $90");
+    expect(container.querySelector('[role="tabpanel"]')?.textContent).not.toContain("Pending");
+    expect(
+      state.useUsage.mock.calls.some(([input]) =>
+        input.quotaIntervals?.some(
+          (interval: { id: string }) => interval.id === "2026-08-27T20:00:00Z",
         ),
-      ).toBe(true);
-      await act(async () =>
-        container.querySelector<HTMLButtonElement>('[aria-label="Next reset cycle"]')!.click(),
-      );
-      expect(container.querySelector("#api-value")?.textContent).toContain("$5.00");
-    } finally {
-      await act(async () => root.unmount());
-      container.remove();
-    }
+      ),
+    ).toBe(true);
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[aria-label="Next reset cycle"]')!.click(),
+    );
+    expect(container.querySelector("#api-value")?.textContent).toContain("$5.00");
   });
 
   it.each(["failed", "empty"] as const)(
     "keeps saved values visible for a %s newest cost query",
     (scenario) => {
+      using _now = setup();
       const fingerprint = {
         hostId: "desktop",
         provider: "codex",
@@ -950,6 +910,7 @@ describe("Limits page", () => {
   );
 
   it("does not list a clock-only change with an unchanged balance as a reset", () => {
+    using _now = setup();
     const fingerprint = {
       hostId: "desktop",
       provider: "codex",
@@ -999,6 +960,7 @@ describe("Limits page", () => {
   it.each(["short", "long"] as const)(
     "uses the selected calibration chain only for a safe %s bridge",
     (bridge) => {
+      using _now = setup();
       const fingerprint = {
         hostId: "desktop",
         provider: "codex",
@@ -1119,6 +1081,7 @@ describe("Limits page", () => {
   );
 
   it("defaults estimates to the healthy history tracker and preserves explicit pending opt-in", async () => {
+    using _now = setup();
     const fingerprint = {
       hostId: "desktop",
       provider: "codex",
@@ -1197,32 +1160,25 @@ describe("Limits page", () => {
     expect(tokenPlanner).toMatch(/≈ [0-9.,]+[KMB]/);
     expect(tokenPlanner).not.toContain("Pending");
 
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<UsageResetPage />));
-      await act(async () =>
-        container.querySelector<HTMLButtonElement>('[aria-label="Monitor settings"]')!.click(),
-      );
-      const computers = document.querySelectorAll<HTMLInputElement>(
-        'fieldset input[type="checkbox"]',
-      );
-      expect(computers).toHaveLength(2);
-      await act(async () => computers[1]!.click());
-      expect(container.textContent).toContain(
-        "Pending computer is still reading Codex transcripts",
-      );
-      expect(container.textContent).toContain(
-        "Transcript costs from Healthy computer, Pending computer",
-      );
-      expect(container.textContent).toContain("Pending");
-    } finally {
-      await act(async () => root.unmount());
-      container.remove();
-    }
+    // The modal and links are mocked; no router timers are needed here.
+    await using screen = await render(<UsageResetPage />, { router: false });
+    const container = screen.container;
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[aria-label="Monitor settings"]')!.click(),
+    );
+    const computers = document.querySelectorAll<HTMLInputElement>(
+      'fieldset input[type="checkbox"]',
+    );
+    expect(computers).toHaveLength(2);
+    await act(async () => computers[1]!.click());
+    expect(container.textContent).toContain("Pending computer is still reading Codex transcripts");
+    expect(container.textContent).toContain(
+      "Transcript costs from Healthy computer, Pending computer",
+    );
+    expect(container.textContent).toContain("Pending");
   });
   it("charts a Claude limit and prices its intervals from Claude transcripts", () => {
+    using _now = setup();
     state.environments = [
       {
         environmentId: "desktop",

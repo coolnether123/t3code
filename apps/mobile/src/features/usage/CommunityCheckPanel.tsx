@@ -41,17 +41,19 @@ export function CommunityCheckPanel({
     active.current = true;
     setSending(true);
     setError(null);
-    try {
-      const reply = await (running ? cancel : start)({ environmentId, input: {} });
-      if (reply._tag === "Success") setCommand(reply.value);
-      else setError("Could not reach the community checker. Reconnect and try again.");
-      appAtomRegistry.refresh(atom);
-    } catch {
-      setError("Could not reach the community checker. Reconnect and try again.");
-    } finally {
-      active.current = false;
-      setSending(false);
-    }
+    await (running ? cancel : start)({ environmentId, input: {} })
+      .then((reply) => {
+        if (reply._tag === "Success") setCommand(reply.value);
+        else setError("Could not reach the community checker. Reconnect and try again.");
+        appAtomRegistry.refresh(atom);
+      })
+      .catch(() => {
+        setError("Could not reach the community checker. Reconnect and try again.");
+      })
+      .finally(() => {
+        active.current = false;
+        setSending(false);
+      });
   };
   const disabled = sending || (!running && (query._tag === "Failure" || state === null));
   const finding = state?.result;

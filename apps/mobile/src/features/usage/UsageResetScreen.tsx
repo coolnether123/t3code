@@ -8,7 +8,7 @@ import {
   watchPublicResetHistory,
   type PublicResetHistory,
 } from "@t3tools/client-runtime/publicResetHistory";
-import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { refreshCodexMonitor } from "@t3tools/client-runtime/usageRefresh";
 import {
   AppState,
@@ -96,82 +96,56 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
   );
   const tracker = trackers.find((entry) => entry.environmentId === trackerId) ?? trackers[0];
   const rawSamples = tracker?.summary?.quotaHistory?.samples;
-  const samples = useMemo(() => quotaMonitoringSamples(rawSamples ?? []), [rawSamples]);
-  const historicalPeriods = useMemo(() => quotaPeriods(rawSamples ?? []), [rawSamples]);
-  const periods = useMemo(() => quotaPeriods(samples), [samples]);
-  const intervals = useMemo(() => quotaIntervals(periods), [periods]);
-  const input = useMemo(
-    () => quotaCostWindow(intervals) ?? historyInput,
-    [historyInput, intervals],
-  );
+  const samples = quotaMonitoringSamples(rawSamples ?? []);
+  const historicalPeriods = quotaPeriods(tracker?.summary?.quotaHistory?.samples ?? []);
+  const periods = quotaPeriods(samples);
+  const intervals = quotaIntervals(periods);
+  const input = quotaCostWindow(intervals) ?? historyInput;
   const costs = useUsage(input);
-  const publicIntervals = useMemo(
-    () => publicResetIntervals(publicHistory.announcements),
-    [publicHistory.announcements],
-  );
-  const publicCostInput = useMemo(
-    () => quotaCostWindow(publicIntervals) ?? historyInput,
-    [historyInput, publicIntervals],
-  );
+  const publicIntervals = publicResetIntervals(publicHistory.announcements);
+  const publicCostInput = quotaCostWindow(publicIntervals) ?? historyInput;
   const publicCosts = useUsage(publicCostInput);
-  const effectivePublicSelectedIds = useMemo(
-    () =>
-      selectedIds ??
-      (tracker
-        ? [tracker.environmentId]
-        : publicCosts.environments[0]
-          ? [publicCosts.environments[0].environmentId]
-          : []),
-    [publicCosts.environments, selectedIds, tracker?.environmentId],
+  const effectivePublicSelectedIds =
+    selectedIds ??
+    (tracker
+      ? [tracker.environmentId]
+      : publicCosts.environments[0]
+        ? [publicCosts.environments[0].environmentId]
+        : []);
+  const selectedPublicCosts = publicCosts.environments.filter((environment) =>
+    effectivePublicSelectedIds.includes(environment.environmentId),
   );
-  const selectedPublicCosts = useMemo(
-    () =>
-      publicCosts.environments.filter((environment) =>
-        effectivePublicSelectedIds.includes(environment.environmentId),
-      ),
-    [effectivePublicSelectedIds, publicCosts.environments],
-  );
-  const publicEstimates = useMemo(
-    () => publicResetCostEstimates(publicHistory.announcements, selectedPublicCosts),
-    [publicHistory.announcements, selectedPublicCosts],
+  const publicEstimates = publicResetCostEstimates(
+    publicHistory.announcements,
+    selectedPublicCosts,
   );
   const bankedAnnouncements = publicHistory.announcements.filter(
     (announcement) => announcement.resetType === "banked",
   );
-  const selected = useMemo(
-    () =>
-      costs.environments.filter(
-        (entry) => selectedIds === null || selectedIds.includes(entry.environmentId),
-      ),
-    [costs.environments, selectedIds],
+  const selected = costs.environments.filter(
+    (entry) => selectedIds === null || selectedIds.includes(entry.environmentId),
   );
-  const selectedWithSavedCosts = useMemo(
-    () =>
-      selected.map((environment) => {
-        const historyEnvironment = history.environments.find(
-          (candidate) => candidate.environmentId === environment.environmentId,
-        );
-        const saved = historyEnvironment?.summary?.quotaCostSnapshots;
-        return saved === undefined
-          ? environment
-          : {
-              ...environment,
-              summary: environment.summary
-                ? {
-                    ...environment.summary,
-                    quotaCostSnapshots: [
-                      ...(environment.summary.quotaCostSnapshots ?? []),
-                      ...saved,
-                    ],
-                  }
-                : (historyEnvironment?.summary ?? environment.summary),
-            };
-      }),
-    [history.environments, selected],
-  );
-  const currentValues = useMemo(
-    () => quotaValueSnapshots(tracker?.environmentId, historicalPeriods, selectedWithSavedCosts),
-    [tracker?.environmentId, historicalPeriods, selectedWithSavedCosts],
+  const selectedWithSavedCosts = selected.map((environment) => {
+    const historyEnvironment = history.environments.find(
+      (candidate) => candidate.environmentId === environment.environmentId,
+    );
+    const saved = historyEnvironment?.summary?.quotaCostSnapshots;
+    return saved === undefined
+      ? environment
+      : {
+          ...environment,
+          summary: environment.summary
+            ? {
+                ...environment.summary,
+                quotaCostSnapshots: [...(environment.summary.quotaCostSnapshots ?? []), ...saved],
+              }
+            : (historyEnvironment?.summary ?? environment.summary),
+        };
+  });
+  const currentValues = quotaValueSnapshots(
+    tracker?.environmentId,
+    historicalPeriods,
+    selectedWithSavedCosts,
   );
   const [snapshots, setSnapshots] = useState<ReadonlyMap<string, QuotaValueSnapshot>>(
     () => new Map(),
@@ -200,34 +174,33 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
     refreshActive.current = true;
     setRefreshing(true);
     setRefreshMessage("Refreshing readings, API costs and public resets…");
-    try {
-      setRefreshMessage(
-        await refreshCodexMonitor({
-          trackerId: tracker?.environmentId,
-          refreshHistory: history.refresh,
-          refreshCosts: async (costInput) => {
-            const replies = await Promise.all([
-              costs.refresh(costInput),
-              publicCosts.refresh(publicCostInput),
-            ]);
-            return replies.flat();
-          },
-          refreshNews: async () => {
-            const results = await Promise.all([
-              newsWatcher.current?.refresh() ?? Promise.resolve(false),
-              publicHistoryWatcher.current?.refresh() ?? Promise.resolve(false),
-            ]);
-            return results.some(Boolean);
-          },
-          onProgress: setRefreshMessage,
-        }),
-      );
-    } catch {
-      setRefreshMessage("Refresh did not finish. Check your connection and try again.");
-    } finally {
-      refreshActive.current = false;
-      setRefreshing(false);
-    }
+    await refreshCodexMonitor({
+      trackerId: tracker?.environmentId,
+      refreshHistory: history.refresh,
+      refreshCosts: async (costInput) => {
+        const replies = await Promise.all([
+          costs.refresh(costInput),
+          publicCosts.refresh(publicCostInput),
+        ]);
+        return replies.flat();
+      },
+      refreshNews: async () => {
+        const results = await Promise.all([
+          newsWatcher.current?.refresh() ?? Promise.resolve(false),
+          publicHistoryWatcher.current?.refresh() ?? Promise.resolve(false),
+        ]);
+        return results.some(Boolean);
+      },
+      onProgress: setRefreshMessage,
+    })
+      .then(setRefreshMessage)
+      .catch(() => {
+        setRefreshMessage("Refresh did not finish. Check your connection and try again.");
+      })
+      .finally(() => {
+        refreshActive.current = false;
+        setRefreshing(false);
+      });
   };
 
   const current = values.at(-1);

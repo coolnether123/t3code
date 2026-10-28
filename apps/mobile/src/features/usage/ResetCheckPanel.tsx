@@ -38,17 +38,16 @@ export function ResetCheckPanel({
   const act = async (action: typeof start) => {
     setSending(true);
     setError(null);
-    try {
-      const reply = await action({ environmentId, input: {} });
-      if (reply._tag === "Success") setCommand(reply.value);
-      else
-        setError(
-          "Could not reach the reset checker. Reconnect or update this computer's T3 server.",
-        );
-      appAtomRegistry.refresh(atom);
-    } finally {
-      setSending(false);
-    }
+    await action({ environmentId, input: {} })
+      .then((reply) => {
+        if (reply._tag === "Success") setCommand(reply.value);
+        else
+          setError(
+            "Could not reach the reset checker. Reconnect or update this computer's T3 server.",
+          );
+        appAtomRegistry.refresh(atom);
+      })
+      .finally(() => setSending(false));
   };
   const presentation = resetCheckPresentation(state);
   const finding = state?.result;

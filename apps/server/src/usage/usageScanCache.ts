@@ -1,19 +1,5 @@
-/**
- * Durable per-file scan cache.
- *
- * Transcripts are append-only and a file that has not changed can never yield
- * different usage, so parsed records are keyed by `(size, mtime)` and reused.
- * Without this every server restart re-parses the whole window: roughly 3.5s
- * for a 30-day scan here, against ~11ms to reload this cache.
- *
- * Caching *per file* rather than per day is deliberate. It is timezone
- * independent, so changing the reporting zone does not invalidate anything, and
- * it keeps cross-file de-duplication exact: cached entries are de-duplicated
- * within their own file only, and the aggregator still applies the global
- * dedupe pass over the small surviving key set.
- *
- * @module usageScanCache
- */
+// Cache per file so timezone changes do not invalidate parsed usage.
+// Deduplicate within each file here; the aggregator handles cross-file copies.
 import type {
   UsageProviderKind,
   UsageRepeatedInputConfidence,
@@ -21,6 +7,9 @@ import type {
   UsageRepeatedInputSourceKind,
 } from "@t3tools/contracts";
 
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as CodexUsage from "../provider/Drivers/codexUsage.ts";
 import { CLAUDE_SYNTHETIC_MODEL } from "../provider/Drivers/claudeUsage.ts";
 import type { CodexScanState, UsageRecord } from "./usageTranscripts.ts";
 import {
@@ -29,15 +18,7 @@ import {
   type RepeatedInputObservation,
 } from "./usageRepeatedInput.ts";
 
-// v2 changed fork-copy suppression. v3 added root coverage. v4 persists the
-// Codex parser cursor. v5 reparses AI Studio files for source dates and branch
-// de-duplication. v6 adds stable Codex cross-file keys. v7 adds append-prefix
-// validation and compact repeated-input observations. v6 Codex entries keep
-// their ordinary usage records; repeated-input data is cold-built until a v7
-// prefix fingerprint exists, so the established usage cache is not discarded.
-// v8 adds a complete-line ordinary-usage cursor for bounded JSONL scans.
-// v9 persists exact provider-native session IDs. Older rows cannot distinguish
-// those IDs from synthetic session IDs, so they must be reparsed.
+// Older rows cannot distinguish native session IDs from synthetic IDs and must be reparsed.
 export const USAGE_SCAN_CACHE_VERSION = 9 as const;
 
 export interface CachedFile {
@@ -45,6 +26,7 @@ export interface CachedFile {
   readonly mtimeMs: number;
   readonly provider: UsageProviderKind;
   readonly records: readonly UsageRecord[];
+  readonly malformedRecords?: number;
   readonly codexState?: CodexScanState;
   /** Complete JSONL prefix already folded into `records`; absent only when complete. */
   readonly scanCursor?: number;
@@ -129,6 +111,9 @@ type SerializedRecord = readonly [
   turnId?: string | null,
   nativeSessionIndex?: number | null,
   speed?: "standard" | "fast" | "ultrafast" | null,
+  rateModelIndex?: number | null,
+  unresolvedServiceTierTurnId?: string | null,
+  serviceTierSource?: UsageRecord["serviceTierSource"] | null,
 ];
 
 type SerializedRepeatedInput = readonly [
@@ -171,6 +156,7 @@ interface SerializedFile {
   readonly m: number;
   readonly p: UsageProviderKind;
   readonly r: readonly SerializedRecord[];
+  readonly mr?: number;
   readonly q?: number;
   readonly x?: readonly [number, boolean];
   readonly h?: string;
@@ -187,6 +173,7 @@ interface SerializedFile {
     number,
     (string | null)?,
     (string | null)?,
+    unknown?,
   ];
 }
 
@@ -226,6 +213,7 @@ export function encodeScanCache(
       s: entry.size,
       m: entry.mtimeMs,
       p: entry.provider,
+      ...(entry.malformedRecords === undefined ? {} : { mr: entry.malformedRecords }),
       ...(entry.prefixFingerprint === undefined ? {} : { h: entry.prefixFingerprint }),
       ...(repeatedInputObservations === undefined
         ? {}
@@ -298,6 +286,7 @@ export function encodeScanCache(
               entry.codexState.forkCopyAnchorMs,
               entry.codexState.serviceTier ?? null,
               entry.codexState.turnId ?? null,
+              entry.codexState.providerState ?? null,
             ] as const,
           }),
       ...(entry.scanCursor === undefined ? {} : { q: entry.scanCursor }),
@@ -321,6 +310,9 @@ export function encodeScanCache(
           ? null
           : intern(sessions, sessionIndex, record.nativeSessionId),
         record.speed ?? null,
+        record.rateModel === undefined ? null : intern(models, modelIndex, record.rateModel),
+        record.unresolvedServiceTierTurnId ?? null,
+        record.serviceTierSource ?? null,
       ]),
     };
   }
@@ -514,6 +506,8 @@ function decodeSerializedFile(
   sessions: readonly string[],
 ): CachedFile | undefined {
   if (typeof raw !== "object" || raw === null) return undefined;
+  // Upstream positional rows use the same numeric version with a different layout.
+  if ("t" in raw) return undefined;
   const entry = raw as Partial<SerializedFile>;
   if (typeof entry.s !== "number" || typeof entry.m !== "number") return undefined;
   if (
@@ -535,9 +529,7 @@ function decodeSerializedFile(
   // repeated-input read before enabling append-only attribution.
   if (version < 6 && provider === "codex") return undefined;
   const records: UsageRecord[] = [];
-  // Any corrupt row disqualifies the whole entry. Keeping the survivors
-  // under the original (size, mtime) would read as a valid warm hit and the
-  // file would never be re-parsed, silently losing the dropped rows' usage.
+  // Reject entire corrupt entries; partial survivors would appear warm and hide usage until the file changes.
   let corrupt = false;
   for (const row of entry.r) {
     if (!isRecordArray(row) || row.length < 10) {
@@ -598,13 +590,23 @@ function decodeSerializedFile(
       },
       reportedCostUsd: typeof reportedCostUsd === "number" ? reportedCostUsd : null,
       ...(typeof serviceTier === "string"
-        ? { serviceTier, serviceTierSource: "transcript" as const }
+        ? {
+            serviceTier,
+            serviceTierSource:
+              row[16] === "t3Request" || row[16] === "userReported"
+                ? row[16]
+                : ("transcript" as const),
+          }
         : {}),
       ...(typeof turnId === "string" ? { turnId } : {}),
       ...(nativeSessionId === undefined ? {} : { nativeSessionId }),
       ...(row[13] === "fast" || row[13] === "ultrafast" || row[13] === "standard"
         ? { speed: row[13] }
         : {}),
+      ...(typeof row[14] === "number" && typeof models[row[14]] === "string"
+        ? { rateModel: models[row[14]] }
+        : {}),
+      ...(typeof row[15] === "string" ? { unresolvedServiceTierTurnId: row[15] } : {}),
       dedupeKey: typeof dedupeKey === "string" ? dedupeKey : null,
     });
   }
@@ -739,6 +741,7 @@ function decodeSerializedFile(
       anchor,
       serviceTier,
       turnId,
+      providerStateValue,
     ] = entry.c;
     if (
       typeof model !== "string" ||
@@ -751,7 +754,9 @@ function decodeSerializedFile(
     ) {
       return undefined;
     }
+    const providerState = Schema.decodeUnknownOption(CodexUsage.CodexScanState)(providerStateValue);
     codexState = {
+      ...(Option.isSome(providerState) ? { providerState: providerState.value } : {}),
       model,
       sessionId,
       lastUsageSignature,
@@ -767,6 +772,9 @@ function decodeSerializedFile(
     mtimeMs: entry.m,
     provider,
     records,
+    ...(typeof entry.mr === "number" && Number.isSafeInteger(entry.mr) && entry.mr >= 0
+      ? { malformedRecords: entry.mr }
+      : {}),
     ...(codexState === undefined ? {} : { codexState }),
     ...(scanCursor === undefined ? {} : { scanCursor }),
     ...(scanSkippedLines === undefined ? {} : { scanSkippedLines }),
@@ -814,6 +822,8 @@ export interface CachedFileMeta {
   readonly prefixFingerprint?: string;
   readonly repeatedInputVersion?: number;
   readonly hasCodexState: boolean;
+  readonly codexParserCurrent?: boolean;
+  readonly malformedRecords?: number;
   readonly hasRepeatedInput: boolean;
   readonly recordCount: number;
   /** Latest of the file mtime, its record times, and its observation times. */
@@ -840,6 +850,9 @@ export function cachedFileMeta(entry: CachedFile): CachedFileMeta {
       ? {}
       : { repeatedInputVersion: entry.repeatedInputVersion }),
     hasCodexState: entry.codexState !== undefined,
+    codexParserCurrent: entry.codexState?.providerState !== undefined,
+    malformedRecords:
+      entry.codexState?.providerState?.malformedRecords ?? entry.malformedRecords ?? 0,
     hasRepeatedInput: entry.repeatedInputObservations !== undefined,
     recordCount: entry.records.length,
     latestMs,
