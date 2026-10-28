@@ -10,6 +10,8 @@ const taskId = "agenda-task:43f97c65571d4e89baa85b2349753c3d";
 const tag = "v0.1.3-nightly.20261024.3643";
 
 async function scenario(kind) {
+  const main = kind === "main" || kind === "retry" || kind === "enable";
+  let deployCalls = 0;
   const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-nightly-synthetic-"));
   const repository = NodePath.join(root, "Worktrees/owner");
   const artifacts = NodePath.join(root, "artifacts");
@@ -67,7 +69,7 @@ async function scenario(kind) {
     git(["-c", "core.hooksPath=NUL", "commit", "-m", "current fork tip"]);
     git(["push", "origin", "HEAD:refs/heads/feat/t3-workers-prototype"]);
     const fork = git(["rev-parse", "HEAD"]).text;
-    if (kind === "main") git(["push", "origin", "HEAD:refs/heads/main"]);
+    if (main) git(["push", "origin", "HEAD:refs/heads/main"]);
     git(["update-ref", "refs/remotes/origin/feat/t3-workers-prototype", stale]);
     const upstream = NodePath.join(root, "Worktrees/upstream-source");
     git(["worktree", "add", "--detach", upstream, base]);
@@ -77,7 +79,7 @@ async function scenario(kind) {
     git(["-c", "core.hooksPath=NUL", "commit", "-m", "upstream fixture"], upstream);
     git(["tag", tag], upstream);
     git(["push", "upstream", tag], upstream);
-    if (kind === "main") {
+    if (main) {
       write(upstream, "src/efficiency.ts", "export const compact = true;\n");
       git(["add", "src/efficiency.ts"], upstream);
       git(["-c", "core.hooksPath=NUL", "commit", "-m", "upstream main efficiency"], upstream);
@@ -86,7 +88,7 @@ async function scenario(kind) {
     write(root, "GitHub/t3code/.vite-hooks/_/pre-commit", "#!/bin/sh\nexit 0\n");
     const config = {
       repository,
-      ...(kind === "main" ? { forkBranch: "main", upstreamBranch: "main", autoPublish: true } : {}),
+      ...(main ? { forkBranch: "main", upstreamBranch: "main", autoPublish: true } : {}),
       node: process.execPath,
       artifactRoot: artifacts,
       releaseRoot: NodePath.join(root, "releases"),
@@ -140,11 +142,11 @@ async function scenario(kind) {
           NodeAssert.equal(args[1], config.taskLinkCheck);
           NodeAssert.equal(
             args[2],
-            `refs/remotes/origin/${kind === "main" ? "main" : "feat/t3-workers-prototype"}`,
+            `refs/remotes/origin/${main ? "main" : "feat/t3-workers-prototype"}`,
           );
           NodeAssert.equal(
             args[3],
-            kind === "main"
+            main
               ? git(["rev-parse", "refs/remotes/upstream/main"], cwd).text
               : git(["rev-parse", tag], cwd).text,
           );
@@ -153,9 +155,20 @@ async function scenario(kind) {
           NodeAssert.ok(message.endsWith(`Otis-Task: ${taskId}`));
           return { code: 0, text: "synthetic agenda acceptance" };
         }
+        if (exe === "powershell.exe") {
+          deployCalls++;
+          return {
+            code: kind === "retry" && deployCalls === 1 ? 1 : 0,
+            text: "synthetic deployment",
+          };
+        }
         throw new Error("Unexpected external action in nightly fixture");
       },
     };
+    if (kind === "retry") {
+      NodeFS.mkdirSync(config.releaseRoot, { recursive: true });
+      NodeFS.writeFileSync(NodePath.join(config.releaseRoot, "auto-deploy-enabled"), "");
+    }
     await runNightly(file, io);
     const readLedger = () =>
       NodeFS.readFileSync(NodePath.join(artifacts, "nightly-ledger.jsonl"), "utf8")
@@ -168,16 +181,35 @@ async function scenario(kind) {
       git(["ls-remote", "origin", "refs/heads/feat/t3-workers-prototype"]).text.split(/\s/)[0],
       fork,
     );
+    if (kind === "enable") {
+      NodeAssert.equal(result.result, "published");
+      NodeAssert.equal(deployCalls, 0);
+      NodeFS.mkdirSync(config.releaseRoot, { recursive: true });
+      NodeFS.writeFileSync(NodePath.join(config.releaseRoot, "auto-deploy-enabled"), "");
+      await runNightly(file, io);
+      NodeAssert.equal(readLedger().at(-1).result, "deployed");
+      NodeAssert.equal(deployCalls, 1);
+      await runNightly(file, io);
+      NodeAssert.equal(deployCalls, 1);
+      return;
+    }
+    if (kind === "retry") {
+      NodeAssert.equal(result.result, "needs-parent");
+      NodeAssert.equal(deployCalls, 1);
+      process.exitCode = 0;
+      await runNightly(file, io);
+      NodeAssert.equal(readLedger().at(-1).result, "deployed");
+      NodeAssert.equal(deployCalls, 2);
+      await runNightly(file, io);
+      NodeAssert.equal(deployCalls, 2);
+      return;
+    }
     NodeAssert.equal(
       NodeFS.existsSync(NodePath.join(config.releaseRoot, "auto-deploy-enabled")),
       false,
     );
     if (["green", "inherited", "main"].includes(kind)) {
-      NodeAssert.equal(
-        result.result,
-        kind === "main" ? "published" : "candidate-pushed",
-        result.failure,
-      );
+      NodeAssert.equal(result.result, main ? "published" : "candidate-pushed", result.failure);
       NodeAssert.equal(workers.length, 0);
       NodeAssert.match(git(["show", `${result.commit}:docs/fork/FEATURES.md`]).text, /src\/new.ts/);
       NodeAssert.match(git(["show", `${result.commit}:src/fork.ts`]).text, /fork = true/);
@@ -185,7 +217,7 @@ async function scenario(kind) {
         git(["ls-remote", "origin", `refs/heads/${result.branch}`]).text.split(/\s/)[0],
         result.commit,
       );
-      if (kind === "main") {
+      if (main) {
         NodeAssert.equal(
           git(["ls-remote", "origin", "refs/heads/main"]).text.split(/\s/)[0],
           result.commit,
@@ -198,7 +230,7 @@ async function scenario(kind) {
       await runNightly(file, io);
       NodeAssert.equal(
         readLedger().at(-1).result,
-        kind === "main" ? "already-synced" : "existing-candidate-needs-resume",
+        main ? "already-synced" : "existing-candidate-needs-resume",
       );
     } else if (kind === "unavailable") {
       NodeAssert.equal(result.result, "verification-unavailable", result.failure);
@@ -219,7 +251,7 @@ async function scenario(kind) {
   }
 }
 
-it.each(["green", "conflict", "failure", "inherited", "unavailable", "main"])(
+it.each(["green", "conflict", "failure", "inherited", "unavailable", "main", "retry", "enable"])(
   "nightly controller handles %s with isolated Git and synthetic check providers",
   async (kind) => {
     await scenario(kind);

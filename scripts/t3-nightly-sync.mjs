@@ -134,6 +134,31 @@ export async function runNightly(configFile, io = {}) {
     );
     ledger.result = "needs-parent";
   };
+  const deploy = (tree, sha) => {
+    const deployed = run(
+      "powershell.exe",
+      [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-WindowStyle",
+        "Hidden",
+        "-File",
+        NodePath.join(tree, "scripts/t3-deploy.ps1"),
+        "-Commit",
+        sha,
+        "-Config",
+        config.deployConfig,
+      ],
+      tree,
+      true,
+    );
+    if (deployed.code !== 0) throw new Error("Deployment failed; inspect deployment receipt");
+    ledger.deployedCommit = sha;
+    ledger.result = "deployed";
+  };
   try {
     if (
       git("remote", "get-url", "origin") !== "https://github.com/coolnether123/t3code.git" ||
@@ -195,7 +220,45 @@ export async function runNightly(configFile, io = {}) {
       run("git", ["merge-base", "--is-ancestor", upstreamCommit, base], config.repository, true)
         .code === 0
     ) {
-      ledger.result = "already-synced";
+      const ledgerFile = NodePath.join(config.artifactRoot, "nightly-ledger.jsonl");
+      const history = NodeFS.existsSync(ledgerFile)
+        ? NodeFS.readFileSync(ledgerFile, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse)
+        : [];
+      const published = history.findLast(
+        (entry) =>
+          (entry.publishedCommit === base ||
+            (entry.commit === base &&
+              (entry.result === "published" ||
+                entry.result === "deployed" ||
+                entry.failure?.includes("Deployment failed; inspect deployment receipt")))) &&
+          entry.worktree,
+      );
+      const deployed = history.some(
+        (entry) =>
+          entry.deployedCommit === base || (entry.commit === base && entry.result === "deployed"),
+      );
+      if (
+        NodeFS.existsSync(NodePath.join(config.releaseRoot, "auto-deploy-enabled")) &&
+        published &&
+        !deployed
+      ) {
+        refreshFork();
+        if (git("rev-parse", forkRef) !== base)
+          throw new Error("Fork advanced; candidate requires reintegration");
+        const tree = published.worktree;
+        if (
+          run("git", ["rev-parse", "HEAD"], tree).text !== base ||
+          run("git", ["status", "--porcelain"], tree).text
+        ) {
+          throw new Error("Published candidate worktree changed; cannot retry deployment");
+        }
+        ledger.worktree = tree;
+        ledger.commit = base;
+        ledger.publishedCommit = base;
+        deploy(tree, base);
+      } else {
+        ledger.result = "already-synced";
+      }
       return;
     }
     const branch = `sync/t3-nightly-${night}-${base.slice(0, 8)}`;
@@ -352,32 +415,10 @@ export async function runNightly(configFile, io = {}) {
         ["-c", "push.followTags=false", "push", "origin", `${sha}:refs/heads/${forkBranch}`],
         tree,
       );
+      ledger.publishedCommit = sha;
       ledger.result = "published";
     }
-    if (deployEnabled) {
-      const deployed = run(
-        "powershell.exe",
-        [
-          "-NoLogo",
-          "-NoProfile",
-          "-NonInteractive",
-          "-ExecutionPolicy",
-          "Bypass",
-          "-WindowStyle",
-          "Hidden",
-          "-File",
-          NodePath.join(tree, "scripts/t3-deploy.ps1"),
-          "-Commit",
-          sha,
-          "-Config",
-          config.deployConfig,
-        ],
-        tree,
-        true,
-      );
-      if (deployed.code !== 0) throw new Error("Deployment failed; inspect deployment receipt");
-      ledger.result = "deployed";
-    }
+    if (deployEnabled) deploy(tree, sha);
   } catch (error) {
     ledger.failure = String(error);
     worker(ledger.failure);
