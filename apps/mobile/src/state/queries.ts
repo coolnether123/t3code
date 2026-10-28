@@ -30,7 +30,7 @@ import * as Cause from "effect/Cause";
 import { turnItemDetailRevision } from "@t3tools/client-runtime/work-log/item-detail";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { appAtomRegistry } from "./atom-registry";
 import { orchestrationEnvironment } from "./orchestration";
@@ -89,6 +89,7 @@ export interface ComposerPathSearchTarget {
 export function useDebouncedValue<A>(value: A, delayMs: number): A {
   const [debounced, setDebounced] = useState(value);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- timer that publishes the value after the delay and clears on change
   useEffect(() => {
     const timer = setTimeout(() => {
       setDebounced(value);
@@ -227,6 +228,7 @@ export function useThreadSearch(
     : { query: "", matches: EMPTY_THREAD_SEARCH_MATCHES };
   // The shown results' rows stay mounted until newer results replace them.
   const shownKey = visible.query === "" ? null : searchKeyOf(visible.query);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- mounts the shown search results' rows into the shared thread registry until newer results replace them
   useEffect(() => {
     if (shownKey === null) return;
     const environments = (JSON.parse(shownKey) as [ReadonlyArray<EnvironmentId>])[0];
@@ -370,11 +372,11 @@ export function usePaginatedBranches(target: VcsRefTarget) {
 }
 
 export function useComposerPathSearch(target: ComposerPathSearchTarget) {
-  const normalizedTarget = {
-    environmentId: target.environmentId,
-    cwd: target.cwd,
-    query: normalizeComposerPathSearchQuery(target.query),
-  };
+  const query = normalizeComposerPathSearchQuery(target.query);
+  const normalizedTarget = useMemo(
+    () => ({ environmentId: target.environmentId, cwd: target.cwd, query }),
+    [target.environmentId, target.cwd, query],
+  );
   const debouncedTarget = useDebouncedValue(normalizedTarget, COMPOSER_PATH_SEARCH_DEBOUNCE_MS);
   const fileAccessSession = useEnvironmentQuery(
     debouncedTarget.environmentId === null

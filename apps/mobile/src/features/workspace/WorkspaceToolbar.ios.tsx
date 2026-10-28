@@ -115,10 +115,12 @@ export function WorkspaceToolbar(props: {
       return () => cancelAnimationFrame(frame);
     }, [restoreSearch]),
   );
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- schedules a frame to restore the native search bar's text and focus when its tab becomes active
   useEffect(() => {
     if (!tabActive) return;
     const frame = requestAnimationFrame(restoreSearch);
     return () => cancelAnimationFrame(frame);
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Moving the search bar to the bottom toolbar restores its focus and query.
   }, [restoreSearch, tabActive, bottomSearch]);
   const composeButton = nativeToolbarCompose ? (
     <Toolbar.Button

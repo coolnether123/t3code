@@ -166,9 +166,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
       const issuedAt = yield* currentTimeMillis;
       const settingsService = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
       const settings = Option.isSome(settingsService)
-        ? yield* settingsService.value.getSettings.pipe(
-            Effect.catch(() => Effect.succeed(undefined)),
-          )
+        ? yield* settingsService.value.getSettings.pipe(Effect.orElseSucceed(() => undefined))
         : undefined;
       const extraCapabilities = resolveMcpCapabilities(
         { enableAgentBrowserAccess: false },
@@ -329,12 +327,6 @@ export const touchActiveMcpThread = (
   activeMcpSessionRegistry
     ? activeMcpSessionRegistry.touch(threadId, modelSelection, parentTurnId)
     : Effect.void;
-
-const revokeActiveMcpThread = (threadId: ThreadId): Effect.Effect<void> =>
-  activeMcpSessionRegistry ? activeMcpSessionRegistry.revokeThread(threadId) : Effect.void;
-
-const revokeAllActiveMcpCredentials = (): Effect.Effect<void> =>
-  activeMcpSessionRegistry ? activeMcpSessionRegistry.revokeAll : Effect.void;
 
 export const __testing = {
   make: makeWithOptions,

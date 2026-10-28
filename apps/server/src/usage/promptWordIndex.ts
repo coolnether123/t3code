@@ -13,119 +13,117 @@ const MAX_MESSAGE_CHARACTERS = 262144;
 const BATCH_MESSAGES = 32;
 
 /** Each committed message is its own durable checkpoint. Parsing holds no write lease. */
-export const warmPromptWordIndexBatch = (
+export const warmPromptWordIndexBatch = Effect.fn("warmPromptWordIndexBatch")(function* (
   sql: SqlClient.SqlClient,
   sourceTable = "usage_prompt_messages_v2",
-) =>
-  Effect.gen(function* () {
-    const started = yield* Clock.currentTimeMillis;
-    const pending = yield* sql<{ messageId: string; generation: number }>`
+) {
+  const started = yield* Clock.currentTimeMillis;
+  const pending = yield* sql<{ messageId: string; generation: number }>`
       SELECT message_id AS messageId, generation FROM usage_prompt_pending_v1
       ORDER BY rowid LIMIT ${BATCH_MESSAGES}`;
-    let processed = 0;
-    let characters = 0;
-    for (const item of pending) {
-      if (
-        processed > 0 &&
-        (characters >= 1024 * 1024 || (yield* Clock.currentTimeMillis) - started >= 50)
-      )
-        break;
-      const row = (yield* sql<{
-        messageId: string;
-        threadId: string;
-        createdAt: string;
-        text: string;
-        characters: number;
-        generation: number;
-      }>`SELECT m.message_id AS messageId, m.thread_id AS threadId, m.created_at AS createdAt,
+  let processed = 0;
+  let characters = 0;
+  for (const item of pending) {
+    if (
+      processed > 0 &&
+      (characters >= 1024 * 1024 || (yield* Clock.currentTimeMillis) - started >= 50)
+    )
+      break;
+    const row = (yield* sql<{
+      messageId: string;
+      threadId: string;
+      createdAt: string;
+      text: string;
+      characters: number;
+      generation: number;
+    }>`SELECT m.message_id AS messageId, m.thread_id AS threadId, m.created_at AS createdAt,
       substr(m.text, 1, ${MAX_MESSAGE_CHARACTERS}) AS text, length(m.text) AS characters,
       q.generation AS generation
       FROM usage_prompt_pending_v1 q JOIN ${sql(sourceTable)} m ON m.message_id = q.message_id
       WHERE q.message_id = ${item.messageId} AND q.generation = ${item.generation}`)[0];
-      if (row === undefined) continue;
-      if (
-        processed > 0 &&
-        (characters + row.text.length > 1024 * 1024 ||
-          (yield* Clock.currentTimeMillis) - started >= 50)
-      )
-        break;
-      characters += row.text.length;
-      const complete = Array.from(row.text).length === row.characters;
-      const words = complete ? promptWords(row.text) : [];
-      const terms = new Map<string, number>();
-      for (const word of words) {
-        if (word.length <= 64) terms.set(word, (terms.get(word) ?? 0) + 1);
-      }
-      const entries = [...terms].map(([word, occurrences]) => ({
-        message_id: row.messageId,
-        word,
-        occurrences,
-        frequent: isFrequentPromptWord(word) ? 1 : 0,
-      }));
-      const committed = yield* Effect.scoped(
-        Effect.gen(function* () {
-          // BEGIN IMMEDIATE runs before withTransaction's body. Reserve the writer
-          // so its busy timeout covers lock acquisition and cannot affect another caller.
-          const active = yield* Effect.serviceOption(sql.transactionService);
-          // The reserved connection has not begun a transaction yet. Its first
-          // withTransaction call must start at depth zero and install the semaphore.
-          const transaction = Option.isSome(active)
-            ? active.value
-            : ([yield* sql.reserve, -1] as const);
-          return yield* Effect.acquireUseRelease(
-            Effect.gen(function* () {
-              const timeout = (yield* sql<{ timeout: number }>`PRAGMA busy_timeout`)[0]!.timeout;
-              yield* sql`PRAGMA busy_timeout = 0`;
-              return timeout;
-            }),
-            () =>
-              sql.withTransaction(
-                Effect.gen(function* () {
-                  // An edit or delete during parsing must not publish stale counts. This also
-                  // handles delete/reinsert identity reuse without trusting updated_at.
-                  const current = yield* sql`SELECT 1 FROM usage_prompt_pending_v1 q
+    if (row === undefined) continue;
+    if (
+      processed > 0 &&
+      (characters + row.text.length > 1024 * 1024 ||
+        (yield* Clock.currentTimeMillis) - started >= 50)
+    )
+      break;
+    characters += row.text.length;
+    const complete = Array.from(row.text).length === row.characters;
+    const words = complete ? promptWords(row.text) : [];
+    const terms = new Map<string, number>();
+    for (const word of words) {
+      if (word.length <= 64) terms.set(word, (terms.get(word) ?? 0) + 1);
+    }
+    const entries = [...terms].map(([word, occurrences]) => ({
+      message_id: row.messageId,
+      word,
+      occurrences,
+      frequent: isFrequentPromptWord(word) ? 1 : 0,
+    }));
+    const committed = yield* Effect.scoped(
+      Effect.gen(function* () {
+        // BEGIN IMMEDIATE runs before withTransaction's body. Reserve the writer
+        // so its busy timeout covers lock acquisition and cannot affect another caller.
+        const active = yield* Effect.serviceOption(sql.transactionService);
+        // The reserved connection has not begun a transaction yet. Its first
+        // withTransaction call must start at depth zero and install the semaphore.
+        const transaction = Option.isSome(active)
+          ? active.value
+          : ([yield* sql.reserve, -1] as const);
+        return yield* Effect.acquireUseRelease(
+          Effect.gen(function* () {
+            const timeout = (yield* sql<{ timeout: number }>`PRAGMA busy_timeout`)[0]!.timeout;
+            yield* sql`PRAGMA busy_timeout = 0`;
+            return timeout;
+          }),
+          () =>
+            sql.withTransaction(
+              Effect.gen(function* () {
+                // An edit or delete during parsing must not publish stale counts. This also
+                // handles delete/reinsert identity reuse without trusting updated_at.
+                const current = yield* sql`SELECT 1 FROM usage_prompt_pending_v1 q
           JOIN ${sql(sourceTable)} m ON m.message_id = q.message_id
           WHERE q.message_id = ${row.messageId} AND q.generation = ${row.generation}
             AND m.role = 'user' AND m.thread_id = ${row.threadId} AND m.created_at = ${row.createdAt}
             AND length(m.text) = ${row.characters}
             AND substr(m.text, 1, ${MAX_MESSAGE_CHARACTERS}) = ${row.text}`;
-                  if (current.length === 0) return false;
-                  yield* sql`INSERT INTO usage_prompt_words_v1 (message_id, thread_id, created_at, words, characters)
+                if (current.length === 0) return false;
+                yield* sql`INSERT INTO usage_prompt_words_v1 (message_id, thread_id, created_at, words, characters)
           VALUES (${row.messageId}, ${row.threadId}, ${row.createdAt}, ${complete ? words.length : null}, ${row.characters})`;
-                  for (let offset = 0; offset < entries.length; offset += 200) {
-                    yield* sql`INSERT INTO usage_prompt_terms_v1 ${sql.insert(entries.slice(offset, offset + 200))}`;
-                  }
-                  yield* sql`DELETE FROM usage_prompt_pending_v1 WHERE message_id = ${row.messageId}`;
-                  return true;
-                }),
-              ),
-            (timeout) => sql.unsafe(`PRAGMA busy_timeout = ${timeout}`),
-          ).pipe(Effect.provideService(sql.transactionService, transaction));
-        }),
-      );
-      if (committed) processed++;
-    }
-    return processed;
-  });
+                for (let offset = 0; offset < entries.length; offset += 200) {
+                  yield* sql`INSERT INTO usage_prompt_terms_v1 ${sql.insert(entries.slice(offset, offset + 200))}`;
+                }
+                yield* sql`DELETE FROM usage_prompt_pending_v1 WHERE message_id = ${row.messageId}`;
+                return true;
+              }),
+            ),
+          (timeout) => sql.unsafe(`PRAGMA busy_timeout = ${timeout}`),
+        ).pipe(Effect.provideService(sql.transactionService, transaction));
+      }),
+    );
+    if (committed) processed++;
+  }
+  return processed;
+});
 
 /** One service-scoped worker resumes persisted pending IDs after every restart. */
-export const runPromptWordIndexer = (
+export const runPromptWordIndexer = Effect.fn("runPromptWordIndexer")(function* (
   sql: SqlClient.SqlClient,
   sourceTable = "usage_prompt_messages_v2",
-) =>
-  Effect.gen(function* () {
-    while (true) {
-      if (promptIndexCutoverEnabled() && !(yield* localPromptFallbackActive)) {
-        yield* Effect.sleep(1000);
-        continue;
-      }
-      const processed = yield* warmPromptWordIndexBatch(sql, sourceTable).pipe(
-        Effect.catchCause(() => Effect.succeed(0)),
-      );
-      // Yield to projection writers and readers, and retry lock contention later.
-      yield* Effect.sleep(processed > 0 ? 50 : 1000);
+) {
+  while (true) {
+    if (promptIndexCutoverEnabled() && !(yield* localPromptFallbackActive)) {
+      yield* Effect.sleep(1000);
+      continue;
     }
-  });
+    const processed = yield* warmPromptWordIndexBatch(sql, sourceTable).pipe(
+      Effect.catchCause(() => Effect.succeed(0)),
+    );
+    // Yield to projection writers and readers, and retry lock contention later.
+    yield* Effect.sleep(processed > 0 ? 50 : 1000);
+  }
+});
 
 /** Read only committed counts. A cold request never builds its own index. */
 export const readPromptWordIndex = (

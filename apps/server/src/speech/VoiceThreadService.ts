@@ -80,7 +80,7 @@ const make = Effect.gen(function* () {
           );
         if (existing) {
           if (existing.projection.thread.deletedAt)
-            return yield* Effect.fail(new VoiceProjectUnavailableError({ threadId }));
+            return yield* new VoiceProjectUnavailableError({ threadId });
           if (existing.projection.thread.archivedAt)
             yield* orchestrator.dispatch({
               type: "thread.unarchive",
@@ -101,7 +101,7 @@ const make = Effect.gen(function* () {
         const project =
           available.find((project) => project.title === "Otis") ??
           available.find((project) => project.workspaceRoot === config.cwd);
-        if (!project) return yield* Effect.fail(new VoiceProjectUnavailableError({ threadId }));
+        if (!project) return yield* new VoiceProjectUnavailableError({ threadId });
         yield* orchestrator.dispatch({
           type: "thread.create",
           commandId: CommandId.make("otis-main:create"),
@@ -350,8 +350,7 @@ const make = Effect.gen(function* () {
   const context = Effect.fn("VoiceThreadService.context")(function* (threadId: string) {
     const { projection } = yield* projections.getThreadSnapshot(ThreadId.make(threadId));
     const project = yield* projects.getShell(projection.thread.projectId);
-    if (Option.isNone(project))
-      return yield* Effect.fail(new VoiceProjectUnavailableError({ threadId }));
+    if (Option.isNone(project)) return yield* new VoiceProjectUnavailableError({ threadId });
     const playbackEvidence = yield* encodePlaybackEvidence(
       projection.turnItems
         .filter(

@@ -24,7 +24,7 @@ const testLayer = Layer.mergeAll(
   Layer.succeed(CodexUsageHistory.CodexUsageHistory, {
     resolve: () => Effect.succeed(new Map()),
   }),
-  Layer.succeed(MuseUsageHome.MuseUsageHome, { resolve: () => Effect.succeed(undefined) }),
+  Layer.succeed(MuseUsageHome.MuseUsageHome, { resolve: () => Effect.sync(() => undefined) }),
   ServerSettings.layerTest(),
   ServerConfig.layerTest(process.cwd(), { prefix: "t3-quota-service-test-" }),
 ).pipe(Layer.provideMerge(NodeServices.layer));

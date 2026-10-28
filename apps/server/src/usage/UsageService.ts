@@ -501,17 +501,21 @@ const emptyUsageSummary = (input: {
 export const layerTest = Layer.succeed(
   UsageService,
   UsageService.of({
-    readSummary: (input) => Effect.succeed(emptyUsageSummary(input)),
-    readReport: <Input extends UsageReportInput>(input: Input) =>
-      Effect.succeed(
-        (input.mode === "prompts"
-          ? new PromptUsageAccumulator(input).report("1970-01-01T00:00:00.000Z")
-          : projectUsageReport(
-              emptyUsageSummary(input),
-              input,
-              makeUsageReportCalculation(EMPTY_PRICING, {}),
-            )) as Extract<UsageReport, { readonly mode: Input["mode"] }>,
-      ),
+    readSummary: Effect.fn("UsageService.readSummary")((input) =>
+      Effect.succeed(emptyUsageSummary(input)),
+    ),
+    readReport: Effect.fn("UsageService.readReport")(
+      <Input extends UsageReportInput>(input: Input) =>
+        Effect.succeed(
+          (input.mode === "prompts"
+            ? new PromptUsageAccumulator(input).report("1970-01-01T00:00:00.000Z")
+            : projectUsageReport(
+                emptyUsageSummary(input),
+                input,
+                makeUsageReportCalculation(EMPTY_PRICING, {}),
+              )) as Extract<UsageReport, { readonly mode: Input["mode"] }>,
+        ),
+    ),
     refreshRates: Effect.succeed(EMPTY_PRICING),
   }),
 );
@@ -684,7 +688,7 @@ export const make = Effect.gen(function* () {
                   Effect.provideService(Path.Path, path),
                 ),
               ),
-              Effect.catchCause(() => Effect.void),
+              Effect.ignoreCause,
             );
           }),
         ),
@@ -726,8 +730,8 @@ export const make = Effect.gen(function* () {
     const claudeDirs = yield* Effect.forEach(
       claudeConfigs,
       Effect.fnUntraced(function* (raw) {
-        const config = yield* Schema.decodeUnknownEffect(ClaudeSettings)(raw.config ?? {}).pipe(
-          Effect.orElseSucceed(() => Schema.decodeUnknownSync(ClaudeSettings)({})),
+        const config = yield* Schema.decodeEffect(ClaudeSettings)(raw.config ?? {}).pipe(
+          Effect.orElseSucceed(() => Schema.decodeSync(ClaudeSettings)({})),
         );
         const environment = yield* mergeProviderInstanceEnvironment(
           raw.environment,
@@ -2518,40 +2522,37 @@ export const make = Effect.gen(function* () {
             // Capture queued windows after acquiring the lock. They use one
             // inventory, parse and priced index pass, including overlapping quotas.
             yield* Effect.forkIn(
-              Effect.yieldNow
-                .pipe(
-                  Effect.andThen(
-                    scanSemaphore.withPermits(1)(
-                      Effect.gen(function* () {
-                        const queued = mergeUsageReads(batch.inputs);
-                        if (queued.includeQuotaHistory || queued.quotaIntervals !== undefined) {
-                          yield* readSummaryUnlocked(
-                            { ...queued, quotaHistoryOnly: true },
-                            undefined,
-                            batch.progress,
-                            true,
-                          );
-                        }
-                        yield* ensureLegacyScanCacheImported;
-                        batch.started = true;
-                        return yield* readSummaryUnlocked(
-                          mergeUsageReads(batch.inputs),
-                          context,
+              Effect.yieldNow.pipe(
+                Effect.andThen(
+                  scanSemaphore.withPermits(1)(
+                    Effect.gen(function* () {
+                      const queued = mergeUsageReads(batch.inputs);
+                      if (queued.includeQuotaHistory || queued.quotaIntervals !== undefined) {
+                        yield* readSummaryUnlocked(
+                          { ...queued, quotaHistoryOnly: true },
+                          undefined,
                           batch.progress,
                           true,
-                        ).pipe(Effect.ensuring(Effect.sync(() => scanStore.release())));
-                      }),
-                    ),
-                  ),
-                )
-                .pipe(
-                  Effect.onExit((exit) =>
-                    Effect.sync(() => {
-                      if (inFlightSummaries.get(batchKey) === batch)
-                        inFlightSummaries.delete(batchKey);
-                    }).pipe(Effect.andThen(Deferred.succeed(batch.result, exit))),
+                        );
+                      }
+                      yield* ensureLegacyScanCacheImported;
+                      batch.started = true;
+                      return yield* readSummaryUnlocked(
+                        mergeUsageReads(batch.inputs),
+                        context,
+                        batch.progress,
+                        true,
+                      ).pipe(Effect.ensuring(Effect.sync(() => scanStore.release())));
+                    }),
                   ),
                 ),
+                Effect.onExit((exit) =>
+                  Effect.sync(() => {
+                    if (inFlightSummaries.get(batchKey) === batch)
+                      inFlightSummaries.delete(batchKey);
+                  }).pipe(Effect.andThen(Deferred.succeed(batch.result, exit))),
+                ),
+              ),
               serviceScope,
               { startImmediately: true },
             );

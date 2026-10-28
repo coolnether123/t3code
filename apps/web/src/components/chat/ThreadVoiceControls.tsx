@@ -313,10 +313,7 @@ export function ThreadVoiceControls({
       <div ref={anchorRef} className="relative min-w-0 w-full" data-voice-state={state}>
         {active ? (
           <section aria-label="Otis call">
-            <ComposerBanner.Root
-              placement="floating"
-              variant={state === "error" ? "error" : "default"}
-            >
+            <ComposerBanner.Root variant={state === "error" ? "error" : "default"}>
               <ComposerBanner.Row>
                 <ComposerBanner.Content>
                   <CallStatusLine

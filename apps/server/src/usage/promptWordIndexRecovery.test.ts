@@ -56,14 +56,12 @@ it.effect(
             yield* createSource(sql);
             // The cold migration queues old rows but never parses their prompt bodies.
             yield* sql.withTransaction(
-              Effect.gen(function* () {
-                yield* sql`WITH RECURSIVE ids(n) AS (
+              sql`WITH RECURSIVE ids(n) AS (
           SELECT 0 UNION ALL SELECT n + 1 FROM ids WHERE n < 356677
         ) INSERT INTO projection_thread_messages
           SELECT 'synthetic-' || n, 'thread-' || (n % 2009),
             CASE WHEN n < 5001 THEN 'user' ELSE 'assistant' END,
-            'build build the', ${now}, ${now} FROM ids`;
-              }),
+            'build build the', ${now}, ${now} FROM ids`,
             );
             yield* migration;
             const started = NodePerfHooks.performance.now();

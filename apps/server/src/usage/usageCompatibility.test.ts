@@ -6,22 +6,22 @@ import { makeUsageReportCalculation, projectUsageReport } from "./usageReport.ts
 
 // These payloads match Otis integration/tools/t3-usage-transport.mjs.
 const window = { sinceDay: "2026-10-18", untilDay: "2026-10-19", timeZone: "America/Chicago" };
-const decodeSummaryInput = Schema.decodeUnknownSync(UsageSummaryInput);
+const decodeSummaryInput = Schema.decodeSync(UsageSummaryInput);
 
 describe("retained usage consumer contract", () => {
   it("accepts the contract 7 summary and exact native-scope requests", () => {
     const request = {
       ...window,
       clientContractVersion: 7,
-      resolution: "day",
-      groupBy: "model",
+      resolution: "day" as const,
+      groupBy: "model" as const,
       includeQuotaHistory: false,
       includeRepeatedInput: false,
     };
     expect(decodeSummaryInput(request)).toEqual(request);
     const scoped = {
       ...request,
-      groupBy: "run",
+      groupBy: "run" as const,
       runIds: ["synthetic-native-session"],
       sinceTime: "2026-10-18T05:00:00Z",
       untilTime: "2026-10-19T05:00:00Z",
@@ -30,7 +30,7 @@ describe("retained usage consumer contract", () => {
   });
 
   it("keeps the saved Codex quota history in the report response", () => {
-    const request = Schema.decodeUnknownSync(UsageReportInput)({
+    const request = Schema.decodeSync(UsageReportInput)({
       ...window,
       mode: "quota",
       refresh: false,
@@ -49,7 +49,7 @@ describe("retained usage consumer contract", () => {
         },
       ],
     });
-    const summary = Schema.decodeUnknownSync(UsageSummary)({
+    const summary = Schema.decodeSync(UsageSummary)({
       ...window,
       contractVersion: 7,
       readAt: "2026-10-19T06:00:00Z",

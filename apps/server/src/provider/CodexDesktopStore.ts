@@ -245,291 +245,277 @@ const messageFromItem = (itemJson: string, id: string): CodexDesktopMessage | un
   return message ? { ...message, id } : undefined;
 };
 
-export const make = (options?: { readonly homePath?: string }) =>
-  Effect.gen(function* () {
-    const fileSystem = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    const settingsService =
-      options?.homePath === undefined ? yield* ServerSettings.ServerSettingsService : undefined;
+export const make = Effect.fn("make")(function* (options?: { readonly homePath?: string }) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const settingsService =
+    options?.homePath === undefined ? yield* ServerSettings.ServerSettingsService : undefined;
 
-    const desktopHome = Effect.fn("CodexDesktopStore.desktopHome")(function* () {
-      if (options?.homePath !== undefined) return options.homePath;
-      const settings = yield* settingsService!.getSettings;
-      const layout = yield* resolveCodexHomeLayout(codexDesktopSettings(settings));
-      return layout.sharedHomePath;
+  const desktopHome = Effect.fn("CodexDesktopStore.desktopHome")(function* () {
+    if (options?.homePath !== undefined) return options.homePath;
+    const settings = yield* settingsService!.getSettings;
+    const layout = yield* resolveCodexHomeLayout(codexDesktopSettings(settings));
+    return layout.sharedHomePath;
+  });
+
+  const stateDatabase = Effect.fn("CodexDesktopStore.stateDatabase")(function* (home: string) {
+    const names = yield* fileSystem.readDirectory(home).pipe(
+      Effect.mapError(
+        (cause) =>
+          new CodexDesktopStoreError({
+            operation: "open",
+            detail: `could not inspect '${home}'`,
+            cause,
+          }),
+      ),
+    );
+    const candidates = names.filter((name) => /^state_\d+\.sqlite$/i.test(name));
+    if (candidates.length === 0) {
+      return yield* new CodexDesktopStoreError({
+        operation: "open",
+        detail: `no native Codex state database exists under '${home}'`,
+      });
+    }
+    const withMtime = yield* Effect.forEach(candidates, (name) =>
+      fileSystem
+        .stat(path.join(home, name))
+        .pipe(Effect.map((info) => ({ name, mtime: Number(info.mtime) }))),
+    );
+    return path.join(home, [...withMtime].sort((left, right) => right.mtime - left.mtime)[0]!.name);
+  });
+
+  const historyDatabase = Effect.fn("CodexDesktopStore.historyDatabase")(function* (home: string) {
+    const names = yield* fileSystem.readDirectory(home).pipe(
+      Effect.mapError(
+        (cause) =>
+          new CodexDesktopStoreError({
+            operation: "open",
+            detail: `could not inspect '${home}' for native history`,
+            cause,
+          }),
+      ),
+    );
+    const candidates = names.filter((name) => /^thread_history_\d+\.sqlite$/i.test(name));
+    if (candidates.length === 0) {
+      return yield* new CodexDesktopStoreError({
+        operation: "open",
+        detail: `no native Codex history database exists under '${home}'`,
+      });
+    }
+    const withMtime = yield* Effect.forEach(candidates, (name) =>
+      fileSystem
+        .stat(path.join(home, name))
+        .pipe(Effect.map((info) => ({ name, mtime: Number(info.mtime) }))),
+    );
+    return path.join(home, [...withMtime].sort((left, right) => right.mtime - left.mtime)[0]!.name);
+  });
+
+  const withDatabase = <A>(
+    databasePath: string,
+    operation: string,
+    callback: (database: NodeSqlite.DatabaseSync) => A,
+  ) =>
+    Effect.try({
+      try: () => {
+        const database = new NodeSqlite.DatabaseSync(databasePath, { readOnly: true });
+        try {
+          return callback(database);
+        } finally {
+          database.close();
+        }
+      },
+      catch: (cause) =>
+        new CodexDesktopStoreError({
+          operation: operation === "open" ? "open" : "query",
+          detail: `database '${databasePath}'`,
+          cause,
+        }),
     });
 
-    const stateDatabase = Effect.fn("CodexDesktopStore.stateDatabase")(function* (home: string) {
-      const names = yield* fileSystem.readDirectory(home).pipe(
+  const readThreadRow = (database: NodeSqlite.DatabaseSync, threadId: string) => {
+    if (!UUID_PATTERN.test(threadId)) return undefined;
+    const raw = database
+      .prepare(
+        "SELECT id,title,updated_at,updated_at_ms,preview,cwd,archived,rollout_path,history_mode FROM threads WHERE id = ? LIMIT 1",
+      )
+      .get(threadId) as Record<string, unknown> | undefined;
+    return raw === undefined ? undefined : rowToThread(raw);
+  };
+
+  const listThreads = Effect.fn("listThreads")(function* (input?: {
+    readonly cursor?: string;
+    readonly search?: string;
+    readonly limit?: number;
+  }) {
+    const home = yield* desktopHome();
+    const databasePath = yield* stateDatabase(home);
+    const limit = pageSize(input?.limit);
+    const offset = pageValue(input?.cursor);
+    const search = input?.search?.trim() ?? "";
+    const result = yield* withDatabase(databasePath, "query", (database) => {
+      const rows = database
+        .prepare(
+          `SELECT id,title,updated_at,updated_at_ms,preview,cwd,archived,rollout_path,history_mode
+             FROM threads
+             WHERE archived = 0 AND (? = '' OR title LIKE ? OR preview LIKE ?)
+             ORDER BY COALESCE(updated_at_ms, updated_at * 1000) DESC LIMIT ? OFFSET ?`,
+        )
+        .all(search, `%${search}%`, `%${search}%`, limit + 1, offset) as Record<string, unknown>[];
+      return rows.map(rowToThread);
+    });
+    return {
+      threads: result.slice(0, limit).map(toThread),
+      nextCursor: result.length > limit ? String(offset + limit) : null,
+    } satisfies CodexDesktopThreadListResponse;
+  });
+
+  const readThread = Effect.fn("readThread")(function* (
+    threadId: string,
+    input?: { readonly beforeCursor?: string; readonly limit?: number },
+  ) {
+    const home = yield* desktopHome();
+    const databasePath = yield* stateDatabase(home);
+    const limit = pageSize(input?.limit);
+    const offset = pageValue(input?.beforeCursor);
+    let nextCursor: string | null = null;
+    const result = yield* withDatabase(databasePath, "query", (database) => {
+      const row = readThreadRow(database, threadId);
+      if (!row || row.archived !== 0) return null;
+      return { row, messages: [], hasMore: false };
+    });
+    if (result === null) {
+      return yield* new CodexDesktopStoreError({
+        operation: "query",
+        detail: `native Codex thread '${threadId}' was not found`,
+      });
+    }
+    // Legacy JSONL message extraction is kept outside the database callback
+    // so the SQLite handle remains open for the shortest possible period.
+    let messages: CodexDesktopMessage[] = result.messages as CodexDesktopMessage[];
+    let hasMore = result.hasMore;
+    if (result.row.history_mode === "paginated") {
+      const historyPath = yield* historyDatabase(home);
+      const paginated = yield* withDatabase(
+        historyPath,
+        "query",
+        (database) =>
+          database
+            .prepare(
+              `SELECT item_id,item_json FROM thread_items
+               WHERE thread_id = ? AND item_type IN ('userMessage','agentMessage','commandExecution','functionCallOutput','mcpToolCall','fileChange')
+               ORDER BY created_at_ms DESC, rollout_ordinal DESC
+               LIMIT ? OFFSET ?`,
+            )
+            .all(threadId, limit + 1, offset) as Record<string, unknown>[],
+      );
+      messages = paginated
+        .map((item) => messageFromItem(String(item.item_json ?? ""), String(item.item_id ?? "")))
+        .filter((message): message is CodexDesktopMessage => message !== undefined);
+      messages.reverse();
+      hasMore = paginated.length > limit;
+      if (messages.length > limit) messages = messages.slice(messages.length - limit);
+      nextCursor = hasMore ? String(offset + limit) : null;
+    } else {
+      const storedRollout = result.row.rollout_path;
+      const rollout = path.resolve(
+        path.isAbsolute(storedRollout) ? storedRollout : path.join(home, storedRollout),
+      );
+      const homeRoot = path.resolve(home);
+      if (rollout !== homeRoot && !rollout.startsWith(`${homeRoot}${path.sep}`)) {
+        return yield* new CodexDesktopStoreError({
+          operation: "path",
+          detail: `rollout path for '${threadId}' escapes the configured Codex home`,
+        });
+      }
+      const info = yield* fileSystem.stat(rollout).pipe(
         Effect.mapError(
           (cause) =>
             new CodexDesktopStoreError({
-              operation: "open",
-              detail: `could not inspect '${home}'`,
+              operation: "query",
+              detail: `rollout '${rollout}'`,
               cause,
             }),
         ),
       );
-      const candidates = names.filter((name) => /^state_\d+\.sqlite$/i.test(name));
-      if (candidates.length === 0) {
-        return yield* new CodexDesktopStoreError({
-          operation: "open",
-          detail: `no native Codex state database exists under '${home}'`,
-        });
-      }
-      const withMtime = yield* Effect.forEach(candidates, (name) =>
-        fileSystem
-          .stat(path.join(home, name))
-          .pipe(Effect.map((info) => ({ name, mtime: Number(info.mtime) }))),
-      );
-      return path.join(
-        home,
-        [...withMtime].sort((left, right) => right.mtime - left.mtime)[0]!.name,
-      );
-    });
-
-    const historyDatabase = Effect.fn("CodexDesktopStore.historyDatabase")(function* (
-      home: string,
-    ) {
-      const names = yield* fileSystem.readDirectory(home).pipe(
-        Effect.mapError(
-          (cause) =>
-            new CodexDesktopStoreError({
-              operation: "open",
-              detail: `could not inspect '${home}' for native history`,
-              cause,
-            }),
-        ),
-      );
-      const candidates = names.filter((name) => /^thread_history_\d+\.sqlite$/i.test(name));
-      if (candidates.length === 0) {
-        return yield* new CodexDesktopStoreError({
-          operation: "open",
-          detail: `no native Codex history database exists under '${home}'`,
-        });
-      }
-      const withMtime = yield* Effect.forEach(candidates, (name) =>
-        fileSystem
-          .stat(path.join(home, name))
-          .pipe(Effect.map((info) => ({ name, mtime: Number(info.mtime) }))),
-      );
-      return path.join(
-        home,
-        [...withMtime].sort((left, right) => right.mtime - left.mtime)[0]!.name,
-      );
-    });
-
-    const withDatabase = <A>(
-      databasePath: string,
-      operation: string,
-      callback: (database: NodeSqlite.DatabaseSync) => A,
-    ) =>
-      Effect.try({
-        try: () => {
-          const database = new NodeSqlite.DatabaseSync(databasePath, { readOnly: true });
+      const rawAndStart = yield* Effect.tryPromise({
+        try: async () => {
+          const handle = await NodeFSP.open(rollout, "r");
           try {
-            return callback(database);
+            const size = Number(info.size);
+            const cursor = input?.beforeCursor?.match(/^byte:(\d+)(?::(\d+))?$/);
+            const end =
+              cursor === null || cursor === undefined ? size : Math.min(size, Number(cursor[1]));
+            const skip = cursor?.[2] === undefined ? 0 : Number(cursor[2]);
+            const start = Math.max(0, end - MAX_LEGACY_ROLLOUT_BYTES);
+            const buffer = Buffer.alloc(end - start);
+            const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
+            const text = buffer.subarray(0, bytesRead).toString("utf8");
+            return {
+              text: start === 0 ? text : text.slice(text.indexOf("\n") + 1),
+              start,
+              end,
+              skip,
+            };
           } finally {
-            database.close();
+            await handle.close();
           }
         },
         catch: (cause) =>
           new CodexDesktopStoreError({
-            operation: operation === "open" ? "open" : "query",
-            detail: `database '${databasePath}'`,
+            operation: "query",
+            detail: `bounded rollout '${rollout}'`,
             cause,
           }),
       });
-
-    const readThreadRow = (database: NodeSqlite.DatabaseSync, threadId: string) => {
-      if (!UUID_PATTERN.test(threadId)) return undefined;
-      const raw = database
-        .prepare(
-          "SELECT id,title,updated_at,updated_at_ms,preview,cwd,archived,rollout_path,history_mode FROM threads WHERE id = ? LIMIT 1",
-        )
-        .get(threadId) as Record<string, unknown> | undefined;
-      return raw === undefined ? undefined : rowToThread(raw);
-    };
-
-    const listThreads = (input?: {
-      readonly cursor?: string;
-      readonly search?: string;
-      readonly limit?: number;
-    }) =>
-      Effect.gen(function* () {
-        const home = yield* desktopHome();
-        const databasePath = yield* stateDatabase(home);
-        const limit = pageSize(input?.limit);
-        const offset = pageValue(input?.cursor);
-        const search = input?.search?.trim() ?? "";
-        const result = yield* withDatabase(databasePath, "query", (database) => {
-          const rows = database
-            .prepare(
-              `SELECT id,title,updated_at,updated_at_ms,preview,cwd,archived,rollout_path,history_mode
-             FROM threads
-             WHERE archived = 0 AND (? = '' OR title LIKE ? OR preview LIKE ?)
-             ORDER BY COALESCE(updated_at_ms, updated_at * 1000) DESC LIMIT ? OFFSET ?`,
-            )
-            .all(search, `%${search}%`, `%${search}%`, limit + 1, offset) as Record<
-            string,
-            unknown
-          >[];
-          return rows.map(rowToThread);
-        });
-        return {
-          threads: result.slice(0, limit).map(toThread),
-          nextCursor: result.length > limit ? String(offset + limit) : null,
-        } satisfies CodexDesktopThreadListResponse;
-      });
-
-    const readThread = (
-      threadId: string,
-      input?: { readonly beforeCursor?: string; readonly limit?: number },
-    ) =>
-      Effect.gen(function* () {
-        const home = yield* desktopHome();
-        const databasePath = yield* stateDatabase(home);
-        const limit = pageSize(input?.limit);
-        const offset = pageValue(input?.beforeCursor);
-        let nextCursor: string | null = null;
-        const result = yield* withDatabase(databasePath, "query", (database) => {
-          const row = readThreadRow(database, threadId);
-          if (!row || row.archived !== 0) return null;
-          return { row, messages: [], hasMore: false };
-        });
-        if (result === null) {
-          return yield* new CodexDesktopStoreError({
-            operation: "query",
-            detail: `native Codex thread '${threadId}' was not found`,
-          });
-        }
-        // Legacy JSONL message extraction is kept outside the database callback
-        // so the SQLite handle remains open for the shortest possible period.
-        let messages: CodexDesktopMessage[] = result.messages as CodexDesktopMessage[];
-        let hasMore = result.hasMore;
-        if (result.row.history_mode === "paginated") {
-          const historyPath = yield* historyDatabase(home);
-          const paginated = yield* withDatabase(
-            historyPath,
-            "query",
-            (database) =>
-              database
-                .prepare(
-                  `SELECT item_id,item_json FROM thread_items
-               WHERE thread_id = ? AND item_type IN ('userMessage','agentMessage','commandExecution','functionCallOutput','mcpToolCall','fileChange')
-               ORDER BY created_at_ms DESC, rollout_ordinal DESC
-               LIMIT ? OFFSET ?`,
-                )
-                .all(threadId, limit + 1, offset) as Record<string, unknown>[],
-          );
-          messages = paginated
-            .map((item) =>
-              messageFromItem(String(item.item_json ?? ""), String(item.item_id ?? "")),
-            )
-            .filter((message): message is CodexDesktopMessage => message !== undefined);
-          messages.reverse();
-          hasMore = paginated.length > limit;
-          if (messages.length > limit) messages = messages.slice(messages.length - limit);
-          nextCursor = hasMore ? String(offset + limit) : null;
-        } else {
-          const storedRollout = result.row.rollout_path;
-          const rollout = path.resolve(
-            path.isAbsolute(storedRollout) ? storedRollout : path.join(home, storedRollout),
-          );
-          const homeRoot = path.resolve(home);
-          if (rollout !== homeRoot && !rollout.startsWith(`${homeRoot}${path.sep}`)) {
-            return yield* new CodexDesktopStoreError({
-              operation: "path",
-              detail: `rollout path for '${threadId}' escapes the configured Codex home`,
-            });
+      const raw = rawAndStart.text;
+      const parsedMessages = raw
+        .split(/\r?\n/)
+        .map((line, index) => {
+          try {
+            return messageFromRecord(JSON.parse(line), index);
+          } catch {
+            return undefined;
           }
-          const info = yield* fileSystem.stat(rollout).pipe(
-            Effect.mapError(
-              (cause) =>
-                new CodexDesktopStoreError({
-                  operation: "query",
-                  detail: `rollout '${rollout}'`,
-                  cause,
-                }),
-            ),
-          );
-          const rawAndStart = yield* Effect.tryPromise({
-            try: async () => {
-              const handle = await NodeFSP.open(rollout, "r");
-              try {
-                const size = Number(info.size);
-                const cursor = input?.beforeCursor?.match(/^byte:(\d+)(?::(\d+))?$/);
-                const end =
-                  cursor === null || cursor === undefined
-                    ? size
-                    : Math.min(size, Number(cursor[1]));
-                const skip = cursor?.[2] === undefined ? 0 : Number(cursor[2]);
-                const start = Math.max(0, end - MAX_LEGACY_ROLLOUT_BYTES);
-                const buffer = Buffer.alloc(end - start);
-                const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
-                const text = buffer.subarray(0, bytesRead).toString("utf8");
-                return {
-                  text: start === 0 ? text : text.slice(text.indexOf("\n") + 1),
-                  start,
-                  end,
-                  skip,
-                };
-              } finally {
-                await handle.close();
-              }
-            },
-            catch: (cause) =>
-              new CodexDesktopStoreError({
-                operation: "query",
-                detail: `bounded rollout '${rollout}'`,
-                cause,
-              }),
-          });
-          const raw = rawAndStart.text;
-          const parsedMessages = raw
-            .split(/\r?\n/)
-            .map((line, index) => {
-              try {
-                return messageFromRecord(JSON.parse(line), index);
-              } catch {
-                return undefined;
-              }
-            })
-            .filter((message): message is CodexDesktopMessage => message !== undefined);
-          const endIndex = Math.max(0, parsedMessages.length - rawAndStart.skip);
-          const startIndex = Math.max(0, endIndex - limit);
-          messages = parsedMessages.slice(startIndex, endIndex);
-          const olderInChunk = startIndex > 0;
-          hasMore = olderInChunk || rawAndStart.start > 0;
-          nextCursor = olderInChunk
-            ? `byte:${rawAndStart.end}:${rawAndStart.skip + limit}`
-            : rawAndStart.start > 0
-              ? `byte:${rawAndStart.start}:0`
-              : null;
-        }
-        return {
-          thread: toThread(result.row),
-          messages: messages.slice(0, limit),
-          nextCursor,
-        } satisfies CodexDesktopThreadHistoryResponse;
-      });
-
-    const provideBase = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem | Path.Path>) =>
-      effect.pipe(
-        Effect.provideService(FileSystem.FileSystem, fileSystem),
-        Effect.provideService(Path.Path, path),
-      );
-    const provideSettings = <A, E>(
-      effect: Effect.Effect<A, E, ServerSettings.ServerSettingsService>,
-    ) =>
-      settingsService === undefined
-        ? (effect as Effect.Effect<A, E, never>)
-        : effect.pipe(Effect.provideService(ServerSettings.ServerSettingsService, settingsService));
-    return CodexDesktopStore.of({
-      listThreads: (input) => provideSettings(provideBase(listThreads(input))),
-      readThread: (threadId, input) => provideSettings(provideBase(readThread(threadId, input))),
-    });
+        })
+        .filter((message): message is CodexDesktopMessage => message !== undefined);
+      const endIndex = Math.max(0, parsedMessages.length - rawAndStart.skip);
+      const startIndex = Math.max(0, endIndex - limit);
+      messages = parsedMessages.slice(startIndex, endIndex);
+      const olderInChunk = startIndex > 0;
+      hasMore = olderInChunk || rawAndStart.start > 0;
+      nextCursor = olderInChunk
+        ? `byte:${rawAndStart.end}:${rawAndStart.skip + limit}`
+        : rawAndStart.start > 0
+          ? `byte:${rawAndStart.start}:0`
+          : null;
+    }
+    return {
+      thread: toThread(result.row),
+      messages: messages.slice(0, limit),
+      nextCursor,
+    } satisfies CodexDesktopThreadHistoryResponse;
   });
+
+  const provideBase = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem | Path.Path>) =>
+    effect.pipe(
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.provideService(Path.Path, path),
+    );
+  const provideSettings = <A, E>(
+    effect: Effect.Effect<A, E, ServerSettings.ServerSettingsService>,
+  ) =>
+    settingsService === undefined
+      ? (effect as Effect.Effect<A, E, never>)
+      : effect.pipe(Effect.provideService(ServerSettings.ServerSettingsService, settingsService));
+  return CodexDesktopStore.of({
+    listThreads: Effect.fn("CodexDesktopStore.listThreads")((input) =>
+      provideSettings(provideBase(listThreads(input))),
+    ),
+    readThread: Effect.fn("CodexDesktopStore.readThread")((threadId, input) =>
+      provideSettings(provideBase(readThread(threadId, input))),
+    ),
+  });
+});
 
 export const layer = Layer.effect(
   CodexDesktopStore,

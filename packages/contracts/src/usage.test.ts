@@ -12,7 +12,7 @@ const base = {
 
 it("accepts missing Grok source fingerprints reported by older Mac servers", () => {
   expect(
-    Schema.decodeUnknownSync(UsageSourceFingerprint)({
+    Schema.decodeSync(UsageSourceFingerprint)({
       hostId: "millie",
       provider: "grok",
       resolvedHomePath: "/Users/millie/.grok",

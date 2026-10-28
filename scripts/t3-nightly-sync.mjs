@@ -19,7 +19,8 @@ export function compareChecks(candidate, baseline) {
   return candidate.every(
     (c) =>
       c.exit === 0 ||
-      (c.classified &&
+      (!["format", "lint", "agent-context"].includes(c.name) &&
+        c.classified &&
         c.failures.length > 0 &&
         baseline.some(
           (b) =>
@@ -124,27 +125,39 @@ export async function runNightly(configFile, io = {}) {
       git("remote", "get-url", "upstream") !== "https://github.com/pingdotgg/t3code.git"
     )
       throw new Error("Unexpected repository owner");
-    git(
-      "fetch",
-      "origin",
-      "+refs/heads/feat/t3-workers-prototype:refs/remotes/origin/feat/t3-workers-prototype",
-    );
-    const advertisedTags = git("ls-remote", "--tags", "--refs", "upstream", "v*-nightly.*")
-      .split(/\r?\n/)
-      .map((line) => {
-        const [object, ref] = line.split(/\s+/);
-        return { object, tag: ref?.replace("refs/tags/", "") };
-      });
-    const tag = selectNightly(advertisedTags.map((entry) => entry.tag ?? ""));
-    if (!tag) throw new Error("No upstream nightly tag");
+    const forkBranch = config.forkBranch ?? "feat/t3-workers-prototype";
+    if (!["main", "feat/t3-workers-prototype"].includes(forkBranch))
+      throw new Error("Unsupported fork branch");
+    const forkRef = `refs/remotes/origin/${forkBranch}`;
+    const refreshFork = () => git("fetch", "origin", `+refs/heads/${forkBranch}:${forkRef}`);
+    refreshFork();
+    let upstreamCommit;
+    let tag;
+    if (config.upstreamBranch === "main") {
+      git("fetch", "upstream", "+refs/heads/main:refs/remotes/upstream/main");
+      upstreamCommit = git("rev-parse", "refs/remotes/upstream/main");
+      tag = `upstream/main@${upstreamCommit.slice(0, 10)}`;
+      ledger.sourceRef = "refs/heads/main";
+    } else {
+      const advertisedTags = git("ls-remote", "--tags", "--refs", "upstream", "v*-nightly.*")
+        .split(/\r?\n/)
+        .map((line) => {
+          const [object, ref] = line.split(/\s+/);
+          return { object, tag: ref?.replace("refs/tags/", "") };
+        });
+      tag = selectNightly(advertisedTags.map((entry) => entry.tag ?? ""));
+      if (!tag) throw new Error("No upstream nightly tag");
+      const nightlyRef = `refs/t3-sync/upstream/${tag}`;
+      git("fetch", "upstream", `refs/tags/${tag}:${nightlyRef}`);
+      if (
+        git("rev-parse", nightlyRef) !== advertisedTags.find((entry) => entry.tag === tag)?.object
+      )
+        throw new Error("Upstream tag changed during fetch");
+      upstreamCommit = git("rev-parse", `${nightlyRef}^{commit}`);
+    }
     ledger.tag = tag;
-    const nightlyRef = `refs/t3-sync/upstream/${tag}`;
-    git("fetch", "upstream", `refs/tags/${tag}:${nightlyRef}`);
-    if (git("rev-parse", nightlyRef) !== advertisedTags.find((entry) => entry.tag === tag)?.object)
-      throw new Error("Upstream tag changed during fetch");
-    const upstreamCommit = git("rev-parse", `${nightlyRef}^{commit}`);
     ledger.upstreamCommit = upstreamCommit;
-    const base = git("rev-parse", "origin/feat/t3-workers-prototype");
+    const base = git("rev-parse", forkRef);
     ledger.base = base;
     if (process.argv.includes("--observe")) {
       ledger.sourceIntegrated =
@@ -305,32 +318,28 @@ export async function runNightly(configFile, io = {}) {
       [
         NodePath.join(import.meta.dirname, "t3-nightly-task-links.mjs"),
         config.taskLinkCheck,
-        "refs/remotes/origin/feat/t3-workers-prototype",
+        forkRef,
         upstreamCommit,
       ],
       tree,
     );
     run("git", ["-c", "push.followTags=false", "push", "-u", "origin", branch], tree);
     ledger.result = "candidate-pushed";
-    if (NodeFS.existsSync(NodePath.join(config.releaseRoot, "auto-deploy-enabled"))) {
-      git(
-        "fetch",
-        "origin",
-        "+refs/heads/feat/t3-workers-prototype:refs/remotes/origin/feat/t3-workers-prototype",
-      );
-      if (git("rev-parse", "origin/feat/t3-workers-prototype") !== base)
+    const deployEnabled = NodeFS.existsSync(
+      NodePath.join(config.releaseRoot, "auto-deploy-enabled"),
+    );
+    if (config.autoPublish || deployEnabled) {
+      refreshFork();
+      if (git("rev-parse", forkRef) !== base)
         throw new Error("Fork advanced; candidate requires reintegration");
       run(
         "git",
-        [
-          "-c",
-          "push.followTags=false",
-          "push",
-          "origin",
-          `${sha}:refs/heads/feat/t3-workers-prototype`,
-        ],
+        ["-c", "push.followTags=false", "push", "origin", `${sha}:refs/heads/${forkBranch}`],
         tree,
       );
+      ledger.result = "published";
+    }
+    if (deployEnabled) {
       const deployed = run(
         "powershell.exe",
         [

@@ -35,6 +35,7 @@ import * as ServerSettings from "../serverSettings.ts";
 
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import { ProjectEnrichmentService } from "../project/ProjectEnrichmentService.ts";
+import { DocumentText } from "../provider/DocumentText.ts";
 import * as OrchestrationHttp from "./http.ts";
 import * as VoiceThreadService from "../speech/VoiceThreadService.ts";
 import { EventSinkV2 } from "./EventSink.ts";
@@ -54,7 +55,7 @@ const decodeTranscript = Schema.decodeUnknownEffect(
 const now = DateTime.makeUnsafe("2026-09-29T00:00:00.000Z");
 const environmentId = EnvironmentId.make("source-بيئة");
 const output = "Full tool output. ".repeat(4_000);
-const thread = Schema.decodeUnknownSync(OrchestrationV2AppThread)({
+const thread = Schema.decodeSync(OrchestrationV2AppThread)({
   id: "source-thread",
   projectId: "source-project",
   title: "Source 界\nconversation",
@@ -133,6 +134,7 @@ const serveOrchestrationHttp = (allowed: () => boolean, voice = false) =>
     });
     const routes = HttpApiBuilder.layer(TranscriptTestApi).pipe(
       Layer.provide(OrchestrationHttp.layer),
+      Layer.provide(Layer.mock(DocumentText)({})),
       Layer.provide(
         voice
           ? Layer.mock(VoiceThreadService.VoiceThreadService)({

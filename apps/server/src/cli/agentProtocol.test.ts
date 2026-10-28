@@ -24,7 +24,7 @@ import {
   validateAgentReceiptMetadata,
 } from "./agentProtocol.ts";
 
-const decodeEnvironmentProviderStatus = Schema.decodeUnknownSync(EnvironmentProviderStatus);
+const decodeEnvironmentProviderStatus = Schema.decodeSync(EnvironmentProviderStatus);
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const now = "2026-08-31T04:00:00.000Z";
 const runtime = { pid: 123, startedAt: now };
@@ -66,9 +66,7 @@ const run = {
   checkpointId: null,
   contextHandoffId: null,
 };
-const decodeDetail = Schema.decodeUnknownSync(
-  Schema.toCodecJson(OrchestrationV2ThreadDetailSnapshot),
-);
+const decodeDetail = Schema.decodeSync(Schema.toCodecJson(OrchestrationV2ThreadDetailSnapshot));
 const detail = decodeDetail({
   snapshotSequence: 12,
   historyCursor: "older",
@@ -94,7 +92,7 @@ const detail = decodeDetail({
     updatedAt: now,
   },
 });
-const shellThread = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2ThreadShell))({
+const shellThread = Schema.decodeSync(Schema.toCodecJson(OrchestrationV2ThreadShell))({
   ...thread,
   latestRunId: "run-a",
   activeRunId: "run-a",
@@ -108,7 +106,7 @@ const shellThread = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2T
   settledOverride: null,
   settledAt: null,
 });
-const shell = Schema.decodeUnknownSync(OrchestrationV2ShellSnapshot)({
+const shell = Schema.decodeSync(OrchestrationV2ShellSnapshot)({
   schemaVersion: 2,
   snapshotSequence: 12,
   projects: [],
@@ -138,7 +136,7 @@ const interrupt = {
   threadId: "thread-a",
   runId: "run-a",
 };
-const request = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2RuntimeRequest))({
+const request = Schema.decodeSync(Schema.toCodecJson(OrchestrationV2RuntimeRequest))({
   id: "request-a",
   nodeId: "node-a",
   providerTurnId: null,
@@ -149,7 +147,7 @@ const request = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2Runti
   createdAt: now,
   resolvedAt: null,
 });
-const item = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2TurnItem))({
+const item = Schema.decodeSync(Schema.toCodecJson(OrchestrationV2TurnItem))({
   id: "item-a",
   threadId: "thread-a",
   runId: "run-a",

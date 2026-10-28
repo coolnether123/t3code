@@ -12,6 +12,7 @@ import { lookupVoiceAgenda } from "./voiceLookups.ts";
 
 export const layer = Layer.effectDiscard(
   Effect.gen(function* () {
+    const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
     const config = yield* ServerConfig.ServerConfig;
     const sessions = yield* Auxiliary.AuxiliaryProviderSessions;
     const threads = yield* VoiceThreadService.VoiceThreadService;
@@ -19,9 +20,9 @@ export const layer = Layer.effectDiscard(
     const replies = new CallReplyBuffer();
     const holds = new HoldTurnGuard();
     calls.bind({
-      context: (threadId) => Effect.runPromise(threads.context(threadId)),
+      context: (threadId) => runPromise(threads.context(threadId)),
       start: (input) =>
-        Effect.runPromise(
+        runPromise(
           Effect.gen(function* () {
             const link = yield* Effect.promise(() => calls.findLink(input.threadId));
             return yield* sessions.startSession(
@@ -31,9 +32,9 @@ export const layer = Layer.effectDiscard(
             );
           }),
         ),
-      send: (input) => Effect.runPromise(sessions.sendTurn(input)),
-      sessions: () => Effect.runPromise(sessions.listSessions()),
-      dispatch: (command) => Effect.runPromise(threads.dispatch(command)),
+      send: (input) => runPromise(sessions.sendTurn(input)),
+      sessions: () => runPromise(sessions.listSessions()),
+      dispatch: (command) => runPromise(threads.dispatch(command)),
       lookup: lookupVoiceAgenda,
     });
     yield* sessions.streamEvents.pipe(

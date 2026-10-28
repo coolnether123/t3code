@@ -37,7 +37,7 @@ const launcher = (
 ) =>
   ExternalLauncher.ExternalLauncher.of({
     resolveAvailableEditors: () => Effect.succeed([]),
-    resolveFileManagerRevealKind: () => Effect.succeed(undefined),
+    resolveFileManagerRevealKind: () => Effect.sync(() => undefined),
     launchBrowser,
     launchEditor: () => Effect.die("unused launchEditor"),
   });

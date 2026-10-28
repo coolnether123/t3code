@@ -89,6 +89,7 @@ export function HardwareKeyboardCommandProvider({
       setCopyFeedback(EMPTY_COPY_FEEDBACK);
     }, COPY_FEEDBACK_DISMISS_MS);
   }, []);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- clears the copy feedback timer on unmount
   useEffect(
     () => () => {
       if (copyFeedbackTimerRef.current !== null) {
@@ -119,6 +120,7 @@ export function HardwareKeyboardCommandProvider({
       if (pathname.split("/")[4] !== "terminal") commands.add("copyThreadReference");
     }
     return [...commands];
+    // oxlint-disable-next-line react/memo-dependencies -- registrationVersion invalidates the snapshot of the external keyboard-command registry.
   }, [activeThreadRef, pathname, registrationVersion, navigation]);
 
   const onCommand = useCallback(

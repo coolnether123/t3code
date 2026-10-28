@@ -60,6 +60,8 @@ export interface ExecuteGitInput {
   /** With appendTruncationMarker, line callbacks continue beyond the buffer cap for progress-only consumers. */
   readonly keepLineCallbacksAfterTruncation?: boolean;
   readonly progress?: ExecuteGitProgress;
+  /** Writes .git/config, which every worktree shares and Git locks without waiting. */
+  readonly writesSharedConfig?: boolean;
 }
 
 export interface ExecuteGitResult {
@@ -272,6 +274,18 @@ export interface GitFetchWorktreeBaseCommitInput {
   refName: string;
 }
 
+export interface GitCreateBranchInput {
+  readonly cwd: string;
+  readonly branch: string;
+  readonly startPoint: string;
+}
+
+export interface GitWriteConfigValueInput {
+  readonly cwd: string;
+  readonly key: string;
+  readonly value: string;
+}
+
 export interface GitSetBranchUpstreamInput {
   cwd: string;
   branch: string;
@@ -389,6 +403,11 @@ export class GitVcsDriver extends Context.Service<
     ) => Effect.Effect<void, GitCommandError>;
     readonly setBranchUpstream: (
       input: GitSetBranchUpstreamInput,
+    ) => Effect.Effect<void, GitCommandError>;
+    /** Tracks the start point like `git branch` does. */
+    readonly createBranch: (input: GitCreateBranchInput) => Effect.Effect<void, GitCommandError>;
+    readonly writeConfigValue: (
+      input: GitWriteConfigValueInput,
     ) => Effect.Effect<void, GitCommandError>;
     readonly removeWorktree: (
       input: VcsRemoveWorktreeInput,
@@ -1243,9 +1262,7 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
     restoreCheckpoint: Effect.fn("GitVcsDriver.checkpoints.restoreCheckpoint")(function* (input) {
       const operation = "GitVcsDriver.checkpoints.restoreCheckpoint";
 
-      const repository = yield* detectRepository(input.cwd).pipe(
-        Effect.catch(() => Effect.succeed(null)),
-      );
+      const repository = yield* detectRepository(input.cwd).pipe(Effect.orElseSucceed(() => null));
       if (!repository) {
         return {
           restored: false,
@@ -1255,7 +1272,7 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
       }
       const expectedRootRepository = input.expectedRepositoryRoot
         ? yield* detectRepository(input.expectedRepositoryRoot).pipe(
-            Effect.catch(() => Effect.succeed(null)),
+            Effect.orElseSucceed(() => null),
           )
         : null;
       const repositoryMatchesExpectedRoot = input.expectedRepositoryRoot

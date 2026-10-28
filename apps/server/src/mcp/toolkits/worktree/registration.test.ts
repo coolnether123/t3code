@@ -38,7 +38,22 @@ import * as McpSessionRegistry from "../../McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as PreviewBrowser from "../../../preview/PreviewBrowser.ts";
 
+import { DocumentText } from "../../../provider/DocumentText.ts";
+
+import { PeerForwarding } from "../../../peer/PeerForwarding.ts";
+
+import { PeerLinkRequests } from "../../../peer/PeerLinkRequests.ts";
+
+import { PeerLinks } from "../../../peer/PeerLinks.ts";
+
+import { RemoteDelegation } from "../../../peer/RemoteDelegation.ts";
+
 const layerStubServices = Layer.mergeAll(
+  Layer.mock(RemoteDelegation)({}),
+  Layer.mock(PeerLinks)({}),
+  Layer.mock(PeerLinkRequests)({}),
+  Layer.mock(PeerForwarding)({}),
+  Layer.mock(DocumentText)({}),
   Layer.mock(McpProviderSessions.McpProviderSessions)({}),
   Layer.mock(ChromeAutomation.ChromeAutomation)({}),
   Layer.mock(ExternalLauncher.ExternalLauncher)({}),

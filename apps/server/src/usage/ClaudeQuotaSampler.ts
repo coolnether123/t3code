@@ -56,20 +56,19 @@ const decodeClaudeSettings = Schema.decodeUnknownEffect(ClaudeSettings);
  * History needs readings while nobody has T3 open, so this checks only the
  * host's constraints rather than the client-activity leases other polling uses.
  */
-const hostAllowsSampling = (
+const hostAllowsSampling = Effect.fn("hostAllowsSampling")(function* (
   backgroundPolicy: BackgroundPolicy.BackgroundPolicy["Service"],
   settingsService: ServerSettingsService["Service"],
-) =>
-  Effect.gen(function* () {
-    const snapshot = yield* backgroundPolicy.snapshot;
-    const settings = yield* settingsService.getSettings.pipe(Effect.orElseSucceed(() => null));
-    return settings === null
-      ? true
-      : !BackgroundPolicy.isHostConstrained(
-          snapshot.hostPower,
-          resolveServerBackgroundActivitySettings(settings),
-        );
-  });
+) {
+  const snapshot = yield* backgroundPolicy.snapshot;
+  const settings = yield* settingsService.getSettings.pipe(Effect.orElseSucceed(() => null));
+  return settings === null
+    ? true
+    : !BackgroundPolicy.isHostConstrained(
+        snapshot.hostPower,
+        resolveServerBackgroundActivitySettings(settings),
+      );
+});
 
 export class ClaudeQuotaSampler extends Context.Service<
   ClaudeQuotaSampler,
@@ -80,17 +79,16 @@ export class ClaudeQuotaSampler extends Context.Service<
 >()("t3/usage/ClaudeQuotaSampler") {}
 
 /** The first Claude instance's settings, falling back to the built-in provider's. */
-const claudeSettingsFor = (settings: ServerSettings) =>
-  Effect.gen(function* () {
-    for (const instance of Object.values(settings.providerInstances)) {
-      if (String(instance.driver) !== "claudeAgent") continue;
-      const decoded = yield* decodeClaudeSettings(instance.config ?? {}).pipe(
-        Effect.orElseSucceed(() => null),
-      );
-      if (decoded !== null) return decoded;
-    }
-    return yield* decodeClaudeSettings({});
-  });
+const claudeSettingsFor = Effect.fn("claudeSettingsFor")(function* (settings: ServerSettings) {
+  for (const instance of Object.values(settings.providerInstances)) {
+    if (String(instance.driver) !== "claudeAgent") continue;
+    const decoded = yield* decodeClaudeSettings(instance.config ?? {}).pipe(
+      Effect.orElseSucceed(() => null),
+    );
+    if (decoded !== null) return decoded;
+  }
+  return yield* decodeClaudeSettings({});
+});
 
 export const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;

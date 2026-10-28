@@ -493,19 +493,18 @@ export const makeCodexDesktopDaemonStdio = Effect.fn("makeCodexDesktopDaemonStdi
     });
 
   let outgoingRemainder = "";
-  const send = (chunk: string | Uint8Array) =>
-    Effect.gen(function* () {
-      const text =
-        outgoingRemainder +
-        (typeof chunk === "string" ? chunk : outgoingTextDecoder.decode(chunk, { stream: true }));
-      let start = 0;
-      for (let newline = text.indexOf("\n"); newline !== -1; newline = text.indexOf("\n", start)) {
-        const message = text.slice(start, newline).replace(/\r$/, "");
-        if (message.length > 0) yield* sendMessage(message);
-        start = newline + 1;
-      }
-      outgoingRemainder = text.slice(start);
-    });
+  const send = Effect.fn("CodexAppServerTransport.send")(function* (chunk: string | Uint8Array) {
+    const text =
+      outgoingRemainder +
+      (typeof chunk === "string" ? chunk : outgoingTextDecoder.decode(chunk, { stream: true }));
+    let start = 0;
+    for (let newline = text.indexOf("\n"); newline !== -1; newline = text.indexOf("\n", start)) {
+      const message = text.slice(start, newline).replace(/\r$/, "");
+      if (message.length > 0) yield* sendMessage(message);
+      start = newline + 1;
+    }
+    outgoingRemainder = text.slice(start);
+  });
 
   yield* Effect.addFinalizer(() =>
     Effect.sync(() => {

@@ -210,6 +210,7 @@ it.effect(
         ProjectionStore.ProjectionStoreV2.of({
           apply: () => Effect.void,
           getLimitRecoveryCandidates: () => Effect.die("unused getLimitRecoveryCandidates"),
+          getOpenRemoteDelegatedTasks: Effect.die("unused getOpenRemoteDelegatedTasks"),
           getShellSnapshot: () => Effect.die("unused getShellSnapshot"),
           listActiveSubagentThreadIds: () => Effect.die("unused listActiveSubagentThreadIds"),
           listOlderSettledThreads: () => Effect.die("unused listOlderSettledThreads"),
@@ -276,7 +277,7 @@ it.effect(
               providerSessionId === oldSessionId ? Option.some(runtime) : Option.none(),
             ),
           isLive: (providerSessionId) => Effect.succeed(providerSessionId === oldSessionId),
-          getAuxiliaryOwner: () => Effect.succeed(undefined),
+          getAuxiliaryOwner: () => Effect.sync(() => undefined),
           close: () => Effect.void,
           closeInstance: () => Effect.void,
           release: () => Effect.void,

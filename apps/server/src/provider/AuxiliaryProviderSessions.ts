@@ -254,9 +254,10 @@ const make = Effect.gen(function* () {
   return AuxiliaryProviderSessions.of({
     streamEvents: Stream.fromPubSub(events),
     streamAdapterEvents: Stream.fromPubSub(adapterEvents),
-    getInstanceInfo: (instanceId) =>
+    getInstanceInfo: Effect.fn("AuxiliaryProviderSessions.getInstanceInfo")((instanceId) =>
       registry.get(instanceId).pipe(Effect.map((adapter) => ({ driverKind: adapter.driver }))),
-    listSessions: () =>
+    ),
+    listSessions: Effect.fn("AuxiliaryProviderSessions.listSessions")(() =>
       Effect.forEach([...sessions], ([id, session]) =>
         Effect.gen(function* () {
           if (!(yield* manager.isLive(session.runtime.providerSessionId)))
@@ -264,109 +265,117 @@ const make = Effect.gen(function* () {
           return sessionView(id, session);
         }),
       ),
+    ),
     stopSession,
-    startSession: (threadId, input, owningThreadId) =>
-      lock.withPermit(
-        Effect.gen(function* () {
-          yield* stopSession({ threadId });
-          const modelSelection = input.modelSelection;
-          if (modelSelection === undefined)
-            return yield* new AuxiliarySessionError({ operation: "select a model for", threadId });
-          const adapter = yield* registry.get(
-            input.providerInstanceId ?? modelSelection.instanceId,
-          );
-          if (input.toolMode === "none" && adapter.driver !== "claudeAgent") {
-            return yield* new AuxiliarySessionError({
-              operation: "open a tool-free conversation with this provider in",
-              threadId,
-            });
-          }
-          const scope = yield* Scope.fork(ownerScope, "sequential");
-          const runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy = {
-            cwd: input.cwd ?? null,
-            runtimeMode: input.runtimeMode,
-            interactionMode: "default",
-            ...(input.approvalPolicy === undefined ? {} : { approvalPolicy: input.approvalPolicy }),
-            ...(input.sandboxMode === undefined ? {} : { sandboxPolicy: input.sandboxMode }),
-            ...(input.toolMode === undefined ? {} : { toolMode: input.toolMode }),
-            isolated: true,
-          };
-          const runtime = yield* manager.open({
-            threadId,
-            ...(owningThreadId === undefined ? {} : { owningThreadId }),
-            providerSessionId: ProviderSessionId.make(yield* uuid),
-            modelSelection,
-            runtimePolicy,
-          });
-          const providerThread = yield* runtime.ensureThread({
-            threadId,
-            modelSelection,
-            runtimePolicy,
-            ...(input.title === undefined ? {} : { title: input.title }),
-          });
-          const session: Session = {
-            runtime,
-            scope,
-            input,
-            modelSelection,
-            runtimePolicy,
-            providerThread,
-            status: "ready",
-            texts: new Map(),
-            turnId: undefined,
-            runId: undefined,
-            ordinal: 0,
-            pending: undefined,
-            createdAt: DateTime.formatIso(yield* DateTime.now),
-          };
-          sessions.set(threadId, session);
-          const subscription =
-            runtime.subscribeEvents === undefined ? undefined : yield* runtime.subscribeEvents;
-          if (subscription !== undefined)
-            yield* Effect.addFinalizer(() => subscription.close).pipe(
-              Effect.provideService(Scope.Scope, scope),
-            );
-          yield* (subscription?.events ?? runtime.events).pipe(
-            Stream.runForEach((event) => ingest(threadId, session, event)),
-            Effect.andThen(
-              Effect.fail(new AuxiliarySessionError({ operation: "read events from", threadId })),
-            ),
-            Effect.catch((cause) =>
-              Effect.gen(function* () {
-                session.status = "error";
-                const error = new AuxiliarySessionError({
-                  operation: "read events from",
-                  threadId,
-                  cause,
-                });
-                if (session.pending !== undefined) yield* Deferred.fail(session.pending, error);
-                session.pending = undefined;
-                yield* emit(threadId, session, {
-                  type: "runtime.error",
-                  payload: { message: error.message },
-                });
-              }),
-            ),
-            Effect.forkIn(scope),
-          );
-          if (input.toolMode === "none" && runtime.prepareThread !== undefined)
-            yield* runtime
-              .prepareThread({
+    startSession: Effect.fn("AuxiliaryProviderSessions.startSession")(
+      (threadId, input, owningThreadId) =>
+        lock.withPermit(
+          Effect.gen(function* () {
+            yield* stopSession({ threadId });
+            const modelSelection = input.modelSelection;
+            if (modelSelection === undefined)
+              return yield* new AuxiliarySessionError({
+                operation: "select a model for",
                 threadId,
-                providerThread,
-                modelSelection,
-                runtimePolicy,
-              })
-              .pipe(Effect.onError(() => stopSession({ threadId })));
-          return sessionView(threadId, session);
-        }).pipe(
-          Effect.mapError((cause) =>
-            isAuxiliarySessionError(cause)
-              ? cause
-              : new AuxiliarySessionError({ operation: "open", threadId, cause }),
+              });
+            const adapter = yield* registry.get(
+              input.providerInstanceId ?? modelSelection.instanceId,
+            );
+            if (input.toolMode === "none" && adapter.driver !== "claudeAgent") {
+              return yield* new AuxiliarySessionError({
+                operation: "open a tool-free conversation with this provider in",
+                threadId,
+              });
+            }
+            const scope = yield* Scope.fork(ownerScope, "sequential");
+            const runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy = {
+              cwd: input.cwd ?? null,
+              runtimeMode: input.runtimeMode,
+              interactionMode: "default",
+              ...(input.approvalPolicy === undefined
+                ? {}
+                : { approvalPolicy: input.approvalPolicy }),
+              ...(input.sandboxMode === undefined ? {} : { sandboxPolicy: input.sandboxMode }),
+              ...(input.toolMode === undefined ? {} : { toolMode: input.toolMode }),
+              isolated: true,
+            };
+            const runtime = yield* manager.open({
+              threadId,
+              ...(owningThreadId === undefined ? {} : { owningThreadId }),
+              providerSessionId: ProviderSessionId.make(yield* uuid),
+              modelSelection,
+              runtimePolicy,
+            });
+            const providerThread = yield* runtime.ensureThread({
+              threadId,
+              modelSelection,
+              runtimePolicy,
+              ...(input.title === undefined ? {} : { title: input.title }),
+            });
+            const session: Session = {
+              runtime,
+              scope,
+              input,
+              modelSelection,
+              runtimePolicy,
+              providerThread,
+              status: "ready",
+              texts: new Map(),
+              turnId: undefined,
+              runId: undefined,
+              ordinal: 0,
+              pending: undefined,
+              createdAt: DateTime.formatIso(yield* DateTime.now),
+            };
+            sessions.set(threadId, session);
+            const subscription =
+              runtime.subscribeEvents === undefined ? undefined : yield* runtime.subscribeEvents;
+            if (subscription !== undefined)
+              yield* Effect.addFinalizer(() => subscription.close).pipe(
+                Effect.provideService(Scope.Scope, scope),
+              );
+            yield* (subscription?.events ?? runtime.events).pipe(
+              Stream.runForEach((event) => ingest(threadId, session, event)),
+              Effect.andThen(
+                Effect.fail(new AuxiliarySessionError({ operation: "read events from", threadId })),
+              ),
+              Effect.catch((cause) =>
+                Effect.gen(function* () {
+                  session.status = "error";
+                  const error = new AuxiliarySessionError({
+                    operation: "read events from",
+                    threadId,
+                    cause,
+                  });
+                  if (session.pending !== undefined) yield* Deferred.fail(session.pending, error);
+                  session.pending = undefined;
+                  yield* emit(threadId, session, {
+                    type: "runtime.error",
+                    payload: { message: error.message },
+                  });
+                }),
+              ),
+              Effect.forkIn(scope),
+            );
+            if (input.toolMode === "none" && runtime.prepareThread !== undefined)
+              yield* runtime
+                .prepareThread({
+                  threadId,
+                  providerThread,
+                  modelSelection,
+                  runtimePolicy,
+                })
+                .pipe(Effect.onError(() => stopSession({ threadId })));
+            return sessionView(threadId, session);
+          }).pipe(
+            Effect.mapError((cause) =>
+              isAuxiliarySessionError(cause)
+                ? cause
+                : new AuxiliarySessionError({ operation: "open", threadId, cause }),
+            ),
           ),
         ),
-      ),
+    ),
     sendTurn: (input) =>
       Effect.gen(function* () {
         const session = yield* requireSession(input.threadId, "start a turn in");

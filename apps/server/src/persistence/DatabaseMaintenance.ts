@@ -184,7 +184,7 @@ const make = Effect.gen(function* () {
         if (!(yield* maintenance.verify).valid) {
           return yield* new DatabaseProjectionsInvalidError({ path: databasePath });
         }
-        const summary = yield* maintenance.compactEventStore;
+        const summary = yield* maintenance.compactEventStore();
         if (!(yield* maintenance.verify).valid) {
           return yield* new DatabaseProjectionsInvalidError({ path: databasePath });
         }

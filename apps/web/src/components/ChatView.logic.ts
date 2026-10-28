@@ -41,6 +41,7 @@ import {
   type ScopedProjectRef,
   type ScopedThreadRef,
   type ThreadContextRecord,
+  type EnvironmentContextRecord,
   type ThreadId,
   type ThreadLinkedPullRequest,
   type RunId,
@@ -114,7 +115,7 @@ type ThreadStructureRow = ThreadStructure["visibleTurnItems"][number];
 export const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "t3code:last-invoked-script-by-project";
 export const MAX_HIDDEN_MOUNTED_TERMINAL_THREADS = 10;
 
-const ENVIRONMENT_RECONNECT_WARNING_GRACE_MS = 2_000;
+export const ENVIRONMENT_RECONNECT_WARNING_GRACE_MS = 2_000;
 
 /** Reuse the ordinary create command with the draft's identity and call voice selection. */
 export function buildVoiceThreadCreateInput(input: {
@@ -518,18 +519,18 @@ export function resolveThreadSwitchTimeline<T extends readonly unknown[]>(input:
   nextEntries: T;
   rememberedForActive?: T | null;
   lastReady?: HeldThreadTimeline<T> | null;
-}): { entries: T; displayThreadKey: string | null } {
+}): T {
   if (input.nextEntries.length > 0) {
-    return { entries: input.nextEntries, displayThreadKey: input.activeThreadKey };
+    return input.nextEntries;
   }
 
   const rememberedForActive =
     input.rememberedForActive ?? peekRememberedThreadTimeline<T>(input.activeThreadKey);
   if (input.loading && rememberedForActive !== null && rememberedForActive.length > 0) {
-    return { entries: rememberedForActive, displayThreadKey: input.activeThreadKey };
+    return rememberedForActive;
   }
 
-  return { entries: input.nextEntries, displayThreadKey: input.activeThreadKey };
+  return input.nextEntries;
 }
 
 export function resolveDraftPromotionNavigationTarget(input: {
@@ -1367,6 +1368,7 @@ export interface PlanFollowUpComposerSnapshot {
   readonly reviewComments: ReadonlyArray<ReviewCommentContext>;
   readonly previewAnnotations: ReadonlyArray<PreviewAnnotationPayload>;
   readonly threadContexts: ReadonlyArray<ThreadContextRecord>;
+  readonly environmentContexts: ReadonlyArray<EnvironmentContextRecord>;
 }
 
 export function restorePlanFollowUpComposer(input: {
@@ -1376,6 +1378,7 @@ export function restorePlanFollowUpComposer(input: {
   readonly writeReviewComments: (comments: ReadonlyArray<ReviewCommentContext>) => void;
   readonly writePreviewAnnotations: (annotations: ReadonlyArray<PreviewAnnotationPayload>) => void;
   readonly writeThreadContexts: (records: ReadonlyArray<ThreadContextRecord>) => void;
+  readonly writeEnvironmentContexts: (records: ReadonlyArray<EnvironmentContextRecord>) => void;
   readonly resetCursor: (options: {
     cursor: number;
     prompt: string;
@@ -1387,6 +1390,7 @@ export function restorePlanFollowUpComposer(input: {
   input.writeReviewComments(input.snapshot.reviewComments);
   input.writePreviewAnnotations(input.snapshot.previewAnnotations);
   input.writeThreadContexts(input.snapshot.threadContexts);
+  input.writeEnvironmentContexts(input.snapshot.environmentContexts);
   input.resetCursor({
     cursor: collapseExpandedComposerCursor(input.snapshot.prompt, input.snapshot.prompt.length),
     prompt: input.snapshot.prompt,
@@ -1546,6 +1550,7 @@ export interface ComposerSendContents {
   readonly previewAnnotations: ReadonlyArray<PreviewAnnotationPayload>;
   readonly reviewComments: ReadonlyArray<ReviewCommentContext>;
   readonly threadContexts: ReadonlyArray<ThreadContextRecord>;
+  readonly environmentContexts: ReadonlyArray<EnvironmentContextRecord>;
 }
 
 /**
@@ -1565,6 +1570,7 @@ export function snapshotComposerSend(contents: ComposerSendContents) {
     previewAnnotations: [...contents.previewAnnotations],
     reviewComments: [...contents.reviewComments],
     threadContexts: [...contents.threadContexts],
+    environmentContexts: [...contents.environmentContexts],
     messageText: contents.terminalContexts
       .filter((context) => !terminalContexts.includes(context))
       .reduce(

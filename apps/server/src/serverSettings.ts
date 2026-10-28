@@ -580,7 +580,7 @@ const make = Effect.gen(function* () {
   );
 
   const readRawConfig = fs.readFileString(settingsPath).pipe(
-    Effect.map(Option.some),
+    Effect.asSome,
     Effect.catchIf(
       (cause) => cause.reason._tag === "NotFound",
       () => Effect.succeedNone,

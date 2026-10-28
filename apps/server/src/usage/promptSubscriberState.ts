@@ -28,11 +28,8 @@ export function validPromptCutoverReceipt(receipt: unknown): boolean {
   );
 }
 
-export const promptCutoverEnabled = (
-  env: NodeJS.ProcessEnv = process.env,
-  filesystem?: FileSystem.FileSystem,
-) =>
-  Effect.gen(function* () {
+export const promptCutoverEnabled = Effect.fn("promptCutoverEnabled")(
+  function* (env: NodeJS.ProcessEnv, filesystem?: FileSystem.FileSystem) {
     if (
       env.T3_OTIS_USAGE_MODE !== "otis" ||
       !env.T3_OTIS_USAGE_ORIGIN ||
@@ -47,7 +44,9 @@ export const promptCutoverEnabled = (
     if (stat.size > 4n * 1024n * 1024n) return false;
     const text = yield* fs.readFileString(env.T3_OTIS_USAGE_PARITY_RECEIPT);
     return validPromptCutoverReceipt(yield* decodeReceipt(text));
-  }).pipe(Effect.catchCause(() => Effect.succeed(false)));
+  },
+  (effect) => Effect.orElseSucceed(effect, () => false),
+);
 
 let localFallbackUntil = 0;
 let promptIndexCutover = false;

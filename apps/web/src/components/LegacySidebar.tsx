@@ -26,7 +26,15 @@ import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { ProjectFavicon } from "./ProjectFavicon";
 import { useAtomValue } from "@effect/atom-react";
 import { autoAnimate } from "@formkit/auto-animate";
-import React, { useEffect, useEffectEvent, memo, useRef, useState } from "react";
+import React, {
+  createContext,
+  useEffect,
+  useEffectEvent,
+  memo,
+  useContext,
+  useRef,
+  useState,
+} from "react";
 import { cn } from "~/lib/utils";
 import { useShallow } from "zustand/react/shallow";
 import {
@@ -92,6 +100,7 @@ import { makeWorkspaceFileDropHandlers } from "./chat/workspaceFileDrop";
 import {
   readThreadShell,
   useProjects,
+  useDelegatedUnderParent,
   useThreadShells,
   useThreadShellsForProjectRefs,
   waitForProjectRemoval,
@@ -201,7 +210,8 @@ import {
   shouldClearThreadSelectionOnMouseDown,
   sortProjectsForSidebar,
   useSidebarRowSubscriptionLease,
-  useThreadJumpHintVisibility,
+  setFileDragActive,
+  useThreadJumpHintsVisible,
   ThreadStatusPill,
 } from "./Sidebar.logic";
 import { sortThreads } from "../lib/threadSort";
@@ -210,7 +220,7 @@ import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useIsMobile } from "~/hooks/useMediaQuery";
 import { CommandDialogTrigger } from "./ui/command";
 import { useClientSettings, updateClientSettings } from "~/hooks/useSettings";
-import { primaryServerKeybindingsAtom, serverEnvironment } from "../state/server";
+import { primaryServerKeybindingsAtom } from "../state/server";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { canShareWithGuestAtom } from "./chat/guestShareAvailability";
 import { openGuestShareDialog } from "./chat/guestShareDialogState";
@@ -229,11 +239,7 @@ import {
 } from "../sidebarProjectGrouping";
 import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
 import { useThreadRouteTarget } from "../hooks/useThreadRouteTarget";
-import {
-  completeSidebarRouteReveal,
-  pendingSidebarRouteReveal,
-  type SidebarRouteReveal,
-} from "./sidebar/routeReveal";
+import { type SidebarRouteReveal, useActiveRowReveal } from "./sidebar/routeReveal";
 const SIDEBAR_SORT_LABELS: Record<SidebarProjectSortOrder, string> = {
   updated_at: "Last user message",
   created_at: "Created at",
@@ -385,6 +391,11 @@ function checkTaskPermission(environmentId: EnvironmentId): boolean {
   return false;
 }
 
+// The active row reports itself, so a route change scrolls to it once it mounts.
+const RevealActiveRowContext = createContext<(row: HTMLElement | null, threadKey: string) => void>(
+  () => {},
+);
+
 const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowProps) {
   const {
     orderedProjectThreadKeys,
@@ -417,12 +428,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   const canOperatePreview = useEnvironmentScope(thread.environmentId, AuthPreviewOperateScope);
   const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
   const [isFileDragOver, setIsFileDragOver] = useState(false);
-  useEffect(() => {
-    if (!isFileDragOver) return;
-    const clearFileDrag = () => setIsFileDragOver(false);
-    window.addEventListener("dragend", clearFileDrag);
-    return () => window.removeEventListener("dragend", clearFileDrag);
-  }, [isFileDragOver]);
+  const revealActiveRow = useContext(RevealActiveRowContext);
   const { leaseLiveStatus, rowRef } = useSidebarRowSubscriptionLease(isActive);
   const localLastVisitedAt = useUiStateStore((state) => state.threadLastVisitedAtById[threadKey]);
   const lastVisitedAt = resolveThreadLastVisitedAt(thread.lastVisitedAt, localLastVisitedAt);
@@ -468,7 +474,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   // Hooks must precede this ref's plain uses for the compiler to cache it.
   const threadRef = scopeThreadRef(thread.environmentId, thread.id);
   const fileDropHandlers = makeWorkspaceFileDropHandlers({
-    setDragActive: setIsFileDragOver,
+    setDragActive: (active) => setFileDragActive(setIsFileDragOver, active),
     addFiles: (files) => {
       onFileDropThreads(threadRef, files);
     },
@@ -671,6 +677,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       onBlurCapture={handleBlurCapture}
     >
       <div
+        ref={isActive ? (node) => revealActiveRow(node, threadKey) : undefined}
         role="button"
         tabIndex={0}
         data-active={isActive}
@@ -1120,6 +1127,7 @@ function useProjectThreads(project: SidebarProjectSnapshot) {
     (settings) => settings.sidebarThreadSortOrder,
   );
   const sidebarThreads = useThreadShellsForProjectRefs(project.memberProjectRefs);
+  const delegatedUnderParent = useDelegatedUnderParent();
   const threadLastVisitedAts = useUiStateStore(
     useShallow((state) =>
       sidebarThreads.map(
@@ -1164,7 +1172,7 @@ function useProjectThreads(project: SidebarProjectSnapshot) {
     ]),
   );
   const visibleProjectThreads = sortThreads(
-    filterSidebarV2VisibleThreads(sidebarThreads, null),
+    filterSidebarV2VisibleThreads(sidebarThreads, null, delegatedUnderParent),
     threadSortOrder,
   );
   const projectStatus = resolveProjectStatusIndicator(
@@ -3118,6 +3126,7 @@ function useSortedLegacySidebarProjects(input: {
     sidebarProjectSortOrder,
   } = input;
   const sidebarThreads = useThreadShells().filter((thread) => thread.id !== OTIS_THREAD_ID);
+  const delegatedUnderParent = useDelegatedUnderParent();
   const sidebarProjectByKey = new Map(
     sidebarProjects.map((project) => [project.projectKey, project] as const),
   );
@@ -3125,7 +3134,11 @@ function useSortedLegacySidebarProjects(input: {
     ...project,
     id: project.projectKey,
   }));
-  const sortableThreads = filterSidebarV2VisibleThreads(sidebarThreads, null).map((thread) => {
+  const sortableThreads = filterSidebarV2VisibleThreads(
+    sidebarThreads,
+    null,
+    delegatedUnderParent,
+  ).map((thread) => {
     const physicalKey =
       projectPhysicalKeyByScopedRef.get(
         scopedProjectKey(scopeProjectRef(thread.environmentId, thread.projectId)),
@@ -3168,6 +3181,7 @@ function useLegacySidebarThreads(input: {
     expandedThreadListsByProject,
   } = input;
   const sidebarThreads = useThreadShells();
+  const delegatedUnderParent = useDelegatedUnderParent();
   const projectExpandedById = useUiStateStore((store) => store.projectExpandedById);
   const sidebarThreadByKey = new Map(
     sidebarThreads.map(
@@ -3198,7 +3212,11 @@ function useLegacySidebarThreads(input: {
   }
   const visibleSidebarThreadKeys = sortedProjects.flatMap((project) => {
     const projectThreads = sortThreads(
-      filterSidebarV2VisibleThreads(threadsByProjectKey.get(project.projectKey) ?? [], null),
+      filterSidebarV2VisibleThreads(
+        threadsByProjectKey.get(project.projectKey) ?? [],
+        null,
+        delegatedUnderParent,
+      ),
       sidebarThreadSortOrder,
     );
     const projectExpanded = resolveProjectExpanded(
@@ -3262,6 +3280,13 @@ function useLegacySidebarThreads(input: {
   };
 }
 
+function clearThreadSelectionOnOutsideMouseDown(event: globalThis.MouseEvent) {
+  const selection = useThreadSelectionStore.getState();
+  if (!selection.hasSelection()) return;
+  const target = event.target instanceof HTMLElement ? event.target : null;
+  if (shouldClearThreadSelectionOnMouseDown(target)) selection.clearSelection();
+}
+
 export default function LegacySidebar({ routeReveal }: { routeReveal: SidebarRouteReveal }) {
   const reorderProjects = useUiStateStore((store) => store.reorderProjects);
   const navigate = useNavigate();
@@ -3286,7 +3311,6 @@ export default function LegacySidebar({ routeReveal }: { routeReveal: SidebarRou
   const [expandedThreadListsByProject, setExpandedThreadListsByProject] = useState<
     ReadonlySet<string>
   >(() => new Set());
-  const { showThreadJumpHints, updateThreadJumpHintsVisibility } = useThreadJumpHintVisibility();
   const dragInProgressRef = useRef(false);
   const suppressProjectClickAfterDragRef = useRef(false);
   const suppressProjectClickForContextMenuRef = useRef(false);
@@ -3326,25 +3350,7 @@ export default function LegacySidebar({ routeReveal }: { routeReveal: SidebarRou
     sidebarThreadPreviewCount,
     expandedThreadListsByProject,
   });
-  // History and the command palette can open a thread scrolled out of view,
-  // and a remount starts the list at the top, so each route change and each
-  // mount scroll to the open thread once. Its row can mount after the route
-  // does, once its environment's shells arrive, so the reveal waits for it.
-  const mountRevealOwed = useRef(true);
-  const routeRowRendered =
-    routeThreadKey !== null && visibleSidebarThreadKeys.includes(routeThreadKey);
-  const revealRouteRow = useStableCallback(() => {
-    const pendingKey = pendingSidebarRouteReveal(routeReveal, routeThreadKey);
-    if (pendingKey === null && (!mountRevealOwed.current || routeThreadKey === null)) return;
-    const activeRow = document.querySelector(
-      '[data-sidebar="content"] [data-thread-item] [data-active="true"]',
-    );
-    if (!activeRow) return;
-    completeSidebarRouteReveal(routeReveal);
-    mountRevealOwed.current = false;
-    activeRow.scrollIntoView({ block: "nearest" });
-  });
-  useEffect(revealRouteRow, [revealRouteRow, routeThreadKey, routeRowRendered]);
+  const revealActiveRow = useActiveRowReveal(routeReveal, routeThreadKey);
   const newThreadShortcutLabelOptions = {
     platform,
     context: {
@@ -3441,14 +3447,11 @@ export default function LegacySidebar({ routeReveal }: { routeReveal: SidebarRou
       context: sidebarShortcutContext,
     },
   );
+  const showThreadJumpHints = useThreadJumpHintsVisible(shouldShowThreadJumpHintsNow);
   const visibleThreadJumpLabelByKey = showThreadJumpHints
     ? threadJumpLabelByKey
     : EMPTY_THREAD_JUMP_LABELS;
   const orderedSidebarThreadKeys = visibleSidebarThreadKeys;
-
-  useEffect(() => {
-    updateThreadJumpHintsVisibility(shouldShowThreadJumpHintsNow);
-  }, [shouldShowThreadJumpHintsNow, updateThreadJumpHintsVisibility]);
 
   const onWindowKeyDown = useEffectEvent((event: globalThis.KeyboardEvent) => {
     const shortcutContext = {
@@ -3504,6 +3507,7 @@ export default function LegacySidebar({ routeReveal }: { routeReveal: SidebarRou
     event.stopPropagation();
     navigateToThread(scopeThreadRef(targetThread.environmentId, targetThread.id));
   });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- subscribes to window keydown for thread navigation shortcuts for the sidebar's lifetime
   useEffect(() => {
     const handleWindowKeyDown = (event: globalThis.KeyboardEvent) => onWindowKeyDown(event);
     window.addEventListener("keydown", handleWindowKeyDown);
@@ -3511,20 +3515,12 @@ export default function LegacySidebar({ routeReveal }: { routeReveal: SidebarRou
       window.removeEventListener("keydown", handleWindowKeyDown);
     };
   }, []);
-
+  // A window listener whose lifetime is the sidebar's: no element owns outside clicks.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- window mousedown listener that clears thread selection on outside clicks for the sidebar's lifetime
   useEffect(() => {
-    const onMouseDown = (event: globalThis.MouseEvent) => {
-      if (!useThreadSelectionStore.getState().hasSelection()) return;
-      const target = event.target instanceof HTMLElement ? event.target : null;
-      if (!shouldClearThreadSelectionOnMouseDown(target)) return;
-      clearSelection();
-    };
-
-    window.addEventListener("mousedown", onMouseDown);
-    return () => {
-      window.removeEventListener("mousedown", onMouseDown);
-    };
-  }, [clearSelection]);
+    window.addEventListener("mousedown", clearThreadSelectionOnOutsideMouseDown);
+    return () => window.removeEventListener("mousedown", clearThreadSelectionOnOutsideMouseDown);
+  }, []);
 
   const desktopUpdateButtonDisabled = isDesktopUpdateButtonDisabled(desktopUpdateState);
   const desktopUpdateButtonAction = desktopUpdateState
@@ -3650,7 +3646,7 @@ export default function LegacySidebar({ routeReveal }: { routeReveal: SidebarRou
   };
 
   return (
-    <>
+    <RevealActiveRowContext value={revealActiveRow}>
       {prewarmedSidebarThreadRefs.map((threadRef) => (
         <SidebarThreadDetailPrewarmer key={scopedThreadKey(threadRef)} threadRef={threadRef} />
       ))}
@@ -3695,7 +3691,7 @@ export default function LegacySidebar({ routeReveal }: { routeReveal: SidebarRou
         attachProjectListAutoAnimateRef={attachProjectListAutoAnimateRef}
         projectsLength={projectsLength}
       />
-      <SidebarChromeFooter />
-    </>
+      <SidebarChromeFooter showUndoNotice />
+    </RevealActiveRowContext>
   );
 }

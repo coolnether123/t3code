@@ -1,3 +1,4 @@
+import * as DocumentText from "../provider/DocumentText.ts";
 import * as FileSystem from "effect/FileSystem";
 import * as VoiceThreadService from "../speech/VoiceThreadService.ts";
 import * as ServerConfig from "../config.ts";
@@ -12,6 +13,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Result from "effect/Result";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
@@ -65,6 +67,7 @@ export const layer = HttpApiBuilder.group(
     const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
     const voiceThreads = yield* Effect.serviceOption(VoiceThreadService.VoiceThreadService);
     const dispatchContext = yield* Effect.context<
+      | DocumentText.DocumentText
       | FileSystem.FileSystem
       | ServerConfig.ServerConfig
       | ThreadManagementService.ThreadManagementService
@@ -302,9 +305,11 @@ export const layer = HttpApiBuilder.group(
         Effect.fn("environment.orchestration.threadHistoryPage")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
           yield* requireEnvironmentScope(AuthOrchestrationReadScope);
-          try {
-            decodeThreadHistoryCursor(args.query.cursor);
-          } catch (cause) {
+          const decoded = yield* Effect.try(() =>
+            decodeThreadHistoryCursor(args.query.cursor),
+          ).pipe(Effect.result);
+          if (Result.isFailure(decoded)) {
+            const cause = decoded.failure.cause;
             if (cause instanceof InvalidThreadHistoryCursorError)
               return yield* failEnvironmentInvalidRequest("invalid_history_cursor");
             return yield* failEnvironmentInternal("orchestration_thread_history_failed", cause);

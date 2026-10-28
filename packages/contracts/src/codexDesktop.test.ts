@@ -8,7 +8,7 @@ import {
 
 describe("Codex desktop contracts", () => {
   it("accepts native history with untimestamped items and tool activity", () => {
-    const history = Schema.decodeUnknownSync(CodexDesktopThreadHistoryResponse)({
+    const history = Schema.decodeSync(CodexDesktopThreadHistoryResponse)({
       thread: {
         id: "thread-1",
         title: "Release review",
@@ -34,7 +34,7 @@ describe("Codex desktop contracts", () => {
   });
 
   it("keeps delivery state distinct from native agent state", () => {
-    const delivery = Schema.decodeUnknownSync(CodexDesktopSendMessageResponse)({
+    const delivery = Schema.decodeSync(CodexDesktopSendMessageResponse)({
       requestId: "request-1",
       status: "queued",
       message: null,

@@ -48,6 +48,7 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
 import { subscribeOrchestrationV2Thread } from "../ws.ts";
+import { DocumentText } from "../provider/DocumentText.ts";
 import * as OrchestrationHttp from "./http.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProjectStore from "./ProjectStore.ts";
@@ -409,6 +410,7 @@ const withHttp = <A>(use: (get: (path: string) => Promise<Response>) => Promise<
     const context = yield* Effect.context<Layer.Success<typeof TestLayer>>();
     const appLayer = HttpApiBuilder.layer(OrchestrationApi).pipe(
       Layer.provide(OrchestrationHttp.layer),
+      Layer.provide(Layer.mock(DocumentText)({})),
       Layer.provide(
         Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({
           enqueueCommand: (effect) => effect,

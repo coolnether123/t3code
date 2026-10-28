@@ -36,6 +36,7 @@ export const speechRouteLayer = HttpRouter.add(
     if (text.length > 16_000_000)
       return HttpServerResponse.text("Recording too large.", { status: 413 });
     const input = yield* decodeSpeechRequest(text);
+    const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
     const config = yield* ServerConfig;
     const engine = yield* VoiceThreadService;
     if (input.action === "otis.open")
@@ -46,20 +47,18 @@ export const speechRouteLayer = HttpRouter.add(
       callStore(config.stateDir),
       {
         verify: async (options) => {
-          const snapshot = await Effect.runPromise(engine.snapshot(options.threadId));
+          const snapshot = await runPromise(engine.snapshot(options.threadId));
           if (!snapshot.projection.thread || snapshot.projection.thread.archivedAt)
             throw new Error("Open an existing chat before starting a call.");
-          verifyCallModel(options, await Effect.runPromise(providers.getProviders));
+          verifyCallModel(options, await runPromise(providers.getProviders));
           return {
             runtimeMode: snapshot.projection.thread.runtimeMode,
             interactionMode: snapshot.projection.thread.interactionMode,
           };
         },
-        dispatch: (command) => Effect.runPromise(engine.dispatch(command)),
+        dispatch: (command) => runPromise(engine.dispatch(command)),
         verifyVoice: async (selection) => {
-          const caps = await Effect.runPromise(
-            providerService.getInstanceInfo(selection.instanceId),
-          );
+          const caps = await runPromise(providerService.getInstanceInfo(selection.instanceId));
           if (caps.driverKind !== "claudeAgent")
             throw new Error(
               "This provider does not support tool-free voice sessions. It can still run as the background agent.",
@@ -82,6 +81,8 @@ export const speechRouteLayer = HttpRouter.add(
       callOperator(config.stateDir),
     );
     if ("callId" in input && input.action === "call.speak" && input.streamAudio) {
+      // The response stream outlives the handler and cancels its own speech request.
+      // @effect-diagnostics-next-line abortControllerInEffect:off
       const controller = new AbortController();
       const body = Stream.fromAsyncIterable(
         calls.speakStream(input, controller.signal),
@@ -138,8 +139,6 @@ export const speechRouteLayer = HttpRouter.add(
       EnvironmentInternalError: HttpServerRespondable.toResponse,
       EnvironmentScopeRequiredError: HttpServerRespondable.toResponse,
     }),
-    Effect.catch(() =>
-      Effect.succeed(HttpServerResponse.text("Invalid speech request.", { status: 400 })),
-    ),
+    Effect.orElseSucceed(() => HttpServerResponse.text("Invalid speech request.", { status: 400 })),
   ),
 );

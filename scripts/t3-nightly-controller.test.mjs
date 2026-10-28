@@ -4,7 +4,7 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeChildProcess from "node:child_process";
-import { runNightly } from "./t3-nightly-sync.mjs";
+import { runNightly, compareChecks } from "./t3-nightly-sync.mjs";
 
 const taskId = "agenda-task:43f97c65571d4e89baa85b2349753c3d";
 const tag = "v0.1.3-nightly.20261024.3643";
@@ -16,11 +16,25 @@ async function scenario(kind) {
   NodeFS.mkdirSync(repository, { recursive: true });
   NodeFS.mkdirSync(artifacts);
   const git = (args, cwd = repository, allowFailure = false) => {
-    const result = NodeChildProcess.spawnSync("git", args, {
-      cwd,
-      windowsHide: true,
-      encoding: "utf8",
-    });
+    const result = NodeChildProcess.spawnSync(
+      "git",
+      [
+        "-c",
+        "gc.auto=0",
+        "-c",
+        "maintenance.auto=false",
+        "-c",
+        "http.postBuffer=1048576",
+        "-c",
+        "http.maxRequestBuffer=10485760",
+        ...args,
+      ],
+      {
+        cwd,
+        windowsHide: true,
+        encoding: "utf8",
+      },
+    );
     if (result.status !== 0 && !allowFailure) throw new Error(result.stderr);
     return { code: result.status, text: result.stdout.trim() };
   };
@@ -53,6 +67,7 @@ async function scenario(kind) {
     git(["-c", "core.hooksPath=NUL", "commit", "-m", "current fork tip"]);
     git(["push", "origin", "HEAD:refs/heads/feat/t3-workers-prototype"]);
     const fork = git(["rev-parse", "HEAD"]).text;
+    if (kind === "main") git(["push", "origin", "HEAD:refs/heads/main"]);
     git(["update-ref", "refs/remotes/origin/feat/t3-workers-prototype", stale]);
     const upstream = NodePath.join(root, "Worktrees/upstream-source");
     git(["worktree", "add", "--detach", upstream, base]);
@@ -62,9 +77,16 @@ async function scenario(kind) {
     git(["-c", "core.hooksPath=NUL", "commit", "-m", "upstream fixture"], upstream);
     git(["tag", tag], upstream);
     git(["push", "upstream", tag], upstream);
+    if (kind === "main") {
+      write(upstream, "src/efficiency.ts", "export const compact = true;\n");
+      git(["add", "src/efficiency.ts"], upstream);
+      git(["-c", "core.hooksPath=NUL", "commit", "-m", "upstream main efficiency"], upstream);
+      git(["push", "upstream", "HEAD:refs/heads/main"], upstream);
+    }
     write(root, "GitHub/t3code/.vite-hooks/_/pre-commit", "#!/bin/sh\nexit 0\n");
     const config = {
       repository,
+      ...(kind === "main" ? { forkBranch: "main", upstreamBranch: "main", autoPublish: true } : {}),
       node: process.execPath,
       artifactRoot: artifacts,
       releaseRoot: NodePath.join(root, "releases"),
@@ -116,8 +138,16 @@ async function scenario(kind) {
         }
         if (args[0].endsWith("t3-nightly-task-links.mjs")) {
           NodeAssert.equal(args[1], config.taskLinkCheck);
-          NodeAssert.equal(args[2], "refs/remotes/origin/feat/t3-workers-prototype");
-          NodeAssert.equal(args[3], git(["rev-parse", tag], cwd).text);
+          NodeAssert.equal(
+            args[2],
+            `refs/remotes/origin/${kind === "main" ? "main" : "feat/t3-workers-prototype"}`,
+          );
+          NodeAssert.equal(
+            args[3],
+            kind === "main"
+              ? git(["rev-parse", "refs/remotes/upstream/main"], cwd).text
+              : git(["rev-parse", tag], cwd).text,
+          );
           const message = git(["log", "-1", "--format=%B"], cwd).text;
           NodeAssert.equal(message.match(/Otis-Task:/g)?.length, 1);
           NodeAssert.ok(message.endsWith(`Otis-Task: ${taskId}`));
@@ -142,8 +172,12 @@ async function scenario(kind) {
       NodeFS.existsSync(NodePath.join(config.releaseRoot, "auto-deploy-enabled")),
       false,
     );
-    if (["green", "inherited"].includes(kind)) {
-      NodeAssert.equal(result.result, "candidate-pushed", result.failure);
+    if (["green", "inherited", "main"].includes(kind)) {
+      NodeAssert.equal(
+        result.result,
+        kind === "main" ? "published" : "candidate-pushed",
+        result.failure,
+      );
       NodeAssert.equal(workers.length, 0);
       NodeAssert.match(git(["show", `${result.commit}:docs/fork/FEATURES.md`]).text, /src\/new.ts/);
       NodeAssert.match(git(["show", `${result.commit}:src/fork.ts`]).text, /fork = true/);
@@ -151,8 +185,21 @@ async function scenario(kind) {
         git(["ls-remote", "origin", `refs/heads/${result.branch}`]).text.split(/\s/)[0],
         result.commit,
       );
+      if (kind === "main") {
+        NodeAssert.equal(
+          git(["ls-remote", "origin", "refs/heads/main"]).text.split(/\s/)[0],
+          result.commit,
+        );
+        NodeAssert.match(
+          git(["show", `${result.commit}:src/efficiency.ts`]).text,
+          /compact = true/,
+        );
+      }
       await runNightly(file, io);
-      NodeAssert.equal(readLedger().at(-1).result, "existing-candidate-needs-resume");
+      NodeAssert.equal(
+        readLedger().at(-1).result,
+        kind === "main" ? "already-synced" : "existing-candidate-needs-resume",
+      );
     } else if (kind === "unavailable") {
       NodeAssert.equal(result.result, "verification-unavailable", result.failure);
       NodeAssert.equal(workers.length, 0);
@@ -172,9 +219,14 @@ async function scenario(kind) {
   }
 }
 
-it.each(["green", "conflict", "failure", "inherited", "unavailable"])(
+it.each(["green", "conflict", "failure", "inherited", "unavailable", "main"])(
   "nightly controller handles %s with isolated Git and synthetic check providers",
   async (kind) => {
     await scenario(kind);
   },
 );
+
+it.each(["format", "lint", "agent-context"])("never waives an inherited %s failure", (name) => {
+  const failed = { name, exit: 1, classified: true, failures: ["same diagnostic"] };
+  NodeAssert.equal(compareChecks([failed], [failed]), false);
+});

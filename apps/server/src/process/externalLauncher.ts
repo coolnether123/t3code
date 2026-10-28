@@ -73,7 +73,6 @@ interface TargetPathAndPosition {
 }
 
 // cmd shims reparse %* after escaping is gone; newlines and quotes can expose shell operators.
-// oxlint-disable-next-line no-control-regex
 const WINDOWS_SHIM_UNSAFE_ARG_PATTERN = /[\u0000-\u001f\u007f"]/;
 const TARGET_WITH_POSITION_PATTERN = /^(.*?):(\d+)(?::(\d+))?$/;
 const POWERSHELL_ARGUMENTS_PREFIX = [
@@ -877,20 +876,26 @@ export const make = Effect.gen(function* () {
   }).pipe(Effect.uninterruptible);
   const cachedAvailableEditors = Effect.flatMap(acquireEditorDiscovery, Deferred.await);
 
+  // Forwarders retain the underlying launcher and discovery spans.
   return ExternalLauncher.of({
-    resolveAvailableEditors: () => cachedAvailableEditors,
-    resolveFileManagerRevealKind: () =>
+    resolveAvailableEditors: Effect.fn("ExternalLauncher.resolveAvailableEditors")(
+      () => cachedAvailableEditors,
+    ),
+    resolveFileManagerRevealKind: Effect.fn("ExternalLauncher.resolveFileManagerRevealKind")(() =>
       provideCommandResolutionServices(resolveFileManagerRevealKind()).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       ),
-    launchBrowser: (target, options) =>
+    ),
+    launchBrowser: Effect.fn("ExternalLauncher.launchBrowser")((target, options) =>
       provideCommandResolutionServices(launchBrowser(target, options)).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       ),
-    launchEditor: (input) =>
+    ),
+    launchEditor: Effect.fn("ExternalLauncher.launchEditor")((input) =>
       provideCommandResolutionServices(launchEditor(input)).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       ),
+    ),
   });
 });
 

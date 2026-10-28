@@ -671,14 +671,14 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
         input.updateCurrentTab === false ? timeoutMs : timeoutMs + HOST_RESPONSE_GRACE_MS;
       const result = yield* Deferred.await(deferred).pipe(Effect.timeoutOption(responseTimeoutMs));
       return yield* Option.match(result, {
-        onNone: () =>
-          Effect.gen(function* () {
-            // Never replay possibly applied actions; slow metadata reads must not evict the host.
-            if (input.updateCurrentTab !== false) {
-              yield* disconnect(connection.clientId, connection.queue, true);
-            }
-            return yield* new PreviewAutomationTimeoutError(requestContext);
-          }),
+        // The enclosing operation owns the span for this inline handler.
+        onNone: Effect.fnUntraced(function* () {
+          // Never replay possibly applied actions; slow metadata reads must not evict the host.
+          if (input.updateCurrentTab !== false) {
+            yield* disconnect(connection.clientId, connection.queue, true);
+          }
+          return yield* new PreviewAutomationTimeoutError(requestContext);
+        }),
         onSome: (value) => Effect.succeed(value as A),
       });
     });
@@ -719,10 +719,11 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
     focusHost,
     respond,
     invoke,
-    isBrowserAvailable: (environmentId) =>
+    isBrowserAvailable: Effect.fn("PreviewAutomationBroker.isBrowserAvailable")((environmentId) =>
       SubscriptionRef.get(availableEnvironments).pipe(
         Effect.map((ready) => ready.has(environmentId)),
       ),
+    ),
     streamBrowserAvailability: (environmentId) =>
       SubscriptionRef.changes(availableEnvironments).pipe(
         Stream.map((ready) => ready.has(environmentId)),

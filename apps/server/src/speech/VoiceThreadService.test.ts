@@ -46,9 +46,9 @@ import * as Auxiliary from "../provider/AuxiliaryProviderSessions.ts";
 import * as VoiceThreadService from "./VoiceThreadService.ts";
 import { callOperator } from "./callOperator.ts";
 
-const decodeRuntimeEvent = Schema.decodeUnknownSync(ProviderRuntimeEvent);
+const decodeRuntimeEvent = Schema.decodeSync(ProviderRuntimeEvent);
 const now = "2026-10-19T06:00:00.000Z";
-const thread = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2AppThread))({
+const thread = Schema.decodeSync(Schema.toCodecJson(OrchestrationV2AppThread))({
   id: "synthetic-voice-thread",
   projectId: "synthetic-project",
   title: "Voice fixture",

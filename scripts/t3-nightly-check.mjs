@@ -7,7 +7,23 @@ NodeFS.mkdirSync(artifact, { recursive: true });
 const vp = NodePath.join(root, "node_modules/vite-plus/bin/vp");
 const files = JSON.parse(NodeFS.readFileSync(filesJson, "utf8"));
 const results = [];
+const sourceFiles = files.filter(
+  (f) => /\.[cm]?[jt]sx?$/.test(f) && NodeFS.existsSync(NodePath.join(root, f)),
+);
 for (const [name, args] of [
+  ["format", ["fmt", "--check", ...sourceFiles]],
+  ["lint", ["lint", "--report-unused-disable-directives", ...sourceFiles]],
+  [
+    "agent-context",
+    [
+      "test",
+      "run",
+      "apps/server/src/provider/AgentContextBudget.test.ts",
+      "evals/mcp-tool-use/run.test.ts",
+      "--maxWorkers=1",
+      "--reporter=dot",
+    ],
+  ],
   [
     "typecheck",
     ["run", "-r", "--cache", "--concurrency-limit", "1", "typecheck", "--singleThreaded"],
@@ -21,7 +37,7 @@ for (const [name, args] of [
       "--maxWorkers=1",
       "--reporter=json",
       `--outputFile=${NodePath.join(artifact, "tests.json")}`,
-      ...files.filter((f) => /\.[cm]?[jt]sx?$/.test(f)),
+      ...sourceFiles,
     ],
   ],
 ]) {

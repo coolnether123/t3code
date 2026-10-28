@@ -179,7 +179,9 @@ describe("voice environment transport", () => {
   );
   it.effect("keeps a streaming speech request alive when a concurrent watch is aborted", () =>
     Effect.gen(function* () {
+      // @effect-diagnostics-next-line abortControllerInEffect:off - Simulates an independent client signal.
       const streamSignal = new AbortController();
+      // @effect-diagnostics-next-line abortControllerInEffect:off - The test aborts only the external watch request.
       const watchSignal = new AbortController();
       let source!: ReadableStreamDefaultController<Uint8Array>;
       let received!: () => void;

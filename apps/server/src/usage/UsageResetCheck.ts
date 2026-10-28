@@ -70,9 +70,9 @@ const makeLunaResearch = Effect.gen(function* () {
         const instance = instances.find(
           (instance) => instance.driver === "codex" && instance.enabled !== false,
         );
-        const config = yield* Schema.decodeUnknownEffect(CodexSettings)(
-          instance?.config ?? {},
-        ).pipe(Effect.mapError(() => new ResetResearchFailed({ stage: "config" })));
+        const config = yield* Schema.decodeEffect(CodexSettings)(instance?.config ?? {}).pipe(
+          Effect.mapError(() => new ResetResearchFailed({ stage: "config" })),
+        );
         const homeLayout = yield* resolveCodexHomeLayout(
           config.useDesktopAppDaemon ? { ...config, shadowHomePath: "" } : config,
         ).pipe(Effect.provideService(Path.Path, path));
@@ -278,37 +278,38 @@ export const layerTest = Layer.succeed(UsageResetCheck, {
   cancel: Effect.succeed(IDLE_RESET_CHECK),
 });
 
-const makeSavedCheck = <Finding>(options: {
+const makeSavedCheck = Effect.fn("makeSavedCheck")(function* <Finding>(options: {
   readonly cacheName: string;
   readonly decode: (raw: string) => Effect.Effect<ResearchState<Finding>, Schema.SchemaError>;
   readonly encode: (state: ResearchState<Finding>) => Effect.Effect<string, Schema.SchemaError>;
   readonly research: (now: string) => Effect.Effect<Finding, ResetResearchFailed>;
-}) =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const path = yield* Path.Path;
-    const config = yield* ServerConfig;
-    const cache = path.join(config.providerStatusCacheDir, options.cacheName);
-    const saved = yield* Effect.gen(function* () {
-      if (Number((yield* fs.stat(cache)).size) > 32_000) return IDLE_RESET_CHECK;
-      return yield* fs.readFileString(cache).pipe(Effect.flatMap(options.decode));
-    }).pipe(Effect.orElseSucceed(() => IDLE_RESET_CHECK));
-    const initial: ResearchState<Finding> =
-      saved.status === "running"
-        ? {
-            ...saved,
-            status: "failed",
-            error: "The server restarted during the last check. Press Check with Luna to retry.",
-          }
-        : saved;
-    const save = (state: ResearchState<Finding>) =>
-      Effect.gen(function* () {
-        yield* fs.makeDirectory(config.providerStatusCacheDir, { recursive: true });
-        yield* fs.writeFileString(`${cache}.tmp`, yield* options.encode(state));
-        yield* fs.rename(`${cache}.tmp`, cache);
-      }).pipe(Effect.catch(() => Effect.logWarning("Luna-check result could not be saved.")));
-    return yield* makeResetCheck(options.research, initial, save);
-  });
+}) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const config = yield* ServerConfig;
+  const cache = path.join(config.providerStatusCacheDir, options.cacheName);
+  const saved = yield* Effect.gen(function* () {
+    if (Number((yield* fs.stat(cache)).size) > 32_000) return IDLE_RESET_CHECK;
+    return yield* fs.readFileString(cache).pipe(Effect.flatMap(options.decode));
+  }).pipe(Effect.orElseSucceed(() => IDLE_RESET_CHECK));
+  const initial: ResearchState<Finding> =
+    saved.status === "running"
+      ? {
+          ...saved,
+          status: "failed",
+          error: "The server restarted during the last check. Press Check with Luna to retry.",
+        }
+      : saved;
+  const save = Effect.fn("save")(
+    function* (state: ResearchState<Finding>) {
+      yield* fs.makeDirectory(config.providerStatusCacheDir, { recursive: true });
+      yield* fs.writeFileString(`${cache}.tmp`, yield* options.encode(state));
+      yield* fs.rename(`${cache}.tmp`, cache);
+    },
+    Effect.catch(() => Effect.logWarning("Luna-check result could not be saved.")),
+  );
+  return yield* makeResetCheck(options.research, initial, save);
+});
 
 export const layer = Layer.effect(
   UsageResetCheck,
