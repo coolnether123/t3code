@@ -34,11 +34,12 @@ export const retryConnection = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   );
 
 /** Failed connection attempts release their processes before the next attempt starts. */
-export const retryScopedConnection = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-  Effect.gen(function* () {
-    const scope = yield* Scope.fork(yield* Scope.Scope);
-    return yield* effect.pipe(
-      Effect.provideService(Scope.Scope, scope),
-      Effect.onExit((exit) => (Exit.isFailure(exit) ? Scope.close(scope, exit) : Effect.void)),
-    );
-  }).pipe(retryConnection);
+export const retryScopedConnection = Effect.fn("retryScopedConnection")(function* <A, E, R>(
+  effect: Effect.Effect<A, E, R>,
+) {
+  const scope = yield* Scope.fork(yield* Scope.Scope);
+  return yield* effect.pipe(
+    Effect.provideService(Scope.Scope, scope),
+    Effect.onExit((exit) => (Exit.isFailure(exit) ? Scope.close(scope, exit) : Effect.void)),
+  );
+}, retryConnection);

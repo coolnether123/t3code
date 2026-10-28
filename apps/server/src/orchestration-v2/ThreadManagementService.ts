@@ -693,44 +693,45 @@ const make = Effect.gen(function* () {
     }
   };
 
-  const dispatch: ThreadManagementServiceShape["dispatch"] = (command) =>
-    Effect.gen(function* () {
-      let routed = command;
-      if (command.type === "message.dispatch" && !(yield* hasReceipt(command.commandId))) {
-        const projection = yield* orchestrator.getThreadRecords(command.threadId, []);
-        const settings = yield* serverSettings.getSettings.pipe(
-          Effect.mapError(
-            (cause) =>
-              new Orchestrator.OrchestratorDispatchError({
-                commandId: command.commandId,
-                commandType: command.type,
-                cause,
-              }),
-          ),
-        );
-        const modelSelection = yield* Effect.try({
-          try: () =>
-            resolveContinuationRoute(
-              settings.providerInstances,
-              command.modelSelection ?? projection.thread.modelSelection,
-            ),
-          catch: (cause) =>
+  const dispatch: ThreadManagementServiceShape["dispatch"] = Effect.fn(
+    "ThreadManagementService.dispatch",
+  )(function* (command) {
+    let routed = command;
+    if (command.type === "message.dispatch" && !(yield* hasReceipt(command.commandId))) {
+      const projection = yield* orchestrator.getThreadRecords(command.threadId, []);
+      const settings = yield* serverSettings.getSettings.pipe(
+        Effect.mapError(
+          (cause) =>
             new Orchestrator.OrchestratorDispatchError({
               commandId: command.commandId,
               commandType: command.type,
               cause,
             }),
-        });
-        if (
-          modelSelection.instanceId !==
-          (command.modelSelection ?? projection.thread.modelSelection).instanceId
-        )
-          routed = { ...command, modelSelection };
-      }
-      yield* ensureCommandTranscripts(routed);
-      yield* assertDispatchTargetEnabled(routed);
-      return yield* orchestrator.dispatch(routed);
-    });
+        ),
+      );
+      const modelSelection = yield* Effect.try({
+        try: () =>
+          resolveContinuationRoute(
+            settings.providerInstances,
+            command.modelSelection ?? projection.thread.modelSelection,
+          ),
+        catch: (cause) =>
+          new Orchestrator.OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause,
+          }),
+      });
+      if (
+        modelSelection.instanceId !==
+        (command.modelSelection ?? projection.thread.modelSelection).instanceId
+      )
+        routed = { ...command, modelSelection };
+    }
+    yield* ensureCommandTranscripts(routed);
+    yield* assertDispatchTargetEnabled(routed);
+    return yield* orchestrator.dispatch(routed);
+  });
 
   const getProjectThread: ThreadManagementServiceShape["getProjectThread"] = (input) =>
     getThreadProjection(input.threadId).pipe(

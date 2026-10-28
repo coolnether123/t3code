@@ -1,11 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off globalDate:off globalFetch:off globalTimers:off globalConsole:off - This is an intentionally standalone macOS operator script boundary.
 /**
- * Guarded deployment helper for the Millie T3 backend.
- *
- * The default mode is a no-write plan.  `--execute` is deliberately explicit
- * and requires an exact source commit, a fresh backup root, a fresh smoke
- * home, and the PID of the process that the operator already inspected.
- * Nothing in this module guesses ownership of a port or a LaunchAgent.
+ * Guarded Millie T3 backend deployment. Without `--execute` it only plans;
+ * `--execute` needs the exact commit, fresh backup and smoke roots and the
+ * inspected PID. It never guesses who owns a port or a LaunchAgent.
  */
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
