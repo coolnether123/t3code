@@ -1,16 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off
 // @effect-diagnostics globalDate:off - the inventory sweep interval is wall-clock, like file mtimes.
-/**
- * Raw filesystem access for transcript scanning.
- *
- * Isolated here so the rest of the usage code stays on Effect's `FileSystem`.
- * The direct `node:fs` streaming is deliberate: a cold 30-day window is ~1.4 GB
- * across ~1,500 files, and `readline` over a read stream is roughly an order of
- * magnitude cheaper than materialising each file. The equivalent Effect stream
- * pipeline is idiomatic but not fast enough to sit behind a page load.
- *
- * @module usageTranscriptReader
- */
+// Direct filesystem streaming keeps cold transcript scans within the page-load budget.
 import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
@@ -67,14 +57,7 @@ interface TranscriptInventoryWalk {
 
 const pendingTranscriptInventories = new Map<string, TranscriptInventoryWalk>();
 
-/**
- * The last complete walk of a root. Later reads refresh it instead of walking
- * again: a directory whose mtime is unchanged has the same entries, so only
- * changed directories are re-read and only recently written transcripts are
- * re-stat'd. A full walk still runs every few minutes, because appending to an
- * old transcript (a resumed session) changes neither its directory nor, until
- * then, anything the refresh looks at.
- */
+// Periodic full sweeps detect resumed transcripts whose parent directory mtime did not change.
 interface KnownTranscriptInventory {
   readonly files: Map<string, TranscriptFile>;
   readonly directoryMtimes: Map<string, number>;
@@ -116,10 +99,10 @@ async function refreshKnownInventory(
     batch.forEach((directory, index) => {
       const mtime = mtimes[index];
       if (mtime === null) {
-        for (const path of [...known.directoryMtimes.keys()]) {
+        for (const path of known.directoryMtimes.keys()) {
           if (path === directory || isInside(directory, path)) known.directoryMtimes.delete(path);
         }
-        for (const path of [...known.files.keys()]) {
+        for (const path of known.files.keys()) {
           if (isInside(directory, path)) known.files.delete(path);
         }
       } else if (mtime !== known.directoryMtimes.get(directory)) {
@@ -160,7 +143,7 @@ async function refreshKnownInventory(
           restat.add(child);
         }
       }
-      for (const path of [...known.files.keys()]) {
+      for (const path of known.files.keys()) {
         if (NodePath.dirname(path) === directory && !present.has(path)) known.files.delete(path);
       }
     }
@@ -198,6 +181,11 @@ export interface TranscriptScanSelection<File extends TranscriptFile = Transcrip
   readonly deferredFiles: number;
   readonly deferredBytes: number;
   readonly coldBytes: number;
+}
+
+/** Resolves Claude Desktop's JSONL store when Windows provides its app-data root. */
+export function resolveClaudeDesktopLocalAgentDir(appDataPath: string | undefined): string | null {
+  return appDataPath ? NodePath.join(appDataPath, "Claude", "local-agent-mode-sessions") : null;
 }
 
 /**
@@ -238,11 +226,7 @@ export function selectTranscriptFilesForScan<File extends TranscriptFile>(
     deferredBytes += readBytes;
   }
 
-  // A single giant rollout must make progress eventually, but it should not
-  // block the first useful result while smaller cold files can fill the
-  // bounded batch. Warm files and append-only active rollouts do not provide
-  // that first-load protection, so admit one oversized file alongside them
-  // and keep the partial totals visible while it is parsed.
+  // Admit one oversized cold file alongside smaller files so it eventually makes progress.
   if (!selectedColdFile && oversized.length > 0) {
     const file = oversized[0]!;
     const readBytes = bytesToRead(file);
@@ -449,19 +433,8 @@ export async function readDirectoryVolumeId(path: string): Promise<string> {
   }
 }
 
-/**
- * Streams one transcript and returns the usage records it contains, or `null`
- * when the file could not be read.
- *
- * The distinction matters to the caller's cache: a genuinely empty transcript
- * is a stable fact worth memoising, while a transient read failure memoised
- * under the same `(size, mtime)` key would silently drop that file's usage
- * until the file next changes.
- *
- * Codex carries the active model on `turn_context` lines that hold no usage of
- * their own, so those still have to pass through the reducer to keep model
- * attribution correct.
- */
+// Cache empty transcripts, but never memoise a transient read failure as an empty result.
+// Model-only turn_context records still feed Codex attribution.
 export interface TranscriptReadOptions {
   readonly startByte?: number;
   readonly endByte?: number;

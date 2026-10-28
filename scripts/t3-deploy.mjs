@@ -5,6 +5,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeTimersPromises from "node:timers/promises";
 import { ReleaseTransaction, readReleaseState } from "./t3-release-state.mjs";
 import { supervisorCommand } from "./t3-supervisor.mjs";
+import { restoreOfflineUserdata } from "./t3-restore-userdata.mjs";
 import { idleEvidence } from "./t3-deploy-idle.mjs";
 
 function run(exe, args, input) {
@@ -257,13 +258,7 @@ export function productionAdapter(config, io = {}) {
         NodePath.dirname(NodePath.resolve(root)) !== NodePath.resolve(config.backupRoot)
       )
         throw new Error("Offline snapshot identity mismatch");
-      // Restore into the junction target so the link survives and renames stay on one volume.
-      const data = liveUserdata();
-      const failed = `${data}.failed-${NodeCrypto.randomUUID()}`;
-      const staged = `${data}.restore-${NodeCrypto.randomUUID()}`;
-      NodeFS.cpSync(NodePath.join(root, "userdata"), staged, { recursive: true });
-      if (NodeFS.existsSync(data)) NodeFS.renameSync(data, failed);
-      NodeFS.renameSync(staged, data);
+      restoreOfflineUserdata(NodePath.join(root, "userdata"), liveUserdata());
     },
     async start(release) {
       await owners("start", release);
@@ -278,9 +273,13 @@ export function productionAdapter(config, io = {}) {
         )
           return;
         const checks = await Promise.all(
-          config.healthUrls.map(
-            async (url) => (await http(url, { signal: AbortSignal.timeout(10000) })).status,
-          ),
+          config.healthUrls.map(async (url) => {
+            try {
+              return (await http(url, { signal: AbortSignal.timeout(10000) })).status;
+            } catch (cause) {
+              throw new Error(`Health request failed: ${url}`, { cause });
+            }
+          }),
         );
         if (checks.some((code) => code !== 200)) return;
         const snapshot = await cli(release, { kind: "snapshot" });

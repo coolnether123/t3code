@@ -9,7 +9,7 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { ChevronDownIcon } from "lucide-react";
+import { CopyIcon, ChevronDownIcon } from "lucide-react";
 import {
   memo,
   useEffect,
@@ -40,6 +40,9 @@ import { observeResize } from "~/lib/observeResize";
 import { cn } from "~/lib/utils";
 import { textDirection } from "~/textDirection";
 import { useClientSettings } from "../../hooks/useSettings";
+import { useMultiChatTranscriptCopy } from "../MultiChatTranscriptLoader";
+import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
+import { Button } from "../ui/button";
 import { GuestShareIndicator } from "./GuestShareControls";
 
 interface ChatHeaderProps {
@@ -81,6 +84,17 @@ export const ChatHeader = memo(function ChatHeader({
   onNewThreadInProject,
   onOpenProjectSettings,
 }: ChatHeaderProps) {
+  const fullChatCopy = useMultiChatTranscriptCopy();
+  const draftCopy = useCopyToClipboard({ target: "chat draft" });
+  const copyChat = () => {
+    if (isServerThread)
+      void fullChatCopy.startCopy([scopeThreadRef(activeThreadEnvironmentId, activeThreadId)]);
+    else
+      draftCopy.copyToClipboard(
+        document.querySelector("[data-chat-transcript]")?.textContent ?? "",
+        undefined,
+      );
+  };
   const activeProjectName = activeProject?.isScratch ? "No project" : activeProject?.title;
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
   const interfaceFont = useClientSettings((settings) => settings.fontFamilySans);
@@ -423,6 +437,15 @@ export const ChatHeader = memo(function ChatHeader({
           ) : null}
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
+      <Button
+        variant="ghost"
+        size="icon"
+        aria-label="Copy chat"
+        title="Copy chat"
+        onClick={copyChat}
+      >
+        <CopyIcon />
+      </Button>
       {isServerThread ? <GuestShareIndicator threadRef={activeThreadRef} /> : null}
     </div>
   );

@@ -6,6 +6,7 @@ import * as NodePath from "node:path";
 import { describe, expect, it } from "@effect/vitest";
 
 import {
+  resolveClaudeDesktopLocalAgentDir,
   readRepeatedInputRecords,
   readTranscriptRecords,
   readTranscriptPrefixFingerprint,
@@ -22,6 +23,19 @@ const file = (path: string, size: number, mtimeMs: number): TranscriptFile => ({
   path,
   size,
   mtimeMs,
+});
+
+describe("resolveClaudeDesktopLocalAgentDir", () => {
+  it("resolves the private JSONL store below APPDATA", () => {
+    const resolved = resolveClaudeDesktopLocalAgentDir("C:\\Users\\PrecisionX\\AppData\\Roaming");
+
+    expect(resolved).toContain("C:\\Users\\PrecisionX\\AppData\\Roaming");
+    expect(resolved).toMatch(/Claude[\\/]+local-agent-mode-sessions$/);
+  });
+
+  it("does not invent a path when APPDATA is unavailable", () => {
+    expect(resolveClaudeDesktopLocalAgentDir(undefined)).toBeNull();
+  });
 });
 
 describe("selectTranscriptFilesForScan", () => {

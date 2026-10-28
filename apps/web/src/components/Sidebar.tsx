@@ -162,6 +162,7 @@ import {
 import type { SidebarThreadSummary } from "../types";
 import { isScratchProject } from "@t3tools/client-runtime/state/projects";
 import { cn } from "~/lib/utils";
+import { useMultiChatTranscriptCopy } from "./MultiChatTranscriptLoader";
 import { ProjectEnvironmentBadge } from "./ProjectEnvironmentBadge";
 import {
   buildDraftActionMenuItems,
@@ -948,6 +949,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
   const { handleNewThread } = newThreadContext;
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const clearSelection = useThreadSelectionStore((s) => s.clearSelection);
+  const { startCopy: startMultiChatCopy } = useMultiChatTranscriptCopy((threadRefs) =>
+    useThreadSelectionStore.getState().removeFromSelection(threadRefs.map(scopedThreadKey)),
+  );
   const setSelectionAnchor = useThreadSelectionStore((s) => s.setAnchor);
   const toggleThreadSelection = useThreadSelectionStore((s) => s.toggleThread);
   const rangeSelectTo = useThreadSelectionStore((s) => s.rangeSelectTo);
@@ -2205,6 +2209,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                   },
                 ]
               : []),
+            { id: "copy", label: `Copy chats (${count})` },
             { id: "mark-unread", label: `Mark unread (${count})` },
             {
               id: "delete",
@@ -2217,6 +2222,12 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         ),
       );
       if (clicked._tag === "Failure" || clicked.value === null) return;
+      if (clicked.value === "copy") {
+        void startMultiChatCopy(
+          selectedThreads.map((thread) => scopeThreadRef(thread.environmentId, thread.id)),
+        );
+        return;
+      }
       const actionTargets =
         clicked.value === "unpin"
           ? pinnedSelectedThreads

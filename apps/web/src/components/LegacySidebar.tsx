@@ -155,6 +155,7 @@ import {
   shouldToastDesktopUpdateActionResult,
 } from "./desktopUpdate.logic";
 import { showDesktopUpdateDownloadedToast } from "./desktopUpdate.toast";
+import { useMultiChatTranscriptCopy } from "./MultiChatTranscriptLoader";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "./ui/alert";
 import { Button } from "./ui/button";
 import {
@@ -1307,6 +1308,9 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   const rangeSelectTo = useThreadSelectionStore((state) => state.rangeSelectTo);
   const clearSelection = useThreadSelectionStore((state) => state.clearSelection);
   const removeFromSelection = useThreadSelectionStore((state) => state.removeFromSelection);
+  const { startCopy: startMultiChatCopy } = useMultiChatTranscriptCopy((threadRefs) =>
+    useThreadSelectionStore.getState().removeFromSelection(threadRefs.map(scopedThreadKey)),
+  );
   const setSelectionAnchor = useThreadSelectionStore((state) => state.setAnchor);
   const { copyToClipboard: copyThreadIdToClipboard } = useCopyToClipboard<{
     threadId: ThreadId;
@@ -1837,6 +1841,10 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       position,
     );
 
+    if (clicked === "copy") {
+      void startMultiChatCopy(selectedThreadEntries.map(({ threadRef }) => threadRef));
+      return;
+    }
     if (clicked === "mark-unread") {
       for (const { threadRef } of selectedThreadEntries) {
         markThreadUnread(threadRef);

@@ -80,6 +80,7 @@ import {
 } from "./promptSubscriberState.ts";
 import {
   listTranscriptFilesBounded,
+  resolveClaudeDesktopLocalAgentDir,
   readDirectoryVolumeId,
   readTranscriptRecords,
   readRepeatedInputRecords,
@@ -790,7 +791,11 @@ export const make = Effect.gen(function* () {
       Effect.orElseSucceed(() => null),
     );
 
+    const claudeDesktopLocalAgentDir = resolveClaudeDesktopLocalAgentDir(hostEnvironment.APPDATA);
     const directories = [
+      ...(claudeDesktopLocalAgentDir === null
+        ? []
+        : [{ provider: "claude" as const, dir: claudeDesktopLocalAgentDir }]),
       ...[...new Set(claudeDirs)].map((dir) => ({ provider: "claude" as const, dir })),
       ...[...codexHomes].flatMap((codexHome) => [
         { provider: "codex" as const, dir: path.join(codexHome, "sessions") },

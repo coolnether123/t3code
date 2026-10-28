@@ -278,3 +278,7 @@ several selected threads together. Choose **Wake thread** to bring a thread back
 A snoozed thread keeps working and stays hidden until its wake time, even while
 its agent wakes itself for background work. It comes back early only when it needs
 an approval or answer from you, when a run fails, or when you send it a message.
+
+## Copy chats
+
+On web and desktop, choose **Copy chat** in the chat header to copy the full saved transcript or the current draft. To copy several saved chats, select them in the sidebar and choose **Copy chats**. Transcripts include full earlier history and stay in selection order. A failed load or clipboard write keeps the selection available to retry, and newer selections remain selected.

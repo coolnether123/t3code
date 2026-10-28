@@ -502,3 +502,5 @@ The tracker does not verify account identity or identify chats copied between di
 The power monitor is separate and does not contribute to Codex quota totals.
 
 The reset-cycle arrows update the chart, API-equivalent value, and token planner together. Older cycles are calculated from their recorded transcript interval. Local Qwen sessions do not count toward the OpenAI subscription conversion. Refresh keeps the selected cycle. Incomplete transcript reads retry automatically with a bounded backoff; complete saved calculations remain available while newer data is being read.
+
+On Windows, Claude usage also includes Claude Desktop local-agent sessions from the app data directory.

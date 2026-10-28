@@ -134,24 +134,35 @@ async function supervise(configFile, mode) {
             "--port",
             "6803",
           ]);
-    child = NodeChildProcess.spawn(config.node, args, {
-      cwd: config.fixtureLaunch ? root : mode === "server" ? root : NodePath.join(root, "apps/web"),
-      windowsHide: true,
-      stdio: "ignore",
-      env: {
-        ...process.env,
-        PATH: `${NodePath.dirname(config.node)};${process.env.PATH}`,
-        T3CODE_HOME: config.baseDir,
-        ...(mode === "web"
-          ? {
-              T3CODE_PORT_OFFSET: "1070",
-              T3CODE_PORT: "3774",
-              PORT: "6803",
-              T3CODE_SINGLE_ORIGIN_DEV: "1",
-            }
-          : {}),
-      },
-    });
+    const logs = NodePath.join(config.releaseRoot, "supervisor-logs");
+    NodeFS.mkdirSync(logs, { recursive: true });
+    const log = NodeFS.openSync(NodePath.join(logs, `${mode}.log`), "a");
+    try {
+      child = NodeChildProcess.spawn(config.node, args, {
+        cwd: config.fixtureLaunch
+          ? root
+          : mode === "server"
+            ? root
+            : NodePath.join(root, "apps/web"),
+        windowsHide: true,
+        stdio: ["ignore", log, log],
+        env: {
+          ...process.env,
+          PATH: `${NodePath.dirname(config.node)};${process.env.PATH}`,
+          T3CODE_HOME: config.baseDir,
+          ...(mode === "web"
+            ? {
+                T3CODE_PORT_OFFSET: "1070",
+                T3CODE_PORT: "3774",
+                PORT: "6803",
+                T3CODE_SINGLE_ORIGIN_DEV: "1",
+              }
+            : {}),
+        },
+      });
+    } finally {
+      NodeFS.closeSync(log);
+    }
     await NodeEvents.once(child, "spawn");
     startedAt = new Date().toISOString();
     ready = false;

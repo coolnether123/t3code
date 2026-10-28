@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import * as Cause from "effect/Cause";
 import { AsyncResult } from "effect/reactivity";
 import {
+  buildMultiSelectThreadContextMenuItems,
   archiveSelectedThreadEntries,
   deleteSelectedThreadEntries,
   getFallbackThreadIdAfterDelete,
@@ -1354,5 +1355,13 @@ describe("resolveSidebarRouteReveal", () => {
         findThread,
       }),
     ).toEqual({ pendingKey: hiddenKey, widensScope: false });
+  });
+});
+
+describe("bulk transcript copy", () => {
+  it("offers copying all selected chats", () => {
+    expect(
+      buildMultiSelectThreadContextMenuItems({ count: 3, hasRunningThread: false }),
+    ).toContainEqual({ id: "copy", label: "Copy chats (3)" });
   });
 });
