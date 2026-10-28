@@ -158,11 +158,12 @@ export const codexDesktopRouteLayer = Layer.unwrap(
             return badRequest("Invalid Codex thread ID.");
           yield* store.readThread(threadId, { limit: 1 });
           return HttpServerResponse.jsonUnsafe(
-            yield* store.readThread(threadId, {
-              ...(url.searchParams.get("beforeCursor") === null
+            yield* store.readThread(
+              threadId,
+              url.searchParams.get("beforeCursor") === null
                 ? {}
-                : { beforeCursor: url.searchParams.get("beforeCursor")! }),
-            }),
+                : { beforeCursor: url.searchParams.get("beforeCursor")! },
+            ),
           );
         }).pipe(Effect.catch(routeError)),
       ),

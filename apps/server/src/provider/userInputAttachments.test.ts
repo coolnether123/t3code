@@ -293,7 +293,7 @@ describe("question answer paths", () => {
         attachmentsDir: config.attachmentsDir,
         attachmentsByQuestionId: { q: [file] },
       });
-      expect(answers.q).toContain(`text extracted to: "${path}.txt"`);
+      expect(answers.q).toContain(`text extracted to: ${JSON.stringify(`${path}.txt`)}`);
       expect(NodeFS.readFileSync(`${path}.txt`, "utf8")).toContain("Vessel: Larkspur");
       expect(NodeFS.readFileSync(`${path}.txt`, "utf8")).toContain("301");
       expect(NodeFS.readFileSync(`${path}.txt`, "utf8")).toContain("42");
@@ -354,7 +354,7 @@ describe("question answer paths", () => {
             attachmentsDir: config.attachmentsDir,
             attachmentsByQuestionId: { q: [file] },
           });
-          expect(answers.q).toContain(path);
+          expect(answers.q).toContain(JSON.stringify(path));
           expect(answers.q).not.toContain("text extracted");
           expect(NodeFS.existsSync(`${path}.txt`)).toBe(false);
           expect(NodeFS.readFileSync(path, "utf8")).toBe("invalid document");

@@ -983,7 +983,7 @@ it("renders automatic compaction as one live divider that finishes with its reas
   container.style.cssText = "height: 1200px; width: 900px; display: flex; flex-direction: column;";
   await using screen = await render(ui(false), { container });
   await expect
-    .element(screen.getByRole("separator", { name: "Compacting before the cache expiresâ€¦" }))
+    .element(screen.getByRole("separator", { name: "Compacting before the cache expires…" }))
     .toBeVisible();
   expect(container.textContent).not.toContain("/compact");
   expect(container.textContent).not.toContain("Thinking");
@@ -993,7 +993,7 @@ it("renders automatic compaction as one live divider that finishes with its reas
   await expect
     .element(
       screen.getByRole("separator", {
-        name: "Context automatically compacted before cache expiry 899K â†’ 19K tokens",
+        name: "Context automatically compacted before cache expiry 899K → 19K tokens",
       }),
     )
     .toBeVisible();
@@ -1030,7 +1030,7 @@ it("shows Otis call status as navy pills in timeline order", async () => {
   await using screen = await renderTimeline(entries, {
     routeThreadKey: "environment-local:otis-main",
   });
-  const label = `${new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(DateTime.formatIso(at)))} Â· Call ended`;
+  const label = `${new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", hour12: false }).format(new Date(DateTime.formatIso(at)))} · Call ended`;
   await expect.element(screen.getByText(label)).toBeVisible();
   const chip = screen.container.querySelector("[data-otis-call-status]")!;
   expect(chip.classList.contains("bg-otis-chip")).toBe(true);

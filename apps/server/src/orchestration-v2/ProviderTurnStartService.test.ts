@@ -844,6 +844,7 @@ effectIt.effect(
           worktreePath,
           worktreesDir,
           fileSystem,
+          path,
           gitWorkflow,
           failReadsAfterRunning: true,
         });
@@ -902,6 +903,7 @@ effectIt.effect(
         worktreesDir,
         worktreePath,
         fileSystem,
+        path,
         failReadsAfterRunning: true,
       });
       harness.createWorktree.mockImplementationOnce(() => Effect.interrupt);

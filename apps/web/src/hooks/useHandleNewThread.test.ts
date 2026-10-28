@@ -176,6 +176,7 @@ vi.mock("../lib/t3ProjectFileDefaults", () => ({
   readT3ProjectFile: () => testState.projectFileRead,
 }));
 vi.mock("../lib/utils", () => ({
+  randomUUID: () => "11111111-1111-4111-8111-111111111111",
   newDraftId: () => "draft-delayed",
   newThreadId: () => "thread-delayed",
 }));
