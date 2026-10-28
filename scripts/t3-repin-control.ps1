@@ -78,6 +78,8 @@ function Invoke-Repin {
         Write-AtomicConfig ($settings | ConvertTo-Json -Depth 12)
         Restart-T3Tasks
         Test-T3Owners
+        & $settings.node (Join-Path $PSScriptRoot 't3-cli-forward.mjs') $Config 'A:/Dev/Worktrees/t3code-deploy/apps/server/dist/bin.mjs' $backup
+        if ($LASTEXITCODE -ne 0) { throw 'Fixed relay CLI forwarding installation failed' }
         Write-Output "Re-pin verified. Backup: $backup"
     } catch {
         $failure = $_

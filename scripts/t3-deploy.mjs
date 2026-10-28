@@ -258,7 +258,7 @@ export function productionAdapter(config, io = {}) {
         NodePath.dirname(NodePath.resolve(root)) !== NodePath.resolve(config.backupRoot)
       )
         throw new Error("Offline snapshot identity mismatch");
-      restoreOfflineUserdata(NodePath.join(root, "userdata"), liveUserdata());
+      restoreOfflineUserdata(NodePath.join(root, "userdata"), liveUserdata(), io.renameUserdata);
     },
     async start(release) {
       await owners("start", release);
