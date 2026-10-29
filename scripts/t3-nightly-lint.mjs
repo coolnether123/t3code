@@ -66,18 +66,20 @@ export function lintAgainstBase(root, files, base, artifact) {
     root,
   );
   if (add.status !== 0) throw new Error(`Cannot create lint baseline: ${add.stderr}`);
+  const linkedModules = [];
   const cleanup = () => {
-    const modules = NodePath.join(tree, "node_modules");
-    if (NodeFS.existsSync(modules)) NodeFS.unlinkSync(modules);
+    for (const modules of linkedModules) NodeFS.unlinkSync(modules);
     const removed = execute("git", ["worktree", "remove", tree], root);
     if (removed.status !== 0) throw new Error(`Cannot clean lint baseline: ${removed.stderr}`);
   };
   try {
-    NodeFS.symlinkSync(
-      NodePath.join(root, "node_modules"),
-      NodePath.join(tree, "node_modules"),
-      "junction",
-    );
+    for (const relative of ["node_modules", "oxlint-plugin-t3code/node_modules"]) {
+      const source = NodePath.join(root, relative);
+      if (!NodeFS.existsSync(source)) continue;
+      const target = NodePath.join(tree, relative);
+      NodeFS.symlinkSync(source, target, "junction");
+      linkedModules.push(target);
+    }
     const baseline = lint(tree, "lint-baseline");
     const failures = newLintDiagnostics(candidate, baseline);
     return { inherited: candidate.length - failures.length, failures };
