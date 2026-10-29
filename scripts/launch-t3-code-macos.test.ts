@@ -13,6 +13,7 @@ const scriptPath = NodePath.join(
 );
 
 const source = NodeFS.readFileSync(scriptPath, "utf8");
+const bash = NodeOS.type() === "Windows_NT" ? "C:/Program Files/Git/bin/bash.exe" : "/bin/bash";
 
 describe("launch-t3-code-macos", () => {
   it("recognizes a recovered headless backend without claiming desktop children", () => {
@@ -34,7 +35,6 @@ describe("launch-t3-code-macos", () => {
       roots,
       `roots '${exe}'`,
     ].join("\n");
-    const bash = NodeOS.type() === "Windows_NT" ? "C:/Program Files/Git/bin/bash.exe" : "/bin/bash";
     const result = NodeChildProcess.execFileSync(bash, ["-c", program], { encoding: "utf8" });
     assert.deepEqual(result.trim().split(/\r?\n/), ["100", "200"]);
   });
@@ -112,6 +112,86 @@ describe("launch-t3-code-macos", () => {
     assert.include(source, "EXPECTED_ENVIRONMENT_ID");
     assert.include(source, "dry run complete: no files, processes, app/data");
     assert.include(source, '[[ -f "$STATE_PATH" ]] || return 0');
+  });
+
+  it("sets aside only the current database a failed first start created", () => {
+    const helper = source.match(/set_aside_first_start_database\(\) \{[\s\S]*?\n\}/)?.[0];
+    assert.isString(helper);
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-first-start-"));
+    try {
+      const userdata = NodePath.join(root, "userdata");
+      NodeFS.mkdirSync(NodePath.join(userdata, ".v2-import-x"), { recursive: true });
+      for (const name of [
+        "state.sqlite",
+        "state.sqlite-wal",
+        "statev2.sqlite",
+        "statev2.sqlite-wal",
+        "statev2.sqlite-shm",
+      ])
+        NodeFS.writeFileSync(NodePath.join(userdata, name), name);
+      const program = [
+        "set -euo pipefail",
+        helper,
+        'set_aside_first_start_database "$1" "$2"',
+        'printf "|"; set_aside_first_start_database "$1" "$2-again"',
+      ].join("\n");
+      const output = NodeChildProcess.execFileSync(
+        bash,
+        [
+          "-c",
+          program,
+          "test",
+          userdata.replaceAll("\\", "/"),
+          NodePath.join(root, "aside").replaceAll("\\", "/"),
+        ],
+        { encoding: "utf8" },
+      );
+      assert.equal(output, "statev2.sqlite statev2.sqlite-wal statev2.sqlite-shm .v2-import-x |");
+      assert.deepEqual(NodeFS.readdirSync(userdata).toSorted(), [
+        "state.sqlite",
+        "state.sqlite-wal",
+      ]);
+      assert.equal(
+        NodeFS.readFileSync(NodePath.join(root, "aside/statev2.sqlite"), "utf8"),
+        "statev2.sqlite",
+      );
+    } finally {
+      NodeFS.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("follows first-start migration progress through the database files", () => {
+    const helper = source.match(/first_start_signature\(\) \{[\s\S]*?\n\}/)?.[0];
+    assert.isString(helper);
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-first-start-"));
+    const signature = () =>
+      NodeChildProcess.execFileSync(
+        bash,
+        ["-c", `${helper}\nfirst_start_signature "$1"`, "test", root.replaceAll("\\", "/")],
+        {
+          encoding: "utf8",
+        },
+      );
+    try {
+      assert.equal(signature(), "");
+      NodeFS.writeFileSync(NodePath.join(root, "statev2.sqlite"), "db");
+      NodeFS.writeFileSync(NodePath.join(root, "statev2.sqlite-wal"), "w");
+      const migrating = signature();
+      assert.notEqual(migrating, "");
+      assert.equal(signature(), migrating);
+      NodeFS.appendFileSync(NodePath.join(root, "statev2.sqlite-wal"), "more");
+      assert.notEqual(signature(), migrating);
+    } finally {
+      NodeFS.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("waits longer only for a first start and rolls that database aside", () => {
+    assert.include(source, '[[ -e "$T3_HOME/userdata/statev2.sqlite" ]] || FIRST_V2_START=1');
+    assert.include(source, 'if ! launch_verify "$first_mode"; then');
+    assert.include(source, '[[ "$mode" == first-start ]] && { limit="$FIRST_START_WAIT_SECONDS"');
+    assert.include(source, '"$RUN_DIR/failed-first-start-database"');
+    assert.match(source, /launch_previous\(\) \{[\s\S]*?\n    launch_verify\n/);
   });
 
   it("launches through LaunchServices so saved connections stay readable", () => {

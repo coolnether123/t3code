@@ -34,6 +34,10 @@ import {
   assertInstallMatches,
   cloneCodeTree,
   startupAllocation,
+  FIRST_START_STALL_MS,
+  migrationProgress,
+  setAsideFirstStartDatabase,
+  waitWithProgress,
 } from "./deploy-macos-backend.ts";
 
 const commit = "0123456789abcdef0123456789abcdef01234567";
@@ -525,6 +529,115 @@ describe("deploy-macos-backend guards", () => {
     expect(options.dryRun).toBe(true);
     expect(options.port).toBe(3773);
     expect(DeploymentGuardError).toBeDefined();
+  });
+});
+
+const fakeClock = () => {
+  let now = 0;
+  return { now: () => now, sleep: async (ms: number) => void (now += ms) };
+};
+const unhealthy = async () => {
+  throw new Error("connection refused");
+};
+
+describe("first start on a new database", () => {
+  it("waits past the normal health limit while the migration keeps changing files", async () => {
+    const clock = fakeClock();
+    const result = await waitWithProgress(
+      async () => {
+        if (clock.now() < 20 * 60_000) throw new Error("connection refused");
+      },
+      { timeoutMs: 30 * 60_000, progress: async () => String(Math.floor(clock.now() / 60_000)) },
+      clock,
+    );
+    expect(result.passed).toBe(true);
+    expect(clock.now()).toBeGreaterThanOrEqual(20 * 60_000);
+  });
+
+  it("gives up once the database files stop changing", async () => {
+    const clock = fakeClock();
+    const result = await waitWithProgress(
+      unhealthy,
+      { timeoutMs: 30 * 60_000, progress: async () => "same" },
+      clock,
+    );
+    expect(result).toMatchObject({
+      passed: false,
+      reason: "startup stopped making database progress",
+    });
+    expect(clock.now()).toBe(FIRST_START_STALL_MS);
+  });
+
+  it("still stops at the overall limit while progress continues", async () => {
+    const clock = fakeClock();
+    const result = await waitWithProgress(
+      unhealthy,
+      { timeoutMs: 30 * 60_000, progress: async () => String(clock.now()) },
+      clock,
+    );
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("no health within");
+    expect(clock.now()).toBe(30 * 60_000);
+  });
+
+  it("keeps the ordinary short limit without a progress signal", async () => {
+    const clock = fakeClock();
+    const result = await waitWithProgress(unhealthy, { timeoutMs: 90_000 }, clock);
+    expect(result.passed).toBe(false);
+    expect(clock.now()).toBe(90_000);
+  });
+
+  it("reports progress from the copy snapshot and the current database WAL", async () => {
+    await withTempDirectory(async (userdata) => {
+      const empty = await migrationProgress(userdata);
+      await NodeFSP.mkdir(NodePath.join(userdata, ".v2-import-abc"));
+      await NodeFSP.writeFile(NodePath.join(userdata, ".v2-import-abc/snapshot.sqlite"), "a");
+      const copying = await migrationProgress(userdata);
+      expect(copying).not.toBe(empty);
+      await NodeFSP.rm(NodePath.join(userdata, ".v2-import-abc"), { recursive: true });
+      await NodeFSP.writeFile(NodePath.join(userdata, "statev2.sqlite"), "db");
+      await NodeFSP.writeFile(NodePath.join(userdata, "statev2.sqlite-wal"), "w");
+      const migrating = await migrationProgress(userdata);
+      await NodeFSP.appendFile(NodePath.join(userdata, "statev2.sqlite-wal"), "more");
+      expect(await migrationProgress(userdata)).not.toBe(migrating);
+      expect(await migrationProgress(userdata)).toBe(await migrationProgress(userdata));
+    });
+  });
+
+  it("sets aside only the current database a failed first start created", async () => {
+    await withTempDirectory(async (root) => {
+      const userdata = NodePath.join(root, "userdata");
+      const aside = NodePath.join(root, "run/failed-first-start-database");
+      await NodeFSP.mkdir(NodePath.join(userdata, ".v2-import-x"), { recursive: true });
+      await NodeFSP.mkdir(NodePath.join(root, "run"));
+      for (const name of [
+        "state.sqlite",
+        "state.sqlite-wal",
+        "statev2.sqlite",
+        "statev2.sqlite-wal",
+        "statev2.sqlite-shm",
+        "settings.json",
+      ])
+        await NodeFSP.writeFile(NodePath.join(userdata, name), name);
+      const moved = await setAsideFirstStartDatabase(userdata, aside);
+      expect([...moved].toSorted()).toEqual([
+        ".v2-import-x",
+        "statev2.sqlite",
+        "statev2.sqlite-shm",
+        "statev2.sqlite-wal",
+      ]);
+      expect((await NodeFSP.readdir(userdata)).toSorted()).toEqual([
+        "settings.json",
+        "state.sqlite",
+        "state.sqlite-wal",
+      ]);
+      expect(await NodeFSP.readFile(NodePath.join(aside, "statev2.sqlite"), "utf8")).toBe(
+        "statev2.sqlite",
+      );
+      expect(await setAsideFirstStartDatabase(userdata, NodePath.join(root, "run/again"))).toEqual(
+        [],
+      );
+    });
   });
 });
 

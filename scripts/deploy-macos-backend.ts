@@ -828,34 +828,128 @@ export const assertLiveIdleReadOnly = async (dbPath: string): Promise<void> => {
   }
 };
 
+/** The first start on a new database migrates before it serves; it may take this long. */
+export const FIRST_START_HEALTH_MS = 30 * 60_000;
+/** A first start whose database files stop changing for this long is treated as stuck. */
+export const FIRST_START_STALL_MS = 10 * 60_000;
+
+export interface HealthWaitPolicy {
+  readonly timeoutMs: number;
+  /** Returns a value that changes while startup work progresses. */
+  readonly progress?: () => Promise<string>;
+  readonly stallMs?: number;
+}
+
+export interface HealthWaitClock {
+  readonly now: () => number;
+  readonly sleep: (ms: number) => Promise<void>;
+}
+
+const realClock: HealthWaitClock = {
+  now: () => Date.now(),
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
+
+/**
+ * Retries `probe` until it passes or the timeout ends. With `progress`, it also
+ * stops once the progress signature has stayed the same for `stallMs`.
+ */
+export const waitWithProgress = async (
+  probe: () => Promise<void>,
+  policy: HealthWaitPolicy,
+  clock: HealthWaitClock = realClock,
+): Promise<{ readonly passed: boolean; readonly reason: string; readonly lastError: unknown }> => {
+  const started = clock.now();
+  const deadline = started + policy.timeoutMs;
+  const stallMs = policy.stallMs ?? FIRST_START_STALL_MS;
+  let lastError: unknown;
+  let signature = policy.progress ? await policy.progress() : "";
+  let changedAt = started;
+  while (clock.now() < deadline) {
+    try {
+      await probe();
+      return { passed: true, reason: "healthy", lastError: undefined };
+    } catch (error) {
+      lastError = error;
+    }
+    if (policy.progress) {
+      const next = await policy.progress();
+      if (next !== signature) {
+        signature = next;
+        changedAt = clock.now();
+      } else if (clock.now() - changedAt >= stallMs) {
+        return { passed: false, reason: "startup stopped making database progress", lastError };
+      }
+    }
+    await clock.sleep(1_000);
+  }
+  return { passed: false, reason: `no health within ${policy.timeoutMs} ms`, lastError };
+};
+
+/** Sizes and times of the current database files and any in-flight V1 import snapshot. */
+export const migrationProgress = async (userdata: string): Promise<string> => {
+  const names = ["statev2.sqlite", "statev2.sqlite-wal"];
+  for (const entry of await NodeFSP.readdir(userdata).catch((): string[] => []))
+    if (entry.startsWith(".v2-import-")) names.push(NodePath.join(entry, "snapshot.sqlite"));
+  const parts: string[] = [];
+  for (const name of names.toSorted()) {
+    const info = await optionalLstat(NodePath.join(userdata, name));
+    parts.push(info ? `${name}:${info.size}:${info.mtimeMs}` : `${name}:-`);
+  }
+  return parts.join("|");
+};
+
+/**
+ * Moves a current database created by a failed first start out of the live directory.
+ * The old server keeps writing state.sqlite, so a later start must copy it afresh.
+ */
+export const setAsideFirstStartDatabase = async (
+  userdata: string,
+  destination: string,
+): Promise<ReadonlyArray<string>> => {
+  const names = (await NodeFSP.readdir(userdata)).filter(
+    (entry) =>
+      entry === "statev2.sqlite" ||
+      entry === "statev2.sqlite-wal" ||
+      entry === "statev2.sqlite-shm" ||
+      entry.startsWith(".v2-import-"),
+  );
+  if (names.length === 0) return [];
+  await NodeFSP.mkdir(destination, { mode: 0o700 });
+  for (const name of names)
+    await NodeFSP.rename(NodePath.join(userdata, name), NodePath.join(destination, name));
+  return names;
+};
+
+const probeHttp = async (port: number, expectedEnvironmentId?: string): Promise<void> => {
+  const response = await fetch(`http://127.0.0.1:${port}/.well-known/t3/environment`, {
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!response.ok) throw new Error(`status ${response.status}`);
+  const body = (await response.json()) as { environmentId?: unknown };
+  if (expectedEnvironmentId !== undefined && body.environmentId !== expectedEnvironmentId)
+    fail("health identity does not match the preserved T3 environment.");
+  const root = await fetch(`http://127.0.0.1:${port}/`, {
+    redirect: "manual",
+    signal: AbortSignal.timeout(5_000),
+  });
+  assertRootHttpStatus(root.status);
+};
+
 const waitForHttp = async (
   port: number,
   expectedEnvironmentId?: string,
   timeoutMs = 60_000,
+  progress?: () => Promise<string>,
 ): Promise<void> => {
-  const deadline = Date.now() + timeoutMs;
-  let lastError: unknown;
-  while (Date.now() < deadline) {
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/.well-known/t3/environment`, {
-        signal: AbortSignal.timeout(5_000),
-      });
-      if (!response.ok) throw new Error(`status ${response.status}`);
-      const body = (await response.json()) as { environmentId?: unknown };
-      if (expectedEnvironmentId !== undefined && body.environmentId !== expectedEnvironmentId)
-        fail("health identity does not match the preserved T3 environment.");
-      const root = await fetch(`http://127.0.0.1:${port}/`, {
-        redirect: "manual",
-        signal: AbortSignal.timeout(5_000),
-      });
-      assertRootHttpStatus(root.status);
-      return;
-    } catch (error) {
-      lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-    }
-  }
-  fail(`HTTP health did not pass on loopback port ${port}: ${String(lastError)}.`);
+  const result = await waitWithProgress(
+    () => probeHttp(port, expectedEnvironmentId),
+    progress ? { timeoutMs, progress } : { timeoutMs },
+  );
+  if (!result.passed)
+    fail(
+      `HTTP health did not pass on loopback port ${port} (${result.reason}): ${String(result.lastError)}.`,
+    );
 };
 
 export const assertRootHttpStatus = (status: number): void => {
@@ -1189,10 +1283,23 @@ const rollbackDeployment = async (input: {
   readonly oldWrapper: string | undefined;
   readonly oldLaunchAgentWasLoaded: boolean;
   readonly environmentId: string;
+  readonly firstStartDatabaseAside?: string;
 }): Promise<void> => {
   await bootoutAndWait(input.uid, input.options.label, "rollback bootout");
   await restoreDeploymentFiles(input.plist, input.wrapper, input.oldPlist, input.oldWrapper);
   await waitForListenerRelease(input.options);
+  let setAsideError: unknown;
+  if (input.firstStartDatabaseAside !== undefined) {
+    try {
+      const moved = await setAsideFirstStartDatabase(
+        NodePath.join(input.options.baseDir, "userdata"),
+        input.firstStartDatabaseAside,
+      );
+      console.error(`set aside the failed first-start database: ${moved.join(", ") || "none"}`);
+    } catch (error) {
+      setAsideError = error;
+    }
+  }
   if (input.oldLaunchAgentWasLoaded) {
     await requireCommandSuccess(
       "launchctl",
@@ -1210,6 +1317,8 @@ const rollbackDeployment = async (input: {
     await waitForHttp(input.options.port, input.environmentId, 60_000);
     if (old.exitCode !== null) fail("rollback old server exited before health completed.");
   }
+  if (setAsideError !== undefined)
+    fail(`could not set aside the failed first-start database: ${String(setAsideError)}`);
 };
 
 export const recoverFailedDeployment = async (
@@ -1319,6 +1428,7 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
   }
 
   let stopped = false;
+  let firstCurrentStart = false;
   try {
     await atomicWriteOwned(
       wrapper,
@@ -1370,7 +1480,8 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
       NodePath.join(runDir, "state.sqlite"),
     );
     const currentDatabase = NodePath.join(options.baseDir, "userdata/statev2.sqlite");
-    if (await optionalLstat(currentDatabase)) {
+    firstCurrentStart = !(await optionalLstat(currentDatabase));
+    if (!firstCurrentStart) {
       await backupDatabase(currentDatabase, NodePath.join(runDir, "statev2.sqlite"));
       await verifyDatabaseBackup(NodePath.join(runDir, "statev2.sqlite"));
     }
@@ -1382,7 +1493,11 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
       ["bootstrap", `gui/${uid}`, plist],
       "candidate LaunchAgent bootstrap",
     );
-    await waitForHttp(options.port, environmentId, 90_000);
+    if (firstCurrentStart)
+      await waitForHttp(options.port, environmentId, FIRST_START_HEALTH_MS, () =>
+        migrationProgress(NodePath.join(options.baseDir, "userdata")),
+      );
+    else await waitForHttp(options.port, environmentId, 90_000);
     await verifyDatabaseBackup(NodePath.join(runDir, "state.sqlite"));
     console.log(`deployment passed for ${options.commit}; backup: ${runDir}`);
   } catch (error) {
@@ -1399,6 +1514,9 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
           oldWrapper,
           oldLaunchAgentWasLoaded,
           environmentId,
+          ...(firstCurrentStart
+            ? { firstStartDatabaseAside: NodePath.join(runDir, "failed-first-start-database") }
+            : {}),
         }),
     );
     throw error;

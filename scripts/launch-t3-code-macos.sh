@@ -17,6 +17,24 @@ EXPECTED_ENVIRONMENT_ID=""
 VP_PATH=""; declare -a OWNED_PIDS=()
 STORAGE_HELPER="$(dirname -- "${BASH_SOURCE[0]}")/macos-storage.py"
 RESTART_OLD_ON_FAILURE=0
+# The first start on a new current database copies and migrates it before serving.
+FIRST_START_WAIT_SECONDS=1800; FIRST_START_STALL_SECONDS=600; FIRST_V2_START=0
+first_start_signature() {
+  local userdata="$1" path out=""
+  for path in "$userdata/statev2.sqlite" "$userdata/statev2.sqlite-wal" "$userdata"/.v2-import-*/snapshot.sqlite; do
+    if [[ -e "$path" ]]; then out+="$path:$(stat -c '%s:%Y' "$path" 2>/dev/null || stat -f '%z:%m' "$path")|"; fi
+  done
+  printf '%s' "$out"
+}
+set_aside_first_start_database() {
+  local userdata="$1" destination="$2" path name moved=""
+  for path in "$userdata/statev2.sqlite" "$userdata/statev2.sqlite-wal" "$userdata/statev2.sqlite-shm" "$userdata"/.v2-import-*; do
+    if [[ -e "$path" ]]; then
+      name="$(basename "$path")"; (umask 077 && mkdir -p "$destination") || return 1; mv "$path" "$destination/$name" || return 1; moved+="$name "
+    fi
+  done
+  printf '%s' "$moved"
+}
 storage() { /usr/bin/python3 "$STORAGE_HELPER" "$@"; }
 space_gate() { storage capacity "$1" --allocation "${2:-1048576}" || fail "T3 space guard refused step; 20 GiB reserve required"; }
 
@@ -419,13 +437,15 @@ environment_id_from_json() {
   printf '%s' "$identity"
 }
 launch_verify() {
+  local mode="${1:-}" limit="$WAIT_SECONDS" signature="" last_signature="" changed=0
+  [[ "$mode" == first-start ]] && { limit="$FIRST_START_WAIT_SECONDS"; last_signature="$(first_start_signature "$T3_HOME/userdata")"; }
   local exe root_pid i log environment_body actual_environment_id session_body; exe="$(validate_app "$APP_PATH")"; log="$RUN_DIR/runtime-$(date -u +%Y%m%d-%H%M%S).log"; plan "Launching $exe with T3CODE_HOME=$T3_HOME and T3CODE_PORT=$SERVER_PORT."
   [[ "$DRY_RUN" -eq 1 ]] && return
   # Launch through LaunchServices so the app runs in the user's GUI session. A child of an SSH
   # shell cannot reach the login keychain, so Electron safeStorage fails to decrypt the saved
   # connection catalog and remote environments silently disappear until a manual relaunch.
   open -g -n -a "$APP_PATH" --env "T3CODE_HOME=$T3_HOME" --env "T3CODE_PORT=$SERVER_PORT" --env "T3CODE_BACKGROUND_LAUNCH=1" --stdout "$log" --stderr "$log" || { printf 'LaunchServices could not open %s\n' "$APP_PATH" >&2; return 1; }
-  for ((i=0; i<WAIT_SECONDS; i++)); do root_pid="$(root "$exe")"
+  for ((i=0; i<limit; i++)); do root_pid="$(root "$exe")"
     if [[ -n "$root_pid" ]]; then
       capture_tree "$root_pid"; check_listeners
       if environment_body="$(curl --fail --silent --show-error --max-time 5 "http://127.0.0.1:$SERVER_PORT/.well-known/t3/environment" 2>>"$log")" && actual_environment_id="$(environment_id_from_json "$environment_body")"; then
@@ -434,8 +454,15 @@ launch_verify() {
         fi
       fi
     fi
+    if [[ "$mode" == first-start ]]; then
+      signature="$(first_start_signature "$T3_HOME/userdata")"
+      if [[ "$signature" != "$last_signature" ]]; then last_signature="$signature"; changed="$i"
+      elif (( i - changed >= FIRST_START_STALL_SECONDS )); then
+        printf 'first start stopped making database progress after %s seconds; see %s\n' "$i" "$log" >&2; return 1
+      fi
+    fi
     sleep 1
-  done; printf 'app did not pass API health within %s seconds; see %s\n' "$WAIT_SECONDS" "$log" >&2; return 1
+  done; printf 'app did not pass API health within %s seconds; see %s\n' "$limit" "$log" >&2; return 1
 }
 launch_previous() {
   if [[ "$HEADLESS_ROLLBACK" -eq 1 ]]; then
@@ -449,8 +476,16 @@ launch_previous() {
   fi
 }
 rollback() {
-  local exe rt failed; idle_gate; exe="$(bundle_exec "$APP_PATH")"; rt="$(root "$exe")"; if [[ -n "$rt" ]]; then capture_tree "$rt"; check_listeners; stop_tree; fi
+  local exe rt failed aside_failed=0; idle_gate; exe="$(bundle_exec "$APP_PATH")"; rt="$(root "$exe")"; if [[ -n "$rt" ]]; then capture_tree "$rt"; check_listeners; stop_tree; fi
+  # The old app keeps writing state.sqlite, so a later first start must copy it afresh.
+  if [[ "$FIRST_V2_START" == 1 ]]; then
+    local moved
+    if moved="$(set_aside_first_start_database "$T3_HOME/userdata" "$RUN_DIR/failed-first-start-database")"; then
+      printf 'set aside failed first-start database: %s\n' "$moved" >>"$LOG_PATH"
+    else aside_failed=1; fi
+  fi
   failed="$RUN_DIR/failed-candidate-$(basename "$APP_PATH")"; [[ ! -e "$failed" ]] || fail "rollback destination exists"; [[ -d "$APP_PATH" ]] && mv "$APP_PATH" "$failed"; [[ -d "$PREVIOUS_APP" ]] || fail "previous app unavailable"; mv "$PREVIOUS_APP" "$APP_PATH"; write_state rolled-back; rm -f "$STATE_PATH"; launch_previous || fail "rollback health verification failed"; printf 'rollback passed; failed candidate retained at %s\n' "$failed"
+  [[ "$aside_failed" == 0 ]] || fail "could not set aside the failed first-start database; reconcile $T3_HOME/userdata"
 }
 deploy() {
   [[ -d "$APP_PATH" ]] || fail "installed app missing; refusing deployment"; local old new app_parent app_name
@@ -468,8 +503,10 @@ deploy() {
   PREVIOUS_APP="$app_parent/.$app_name.previous.$RUN_ID.app"; new="$app_parent/.$app_name.new.$RUN_ID.app"
   [[ ! -e "$PREVIOUS_APP" && ! -e "$new" ]] || fail "app staging path exists"; storage clone "$STAGED_APP" "$new" >>"$LOG_PATH" 2>&1 || fail "candidate staging APFS clone failed"; validate_app "$new" 1 >/dev/null; STAGED_APP="$new"; write_state ready-to-swap
   RESTART_OLD_ON_FAILURE=0
+  [[ -e "$T3_HOME/userdata/statev2.sqlite" ]] || FIRST_V2_START=1
   mv "$APP_PATH" "$PREVIOUS_APP"; write_state old-moved; mv "$STAGED_APP" "$APP_PATH"; write_state new-installed
-  if ! launch_verify; then printf 'new app health failed; rolling back\n' >&2; rollback; fail "deployment rolled back"; fi
+  local first_mode=""; [[ "$FIRST_V2_START" == 1 ]] && first_mode=first-start
+  if ! launch_verify "$first_mode"; then printf 'new app health failed; rolling back\n' >&2; rollback; fail "deployment rolled back"; fi
   storage retire "$RUN_DIR" "$PREVIOUS_APP" --app "$APP_PATH" >>"$LOG_PATH" 2>&1 || fail "accepted rollback retirement failed; current rollback retained"
   rm -f "$STATE_PATH"; printf 'deployment ready: %s\nbackup: %s\nprevious app retained: %s\n' "$APP_PATH" "$RUN_DIR" "$PREVIOUS_APP"
 }
