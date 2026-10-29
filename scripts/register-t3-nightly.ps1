@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([string]$ArtifactRoot = 'A:/Dev/Artifacts/t3-auto-sync-20261025', [string]$ReleaseRoot = 'A:/Runtime/T3CodeReleases', [string]$Repository, [switch]$Update)
+param([string]$ArtifactRoot = 'H:/Dev/T3Sync/artifacts', [string]$ReleaseRoot = 'A:/Runtime/T3CodeReleases', [string]$Repository = 'H:/Dev/T3Sync/repository', [string]$ParentChatId = '571b2119-2f8c-4ce2-9af1-f5ebf39b36d6', [switch]$Update)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot
 . (Join-Path $PSScriptRoot 't3-build-common.ps1')
@@ -11,7 +11,7 @@ if (-not $Update -and (Test-Path -LiteralPath (Join-Path $ReleaseRoot 'auto-depl
 New-Item -ItemType Directory -Path $ArtifactRoot -Force | Out-Null
 $control = Copy-T3ControlScripts $repo (Join-Path $ArtifactRoot 'nightly-control')
 $configPath = Join-Path $ArtifactRoot 'nightly-config.json'
-$settings = [ordered]@{repository=$Repository;forkBranch='main';upstreamBranch='main';autoPublish=$true;node=$node;artifactRoot=$ArtifactRoot;releaseRoot=$ReleaseRoot;deployConfig=(Join-Path $ReleaseRoot 'deploy-config.json');otisCall='A:/Dev/Projects/Otis/tools/otis-call/otis-call.mjs';taskLinkCheck='A:/Dev/Projects/Otis/tools/change-tracking/check-task-links.mjs';taskId='agenda-task:43f97c65571d4e89baa85b2349753c3d';handoff=(Join-Path $ArtifactRoot 'HANDOFF.md');workerCapabilities=(Join-Path $ArtifactRoot 'manifest.json')}
+$settings = [ordered]@{repository=$Repository;worktreeRoot=(Join-Path (Split-Path $Repository) 'worktrees');parentChatId=$ParentChatId;forkBranch='main';upstreamBranch='main';autoPublish=$true;node=$node;artifactRoot=$ArtifactRoot;releaseRoot=$ReleaseRoot;deployConfig=(Join-Path $ReleaseRoot 'deploy-config.json');otisCall='A:/Dev/Projects/Otis/tools/otis-call/otis-call.mjs';taskLinkCheck='A:/Dev/Projects/Otis/tools/change-tracking/check-task-links.mjs';taskId='agenda-task:18d48418e0374831a2e088da64be40f6';handoff=(Join-Path $Repository 'docs/fork/FEATURES.md')}
 $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\conhost.exe" -Argument "--headless `"$node`" `"$control/t3-nightly-sync.mjs`" `"$configPath`"" -WorkingDirectory $Repository
 $trigger = New-ScheduledTaskTrigger -Daily -At '03:30'
 # Omit the offset so Windows follows the local daylight-saving rules.
@@ -22,7 +22,7 @@ $name = 'Otis T3 Nightly Sync'
 $existing = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
 if ($existing) {
     if ($existing.State -eq 'Running') { throw 'Wait for the existing nightly run before updating its action' }
-    if (-not $Update -or $existing.Actions.Arguments -notlike '*t3-nightly-sync.mjs*' -or $existing.Actions.Arguments -notlike ('*' + $configPath.Replace('/','\') + '*')) { throw 'Task exists; inspect before replacing' }
+    if (-not $Update -or $existing.Actions.Arguments -notlike '*t3-nightly-sync.mjs*') { throw 'Task exists; inspect before replacing' }
     Export-ScheduledTask -TaskName $name | Set-Content -LiteralPath (Join-Path $ArtifactRoot ('nightly-task-before-' + (Get-Date -Format yyyyMMdd-HHmmss) + '.xml')) -Encoding Unicode
 }
 [IO.File]::WriteAllText($configPath, ($settings | ConvertTo-Json -Depth 5))

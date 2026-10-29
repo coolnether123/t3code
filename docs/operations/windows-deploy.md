@@ -96,20 +96,28 @@ that folder. Use `-Repository` to select the persistent Windows checkout and
 Register the script as an automation output on the owning agenda task and check
 the startup inventory after changing the action.
 
-The controller requires this implementation and `docs/fork/FEATURES.md` on the
-Windows fork branch before starting sync work. It selects the newest upstream
-nightly by date and numeric sequence, merges in an isolated worktree, runs all
-package typechecks and affected tests, and pushes a `sync/*` candidate. Failed
-checks are inherited only with exact classified evidence from a cached plain-tag
-baseline. Each run explicitly fetches the current remote fork tip before
-choosing its merge base. Conflicts and real failures write `repair.md` and
-`NEEDS-PARENT.json` in the night folder and append a `needs-parent` ledger result.
-The manifest records night, branch, worktree, packet path and conflict count.
-The parent launches the packet in the morning. The scheduler never calls
-`start_agent` or invents a chat identity.
-Moved paths update the feature inventory during a clean merge.
-Unavailable verification is recorded without starting a repair worker. Re-running
-the same night preserves an existing candidate for resumption.
+The controller follows upstream main by default and explicitly fetches the remote
+fork tip before choosing its merge base. It merges in an isolated worktree under
+`H:/Dev/T3Sync`, outside task worktrees. The durable repository and artifact root
+can be selected during registration.
+
+Verification runs package typechecks and affected tests. Lint compares diagnostic
+counts against the fork base, so existing debt does not block unrelated upstream
+changes; new diagnostics still fail. Format and context-budget checks cannot be
+waived by an upstream baseline. Context-budget conflicts use upstream's numbers
+plus `docs/fork/agent-context-delta.json`, only when the fork's previous numbers
+match that documented delta. A mismatch requires parent attention.
+
+Every stopped run writes `repair.md` and `NEEDS-PARENT.json`, sends an urgent
+`tell_jared` notification addressed to the configured parent chat, and exits
+nonzero. The ledger records notification delivery or its failure. Failed
+candidates remain available for repair; the scheduler does not launch agents.
+Re-running the same night preserves an existing candidate for resumption.
+
+The production release is built and its artifact hashes verified before either
+candidate or fork main publication. `--dry-run` performs integration, checks and
+the production build, then uses Git's dry-run push without changing remote refs.
+A changed fork tip blocks promotion and requires a new integration candidate.
 
 After the first successful live deployment, create
 `A:/Runtime/T3CodeReleases/auto-deploy-enabled` to allow the nightly controller to

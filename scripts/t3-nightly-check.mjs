@@ -2,7 +2,8 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeChildProcess from "node:child_process";
 import * as NodeUtil from "node:util";
-const [root, artifact, filesJson] = process.argv.slice(2);
+import { lintAgainstBase } from "./t3-nightly-lint.mjs";
+const [root, artifact, filesJson, lintBase] = process.argv.slice(2);
 NodeFS.mkdirSync(artifact, { recursive: true });
 const vp = NodePath.join(root, "node_modules/vite-plus/bin/vp");
 const files = JSON.parse(NodeFS.readFileSync(filesJson, "utf8"));
@@ -12,7 +13,7 @@ const sourceFiles = files.filter(
 );
 for (const [name, args] of [
   ["format", ["fmt", "--check", ...sourceFiles]],
-  ["lint", ["lint", "--report-unused-disable-directives", ...sourceFiles]],
+  ["lint", []],
   [
     "agent-context",
     [
@@ -41,6 +42,34 @@ for (const [name, args] of [
     ],
   ],
 ]) {
+  if (["format", "lint", "tests"].includes(name) && sourceFiles.length === 0) {
+    results.push({
+      name,
+      exit: 0,
+      failures: [],
+      classified: true,
+      skipped: "No changed source files",
+    });
+    continue;
+  }
+  if (name === "lint") {
+    try {
+      const lint = lintAgainstBase(root, sourceFiles, lintBase, artifact);
+      NodeFS.writeFileSync(NodePath.join(artifact, "lint-new.json"), JSON.stringify(lint, null, 2));
+      results.push({
+        name,
+        exit: lint.failures.length ? 1 : 0,
+        failures: lint.failures.map((d) => JSON.stringify(d)).sort(),
+        classified: true,
+        inherited: lint.inherited,
+        baseline: lintBase ?? null,
+      });
+    } catch (error) {
+      NodeFS.writeFileSync(NodePath.join(artifact, "lint.log"), String(error));
+      results.push({ name, exit: 1, failures: [], classified: false });
+    }
+    continue;
+  }
   const log = NodeFS.openSync(NodePath.join(artifact, `${name}.log`), "w");
   const result = NodeChildProcess.spawnSync(process.execPath, [vp, ...args], {
     cwd: root,
@@ -58,7 +87,7 @@ for (const [name, args] of [
           .split(/\r?\n/)
           .filter((l) => /error TS\d+/.test(l))
           .sort()
-      : NodeFS.existsSync(NodePath.join(artifact, "tests.json"))
+      : name === "tests" && NodeFS.existsSync(NodePath.join(artifact, "tests.json"))
         ? JSON.parse(NodeFS.readFileSync(NodePath.join(artifact, "tests.json"), "utf8"))
             .testResults.flatMap((s) =>
               s.assertionResults
