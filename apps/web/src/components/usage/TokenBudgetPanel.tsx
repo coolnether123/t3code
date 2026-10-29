@@ -9,6 +9,9 @@ import {
   tokenCount,
 } from "./usageTokenBudget";
 
+// oxlint-disable-next-line t3code/no-em-dash-copy -- Empty-value placeholder glyph, not prose.
+const NO_VALUE = "—";
+
 export function TokenBudgetPanel({
   budgetUsd,
   models,
@@ -189,13 +192,13 @@ export function TokenBudgetPanel({
                     {result ? `≈ ${formatTokens(result.total)}` : "Pending"}
                   </td>
                   <td className="text-right font-mono text-xs tabular-nums">
-                    {result ? formatTokens(result.input) : "—"}
+                    {result ? formatTokens(result.input) : NO_VALUE}
                   </td>
                   <td className="text-right font-mono text-xs tabular-nums">
-                    {result ? formatTokens(result.output) : "—"}
+                    {result ? formatTokens(result.output) : NO_VALUE}
                   </td>
                   <td className="text-right font-mono text-xs tabular-nums">
-                    {result ? `$${result.perMillion.toFixed(4)}` : "—"}
+                    {result ? `$${result.perMillion.toFixed(4)}` : NO_VALUE}
                   </td>
                 </tr>
               );

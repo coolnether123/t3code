@@ -12,11 +12,10 @@ import * as Schema from "effect/Schema";
 import { checkCodexProviderStatus } from "./CodexProvider.ts";
 
 /**
- * Stand-in for Codex 0.162's app-server catalog behavior:
- * - `model/list` answers from `CODEX_HOME/models_cache.json` while it is fresh.
- * - A startup refresh runs before `initialize`, so it uses the originator set
- *   at spawn (the override env var, else the plain CLI's `codex_cli_rs`).
- * - The backend grants Ultrafast only to entitled accounts on app originators.
+ * Stand-in for Codex 0.162's catalog: `model/list` answers from a fresh
+ * `CODEX_HOME/models_cache.json`; the startup refresh runs before `initialize`
+ * with the spawn originator (override env var, else `codex_cli_rs`); Ultrafast
+ * is granted only to entitled accounts on app originators.
  */
 const FAKE_CODEX_APP_SERVER = String.raw`#!/usr/bin/env node
 const fs = require("node:fs");

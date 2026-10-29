@@ -1,6 +1,5 @@
-import { act } from "react";
-import { createRoot } from "react-dom/client";
-import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
+import { act, render } from "../../../test/render";
 import { quotaPeriods } from "@t3tools/shared/usageQuota";
 import type { UsageSummaryInput } from "@t3tools/contracts";
 const state = vi.hoisted(() => ({ usage: vi.fn(), missing: false }));
@@ -23,7 +22,7 @@ const fingerprint = {
   resolvedHomePath: "/sessions",
   volumeId: "1",
 };
-beforeEach(() => {
+function setup() {
   state.missing = false;
   state.usage.mockReset().mockImplementation((input: UsageSummaryInput) => ({
     isPending: false,
@@ -59,88 +58,70 @@ beforeEach(() => {
       },
     ],
   }));
-});
+}
 
 describe("cycle comparison controls", () => {
   it("loads costs on expansion, switches any older cycle, and collapses without changing the selected chart cycle", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () =>
-        root.render(
-          <UsageCycleComparison
-            period={periods[2]!}
-            periods={periods}
-            samples={samples}
-            selectedIds={["pc"]}
-          />,
-        ),
-      );
-      expect(container.textContent).toContain("2.0 points more quota used");
-      expect(state.usage).not.toHaveBeenCalled();
-      const toggle = container.querySelector("button")!;
-      await act(async () => toggle.click());
-      expect(container.querySelector('[aria-label="Cycle insights"]')?.textContent).toContain(
-        "100% more",
-      );
-      expect(
-        container.querySelector('[aria-label="Cycle cost comparison"]')?.textContent,
-      ).toContain("80.0%");
-      const select = container.querySelector("select")!;
-      expect(select.options).toHaveLength(2);
-      await act(async () => {
-        select.value = periods[0]!.id;
-        select.dispatchEvent(new Event("change", { bubbles: true }));
-      });
-      expect(container.textContent).toContain("4.0 points more quota used");
-      const input = state.usage.mock.lastCall![0] as UsageSummaryInput;
-      expect(input.quotaIntervals?.[0]?.sinceTime).toBe(periods[0]!.first.observedAt);
-      expect(input.quotaIntervals?.[1]?.sinceTime).toBe(periods[2]!.first.observedAt);
-      await act(async () => toggle.click());
-      expect(container.querySelector("select")).toBeNull();
-    } finally {
-      await act(async () => root.unmount());
-      vi.unstubAllGlobals();
-    }
+    setup();
+    await using screen = await render(
+      <UsageCycleComparison
+        period={periods[2]!}
+        periods={periods}
+        samples={samples}
+        selectedIds={["pc"]}
+      />,
+    );
+    const container = screen.container;
+    expect(container.textContent).toContain("2.0 points more quota used");
+    expect(state.usage).not.toHaveBeenCalled();
+    const toggle = container.querySelector("button")!;
+    await act(async () => toggle.click());
+    expect(container.querySelector('[aria-label="Cycle insights"]')?.textContent).toContain(
+      "100% more",
+    );
+    expect(container.querySelector('[aria-label="Cycle cost comparison"]')?.textContent).toContain(
+      "80.0%",
+    );
+    const select = container.querySelector("select")!;
+    expect(select.options).toHaveLength(2);
+    await act(async () => {
+      select.value = periods[0]!.id;
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(container.textContent).toContain("4.0 points more quota used");
+    const input = state.usage.mock.lastCall![0] as UsageSummaryInput;
+    expect(input.quotaIntervals?.[0]?.sinceTime).toBe(periods[0]!.first.observedAt);
+    expect(input.quotaIntervals?.[1]?.sinceTime).toBe(periods[2]!.first.observedAt);
+    await act(async () => toggle.click());
+    expect(container.querySelector("select")).toBeNull();
   });
   it("withholds cost conclusions when either interval is incomplete or a selected computer is missing", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      state.missing = true;
-      await act(async () =>
-        root.render(
-          <UsageCycleComparison
-            period={periods[2]!}
-            periods={periods}
-            samples={samples}
-            selectedIds={["pc"]}
-          />,
-        ),
-      );
-      await act(async () => container.querySelector("button")!.click());
-      expect(container.textContent).toContain("Complete priced transcripts are unavailable");
-      expect(container.querySelector('[aria-label="Cycle insights"]')).toBeNull();
-      state.missing = false;
-      await act(async () =>
-        root.render(
-          <UsageCycleComparison
-            period={periods[2]!}
-            periods={periods}
-            samples={samples}
-            selectedIds={["pc", "offline"]}
-          />,
-        ),
-      );
-      expect(container.querySelector('[aria-label="Cycle insights"]')).toBeNull();
-      expect(
-        container.querySelector('[aria-label="Quota used over equal recorded time"]'),
-      ).not.toBeNull();
-    } finally {
-      await act(async () => root.unmount());
-      vi.unstubAllGlobals();
-    }
+    setup();
+    state.missing = true;
+    await using screen = await render(
+      <UsageCycleComparison
+        period={periods[2]!}
+        periods={periods}
+        samples={samples}
+        selectedIds={["pc"]}
+      />,
+    );
+    const container = screen.container;
+    await act(async () => container.querySelector("button")!.click());
+    expect(container.textContent).toContain("Complete priced transcripts are unavailable");
+    expect(container.querySelector('[aria-label="Cycle insights"]')).toBeNull();
+    state.missing = false;
+    await screen.rerender(
+      <UsageCycleComparison
+        period={periods[2]!}
+        periods={periods}
+        samples={samples}
+        selectedIds={["pc", "offline"]}
+      />,
+    );
+    expect(container.querySelector('[aria-label="Cycle insights"]')).toBeNull();
+    expect(
+      container.querySelector('[aria-label="Quota used over equal recorded time"]'),
+    ).not.toBeNull();
   });
 });

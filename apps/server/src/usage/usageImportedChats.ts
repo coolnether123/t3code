@@ -1,12 +1,7 @@
 // @effect-diagnostics globalDate:off nodeBuiltinImport:off
 /**
- * Parsers for user-requested chat archives.
- *
- * These archives describe subscription/product chats, not API invoices. The
- * records intentionally flow through the normal pricing table so the result is
- * an API-equivalent estimate with the same model and long-context rules as CLI
- * transcripts.
- *
+ * Parsers for user-requested subscription chat archives. Records go through
+ * the normal pricing table, giving an API-equivalent estimate.
  * @module usageImportedChats
  */
 import * as NodeCrypto from "node:crypto";

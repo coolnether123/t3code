@@ -8,6 +8,9 @@ import { modelDisplayName } from "./UsageModelHourlyChart";
 import type { ChartActivity } from "./usageChartActivity";
 import { monitoredModels, tokenCount } from "./usageTokenBudget";
 
+// oxlint-disable-next-line t3code/no-em-dash-copy -- Empty-value placeholder glyph, not prose.
+const NO_VALUE = "—";
+
 type Models = NonNullable<ReturnType<typeof monitoredModels>>;
 
 const COLORS = ["#ed854c", "#62a7ed", "#b897ed", "#67bc9d", "#e4b75e", "#b5b9c0"];
@@ -157,7 +160,7 @@ export function UsageModelTracker({
           </p>
         </div>
         <div className="text-right">
-          <p className="text-xl tabular-nums">{data ? `${data.drop.toFixed(1)} pts` : "—"}</p>
+          <p className="text-xl tabular-nums">{data ? `${data.drop.toFixed(1)} pts` : NO_VALUE}</p>
           <p className="text-xs text-muted-foreground">quota used while monitored</p>
         </div>
       </div>
@@ -192,7 +195,9 @@ export function UsageModelTracker({
                     <TooltipPopup>{row.model}</TooltipPopup>
                   </Tooltip>
                   <span className="ms-auto shrink-0 tabular-nums">
-                    {row.estimatedPoints === null ? "—" : `≈ ${percentage(row.estimatedPoints)}`}
+                    {row.estimatedPoints === null
+                      ? NO_VALUE
+                      : `≈ ${percentage(row.estimatedPoints)}`}
                   </span>
                 </div>
                 <p className="mt-1 ps-4 text-2xs text-muted-foreground tabular-nums">

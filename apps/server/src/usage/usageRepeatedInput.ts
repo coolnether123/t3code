@@ -668,11 +668,9 @@ function directTokens(
   // empty placeholder or guessing from byte length.
   const tokenCount = descriptor.tokenCount ?? null;
   if (tokenCount === null) return EMPTY_REPEATED_INPUT_TOKENS;
-  // Codex reports cache classes for the complete request, not for a specific
-  // payload inside it. The direct load observation therefore stays exact;
-  // cache attribution is assigned only by a later token-count record whose
-  // partition proves that the carried payload is in the complete cached or
-  // cache-write region.
+  // Codex reports cache classes per request, not per payload, so the direct load
+  // stays exact and cache attribution waits for a token-count record whose
+  // partition proves the payload is in the cached or cache-write region.
   if (confidence === "confirmedPayload") {
     return { exact: tokenCount, estimated: 0, cached: 0, cacheWrite: 0, unknown: 0 };
   }

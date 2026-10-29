@@ -13,11 +13,9 @@ const MAX_MESSAGE_CHARACTERS = 262144;
 const BATCH_MESSAGES = 32;
 
 /** Each committed message is its own durable checkpoint. Parsing holds no write lease. */
-export const warmPromptWordIndexBatch = (
-  sql: SqlClient.SqlClient,
-  sourceTable = "usage_prompt_messages_v2",
-) =>
-  Effect.gen(function* () {
+export const warmPromptWordIndexBatch =
+  // Untraced: the indexer loop calls this every second, or every 50 ms while busy.
+  Effect.fnUntraced(function* (sql: SqlClient.SqlClient, sourceTable = "usage_prompt_messages_v2") {
     const started = yield* Clock.currentTimeMillis;
     const pending = yield* sql<{ messageId: string; generation: number }>`
       SELECT message_id AS messageId, generation FROM usage_prompt_pending_v1
@@ -109,11 +107,9 @@ export const warmPromptWordIndexBatch = (
   });
 
 /** One service-scoped worker resumes persisted pending IDs after every restart. */
-export const runPromptWordIndexer = (
-  sql: SqlClient.SqlClient,
-  sourceTable = "usage_prompt_messages_v2",
-) =>
-  Effect.gen(function* () {
+export const runPromptWordIndexer =
+  // Untraced: this loop runs for the service lifetime.
+  Effect.fnUntraced(function* (sql: SqlClient.SqlClient, sourceTable = "usage_prompt_messages_v2") {
     while (true) {
       if (promptIndexCutoverEnabled() && !(yield* localPromptFallbackActive)) {
         yield* Effect.sleep(1000);

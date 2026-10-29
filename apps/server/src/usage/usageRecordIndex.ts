@@ -1,19 +1,7 @@
 /**
- * One transcript's usage, priced once and indexed by time.
- *
- * A summary read used to decode and re-price every record of every transcript
- * in its window. A transcript's records only change when the transcript does,
- * so they are priced when it is read and folded into groups that share every
- * bucket dimension (model, tier, session, turn, run). Each group keeps sorted
- * timestamps and prefix sums, so any window, day or hour reads a group with two
- * binary searches.
- *
- * Records whose de-duplication key also appears in another transcript are kept
- * as individual priced records. The aggregator resolves those in file order
- * exactly as it resolves raw records, so a copied event is still counted once.
- *
- * Pure: pricing is passed in, and nothing here reads the filesystem or clock.
- *
+ * One transcript's usage, priced once and grouped by bucket dimensions with
+ * sorted timestamps and prefix sums. Keys shared across transcripts stay as
+ * per-record entries so copied events still count once. Pure: no fs or clock.
  * @module usageRecordIndex
  */
 import type { UsageTokenTotals, UsageCategoryCost } from "@t3tools/contracts";
@@ -259,12 +247,9 @@ export function buildTranscriptUsageIndex(
 }
 
 /**
- * Which de-duplication keys more than one transcript holds.
- *
- * Counts only grow toward "shared" while a transcript is held: when a key gains
- * its second holder, the first holder's index folded that record into its sums
- * and must be rebuilt, which `register` reports. A key that drops back to one
- * holder stays on the exact per-record path until that holder is rebuilt.
+ * Which de-duplication keys more than one transcript holds. A key gaining its
+ * second holder forces the first holder's index to rebuild (`register` reports
+ * it); a key back to one holder stays per-record until that holder rebuilds.
  */
 export class DedupeKeyRegistry {
   readonly #holders = new Map<number, number>();

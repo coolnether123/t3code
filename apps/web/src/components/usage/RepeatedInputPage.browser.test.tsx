@@ -1,13 +1,15 @@
-import { act } from "react";
-import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 import type { UsageRepeatedInputSummary } from "@t3tools/contracts";
+import { act, render } from "../../../test/render";
 
 const state = vi.hoisted(() => ({ useUsage: vi.fn(), refresh: vi.fn() }));
 vi.mock("../../state/usage", () => ({ useUsage: state.useUsage }));
 vi.mock("../../env", () => ({ isElectron: false }));
-vi.mock("@tanstack/react-router", () => ({ Link: "a" }));
+vi.mock("@tanstack/react-router", async (original) => ({
+  ...(await original<typeof import("@tanstack/react-router")>()),
+  Link: "a",
+}));
 vi.mock("../ui/scroll-area", () => ({ ScrollArea: "div" }));
 vi.mock("../ui/sidebar", () => ({ SidebarInset: "div" }));
 vi.mock("../WorkspacePageHeader", () => ({ WorkspacePageHeader: "header" }));
@@ -29,14 +31,14 @@ const desktop = {
   summary: { sources: [], repeatedInput: attribution },
 };
 
-beforeEach(() => {
+function setup() {
   vi.clearAllMocks();
   state.useUsage.mockReturnValue({ environments: [desktop], refresh: state.refresh });
-});
-afterEach(() => vi.unstubAllGlobals());
+}
 
 describe("RepeatedInputPage", () => {
   it("opens attribution as a separate page with a return link and opt-in request", () => {
+    setup();
     const markup = renderToStaticMarkup(<RepeatedInputPage />);
     expect(markup).toContain("Skills &amp; repeated input");
     expect(markup).toContain('to="/usage"');
@@ -46,6 +48,7 @@ describe("RepeatedInputPage", () => {
   });
 
   it("distinguishes scanning, unavailable, unsupported and empty attribution", () => {
+    setup();
     state.useUsage.mockReturnValue({
       environments: [{ ...desktop, isPending: true, summary: null }],
       refresh: state.refresh,
@@ -68,6 +71,7 @@ describe("RepeatedInputPage", () => {
   });
 
   it("keeps returned attribution visible while naming a missing computer", () => {
+    setup();
     state.useUsage.mockReturnValue({
       environments: [
         desktop,
@@ -83,7 +87,7 @@ describe("RepeatedInputPage", () => {
   });
 
   it("changes the period query and scopes the overview to the selected computer", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    setup();
     state.useUsage.mockReturnValue({
       environments: [
         desktop,
@@ -96,38 +100,31 @@ describe("RepeatedInputPage", () => {
       ],
       refresh: state.refresh,
     });
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    try {
-      await act(async () => root.render(<RepeatedInputPage />));
-      expect(container.textContent).toContain("$0.32");
-      const computer = container.querySelector<HTMLSelectElement>(
-        '[aria-label="Repeated input computer"]',
-      )!;
-      await act(async () => {
-        computer.value = "desktop";
-        computer.dispatchEvent(new Event("change", { bubbles: true }));
-      });
-      expect(container.textContent).toContain("$0.12");
-      expect(container.textContent).not.toContain("$0.32");
-      const prior = state.useUsage.mock.lastCall?.[0];
-      const period = container.querySelector<HTMLSelectElement>(
-        '[aria-label="Repeated input period"]',
-      )!;
-      await act(async () => {
-        period.value = "7";
-        period.dispatchEvent(new Event("change", { bubbles: true }));
-      });
-      expect(state.useUsage.mock.lastCall?.[0].sinceDay).not.toEqual(prior.sinceDay);
-      expect(state.useUsage.mock.lastCall?.[0].includeRepeatedInput).toBe(true);
-      await act(async () =>
-        container
-          .querySelector<HTMLButtonElement>('[aria-label="Refresh repeated input"]')!
-          .click(),
-      );
-      expect(state.refresh).toHaveBeenCalledOnce();
-    } finally {
-      await act(async () => root.unmount());
-    }
+    await using screen = await render(<RepeatedInputPage />);
+    const container = screen.container;
+    expect(container.textContent).toContain("$0.32");
+    const computer = container.querySelector<HTMLSelectElement>(
+      '[aria-label="Repeated input computer"]',
+    )!;
+    await act(async () => {
+      computer.value = "desktop";
+      computer.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(container.textContent).toContain("$0.12");
+    expect(container.textContent).not.toContain("$0.32");
+    const prior = state.useUsage.mock.lastCall?.[0];
+    const period = container.querySelector<HTMLSelectElement>(
+      '[aria-label="Repeated input period"]',
+    )!;
+    await act(async () => {
+      period.value = "7";
+      period.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(state.useUsage.mock.lastCall?.[0].sinceDay).not.toEqual(prior.sinceDay);
+    expect(state.useUsage.mock.lastCall?.[0].includeRepeatedInput).toBe(true);
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[aria-label="Refresh repeated input"]')!.click(),
+    );
+    expect(state.refresh).toHaveBeenCalledOnce();
   });
 });

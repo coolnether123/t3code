@@ -4,7 +4,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import { buildCodexDesktopCoordinatorInstructions } from "./CodexDesktopCoordinatorInstructions.ts";
 import {
@@ -217,7 +217,7 @@ describe("CodexDesktopMailbox", () => {
         return watcher;
       };
       const waiting = waitForCodexDesktopMailboxChange(layout, 20, failingWatch);
-      await new Promise((resolve) => setImmediate(resolve));
+      await vi.waitFor(() => expect(watchers).toHaveLength(3), { interval: 1 });
       watchers[0]?.emit(
         "error",
         Object.assign(new Error("too many open files"), { code: "EMFILE" }),

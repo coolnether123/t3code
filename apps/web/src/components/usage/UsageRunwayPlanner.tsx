@@ -9,6 +9,9 @@ import {
 } from "./usageApiPace";
 import { useState } from "react";
 
+// oxlint-disable-next-line t3code/no-em-dash-copy -- Empty-value placeholder glyph, not prose.
+const NO_VALUE = "—";
+
 const date = (value: string) =>
   new Date(value).toLocaleString(undefined, {
     month: "short",
@@ -95,7 +98,7 @@ export function UsageRunwayPlanner({
                 {formatUsd(plan.measuredUsdPerHour)} / hour
               </dd>
               <dd className="mt-1 text-xs text-muted-foreground">
-                Measured {pace ? pace.hours.toFixed(1) : "—"}h, including idle time
+                Measured {pace ? pace.hours.toFixed(1) : NO_VALUE}h, including idle time
               </dd>
             </div>
             <div>

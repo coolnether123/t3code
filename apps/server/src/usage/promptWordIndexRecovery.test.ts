@@ -144,7 +144,6 @@ it.effect(
         );
       }),
     ),
-  { timeout: 60000 },
 );
 
 it.effect(

@@ -1,15 +1,7 @@
 // @effect-diagnostics globalDate:off
 /**
- * Folds parsed transcript records into `(day, hourStart?, provider, model)`
- * buckets.
- *
- * `Intl.DateTimeFormat` is the only reliable way to resolve a wall-clock day in
- * an arbitrary IANA zone, and it takes a `Date`. That is why the raw `Date`
- * construction is allowed here; nothing in this module reads the clock.
- *
- * Pure, so the bucketing and de-duplication rules are testable without touching
- * the filesystem or the network.
- *
+ * Folds parsed records into `(day, hourStart?, provider, model)` buckets. Pure;
+ * raw `Date` construction is allowed only for `Intl.DateTimeFormat` zone days.
  * @module usageAggregation
  */
 import type {
