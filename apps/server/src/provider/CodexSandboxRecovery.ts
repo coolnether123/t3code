@@ -379,12 +379,12 @@ export function shouldRecoverCodexSandboxExit(
   );
 }
 
-export function withCodexSandboxStartupRecovery<A, E, R>(input: {
-  readonly run: () => Effect.Effect<A, E, R>;
-  readonly homeDirectory?: string;
-  readonly platform?: string;
-}): Effect.Effect<A, E, R> {
-  return Effect.gen(function* () {
+export const withCodexSandboxStartupRecovery = Effect.fn("withCodexSandboxStartupRecovery")(
+  function* <A, E, R>(input: {
+    readonly run: () => Effect.Effect<A, E, R>;
+    readonly homeDirectory?: string;
+    readonly platform?: string;
+  }): Effect.fn.Return<A, E, R> {
     const first = yield* Effect.result(input.run());
     if (first._tag === "Success") return first.success;
     if (!isConfirmedCorruptCodexSandboxExit(first.failure)) {
@@ -397,5 +397,5 @@ export function withCodexSandboxStartupRecovery<A, E, R>(input: {
     });
     if (!recovery) return yield* Effect.fail(first.failure);
     return yield* input.run();
-  });
-}
+  },
+);

@@ -1,13 +1,6 @@
 /**
- * Saved Claude subscription readings.
- *
- * Claude reports its session, weekly, and model-scoped weekly windows as
- * percentages through the CLI's usage request. Each reading is kept per window
- * in a small JSON document in the server state directory so the reset monitor
- * can chart Claude cycles with the same math it uses for Codex's weekly cycle.
- * Identical consecutive readings are coalesced, but one is kept at least
- * hourly so a quiet stretch still draws its flat segment.
- *
+ * Saved Claude subscription readings per window, as JSON in the state dir.
+ * Identical consecutive readings coalesce, keeping at least one per hour.
  * @module claudeQuotaHistory
  */
 import * as DateTime from "effect/DateTime";

@@ -76,11 +76,9 @@ The selected Codex app-server model runtime controls the callable sub-agent tool
 `;
 
 /**
- * The browser block is omitted entirely when the preview tools aren't attached.
- * Describing `preview_*` tools that aren't in the turn's tool list would be
- * worse than saying nothing: the instructions actively steer the model away
- * from Playwright and agent-browser, so leaving them in would talk it out of
- * the only browser automation it still has.
+ * Omit the browser block when the preview tools aren't attached: it steers the
+ * model away from Playwright and agent-browser, which would then be the only
+ * browser automation it has.
  */
 export interface CodexControlRuntime {
   readonly useDesktopAppDaemon?: boolean | undefined;

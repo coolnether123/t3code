@@ -627,27 +627,26 @@ export const make = Effect.fn("ChromeAutomation.make")(function* (
     return currentBrowser;
   };
 
-  const failStart = (cause: unknown) =>
-    Effect.gen(function* () {
-      yield* Effect.logError("managed Chrome failed to start", {
-        profileDir,
-        executablePath: status.executablePath,
-        channel: launchChannel,
-        detail: errorDetail(cause),
-        cause,
-      });
-      const currentBrowser = browser;
-      expectedDisconnect = true;
-      let retainedBrowser: ChromeAutomationBrowser | undefined;
-      if (currentBrowser !== undefined) {
-        const closed = yield* Effect.tryPromise({
-          try: () => currentBrowser.close(),
-          catch: (closeCause) => failure("cleanup", closeCause),
-        }).pipe(Effect.result);
-        if (closed._tag === "Failure") retainedBrowser = currentBrowser;
-      }
-      setFailed(retainedBrowser);
+  const failStart = Effect.fn("ChromeAutomation.failStart")(function* (cause: unknown) {
+    yield* Effect.logError("managed Chrome failed to start", {
+      profileDir,
+      executablePath: status.executablePath,
+      channel: launchChannel,
+      detail: errorDetail(cause),
+      cause,
     });
+    const currentBrowser = browser;
+    expectedDisconnect = true;
+    let retainedBrowser: ChromeAutomationBrowser | undefined;
+    if (currentBrowser !== undefined) {
+      const closed = yield* Effect.tryPromise({
+        try: () => currentBrowser.close(),
+        catch: (closeCause) => failure("cleanup", closeCause),
+      }).pipe(Effect.result);
+      if (closed._tag === "Failure") retainedBrowser = currentBrowser;
+    }
+    setFailed(retainedBrowser);
+  });
 
   const onDisconnected = (connection: number) => {
     if (

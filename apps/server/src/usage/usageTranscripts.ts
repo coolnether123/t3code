@@ -93,12 +93,8 @@ export function mightCarryUsage(line: string, provider: UsageProviderKind): bool
 /* Claude Code                                                                */
 
 /**
- * Parses one line of a Claude Code transcript.
- *
- * T3 Code writes one record per assistant *content block*, and every one of
- * those records repeats the same complete `usage` object for the parent
- * message. Summing them overcounts by roughly 2.4x on a real workload, so the
- * caller must drop repeats by `dedupeKey` and keep the first.
+ * Parses one Claude Code transcript line. Each content block repeats the
+ * message's full `usage`, so callers must keep only the first per `dedupeKey`.
  */
 export function parseClaudeLine(line: string): UsageRecord | null {
   let parsed: unknown;
@@ -269,14 +265,8 @@ export function parseAntigravityTokenCache(
 /* OpenCode                                                                   */
 
 /**
- * Parses one OpenCode assistant message from its SQLite session store.
- *
- * OpenCode 1.x stores fresh input, cache reads, cache writes, visible output,
- * and reasoning as disjoint counters. Its own `opencode stats` command adds
- * reasoning to output when computing the total, so we do the same while
- * retaining reasoning as the output subset expected by the usage contract.
- * The recorded cost is authoritative: it includes OpenCode's provider/model
- * pricing configuration, including explicit zero-cost local and free models.
+ * Parses one OpenCode assistant message. Counters are disjoint; output adds
+ * reasoning (as `opencode stats` does) and the recorded cost is authoritative.
  */
 export function parseOpenCodeMessageValue(
   parsed: unknown,

@@ -7,6 +7,9 @@ import {
   type quotaActivityPoints,
 } from "./usageChartActivity";
 
+// oxlint-disable-next-line t3code/no-em-dash-copy -- Empty-value placeholder glyph, not prose.
+const NO_VALUE = "—";
+
 const date = (at: number) =>
   new Date(at).toLocaleString(undefined, {
     month: "short",
@@ -97,7 +100,7 @@ export function UsageActivityPanel({
         <div>
           <dt className="text-3xs text-muted-foreground">Average / hour</dt>
           <dd className="mt-1 text-sm font-medium">
-            {data.averagePerHour === null ? "—" : formatUsd(data.averagePerHour)}
+            {data.averagePerHour === null ? NO_VALUE : formatUsd(data.averagePerHour)}
           </dd>
         </div>
         <div>
@@ -105,7 +108,7 @@ export function UsageActivityPanel({
           <dd className="mt-1 text-sm font-medium">
             {data.averagePerHour && data.peak
               ? `${(data.peak.perHour / data.averagePerHour).toFixed(1)}×`
-              : "—"}
+              : NO_VALUE}
           </dd>
         </div>
       </dl>

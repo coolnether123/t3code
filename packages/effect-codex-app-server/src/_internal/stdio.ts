@@ -115,11 +115,11 @@ function flushSanitizedStderrLine(state: ForwardedStderrState): string | undefin
   return state.remainder.length > 0 ? sanitizeCodexDiagnosticText(state.remainder) : undefined;
 }
 
-export const captureChildStderr = (
-  stderr: Stream.Stream<Uint8Array, unknown>,
-  onChunk?: (chunk: string) => Effect.Effect<void, never>,
-): Effect.Effect<CodexAppServerStderrCapture, never, Scope.Scope> =>
-  Effect.gen(function* () {
+export const captureChildStderr = Effect.fn("effect-codex-app-server/stdio.captureChildStderr")(
+  function* (
+    stderr: Stream.Stream<Uint8Array, unknown>,
+    onChunk?: (chunk: string) => Effect.Effect<void, never>,
+  ): Effect.fn.Return<CodexAppServerStderrCapture, never, Scope.Scope> {
     const state = yield* Ref.make<CodexAppServerStderrDiagnostics>({
       stderr: "",
       stderrTruncated: false,
@@ -168,7 +168,8 @@ export const captureChildStderr = (
       snapshot: Ref.get(state),
       completion: Deferred.await(completed),
     } satisfies CodexAppServerStderrCapture;
-  });
+  },
+);
 
 export const readFinalChildStderr = (
   capture: CodexAppServerStderrCapture,

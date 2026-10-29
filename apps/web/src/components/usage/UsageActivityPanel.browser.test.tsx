@@ -1,7 +1,6 @@
-import { act } from "react";
-import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vite-plus/test";
+import { act, render } from "../../../test/render";
 import { UsageActivityPanel } from "./UsageActivityPanel";
 import { quotaActivityPoints, type ChartActivity } from "./usageChartActivity";
 
@@ -69,68 +68,59 @@ describe("usage activity explorer", () => {
     expect(markup).toContain('width="479"');
   });
   it("switches model and spike views, inspects by touch and zooms the chosen interval", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    const container = document.createElement("div");
-    const root = createRoot(container);
     const zoom = vi.fn();
     const reset = vi.fn();
     const button = (label: string) =>
       Array.from(container.querySelectorAll("button")).find((b) => b.textContent === label)!;
-    try {
-      await act(async () =>
-        root.render(
-          <UsageActivityPanel
-            activity={activity}
-            points={points}
-            start={start}
-            end={end}
-            onZoom={zoom}
-            onResetZoom={reset}
-          />,
-        ),
-      );
-      await act(async () => button("Models").click());
-      expect(container.querySelector('[aria-label="Model cost shares"]')?.textContent).toContain(
-        "90%",
-      );
-      const plot = container.querySelector("svg")!;
-      plot.setPointerCapture = vi.fn();
-      vi.spyOn(plot, "getBoundingClientRect").mockReturnValue({ left: 0, width: 100 } as DOMRect);
-      expect(container.querySelector('input[aria-label="Inspect API activity"]')).toBeNull();
-      await act(async () =>
-        plot.dispatchEvent(
-          new PointerEvent("pointerdown", { clientX: 75, pointerType: "touch", bubbles: true }),
-        ),
-      );
-      expect(
-        container.querySelector('[aria-label="Selected activity interval"]')?.textContent,
-      ).toContain("1.00 quota points");
-      await act(async () => button("Zoom here").click());
-      expect(zoom).toHaveBeenLastCalledWith(start + 3_600_000, end);
-      await act(async () =>
-        plot.dispatchEvent(new PointerEvent("pointermove", { clientX: 95, bubbles: true })),
-      );
-      await act(async () =>
-        plot.dispatchEvent(new PointerEvent("pointerup", { clientX: 95, bubbles: true })),
-      );
-      expect(zoom).toHaveBeenLastCalledWith(
-        start + 0.75 * (end - start),
-        start + 0.95 * (end - start),
-      );
-      await act(async () => plot.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
-      expect(reset).toHaveBeenCalledOnce();
-      await act(async () => button("Spikes").click());
-      const spikes = container.querySelector('[aria-label="Highest spending intervals"]')!;
-      expect(spikes.querySelector("button")?.textContent).toContain("gpt-6-astra");
-      await act(async () => spikes.querySelector("button")!.click());
-      expect(button("Intensity").getAttribute("aria-pressed")).toBe("true");
-      expect(
-        container.querySelector('[aria-label="Selected activity interval"]')?.textContent,
-      ).toContain("9.00 quota points");
-    } finally {
-      await act(async () => root.unmount());
-      vi.unstubAllGlobals();
-    }
+    await using screen = await render(
+      <UsageActivityPanel
+        activity={activity}
+        points={points}
+        start={start}
+        end={end}
+        onZoom={zoom}
+        onResetZoom={reset}
+      />,
+    );
+    const container = screen.container;
+    await act(async () => button("Models").click());
+    expect(container.querySelector('[aria-label="Model cost shares"]')?.textContent).toContain(
+      "90%",
+    );
+    const plot = container.querySelector("svg")!;
+    plot.setPointerCapture = vi.fn();
+    vi.spyOn(plot, "getBoundingClientRect").mockReturnValue({ left: 0, width: 100 } as DOMRect);
+    expect(container.querySelector('input[aria-label="Inspect API activity"]')).toBeNull();
+    await act(async () =>
+      plot.dispatchEvent(
+        new PointerEvent("pointerdown", { clientX: 75, pointerType: "touch", bubbles: true }),
+      ),
+    );
+    expect(
+      container.querySelector('[aria-label="Selected activity interval"]')?.textContent,
+    ).toContain("1.00 quota points");
+    await act(async () => button("Zoom here").click());
+    expect(zoom).toHaveBeenLastCalledWith(start + 3_600_000, end);
+    await act(async () =>
+      plot.dispatchEvent(new PointerEvent("pointermove", { clientX: 95, bubbles: true })),
+    );
+    await act(async () =>
+      plot.dispatchEvent(new PointerEvent("pointerup", { clientX: 95, bubbles: true })),
+    );
+    expect(zoom).toHaveBeenLastCalledWith(
+      start + 0.75 * (end - start),
+      start + 0.95 * (end - start),
+    );
+    await act(async () => plot.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
+    expect(reset).toHaveBeenCalledOnce();
+    await act(async () => button("Spikes").click());
+    const spikes = container.querySelector('[aria-label="Highest spending intervals"]')!;
+    expect(spikes.querySelector("button")?.textContent).toContain("gpt-6-astra");
+    await act(async () => spikes.querySelector("button")!.click());
+    expect(button("Intensity").getAttribute("aria-pressed")).toBe("true");
+    expect(
+      container.querySelector('[aria-label="Selected activity interval"]')?.textContent,
+    ).toContain("9.00 quota points");
   });
   it("withholds aggregate insights when an interval is missing", () => {
     const markup = renderToStaticMarkup(

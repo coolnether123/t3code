@@ -71,11 +71,9 @@ export const codexManagedCliPath = Effect.fn("codexManagedCliPath")(function* (
 });
 
 /**
- * Starts the host's managed Codex daemon unless it reports itself running,
- * for example after a reboot or after the daemon exited and left its control
- * socket file behind. `daemon start` is idempotent and keeps the user's saved
- * daemon settings. A failure is left to the connection attempt, which reports
- * the actionable repair message.
+ * Starts the managed Codex daemon unless it reports itself running (after a
+ * reboot, or a stale socket file). `daemon start` is idempotent; a failure is
+ * left to the connection attempt, which reports the repair message.
  */
 export const ensureCodexDesktopDaemonStarted = Effect.fn("ensureCodexDesktopDaemonStarted")(
   function* (environment: NodeJS.ProcessEnv) {
@@ -255,12 +253,8 @@ const toMessageText = (data: NodeSocket.NodeWS.WebSocket.RawData): string => {
 };
 
 /**
- * Adapts `codex app-server proxy` to the line-oriented app-server client.
- *
- * The desktop proxy exposes the daemon's Unix WebSocket as a raw byte stream
- * on its own stdin/stdout. `ws` owns the HTTP Upgrade and WebSocket framing;
- * this adapter translates WebSocket message boundaries to the line-oriented
- * Effect child-process streams.
+ * Adapts `codex app-server proxy` (the daemon's Unix WebSocket as raw stdio) to
+ * the line-oriented app-server client; `ws` owns the upgrade and framing.
  */
 export const makeCodexDesktopDaemonStdio = Effect.fn("makeCodexDesktopDaemonStdio")(function* (
   child: DesktopDaemonChildProcess,
@@ -493,19 +487,19 @@ export const makeCodexDesktopDaemonStdio = Effect.fn("makeCodexDesktopDaemonStdi
     });
 
   let outgoingRemainder = "";
-  const send = (chunk: string | Uint8Array) =>
-    Effect.gen(function* () {
-      const text =
-        outgoingRemainder +
-        (typeof chunk === "string" ? chunk : outgoingTextDecoder.decode(chunk, { stream: true }));
-      let start = 0;
-      for (let newline = text.indexOf("\n"); newline !== -1; newline = text.indexOf("\n", start)) {
-        const message = text.slice(start, newline).replace(/\r$/, "");
-        if (message.length > 0) yield* sendMessage(message);
-        start = newline + 1;
-      }
-      outgoingRemainder = text.slice(start);
-    });
+  // Runs for every stdout chunk; the protocol's request spans already cover each write.
+  const send = Effect.fnUntraced(function* (chunk: string | Uint8Array) {
+    const text =
+      outgoingRemainder +
+      (typeof chunk === "string" ? chunk : outgoingTextDecoder.decode(chunk, { stream: true }));
+    let start = 0;
+    for (let newline = text.indexOf("\n"); newline !== -1; newline = text.indexOf("\n", start)) {
+      const message = text.slice(start, newline).replace(/\r$/, "");
+      if (message.length > 0) yield* sendMessage(message);
+      start = newline + 1;
+    }
+    outgoingRemainder = text.slice(start);
+  });
 
   yield* Effect.addFinalizer(() =>
     Effect.sync(() => {

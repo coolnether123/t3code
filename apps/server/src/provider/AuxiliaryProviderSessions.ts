@@ -367,8 +367,8 @@ const make = Effect.gen(function* () {
           ),
         ),
       ),
-    sendTurn: (input) =>
-      Effect.gen(function* () {
+    sendTurn: Effect.fn("AuxiliaryProviderSessions.sendTurn")(
+      function* (input: ProviderSendTurnInput) {
         const session = yield* requireSession(input.threadId, "start a turn in");
         if (session.status !== "ready")
           return yield* new AuxiliarySessionError({
@@ -445,8 +445,9 @@ const make = Effect.gen(function* () {
           turnId,
           resumeCursor: { threadId: session.providerThread.nativeThreadRef?.nativeId },
         };
-      }).pipe(
-        Effect.mapError((cause) =>
+      },
+      (effect, input) =>
+        Effect.mapError(effect, (cause) =>
           isAuxiliarySessionError(cause)
             ? cause
             : new AuxiliarySessionError({
@@ -455,30 +456,34 @@ const make = Effect.gen(function* () {
                 cause,
               }),
         ),
-      ),
-    interruptTurn: (input) =>
-      Effect.gen(function* () {
+    ),
+    interruptTurn: Effect.fn("AuxiliaryProviderSessions.interruptTurn")(
+      function* (input: ProviderInterruptTurnInput) {
         const session = yield* requireSession(input.threadId, "interrupt");
         if (session.turnId === undefined) return;
         yield* session.runtime.interruptTurn({
           providerThread: session.providerThread,
           providerTurnId: ProviderTurnId.make(input.turnId ?? session.turnId),
         });
-      }).pipe(
+      },
+      (effect, input) =>
         Effect.mapError(
+          effect,
           (cause) =>
             new AuxiliarySessionError({ operation: "interrupt", threadId: input.threadId, cause }),
         ),
-      ),
-    respondToRequest: (input) =>
-      Effect.gen(function* () {
+    ),
+    respondToRequest: Effect.fn("AuxiliaryProviderSessions.respondToRequest")(
+      function* (input: ProviderRespondToRequestInput) {
         const session = yield* requireSession(input.threadId, "answer an approval in");
         yield* session.runtime.respondToRuntimeRequest({
           requestId: RuntimeRequestId.make(input.requestId),
           decision: input.decision,
         });
-      }).pipe(
+      },
+      (effect, input) =>
         Effect.mapError(
+          effect,
           (cause) =>
             new AuxiliarySessionError({
               operation: "answer an approval in",
@@ -486,7 +491,7 @@ const make = Effect.gen(function* () {
               cause,
             }),
         ),
-      ),
+    ),
   });
 });
 

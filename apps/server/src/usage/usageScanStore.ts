@@ -1,18 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off
 /**
- * Durable, incrementally written transcript scan cache.
- *
- * Only a small index stays in memory: each transcript's size, mtime, cursor
- * state, and latest timestamp. Parsed records live in SQLite and are decoded
- * when a scan needs that file, behind a bounded decode cache, so retained
- * usage history no longer grows the server heap.
- *
- * Each file has one head row (cursor, parser state, repeated-input data) and
- * append-only record chunks. A transcript that grew writes only its new
- * records; a re-parsed one replaces its chunks. Rows use the positional format
- * `usageScanCache` already validates, so a corrupt row costs one re-parse of
- * that transcript, never a broken usage read.
- *
+ * Durable transcript scan cache. Memory keeps only a per-file index; records live
+ * in SQLite as one head row plus append-only chunks, decoded on demand. A corrupt
+ * row costs one re-parse of that transcript, never a broken usage read.
  * @module usageScanStore
  */
 import * as NodeSqlite from "node:sqlite";

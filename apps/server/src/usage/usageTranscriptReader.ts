@@ -1,14 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off
 // @effect-diagnostics globalDate:off - the inventory sweep interval is wall-clock, like file mtimes.
 /**
- * Raw filesystem access for transcript scanning.
- *
- * Isolated here so the rest of the usage code stays on Effect's `FileSystem`.
- * The direct `node:fs` streaming is deliberate: a cold 30-day window is ~1.4 GB
- * across ~1,500 files, and `readline` over a read stream is roughly an order of
- * magnitude cheaper than materialising each file. The equivalent Effect stream
- * pipeline is idiomatic but not fast enough to sit behind a page load.
- *
+ * Raw `node:fs` streaming for transcript scans: `readline` over a read stream is
+ * about 10x cheaper than Effect streams for ~1.4 GB cold windows.
  * @module usageTranscriptReader
  */
 import * as NodeFS from "node:fs";
@@ -68,12 +62,9 @@ interface TranscriptInventoryWalk {
 const pendingTranscriptInventories = new Map<string, TranscriptInventoryWalk>();
 
 /**
- * The last complete walk of a root. Later reads refresh it instead of walking
- * again: a directory whose mtime is unchanged has the same entries, so only
- * changed directories are re-read and only recently written transcripts are
- * re-stat'd. A full walk still runs every few minutes, because appending to an
- * old transcript (a resumed session) changes neither its directory nor, until
- * then, anything the refresh looks at.
+ * The last complete walk of a root. Refreshes re-read only directories whose
+ * mtime changed and re-stat recent files; a full walk still runs every few
+ * minutes because appends to old transcripts change neither.
  */
 interface KnownTranscriptInventory {
   readonly files: Map<string, TranscriptFile>;
@@ -238,11 +229,8 @@ export function selectTranscriptFilesForScan<File extends TranscriptFile>(
     deferredBytes += readBytes;
   }
 
-  // A single giant rollout must make progress eventually, but it should not
-  // block the first useful result while smaller cold files can fill the
-  // bounded batch. Warm files and append-only active rollouts do not provide
-  // that first-load protection, so admit one oversized file alongside them
-  // and keep the partial totals visible while it is parsed.
+  // Admit one oversized cold file so a giant rollout progresses without blocking
+  // the first result; warm and active files don't provide that protection.
   if (!selectedColdFile && oversized.length > 0) {
     const file = oversized[0]!;
     const readBytes = bytesToRead(file);
@@ -450,17 +438,9 @@ export async function readDirectoryVolumeId(path: string): Promise<string> {
 }
 
 /**
- * Streams one transcript and returns the usage records it contains, or `null`
- * when the file could not be read.
- *
- * The distinction matters to the caller's cache: a genuinely empty transcript
- * is a stable fact worth memoising, while a transient read failure memoised
- * under the same `(size, mtime)` key would silently drop that file's usage
- * until the file next changes.
- *
- * Codex carries the active model on `turn_context` lines that hold no usage of
- * their own, so those still have to pass through the reducer to keep model
- * attribution correct.
+ * Streams one transcript's usage records, or `null` when it could not be read
+ * (never memoise a transient failure). Codex `turn_context` lines carry no
+ * usage but still pass through the reducer to keep model attribution.
  */
 export interface TranscriptReadOptions {
   readonly startByte?: number;

@@ -1,9 +1,8 @@
-import { act } from "react";
-import { create, type ReactTestRenderer } from "react-test-renderer";
+import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { renderToStaticMarkup } from "react-dom/server";
 import { getSharedHighlighter } from "@pierre/diffs";
 import { toHtml } from "hast-util-to-html";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it } from "vite-plus/test";
 
 import { createIncrementalHighlightedDocument } from "../../lib/incrementalHighlighting";
 import { HighlightedCodeLines } from "./HighlightedCodeLines";
@@ -28,7 +27,6 @@ describe("highlighted code lines", () => {
   });
 
   it("retains completed line component identity as new lines arrive", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const highlighter = await getSharedHighlighter({
       langs: ["typescript"],
       themes: ["pierre-dark"],
@@ -59,7 +57,6 @@ describe("highlighted code lines", () => {
       expect(nextLine).toBe(initialLine);
     } finally {
       await act(async () => renderer?.unmount());
-      vi.unstubAllGlobals();
     }
   });
 });

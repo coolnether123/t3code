@@ -1,6 +1,5 @@
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
-import { describe, expect, it, beforeEach, afterEach, vi } from "vite-plus/test";
+import { describe, expect, it } from "vite-plus/test";
+import { act, render } from "../../../test/render";
 import type { HourlyTotals, HourlyModelTotals } from "@t3tools/shared/usageMerge";
 import {
   collectHourlyModelKeys,
@@ -31,22 +30,6 @@ const hour = (start: string, models: ModelInput[]): HourlyTotals => ({
 });
 
 describe("UsageModelHourlyChart", () => {
-  let container: HTMLDivElement;
-  let root: Root;
-
-  beforeEach(() => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    container = document.createElement("div");
-    document.body.append(container);
-    root = createRoot(container);
-  });
-
-  afterEach(async () => {
-    await act(async () => root.unmount());
-    container.remove();
-    vi.unstubAllGlobals();
-  });
-
   it("keeps model keys provider-qualified and labels known models", () => {
     const values = [
       hour("2026-08-11T10:00:00.000Z", [
@@ -77,9 +60,10 @@ describe("UsageModelHourlyChart", () => {
         ["claude:gpt-5.6-sol", "gpt-5.6-sol", "claude", 2.25, 600],
       ]),
     ];
-    await act(async () =>
-      root.render(<UsageModelHourlyChart hours={starts} hourly={hourly} timeZone="UTC" />),
+    await using screen = await render(
+      <UsageModelHourlyChart hours={starts} hourly={hourly} timeZone="UTC" />,
     );
+    const container = screen.container;
     const readout = () =>
       container.querySelector<HTMLElement>('[aria-label="Usage for selected hour"]')!;
     const select = container.querySelector<HTMLSelectElement>(
@@ -105,15 +89,14 @@ describe("UsageModelHourlyChart", () => {
       "2026-08-11T11:00:00.000Z",
       "2026-08-11T12:00:00.000Z",
     ];
-    await act(async () =>
-      root.render(
-        <UsageModelHourlyChart
-          hours={starts}
-          hourly={[hour(starts[0]!, [["codex:gpt-5.6-astra", "gpt-5.6-astra", "codex", 1, 100]])]}
-          timeZone="UTC"
-        />,
-      ),
+    await using screen = await render(
+      <UsageModelHourlyChart
+        hours={starts}
+        hourly={[hour(starts[0]!, [["codex:gpt-5.6-astra", "gpt-5.6-astra", "codex", 1, 100]])]}
+        timeZone="UTC"
+      />,
     );
+    const container = screen.container;
     const select = container.querySelector<HTMLSelectElement>(
       'select[aria-label="Inspect hourly model usage"]',
     )!;
@@ -133,9 +116,10 @@ describe("UsageModelHourlyChart", () => {
       hour(starts[0]!, [["codex:gpt-5.6-astra", "gpt-5.6-astra", "codex", 1.25, 1200]]),
       hour(starts[1]!, [["codex:gpt-5.6-sol", "gpt-5.6-sol", "codex", 4.5, 3400]]),
     ];
-    await act(async () =>
-      root.render(<UsageModelHourlyChart hours={starts} hourly={hourly} timeZone="UTC" />),
+    await using screen = await render(
+      <UsageModelHourlyChart hours={starts} hourly={hourly} timeZone="UTC" />,
     );
+    const container = screen.container;
     const marks = container.querySelectorAll<SVGRectElement>('rect[role="button"]');
     expect(marks).toHaveLength(4);
     await act(async () => marks[0]!.focus());
