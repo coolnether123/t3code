@@ -22,6 +22,7 @@ import {
   type UsageSummaryInput,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
+import { usageSummaryInput } from "@t3tools/client-runtime/state/usage";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useStableCallback } from "../hooks/useStableCallback";
@@ -71,7 +72,7 @@ const usageByWindowAtom = Atom.family((windowKey: string) =>
       const sessionResult = get(environmentSession.sessionStateAtom(environmentId));
       const access = resolveUsageAccess({
         connectionPhase: presentation.connection.phase,
-        session: Option.getOrNull(AsyncResult.value(sessionResult)),
+        session: AsyncResult.getOrElse(sessionResult, () => null),
         hasSessionError: sessionResult._tag === "Failure",
       });
       if (!access.canReadDiagnostics) {
@@ -86,8 +87,16 @@ const usageByWindowAtom = Atom.family((windowKey: string) =>
         });
         continue;
       }
-      const result = get(serverEnvironment.usageSummary({ environmentId, input }));
-      const summary = Option.getOrNull(AsyncResult.value(result));
+      const result = get(
+        serverEnvironment.usageSummary({
+          environmentId,
+          input: usageSummaryInput(
+            input,
+            get(serverEnvironment.usageModelFilterAtom(environmentId)),
+          ),
+        }),
+      );
+      const summary = AsyncResult.getOrElse(result, () => null);
       statuses.push({
         environmentId,
         label: presentation.entry.target.label,
@@ -182,6 +191,7 @@ export function useUsage(
   const refreshGeneration = useRef(0);
   const windowKeyRef = useRef(windowKey);
   const refreshAfterCommit = useRef<UsageView["refresh"] | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Keeps in-flight request callbacks bound to the last committed window.
   useLayoutEffect(() => {
     windowKeyRef.current = windowKey;
   }, [windowKey]);
@@ -222,7 +232,12 @@ export function useUsage(
             appAtomRegistry,
             serverEnvironment.usageSummary({
               environmentId: environment.environmentId,
-              input: requestInput,
+              input: usageSummaryInput(
+                requestInput,
+                appAtomRegistry.get(
+                  serverEnvironment.usageModelFilterAtom(environment.environmentId),
+                ),
+              ),
             }),
             { refresh: true, reportFailure: false, reportDefect: false },
           );
@@ -269,6 +284,7 @@ export function useUsage(
     void promise.then(settleInFlight, () => settleInFlight());
     return promise;
   });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Installs the committed retry callback for externally resolving promises.
   useLayoutEffect(() => {
     refreshAfterCommit.current = refresh;
   }, [refresh]);
@@ -276,6 +292,7 @@ export function useUsage(
   // Route navigation can remount this view while its shared atom still holds a
   // transient disconnected result. Retry that result once on entry so mobile
   // users do not need to reload the whole browser tab.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Schedules recovery when the remote connection reports a failed read.
   useEffect(() => {
     const failedIds = environments
       .filter((environment) => environment.error !== null && !environment.isPending)
@@ -324,6 +341,7 @@ export function useUsage(
     delayedRetryTimers.current.set(retryKey, timer);
   }, [environments, refresh, windowKey]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Disposes remote-read retry timers when the window changes or unmounts.
   useEffect(() => {
     const timers = delayedRetryTimers.current;
     return () => {
@@ -359,6 +377,7 @@ export function useUsage(
   // A bounded server scan intentionally returns partial data while its cache is
   // cold. Keep advancing that cache while the Usage page is mounted so totals
   // converge without asking the user to click Refresh once per 128 MiB batch.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Schedules follow-up server scans while transcript coverage remains partial.
   useEffect(() => {
     const retry = deferredTranscriptRetry.current;
     if (retry.windowKey !== windowKey) {

@@ -5,6 +5,7 @@ import {
   OrchestratorMcpThreadSendResult,
   OrchestratorMcpThreadWaitResult,
   ProjectId,
+  ModelSelection,
   RunId,
   ThreadId,
   TrimmedNonEmptyString,
@@ -162,6 +163,34 @@ const ThreadLaunchResult = Schema.Struct({
   projectId: ProjectId,
   runId: Schema.NullOr(RunId),
 });
+const decodeModelSelection = Schema.decodeEffect(ModelSelection);
+
+export const resolveStartModelSelection = Effect.fn("cli.thread.resolveStartModelSelection")(
+  function* (input: {
+    readonly provider: Option.Option<string>;
+    readonly model: Option.Option<string>;
+    readonly reasoningEffort: Option.Option<string>;
+  }) {
+    if (Option.isSome(input.provider) !== Option.isSome(input.model)) {
+      return yield* new ThreadUsageError({ detail: "--provider and --model go together." });
+    }
+    if (Option.isNone(input.provider) || Option.isNone(input.model)) {
+      if (Option.isSome(input.reasoningEffort)) {
+        return yield* new ThreadUsageError({
+          detail: "--reasoning-effort requires --provider and --model.",
+        });
+      }
+      return undefined;
+    }
+    return yield* decodeModelSelection({
+      instanceId: input.provider.value,
+      model: input.model.value,
+      ...(Option.isNone(input.reasoningEffort)
+        ? {}
+        : { options: [{ id: "reasoningEffort", value: input.reasoningEffort.value }] }),
+    }).pipe(Effect.mapError(() => new ThreadUsageError({ detail: "Invalid model selection." })));
+  },
+);
 
 const toolFailureDetail = (result: typeof ToolResult.Type) => {
   const text = result.content?.find((part) => part.text !== undefined)?.text ?? "";
@@ -221,6 +250,7 @@ const withThreadTools = Effect.fn("cli.thread.withThreadTools")(function* <A, E,
         // The CLI runs as the machine's owner. New threads still start at
         // the project's default mode, never at this ceiling by default.
         access: "full-access",
+        peerLink: false,
         client: { deviceType: "bot" },
       }),
       (session) =>
@@ -330,6 +360,63 @@ const readTimeline = Effect.fn("cli.thread.readTimeline")(function* (
     afterPosition = page.nextPosition ?? undefined;
   } while (page.hasMore && afterPosition !== undefined);
   return { thread: page.thread, items };
+});
+
+/**
+ * The latest `count` user and assistant messages, oldest first. Positions
+ * count every timeline item, so the read starts near the end and widens
+ * backward only while tool and plan items leave too few messages.
+ */
+export const readLatestMessages = Effect.fn("cli.thread.readLatestMessages")(function* (
+  tools: ThreadTools,
+  threadId: ThreadId,
+  count: number,
+) {
+  let { thread } = yield* tools.call(
+    "t3_thread_read",
+    { threadId, limit: 1, runLimit: 1 },
+    OrchestratorMcpThreadReadResult,
+  );
+  let messages: Array<OrchestratorMcpThreadTimelineItem> = [];
+  // The newest window has no upper bound, so items added since the first
+  // read are still shown.
+  let before: number | undefined;
+  let start = thread.itemCount;
+  let span = Math.max(count, READ_PAGE_LIMIT);
+  do {
+    const end = before;
+    start = Math.max(0, start - span);
+    const window: Array<OrchestratorMcpThreadTimelineItem> = [];
+    let afterPosition = start - 1;
+    let page: OrchestratorMcpThreadReadResult;
+    do {
+      page = yield* tools.call(
+        "t3_thread_read",
+        {
+          threadId,
+          view: "messages",
+          limit: READ_PAGE_LIMIT,
+          runLimit: 1,
+          ...(afterPosition < 0 ? {} : { afterPosition }),
+        },
+        OrchestratorMcpThreadReadResult,
+      );
+      window.push(
+        ...page.items.filter(
+          (item) =>
+            (item.type === "user_message" || item.type === "assistant_message") &&
+            (end === undefined || item.position < end),
+        ),
+      );
+      afterPosition = page.nextPosition ?? Number.POSITIVE_INFINITY;
+    } while (page.hasMore && afterPosition < (end ?? Number.POSITIVE_INFINITY) - 1);
+    thread = page.thread;
+    // A window can hold the whole --messages count, too many to spread as arguments.
+    messages = window.concat(messages);
+    before = start;
+    span *= 2;
+  } while (messages.length < count && start > 0);
+  return { thread, messages: messages.slice(Math.max(0, messages.length - count)) };
 });
 
 /** Item text past the read's per-item cap. */
@@ -450,11 +537,16 @@ const finishRun = Effect.fn("cli.thread.finishRun")(function* (
   }
 });
 
-const titleFromMessage = (message: string) => {
+export const titleFromMessage = (message: string) => {
   const firstLine = message.trim().split("\n")[0]?.trim() ?? "";
-  return firstLine.length > TITLE_MAX_CHARS
-    ? `${firstLine.slice(0, TITLE_MAX_CHARS - 1).trimEnd()}…`
-    : firstLine;
+  if (firstLine.length <= TITLE_MAX_CHARS) return firstLine;
+  let end = TITLE_MAX_CHARS - 1;
+  const previous = firstLine.charCodeAt(end - 1);
+  const next = firstLine.charCodeAt(end);
+  if (previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) {
+    end -= 1;
+  }
+  return `${firstLine.slice(0, end).trimEnd()}…`;
 };
 
 const launchWorkspaceStrategy = (input: {
@@ -465,7 +557,7 @@ const launchWorkspaceStrategy = (input: {
     onNone: () =>
       Option.isSome(input.branch)
         ? Effect.fail(new ThreadUsageError({ detail: "--branch needs --worktree <base-ref>." }))
-        : Effect.succeed(undefined),
+        : Effect.void,
     onSome: (baseRef) =>
       Effect.succeed({
         type: "worktree" as const,
@@ -550,6 +642,10 @@ const threadStartCommand = Command.make("start", {
     Flag.withDescription("Model slug. Defaults to the project's default model."),
     Flag.optional,
   ),
+  reasoningEffort: Flag.String("reasoning-effort").pipe(
+    Flag.withDescription("Explicit provider reasoning effort. Requires --provider and --model."),
+    Flag.optional,
+  ),
   worktree: Flag.String("worktree").pipe(
     Flag.withDescription(
       "Run in a new git worktree based on this branch, tag, or commit, instead of the project folder.",
@@ -568,9 +664,7 @@ const threadStartCommand = Command.make("start", {
     Effect.gen(function* () {
       const message = yield* readMessageArgument(flags.message);
       const workspaceStrategy = yield* launchWorkspaceStrategy(flags);
-      if (Option.isSome(flags.provider) !== Option.isSome(flags.model)) {
-        return yield* new ThreadUsageError({ detail: "--provider and --model go together." });
-      }
+      const modelSelection = yield* resolveStartModelSelection(flags);
       const title = yield* decodeTitle(
         Option.getOrElse(flags.title, () => titleFromMessage(message)),
       ).pipe(Effect.mapError(() => new ThreadUsageError({ detail: "The title is empty." })));
@@ -585,14 +679,7 @@ const threadStartCommand = Command.make("start", {
               title,
               message,
               ...(workspaceStrategy === undefined ? {} : { workspaceStrategy }),
-              ...(Option.isSome(flags.provider) && Option.isSome(flags.model)
-                ? {
-                    modelSelection: {
-                      instanceId: flags.provider.value,
-                      model: flags.model.value,
-                    },
-                  }
-                : {}),
+              ...(modelSelection === undefined ? {} : { modelSelection }),
             },
             ThreadLaunchResult,
           );
@@ -661,11 +748,11 @@ const threadShowCommand = Command.make("show", {
       yield* withThreadTools(
         flags,
         Effect.fn("cli.thread.show")(function* (tools) {
-          const { thread, items } = yield* readTimeline(tools, threadId, "messages");
-          const conversation = items.filter(
-            (item) => item.type === "user_message" || item.type === "assistant_message",
+          const { thread, messages: latest } = yield* readLatestMessages(
+            tools,
+            threadId,
+            flags.messages,
           );
-          const latest = conversation.slice(Math.max(0, conversation.length - flags.messages));
           const messages = yield* Effect.forEach(latest, (item) =>
             readFullText(tools, threadId, item).pipe(
               Effect.map((text) => ({
@@ -699,6 +786,26 @@ const threadShowCommand = Command.make("show", {
   ),
 );
 
+const threadWaitCommand = Command.make("wait", {
+  ...projectLocationFlags,
+  thread: threadArgument,
+  run: Flag.String("run").pipe(
+    Flag.withSchema(RunId),
+    Flag.withDescription("Observed run id to wait for, following its restart continuation."),
+  ),
+  json: jsonFlag,
+}).pipe(
+  Command.withDescription("Wait for an existing run without sending another message."),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      const threadId = yield* decodeThreadId(flags.thread);
+      yield* withThreadTools(flags, (tools) =>
+        finishRun(tools, { threadId, runId: flags.run, json: flags.json }),
+      );
+    }).pipe(reportThreadErrors),
+  ),
+);
+
 export const threadCommand = Command.make("thread").pipe(
   Command.withDescription("Start, message, and read threads on the running server."),
   Command.withSubcommands([
@@ -706,5 +813,6 @@ export const threadCommand = Command.make("thread").pipe(
     threadStartCommand,
     threadSendCommand,
     threadShowCommand,
+    threadWaitCommand,
   ]),
 );

@@ -194,6 +194,7 @@ export function CodexChatsView({ api = defaultCodexDesktopApi }: { api?: CodexDe
   const selectedThreadIdRef = useRef<string | null>(null);
   const sendGenerationRef = useRef(0);
   const historyScrollRef = useRef<HTMLDivElement>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Async native Codex requests compare against the latest selected thread before applying their results.
   useEffect(() => {
     selectedThreadIdRef.current = selectedThreadId;
   }, [selectedThreadId]);
@@ -276,6 +277,7 @@ export function CodexChatsView({ api = defaultCodexDesktopApi }: { api?: CodexDe
     setHistoryState(selectedThreadId ? "loading" : "idle");
   }
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- The mounted native Codex bridge reads daemon availability and ignores responses after unmount.
   useEffect(() => {
     let cancelled = false;
     void api
@@ -297,6 +299,7 @@ export function CodexChatsView({ api = defaultCodexDesktopApi }: { api?: CodexDe
     };
   }, [api]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- The native Codex bridge search owns a debounced refresh timer that is cancelled when its query changes.
   useEffect(() => {
     const timeout = window.setTimeout(() => void loadThreads(), search ? 180 : 0);
     return () => window.clearTimeout(timeout);
@@ -352,16 +355,19 @@ export function CodexChatsView({ api = defaultCodexDesktopApi }: { api?: CodexDe
     }
   };
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- The mounted native Codex conversation refreshes its external history when the requested thread changes.
   useEffect(() => {
     void loadHistory(false);
   }, [loadHistory]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- An active native Codex conversation owns a polling timer until it settles or the selection changes.
   useEffect(() => {
     if (!selectedThread || !shouldPollCodexThread(selectedThread.status)) return;
     const interval = window.setInterval(() => void loadHistory(), POLL_INTERVAL_MS);
     return () => window.clearInterval(interval);
   }, [loadHistory, selectedThread]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Unmount releases native request-observation timers so they cannot update a different conversation.
   useEffect(() => {
     return () => {
       if (requestPollRef.current !== null) window.clearInterval(requestPollRef.current);

@@ -8,6 +8,7 @@ import {
   OrchestrationV2ThreadShell,
   OrchestrationV2TurnItem,
   OrchestrationV2RuntimeRequest,
+  OrchestrationV2Subagent,
   type EnvironmentProviderSnapshotResult,
 } from "@t3tools/contracts";
 import {
@@ -69,6 +70,7 @@ const run = {
 const decodeDetail = Schema.decodeUnknownSync(
   Schema.toCodecJson(OrchestrationV2ThreadDetailSnapshot),
 );
+const decodeSubagent = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2Subagent));
 const detail = decodeDetail({
   snapshotSequence: 12,
   historyCursor: "older",
@@ -94,7 +96,7 @@ const detail = decodeDetail({
     updatedAt: now,
   },
 });
-const shellThread = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2ThreadShell))({
+const shellThread = Schema.decodeSync(Schema.toCodecJson(OrchestrationV2ThreadShell))({
   ...thread,
   latestRunId: "run-a",
   activeRunId: "run-a",
@@ -108,7 +110,7 @@ const shellThread = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2T
   settledOverride: null,
   settledAt: null,
 });
-const shell = Schema.decodeUnknownSync(OrchestrationV2ShellSnapshot)({
+const shell = Schema.decodeSync(OrchestrationV2ShellSnapshot)({
   schemaVersion: 2,
   snapshotSequence: 12,
   projects: [],
@@ -132,13 +134,50 @@ it("binds voice coverage to the observed runtime and preserves legacy absence", 
     runtime: identity.runtime,
   });
 });
+it("keeps native helper completion and wake evidence in the bounded snapshot", () => {
+  const subagent = decodeSubagent({
+    id: "child-node",
+    threadId: "thread-a",
+    runId: "run-a",
+    parentNodeId: "parent-node",
+    origin: "app_owned",
+    createdBy: "agent",
+    driver: "codex",
+    providerInstanceId: "codex",
+    providerThreadId: null,
+    childThreadId: "child-thread",
+    nativeTaskRef: null,
+    prompt: "Private helper prompt",
+    title: "Helper",
+    model: "gpt-6.1-sol",
+    completionWake: "always",
+    status: "completed",
+    result: "Helper finished",
+    startedAt: now,
+    completedAt: now,
+    updatedAt: now,
+  });
+  const snapshot = compactAgentSnapshot(identity, shell, {
+    ...detail,
+    projection: { ...detail.projection, subagents: [subagent] },
+  });
+  expect(snapshot.subagents).toMatchObject([
+    {
+      childThreadId: "child-thread",
+      status: "completed",
+      completionWake: "always",
+      result: "Helper finished",
+    },
+  ]);
+  expect(encodeJson(snapshot)).not.toContain("Private helper prompt");
+});
 const interrupt = {
   type: "run.interrupt",
   commandId: "command-a",
   threadId: "thread-a",
   runId: "run-a",
 };
-const request = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2RuntimeRequest))({
+const request = Schema.decodeSync(Schema.toCodecJson(OrchestrationV2RuntimeRequest))({
   id: "request-a",
   nodeId: "node-a",
   providerTurnId: null,
@@ -149,7 +188,7 @@ const request = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2Runti
   createdAt: now,
   resolvedAt: null,
 });
-const item = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2TurnItem))({
+const item = Schema.decodeSync(Schema.toCodecJson(OrchestrationV2TurnItem))({
   id: "item-a",
   threadId: "thread-a",
   runId: "run-a",
@@ -179,6 +218,21 @@ const item = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2TurnItem
 });
 
 describe("agent action boundary", () => {
+  it("archives only after every observed run has finished", () => {
+    const action = decodeAgentAction(
+      envelope({ type: "thread.archive", commandId: "archive-a", threadId: "thread-a" }),
+    );
+    expect(() => validateAgentAction(action, identity, shell, detail)).toThrow("unfinished runs");
+    expect(() =>
+      validateAgentAction(action, identity, shell, {
+        ...detail,
+        projection: {
+          ...detail.projection,
+          runs: detail.projection.runs.map((run) => ({ ...run, status: "completed" })),
+        },
+      }),
+    ).not.toThrow();
+  });
   it("requires the current environment, runtime and active run before interrupting", () => {
     const action = decodeAgentAction(envelope(interrupt));
     expect(action.command).toEqual(interrupt);

@@ -42,6 +42,7 @@ import {
   assertAgentActionConfirmed,
   agentCommandSchema,
   compactAgentSnapshot,
+  compactAgentHistory,
   compactAgentProviders,
   decodeAgentRequest,
   decodeAgentAction,
@@ -247,7 +248,7 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
               "Send preserves existing runtimeMode; steer/interrupt require the observed active turn ID",
               "Receipt confirms persisted acceptance, not provider execution or completion",
               "Local preflight identity checks are not atomic server-side concurrency guards",
-              "No visible browser navigation or subscription-based wait",
+              "No visible browser navigation; use t3 thread start/send --wait for native run completion",
             ],
           };
         }
@@ -271,8 +272,7 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
                 request.action.command.type !== "thread.unarchive"
               ? request.action.command.threadId
               : undefined;
-        // GET query fields are the endpoint's payload, including its optional history cursor.
-        const loadThread = (id: ThreadId, _turnLimit = 3, _beforeCursor?: string) =>
+        const loadThread = (id: ThreadId) =>
           boundedHttp(
             client.orchestration.threadBoundedSnapshot({
               headers,
@@ -280,15 +280,24 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
               query: {},
             }),
           );
-        const detail = threadId
-          ? yield* loadThread(
-              threadId,
-              request.kind === "snapshot" ? request.turnLimit : 3,
-              request.kind === "snapshot" ? request.beforeCursor : undefined,
-            )
-          : undefined;
-        if (request.kind === "snapshot")
-          return { ...context, ...compactAgentSnapshot(target, shell, detail, request.offset) };
+        const detail = threadId ? yield* loadThread(threadId) : undefined;
+        if (request.kind === "snapshot") {
+          const history =
+            threadId !== undefined && request.beforeCursor !== undefined
+              ? yield* boundedHttp(
+                  client.orchestration.threadHistoryPage({
+                    headers,
+                    params: { threadId },
+                    query: { cursor: request.beforeCursor },
+                  }),
+                )
+              : undefined;
+          return {
+            ...context,
+            ...compactAgentSnapshot(target, shell, detail, request.offset, request.turnLimit),
+            ...(history === undefined ? {} : { history: compactAgentHistory(history) }),
+          };
+        }
         const { action } = request;
         const actionShell =
           action.command.type === "thread.unarchive"
@@ -352,13 +361,9 @@ export const executeAgentRequest = Effect.fn("executeAgentRequest")(function* (
                 yield* client.projects.mutate({ headers, payload: command });
                 return { sequence: null };
               default:
-                // The client distributes command variants across overloads; schema decoding owns validation.
                 return yield* client.orchestration.dispatch({
                   headers,
                   payload: command,
-                  responseMode: "decoded-only",
-                } as Parameters<typeof client.orchestration.dispatch>[0] & {
-                  readonly responseMode: "decoded-only";
                 });
             }
           }).pipe(Effect.timeout(Duration.seconds(10))),
@@ -514,6 +519,9 @@ const snapshotCommand = Command.make("snapshot", {
   turnLimit: Flag.Int("turn-limit").pipe(
     Flag.withSchema(AGENT_TURN_LIMIT_SCHEMA),
     Flag.withDefault(3),
+    Flag.withDescription(
+      "Latest run records to print, 1 through 5. Server policy bounds history pages.",
+    ),
   ),
   beforeCursor: Flag.String("before-cursor").pipe(Flag.optional),
   offset: Flag.Int("offset").pipe(

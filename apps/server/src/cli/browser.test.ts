@@ -6,6 +6,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
+import * as Redacted from "effect/Redacted";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as TestConsole from "effect/testing/TestConsole";
@@ -28,7 +29,10 @@ const fakeSpawner = (host: { readonly font?: string; readonly missingLibrary?: b
   const spawner = ChildProcessSpawner.make((command) =>
     Effect.gen(function* () {
       if (!ChildProcess.isStandardCommand(command)) return yield* Effect.die("Unexpected pipeline");
-      commands.push([command.command, ...command.args]);
+      commands.push([
+        command.command,
+        ...command.args.map((arg) => (Redacted.isRedacted(arg) ? "<redacted>" : arg)),
+      ]);
       if (command.command === "apt-get" && command.args.includes("fonts-liberation")) font = FONT;
       if (command.command === "fc-match" && font === undefined) {
         return yield* PlatformError.systemError({
@@ -112,7 +116,7 @@ it.effect("setup in a root shell warns that the server cannot run as root", () =
       Effect.provideService(HostProcess.Environment, { SUDO_USER: "root" }),
     );
     const output = (yield* TestConsole.logLines).join("\n");
-    expect(output).toContain("Chrome will not start its sandbox as root");
+    expect(output).toContain("Chrome's sandbox cannot start");
     expect(output).not.toContain("ready");
   }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, TestConsole.layer))),
 );

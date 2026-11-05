@@ -55,6 +55,7 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
     status: "loading",
   });
   const publicHistoryWatcher = useRef<ReturnType<typeof watchPublicResetHistory> | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Subscribes to reset announcements and stops the watcher on unmount.
   useEffect(() => {
     const watcher = watchResetAnnouncements(setNews);
     newsWatcher.current = watcher;
@@ -63,6 +64,7 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
       newsWatcher.current = null;
     };
   }, []);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Subscribes to public reset history and stops the watcher on unmount.
   useEffect(() => {
     const watcher = watchPublicResetHistory(setPublicHistory);
     publicHistoryWatcher.current = watcher;
@@ -77,6 +79,7 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
   const [showTracking, setShowTracking] = useState(false);
   const history = useUsage(historyInput);
   const refreshHistory = useEffectEvent(() => history.refresh());
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Refreshes saved history on the native app activation event and minute timer.
   useEffect(() => {
     const timer = setInterval(refreshHistory, 60_000);
     const subscription = AppState.addEventListener("change", (state) => {
@@ -147,12 +150,20 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
     historicalPeriods,
     selectedWithSavedCosts,
   );
-  const [snapshots, setSnapshots] = useState<ReadonlyMap<string, QuotaValueSnapshot>>(
-    () => new Map(),
+  const [snapshotState, setSnapshotState] = useState<{
+    readonly key: string;
+    readonly values: ReadonlyMap<string, QuotaValueSnapshot>;
+  }>(() => ({ key: "", values: new Map() }));
+  const snapshotKey = JSON.stringify(
+    currentValues.map(({ calculatedAt: _calculatedAt, ...value }) => value),
   );
-  useEffect(() => {
-    setSnapshots((previous) => retainQuotaValueSnapshots(previous, currentValues));
-  }, [currentValues]);
+  if (snapshotState.key !== snapshotKey) {
+    setSnapshotState({
+      key: snapshotKey,
+      values: retainQuotaValueSnapshots(snapshotState.values, currentValues),
+    });
+  }
+  const snapshots = snapshotState.values;
   const values = currentValues.map((current, index) => {
     const value = quotaValueWithSnapshot(current, snapshots);
     const previous = index > 0 ? currentValues[index - 1] : undefined;
@@ -204,7 +215,6 @@ export function UsageResetScreen({ onBack }: { readonly onBack: () => void }) {
   };
 
   const current = values.at(-1);
-  const completed = values.slice(0, -1);
   return (
     <View className="flex-1 bg-sheet">
       <NativeStackScreenOptions options={{ title: "Codex monitor" }} />

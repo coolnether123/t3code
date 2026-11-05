@@ -5,10 +5,12 @@ import {
   CodexDesktopSendMessageResponse,
   CodexDesktopThreadHistoryResponse,
 } from "./codexDesktop.ts";
+const decodeHistory = Schema.decodeSync(CodexDesktopThreadHistoryResponse);
+const decodeDelivery = Schema.decodeSync(CodexDesktopSendMessageResponse);
 
 describe("Codex desktop contracts", () => {
   it("accepts native history with untimestamped items and tool activity", () => {
-    const history = Schema.decodeUnknownSync(CodexDesktopThreadHistoryResponse)({
+    const history = decodeHistory({
       thread: {
         id: "thread-1",
         title: "Release review",
@@ -34,7 +36,7 @@ describe("Codex desktop contracts", () => {
   });
 
   it("keeps delivery state distinct from native agent state", () => {
-    const delivery = Schema.decodeUnknownSync(CodexDesktopSendMessageResponse)({
+    const delivery = decodeDelivery({
       requestId: "request-1",
       status: "queued",
       message: null,

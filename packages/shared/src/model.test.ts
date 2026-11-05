@@ -104,7 +104,6 @@ const claudeCaps: ModelCapabilities = createModelCapabilities({
     },
   ],
 });
-
 describe("descriptor helpers", () => {
   it("applies selection values to capability descriptors", () => {
     expect(

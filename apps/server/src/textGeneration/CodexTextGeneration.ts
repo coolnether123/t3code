@@ -10,7 +10,6 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import {
   type CodexSettings,
   DEFAULT_TEXT_GENERATION_REASONING_EFFORT,
-  type ModelSelection,
   type ServerProviderModel,
   TextGenerationError,
 } from "@t3tools/contracts";
@@ -81,9 +80,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     );
 
   const removeTempFileDir = (filePath: string): Effect.Effect<void, never> =>
-    fileSystem
-      .remove(path.dirname(filePath), { recursive: true })
-      .pipe(Effect.catch(() => Effect.void));
+    fileSystem.remove(path.dirname(filePath), { recursive: true }).pipe(Effect.ignore);
 
   // Background fibers may inherit closed scopes that immediately reap temp files; write unscoped.
   const writeTempFile = (

@@ -8,6 +8,7 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
+import * as Schema from "effect/Schema";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import * as NodeCrypto from "node:crypto";
@@ -101,15 +102,15 @@ export interface ProcessIdentityInput {
   readonly port: number;
 }
 
-export class DeploymentGuardError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "DeploymentGuardError";
-  }
-}
+export class DeploymentGuardError extends Schema.TaggedError<DeploymentGuardError>()(
+  "DeploymentGuardError",
+  { message: Schema.String },
+) {}
+
+const isDeploymentGuardError = Schema.is(DeploymentGuardError);
 
 const fail = (message: string): never => {
-  throw new DeploymentGuardError(message);
+  throw new DeploymentGuardError({ message });
 };
 
 const absolute = (value: string, name: string): string => {
@@ -170,7 +171,7 @@ const optionalLstat = async (path: string): Promise<NodeFS.Stats | undefined> =>
 
 const requireNoSymlink = async (path: string, description: string): Promise<NodeFS.Stats> => {
   const stat = await optionalLstat(path);
-  if (!stat) throw new DeploymentGuardError(`${description} is missing: ${path}`);
+  if (!stat) throw new DeploymentGuardError({ message: `${description} is missing: ${path}` });
   if (stat.isSymbolicLink()) fail(`${description} must not be a symlink: ${path}`);
   return stat;
 };
@@ -1027,7 +1028,7 @@ const ensureOwnedDestination = async (
   try {
     assertOwnedDestinationContent(content, kind, label);
   } catch (error) {
-    if (error instanceof DeploymentGuardError) fail(`${error.message}: ${path}`);
+    if (isDeploymentGuardError(error)) fail(`${error.message}: ${path}`);
     throw error;
   }
 };
@@ -1137,7 +1138,9 @@ export const retirePreviousRollback = async (
   if (text) {
     const previous = JSON.parse(text) as { marker?: string; directory?: string };
     if (previous.marker !== DEPLOYMENT_MARKER || typeof previous.directory !== "string")
-      throw new DeploymentGuardError("Previous rollback marker is not owned by this deployer.");
+      throw new DeploymentGuardError({
+        message: "Previous rollback marker is not owned by this deployer.",
+      });
     const root = await NodeFSP.realpath(backupRoot);
     const old = await NodeFSP.realpath(previous.directory);
     if (NodePath.dirname(old) !== root || old === root)

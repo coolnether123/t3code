@@ -14,6 +14,7 @@ export function usageReadBatchKey(input: UsageSummaryInput): string {
     groupBy: input.groupBy ?? "model",
     includeQuotaHistory: false,
     awaitRefresh: input.awaitRefresh,
+    modelFilter: input.modelFilter,
   });
 }
 

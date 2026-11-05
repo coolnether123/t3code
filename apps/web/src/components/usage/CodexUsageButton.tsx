@@ -16,6 +16,7 @@ export function CodexUsageButton({
     timer.current = null;
     start.current = null;
   };
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Cancels the native hold-gesture timer when the button unmounts.
   useEffect(
     () => () => {
       if (timer.current !== null) clearTimeout(timer.current);

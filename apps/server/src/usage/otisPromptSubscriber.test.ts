@@ -10,6 +10,7 @@ import { readOtisPromptReport, selectPromptReport } from "./otisPromptSubscriber
 import { validPromptCutoverReceipt } from "./promptSubscriberState.ts";
 
 const decodeLocalReport = Schema.decodeUnknownSync(UsageReportPrompts);
+const decodeOtisReport = Schema.decodeUnknownSync(OtisPromptReport);
 
 const input: UsageReportInput = {
   mode: "prompts",
@@ -155,7 +156,7 @@ describe("Otis prompt subscriber compatibility", () => {
       words: report.words.map(row),
       keyword: row(report.keyword!),
     };
-    const decoded = Schema.decodeUnknownSync(OtisPromptReport)(JSON.parse(JSON.stringify(report)));
+    const decoded = decodeOtisReport(JSON.parse(JSON.stringify(report)));
     const matched = selectPromptReport(input, decoded, sqliteLocal);
     expect(matched.analytics?.parity).toBe("matched");
     expect(matched.analytics?.differences).toEqual([]);

@@ -412,6 +412,106 @@ describe("agent HTTP action receipt", () => {
 });
 
 describe("agent request mode", () => {
+  it.effect(
+    "reads the supplied V2 history cursor instead of silently returning the latest page",
+    () =>
+      Effect.gen(function* () {
+        const state = fakeAuth();
+        const urls: URL[] = [];
+        const thread = {
+          id: "thread-a",
+          projectId: "project-a",
+          title: "History fixture",
+          createdBy: "user",
+          creationSource: "web",
+          providerInstanceId: "codex",
+          modelSelection: { instanceId: "codex", model: "gpt-6.1-sol" },
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          activeProviderThreadId: null,
+          lineage: { rootThreadId: "thread-a", parentThreadId: null, relationshipToParent: null },
+          forkedFrom: null,
+          createdAt: now,
+          updatedAt: now,
+          archivedAt: null,
+          deletedAt: null,
+        };
+        const result = yield* Effect.gen(function* () {
+          const target = yield* resolveAgentTarget("/sandbox");
+          return yield* executeAgentRequest(
+            target,
+            decodeAgentRequest(
+              json({
+                kind: "snapshot",
+                thread: "thread-a",
+                turnLimit: 1,
+                beforeCursor: "opaque+old",
+              }),
+            ),
+            state.auth,
+          );
+        }).pipe(
+          Effect.provide(testLayer),
+          Effect.provideService(
+            FetchHttpClient.Fetch,
+            mockFetch(async (url) => {
+              const address = new URL(String(url));
+              urls.push(address);
+              if (address.pathname.includes("/.well-known/")) return Response.json(descriptor);
+              if (address.pathname.endsWith("/shell")) return Response.json(shell);
+              if (address.pathname.endsWith("/history")) {
+                return Response.json({
+                  snapshotSequence: 12,
+                  items: [],
+                  nextCursor: "next-page",
+                  hasMoreHistory: true,
+                });
+              }
+              if (address.pathname.endsWith("/bounded")) {
+                return Response.json({
+                  snapshotSequence: 12,
+                  historyCursor: "latest-page",
+                  hasMoreHistory: true,
+                  latestLocalTurnOrdinal: null,
+                  projection: {
+                    thread,
+                    runs: [],
+                    attempts: [],
+                    nodes: [],
+                    subagents: [],
+                    providerSessions: [],
+                    providerThreads: [],
+                    providerTurns: [],
+                    runtimeRequests: [],
+                    messages: [],
+                    plans: [],
+                    turnItems: [],
+                    checkpointScopes: [],
+                    checkpoints: [],
+                    contextHandoffs: [],
+                    contextTransfers: [],
+                    visibleTurnItems: [],
+                    updatedAt: now,
+                  },
+                });
+              }
+              throw new Error("Unexpected snapshot route");
+            }),
+          ),
+        );
+        expect(result).toMatchObject({
+          thread: { id: "thread-a" },
+          history: { historyCursor: "next-page", hasMoreHistory: true, items: [] },
+        });
+        expect(
+          urls.find((url) => url.pathname.endsWith("/history"))?.searchParams.get("cursor"),
+        ).toBe("opaque+old");
+        expect(state.issued[0]?.scopes).toEqual([AuthOrchestrationReadScope]);
+        expect(state.revoked).toEqual(["session-a"]);
+      }),
+  );
   it.effect("reads bounded provider summaries with only orchestration-read scope", () =>
     Effect.gen(function* () {
       const state = fakeAuth();

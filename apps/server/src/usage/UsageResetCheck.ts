@@ -6,7 +6,6 @@ import {
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
-import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -34,9 +33,12 @@ import {
 } from "./resetCheckResearch.ts";
 import { communityCheckPrompt, validateCommunityFinding } from "./communityCheckResearch.ts";
 
-export class ResetResearchFailed extends Data.TaggedError("ResetResearchFailed")<{
-  readonly stage?: string;
-}> {}
+export class ResetResearchFailed extends Schema.TaggedError<ResetResearchFailed>()(
+  "ResetResearchFailed",
+  { stage: Schema.optional(Schema.String) },
+) {}
+const isResetResearchFailed = Schema.is(ResetResearchFailed);
+const decodeCodexSettings = Schema.decodeEffect(CodexSettings);
 const decodeFinding = Schema.decodeUnknownEffect(Schema.fromJsonString(ResetResearchFinding));
 const decodeState = Schema.decodeUnknownEffect(Schema.fromJsonString(ResetCheckState));
 const encodeState = Schema.encodeEffect(Schema.fromJsonString(ResetCheckState));
@@ -70,9 +72,9 @@ const makeLunaResearch = Effect.gen(function* () {
         const instance = instances.find(
           (instance) => instance.driver === "codex" && instance.enabled !== false,
         );
-        const config = yield* Schema.decodeUnknownEffect(CodexSettings)(
-          instance?.config ?? {},
-        ).pipe(Effect.mapError(() => new ResetResearchFailed({ stage: "config" })));
+        const config = yield* decodeCodexSettings(instance?.config ?? {}).pipe(
+          Effect.mapError(() => new ResetResearchFailed({ stage: "config" })),
+        );
         const homeLayout = yield* resolveCodexHomeLayout(
           config.useDesktopAppDaemon ? { ...config, shadowHomePath: "" } : config,
         ).pipe(Effect.provideService(Path.Path, path));
@@ -158,7 +160,7 @@ const makeLunaResearch = Effect.gen(function* () {
       }).pipe(
         Effect.scoped,
         Effect.mapError((error) =>
-          error instanceof ResetResearchFailed
+          isResetResearchFailed(error)
             ? error
             : new ResetResearchFailed({ stage: "Research process failed" }),
         ),

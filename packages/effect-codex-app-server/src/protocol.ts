@@ -2,6 +2,7 @@ import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as FiberMap from "effect/FiberMap";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
@@ -49,9 +50,11 @@ export interface CodexAppServerTerminationContext {
 
 export interface CodexAppServerPatchedProtocolOptions {
   readonly stdio: Stdio.Stdio;
-  readonly terminationError?: (
-    context: CodexAppServerTerminationContext,
-  ) => Effect.Effect<CodexError.CodexAppServerError>;
+  readonly terminationError?:
+    | Effect.Effect<CodexError.CodexAppServerError>
+    | ((
+        context: CodexAppServerTerminationContext,
+      ) => Effect.Effect<CodexError.CodexAppServerError>);
   readonly logIncoming?: boolean;
   readonly logOutgoing?: boolean;
   // Test override; production uses MAX_INCOMING_MESSAGE_BYTES.
@@ -188,6 +191,9 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
     const terminationFailure = yield* Ref.make(Option.none<CodexError.CodexAppServerError>());
     const terminationSignal = yield* Deferred.make<void>();
     const activeRequestHandlers = yield* Ref.make(0);
+    const requestHandlers = yield* FiberMap.make<string | number>().pipe(
+      Scope.provide(requestHandlerScope),
+    );
 
     const logProtocol = (event: CodexAppServerProtocolLogEvent) => {
       if (event.direction === "incoming" && !options.logIncoming) {
@@ -355,7 +361,7 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
                     Effect.asVoid,
                   ),
                 ),
-                Effect.forkIn(requestHandlerScope, { startImmediately: true }),
+                FiberMap.run(requestHandlers, request.id),
                 Effect.asVoid,
               );
             }),
@@ -364,8 +370,17 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
         Effect.asVoid,
       );
 
+    // Codex settles requests itself when their turn ends; a handler still waiting would hold its slot.
+    const releaseResolvedRequest = (notification: CodexAppServerIncomingNotification) =>
+      notification.method === "serverRequest/resolved" &&
+      isObject(notification.params) &&
+      isJsonRpcId(notification.params.requestId)
+        ? FiberMap.remove(requestHandlers, notification.params.requestId)
+        : Effect.void;
+
     const handleNotification = (notification: CodexAppServerIncomingNotification) =>
-      Queue.offer(incomingNotifications, notification).pipe(
+      releaseResolvedRequest(notification).pipe(
+        Effect.andThen(Queue.offer(incomingNotifications, notification)),
         Effect.andThen(options.onNotification ? options.onNotification(notification) : Effect.void),
         Effect.asVoid,
       );
@@ -471,7 +486,10 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
                       ? { method: active.method, ...(requestId ? { requestId } : {}) }
                       : {};
                     return yield* options.terminationError
-                      ? options.terminationError(context).pipe(
+                      ? (Effect.isEffect(options.terminationError)
+                          ? options.terminationError
+                          : options.terminationError(context)
+                        ).pipe(
                           Effect.timeoutOrElse({
                             duration: EXIT_STATUS_GRACE,
                             orElse: () =>
@@ -489,7 +507,20 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
       Effect.forkScoped,
     );
 
-    yield* Stream.fromQueue(outgoing).pipe(Stream.run(options.stdio.stdout()), Effect.forkScoped);
+    yield* Stream.fromQueue(outgoing).pipe(
+      Stream.run(options.stdio.stdout()),
+      Effect.catch((cause) =>
+        handleTermination(() =>
+          Effect.succeed(
+            new CodexError.CodexAppServerTransportError({
+              operation: "write-output-stream",
+              cause,
+            }),
+          ),
+        ),
+      ),
+      Effect.forkScoped,
+    );
 
     const request = Effect.fn("CodexAppServerProtocol.request")(function* (
       method: string,
@@ -499,17 +530,30 @@ export const makeCodexAppServerPatchedProtocol = Effect.fn("makeCodexAppServerPa
         nextRequestId,
         (current) => [current, current + 1] as const,
       );
+      const attributes = {
+        "rpc.system": "jsonrpc",
+        "rpc.method": method,
+        "rpc.request_id": requestId,
+      };
+      yield* Effect.annotateCurrentSpan(attributes);
       const deferred = yield* Deferred.make<unknown, CodexError.CodexAppServerError>();
-      yield* Ref.update(pending, (current) =>
-        new Map(current).set(String(requestId), { deferred, method }),
-      );
-      yield* offerOutgoing({
-        id: requestId,
-        method,
-        ...(payload !== undefined ? { params: payload } : {}),
-      }).pipe(Effect.tapError(() => removePending(String(requestId))));
-      return yield* Deferred.await(deferred).pipe(
-        Effect.onInterrupt(() => removePending(String(requestId))),
+      return yield* Effect.acquireUseRelease(
+        Ref.update(pending, (current) =>
+          new Map(current).set(String(requestId), { deferred, method }),
+        ),
+        () =>
+          Effect.gen(function* () {
+            yield* offerOutgoing({
+              id: requestId,
+              method,
+              ...(payload !== undefined ? { params: payload } : {}),
+            }).pipe(Effect.withSpan("CodexAppServerProtocol.request.enqueue", { attributes }));
+            // Includes queue/stdin delivery, Codex work and response routing, not just T3 CPU.
+            return yield* Deferred.await(deferred).pipe(
+              Effect.withSpan("CodexAppServerProtocol.request.awaitResponse", { attributes }),
+            );
+          }),
+        () => removePending(String(requestId)),
       );
     });
 

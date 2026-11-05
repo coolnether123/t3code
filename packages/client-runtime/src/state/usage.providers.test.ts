@@ -71,6 +71,7 @@ function harness(ids = ["a"]) {
     environmentIds: environments.map((entry) => entry.environmentId),
     input,
     server: {
+      usageModelFilterAtom: () => Atom.make(undefined),
       usageSummary: ({ environmentId }: { environmentId: EnvironmentId }) =>
         get(environmentId).query,
       refreshUsageRates: {

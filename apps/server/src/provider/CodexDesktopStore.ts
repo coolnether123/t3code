@@ -510,8 +510,12 @@ export const make = Effect.fn("CodexDesktopStore.make")(function* (options?: {
       ? (effect as Effect.Effect<A, E, never>)
       : effect.pipe(Effect.provideService(ServerSettings.ServerSettingsService, settingsService));
   return CodexDesktopStore.of({
-    listThreads: (input) => provideSettings(provideBase(listThreads(input))),
-    readThread: (threadId, input) => provideSettings(provideBase(readThread(threadId, input))),
+    listThreads: Effect.fn("CodexDesktopStore.listThreads")((input) =>
+      provideSettings(provideBase(listThreads(input))),
+    ),
+    readThread: Effect.fn("CodexDesktopStore.readThread")((threadId, input) =>
+      provideSettings(provideBase(readThread(threadId, input))),
+    ),
   });
 });
 

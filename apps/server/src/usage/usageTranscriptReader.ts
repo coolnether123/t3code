@@ -19,14 +19,18 @@ import {
   initialGeminiScanState,
   mightCarryUsage,
   parseAntigravityTokenCache,
-  parseClaudeLine,
-  parseCodexLine,
+  parseCodexLines,
   parseGeminiLine,
   parseGeminiValue,
   parseOpenCodeMessageValue,
   type CodexScanState,
   type UsageRecord,
 } from "./usageTranscripts.ts";
+import { parseClaudeLine as parseProviderClaudeLine } from "../provider/Drivers/claudeUsage.ts";
+import { claudeUsageFormat } from "../provider/Drivers/claudeUsage.ts";
+import { codexUsageFormat } from "../provider/Drivers/codexUsage.ts";
+import type { TranscriptUsageFormat } from "@t3tools/provider-core/server/usage";
+import { readTranscriptRecords as readProviderTranscriptRecords } from "./usageProviderTranscriptReader.ts";
 import { parseAiStudioExport, parseChatGptExport } from "./usageImportedChats.ts";
 import {
   initialRepeatedInputParserState,
@@ -107,10 +111,10 @@ async function refreshKnownInventory(
     batch.forEach((directory, index) => {
       const mtime = mtimes[index];
       if (mtime === null) {
-        for (const path of [...known.directoryMtimes.keys()]) {
+        for (const path of known.directoryMtimes.keys()) {
           if (path === directory || isInside(directory, path)) known.directoryMtimes.delete(path);
         }
-        for (const path of [...known.files.keys()]) {
+        for (const path of known.files.keys()) {
           if (isInside(directory, path)) known.files.delete(path);
         }
       } else if (mtime !== known.directoryMtimes.get(directory)) {
@@ -151,7 +155,7 @@ async function refreshKnownInventory(
           restat.add(child);
         }
       }
-      for (const path of [...known.files.keys()]) {
+      for (const path of known.files.keys()) {
         if (NodePath.dirname(path) === directory && !present.has(path)) known.files.delete(path);
       }
     }
@@ -283,7 +287,7 @@ export async function listTranscriptFilesBounded(
         : provider === "gemini"
           ? (name.startsWith("session-") && (name.endsWith(".json") || name.endsWith(".jsonl"))) ||
             name === "tokens_cache.json"
-          : name.endsWith(".jsonl");
+          : name.endsWith(".jsonl") || name.endsWith(".jsonl.zst");
   const inventoryKey = `${provider}\u0000${root}`;
   const deadline = now() + maxDurationMs;
   const expired = () => now() >= deadline;
@@ -534,6 +538,7 @@ const PREFIX_MARKER_BYTES = 4 * 1024;
 const CODEX_LINE_RELEVANCE: OversizedLineRelevance = {
   prefixMarkers: [
     '"type":"token_count"',
+    '"type":"token_usage_record"',
     '"type":"turn_context"',
     '"type":"session_meta"',
     '"type":"thread_settings_applied"',
@@ -668,6 +673,37 @@ export async function readTranscriptRecords(
   provider: UsageProviderKind,
   options: TranscriptReadOptions = {},
 ): Promise<TranscriptReadResult | null> {
+  if (filePath.endsWith(".jsonl.zst") && (provider === "codex" || provider === "claude")) {
+    const state = initialCodexScanState();
+    const parseLine = (line: string) =>
+      (provider === "codex" ? parseCodexLines(line, state) : parseProviderClaudeLine(line)).map(
+        (record) => ({ ...record, speed: record.speed ?? ("standard" as const) }),
+      );
+    const sourceFormat = provider === "codex" ? codexUsageFormat : claudeUsageFormat;
+    const format: TranscriptUsageFormat<void> = {
+      selectFields: sourceFormat.selectFields,
+      usageMarkers: sourceFormat.usageMarkers,
+      parseLine,
+      parseProjected: (projected) => parseLine(JSON.stringify(projected)),
+    };
+    const parsed = await readProviderTranscriptRecords(filePath, format);
+    if (parsed === null) return null;
+    const records = [...parsed.records, ...parsed.tailRecords].map((record) => ({
+      ...record,
+      ...(record.sessionId.length > 0 &&
+      record.sessionId.length <= 512 &&
+      record.sessionId.trim() === record.sessionId
+        ? { nativeSessionId: record.sessionId }
+        : {}),
+    }));
+    return {
+      records,
+      nextByte: options.sourceSize ?? (await NodeFSP.stat(filePath)).size,
+      discardedLines: 0,
+      discardingLine: false,
+      ...(provider === "codex" ? { codexState: state } : {}),
+    };
+  }
   if (provider === "aistudio" || provider === "chatgpt") {
     const records = await readImportedChatRecords(filePath, provider);
     return records === null
@@ -708,7 +744,16 @@ export async function readTranscriptRecords(
         ...options.codexState,
         ...(options.codexState.providerState === undefined
           ? {}
-          : { providerState: { ...options.codexState.providerState } }),
+          : {
+              providerState: {
+                ...options.codexState.providerState,
+                ...(options.codexState.providerState.unreportedRequests === undefined
+                  ? {}
+                  : {
+                      unreportedRequests: [...options.codexState.providerState.unreportedRequests],
+                    }),
+              },
+            }),
       }
     : initialCodexScanState();
 
@@ -733,14 +778,20 @@ export async function readTranscriptRecords(
           ) {
             return;
           }
-          const record = parseCodexLine(line, codexState);
-          if (record !== null) records.push(record);
+          records.push(...parseCodexLines(line, codexState));
           return;
         }
 
         if (!mightCarryUsage(line, provider)) return;
-        const record = parseClaudeLine(line);
-        if (record !== null) records.push(record);
+        for (const record of parseProviderClaudeLine(line)) {
+          const sessionId = record.sessionId;
+          records.push({
+            ...record,
+            ...(sessionId.length > 0 && sessionId.length <= 512 && sessionId.trim() === sessionId
+              ? { nativeSessionId: sessionId }
+              : {}),
+          });
+        }
       },
       provider === "codex" ? CODEX_LINE_RELEVANCE : CLAUDE_LINE_RELEVANCE,
     );

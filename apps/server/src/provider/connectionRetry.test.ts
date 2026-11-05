@@ -1,14 +1,16 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
-import * as Data from "effect/Data";
+import * as Schema from "effect/Schema";
 import { CodexAppServerSpawnError } from "effect-codex-app-server/errors";
 import {
   isTransientConnectionFailure,
   retryConnection,
   retryScopedConnection,
 } from "./connectionRetry.ts";
-class ConnectionError extends Data.TaggedError("ConnectionError")<{ message: string }> {}
+class ConnectionError extends Schema.TaggedError<ConnectionError>()("ConnectionError", {
+  message: Schema.String,
+}) {}
 
 it.live(
   "closes failed connection resources before retrying and retains the successful connection",
@@ -27,8 +29,7 @@ it.live(
                   closed++;
                 }),
               );
-              if (opened < 3)
-                return yield* Effect.fail(new ConnectionError({ message: "ECONNREFUSED" }));
+              if (opened < 3) return yield* new ConnectionError({ message: "ECONNREFUSED" });
               return "connected";
             }),
           );

@@ -13,7 +13,8 @@ import * as Option from "effect/Option";
 import * as ServerSettings from "../serverSettings.ts";
 import { modelSelectionAllowsFullComputerControl } from "../provider/CodexComputerControl.ts";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SynchronizedRef from "effect/SynchronizedRef";
@@ -145,7 +146,8 @@ const getHttpMcpEndpointHost = (address: NetAddress.IpAddress): string =>
 const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
   options: McpSessionRegistryOptions = {},
 ) {
-  const crypto = yield* Crypto.Crypto;
+  const random = yield* SecureRandom.SecureRandom;
+  const digest = yield* Digest.Digest;
   const environment = yield* ServerEnvironment.ServerEnvironment;
   const environmentId = yield* environment.getEnvironmentId;
   const httpServer = yield* HttpServer.HttpServer;
@@ -157,8 +159,8 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
     : "http://127.0.0.1/mcp";
 
   const hashToken = (token: string) =>
-    crypto
-      .digest("SHA-256", new TextEncoder().encode(token))
+    digest
+      .digest(Digest.sha256, new TextEncoder().encode(token))
       .pipe(Effect.map(bytesToHex), Effect.orDie);
 
   const issue: McpSessionRegistryShape["issue"] = Effect.fn("McpSessionRegistry.issue")(
@@ -166,9 +168,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
       const issuedAt = yield* currentTimeMillis;
       const settingsService = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
       const settings = Option.isSome(settingsService)
-        ? yield* settingsService.value.getSettings.pipe(
-            Effect.catch(() => Effect.succeed(undefined)),
-          )
+        ? yield* settingsService.value.getSettings.pipe(Effect.orElseSucceed(() => undefined))
         : undefined;
       const extraCapabilities = resolveMcpCapabilities(
         { enableAgentBrowserAccess: false },
@@ -181,8 +181,8 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
           : isDesktopBackedCodexInstance(settings, request.providerInstanceId),
         yield* HostProcess.Platform,
       );
-      const providerSessionId = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
-      const rawToken = yield* crypto.randomBytes(32).pipe(Effect.map(tokenFromBytes), Effect.orDie);
+      const providerSessionId = yield* random.uuidV4();
+      const rawToken = yield* random.randomBytes(32).pipe(Effect.map(tokenFromBytes), Effect.orDie);
       const tokenHash = yield* hashToken(rawToken);
       const browserToolsAvailable = request.browserToolsAvailable ?? true;
       const scope: McpInvocationContext.McpThreadInvocationScope = {
@@ -329,12 +329,6 @@ export const touchActiveMcpThread = (
   activeMcpSessionRegistry
     ? activeMcpSessionRegistry.touch(threadId, modelSelection, parentTurnId)
     : Effect.void;
-
-const revokeActiveMcpThread = (threadId: ThreadId): Effect.Effect<void> =>
-  activeMcpSessionRegistry ? activeMcpSessionRegistry.revokeThread(threadId) : Effect.void;
-
-const revokeAllActiveMcpCredentials = (): Effect.Effect<void> =>
-  activeMcpSessionRegistry ? activeMcpSessionRegistry.revokeAll : Effect.void;
 
 export const __testing = {
   make: makeWithOptions,

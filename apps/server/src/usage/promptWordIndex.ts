@@ -91,7 +91,9 @@ export const warmPromptWordIndexBatch =
                   yield* sql`INSERT INTO usage_prompt_words_v1 (message_id, thread_id, created_at, words, characters)
           VALUES (${row.messageId}, ${row.threadId}, ${row.createdAt}, ${complete ? words.length : null}, ${row.characters})`;
                   for (let offset = 0; offset < entries.length; offset += 200) {
-                    yield* sql`INSERT INTO usage_prompt_terms_v1 ${sql.insert(entries.slice(offset, offset + 200))}`;
+                    const [first, ...rest] = entries.slice(offset, offset + 200);
+                    if (first !== undefined)
+                      yield* sql`INSERT INTO usage_prompt_terms_v1 ${sql.insert([first, ...rest])}`;
                   }
                   yield* sql`DELETE FROM usage_prompt_pending_v1 WHERE message_id = ${row.messageId}`;
                   return true;

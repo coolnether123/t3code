@@ -23,14 +23,15 @@ export function UsagePaceChart({
   readonly news?: ResetNews;
   readonly resetCheck?: ReactNode;
 }) {
-  const [now, setNow] = useState(Date.now);
+  const [clock, setClock] = useState(Date.now);
+  const now = Math.max(clock, Date.parse(samples.at(-1)?.observedAt ?? "") || 0);
   const [width, setWidth] = useState(1);
   const [recorded, setRecorded] = useState(false);
   const [showRecentPace, setShowRecentPace] = useState(true);
   const colors = useProviderColors();
-  useEffect(() => setNow(Date.now()), [samples]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Updates the displayed countdown from the wall clock while mounted.
   useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 60_000);
+    const timer = setInterval(() => setClock(Date.now()), 60_000);
     return () => clearInterval(timer);
   }, []);
   const announced = currentResetAnnouncement(news, samples.at(-1), now);

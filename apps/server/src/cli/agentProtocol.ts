@@ -11,6 +11,7 @@ import {
   type EnvironmentProviderSnapshotResult,
   type OrchestrationV2ShellSnapshot as OrchestrationShellSnapshot,
   type OrchestrationV2ThreadDetailSnapshot as OrchestrationThreadDetailSnapshot,
+  type OrchestrationV2ThreadHistoryPage,
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
@@ -330,6 +331,13 @@ export function validateAgentAction(
   const active = projection.runs.find((run) =>
     ["running", "waiting", "starting"].includes(run.status),
   );
+  if (
+    command.type === "thread.archive" &&
+    projection.runs.some((run) =>
+      ["preparing", "queued", "starting", "running", "waiting"].includes(run.status),
+    )
+  )
+    reject("Thread still has unfinished runs. Wait for completion before archiving it.");
   if (command.type === "run.interrupt" && active?.id !== command.runId)
     reject("Observed active run no longer matches the command target.");
   if (command.type === "message.dispatch") {
@@ -357,9 +365,6 @@ const record = (value: unknown): Record<string, unknown> | undefined =>
   value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
-const textField = (value: unknown, max = 1000) =>
-  typeof value === "string" ? clip(value, max) : undefined;
-
 function compactValue(
   value: unknown,
   depth = 0,
@@ -409,6 +414,7 @@ export function compactAgentSnapshot(
   shell: OrchestrationShellSnapshot,
   detail?: OrchestrationThreadDetailSnapshot,
   offset = 0,
+  turnLimit = 5,
 ) {
   const projection = detail?.projection;
   return {
@@ -443,7 +449,19 @@ export function compactAgentSnapshot(
       ? {}
       : {
           thread: projection.thread,
-          runs: projection.runs.slice(-5),
+          runs: projection.runs.slice(-turnLimit),
+          subagents: projection.subagents.slice(-20).map((subagent) => ({
+            id: subagent.id,
+            threadId: subagent.threadId,
+            runId: subagent.runId,
+            childThreadId: subagent.childThreadId,
+            origin: subagent.origin,
+            status: subagent.status,
+            completionWake: subagent.completionWake,
+            completionDelivery: compactValue(subagent.completionDelivery),
+            result: subagent.result === null ? null : clip(subagent.result),
+            completedAt: subagent.completedAt,
+          })),
           messages: projection.messages.slice(-20).map((message) => ({
             id: message.id,
             role: message.role,
@@ -489,6 +507,37 @@ export function compactAgentSnapshot(
           historyCursor: detail?.historyCursor ?? null,
           hasMoreHistory: detail?.hasMoreHistory ?? false,
         }),
+  };
+}
+
+export function compactAgentHistory(history: OrchestrationV2ThreadHistoryPage) {
+  return {
+    snapshotSequence: history.snapshotSequence,
+    items: history.items
+      .slice(-25)
+      .map(({ position, visibility, sourceThreadId, sourceItemId, item }) => ({
+        position,
+        visibility,
+        sourceThreadId,
+        sourceItemId,
+        item: compactValue(
+          {
+            id: item.id,
+            type: item.type,
+            status: item.status,
+            title: item.title,
+            ...("text" in item ? { text: item.text } : {}),
+            ...("message" in item ? { message: item.message } : {}),
+            ...("activity" in item ? { activity: item.activity } : {}),
+          },
+          0,
+          { characters: 4000, truncated: false },
+          4,
+        ),
+      })),
+    itemsOmitted: Math.max(0, history.items.length - 25),
+    historyCursor: history.nextCursor,
+    hasMoreHistory: history.hasMoreHistory,
   };
 }
 

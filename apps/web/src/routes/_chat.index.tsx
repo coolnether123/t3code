@@ -1,3 +1,4 @@
+import { workspaceAreaProps } from "../lib/workspaceFocus";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { createFileRoute, useRouter } from "@tanstack/react-router";
@@ -17,7 +18,7 @@ import {
   readProject,
   useAllEnvironmentShellsBootstrapped,
   useProjects,
-  useThreadShells,
+  useVisibleThreadShells,
 } from "../state/entities";
 import { useEnvironments } from "../state/environments";
 
@@ -35,7 +36,7 @@ function ChatIndexRouteView() {
 
 function IndexDraftLanding() {
   const projects = useProjects();
-  const threads = useThreadShells();
+  const threads = useVisibleThreadShells();
   const bootstrapped = useAllEnvironmentShellsBootstrapped();
   const handleNewThread = useNewThreadHandler();
   const router = useRouter();
@@ -47,9 +48,11 @@ function IndexDraftLanding() {
   const { selectedEnvironmentId } = useSidebarEnvironmentScope();
   const mostRecentProject = bootstrapped
     ? (sortScopedProjectsForSidebar(
-        selectedEnvironmentId === null
-          ? projects
-          : projects.filter((project) => project.environmentId === selectedEnvironmentId),
+        projects.filter(
+          (project) =>
+            project.archivedAt == null &&
+            (selectedEnvironmentId === null || project.environmentId === selectedEnvironmentId),
+        ),
         selectedEnvironmentId === null
           ? threads
           : threads.filter((thread) => thread.environmentId === selectedEnvironmentId),
@@ -58,6 +61,7 @@ function IndexDraftLanding() {
     : null;
   const attempt = startState.retryRequest;
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- starts a draft thread in the most recent project and navigates to it while still on the index
   useEffect(() => {
     // Starting a draft after the user has left would replace the page they picked.
     if (mostRecentProject === null || startedAttemptRef.current === attempt || !isStillOnIndex()) {
@@ -96,8 +100,13 @@ function IndexDraftLanding() {
 }
 
 function DraftStartError({ onRetry }: { readonly onRetry: () => void }) {
+  const contentArea = workspaceAreaProps("home", 1, "Home");
   return (
-    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none">
+    <SidebarInset
+      {...contentArea}
+      role="main"
+      className="h-dvh min-h-0 overflow-hidden overscroll-y-none"
+    >
       {isElectron ? <WorkspacePageHeader electron /> : null}
       <Empty className="flex-1">
         <EmptyHeader className="max-w-md">

@@ -1,5 +1,6 @@
 import { expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import {
   CommandId,
   MessageId,
@@ -48,7 +49,7 @@ import { callOperator } from "./callOperator.ts";
 
 const decodeRuntimeEvent = Schema.decodeUnknownSync(ProviderRuntimeEvent);
 const now = "2026-10-19T06:00:00.000Z";
-const thread = Schema.decodeUnknownSync(Schema.toCodecJson(OrchestrationV2AppThread))({
+const thread = Schema.decodeSync(Schema.toCodecJson(OrchestrationV2AppThread))({
   id: "synthetic-voice-thread",
   projectId: "synthetic-project",
   title: "Voice fixture",
@@ -84,7 +85,7 @@ const dependencies = Layer.mergeAll(
 );
 const layer = VoiceThreadService.layer.pipe(
   Layer.provideMerge(dependencies),
-  Layer.provideMerge(NodeServices.layer),
+  Layer.provideMerge(Layer.merge(NodeServices.layer, NodeCrypto.layer)),
 );
 const seed = Effect.gen(function* () {
   const sink = yield* EventSink.EventSinkV2;
@@ -466,7 +467,7 @@ it.effect.each(["session", "turn"] as const)(
         Effect.provide(
           VoiceThreadService.layer.pipe(
             Layer.provideMerge(testDependencies),
-            Layer.provideMerge(NodeServices.layer),
+            Layer.provideMerge(Layer.merge(NodeServices.layer, NodeCrypto.layer)),
           ),
         ),
       );
@@ -798,7 +799,7 @@ it.effect(
               Layer.mock(Auxiliary.AuxiliaryProviderSessions)({}),
             ),
           ),
-          Layer.provideMerge(NodeServices.layer),
+          Layer.provideMerge(Layer.merge(NodeServices.layer, NodeCrypto.layer)),
         ),
       ),
     );

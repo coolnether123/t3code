@@ -9,6 +9,7 @@ import * as NodePath from "node:path";
 
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import {
   Environment as HostProcessEnvironment,
   HomeDirectory as HostHomeDirectory,
@@ -43,6 +44,8 @@ import * as UsageService from "./UsageService.ts";
 import { UsageScanStore } from "./usageScanStore.ts";
 
 const encodeProof = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
+const isUsageSummary = Schema.is(UsageSummarySchema);
+const isUsageReport = Schema.is(UsageReportSchema);
 
 function claudeLine(
   id: number,
@@ -142,12 +145,12 @@ const serviceLayers = (input: {
   readonly ratesDocument?: unknown;
 }) =>
   ServerConfig.layerTest(process.cwd(), input.configBaseDir ?? { prefix: input.prefix }).pipe(
-    Layer.provideMerge(NodeServices.layer),
+    Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
     Layer.provideMerge(Layer.succeed(HostHomeDirectory, input.home)),
     Layer.provideMerge(Layer.mock(AntigravityUsage.AntigravityUsage)({})),
     Layer.provideMerge(Layer.mock(CursorUsageAccounts.CursorUsageAccounts)({})),
     Layer.provideMerge(
-      Layer.succeed(MuseUsageHome.MuseUsageHome, { resolve: () => Effect.succeed(undefined) }),
+      Layer.succeed(MuseUsageHome.MuseUsageHome, { resolve: () => Effect.undefined }),
     ),
     Layer.provideMerge(ServerSettings.layerTest(input.settings)),
     Layer.provideMerge(
@@ -163,8 +166,9 @@ const serviceLayers = (input: {
             input.onRatesFetch?.();
             return HttpClientResponse.fromWeb(request, Response.json(input.ratesDocument ?? {}));
           }).pipe(
-            Effect.flatMap((response) =>
-              input.neverRates === true ? Effect.never : Effect.succeed(response),
+            Effect.filterOrElse(
+              () => input.neverRates !== true,
+              () => Effect.never,
             ),
           ),
         ),
@@ -256,14 +260,14 @@ describe("UsageService", () => {
         includeRepeatedInput: false,
       });
       assert.strictEqual(summary.contractVersion, 7);
-      assert.strictEqual(Schema.is(UsageSummarySchema)(summary), true);
+      assert.strictEqual(isUsageSummary(summary), true);
       assert.strictEqual(
         summary.buckets.some((bucket) => bucket.provider === "claude"),
         true,
       );
       const report = yield* service.readReport({ ...WINDOW, mode: "overview", refresh: false });
       assert.strictEqual(report.mode, "overview");
-      assert.strictEqual(Schema.is(UsageReportSchema)(report), true);
+      assert.strictEqual(isUsageReport(report), true);
     }).pipe(Effect.scoped),
   );
 
@@ -887,6 +891,36 @@ describe("UsageService", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.live("filters original models before aliases and isolates cached filtered indexes", () =>
+    Effect.gen(function* () {
+      const { transcript, settings, home } = yield* setup;
+      yield* Effect.promise(() =>
+        NodeFSP.writeFile(transcript, claudeLine(1, 5, "kept") + claudeLine(2, 7, "omitted")),
+      );
+      yield* Effect.gen(function* () {
+        const settingsService = yield* ServerSettings.ServerSettingsService;
+        yield* settingsService.updateSettings({ usageModelAliases: { omitted: "kept" } });
+        const service = yield* UsageService.make;
+        const filter = { include: [{ model: "kept" }], exclude: [{ model: "omitted" }] };
+        const filtered = yield* service.readSummary({ ...WINDOW, modelFilter: filter });
+        assert.strictEqual(totalOutputTokens(filtered), 5);
+        assert.deepStrictEqual(filtered.modelFilter, filter);
+        const unfiltered = yield* service.readSummary(WINDOW);
+        assert.strictEqual(totalOutputTokens(unfiltered), 12);
+        assert.isUndefined(unfiltered.modelFilter);
+        const filteredAgain = yield* service.readSummary({ ...WINDOW, modelFilter: filter });
+        assert.strictEqual(totalOutputTokens(filteredAgain), 5);
+        const empty = yield* service.readSummary({ ...WINDOW, modelFilter: { include: [] } });
+        assert.deepStrictEqual(empty.buckets, []);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          serviceLayers({ prefix: "usage-service-model-filter-test", home, settings }),
+        ),
+      );
+    }).pipe(Effect.scoped),
+  );
+
   it.live("reprices unchanged transcripts when custom prices are added, edited, or removed", () =>
     Effect.gen(function* () {
       const { transcript, settings, home } = yield* setup;
@@ -1129,6 +1163,7 @@ describe("UsageService", () => {
       );
 
       let orphanedAt: number | undefined;
+      // oxlint-disable-next-line t3code/no-polling-loop-in-tests -- Exercises independent deterministic scheduler interruption boundaries, not readiness polling.
       for (let interruptAt = 1; interruptAt <= 31; interruptAt += 1) {
         const tasks: Array<() => void> = [];
         const dispatcher: Scheduler.SchedulerDispatcher = {

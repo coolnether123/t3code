@@ -4,7 +4,7 @@ import { checkFileBatches } from "./check-file-batches.ts";
 it("keeps every selected path in order across Windows command boundaries", () => {
   const files = Array.from(
     { length: 2_500 },
-    (_, index) => `apps/server/src/fixture with spaces/quoted-\"${index}\".test.ts`,
+    (_, index) => `apps/server/src/fixture with spaces/quoted-"${index}".test.ts`,
   );
   const batches = checkFileBatches(files);
   expect(batches.length).toBeGreaterThan(1);

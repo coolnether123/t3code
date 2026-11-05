@@ -22,6 +22,7 @@ export function OtisDictation({
   const speech = useRef<ReturnType<typeof createDeviceSpeech> | null>(null);
   const preparing = useRef(false);
   const abort = useRef<AbortController | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Unmount releases microphone audio and aborts the outstanding native dictation request.
   useEffect(
     () => () => {
       const controller = abort.current;

@@ -1,4 +1,4 @@
-import * as Data from "effect/Data";
+import * as Schema from "effect/Schema";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -11,9 +11,12 @@ interface PluginConfig {
   readonly enabledPlugins: ReadonlyArray<string>;
 }
 
-class DesktopPluginSkillError extends Data.TaggedError("DesktopPluginSkillError")<{
-  readonly reason: string;
-}> {}
+class DesktopPluginSkillError extends Schema.TaggedError<DesktopPluginSkillError>()(
+  "DesktopPluginSkillError",
+  { reason: Schema.String },
+) {}
+
+const isDesktopPluginSkillError = Schema.is(DesktopPluginSkillError);
 
 const tomlString = (value: string): string => {
   const trimmed = value.trim();
@@ -137,7 +140,7 @@ export const attachCodexDesktopPluginSkills = Effect.fn("attachCodexDesktopPlugi
       return { extraRoots, warning: undefined as string | undefined };
     }).pipe(
       Effect.catch((error) => {
-        const warning = `desktop plugin skills could not be attached: ${error instanceof DesktopPluginSkillError ? error.reason : "skill directory lookup failed"}`;
+        const warning = `desktop plugin skills could not be attached: ${isDesktopPluginSkillError(error) ? error.reason : "skill directory lookup failed"}`;
         return Effect.logWarning(warning).pipe(Effect.as({ extraRoots: [], warning }));
       }),
     );

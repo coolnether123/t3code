@@ -53,13 +53,14 @@ const make = Effect.gen(function* () {
   yield* setupUsagePromptIndex.pipe(Effect.mapError(failure));
   yield* Effect.forkScoped(runPromptWordIndexer(sql, "usage_prompt_messages_v2"));
   return UsageProjection.of({
-    getSnapshotSequence: () =>
+    getSnapshotSequence: Effect.fn("UsageProjection.getSnapshotSequence")(() =>
       sql<{ snapshotSequence: number }>`
       SELECT coalesce(max(sequence), 0) AS snapshotSequence FROM orchestration_events`.pipe(
         Effect.map((rows) => rows[0] ?? { snapshotSequence: 0 }),
         Effect.mapError(failure),
       ),
-    listPromptUsageMessages: (input) =>
+    ),
+    listPromptUsageMessages: Effect.fn("UsageProjection.listPromptUsageMessages")((input) =>
       sql<PromptUsageMessage>`
       SELECT message_id AS messageId, thread_id AS threadId, created_at AS createdAt,
         substr(text, 1, 262144) AS text, length(text) AS textLength
@@ -68,11 +69,15 @@ const make = Effect.gen(function* () {
         AND (created_at < ${input.beforeCreatedAt} OR
           (created_at = ${input.beforeCreatedAt} AND message_id < ${input.beforeMessageId}))
       ORDER BY created_at DESC, message_id DESC LIMIT 32`.pipe(Effect.mapError(failure)),
-    readPromptWordIndex: (input, readAt) =>
+    ),
+    readPromptWordIndex: Effect.fn("UsageProjection.readPromptWordIndex")((input, readAt) =>
       readPromptWordIndex(sql, input, readAt, "usage_prompt_messages_v2").pipe(
         Effect.mapError(failure),
       ),
-    findThreadMappingsByProviderSessionIds: (ids) =>
+    ),
+    findThreadMappingsByProviderSessionIds: Effect.fn(
+      "UsageProjection.findThreadMappingsByProviderSessionIds",
+    )((ids) =>
       ids.length === 0
         ? Effect.succeed([])
         : sql<{
@@ -89,6 +94,7 @@ const make = Effect.gen(function* () {
       count(*) OVER (PARTITION BY providerName, providerSessionId) AS threadCount FROM native`.pipe(
             Effect.mapError(failure),
           ),
+    ),
   });
 });
 

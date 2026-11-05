@@ -2,6 +2,7 @@
 import * as NodeHttp from "node:http";
 import * as NodeCrypto from "node:crypto";
 import * as NodeUtil from "node:util";
+import * as Schema from "effect/Schema";
 import {
   CALL_PREPARE_TIMEOUT_MS,
   type SpeechTransportRequest,
@@ -31,7 +32,10 @@ const acquireSpeechLease = (url: string, init: RequestInit): Promise<Response> =
     request.end(init.body);
   });
 
-export class SpeechUnavailableError extends Error {}
+export class SpeechUnavailableError extends Schema.TaggedError<SpeechUnavailableError>()(
+  "SpeechUnavailableError",
+  { message: Schema.String },
+) {}
 
 const speechDebug = NodeUtil.debuglog("t3-speech");
 
@@ -123,7 +127,9 @@ export async function* streamSpeech(
   });
   trace("headers", { status: response.status });
   if (!response.ok)
-    throw new SpeechUnavailableError(`Local speech service unavailable (${response.status}).`);
+    throw new SpeechUnavailableError({
+      message: `Local speech service unavailable (${response.status}).`,
+    });
   const sampleRate = Number(response.headers.get("x-sample-rate"));
   if (!response.body || !Number.isInteger(sampleRate) || sampleRate < 8000 || sampleRate > 96000)
     throw new Error("Speech service returned an invalid stream.");
@@ -234,7 +240,9 @@ export async function proxySpeech(
   });
   if (input.action === "release" && response.status === 404) return {};
   if (!response.ok)
-    throw new SpeechUnavailableError(`Local speech service unavailable (${response.status}).`);
+    throw new SpeechUnavailableError({
+      message: `Local speech service unavailable (${response.status}).`,
+    });
   if (input.action === "release") return {};
   if (input.action === "speak") {
     const sampleRate = Number(response.headers.get("x-sample-rate"));
@@ -287,7 +295,9 @@ export async function proxySpeech(
           ),
         )
       )
-        throw new SpeechUnavailableError("Speech engine health was lost. Prepare the call again.");
+        throw new SpeechUnavailableError({
+          message: "Speech engine health was lost. Prepare the call again.",
+        });
     }
     return {
       sessionId: result.sessionId,

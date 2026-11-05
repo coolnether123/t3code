@@ -10,6 +10,7 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as TestClock from "effect/testing/TestClock";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { HttpClient } from "effect/http";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -24,10 +25,10 @@ const testLayer = Layer.mergeAll(
   Layer.succeed(CodexUsageHistory.CodexUsageHistory, {
     resolve: () => Effect.succeed(new Map()),
   }),
-  Layer.succeed(MuseUsageHome.MuseUsageHome, { resolve: () => Effect.succeed(undefined) }),
+  Layer.succeed(MuseUsageHome.MuseUsageHome, { resolve: () => Effect.undefined }),
   ServerSettings.layerTest(),
   ServerConfig.layerTest(process.cwd(), { prefix: "t3-quota-service-test-" }),
-).pipe(Layer.provideMerge(NodeServices.layer));
+).pipe(Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)));
 
 vi.mock("./usageQuotaHistory.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./usageQuotaHistory.ts")>()),
@@ -180,6 +181,7 @@ describe("history-only usage requests", () => {
         Effect.provideService(FileSystem.FileSystem, { ...fs, readFileString }),
         Effect.provideService(HttpClient.HttpClient, HttpClient.make(request)),
       );
+      readFileString.mockClear();
       const result = yield* service.readSummary({
         sinceDay: UsageDay.make("2026-07-01"),
         untilDay: UsageDay.make("2026-08-30"),

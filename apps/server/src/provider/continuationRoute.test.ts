@@ -3,7 +3,7 @@ import { ProviderInstanceConfigMap, ProviderInstanceId, ModelSelection } from "@
 import * as Schema from "effect/Schema";
 import { resolveContinuationRoute } from "./continuationRoute.ts";
 
-const selection = Schema.decodeUnknownSync(ModelSelection)({
+const selection = Schema.decodeSync(ModelSelection)({
   instanceId: "codex",
   model: "gpt-6.1-sol",
   options: { reasoningEffort: "medium" },

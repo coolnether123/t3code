@@ -20,6 +20,8 @@ import {
 
 // Older rows cannot distinguish native session IDs from synthetic IDs and must be reparsed.
 export const USAGE_SCAN_CACHE_VERSION = 9 as const;
+export const USAGE_PARSER_REVISION = "codexRecoveryAndClaudeAdvisorsV11";
+const decodeCodexProviderState = Schema.decodeUnknownOption(CodexUsage.CodexScanState);
 
 export interface CachedFile {
   readonly size: number;
@@ -179,6 +181,7 @@ interface SerializedFile {
 
 interface SerializedCache {
   readonly version: number;
+  readonly parserRevision?: string;
   readonly models: readonly string[];
   readonly sessions: readonly string[];
   readonly files: Readonly<Record<string, SerializedFile>>;
@@ -319,6 +322,7 @@ export function encodeScanCache(
 
   return {
     version: USAGE_SCAN_CACHE_VERSION,
+    parserRevision: USAGE_PARSER_REVISION,
     models,
     sessions,
     files,
@@ -754,7 +758,7 @@ function decodeSerializedFile(
     ) {
       return undefined;
     }
-    const providerState = Schema.decodeUnknownOption(CodexUsage.CodexScanState)(providerStateValue);
+    const providerState = decodeCodexProviderState(providerStateValue);
     codexState = {
       ...(Option.isSome(providerState) ? { providerState: providerState.value } : {}),
       model,

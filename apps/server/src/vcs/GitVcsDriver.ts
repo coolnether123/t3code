@@ -1,10 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off - Git checkpoint names require native path handling and a synchronous content digest.
 import * as NodePath from "node:path";
-import * as NodeCrypto from "node:crypto";
 import * as NodeBuffer from "node:buffer";
 
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -23,6 +22,8 @@ import {
   type VcsCreateRefResult,
   type VcsCreateWorktreeInput,
   type VcsCreateWorktreeResult,
+  type ReviewBranchCommitsInput,
+  type ReviewBranchCommitsResult,
   type ReviewDiffPreviewInput,
   type ReviewDiffPreviewResult,
   type ReviewDiffFileContentsInput,
@@ -60,6 +61,8 @@ export interface ExecuteGitInput {
   /** With appendTruncationMarker, line callbacks continue beyond the buffer cap for progress-only consumers. */
   readonly keepLineCallbacksAfterTruncation?: boolean;
   readonly progress?: ExecuteGitProgress;
+  /** Writes .git/config, which every worktree shares and Git locks without waiting. */
+  readonly writesSharedConfig?: boolean;
 }
 
 export interface ExecuteGitResult {
@@ -272,6 +275,23 @@ export interface GitFetchWorktreeBaseCommitInput {
   refName: string;
 }
 
+export interface GitCreateBranchInput {
+  readonly cwd: string;
+  readonly branch: string;
+  readonly startPoint: string;
+}
+
+export interface GitWriteConfigValueInput {
+  readonly cwd: string;
+  readonly key: string;
+  readonly value: string;
+}
+
+export interface GitWorktreeBaseRemote {
+  remoteName: string;
+  branchName: string;
+}
+
 export interface GitSetBranchUpstreamInput {
   cwd: string;
   branch: string;
@@ -317,6 +337,9 @@ export class GitVcsDriver extends Context.Service<
       cwd: string,
       baseRef: string,
     ) => Effect.Effect<GitRangeContext, GitCommandError>;
+    readonly getReviewBranchCommits: (
+      input: ReviewBranchCommitsInput,
+    ) => Effect.Effect<ReviewBranchCommitsResult, GitCommandError>;
     readonly getReviewDiffPreview: (
       input: ReviewDiffPreviewInput,
     ) => Effect.Effect<ReviewDiffPreviewResult, GitCommandError>;
@@ -376,10 +399,13 @@ export class GitVcsDriver extends Context.Service<
     ) => Effect.Effect<GitResolveRemoteTrackingCommitResult, GitCommandError>;
     readonly resolveWorktreeBaseRemote: (
       input: GitFetchWorktreeBaseCommitInput,
-    ) => Effect.Effect<{ remoteName: string; branchName: string } | null, GitCommandError>;
-    /** Fetches the configured upstream, explicit remote ref, or origin; null uses the local base. */
+    ) => Effect.Effect<GitWorktreeBaseRemote | null, GitCommandError>;
+    /**
+     * Fetches the configured upstream, explicit remote ref, or origin; null uses the local base.
+     * A caller that already ran `resolveWorktreeBaseRemote` passes its result as `remote`.
+     */
     readonly fetchWorktreeBaseCommit: (
-      input: GitFetchWorktreeBaseCommitInput,
+      input: GitFetchWorktreeBaseCommitInput & { readonly remote?: GitWorktreeBaseRemote },
     ) => Effect.Effect<GitResolveRemoteTrackingCommitResult | null, GitCommandError>;
     readonly fetchRemoteBranch: (
       input: GitFetchRemoteBranchInput,
@@ -389,6 +415,11 @@ export class GitVcsDriver extends Context.Service<
     ) => Effect.Effect<void, GitCommandError>;
     readonly setBranchUpstream: (
       input: GitSetBranchUpstreamInput,
+    ) => Effect.Effect<void, GitCommandError>;
+    /** Tracks the start point like `git branch` does. */
+    readonly createBranch: (input: GitCreateBranchInput) => Effect.Effect<void, GitCommandError>;
+    readonly writeConfigValue: (
+      input: GitWriteConfigValueInput,
     ) => Effect.Effect<void, GitCommandError>;
     readonly removeWorktree: (
       input: VcsRemoveWorktreeInput,
@@ -415,6 +446,7 @@ export class GitVcsDriver extends Context.Service<
 >()("t3/vcs/GitVcsDriver") {}
 
 const WORKSPACE_FILES_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+const FLAGGED_INDEX_ENTRIES_MAX_BYTES = 1024 * 1024;
 const CHECKPOINT_RECOVERY_MAX_CANDIDATES = 64;
 const CHECKPOINT_RECOVERY_TIMEOUT = "5 seconds";
 const GIT_CHECK_IGNORE_MAX_STDIN_BYTES = 256 * 1024;
@@ -537,17 +569,8 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const vcsProcess = yield* VcsProcess.VcsProcess;
-  const crypto = yield* Crypto.Crypto;
+  const random = yield* SecureRandom.SecureRandom;
   const hostPlatform = yield* HostProcess.Platform;
-  const capabilities = {
-    kind: "git" as const,
-    supportsWorktrees: true,
-    supportsBookmarks: false,
-    supportsAtomicSnapshot: false,
-    supportsPushDefaultRemote: true,
-    ignoreClassifier: "native" as const,
-  };
-
   const isInsideWorkTree: VcsDriver.VcsDriver["Service"]["isInsideWorkTree"] = (cwd) =>
     gitCommand(
       vcsProcess,
@@ -580,31 +603,43 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
   const detectRepository: VcsDriver.VcsDriver["Service"]["detectRepository"] = Effect.fn(
     "detectRepository",
   )(function* (cwd) {
-    if (!(yield* isInsideWorkTree(cwd))) {
-      return null;
+    // One spawn answers all three; outside a work tree it exits non-zero or prints "false".
+    const result = yield* gitCommand(
+      vcsProcess,
+      "GitVcsDriver.detectRepository",
+      cwd,
+      ["rev-parse", "--is-inside-work-tree", "--show-toplevel", "--git-common-dir"],
+      {
+        allowNonZeroExit: true,
+        timeoutMs: 5_000,
+        maxOutputBytes: 16_384,
+      },
+    ).pipe(Effect.catchIf(isMissingExecutable, () => Effect.succeed(null)));
+    if (result === null || result.exitCode !== 0) return null;
+    const lines = result.stdout.replace(/\r?\n$/u, "").split(/\r?\n/u);
+    if (lines[0]?.trim() !== "true") return null;
+    // A newline inside a path breaks the line framing; ask for each path on its own.
+    if (lines.length !== 3) {
+      const root = yield* gitCommand(vcsProcess, "GitVcsDriver.detectRepository", cwd, [
+        "rev-parse",
+        "--show-toplevel",
+      ]);
+      const gitCommonDir = yield* gitCommand(vcsProcess, "GitVcsDriver.detectRepository", cwd, [
+        "rev-parse",
+        "--git-common-dir",
+      ]).pipe(Effect.orElseSucceed(() => null));
+      return {
+        kind: "git" as const,
+        rootPath: root.stdout.trim(),
+        metadataPath: gitCommonDir?.stdout.trim() || null,
+        freshness: yield* nowFreshness(),
+      };
     }
 
-    const root = yield* gitCommand(vcsProcess, "GitVcsDriver.detectRepository.root", cwd, [
-      "rev-parse",
-      "--show-toplevel",
-    ]);
-    const gitCommonDir = yield* gitCommand(
-      vcsProcess,
-      "GitVcsDriver.detectRepository.commonDir",
-      cwd,
-      ["rev-parse", "--git-common-dir"],
-    ).pipe(Effect.orElseSucceed(() => null));
-
-    const metadataPath = gitCommonDir?.stdout.trim() || null;
     return {
       kind: "git" as const,
-      rootPath: root.stdout.trim(),
-      metadataPath:
-        metadataPath === null
-          ? null
-          : path.isAbsolute(metadataPath)
-            ? metadataPath
-            : path.resolve(cwd, metadataPath),
+      rootPath: lines[1]!.trim(),
+      metadataPath: lines[2]!.trim() || null,
       freshness: yield* nowFreshness(),
     };
   });
@@ -817,53 +852,6 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
       }),
     );
 
-  const currentWorktreeDiffersFrom = Effect.fn("GitVcsDriver.currentWorktreeDiffersFrom")(
-    function* (cwd: string, commitOid: string) {
-      const gitCommonDir = yield* resolveGitCommonDir(cwd);
-      const tempIndexPath = path.join(
-        gitCommonDir,
-        `t3-checkpoint-compare-index-${NodeCrypto.randomUUID()}`,
-      );
-      const compareEnv: NodeJS.ProcessEnv = { ...process.env, GIT_INDEX_FILE: tempIndexPath };
-      const cleanupTempIndex = fileSystem
-        .remove(tempIndexPath, { force: true })
-        .pipe(Effect.ignore);
-
-      return yield* Effect.gen(function* () {
-        yield* execute({
-          operation: "GitVcsDriver.checkpoints.prepareCurrentWorktreeComparison",
-          cwd,
-          args: ["read-tree", commitOid],
-          env: compareEnv,
-        });
-        yield* execute({
-          operation: "GitVcsDriver.checkpoints.refreshCurrentWorktreeComparison",
-          cwd,
-          args: ["update-index", "--refresh"],
-          env: compareEnv,
-          allowNonZeroExit: true,
-        });
-        const tracked = yield* execute({
-          operation: "GitVcsDriver.checkpoints.compareCurrentWorktree",
-          cwd,
-          args: ["diff-files", "--quiet"],
-          env: compareEnv,
-          allowNonZeroExit: true,
-        });
-        if (tracked.exitCode !== 0) return true;
-
-        const untracked = yield* execute({
-          operation: "GitVcsDriver.checkpoints.checkCurrentWorktreeStatus",
-          cwd,
-          args: ["ls-files", "--others", "--exclude-standard"],
-          env: compareEnv,
-          allowNonZeroExit: true,
-        });
-        return untracked.stdout.trim().length > 0;
-      }).pipe(Effect.ensuring(cleanupTempIndex));
-    },
-  );
-
   // Git reports relative paths from the physical cwd, which can differ from a symlink.
   const resolveGitCommonDir = Effect.fn("GitVcsDriver.resolveGitCommonDir")(function* (
     cwd: string,
@@ -877,6 +865,45 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
     if (path.isAbsolute(gitCommonDir)) return gitCommonDir;
     const physicalCwd = yield* fileSystem.realPath(cwd).pipe(Effect.orElseSucceed(() => cwd));
     return path.resolve(physicalCwd, gitCommonDir);
+  });
+
+  // --verify prints HEAD after the paths; --quiet leaves only paths for an unborn HEAD.
+  const resolveCaptureRepository = Effect.fn("GitVcsDriver.resolveCaptureRepository")(function* (
+    cwd: string,
+  ) {
+    const result = yield* execute({
+      operation: VcsProcess.CHECKPOINT_CAPTURE_OPERATION,
+      cwd,
+      args: [
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+        "--git-path",
+        "index",
+        "--verify",
+        "--quiet",
+        "HEAD",
+      ],
+      allowNonZeroExit: true,
+    });
+    const headExists = result.exitCode === 0;
+    const headChecked = headExists || result.exitCode === 1;
+    const lines = result.stdout.split("\n");
+    const [gitCommonDir = "", indexPath = ""] = lines;
+    if (headChecked && lines.length === (headExists ? 4 : 3) && lines.at(-1) === "") {
+      return {
+        gitCommonDir: gitCommonDir.trim(),
+        indexPath: indexPath.trim(),
+        headExists,
+      };
+    }
+    // Git before 2.31 echoes --path-format, and a path containing a newline spans lines.
+    // Separate commands read the paths as before and report a failure the same way.
+    return {
+      gitCommonDir: yield* resolveGitCommonDir(cwd),
+      indexPath: undefined,
+      headExists: headChecked ? headExists : yield* hasHeadCommit(cwd),
+    };
   });
 
   // Git defaults and macOS writeout-only can leave empty refs after crashes; flush before publication.
@@ -911,11 +938,12 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         "-c",
         "splitIndex.sharedIndexExpire=never",
       ];
-      const gitCommonDir = yield* resolveGitCommonDir(input.cwd);
-      const indexId = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
+      const { gitCommonDir, indexPath, headExists } = yield* resolveCaptureRepository(input.cwd);
+      const indexId = yield* random.uuidV4();
       const tempIndexPath = path.join(gitCommonDir, `t3-checkpoint-index-${indexId}`);
+      const hostEnv = yield* HostProcess.Environment;
       const commitEnv: NodeJS.ProcessEnv = {
-        ...process.env,
+        ...hostEnv,
         GIT_INDEX_FILE: tempIndexPath,
         GIT_AUTHOR_NAME: "T3 Code",
         GIT_AUTHOR_EMAIL: "t3code@users.noreply.github.com",
@@ -930,7 +958,6 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
       );
 
       yield* Effect.gen(function* () {
-        const headExists = yield* hasHeadCommit(input.cwd);
         const sparseConfig = yield* execute({
           operation,
           cwd: input.cwd,
@@ -949,17 +976,19 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         }
         if (headExists) {
           const reusedIndex = yield* Effect.gen(function* () {
-            const indexPath = yield* execute({
-              operation,
-              cwd: input.cwd,
-              args: ["rev-parse", "--path-format=absolute", "--git-path", "index"],
-            });
-            const { mtime } = yield* fileSystem.stat(indexPath.stdout.trim());
+            const userIndexPath =
+              indexPath ??
+              (yield* execute({
+                operation,
+                cwd: input.cwd,
+                args: ["rev-parse", "--path-format=absolute", "--git-path", "index"],
+              })).stdout.trim();
+            const { mtime } = yield* fileSystem.stat(userIndexPath);
             if (Option.isNone(mtime)) return false;
             // Stay below the source timestamp even if Date rounded up, preserving Git's racy check.
             const indexTime = Math.floor((mtime.value.getTime() - 1) / 1000);
             if (indexTime <= 0) return false;
-            yield* fileSystem.copyFile(indexPath.stdout.trim(), tempIndexPath);
+            yield* fileSystem.copyFile(userIndexPath, tempIndexPath);
             yield* execute({
               operation,
               cwd: input.cwd,
@@ -968,57 +997,108 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
             });
             // read-tree can rewrite the index, so restore its racy timestamp afterward.
             yield* fileSystem.utimes(tempIndexPath, indexTime, indexTime);
-            let specialFlags = false;
+            // Manually flagged entries hide edits from add -A, so they are re-added below
+            // with no stat cache. Every other entry keeps its stat data and is not rehashed.
+            let fallback = false;
+            let flaggedBytes = 0;
             let recordStart = true;
-            let skipped = false;
-            let skippedRecord: number[] = [];
-            const skippedPaths: string[] = [];
+            let collect: "flagged" | "skipped" | undefined;
+            let record: Uint8Array[] = [];
+            const flagged: string[] = [];
+            const skipped: string[] = [];
             yield* vcsProcess.run({
               operation,
               command: "git",
               cwd: input.cwd,
-              args: [...indexConfig, "ls-files", "--full-name", "--sparse", "-v", "-z"],
+              args: [...indexConfig, "ls-files", "--full-name", "--sparse", "--stage", "-v", "-z"],
               env: commitEnv,
               maxOutputBytes: 4_096,
               outputMode: "truncate",
+              // Only tags and flagged or skip-worktree records matter; scan NUL-delimited records.
               onStdoutChunk: (chunk) => {
-                for (const byte of chunk) {
-                  if (recordStart) skipped = byte === 83;
-                  if (skipped && sparseCheckout) {
-                    if (byte !== 0) skippedRecord.push(byte);
-                    else {
-                      if (skippedRecord.at(-1) !== 47) {
-                        const name = Buffer.from(skippedRecord).subarray(2);
-                        if (!NodeBuffer.isUtf8(name)) specialFlags = true;
-                        else skippedPaths.push(name.toString("utf8"));
+                let start = 0;
+                while (start < chunk.length && !fallback) {
+                  const end = chunk.indexOf(0, start);
+                  if (recordStart) {
+                    const tag = chunk[start]!;
+                    record = [];
+                    // Sparse skip-worktree bits are expected; only in-cone ones are manual.
+                    collect =
+                      tag === 83 && sparseCheckout
+                        ? "skipped"
+                        : (tag >= 97 && tag <= 122) || tag === 83
+                          ? "flagged"
+                          : undefined;
+                    // index-info cannot keep skip-worktree while dropping assume-unchanged.
+                    if (tag === 115 && sparseCheckout) fallback = true;
+                  }
+                  if (collect !== undefined && !fallback) {
+                    const piece = chunk.subarray(start, end === -1 ? undefined : end);
+                    record.push(Buffer.from(piece));
+                    if (
+                      collect === "flagged" &&
+                      (flaggedBytes += piece.length) > FLAGGED_INDEX_ENTRIES_MAX_BYTES
+                    )
+                      fallback = true;
+                    if (end !== -1 && !fallback) {
+                      const full = Buffer.concat(record);
+                      record = [];
+                      // Sparse directory entries stay collapsed.
+                      if (collect === "flagged" || full.at(-1) !== 47) {
+                        // Drop the "<tag> " prefix, leaving index-info's "<mode> <oid> <stage>\t<path>".
+                        const entry = full.subarray(2);
+                        if (!NodeBuffer.isUtf8(entry)) fallback = true;
+                        else
+                          (collect === "flagged" ? flagged : skipped).push(entry.toString("utf8"));
                       }
-                      skippedRecord = [];
                     }
                   }
-                  if (
-                    recordStart &&
-                    ((byte >= 97 && byte <= 122) || (!sparseCheckout && byte === 83))
-                  ) {
-                    specialFlags = true;
-                  }
-                  recordStart = byte === 0;
+                  recordStart = end !== -1;
+                  if (!recordStart) break;
+                  start = end + 1;
                 }
               },
             });
-            if (skippedPaths.length > 0 && !specialFlags) {
-              const selected = yield* execute({
+            if (fallback) return false;
+            if (skipped.length > 0) {
+              const paths = skipped.map((entry) => entry.slice(entry.indexOf("\t") + 1));
+              const stdin = paths.join("\0") + "\0";
+              // check-rules echoes a subset of its input, so the input size bounds its output.
+              const rules = yield* execute({
                 operation,
                 cwd: input.cwd,
                 args: [...indexConfig, "sparse-checkout", "check-rules", "-z"],
-                stdin: skippedPaths.join("\0") + "\0",
+                stdin,
                 env: commitEnv,
-                maxOutputBytes: 1,
-                outputMode: "truncate",
+                maxOutputBytes: Buffer.byteLength(stdin),
+                outputMode: "error",
               });
-              specialFlags = selected.stdout.length > 0 || selected.stdoutTruncated;
+              const selected = new Set(rules.stdout.split("\0"));
+              skipped.forEach((entry, index) => {
+                if (selected.has(paths[index]!)) flagged.push(entry);
+              });
             }
-            // Sparse Git clears skip-worktree for present files. Manual flags still need a reset.
-            return !specialFlags;
+            if (flagged.length > 0) {
+              // Flagged gitlinks keep the fresh-index behaviour rather than a guessed one.
+              if (flagged.some((entry) => entry.startsWith("160000 "))) return false;
+              yield* execute({
+                operation,
+                cwd: input.cwd,
+                // core.ignorestat would mark these assume-unchanged, hiding edits from add -A.
+                args: [
+                  ...indexConfig,
+                  "-c",
+                  "core.ignorestat=false",
+                  "update-index",
+                  "-z",
+                  "--index-info",
+                ],
+                stdin: flagged.join("\0") + "\0",
+                env: commitEnv,
+              });
+              yield* fileSystem.utimes(tempIndexPath, indexTime, indexTime);
+            }
+            return true;
           }).pipe(Effect.orElseSucceed(() => false));
           if (!reusedIndex) {
             if (sparseCheckout) {
@@ -1117,6 +1197,9 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
               ...indexConfig,
               ...durableWrite,
               ...longPaths,
+              // safecrlf=true refuses LF files under CRLF conversion; capture them as Git's default does.
+              "-c",
+              "core.safecrlf=false",
               "add",
               ...(sparseCheckout ? ["--sparse"] : []),
               // add -A rejects ignored directories even when they contain tracked files.
@@ -1153,7 +1236,7 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
                 );
                 if (candidates.length > CHECKPOINT_RECOVERY_MAX_CANDIDATES) return yield* error;
                 const nestedRepoEnv: NodeJS.ProcessEnv = {
-                  ...process.env,
+                  ...hostEnv,
                   GIT_DIR: undefined,
                   GIT_WORK_TREE: undefined,
                   GIT_COMMON_DIR: undefined,
@@ -1243,9 +1326,7 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
     restoreCheckpoint: Effect.fn("GitVcsDriver.checkpoints.restoreCheckpoint")(function* (input) {
       const operation = "GitVcsDriver.checkpoints.restoreCheckpoint";
 
-      const repository = yield* detectRepository(input.cwd).pipe(
-        Effect.catch(() => Effect.succeed(null)),
-      );
+      const repository = yield* detectRepository(input.cwd).pipe(Effect.orElseSucceed(() => null));
       if (!repository) {
         return {
           restored: false,
@@ -1255,7 +1336,7 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
       }
       const expectedRootRepository = input.expectedRepositoryRoot
         ? yield* detectRepository(input.expectedRepositoryRoot).pipe(
-            Effect.catch(() => Effect.succeed(null)),
+            Effect.orElseSucceed(() => null),
           )
         : null;
       const repositoryMatchesExpectedRoot = input.expectedRepositoryRoot
@@ -1373,14 +1454,11 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
       // On Windows the same clean can remove './' and exit 0.
       yield* recreateWorkspace;
 
-      const headExists = yield* hasHeadCommit(input.cwd);
-      if (headExists) {
-        yield* execute({
-          operation,
-          cwd: input.cwd,
-          args: [...longPaths, "reset", "--quiet", "--", "."],
-        });
-      }
+      yield* execute({
+        operation,
+        cwd: input.cwd,
+        args: [...longPaths, "reset", "--quiet", "--", "."],
+      });
 
       return { restored: true, commitOid };
     }),
@@ -1424,11 +1502,17 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         operation,
         cwd: input.cwd,
         args: [
+          // Not --no-relative, which Git before 2.28 rejects.
+          "-c",
+          "diff.relative=false",
+          "-c",
+          "diff.suppressBlankEmpty=false",
           "diff",
           ...(input.format === "numstat" ? ["--numstat", "-z"] : ["--patch"]),
           "--no-color",
           "--no-ext-diff",
           "--no-textconv",
+          "--submodule=short",
           ...PATCH_RENDER_PREFIX_ARGS,
           ...(input.ignoreWhitespace ? ["--ignore-all-space"] : []),
           `${fromRevision}^{commit}`,
@@ -1480,7 +1564,18 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         execute({
           operation,
           cwd: input.cwd,
-          args: [...args, "--name-only", "-z", "--no-renames", "--no-ext-diff"],
+          args: [
+            "-c",
+            "diff.relative=false",
+            // log.showSignature prints verification text into the path list.
+            "-c",
+            "log.showSignature=false",
+            ...args,
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--no-ext-diff",
+          ],
           maxOutputBytes: VcsDriver.CHECKPOINT_DIFF_MAX_OUTPUT_BYTES,
           outputMode: "error",
         }).pipe(Effect.map((result) => result.stdout.split("\0")));
@@ -1521,7 +1616,6 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
   };
 
   return {
-    capabilities,
     execute,
     checkpoints,
     detectRepository,

@@ -176,8 +176,7 @@ describe("Limits page", () => {
 
     openTab("public");
     // The modal and links are mocked; no router timers are needed here.
-    await using screen = await render(<UsageResetPage />, { router: false });
-    const container = screen.container;
+    await using _screen = await render(<UsageResetPage />, { router: false });
     const intervalIds = requestedInputs.flatMap(
       (input) => input.quotaIntervals?.map((interval) => interval.id) ?? [],
     );
@@ -221,8 +220,7 @@ describe("Limits page", () => {
       refresh: ++hookCalls % 6 === 1 ? historyRefresh : costRefresh,
     }));
     // The modal and links are mocked; no router timers are needed here.
-    await using screen = await render(<UsageResetPage />, { router: false });
-    const container = screen.container;
+    await using _screen = await render(<UsageResetPage />, { router: false });
     await act(async () => vi.advanceTimersByTimeAsync(60_000));
     expect(historyRefresh).toHaveBeenCalledTimes(1);
     expect(costRefresh).toHaveBeenCalledTimes(1);
@@ -280,8 +278,7 @@ describe("Limits page", () => {
       refresh: ++hookCalls % 6 === 1 ? historyRefresh : costRefresh,
     }));
     // The modal and links are mocked; no router timers are needed here.
-    await using screen = await render(<UsageResetPage />, { router: false });
-    const container = screen.container;
+    await using _screen = await render(<UsageResetPage />, { router: false });
     try {
       await act(async () => vi.advanceTimersByTimeAsync(60_000));
       expect(historyRefresh).toHaveBeenCalledTimes(1);

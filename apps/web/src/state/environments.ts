@@ -10,6 +10,7 @@ import type { EnvironmentId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 
 import { environmentCatalog } from "../connection/catalog";
+import { appAtomRegistry } from "../rpc/atomRegistry";
 import {
   environmentPresentations,
   environmentSummaries,
@@ -72,6 +73,18 @@ export function usePrimaryEnvironmentId(): EnvironmentId | null {
   return useAtomValue(primaryEnvironmentIdAtom);
 }
 
+export function readPrimaryEnvironmentId(): EnvironmentId | null {
+  return appAtomRegistry.get(primaryEnvironmentIdAtom);
+}
+
+/** The environment's state now, for handlers that should not re-render on every change. */
+export function readEnvironment(environmentId: EnvironmentId): EnvironmentPresentation | null {
+  const presentation = appAtomRegistry
+    .get(environmentPresentations.presentationsAtom)
+    .get(environmentId);
+  return presentation ? projectEnvironmentPresentation(environmentId, presentation) : null;
+}
+
 export function useEnvironment(
   environmentId: EnvironmentId | null,
 ): EnvironmentPresentation | null {
@@ -92,10 +105,6 @@ export function useEnvironmentHttpBaseUrl(environmentId: EnvironmentId | null): 
 
 export function useRelayEnvironmentDiscovery(): Discovery.RelayEnvironmentDiscoveryState {
   return useAtomValue(relayEnvironmentDiscovery.stateValueAtom);
-}
-
-export function useEnvironmentIds() {
-  return useAtomValue(environmentSummaries.environmentIdsAtom);
 }
 
 export function useEnvironmentIdentities() {

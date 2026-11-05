@@ -118,6 +118,7 @@ export function useEnvironmentSwitch() {
     }
   };
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- A deferred router navigation resumes when the destination environment finishes bootstrapping its shell.
   useEffect(() => {
     if (pendingValue.current === null || !shellsBootstrapped) return;
     switchEnvironment(pendingValue.current);

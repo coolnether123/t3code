@@ -1,5 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import * as NodeSocket from "@effect/platform-node/NodeSocket";
+import * as NodeWS from "@effect/platform-node/NodeWS";
 import { assert, it } from "@effect/vitest";
 import { CodexSettings } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -85,8 +85,8 @@ const solServiceTiers = Effect.fn("solServiceTiers")(function* (
     const server = yield* Effect.acquireRelease(
       Effect.promise(
         () =>
-          new Promise<NodeSocket.NodeWS.WebSocketServer>((resolve, reject) => {
-            const server = new NodeSocket.NodeWS.WebSocketServer({ port: 0 });
+          new Promise<NodeWS.WebSocketServer>((resolve, reject) => {
+            const server = new NodeWS.WebSocketServer({ port: 0 });
             server.once("listening", () => resolve(server));
             server.once("error", reject);
           }),

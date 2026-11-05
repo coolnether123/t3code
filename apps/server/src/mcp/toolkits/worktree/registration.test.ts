@@ -8,6 +8,14 @@ import * as ServerConfig from "../../../config.ts";
 import { expect, it } from "@effect/vitest";
 import { NodeHttpServer } from "@effect/platform-node";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import { AssetSigner } from "../../../assets/AssetSigner.ts";
+import { DocumentText } from "../../../provider/DocumentText.ts";
+import { PeerForwarding } from "../../../peer/PeerForwarding.ts";
+import { PeerLinkRequests } from "../../../peer/PeerLinkRequests.ts";
+import { PeerLinks } from "../../../peer/PeerLinks.ts";
+import { RemoteDelegation } from "../../../peer/RemoteDelegation.ts";
+import { ProjectCloneTracker } from "../../../project/ProjectCloneTracker.ts";
 import { ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -39,6 +47,13 @@ import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 import * as PreviewBrowser from "../../../preview/PreviewBrowser.ts";
 
 const layerStubServices = Layer.mergeAll(
+  Layer.mock(AssetSigner)({}),
+  Layer.mock(DocumentText)({}),
+  Layer.mock(PeerForwarding)({}),
+  Layer.mock(PeerLinkRequests)({}),
+  Layer.mock(PeerLinks)({}),
+  Layer.mock(RemoteDelegation)({}),
+  Layer.mock(ProjectCloneTracker)({}),
   Layer.mock(McpProviderSessions.McpProviderSessions)({}),
   Layer.mock(ChromeAutomation.ChromeAutomation)({}),
   Layer.mock(ExternalLauncher.ExternalLauncher)({}),
@@ -171,6 +186,7 @@ it.effect("production mcp layer lists worktree tools over http", () =>
           Layer.provide(NodeServices.layer),
         ),
         NodeServices.layer,
+        NodeCrypto.layer,
       ),
     ),
   ),

@@ -31,6 +31,7 @@ export function CommunityCheckPanel({
   const [error, setError] = useState<string | null>(null);
   const state = latestResetCheck(Option.getOrNull(AsyncResult.value(query)), command);
   const running = state?.status === "running";
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Refreshes the external research query while its server job is running.
   useEffect(() => {
     if (!running) return;
     const timer = setInterval(() => appAtomRegistry.refresh(atom), 3_000);

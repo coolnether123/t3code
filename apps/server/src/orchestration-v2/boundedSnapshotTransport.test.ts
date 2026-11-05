@@ -1,5 +1,6 @@
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import * as ServerConfig from "../config.ts";
+import * as DocumentText from "../provider/DocumentText.ts";
 import { assert, describe, it } from "@effect/vitest";
 import {
   AuthOrchestrationReadScope,
@@ -419,6 +420,7 @@ const withHttp = <A>(use: (get: (path: string) => Promise<Response>) => Promise<
       ),
       Layer.provide(auth),
       Layer.provide(Layer.succeedContext(context)),
+      Layer.provide(Layer.mock(DocumentText.DocumentText)({})),
       Layer.provide(NodeHttpPlatform.layer),
       Layer.provide(Etag.layerWeak),
       Layer.provide(NodeServices.layer),

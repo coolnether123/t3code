@@ -1,5 +1,6 @@
 import { expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import {
   ProviderDriverKind,
   ProviderInstanceId,
@@ -199,7 +200,7 @@ it.effect.each([true, false])(
         Effect.provide(
           Auxiliary.layer.pipe(
             Layer.provide(Layer.merge(manager, registry)),
-            Layer.provide(NodeServices.layer),
+            Layer.provide(Layer.merge(NodeServices.layer, NodeCrypto.layer)),
           ),
         ),
       );

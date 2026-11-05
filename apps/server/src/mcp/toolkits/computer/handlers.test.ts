@@ -37,7 +37,7 @@ const launcher = (
 ) =>
   ExternalLauncher.ExternalLauncher.of({
     resolveAvailableEditors: () => Effect.succeed([]),
-    resolveFileManagerRevealKind: () => Effect.succeed(undefined),
+    resolveFileManagerRevealKind: () => Effect.undefined,
     launchBrowser,
     launchEditor: () => Effect.die("unused launchEditor"),
   });
@@ -235,7 +235,9 @@ it.effect("maps managed Chrome failures without exposing service causes", () =>
         ChromeAutomation.ChromeAutomation.of({
           ...service,
           listTabs: () =>
-            Effect.fail(new ChromeAutomation.ChromeAutomationError("tabs", "secret cause")),
+            Effect.fail(
+              ChromeAutomation.ChromeAutomationError.fromOperation("tabs", "secret cause"),
+            ),
         }),
       ),
       Effect.flip,

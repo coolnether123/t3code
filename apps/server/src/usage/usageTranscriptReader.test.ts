@@ -2,6 +2,7 @@
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeZlib from "node:zlib";
 
 import { describe, expect, it } from "@effect/vitest";
 
@@ -337,6 +338,17 @@ describe("incremental transcript reads", () => {
       expect(appended?.records[0]?.model).toBe("gpt-5.6-sol");
       expect(appended?.records[0]?.sessionId).toBe("session-a");
       expect(appended?.records[0]?.totals.outputTokens).toBe(4);
+      const compressed = `${path}.zst`;
+      await NodeFSP.writeFile(compressed, NodeZlib.zstdCompressSync(Buffer.from(first + second)));
+      expect((await listTranscriptFiles(directory, 0, "codex")).map((file) => file.path)).toContain(
+        compressed,
+      );
+      const archived = await readTranscriptRecords(compressed, "codex");
+      expect(archived?.records).toEqual([
+        ...(initial?.records ?? []),
+        ...(appended?.records ?? []),
+      ]);
+      expect(archived?.nextByte).toBe((await NodeFSP.stat(compressed)).size);
     } finally {
       await NodeFSP.rm(directory, { recursive: true, force: true });
     }

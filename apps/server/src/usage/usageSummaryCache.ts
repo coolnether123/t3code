@@ -22,6 +22,7 @@ export function usageSummaryCacheKey(
     input.quotaIntervals ?? null,
     input.quotaProvider ?? "codex",
     input.awaitRefresh === true,
+    input.modelFilter ?? null,
     priceOverrides ?? null,
   ]);
 }

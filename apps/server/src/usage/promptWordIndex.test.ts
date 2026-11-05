@@ -83,8 +83,11 @@ layer("derived prompt word index", (it) => {
           created_at: "2026-10-09T12:00:00.000Z",
           updated_at: now,
         }));
-        for (let offset = 0; offset < many.length; offset += 200)
-          yield* sql`INSERT INTO projection_thread_messages ${sql.insert(many.slice(offset, offset + 200))}`;
+        for (let offset = 0; offset < many.length; offset += 200) {
+          const [first, ...rest] = many.slice(offset, offset + 200);
+          if (first !== undefined)
+            yield* sql`INSERT INTO projection_thread_messages ${sql.insert([first, ...rest])}`;
+        }
         const warming = yield* readPromptWordIndex(sql, input, now, "projection_thread_messages");
         assert.include(warming.coverage.reasons, "index-warming");
         assert.isNull(warming.totals.averageWordsPerPrompt);

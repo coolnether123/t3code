@@ -1,5 +1,6 @@
 import { AuthOrchestrationOperateScope, SpeechRequest, type CallRequest } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Config from "effect/Config";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import {
@@ -20,6 +21,7 @@ import { callOperator } from "./callOperator.ts";
 import { AuxiliaryProviderSessions } from "../provider/AuxiliaryProviderSessions.ts";
 
 const decodeSpeechRequest = Schema.decodeUnknownEffect(Schema.fromJsonString(SpeechRequest));
+const isSpeechUnavailableError = Schema.is(SpeechUnavailableError);
 
 class SpeechServiceError extends Schema.TaggedError<SpeechServiceError>()("SpeechServiceError", {
   message: Schema.String,
@@ -42,50 +44,57 @@ export const speechRouteLayer = HttpRouter.add(
       return HttpServerResponse.jsonUnsafe({ threadId: yield* engine.openOtis() });
     const providers = yield* ProviderRegistry;
     const providerService = yield* AuxiliaryProviderSessions;
+    const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
+    const sttTenant = yield* Config.String("T3_CALL_STT_TENANT").pipe(
+      Config.withDefault("whisper-large-v3-turbo"),
+    );
+    const ttsTenant = yield* Config.String("T3_CALL_TTS_TENANT").pipe(
+      Config.withDefault("breeze-tts-2"),
+    );
+    const ttsModel = yield* Config.String("T3_CALL_TTS_MODEL").pipe(
+      Config.withDefault("breeze-tts-2"),
+    );
+    const forceDevice =
+      (yield* Config.String("T3_CALL_FORCE_DEVICE_STT").pipe(Config.withDefault(""))) === "1";
     const calls = new CallService(
       callStore(config.stateDir),
       {
         verify: async (options) => {
-          const snapshot = await Effect.runPromise(engine.snapshot(options.threadId));
+          const snapshot = await runPromise(engine.snapshot(options.threadId));
           if (!snapshot.projection.thread || snapshot.projection.thread.archivedAt)
             throw new Error("Open an existing chat before starting a call.");
-          verifyCallModel(options, await Effect.runPromise(providers.getProviders));
+          verifyCallModel(options, await runPromise(providers.getProviders));
           return {
             runtimeMode: snapshot.projection.thread.runtimeMode,
             interactionMode: snapshot.projection.thread.interactionMode,
           };
         },
-        dispatch: (command) => Effect.runPromise(engine.dispatch(command)),
+        dispatch: (command) => runPromise(engine.dispatch(command)),
         verifyVoice: async (selection) => {
-          const caps = await Effect.runPromise(
-            providerService.getInstanceInfo(selection.instanceId),
-          );
+          const caps = await runPromise(providerService.getInstanceInfo(selection.instanceId));
           if (caps.driverKind !== "claudeAgent")
             throw new Error(
               "This provider does not support tool-free voice sessions. It can still run as the background agent.",
             );
         },
         speech: proxySpeech,
-        inputMode: (signal) =>
-          speechInputMode(
-            signal,
-            process.env.T3_CALL_STT_TENANT ?? "whisper-large-v3-turbo",
-            process.env.T3_CALL_FORCE_DEVICE_STT === "1",
-          ),
+        inputMode: (signal) => speechInputMode(signal, sttTenant, forceDevice),
         speechStream: streamSpeech,
-        tenants: [
-          process.env.T3_CALL_STT_TENANT ?? "whisper-large-v3-turbo",
-          process.env.T3_CALL_TTS_TENANT ?? "breeze-tts-2",
-        ],
-        ttsModel: process.env.T3_CALL_TTS_MODEL ?? "breeze-tts-2",
+        tenants: [sttTenant, ttsTenant],
+        ttsModel,
       },
       callOperator(config.stateDir),
     );
     if ("callId" in input && input.action === "call.speak" && input.streamAudio) {
-      const controller = new AbortController();
-      const body = Stream.fromAsyncIterable(
-        calls.speakStream(input, controller.signal),
-        () => new Error("Speech stream interrupted."),
+      const body = Stream.unwrap(
+        Effect.gen(function* () {
+          const signal = yield* Effect.abortSignal;
+          return Stream.fromAsyncIterable(
+            calls.speakStream(input, signal),
+            () =>
+              new SpeechServiceError({ message: "Speech stream interrupted.", recoverable: true }),
+          );
+        }),
       ).pipe(
         Stream.catch(() =>
           Stream.succeed({ error: "Speech stream interrupted. Saved speech is retained." }),
@@ -99,7 +108,6 @@ export const speechRouteLayer = HttpRouter.add(
             })}\n`,
           ),
         ),
-        Stream.ensuring(Effect.sync(() => controller.abort())),
       );
       return HttpServerResponse.stream(body, {
         headers: {
@@ -116,7 +124,7 @@ export const speechRouteLayer = HttpRouter.add(
       catch: (cause) =>
         new SpeechServiceError({
           recoverable:
-            cause instanceof SpeechUnavailableError ||
+            isSpeechUnavailableError(cause) ||
             cause instanceof TypeError ||
             (cause instanceof Error && cause.name === "TimeoutError"),
           message:
@@ -126,10 +134,8 @@ export const speechRouteLayer = HttpRouter.add(
         }),
     }).pipe(
       Effect.map((result) => HttpServerResponse.jsonUnsafe(result)),
-      Effect.catch((error) =>
-        Effect.succeed(
-          HttpServerResponse.text(error.message, { status: error.recoverable ? 503 : 409 }),
-        ),
+      Effect.orElseSucceed((error) =>
+        HttpServerResponse.text(error.message, { status: error.recoverable ? 503 : 409 }),
       ),
     );
   }).pipe(
@@ -138,8 +144,6 @@ export const speechRouteLayer = HttpRouter.add(
       EnvironmentInternalError: HttpServerRespondable.toResponse,
       EnvironmentScopeRequiredError: HttpServerRespondable.toResponse,
     }),
-    Effect.catch(() =>
-      Effect.succeed(HttpServerResponse.text("Invalid speech request.", { status: 400 })),
-    ),
+    Effect.orElseSucceed(() => HttpServerResponse.text("Invalid speech request.", { status: 400 })),
   ),
 );

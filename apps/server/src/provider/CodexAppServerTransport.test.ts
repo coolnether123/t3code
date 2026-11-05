@@ -1,4 +1,4 @@
-import * as NodeSocket from "@effect/platform-node/NodeSocket";
+import * as NodeWS from "@effect/platform-node/NodeWS";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import { Platform as HostProcessPlatform } from "@t3tools/shared/HostProcess";
@@ -127,8 +127,8 @@ describe("CodexAppServerTransport", () => {
       const server = yield* Effect.acquireRelease(
         Effect.promise(
           () =>
-            new Promise<NodeSocket.NodeWS.WebSocketServer>((resolve, reject) => {
-              const instance = new NodeSocket.NodeWS.WebSocketServer({ port: 0 });
+            new Promise<NodeWS.WebSocketServer>((resolve, reject) => {
+              const instance = new NodeWS.WebSocketServer({ port: 0 });
               instance.once("listening", () => resolve(instance));
               instance.once("error", reject);
             }),

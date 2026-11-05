@@ -213,11 +213,12 @@ describe("launch-t3-code-macos", () => {
     const git = (args: string[]) =>
       NodeChildProcess.execFileSync("git", ["-C", sourceRoot, ...args], {
         encoding: "utf8",
+        maxBuffer: 16 * 1024 * 1024,
       }).trim();
     const beforeStatus = git(["status", "--porcelain", "--untracked-files=normal"]);
 
     try {
-      const output = NodeChildProcess.execFileSync(
+      const result = NodeChildProcess.spawnSync(
         "/bin/bash",
         [
           scriptPath,
@@ -236,7 +237,13 @@ describe("launch-t3-code-macos", () => {
         { encoding: "utf8" },
       );
 
-      assert.include(output, "dry run complete");
+      if (beforeStatus.length === 0) {
+        assert.equal(result.status, 0, result.stderr);
+        assert.include(result.stdout, "dry run complete");
+      } else {
+        assert.notEqual(result.status, 0);
+        assert.include(result.stderr, "source checkout has uncommitted changes");
+      }
       assert.isFalse(NodeFS.existsSync(backupRoot));
       assert.isFalse(NodeFS.existsSync(artifactDir));
       assert.equal(git(["status", "--porcelain", "--untracked-files=normal"]), beforeStatus);

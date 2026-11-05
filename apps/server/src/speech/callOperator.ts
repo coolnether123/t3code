@@ -130,7 +130,7 @@ export class CallOperator {
     void task.finally(() => this.tasks.delete(task)).catch(() => {});
   }
   async drain() {
-    while (this.tasks.size) await Promise.all([...this.tasks]);
+    while (this.tasks.size) await Promise.all(this.tasks);
   }
   private requirePorts() {
     if (!this.ports) throw new Error("Call sessions are not connected to the provider runtime.");

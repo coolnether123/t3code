@@ -119,7 +119,7 @@ export class SpeechPlaybackController {
     if (generation !== this.generation) return [];
     this.closed.add(generation);
     for (const speech of this.speech.values()) speech.progress.stopped = true;
-    for (const entry of [...this.sources]) entry.finish(true);
+    for (const entry of this.sources) entry.finish(true);
     this.until = { reply: 0, backchannel: 0 };
     return this.progress(generation);
   }
@@ -129,7 +129,7 @@ export class SpeechPlaybackController {
     this.until.backchannel = 0;
     for (const speech of this.speech.values())
       if (speech.progress.channel === "backchannel") speech.progress.stopped = true;
-    for (const entry of [...this.sources])
+    for (const entry of this.sources)
       if (entry.speech.progress.channel === "backchannel") entry.finish(true);
   }
 
@@ -241,7 +241,7 @@ export class SpeechPlaybackController {
       const abort = () => {
         // Only this clip's sources are cancelled. A filler signal must not flush a reply.
         current.progress.stopped = true;
-        for (const entry of [...this.sources]) if (entry.speech === current) entry.finish(true);
+        for (const entry of this.sources) if (entry.speech === current) entry.finish(true);
         this.until[channel] = Math.max(
           this.context.currentTime,
           ...[...this.sources]

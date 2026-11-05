@@ -3,6 +3,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as Schema from "effect/Schema";
+const decodeRuntimeEvent = Schema.decodeUnknownSync(ProviderRuntimeEvent);
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   ProviderRuntimeEvent,
@@ -107,7 +108,7 @@ async function fixture() {
   operator.bind(ports);
   await operator.configure("chat", models);
   const event = (sessionId: string, type: string, turnId: string, payload: unknown = {}) =>
-    Schema.decodeUnknownSync(ProviderRuntimeEvent)({
+    decodeRuntimeEvent({
       type,
       eventId: `${type}-${turnId}-${JSON.stringify(payload)}`,
       provider: "codex",

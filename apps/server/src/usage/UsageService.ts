@@ -31,8 +31,10 @@ import {
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
+import * as Config from "effect/Config";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
@@ -58,7 +60,13 @@ import {
   codexIsolatedHomePath,
   resolveCodexHomeLayout,
 } from "../provider/Drivers/CodexHomeLayout.ts";
-import { makeDayFormatter, resolveModelAliases, UsageAggregator } from "./usageAggregation.ts";
+import {
+  canonicalModelFilter,
+  keepsUsageRecord,
+  makeDayFormatter,
+  resolveModelAliases,
+  UsageAggregator,
+} from "./usageAggregation.ts";
 import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
 import { mergeUsageReads, projectUsageRead, usageReadBatchKey } from "./usageReadBatch.ts";
 import { UsageSummaryCache, usageSummaryCacheKey } from "./usageSummaryCache.ts";
@@ -106,6 +114,7 @@ import {
   decodeScanCoverage,
   dedupeWithinFile,
   planTranscriptScan,
+  USAGE_PARSER_REVISION,
   type CachedFile,
   type CachedFileMeta,
 } from "./usageScanCache.ts";
@@ -213,7 +222,8 @@ const isWholeQuotaWindow = (input: UsageSummaryInput) =>
   (input.groupBy === undefined || input.groupBy === "model") &&
   input.sessionIds === undefined &&
   input.runIds === undefined &&
-  input.turnIds === undefined;
+  input.turnIds === undefined &&
+  input.modelFilter === undefined;
 
 function repeatedInputPrice(
   cost: number | null,
@@ -451,6 +461,8 @@ const decodeUsageImports = Schema.decodeUnknownEffect(
   Schema.fromJsonString(UsageImportsFile as unknown as Schema.Codec<typeof UsageImportsFile.Type>),
 );
 const decodeCodexSettings = Schema.decodeUnknownEffect(CodexSettings);
+const decodeClaudeSettings = Schema.decodeEffect(ClaudeSettings);
+const defaultClaudeSettings = Schema.decodeSync(ClaudeSettings)({});
 
 /** The scan cache is narrowed by hand in `usageScanCache`, so JSON is enough here. */
 const ScanCacheJson = Schema.fromJsonString(Schema.Unknown as unknown as Schema.Codec<unknown>);
@@ -501,28 +513,62 @@ const emptyUsageSummary = (input: {
 export const layerTest = Layer.succeed(
   UsageService,
   UsageService.of({
-    readSummary: (input) => Effect.succeed(emptyUsageSummary(input)),
-    readReport: <Input extends UsageReportInput>(input: Input) =>
-      Effect.succeed(
-        (input.mode === "prompts"
-          ? new PromptUsageAccumulator(input).report("1970-01-01T00:00:00.000Z")
-          : projectUsageReport(
-              emptyUsageSummary(input),
-              input,
-              makeUsageReportCalculation(EMPTY_PRICING, {}),
-            )) as Extract<UsageReport, { readonly mode: Input["mode"] }>,
-      ),
+    readSummary: Effect.fn("UsageService.readSummary")((input) =>
+      Effect.succeed(emptyUsageSummary(input)),
+    ),
+    readReport: Effect.fn("UsageService.readReport")(
+      <Input extends UsageReportInput>(input: Input) =>
+        Effect.succeed(
+          (input.mode === "prompts"
+            ? new PromptUsageAccumulator(input).report("1970-01-01T00:00:00.000Z")
+            : projectUsageReport(
+                emptyUsageSummary(input),
+                input,
+                makeUsageReportCalculation(EMPTY_PRICING, {}),
+              )) as Extract<UsageReport, { readonly mode: Input["mode"] }>,
+        ),
+    ),
     refreshRates: Effect.succeed(EMPTY_PRICING),
   }),
 );
 
 export const make = Effect.gen(function* () {
-  const crypto = yield* Crypto.Crypto;
+  const crypto = yield* Digest.Digest;
   const fileSystem = yield* FileSystem.FileSystem;
   setPromptIndexCutover(yield* promptCutoverEnabled(process.env, fileSystem));
   const path = yield* Path.Path;
   const config = yield* ServerConfig;
   const hostEnvironment = yield* HostProcess.Environment;
+  const hostname = NodeOS.hostname();
+  const hostIdPath = path.join(config.baseDir, "usage-host-id");
+  const hostId =
+    hostEnvironment["T3CODE_HOST_ID"]?.trim() ||
+    (yield* fileSystem.readFileString(hostIdPath).pipe(
+      Effect.catchIf(
+        (error) => error.reason._tag === "NotFound",
+        () =>
+          Effect.scoped(
+            Effect.gen(function* () {
+              yield* fileSystem.makeDirectory(config.baseDir, { recursive: true });
+              const temporary = yield* fileSystem.makeTempDirectoryScoped({
+                directory: config.baseDir,
+                prefix: "usage-host-id.",
+              });
+              const identity = path.join(temporary, "identity");
+              yield* fileSystem.writeFileString(identity, `${hostname}\n`);
+              yield* fileSystem.link(identity, hostIdPath).pipe(
+                Effect.catchIf(
+                  (error) => error.reason._tag === "AlreadyExists",
+                  () => Effect.void,
+                ),
+              );
+              return yield* fileSystem.readFileString(hostIdPath);
+            }),
+          ),
+      ),
+      Effect.map((value) => value.trim() || hostname),
+      Effect.orElseSucceed(() => hostname),
+    ));
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const httpClient = yield* HttpClient.HttpClient;
   const readProviderUsage = yield* makeProviderUsageReader;
@@ -622,7 +668,7 @@ export const make = Effect.gen(function* () {
     rates = parsed;
     const revisionDocument = encodeRateDocument(fromDisk.document);
     ratesRevision = Buffer.from(
-      yield* crypto.digest("SHA-256", Buffer.from(revisionDocument)).pipe(Effect.orDie),
+      yield* crypto.digest(Digest.sha256, Buffer.from(revisionDocument)).pipe(Effect.orDie),
     ).toString("hex");
     ratesFetchedAtMs = fromDisk.fetchedAtMs;
     ratesStatus = "cached";
@@ -672,7 +718,7 @@ export const make = Effect.gen(function* () {
             ratesLastFailedAtMs = null;
             const revisionDocument = encodeRateDocument(fetched.document);
             ratesRevision = Buffer.from(
-              yield* crypto.digest("SHA-256", Buffer.from(revisionDocument)).pipe(Effect.orDie),
+              yield* crypto.digest(Digest.sha256, Buffer.from(revisionDocument)).pipe(Effect.orDie),
             ).toString("hex");
             ratesFetchedAtMs = now;
             ratesStatus = "fresh";
@@ -684,7 +730,7 @@ export const make = Effect.gen(function* () {
                   Effect.provideService(Path.Path, path),
                 ),
               ),
-              Effect.catchCause(() => Effect.void),
+              Effect.ignoreCause,
             );
           }),
         ),
@@ -726,8 +772,8 @@ export const make = Effect.gen(function* () {
     const claudeDirs = yield* Effect.forEach(
       claudeConfigs,
       Effect.fnUntraced(function* (raw) {
-        const config = yield* Schema.decodeUnknownEffect(ClaudeSettings)(raw.config ?? {}).pipe(
-          Effect.orElseSucceed(() => Schema.decodeUnknownSync(ClaudeSettings)({})),
+        const config = yield* decodeClaudeSettings(raw.config ?? {}).pipe(
+          Effect.orElseSucceed(() => defaultClaudeSettings),
         );
         const environment = yield* mergeProviderInstanceEnvironment(
           raw.environment,
@@ -893,7 +939,17 @@ export const make = Effect.gen(function* () {
     return document;
   }).pipe(Effect.withSpan("UsageService.importCustomScanCache"));
   const importLegacyScanCache = Effect.fn("UsageService.importLegacyScanCache")(function* () {
+    const hadExistingRows = scanStore.index().size > 0;
     const customDocument = yield* importCustomScanCache;
+    if (
+      !hadExistingRows &&
+      typeof customDocument === "object" &&
+      customDocument !== null &&
+      "parserRevision" in customDocument &&
+      customDocument.parserRevision === USAGE_PARSER_REVISION
+    ) {
+      scanStore.writeFlag(USAGE_PARSER_REVISION, DateTime.formatIso(yield* DateTime.now));
+    }
     const flag = "providerJsonImportedAt";
     if (scanStore.readFlag(flag) !== undefined) return;
     const formats = new Map(
@@ -950,13 +1006,31 @@ export const make = Effect.gen(function* () {
     }
     if (scanStore.persistent) scanStore.writeFlag(flag, DateTime.formatIso(yield* DateTime.now));
   });
+  const migrateTranscriptParsers = Effect.fn("UsageService.migrateTranscriptParsers")(function* () {
+    const flag = USAGE_PARSER_REVISION;
+    if (scanStore.readFlag(flag) !== undefined) return;
+    for (const [filePath, meta] of scanStore.index()) {
+      if (meta.provider !== "codex" && meta.provider !== "claude") continue;
+      const entry = scanStore.load(filePath);
+      if (entry === undefined) continue;
+      const { codexState: _legacyState, ...retained } = entry;
+      // Retain deleted-file history; available files rebuild under the new parser semantics.
+      scanStore.set(filePath, { ...retained, scanCursor: 0 });
+      yield* Effect.yieldNow;
+    }
+    if (scanStore.persistent) scanStore.writeFlag(flag, DateTime.formatIso(yield* DateTime.now));
+  });
   // Detached from the request that starts it: a reader that reaches its
   // deadline must not interrupt, and later restart, a half-finished import.
   let legacyScanCacheImport: Fiber.Fiber<void> | undefined;
   const ensureLegacyScanCacheImported = Effect.gen(function* () {
-    legacyScanCacheImport ??= yield* Effect.forkIn(importLegacyScanCache(), serviceScope, {
-      startImmediately: true,
-    });
+    legacyScanCacheImport ??= yield* Effect.forkIn(
+      importLegacyScanCache().pipe(Effect.andThen(migrateTranscriptParsers())),
+      serviceScope,
+      {
+        startImmediately: true,
+      },
+    );
     yield* Fiber.await(legacyScanCacheImport);
   });
 
@@ -1245,7 +1319,7 @@ export const make = Effect.gen(function* () {
       input.includeQuotaHistory || input.quotaHistoryOnly || input.quotaIntervals !== undefined
         ? (progress?.quotaHistory ??
           (yield* readQuotaHistory(undefined).pipe(
-            Effect.provideService(Crypto.Crypto, crypto),
+            Effect.provideService(Digest.Digest, crypto),
             Effect.provideService(FileSystem.FileSystem, fileSystem),
             Effect.provideService(Path.Path, path),
           )))
@@ -1320,7 +1394,6 @@ export const make = Effect.gen(function* () {
         }),
     });
 
-    const hostId = NodeOS.hostname();
     // The home resolvers ask for `Path` themselves; satisfy them from the
     // instance we already hold so `readSummary` stays context-free.
     if (context === undefined) {
@@ -1394,6 +1467,7 @@ export const make = Effect.gen(function* () {
       ...hourlyWindow,
       rates: scanRates,
       modelAliases: resolveModelAliases(settings.usageModelAliases),
+      ...(input.modelFilter === undefined ? {} : { modelFilter: input.modelFilter }),
       priceOverrides: createOverrideRateTable(settings.usagePriceOverrides),
       ...(input.providers === undefined ? {} : { providers: input.providers }),
       ...(input.runIds === undefined ? {} : { runIds: input.runIds }),
@@ -1408,7 +1482,7 @@ export const make = Effect.gen(function* () {
     const indexRevision = transcriptIndexRevisionOf(
       ratesRevision,
       scanRates.size,
-      [settings.usagePriceOverrides, settings.usageModelAliases],
+      [settings.usagePriceOverrides, settings.usageModelAliases, input.modelFilter],
       tierJournal,
       fastWindowText,
     );
@@ -1435,7 +1509,9 @@ export const make = Effect.gen(function* () {
         )
         .sort((a, b) => b.dir.length - a.dir.length)[0]?.dir;
       const index = buildTranscriptUsageIndex(
-        records,
+        input.modelFilter === undefined
+          ? records
+          : records.filter((record) => keepsUsageRecord(input.modelFilter, record)),
         (record) =>
           aggregator.price({
             ...applyCodexServiceTier(record, tiers, fastWindows),
@@ -2245,7 +2321,7 @@ export const make = Effect.gen(function* () {
               source.fingerprint.resolvedHomePath === dir,
           ) ?? {
             fingerprint: {
-              hostId: NodeOS.hostname(),
+              hostId,
               provider,
               resolvedHomePath: dir,
               volumeId: "",
@@ -2299,7 +2375,10 @@ export const make = Effect.gen(function* () {
   });
 
   const readSummary: UsageService["Service"]["readSummary"] = Effect.fn("UsageService.readSummary")(
-    function* (input: UsageSummaryInput) {
+    function* (requested: UsageSummaryInput) {
+      const { modelFilter: requestedFilter, ...unfiltered } = requested;
+      const modelFilter = canonicalModelFilter(requestedFilter);
+      const input = modelFilter === undefined ? unfiltered : { ...unfiltered, modelFilter };
       const startedAtMs = yield* Clock.currentTimeMillis;
       let resolvedDirs: readonly { readonly provider: UsageProviderKind; readonly dir: string }[] =
         [];
@@ -2373,7 +2452,7 @@ export const make = Effect.gen(function* () {
               const exists = yield* fileSystem.exists(dir).pipe(Effect.orElseSucceed(() => false));
               return {
                 fingerprint: {
-                  hostId: NodeOS.hostname(),
+                  hostId,
                   provider,
                   resolvedHomePath: dir,
                   volumeId,
@@ -2518,40 +2597,37 @@ export const make = Effect.gen(function* () {
             // Capture queued windows after acquiring the lock. They use one
             // inventory, parse and priced index pass, including overlapping quotas.
             yield* Effect.forkIn(
-              Effect.yieldNow
-                .pipe(
-                  Effect.andThen(
-                    scanSemaphore.withPermits(1)(
-                      Effect.gen(function* () {
-                        const queued = mergeUsageReads(batch.inputs);
-                        if (queued.includeQuotaHistory || queued.quotaIntervals !== undefined) {
-                          yield* readSummaryUnlocked(
-                            { ...queued, quotaHistoryOnly: true },
-                            undefined,
-                            batch.progress,
-                            true,
-                          );
-                        }
-                        yield* ensureLegacyScanCacheImported;
-                        batch.started = true;
-                        return yield* readSummaryUnlocked(
-                          mergeUsageReads(batch.inputs),
-                          context,
+              Effect.yieldNow.pipe(
+                Effect.andThen(
+                  scanSemaphore.withPermits(1)(
+                    Effect.gen(function* () {
+                      const queued = mergeUsageReads(batch.inputs);
+                      if (queued.includeQuotaHistory || queued.quotaIntervals !== undefined) {
+                        yield* readSummaryUnlocked(
+                          { ...queued, quotaHistoryOnly: true },
+                          undefined,
                           batch.progress,
                           true,
-                        ).pipe(Effect.ensuring(Effect.sync(() => scanStore.release())));
-                      }),
-                    ),
-                  ),
-                )
-                .pipe(
-                  Effect.onExit((exit) =>
-                    Effect.sync(() => {
-                      if (inFlightSummaries.get(batchKey) === batch)
-                        inFlightSummaries.delete(batchKey);
-                    }).pipe(Effect.andThen(Deferred.succeed(batch.result, exit))),
+                        );
+                      }
+                      yield* ensureLegacyScanCacheImported;
+                      batch.started = true;
+                      return yield* readSummaryUnlocked(
+                        mergeUsageReads(batch.inputs),
+                        context,
+                        batch.progress,
+                        true,
+                      ).pipe(Effect.ensuring(Effect.sync(() => scanStore.release())));
+                    }),
                   ),
                 ),
+                Effect.onExit((exit) =>
+                  Effect.sync(() => {
+                    if (inFlightSummaries.get(batchKey) === batch)
+                      inFlightSummaries.delete(batchKey);
+                  }).pipe(Effect.andThen(Deferred.succeed(batch.result, exit))),
+                ),
+              ),
               serviceScope,
               { startImmediately: true },
             );
@@ -2583,7 +2659,7 @@ export const make = Effect.gen(function* () {
             input,
           ),
         );
-      });
+      }).pipe(Effect.map((summary) => ({ ...summary, modelFilter })));
     },
   );
 
@@ -2600,9 +2676,15 @@ export const make = Effect.gen(function* () {
       const otis =
         input.promptSource === "t3"
           ? null
-          : yield* Effect.tryPromise(() => readOtisPromptReport(input)).pipe(
-              Effect.catchCause(() => Effect.succeed(null)),
-            );
+          : yield* Effect.tryPromise({
+              try: () => readOtisPromptReport(input),
+              catch: (cause) =>
+                new UsageReadError({
+                  reason: "scanFailed",
+                  detail: "Prompt analytics request failed.",
+                  cause,
+                }),
+            }).pipe(Effect.catchCause(() => Effect.succeed(null)));
       const cutover = yield* promptCutoverEnabled(process.env, fileSystem);
       setPromptIndexCutover(cutover);
       if (input.promptSource !== "t3" && cutover && usableOtisReport(otis))
@@ -2685,9 +2767,13 @@ export const make = Effect.gen(function* () {
           accumulator.examinedMessages === 0 && accumulator.reasons.has("projection-read-failed"),
         );
       });
-      return input.promptSource === "t3" ||
-        !process.env.T3_OTIS_USAGE_ORIGIN ||
-        process.env.T3_OTIS_USAGE_MODE === "off"
+      const analyticsOrigin = yield* Config.String("T3_OTIS_USAGE_ORIGIN")
+        .parse(ConfigProvider.fromEnv())
+        .pipe(Effect.orElseSucceed(() => ""));
+      const analyticsMode = yield* Config.String("T3_OTIS_USAGE_MODE")
+        .parse(ConfigProvider.fromEnv())
+        .pipe(Effect.orElseSucceed(() => ""));
+      return input.promptSource === "t3" || !analyticsOrigin || analyticsMode === "off"
         ? local
         : selectPromptReport(input, otis, local);
     }

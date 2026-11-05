@@ -12,15 +12,10 @@ import { HttpBody, HttpClient, HttpClientRequest } from "effect/http";
 import { resolvePrimaryEnvironmentHttpUrl } from "./environments/primary";
 import * as PrimaryEnvironmentHttp from "./environments/primary/httpLayer";
 
-export class CodexDesktopApiError extends Error {
-  readonly status: number | null;
-
-  constructor(message: string, status: number | null = null) {
-    super(message);
-    this.name = "CodexDesktopApiError";
-    this.status = status;
-  }
-}
+export class CodexDesktopApiError extends Schema.TaggedError<CodexDesktopApiError>()(
+  "CodexDesktopApiError",
+  { message: Schema.String, status: Schema.NullOr(Schema.Number) },
+) {}
 
 export interface CodexDesktopApi {
   getStatus(): Promise<CodexDesktopStatusResponse>;
@@ -108,16 +103,17 @@ async function readJson(
       },
     );
   } catch (cause) {
-    throw new CodexDesktopApiError(
-      cause instanceof Error ? cause.message : "Could not reach the Codex host.",
-    );
+    throw new CodexDesktopApiError({
+      message: cause instanceof Error ? cause.message : "Could not reach the Codex host.",
+      status: null,
+    });
   }
 
   const payload = (await response.json().catch(() => null)) as { error?: unknown } | null;
   if (!response.ok) {
     const detail =
       typeof payload?.error === "string" ? payload.error : `Request failed (${response.status}).`;
-    throw new CodexDesktopApiError(detail, response.status);
+    throw new CodexDesktopApiError({ message: detail, status: response.status });
   }
   return payload;
 }
@@ -125,8 +121,11 @@ async function readJson(
 function decode<A>(schema: Schema.Schema<A>, payload: unknown, endpoint: string): A {
   try {
     return Schema.decodeUnknownSync(schema as never)(payload) as A;
-  } catch (cause) {
-    throw new CodexDesktopApiError(`Codex host returned an invalid response for ${endpoint}.`);
+  } catch {
+    throw new CodexDesktopApiError({
+      message: `Codex host returned an invalid response for ${endpoint}.`,
+      status: null,
+    });
   }
 }
 

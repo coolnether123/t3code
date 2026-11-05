@@ -58,6 +58,7 @@ describe("usageSummaryCacheKey", () => {
     expect(usageSummaryCacheKey({ ...input, turnIds: ["turn-1"] })).not.toBe(plain);
     expect(usageSummaryCacheKey({ ...input, groupBy: "turn" })).not.toBe(plain);
     expect(usageSummaryCacheKey({ ...input, groupBy: "run" })).not.toBe(plain);
+    expect(usageSummaryCacheKey({ ...input, modelFilter: { include: [] } })).not.toBe(plain);
   });
   it("separates different reporting windows", () => {
     expect(usageSummaryCacheKey(input)).not.toBe(

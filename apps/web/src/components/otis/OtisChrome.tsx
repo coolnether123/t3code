@@ -28,6 +28,7 @@ export function OtisChrome(props: {
   const [speaker, setSpeaker] = useState(true);
   const [seconds, setSeconds] = useState(0);
   const { setOpenMobile, toggleSidebar, isMobile } = useSidebar();
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- The visible call owns a wall-clock timer until the external voice session ends.
   useEffect(() => {
     if (!props.active) return;
     const started = Date.now();

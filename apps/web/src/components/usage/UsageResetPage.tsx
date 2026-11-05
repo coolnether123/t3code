@@ -88,6 +88,7 @@ const TABS: readonly {
 
 function PendingHistoryStatus() {
   const [waitExceeded, setWaitExceeded] = useState(false);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Owns the delayed slow-connection notice timer.
   useEffect(() => {
     const timer = window.setTimeout(() => setWaitExceeded(true), 15_000);
     return () => window.clearTimeout(timer);
@@ -145,6 +146,7 @@ export function UsageResetPage() {
     status: "loading",
   });
   const publicHistoryWatcher = useRef<ReturnType<typeof watchPublicResetHistory> | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Subscribes to reset announcements and stops the watcher on unmount.
   useEffect(() => {
     const watcher = watchResetAnnouncements(setNews);
     newsWatcher.current = watcher;
@@ -153,6 +155,7 @@ export function UsageResetPage() {
       newsWatcher.current = null;
     };
   }, []);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Subscribes to public reset history and stops the watcher on unmount.
   useEffect(() => {
     const watcher = watchPublicResetHistory(setPublicHistory);
     publicHistoryWatcher.current = watcher;
@@ -284,6 +287,7 @@ export function UsageResetPage() {
     }
     backgroundRefreshActive.current = false;
   });
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Refreshes saved readings on the document visibility event and minute timer.
   useEffect(() => {
     const timer = window.setInterval(() => void refreshVisibleMonitor(), 60_000);
     const onVisible = () => void refreshVisibleMonitor();
@@ -324,6 +328,7 @@ export function UsageResetPage() {
       : historyInput)();
   const paceCosts = useUsage(paceInput);
   const [requestedActivityIntervals, setRequestedActivityIntervals] = useState(activityIntervals);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Debounces pointer-driven chart ranges before issuing external cost queries.
   useEffect(() => {
     const timer = window.setTimeout(() => setRequestedActivityIntervals(activityIntervals), 300);
     return () => window.clearTimeout(timer);

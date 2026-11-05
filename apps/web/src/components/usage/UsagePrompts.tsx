@@ -163,6 +163,7 @@ function EnvironmentPrompts({
   );
   const { refresh } = query;
   const lastRefreshRevision = useRef(refreshRevision);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Refreshes the external query cache after the parent requests a new reading.
   useEffect(() => {
     if (lastRefreshRevision.current === refreshRevision) return;
     lastRefreshRevision.current = refreshRevision;

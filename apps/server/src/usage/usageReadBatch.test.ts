@@ -35,6 +35,9 @@ describe("shared usage reads", () => {
     expect(usageReadBatchKey({ ...input, includeRepeatedInput: true })).not.toBe(
       usageReadBatchKey(input),
     );
+    expect(usageReadBatchKey({ ...input, modelFilter: { include: [] } })).not.toBe(
+      usageReadBatchKey(input),
+    );
   });
   it("projects a combined scan back to each requested day and provider", () => {
     const fingerprint = {

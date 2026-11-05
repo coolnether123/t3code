@@ -1,7 +1,6 @@
 import type { UsageQuotaInterval, UsageTokenTotals } from "@t3tools/contracts";
 import type { QuotaEnvironment } from "@t3tools/shared/usageQuota";
 import * as Clock from "effect/Clock";
-import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -53,7 +52,10 @@ export interface PublicResetCostEstimate extends PublicResetPeriod {
 const decodeJson = Schema.decodeUnknownEffect(
   Schema.fromJsonString(Schema.Unknown as unknown as Schema.Codec<unknown>),
 );
-class PublicResetHistoryUnavailable extends Data.TaggedError("PublicResetHistoryUnavailable") {}
+class PublicResetHistoryUnavailable extends Schema.TaggedError<PublicResetHistoryUnavailable>()(
+  "PublicResetHistoryUnavailable",
+  {},
+) {}
 
 const object = (value: unknown): Record<string, unknown> | null =>
   typeof value === "object" && value !== null && !Array.isArray(value)

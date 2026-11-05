@@ -87,7 +87,7 @@ export function totalTokens(totals: UsageTokenTotals): number {
 export function mightCarryUsage(line: string, provider: UsageProviderKind): boolean {
   if (provider === "claude") return line.includes('"usage"');
   if (provider === "gemini") return line.includes('"tokens"');
-  return line.includes('"token_count"');
+  return line.includes('"token_count"') || line.includes('"token_usage_record"');
 }
 
 /* Claude Code                                                                */
@@ -356,17 +356,17 @@ export function initialCodexScanState(): CodexScanState {
 }
 
 /** Keeps native run attribution while the provider parser owns counter reconciliation. */
-export function parseCodexLine(line: string, state: CodexScanState): UsageRecord | null {
+export function parseCodexLines(line: string, state: CodexScanState): readonly UsageRecord[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
   } catch {
-    return null;
+    return [];
   }
-  if (typeof parsed !== "object" || parsed === null) return null;
+  if (typeof parsed !== "object" || parsed === null) return [];
   const envelope = parsed as Record<string, unknown>;
   const payload = envelope["payload"];
-  if (typeof payload !== "object" || payload === null) return null;
+  if (typeof payload !== "object" || payload === null) return [];
   const fields = payload as Record<string, unknown>;
   const providerState = state.providerState ?? CodexUsage.initialCodexScanState();
   if (envelope["type"] === "turn_context") {
@@ -377,7 +377,8 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
     state.serviceTier = normalizeServiceTier(fields["service_tier"] ?? fields["serviceTier"]);
     state.turnId = turnId;
   }
-  const record = CodexUsage.parseCodexLine(line, providerState);
+  const pending = [...(providerState.unreportedRequests ?? [])];
+  const records = CodexUsage.parseCodexLine(line, providerState);
   state.providerState = providerState;
   state.model = providerState.model;
   state.sessionId = providerState.sessionId;
@@ -385,32 +386,45 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
   state.sawSessionMeta = providerState.sawSessionMeta;
   state.suppressingForkCopies = providerState.suppressingForkCopies;
   state.forkCopyAnchorMs = providerState.forkCopyAnchorMs;
-  if (record === null) return null;
-  const info = fields["info"];
-  const tier =
-    normalizeServiceTier(
-      (typeof info === "object" && info !== null
-        ? (info as Record<string, unknown>)["service_tier"]
-        : undefined) ?? fields["service_tier"],
-    ) ??
-    (providerState.sawThreadSettings
-      ? record.speed === "fast"
-        ? "priority"
-        : record.speed === "ultrafast"
-          ? "ultrafast"
-          : "default"
-      : state.serviceTier);
-  const nativeSessionId = knownNativeSessionId(record.sessionId);
-  return {
-    ...record,
-    ...(state.turnId === undefined ? {} : { turnId: state.turnId }),
-    ...(nativeSessionId === undefined ? {} : { nativeSessionId }),
-    ...(tier === undefined ? {} : { serviceTier: tier, serviceTierSource: "transcript" as const }),
-    dedupeKey:
-      record.sessionId.length > 0
-        ? `codex:${record.sessionId}:${record.timestampMs}:${JSON.stringify(record.totals)}`
-        : null,
-  };
+  return records.map((record) => {
+    const prior = pending.find(
+      (request) => request.timestampMs === record.timestampMs && request.model === record.model,
+    );
+    const recordTurnId = prior?.turnId ?? state.turnId;
+    const info = fields["info"];
+    const tier =
+      normalizeServiceTier(
+        (typeof info === "object" && info !== null
+          ? (info as Record<string, unknown>)["service_tier"]
+          : undefined) ?? fields["service_tier"],
+      ) ??
+      ((prior?.sawThreadSettings ?? providerState.sawThreadSettings)
+        ? record.speed === "fast"
+          ? "priority"
+          : record.speed === "ultrafast"
+            ? "ultrafast"
+            : "default"
+        : prior === undefined
+          ? state.serviceTier
+          : undefined);
+    const nativeSessionId = knownNativeSessionId(record.sessionId);
+    return {
+      ...record,
+      ...(recordTurnId === undefined ? {} : { turnId: recordTurnId }),
+      ...(nativeSessionId === undefined ? {} : { nativeSessionId }),
+      ...(tier === undefined
+        ? {}
+        : { serviceTier: tier, serviceTierSource: "transcript" as const }),
+      dedupeKey:
+        record.sessionId.length > 0
+          ? `codex:${record.sessionId}:${record.timestampMs}:${JSON.stringify(record.totals)}`
+          : null,
+    };
+  });
+}
+
+export function parseCodexLine(line: string, state: CodexScanState): UsageRecord | null {
+  return parseCodexLines(line, state).at(-1) ?? null;
 }
 
 export { EMPTY_TOTALS };

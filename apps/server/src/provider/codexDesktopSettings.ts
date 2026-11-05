@@ -7,7 +7,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 const decode = Schema.decodeUnknownOption(CodexSettings);
-const defaults = Schema.decodeUnknownSync(CodexSettings)({});
+const defaults = Schema.decodeSync(CodexSettings)({});
 
 export function codexDesktopSettings(settings: Pick<ServerSettings, "providerInstances">) {
   for (const entry of Object.values(settings.providerInstances)) {

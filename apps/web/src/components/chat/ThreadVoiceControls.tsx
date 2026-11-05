@@ -34,6 +34,7 @@ export interface ThreadVoiceHandle {
 }
 function CallStatusLine({ label }: { label: string }) {
   const [seconds, setSeconds] = useState(0);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- The mounted call-status display owns its elapsed-time interval.
   useEffect(() => {
     const started = Date.now();
     const timer = setInterval(() => setSeconds(Math.floor((Date.now() - started) / 1000)), 1000);
@@ -104,6 +105,7 @@ export function ThreadVoiceControls({
     savedDefaults,
   );
   const callbacks = useRef(props);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- The long-lived native voice session invokes the latest callbacks without recreating its audio connection.
   useLayoutEffect(() => {
     callbacks.current = props;
   });
@@ -131,6 +133,7 @@ export function ThreadVoiceControls({
   const audioRef = useRef<ReturnType<typeof createBrowserAudio> | null>(null);
   const sessionRef = useRef<ThreadVoiceSession | null>(null);
   const anchorRef = useRef<HTMLDivElement>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- The mounted voice session loads its remote configuration and aborts the request when its identity changes.
   useEffect(() => {
     if (!canCall) return;
     const abort = new AbortController();
@@ -211,6 +214,7 @@ export function ThreadVoiceControls({
         );
     }
   };
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Each mounted thread owns one audio session and online listener, both released when its identity changes.
   useLayoutEffect(() => {
     const audio = createBrowserAudio(() => session.audioInterrupted());
     audioRef.current = audio;
@@ -257,6 +261,7 @@ export function ThreadVoiceControls({
     }),
     [],
   );
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- The native voice session observes current conversation output and selected models while it remains mounted.
   useLayoutEffect(() => {
     sessionRef.current?.observe(
       messages,
@@ -269,9 +274,11 @@ export function ThreadVoiceControls({
   const active = state !== "idle";
   const panelOpen = active || expanded;
   // Keep the session mounted when the phone composer blurs or an approval arrives.
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- The external composer shell tracks whether the mounted voice session panel occupies its layout.
   useEffect(() => {
     callbacks.current.onPanelOpenChange?.(panelOpen);
   }, [panelOpen]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Unmount releases the external composer shell panel-open notification.
   useEffect(() => () => callbacks.current.onPanelOpenChange?.(false), []);
   const unheard = (call?.operatorUpdates ?? updates).filter(
     (update) => !update.heardAt && (update.status === "done" || update.status === "needs-Jared"),
@@ -313,10 +320,7 @@ export function ThreadVoiceControls({
       <div ref={anchorRef} className="relative min-w-0 w-full" data-voice-state={state}>
         {active ? (
           <section aria-label="Otis call">
-            <ComposerBanner.Root
-              placement="floating"
-              variant={state === "error" ? "error" : "default"}
-            >
+            <ComposerBanner.Root detached variant={state === "error" ? "error" : "default"}>
               <ComposerBanner.Row>
                 <ComposerBanner.Content>
                   <CallStatusLine

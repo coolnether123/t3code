@@ -1,6 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
+import * as Schema from "effect/Schema";
 import { ThreadId } from "@t3tools/contracts";
 import * as ServerConfig from "../config.ts";
 import * as Auxiliary from "../provider/AuxiliaryProviderSessions.ts";
@@ -10,18 +11,23 @@ import { CallReplyBuffer } from "./operatorProtocol.ts";
 import { HoldTurnGuard } from "./hold.ts";
 import { lookupVoiceAgenda } from "./voiceLookups.ts";
 
+class VoiceRuntimeError extends Schema.TaggedError<VoiceRuntimeError>()("VoiceRuntimeError", {
+  cause: Schema.Defect(),
+}) {}
+
 export const layer = Layer.effectDiscard(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
     const sessions = yield* Auxiliary.AuxiliaryProviderSessions;
     const threads = yield* VoiceThreadService.VoiceThreadService;
+    const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
     const calls = callOperator(config.stateDir);
     const replies = new CallReplyBuffer();
     const holds = new HoldTurnGuard();
     calls.bind({
-      context: (threadId) => Effect.runPromise(threads.context(threadId)),
+      context: (threadId) => runPromise(threads.context(threadId)),
       start: (input) =>
-        Effect.runPromise(
+        runPromise(
           Effect.gen(function* () {
             const link = yield* Effect.promise(() => calls.findLink(input.threadId));
             return yield* sessions.startSession(
@@ -31,9 +37,9 @@ export const layer = Layer.effectDiscard(
             );
           }),
         ),
-      send: (input) => Effect.runPromise(sessions.sendTurn(input)),
-      sessions: () => Effect.runPromise(sessions.listSessions()),
-      dispatch: (command) => Effect.runPromise(threads.dispatch(command)),
+      send: (input) => runPromise(sessions.sendTurn(input)),
+      sessions: () => runPromise(sessions.listSessions()),
+      dispatch: (command) => runPromise(threads.dispatch(command)),
       lookup: lookupVoiceAgenda,
     });
     yield* sessions.streamEvents.pipe(
@@ -45,7 +51,10 @@ export const layer = Layer.effectDiscard(
             owner?.role === "voice" ? holds.accept(event, reply.raw) : { event, stop: false };
           if (!accepted) return;
           const next = accepted.event;
-          const link = yield* Effect.tryPromise(() => calls.event(next, reply.raw));
+          const link = yield* Effect.tryPromise({
+            try: () => calls.event(next, reply.raw),
+            catch: (cause) => new VoiceRuntimeError({ cause }),
+          });
           if (
             link?.role === "voice" &&
             (event.type === "turn.started" ||
@@ -66,7 +75,10 @@ export const layer = Layer.effectDiscard(
               yield* Effect.sleep(5_000);
               const expired = holds.expire(event);
               if (!expired) return;
-              const link = yield* Effect.tryPromise(() => calls.event(expired.event, reply.raw));
+              const link = yield* Effect.tryPromise({
+                try: () => calls.event(expired.event, reply.raw),
+                catch: (cause) => new VoiceRuntimeError({ cause }),
+              });
               if (link?.role === "voice")
                 yield* threads.recordVoiceEvent(link, expired.event, reply.raw);
               replies.accept(expired.event);

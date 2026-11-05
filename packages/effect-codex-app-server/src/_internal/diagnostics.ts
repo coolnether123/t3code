@@ -7,6 +7,18 @@ const CONTROL_CHARACTER_REGEX = new RegExp(
 
 export const CODEX_APP_SERVER_STDERR_MAX_CHARS = 8_192;
 
+export function summarizeCodexStderr(text: string): string | undefined {
+  const lines = sanitizeCodexDiagnosticText(text)
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/\s+/g, " "))
+    .filter((line) => line.length > 0);
+  const line =
+    lines.findLast((candidate) =>
+      /^(?:[a-z]*error|fatal)(?: ?\[[^\]]+\])?:\s*\S/i.test(candidate),
+    ) ?? lines.at(-1);
+  return line === undefined ? undefined : line.length <= 512 ? line : `${line.slice(0, 511)}…`;
+}
+
 const AUTHORIZATION_KEY_PATTERN = String.raw`(?:["'])?\b(?:proxy[-_ ]?authorization|authorization)\b(?:["'])?`;
 
 const SECRET_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [

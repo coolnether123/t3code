@@ -1,6 +1,6 @@
 import { mapUsageModel } from "./usageAggregation.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
 
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -148,9 +148,9 @@ export const readQuotaHistory = Effect.fn("UsageQuotaHistory.read")(
       const archiveText = yield* fileSystem.readFileString(archivePath);
       if (Buffer.byteLength(archiveText, "utf8") > MAX_ARCHIVE_BYTES)
         return decodeQuotaHistory(null);
-      const crypto = yield* Crypto.Crypto;
+      const crypto = yield* Digest.Digest;
       const digest = Buffer.from(
-        yield* crypto.digest("SHA-256", Buffer.from(archiveText)),
+        yield* crypto.digest(Digest.sha256, Buffer.from(archiveText)),
       ).toString("hex");
       if (`${digest}.json` !== name) {
         return decodeQuotaHistory(null);

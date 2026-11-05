@@ -17,6 +17,7 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { HttpClient } from "effect/http";
 import { UsageDay, type UsageSummary } from "@t3tools/contracts";
 import * as ServerConfig from "../config.ts";
@@ -81,10 +82,10 @@ const testLayer = Layer.mergeAll(
   Layer.succeed(CodexUsageHistory.CodexUsageHistory, {
     resolve: () => Effect.succeed(new Map()),
   }),
-  Layer.succeed(MuseUsageHome.MuseUsageHome, { resolve: () => Effect.succeed(undefined) }),
+  Layer.succeed(MuseUsageHome.MuseUsageHome, { resolve: () => Effect.undefined }),
   ServerSettings.layerTest(),
   ServerConfig.layerTest(process.cwd(), { prefix: "t3-scan-budget-test-" }),
-).pipe(Layer.provideMerge(NodeServices.layer));
+).pipe(Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)));
 
 beforeEach(() => {
   inventoryComplete = true;

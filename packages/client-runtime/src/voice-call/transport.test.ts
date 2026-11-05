@@ -3,6 +3,8 @@ import { EnvironmentId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Fiber from "effect/Fiber";
+import * as Scope from "effect/Scope";
+import * as Exit from "effect/Exit";
 import * as TestClock from "effect/testing/TestClock";
 import {
   PrimaryConnectionTarget,
@@ -179,8 +181,11 @@ describe("voice environment transport", () => {
   );
   it.effect("keeps a streaming speech request alive when a concurrent watch is aborted", () =>
     Effect.gen(function* () {
-      const streamSignal = new AbortController();
-      const watchSignal = new AbortController();
+      const streamSignal = yield* Effect.abortSignal;
+      const watchScope = yield* Scope.fork(yield* Scope.Scope, "sequential");
+      const watchSignal = yield* Effect.abortSignal.pipe(
+        Effect.provideService(Scope.Scope, watchScope),
+      );
       let source!: ReadableStreamDefaultController<Uint8Array>;
       let received!: () => void;
       const firstChunk = new Promise<void>((resolve) => {
@@ -209,13 +214,13 @@ describe("voice environment transport", () => {
       };
       const watch = yield* fetchEnvironmentSpeech({
         ...input,
-        signal: watchSignal.signal,
+        signal: watchSignal,
         request: { action: "call.watch", callId: "synthetic" },
         fetcher,
       }).pipe(Effect.provide(layerRemoteHttpClient(fetcher)), Effect.result, Effect.forkChild);
       const speech = yield* fetchEnvironmentSpeech({
         ...input,
-        signal: streamSignal.signal,
+        signal: streamSignal,
         request: {
           action: "call.speak",
           callId: "synthetic",
@@ -229,9 +234,9 @@ describe("voice environment transport", () => {
       source.enqueue(new TextEncoder().encode('{"audio":"AAA=","sampleRate":24000}\n'));
       yield* Effect.promise(() => firstChunk);
       yield* Effect.promise(() => watchEntered);
-      watchSignal.abort();
+      yield* Scope.close(watchScope, Exit.void);
       expect((yield* Fiber.join(watch))._tag).toBe("Failure");
-      expect(streamSignal.signal.aborted).toBe(false);
+      expect(streamSignal.aborted).toBe(false);
       source.enqueue(new TextEncoder().encode('{"complete":true}\n'));
       source.close();
       expect(yield* Fiber.join(speech)).toEqual({ complete: true });
@@ -342,6 +347,7 @@ describe("voice environment transport", () => {
           }),
       });
       const remoteAuthorization = RemoteEnvironmentAuthorization.of({
+        renewDpopBeforeExpiry: () => Effect.die("unused"),
         authorizeBearer: () => Effect.die("unused"),
         authorizeDpop: () => Effect.die("unused"),
         authorizeDpopHttp: (request) =>

@@ -357,7 +357,7 @@ const publishImmutableJson = async <T>(
     if (cause instanceof Error && "code" in cause && cause.code === "EEXIST") {
       const existing = await readJson<T>(target);
       if (existing !== undefined && sameJson(existing, value)) return;
-      throw new Error(`${description} already exists with different data`);
+      throw new Error(`${description} already exists with different data`, { cause: cause });
     }
     throw cause;
   }

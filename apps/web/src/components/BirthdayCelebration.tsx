@@ -54,6 +54,7 @@ export function BirthdayCelebration({ children }: { readonly children: ReactNode
     nextNote: () => setNoteIndex((index) => index + 1),
   }))();
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- The mounted birthday display subscribes to the wall clock and document visibility changes.
   useEffect(() => {
     const update = () => setNow(Date.now());
     const timer = window.setInterval(update, 30_000);
@@ -66,6 +67,7 @@ export function BirthdayCelebration({ children }: { readonly children: ReactNode
     };
   }, []);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- The document root attributes reflect the mounted birthday theme and are removed on unmount.
   useEffect(() => {
     const root = document.documentElement;
     root.toggleAttribute("data-birthday", active);
@@ -76,6 +78,7 @@ export function BirthdayCelebration({ children }: { readonly children: ReactNode
     };
   }, [active, effects]);
 
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- The mounted celebration owns reduced-motion listeners and animation timers, all released on cleanup.
   useEffect(() => {
     if (!effects) return;
     const motion = window.matchMedia("(prefers-reduced-motion: reduce)");

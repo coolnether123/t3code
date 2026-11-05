@@ -110,6 +110,7 @@ export function UsagePaceChart({
         )
       : [])();
   const chartSamples = (() => quotaHistoryPoints(cycleSamples))();
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Updates the forecast countdown from the wall clock while mounted.
   useEffect(() => {
     const timer = window.setInterval(() => setClock(Date.now()), 60_000);
     return () => window.clearInterval(timer);

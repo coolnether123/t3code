@@ -12,8 +12,9 @@ import {
   type UsageSummary,
   type UsageSummaryInput,
 } from "@t3tools/contracts";
-import { mergeUsage, type EnvironmentUsage, type MergedUsage } from "@t3tools/shared/usageMerge";
+import { usageSummaryInput } from "@t3tools/client-runtime/state/usage";
 import * as Option from "effect/Option";
+import { mergeUsage, type EnvironmentUsage, type MergedUsage } from "@t3tools/shared/usageMerge";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { useCallback, useEffect, useMemo, useRef } from "react";
 
@@ -42,7 +43,7 @@ const usageByWindowAtom = Atom.family((windowKey: string) =>
       const sessionResult = get(environmentSession.sessionStateAtom(environmentId));
       const access = resolveUsageAccess({
         connectionPhase: presentation.connection.phase,
-        session: Option.getOrNull(AsyncResult.value(sessionResult)),
+        session: AsyncResult.getOrElse(sessionResult, () => null),
         hasSessionError: sessionResult._tag === "Failure",
       });
       if (!access.canReadDiagnostics) {
@@ -56,8 +57,16 @@ const usageByWindowAtom = Atom.family((windowKey: string) =>
         });
         continue;
       }
-      const result = get(serverEnvironment.usageSummary({ environmentId, input }));
-      const summary = Option.getOrNull(AsyncResult.value(result));
+      const result = get(
+        serverEnvironment.usageSummary({
+          environmentId,
+          input: usageSummaryInput(
+            input,
+            get(serverEnvironment.usageModelFilterAtom(environmentId)),
+          ),
+        }),
+      );
+      const summary = AsyncResult.getOrElse(result, () => null);
       statuses.push({
         environmentId,
         label: presentation.entry.target.label,
@@ -122,7 +131,15 @@ export function useUsage(
         environments.map(async (environment) => {
           const result = await executeAtomQuery(
             appAtomRegistry,
-            serverEnvironment.usageSummary({ environmentId: environment.environmentId, input }),
+            serverEnvironment.usageSummary({
+              environmentId: environment.environmentId,
+              input: usageSummaryInput(
+                input,
+                appAtomRegistry.get(
+                  serverEnvironment.usageModelFilterAtom(environment.environmentId),
+                ),
+              ),
+            }),
             { refresh: true, timeoutMs: 30_000, reportFailure: false, reportDefect: false },
           );
           return {
@@ -174,6 +191,7 @@ export function useUsage(
             /\bdeferred\b|response budget|complete-line chunks/i.test(source.message ?? ""),
         )),
   );
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- Schedules remote-read recovery while the mounted window has incomplete coverage.
   useEffect(() => {
     if (retry.current.windowKey !== windowKey)
       retry.current = { windowKey, failures: 0, attempts: 0 };

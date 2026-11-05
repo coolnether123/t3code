@@ -40,6 +40,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as CodexDesktopStore from "./CodexDesktopStore.ts";
 
 const CODEX_PATH = "/api/codex";
+const decodeSendMessageRequest = Schema.decodeUnknownEffect(CodexDesktopSendMessageRequest);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const badRequest = (message: string) =>
@@ -158,11 +159,12 @@ export const codexDesktopRouteLayer = Layer.unwrap(
             return badRequest("Invalid Codex thread ID.");
           yield* store.readThread(threadId, { limit: 1 });
           return HttpServerResponse.jsonUnsafe(
-            yield* store.readThread(threadId, {
-              ...(url.searchParams.get("beforeCursor") === null
+            yield* store.readThread(
+              threadId,
+              url.searchParams.get("beforeCursor") === null
                 ? {}
-                : { beforeCursor: url.searchParams.get("beforeCursor")! }),
-            }),
+                : { beforeCursor: url.searchParams.get("beforeCursor")! },
+            ),
           );
         }).pipe(Effect.catch(routeError)),
       ),
@@ -179,9 +181,7 @@ export const codexDesktopRouteLayer = Layer.unwrap(
             return badRequest("Invalid Codex thread ID.");
           const bodyJson = yield* Effect.result(request.json);
           if (Result.isFailure(bodyJson)) return badRequest("Invalid Codex message request.");
-          const decoded = yield* Effect.result(
-            Schema.decodeUnknownEffect(CodexDesktopSendMessageRequest)(bodyJson.success),
-          );
+          const decoded = yield* Effect.result(decodeSendMessageRequest(bodyJson.success));
           if (Result.isFailure(decoded)) return badRequest("Invalid Codex message request.");
           const body = decoded.success;
           if (!UUID_PATTERN.test(body.requestId)) return badRequest("requestId must be a UUID.");
