@@ -23,6 +23,7 @@ import {
   renderLaunchAgentPlist,
   localEnvironment,
   renderWrapper,
+  requireLaunchAgentPid,
   recoverFailedDeployment,
   validateCandidate,
   validateOptions,
@@ -248,6 +249,18 @@ describe("deploy-macos-backend guards", () => {
         port: 3773,
       }),
     ).toThrow("listener PID changed");
+  });
+
+  it("requires the installed LaunchAgent PID rather than trusting another healthy server", () => {
+    expect(requireLaunchAgentPid("state = running\n\tpid = 47599\n")).toBe(47599);
+    expect(() => requireLaunchAgentPid("state = spawn scheduled\nlast exit code = 78\n")).toThrow(
+      "health is not deployment proof",
+    );
+    expect(() => requireLaunchAgentPid("pid = 1\npid = 2\n")).toThrow("unambiguous");
+    expect(() => requireLaunchAgentPid("pid = 0\n")).toThrow("unambiguous");
+    expect(() =>
+      assertSingleLoopbackListener([{ pid: 44237, name: "127.0.0.1:3773" }], 47599),
+    ).toThrow("does not match expected PID");
   });
 
   it("accepts the real staged bundle layout and an in-bundle dependency symlink", async () => {

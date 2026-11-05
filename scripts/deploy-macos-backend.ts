@@ -1239,6 +1239,38 @@ const launchctlPrint = async (uid: number, label: string): Promise<boolean> => {
   return result.code === 0;
 };
 
+/** HTTP and environment identity alone can belong to an SSH fallback that won the stop gap. */
+export const requireLaunchAgentPid = (output: string): number => {
+  const matches = [...output.matchAll(/^\s*pid = (\d+)\s*$/gm)];
+  const pid = Number(matches[0]?.[1]);
+  if (matches.length !== 1 || !Number.isSafeInteger(pid) || pid <= 0)
+    fail("candidate LaunchAgent has no unambiguous running PID; health is not deployment proof.");
+  return pid;
+};
+
+const assertInstalledBackendOwner = async (
+  options: BackendDeployOptions,
+  uid: number,
+  destination: string,
+): Promise<void> => {
+  const job = await requireCommandSuccess(
+    "launchctl",
+    ["print", `gui/${uid}/${options.label}`],
+    "candidate LaunchAgent ownership",
+  );
+  const pid = requireLaunchAgentPid(job);
+  assertSingleLoopbackListener(await inspectListeners(options), pid);
+  assertProcessIdentity({
+    expectedPid: pid,
+    actualPid: pid,
+    command: await currentCommand(pid),
+    oldEntry: NodePath.join(destination, "dist/bin.mjs"),
+    baseDir: options.baseDir,
+    host: "127.0.0.1",
+    port: options.port,
+  });
+};
+
 /**
  * `launchctl bootout` returns before launchd finishes removing the job, and a
  * bootstrap issued in that window fails with an I/O error. Wait until the
@@ -1501,7 +1533,9 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
         migrationProgress(NodePath.join(options.baseDir, "userdata")),
       );
     else await waitForHttp(options.port, environmentId, 90_000);
+    await assertInstalledBackendOwner(options, uid, destination);
     await verifyDatabaseBackup(NodePath.join(runDir, "state.sqlite"));
+    await assertInstalledBackendOwner(options, uid, destination);
     console.log(`deployment passed for ${options.commit}; backup: ${runDir}`);
   } catch (error) {
     await recoverFailedDeployment(
