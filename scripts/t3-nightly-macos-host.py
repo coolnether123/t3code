@@ -300,7 +300,7 @@ if __name__ == "__main__":
                 shutil.rmtree(candidate)
             else:
                 raise guard.Hold("unknown nightly host operation")
-        if sys.argv[1:] == ["--gate-only"] or operation not in ("installed", "deploy", "accept-recovered"):
+        if sys.argv[1:] == ["--gate-only"] or operation not in ("capture", "installed", "reconcile", "deploy", "accept-recovered"):
             print("nightly host step passed")
     except Exception as error:
         print("nightly host step held: " + (str(error) if isinstance(error, guard.Hold) else type(error).__name__), file=sys.stderr)

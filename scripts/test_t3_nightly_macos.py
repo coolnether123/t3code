@@ -1,13 +1,17 @@
 """Small local fixtures. No production state, network, models or schedules."""
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import plistlib
+import runpy
 import tempfile
 import unittest
 from unittest.mock import patch, call
 import signal
+import sys
+from contextlib import ExitStack, redirect_stdout, redirect_stderr
 from types import SimpleNamespace
 
 
@@ -25,6 +29,77 @@ peer = module("nightly_peer", "macos-peer-handoff.py")
 
 
 class NightlyTests(unittest.TestCase):
+    def test_host_cli_json_operations_emit_one_complete_document(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            commit = "a" * 40
+            folder = root / "run-11111111-1111-1111-1111-111111111111"
+            folder.mkdir()
+            prior = root / "run-22222222-2222-2222-2222-222222222222"
+            prior.mkdir()
+            entry = root / ".local/lib/t3-fork" / commit / "dist/bin.mjs"
+            entry.parent.mkdir(parents=True)
+            entry.parent.parent.joinpath(".t3-source-commit").write_text(commit)
+            source = root / "source"
+            websocket = source / "node_modules/.pnpm/ws@8.0.0/node_modules/ws/package.json"
+            websocket.parent.mkdir(parents=True)
+            websocket.write_text("{}")
+            settings = dict(hostname="fixture", home=str(root), sourceRoot=str(source),
+                            environmentId="fixture", baseDir=str(root / ".t3"),
+                            listenerAddresses=["127.0.0.1:3773"], node="/node",
+                            nativeSocket="/private/fixture", backupRoot=str(root / "backups"))
+            config = root / "config.json"
+            config.write_text(json.dumps({"millie": settings}))
+            config.chmod(0o600)
+            pending = folder / "peer-recovery.json"
+            pending.write_text(json.dumps({"commit": commit, "backup": str(root / "backups/current")}))
+            pending.chmod(0o600)
+            counts = dict(activeRuns=1, pendingApprovals=1, childAgents=1, held=0)
+            recovery = dict(verified=True, resumed=1)
+            installed = dict(commitPrefix=commit)
+
+            def command(argv, **kwargs):
+                if argv[0] == str(root / ".local/bin/codex"):
+                    return json.dumps(dict(status="running", appServerVersion="fixture", managedCodexVersion="fixture"))
+                if argv[0] == "/usr/sbin/lsof":
+                    return "p123\nn127.0.0.1:3773"
+                if argv[0] == "git":
+                    return commit
+                if argv[0] == "/bin/ps":
+                    return "/node " + str(entry)
+                if argv[0] == "/usr/bin/python3" and argv[-1] == "--verify":
+                    return json.dumps(recovery)
+                if argv[0] == "/node":
+                    return ""
+                raise AssertionError("unexpected host command: " + repr(argv))
+
+            operations = [
+                ("capture", [], dict(counts, admitted=True)),
+                ("installed", [], installed),
+                ("reconcile", [prior.name, commit], dict(installed, recovery=recovery)),
+                ("deploy", [commit], dict(installed, maintenanceHold=False, recovery=recovery)),
+                ("accept-recovered", [commit], dict(installed, maintenanceHold=False, recovery=recovery)),
+            ]
+            script = Path(__file__).with_name("t3-nightly-macos-host.py")
+            for operation, arguments, expected in operations:
+                with self.subTest(operation=operation), ExitStack() as stack:
+                    stack.enter_context(patch.object(sys, "argv", [str(script), str(config), "millie", operation, str(folder), *arguments]))
+                    stack.enter_context(patch.object(Path, "home", return_value=root))
+                    stack.enter_context(patch.object(host.socket, "gethostname", return_value="fixture"))
+                    stack.enter_context(patch.object(host.subprocess, "check_output", side_effect=command))
+                    stack.enter_context(patch.object(host.guard, "load_manifest", side_effect=lambda path: json.loads(Path(path).read_text())))
+                    stack.enter_context(patch.object(host.guard, "check_pins"))
+                    stack.enter_context(patch.object(host.guard, "admit", return_value={"state": counts}))
+                    stack.enter_context(patch.object(host.guard, "process_identity", return_value={"pid": 123}))
+                    stack.enter_context(patch.object(host.guard, "file_digest", return_value="fixture"))
+                    stack.enter_context(patch.object(importlib.util, "spec_from_file_location", return_value=SimpleNamespace(loader=SimpleNamespace(exec_module=lambda module: None))))
+                    stack.enter_context(patch.object(importlib.util, "module_from_spec", return_value=host.guard))
+                    stdout, stderr = io.StringIO(), io.StringIO()
+                    with redirect_stdout(stdout), redirect_stderr(stderr):
+                        runpy.run_path(str(script), run_name="__main__")
+                    self.assertEqual(stderr.getvalue(), "")
+                    self.assertEqual(json.loads(stdout.getvalue()), expected)
+
     def test_peer_recovery_expired_window_refuses_any_signal(self):
         with patch.object(peer.os, "kill") as send, patch.object(peer.host, "gate") as gate:
             with self.assertRaises(peer.g.Hold):
