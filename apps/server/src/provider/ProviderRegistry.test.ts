@@ -85,14 +85,15 @@ const decodeServerSettings = Schema.decodeSync(ServerSettings);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const encodedDefaultServerSettings = encodeServerSettings(DEFAULT_SERVER_SETTINGS);
 
-const disabledDefaultSlots = (
-  ...drivers: ReadonlyArray<string>
-): ContractServerSettings["providerInstances"] =>
+const disabledDefaultSlots = (...drivers: ReadonlyArray<string>) =>
   Object.fromEntries(
-    drivers.map((driver) => [
-      ProviderInstanceId.make(driver),
-      { driver: ProviderDriverKind.make(driver), enabled: false },
-    ]),
+    drivers.map(
+      (driver) =>
+        [
+          ProviderInstanceId.make(driver),
+          { driver: ProviderDriverKind.make(driver), enabled: false },
+        ] as const,
+    ),
   );
 
 const defaultClaudeSettings: ClaudeSettings = Schema.decodeSync(ClaudeSettings)({});
