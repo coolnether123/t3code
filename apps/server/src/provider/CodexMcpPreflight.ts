@@ -285,7 +285,9 @@ function resolveCodexHomePath(
     : NodePath.resolve(configured);
 }
 
-async function readConfigTexts(input: CodexMcpPreflightInput): Promise<ReadonlyArray<ConfigText>> {
+export async function readCodexMcpConfigTexts(
+  input: CodexMcpPreflightInput,
+): Promise<ReadonlyArray<ConfigText>> {
   if (input.configTexts !== undefined) return input.configTexts;
   const paths = [NodePath.join(resolveCodexHomePath(input), "config.toml")];
   const projectPaths: string[] = [];
@@ -459,7 +461,7 @@ export async function preflightCodexMcpServers(
   input: CodexMcpPreflightInput,
 ): Promise<CodexMcpPreflightResult> {
   const servers = collectCodexHttpMcpServers({
-    configTexts: await readConfigTexts(input),
+    configTexts: await readCodexMcpConfigTexts(input),
     ...(input.appServerArgs !== undefined ? { appServerArgs: input.appServerArgs } : {}),
   });
   if (servers.length === 0) return emptyResult();

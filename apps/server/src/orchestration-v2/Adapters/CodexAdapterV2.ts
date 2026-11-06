@@ -17,6 +17,7 @@ import {
   codexMcpDisableOverride,
 } from "../../provider/CodexMcpPreflight.ts";
 import { recoverCodexDenyReadAclState } from "../../provider/CodexSandboxRecovery.ts";
+import { ensureCodexCatalogStartup } from "../../provider/CodexCatalogStartup.ts";
 import { migrateCodexResumeRollout } from "../../provider/Drivers/CodexHomeLayout.ts";
 import { pipe } from "effect/Function";
 import * as DocumentText from "../../provider/DocumentText.ts";
@@ -1660,6 +1661,21 @@ export const layerAppServerClientFactory: Layer.Layer<
                 ...codexAppServerEnvironment(input.environment),
                 ...(input.settings.homePath ? { CODEX_HOME: input.settings.homePath } : {}),
               };
+          yield* ensureCodexCatalogStartup({
+            homePath: input.settings.homePath,
+            environment,
+            ...(input.runtimePolicy.cwd === null ? {} : { cwd: input.runtimePolicy.cwd }),
+          }).pipe(
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterOpenSessionError({
+                  driver: CODEX_PROVIDER,
+                  providerSessionId: input.providerSessionId,
+                  cause,
+                }),
+            ),
+          );
           const preflight = yield* Effect.promise(() =>
             preflightCodexMcpServers({
               homePath: input.settings.homePath,

@@ -971,7 +971,7 @@ describe("CodexAdapterV2 process exit", () => {
             threadId: ThreadId.make("thread-codex-agent"),
             providerSessionId: ProviderSessionId.make("session-codex-agent"),
             runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
-            settings: DEFAULT_CODEX_SETTINGS,
+            settings: { ...DEFAULT_CODEX_SETTINGS, homePath: "/t3-test-home-without-config" },
             environment: {},
           })
           .pipe(Effect.tap(() => Effect.sync(() => assert.equal(runningAgents, 1)))),
