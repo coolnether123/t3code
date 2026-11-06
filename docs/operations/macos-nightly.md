@@ -166,6 +166,11 @@ deployer, then as `accepted` only after the installed source and checkpoint
 recovery both verify. A source marker alone cannot accept a swap. The pre-stop
 manifest remains separately pinned while a fresh capture records the new
 listener. Missing or duplicate continuation proof retains the run for recovery.
+Before the already-current shortcut, a later nightly reconciles prior
+`attempting` journals. It accepts a prior swap without reinstalling only when the
+current source, actual installed revision and saved checkpoint verification all
+match. A pre-install crash, changed revision or missing recovery proof holds with
+the exact journal and a reconciliation step. It never retries an uncertain swap.
 
 An archive peer may win Millie's cold-backup gap before the installed service
 starts. The controller permits one bounded handoff only after proving the new

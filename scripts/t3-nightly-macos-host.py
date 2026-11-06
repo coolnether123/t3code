@@ -111,6 +111,18 @@ def verify_checkpoint(folder):
     return proof
 
 
+def reconcile(host, name, folder, prior_name, commit):
+    guard.require(re.fullmatch(r"run-[a-f0-9-]{36}", prior_name) is not None,
+                  "prior run directory identity differs")
+    prior = folder.parent / prior_name
+    guard.require(prior.is_dir() and not prior.is_symlink(), "prior run directory unavailable")
+    proof = installed(host, name, folder)
+    guard.require(re.fullmatch(r"[a-f0-9]{40}", commit) is not None
+                  and commit.startswith(proof["commitPrefix"]), "prior installed source differs")
+    versions(host)
+    return dict(proof, recovery=verify_checkpoint(prior))
+
+
 def backend_args(host, folder, commit):
     m = json.loads((folder / "current-manifest.json").read_text())
     argv = shlex.split(command(["/bin/ps", "-ww", "-p", str(m["listener_pid"]), "-o", "command="]))
@@ -270,6 +282,8 @@ if __name__ == "__main__":
                 prepare(host, folder, sys.argv[5])
             elif operation == "installed":
                 print(json.dumps(installed(host, name, folder)))
+            elif operation == "reconcile":
+                print(json.dumps(reconcile(host, name, folder, sys.argv[5], sys.argv[6])))
             elif operation == "maintenance":
                 maintenance(host, name)
             elif operation == "deploy":

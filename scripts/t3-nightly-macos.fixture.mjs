@@ -39,12 +39,30 @@ async function scenario(kind) {
   };
   validateMacConfig(config);
   const commands = [];
+  const priorName = "run-11111111-1111-4111-8111-111111111111";
+  let priorPath;
+  if (kind.startsWith("current-crash-")) {
+    const priorDirectory = NodePath.join(directory, "artifacts", priorName);
+    NodeFS.mkdirSync(priorDirectory, { recursive: true, mode: 0o700 });
+    priorPath = NodePath.join(priorDirectory, "result.json");
+    NodeFS.writeFileSync(
+      priorPath,
+      JSON.stringify({
+        runId: priorName.slice(4),
+        result: "held",
+        liveChanges: [],
+        swaps: { elora: { phase: "attempting", commit: base } },
+      }),
+      { mode: 0o600 },
+    );
+  }
   let head = base;
   let merging = false;
   let captures = 0;
   let unresolved = false;
   const persistedSwaps = [];
   const installed = { elora: base, millie: kind === "current-partial" ? "0".repeat(40) : base };
+  if (kind === "current-crash-before-install") installed.elora = "0".repeat(40);
   const run = (exe, args, cwd, env) => {
     commands.push([exe, args, cwd, env]);
     const ok = (text = "") => ({ code: 0, text });
@@ -100,6 +118,13 @@ async function scenario(kind) {
     }
     if (exe === "/vp" && args[0] === "check" && ["gate", "conflict-gate"].includes(kind))
       return { code: 1, text: "" };
+    if (exe === "/usr/bin/python3" && args[3] === "reconcile")
+      return ok(
+        JSON.stringify({
+          commitPrefix: base,
+          recovery: { verified: kind !== "current-crash-unverified", resumedOnce: 1, held: 0 },
+        }),
+      );
     if (
       (exe === "/usr/bin/python3" && args[3] === "installed") ||
       (exe === "/usr/bin/ssh" && args.at(-1).includes("'installed'"))
@@ -170,7 +195,14 @@ async function scenario(kind) {
         return { code: kind === "conflict" ? 1 : 0, safeToRecover: kind !== "conflict-live" };
       },
     });
-    return { result, commands, head, merging, persistedSwaps };
+    return {
+      result,
+      commands,
+      head,
+      merging,
+      persistedSwaps,
+      prior: priorPath ? JSON.parse(NodeFS.readFileSync(priorPath, "utf8")) : null,
+    };
   } finally {
     NodeFS.rmSync(directory, { recursive: true, force: true });
   }
@@ -219,6 +251,39 @@ NodeTest.test("an installed marker without recovery proof retains an uncertain s
     false,
   );
 });
+
+NodeTest.test(
+  "a crash after install reconciles exact recovery before the already-current shortcut",
+  async () => {
+    const { result, commands, prior } = await scenario("current-crash-after-install");
+    NodeAssert.equal(result.result, "already-current");
+    NodeAssert.equal(prior.swaps.elora.phase, "accepted");
+    NodeAssert.equal(prior.swaps.elora.recovered, true);
+    NodeAssert.equal(result.recoveredSwaps.length, 1);
+    NodeAssert.equal(commands.filter(([, args]) => args[3] === "reconcile").length, 1);
+    NodeAssert.equal(
+      commands.some(([, args]) => args.includes("deploy")),
+      false,
+    );
+  },
+);
+
+NodeTest.test(
+  "crashes before install or without recovery proof stay named and never replay",
+  async () => {
+    for (const kind of ["current-crash-before-install", "current-crash-unverified"]) {
+      const { result, commands, prior } = await scenario(kind);
+      NodeAssert.equal(result.result, "held");
+      NodeAssert.equal(prior.swaps.elora.phase, "attempting");
+      NodeAssert.match(result.reason, /run-11111111-1111-4111-8111-111111111111/);
+      NodeAssert.match(result.reason, /reconcile/);
+      NodeAssert.equal(
+        commands.some(([, args]) => args.includes("deploy")),
+        false,
+      );
+    }
+  },
+);
 
 NodeTest.test(
   "prepare-only builds and publishes without live-host idle checks or install",

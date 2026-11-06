@@ -21,6 +21,31 @@ const controls = [
   "macos-peer-handoff.py",
 ];
 
+function savePrivateJson(path, value) {
+  const next = path + ".next";
+  const descriptor = NodeFS.openSync(
+    next,
+    NodeFS.constants.O_WRONLY |
+      NodeFS.constants.O_CREAT |
+      NodeFS.constants.O_TRUNC |
+      NodeFS.constants.O_NOFOLLOW,
+    0o600,
+  );
+  try {
+    NodeFS.writeFileSync(descriptor, JSON.stringify(value, null, 2));
+    NodeFS.fsyncSync(descriptor);
+  } finally {
+    NodeFS.closeSync(descriptor);
+  }
+  NodeFS.renameSync(next, path);
+  const parent = NodeFS.openSync(NodePath.dirname(path), "r");
+  try {
+    NodeFS.fsyncSync(parent);
+  } finally {
+    NodeFS.closeSync(parent);
+  }
+}
+
 export function validateMacConfig(config) {
   if (config.maintenanceMode !== undefined && config.maintenanceMode !== "prepare-only")
     throw Error("Unknown nightly maintenance mode.");
@@ -88,24 +113,7 @@ export async function runMacNightly(input, io = {}) {
     swaps: {},
     startedAt: new Date().toISOString(),
   };
-  const saveLedger = () => {
-    const path = NodePath.join(directory, "result.json");
-    const next = path + ".next";
-    const descriptor = NodeFS.openSync(next, "w", 0o600);
-    try {
-      NodeFS.writeFileSync(descriptor, JSON.stringify(ledger, null, 2));
-      NodeFS.fsyncSync(descriptor);
-    } finally {
-      NodeFS.closeSync(descriptor);
-    }
-    NodeFS.renameSync(next, path);
-    const parent = NodeFS.openSync(directory, "r");
-    try {
-      NodeFS.fsyncSync(parent);
-    } finally {
-      NodeFS.closeSync(parent);
-    }
-  };
+  const saveLedger = () => savePrivateJson(NodePath.join(directory, "result.json"), ledger);
   saveLedger();
   const env = {
     ...process.env,
@@ -290,6 +298,74 @@ export async function runMacNightly(input, io = {}) {
           }),
         );
     if (!prepareOnly) {
+      for (const name of NodeFS.readdirSync(root).sort()) {
+        if (name === NodePath.basename(directory) || !/^run-[a-f0-9-]{36}$/.test(name)) continue;
+        const priorDirectory = NodePath.join(root, name);
+        const path = NodePath.join(priorDirectory, "result.json");
+        const directoryInfo = NodeFS.lstatSync(priorDirectory);
+        if (
+          !directoryInfo.isDirectory() ||
+          directoryInfo.isSymbolicLink() ||
+          directoryInfo.uid !== process.getuid() ||
+          directoryInfo.mode & 0o077
+        )
+          throw Error(`Prior swap directory ${name} requires owner reconciliation.`);
+        if (!NodeFS.existsSync(path))
+          throw Error(`Prior journal ${name} is missing; reconcile before updating.`);
+        const info = NodeFS.lstatSync(path);
+        if (
+          !info.isFile() ||
+          info.isSymbolicLink() ||
+          info.uid !== process.getuid() ||
+          info.mode & 0o077
+        )
+          throw Error(`Prior journal ${name} requires owner reconciliation.`);
+        let prior;
+        try {
+          prior = JSON.parse(NodeFS.readFileSync(path, "utf8"));
+          if (!prior || typeof prior !== "object") throw Error("invalid journal");
+        } catch {
+          throw Error(`Prior journal ${name} is unreadable; reconcile before updating.`);
+        }
+        for (const [hostName, swap] of Object.entries(prior.swaps ?? {})) {
+          if (swap.phase !== "attempting") continue;
+          const held = `Prior journal ${name}/${hostName} is unresolved; reconcile its installed source and checkpoint receipt before retrying.`;
+          if (
+            !["elora", "millie"].includes(hostName) ||
+            prior.runId !== name.slice(4) ||
+            !/^[a-f0-9]{40}$/.test(swap.commit ?? "") ||
+            base !== swap.commit ||
+            !base.startsWith(installed[hostName] ?? "!")
+          )
+            throw Error(held);
+          let accepted;
+          try {
+            accepted = JSON.parse(host(hostName, "reconcile", name, swap.commit));
+          } catch {
+            throw Error(held);
+          }
+          if (
+            !base.startsWith(accepted.commitPrefix ?? "!") ||
+            accepted.recovery?.verified !== true
+          )
+            throw Error(held);
+          prior.swaps[hostName] = {
+            ...swap,
+            phase: "accepted",
+            recovered: true,
+            recovery: accepted.recovery,
+          };
+          prior.reconciledAt = new Date().toISOString();
+          savePrivateJson(path, prior);
+          (ledger.recoveredSwaps ??= []).push({
+            journal: path,
+            host: hostName,
+            commit: swap.commit,
+            recovery: accepted.recovery,
+          });
+          saveLedger();
+        }
+      }
       host("elora", "maintenance");
       host("millie", "maintenance");
     }
