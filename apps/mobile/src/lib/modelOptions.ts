@@ -20,6 +20,7 @@ import {
 import {
   buildExplicitProviderOptionSelectionsFromDescriptors,
   getProviderOptionDescriptors,
+  isAutomaticModelFallbackAllowed,
 } from "@t3tools/shared/model";
 import { resolveModelShortName } from "@t3tools/client-runtime/provider-clients";
 
@@ -266,12 +267,17 @@ export function resolveNewTaskModelSelection(input: {
   readonly stickySelection: ModelSelection | null;
   readonly modelOptions: ReadonlyArray<ModelOption>;
 }): ModelSelection | null {
+  const fallbackOptions = input.modelOptions.filter(
+    (option) =>
+      !option.isUnavailable &&
+      isAutomaticModelFallbackAllowed(option.providerDriver, option.selection.model),
+  );
   return (
     input.draftSelection ??
     input.projectDefaultSelection ??
     input.stickySelection ??
-    input.modelOptions.find((option) => option.isDefault && !option.isUnavailable)?.selection ??
-    input.modelOptions.find((option) => !option.isUnavailable)?.selection ??
+    fallbackOptions.find((option) => option.isDefault)?.selection ??
+    fallbackOptions[0]?.selection ??
     null
   );
 }

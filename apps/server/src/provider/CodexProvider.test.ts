@@ -1,6 +1,10 @@
 import { assert, it } from "@effect/vitest";
 
-import { applyPreferredCodexDefaultModel, mapCodexModelCapabilities } from "./CodexProvider.ts";
+import {
+  applyPreferredCodexDefaultModel,
+  codexDefaultReasoningEffortOverride,
+  mapCodexModelCapabilities,
+} from "./CodexProvider.ts";
 
 it("maps current Codex model capability fields", () => {
   const capabilities = mapCodexModelCapabilities(
@@ -119,7 +123,7 @@ it("uses standard routing when the catalog has no default service tier", () => {
   ]);
 });
 
-it("marks the most preferred available model as default", () => {
+it("does not automatically fall back to Terra when Sol is absent", () => {
   const models = applyPreferredCodexDefaultModel([
     { slug: "gpt-5.6-terra", name: "GPT-5.6-Terra", isCustom: false, capabilities: null },
     { slug: "gpt-5.4", name: "GPT-5.4", isCustom: false, isDefault: true, capabilities: null },
@@ -128,11 +132,34 @@ it("marks the most preferred available model as default", () => {
   assert.deepStrictEqual(
     models.map((model) => ({ slug: model.slug, isDefault: model.isDefault })),
     [
-      { slug: "gpt-5.6-terra", isDefault: true },
-      { slug: "gpt-5.4", isDefault: undefined },
+      { slug: "gpt-5.6-terra", isDefault: undefined },
+      { slug: "gpt-5.4", isDefault: true },
     ],
   );
 });
+
+it.each(["gpt-6.1-sol", "openai.gpt-6.1-sol"])("defaults %s to medium effort", (model) => {
+  assert.strictEqual(codexDefaultReasoningEffortOverride(model), "medium");
+});
+
+it.each(["gpt-6-astra", "gpt-5.6-terra", "openai.gpt-6-astra"])(
+  "does not make %s the automatic fallback when Sol is absent",
+  (slug) => {
+    const unsafe = { slug, name: slug, isCustom: false, isDefault: true, capabilities: null };
+    const available = applyPreferredCodexDefaultModel([
+      unsafe,
+      { slug: "gpt-6-luna", name: "Luna", isCustom: false, capabilities: null },
+    ]);
+    assert.deepStrictEqual(
+      available.filter((model) => model.isDefault).map((model) => model.slug),
+      ["gpt-6-luna"],
+    );
+    assert.deepStrictEqual(
+      applyPreferredCodexDefaultModel([unsafe]).some((model) => model.isDefault),
+      false,
+    );
+  },
+);
 
 it("ranks qualified Codex models while preserving their wire ids", () => {
   const models = applyPreferredCodexDefaultModel([

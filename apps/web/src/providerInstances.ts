@@ -1,4 +1,5 @@
 import { pipe } from "effect/Function";
+import { isAutomaticModelFallbackAllowed } from "@t3tools/shared/model";
 import {
   DEFAULT_MODEL_BY_PROVIDER,
   defaultInstanceIdForDriver,
@@ -247,10 +248,13 @@ export function getDefaultProviderInstanceModel(
 ): string | undefined {
   const entry = getProviderInstanceEntry(providers, instanceId);
   if (!entry) return undefined;
+  const models = entry.models.filter((model) =>
+    isAutomaticModelFallbackAllowed(entry.driverKind, model.slug),
+  );
   return (
-    entry.models.find((model) => model.isDefault && !model.isCustom)?.slug ??
-    entry.models.find((model) => !model.isCustom)?.slug ??
-    entry.models[0]?.slug ??
+    models.find((model) => model.isDefault && !model.isCustom)?.slug ??
+    models.find((model) => !model.isCustom)?.slug ??
+    models[0]?.slug ??
     DEFAULT_MODEL_BY_PROVIDER[entry.driverKind]
   );
 }

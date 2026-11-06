@@ -417,6 +417,10 @@ export function codexModelFamily(slug: string): string {
   return slug.startsWith("openai.gpt-") ? slug.slice("openai.".length) : slug;
 }
 
+export function isAutomaticModelFallbackAllowed(provider: string, model: string): boolean {
+  return provider !== "codex" || !/(?:^|[./])gpt-[\d.]+-(?:astra|terra)(?:$|-)/.test(model);
+}
+
 export interface CustomModelDefinition {
   readonly slug: string;
   readonly name: string;

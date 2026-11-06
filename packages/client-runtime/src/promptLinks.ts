@@ -9,7 +9,11 @@ import {
   type ThreadId,
   type ThreadPullRequestLink,
 } from "@t3tools/contracts";
-import { resolveSelectableModel, type SelectableModelOption } from "@t3tools/shared/model";
+import {
+  isAutomaticModelFallbackAllowed,
+  resolveSelectableModel,
+  type SelectableModelOption,
+} from "@t3tools/shared/model";
 import type { AsyncResult } from "effect/reactivity";
 import type { PromptLinkPullRequest, PromptLinkRepository } from "@t3tools/shared/promptLinks";
 import {
@@ -117,9 +121,12 @@ export function resolvePromptLinkModelSelection(
     request.model === null
       ? null
       : resolveSelectableModel(instance.driver, request.model, instance.models);
+  const fallbackModels = instance.models.filter((model) =>
+    isAutomaticModelFallbackAllowed(instance.driver, model.slug),
+  );
   const model =
     requested ??
-    (instance.models.find((candidate) => candidate.isDefault) ?? instance.models[0])?.slug;
+    (fallbackModels.find((candidate) => candidate.isDefault) ?? fallbackModels[0])?.slug;
   if (model === undefined) return null;
   return {
     selection: { instanceId: instance.instanceId, model },

@@ -2333,6 +2333,12 @@ describe("OrchestratorMcpService provider resolution", () => {
         for (const testCase of cases) {
           const dispatched = yield* Ref.make<ReadonlyArray<unknown>>([]);
           let delegated = false;
+          const peerProvider = providerSnapshot({
+            instanceId: codexAltInstanceId,
+            driver: testCase.candidateDriver,
+            model: "codex-alt-model",
+            enabled: testCase.peerEnabled,
+          });
           const layerDependencies = Layer.mergeAll(
             NodeServices.layer,
             NodeCrypto.layer,
@@ -2373,12 +2379,20 @@ describe("OrchestratorMcpService provider resolution", () => {
                 model: "gpt-5.4",
                 enabled: testCase.inheritedEnabled,
               }),
-              providerSnapshot({
-                instanceId: codexAltInstanceId,
-                driver: testCase.candidateDriver,
-                model: "codex-alt-model",
-                enabled: testCase.peerEnabled,
-              }),
+              {
+                ...peerProvider,
+                models: [
+                  {
+                    slug: "gpt-6-astra",
+                    name: "Astra",
+                    isDefault: true,
+                    isCustom: false,
+                    capabilities: null,
+                  },
+                  { slug: "gpt-5.6-terra", name: "Terra", isCustom: false, capabilities: null },
+                  ...peerProvider.models,
+                ],
+              },
             ]),
             adapterRegistryLayer(
               testCase.name === "explicit-disabled-without-adapter"

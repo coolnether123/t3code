@@ -569,6 +569,18 @@ describe("mobile model options", () => {
         modelOptions: [unavailable],
       }),
     ).toBeNull();
+    for (const model of ["gpt-6-astra", "gpt-5.6-terra"]) {
+      const explicit = { instanceId: ProviderInstanceId.make("codex"), model };
+      const implicit = { ...providerDefault, providerDriver: "codex", selection: explicit };
+      const input = {
+        draftSelection: null,
+        projectDefaultSelection: null,
+        stickySelection: null,
+        modelOptions: [implicit],
+      };
+      expect(resolveNewTaskModelSelection(input)).toBeNull();
+      expect(resolveNewTaskModelSelection({ ...input, draftSelection: explicit })).toBe(explicit);
+    }
   });
 
   describe("project-aware enablement", () => {

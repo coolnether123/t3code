@@ -57,6 +57,7 @@ import {
   codexModelFamily,
   createModelCapabilities,
   formatCodexModelName,
+  isAutomaticModelFallbackAllowed,
 } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { codexAppServerArgs, resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
@@ -196,7 +197,7 @@ function codexAccountEmail(account: CodexSchema.V2GetAccountResponse["account"])
 }
 
 export function codexDefaultReasoningEffortOverride(model: string): "medium" | undefined {
-  return codexModelFamily(model) === "gpt-6-astra" ? "medium" : undefined;
+  return ["gpt-6.1-sol", "gpt-6-astra"].includes(codexModelFamily(model)) ? "medium" : undefined;
 }
 
 export function mapCodexModelCapabilities(
@@ -321,12 +322,14 @@ function parseCodexModelListResponse(
 export function applyPreferredCodexDefaultModel(
   models: ReadonlyArray<ServerProviderModel>,
 ): ReadonlyArray<ServerProviderModel> {
-  const preferredSlug = ["gpt-6.1-sol", ...PREFERRED_DEFAULT_CODEX_MODELS].flatMap((slug) =>
-    models.filter((model) => !model.isCustom && codexModelFamily(model.slug) === slug),
-  )[0]?.slug;
-  if (!preferredSlug) {
-    return models;
-  }
+  const allowed = models.filter((model) => isAutomaticModelFallbackAllowed("codex", model.slug));
+  const preferredSlug =
+    PREFERRED_DEFAULT_CODEX_MODELS.flatMap((slug) =>
+      allowed.filter((model) => !model.isCustom && codexModelFamily(model.slug) === slug),
+    )[0]?.slug ??
+    allowed.find((model) => model.isDefault)?.slug ??
+    allowed.find((model) => !model.isCustom)?.slug ??
+    allowed[0]?.slug;
   return models.map((model) => {
     if (model.slug === preferredSlug) {
       return model.isDefault ? model : { ...model, isDefault: true };

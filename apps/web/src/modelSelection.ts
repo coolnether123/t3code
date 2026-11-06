@@ -13,6 +13,7 @@ import {
 import {
   type CustomModelDefinition,
   createModelSelection,
+  isAutomaticModelFallbackAllowed,
   normalizeCustomModelSlug,
   readCustomModelEntries,
   resolveSelectableModel,
@@ -299,7 +300,12 @@ export function resolveAppModelSelectionForInstance(
       return unavailableSelection;
     }
   }
-  return options.find((option) => option.isDefault)?.slug ?? options[0]?.slug ?? null;
+  const fallbackOptions = options.filter((option) =>
+    isAutomaticModelFallbackAllowed(entry.driverKind, option.slug),
+  );
+  return (
+    fallbackOptions.find((option) => option.isDefault)?.slug ?? fallbackOptions[0]?.slug ?? null
+  );
 }
 
 // New drafts carry the stored selection; capabilities resolve its raw options later.
@@ -408,7 +414,8 @@ export function resolveAppModelSelectionState(
         supportedProviders,
         selectedModel,
       ) ??
-      entry.models[0]?.slug ??
+      entry.models.find((model) => isAutomaticModelFallbackAllowed(entry.driverKind, model.slug))
+        ?.slug ??
       DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER[entry.driverKind];
     if (!model) {
       return createModelSelection(entry.instanceId, "", []);

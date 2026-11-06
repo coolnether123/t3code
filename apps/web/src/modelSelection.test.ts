@@ -148,12 +148,12 @@ describe("scoped default model selections", () => {
         ...DEFAULT_SERVER_SETTINGS,
         providerModelPreferences: {
           [ProviderInstanceId.make("codex")]: {
-            hiddenModels: ["gpt-6-astra"],
+            hiddenModels: ["gpt-6-luna"],
             modelOrder: [],
           },
         },
       },
-      providers: [provider({ instanceId: "codex", models: ["gpt-6-astra", "gpt-6-sol"] })],
+      providers: [provider({ instanceId: "codex", models: ["gpt-6-luna", "gpt-6-sol"] })],
     };
     const inherited = { ...configured, settings: DEFAULT_SERVER_SETTINGS };
     expect(defaultModelSelectionsAreMixed(DEFAULT_CLIENT_SETTINGS, [configured, inherited])).toBe(

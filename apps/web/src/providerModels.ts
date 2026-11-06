@@ -8,7 +8,11 @@ import {
   type ServerProvider,
   type ServerProviderModel,
 } from "@t3tools/contracts";
-import { createModelCapabilities, resolveSelectableModel } from "@t3tools/shared/model";
+import {
+  createModelCapabilities,
+  isAutomaticModelFallbackAllowed,
+  resolveSelectableModel,
+} from "@t3tools/shared/model";
 
 const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],
@@ -88,7 +92,9 @@ export function getDefaultServerModel(
   providers: ReadonlyArray<ServerProvider>,
   provider: ProviderDriverKind,
 ): string {
-  const models = getProviderModels(providers, provider);
+  const models = getProviderModels(providers, provider).filter((model) =>
+    isAutomaticModelFallbackAllowed(provider, model.slug),
+  );
   return (
     models.find((model) => model.isDefault && !model.isCustom)?.slug ??
     models.find((model) => !model.isCustom)?.slug ??

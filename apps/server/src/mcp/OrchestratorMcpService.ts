@@ -66,7 +66,11 @@ import {
   resolveProjectProviderInstanceEnabled,
   SECRET_REQUEST_UNSAVED_NOTE,
 } from "@t3tools/contracts";
-import { getProviderOptionCurrentValue, withLegacyUltracodeEffort } from "@t3tools/shared/model";
+import {
+  getProviderOptionCurrentValue,
+  isAutomaticModelFallbackAllowed,
+  withLegacyUltracodeEffort,
+} from "@t3tools/shared/model";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import {
@@ -1412,11 +1416,15 @@ const make = Effect.gen(function* () {
 
     const inheritedSelection = input.parent.thread.modelSelection;
     const requestedModel = input.target?.model;
+    const fallbackModels = provider.models.filter((candidate) =>
+      isAutomaticModelFallbackAllowed(provider.driver, candidate.slug),
+    );
     const model =
       requestedModel ??
       (instanceId === inheritedSelection.instanceId
         ? inheritedSelection.model
-        : provider.models[0]?.slug);
+        : (fallbackModels.find((candidate) => candidate.isDefault)?.slug ??
+          fallbackModels[0]?.slug));
     if (model === undefined) {
       return yield* failure(
         "model_unavailable",

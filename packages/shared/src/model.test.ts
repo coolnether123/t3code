@@ -13,6 +13,7 @@ import {
   getModelSelectionBooleanOptionValue,
   getModelSelectionStringOptionValue,
   getProviderOptionDescriptors,
+  isAutomaticModelFallbackAllowed,
   readCustomModelEntries,
   toCustomModelSetting,
   normalizeCustomModelSlug,
@@ -61,6 +62,18 @@ const codexCaps: ModelCapabilities = createModelCapabilities({
 });
 
 describe("model slug normalization", () => {
+  it.each([
+    ["codex", "gpt-6-astra", false],
+    ["codex", "gpt-5.6-terra", false],
+    ["codex", "openai.gpt-6-astra", false],
+    ["codex", "openai/gpt-5.6-terra", false],
+    ["codex", "gpt-6.1-sol", true],
+    ["codex", "gpt-6-luna", true],
+    ["opencode", "gpt-6-astra", true],
+  ])("checks automatic fallback policy for %s model %s", (provider, model, allowed) => {
+    expect(isAutomaticModelFallbackAllowed(provider, model)).toBe(allowed);
+  });
+
   it("preserves exact custom slugs instead of expanding provider aliases", () => {
     const claude = ProviderDriverKind.make("claudeAgent");
 
