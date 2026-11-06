@@ -598,12 +598,28 @@ export const make = Effect.gen(function* () {
         });
       }
       const recoveredNonterminalRunIds = new Set(runs.map((run) => run.id));
+      const orphanedApprovalIds = new Set(
+        projection.runtimeRequests
+          .filter(
+            (request) =>
+              (request.kind === "command" ||
+                request.kind === "file-read" ||
+                request.kind === "file-change") &&
+              (requests.some((pending) => pending.id === request.id) ||
+                ((request.status === "cancelled" || request.status === "expired") &&
+                  request.responseCapability.type === "not_resumable")),
+          )
+          .map((request) => request.id),
+      );
       const cancelledStaleNodeIds = new Set<string>();
       for (const item of projection.turnItems ?? []) {
         if (item.runId !== null && recoveredNonterminalRunIds.has(item.runId)) {
           continue;
         }
-        if (!isBackgroundCapableTurnItemType(item.type)) {
+        if (
+          !isBackgroundCapableTurnItemType(item.type) &&
+          !(item.type === "approval_request" && orphanedApprovalIds.has(item.requestId))
+        ) {
           continue;
         }
         if (!isNonterminalTurnItemStatus(item.status) || isAppOwnedDelegationItem(item)) {

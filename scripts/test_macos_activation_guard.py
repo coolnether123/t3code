@@ -272,9 +272,18 @@ class CurrentOrphanTests(unittest.TestCase):
         self.assertEqual(before, (self.root / 'statev2.sqlite').read_bytes())
         with self.assertRaises(guard.Busy):
             guard.current_database_snapshot(str(self.path))
+        for status in ('cancelled', 'expired'):
+            self.db.execute("UPDATE orchestration_v2_projection_runtime_requests SET status=?, payload_json=json_set(payload_json,'$.status',?,'$.responseCapability',json('{\"type\":\"not_resumable\",\"reason\":\"process ended\"}'))", (status, status))
+            self.db.commit()
+            self.assertEqual(self.snapshot()['orphan_count'], 1)
+            with self.assertRaises(guard.Busy):
+                guard.current_database_snapshot(str(self.path))
 
     def test_live_unknown_background_and_changed_orphan_hold(self):
         for mutation in (
+            "UPDATE orchestration_v2_projection_runtime_requests SET payload_json=json_set(payload_json,'$.status','resolved')",
+            "UPDATE orchestration_v2_projection_runtime_requests SET payload_json=json_set(payload_json,'$.kind','user_input')",
+            "UPDATE orchestration_v2_projection_runtime_requests SET payload_json=json_set(payload_json,'$.responseCapability.type','message')",
             "UPDATE orchestration_v2_projection_threads SET archived_at=NULL",
             "UPDATE orchestration_v2_projection_runs SET status='running'",
             "UPDATE orchestration_v2_projection_provider_turns SET status='completed'",

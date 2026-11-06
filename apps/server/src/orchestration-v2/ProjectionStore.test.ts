@@ -1114,6 +1114,7 @@ it.effect("SQL shells use the latest subagent owner for duplicate provider-threa
 
 const addOrphanedRecoveryCandidate = Effect.fn("addOrphanedRecoveryCandidate")(function* (
   suffix: string,
+  approval = false,
 ) {
   const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
   const now = yield* DateTime.now;
@@ -1177,10 +1178,60 @@ const addOrphanedRecoveryCandidate = Effect.fn("addOrphanedRecoveryCandidate")(f
       startedAt: now,
       completedAt: null,
       updatedAt: now,
-      type: "command_execution",
-      input: "sleep 60",
+      ...(approval
+        ? {
+            type: "approval_request" as const,
+            requestId: RuntimeRequestId.make(`request:${suffix}`),
+            requestKind: "command" as const,
+            prompt: "hostname",
+          }
+        : { type: "command_execution" as const, input: "sleep 60" }),
     },
   });
+  if (approval) {
+    yield* projectionStore.apply({
+      id: EventId.make(`event:${suffix}:request-cancelled`),
+      type: "runtime-request.updated",
+      threadId,
+      nodeId: rootNodeId,
+      occurredAt: now,
+      payload: {
+        id: RuntimeRequestId.make(`request:${suffix}`),
+        nodeId: rootNodeId,
+        providerTurnId: null,
+        nativeRequestRef: null,
+        kind: "command",
+        status: "cancelled",
+        responseCapability: { type: "not_resumable", reason: "process ended" },
+        createdAt: now,
+        resolvedAt: now,
+      },
+    });
+    yield* projectionStore.apply({
+      id: EventId.make(`event:${suffix}:node-waiting`),
+      type: "node.updated",
+      threadId,
+      nodeId: rootNodeId,
+      occurredAt: now,
+      payload: {
+        id: rootNodeId,
+        threadId,
+        runId,
+        parentNodeId: null,
+        rootNodeId,
+        kind: "tool_call",
+        status: "waiting",
+        countsForRun: true,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        runtimeRequestId: RuntimeRequestId.make(`request:${suffix}`),
+        checkpointScopeId: null,
+        startedAt: now,
+        completedAt: null,
+      },
+    });
+  }
 
   return threadId;
 });
@@ -5490,6 +5541,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       const childThreadId = ThreadId.make("thread:recovery-candidates:child");
       const rolledBackThreadId = yield* addRolledBackRecoveryCandidate("recovery-candidates");
       const orphanedThreadId = yield* addOrphanedRecoveryCandidate("recovery-candidates");
+      const approvalThreadId = yield* addOrphanedRecoveryCandidate("recovery-approval", true);
       const projectId = ProjectId.make("project:recovery-candidates");
       const makeThread = (threadId: ThreadId) => ({
         createdBy: "user" as const,
@@ -5637,6 +5689,12 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       const recoveryThreadIds = yield* projectionStore.getRecoveryThreadIds("runtime");
       assert.include(recoveryThreadIds, runningThreadId);
       assert.include(recoveryThreadIds, orphanedThreadId);
+      assert.include(recoveryThreadIds, approvalThreadId);
+      const approvalRecovery =
+        yield* projectionStore.getRuntimeRecoveryProjection(approvalThreadId);
+      assert.equal(approvalRecovery.runtimeRequests[0]?.status, "cancelled");
+      assert.equal(approvalRecovery.turnItems[0]?.type, "approval_request");
+      assert.equal(approvalRecovery.nodes[0]?.status, "waiting");
       assert.include(recoveryThreadIds, memberThreadId);
       assert.include(recoveryThreadIds, childThreadId);
       assert.notInclude(recoveryThreadIds, settledThreadId);

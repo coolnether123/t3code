@@ -4233,6 +4233,19 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 SELECT thread_id FROM orchestration_v2_projection_runtime_requests
                 WHERE status = 'pending'
                 UNION
+                SELECT item.thread_id FROM orchestration_v2_projection_turn_items AS item
+                JOIN orchestration_v2_projection_runtime_requests AS request
+                  ON request.thread_id = item.thread_id
+                  AND request.runtime_request_id = json_extract(item.payload_json, '$.requestId')
+                WHERE item.type = 'approval_request' AND item.status IN ('pending', 'running', 'waiting')
+                  AND request.kind IN ('command', 'file-read', 'file-change')
+                  AND request.status IN ('cancelled', 'expired')
+                  AND json_extract(request.payload_json, '$.responseCapability.type') = 'not_resumable'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM orchestration_v2_projection_runs AS run
+                    WHERE run.run_id = item.run_id AND run.status = 'rolled_back'
+                  )
+                UNION
                 SELECT bindings.thread_id
                 FROM orchestration_v2_projection_provider_sessions AS sessions
                 CROSS JOIN orchestration_v2_projection_provider_session_bindings AS bindings
@@ -4661,7 +4674,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   OR run.run_id IN (
                     SELECT item.run_id FROM orchestration_v2_projection_turn_items AS item
                     WHERE item.thread_id = ${threadId}
-                      AND item.type IN ('command_execution', 'dynamic_tool', 'subagent')
+                      AND item.type IN ('command_execution', 'dynamic_tool', 'subagent', 'approval_request')
                       AND item.status IN ('pending', 'running', 'waiting')
                       AND item.run_id IS NOT NULL
                   )
@@ -4697,7 +4710,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   OR node.node_id IN (
                     SELECT item.node_id FROM orchestration_v2_projection_turn_items AS item
                     WHERE item.thread_id = ${threadId}
-                      AND item.type IN ('command_execution', 'dynamic_tool', 'subagent')
+                      AND item.type IN ('command_execution', 'dynamic_tool', 'subagent', 'approval_request')
                       AND item.status IN ('pending', 'running', 'waiting')
                   )
                   OR node.node_id IN (
@@ -4848,7 +4861,18 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             `,
             sql<PayloadRow>`
               SELECT payload_json FROM orchestration_v2_projection_runtime_requests
-              WHERE thread_id = ${threadId} AND status = 'pending'
+              WHERE thread_id = ${threadId} AND (
+                status = 'pending' OR (
+                  status IN ('cancelled', 'expired') AND kind IN ('command', 'file-read', 'file-change')
+                  AND json_extract(payload_json, '$.responseCapability.type') = 'not_resumable'
+                  AND runtime_request_id IN (
+                    SELECT json_extract(item.payload_json, '$.requestId')
+                    FROM orchestration_v2_projection_turn_items AS item
+                    WHERE item.thread_id = ${threadId} AND item.type = 'approval_request'
+                      AND item.status IN ('pending', 'running', 'waiting')
+                  )
+                )
+              )
               ORDER BY created_at ASC, runtime_request_id ASC
             `,
             // CROSS JOIN keeps empty run cohorts out of message history; the run index bounds each lookup.
@@ -4872,6 +4896,15 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                       AND status IN ('queued', 'preparing', 'starting', 'running', 'waiting')
                   )
                   OR item.type IN ('command_execution', 'dynamic_tool', 'subagent')
+                  OR (
+                    item.type = 'approval_request'
+                    AND json_extract(item.payload_json, '$.requestId') IN (
+                      SELECT runtime_request_id FROM orchestration_v2_projection_runtime_requests
+                      WHERE thread_id = ${threadId} AND kind IN ('command', 'file-read', 'file-change')
+                        AND (status = 'pending' OR (status IN ('cancelled', 'expired')
+                          AND json_extract(payload_json, '$.responseCapability.type') = 'not_resumable'))
+                    )
+                  )
                   OR (
                     item.type = 'user_input_request'
                     AND json_extract(item.payload_json, '$.requestId') IN (

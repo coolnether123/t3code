@@ -205,13 +205,15 @@ def current_database_snapshot(path, orphan_requests=None):
                               (thread, request_id)).fetchall()
             require(len(rows) == 1, "pinned orphan request missing")
             request = json.loads(rows[0][0])
-            require(request.get('status') == 'pending' and request.get('kind') in ('command', 'file_read', 'file_change')
-                    and request.get('responseCapability', {}).get('type') == 'live', "pinned request is not orphan approval")
-            session_id = request['responseCapability'].get('providerSessionId')
+            capability = request.get('responseCapability', {}).get('type')
+            require(request.get('kind') in ('command', 'file-read', 'file-change') and
+                    ((request.get('status') == 'pending' and capability == 'live') or
+                     (request.get('status') in ('cancelled', 'expired') and capability == 'not_resumable')),
+                    "pinned request is not orphan approval")
             archived = db.execute("SELECT archived_at,deleted_at FROM " + prefix + "threads WHERE thread_id=?", (thread,)).fetchall()
             require(len(archived) == 1 and archived[0][0] is not None and archived[0][1] is None, "orphan thread is not archived")
-            require(not db.execute("SELECT 1 FROM " + prefix + "provider_session_bindings WHERE thread_id=? AND provider_session_id=?",
-                                   (thread, session_id)).fetchall(), "orphan provider binding still exists")
+            require(not db.execute("SELECT 1 FROM " + prefix + "provider_session_bindings WHERE thread_id=?",
+                                   (thread,)).fetchall(), "orphan provider binding still exists")
             turns = db.execute("SELECT status FROM " + prefix + "provider_turns WHERE thread_id=? AND provider_turn_id=?",
                                (thread, request.get('providerTurnId'))).fetchall()
             require(turns == [('interrupted',)], "orphan provider turn is not interrupted")
