@@ -115,6 +115,7 @@ def verify(before, path, fence=None):
         db.execute("BEGIN")
         threads = {json.loads(row[0])["id"] for row in db.execute("SELECT payload_json FROM orchestration_v2_projection_threads")}
         runs = [json.loads(row[0]) for row in db.execute("SELECT payload_json FROM orchestration_v2_projection_runs")]
+        provider_turns = [dict(json.loads(payload), threadId=thread) for thread, payload in db.execute("SELECT thread_id,payload_json FROM orchestration_v2_projection_provider_turns")]
         items = {item["id"]: item for thread, payload in db.execute("SELECT thread_id,payload_json FROM orchestration_v2_projection_turn_items") for item in [dict(json.loads(payload), threadId=thread)]}
         requests = {item["id"]: item for thread, payload in db.execute("SELECT thread_id,payload_json FROM orchestration_v2_projection_runtime_requests") for item in [dict(json.loads(payload), threadId=thread)]}
     if not set(before["threadIds"]).issubset(threads):
@@ -131,7 +132,8 @@ def verify(before, path, fence=None):
                 raise ValueError("pending checkpoint approval changed")
         elif current.get("status") not in {"cancelled", "expired"} or current.get("responseCapability", {}).get("type") != "not_resumable" or not current.get("responseCapability", {}).get("reason") or not current.get("resolvedAt"):
             raise ValueError("checkpoint approval not explicitly held")
-    resumed = held = pending = natural = 0
+    resumed = held = pending = natural = failed = failed_sources = 0
+    receipts = []
     for source in before["runs"]:
         if not any(run["id"] == source["id"] for run in runs):
             raise ValueError("checkpoint source missing")
@@ -143,13 +145,36 @@ def verify(before, path, fence=None):
                 raise ValueError("held checkpoint was resumed")
             held += 1
         elif continuations:
-            resumed += 1
-        elif any(run["id"] == source["id"] and run.get("status") in {"completed", "failed"} for run in runs):
+            continuation = continuations[0]
+            accepted = [turn for turn in provider_turns
+                        if continuation.get("activeAttemptId") is not None
+                        and turn.get("runAttemptId") == continuation["activeAttemptId"]
+                        and turn.get("threadId") == source["threadId"]
+                        and turn.get("providerThreadId") == continuation.get("providerThreadId")
+                        and turn.get("status") in {"running", "completed"}
+                        and turn.get("startedAt")
+                        and (turn.get("nativeTurnRef") or {}).get("driver") == "codex"
+                        and (turn.get("nativeTurnRef") or {}).get("strength") == "strong"
+                        and (turn.get("nativeTurnRef") or {}).get("nativeId")]
+            if continuation.get("status") in {"failed", "cancelled", "interrupted", "rolled_back"} or any(run.get("restartContinuationOfRunId") == continuation["id"] for run in runs):
+                failed += 1
+            elif continuation.get("status") in {"running", "completed", "waiting"} and accepted:
+                resumed += 1
+                receipts.append({"sourceRunId": source["id"], "runId": continuation["id"],
+                                 "runStatus": continuation["status"], "attemptId": continuation["activeAttemptId"],
+                                 "providerTurnId": accepted[-1]["id"], "providerTurnStatus": accepted[-1]["status"],
+                                 "nativeTurnId": accepted[-1]["nativeTurnRef"]["nativeId"]})
+            else:
+                pending += 1
+        elif any(run["id"] == source["id"] and run.get("status") == "completed" for run in runs):
             natural += 1
+        elif any(run["id"] == source["id"] and run.get("status") == "failed" for run in runs):
+            failed_sources += 1
         else:
             pending += 1
-    return {"verified": pending == 0, "threadsPreserved": len(before["threadIds"]),
+    return {"verified": pending == 0 and failed == 0 and failed_sources == 0, "threadsPreserved": len(before["threadIds"]),
             "resumedOnce": resumed, "finishedNaturally": natural, "held": held, "pending": pending,
+            "failedResumes": failed, "failedSources": failed_sources, "resumeReceipts": receipts,
             "additionalHeld": len(set((fence or {}).get("heldRunIds", [])) - {run["id"] for run in before["runs"]})}
 
 

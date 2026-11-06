@@ -1403,6 +1403,54 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       };
     });
 
+  it.effect(
+    "sends the restart continuation prompt once without replaying the original command",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const text =
+            "Continue where you left off. Confirm completed actions before repeating them.";
+          const starts: Array<unknown> = [];
+          const harness = yield* makeCodexReplayHarness(
+            makeCodexReplayTranscript({
+              scenario: "restart-continuation-input",
+              entries: codexReplayPreamble({
+                nativeThreadId: "restart-native-thread",
+                nativeTurnId: "restart-native-turn",
+                prompt: text,
+              }),
+            }),
+            undefined,
+            (method, params) =>
+              Effect.sync(() => {
+                if (method === "turn/start") starts.push(params);
+              }),
+          );
+          yield* harness.runtime.startTurn({
+            ...makeCodexTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now: yield* DateTime.now,
+              attemptId: RunAttemptId.make("restart-attempt"),
+              text,
+            }),
+            restartContinuationOfRunId: RunId.make("interrupted-original-run"),
+          });
+          assert.lengthOf(starts, 1);
+          assert.deepEqual((starts[0] as { input: unknown }).input, [{ type: "text", text }]);
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              IdAllocator.layer,
+              McpProviderSessions.layer,
+              NodeServices.layer,
+              NodeCrypto.layer,
+            ),
+          ),
+        ),
+      ),
+  );
+
   it.effect.each(["before", "after"] as const)(
     "rejects a previous run's native turn when it completes %s the new start response",
     (completionOrder) =>

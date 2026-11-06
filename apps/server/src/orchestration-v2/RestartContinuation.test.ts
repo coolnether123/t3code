@@ -25,6 +25,7 @@ import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { restartContinuationRun, continueRestartedRun } from "./RestartContinuation.ts";
 import { continuationStartRetryDelayMs } from "./RestartBackgroundNote.ts";
+import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -1084,6 +1085,19 @@ it("backs off twice from a continuation the provider never took, then lets it fa
   );
   for (const failureClass of ["usage_limit", "permission_error", "validation_error"])
     assert.isUndefined(continuationStartRetryDelayMs(first, projection(failureClass)));
+  const emptyInputFailure = makeProviderFailure({
+    class: "provider_error",
+    cause: {
+      _tag: "ProviderAdapterTurnStartError",
+      cause: {
+        _tag: "CodexAppServerRequestError",
+        method: "turn/start",
+        code: -32603,
+        errorMessage: "failed to submit turn input: EmptyInput",
+      },
+    },
+  });
+  assert.isUndefined(continuationStartRetryDelayMs(first, projection(emptyInputFailure.class)));
   // Once the provider took the prompt, starting again would repeat the turn.
   assert.isUndefined(
     continuationStartRetryDelayMs(

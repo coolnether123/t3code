@@ -25,6 +25,28 @@ import {
 import * as IdAllocator from "./IdAllocator.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
+it("classifies a rejected empty Codex turn as non-retryable validation without exposing raw errors", () => {
+  const rejection = {
+    _tag: "CodexAppServerRequestError",
+    method: "turn/start",
+    code: -32603,
+    errorMessage: "failed to submit turn input: EmptyInput",
+  };
+  const failure = makeProviderFailure({
+    cause: { _tag: "ProviderAdapterTurnStartError", cause: rejection },
+    class: "provider_error",
+  });
+  assert.equal(failure.class, "validation_error");
+  assert.equal(failure.code, "EmptyInput");
+  assert.equal(failure.retryable, false);
+  assert.notInclude(failure.message, rejection.errorMessage);
+  for (const changed of [
+    { ...rejection, method: "thread/resume" },
+    { ...rejection, errorMessage: "temporary server failure" },
+  ])
+    assert.equal(makeProviderFailure({ cause: changed }).class, "unknown");
+});
+
 it("redacts credentials and URL secrets from provider failures", () => {
   const failure = makeProviderFailure({
     message:

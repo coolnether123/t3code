@@ -78,6 +78,7 @@ const PROVIDER_FAILURE_REASONS: Record<ProviderAdapterFailureReason, string> = {
 function curatedCauseMessages(cause: unknown): {
   readonly known: string | undefined;
   readonly category: string | undefined;
+  readonly emptyTurnInput?: true;
 } {
   const seen = new Set<unknown>();
   let category: (typeof PROVIDER_FAILURE_CATEGORIES)[string];
@@ -118,6 +119,17 @@ function curatedCauseMessages(cause: unknown): {
         case "ProviderAdapterThreadInUseError":
           return { known: stringField(cause, "message"), category: categoryMessage() };
         case "CodexAppServerRequestError": {
+          if (
+            (cause as Record<string, unknown>).method === "turn/start" &&
+            (cause as Record<string, unknown>).code === -32603 &&
+            stringField(cause, "errorMessage") === "failed to submit turn input: EmptyInput"
+          ) {
+            return {
+              known: "Codex rejected the turn because its input was empty.",
+              category: categoryMessage(),
+              emptyTurnInput: true,
+            };
+          }
           // Only Codex's fixed-shape goal validation text is actionable and
           // safe to show; other request error text stays hidden.
           const rejection = stringField(cause, "message");
@@ -186,7 +198,7 @@ export function knownProviderFailureMessage(cause: unknown): string | undefined 
   return curatedCauseMessages(cause).known;
 }
 
-function stringField(value: unknown, key: "message" | "code"): string | undefined {
+function stringField(value: unknown, key: "message" | "code" | "errorMessage"): string | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   try {
     const candidate = (value as Record<string, unknown>)[key];
@@ -271,10 +283,10 @@ export function makeProviderFailure(input: {
     rawCode === null ? null : boundedText(rawCode, MAX_PROVIDER_FAILURE_CODE_LENGTH) || null;
 
   return {
-    class: input.class ?? "unknown",
+    class: curated.emptyTurnInput ? "validation_error" : (input.class ?? "unknown"),
     message: message || DEFAULT_PROVIDER_FAILURE_MESSAGE,
-    code,
-    retryable: input.retryable ?? null,
+    code: curated.emptyTurnInput ? "EmptyInput" : code,
+    retryable: curated.emptyTurnInput ? false : (input.retryable ?? null),
     ...(input.class === "usage_limit" &&
     input.resetAt != null &&
     Number.isFinite(Date.parse(input.resetAt))
