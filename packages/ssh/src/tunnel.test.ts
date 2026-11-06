@@ -1,10 +1,13 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodeNet from "node:net";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NetService from "@t3tools/shared/Net";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
@@ -86,6 +89,73 @@ function commandArgs(command: ChildProcess.Command): ReadonlyArray<string> {
 const ARCHIVE = { archiveVersion: "1.2.3-preview.20260911.4" } as const;
 
 describe("ssh tunnel scripts", () => {
+  it.live.each(["external", "installed"] as const)(
+    "never replaces an unavailable %s backend",
+    (owner) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-external-owner-" });
+        const state = path.join(root, ".t3/ssh-launch/probe");
+        const receipt = path.join(root, "unexpected-server.json");
+        const fixture = path.join(root, "runner.mjs");
+        yield* Effect.addFinalizer(() =>
+          Effect.gen(function* () {
+            if (yield* fs.exists(receipt)) {
+              const { pid } = JSON.parse(yield* fs.readFileString(receipt));
+              yield* Effect.sync(() => process.kill(pid, "SIGTERM"));
+            }
+          }).pipe(Effect.orDie),
+        );
+        yield* fs.makeDirectory(state, { recursive: true });
+        const probe = NodeNet.createServer();
+        yield* Effect.promise(
+          () => new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve)),
+        );
+        const port = (probe.address() as NodeNet.AddressInfo).port;
+        yield* Effect.promise(() => new Promise<void>((resolve) => probe.close(() => resolve())));
+        const managed = owner === "external" ? "external\n" : "managed\n";
+        yield* fs.writeFileString(path.join(state, "managed"), managed);
+        yield* fs.writeFileString(path.join(state, "port"), String(port) + "\n");
+        if (owner === "installed") {
+          const launchAgents = path.join(root, "Library/LaunchAgents");
+          yield* fs.makeDirectory(launchAgents, { recursive: true });
+          yield* fs.writeFileString(
+            path.join(launchAgents, "com.christinesmith.t3-fork.backend.plist"),
+            "t3-fork-backend-deployment-v1",
+          );
+        }
+        yield* fs.writeFileString(
+          fixture,
+          `import http from 'node:http'; import fs from 'node:fs';
+        if (process.argv[2] === 'serve') {
+          const port = Number(process.argv[process.argv.indexOf('--port')+1]);
+          http.createServer((req,res)=>{res.end('fixture');}).listen(port,'127.0.0.1',()=>fs.writeFileSync(${JSON.stringify(receipt)},JSON.stringify({pid:process.pid})));
+        }`,
+        );
+        const child = yield* spawner.spawn(
+          ChildProcess.make("/bin/sh", ["-s", "--", "probe"], {
+            env: { HOME: root },
+            extendEnv: true,
+            stdin: {
+              stream: Stream.make(
+                new TextEncoder().encode(
+                  SshTunnel.buildRemoteLaunchScript({ nodeScriptPath: fixture }),
+                ),
+              ),
+              endOnDone: true,
+            },
+          }),
+        );
+        assert.notEqual(yield* child.exitCode, 0);
+        assert.isFalse(
+          yield* fs.exists(receipt),
+          "an external outage must not launch a replacement",
+        );
+        assert.equal(yield* fs.readFileString(path.join(state, "managed")), managed);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
   it("rejects archive versions that are not a single exact version segment", () => {
     for (const archiveVersion of [
       "../other",

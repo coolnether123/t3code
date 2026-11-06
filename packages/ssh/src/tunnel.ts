@@ -649,6 +649,16 @@ if [ -n "$DEFAULT_RUNTIME_INFO" ]; then
   DEFAULT_RUNTIME_PID="\${DEFAULT_RUNTIME_INFO%% *}"
   DEFAULT_REMOTE_PORT="\${DEFAULT_RUNTIME_INFO#* }"
 fi
+# The reviewed macOS fork has its own persistent owner. A reconnect during
+# its guarded restart must never install or start a second archive backend.
+EXTERNAL_SERVICE_PLIST="$HOME/Library/LaunchAgents/com.christinesmith.t3-fork.backend.plist"
+if [ -f "$EXTERNAL_SERVICE_PLIST" ] && grep -q 't3-fork-backend-deployment-v1' "$EXTERNAL_SERVICE_PLIST"; then
+  if [ -z "$DEFAULT_REMOTE_PORT" ]; then
+    printf 'The externally owned T3 backend is restarting; retry the connection after its owner restores it.\\n' >&2
+    exit 1
+  fi
+  REMOTE_MANAGED="external"
+fi
 # The managed server runs on the default home, so it writes the default
 # runtime file too. When that file names the PID this launcher recorded as
 # managed, it describes our own server and its real port, not one to adopt.
@@ -688,9 +698,8 @@ if [ "$REMOTE_MANAGED" = "external" ]; then
   if server_running "$ADOPTED_PID"; then
     :
   elif [ -z "$REMOTE_PORT" ] || ! wait_ready "@@T3_REUSE_READY_TIMEOUT_MS@@"; then
-    REMOTE_PID=""
-    REMOTE_PORT=""
-    REMOTE_MANAGED=""
+    printf 'The externally owned T3 backend is unavailable; retry the connection after its owner restores it.\\n' >&2
+    exit 1
   fi
 elif [ -n "$REMOTE_PID" ] && [ -n "$REMOTE_PORT" ] && server_running "$REMOTE_PID"; then
   # Reconnect owns the local tunnel, not the lifetime of an already running
@@ -844,7 +853,7 @@ export function buildRemoteNodeEnvScript(input?: RemoteT3RunnerOptions): string 
   );
 }
 
-function buildRemoteLaunchScript(input?: RemoteT3RunnerOptions): string {
+export function buildRemoteLaunchScript(input?: RemoteT3RunnerOptions): string {
   return applyScriptPlaceholders(REMOTE_LAUNCH_SCRIPT, {
     T3_ARCHIVE_MODE: isNodeScriptRunner(input) ? "0" : "1",
     T3_NODE_ENV_SCRIPT: buildRemoteNodeEnvScript(input),
