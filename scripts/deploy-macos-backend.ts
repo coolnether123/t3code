@@ -1155,6 +1155,9 @@ export const retirePreviousRollback = async (
         "rollback",
       ],
       "verified recoverable local rollback archive",
+      // Full inventories of large cold databases share the host operation's
+      // deadline, not the short deadline used for process-inspection commands.
+      0,
     );
   },
 ): Promise<void> => {
