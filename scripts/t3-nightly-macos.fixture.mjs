@@ -43,8 +43,8 @@ async function scenario(kind) {
   let captures = 0;
   let unresolved = false;
   const installed = { elora: base, millie: kind === "current-partial" ? "0".repeat(40) : base };
-  const run = (exe, args) => {
-    commands.push([exe, args]);
+  const run = (exe, args, cwd, env) => {
+    commands.push([exe, args, cwd, env]);
     const ok = (text = "") => ({ code: 0, text });
     if (exe === "git") {
       if (args[0] === "remote")
@@ -224,6 +224,10 @@ NodeTest.test(
       NodeAssert.equal(head, candidate);
       NodeAssert.deepEqual(result.liveChanges, ["elora", "millie"]);
       NodeAssert.equal(result.originPublished, kind !== "origin");
+      for (const [, , cwd, env] of commands.filter(([exe]) => exe === "git")) {
+        NodeAssert.equal(env?.GIT_OPTIONAL_LOCKS, "0");
+        NodeAssert.equal(cwd, "/Users/christinesmith/Developer/t3code");
+      }
       const commit = commands.find(([, args]) => args[0] === "commit")[1];
       NodeAssert.equal(commit.at(-1).match(/Otis-Task:/g).length, 1);
       NodeAssert.ok(

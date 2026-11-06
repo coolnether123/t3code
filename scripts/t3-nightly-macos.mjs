@@ -86,27 +86,28 @@ export async function runMacNightly(input, io = {}) {
     ...process.env,
     PATH: `${NodePath.dirname(config.node)}:${NodePath.dirname(config.vp)}:${process.env.PATH}`,
     GIT_TERMINAL_PROMPT: "0",
+    GIT_OPTIONAL_LOCKS: "0",
     GCM_INTERACTIVE: "never",
     VITE_OTIS_ENABLED: "false",
     VITE_OTIS_CALL_ENABLED: "false",
   };
-  const execute =
-    io.run ??
-    ((exe, args, cwd = config.repository, extraEnv = {}) => {
-      const result = NodeChildProcess.spawnSync(exe, args, {
-        cwd,
-        env: { ...env, ...extraEnv },
-        encoding: "utf8",
-        timeout: 7_200_000,
-        maxBuffer: 64 * 1024 * 1024,
-      });
-      NodeFS.appendFileSync(
-        NodePath.join(directory, "commands.log"),
-        `${JSON.stringify({ exe, args, code: result.status })}\n${result.stdout ?? ""}${result.stderr ?? ""}\n`,
-        { mode: 0o600 },
-      );
-      return { code: result.status ?? 1, text: result.stdout?.trim() ?? "" };
+  const execute = (exe, args, cwd = config.repository, extraEnv = {}) => {
+    const commandEnv = { ...env, ...extraEnv };
+    if (io.run) return io.run(exe, args, cwd, commandEnv);
+    const result = NodeChildProcess.spawnSync(exe, args, {
+      cwd,
+      env: commandEnv,
+      encoding: "utf8",
+      timeout: 7_200_000,
+      maxBuffer: 64 * 1024 * 1024,
     });
+    NodeFS.appendFileSync(
+      NodePath.join(directory, "commands.log"),
+      `${JSON.stringify({ exe, args, code: result.status })}\n${result.stdout ?? ""}${result.stderr ?? ""}\n`,
+      { mode: 0o600 },
+    );
+    return { code: result.status ?? 1, text: result.stdout?.trim() ?? "" };
+  };
   const stopped = () =>
     ["STOP-ALL", "STOP-t3-nightly-sync"].some((name) =>
       NodeFS.existsSync(NodePath.join(io.stopRoot ?? config.stopRoot, name)),
