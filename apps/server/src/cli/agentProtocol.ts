@@ -434,6 +434,7 @@ export function compactAgentSnapshot(
       projectId: thread.projectId,
       activeRunId: thread.activeRunId,
       status: thread.status,
+      paused: thread.paused ?? false,
       pendingRuntimeRequest: thread.pendingRuntimeRequest,
     })),
     threadCount: shell.threads.length,

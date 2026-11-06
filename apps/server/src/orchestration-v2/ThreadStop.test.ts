@@ -98,6 +98,95 @@ const createWatchingThread = (threadId: ThreadId, number: number) =>
     yield* watch(threadId, number);
   });
 
+it.effect.each([false, true])(
+  "pause preserves scheduled and helper work until explicit resume, active=%s",
+  (active) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const threadId = ThreadId.make("thread:pause-boundary");
+      yield* createWatchingThread(threadId, 987);
+      if (active) yield* send(threadId, "current work", "start_immediately");
+      const pauseId = CommandId.make("pause-boundary");
+      yield* orchestrator.dispatch({
+        type: "thread.metadata.update",
+        commandId: pauseId,
+        threadId,
+        paused: true,
+      });
+      assert.deepEqual(yield* outbox.listByCommandId(pauseId), []);
+      assert.isTrue((yield* projections.getThreadProjection(threadId)).thread.paused);
+      assert.isTrue((yield* projections.getThreadShell(threadId))?.paused);
+      for (const [index, source] of ["scheduled", "helper"].entries()) {
+        const commandId = CommandId.make(`paused-dispatch:${source}`);
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId,
+          threadId,
+          messageId: MessageId.make(`paused-message:${source}`),
+          text: source,
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "agent",
+          creationSource: "server",
+          ...(index === 0 ? { scheduledTaskId: ScheduledTaskId.make("pause-schedule") } : {}),
+        });
+        assert.deepEqual(yield* outbox.listByCommandId(commandId), []);
+      }
+      let projection = yield* projections.getThreadProjection(threadId);
+      assert.deepEqual(
+        projection.runs.map((run) => run.status),
+        active ? ["starting", "queued", "queued"] : ["queued", "queued"],
+      );
+      if (active) {
+        const run = projection.runs[0]!;
+        assert.isTrue(
+          Exit.isFailure(
+            yield* Effect.exit(
+              orchestrator.dispatch({
+                type: "queued-message.promote-to-steer",
+                commandId: CommandId.make("pause:no-steer"),
+                threadId,
+                queuedRunId: projection.runs[1]!.id,
+                targetRunId: run.id,
+              }),
+            ),
+          ),
+        );
+        const now = yield* DateTime.now;
+        yield* projections.apply({
+          id: EventId.make("pause:current-completed"),
+          type: "run.updated",
+          threadId,
+          runId: run.id,
+          occurredAt: now,
+          payload: { ...run, status: "completed", completedAt: now },
+        });
+      }
+      assert.isFalse(yield* projections.canStartQueuedRun(threadId));
+      assert.equal(yield* orchestrator.resumeQueuedRuns, 0);
+      const resume = {
+        type: "thread.metadata.update" as const,
+        commandId: CommandId.make("resume-boundary"),
+        threadId,
+        paused: false,
+      };
+      yield* orchestrator.dispatch(resume);
+      yield* orchestrator.dispatch(resume);
+      projection = yield* projections.getThreadProjection(threadId);
+      assert.isFalse(projection.thread.paused);
+      assert.deepEqual(
+        projection.runs.map((run) => run.status),
+        active ? ["completed", "starting", "queued"] : ["starting", "queued"],
+      );
+      assert.equal(
+        projection.messages.filter((message) => message.role === "user").length,
+        active ? 3 : 2,
+      );
+    }).pipe(Effect.provide(layerTest)),
+);
+
 const watch = (threadId: ThreadId, number: number) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;

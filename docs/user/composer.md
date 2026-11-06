@@ -88,6 +88,14 @@ running the send button shows which action it will take. Long-press it to use th
 other action for a single message, or hold `Cmd` while sending from a hardware
 keyboard. The button only offers Steer when the running agent supports it.
 
+## Pause the next work
+
+On web and desktop, use **Pause** in the thread header to hold the thread's next
+work. Its current turn may finish. New messages, helper results and scheduled
+wakes wait in order until you choose **Resume**. The pause survives a server
+restart and applies to messages from every connected client. Stop remains the
+control for interrupting current work.
+
 ## Queue messages offline on mobile
 
 Mobile keeps local copies of draft attachments, so you can preview them and queue

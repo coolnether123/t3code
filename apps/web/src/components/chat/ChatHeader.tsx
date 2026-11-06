@@ -21,6 +21,7 @@ import {
 } from "react";
 import { isTrailingDoubleClick } from "../Sidebar.logic";
 import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
 import { useThreadActionMenu } from "~/hooks/useThreadActionMenu";
@@ -48,6 +49,7 @@ interface ChatHeaderProps {
   activeThreadEnvironmentId: EnvironmentId;
   activeThreadId: ThreadId;
   activeThreadTitle: string;
+  activeThreadPaused?: boolean;
   activeThreadLinkOrigin?: string | null | undefined;
   isServerThread: boolean;
   activeProject: EnvironmentProject | null;
@@ -75,6 +77,7 @@ export const ChatHeader = memo(function ChatHeader({
   activeThreadEnvironmentId,
   activeThreadId,
   activeThreadTitle,
+  activeThreadPaused = false,
   activeThreadLinkOrigin,
   isServerThread,
   activeProject,
@@ -432,6 +435,22 @@ export const ChatHeader = memo(function ChatHeader({
           ) : null}
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
+      {isServerThread && canOperateThread ? (
+        <Button
+          variant="ghost"
+          size="sm"
+          aria-label={activeThreadPaused ? "Resume thread" : "Pause thread"}
+          title="Pause holds the next work. The current turn may finish. Resume releases waiting work."
+          onClick={() =>
+            void updateThreadMetadata({
+              environmentId: activeThreadEnvironmentId,
+              input: { threadId: activeThreadId, paused: !activeThreadPaused },
+            })
+          }
+        >
+          {activeThreadPaused ? "Resume" : "Pause"}
+        </Button>
+      ) : null}
       {isServerThread ? <GuestShareIndicator threadRef={activeThreadRef} /> : null}
     </div>
   );
