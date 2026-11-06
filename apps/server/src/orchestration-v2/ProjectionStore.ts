@@ -316,7 +316,7 @@ export type ProjectionRuntimeRecoveryState = Pick<
   | "turnItems"
 >;
 
-export type ProjectionPendingUserInputs = Pick<
+export type ProjectionPendingNativeRequests = Pick<
   OrchestrationV2ThreadProjection,
   "runtimeRequests" | "nodes" | "turnItems"
 >;
@@ -612,10 +612,11 @@ export interface ProjectionStoreV2Shape {
   readonly getRuntimeRecoveryProjection: (
     threadId: ThreadId,
   ) => Effect.Effect<ProjectionRuntimeRecoveryState, ProjectionStoreV2Error>;
-  readonly getPendingNativeUserInputs: (
+  readonly getPendingNativeRequests: (
     threadId: ThreadId,
     providerTurnId: ProviderTurnId,
-  ) => Effect.Effect<ProjectionPendingUserInputs, ProjectionStoreV2Error>;
+    includeApprovals: boolean,
+  ) => Effect.Effect<ProjectionPendingNativeRequests, ProjectionStoreV2Error>;
   readonly getPlan: (
     threadId: ThreadId,
     planId: PlanId,
@@ -4971,9 +4972,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         ? cause
         : new ProjectionStoreReadError({ threadId, cause });
 
-    const getPendingNativeUserInputs: ProjectionStoreV2Shape["getPendingNativeUserInputs"] = (
+    const getPendingNativeRequests: ProjectionStoreV2Shape["getPendingNativeRequests"] = (
       threadId,
       providerTurnId,
+      includeApprovals,
     ) =>
       sql
         .withTransaction(
@@ -4981,7 +4983,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             const rows = yield* sql<PayloadRow>`
           SELECT payload_json FROM orchestration_v2_projection_runtime_requests
           WHERE thread_id = ${threadId} AND provider_turn_id = ${providerTurnId}
-            AND kind = 'user_input' AND status = 'pending'
+            AND ${includeApprovals ? sql`` : sql`kind = 'user_input' AND`} status = 'pending'
         `;
             const runtimeRequests = (yield* decodeRows(
               decodeRuntimeRequestPayload,
@@ -4998,14 +5000,16 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             const itemRows = yield* sql<PayloadRow>`
           SELECT payload_json FROM orchestration_v2_projection_turn_items
           WHERE thread_id = ${threadId} AND provider_turn_id = ${providerTurnId}
-            AND type = 'user_input_request'
+            AND type IN ('user_input_request', 'approval_request')
         `;
             const requestIds = new Set(runtimeRequests.map((request) => request.id));
             return {
               runtimeRequests,
               nodes: yield* decodeRows(decodeNodePayload, threadId)(nodeRows),
               turnItems: (yield* decodeRows(decodeTurnItemPayload, threadId)(itemRows)).filter(
-                (item) => item.type === "user_input_request" && requestIds.has(item.requestId),
+                (item) =>
+                  (item.type === "user_input_request" || item.type === "approval_request") &&
+                  requestIds.has(item.requestId),
               ),
             };
           }),
@@ -7493,7 +7497,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getRunMessage: readOnReader(getRunMessage),
       canStartQueuedRun: readOnReader(canStartQueuedRun),
       getHeldQueuedRuns: readOnReader(getHeldQueuedRuns),
-      getPendingNativeUserInputs: readOnReader(getPendingNativeUserInputs),
+      getPendingNativeRequests: readOnReader(getPendingNativeRequests),
       hasUnpairedRunInterruptRequest: readOnReader(hasUnpairedRunInterruptRequest),
       isNodeStored: readOnReader(isNodeStored),
       getMessageCount: readOnReader(getMessageCount),

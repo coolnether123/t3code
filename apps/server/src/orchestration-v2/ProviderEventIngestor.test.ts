@@ -1115,8 +1115,15 @@ layer("ProviderEventIngestorV2", (it) => {
     }),
   );
 
-  it.effect.each(["interrupted", "control"] as const)(
-    "dismisses only native questions when a provider turn ends with %s",
+  it.effect.each([
+    "interrupted",
+    "failed",
+    "cancelled",
+    "completed",
+    "control",
+    "control-interrupted",
+  ] as const)(
+    "dismisses native requests without retaining stopped-turn approvals for %s",
     (terminal) =>
       Effect.gen(function* () {
         const now = yield* DateTime.now;
@@ -1232,14 +1239,15 @@ layer("ProviderEventIngestorV2", (it) => {
           providerInstanceId: modelSelection.instanceId,
           threadId,
           event:
-            terminal === "control"
+            terminal === "control" || terminal === "control-interrupted"
               ? {
                   type: "turn.terminal" as const,
                   driver: CODEX_DRIVER,
                   providerThreadId,
                   providerTurnId,
                   runOrdinal: 1,
-                  status: "completed" as const,
+                  status:
+                    terminal === "control" ? ("completed" as const) : ("interrupted" as const),
                   failure: null,
                   threadDisposition: "reusable" as const,
                 }
@@ -1262,7 +1270,11 @@ layer("ProviderEventIngestorV2", (it) => {
         const stored = yield* ingestor.ingestNormalized(input);
         const projection = yield* projectionStore.getThreadProjection(threadId);
         for (const fixture of fixtures) {
-          const closed = fixture.key === "native" || fixture.key === "unavailable";
+          const closesApprovals = terminal !== "completed" && terminal !== "control";
+          const closed =
+            fixture.key === "native" ||
+            fixture.key === "unavailable" ||
+            (fixture.key === "approval" && closesApprovals);
           const request = projection.runtimeRequests.find(
             (item) => item.id === fixture.request.id,
           )!;
@@ -1283,11 +1295,14 @@ layer("ProviderEventIngestorV2", (it) => {
         }
         assert.equal(
           stored.filter((entry) => entry.event.type === "runtime-request.updated").length,
-          2,
+          terminal === "completed" || terminal === "control" ? 2 : 3,
         );
         assert.isEmpty(
-          (yield* projectionStore.getPendingNativeUserInputs(threadId, providerTurnId))
-            .runtimeRequests,
+          (yield* projectionStore.getPendingNativeRequests(
+            threadId,
+            providerTurnId,
+            terminal !== "completed" && terminal !== "control",
+          )).runtimeRequests,
         );
         const replayed = yield* eventStore.read({ threadId }).pipe(Stream.runCollect);
         assert.equal(
@@ -1296,16 +1311,16 @@ layer("ProviderEventIngestorV2", (it) => {
               entry.event.type === "runtime-request.updated" &&
               entry.event.payload.status === "cancelled",
           ).length,
-          2,
+          terminal === "completed" || terminal === "control" ? 2 : 3,
         );
         const repeated = yield* ingestor.ingestNormalized(input);
         assert.isFalse(repeated.some((entry) => entry.event.type === "runtime-request.updated"));
       }),
   );
 
-  it.effect(
-    "preserves an answer committed after terminal normalization reads a pending question",
-    () =>
+  it.effect.each(["user_input", "command"] as const)(
+    "preserves a %s response committed after interrupted-turn normalization reads it",
+    (kind) =>
       Effect.scoped(
         Effect.gen(function* () {
           const eventSink = yield* EventSink.EventSinkV2;
@@ -1333,7 +1348,7 @@ layer("ProviderEventIngestorV2", (it) => {
             nodeId,
             providerTurnId,
             nativeRequestRef: null,
-            kind: "user_input",
+            kind,
             status: "pending",
             responseCapability: { type: "live", providerSessionId },
             createdAt: now,
@@ -1345,7 +1360,7 @@ layer("ProviderEventIngestorV2", (it) => {
             runId: null,
             parentNodeId: null,
             rootNodeId: nodeId,
-            kind: "user_input_request",
+            kind: kind === "user_input" ? "user_input_request" : "approval_request",
             status: "waiting",
             countsForRun: false,
             providerThreadId,
@@ -1371,9 +1386,9 @@ layer("ProviderEventIngestorV2", (it) => {
             startedAt: now,
             completedAt: null,
             updatedAt: now,
-            type: "user_input_request",
-            requestId: request.id,
-            questions: [],
+            ...(kind === "user_input"
+              ? { type: "user_input_request", requestId: request.id, questions: [] }
+              : { type: "approval_request", requestId: request.id, requestKind: "command" }),
           };
           const seedEvents: Array<OrchestrationV2DomainEvent> = [threadEvent];
           for (const payload of [
@@ -1417,7 +1432,7 @@ layer("ProviderEventIngestorV2", (it) => {
                   runAttemptId: null,
                   nativeTurnRef: null,
                   ordinal: 1,
-                  status: "completed",
+                  status: "interrupted",
                   startedAt: now,
                   completedAt: now,
                 },

@@ -4,6 +4,7 @@ import {
   OrchestrationV2DomainEvent,
   OrchestrationV2StoredEvent,
   type OrchestrationV2PlanArtifact,
+  type OrchestrationV2ProviderTurn,
   type OrchestrationV2Run,
   type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
@@ -293,13 +294,19 @@ export const layer: Layer.Layer<
         );
       });
 
-    const dismissNativeUserInputs = Effect.fn("ProviderEventIngestor.dismissNativeUserInputs")(
+    const dismissNativeRequests = Effect.fn("ProviderEventIngestor.dismissNativeRequests")(
       function* (
         input: ProviderEventIngestInput,
         providerTurnId: ProviderTurnId,
+        status: OrchestrationV2ProviderTurn["status"],
         threadId = input.threadId,
       ) {
-        const pending = yield* projections.getPendingNativeUserInputs(threadId, providerTurnId);
+        // Completed turns may retain background work that still needs approval.
+        const pending = yield* projections.getPendingNativeRequests(
+          threadId,
+          providerTurnId,
+          status !== "completed",
+        );
         const now = yield* DateTime.now;
         const events: Array<OrchestrationV2DomainEvent> = [];
         for (const request of pending.runtimeRequests) {
@@ -523,9 +530,10 @@ export const layer: Layer.Layer<
                 ...(["completed", "interrupted", "failed", "cancelled"].includes(
                   input.event.providerTurn.status,
                 )
-                  ? yield* dismissNativeUserInputs(
+                  ? yield* dismissNativeRequests(
                       input,
                       input.event.providerTurn.id,
+                      input.event.providerTurn.status,
                       input.event.threadId,
                     )
                   : []),
@@ -622,7 +630,11 @@ export const layer: Layer.Layer<
               // Live output is routed to the command output hub before ingestion.
               return [];
             case "turn.terminal":
-              const dismissed = yield* dismissNativeUserInputs(input, input.event.providerTurnId);
+              const dismissed = yield* dismissNativeRequests(
+                input,
+                input.event.providerTurnId,
+                input.event.status,
+              );
               if (input.event.status !== "failed") {
                 return dismissed;
               }
@@ -686,7 +698,7 @@ export const layer: Layer.Layer<
             if (input.writeIfProviderThreadOwner !== undefined) {
               const ownerResult = yield* eventSink
                 .writeIfProviderThreadOwner({
-                  guardPendingUserInputCancellations: true,
+                  guardPendingNativeRequestCancellations: true,
                   ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
                   ...input.writeIfProviderThreadOwner,
                   events,
@@ -697,7 +709,7 @@ export const layer: Layer.Layer<
             if (input.writeIfRunCurrent === undefined) {
               return yield* eventSink
                 .write({
-                  guardPendingUserInputCancellations: true,
+                  guardPendingNativeRequestCancellations: true,
                   ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
                   events,
                 })
@@ -705,7 +717,7 @@ export const layer: Layer.Layer<
             }
             const result = yield* eventSink
               .writeIfRunCurrent({
-                guardPendingUserInputCancellations: true,
+                guardPendingNativeRequestCancellations: true,
                 ...(input.commandId === undefined ? {} : { commandId: input.commandId }),
                 threadId: input.threadId,
                 ...input.writeIfRunCurrent,
