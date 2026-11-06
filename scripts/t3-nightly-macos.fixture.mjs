@@ -33,6 +33,7 @@ async function scenario(kind) {
     vp: "/vp",
     stopRoot: "/Users/christinesmith/Codex_Workroom/task_evidence/otis-control",
     focusedTests: ["scripts/deploy-macos-backend.test.ts"],
+    ...(kind === "prepare" ? { maintenanceMode: "prepare-only" } : {}),
     elora: host("christinesmith"),
     millie: { ...host("millie"), ssh: "millie-codex" },
   };
@@ -135,6 +136,24 @@ async function scenario(kind) {
 NodeTest.test("nightly refuses a clone, missing focused tests and arbitrary remote route", () => {
   NodeAssert.throws(() => validateMacConfig({ repository: "/tmp/clone" }));
 });
+
+NodeTest.test(
+  "prepare-only builds and publishes without live-host idle checks or install",
+  async () => {
+    const { result, commands } = await scenario("prepare");
+    NodeAssert.equal(result.result, "prepared");
+    NodeAssert.deepEqual(result.liveChanges, []);
+    for (const operation of ["capture", "installed", "maintenance", "prepare", "deploy"])
+      NodeAssert.equal(
+        commands.some(
+          ([, args]) => args.includes(operation) || args.at(-1)?.includes?.("'" + operation + "'"),
+        ),
+        false,
+      );
+    NodeAssert.ok(commands.some(([, args]) => args.includes("--build-only")));
+    NodeAssert.ok(commands.some(([, args]) => args[0] === "push" && args[1] === "nas"));
+  },
+);
 
 for (const kind of ["busy", "conflict", "gate", "nas", "publish", "late-busy"]) {
   NodeTest.test(
