@@ -16,6 +16,7 @@ import type { ProjectionRuntimeRecoveryState } from "./ProjectionStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { isNativeMaintenanceCommand } from "./CommandPolicy.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
+import { readUpdateCheckpoint } from "./UpdateCheckpoint.ts";
 import {
   awaitingProviderThreadId,
   cancelledRosterTaskWork,
@@ -183,7 +184,14 @@ export function restartContinuationRun(
 }
 
 export const continueRestartedRun = Effect.fn("RestartContinuation.continueRestartedRun")(
-  function* (input: { readonly threadId: ThreadId; readonly sourceRunId: RunId }) {
+  function* (input: {
+    readonly threadId: ThreadId;
+    readonly sourceRunId: RunId;
+    readonly updateCheckpointDecision?: "continue" | "held" | undefined;
+  }) {
+    const checkpoint =
+      input.updateCheckpointDecision ?? (yield* readUpdateCheckpoint(input.sourceRunId));
+    if (checkpoint === "held") return;
     const settings = yield* ServerSettings.ServerSettingsService;
     const enabled = yield* settings.getSettings.pipe(Effect.orElseSucceed(() => null));
     if (!enabled) return;
@@ -195,6 +203,7 @@ export const continueRestartedRun = Effect.fn("RestartContinuation.continueResta
       { messageIds: [messageId], turnItemTypes: ["secret_request"] },
     );
     if (
+      checkpoint !== "continue" &&
       !resolveProjectSettings(enabled, projection.thread.projectId).settings
         .continueThreadsAfterServerUpdate
     )

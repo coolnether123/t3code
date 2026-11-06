@@ -20,6 +20,7 @@ never runs deployment. Existing deployment hooks invoke --gate-only directly.
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -356,6 +357,8 @@ def observe(m):
 
 
 def admit(m, capture=False):
+    if m.get("active_checkpoint") is True:
+        return admit_active(m, capture)
     baseline = pathlib.Path(m["baseline_file"])
     if capture:
         require(not baseline.exists(), "baseline exists; reconcile rather than recapture")
@@ -370,6 +373,27 @@ def admit(m, capture=False):
     current = observe(m)
     require(current == previous, "baseline identity, pending requests, runtime or native state changed")
     return current
+
+
+def admit_active(m, capture=False):
+    spec = importlib.util.spec_from_file_location("active_checkpoint", pathlib.Path(__file__).with_name("macos-active-checkpoint.py"))
+    checkpoint = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(checkpoint)
+    check_pins(m)
+    state = checkpoint.snapshot(m["database"])
+    check_pins(m)
+    proof = {"manifest_sha256": m["_manifest_sha256"], "environment_id": m["environment_id"],
+             "state": state, "native": {"checkpoint": True}}
+    baseline = pathlib.Path(m["baseline_file"])
+    if capture:
+        require(not baseline.exists(), "baseline exists; reconcile rather than recapture")
+        checkpoint.atomic_private(baseline, proof)
+    else:
+        previous = json.loads(private_file(baseline).read_text())
+        require(previous["manifest_sha256"] == proof["manifest_sha256"] and previous["environment_id"] == proof["environment_id"],
+                "active checkpoint identity changed")
+        require(set(previous["state"]["threadIds"]).issubset(state["threadIds"]), "active checkpoint thread missing")
+    return proof
 
 
 def finite_wait(m, seconds, interval=10, clock=time.monotonic, pause=time.sleep):
@@ -403,7 +427,11 @@ def main():
             signal.signal(signal.SIGALRM, expired)
             signal.alarm(args.wait_seconds)
         proof = finite_wait(m, args.wait_seconds) if args.wait_seconds is not None else admit(m, args.capture)
-        print(json.dumps({"admitted": True, "pending": proof["state"]["pending"]}, sort_keys=True))
+        state = proof["state"]
+        summary = {"admitted": True, **{key: state[key] for key in ("activeRuns", "pendingApprovals", "childAgents", "held") if key in state}}
+        if "pending" in state:
+            summary["pending"] = state["pending"]
+        print(json.dumps(summary, sort_keys=True))
         return 0
     except (Hold, OSError, ValueError, KeyError, TypeError, sqlite3.Error, subprocess.SubprocessError) as error:
         # Never include subprocess output, database rows, conversation text or tokens.

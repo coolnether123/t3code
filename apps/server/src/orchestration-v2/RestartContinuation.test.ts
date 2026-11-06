@@ -20,6 +20,8 @@ import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as FileSystem from "effect/FileSystem";
+import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { restartContinuationRun, continueRestartedRun } from "./RestartContinuation.ts";
 import { continuationStartRetryDelayMs } from "./RestartBackgroundNote.ts";
@@ -489,6 +491,100 @@ it.effect("does not duplicate delivery and yields to newer user work or opt-out"
     );
     assert.lengthOf(commands, 1);
   }),
+);
+
+it.effect.each(["continue", "held"] as const)(
+  "honors an update-scoped %s decision without changing opt-out settings",
+  (decision) =>
+    Effect.gen(function* () {
+      const base = makeProjection();
+      let projection = { ...base, runs: [{ ...base.runs[0]!, status: "cancelled" as const }] };
+      const commands: Parameters<
+        ThreadManagementService.ThreadManagementService["Service"]["dispatch"]
+      >[0][] = [];
+      const checkpoint = {
+        version: 1,
+        active: true,
+        authorizedRunIds: [runId],
+        heldRunIds: decision === "held" ? [runId] : [],
+      };
+      const layers = Layer.mergeAll(
+        ServerSettings.layerTest({ continueThreadsAfterServerUpdate: false }),
+        Layer.succeed(ServerConfig.ServerConfig, { baseDir: "/synthetic" } as never),
+        FileSystem.layerNoop({
+          exists: () => Effect.succeed(true),
+          readFileString: () => Effect.succeed(JSON.stringify(checkpoint)),
+        }),
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadRecords: () => Effect.succeed(projection),
+          recoverDelegatedTask: () => Effect.void,
+          dispatch: (command) => {
+            commands.push(command);
+            if (command.type === "message.dispatch")
+              projection = { ...projection, messages: [{ id: command.messageId } as never] };
+            return Effect.succeed({} as never);
+          },
+        }),
+      );
+      yield* continueRestartedRun({ threadId, sourceRunId: runId }).pipe(Effect.provide(layers));
+      yield* continueRestartedRun({ threadId, sourceRunId: runId }).pipe(Effect.provide(layers));
+      assert.lengthOf(commands, decision === "held" ? 0 : 1);
+    }),
+);
+
+it.effect(
+  "recovers an update checkpoint even when the old opted-out server already stopped its run",
+  () =>
+    Effect.gen(function* () {
+      const base = makeProjection();
+      const projection = {
+        ...base,
+        runs: [{ ...base.runs[0]!, status: "cancelled" }],
+        providerThreads: [{ ...base.providerThreads[0]!, status: "idle" }],
+        providerSessions: [{ ...base.providerSessions[0]!, status: "stopped" }],
+        providerTurns: [{ ...base.providerTurns[0]!, status: "interrupted" }],
+      } as OrchestrationV2ThreadProjection;
+      let committed: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | undefined;
+      const checkpoint = {
+        version: 1,
+        active: true,
+        authorizedRunIds: [runId],
+        heldRunIds: [],
+        sourceThreadIds: [threadId],
+      };
+      const recovery = yield* ProviderRuntimeRecovery.make.pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            ServerSettings.layerTest({ continueThreadsAfterServerUpdate: false }),
+            Layer.succeed(ServerConfig.ServerConfig, { baseDir: "/synthetic" } as never),
+            FileSystem.layerNoop({
+              exists: () => Effect.succeed(true),
+              readFileString: () => Effect.succeed(JSON.stringify(checkpoint)),
+            }),
+            Layer.mock(ProjectionStore.ProjectionStoreV2)({
+              getRecoveryThreadIds: () => Effect.succeed([]),
+              getRuntimeRecoveryProjection: () => Effect.succeed(projection),
+            }),
+            Layer.mock(EventSink.EventSinkV2)({
+              commitCommand: (input) => {
+                committed = input;
+                return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
+              },
+            }),
+            IdAllocator.layer,
+            Layer.mock(EffectWorker.OrchestrationEffectWorkerV2)({}),
+            Layer.mock(EffectOutbox.EffectOutboxV2)({
+              reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
+            }),
+          ),
+        ),
+      );
+      yield* recovery.reconcile("startup");
+      assert.deepEqual(
+        committed?.effects.map((effect) => effect.request),
+        [{ type: "provider-runtime.continue", sourceRunId: runId }],
+      );
+    }),
 );
 
 it.effect("prepares no continuation for background work another provider thread launched", () =>

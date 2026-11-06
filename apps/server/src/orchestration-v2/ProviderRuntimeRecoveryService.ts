@@ -24,6 +24,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { restartContinuationRun } from "./RestartContinuation.ts";
+import { makeUpdateCheckpointAccess, uncertainUpdateRuns } from "./UpdateCheckpoint.ts";
 import { isBufferedProviderNotification } from "./NotificationMailbox.ts";
 import { queuedRunsInDeliveryOrder } from "./QueuedRunOrder.ts";
 import {
@@ -188,6 +189,7 @@ export const make = Effect.gen(function* () {
   const eventSink = yield* EventSink.EventSinkV2;
   const ids = yield* IdAllocator.IdAllocatorV2;
   const outbox = yield* EffectOutbox.EffectOutboxV2;
+  const updateCheckpoint = yield* makeUpdateCheckpointAccess;
   type RecoverySession = ProjectionStore.ProjectionRuntimeRecoveryState["providerSessions"][number];
   /** Shared sessions stop on their first recovered thread; later threads still decide wakes from pre-recovery liveness. */
   const sessionsLiveAtStart = (
@@ -212,6 +214,16 @@ export const make = Effect.gen(function* () {
       continueAfterRestart: boolean,
       stoppedThisPass: ReadonlyMap<string, RecoverySession> = new Map(),
     ) {
+      if (trigger === "startup" && (yield* updateCheckpoint.read("")) !== undefined) {
+        const uncertain = new Set(uncertainUpdateRuns(projection));
+        const held = new Set<string>();
+        for (const run of projection.runs) {
+          const decision = yield* updateCheckpoint.read(run.id);
+          if (decision === "held" || (decision === "continue" && uncertain.has(run.id)))
+            held.add(run.id);
+        }
+        yield* updateCheckpoint.hold([...held]);
+      }
       const now = yield* DateTime.now;
       let runs = [] as Array<OrchestrationV2ThreadProjection["runs"][number]>;
       for (const run of nonterminalRuns(projection)) {
@@ -759,29 +771,44 @@ export const make = Effect.gen(function* () {
           },
         });
       }
-      const continuationRun =
-        continueAfterRestart && trigger === "startup"
+      let continuationRun =
+        (continueAfterRestart || projection.runs.some((run) => run.status === "running")) &&
+        trigger === "startup"
           ? restartContinuationRun(
               { ...projection, providerSessions: sessionsLiveAtStart(projection, stoppedThisPass) },
               now,
             )
           : undefined;
-      const effects: Array<EffectOutbox.PendingOrchestrationEffectV2> = continuationRun
-        ? [
-            {
-              id: `effect:restart-continuation:${continuationRun.id}`,
-              commandId,
-              threadId: projection.thread.id,
-              request: { type: "provider-runtime.continue", sourceRunId: continuationRun.id },
-            },
-          ]
-        : [];
+      if (continuationRun === undefined && trigger === "startup") {
+        for (const run of projection.runs) {
+          if (run.status === "cancelled" && (yield* updateCheckpoint.read(run.id)) === "continue") {
+            continuationRun = run;
+          }
+        }
+      }
+      const checkpoint =
+        continuationRun === undefined
+          ? undefined
+          : yield* updateCheckpoint.read(continuationRun.id);
+      const effects: Array<EffectOutbox.PendingOrchestrationEffectV2> =
+        continuationRun &&
+        checkpoint !== "held" &&
+        (continueAfterRestart || checkpoint === "continue")
+          ? [
+              {
+                id: `effect:restart-continuation:${continuationRun.id}`,
+                commandId,
+                threadId: projection.thread.id,
+                request: { type: "provider-runtime.continue", sourceRunId: continuationRun.id },
+              },
+            ]
+          : [];
       const stoppedSessions = projection.providerSessions.filter(
         (candidate) => candidate.status !== "stopped" && candidate.status !== "error",
       ).length;
       let retiredEffects: number;
       let cancelledEffectIds: ReadonlyArray<string> = [];
-      if (events.length === 0) {
+      if (events.length === 0 && effects.length === 0) {
         const retiredEffectIds = yield* outbox
           .cancelUnsettled({
             threadId: projection.thread.id,
@@ -840,13 +867,19 @@ export const make = Effect.gen(function* () {
     trigger: "startup" | "shutdown",
   ) {
     const continueAfterRestart = yield* settings.getSettings.pipe(Effect.orElseSucceed(() => null));
-    const threadIds = yield* projections
+    const recoveryThreadIds = yield* projections
       .getRecoveryThreadIds("runtime")
       .pipe(
         Effect.mapError(
           (cause) => new ProviderRuntimeRecoveryError({ operation: "read-projections", cause }),
         ),
       );
+    const threadIds = [
+      ...new Set([
+        ...recoveryThreadIds,
+        ...(yield* updateCheckpoint.threads).map((id) => ThreadId.make(id)),
+      ]),
+    ];
     let terminalizedRuns = 0;
     let stoppedSessions = 0;
     let closedRequests = 0;
@@ -916,28 +949,35 @@ export const make = Effect.gen(function* () {
     const enabledProjects = Object.entries(enabled.projectSettingsOverrides)
       .filter(([, overrides]) => overrides.continueThreadsAfterServerUpdate === true)
       .map(([id]) => id);
-    if (!enabled.continueThreadsAfterServerUpdate && enabledProjects.length === 0) return;
+    const updateActive = (yield* updateCheckpoint.read("")) !== undefined;
+    if (!enabled.continueThreadsAfterServerUpdate && enabledProjects.length === 0 && !updateActive)
+      return;
     const disabledProjects = Object.entries(enabled.projectSettingsOverrides)
       .filter(([, overrides]) => overrides.continueThreadsAfterServerUpdate === false)
       .map(([id]) => id);
     const threadIds = yield* projections.getRecoveryThreadIds(
       "restart-continuations",
-      enabled.continueThreadsAfterServerUpdate
-        ? { exclude: disabledProjects }
-        : { include: enabledProjects },
+      updateActive
+        ? undefined
+        : enabled.continueThreadsAfterServerUpdate
+          ? { exclude: disabledProjects }
+          : { include: enabledProjects },
     );
     yield* Effect.forEach(
       threadIds,
       (threadId) =>
         Effect.gen(function* () {
           const projection = yield* projections.getRuntimeRecoveryProjection(threadId);
+          const run = restartContinuationRun(projection, yield* DateTime.now);
+          if (!run) return;
+          const checkpoint = yield* updateCheckpoint.read(run.id);
+          if (checkpoint === "held") return;
           if (
+            checkpoint !== "continue" &&
             !resolveProjectSettings(enabled, projection.thread.projectId).settings
               .continueThreadsAfterServerUpdate
           )
             return;
-          const run = restartContinuationRun(projection, yield* DateTime.now);
-          if (!run) return;
           const commandId = CommandId.make(`command:restart-prepare:${run.id}`);
           yield* eventSink.writeWithEffects({
             commandId,

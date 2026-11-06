@@ -374,6 +374,10 @@ agent_snapshot() {
   done
 }
 idle_gate() {
+  if [[ -n "${T3CODE_GUARD_MANIFEST:-}" ]] && /usr/bin/python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("active_checkpoint") is True else 1)' "$T3CODE_GUARD_MANIFEST"; then
+    /usr/bin/python3 "$SOURCE_ROOT/scripts/macos-activation-guard.py" --gate-only || fail "active checkpoint identity gate failed"
+    return
+  fi
   if [[ "${T3CODE_PRESERVE_PENDING_REQUESTS:-0}" == 1 ]]; then
     [[ -n "${T3CODE_PRESTOP_GUARD:-}" ]] || fail "Pending preservation requires the exact pre-stop fingerprint guard"
     /usr/bin/python3 "$T3CODE_PRESTOP_GUARD" --gate-only || fail "Current turn or pending fingerprint blocks restart"
@@ -497,6 +501,9 @@ deploy() {
   old="$(validate_app "$APP_PATH")"; record_environment_identity; space_gate "$T3_HOME"; idle_gate; backup_app; idle_gate
   trap 'if [[ "$RESTART_OLD_ON_FAILURE" == 1 ]]; then if ! launch_previous >>"$LOG_PATH" 2>&1; then printf "old backend recovery failed; reconcile %s\n" "$LOG_PATH" >&2; fi; fi' EXIT
   storage startup "$T3_HOME/userdata" >>"$LOG_PATH" 2>&1 || fail "first-launch database copy would cross the 20 GiB floor"
+  if [[ -n "${T3CODE_GUARD_MANIFEST:-}" ]]; then
+    /usr/bin/python3 "$SOURCE_ROOT/scripts/macos-active-checkpoint.py" --prepare >>"$LOG_PATH" 2>&1 || fail "active checkpoint preparation failed"
+  fi
   stop_existing "$old"; RESTART_OLD_ON_FAILURE=1
   storage checkpoint "$T3_HOME/userdata/state.sqlite" >>"$LOG_PATH" 2>&1 || fail "quiescent SQLite checkpoint failed"
   if [[ -e "$T3_HOME/userdata/statev2.sqlite" ]]; then

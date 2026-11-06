@@ -726,6 +726,24 @@ const sqliteCount = async (dbPath: string, query: string, description: string): 
  * This guard only uses sqlite3 -readonly and fails closed on schema drift.
  */
 export const assertLiveIdleReadOnly = async (dbPath: string): Promise<void> => {
+  const manifest = process.env.T3CODE_GUARD_MANIFEST;
+  const checkpointManifest = manifest
+    ? JSON.parse(await NodeFSP.readFile(manifest, "utf8"))
+    : undefined;
+  if (manifest && checkpointManifest?.active_checkpoint === true) {
+    if (NodePath.resolve(checkpointManifest.database) !== NodePath.resolve(dbPath))
+      fail("Active checkpoint is for a different T3 database.");
+    const guard = NodePath.join(
+      NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),
+      "macos-activation-guard.py",
+    );
+    await requireCommandSuccess(
+      "/usr/bin/python3",
+      [guard, "--manifest", manifest, "--gate-only"],
+      "active checkpoint identity gate",
+    );
+    return;
+  }
   await requireNoSymlink(dbPath, "live SQLite database");
   const currentPath = NodePath.join(NodePath.dirname(dbPath), "statev2.sqlite");
   if (await optionalLstat(currentPath)) {
@@ -1563,6 +1581,17 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
     await requireCapacity(options.baseDir);
     await requireStartupCapacity(options.baseDir);
     stopped = true;
+    if (process.env.T3CODE_GUARD_MANIFEST) {
+      const checkpoint = NodePath.join(
+        NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),
+        "macos-active-checkpoint.py",
+      );
+      await requireCommandSuccess(
+        "/usr/bin/python3",
+        [checkpoint, "--prepare"],
+        "active checkpoint preparation",
+      );
+    }
     await stopOwnedBackend({
       loaded: oldLaunchAgentWasLoaded,
       bootout: () => bootoutAndWait(uid, options.label, "owned LaunchAgent bootout"),
