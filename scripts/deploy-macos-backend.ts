@@ -1417,6 +1417,26 @@ const requireExternalPreStopGuard = async (): Promise<void> => {
   }
 };
 
+export const stopOwnedBackend = async (input: {
+  readonly loaded: boolean;
+  readonly bootout: () => Promise<void>;
+  readonly listeners: () => Promise<ReadonlyArray<LsofListener>>;
+  readonly identity: ProcessIdentityInput;
+  readonly command: () => Promise<string>;
+  readonly guard: () => Promise<void>;
+  readonly stop: () => void;
+}): Promise<void> => {
+  if (input.loaded) await input.bootout();
+  // A reconnect may have left an SSH-owned listener beside the stale job.
+  // Reconcile the port after unloading, never assume bootout stopped it.
+  const remaining = await input.listeners();
+  if (remaining.length === 0) return;
+  assertSingleLoopbackListener(remaining, input.identity.expectedPid);
+  assertProcessIdentity({ ...input.identity, command: await input.command() });
+  await input.guard();
+  input.stop();
+};
+
 const restoreDeploymentFiles = async (
   plist: string,
   wrapper: string,
@@ -1542,14 +1562,26 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
     await requireExternalPreStopGuard();
     await requireCapacity(options.baseDir);
     await requireStartupCapacity(options.baseDir);
-    if (oldLaunchAgentWasLoaded) {
-      // Unload first so KeepAlive cannot restart a writer during the checkpoint.
-      stopped = true;
-      await bootoutAndWait(uid, options.label, "owned LaunchAgent bootout");
-    } else {
-      process.kill(pid, "SIGTERM");
-      stopped = true;
-    }
+    stopped = true;
+    await stopOwnedBackend({
+      loaded: oldLaunchAgentWasLoaded,
+      bootout: () => bootoutAndWait(uid, options.label, "owned LaunchAgent bootout"),
+      listeners: () => inspectListeners(options),
+      identity: {
+        expectedPid: pid,
+        actualPid: pid,
+        command: "",
+        oldEntry: options.oldEntry,
+        baseDir: options.baseDir,
+        host: "127.0.0.1",
+        port: options.port,
+      },
+      command: () => currentCommand(pid),
+      guard: requireExternalPreStopGuard,
+      stop: () => {
+        process.kill(pid, "SIGTERM");
+      },
+    });
     await waitForListenerRelease(options);
     await backupDatabase(
       NodePath.join(options.baseDir, "userdata/state.sqlite"),

@@ -25,6 +25,7 @@ import {
   renderWrapper,
   requireLaunchAgentPid,
   recoverFailedDeployment,
+  stopOwnedBackend,
   validateCandidate,
   validateOptions,
   assertCapacity,
@@ -80,6 +81,50 @@ const writeCandidate = async (candidate: string) => {
 };
 
 describe("deploy-macos-backend guards", () => {
+  it.each(["idle", "gone", "changed", "active", "wrong-command"] as const)(
+    "reconciles a stale owned launch agent with %s listener",
+    async (state) => {
+      const actions: string[] = [];
+      const identity = {
+        expectedPid: 42,
+        actualPid: 42,
+        command: "",
+        oldEntry: "/native/t3",
+        baseDir: "/Users/millie/.t3",
+        host: "127.0.0.1",
+        port: 3773,
+      };
+      const operation = stopOwnedBackend({
+        loaded: true,
+        identity,
+        bootout: async () => {
+          actions.push("bootout");
+        },
+        listeners: async () =>
+          state === "gone" ? [] : [{ pid: state === "changed" ? 43 : 42, name: "127.0.0.1:3773" }],
+        command: async () =>
+          state === "wrong-command"
+            ? "/another/service"
+            : "/native/t3 serve --host 127.0.0.1 --port 3773 --base-dir /Users/millie/.t3",
+        guard: async () => {
+          actions.push("guard");
+          if (state === "active") throw new Error("active turn");
+        },
+        stop: () => {
+          actions.push("stop42");
+        },
+      });
+      if (state === "idle" || state === "gone") await operation;
+      else await expect(operation).rejects.toThrow();
+      expect(actions).toEqual(
+        state === "idle"
+          ? ["bootout", "guard", "stop42"]
+          : state === "active"
+            ? ["bootout", "guard"]
+            : ["bootout"],
+      );
+    },
+  );
   it("reserves the first-launch database copy before admitting a restart", async () => {
     await withTempDirectory(async (root) => {
       await NodeFSP.writeFile(NodePath.join(root, "state.sqlite"), Buffer.alloc(8192));
