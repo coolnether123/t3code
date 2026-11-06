@@ -18,12 +18,16 @@ const fixtureRpc = (fixture) => async (method, params) =>
 
 NodeTest.test("T3-owned proof reads only pinned native threads", async () => {
   const methods = [];
-  const proof = await proveNativeIdle(async (method, params) => {
-    methods.push(method);
-    NodeAssert.notEqual(method, "thread/list");
-    NodeAssert.equal(params.threadId, "native");
-    return replies()[method];
-  }, bindings, true);
+  const proof = await proveNativeIdle(
+    async (method, params) => {
+      methods.push(method);
+      NodeAssert.notEqual(method, "thread/list");
+      NodeAssert.equal(params.threadId, "native");
+      return replies()[method];
+    },
+    bindings,
+    true,
+  );
   NodeAssert.equal(proof.idle, true);
   NodeAssert.deepEqual(methods, ["thread/read", "thread/turns/list"]);
 });
