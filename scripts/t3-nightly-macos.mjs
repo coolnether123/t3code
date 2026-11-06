@@ -444,6 +444,9 @@ export async function runMacNightly(input, io = {}) {
     run("/usr/bin/python3", [
       NodePath.join(config.repository, "scripts/test_macos_activation_guard.py"),
     ]);
+    run("/usr/bin/python3", [
+      NodePath.join(config.repository, "scripts/test_macos_active_checkpoint.py"),
+    ]);
     run("/usr/bin/python3", [NodePath.join(config.repository, "scripts/test_t3_nightly_macos.py")]);
     run(config.vp, ["run", "check:changed", base]);
     if (git("diff", "--name-only") || git("ls-files", "--others", "--exclude-standard"))
