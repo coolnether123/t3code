@@ -148,7 +148,7 @@ export async function runNightly(configFile, io = {}) {
           night,
           reason: ledger.stopReason ?? ledger.result,
           result: ledger.result,
-          parentChatId: config.parentChatId ?? null,
+          taskId: config.taskId ?? null,
           branch: ledger.branch ?? null,
           worktree: ledger.worktree ?? null,
           packet,
@@ -158,29 +158,20 @@ export async function runNightly(configFile, io = {}) {
         2,
       ),
     );
-    const notification = NodePath.join(artifact, "alert.json");
-    NodeFS.writeFileSync(
-      notification,
-      JSON.stringify({
-        requestId: `t3-nightly-${NodePath.basename(artifact)}`,
-        title: "T3 nightly sync stopped",
-        text: `Jared, T3 nightly sync stopped: ${ledger.stopReason ?? ledger.result}. Result: ${ledger.result}. Evidence: ${artifact}/NEEDS-PARENT.json. Parent: ${config.parentChatId ?? "unbound"}.`,
-        category: "failures",
-        priority: "urgent",
-        speak: true,
-        project: "t3code",
-        taskId: config.taskId,
-      }),
-    );
-    const notified = run(
-      config.node,
-      [config.otisCall, "call", "tell_jared", `@${notification}`],
-      config.repository,
-      true,
-    );
-    ledger.alertDelivered = notified.code === 0;
-    if (!ledger.alertDelivered)
-      ledger.alertFailure = "tell_jared failed; retained alert.json and NEEDS-PARENT.json";
+    const pending = NodePath.join(config.artifactRoot, "pending-handoffs");
+    NodeFS.mkdirSync(pending, { recursive: true });
+    const handoff = NodePath.join(pending, `${NodePath.basename(artifact)}.json`);
+    const temporary = `${handoff}.tmp`;
+    NodeFS.writeFileSync(temporary, JSON.stringify({
+      schemaVersion: 1,
+      taskId: config.taskId ?? null,
+      result: NodePath.join(artifact, "result.json"),
+      packet: NodePath.join(artifact, "NEEDS-PARENT.json"),
+      state: "pending-parent-pickup",
+    }, null, 2));
+    NodeFS.renameSync(temporary, handoff);
+    ledger.handoff = handoff;
+    ledger.handoffState = "pending-parent-pickup";
   };
   try {
     if (configFailure) throw configFailure;
@@ -191,7 +182,7 @@ export async function runNightly(configFile, io = {}) {
       git("remote", "get-url", "upstream") !== "https://github.com/pingdotgg/t3code.git"
     )
       throw new Error("Unexpected repository owner");
-    const forkBranch = config.forkBranch ?? "feat/t3-workers-prototype";
+    const forkBranch = config.forkBranch ?? "main";
     if (!["main", "feat/t3-workers-prototype"].includes(forkBranch))
       throw new Error("Unsupported fork branch");
     const forkRef = `refs/remotes/origin/${forkBranch}`;
@@ -199,12 +190,7 @@ export async function runNightly(configFile, io = {}) {
     refreshFork();
     let upstreamCommit;
     let tag;
-    if (config.upstreamBranch === "main") {
-      git("fetch", "upstream", "+refs/heads/main:refs/remotes/upstream/main");
-      upstreamCommit = git("rev-parse", "refs/remotes/upstream/main");
-      tag = `upstream/main@${upstreamCommit.slice(0, 10)}`;
-      ledger.sourceRef = "refs/heads/main";
-    } else {
+    {
       const advertisedTags = git("ls-remote", "--tags", "--refs", "upstream", "v*-nightly.*")
         .split(/\r?\n/)
         .map((line) => {
@@ -221,6 +207,7 @@ export async function runNightly(configFile, io = {}) {
         throw new Error("Upstream tag changed during fetch");
       upstreamCommit = git("rev-parse", `${nightlyRef}^{commit}`);
     }
+    ledger.sourceRef = `refs/tags/${tag}`;
     ledger.tag = tag;
     ledger.upstreamCommit = upstreamCommit;
     const base = git("rev-parse", forkRef);
@@ -247,6 +234,10 @@ export async function runNightly(configFile, io = {}) {
       run("git", ["merge-base", "--is-ancestor", upstreamCommit, base], config.repository, true)
         .code === 0
     ) {
+      ledger.commit = base;
+      ledger.deploymentPending = NodeFS.existsSync(NodePath.join(config.releaseRoot, "auto-deploy-enabled"));
+      if (ledger.deploymentPending)
+        ledger.stopReason = "Fork already contains the nightly; parent must reconcile the prepared release and idle-guarded deployment";
       ledger.result = "already-synced";
       return ledger;
     }
@@ -260,6 +251,11 @@ export async function runNightly(configFile, io = {}) {
       ).code === 0
     ) {
       ledger.branch = branch;
+      const entries = git("worktree", "list", "--porcelain").split(/\r?\n\r?\n/);
+      const existing = entries.find((entry) => entry.split(/\r?\n/).includes(`branch refs/heads/${branch}`));
+      ledger.worktree = existing?.split(/\r?\n/).find((line) => line.startsWith("worktree "))?.slice(9);
+      if (ledger.worktree)
+        ledger.conflicts = run("git", ["diff", "--name-only", "--diff-filter=U"], ledger.worktree).text.split(/\r?\n/).filter(Boolean);
       ledger.result = "existing-candidate-needs-resume";
       return ledger;
     }
@@ -348,7 +344,7 @@ export async function runNightly(configFile, io = {}) {
       return ledger;
     }
     const candidateChecks = NodePath.join(artifact, "candidate");
-    queue("Nightly all-package typecheck and affected tests", tree, [
+    queue("Nightly affected checks and focused tests", tree, [
       NodePath.join(import.meta.dirname, "t3-nightly-check.mjs"),
       tree,
       candidateChecks,
@@ -586,7 +582,7 @@ export async function runNightly(configFile, io = {}) {
     ].includes(ledger.result)
       ? 0
       : 1;
-    if (ledger.exitCode !== 0) {
+    if (ledger.exitCode !== 0 || ledger.deploymentPending) {
       try {
         alert();
       } catch (error) {

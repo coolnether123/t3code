@@ -26,8 +26,8 @@ for (const [name, args] of [
     ],
   ],
   [
-    "typecheck",
-    ["run", "-r", "--cache", "--concurrency-limit", "1", "typecheck", "--singleThreaded"],
+    "affected-checks",
+    ["run", "check:changed", lintBase ?? "HEAD"],
   ],
   [
     "tests",

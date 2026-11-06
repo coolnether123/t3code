@@ -108,6 +108,7 @@ async function scenario(kind) {
     write(repository, ".vite-hooks/_/pre-commit", "#!/bin/sh\nexit 0\n");
     const config = {
       repository,
+      forkBranch: "feat/t3-workers-prototype",
       ...(followsMain ? { forkBranch: "main", upstreamBranch: "main", autoPublish: true } : {}),
       node: process.execPath,
       artifactRoot: artifacts,
@@ -192,9 +193,7 @@ async function scenario(kind) {
           );
           NodeAssert.equal(
             args[3],
-            followsMain
-              ? git(["rev-parse", "refs/remotes/upstream/main"], cwd).text
-              : git(["rev-parse", tag], cwd).text,
+            git(["rev-parse", tag], cwd).text,
           );
           const message = git(["log", "-1", "--format=%B"], cwd).text;
           NodeAssert.equal(message.match(/Otis-Task:/g)?.length, 1);
@@ -215,7 +214,12 @@ async function scenario(kind) {
         .split("\n")
         .map((line) => JSON.parse(line));
     const result = readLedger().at(-1);
+    NodeAssert.deepEqual(
+      JSON.parse(NodeFS.readFileSync(NodePath.join(result.artifact, "result.json"), "utf8")),
+      result,
+    );
     NodeAssert.equal(result.base, fork);
+    NodeAssert.equal(result.tag, tag);
     NodeAssert.equal(
       git(["ls-remote", "origin", "refs/heads/feat/t3-workers-prototype"]).text.split(/\s/)[0],
       fork,
@@ -238,7 +242,7 @@ async function scenario(kind) {
         followsMain ? "published" : "candidate-pushed",
         result.failure,
       );
-      NodeAssert.equal(notifications.length, followsMain ? 0 : 1);
+      NodeAssert.equal(notifications.length, 0);
       NodeAssert.match(git(["show", `${result.commit}:docs/fork/FEATURES.md`]).text, /src\/new.ts/);
       NodeAssert.match(git(["show", `${result.commit}:src/fork.ts`]).text, /fork = true/);
       NodeAssert.equal(
@@ -250,9 +254,9 @@ async function scenario(kind) {
           git(["ls-remote", "origin", "refs/heads/main"]).text.split(/\s/)[0],
           result.commit,
         );
-        NodeAssert.match(
-          git(["show", `${result.commit}:src/efficiency.ts`]).text,
-          /compact = true/,
+        NodeAssert.notEqual(
+          git(["cat-file", "-e", `${result.commit}:src/efficiency.ts`], repository, true).code,
+          0,
         );
       }
       await runNightly(file, io);
@@ -266,12 +270,16 @@ async function scenario(kind) {
         kind === "unavailable" ? "verification-unavailable" : "dependency-verification-unavailable",
         result.failure,
       );
-      NodeAssert.equal(notifications.length, 1);
+      NodeAssert.equal(notifications.length, 0);
+      NodeAssert.equal(result.handoffState, "pending-parent-pickup");
+      NodeAssert.ok(NodeFS.existsSync(result.handoff));
       NodeAssert.equal(outcome.exitCode, 1);
       NodeAssert.ok(NodeFS.existsSync(NodePath.join(result.artifact, "NEEDS-PARENT.json")));
     } else {
       NodeAssert.equal(result.result, "needs-parent", result.failure);
-      NodeAssert.equal(notifications.length, 1);
+      NodeAssert.equal(notifications.length, 0);
+      NodeAssert.equal(result.handoffState, "pending-parent-pickup");
+      NodeAssert.ok(NodeFS.existsSync(result.handoff));
       NodeAssert.equal(outcome.exitCode, 1);
       const packet = JSON.parse(
         NodeFS.readFileSync(NodePath.join(result.artifact, "NEEDS-PARENT.json"), "utf8"),

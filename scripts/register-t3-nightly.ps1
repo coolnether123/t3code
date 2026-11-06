@@ -11,8 +11,10 @@ if (-not $Update -and (Test-Path -LiteralPath (Join-Path $ReleaseRoot 'auto-depl
 New-Item -ItemType Directory -Path $ArtifactRoot -Force | Out-Null
 $control = Copy-T3ControlScripts $repo (Join-Path $ArtifactRoot 'nightly-control')
 $configPath = Join-Path $ArtifactRoot 'nightly-config.json'
-$settings = [ordered]@{repository=$Repository;worktreeRoot=(Join-Path (Split-Path $Repository) 'worktrees');parentChatId=$ParentChatId;forkBranch='main';upstreamBranch='main';autoPublish=$true;node=$node;artifactRoot=$ArtifactRoot;releaseRoot=$ReleaseRoot;deployConfig=(Join-Path $ReleaseRoot 'deploy-config.json');otisCall='A:/Dev/Projects/Otis/tools/otis-call/otis-call.mjs';taskLinkCheck='A:/Dev/Projects/Otis/tools/change-tracking/check-task-links.mjs';taskId='agenda-task:18d48418e0374831a2e088da64be40f6';handoff=(Join-Path $Repository 'docs/fork/FEATURES.md')}
-$action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\conhost.exe" -Argument "--headless `"$node`" `"$control/t3-nightly-sync.mjs`" `"$configPath`"" -WorkingDirectory $Repository
+$settings = [ordered]@{repository=$Repository;worktreeRoot=(Join-Path (Split-Path $Repository) 'worktrees');parentChatId=$ParentChatId;forkBranch='main';autoPublish=$true;node=$node;artifactRoot=$ArtifactRoot;releaseRoot=$ReleaseRoot;deployConfig=(Join-Path $ReleaseRoot 'deploy-config.json');otisCall='A:/Dev/Projects/Otis/tools/otis-call/otis-call.mjs';taskLinkCheck='A:/Dev/Projects/Otis/tools/change-tracking/check-task-links.mjs';taskId='agenda-task:18d48418e0374831a2e088da64be40f6';handoff=(Join-Path $Repository 'docs/fork/FEATURES.md')}
+$wrapper = Join-Path $control 't3-nightly-run.vbs'
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 't3-nightly-run.vbs') -Destination $wrapper -Force
+$action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\wscript.exe" -Argument "//B //Nologo `"$wrapper`" `"$node`" `"$control/t3-nightly-sync.mjs`" `"$configPath`"" -WorkingDirectory $Repository
 $trigger = New-ScheduledTaskTrigger -Daily -At '03:30'
 # Omit the offset so Windows follows the local daylight-saving rules.
 $trigger.StartBoundary = (Get-Date).Date.AddHours(3).AddMinutes(30).ToString("yyyy-MM-dd'T'HH:mm:ss")
@@ -28,4 +30,4 @@ if ($existing) {
 [IO.File]::WriteAllText($configPath, ($settings | ConvertTo-Json -Depth 5))
 Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger -Principal $principal -Settings $options -Force:$Update | Out-Null
 Export-ScheduledTask -TaskName $name | Set-Content -LiteralPath (Join-Path $ArtifactRoot 'nightly-task.xml') -Encoding Unicode
-Write-Output "Registered \$name, daily 03:30 local, interactive limited user, headless. Fork main follows upstream main after checks; deployment follows its existing enable flag."
+Write-Output "Registered \$name, daily 03:30 local, interactive limited user, headless. Fork main follows the newest upstream nightly tag after checks; deployment follows its existing enable flag."
