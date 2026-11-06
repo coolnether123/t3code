@@ -594,16 +594,12 @@ const requireCommandSuccess = async (
   return result.stdout;
 };
 
-const inspectListeners = async (
+export const inspectListeners = async (
   options: BackendDeployOptions,
   allowEmpty = false,
+  inspect = runCommand,
 ): Promise<ReadonlyArray<LsofListener>> => {
-  const result = await runCommand("lsof", [
-    "-nP",
-    `-iTCP:${options.port}`,
-    "-sTCP:LISTEN",
-    "-Fpctn",
-  ]);
+  const result = await inspect("lsof", ["-nP", `-iTCP:${options.port}`, "-sTCP:LISTEN", "-Fpctn"]);
   if (result.code !== 0) {
     if (allowEmpty && result.stdout.trim() === "" && result.stderr.trim() === "") return [];
     fail("lsof could not inspect the live listener; refusing to claim ownership.");
@@ -1415,17 +1411,35 @@ const rollbackDeployment = async (input: {
     fail(`could not set aside the failed first-start database: ${String(setAsideError)}`);
 };
 
-export const recoverFailedDeployment = async (
-  stopped: boolean,
-  restore: () => Promise<void>,
-  rollback: () => Promise<void>,
-): Promise<void> => {
-  if (stopped) {
-    // The candidate may now own the listener and have started native work.
-    // A stale old-PID manifest must fail closed before any rollback mutation.
-    await requireExternalPreStopGuard();
-    await rollback();
-  } else await restore();
+type DeploymentPhase = "prepared" | "stopped" | "candidate-start-attempted";
+
+export const recoverFailedDeployment = async (input: {
+  readonly phase: DeploymentPhase;
+  readonly error: unknown;
+  readonly restore: () => Promise<void>;
+  readonly rollback: () => Promise<void>;
+  readonly listeners: () => Promise<ReadonlyArray<LsofListener>>;
+}): Promise<never> => {
+  try {
+    if (input.phase === "prepared") await input.restore();
+    else {
+      if (input.phase === "candidate-start-attempted") {
+        // A bootstrap error can still leave a candidate running native work.
+        await requireExternalPreStopGuard();
+      } else if ((await input.listeners()).length !== 0) {
+        fail("a listener appeared before candidate startup; refusing rollback mutation.");
+      }
+      await input.rollback();
+    }
+  } catch (recoveryError) {
+    const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
+    throw new AggregateError(
+      [input.error, recoveryError],
+      `deployment failed: ${message(input.error)}; recovery failed: ${message(recoveryError)}`,
+      { cause: recoveryError },
+    );
+  }
+  throw input.error;
 };
 
 const requireExternalPreStopGuard = async (): Promise<void> => {
@@ -1437,6 +1451,8 @@ const requireExternalPreStopGuard = async (): Promise<void> => {
 
 export const stopOwnedBackend = async (input: {
   readonly loaded: boolean;
+  readonly prepare: () => Promise<void>;
+  readonly onStopping: () => void;
   readonly bootout: () => Promise<void>;
   readonly listeners: () => Promise<ReadonlyArray<LsofListener>>;
   readonly identity: ProcessIdentityInput;
@@ -1444,15 +1460,42 @@ export const stopOwnedBackend = async (input: {
   readonly guard: () => Promise<void>;
   readonly stop: () => void;
 }): Promise<void> => {
-  if (input.loaded) await input.bootout();
+  await input.prepare();
+  await input.guard();
+  if (input.loaded) {
+    input.onStopping();
+    await input.bootout();
+  }
   // A reconnect may have left an SSH-owned listener beside the stale job.
   // Reconcile the port after unloading, never assume bootout stopped it.
   const remaining = await input.listeners();
   if (remaining.length === 0) return;
   assertSingleLoopbackListener(remaining, input.identity.expectedPid);
-  assertProcessIdentity({ ...input.identity, command: await input.command() });
-  await input.guard();
-  input.stop();
+  let command: string;
+  try {
+    command = await input.command();
+  } catch (error) {
+    if ((await input.listeners()).length === 0) return;
+    throw error;
+  }
+  assertProcessIdentity({ ...input.identity, command });
+  const beforeSignal = await input.listeners();
+  if (beforeSignal.length === 0) return;
+  assertSingleLoopbackListener(beforeSignal, input.identity.expectedPid);
+  if (!input.loaded) input.onStopping();
+  try {
+    input.stop();
+  } catch (error) {
+    if (
+      error !== null &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "ESRCH" &&
+      (await input.listeners()).length === 0
+    )
+      return;
+    throw error;
+  }
 };
 
 const restoreDeploymentFiles = async (
@@ -1541,7 +1584,7 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
     await validateCandidate({ ...options, candidate: destination });
   }
 
-  let stopped = false;
+  let phase: DeploymentPhase = "prepared";
   let firstCurrentStart = false;
   try {
     await atomicWriteOwned(
@@ -1580,22 +1623,26 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
     await requireExternalPreStopGuard();
     await requireCapacity(options.baseDir);
     await requireStartupCapacity(options.baseDir);
-    stopped = true;
-    if (process.env.T3CODE_GUARD_MANIFEST) {
-      const checkpoint = NodePath.join(
-        NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),
-        "macos-active-checkpoint.py",
-      );
-      await requireCommandSuccess(
-        "/usr/bin/python3",
-        [checkpoint, "--prepare"],
-        "active checkpoint preparation",
-      );
-    }
     await stopOwnedBackend({
       loaded: oldLaunchAgentWasLoaded,
+      prepare: async () => {
+        if (process.env.T3CODE_GUARD_MANIFEST) {
+          const checkpoint = NodePath.join(
+            NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),
+            "macos-active-checkpoint.py",
+          );
+          await requireCommandSuccess(
+            "/usr/bin/python3",
+            [checkpoint, "--prepare"],
+            "active checkpoint preparation",
+          );
+        }
+      },
+      onStopping: () => {
+        phase = "stopped";
+      },
       bootout: () => bootoutAndWait(uid, options.label, "owned LaunchAgent bootout"),
-      listeners: () => inspectListeners(options),
+      listeners: () => inspectListeners(options, true),
       identity: {
         expectedPid: pid,
         actualPid: pid,
@@ -1625,6 +1672,7 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
     if (process.env.T3CODE_DEPLOY_CODE_ONLY !== "1") {
       await backupConfig(options.baseDir, NodePath.join(runDir, "config"));
     }
+    phase = "candidate-start-attempted";
     await requireCommandSuccess(
       "launchctl",
       ["bootstrap", `gui/${uid}`, plist],
@@ -1640,10 +1688,12 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
     await assertInstalledBackendOwner(options, uid, destination);
     console.log(`deployment passed for ${options.commit}; backup: ${runDir}`);
   } catch (error) {
-    await recoverFailedDeployment(
-      stopped,
-      () => restoreDeploymentFiles(plist, wrapper, oldPlist, oldWrapper),
-      () =>
+    await recoverFailedDeployment({
+      phase,
+      error,
+      restore: () => restoreDeploymentFiles(plist, wrapper, oldPlist, oldWrapper),
+      listeners: () => inspectListeners(options, true),
+      rollback: () =>
         rollbackDeployment({
           options,
           uid,
@@ -1657,8 +1707,7 @@ const deploy = async (options: BackendDeployOptions): Promise<void> => {
             ? { firstStartDatabaseAside: NodePath.join(runDir, "failed-first-start-database") }
             : {}),
         }),
-    );
-    throw error;
+    });
   }
   await retirePreviousRollback(options.backupRoot, runDir);
 };

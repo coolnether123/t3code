@@ -16,6 +16,7 @@ import {
   DEPLOYMENT_MARKER,
   DeploymentGuardError,
   idleGuardQueries,
+  inspectListeners,
   isOwnedPlist,
   isOwnedWrapper,
   parseArgs,
@@ -81,50 +82,104 @@ const writeCandidate = async (candidate: string) => {
 };
 
 describe("deploy-macos-backend guards", () => {
-  it.each(["idle", "gone", "changed", "active", "wrong-command"] as const)(
-    "reconciles a stale owned launch agent with %s listener",
-    async (state) => {
-      const actions: string[] = [];
-      const identity = {
-        expectedPid: 42,
-        actualPid: 42,
-        command: "",
-        oldEntry: "/native/t3",
-        baseDir: "/Users/millie/.t3",
-        host: "127.0.0.1",
-        port: 3773,
-      };
-      const operation = stopOwnedBackend({
-        loaded: true,
-        identity,
-        bootout: async () => {
-          actions.push("bootout");
-        },
-        listeners: async () =>
-          state === "gone" ? [] : [{ pid: state === "changed" ? 43 : 42, name: "127.0.0.1:3773" }],
-        command: async () =>
-          state === "wrong-command"
-            ? "/another/service"
-            : "/native/t3 serve --host 127.0.0.1 --port 3773 --base-dir /Users/millie/.t3",
-        guard: async () => {
-          actions.push("guard");
-          if (state === "active") throw new Error("active turn");
-        },
-        stop: () => {
-          actions.push("stop42");
-        },
-      });
-      if (state === "idle" || state === "gone") await operation;
-      else await expect(operation).rejects.toThrow();
-      expect(actions).toEqual(
-        state === "idle"
-          ? ["bootout", "guard", "stop42"]
-          : state === "active"
-            ? ["bootout", "guard"]
-            : ["bootout"],
-      );
-    },
-  );
+  it.each([
+    "idle",
+    "gone",
+    "changed",
+    "active",
+    "wrong-command",
+    "failed-prepare",
+    "gone-during-command",
+    "changed-during-command",
+    "gone-before-signal",
+    "changed-before-signal",
+    "gone-during-signal",
+  ] as const)("reconciles a stale owned launch agent with %s listener", async (state) => {
+    const actions: string[] = [];
+    let unloaded = false;
+    let listenerReads = 0;
+    const identity = {
+      expectedPid: 42,
+      actualPid: 42,
+      command: "",
+      oldEntry: "/native/t3",
+      baseDir: "/Users/millie/.t3",
+      host: "127.0.0.1",
+      port: 3773,
+    };
+    const operation = stopOwnedBackend({
+      loaded: true,
+      identity,
+      prepare: async () => {
+        actions.push("prepare");
+        if (state === "failed-prepare") throw new Error("checkpoint failed");
+      },
+      onStopping: () => {
+        actions.push("stopping");
+      },
+      bootout: async () => {
+        actions.push("bootout");
+        unloaded = true;
+      },
+      listeners: async () => {
+        listenerReads += 1;
+        const disappearanceRead = state === "gone-during-signal" ? 3 : 2;
+        const absent =
+          state === "gone" || (state.startsWith("gone-") && listenerReads >= disappearanceRead);
+        const changed = state === "changed" || (state.startsWith("changed-") && listenerReads > 1);
+        return inspectListeners(baseOptions(), true, async () => ({
+          code: absent ? 1 : 0,
+          stdout: absent ? "" : `p${changed ? 43 : 42}\ncnode\ntIPv4\nn127.0.0.1:3773\n`,
+          stderr: "",
+        }));
+      },
+      command: async () => {
+        if (state.endsWith("during-command")) throw new Error("old PID exited");
+        return state === "wrong-command"
+          ? "/another/service"
+          : "/native/t3 serve --host 127.0.0.1 --port 3773 --base-dir /Users/millie/.t3";
+      },
+      guard: async () => {
+        actions.push("guard");
+        if (unloaded) throw new Error("stale old-PID guard after bootout");
+        if (state === "active") throw new Error("active turn");
+      },
+      stop: () => {
+        actions.push("stop42");
+        if (state === "gone-during-signal") {
+          throw Object.assign(new Error("old PID exited"), { code: "ESRCH" });
+        }
+      },
+    });
+    const success = state === "idle" || state === "gone" || state.startsWith("gone-");
+    if (success) await operation;
+    else await expect(operation).rejects.toThrow();
+    expect(actions).toEqual(
+      state === "failed-prepare"
+        ? ["prepare"]
+        : state === "active"
+          ? ["prepare", "guard"]
+          : [
+              "prepare",
+              "guard",
+              "stopping",
+              "bootout",
+              ...(state === "idle" || state === "gone-during-signal" ? ["stop42"] : []),
+            ],
+    );
+  });
+  it("accepts empty lsof only after stopping and never hides inspection errors", async () => {
+    const empty = async () => ({ code: 1, stdout: "", stderr: "" });
+    await expect(inspectListeners(baseOptions(), false, empty)).rejects.toThrow("lsof could not");
+    await expect(inspectListeners(baseOptions(), true, empty)).resolves.toEqual([]);
+    await expect(
+      inspectListeners(baseOptions(), true, async () => ({
+        code: 1,
+        stdout: "",
+        stderr: "lsof inspection denied",
+      })),
+    ).rejects.toThrow("lsof could not");
+  });
   it("reserves the first-launch database copy before admitting a restart", async () => {
     await withTempDirectory(async (root) => {
       await NodeFSP.writeFile(NodePath.join(root, "state.sqlite"), Buffer.alloc(8192));
@@ -393,13 +448,26 @@ describe("deploy-macos-backend guards", () => {
     const rollback = async () => {
       actions.push("rollback");
     };
-    try {
-      assertRootHttpStatus(503);
-    } catch {
-      await recoverFailedDeployment(true, restore, rollback);
-    }
+    const error = new Error("client root unavailable");
+    await expect(
+      recoverFailedDeployment({
+        phase: "candidate-start-attempted",
+        error,
+        restore,
+        rollback,
+        listeners: async () => [],
+      }),
+    ).rejects.toBe(error);
     expect(actions).toEqual(["rollback"]);
-    await recoverFailedDeployment(false, restore, rollback);
+    await expect(
+      recoverFailedDeployment({
+        phase: "prepared",
+        error,
+        restore,
+        rollback,
+        listeners: async () => [],
+      }),
+    ).rejects.toBe(error);
     expect(actions).toEqual(["rollback", "restore"]);
   });
 
@@ -420,16 +488,43 @@ describe("deploy-macos-backend guards", () => {
       };
       vi.stubEnv("T3CODE_PRESTOP_GUARD", guard);
       try {
-        await expect(recoverFailedDeployment(true, restore, rollback)).rejects.toThrow(
-          "overnight idle gate",
+        const error = new Error("candidate health failed");
+        const recover = (
+          phase: "prepared" | "stopped" | "candidate-start-attempted",
+          pid?: number,
+        ) =>
+          recoverFailedDeployment({
+            phase,
+            error,
+            restore,
+            rollback,
+            listeners: async () => (pid === undefined ? [] : [{ pid, name: "127.0.0.1:3773" }]),
+          });
+        const rejected = await recover("candidate-start-attempted").catch(
+          (failure: unknown) => failure,
         );
+        expect(rejected).toBeInstanceOf(AggregateError);
+        expect((rejected as AggregateError).errors[0]).toBe(error);
+        expect((rejected as AggregateError).errors[1].message).toContain("overnight idle gate");
+        expect((rejected as AggregateError).message).toContain("candidate health failed");
+        expect((rejected as AggregateError).message).toContain("overnight idle gate");
         expect(await NodeFSP.readFile(invoked, "utf8")).toBe("checked");
         expect(actions).toEqual([]);
-        await recoverFailedDeployment(false, restore, rollback);
+        await expect(recover("prepared")).rejects.toBe(error);
         expect(actions).toEqual(["restore"]);
-        await NodeFSP.writeFile(guard, "import sys\nassert sys.argv[1:] == ['--gate-only']\n");
-        await recoverFailedDeployment(true, restore, rollback);
+        await expect(recover("stopped", 43)).rejects.toThrow("listener appeared before candidate");
+        expect(actions).toEqual(["restore"]);
+        await NodeFSP.rm(invoked);
+        await expect(recover("stopped")).rejects.toBe(error);
+        await expect(NodeFSP.stat(invoked)).rejects.toMatchObject({ code: "ENOENT" });
         expect(actions).toEqual(["restore", "stop candidate and restore old deployment"]);
+        await NodeFSP.writeFile(guard, "import sys\nassert sys.argv[1:] == ['--gate-only']\n");
+        await expect(recover("candidate-start-attempted")).rejects.toBe(error);
+        expect(actions).toEqual([
+          "restore",
+          "stop candidate and restore old deployment",
+          "stop candidate and restore old deployment",
+        ]);
       } finally {
         vi.unstubAllEnvs();
       }
