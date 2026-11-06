@@ -16,6 +16,28 @@ const source = NodeFS.readFileSync(scriptPath, "utf8");
 const bash = NodeOS.type() === "Windows_NT" ? "C:/Program Files/Git/bin/bash.exe" : "/bin/bash";
 
 describe("launch-t3-code-macos", () => {
+  it("finishes accepted retirement without stopping or rolling back the installed app", () => {
+    const recover = source.match(/recover\(\) \{[\s\S]*?\n\}(?=\nextract_app\(\))/)?.[0];
+    assert.isString(recover);
+    const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-accepted-retirement-"));
+    try {
+      const state = NodePath.join(directory, "state");
+      NodeFS.writeFileSync(state, "accepted");
+      const program = [
+        "set -e",
+        `STATE_PATH='${state}'; DRY_RUN=0; APP_PATH='/Applications/T3.app'; BACKUP_ROOT='${directory}'; LOG_PATH=/dev/null`,
+        `state_value() { case "$1" in app_path) printf /Applications/T3.app;; staged_app) printf '/Applications/.T3.new.1.app';; previous_app) printf '/Applications/.T3.previous.1.app';; run_dir) printf '${directory}/run';; phase) printf accepted;; esac; }`,
+        "real_dir() { :; }; storage() { printf '%s\\n' retired; }; plan() { :; }; fail() { exit 5; }",
+        "record_environment_identity() { exit 7; }; idle_gate() { exit 8; }; stop_tree() { exit 9; }",
+        recover,
+        "recover",
+      ].join("\n");
+      NodeChildProcess.execFileSync(bash, ["-c", program], { encoding: "utf8" });
+      assert.isFalse(NodeFS.existsSync(state));
+    } finally {
+      NodeFS.rmSync(directory, { recursive: true, force: true });
+    }
+  });
   it("recognizes a recovered headless backend without claiming desktop children", () => {
     const roots = source.match(/roots\(\) \{[\s\S]*?\n\}(?=\nroot\(\))/)?.[0];
     assert.isString(roots);

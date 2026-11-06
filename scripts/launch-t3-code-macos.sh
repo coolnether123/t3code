@@ -405,6 +405,10 @@ recover() {
   new_prefix="$app_parent/.$app_name.new."; previous_prefix="$app_parent/.$app_name.previous."
   [[ "$a" == "$APP_PATH" && "$s" == "$new_prefix"*.app && "$p" == "$previous_prefix"*.app && "$r" == "$BACKUP_ROOT/"* ]] || fail "deployment state is not for this exact app/backup"
   real_dir "$r" "deployment backup run directory"
+  if [[ "$phase" == accepted ]]; then
+    storage retire "$r" "$p" --app "$APP_PATH" >>"$LOG_PATH" 2>&1 || fail "accepted rollback retirement remains held; app unchanged"
+    rm -f "$STATE_PATH"; plan "Finished accepted rollback retirement; running app unchanged."; return
+  fi
   record_environment_identity; idle_gate
   if [[ -d "$APP_PATH" ]]; then exe="$(bundle_exec "$APP_PATH")"; else exe="$(bundle_exec "$p")"; fi
   rt="$(root "$exe")"; if [[ -n "$rt" ]]; then capture_tree "$rt"; check_listeners; stop_tree; fi
@@ -507,6 +511,7 @@ deploy() {
   mv "$APP_PATH" "$PREVIOUS_APP"; write_state old-moved; mv "$STAGED_APP" "$APP_PATH"; write_state new-installed
   local first_mode=""; [[ "$FIRST_V2_START" == 1 ]] && first_mode=first-start
   if ! launch_verify "$first_mode"; then printf 'new app health failed; rolling back\n' >&2; rollback; fail "deployment rolled back"; fi
+  write_state accepted
   storage retire "$RUN_DIR" "$PREVIOUS_APP" --app "$APP_PATH" >>"$LOG_PATH" 2>&1 || fail "accepted rollback retirement failed; current rollback retained"
   rm -f "$STATE_PATH"; printf 'deployment ready: %s\nbackup: %s\nprevious app retained: %s\n' "$APP_PATH" "$RUN_DIR" "$PREVIOUS_APP"
 }

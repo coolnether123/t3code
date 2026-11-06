@@ -5,6 +5,7 @@ import os
 import json
 import re
 import shutil
+import subprocess
 from pathlib import Path
 from contextlib import closing
 import sqlite3
@@ -105,6 +106,10 @@ def retire_previous(current, previous_app, app):
         if old != current:
             obsolete = old, old_app
     require_capacity(root, METADATA_RESERVE)
+    if obsolete:
+        for source, slot in ((obsolete[0], 'rollback'), (obsolete[1], 'previous-app')):
+            subprocess.run(['/usr/bin/python3', str(Path(__file__).with_name('macos-rollback-archive.py')),
+                            'archive', str(source), 'elora', obsolete[0].name, slot], check=True)
     temp = root / ('latest-apfs-rollback.' + str(os.getpid()) + '.pending')
     with temp.open('x') as handle:
         json.dump({'marker': 't3-desktop-apfs-v1', 'directory': str(current), 'previous_app': str(previous_app)}, handle)

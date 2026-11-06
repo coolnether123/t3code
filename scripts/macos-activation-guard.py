@@ -103,6 +103,32 @@ def process_identity(pid):
             "command_sha256": hashlib.sha256(run(["/bin/ps", "-ww", "-p", str(pid), "-o", "command="]).encode()).hexdigest()}
 
 
+def check_listener_identity(m, listeners, port):
+    pids, addresses = set(), []
+    for line in listeners.splitlines():
+        if line.startswith("p"):
+            pids.add(int(line[1:]))
+        elif line.startswith("n"):
+            addresses.append(line[1:])
+    expected = m.get("listener_addresses", ["127.0.0.1:" + port])
+    require(isinstance(expected, list) and bool(expected) and len(expected) == len(set(expected))
+            and all(a in ("127.0.0.1:" + port, "*:" + port) for a in expected),
+            "listener address pins are invalid")
+    if "*:" + port in expected:
+        proof = m.get("network_config")
+        require(isinstance(proof, dict), "wildcard listener requires pinned network settings")
+        setting = pathlib.Path(proof["path"])
+        require(setting == pathlib.Path(m["environment_file"]).with_name("desktop-settings.json")
+                and setting.resolve() == setting, "network settings path is not the actual userdata setting")
+        require(setting.is_absolute() and setting.is_file() and not setting.is_symlink()
+                and setting.stat().st_uid == os.getuid(), "network settings ownership changed")
+        require(file_digest(setting) == proof["sha256"]
+                and json.loads(setting.read_text()).get("serverExposureMode") == "network-accessible",
+                "existing network-accessible setting changed")
+    require(pids == {m["listener_pid"]} and set(addresses) == set(expected),
+            "pinned listener identity changed")
+
+
 def check_pins(m):
     require(platform.system() == "Darwin", "macOS required")
     require(socket.gethostname() == m["hostname"] and pwd.getpwuid(os.getuid()).pw_name == m["user"],
@@ -119,14 +145,7 @@ def check_pins(m):
         require(process_identity(expected["pid"]) == expected and expected["uid"] == os.getuid(), "exact process changed or shut down")
     port = m["endpoint"].rsplit(":", 1)[1]
     listeners = run(["/usr/sbin/lsof", "-nP", "-a", "-iTCP:" + port, "-sTCP:LISTEN", "-Fpn"])
-    pids, addresses = set(), []
-    for line in listeners.splitlines():
-        if line.startswith("p"):
-            pids.add(int(line[1:]))
-        elif line.startswith("n"):
-            addresses.append(line[1:])
-    require(pids == {m["listener_pid"]} and bool(addresses) and all(a == "127.0.0.1:" + port for a in addresses),
-            "loopback listener identity changed")
+    check_listener_identity(m, listeners, port)
     # No proxies, redirects, pairing, tokens, or authenticated session creation.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     with opener.open(m["endpoint"] + "/.well-known/t3/environment", timeout=5) as response:

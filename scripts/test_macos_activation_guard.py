@@ -15,6 +15,26 @@ spec.loader.exec_module(guard)
 
 
 class GuardTests(unittest.TestCase):
+    def test_wildcard_requires_explicit_existing_network_setting_and_exact_listener(self):
+        setting = self.root / "desktop-settings.json"
+        setting.write_text('{"serverExposureMode":"network-accessible"}')
+        setting.chmod(0o600)
+        manifest = {"listener_pid": 123, "listener_addresses": ["*:3773"],
+                    "environment_file": str(self.root / "environment-id"),
+                    "network_config": {"path": str(setting), "sha256": guard.file_digest(setting)}}
+        guard.check_listener_identity(manifest, "p123\nn*:3773", "3773")
+        for changed in ({"listener_pid": 124}, {"listener_addresses": ["127.0.0.1:3773"]},
+                        {"network_config": None}, {"environment_file": str(self.root / "other/environment-id")}):
+            with self.subTest(changed=changed), self.assertRaises(guard.Hold):
+                guard.check_listener_identity(dict(manifest, **changed), "p123\nn*:3773", "3773")
+        setting.write_text('{"serverExposureMode":"local-only"}')
+        manifest["network_config"]["sha256"] = guard.file_digest(setting)
+        with self.assertRaises(guard.Hold):
+            guard.check_listener_identity(manifest, "p123\nn*:3773", "3773")
+        guard.check_listener_identity({"listener_pid": 123}, "p123\nn127.0.0.1:3773", "3773")
+        with self.assertRaises(guard.Hold):
+            guard.check_listener_identity({"listener_pid": 123}, "p123\nn*:3773", "3773")
+
     def test_separate_current_database_blocks_idle_legacy_database(self):
         current = self.root / "statev2.sqlite"
         with closing(sqlite3.connect(current)) as db, db:
@@ -46,7 +66,7 @@ class GuardTests(unittest.TestCase):
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.root = pathlib.Path(self.temp.name)
+        self.root = pathlib.Path(self.temp.name).resolve()
         self.db = self.root / "state.sqlite"
         with closing(sqlite3.connect(self.db)) as db, db:
             db.executescript("""

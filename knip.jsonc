@@ -35,6 +35,8 @@
         "t3-nightly-sync.mjs",
         "t3-nightly-check.mjs",
         "t3-nightly-task-links.mjs",
+        // Installed interactively once, then launchd loads the existing sync controller.
+        "register-t3-nightly-macos.mjs",
         "t3-*.fixture.mjs",
         "import-codex-history.mjs",
         "otis-call-acceptance.mjs",

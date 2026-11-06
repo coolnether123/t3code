@@ -1129,6 +1129,20 @@ export const assertInstallMatches = async (candidate: string, installed: string)
 export const retirePreviousRollback = async (
   backupRoot: string,
   current: string,
+  archive: (directory: string) => Promise<void> = async (directory) => {
+    await requireCommandSuccess(
+      "/usr/bin/python3",
+      [
+        NodeURL.fileURLToPath(new URL("./macos-rollback-archive.py", import.meta.url)),
+        "archive",
+        directory,
+        "millie",
+        NodePath.basename(directory),
+        "rollback",
+      ],
+      "verified recoverable local rollback archive",
+    );
+  },
 ): Promise<void> => {
   await requireNoSymlink(current, "current rollback");
   await requireNoSymlink(NodePath.join(current, "state.sqlite"), "current rollback database");
@@ -1155,13 +1169,40 @@ export const retirePreviousRollback = async (
   }
   const temporary = `${marker}.${NodeCrypto.randomUUID()}.pending`;
   await requireCapacity(backupRoot);
+  const pendingPath = NodePath.join(backupRoot, "pending-rollback-retirement.json");
+  if (await optionalLstat(pendingPath))
+    await requireNoSymlink(pendingPath, "pending retirement receipt");
+  const pendingText = await readText(pendingPath);
+  const pending: { marker: string; current: string; directories: string[] } = pendingText
+    ? JSON.parse(pendingText)
+    : { marker: DEPLOYMENT_MARKER, current, directories: [] };
+  const root = await NodeFSP.realpath(backupRoot);
+  if (
+    pending.marker !== DEPLOYMENT_MARKER ||
+    !Array.isArray(pending.directories) ||
+    pending.directories.some(
+      (directory) =>
+        typeof directory !== "string" ||
+        NodePath.dirname(directory) !== root ||
+        !/^[0-9]+-[0-9a-f]{12}$/.test(NodePath.basename(directory)),
+    )
+  )
+    fail("Pending rollback retirement escapes its receipt root.");
+  if (obsolete && !pending.directories.includes(obsolete)) pending.directories.push(obsolete);
+  pending.current = current;
+  await NodeFSP.writeFile(pendingPath, JSON.stringify(pending), { mode: 0o600 });
   await NodeFSP.writeFile(
     temporary,
     JSON.stringify({ marker: DEPLOYMENT_MARKER, directory: current }),
     { mode: 0o600, flag: "wx" },
   );
   await NodeFSP.rename(temporary, marker);
-  if (obsolete) await NodeFSP.rm(obsolete, { recursive: true, force: false });
+  for (const directory of pending.directories) {
+    await archive(directory);
+    if (await optionalLstat(directory))
+      await NodeFSP.rm(directory, { recursive: true, force: false });
+  }
+  await NodeFSP.unlink(pendingPath);
 };
 
 const backupConfig = async (baseDir: string, destination: string): Promise<void> => {

@@ -32,6 +32,10 @@ export function compareChecks(candidate, baseline) {
 }
 export async function runNightly(configFile, io = {}) {
   const config = JSON.parse(NodeFS.readFileSync(configFile, "utf8"));
+  if (config.platform === "darwin") {
+    const { runMacNightly } = await import("./t3-nightly-macos.mjs");
+    return runMacNightly(config, io);
+  }
   const lock = NodeNet.createServer((s) => s.destroy());
   lock.listen("\\\\.\\pipe\\otis-t3-nightly-sync");
   await NodeEvents.once(lock, "listening");

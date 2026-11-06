@@ -177,7 +177,23 @@ describe("deploy-macos-backend guards", () => {
         marker,
         JSON.stringify({ marker: DEPLOYMENT_MARKER, directory: old }),
       );
-      await retirePreviousRollback(root, current);
+      await expect(
+        retirePreviousRollback(root, current, async () => {
+          throw new Error("local archive unavailable");
+        }),
+      ).rejects.toThrow("local archive unavailable");
+      expect((await NodeFSP.stat(old)).isDirectory()).toBe(true);
+      expect(JSON.parse(await NodeFSP.readFile(marker, "utf8")).directory).toBe(current);
+      await retirePreviousRollback(root, current, async (directory) => {
+        await NodeFSP.cp(directory, NodePath.join(root, "verified-local-archive-fixture"), {
+          recursive: true,
+        });
+      });
+      expect(
+        (
+          await NodeFSP.stat(NodePath.join(root, "verified-local-archive-fixture/state.sqlite"))
+        ).isFile(),
+      ).toBe(true);
       await expect(NodeFSP.stat(old)).rejects.toThrow();
       expect((await NodeFSP.stat(current)).isDirectory()).toBe(true);
       await NodeFSP.writeFile(
