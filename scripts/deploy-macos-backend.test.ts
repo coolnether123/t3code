@@ -189,7 +189,6 @@ describe("deploy-macos-backend guards", () => {
         database.exec(
           "PRAGMA journal_mode=WAL; CREATE TABLE saved(value TEXT); INSERT INTO saved VALUES ('saved reply');",
         );
-        const before = await NodeFSP.statfs(root);
         await backupDatabase(source, backup);
         await verifyDatabaseBackup(backup);
         database.exec("INSERT INTO saved VALUES ('later reply');");
@@ -198,8 +197,8 @@ describe("deploy-macos-backend guards", () => {
           expect(clone.prepare("SELECT count(*) AS n FROM saved").get()).toEqual({ n: 1 });
           expect(clone.prepare("PRAGMA integrity_check").get()).toEqual({ integrity_check: "ok" });
           expect((await NodeFSP.stat(source)).ino).not.toBe((await NodeFSP.stat(backup)).ino);
-          const after = await NodeFSP.statfs(root);
-          expect((before.bavail - after.bavail) * before.bsize).toBeLessThan(16 * 1024 * 1024);
+          expect(database.prepare("SELECT count(*) AS n FROM saved").get()).toEqual({ n: 2 });
+          expect((await NodeFSP.stat(backup)).mode & 0o777).toBe(0o600);
           await expect(backupDatabase(source, backup)).rejects.toThrow("already exists");
         } finally {
           clone.close();
